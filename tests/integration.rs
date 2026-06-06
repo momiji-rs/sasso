@@ -217,6 +217,40 @@ fn at_if_else_chain() {
 }
 
 #[test]
+fn at_for_loop() {
+    assert_eq!(
+        css("@for $i from 1 through 3 { .c#{$i} { w: $i * 10px; } }"),
+        ".c1 {\n  w: 10px;\n}\n\n.c2 {\n  w: 20px;\n}\n\n.c3 {\n  w: 30px;\n}\n"
+    );
+    // Exclusive `to` stops one short.
+    assert_eq!(
+        css("@for $i from 1 to 3 { .c#{$i} { x: $i; } }"),
+        ".c1 {\n  x: 1;\n}\n\n.c2 {\n  x: 2;\n}\n"
+    );
+}
+
+#[test]
+fn at_each_loop() {
+    assert_eq!(
+        css("@each $n in a, b { .i-#{$n} { content: \"#{$n}\"; } }"),
+        ".i-a {\n  content: \"a\";\n}\n\n.i-b {\n  content: \"b\";\n}\n"
+    );
+    // Destructuring across nested lists.
+    assert_eq!(
+        css("@each $k, $v in (a 1), (b 2) { .#{$k} { order: $v; } }"),
+        ".a {\n  order: 1;\n}\n\n.b {\n  order: 2;\n}\n"
+    );
+}
+
+#[test]
+fn at_while_loop() {
+    assert_eq!(
+        css(".x { $i: 0; @while $i < 3 { p-#{$i}: $i; $i: $i + 1; } }"),
+        ".x {\n  p-0: 0;\n  p-1: 1;\n  p-2: 2;\n}\n"
+    );
+}
+
+#[test]
 fn undefined_variable_is_an_error() {
     let err = compile(".a { color: $missing; }", &Options::default()).unwrap_err();
     assert!(err.message.contains("Undefined variable"));

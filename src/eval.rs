@@ -166,6 +166,67 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
+    // ---- loop helpers ------------------------------------------------
+
+    /// Set a variable in the innermost scope (loop variables live there,
+    /// alongside the surroundings — flow control adds no scope).
+    fn set_local(&mut self, name: &str, val: Value) {
+        if let Some(sc) = self.scopes.last_mut() {
+            sc.insert(name.to_string(), val);
+        }
+    }
+
+    /// Restore (or clear) a loop variable to its value before the loop.
+    fn restore_local(&mut self, name: &str, saved: Option<Value>) {
+        if let Some(sc) = self.scopes.last_mut() {
+            match saved {
+                Some(v) => {
+                    sc.insert(name.to_string(), v);
+                }
+                None => {
+                    sc.remove(name);
+                }
+            }
+        }
+    }
+
+    fn eval_index(&mut self, e: &Expr) -> Result<i64, Error> {
+        match self.eval_expr(e)? {
+            Value::Number(n) => Ok(n.value.round() as i64),
+            other => Err(Error::unpositioned(format!(
+                "{} is not a number.",
+                other.type_name()
+            ))),
+        }
+    }
+
+    /// The values `@each` iterates: a list yields its items, `null` yields
+    /// nothing, and any other value is iterated once.
+    fn eval_each_items(&mut self, e: &Expr) -> Result<Vec<Value>, Error> {
+        match self.eval_expr(e)? {
+            Value::List(l) => Ok(l.items),
+            Value::Null => Ok(Vec::new()),
+            other => Ok(vec![other]),
+        }
+    }
+
+    /// Bind `@each` variables to an item, destructuring a list across
+    /// multiple variables (missing elements become `null`).
+    fn bind_each(&mut self, vars: &[String], item: Value) {
+        if vars.len() == 1 {
+            self.set_local(&vars[0], item);
+            return;
+        }
+        let elems: Vec<Value> = match item {
+            Value::List(l) => l.items,
+            other => vec![other],
+        };
+        for (i, v) in vars.iter().enumerate() {
+            let val = elems.get(i).cloned().unwrap_or(Value::Null);
+            self.set_local(v, val);
+        }
+    }
+
     // ---- statements --------------------------------------------------
 
     /// Execute a block of statements, routing each into `sink`. One executor
@@ -198,6 +259,52 @@ impl<'a> Evaluator<'a> {
                         if take {
                             self.exec(&branch.body, parents, sink)?;
                             break;
+                        }
+                    }
+                }
+                Stmt::For {
+                    var,
+                    from,
+                    to,
+                    inclusive,
+                    body,
+                } => {
+                    let start = self.eval_index(from)?;
+                    let end = self.eval_index(to)?;
+                    let saved = self.scopes.last().and_then(|sc| sc.get(var).cloned());
+                    for i in for_indices(start, end, *inclusive) {
+                        self.set_local(
+                            var,
+                            Value::Number(Number {
+                                value: i as f64,
+                                unit: String::new(),
+                            }),
+                        );
+                        self.exec(body, parents, sink)?;
+                    }
+                    self.restore_local(var, saved);
+                }
+                Stmt::Each { vars, list, body } => {
+                    let items = self.eval_each_items(list)?;
+                    let saved: Vec<Option<Value>> = vars
+                        .iter()
+                        .map(|v| self.scopes.last().and_then(|sc| sc.get(v).cloned()))
+                        .collect();
+                    for item in items {
+                        self.bind_each(vars, item);
+                        self.exec(body, parents, sink)?;
+                    }
+                    for (v, sv) in vars.iter().zip(saved) {
+                        self.restore_local(v, sv);
+                    }
+                }
+                Stmt::While { cond, body } => {
+                    let mut guard = 0u32;
+                    while self.eval_expr(cond)?.is_truthy() {
+                        self.exec(body, parents, sink)?;
+                        guard += 1;
+                        if guard >= 100_000 {
+                            return Err(Error::unpositioned("@while exceeded 100000 iterations"));
                         }
                     }
                 }
@@ -577,6 +684,28 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
         out.push(OutNode::Blank);
     }
     out.append(&mut group);
+}
+
+/// The integer indices a `@for` iterates: ascending or descending, with the
+/// end included (`through`) or excluded (`to`).
+fn for_indices(start: i64, end: i64, inclusive: bool) -> Vec<i64> {
+    let mut out = Vec::new();
+    if start <= end {
+        let last = if inclusive { end } else { end - 1 };
+        let mut i = start;
+        while i <= last {
+            out.push(i);
+            i += 1;
+        }
+    } else {
+        let last = if inclusive { end } else { end + 1 };
+        let mut i = start;
+        while i >= last {
+            out.push(i);
+            i -= 1;
+        }
+    }
+    out
 }
 
 /// Resolve a (possibly comma-separated) selector against the parent

@@ -25,6 +25,22 @@ pub(crate) enum Stmt {
     Comment(String),
     /// `@if`/`@else if`/`@else` — evaluated top to bottom, first match wins.
     If(Vec<IfBranch>),
+    /// `@for $i from A through|to B { … }`.
+    For {
+        var: String,
+        from: Expr,
+        to: Expr,
+        inclusive: bool,
+        body: Vec<Stmt>,
+    },
+    /// `@each $v[, $k…] in <list> { … }`.
+    Each {
+        vars: Vec<String>,
+        list: Expr,
+        body: Vec<Stmt>,
+    },
+    /// `@while <cond> { … }`.
+    While { cond: Expr, body: Vec<Stmt> },
 }
 
 /// One arm of an `@if` chain. `cond == None` is the trailing `@else`.
