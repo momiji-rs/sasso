@@ -114,6 +114,16 @@ Dart VM. See [`bench/`](bench/) for the methodology. In-process startup is
 effectively free (vs ~140 ms for the dart-sass binary and ~1 s for
 `npx sass`), which matters when a build compiles many files.
 
+## WebAssembly
+
+Because the library is zero-dependency and pure `std`, it compiles to
+`wasm32-unknown-unknown` and `wasm32-wasip1` out of the box (built in CI).
+A whole SCSS compiler stays small: the deployable `.wasm` cdylib is
+**~124 KB** (`opt-level = "z"` + LTO + `panic = "abort"` + `strip` +
+`wasm-opt -Oz`), i.e. **~52 KB brotli / ~59 KB gzip** over the wire — an
+order of magnitude smaller than shipping dart-sass as JavaScript. A
+browser playground is tracked in the issues.
+
 ## Testing & coverage
 
 ```console
