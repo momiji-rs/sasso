@@ -35,7 +35,6 @@ pub(crate) struct VarDecl {
 pub(crate) struct Rule {
     pub selector: Vec<TplPiece>,
     pub body: Vec<Stmt>,
-    pub pos: Pos,
 }
 
 pub(crate) struct Declaration {

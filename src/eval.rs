@@ -37,6 +37,63 @@ pub(crate) enum OutItem {
     Comment(String),
 }
 
+/// Where evaluated statements deposit their output. At the top level each
+/// statement forms its own blank-separated group; inside a style rule,
+/// declarations join the rule's block and nested rules bubble out after it.
+/// This is the seam that lets one block executor serve the top level, rule
+/// bodies, and every nested-block construct (conditionals, loops, mixins).
+enum Sink<'a> {
+    Top(&'a mut Vec<OutNode>),
+    Rule {
+        items: &'a mut Vec<OutItem>,
+        nested: &'a mut Vec<OutNode>,
+    },
+}
+
+impl Sink<'_> {
+    fn is_top(&self) -> bool {
+        matches!(self, Sink::Top(_))
+    }
+
+    fn push_comment(&mut self, text: String) {
+        match self {
+            Sink::Top(out) => {
+                let out = &mut **out;
+                push_group(out, vec![OutNode::Comment(text)]);
+            }
+            Sink::Rule { items, .. } => items.push(OutItem::Comment(text)),
+        }
+    }
+
+    fn push_item(&mut self, item: OutItem) {
+        if let Sink::Rule { items, .. } = self {
+            items.push(item);
+        }
+    }
+
+    /// Emit a produced style rule — its own declaration block (when
+    /// non-empty) plus the rules that bubbled out of it.
+    fn emit_style_rule(&mut self, block: Option<OutNode>, nested: Vec<OutNode>) {
+        match self {
+            Sink::Top(out) => {
+                let mut group = Vec::new();
+                if let Some(b) = block {
+                    group.push(b);
+                }
+                group.extend(nested);
+                let out = &mut **out;
+                push_group(out, group);
+            }
+            Sink::Rule { nested: parent, .. } => {
+                if let Some(b) = block {
+                    parent.push(b);
+                }
+                parent.extend(nested);
+            }
+        }
+    }
+}
+
 /// Options visible to the evaluator (subset of the public `Options`).
 pub(crate) struct EvalOptions<'a> {
     pub style: OutputStyle,
@@ -59,7 +116,8 @@ impl<'a> Evaluator<'a> {
     }
 
     pub(crate) fn eval_sheet(&mut self, sheet: &Stylesheet, out: &mut Vec<OutNode>) -> Result<(), Error> {
-        self.eval_top_stmts(&sheet.stmts, out)
+        let mut sink = Sink::Top(out);
+        self.exec(&sheet.stmts, &[], &mut sink)
     }
 
     fn compressed(&self) -> bool {
@@ -110,60 +168,66 @@ impl<'a> Evaluator<'a> {
 
     // ---- statements --------------------------------------------------
 
-    /// Evaluate top-level statements, grouping each statement's output so a
-    /// blank line separates consecutive groups (dart-sass expanded style).
-    fn eval_top_stmts(&mut self, stmts: &[Stmt], out: &mut Vec<OutNode>) -> Result<(), Error> {
-        let no_parents: Vec<String> = Vec::new();
+    /// Execute a block of statements, routing each into `sink`. One executor
+    /// serves the top level (each statement is its own group), rule bodies
+    /// (declarations join the block, nested rules bubble out), and every
+    /// nested-block construct that reuses it.
+    fn exec(&mut self, stmts: &[Stmt], parents: &[String], sink: &mut Sink<'_>) -> Result<(), Error> {
         for stmt in stmts {
             match stmt {
                 Stmt::VarDecl(v) => self.apply_var(v)?,
+                Stmt::Comment(c) => sink.push_comment(c.clone()),
                 Stmt::Decl(d) => {
-                    return Err(Error::at("top-level declarations aren't allowed", d.pos));
+                    if sink.is_top() {
+                        return Err(Error::at("top-level declarations aren't allowed", d.pos));
+                    }
+                    if let Some(oi) = self.eval_decl(d)? {
+                        sink.push_item(oi);
+                    }
                 }
-                Stmt::Import(args) => self.eval_import_top(args, out)?,
-                Stmt::Rule(r) => {
-                    let mut group: Vec<OutNode> = Vec::new();
-                    self.eval_rule(r, &no_parents, &mut group)?;
-                    push_group(out, group);
-                }
-                Stmt::Comment(c) => push_group(out, vec![OutNode::Comment(c.clone())]),
+                Stmt::Rule(r) => self.eval_style_rule(r, parents, sink)?,
+                Stmt::Import(args) => match sink {
+                    Sink::Top(out) => {
+                        let out = &mut **out;
+                        self.eval_imports(args, out)?;
+                    }
+                    Sink::Rule { .. } => {
+                        return Err(Error::unpositioned(
+                            "nested @import is not supported in this build",
+                        ));
+                    }
+                },
             }
         }
         Ok(())
     }
 
-    fn eval_rule(&mut self, rule: &Rule, parents: &[String], out: &mut Vec<OutNode>) -> Result<(), Error> {
+    /// Evaluate a style rule: resolve its selector against `parents`, run its
+    /// body into a fresh rule sink, then hand the produced block and the
+    /// rules that bubbled out of it to the enclosing `sink`.
+    fn eval_style_rule(&mut self, rule: &Rule, parents: &[String], sink: &mut Sink<'_>) -> Result<(), Error> {
         let sel_str = self.eval_template(&rule.selector)?;
         let current = resolve_selectors(&sel_str, parents);
         self.scopes.push(HashMap::new());
         let mut items: Vec<OutItem> = Vec::new();
         let mut nested: Vec<OutNode> = Vec::new();
-        for stmt in &rule.body {
-            match stmt {
-                Stmt::VarDecl(v) => self.apply_var(v)?,
-                Stmt::Decl(d) => {
-                    if let Some(oi) = self.eval_decl(d)? {
-                        items.push(oi);
-                    }
-                }
-                Stmt::Rule(r) => self.eval_rule(r, &current, &mut nested)?,
-                Stmt::Comment(c) => items.push(OutItem::Comment(c.clone())),
-                Stmt::Import(_) => {
-                    return Err(Error::at(
-                        "nested @import is not supported in this build",
-                        rule.pos,
-                    ));
-                }
-            }
+        {
+            let mut child = Sink::Rule {
+                items: &mut items,
+                nested: &mut nested,
+            };
+            self.exec(&rule.body, &current, &mut child)?;
         }
         self.scopes.pop();
-        if !items.is_empty() {
-            out.push(OutNode::Rule {
+        let block = if items.is_empty() {
+            None
+        } else {
+            Some(OutNode::Rule {
                 selectors: current,
                 items,
-            });
-        }
-        out.append(&mut nested);
+            })
+        };
+        sink.emit_style_rule(block, nested);
         Ok(())
     }
 
@@ -181,10 +245,9 @@ impl<'a> Evaluator<'a> {
         }))
     }
 
-    /// Inline a top-level `@import`. Each imported top-level statement
-    /// becomes its own group (so it blank-separates like a local rule),
-    /// while genuine CSS imports pass through verbatim.
-    fn eval_import_top(&mut self, args: &[String], out: &mut Vec<OutNode>) -> Result<(), Error> {
+    /// Inline `@import`s into the top-level output. Each imported top-level
+    /// statement becomes its own group; genuine CSS imports pass through.
+    fn eval_imports(&mut self, args: &[String], out: &mut Vec<OutNode>) -> Result<(), Error> {
         let importer = self.options.importer;
         for arg in args {
             if is_css_import(arg) {
@@ -197,7 +260,8 @@ impl<'a> Evaluator<'a> {
                         continue;
                     }
                     let sheet = crate::parser::parse(&src)?;
-                    self.eval_top_stmts(&sheet.stmts, out)?;
+                    let mut sink = Sink::Top(&mut *out);
+                    self.exec(&sheet.stmts, &[], &mut sink)?;
                 }
                 None => {
                     return Err(Error::unpositioned(format!(

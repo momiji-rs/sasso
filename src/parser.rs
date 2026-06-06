@@ -180,7 +180,6 @@ impl Parser {
     }
 
     fn parse_rule(&mut self) -> Result<Stmt, Error> {
-        let pos = self.sc.position();
         let selector = self.parse_template(&['{'])?;
         if !self.sc.eat('{') {
             return Err(Error::at("expected \"{\"", self.sc.position()));
@@ -189,7 +188,7 @@ impl Parser {
         if !self.sc.eat('}') {
             return Err(Error::at("expected \"}\"", self.sc.position()));
         }
-        Ok(Stmt::Rule(Rule { selector, body, pos }))
+        Ok(Stmt::Rule(Rule { selector, body }))
     }
 
     fn parse_declaration(&mut self) -> Result<Stmt, Error> {
