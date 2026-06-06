@@ -7,11 +7,14 @@
 //! out after it.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
-use crate::ast::{BinOp, CallArg, Declaration, Expr, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl};
+use crate::ast::{
+    BinOp, CallArg, Callable, Declaration, Expr, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+};
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{List, Number, SassStr, Value};
+use crate::value::{List, ListSep, Number, SassStr, Value};
 use crate::{Importer, OutputStyle};
 
 /// A flattened output node.
@@ -104,6 +107,10 @@ pub(crate) struct Evaluator<'a> {
     scopes: Vec<HashMap<String, Value>>,
     options: EvalOptions<'a>,
     imported: HashSet<String>,
+    functions: HashMap<String, Rc<Callable>>,
+    mixins: HashMap<String, Rc<Callable>>,
+    /// Stack of `@content` blocks, one per active `@include`.
+    content_stack: Vec<Option<Rc<Vec<Stmt>>>>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -112,6 +119,9 @@ impl<'a> Evaluator<'a> {
             scopes: vec![HashMap::new()],
             options,
             imported: HashSet::new(),
+            functions: HashMap::new(),
+            mixins: HashMap::new(),
+            content_stack: Vec::new(),
         }
     }
 
@@ -227,6 +237,196 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    fn restore_each(&mut self, vars: &[String], saved: &[Option<Value>]) {
+        for (v, sv) in vars.iter().zip(saved) {
+            self.restore_local(v, sv.clone());
+        }
+    }
+
+    // ---- callables ---------------------------------------------------
+
+    /// Evaluate call arguments and bind them to a parameter list, returning
+    /// the call frame: positional args fill params in order, then keyword
+    /// args by name, then declared defaults; extra positionals collect into
+    /// a `$rest...` parameter or are an error.
+    fn bind_args(
+        &mut self,
+        params: &ParamList,
+        args: &[CallArg],
+        name: &str,
+    ) -> Result<HashMap<String, Value>, Error> {
+        let mut positional = Vec::new();
+        let mut keyword: HashMap<String, Value> = HashMap::new();
+        for a in args {
+            let v = self.eval_expr(&a.value)?;
+            match &a.name {
+                Some(n) => {
+                    keyword.insert(n.clone(), v);
+                }
+                None => positional.push(v),
+            }
+        }
+        let mut frame = HashMap::new();
+        let mut pos_iter = positional.into_iter();
+        for param in &params.params {
+            let val = if let Some(v) = pos_iter.next() {
+                v
+            } else if let Some(v) = keyword.remove(&param.name) {
+                v
+            } else if let Some(def) = &param.default {
+                self.eval_expr(def)?
+            } else {
+                return Err(Error::unpositioned(format!(
+                    "Missing argument ${} for {name}.",
+                    param.name
+                )));
+            };
+            frame.insert(param.name.clone(), val);
+        }
+        if let Some(rest) = &params.rest {
+            let remaining: Vec<Value> = pos_iter.collect();
+            frame.insert(
+                rest.clone(),
+                Value::List(List {
+                    items: remaining,
+                    sep: ListSep::Comma,
+                }),
+            );
+        } else if pos_iter.next().is_some() {
+            return Err(Error::unpositioned(format!(
+                "{name} was passed too many arguments."
+            )));
+        }
+        Ok(frame)
+    }
+
+    /// Call a user-defined `@function`, returning its `@return` value.
+    fn call_function(&mut self, func: &Rc<Callable>, args: &[CallArg]) -> Result<Value, Error> {
+        let frame = self.bind_args(&func.params, args, &func.name)?;
+        self.scopes.push(frame);
+        let result = self.run_fn_body(&func.body);
+        self.scopes.pop();
+        match result? {
+            Some(v) => Ok(v),
+            None => Err(Error::unpositioned(format!(
+                "Function {}() did not @return a value.",
+                func.name
+            ))),
+        }
+    }
+
+    /// Run a function body, propagating the first `@return` (including from
+    /// nested control flow). Functions emit no CSS, so a returned value
+    /// short-circuits the whole call.
+    fn run_fn_body(&mut self, stmts: &[Stmt]) -> Result<Option<Value>, Error> {
+        for stmt in stmts {
+            match stmt {
+                Stmt::VarDecl(v) => self.apply_var(v)?,
+                Stmt::Comment(_) => {}
+                Stmt::Return(e) => return Ok(Some(self.eval_expr(e)?)),
+                Stmt::FunctionDef(c) => {
+                    self.functions.insert(c.name.clone(), Rc::clone(c));
+                }
+                Stmt::If(branches) => {
+                    for branch in branches {
+                        let take = match &branch.cond {
+                            None => true,
+                            Some(c) => self.eval_expr(c)?.is_truthy(),
+                        };
+                        if take {
+                            if let Some(v) = self.run_fn_body(&branch.body)? {
+                                return Ok(Some(v));
+                            }
+                            break;
+                        }
+                    }
+                }
+                Stmt::For {
+                    var,
+                    from,
+                    to,
+                    inclusive,
+                    body,
+                } => {
+                    let start = self.eval_index(from)?;
+                    let end = self.eval_index(to)?;
+                    let saved = self.scopes.last().and_then(|sc| sc.get(var).cloned());
+                    for i in for_indices(start, end, *inclusive) {
+                        self.set_local(
+                            var,
+                            Value::Number(Number {
+                                value: i as f64,
+                                unit: String::new(),
+                            }),
+                        );
+                        if let Some(v) = self.run_fn_body(body)? {
+                            self.restore_local(var, saved);
+                            return Ok(Some(v));
+                        }
+                    }
+                    self.restore_local(var, saved);
+                }
+                Stmt::Each { vars, list, body } => {
+                    let items = self.eval_each_items(list)?;
+                    let saved: Vec<Option<Value>> = vars
+                        .iter()
+                        .map(|v| self.scopes.last().and_then(|sc| sc.get(v).cloned()))
+                        .collect();
+                    for item in items {
+                        self.bind_each(vars, item);
+                        if let Some(v) = self.run_fn_body(body)? {
+                            self.restore_each(vars, &saved);
+                            return Ok(Some(v));
+                        }
+                    }
+                    self.restore_each(vars, &saved);
+                }
+                Stmt::While { cond, body } => {
+                    let mut guard = 0u32;
+                    while self.eval_expr(cond)?.is_truthy() {
+                        if let Some(v) = self.run_fn_body(body)? {
+                            return Ok(Some(v));
+                        }
+                        guard += 1;
+                        if guard >= 100_000 {
+                            return Err(Error::unpositioned("@while exceeded 100000 iterations"));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(Error::unpositioned(
+                        "only variable assignments, control flow and @return are allowed in a function.",
+                    ));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Execute an `@include`: bind args into a call frame, make the content
+    /// block available, and run the mixin body into the current sink.
+    fn exec_include(
+        &mut self,
+        name: &str,
+        args: &[CallArg],
+        content: Option<Rc<Vec<Stmt>>>,
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        let mixin = self
+            .mixins
+            .get(name)
+            .cloned()
+            .ok_or_else(|| Error::unpositioned(format!("Undefined mixin {name}.")))?;
+        let frame = self.bind_args(&mixin.params, args, &mixin.name)?;
+        self.scopes.push(frame);
+        self.content_stack.push(content);
+        let result = self.exec(&mixin.body, parents, sink);
+        self.content_stack.pop();
+        self.scopes.pop();
+        result
+    }
+
     // ---- statements --------------------------------------------------
 
     /// Execute a block of statements, routing each into `sink`. One executor
@@ -306,6 +506,23 @@ impl<'a> Evaluator<'a> {
                         if guard >= 100_000 {
                             return Err(Error::unpositioned("@while exceeded 100000 iterations"));
                         }
+                    }
+                }
+                Stmt::FunctionDef(callable) => {
+                    self.functions.insert(callable.name.clone(), Rc::clone(callable));
+                }
+                Stmt::MixinDef(callable) => {
+                    self.mixins.insert(callable.name.clone(), Rc::clone(callable));
+                }
+                Stmt::Return(_) => {
+                    return Err(Error::unpositioned("@return is only allowed inside a function."));
+                }
+                Stmt::Include { name, args, content } => {
+                    self.exec_include(name, args, content.clone(), parents, sink)?;
+                }
+                Stmt::Content => {
+                    if let Some(Some(block)) = self.content_stack.last().cloned() {
+                        self.exec(&block, parents, sink)?;
                     }
                 }
                 Stmt::Import(args) => match sink {
@@ -495,6 +712,10 @@ impl<'a> Evaluator<'a> {
                 // if() is lazy: only the selected branch is evaluated.
                 if name == "if" {
                     return self.eval_if_function(args, *pos);
+                }
+                // User-defined @function takes precedence over builtins.
+                if let Some(func) = self.functions.get(name).cloned() {
+                    return self.call_function(&func, args);
                 }
                 let mut pos_args = Vec::new();
                 let mut named = Vec::new();

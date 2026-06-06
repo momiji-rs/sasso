@@ -3,6 +3,8 @@
 //! Selectors and property names are templates ([`TplPiece`]) because they
 //! may contain `#{...}` interpolation that is only resolved at eval time.
 
+use std::rc::Rc;
+
 use crate::scanner::Pos;
 use crate::value::{Color, ListSep};
 
@@ -41,12 +43,47 @@ pub(crate) enum Stmt {
     },
     /// `@while <cond> { … }`.
     While { cond: Expr, body: Vec<Stmt> },
+    /// `@function name(params) { … @return … }`. Shared in an `Rc` so the
+    /// definition survives in the environment after its source drops.
+    FunctionDef(Rc<Callable>),
+    /// `@return <expr>;`
+    Return(Expr),
+    /// `@mixin name(params) { … }`.
+    MixinDef(Rc<Callable>),
+    /// `@include name(args) [{ content }];`
+    Include {
+        name: String,
+        args: Vec<CallArg>,
+        content: Option<Rc<Vec<Stmt>>>,
+    },
+    /// `@content;` — runs the `@include`'s content block.
+    Content,
 }
 
 /// One arm of an `@if` chain. `cond == None` is the trailing `@else`.
 pub(crate) struct IfBranch {
     pub cond: Option<Expr>,
     pub body: Vec<Stmt>,
+}
+
+/// A `@function` or `@mixin` definition (same shape).
+pub(crate) struct Callable {
+    pub name: String,
+    pub params: ParamList,
+    pub body: Vec<Stmt>,
+}
+
+/// A declared parameter list: positional/defaulted params plus an optional
+/// trailing rest parameter (`$args...`).
+pub(crate) struct ParamList {
+    pub params: Vec<Param>,
+    pub rest: Option<String>,
+}
+
+/// One declared parameter, with an optional default expression.
+pub(crate) struct Param {
+    pub name: String,
+    pub default: Option<Expr>,
 }
 
 pub(crate) struct VarDecl {

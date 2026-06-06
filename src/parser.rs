@@ -5,8 +5,11 @@
 //! a bounded lookahead ([`Parser::classify`]) that finds whether a
 //! top-level `{` (a rule) or `;`/`}` (a declaration) comes first.
 
+use std::rc::Rc;
+
 use crate::ast::{
-    BinOp, CallArg, Declaration, Expr, IfBranch, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+    BinOp, CallArg, Callable, Declaration, Expr, IfBranch, Param, ParamList, Rule, Stmt, Stylesheet,
+    TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Scanner;
@@ -305,8 +308,115 @@ impl Parser {
             "for" => self.parse_for(),
             "each" => self.parse_each(),
             "while" => self.parse_while(),
+            "function" => self.parse_callable_def(true),
+            "mixin" => self.parse_callable_def(false),
+            "return" => self.parse_return(),
+            "include" => self.parse_include(),
+            "content" => {
+                self.skip_ws_inline();
+                self.sc.eat(';');
+                Ok(Stmt::Content)
+            }
             other => Err(Error::at(format!("@{other} is not supported in this build"), pos)),
         }
+    }
+
+    /// Parse a `@function name(params) { … }` or `@mixin name(params) { … }`.
+    fn parse_callable_def(&mut self, is_function: bool) -> Result<Stmt, Error> {
+        self.skip_ws_inline();
+        let name = self.read_ident_name()?;
+        let params = self.parse_param_list()?;
+        let body = self.parse_braced_body()?;
+        let callable = Rc::new(Callable { name, params, body });
+        Ok(if is_function {
+            Stmt::FunctionDef(callable)
+        } else {
+            Stmt::MixinDef(callable)
+        })
+    }
+
+    /// Parse a declared parameter list `($a, $b: default, $rest...)`.
+    /// Missing parentheses means no parameters.
+    fn parse_param_list(&mut self) -> Result<ParamList, Error> {
+        let mut params = Vec::new();
+        let mut rest = None;
+        self.skip_ws_inline();
+        if self.sc.peek() != Some('(') {
+            return Ok(ParamList { params, rest });
+        }
+        self.sc.bump(); // '('
+        self.skip_ws_inline();
+        if self.sc.peek() == Some(')') {
+            self.sc.bump();
+            return Ok(ParamList { params, rest });
+        }
+        loop {
+            self.skip_ws_inline();
+            if !self.sc.eat('$') {
+                return Err(Error::at("expected a parameter", self.sc.position()));
+            }
+            let name = self.read_ident_name()?;
+            self.skip_ws_inline();
+            if self.sc.peek() == Some('.')
+                && self.sc.peek_at(1) == Some('.')
+                && self.sc.peek_at(2) == Some('.')
+            {
+                self.sc.bump();
+                self.sc.bump();
+                self.sc.bump();
+                rest = Some(name);
+                self.skip_ws_inline();
+                break;
+            }
+            let default = if self.sc.peek() == Some(':') {
+                self.sc.bump();
+                self.skip_ws_inline();
+                Some(self.space_list()?)
+            } else {
+                None
+            };
+            params.push(Param { name, default });
+            self.skip_ws_inline();
+            if self.sc.eat(',') {
+                continue;
+            }
+            break;
+        }
+        self.skip_ws_inline();
+        if !self.sc.eat(')') {
+            return Err(Error::at("expected \")\"", self.sc.position()));
+        }
+        Ok(ParamList { params, rest })
+    }
+
+    /// Parse `@return <expr>;`.
+    fn parse_return(&mut self) -> Result<Stmt, Error> {
+        self.skip_ws_inline();
+        let value = self.parse_value()?;
+        self.skip_ws_inline();
+        self.sc.eat(';');
+        Ok(Stmt::Return(value))
+    }
+
+    /// Parse `@include name[(args)] [{ content }];`.
+    fn parse_include(&mut self) -> Result<Stmt, Error> {
+        self.skip_ws_inline();
+        let name = self.read_ident_name()?;
+        self.skip_ws_inline();
+        let args = if self.sc.peek() == Some('(') {
+            self.sc.bump();
+            self.parse_args_after_paren()?
+        } else {
+            Vec::new()
+        };
+        self.skip_ws_inline();
+        let content = if self.sc.peek() == Some('{') {
+            Some(Rc::new(self.parse_braced_body()?))
+        } else {
+            self.sc.eat(';');
+            None
+        };
+        Ok(Stmt::Include { name, args, content })
     }
 
     /// `@for $i from <start> through|to <end> { … }`. Bounds are parsed at
@@ -1074,6 +1184,14 @@ impl Parser {
             }
             return Ok(Expr::Ident(pieces));
         }
+        let args = self.parse_args_after_paren()?;
+        Ok(Expr::Func { name, args, pos })
+    }
+
+    /// Parse a call's argument list, assuming the opening `(` was already
+    /// consumed, through the closing `)`. Args are positional or
+    /// `$name: value`. Shared by function calls and `@include`.
+    fn parse_args_after_paren(&mut self) -> Result<Vec<CallArg>, Error> {
         let mut args = Vec::new();
         self.skip_ws_inline();
         if self.sc.peek() != Some(')') {
@@ -1113,6 +1231,6 @@ impl Parser {
         if !self.sc.eat(')') {
             return Err(Error::at("expected \")\"", self.sc.position()));
         }
-        Ok(Expr::Func { name, args, pos })
+        Ok(args)
     }
 }

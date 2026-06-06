@@ -251,6 +251,37 @@ fn at_while_loop() {
 }
 
 #[test]
+fn at_function_and_return() {
+    assert_eq!(
+        css("@function double($n) { @return $n * 2; }\n.a { width: double(8px); }"),
+        ".a {\n  width: 16px;\n}\n"
+    );
+    // Control flow + @return, keyword args, defaults.
+    assert_eq!(
+        css("@function cap($v, $max: 100) { @if $v > $max { @return $max; } @return $v; }\n.a { x: cap(150); y: cap(50, $max: 60); }"),
+        ".a {\n  x: 100;\n  y: 50;\n}\n"
+    );
+    // Rest parameter + @each accumulation.
+    assert_eq!(
+        css("@function sum($n...) { $t: 0; @each $x in $n { $t: $t + $x; } @return $t; }\n.a { order: sum(1, 2, 3, 4); }"),
+        ".a {\n  order: 10;\n}\n"
+    );
+}
+
+#[test]
+fn at_mixin_include_content() {
+    assert_eq!(
+        css("@mixin box($pad, $color: blue) { padding: $pad; color: $color; }\n.a { @include box(4px); }\n.b { @include box(8px, red); }"),
+        ".a {\n  padding: 4px;\n  color: blue;\n}\n\n.b {\n  padding: 8px;\n  color: red;\n}\n"
+    );
+    // @content injects the include's block into the mixin body.
+    assert_eq!(
+        css("@mixin surround { border: 1px; @content; margin: 0; }\n.a { @include surround { background: yellow; } }"),
+        ".a {\n  border: 1px;\n  background: yellow;\n  margin: 0;\n}\n"
+    );
+}
+
+#[test]
 fn undefined_variable_is_an_error() {
     let err = compile(".a { color: $missing; }", &Options::default()).unwrap_err();
     assert!(err.message.contains("Undefined variable"));
