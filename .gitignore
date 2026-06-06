@@ -1,0 +1,17 @@
+# Build artifacts (root crate; nested helper crates carry their own too).
+/target
+bench/grass_runner/target/
+
+# The root Cargo.lock IS committed (this crate ships a binary). Auxiliary
+# throwaway tooling crates (bench) pin their own deps and are not committed.
+/bench/grass_runner/Cargo.lock
+
+# Conformance harness: the upstream sass-spec suite is fetched on demand by
+# spec/fetch.sh and pinned via spec/SPEC_VERSION.txt — never commit the whole
+# upstream tree. The harness scripts (fetch.sh, run_spec.py, etc.) ARE tracked.
+/spec/sass-spec/
+# Per-run artifacts produced by the runner.
+/spec/results.json
+/spec/results-*.json
+/spec/clone.err
+/spec/__pycache__/

@@ -1,0 +1,44 @@
+[package]
+name = "sasso"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT OR Apache-2.0"
+description = "A pure-Rust SCSS to CSS compiler (a dart-sass alternative). Zero dependencies, wasm-friendly, embeddable as a library and usable as a CLI."
+repository = "https://github.com/linyiru/sasso"
+readme = "README.md"
+keywords = ["sass", "scss", "css", "compiler", "wasm"]
+categories = ["compilers", "web-programming"]
+
+[lib]
+name = "sasso"
+path = "src/lib.rs"
+
+# Default binary, auto-detected from src/main.rs, named `sasso`.
+[[bin]]
+name = "sasso"
+path = "src/main.rs"
+
+# Intentionally zero runtime dependencies: pure std, so the crate is
+# trivially wasm32-wasip1 / wasm32-unknown-unknown friendly and embeds
+# into a sandbox (rubyrs Tier-1) without pulling a single native -sys
+# crate. The whole pipeline (scan -> parse -> eval -> emit) and the CLI
+# (a hand-rolled arg parser) are std-only.
+[dependencies]
+
+[features]
+default = []
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Modern lint posture, expressed in-manifest so every target (lib, bin,
+# tests, examples) inherits it and CI/clippy stay consistent.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -1,0 +1,113 @@
+//! The parsed syntax tree.
+//!
+//! Selectors and property names are templates ([`TplPiece`]) because they
+//! may contain `#{...}` interpolation that is only resolved at eval time.
+
+use crate::scanner::Pos;
+use crate::value::{Color, ListSep};
+
+/// A parsed stylesheet: an ordered list of top-level statements.
+pub(crate) struct Stylesheet {
+    pub stmts: Vec<Stmt>,
+}
+
+/// A statement, valid at the top level or inside a rule body.
+pub(crate) enum Stmt {
+    /// `$name: value [!default] [!global];`
+    VarDecl(VarDecl),
+    /// `selector { ... }`
+    Rule(Rule),
+    /// `property: value [!important];`
+    Decl(Declaration),
+    /// `@import "a", "b";` — the args are the raw (unquoted) paths.
+    Import(Vec<String>),
+    /// `/* ... */` loud comment (inner text, without the delimiters).
+    Comment(String),
+}
+
+pub(crate) struct VarDecl {
+    pub name: String,
+    pub value: Expr,
+    pub is_default: bool,
+    pub is_global: bool,
+}
+
+pub(crate) struct Rule {
+    pub selector: Vec<TplPiece>,
+    pub body: Vec<Stmt>,
+    pub pos: Pos,
+}
+
+pub(crate) struct Declaration {
+    pub property: Vec<TplPiece>,
+    pub value: Expr,
+    pub important: bool,
+    pub pos: Pos,
+}
+
+/// One piece of an interpolated template: literal text or an embedded
+/// expression (`#{...}`).
+pub(crate) enum TplPiece {
+    Lit(String),
+    Interp(Expr),
+}
+
+/// A value expression.
+pub(crate) enum Expr {
+    /// Numeric literal: value + unit (`""` for unitless).
+    Number(f64, String),
+    /// Color literal (hex or named), parsed eagerly.
+    Color(Color),
+    /// Quoted string, possibly with interpolation.
+    QuotedString(Vec<TplPiece>),
+    /// Unquoted identifier/string, possibly with interpolation
+    /// (e.g. `solid`, `sans-serif`, `col-#{$n}`).
+    Ident(Vec<TplPiece>),
+    /// `true` / `false`.
+    Bool(bool),
+    /// `null`.
+    Null,
+    /// `$name` variable reference.
+    Var(String),
+    /// Binary arithmetic / string concatenation.
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        pos: Pos,
+    },
+    /// Unary negation.
+    Unary { op: UnOp, operand: Box<Expr> },
+    /// Function call.
+    Func {
+        name: String,
+        args: Vec<CallArg>,
+        pos: Pos,
+    },
+    /// A space- or comma-separated list.
+    List { items: Vec<Expr>, sep: ListSep },
+    /// `( expr )`.
+    Paren(Box<Expr>),
+    /// `#{ expr }` used in value position — always yields an unquoted
+    /// string.
+    Interp(Box<Expr>),
+}
+
+/// A call argument, optionally named (`$name: value`).
+pub(crate) struct CallArg {
+    pub name: Option<String>,
+    pub value: Expr,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Mod,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum UnOp {
+    Neg,
+}
