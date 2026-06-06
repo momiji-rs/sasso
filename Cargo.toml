@@ -1,14 +1,19 @@
 [package]
 name = "sasso"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
 license = "MIT OR Apache-2.0"
 description = "A pure-Rust SCSS to CSS compiler (a dart-sass alternative). Zero dependencies, wasm-friendly, embeddable as a library and usable as a CLI."
 repository = "https://github.com/linyiru/sasso"
+documentation = "https://docs.rs/sasso"
 readme = "README.md"
 keywords = ["sass", "scss", "css", "compiler", "wasm"]
 categories = ["compilers", "web-programming"]
+# Keep the published crate lean: ship only the library, binary, examples,
+# tests, licenses and README — not the conformance harness, benchmarks, or
+# analysis docs (those live in the git repo).
+exclude = ["/bench", "/spec", "/docs", "/.github"]
 
 [lib]
 name = "sasso"
