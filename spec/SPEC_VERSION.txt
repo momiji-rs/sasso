@@ -1,0 +1,4 @@
+repo:   https://github.com/sass/sass-spec.git
+commit: c6ac9a3e5b0d9cffb4ab7a37ee2cbc20badae148
+date:   2026-06-04T16:23:50-07:00
+fetched_at: 2026-06-06T20:35:26Z
