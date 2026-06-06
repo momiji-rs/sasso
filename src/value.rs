@@ -105,6 +105,29 @@ impl Value {
             Value::Null => "null",
         }
     }
+
+    /// Sass truthiness: everything except `false` and `null` is truthy.
+    pub(crate) fn is_truthy(&self) -> bool {
+        !matches!(self, Value::Bool(false) | Value::Null)
+    }
+
+    /// Sass `==` equality. Numbers compare by value and unit; strings by
+    /// text (quotedness is ignored); colors by channel; lists structurally.
+    pub(crate) fn sass_eq(&self, other: &Value) -> bool {
+        match (self, other) {
+            (Value::Number(a), Value::Number(b)) => a.value == b.value && a.unit == b.unit,
+            (Value::Str(a), Value::Str(b)) => a.text == b.text,
+            (Value::Color(a), Value::Color(b)) => a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Null, Value::Null) => true,
+            (Value::List(a), Value::List(b)) => {
+                a.sep == b.sep
+                    && a.items.len() == b.items.len()
+                    && a.items.iter().zip(&b.items).all(|(x, y)| x.sass_eq(y))
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Number {

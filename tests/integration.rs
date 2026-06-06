@@ -174,6 +174,28 @@ fn compressed_output() {
 }
 
 #[test]
+fn comparison_and_logical_operators() {
+    assert_eq!(css(".a { x: if(3 > 2, big, small); }"), ".a {\n  x: big;\n}\n");
+    assert_eq!(css(".a { x: 1 + 2 == 3; }"), ".a {\n  x: true;\n}\n");
+    assert_eq!(css(".a { x: not false; }"), ".a {\n  x: true;\n}\n");
+    assert_eq!(css(".a { x: 1 == 1px; }"), ".a {\n  x: false;\n}\n");
+    assert_eq!(css(".a { x: if(true and false, y, n); }"), ".a {\n  x: n;\n}\n");
+    assert_eq!(css(".a { x: if(2 <= 2 or false, y, n); }"), ".a {\n  x: y;\n}\n");
+}
+
+#[test]
+fn if_function_is_lazy() {
+    // The branch not taken is never evaluated — referencing an undefined
+    // variable there must not error.
+    assert_eq!(css(".a { x: if(true, ok, $undefined); }"), ".a {\n  x: ok;\n}\n");
+    // Named arguments.
+    assert_eq!(
+        css(".a { x: if($condition: false, $if-true: a, $if-false: b); }"),
+        ".a {\n  x: b;\n}\n"
+    );
+}
+
+#[test]
 fn undefined_variable_is_an_error() {
     let err = compile(".a { color: $missing; }", &Options::default()).unwrap_err();
     assert!(err.message.contains("Undefined variable"));

@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{BinOp, Declaration, Expr, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl};
+use crate::ast::{BinOp, CallArg, Declaration, Expr, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl};
 use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{List, Number, SassStr, Value};
@@ -266,23 +266,50 @@ impl<'a> Evaluator<'a> {
             }
             Expr::Unary { op, operand } => {
                 let v = self.eval_expr(operand)?;
-                match (op, v) {
-                    (UnOp::Neg, Value::Number(n)) => Ok(Value::Number(Number {
-                        value: -n.value,
-                        unit: n.unit,
-                    })),
-                    (UnOp::Neg, other) => Err(Error::unpositioned(format!(
-                        "-{} is not a number",
-                        other.type_name()
-                    ))),
+                match op {
+                    UnOp::Neg => match v {
+                        Value::Number(n) => Ok(Value::Number(Number {
+                            value: -n.value,
+                            unit: n.unit,
+                        })),
+                        other => Err(Error::unpositioned(format!(
+                            "-{} is not a number",
+                            other.type_name()
+                        ))),
+                    },
+                    UnOp::Not => Ok(Value::Bool(!v.is_truthy())),
                 }
             }
             Expr::Binary { op, lhs, rhs, pos } => {
+                // `and`/`or` short-circuit and yield a value, so the
+                // right operand is only evaluated when needed.
                 let l = self.eval_expr(lhs)?;
-                let r = self.eval_expr(rhs)?;
-                eval_binary(*op, l, r, *pos)
+                match op {
+                    BinOp::And => {
+                        if l.is_truthy() {
+                            self.eval_expr(rhs)
+                        } else {
+                            Ok(l)
+                        }
+                    }
+                    BinOp::Or => {
+                        if l.is_truthy() {
+                            Ok(l)
+                        } else {
+                            self.eval_expr(rhs)
+                        }
+                    }
+                    _ => {
+                        let r = self.eval_expr(rhs)?;
+                        eval_binary(*op, l, r, *pos)
+                    }
+                }
             }
             Expr::Func { name, args, pos } => {
+                // if() is lazy: only the selected branch is evaluated.
+                if name == "if" {
+                    return self.eval_if_function(args, *pos);
+                }
                 let mut pos_args = Vec::new();
                 let mut named = Vec::new();
                 for a in args {
@@ -296,6 +323,42 @@ impl<'a> Evaluator<'a> {
             }
         }
     }
+
+    /// The lazy `if($condition, $if-true, $if-false)` function: evaluates
+    /// the condition, then only the selected branch.
+    fn eval_if_function(&mut self, args: &[CallArg], pos: Pos) -> Result<Value, Error> {
+        let mut by_pos: Vec<&Expr> = Vec::new();
+        let mut cond = None;
+        let mut t_val = None;
+        let mut f_val = None;
+        for a in args {
+            match a.name.as_deref() {
+                Some("condition") => cond = Some(&a.value),
+                Some("if-true") => t_val = Some(&a.value),
+                Some("if-false") => f_val = Some(&a.value),
+                Some(other) => {
+                    return Err(Error::at(format!("if() has no argument named ${other}."), pos));
+                }
+                None => by_pos.push(&a.value),
+            }
+        }
+        let cond = cond.or_else(|| by_pos.first().copied());
+        let t_val = t_val.or_else(|| by_pos.get(1).copied());
+        let f_val = f_val.or_else(|| by_pos.get(2).copied());
+        match (cond, t_val, f_val) {
+            (Some(c), Some(t), Some(f)) => {
+                if self.eval_expr(c)?.is_truthy() {
+                    self.eval_expr(t)
+                } else {
+                    self.eval_expr(f)
+                }
+            }
+            _ => Err(Error::at(
+                "if() requires arguments $condition, $if-true, $if-false.",
+                pos,
+            )),
+        }
+    }
 }
 
 fn eval_binary(op: BinOp, l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
@@ -304,6 +367,37 @@ fn eval_binary(op: BinOp, l: Value, r: Value, pos: Pos) -> Result<Value, Error> 
         BinOp::Sub => num_binop(l, r, pos, "-", |a, b| a - b),
         BinOp::Mod => num_binop(l, r, pos, "%", |a, b| a.rem_euclid(b)),
         BinOp::Mul => binary_mul(l, r, pos),
+        BinOp::Eq => Ok(Value::Bool(l.sass_eq(&r))),
+        BinOp::Neq => Ok(Value::Bool(!l.sass_eq(&r))),
+        BinOp::Lt => num_compare(l, r, pos, "<", |a, b| a < b),
+        BinOp::Gt => num_compare(l, r, pos, ">", |a, b| a > b),
+        BinOp::Le => num_compare(l, r, pos, "<=", |a, b| a <= b),
+        BinOp::Ge => num_compare(l, r, pos, ">=", |a, b| a >= b),
+        BinOp::And | BinOp::Or => Err(Error::unpositioned(
+            "internal: and/or are short-circuited in eval_expr",
+        )),
+    }
+}
+
+fn num_compare(
+    l: Value,
+    r: Value,
+    pos: Pos,
+    sym: &str,
+    f: impl Fn(f64, f64) -> bool,
+) -> Result<Value, Error> {
+    match (l, r) {
+        (Value::Number(a), Value::Number(b)) => {
+            if a.unit == b.unit || a.unit.is_empty() || b.unit.is_empty() {
+                Ok(Value::Bool(f(a.value, b.value)))
+            } else {
+                Err(Error::at(
+                    format!("Incompatible units {} and {}.", a.unit, b.unit),
+                    pos,
+                ))
+            }
+        }
+        (l, r) => Err(undefined_op(&l, sym, &r, pos)),
     }
 }
 

@@ -105,9 +105,18 @@ pub(crate) enum BinOp {
     Sub,
     Mul,
     Mod,
+    Eq,
+    Neq,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    And,
+    Or,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum UnOp {
     Neg,
+    Not,
 }

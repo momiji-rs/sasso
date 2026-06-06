@@ -436,7 +436,7 @@ impl Parser {
     }
 
     fn space_list(&mut self) -> Result<Expr, Error> {
-        let first = self.additive()?;
+        let first = self.or_expr()?;
         let mut rest = Vec::new();
         loop {
             let mark = self.sc.mark();
@@ -445,7 +445,7 @@ impl Parser {
                 self.sc.reset(mark);
                 break;
             }
-            rest.push(self.additive()?);
+            rest.push(self.or_expr()?);
         }
         if rest.is_empty() {
             Ok(first)
@@ -457,6 +457,150 @@ impl Parser {
                 items,
                 sep: ListSep::Space,
             })
+        }
+    }
+
+    // Operator precedence, lowest to highest: `or`, `and`, `not`, equality
+    // (== !=), relational (< > <= >=), then additive (below). The logical
+    // keywords are bare identifiers recognized only in operator position.
+
+    fn or_expr(&mut self) -> Result<Expr, Error> {
+        let mut lhs = self.and_expr()?;
+        while self.try_keyword("or") {
+            self.skip_ws_inline();
+            let pos = self.sc.position();
+            let rhs = self.and_expr()?;
+            lhs = Expr::Binary {
+                op: BinOp::Or,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                pos,
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn and_expr(&mut self) -> Result<Expr, Error> {
+        let mut lhs = self.not_expr()?;
+        while self.try_keyword("and") {
+            self.skip_ws_inline();
+            let pos = self.sc.position();
+            let rhs = self.not_expr()?;
+            lhs = Expr::Binary {
+                op: BinOp::And,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                pos,
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn not_expr(&mut self) -> Result<Expr, Error> {
+        if self.try_keyword("not") {
+            self.skip_ws_inline();
+            let operand = self.not_expr()?;
+            return Ok(Expr::Unary {
+                op: UnOp::Not,
+                operand: Box::new(operand),
+            });
+        }
+        self.equality()
+    }
+
+    fn equality(&mut self) -> Result<Expr, Error> {
+        let mut lhs = self.relational()?;
+        loop {
+            let mark = self.sc.mark();
+            self.skip_ws_inline();
+            let op = if self.sc.peek() == Some('=') && self.sc.peek_at(1) == Some('=') {
+                self.sc.bump();
+                self.sc.bump();
+                BinOp::Eq
+            } else if self.sc.peek() == Some('!') && self.sc.peek_at(1) == Some('=') {
+                self.sc.bump();
+                self.sc.bump();
+                BinOp::Neq
+            } else {
+                self.sc.reset(mark);
+                break;
+            };
+            let pos = self.sc.position();
+            self.skip_ws_inline();
+            let rhs = self.relational()?;
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                pos,
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn relational(&mut self) -> Result<Expr, Error> {
+        let mut lhs = self.additive()?;
+        loop {
+            let mark = self.sc.mark();
+            self.skip_ws_inline();
+            let op = match (self.sc.peek(), self.sc.peek_at(1)) {
+                (Some('<'), Some('=')) => {
+                    self.sc.bump();
+                    self.sc.bump();
+                    BinOp::Le
+                }
+                (Some('>'), Some('=')) => {
+                    self.sc.bump();
+                    self.sc.bump();
+                    BinOp::Ge
+                }
+                (Some('<'), _) => {
+                    self.sc.bump();
+                    BinOp::Lt
+                }
+                (Some('>'), _) => {
+                    self.sc.bump();
+                    BinOp::Gt
+                }
+                _ => {
+                    self.sc.reset(mark);
+                    break;
+                }
+            };
+            let pos = self.sc.position();
+            self.skip_ws_inline();
+            let rhs = self.additive()?;
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                pos,
+            };
+        }
+        Ok(lhs)
+    }
+
+    /// Consume the bare keyword `kw` (`and`/`or`/`not`) if it appears next
+    /// in operator position (after optional whitespace), matched as a whole
+    /// identifier. Restores the cursor and returns false otherwise.
+    fn try_keyword(&mut self, kw: &str) -> bool {
+        let mark = self.sc.mark();
+        self.skip_ws_inline();
+        if !matches!(self.sc.peek(), Some(c) if c.is_ascii_alphabetic()) {
+            self.sc.reset(mark);
+            return false;
+        }
+        let mut word = String::new();
+        while matches!(self.sc.peek(), Some(c) if is_ident_char(c)) {
+            if let Some(c) = self.sc.bump() {
+                word.push(c);
+            }
+        }
+        if word == kw {
+            true
+        } else {
+            self.sc.reset(mark);
+            false
         }
     }
 
