@@ -5,7 +5,9 @@
 //! a bounded lookahead ([`Parser::classify`]) that finds whether a
 //! top-level `{` (a rule) or `;`/`}` (a declaration) comes first.
 
-use crate::ast::{BinOp, CallArg, Declaration, Expr, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl};
+use crate::ast::{
+    BinOp, CallArg, Declaration, Expr, IfBranch, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+};
 use crate::error::Error;
 use crate::scanner::Scanner;
 use crate::value::{named_color, Color, ListSep};
@@ -299,8 +301,62 @@ impl Parser {
                 self.sc.eat(';');
                 Ok(Stmt::Import(args))
             }
+            "if" => self.parse_if(),
             other => Err(Error::at(format!("@{other} is not supported in this build"), pos)),
         }
+    }
+
+    /// Parse an `@if <cond> { … }` with its `@else if` / `@else` chain.
+    fn parse_if(&mut self) -> Result<Stmt, Error> {
+        let mut branches = Vec::new();
+        self.skip_ws_inline();
+        let cond = self.parse_value()?;
+        let body = self.parse_braced_body()?;
+        branches.push(IfBranch {
+            cond: Some(cond),
+            body,
+        });
+        loop {
+            let mark = self.sc.mark();
+            let mut discard = Vec::new();
+            self.skip_trivia(&mut discard);
+            if self.sc.peek() != Some('@') {
+                self.sc.reset(mark);
+                break;
+            }
+            self.sc.bump(); // '@'
+            if self.read_ident_name().unwrap_or_default() != "else" {
+                self.sc.reset(mark);
+                break;
+            }
+            if self.try_keyword("if") {
+                self.skip_ws_inline();
+                let cond = self.parse_value()?;
+                let body = self.parse_braced_body()?;
+                branches.push(IfBranch {
+                    cond: Some(cond),
+                    body,
+                });
+            } else {
+                let body = self.parse_braced_body()?;
+                branches.push(IfBranch { cond: None, body });
+                break;
+            }
+        }
+        Ok(Stmt::If(branches))
+    }
+
+    /// Parse a `{ … }` statement block.
+    fn parse_braced_body(&mut self) -> Result<Vec<Stmt>, Error> {
+        self.skip_ws_inline();
+        if !self.sc.eat('{') {
+            return Err(Error::at("expected \"{\"", self.sc.position()));
+        }
+        let body = self.parse_statements(false)?;
+        if !self.sc.eat('}') {
+            return Err(Error::at("expected \"}\"", self.sc.position()));
+        }
+        Ok(body)
     }
 
     /// Parse an interpolated template (selector or property name) up to,

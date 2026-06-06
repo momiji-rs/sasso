@@ -23,6 +23,14 @@ pub(crate) enum Stmt {
     Import(Vec<String>),
     /// `/* ... */` loud comment (inner text, without the delimiters).
     Comment(String),
+    /// `@if`/`@else if`/`@else` — evaluated top to bottom, first match wins.
+    If(Vec<IfBranch>),
+}
+
+/// One arm of an `@if` chain. `cond == None` is the trailing `@else`.
+pub(crate) struct IfBranch {
+    pub cond: Option<Expr>,
+    pub body: Vec<Stmt>,
 }
 
 pub(crate) struct VarDecl {

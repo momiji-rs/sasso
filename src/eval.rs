@@ -186,6 +186,21 @@ impl<'a> Evaluator<'a> {
                     }
                 }
                 Stmt::Rule(r) => self.eval_style_rule(r, parents, sink)?,
+                Stmt::If(branches) => {
+                    // Evaluate conditions top to bottom; run the first match's
+                    // body into the same sink. Flow control adds no scope, so
+                    // its assignments are visible to the surroundings (Sass).
+                    for branch in branches {
+                        let take = match &branch.cond {
+                            None => true,
+                            Some(c) => self.eval_expr(c)?.is_truthy(),
+                        };
+                        if take {
+                            self.exec(&branch.body, parents, sink)?;
+                            break;
+                        }
+                    }
+                }
                 Stmt::Import(args) => match sink {
                     Sink::Top(out) => {
                         let out = &mut **out;

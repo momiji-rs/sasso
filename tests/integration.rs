@@ -196,6 +196,27 @@ fn if_function_is_lazy() {
 }
 
 #[test]
+fn at_if_else_chain() {
+    // Inside a rule the matched branch's declarations join the block.
+    assert_eq!(
+        css("$t: dark;\n.a { @if $t == dark { color: white; } @else { color: black; } padding: 1px; }"),
+        ".a {\n  color: white;\n  padding: 1px;\n}\n"
+    );
+    // @else if.
+    assert_eq!(
+        css("$n: 2;\n.a { @if $n == 1 { x: a; } @else if $n == 2 { x: b; } @else { x: c; } }"),
+        ".a {\n  x: b;\n}\n"
+    );
+    // A top-level @if yields a top-level group.
+    assert_eq!(css("@if 2 > 1 { .b { y: 1; } }"), ".b {\n  y: 1;\n}\n");
+    // A false branch contributes nothing.
+    assert_eq!(
+        css(".a { @if false { x: 1; } color: red; }"),
+        ".a {\n  color: red;\n}\n"
+    );
+}
+
+#[test]
 fn undefined_variable_is_an_error() {
     let err = compile(".a { color: $missing; }", &Options::default()).unwrap_err();
     assert!(err.message.contains("Undefined variable"));
