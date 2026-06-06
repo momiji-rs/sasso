@@ -296,3 +296,26 @@ git worktree remove ../sasso-feat-NAME
 ```
 
 **The one invariant that makes the whole system safe:** after *every* integration, rebuild and re-run the **full** spec harness, diff per-case against the prior full run, and refuse to bump the baseline unless the pass count strictly rose and the regression set is empty.
+
+## Real-run note: builtin fan-out (2026-06-06)
+
+The first parallel builtin phase (math, string, list, meta, color_ext)
+was attempted with `Workflow` `isolation: 'worktree'` but failed:
+`Cannot create agent worktree: not in a git repository`. Root cause: the
+session began **before** `git init`, and the worktree feature keys off the
+session-start git detection, so a mid-session repo is invisible to it.
+
+Fallback used: the same workflow run **sequentially** (a `for…await` loop,
+no isolation) in the shared checkout — each agent built, verified against
+dart-sass, and committed its own disjoint module file before the next ran,
+so there was no race on shared build artifacts. Result: five families,
+each byte-verified and atomically committed, sass-spec **1267 → 1351
+(+84)**, no regression.
+
+Takeaway for the next large parallel phase: start a **fresh conversation**
+in the now-existing git repo so worktree isolation (true parallelism) is
+available. Caveat: expect ~2–3× wall-clock (not 5×) — N concurrent
+`cargo build` + spec runs + `npx sass` contend for one machine — so reserve
+it for big batches. The disjoint per-family module layout makes both modes
+clean (parallel integrates by cherry-pick; serial commits straight to
+master).
