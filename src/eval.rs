@@ -772,7 +772,7 @@ fn eval_binary(op: BinOp, l: Value, r: Value, pos: Pos) -> Result<Value, Error> 
     match op {
         BinOp::Add => binary_add(l, r, pos),
         BinOp::Sub => num_binop(l, r, pos, "-", |a, b| a - b),
-        BinOp::Mod => num_binop(l, r, pos, "%", |a, b| a.rem_euclid(b)),
+        BinOp::Mod => num_binop(l, r, pos, "%", sass_modulo),
         BinOp::Mul => binary_mul(l, r, pos),
         BinOp::Eq => Ok(Value::Bool(l.sass_eq(&r))),
         BinOp::Neq => Ok(Value::Bool(!l.sass_eq(&r))),
@@ -844,6 +844,16 @@ fn binary_mul(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
         }
         (l, r) => Err(undefined_op(&l, "*", &r, pos)),
     }
+}
+
+/// Sass modulo: a floored modulo whose result takes the divisor's sign
+/// (matching dart-sass). `1.2 % -4.7 == -3.5`, `-1.2 % 4.7 == 3.5`.
+/// Division by zero yields NaN.
+fn sass_modulo(a: f64, b: f64) -> f64 {
+    if b == 0.0 {
+        return f64::NAN;
+    }
+    a - b * (a / b).floor()
 }
 
 fn num_binop(l: Value, r: Value, pos: Pos, sym: &str, f: impl Fn(f64, f64) -> f64) -> Result<Value, Error> {
