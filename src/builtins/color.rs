@@ -1,20 +1,19 @@
-//! The built-in function library (a focused slice: color, plus a couple
-//! of introspection helpers). Unknown functions are preserved verbatim as
-//! plain CSS function calls (e.g. `translate(...)`, `var(...)`), matching
-//! dart-sass's treatment of CSS functions it doesn't recognize.
+//! Core color builtins: `rgb`/`rgba`/`hsl`/`hsla`/`mix`, the legacy
+//! `lighten`/`darken`, `percentage`, and the channel getters
+//! `red`/`green`/`blue`/`alpha`.
 
+use super::{arg, as_color, channel, clamp01, num, require};
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{fmt_num, Color, Number, SassStr, Value};
+use crate::value::{fmt_num, Color, Number, Value};
 
-/// Dispatch a function call by name.
-pub(crate) fn call(
+pub(super) fn try_call(
     name: &str,
     pos_args: &[Value],
     named: &[(String, Value)],
     pos: Pos,
-) -> Result<Value, Error> {
-    match name {
+) -> Option<Result<Value, Error>> {
+    Some(match name {
         "rgb" | "rgba" => fn_rgb(pos_args, named, pos),
         "hsl" | "hsla" => fn_hsl(pos_args, named, pos),
         "mix" => fn_mix(pos_args, named, pos),
@@ -23,72 +22,8 @@ pub(crate) fn call(
         "percentage" => fn_percentage(pos_args, named, pos),
         "red" | "green" | "blue" => fn_channel(name, pos_args, named, pos),
         "alpha" => fn_alpha(pos_args, named, pos),
-        _ => Ok(plain_css_function(name, pos_args, named)),
-    }
-}
-
-fn arg<'v>(
-    params: &[&str],
-    pos_args: &'v [Value],
-    named: &'v [(String, Value)],
-    i: usize,
-) -> Option<&'v Value> {
-    if let Some(v) = pos_args.get(i) {
-        return Some(v);
-    }
-    let pname = params.get(i)?;
-    named.iter().find(|(n, _)| n == pname).map(|(_, v)| v)
-}
-
-fn require<'v>(
-    params: &[&str],
-    pos_args: &'v [Value],
-    named: &'v [(String, Value)],
-    i: usize,
-    fname: &str,
-    pos: Pos,
-) -> Result<&'v Value, Error> {
-    arg(params, pos_args, named, i).ok_or_else(|| {
-        let pname = params.get(i).copied().unwrap_or("");
-        Error::at(format!("Missing argument ${pname} for {fname}()."), pos)
+        _ => return None,
     })
-}
-
-fn num(v: &Value, pos: Pos) -> Result<f64, Error> {
-    match v {
-        Value::Number(n) => Ok(n.value),
-        other => Err(Error::at(
-            format!("{} is not a number.", other.to_css(false)),
-            pos,
-        )),
-    }
-}
-
-fn color(v: &Value, pos: Pos) -> Result<Color, Error> {
-    match v {
-        Value::Color(c) => Ok(c.clone()),
-        other => Err(Error::at(format!("{} is not a color.", other.to_css(false)), pos)),
-    }
-}
-
-fn channel(v: &Value, pos: Pos) -> Result<f64, Error> {
-    match v {
-        Value::Number(n) => {
-            if n.unit == "%" {
-                Ok((n.value / 100.0 * 255.0).clamp(0.0, 255.0))
-            } else {
-                Ok(n.value.clamp(0.0, 255.0))
-            }
-        }
-        other => Err(Error::at(
-            format!("{} is not a number.", other.to_css(false)),
-            pos,
-        )),
-    }
-}
-
-fn clamp01(v: f64) -> f64 {
-    v.clamp(0.0, 1.0)
 }
 
 fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
@@ -117,7 +52,7 @@ fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     Ok(Value::Color(c))
 }
 
-fn rgb_repr(r: f64, g: f64, b: f64, a: f64) -> String {
+pub(super) fn rgb_repr(r: f64, g: f64, b: f64, a: f64) -> String {
     if (a - 1.0).abs() < f64::EPSILON {
         format!(
             "rgb({}, {}, {})",
@@ -174,8 +109,8 @@ fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
 
 fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color1", "color2", "weight"];
-    let c1 = color(require(&params, pos_args, named, 0, "mix", pos)?, pos)?;
-    let c2 = color(require(&params, pos_args, named, 1, "mix", pos)?, pos)?;
+    let c1 = as_color(require(&params, pos_args, named, 0, "mix", pos)?, pos)?;
+    let c2 = as_color(require(&params, pos_args, named, 1, "mix", pos)?, pos)?;
     let weight = match arg(&params, pos_args, named, 2) {
         Some(v) => num(v, pos)?,
         None => 50.0,
@@ -204,7 +139,7 @@ fn fn_adjust_lightness(
     sign: f64,
 ) -> Result<Value, Error> {
     let params = ["color", "amount"];
-    let c = color(require(&params, pos_args, named, 0, "lightness", pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, "lightness", pos)?, pos)?;
     let amount = num(require(&params, pos_args, named, 1, "lightness", pos)?, pos)?;
     let (h, s, l) = c.to_hsl();
     let new_l = (l + sign * amount / 100.0).clamp(0.0, 1.0);
@@ -222,7 +157,7 @@ fn fn_percentage(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
 
 fn fn_channel(name: &str, pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
-    let c = color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
     let v = match name {
         "red" => c.r,
         "green" => c.g,
@@ -237,20 +172,9 @@ fn fn_channel(name: &str, pos_args: &[Value], named: &[(String, Value)], pos: Po
 
 fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
-    let c = color(require(&params, pos_args, named, 0, "alpha", pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, "alpha", pos)?, pos)?;
     Ok(Value::Number(Number {
         value: c.a,
         unit: String::new(),
     }))
-}
-
-fn plain_css_function(name: &str, pos_args: &[Value], named: &[(String, Value)]) -> Value {
-    let mut parts: Vec<String> = pos_args.iter().map(|v| v.to_css(false)).collect();
-    for (n, v) in named {
-        parts.push(format!("${n}: {}", v.to_css(false)));
-    }
-    Value::Str(SassStr {
-        text: format!("{name}({})", parts.join(", ")),
-        quoted: false,
-    })
 }
