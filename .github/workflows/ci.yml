@@ -52,3 +52,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: build (lib) for wasm
         run: cargo build --lib --target wasm32-wasip1
+
+  conformance:
+    name: sass-spec ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: fetch sass-spec
+        run: bash spec/fetch.sh
+      - name: build release
+        run: cargo build --release
+      - name: pass-rate ratchet (must not regress below spec/BASELINE.json)
+        run: python3 spec/check_baseline.py
