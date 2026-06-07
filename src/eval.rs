@@ -339,10 +339,9 @@ struct Module {
     /// Built-in modules this module `@use`d, by namespace, and unprefixed.
     used_builtin_modules: HashMap<String, String>,
     star_builtin_modules: Vec<String>,
-    /// Built-in `sass:*` modules re-exported via `@forward`, as (module name,
-    /// optional `prefix-`). A `ns.member` that misses every captured member is
-    /// retried against these.
-    forwarded_builtins: Vec<(String, Option<String>)>,
+    /// Built-in `sass:*` modules re-exported via `@forward`. A `ns.member` that
+    /// misses every captured member is retried against these.
+    forwarded_builtins: Vec<ForwardedBuiltin>,
 }
 
 impl Module {
@@ -390,9 +389,33 @@ struct Forwarded {
     vars: HashMap<String, Value>,
     functions: HashMap<String, Rc<Callable>>,
     mixins: HashMap<String, Rc<Callable>>,
-    /// Built-in `sass:*` modules re-exported wholesale via `@forward "sass:x"`,
-    /// stored as (builtin module name, optional `prefix-`).
-    builtins: Vec<(String, Option<String>)>,
+    /// Built-in `sass:*` modules re-exported via `@forward "sass:x"`.
+    builtins: Vec<ForwardedBuiltin>,
+}
+
+/// A built-in module re-exported via `@forward "sass:x" [as p-*] [show|hide ...]`.
+#[derive(Clone)]
+struct ForwardedBuiltin {
+    module: String,
+    prefix: Option<String>,
+    /// `show` allow-list of member names; `None` when no `show` clause.
+    show: Option<std::collections::HashSet<String>>,
+    /// `hide` deny-list of member names.
+    hide: Option<std::collections::HashSet<String>>,
+}
+
+impl ForwardedBuiltin {
+    /// Whether a re-exported built-in member (given by its bare, un-prefixed
+    /// name) is visible through this forward.
+    fn visible(&self, bare: &str) -> bool {
+        if let Some(show) = &self.show {
+            return show.contains(bare);
+        }
+        if let Some(hide) = &self.hide {
+            return !hide.contains(bare);
+        }
+        true
+    }
 }
 
 /// A pending `@extend`, captured during eval and applied after flattening.
@@ -1030,6 +1053,23 @@ impl<'a> Evaluator<'a> {
             }
             return Err(Error::unpositioned("Undefined mixin."));
         }
+        // A bare `@include` may resolve a user module mixin exposed unprefixed
+        // via `@use … as *`.
+        if !self.mixins.contains_key(name) && !self.star_user_modules.is_empty() && !is_private_member(name) {
+            let hits: Vec<(Rc<Module>, Rc<Callable>)> = self
+                .star_user_modules
+                .iter()
+                .filter_map(|m| m.mixin(name).map(|mx| (Rc::clone(m), mx)))
+                .collect();
+            if hits.len() > 1 {
+                return Err(Error::unpositioned(
+                    "This mixin is available from multiple global modules.",
+                ));
+            }
+            if let Some((m, mx)) = hits.into_iter().next() {
+                return self.run_module_mixin(&m, &mx, args, content, parents, sink);
+            }
+        }
         let mixin = self
             .mixins
             .get(name)
@@ -1377,14 +1417,24 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
-        // `@forward "sass:<mod>"` re-exports a built-in module wholesale.
+        // `@forward "sass:<mod>"` re-exports a built-in module. Built-ins can't
+        // be configured.
         if let Some(m) = url.strip_prefix("sass:") {
             if !crate::builtins::is_module(m) {
                 return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
             }
-            self.forwarded
-                .builtins
-                .push((m.to_string(), prefix.map(str::to_string)));
+            if !config.is_empty() {
+                return Err(Error::at(
+                    "Built-in modules can't be configured.".to_string(),
+                    pos,
+                ));
+            }
+            self.forwarded.builtins.push(ForwardedBuiltin {
+                module: m.to_string(),
+                prefix: prefix.map(str::to_string),
+                show: member_set(show, false),
+                hide: member_set(hide, false),
+            });
             return Ok(());
         }
 
@@ -1474,29 +1524,43 @@ impl<'a> Evaluator<'a> {
             }
         };
 
+        // Two `@forward`s of the same member name conflict — an error reported
+        // immediately, even when the member is never used.
         let pfx = prefix.unwrap_or("");
         for (name, val) in &module.vars {
             if visible_var(name) {
-                self.forwarded
-                    .vars
-                    .entry(format!("{pfx}{name}"))
-                    .or_insert_with(|| val.clone());
+                let key = format!("{pfx}{name}");
+                if self.forwarded.vars.contains_key(&key) {
+                    return Err(Error::at(
+                        format!("Two forwarded modules both define a variable named ${key}."),
+                        pos,
+                    ));
+                }
+                self.forwarded.vars.insert(key, val.clone());
             }
         }
         for (name, f) in &module.functions {
             if visible_name(name) {
-                self.forwarded
-                    .functions
-                    .entry(format!("{pfx}{name}"))
-                    .or_insert_with(|| Rc::clone(f));
+                let key = format!("{pfx}{name}");
+                if self.forwarded.functions.contains_key(&key) {
+                    return Err(Error::at(
+                        format!("Two forwarded modules both define a function named {key}."),
+                        pos,
+                    ));
+                }
+                self.forwarded.functions.insert(key, Rc::clone(f));
             }
         }
         for (name, m) in &module.mixins {
             if visible_name(name) {
-                self.forwarded
-                    .mixins
-                    .entry(format!("{pfx}{name}"))
-                    .or_insert_with(|| Rc::clone(m));
+                let key = format!("{pfx}{name}");
+                if self.forwarded.mixins.contains_key(&key) {
+                    return Err(Error::at(
+                        format!("Two forwarded modules both define a mixin named {key}."),
+                        pos,
+                    ));
+                }
+                self.forwarded.mixins.insert(key, Rc::clone(m));
             }
         }
         Ok(())
@@ -2415,8 +2479,25 @@ impl<'a> Evaluator<'a> {
             Expr::Var(name) => match self.lookup(name) {
                 Some(v) => Ok(v.clone().without_slash()),
                 None => {
-                    // A module variable exposed unprefixed via `@use … as *`
-                    // (e.g. `$pi` from `sass:math`).
+                    // A user module variable exposed unprefixed via `@use … as *`.
+                    let star_hits: Vec<Value> = if is_private_member(name) {
+                        Vec::new()
+                    } else {
+                        self.star_user_modules
+                            .iter()
+                            .filter_map(|m| m.var(name))
+                            .collect()
+                    };
+                    if star_hits.len() > 1 {
+                        return Err(Error::unpositioned(
+                            "This variable is available from multiple global modules.",
+                        ));
+                    }
+                    if let Some(v) = star_hits.into_iter().next() {
+                        return Ok(v.without_slash());
+                    }
+                    // A built-in module variable exposed unprefixed via
+                    // `@use "sass:…" as *` (e.g. `$pi` from `sass:math`).
                     for m in &self.star_modules {
                         if let Ok(v) = crate::builtins::module_var(m, name, Pos { line: 1, col: 1 }) {
                             return Ok(v);
@@ -2630,6 +2711,23 @@ impl<'a> Evaluator<'a> {
                 // User-defined @function takes precedence over builtins.
                 if let Some(func) = self.functions.get(name).cloned() {
                     return self.call_function(&func, args);
+                }
+                // A user module function exposed unprefixed via `@use … as *`.
+                if !self.star_user_modules.is_empty() && !is_private_member(name) {
+                    let hits: Vec<(Rc<Module>, Rc<Callable>)> = self
+                        .star_user_modules
+                        .iter()
+                        .filter_map(|m| m.function(name).map(|f| (Rc::clone(m), f)))
+                        .collect();
+                    if hits.len() > 1 {
+                        return Err(Error::at(
+                            "This function is available from multiple global modules.".to_string(),
+                            *pos,
+                        ));
+                    }
+                    if let Some((m, f)) = hits.into_iter().next() {
+                        return self.call_user_module_function(&m, &f, args);
+                    }
                 }
                 // The pure CSS-calculation functions are parsed as
                 // calculations, which cannot take a `...` rest argument.
@@ -3118,15 +3216,15 @@ impl<'a> Evaluator<'a> {
         args: &[CallArg],
         pos: Pos,
     ) -> Result<Option<Value>, Error> {
-        for (m, prefix) in &module.forwarded_builtins {
-            let bare = match prefix {
+        for fb in &module.forwarded_builtins {
+            let bare = match &fb.prefix {
                 Some(p) => match member.strip_prefix(p.as_str()) {
                     Some(rest) => rest,
                     None => continue,
                 },
                 None => member,
             };
-            if crate::builtins::module_has_member(m, bare) {
+            if fb.visible(bare) && crate::builtins::module_has_member(&fb.module, bare) {
                 let (mut pos_args, mut named) = self.eval_call_args(args)?;
                 for v in &mut pos_args {
                     *v = std::mem::replace(v, Value::Null).without_slash();
@@ -3135,7 +3233,7 @@ impl<'a> Evaluator<'a> {
                     *v = std::mem::replace(v, Value::Null).without_slash();
                 }
                 return Ok(Some(crate::builtins::call_module(
-                    m, bare, &pos_args, &named, pos,
+                    &fb.module, bare, &pos_args, &named, pos,
                 )?));
             }
         }
