@@ -1162,6 +1162,9 @@ fn slash_chain_keeps_spelling_through_special_value() {
     // collapsed quotient `0.5/foo()`.
     assert_parity("a { b: 1 / 2 / foo(); }\n");
     assert_parity("a { b: 1/2/foo(); }\n");
+}
+
+#[test]
 fn progid_long_filter_syntax_is_preserved() {
     // IE `progid:Name.Name(...)` long-filter syntax (with `:`, `.`, `=`, and
     // `#hex` inside the arg list) is preserved verbatim; the `progid` keyword
@@ -1200,6 +1203,9 @@ fn quoted_string_line_continuation_is_removed() {
     assert_parity("a { b: \"line1 \\\n      line2\"; }\n");
     assert_parity("a { b: \"x\\\ny\"; }\n");
     assert_parity("a { b: 'a\\\nb\\\nc'; }\n");
+}
+
+#[test]
 fn parent_selector_as_value() {
     // `&` in value position resolves to the current selector: a single
     // selector, a comma list, and a nested/descendant selector. At the
