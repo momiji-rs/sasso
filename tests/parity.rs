@@ -249,6 +249,13 @@ fn parity_unit_converting_arithmetic() {
 }
 
 #[test]
+fn parity_color_hue_family() {
+    assert_parity(
+        "a {\n  b: adjust-hue(red, 540);\n  c: adjust-hue(blue, 0);\n  d: adjust-hue(red, -180);\n  e: adjust-hue(red, 60rad);\n  f: complement(aqua);\n  g: invert(red);\n  h: invert(#b37399, 80%);\n}\n",
+    );
+}
+
+#[test]
 fn parity_calc_unit_folding() {
     assert_parity(
         ".a {\n  a: calc(1in + 1cm);\n  b: calc(1cm + 1in);\n  c: calc(5s - 100ms);\n  d: calc(1px + 1pt);\n  e: calc(10px / 2cm);\n  f: calc(1turn + 90deg);\n  g: calc(100% - 10px);\n  h: calc(1px + 1vw);\n}\n",
@@ -266,5 +273,12 @@ fn parity_math_builtins() {
 fn parity_min_max_clamp_routing() {
     assert_parity(
         ".a {\n  a: min(1px, 2px);\n  b: max(1, 2, 3);\n  c: clamp(1px, 5px, 3px);\n  d: min(1px + 1px, 2vw);\n  e: min(1in, 2cm);\n  f: min(50%, 30%);\n  g: clamp(1px, 2vw, 3px);\n  h: max(2px, min(1px, 2vw));\n  i: min(1px, var(--x));\n}\n",
+    );
+}
+
+#[test]
+fn parity_color_filter_overloads() {
+    assert_parity(
+        "a {\n  b: invert(10%);\n  c: grayscale(15%);\n  d: saturate(50%);\n  e: grayscale(var(--c));\n  f: invert(calc(1 + 2));\n}\n",
     );
 }
