@@ -39,6 +39,9 @@ matching current dart-sass (1.100) byte-for-byte on the implemented subset.
 - **Benchmark harness** — sasso registered as a first-class engine in `bench/`;
   three-way report [`bench/three_way.md`](bench/three_way.md) (sasso vs
   dart-sass vs grass).
+- **`CODE_OF_CONDUCT.md`** adopting the
+  [Sass Community Guidelines](https://sass-lang.com/community-guidelines/), as
+  the Sass project asks every implementation to do.
 - **This CHANGELOG.**
 
 ### Changed

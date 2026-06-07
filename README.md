@@ -189,6 +189,12 @@ $ cargo fmt --check
 
 Notable changes are recorded in [`CHANGELOG.md`](CHANGELOG.md).
 
+## Code of Conduct
+
+As a Sass implementation, sasso adopts the
+[Sass Community Guidelines](https://sass-lang.com/community-guidelines/) — see
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+
 ## License
 
 Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT)
