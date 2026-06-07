@@ -2977,6 +2977,14 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
                     }
                     at_compound_start = false;
                 }
+                // A reference combinator (`/foo/`) used to be valid CSS but is
+                // no longer supported; dart-sass now rejects any top-level `/`
+                // in a selector with "expected selector.". (A `/` inside an
+                // attribute value or a pseudo argument is at depth > 0 and is
+                // handled above.)
+                '/' => {
+                    return Err(Error::unpositioned("expected selector."));
+                }
                 _ => at_compound_start = false,
             }
             i += 1;

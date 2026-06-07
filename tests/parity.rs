@@ -2586,3 +2586,13 @@ fn top_level_parent_selector_is_literal() {
     assert_parity("&.foo {a: b}\n");
     assert_parity("@a {\n  & {b: c}\n}\n");
 }
+
+#[test]
+fn reference_combinator_is_rejected() {
+    // Reference combinators (`/foo/`) are no longer valid CSS: dart-sass rejects
+    // any top-level `/` in a selector with "expected selector.".
+    assert!(compile(".foo /bar/ .baz {\n  a: b;\n}\n", &Options::default()).is_err());
+    assert!(compile(".a/.b {x: y}\n", &Options::default()).is_err());
+    // A `/` inside an attribute value is fine.
+    assert_eq!(ours("a[href^=\"/\"] {x: y}\n"), "a[href^=\"/\"] {\n  x: y;\n}\n");
+}
