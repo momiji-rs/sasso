@@ -1510,11 +1510,10 @@ impl<'a> Evaluator<'a> {
                     BinOp::Add => CalcOp::Add,
                     BinOp::Sub => CalcOp::Sub,
                     BinOp::Mul => CalcOp::Mul,
-                    _ => {
-                        // Non-arithmetic operators are not valid in calc.
-                        let v = self.eval_expr(expr)?;
-                        return Ok(value_to_calc_node(v));
-                    }
+                    // Modulo, comparisons, and `and`/`or` are not arithmetic;
+                    // dart-sass rejects them inside a calculation rather than
+                    // evaluating them (`calc(1px % 2px)`, `calc(1 > 2)`).
+                    _ => return Err(Error::at("This operation can't be used in a calculation.", *pos)),
                 };
                 let l = self.eval_calc(lhs)?;
                 let r = self.eval_calc(rhs)?;

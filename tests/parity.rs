@@ -1126,3 +1126,21 @@ fn calc_space_list_grammar() {
         );
     }
 }
+
+#[test]
+fn calc_rejects_non_arithmetic_operators() {
+    // Only `+`/`-`/`*`/`/` are valid in a calculation; modulo, comparisons,
+    // and `and`/`or` are rejected ("This operation can't be used in a
+    // calculation.").
+    for src in [
+        "a {b: calc(1px % 2px)}\n",
+        "a {b: calc(1 > 2)}\n",
+        "a {b: calc(1 == 2)}\n",
+        "a {b: calc(1 and 2)}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected error for {src}"
+        );
+    }
+}
