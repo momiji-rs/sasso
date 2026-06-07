@@ -3089,6 +3089,10 @@ fn parity_color_invert_in_space() {
     // (1 - weight). Byte-matched to `npx sass`.
     assert_parity(
         "@use \"sass:color\";\na {\n  s: color.invert(color(srgb 0.2 0.5 0.8), $space: srgb);\n  lab: color.invert(lab(20% -30 110), $space: lab);\n  lch: color.invert(lch(20% 80 50deg), $space: lch);\n  hsl: color.invert(hsl(120 50% 40%), $space: hsl);\n  hwb: color.invert(hwb(120 30% 40%), $space: hwb);\n  w: color.invert(color(a98-rgb 0.1 0.4 0.8), 0%, $space: a98-rgb);\n  legacy: color.invert(#123456);\n  legacy_w: color.invert(#123456, 30%);\n}\n",
+    );
+}
+
+#[test]
 fn parity_map_module_gaps() {
     // `map.set`/`map.deep-merge`/`map.deep-remove` plus the nested key-path
     // overloads of `map.get`/`map.has-key`/`map.merge`/`map.remove`, all
@@ -3165,6 +3169,8 @@ fn parity_math_numeric_module_members() {
         "@use \"sass:math\";\na {\n  cl_num: math.clamp(0, 1, 2);\n  cl_max: math.clamp(0, 2, 1);\n  cl_inv: math.clamp(1, 2, 0);\n  cl_unit: math.clamp(180deg, 1turn, 360deg);\n  mn: math.min(3px, 1px, 2px);\n  mn_conv: math.min(1cm, 5mm);\n  mx: math.max(1, 2, 3);\n  rnd: math.round(1.6);\n  ln: math.log(2, null);\n}\n",
     );
     assert_parity("@use \"sass:math\";\na { b: math.$min-number * 1e300 * 1e39; }\n");
+}
+
 /// Compile `files["input.scss"]` with the on-disk module system (writing every
 /// entry to a temp dir, resolving `@use`/`@forward` through `FsImporter`) and
 /// assert byte-parity with dart-sass run on the same directory.
