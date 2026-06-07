@@ -3532,3 +3532,25 @@ fn parity_color_modify_missing_channel_errors() {
         }
     }
 }
+
+#[test]
+fn parity_color_adjust_hue_non_legacy_error() {
+    // The legacy `adjust-hue()` getter only supports legacy colors; a non-legacy
+    // color (e.g. lch) errors with dart-sass's exact message.
+    if !enabled() {
+        return;
+    }
+    let scss = "a {b: adjust-hue(lch(0% 0 0deg), 10deg)}\n";
+    let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+    match dart_sass_error(scss) {
+        Some(theirs) => {
+            let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+            let msg = ours.trim_start_matches("Error: ");
+            assert!(
+                msg.starts_with(&theirs),
+                "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+            );
+        }
+        None => eprintln!("skipping adjust-hue non-legacy parity case: dart-sass unavailable"),
+    }
+}

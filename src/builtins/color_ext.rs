@@ -294,6 +294,15 @@ fn fn_adjust_hue(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
     let params = ["color", "degrees"];
     check_max_args(pos_args, named, 2, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, "adjust-hue", pos)?, pos)?;
+    // The legacy `adjust-hue()` getter only supports legacy colors.
+    if c.modern.as_ref().is_some_and(|m| !m.space.is_legacy()) {
+        return Err(Error::at(
+            "adjust-hue() is only supported for legacy colors. Please use color.adjust() \
+             instead with an explicit $space argument."
+                .to_string(),
+            pos,
+        ));
+    }
     let degrees = angle_degrees(require(&params, pos_args, named, 1, "adjust-hue", pos)?, pos)?;
     Ok(Value::Color(rotate_hue(&c, degrees)))
 }
