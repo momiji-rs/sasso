@@ -1560,6 +1560,17 @@ fn parse_pseudo_parts(text: &str) -> Option<PseudoParts> {
     Some(PseudoParts { head, name, arg })
 }
 
+/// Whether any simple in `complex` is a selector-bearing pseudo (`:not(...)`,
+/// `:is(...)`, etc.) whose argument we might further extend on a later pass.
+fn complex_has_selector_pseudo(complex: &Complex) -> bool {
+    complex.components.iter().any(|comp| {
+        comp.compound.simples.iter().any(|s| {
+            let Simple::Pseudo(text) = s else { return false };
+            parse_pseudo_parts(text).is_some_and(|p| is_selector_pseudo(&p.name))
+        })
+    })
+}
+
 /// Whether a pseudo name takes a selector list we should extend.
 fn is_selector_pseudo(name: &str) -> bool {
     matches!(
@@ -1598,9 +1609,17 @@ fn extend_to_fixpoint(list: &[Complex], extensions: &[Extension]) -> Vec<Complex
         for c in extend_complex(&complex, extensions) {
             let rendered = c.render();
             if seen.insert(rendered) {
-                // Re-extend this freshly-produced selector to chase transitive
-                // extensions (e.g. a target inside a `:is()` extender).
-                queue.push_back(c.clone());
+                // Re-extend a freshly-produced selector only when it carries a
+                // selector-bearing pseudo: that's the sole case where a second
+                // pass can reveal *more* extensions (a target buried in a
+                // pseudo argument that became extendable, or an extender pseudo
+                // that is itself a target). Plain class/placeholder/type chains
+                // are already resolved transitively in a single pass by
+                // `collect_extenders`, so re-feeding them would only risk
+                // re-deriving cyclic self-extends without producing anything new.
+                if complex_has_selector_pseudo(&c) {
+                    queue.push_back(c.clone());
+                }
                 result.push(c);
             }
         }
@@ -1617,13 +1636,29 @@ fn extend_to_fixpoint(list: &[Complex], extensions: &[Extension]) -> Vec<Complex
 /// parse a complex/compound inside `:not`, so each becomes its own `:not`). For
 /// every other pseudo (and `:not` whose argument was already a list), the result
 /// is a single rewritten pseudo carrying the extended argument list.
+// Recursion guard for nested pseudo-argument extension. A target that is itself
+// a selector-pseudo containing the extended selector (`:not(.c) {@extend .c}`)
+// would otherwise recurse without bound through `extend_pseudo` → `extend_list`
+// → ... → `extend_pseudo`. dart-sass bounds this implicitly via its
+// target-tracking; a small fixed depth covers every real case while keeping the
+// engine total.
+const MAX_PSEUDO_DEPTH: usize = 8;
+thread_local! {
+    static PSEUDO_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn extend_pseudo(text: &str, extensions: &[Extension]) -> Option<Vec<Simple>> {
     let parts = parse_pseudo_parts(text)?;
     if !is_selector_pseudo(&parts.name) {
         return None;
     }
+    if PSEUDO_DEPTH.with(|d| d.get()) >= MAX_PSEUDO_DEPTH {
+        return None;
+    }
     let original = parse_list(&parts.arg)?;
+    PSEUDO_DEPTH.with(|d| d.set(d.get() + 1));
     let extended = extend_list(&original, extensions);
+    PSEUDO_DEPTH.with(|d| d.set(d.get() - 1));
     // Nothing changed.
     if extended.len() == original.len()
         && extended

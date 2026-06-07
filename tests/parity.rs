@@ -2943,10 +2943,12 @@ fn parity_extend_graph_fixpoint() {
     // transitively — including targets inside pseudo arguments (the
     // extension-graph fixpoint). `:is(midstream)` extends `upstream`, and
     // `midstream` (inside that `:is`) is then extended by `downstream`.
-    assert_parity(
-        ":is(midstream) {@extend upstream}\ndownstream {@extend midstream}\nupstream {a: b}\n",
-    );
+    assert_parity(":is(midstream) {@extend upstream}\ndownstream {@extend midstream}\nupstream {a: b}\n");
     // The result of `:not(.c)` being extended is itself extendable: `:not(.b)`
     // (produced by extending `.c`) is a target extended by `.a`.
     assert_parity(".a {@extend :not(.b)}\n.b {@extend .c}\n:not(.c) {x: y}\n");
+    // A self-extend must terminate: `.c` extends itself and a pseudo-target
+    // `:not(.c)` extends its own contained class.
+    assert_parity(".c, .a .b .c, .a .c .b {x: y; @extend .c}\n");
+    assert_parity(":not(.c) {@extend .c}\n.c {x: y}\n");
 }
