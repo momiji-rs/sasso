@@ -1896,6 +1896,18 @@ impl<'a> Evaluator<'a> {
                 {
                     return self.eval_calc_size(args, *pos);
                 }
+                // A three-argument `clamp()` evaluates its bounds and value as
+                // calculations, so a `var()`/operation argument (`1% + 1px`)
+                // keeps the call preserved instead of erroring as Sass
+                // arithmetic. Other arities (a preserved single argument, or an
+                // arity error) fall through to the builtin.
+                if name.eq_ignore_ascii_case("clamp")
+                    && !self.functions.contains_key(name)
+                    && args.len() == 3
+                    && !args.iter().any(|a| a.splat || a.name.is_some())
+                {
+                    return self.try_eval_clamp(args, *pos);
+                }
                 // `abs()` is a legacy global function that also exists as the CSS
                 // `abs()` calculation. When its single positional argument
                 // references a `var()`/interpolation it is parsed as a
@@ -2166,6 +2178,48 @@ impl<'a> Evaluator<'a> {
             text: format!("{lname}({})", parts.join(", ")),
             quoted: false,
         })))
+    }
+
+    /// Evaluate a three-argument `clamp(min, value, max)` calculation. Each
+    /// argument is evaluated through the calc machinery (rejecting `%` and other
+    /// non-calculation operators). When every argument folds to a single number,
+    /// the builtin clamps/unit-checks them as before; when an argument keeps a
+    /// `var()`/calculation operand the call is preserved
+    /// (`clamp(1% + 1px, 2px, 3px)`). A resolved operand with complex units is
+    /// rejected like dart-sass.
+    fn try_eval_clamp(&mut self, args: &[CallArg], pos: Pos) -> Result<Value, Error> {
+        let mut nodes = Vec::with_capacity(args.len());
+        for a in args {
+            let node = self.eval_calc(&a.value)?;
+            if let Some(complex) = calc_complex_unit_operand(&node) {
+                return Err(Error::at(
+                    format!(
+                        "Number calc({}) isn't compatible with CSS calculations.",
+                        complex.to_calc_css(false)
+                    ),
+                    pos,
+                ));
+            }
+            nodes.push(node);
+        }
+        // Every argument is a plain number: let the builtin clamp them (and run
+        // its incompatible-unit checks).
+        if nodes.iter().all(|n| matches!(n, CalcNode::Number(_))) {
+            let values: Vec<Value> = nodes
+                .into_iter()
+                .map(|n| match n {
+                    CalcNode::Number(num) => Value::Number(num),
+                    // Unreachable: guarded by the `all` check above.
+                    other => Value::Calc(other),
+                })
+                .collect();
+            return crate::builtins::call("clamp", &values, &[], pos);
+        }
+        let parts: Vec<String> = nodes.iter().map(|n| n.to_calc_css(self.compressed())).collect();
+        Ok(Value::Str(SassStr {
+            text: format!("clamp({})", parts.join(", ")),
+            quoted: false,
+        }))
     }
 
     /// Evaluate a `calc-size(target, value)` calculation. The target (`auto`,

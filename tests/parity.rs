@@ -2902,3 +2902,23 @@ fn parity_calc_unary_operator() {
         "}\n",
     ));
 }
+
+#[test]
+fn parity_clamp_calculation() {
+    // A three-argument `clamp()` evaluates its operands as calculations: an
+    // operation/`var()` argument keeps the call preserved, all-number arguments
+    // clamp, and a complex-unit operand is rejected.
+    assert!(compile("a {b: clamp(1px*1px, 2%*2%, 3px*3px)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: clamp(7 % 3, 2, 3)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: clamp(1s, 2px, 3px)}\n", &Options::default()).is_err());
+    assert_parity(concat!(
+        "a {\n",
+        "  m1: clamp(1% + 1px, 2px, 3px);\n",
+        "  m2: clamp(1px, 1% + 2px, 3px);\n",
+        "  m3: clamp(1px, 2px, 1% + 3px);\n",
+        "  r1: clamp(1px, 2px, 3px);\n",
+        "  r2: clamp(1px, 5px, 3px);\n",
+        "  p1: clamp(1px, 2vw, 3px);\n",
+        "}\n",
+    ));
+}
