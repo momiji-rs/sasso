@@ -1876,6 +1876,14 @@ impl<'a> Evaluator<'a> {
                         return Ok(v);
                     }
                 }
+                // `calc-size()` is a two-argument calculation: a sizing keyword
+                // (or `var()`/calculation) plus a calculation, always preserved.
+                if name.eq_ignore_ascii_case("calc-size")
+                    && !self.functions.contains_key(name)
+                    && !args.iter().any(|a| a.splat || a.name.is_some())
+                {
+                    return self.eval_calc_size(args, *pos);
+                }
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.
                 let (mut pos_args, mut named) = self.eval_call_args(args)?;
@@ -2125,6 +2133,31 @@ impl<'a> Evaluator<'a> {
             text: format!("{lname}({})", parts.join(", ")),
             quoted: false,
         })))
+    }
+
+    /// Evaluate a `calc-size(target, value)` calculation. The target (`auto`,
+    /// `none`, `size`, a `var()`, or a nested calculation) and the optional
+    /// value are each evaluated through the calc machinery and the call is kept
+    /// preserved (`calc-size()` never reduces to a number). Exactly one or two
+    /// arguments are accepted.
+    fn eval_calc_size(&mut self, args: &[CallArg], pos: Pos) -> Result<Value, Error> {
+        if args.is_empty() {
+            return Err(Error::at("Missing argument.", pos));
+        }
+        if args.len() > 2 {
+            return Err(Error::at(
+                format!("Only 2 arguments allowed, but {} were passed.", args.len()),
+                pos,
+            ));
+        }
+        let mut parts = Vec::with_capacity(args.len());
+        for a in args {
+            parts.push(self.eval_calc(&a.value)?.to_calc_css(self.compressed()));
+        }
+        Ok(Value::Str(SassStr {
+            text: format!("calc-size({})", parts.join(", ")),
+            quoted: false,
+        }))
     }
 
     /// Evaluate the interior of a `calc()` into a simplified node tree.

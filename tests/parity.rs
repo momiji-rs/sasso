@@ -2805,3 +2805,17 @@ fn parity_calc_math_function_simplification() {
         "}\n",
     ));
 }
+
+#[test]
+fn parity_calc_size() {
+    // `calc-size()` keeps its sizing target verbatim and evaluates its value
+    // as a calculation, folding the numeric subtree and lower-casing the name.
+    assert_parity(concat!(
+        "a {\n",
+        "  c1: calc-size(var(--foo));\n",
+        "  c2: calc-size(auto, 5% - 20px + size);\n",
+        "  c3: calc-size(auto, 100px - 20px + size);\n",
+        "  c4: CaLc-size(auto, size - 20px);\n",
+        "}\n",
+    ));
+}
