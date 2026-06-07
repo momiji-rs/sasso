@@ -275,9 +275,6 @@ impl Number {
 /// Note: dart-sass does NOT treat the frequency units `hz`/`khz` as
 /// convertible in arithmetic (`1khz + 500hz` is an error), so frequency is
 /// deliberately omitted here to match its behaviour byte-for-byte.
-// `dead_code` is allowed only until the arithmetic/calc/math-builtin batches
-// wire these in; the table lands first with unit tests and no behaviour change.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Dim {
     Length,
@@ -289,7 +286,6 @@ pub(crate) enum Dim {
 /// The dimension group a unit belongs to, or `None` for `%`, an unknown
 /// unit, or a unitless number. Unit names compare case-insensitively, as in
 /// dart-sass (`PX` and `px` are the same unit).
-#[allow(dead_code)]
 pub(crate) fn unit_dimension(unit: &str) -> Option<Dim> {
     match unit.to_ascii_lowercase().as_str() {
         "px" | "in" | "cm" | "mm" | "q" | "pt" | "pc" => Some(Dim::Length),
@@ -306,7 +302,6 @@ pub(crate) fn unit_dimension(unit: &str) -> Option<Dim> {
 ///
 /// Canonical bases (verified against dart-sass):
 /// length → px, angle → deg, time → s, resolution → dpi.
-#[allow(dead_code)]
 fn canonical_factor(unit: &str) -> Option<f64> {
     use std::f64::consts::PI;
     Some(match unit.to_ascii_lowercase().as_str() {
@@ -337,7 +332,6 @@ fn canonical_factor(unit: &str) -> Option<f64> {
 /// The multiplier to convert a value in `from` units to `to` units
 /// (`value_in_to = value_in_from * convert_factor(from, to)`). Returns
 /// `None` when the two units are not in the same convertible group.
-#[allow(dead_code)]
 pub(crate) fn convert_factor(from: &str, to: &str) -> Option<f64> {
     if !units_compatible(from, to) {
         return None;
@@ -352,7 +346,6 @@ pub(crate) fn convert_factor(from: &str, to: &str) -> Option<f64> {
 /// must be non-empty and share a dimension group. An empty unit (unitless)
 /// is handled by the caller, not here — this is the strict "two real units"
 /// test, mirroring dart-sass's `isComparableTo`.
-#[allow(dead_code)]
 pub(crate) fn units_compatible(a: &str, b: &str) -> bool {
     if a.eq_ignore_ascii_case(b) {
         return true;

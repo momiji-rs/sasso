@@ -240,3 +240,10 @@ fn parity_keyframes() {
 fn parity_keyframes_list_and_interpolation() {
     assert_parity("$name: bounce;\n@keyframes #{$name} {\n  0%, 100% { opacity: 0; }\n  50% { opacity: 1; }\n}\n.a {\n  @keyframes nested-#{1 + 1} { from { top: 0; } }\n}\n");
 }
+
+#[test]
+fn parity_unit_converting_arithmetic() {
+    assert_parity(
+        ".a {\n  w: 1in + 1cm;\n  x: 1cm + 1in;\n  y: 5s - 100ms;\n  z: 10px % 3pt;\n  cmp: 1in > 2cm;\n  mix: 5 + 1px;\n  turn: 1turn + 90deg;\n}\n",
+    );
+}

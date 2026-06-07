@@ -1213,7 +1213,44 @@ fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Value, Error> {
             ));
         }
     }
-    num_binop(l.without_slash(), r.without_slash(), pos, "/", |a, b| a / b)
+    match (l.without_slash(), r.without_slash()) {
+        (Value::Number(a), Value::Number(b)) => divide_numbers(&a, &b, pos),
+        (l, r) => Err(undefined_op(&l, "/", &r, pos)),
+    }
+}
+
+/// Real division of two numbers with dart-sass unit semantics: two units in
+/// the same dimension cancel (the divisor is converted into the dividend's
+/// unit first), a unitless divisor keeps the dividend's unit, and a unitless
+/// dividend over a real divisor yields the (unrepresentable) inverse unit —
+/// kept as the bare divisor unit, matching prior behaviour. Cross-dimension
+/// real units error.
+fn divide_numbers(a: &Number, b: &Number, pos: Pos) -> Result<Value, Error> {
+    let (value, unit) = if b.unit.is_empty() {
+        (a.value / b.value, a.unit.clone())
+    } else if a.unit.is_empty() {
+        // Inverse units are out of scope; preserve the prior result shape.
+        (a.value / b.value, b.unit.clone())
+    } else if a.unit.eq_ignore_ascii_case(&b.unit) {
+        (a.value / b.value, String::new())
+    } else {
+        match crate::value::convert_factor(&b.unit, &a.unit) {
+            Some(factor) => (a.value / (b.value * factor), String::new()),
+            None => {
+                return Err(Error::at(
+                    format!(
+                        "{}{} and {}{} have incompatible units.",
+                        crate::value::fmt_num(a.value, false),
+                        a.unit,
+                        crate::value::fmt_num(b.value, false),
+                        b.unit
+                    ),
+                    pos,
+                ))
+            }
+        }
+    };
+    Ok(Value::Number(Number { value, unit }))
 }
 
 /// The slash-spelling text of an operand: a slash value keeps its chained
@@ -1252,14 +1289,8 @@ fn num_compare(
 ) -> Result<Value, Error> {
     match (l, r) {
         (Value::Number(a), Value::Number(b)) => {
-            if a.unit == b.unit || a.unit.is_empty() || b.unit.is_empty() {
-                Ok(Value::Bool(f(a.value, b.value)))
-            } else {
-                Err(Error::at(
-                    format!("Incompatible units {} and {}.", a.unit, b.unit),
-                    pos,
-                ))
-            }
+            let (av, bv, _) = coerce_pair(&a, &b, pos)?;
+            Ok(Value::Bool(f(av, bv)))
         }
         (l, r) => Err(undefined_op(&l, sym, &r, pos)),
     }
@@ -1267,11 +1298,8 @@ fn num_compare(
 
 fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     if let (Value::Number(a), Value::Number(b)) = (&l, &r) {
-        let unit = unify_units(&a.unit, &b.unit, pos)?;
-        return Ok(Value::Number(Number {
-            value: a.value + b.value,
-            unit,
-        }));
+        let (av, bv, unit) = coerce_pair(a, b, pos)?;
+        return Ok(Value::Number(Number { value: av + bv, unit }));
     }
     let quoted = matches!(&l, Value::Str(s) if s.quoted);
     let text = format!("{}{}", concat_str(&l), concat_str(&r));
@@ -1316,9 +1344,9 @@ fn sass_modulo(a: f64, b: f64) -> f64 {
 fn num_binop(l: Value, r: Value, pos: Pos, sym: &str, f: impl Fn(f64, f64) -> f64) -> Result<Value, Error> {
     match (l, r) {
         (Value::Number(a), Value::Number(b)) => {
-            let unit = unify_units(&a.unit, &b.unit, pos)?;
+            let (av, bv, unit) = coerce_pair(&a, &b, pos)?;
             Ok(Value::Number(Number {
-                value: f(a.value, b.value),
+                value: f(av, bv),
                 unit,
             }))
         }
@@ -1326,13 +1354,37 @@ fn num_binop(l: Value, r: Value, pos: Pos, sym: &str, f: impl Fn(f64, f64) -> f6
     }
 }
 
-fn unify_units(a: &str, b: &str, pos: Pos) -> Result<String, Error> {
-    if a == b || b.is_empty() {
-        Ok(a.to_string())
-    } else if a.is_empty() {
-        Ok(b.to_string())
-    } else {
-        Err(Error::at(format!("Incompatible units {a} and {b}."), pos))
+/// Coerce two numbers onto a common unit for `+`, `-`, `%`, `/`, and
+/// comparison. The result keeps the LEFT operand's unit; the right operand
+/// is converted into it (`1in + 1cm` → both in inches, result `in`). When
+/// exactly one operand is unitless the other's unit is adopted with no
+/// rescaling (`5 + 1px` → `6px`). Incompatible real units error, matching
+/// dart-sass's `<a> and <b> have incompatible units.`
+///
+/// Returns `(left_value, right_value, result_unit)` with both values
+/// expressed in `result_unit`.
+fn coerce_pair(a: &Number, b: &Number, pos: Pos) -> Result<(f64, f64, String), Error> {
+    // Equal units (case-insensitively) or a unitless operand never need a
+    // numeric conversion.
+    if a.unit.eq_ignore_ascii_case(&b.unit) || b.unit.is_empty() {
+        return Ok((a.value, b.value, a.unit.clone()));
+    }
+    if a.unit.is_empty() {
+        return Ok((a.value, b.value, b.unit.clone()));
+    }
+    // Two distinct real units: convert the right into the left's unit.
+    match crate::value::convert_factor(&b.unit, &a.unit) {
+        Some(factor) => Ok((a.value, b.value * factor, a.unit.clone())),
+        None => Err(Error::at(
+            format!(
+                "{}{} and {}{} have incompatible units.",
+                crate::value::fmt_num(a.value, false),
+                a.unit,
+                crate::value::fmt_num(b.value, false),
+                b.unit
+            ),
+            pos,
+        )),
     }
 }
 
