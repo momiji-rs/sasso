@@ -2727,4 +2727,54 @@ fn extend_pseudo_element_superselector() {
 
     assert_parity("%x#bar {a: b}\n%y, %y::fblthp {@extend %x}\nz {@extend %y}\n");
     assert_parity("%x#bar {a: b}\n%y, %y:before {@extend %x}\nz {@extend %y}\n");
+fn fs_importer_partial_extension_and_import_only_resolution() {
+    use std::fs;
+    use std::path::PathBuf;
+
+    // A unique scratch dir under the OS temp directory.
+    let dir = std::env::temp_dir().join(format!(
+        "sasso-import-resolve-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&dir).expect("create scratch dir");
+
+    let imp = sasso::FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    let write = |name: &str, body: &str| fs::write(dir.join(name), body).expect("write fixture");
+    let rm = |name: &str| {
+        let _ = fs::remove_file(dir.join(name));
+    };
+
+    // An import-only file (`other.import.scss`) takes precedence over the
+    // normal partial (`_other.scss`), matching dart-sass's load order.
+    write("other.import.scss", "a {import-only: true}\n");
+    write("_other.scss", "a {import-only: false}\n");
+    assert_eq!(
+        compile("@import \"other\";\n", &opts).expect("import-only resolution"),
+        "a {\n  import-only: true;\n}\n"
+    );
+
+    // A real-world import-only file re-exports with `@forward`, which this
+    // build can't inline; resolution falls back to the normal file instead of
+    // failing on the unsupported `@forward`.
+    write("other.import.scss", "@forward \"other\";\n");
+    write("_other.scss", "b {c: fallback}\n");
+    assert_eq!(
+        compile("@import \"other\";\n", &opts).expect("fallback past @forward import-only"),
+        "b {\n  c: fallback;\n}\n"
+    );
+
+    // Two candidates at the same precedence tier (non-partial + partial) are
+    // ambiguous, so the import fails rather than silently picking one.
+    rm("other.import.scss");
+    write("other.scss", "x {y: nonpartial}\n");
+    write("_other.scss", "x {y: partial}\n");
+    assert!(compile("@import \"other\";\n", &opts).is_err());
+
+    // Cleanup (best effort).
+    let _: Result<(), _> = fs::remove_dir_all(PathBuf::from(&dir));
 }

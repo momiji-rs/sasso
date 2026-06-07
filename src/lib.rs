@@ -128,32 +128,179 @@ impl FsImporter {
 impl Importer for FsImporter {
     fn resolve(&self, path: &str) -> Option<String> {
         for base in &self.load_paths {
-            for cand in candidate_paths(base, path) {
-                if let Ok(src) = std::fs::read_to_string(&cand) {
-                    return Some(src);
+            match resolve_in_base(base, path) {
+                Resolution::Found(p) => {
+                    if let Ok(src) = std::fs::read_to_string(&p) {
+                        return Some(src);
+                    }
                 }
+                // An ambiguous match is an error in dart-sass; we surface it as
+                // "not found" (the eval layer turns that into an import error),
+                // which is enough for callers that only care about pass/fail.
+                Resolution::Ambiguous => return None,
+                Resolution::NotFound => {}
             }
         }
         None
     }
 }
 
-fn candidate_paths(base: &Path, path: &str) -> Vec<PathBuf> {
+/// Outcome of resolving an `@import` argument within a single load path.
+enum Resolution {
+    /// Exactly one candidate file matched.
+    Found(PathBuf),
+    /// Two or more candidates matched at the same precedence tier — dart-sass
+    /// treats this as an error ("It's not clear which file to import.").
+    Ambiguous,
+    /// No candidate matched in this base directory.
+    NotFound,
+}
+
+/// Resolve `@import "path"` against `base`, following dart-sass precedence.
+///
+/// dart-sass tries, in strict order (each "tier" is checked together; if a
+/// tier has more than one match it is ambiguous, if it has exactly one that
+/// wins, otherwise fall through to the next tier):
+///
+/// 1. import-only, non-index: `name.import.{scss,sass}` + partials
+/// 2. normal, non-index:      `name.{scss,sass}` + partials
+/// 3. import-only index:      `name/index.import.{…}` + `_index.import.{…}`
+/// 4. normal index:           `name/index.{…}` + `_index.{…}`
+///
+/// An explicit `.scss`/`.sass` extension keeps only the matching extension but
+/// still honours the import-only override (`name.import.scss`).
+///
+/// We deliberately do **not** resolve plain `.css` files here: importing a CSS
+/// file as a stylesheet is a distinct feature (with its own strict-CSS parsing
+/// rules) that this build doesn't implement, and treating `foo.css` as a
+/// stylesheet would mis-handle constructs that dart-sass rejects.
+///
+/// An import-only file whose body is only `@forward`/`@use` (the real-world
+/// shape — re-exporting another module) is treated as unusable and skipped,
+/// since this build has no module system; resolution then falls through to the
+/// normal file, matching the output we can actually produce.
+fn resolve_in_base(base: &Path, path: &str) -> Resolution {
     let p = Path::new(path);
-    let stem = p.file_name().and_then(|s| s.to_str()).unwrap_or(path);
     let dir = match p.parent() {
         Some(par) if !par.as_os_str().is_empty() => base.join(par),
         _ => base.to_path_buf(),
     };
-    let mut out = Vec::new();
-    if path.ends_with(".scss") {
-        out.push(base.join(path));
-        out.push(dir.join(format!("_{stem}")));
-    } else {
-        out.push(dir.join(format!("{stem}.scss")));
-        out.push(dir.join(format!("_{stem}.scss")));
-        out.push(base.join(path).join("_index.scss"));
-        out.push(base.join(path).join("index.scss"));
+    let file = p.file_name().and_then(|s| s.to_str()).unwrap_or(path);
+
+    // Explicit `.scss`/`.sass` extension: only that extension is considered.
+    // (`.css` is handled upstream as a plain CSS import and never reaches here.)
+    let explicit_ext = [".scss", ".sass"].into_iter().find(|ext| file.ends_with(ext));
+
+    if let Some(ext) = explicit_ext {
+        let stem = &file[..file.len() - ext.len()];
+        // Strip the leading dot so `ext` is e.g. "scss".
+        let ext = &ext[1..];
+        // Tier 1: import-only override for the explicit extension.
+        match tier_exact(&dir, stem, &[ext], true) {
+            Tier::One(p) => return Resolution::Found(p),
+            Tier::Many => return Resolution::Ambiguous,
+            Tier::None => {}
+        }
+        // Tier 2: the file as written (+ partial).
+        return match tier_exact(&dir, stem, &[ext], false) {
+            Tier::One(p) => Resolution::Found(p),
+            Tier::Many => Resolution::Ambiguous,
+            Tier::None => Resolution::NotFound,
+        };
     }
-    out
+
+    // Extensionless: scss/sass are equal precedence, css is a fallback.
+    let non_index = [
+        // (stem, import_only)
+        (file.to_string(), true),
+        (file.to_string(), false),
+    ];
+    for (stem, import_only) in &non_index {
+        match tier_with_extensions(&dir, stem, *import_only) {
+            Tier::One(p) => return Resolution::Found(p),
+            Tier::Many => return Resolution::Ambiguous,
+            Tier::None => {}
+        }
+    }
+
+    // Index files live in a subdirectory named after the import path.
+    let index_dir = dir.join(file);
+    for import_only in [true, false] {
+        match tier_with_extensions(&index_dir, "index", import_only) {
+            Tier::One(p) => return Resolution::Found(p),
+            Tier::Many => return Resolution::Ambiguous,
+            Tier::None => {}
+        }
+    }
+
+    Resolution::NotFound
+}
+
+/// One precedence tier's matches.
+enum Tier {
+    None,
+    One(PathBuf),
+    Many,
+}
+
+impl Tier {
+    fn from(mut found: Vec<PathBuf>) -> Tier {
+        match found.len() {
+            0 => Tier::None,
+            1 => Tier::One(found.pop().unwrap_or_default()),
+            _ => Tier::Many,
+        }
+    }
+}
+
+/// Try a tier with the standard extension grouping: `scss` and `sass` are
+/// checked together (any match there wins the tier). Each extension is checked
+/// in both non-partial and partial (`_name`) forms.
+fn tier_with_extensions(dir: &Path, stem: &str, import_only: bool) -> Tier {
+    tier_exact(dir, stem, &["scss", "sass"], import_only)
+}
+
+/// Collect existing candidate files for `stem` under `dir` across `exts`, in
+/// non-partial and partial forms, optionally inserting the `.import` suffix
+/// (import-only files). Import-only candidates we cannot compile (their body is
+/// only `@forward`/`@use`) are skipped. Returns how many matched.
+fn tier_exact(dir: &Path, stem: &str, exts: &[&str], import_only: bool) -> Tier {
+    let mut found = Vec::new();
+    let suffix = if import_only { ".import" } else { "" };
+    for ext in exts {
+        for name in [format!("_{stem}{suffix}.{ext}"), format!("{stem}{suffix}.{ext}")] {
+            let cand = dir.join(&name);
+            if !cand.is_file() {
+                continue;
+            }
+            if import_only && !import_only_is_usable(&cand) {
+                continue;
+            }
+            found.push(cand);
+        }
+    }
+    Tier::from(found)
+}
+
+/// Whether an import-only file is something this build can actually inline.
+///
+/// Real `.import.scss` files re-export another module with `@forward`/`@use`,
+/// which this build has no support for. Such files are reported as unusable so
+/// that resolution falls back to the corresponding normal file. A file with
+/// any other meaningful content (e.g. plain rules) is considered usable.
+fn import_only_is_usable(path: &Path) -> bool {
+    let Ok(src) = std::fs::read_to_string(path) else {
+        // Unreadable: let the normal resolution path report "not found".
+        return false;
+    };
+    for line in src.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("//") || t.starts_with("/*") {
+            continue;
+        }
+        return !(t.starts_with("@forward") || t.starts_with("@use"));
+    }
+    // Empty (only comments/blank lines) — nothing to inline, treat as usable
+    // (an empty import-only file is valid and contributes no output).
+    true
 }
