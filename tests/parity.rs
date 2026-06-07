@@ -826,6 +826,9 @@ fn map_literals_and_builtins() {
     assert_parity("a { b: map-values((c: 1, d: 2)); }\n");
     assert_parity("a { b: map-has-key((c: d), c); }\n");
     assert_parity("@each $k, $v in (a: 1, b: 2) { x-#{$k} { y: $v; } }\n");
+}
+
+#[test]
 fn special_css_functions_verbatim() {
     // calc/element/expression (with/without vendor prefix) and unprefixed
     // type() preserve their arguments verbatim: vendor-prefixed and uppercase
@@ -890,6 +893,9 @@ fn special_url_function_passthrough() {
     assert_parity("$a: b;\nc { d: url($a); }\n");
     assert_parity("$a: b;\nc { d: -e-url($a); }\n");
     assert_parity("$f: bar;\na {\n  foo: url($f);\n  foo: url(#{$f});\n  foo: url(\"x?v=#{$f}\");\n}\n");
+}
+
+#[test]
 fn extended_named_colors() {
     // Every one of the 148 CSS named colors must resolve and feed color
     // functions; previously extended names like `plum` errored as "not a
