@@ -47,7 +47,7 @@ Since this slice was written the ratchet has added a great deal more —
 and `%placeholder`s, a `calc()` engine, the CSS unit system + math functions,
 full CSS Color 4 color spaces (`oklch`/`lab`/`color()`…), structured
 `@media`/`@supports`, maps, the `@use`/`@forward` module system (built-in
-`sass:*` modules + user files), and the indented `.sass` syntax. **81% of the
+`sass:*` modules + user files), and the indented `.sass` syntax. **82% of the
 official sass-spec suite now passes** (see [Conformance](#conformance)); what
 remains is a long tail of byte-level edge cases.
 
@@ -133,7 +133,7 @@ pass rate; we ratchet it upward over time.
 | sass-spec commit | `c6ac9a3` (dart-sass 1.100.0) |
 | Total cases | 13,904 |
 | Attempted (excl. a few :todo) | 13,896 |
-| **Passing** | **11,323 (81.5% of attempted, 81.4% of all 13,904)** |
+| **Passing** | **11,445 (82.4% of attempted, 82.3% of all 13,904)** |
 
 Run it yourself:
 

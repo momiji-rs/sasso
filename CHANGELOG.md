@@ -12,7 +12,7 @@ Conformance is tracked separately as a ratchet against the official
 ## [Unreleased]
 
 Everything since the initial `0.1.0` crates.io publish. This grew the compiler
-from an early vertical slice to roughly **81% of the official sass-spec suite**,
+from an early vertical slice to roughly **82% of the official sass-spec suite**,
 matching current dart-sass (1.100) byte-for-byte on the implemented subset.
 
 ### Added
@@ -33,6 +33,8 @@ matching current dart-sass (1.100) byte-for-byte on the implemented subset.
   `round`/`log` and friends), `list` (bracket-preserving `join`/`append`),
   `map` (nested key paths, `deep-merge`/`deep-remove`), `string`
   (`split`/`unique-id`), and `selector` functions.
+- **First-class mixins** — `meta.get-mixin` returns a mixin value and
+  `meta.apply` invokes it (with `@content` support).
 - **CLI** — compile multiple input files in one process (`sasso a.scss b.scss`,
   startup shared across files); `--loop <N>` for in-process throughput and
   `-q`/`--quiet` to suppress stdout (used by the benchmark harness).
@@ -48,6 +50,12 @@ matching current dart-sass (1.100) byte-for-byte on the implemented subset.
 
 - Selector resolution now matches dart-sass on combinator normalization,
   adjacent-compound separation, and bogus-combinator omission.
+- `color` functions match dart-sass strictness: channel-unit leniency in
+  `adjust`/`change`, missing/powerless-channel errors, the Microsoft `alpha()`
+  filter overload, and `adjust-hue` rejecting non-legacy colors.
+- `selector` functions coerce string/list arguments and validate arity, and
+  accept a list of extendees in `extend`/`replace`.
+- `list` builtins validate fixed-arity arguments and preserve list shape.
 - Unquoted string serialization collapses newlines to spaces; custom-property
   values are emitted verbatim — both matching dart-sass.
 - Control-flow blocks use semi-global scoping with a global-write guard.
