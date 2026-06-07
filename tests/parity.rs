@@ -2218,11 +2218,14 @@ fn get_function_validates_arity_and_type() {
     assert!(compile("a {b: get-function()}\n", &Options::default()).is_err());
     assert!(compile("a {b: get-function(c, true, d, e)}\n", &Options::default()).is_err());
     assert!(compile("a {b: get-function(2px)}\n", &Options::default()).is_err());
-    // A well-formed call has no function-reference value at this layer, so it
-    // is preserved verbatim as a plain CSS function.
+    // A well-formed call now yields a first-class function reference. Used
+    // directly as a declaration value it is not a valid CSS value (dart-sass
+    // `get-function("rgb") isn't a valid CSS value.`); it is meant to be
+    // invoked via `call()`.
+    assert!(compile("a {b: get-function(rgb)}\n", &Options::default()).is_err());
     assert_eq!(
-        ours("a {b: get-function(rgb)}\n"),
-        "a {\n  b: get-function(rgb);\n}\n"
+        ours("a {b: call(get-function(rgb), 1, 2, 3)}\n"),
+        "a {\n  b: rgb(1, 2, 3);\n}\n"
     );
 }
 
