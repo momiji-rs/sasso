@@ -1020,3 +1020,31 @@ fn calc_wrapping_complete_calculation_flattens() {
     assert_parity("a { b: calc(var(--x)); }\n");
     assert_parity("a { b: calc(unknownfn(1%, 2px)); }\n");
 }
+
+#[test]
+fn calc_relative_length_cross_dimension_errors() {
+    // A relative length (`em`, `ch`, `vw`, …) is a known *length*, so mixing
+    // it with another dimension in calc() `+`/`-` is incompatible (dart-sass
+    // errors), even though it is not convertible to an absolute length.
+    for src in [
+        "a {b: calc(1ch + 1deg)}\n",
+        "a {b: calc(1em + 1s)}\n",
+        "a {b: calc(1vw + 1hz)}\n",
+        "a {b: calc(1rem + 1dpi)}\n",
+        "a {b: calc(1vmax - 1khz)}\n",
+        "a {b: calc(1ex + 1grad)}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected error for {src}"
+        );
+    }
+    // Two lengths (even when one is relative and not convertible) are
+    // compatible and preserved; `%`, `fr`, and unknown units never error.
+    assert_parity("a { b: calc(1px + 1vw); }\n");
+    assert_parity("a { b: calc(1em + 1px); }\n");
+    assert_parity("a { b: calc(1ch + 1em); }\n");
+    assert_parity("a { b: calc(1fr + 1px); }\n");
+    assert_parity("a { b: calc(1% + 1deg); }\n");
+    assert_parity("a { b: calc(1foo + 1deg); }\n");
+}

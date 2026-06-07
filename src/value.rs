@@ -483,12 +483,68 @@ pub(crate) fn units_compatible(a: &str, b: &str) -> bool {
     }
 }
 
+/// A relative CSS length unit (`em`, `vw`, `ch`, …). dart-sass knows these are
+/// *lengths* (so `calc(1ch + 1deg)` is a cross-dimension error) even though
+/// they are not convertible to absolute lengths (so `calc(1px + 1vw)` is
+/// preserved). The list mirrors dart-sass's font/viewport/container relative
+/// length units; `%` and `fr` are NOT lengths (they preserve against
+/// everything), and unknown units stay unknown.
+fn is_relative_length(unit: &str) -> bool {
+    matches!(
+        unit.to_ascii_lowercase().as_str(),
+        // font-relative
+        "em" | "rem"
+            | "ex"
+            | "rex"
+            | "cap"
+            | "rcap"
+            | "ch"
+            | "rch"
+            | "ic"
+            | "ric"
+            | "lh"
+            | "rlh"
+            // viewport-relative
+            | "vw"
+            | "svw"
+            | "lvw"
+            | "dvw"
+            | "vh"
+            | "svh"
+            | "lvh"
+            | "dvh"
+            | "vi"
+            | "svi"
+            | "lvi"
+            | "dvi"
+            | "vb"
+            | "svb"
+            | "lvb"
+            | "dvb"
+            | "vmin"
+            | "svmin"
+            | "lvmin"
+            | "dvmin"
+            | "vmax"
+            | "svmax"
+            | "lvmax"
+            | "dvmax"
+            // container-relative
+            | "cqw"
+            | "cqh"
+            | "cqi"
+            | "cqb"
+            | "cqmin"
+            | "cqmax"
+    )
+}
+
 /// The broad class a unit belongs to for `calc()` compatibility decisions.
 /// Unlike [`Dim`] (the *convertible* groups), this includes frequency, whose
 /// `hz`/`khz` dart-sass recognises as absolute units but does not convert
-/// between. Returns `None` for relative units (`em`, `vw`, `%`, `fr`, …) and
-/// genuinely unknown units, which `calc()` preserves verbatim rather than
-/// rejecting.
+/// between, and the relative length units, which are known lengths but not
+/// convertible. Returns `None` for `%`, `fr`, and genuinely unknown units,
+/// which `calc()` preserves verbatim rather than rejecting.
 fn known_calc_class(unit: &str) -> Option<u8> {
     if let Some(d) = unit_dimension(unit) {
         return Some(match d {
@@ -497,6 +553,9 @@ fn known_calc_class(unit: &str) -> Option<u8> {
             Dim::Time => 2,
             Dim::Resolution => 3,
         });
+    }
+    if is_relative_length(unit) {
+        return Some(0); // length class (relative, not convertible)
     }
     match unit.to_ascii_lowercase().as_str() {
         "hz" | "khz" => Some(4), // frequency: known, but not inter-convertible
