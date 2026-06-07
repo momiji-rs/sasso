@@ -1950,4 +1950,43 @@ fn leading_utf8_bom_is_stripped() {
     // A leading UTF-8 BOM in the source is dropped before parsing, so it never
     // appears in the output and never triggers a spurious `@charset`.
     assert_eq!(ours("\u{FEFF}foo {bar: baz}\n"), "foo {\n  bar: baz;\n}\n");
+fn unicode_range_tokens_parse_and_preserve() {
+    // CSS unicode-range values: plain ranges, `-end` ranges, and `?`
+    // wildcards. The original case is preserved (`u+1a2b` stays lowercase).
+    assert_eq!(ours("a {b: U+1}\n"), "a {\n  b: U+1;\n}\n");
+    assert_eq!(ours("a {b: U+123456}\n"), "a {\n  b: U+123456;\n}\n");
+    assert_eq!(ours("a {b: u+1a2b}\n"), "a {\n  b: u+1a2b;\n}\n");
+    assert_eq!(ours("a {b: U+4??}\n"), "a {\n  b: U+4??;\n}\n");
+    assert_eq!(ours("a {b: U+0-7F}\n"), "a {\n  b: U+0-7F;\n}\n");
+    assert_eq!(
+        ours("a {b: U+1A2B3C-10FFFF}\n"),
+        "a {\n  b: U+1A2B3C-10FFFF;\n}\n"
+    );
+    // A `?`-wildcard token is terminal: a directly-following identifier
+    // becomes a fresh space-list element (`U+A?BCDE` -> `U+A? BCDE`,
+    // `U+A?-BCDE` -> `U+A? -BCDE`), while `-<digit>` continues as a
+    // subtraction whose unquoted-string join keeps the source spelling.
+    assert_eq!(ours("a {b: U+A?BCDE}\n"), "a {\n  b: U+A? BCDE;\n}\n");
+    assert_eq!(ours("a {b: U+A?-BCDE}\n"), "a {\n  b: U+A? -BCDE;\n}\n");
+    assert_eq!(ours("a {b: U+A?-1234}\n"), "a {\n  b: U+A?-1234;\n}\n");
+    // Malformed ranges still error like dart-sass.
+    assert!(compile("a {b: U+}\n", &Options::default()).is_err());
+    assert!(compile("a {b: U+1234567}\n", &Options::default()).is_err());
+    assert!(compile("a {b: U+123-456-ABC}\n", &Options::default()).is_err());
+}
+
+#[test]
+fn minus_operator_string_joins_non_numbers() {
+    // dart-sass's `-` operator subtracts two numbers but otherwise produces an
+    // unquoted string join `<left>-<right>`, with each side keeping its own
+    // serialization (quoted strings keep their quotes).
+    assert_eq!(ours("a {b: foo - 1}\n"), "a {\n  b: foo-1;\n}\n");
+    assert_eq!(ours("a {b: 1 - foo}\n"), "a {\n  b: 1-foo;\n}\n");
+    assert_eq!(ours("a {b: foo - bar}\n"), "a {\n  b: foo-bar;\n}\n");
+    assert_eq!(ours("a {b: \"q\" - 1}\n"), "a {\n  b: \"q\"-1;\n}\n");
+    assert_eq!(ours("a {b: 1 - \"q\"}\n"), "a {\n  b: 1-\"q\";\n}\n");
+    assert_eq!(ours("a {b: red - foo}\n"), "a {\n  b: red-foo;\n}\n");
+    // Two numbers still subtract numerically.
+    assert_eq!(ours("a {b: 10 - 20}\n"), "a {\n  b: -10;\n}\n");
+    assert_eq!(ours("a {b: 1px - 2px}\n"), "a {\n  b: -1px;\n}\n");
 }

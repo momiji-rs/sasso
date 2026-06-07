@@ -114,6 +114,12 @@ struct Parser {
     /// is always real division (never a slash separator) and `+`/`-` must be
     /// surrounded by whitespace.
     calc_depth: u32,
+    /// Set by `parse_unicode_range` when a `?`-wildcard range token is
+    /// immediately followed (no whitespace) by an identifier. dart-sass treats
+    /// the wildcard as terminal and starts a new space-list element with an
+    /// implicit separator (`U+A?BCDE` -> `U+A? BCDE`); `space_list` consumes
+    /// the flag to continue without requiring whitespace.
+    pending_unicode_split: bool,
 }
 
 /// Parse a complete stylesheet.
@@ -121,6 +127,7 @@ pub(crate) fn parse(src: &str) -> Result<Stylesheet, Error> {
     let mut p = Parser {
         sc: Scanner::new(src),
         calc_depth: 0,
+        pending_unicode_split: false,
     };
     let stmts = p.parse_statements(true)?;
     Ok(Stylesheet { stmts })
@@ -2094,6 +2101,13 @@ impl Parser {
         let first = self.or_expr()?;
         let mut rest = Vec::new();
         loop {
+            // A `?`-wildcard unicode-range token immediately followed by an
+            // identifier inserts an implicit space separator (`U+A?BCDE` ->
+            // `U+A? BCDE`), so continue without consuming whitespace.
+            if std::mem::take(&mut self.pending_unicode_split) {
+                rest.push(self.or_expr()?);
+                continue;
+            }
             let mark = self.sc.mark();
             let had_ws = self.skip_ws_inline();
             if !had_ws || self.at_value_terminator() {
@@ -2443,6 +2457,11 @@ impl Parser {
                 self.sc.bump();
                 Ok(Expr::Parent)
             }
+            // CSS unicode-range token: `u`/`U` immediately followed by `+`
+            // (no whitespace) commits to the unicode-range grammar, matching
+            // dart-sass. `u + 1` (with whitespace) is ordinary concatenation
+            // and falls through to the identifier branch below.
+            Some('u') | Some('U') if self.sc.peek_at(1) == Some('+') => self.parse_unicode_range(),
             Some(c) if c.is_ascii_alphabetic() || c == '-' || c == '_' => self.parse_ident_or_call(),
             // A value beginning with a CSS escape (`\41`, `\9`, …) is an
             // identifier; let `parse_ident_or_call` consume the escape run.
@@ -2462,6 +2481,105 @@ impl Parser {
             )),
             None => Err(Error::at("unexpected end of input in value", self.sc.position())),
         }
+    }
+
+    /// Parse a CSS unicode-range token (`U+1A2B`, `U+4??`, `U+0-7F`, …). The
+    /// leading `u`/`U` and `+` are not yet consumed; the caller guarantees the
+    /// next two characters are `[uU]` and `+`. The original case is preserved
+    /// verbatim and the token is lowered to an unquoted [`Expr::Ident`].
+    ///
+    /// Grammar (mirrors dart-sass `_unicodeRange`):
+    ///   - 1–6 hex digits, optionally followed by `?` wildcards (total ≤ 6);
+    ///   - if no `?` was seen, an optional `-` then 1–6 hex end digits;
+    ///   - the token must end at a non-identifier boundary.
+    fn parse_unicode_range(&mut self) -> Result<Expr, Error> {
+        let start = self.sc.position();
+        let mut s = String::new();
+        if let Some(c) = self.sc.bump() {
+            s.push(c); // `u` / `U`
+        }
+        if let Some(c) = self.sc.bump() {
+            s.push(c); // `+`
+        }
+        // First range: up to 6 hex digits, then `?` wildcards (total ≤ 6).
+        let mut count = 0usize;
+        while count < 6 && matches!(self.sc.peek(), Some(c) if c.is_ascii_hexdigit()) {
+            if let Some(c) = self.sc.bump() {
+                s.push(c);
+            }
+            count += 1;
+        }
+        let mut saw_question = false;
+        while count < 6 && self.sc.peek() == Some('?') {
+            self.sc.bump();
+            s.push('?');
+            saw_question = true;
+            count += 1;
+        }
+        if count == 0 {
+            return Err(Error::at("Expected hex digit or \"?\".", self.sc.position()));
+        }
+        // After a wildcard form, no `-end` range is allowed.
+        if !saw_question && self.sc.peek() == Some('-') {
+            self.sc.bump();
+            s.push('-');
+            let mut end_count = 0usize;
+            while end_count < 6 && matches!(self.sc.peek(), Some(c) if c.is_ascii_hexdigit()) {
+                if let Some(c) = self.sc.bump() {
+                    s.push(c);
+                }
+                end_count += 1;
+            }
+            if end_count == 0 {
+                return Err(Error::at("Expected hex digit.", self.sc.position()));
+            }
+        }
+        // When the 6-digit cap is reached but more hex digits or `?`
+        // wildcards immediately follow, dart-sass reports "Expected at most 6
+        // digits." (spanning the whole token). Below the cap the token simply
+        // ends and any following identifier becomes the next list element.
+        if count == 6 && matches!(self.sc.peek(), Some(c) if c.is_ascii_hexdigit() || c == '?') {
+            return Err(Error::at("Expected at most 6 digits.", start));
+        }
+        let token = Expr::Ident(vec![TplPiece::Lit(s)]);
+        if !saw_question {
+            // A plain or `-end` range is terminal: any directly-following
+            // identifier char (a stray `-name` chain like `U+123-456-ABC`, or
+            // a non-hex letter like `U+1234GH`) is "Expected end of
+            // identifier." in dart-sass.
+            if matches!(self.sc.peek(), Some(c) if is_ident_char(c))
+                || (self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{'))
+            {
+                return Err(Error::at("Expected end of identifier.", self.sc.position()));
+            }
+            return Ok(token);
+        }
+        // After a `?` wildcard form, dart-sass does not allow a `-end` range,
+        // so the wildcard token is terminal. A directly-following `-<digit>`
+        // (no whitespace) continues as a subtraction whose unquoted-string
+        // join yields `U+A?-1234`. A directly-following identifier
+        // (`U+A?BCDE`, `U+A?-BCDE`) instead begins a fresh space-list element
+        // with an implicit separator, handled by `space_list`.
+        if self.sc.peek() == Some('-')
+            && matches!(self.sc.peek_at(1), Some(c) if c.is_ascii_digit() || c == '.')
+        {
+            let pos = self.sc.position();
+            self.sc.bump(); // '-'
+            let rhs = self.multiplicative()?;
+            return Ok(Expr::Binary {
+                op: BinOp::Sub,
+                lhs: Box::new(token),
+                rhs: Box::new(rhs),
+                pos,
+            });
+        }
+        if matches!(self.sc.peek(), Some(c) if is_ident_char(c) || c == '.')
+            || (self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{'))
+        {
+            // Signal `space_list` to continue without requiring whitespace.
+            self.pending_unicode_split = true;
+        }
+        Ok(token)
     }
 
     /// Continue a comma list whose first element (`first`) has already been

@@ -2139,7 +2139,7 @@ fn slash_repr(v: &Value) -> String {
 fn eval_binary(op: BinOp, l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     match op {
         BinOp::Add => binary_add(l, r, pos),
-        BinOp::Sub => num_binop(l, r, pos, "-", |a, b| a - b),
+        BinOp::Sub => binary_sub(l, r, pos),
         BinOp::Mod => num_binop(l, r, pos, "%", sass_modulo),
         BinOp::Mul => binary_mul(l, r, pos),
         BinOp::Eq => Ok(Value::Bool(l.sass_eq(&r))),
@@ -2201,6 +2201,30 @@ fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     };
     let text = format!("{}{}", concat_str(&l), concat_str(&r));
     Ok(Value::Str(SassStr { text, quoted }))
+}
+
+/// The `-` (minus) operator. Two numbers subtract numerically (coercing to a
+/// common unit); for any other operand pair dart-sass falls back to its
+/// default `Value.minus`, an *unquoted* string join `<left>-<right>` where each
+/// side keeps its own serialization (so quoted strings keep their quotes:
+/// `"q" - 1` -> `"q"-1`). A `calc()` value has no `minus` overload and errors,
+/// and a map cannot serialize as a CSS value.
+fn binary_sub(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
+    if let (Value::Number(a), Value::Number(b)) = (&l, &r) {
+        let (av, bv, unit) = coerce_pair(a, b, pos)?;
+        return Ok(Value::Number(Number { value: av - bv, unit }));
+    }
+    if matches!(&l, Value::Calc(_)) || matches!(&r, Value::Calc(_)) {
+        return Err(undefined_op(&l, "-", &r, pos));
+    }
+    if let Some(m) = find_map(&l).or_else(|| find_map(&r)) {
+        return Err(Error::at(
+            format!("{} isn't a valid CSS value.", m.to_css(false)),
+            pos,
+        ));
+    }
+    let text = format!("{}-{}", l.to_css(false), r.to_css(false));
+    Ok(Value::Str(SassStr { text, quoted: false }))
 }
 
 fn binary_mul(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
