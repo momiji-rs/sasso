@@ -22,12 +22,17 @@ enum NextKind {
 
 struct Parser {
     sc: Scanner,
+    /// Depth of enclosing `calc()`/math-function contexts. Inside one, `/`
+    /// is always real division (never a slash separator) and `+`/`-` must be
+    /// surrounded by whitespace.
+    calc_depth: u32,
 }
 
 /// Parse a complete stylesheet.
 pub(crate) fn parse(src: &str) -> Result<Stylesheet, Error> {
     let mut p = Parser {
         sc: Scanner::new(src),
+        calc_depth: 0,
     };
     let stmts = p.parse_statements(true)?;
     Ok(Stylesheet { stmts })
@@ -877,6 +882,12 @@ impl Parser {
                             rhs: Box::new(rhs),
                             pos,
                         };
+                    } else if self.calc_depth > 0 {
+                        // Inside calc(), `+`/`-` must be whitespace-surrounded.
+                        return Err(Error::at(
+                            "\"+\" and \"-\" must be surrounded by whitespace in calculations.",
+                            self.sc.position(),
+                        ));
                     } else {
                         self.sc.reset(mark);
                         break;
@@ -912,7 +923,9 @@ impl Parser {
                 self.sc.bump();
                 self.skip_ws_inline();
                 let rhs = self.unary()?;
-                let slash = is_slash_operand(&lhs) && is_slash_operand(&rhs);
+                // Inside calc() `/` is always real division; elsewhere it
+                // keeps the slash spelling between number literals.
+                let slash = self.calc_depth == 0 && is_slash_operand(&lhs) && is_slash_operand(&rhs);
                 lhs = Expr::Div {
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
@@ -1193,13 +1206,26 @@ impl Parser {
     fn parse_call(&mut self, name: String) -> Result<Expr, Error> {
         let pos = self.sc.position();
         self.sc.bump(); // '('
-                        // CSS functions whose contents must be preserved verbatim
-                        // (they may contain arithmetic that is not Sass math), while
-                        // still resolving any `#{...}` interpolation inside them.
-        if matches!(
-            name.as_str(),
-            "url" | "calc" | "clamp" | "var" | "env" | "min" | "max"
-        ) {
+                        // `calc()` interior is parsed as a real arithmetic
+                        // expression and simplified at evaluation time.
+        if name == "calc" {
+            self.calc_depth += 1;
+            self.skip_ws_inline();
+            let inner = self.parse_value();
+            self.calc_depth -= 1;
+            let inner = inner?;
+            self.skip_ws_inline();
+            if !self.sc.eat(')') {
+                return Err(Error::at("expected \")\"", self.sc.position()));
+            }
+            return Ok(Expr::Calc {
+                inner: Box::new(inner),
+            });
+        }
+        // CSS functions whose contents must be preserved verbatim (they may
+        // contain arithmetic that is not Sass math), while still resolving
+        // any `#{...}` interpolation inside them.
+        if matches!(name.as_str(), "url" | "clamp" | "var" | "env" | "min" | "max") {
             let mut pieces: Vec<TplPiece> = Vec::new();
             let mut lit = format!("{name}(");
             let mut depth = 1;

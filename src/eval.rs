@@ -14,7 +14,7 @@ use crate::ast::{
 };
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{List, ListSep, Number, SassStr, Value};
+use crate::value::{CalcNode, CalcOp, List, ListSep, Number, SassStr, Value};
 use crate::{Importer, OutputStyle};
 
 /// A flattened output node.
@@ -721,6 +721,15 @@ impl<'a> Evaluator<'a> {
                 let r = self.eval_expr(rhs)?;
                 eval_div(l, r, *slash, *pos)
             }
+            Expr::Calc { inner, .. } => {
+                let node = self.eval_calc(inner)?;
+                // A calculation that reduces to a single number unwraps to it;
+                // anything still containing an operation stays a calculation.
+                match node {
+                    CalcNode::Number(n) => Ok(Value::Number(n)),
+                    other => Ok(Value::Calc(other)),
+                }
+            }
             Expr::Func { name, args, pos } => {
                 // if() is lazy: only the selected branch is evaluated.
                 if name == "if" {
@@ -783,6 +792,150 @@ impl<'a> Evaluator<'a> {
                 "if() requires arguments $condition, $if-true, $if-false.",
                 pos,
             )),
+        }
+    }
+
+    /// Evaluate the interior of a `calc()` into a simplified node tree.
+    /// Numeric `number <op> number` subtrees with compatible units fold;
+    /// everything else (variables, interpolations, incompatible units) is
+    /// preserved for canonical serialization, mirroring dart-sass's
+    /// "only simplify number+number" rule.
+    fn eval_calc(&mut self, expr: &Expr) -> Result<CalcNode, Error> {
+        match expr {
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let calc_op = match op {
+                    BinOp::Add => CalcOp::Add,
+                    BinOp::Sub => CalcOp::Sub,
+                    BinOp::Mul => CalcOp::Mul,
+                    _ => {
+                        // Non-arithmetic operators are not valid in calc.
+                        let v = self.eval_expr(expr)?;
+                        return Ok(value_to_calc_node(v));
+                    }
+                };
+                let l = self.eval_calc(lhs)?;
+                let r = self.eval_calc(rhs)?;
+                Ok(fold_calc(calc_op, l, r))
+            }
+            Expr::Div { lhs, rhs, .. } => {
+                let l = self.eval_calc(lhs)?;
+                let r = self.eval_calc(rhs)?;
+                Ok(fold_calc(CalcOp::Div, l, r))
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+            } => {
+                let node = self.eval_calc(operand)?;
+                match node {
+                    CalcNode::Number(n) => Ok(CalcNode::Number(Number {
+                        value: -n.value,
+                        unit: n.unit,
+                    })),
+                    other => Ok(CalcNode::Op {
+                        op: CalcOp::Mul,
+                        left: Box::new(CalcNode::Number(Number {
+                            value: -1.0,
+                            unit: String::new(),
+                        })),
+                        right: Box::new(other),
+                    }),
+                }
+            }
+            // Parentheses around a single opaque operand (a `var()`,
+            // identifier, or interpolation) are preserved verbatim; around a
+            // number or an operation they are redundant and dropped (operator
+            // precedence reintroduces them where needed).
+            Expr::Paren(inner) => {
+                let node = self.eval_calc(inner)?;
+                match node {
+                    CalcNode::Str(s) => Ok(CalcNode::Str(format!("({s})"))),
+                    other => Ok(other),
+                }
+            }
+            // A nested calc() flattens into the surrounding calculation.
+            Expr::Calc { inner, .. } => self.eval_calc(inner),
+            // Any leaf (number, var(), interpolation, ident) evaluates to a
+            // value and becomes a calc operand.
+            other => {
+                let v = self.eval_expr(other)?;
+                Ok(value_to_calc_node(v))
+            }
+        }
+    }
+}
+
+/// Convert an evaluated value into a calc operand node. Numbers stay numeric
+/// (and can fold); everything else becomes an opaque string token preserved
+/// verbatim.
+fn value_to_calc_node(v: Value) -> CalcNode {
+    match v.without_slash() {
+        Value::Number(n) => CalcNode::Number(n),
+        Value::Calc(node) => node,
+        other => CalcNode::Str(other.to_css(false)),
+    }
+}
+
+/// Fold a calc operation: combine two compatible numbers into one; otherwise
+/// keep the operation. Matches dart-sass's limited "number <op> number"
+/// simplification (only the immediate operands are considered).
+fn fold_calc(op: CalcOp, left: CalcNode, right: CalcNode) -> CalcNode {
+    if let (CalcNode::Number(a), CalcNode::Number(b)) = (&left, &right) {
+        if let Some(n) = fold_numbers(op, a, b) {
+            return CalcNode::Number(n);
+        }
+    }
+    CalcNode::Op {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+    }
+}
+
+/// Try to combine two numbers under a calc operator. `+`/`-` need equal
+/// units; `*`/`/` need at least one unitless operand. Returns `None` when
+/// the operands are unit-incompatible (so the operation is preserved).
+fn fold_numbers(op: CalcOp, a: &Number, b: &Number) -> Option<Number> {
+    match op {
+        CalcOp::Add | CalcOp::Sub => {
+            if a.unit != b.unit {
+                return None;
+            }
+            let value = if op == CalcOp::Add {
+                a.value + b.value
+            } else {
+                a.value - b.value
+            };
+            Some(Number {
+                value,
+                unit: a.unit.clone(),
+            })
+        }
+        CalcOp::Mul => {
+            let unit = if a.unit.is_empty() {
+                b.unit.clone()
+            } else if b.unit.is_empty() {
+                a.unit.clone()
+            } else {
+                return None;
+            };
+            Some(Number {
+                value: a.value * b.value,
+                unit,
+            })
+        }
+        CalcOp::Div => {
+            let unit = if b.unit.is_empty() {
+                a.unit.clone()
+            } else if a.unit == b.unit {
+                String::new()
+            } else {
+                return None;
+            };
+            Some(Number {
+                value: a.value / b.value,
+                unit,
+            })
         }
     }
 }

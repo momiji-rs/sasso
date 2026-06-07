@@ -27,6 +27,105 @@ pub(crate) enum Value {
     /// `number`) when the value crosses a variable, function/mixin, or
     /// arithmetic boundary — matching dart-sass.
     Slash(Number, String),
+    /// A `calc()` calculation that could not be reduced to a single number
+    /// (e.g. it contains `var()`, an interpolation, or incompatible units).
+    /// Stored as its simplified operand tree for canonical serialization.
+    Calc(CalcNode),
+}
+
+/// A node in a simplified `calc()` tree. Numeric subtrees are folded during
+/// evaluation; everything else (variables, interpolations, percentages with
+/// incompatible neighbours) is preserved for canonical serialization.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CalcNode {
+    /// A resolved number operand.
+    Number(Number),
+    /// An opaque operand: `var(--x)`, an interpolation result, a nested
+    /// unknown function — anything kept verbatim.
+    Str(String),
+    /// A binary operation `left <op> right`.
+    Op {
+        op: CalcOp,
+        left: Box<CalcNode>,
+        right: Box<CalcNode>,
+    },
+}
+
+/// A `calc()` binary operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CalcOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl CalcOp {
+    fn symbol(self) -> &'static str {
+        match self {
+            CalcOp::Add => "+",
+            CalcOp::Sub => "-",
+            CalcOp::Mul => "*",
+            CalcOp::Div => "/",
+        }
+    }
+
+    /// Precedence: `*`/`/` bind tighter than `+`/`-`.
+    fn precedence(self) -> u8 {
+        match self {
+            CalcOp::Add | CalcOp::Sub => 1,
+            CalcOp::Mul | CalcOp::Div => 2,
+        }
+    }
+}
+
+impl CalcNode {
+    /// Serialize this node's interior (without the enclosing `calc(`...`)`),
+    /// adding parentheses only where operator precedence/associativity
+    /// requires them, matching dart-sass's canonical form.
+    fn to_calc_css(&self, compressed: bool) -> String {
+        match self {
+            CalcNode::Number(n) => n.to_css(compressed),
+            CalcNode::Str(s) => s.clone(),
+            CalcNode::Op { op, left, right } => {
+                let l = self.fmt_operand(left, *op, false, compressed);
+                let r = self.fmt_operand(right, *op, true, compressed);
+                let sep = match (op, compressed) {
+                    (CalcOp::Mul | CalcOp::Div, true) => op.symbol().to_string(),
+                    _ => format!(" {} ", op.symbol()),
+                };
+                // A `+ -n` / `- -n` numeric right operand flips the operator.
+                if matches!(op, CalcOp::Add | CalcOp::Sub) && !compressed {
+                    if let CalcNode::Number(n) = right.as_ref() {
+                        if n.value.is_sign_negative() && n.value != 0.0 {
+                            let flipped = if *op == CalcOp::Add { "-" } else { "+" };
+                            let pos = Number {
+                                value: -n.value,
+                                unit: n.unit.clone(),
+                            };
+                            return format!("{l} {flipped} {}", pos.to_css(compressed));
+                        }
+                    }
+                }
+                format!("{l}{sep}{r}")
+            }
+        }
+    }
+
+    /// Format `operand` as a child of a parent `op`, wrapping in parens when
+    /// the child binds more loosely (or equally on the right of `-`/`/`).
+    fn fmt_operand(&self, operand: &CalcNode, parent: CalcOp, is_right: bool, compressed: bool) -> String {
+        if let CalcNode::Op { op: child_op, .. } = operand {
+            let needs_paren = child_op.precedence() < parent.precedence()
+                || (child_op.precedence() == parent.precedence()
+                    && is_right
+                    && matches!(parent, CalcOp::Sub | CalcOp::Div));
+            if needs_paren {
+                return format!("({})", operand.to_calc_css(compressed));
+            }
+        }
+        operand.to_calc_css(compressed)
+    }
 }
 
 /// A number and its unit (`unit` is empty for unitless numbers).
@@ -89,6 +188,7 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Null => String::new(),
             Value::Slash(_, repr) => repr.clone(),
+            Value::Calc(node) => format!("calc({})", node.to_calc_css(compressed)),
         }
     }
 
@@ -100,6 +200,7 @@ impl Value {
             Value::Null => String::new(),
             Value::List(l) => l.to_interp(),
             Value::Slash(_, repr) => repr.clone(),
+            Value::Calc(node) => format!("calc({})", node.to_calc_css(false)),
             other => other.to_css(false),
         }
     }
@@ -113,6 +214,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Null => "null",
             Value::Slash(_, _) => "number",
+            Value::Calc(_) => "calculation",
         }
     }
 
@@ -144,6 +246,7 @@ impl Value {
         }
         match (self, other) {
             (Value::Number(a), Value::Number(b)) => a.value == b.value && a.unit == b.unit,
+            (Value::Calc(a), Value::Calc(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a.text == b.text,
             (Value::Color(a), Value::Color(b)) => a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -489,6 +592,50 @@ mod tests {
         assert_eq!(fmt_num(0.5, true), ".5");
         assert_eq!(fmt_num(-0.25, true), "-.25");
         assert_eq!(fmt_num(2.0, true), "2");
+    }
+
+    fn num(value: f64, unit: &str) -> CalcNode {
+        CalcNode::Number(Number {
+            value,
+            unit: unit.to_string(),
+        })
+    }
+
+    #[test]
+    fn calc_serialization_drops_redundant_parens() {
+        // `1px + 2% * var(--c)`: `*` binds tighter, so no parens are needed.
+        let node = CalcNode::Op {
+            op: CalcOp::Add,
+            left: Box::new(num(1.0, "px")),
+            right: Box::new(CalcNode::Op {
+                op: CalcOp::Mul,
+                left: Box::new(num(2.0, "%")),
+                right: Box::new(CalcNode::Str("var(--c)".into())),
+            }),
+        };
+        assert_eq!(Value::Calc(node).to_css(false), "calc(1px + 2% * var(--c))");
+    }
+
+    #[test]
+    fn calc_serialization_keeps_required_parens_and_flips_sign() {
+        // `1px - (2% + var(--c))`: subtracting a sum needs parens.
+        let node = CalcNode::Op {
+            op: CalcOp::Sub,
+            left: Box::new(num(1.0, "px")),
+            right: Box::new(CalcNode::Op {
+                op: CalcOp::Add,
+                left: Box::new(num(2.0, "%")),
+                right: Box::new(CalcNode::Str("var(--c)".into())),
+            }),
+        };
+        assert_eq!(Value::Calc(node).to_css(false), "calc(1px - (2% + var(--c)))");
+        // `1% + -1px` serializes as `1% - 1px`.
+        let flip = CalcNode::Op {
+            op: CalcOp::Add,
+            left: Box::new(num(1.0, "%")),
+            right: Box::new(num(-1.0, "px")),
+        };
+        assert_eq!(Value::Calc(flip).to_css(false), "calc(1% - 1px)");
     }
 
     #[test]

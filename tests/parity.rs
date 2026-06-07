@@ -119,6 +119,30 @@ fn parity_large_numbers() {
 }
 
 #[test]
+fn parity_calc() {
+    // Fully numeric calc() interiors simplify and unwrap; mixed ones keep a
+    // canonical calc() with folded numeric subtrees and minimal parens.
+    assert_parity(concat!(
+        "a {\n",
+        "  c1: calc(1px + 2px);\n",
+        "  c2: calc(100% / 4);\n",
+        "  c3: calc(2 * 3);\n",
+        "  c4: calc(50px);\n",
+        "  c5: calc((1 + 2) * 3px);\n",
+        "  k1: calc(100% - 50px);\n",
+        "  k2: calc(var(--a) + 1px);\n",
+        "  k3: calc(1px + 1em);\n",
+        "  k4: calc(1px + 2px + 1%);\n",
+        "  k5: calc(3px * 2 + 1%);\n",
+        "  k6: calc(1% + -1px);\n",
+        "  k7: calc(1px + (2% * var(--c)));\n",
+        "  k8: calc(1px - (2% + var(--c)));\n",
+        "  k9: calc(1px + (var(--c)));\n",
+        "}\n",
+    ));
+}
+
+#[test]
 fn parity_slash_division() {
     // The deprecated `/` keeps a slash spelling between number literals but
     // performs real division once an operand is computed, parenthesized,

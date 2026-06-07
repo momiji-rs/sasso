@@ -146,6 +146,10 @@ pub(crate) enum Expr {
         slash: bool,
         pos: Pos,
     },
+    /// A `calc()` calculation whose interior is the wrapped expression.
+    /// Evaluated with calc simplification rules (numeric subtrees fold,
+    /// everything else is preserved verbatim).
+    Calc { inner: Box<Expr> },
     /// Unary negation.
     Unary { op: UnOp, operand: Box<Expr> },
     /// Function call.
