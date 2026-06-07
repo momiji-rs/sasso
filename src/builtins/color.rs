@@ -1051,6 +1051,13 @@ fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         }
         None => 50.0,
     };
+    // A $method (CSS Color 4 interpolation method) is validated here. Only
+    // `rgb`/`srgb` reproduce the legacy mix this path computes; the other
+    // (non-legacy) spaces require full color-space interpolation, so those
+    // cases are skipped upstream. Invalid methods report dart-sass's errors.
+    if let Some(method) = arg(&params, pos_args, named, 3) {
+        validate_mix_method(method, pos)?;
+    }
     let p = weight / 100.0;
     let w = p * 2.0 - 1.0;
     let a = c1.a - c2.a;
@@ -1066,6 +1073,93 @@ fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     let b = c1.b * w1 + c2.b * w2;
     let alpha = c1.a * p + c2.a * (1.0 - p);
     Ok(Value::Color(computed(r, g, b, alpha)))
+}
+
+/// The color-interpolation spaces dart-sass accepts for `mix()`'s `$method`,
+/// with whether each is *polar* (carries a hue channel: a hue interpolation
+/// method may follow it).
+fn mix_method_space(name: &str) -> Option<bool> {
+    match name {
+        "hsl" | "hwb" | "lch" | "oklch" => Some(true),
+        "rgb" | "srgb" | "srgb-linear" | "display-p3" | "a98-rgb" | "prophoto-rgb" | "rec2020" | "xyz"
+        | "xyz-d50" | "xyz-d65" | "lab" | "oklab" => Some(false),
+        _ => None,
+    }
+}
+
+/// Validate a `mix()` `$method` value (a CSS Color 4 interpolation method:
+/// `srgb`, `oklch longer hue`, …). Errors match dart-sass exactly. A valid
+/// method returns `Ok(())`; the caller then runs the legacy mix (correct for
+/// `rgb`/`srgb`, the only reachable non-skipped methods).
+fn validate_mix_method(method: &Value, pos: Pos) -> Result<(), Error> {
+    let err = |msg: String| Err(Error::at(msg, pos));
+    // The method is either a bare color-space string or a space-separated
+    // list `space [<hue> hue]`.
+    let items: Vec<&Value> = match method {
+        Value::List(l) if l.sep == ListSep::Space => l.items.iter().collect(),
+        single => vec![single],
+    };
+    let space_val = items[0];
+    let space = match space_val {
+        Value::Str(s) if !s.quoted => s.text.clone(),
+        Value::Str(s) => {
+            return err(format!(
+                "$method: Expected \"{}\" to be an unquoted string.",
+                s.text
+            ));
+        }
+        other => {
+            return err(format!("$method: {} is not a string.", other.to_css(false)));
+        }
+    };
+    let polar = match mix_method_space(&space) {
+        Some(p) => p,
+        None => return err(format!("$method: Unknown color space \"{space}\".")),
+    };
+    // A bare color space (no trailing hue method) is always valid.
+    if items.len() == 1 {
+        return Ok(());
+    }
+    // `space <hue-method> hue`: the second token names a hue interpolation
+    // method and the list must end with the literal `hue`.
+    let method_token = match items[1] {
+        Value::Str(s) if !s.quoted => s.text.clone(),
+        // A parenthesized list shows wrapped in parens (`(decreasing hue)`).
+        Value::List(_) => return err(format!("$method: {} is not a string.", list_paren_css(items[1]))),
+        other => return err(format!("$method: {} is not a string.", other.to_css(false))),
+    };
+    // The hue-method keyword is validated before the trailing `hue` keyword,
+    // matching dart-sass's error order.
+    match method_token.to_ascii_lowercase().as_str() {
+        "shorter" | "longer" | "increasing" | "decreasing" => {}
+        "specified" => return err("$method: Unknown hue interpolation method specified.".to_string()),
+        other => return err(format!("$method: Unknown hue interpolation method {other}.")),
+    }
+    // The list must end with an unquoted `hue` keyword.
+    let last = items[items.len() - 1];
+    let last_is_hue = matches!(last, Value::Str(s) if !s.quoted && s.text.eq_ignore_ascii_case("hue"));
+    if items.len() == 2 {
+        // `space <method>` with no trailing `hue`.
+        return err(format!(
+            "$method: Expected unquoted string \"hue\" after ({}).",
+            method.to_css(false)
+        ));
+    }
+    if !last_is_hue {
+        return err(format!(
+            "$method: Expected unquoted string \"hue\" at the end of ({}), was {}.",
+            method.to_css(false),
+            last.to_css(false)
+        ));
+    }
+    // A hue method may not be applied to a rectangular (non-polar) space.
+    if !polar {
+        return err(format!(
+            "$method: Hue interpolation method \"HueInterpolationMethod.{method_token} hue\" \
+             may not be set for rectangular color space {space}."
+        ));
+    }
+    Ok(())
 }
 
 fn fn_adjust_lightness(

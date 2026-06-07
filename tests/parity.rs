@@ -935,3 +935,13 @@ fn hsl_degenerate_calc_channels() {
     assert_parity("a { b: hsl(0, 100%, calc(-infinity)); }\n");
     assert_parity("a { b: hsl(0, 100%, calc(NaN)); }\n");
 }
+
+#[test]
+fn mix_srgb_method_matches_legacy() {
+    // The `srgb`/`rgb` interpolation methods reproduce the legacy mix this
+    // build computes, and must byte-match dart-sass (other spaces require
+    // full color-space interpolation and are validated elsewhere).
+    assert_parity("a { b: mix(red, blue, $method: srgb); }\n");
+    assert_parity("a { b: mix(red, blue, $method: rgb); }\n");
+    assert_parity("a { b: mix(red, blue, 25%, $method: srgb); }\n");
+}
