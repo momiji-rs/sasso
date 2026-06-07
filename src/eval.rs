@@ -347,16 +347,39 @@ struct Module {
 }
 
 impl Module {
-    /// Look up a public variable. Private members (leading `-`/`_`) are the
-    /// caller's responsibility to exclude.
+    /// Look up a public variable. Names are dash/underscore-insensitive, so an
+    /// exact miss falls back to comparing the canonical (dashed) form against
+    /// every key. Private members (leading `-`/`_`) are the caller's
+    /// responsibility to exclude.
     fn var(&self, name: &str) -> Option<Value> {
-        self.vars.borrow().get(name).cloned()
+        let vars = self.vars.borrow();
+        if let Some(v) = vars.get(name) {
+            return Some(v.clone());
+        }
+        let norm = normalize_var_name(name);
+        vars.iter()
+            .find(|(k, _)| normalize_var_name(k) == norm)
+            .map(|(_, v)| v.clone())
     }
     fn function(&self, name: &str) -> Option<Rc<Callable>> {
-        self.functions.get(name).cloned()
+        if let Some(f) = self.functions.get(name) {
+            return Some(Rc::clone(f));
+        }
+        let norm = normalize_var_name(name);
+        self.functions
+            .iter()
+            .find(|(k, _)| normalize_var_name(k) == norm)
+            .map(|(_, f)| Rc::clone(f))
     }
     fn mixin(&self, name: &str) -> Option<Rc<Callable>> {
-        self.mixins.get(name).cloned()
+        if let Some(m) = self.mixins.get(name) {
+            return Some(Rc::clone(m));
+        }
+        let norm = normalize_var_name(name);
+        self.mixins
+            .iter()
+            .find(|(k, _)| normalize_var_name(k) == norm)
+            .map(|(_, m)| Rc::clone(m))
     }
 }
 
@@ -1632,24 +1655,28 @@ impl<'a> Evaluator<'a> {
         let hide_names = member_set(hide, false);
         let has_show = show.is_some();
 
+        // `show`/`hide` names are dash/underscore-insensitive, so compare the
+        // canonical (dashed) form.
         let visible_var = |name: &str| -> bool {
             if is_private_member(name) {
                 return false;
             }
+            let n = normalize_var_name(name);
             if has_show {
-                show_vars.as_ref().map(|s| s.contains(name)).unwrap_or(false)
+                show_vars.as_ref().map(|s| s.contains(&n)).unwrap_or(false)
             } else {
-                !hide_vars.as_ref().map(|s| s.contains(name)).unwrap_or(false)
+                !hide_vars.as_ref().map(|s| s.contains(&n)).unwrap_or(false)
             }
         };
         let visible_name = |name: &str| -> bool {
             if is_private_member(name) {
                 return false;
             }
+            let n = normalize_var_name(name);
             if has_show {
-                show_names.as_ref().map(|s| s.contains(name)).unwrap_or(false)
+                show_names.as_ref().map(|s| s.contains(&n)).unwrap_or(false)
             } else {
-                !hide_names.as_ref().map(|s| s.contains(name)).unwrap_or(false)
+                !hide_names.as_ref().map(|s| s.contains(&n)).unwrap_or(false)
             }
         };
 
@@ -5188,11 +5215,12 @@ fn forward_var_visibility(
     let show = member_set(show, true);
     let hide = member_set(hide, true);
     move |name: &str| -> bool {
+        let n = normalize_var_name(name);
         if let Some(s) = &show {
-            return s.contains(name);
+            return s.contains(&n);
         }
         if let Some(h) = &hide {
-            return !h.contains(name);
+            return !h.contains(&n);
         }
         true
     }
@@ -5212,6 +5240,7 @@ fn is_private_member(name: &str) -> bool {
 
 /// Collect the names from a `@forward` `show`/`hide` member list, selecting
 /// either the `$variable` entries (`vars == true`) or the function/mixin names.
+/// Names are stored in canonical (dashed) form for dash-insensitive matching.
 fn member_set(
     members: &Option<Vec<crate::ast::ForwardMember>>,
     vars: bool,
@@ -5219,8 +5248,8 @@ fn member_set(
     members.as_ref().map(|list| {
         list.iter()
             .filter_map(|m| match (m, vars) {
-                (crate::ast::ForwardMember::Var(n), true) => Some(n.clone()),
-                (crate::ast::ForwardMember::Name(n), false) => Some(n.clone()),
+                (crate::ast::ForwardMember::Var(n), true) => Some(normalize_var_name(n)),
+                (crate::ast::ForwardMember::Name(n), false) => Some(normalize_var_name(n)),
                 _ => None,
             })
             .collect()
