@@ -191,8 +191,13 @@ pub(crate) enum Expr {
         args: Vec<CallArg>,
         pos: Pos,
     },
-    /// A space- or comma-separated list.
-    List { items: Vec<Expr>, sep: ListSep },
+    /// A space- or comma-separated list. `bracketed` marks `[a b]`/`[a, b]`
+    /// literals, which serialize wrapped in square brackets.
+    List {
+        items: Vec<Expr>,
+        sep: ListSep,
+        bracketed: bool,
+    },
     /// `( expr )`.
     Paren(Box<Expr>),
     /// `#{ expr }` used in value position — always yields an unquoted

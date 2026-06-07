@@ -1272,6 +1272,7 @@ impl Parser {
             Ok(Expr::List {
                 items,
                 sep: ListSep::Comma,
+                bracketed: false,
             })
         }
     }
@@ -1297,6 +1298,7 @@ impl Parser {
             Ok(Expr::List {
                 items,
                 sep: ListSep::Space,
+                bracketed: false,
             })
         }
     }
@@ -1600,6 +1602,7 @@ impl Parser {
                     return Ok(Expr::List {
                         items: Vec::new(),
                         sep: ListSep::Space,
+                        bracketed: false,
                     });
                 }
                 let e = self.parse_value()?;
@@ -1609,12 +1612,55 @@ impl Parser {
                 }
                 Ok(Expr::Paren(Box::new(e)))
             }
+            Some('[') => self.parse_bracketed_list(),
             Some(c) if c.is_ascii_alphabetic() || c == '-' || c == '_' => self.parse_ident_or_call(),
             Some(c) => Err(Error::at(
                 format!("unexpected character {c:?} in value"),
                 self.sc.position(),
             )),
             None => Err(Error::at("unexpected end of input in value", self.sc.position())),
+        }
+    }
+
+    /// Parse a bracketed list literal `[ ... ]`. An empty `[]` is a bracketed
+    /// empty space list; otherwise the interior is parsed as an ordinary value
+    /// (which may itself be a comma/space list) and re-marked as bracketed.
+    fn parse_bracketed_list(&mut self) -> Result<Expr, Error> {
+        self.sc.bump(); // '['
+        self.skip_ws_inline();
+        if self.sc.peek() == Some(']') {
+            self.sc.bump();
+            return Ok(Expr::List {
+                items: Vec::new(),
+                sep: ListSep::Space,
+                bracketed: true,
+            });
+        }
+        let inner = self.parse_value()?;
+        self.skip_ws_inline();
+        if !self.sc.eat(']') {
+            return Err(Error::at("expected \"]\"", self.sc.position()));
+        }
+        // An *unbracketed* list interior (the comma/space list produced by
+        // parsing several elements) keeps its separator and is simply marked
+        // bracketed. A scalar — or a single nested bracketed list like
+        // `[[c]]` — becomes a one-item bracketed list instead of being
+        // unwrapped.
+        match inner {
+            Expr::List {
+                items,
+                sep,
+                bracketed: false,
+            } => Ok(Expr::List {
+                items,
+                sep,
+                bracketed: true,
+            }),
+            other => Ok(Expr::List {
+                items: vec![other],
+                sep: ListSep::Space,
+                bracketed: true,
+            }),
         }
     }
 

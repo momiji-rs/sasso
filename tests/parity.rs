@@ -574,4 +574,19 @@ fn rgb_degenerate_calc_constants_fold() {
         ours("a {b: color(srgb calc(infinity) 0 0)}\n"),
         "a {\n  b: color(srgb calc(infinity) 0 0);\n}\n"
     );
+#[test]
+fn bracketed_list_literals() {
+    // `[ ... ]` produces a bracketed list that serializes wrapped in square
+    // brackets, preserving the interior separator and nesting (parenthesized
+    // unbracketed lists flatten; nested bracketed lists stay nested).
+    assert_parity("x { b: []; }\n");
+    assert_parity("x { b: [c]; }\n");
+    assert_parity("x { b: [c d]; }\n");
+    assert_parity("x { b: [a, b]; }\n");
+    assert_parity("x { b: [[]]; }\n");
+    assert_parity("x { b: [[c]]; }\n");
+    assert_parity("x { b: [[c] [d]]; }\n");
+    assert_parity("x { b: [()]; }\n");
+    assert_parity("x { b: [(c,)]; }\n");
+    assert_parity("x { b: [(c,) (d e)]; }\n");
 }

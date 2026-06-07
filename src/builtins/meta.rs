@@ -220,7 +220,11 @@ mod tests {
     }
 
     fn list(items: Vec<Value>, sep: ListSep) -> Value {
-        Value::List(List { items, sep })
+        Value::List(List {
+            items,
+            sep,
+            bracketed: false,
+        })
     }
 
     fn call(name: &str, args: &[Value]) -> Value {

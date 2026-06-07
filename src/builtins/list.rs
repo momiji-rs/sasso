@@ -153,7 +153,11 @@ fn fn_set_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
     if let Some(slot) = items.get_mut(idx) {
         *slot = value;
     }
-    Ok(Value::List(List { items, sep }))
+    Ok(Value::List(List {
+        items,
+        sep,
+        bracketed: false,
+    }))
 }
 
 /// The "settled" separator of a value, or `None` when undecided. A `List`
@@ -187,7 +191,11 @@ fn fn_join(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
 
     let mut items = items1;
     items.extend(items2);
-    Ok(Value::List(List { items, sep }))
+    Ok(Value::List(List {
+        items,
+        sep,
+        bracketed: false,
+    }))
 }
 
 /// `join`'s `auto` rule: list1's settled separator, else list2's, else space.
@@ -215,7 +223,11 @@ fn fn_append(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<
     };
 
     items.push(val);
-    Ok(Value::List(List { items, sep }))
+    Ok(Value::List(List {
+        items,
+        sep,
+        bracketed: false,
+    }))
 }
 
 /// `index($list, $value)`: the 1-based position of the first element equal to
@@ -278,7 +290,11 @@ mod tests {
     }
 
     fn list(items: Vec<Value>, sep: ListSep) -> Value {
-        Value::List(List { items, sep })
+        Value::List(List {
+            items,
+            sep,
+            bracketed: false,
+        })
     }
 
     fn call(name: &str, args: &[Value]) -> Value {

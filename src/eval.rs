@@ -373,6 +373,7 @@ impl<'a> Evaluator<'a> {
                 Value::List(List {
                     items: remaining,
                     sep: ListSep::Comma,
+                    bracketed: false,
                 }),
             );
         } else if pos_iter.next().is_some() {
@@ -1078,7 +1079,11 @@ impl<'a> Evaluator<'a> {
             // Parentheses force the deprecated slash to perform real
             // division: `(1/2)` is `0.5`, not the slash value `1/2`.
             Expr::Paren(inner) => Ok(self.eval_expr(inner)?.without_slash()),
-            Expr::List { items, sep } => {
+            Expr::List {
+                items,
+                sep,
+                bracketed,
+            } => {
                 let mut vals = Vec::with_capacity(items.len());
                 for it in items {
                     vals.push(self.eval_expr(it)?);
@@ -1086,6 +1091,7 @@ impl<'a> Evaluator<'a> {
                 Ok(Value::List(List {
                     items: vals,
                     sep: *sep,
+                    bracketed: *bracketed,
                 }))
             }
             Expr::Unary { op, operand } => {

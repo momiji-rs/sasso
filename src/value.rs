@@ -147,6 +147,10 @@ pub(crate) struct SassStr {
 pub(crate) struct List {
     pub items: Vec<Value>,
     pub sep: ListSep,
+    /// Whether the list was written with square brackets (`[a b]`); such
+    /// lists serialize wrapped in `[`...`]` and report `true` from
+    /// `list.is-bracketed`.
+    pub bracketed: bool,
 }
 
 /// List separator.
@@ -253,6 +257,7 @@ impl Value {
             (Value::Null, Value::Null) => true,
             (Value::List(a), Value::List(b)) => {
                 a.sep == b.sep
+                    && a.bracketed == b.bracketed
                     && a.items.len() == b.items.len()
                     && a.items.iter().zip(&b.items).all(|(x, y)| x.sass_eq(y))
             }
@@ -397,12 +402,18 @@ impl List {
             (ListSep::Comma, true) => ",",
             (ListSep::Comma, false) => ", ",
         };
-        self.items
+        let inner = self
+            .items
             .iter()
             .filter(|v| !matches!(v, Value::Null))
             .map(|v| v.to_css(compressed))
             .collect::<Vec<_>>()
-            .join(sep)
+            .join(sep);
+        if self.bracketed {
+            format!("[{inner}]")
+        } else {
+            inner
+        }
     }
 
     fn to_interp(&self) -> String {
@@ -410,12 +421,18 @@ impl List {
             ListSep::Space => " ",
             ListSep::Comma => ", ",
         };
-        self.items
+        let inner = self
+            .items
             .iter()
             .filter(|v| !matches!(v, Value::Null))
             .map(|v| v.to_interp())
             .collect::<Vec<_>>()
-            .join(sep)
+            .join(sep);
+        if self.bracketed {
+            format!("[{inner}]")
+        } else {
+            inner
+        }
     }
 }
 
