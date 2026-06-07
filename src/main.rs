@@ -9,12 +9,15 @@
 //!   -s, --style <expanded|compressed>   output style (default: expanded)
 //!   -I, --load-path <dir>               add an @import search path (repeatable)
 //!       --stdin                         read SCSS from standard input
+//!       --loop <N>                      recompile in-process N times (throughput)
+//!   -q, --quiet                         suppress CSS on stdout (timing only)
 //!       --version                       print version and exit
 //!   -h, --help                          print this help and exit
 //! ```
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use sasso::{compile, FsImporter, Options, OutputStyle, Syntax};
 
@@ -30,18 +33,24 @@ OPTIONS:
     -I, --load-path <dir>               add an @import search path (repeatable)
         --stdin                         read SCSS from standard input
         --indented                      parse the indented .sass syntax
+        --loop <N>                      recompile in-process N times (throughput)
+    -q, --quiet                         suppress CSS on stdout (timing only)
         --version                       print version and exit
     -h, --help                          print this help and exit
 ";
 
 struct Cli {
-    input: Option<PathBuf>,
+    inputs: Vec<PathBuf>,
     use_stdin: bool,
     style: OutputStyle,
     load_paths: Vec<PathBuf>,
     /// Force the indented `.sass` syntax (otherwise inferred from the input
     /// path's extension; `--stdin` defaults to SCSS).
     indented: bool,
+    /// Suppress CSS on stdout (timing-only runs).
+    quiet: bool,
+    /// Recompile the input in-process this many times and report throughput.
+    loop_n: Option<u32>,
 }
 
 fn main() -> ExitCode {
@@ -72,11 +81,13 @@ enum Action {
 
 fn parse_args(args: &[String]) -> Result<Action, String> {
     let mut cli = Cli {
-        input: None,
+        inputs: Vec::new(),
         use_stdin: false,
         style: OutputStyle::Expanded,
         load_paths: Vec::new(),
         indented: false,
+        quiet: false,
+        loop_n: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -86,6 +97,12 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
             "--version" => return Ok(Action::Version),
             "--stdin" => cli.use_stdin = true,
             "--indented" => cli.indented = true,
+            "-q" | "--quiet" => cli.quiet = true,
+            "--loop" => {
+                i += 1;
+                let v = args.get(i).ok_or("--loop requires a value")?;
+                cli.loop_n = Some(parse_loop(v)?);
+            }
             "-s" | "--style" => {
                 i += 1;
                 let v = args.get(i).ok_or("--style requires a value")?;
@@ -101,16 +118,25 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
                     cli.style = parse_style(v)?;
                 } else if let Some(v) = other.strip_prefix("--load-path=") {
                     cli.load_paths.push(PathBuf::from(v));
+                } else if let Some(v) = other.strip_prefix("--loop=") {
+                    cli.loop_n = Some(parse_loop(v)?);
                 } else if other.starts_with('-') && other != "-" {
                     return Err(format!("unknown option {other}"));
                 } else {
-                    cli.input = Some(PathBuf::from(other));
+                    cli.inputs.push(PathBuf::from(other));
                 }
             }
         }
         i += 1;
     }
     Ok(Action::Run(cli))
+}
+
+fn parse_loop(s: &str) -> Result<u32, String> {
+    match s.parse::<u32>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!("--loop expects a positive integer (got {s:?})")),
+    }
 }
 
 fn parse_style(s: &str) -> Result<OutputStyle, String> {
@@ -124,73 +150,116 @@ fn parse_style(s: &str) -> Result<OutputStyle, String> {
 }
 
 fn run(mut cli: Cli) -> ExitCode {
-    // Pick the input syntax: the `--indented` flag forces `.sass`, otherwise the
-    // input path's extension decides (`.sass` -> indented, anything else SCSS);
-    // `--stdin` without `--indented` is SCSS.
-    let ext_is_sass = cli
-        .input
-        .as_ref()
-        .and_then(|p| p.extension())
-        .map(|e| e.eq_ignore_ascii_case("sass"))
-        .unwrap_or(false);
-    let syntax = if cli.indented || ext_is_sass {
-        Syntax::Sass
-    } else {
-        Syntax::Scss
-    };
-    let source = if cli.use_stdin {
+    // Gather the input units to compile, each paired with its syntax. `--stdin`
+    // is a single unit (SCSS unless `--indented`); otherwise every path on the
+    // command line is a unit, with its syntax inferred from the extension
+    // (`.sass` -> indented) unless `--indented` forces it. Multiple file inputs
+    // are compiled in one process so per-invocation startup is shared.
+    let mut units: Vec<(String, Syntax)> = Vec::new();
+    if cli.use_stdin {
+        let syntax = if cli.indented { Syntax::Sass } else { Syntax::Scss };
         match read_stdin() {
-            Ok(s) => s,
+            Ok(s) => units.push((s, syntax)),
             Err(e) => {
                 eprintln!("error: failed to read stdin: {e}");
                 return ExitCode::FAILURE;
             }
         }
     } else {
-        match &cli.input {
-            Some(path) => {
-                // Make the input file's directory an implicit load path so
-                // sibling partials resolve, like dart-sass.
-                if let Some(parent) = path.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        cli.load_paths.insert(0, parent.to_path_buf());
-                    }
-                }
-                match std::fs::read_to_string(path) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("error: cannot read {}: {e}", path.display());
-                        return ExitCode::FAILURE;
-                    }
+        if cli.inputs.is_empty() {
+            eprintln!("error: no input file (pass a path or --stdin)\n");
+            eprint!("{USAGE}");
+            return ExitCode::FAILURE;
+        }
+        for path in &cli.inputs {
+            // Make each input file's directory an implicit load path so sibling
+            // partials resolve, like dart-sass.
+            if let Some(parent) = path.parent() {
+                let parent = parent.to_path_buf();
+                if !parent.as_os_str().is_empty() && !cli.load_paths.contains(&parent) {
+                    cli.load_paths.push(parent);
                 }
             }
-            None => {
-                eprintln!("error: no input file (pass a path or --stdin)\n");
-                eprint!("{USAGE}");
-                return ExitCode::FAILURE;
+            let ext_is_sass = path
+                .extension()
+                .map(|e| e.eq_ignore_ascii_case("sass"))
+                .unwrap_or(false);
+            let syntax = if cli.indented || ext_is_sass {
+                Syntax::Sass
+            } else {
+                Syntax::Scss
+            };
+            match std::fs::read_to_string(path) {
+                Ok(s) => units.push((s, syntax)),
+                Err(e) => {
+                    eprintln!("error: cannot read {}: {e}", path.display());
+                    return ExitCode::FAILURE;
+                }
             }
         }
-    };
+    }
 
     if cli.load_paths.is_empty() {
         cli.load_paths.push(PathBuf::from("."));
     }
     let importer = FsImporter::new(cli.load_paths);
-    let options = Options::default()
-        .with_style(cli.style)
-        .with_syntax(syntax)
-        .with_importer(&importer);
+    let style = cli.style;
+    let opts_for = |syntax| {
+        Options::default()
+            .with_style(style)
+            .with_syntax(syntax)
+            .with_importer(&importer)
+    };
 
-    match compile(&source, &options) {
-        Ok(css) => {
-            print!("{css}");
-            ExitCode::SUCCESS
+    // Throughput mode: recompile the whole input set in-process N times, timing
+    // only the compile calls (sources are read once), and report ms/compile +
+    // compiles/sec to stderr. The CSS is still emitted once unless `--quiet`.
+    if let Some(n) = cli.loop_n {
+        // Warm + correctness pass (also catches compile errors before timing).
+        for (source, syntax) in &units {
+            if let Err(e) = compile(source, &opts_for(*syntax)) {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
         }
-        Err(e) => {
-            eprintln!("{e}");
-            ExitCode::FAILURE
+        let mut last = String::new();
+        let start = Instant::now();
+        for _ in 0..n {
+            for (source, syntax) in &units {
+                match compile(source, &opts_for(*syntax)) {
+                    Ok(css) => last = css,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+        }
+        let elapsed = start.elapsed();
+        let per = elapsed.as_secs_f64() * 1000.0 / f64::from(n);
+        let per_sec = if per > 0.0 { 1000.0 / per } else { f64::INFINITY };
+        eprintln!("sasso: {n} compiles in {elapsed:.3?} => {per:.3} ms/compile, {per_sec:.1} compiles/sec");
+        if !cli.quiet {
+            print!("{last}");
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    // One-shot: compile each input unit and stream the CSS to stdout in order.
+    let mut out = String::new();
+    for (source, syntax) in &units {
+        match compile(source, &opts_for(*syntax)) {
+            Ok(css) => out.push_str(&css),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
         }
     }
+    if !cli.quiet {
+        print!("{out}");
+    }
+    ExitCode::SUCCESS
 }
 
 fn read_stdin() -> std::io::Result<String> {

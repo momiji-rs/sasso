@@ -7,11 +7,12 @@ Compares SCSS compilers on this machine on two axes that matter:
 2. **Pure compile throughput** — parse → evaluate → serialize, with startup
    removed.
 
-Current engines: **dart-sass** (`npx sass`) and **grass** (Rust, in-process via
-`grass_runner`). A third, **sasso**, is designed to slot in — see
-[Adding a third engine](#adding-a-third-engine).
+Current engines: **sasso** (this repo's real CLI, in-process throughput via its
+own `--loop`/`--quiet` flags), **dart-sass** (`npx sass` + the cached binary),
+and **grass** (Rust, in-process via `grass_runner`).
 
-Latest results: [`dart_vs_grass.md`](./dart_vs_grass.md).
+Latest results: [`three_way.md`](./three_way.md) (sasso vs dart-sass vs grass).
+The older two-way report is [`dart_vs_grass.md`](./dart_vs_grass.md).
 
 ## Layout
 
