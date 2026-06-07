@@ -3077,3 +3077,14 @@ fn parity_color_modify_in_space() {
         "@use \"sass:color\";\na {\n  s1: color.scale(red, $lightness: 50%, $space: oklch);\n  s2: color.scale(oklch(0.5 0.1 90), $chroma: 50%, $space: oklch);\n  s3: color.scale(lab(50 40 30), $a: 50%, $space: lab);\n  s4: color.scale(color(srgb 0.5 0.5 0.5), $red: 50%, $space: srgb);\n}\n",
     );
 }
+
+#[test]
+fn parity_color_invert_in_space() {
+    // color.invert($color, $weight, $space) inverts each channel in the named
+    // space (rgb/lightness toward max, lab/oklab a/b negate, hue +180, chroma
+    // unchanged, hwb whiteness/blackness swap), mixing toward the original by
+    // (1 - weight). Byte-matched to `npx sass`.
+    assert_parity(
+        "@use \"sass:color\";\na {\n  s: color.invert(color(srgb 0.2 0.5 0.8), $space: srgb);\n  lab: color.invert(lab(20% -30 110), $space: lab);\n  lch: color.invert(lch(20% 80 50deg), $space: lch);\n  hsl: color.invert(hsl(120 50% 40%), $space: hsl);\n  hwb: color.invert(hwb(120 30% 40%), $space: hwb);\n  w: color.invert(color(a98-rgb 0.1 0.4 0.8), 0%, $space: a98-rgb);\n  legacy: color.invert(#123456);\n  legacy_w: color.invert(#123456, 30%);\n}\n",
+    );
+}

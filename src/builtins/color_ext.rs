@@ -352,6 +352,7 @@ fn fn_invert(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option<
         }
         return Some(Ok(plain_filter("invert", color)));
     }
+    let params = ["color", "weight", "space"];
     Some((|| {
         let c = as_color(color, pos)?;
         let weight = match arg(&params, pos_args, named, 1) {
@@ -359,6 +360,23 @@ fn fn_invert(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option<
             None => 100.0,
         };
         let w = (weight / 100.0).clamp(0.0, 1.0);
+        let space_v = arg(&params, pos_args, named, 2);
+        let is_legacy = c.modern.as_ref().map(|m| m.space.is_legacy()).unwrap_or(true);
+        // The modern form (`$space` given, or a non-legacy color) inverts each
+        // channel in that space; a non-legacy color without $space errors.
+        if space_v.is_some() || !is_legacy {
+            let space = match space_v {
+                Some(v) => space_arg(v, pos)?,
+                None => return Err(Error::at(
+                    format!(
+                        "$color: To use color.invert() with non-legacy color {}, you must provide a $space.",
+                        c.to_css(false)
+                    ),
+                    pos,
+                )),
+            };
+            return Ok(Value::Color(super::color::invert_in_space(&c, space, w)));
+        }
         let r = (255.0 - c.r) * w + c.r * (1.0 - w);
         let g = (255.0 - c.g) * w + c.g * (1.0 - w);
         let b = (255.0 - c.b) * w + c.b * (1.0 - w);

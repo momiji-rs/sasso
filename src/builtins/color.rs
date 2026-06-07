@@ -3266,3 +3266,74 @@ fn clamp_adjust_channel(space: ColorSpace, idx: usize, v: f64) -> f64 {
         _ => v,
     }
 }
+
+/// CSS Color 4 `color.invert($color, $weight, $space)`: invert each channel in
+/// `space` (mixing toward the original by `1 - weight`), then convert back to
+/// the color's original space.
+pub(super) fn invert_in_space(c: &Color, space: ColorSpace, weight: f64) -> Color {
+    let orig = legacy_to_modern(c);
+    let dest = orig.space;
+    let src = convert_modern(&orig, space);
+    let inverted = invert_channels(space, &src);
+    // Mix the inverted color toward the original by `1 - weight` (per channel).
+    let mix = |a: Option<f64>, b: Option<f64>, hue: bool| -> Option<f64> {
+        match (a, b) {
+            (Some(x), Some(y)) => {
+                if hue {
+                    Some(interpolate_hue(x, y, weight, HueMethod::Shorter))
+                } else {
+                    Some(x * weight + y * (1.0 - weight))
+                }
+            }
+            _ => a.or(b),
+        }
+    };
+    let hue_idx = match space {
+        ColorSpace::Hsl | ColorSpace::Hwb => Some(0),
+        ColorSpace::Lch | ColorSpace::Oklch => Some(2),
+        _ => None,
+    };
+    let channels = [
+        mix(inverted.channels[0], src.channels[0], hue_idx == Some(0)),
+        mix(inverted.channels[1], src.channels[1], hue_idx == Some(1)),
+        mix(inverted.channels[2], src.channels[2], hue_idx == Some(2)),
+    ];
+    let mc = ModernColor {
+        space,
+        channels,
+        alpha: src.alpha,
+    };
+    let back = convert_modern(&mc, dest);
+    make_modern_in(back, dest)
+}
+
+/// Invert each channel of `src` (already in `space`) per CSS Color 4: rgb-style
+/// and lightness channels invert toward their max, lab/oklab a/b negate, hue
+/// shifts 180 degrees, chroma is unchanged, and hwb swaps whiteness/blackness.
+fn invert_channels(space: ColorSpace, src: &ModernColor) -> ModernColor {
+    use ColorSpace::*;
+    let ch = src.channels;
+    let inv_max = |v: Option<f64>, max: f64| v.map(|x| max - x);
+    let negate = |v: Option<f64>| v.map(|x| -x);
+    let shift_hue = |v: Option<f64>| v.map(|x| x + 180.0);
+    let channels = match space {
+        Rgb => [
+            inv_max(ch[0], 255.0),
+            inv_max(ch[1], 255.0),
+            inv_max(ch[2], 255.0),
+        ],
+        Srgb | SrgbLinear | DisplayP3 | DisplayP3Linear | A98Rgb | ProphotoRgb | Rec2020 | XyzD65
+        | XyzD50 => [inv_max(ch[0], 1.0), inv_max(ch[1], 1.0), inv_max(ch[2], 1.0)],
+        Hsl => [shift_hue(ch[0]), ch[1], inv_max(ch[2], 100.0)],
+        Hwb => [shift_hue(ch[0]), ch[2], ch[1]],
+        Lab => [inv_max(ch[0], 100.0), negate(ch[1]), negate(ch[2])],
+        Oklab => [inv_max(ch[0], 1.0), negate(ch[1]), negate(ch[2])],
+        Lch => [inv_max(ch[0], 100.0), ch[1], shift_hue(ch[2])],
+        Oklch => [inv_max(ch[0], 1.0), ch[1], shift_hue(ch[2])],
+    };
+    ModernColor {
+        space,
+        channels,
+        alpha: src.alpha,
+    }
+}
