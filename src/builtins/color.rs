@@ -57,6 +57,7 @@ pub(super) fn try_call(
         "rgb" | "rgba" => fn_rgb(pos_args, named, pos),
         "hsl" | "hsla" => fn_hsl(pos_args, named, pos),
         "hwb" => fn_hwb(pos_args, named, pos),
+        "lab" | "lch" | "oklab" | "oklch" => fn_lab_family(name, pos_args, named, pos),
         "mix" => fn_mix(pos_args, named, pos),
         "lighten" => fn_adjust_lightness(name, pos_args, named, pos, 1.0),
         "darken" => fn_adjust_lightness(name, pos_args, named, pos, -1.0),
@@ -513,6 +514,138 @@ fn hwb_hue_css(v: &Value) -> String {
         }
     }
     v.to_css(false)
+}
+
+/// The three channel names of a CIE/OK color space, for error messages.
+fn lab_channel_names(name: &str) -> [&'static str; 3] {
+    match name {
+        "lch" | "oklch" => ["lightness", "chroma", "hue"],
+        // lab / oklab
+        _ => ["lightness", "a", "b"],
+    }
+}
+
+/// The modern CIE/OK color functions `lab()`, `lch()`, `oklab()`, `oklch()`.
+///
+/// Full color-space math is out of scope: a fully numeric, well-formed call is
+/// preserved verbatim (it is never reduced to another space here), and a call
+/// containing a special value (`var()`/`calc()`), a `none` channel, or the
+/// `from` relative-color keyword is likewise preserved verbatim. Malformed
+/// calls raise the same validation errors as dart-sass.
+fn fn_lab_family(
+    name: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Result<Value, Error> {
+    let params = ["channels"];
+    let n = pos_args.len() + named.len();
+    if n == 0 {
+        return Err(Error::at("Missing argument $channels.".to_string(), pos));
+    }
+    if n > 1 {
+        return Err(Error::at(
+            format!("Only 1 argument allowed, but {n} were passed."),
+            pos,
+        ));
+    }
+    let channels = require(&params, pos_args, named, 0, name, pos)?.clone();
+    // A comma-separated or bracketed list is not a valid channels list.
+    if let Value::List(l) = &channels {
+        if l.sep == ListSep::Comma {
+            return Err(Error::at(
+                format!(
+                    "$channels: Expected a space- or slash-separated list, was {}",
+                    list_paren_css(&channels)
+                ),
+                pos,
+            ));
+        }
+        if l.items.is_empty() {
+            return Err(Error::at(
+                "$channels: Color component list may not be empty.".to_string(),
+                pos,
+            ));
+        }
+    }
+    let (comps, alpha) = split_channels(&channels);
+    // A relative-color call (`lab(from … )`) or any special/`none` channel is
+    // preserved verbatim.
+    let is_relative = comps
+        .first()
+        .is_some_and(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.eq_ignore_ascii_case("from")));
+    let has_special = comps.iter().any(|v| is_special(v) || is_none_keyword(v))
+        || alpha
+            .as_ref()
+            .is_some_and(|v| is_special(v) || is_none_keyword(v));
+    if is_relative || has_special {
+        return Ok(verbatim_call(name, &channels));
+    }
+    // All-plain channels: validate count, types, and units like dart-sass.
+    let names = lab_channel_names(name);
+    if comps.len() != 3 {
+        return Err(Error::at(
+            format!(
+                "$channels: The {} color space has 3 channels but {} has {}.",
+                name,
+                list_paren_css(&channels),
+                comps.len()
+            ),
+            pos,
+        ));
+    }
+    let is_hue = |i: usize| matches!(name, "lch" | "oklch") && i == 2;
+    for (i, comp) in comps.iter().enumerate() {
+        match comp {
+            Value::Number(num) => {
+                if is_hue(i) {
+                    let ok =
+                        num.unit.is_empty() || matches!(num.unit.as_str(), "deg" | "grad" | "rad" | "turn");
+                    if !ok {
+                        return Err(Error::at(
+                            format!(
+                                "$hue: Expected {} to have an angle unit (deg, grad, rad, turn).",
+                                num.to_css(false)
+                            ),
+                            pos,
+                        ));
+                    }
+                } else if !num.unit.is_empty() && num.unit != "%" {
+                    return Err(Error::at(
+                        format!(
+                            "${}: Expected {} to have unit \"%\" or no units.",
+                            names[i],
+                            num.to_css(false)
+                        ),
+                        pos,
+                    ));
+                }
+            }
+            Value::Slash(..) => {}
+            other => {
+                return Err(Error::at(
+                    format!(
+                        "$channels: Expected {} channel to be a number, was {}.",
+                        names[i],
+                        other.to_css(false)
+                    ),
+                    pos,
+                ));
+            }
+        }
+    }
+    if let Some(a) = &alpha {
+        // Validate the alpha's unit (errors on e.g. `0.4px`).
+        alpha_value(a, pos)?;
+    }
+    // Well-formed and fully numeric: preserve the call verbatim (no math).
+    Ok(verbatim_call(name, &channels))
+}
+
+/// Serialize a list value wrapped in parentheses, as dart-sass does in its
+/// channel-list error messages (`(1%, 2, 3)`, `(1% 2)`).
+fn list_paren_css(v: &Value) -> String {
+    format!("({})", v.to_css(false))
 }
 
 fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {

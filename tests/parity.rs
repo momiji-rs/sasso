@@ -463,3 +463,40 @@ fn hwb_global_conversion_and_passthrough() {
         "a {\n  b: hwb(0deg 30% none);\n}\n"
     );
 }
+
+#[test]
+fn lab_family_validation_and_passthrough() {
+    // Well-formed, fully numeric and special-value calls are preserved verbatim.
+    assert_eq!(ours("a {b: lab(1% 2 3)}\n"), "a {\n  b: lab(1% 2 3);\n}\n");
+    assert_eq!(
+        ours("a {b: lab(var(--foo) 2 3)}\n"),
+        "a {\n  b: lab(var(--foo) 2 3);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: lab(var(--foo) 2)}\n"),
+        "a {\n  b: lab(var(--foo) 2);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: lab(from var(--c) l a b)}\n"),
+        "a {\n  b: lab(from var(--c) l a b);\n}\n"
+    );
+    assert_eq!(ours("a {b: lch(1% 2 3deg)}\n"), "a {\n  b: lch(1% 2 3deg);\n}\n");
+    // Malformed calls raise validation errors.
+    for src in [
+        "a {b: lab(1% 2)}\n",
+        "a {b: lab(1% 2 3 0.4)}\n",
+        "a {b: lab(c 2 3)}\n",
+        "a {b: lab(1px 2 3)}\n",
+        "a {b: lab(1% 2 3/0.4px)}\n",
+        "a {b: lab()}\n",
+        "a {b: lab(1%, 2, 3, 0.4)}\n",
+        "a {b: lab((1%, 2, 3))}\n",
+        "a {b: lch(1% 2 3px)}\n",
+        "a {b: lch(1% 2 3%)}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected error for {src}"
+        );
+    }
+}
