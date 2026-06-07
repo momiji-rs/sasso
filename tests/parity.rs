@@ -2379,6 +2379,9 @@ fn adjacent_quoted_string_schema() {
         ours("$m: (\"a\": 1); a {b: map-get($m, \"a\")}\n"),
         "a {\n  b: 1;\n}\n"
     );
+}
+
+#[test]
 fn supports_condition_serialization() {
     // A declaration condition normalizes spacing (`(a:b)` -> `(a: b)`) and
     // evaluates SassScript on both sides.
