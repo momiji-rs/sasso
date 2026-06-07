@@ -123,6 +123,16 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
             out.push_str(text);
             out.push_str("*/\n");
         }
+        OutItem::ChildlessAtRule { name, prelude } => {
+            out.push_str(&indent);
+            out.push('@');
+            out.push_str(name);
+            if !prelude.is_empty() {
+                out.push(' ');
+                out.push_str(prelude);
+            }
+            out.push_str(";\n");
+        }
     }
 }
 
@@ -168,6 +178,13 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
                         Some(format!("{prop}:{value}{imp}"))
                     }
                     OutItem::Comment(_) => None,
+                    OutItem::ChildlessAtRule { name, prelude } => {
+                        if prelude.is_empty() {
+                            Some(format!("@{name}"))
+                        } else {
+                            Some(format!("@{name} {prelude}"))
+                        }
+                    }
                 })
                 .collect();
             if decls.is_empty() {

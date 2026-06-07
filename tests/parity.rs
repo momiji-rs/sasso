@@ -2625,3 +2625,29 @@ fn font_face_does_not_carry_parent_selector() {
     assert_parity("a { b { c { @font-face { e: f } g: h; } } }\n");
     assert_parity("a {\n  @page { d: e }\n}\n");
 }
+
+#[test]
+fn childless_at_rule_stays_in_rule_block() {
+    // A childless at-rule (`@e f;`) inside a style rule stays in the parent
+    // block, interleaved with declarations in source order, rather than bubbling
+    // out to the document root (unlike a block at-rule).
+    assert_eq!(ours("a {\n  @b c;\n}\n"), "a {\n  @b c;\n}\n");
+    assert_eq!(
+        ours("a {\n  b {c: d}\n  @e f;\n  g: h\n}\n"),
+        "a b {\n  c: d;\n}\na {\n  @e f;\n  g: h;\n}\n"
+    );
+    assert_eq!(
+        ours("a {\n  b {c: d}\n  @e f;\n  g {h: i}\n}\n"),
+        "a b {\n  c: d;\n}\na {\n  @e f;\n}\na g {\n  h: i;\n}\n"
+    );
+    // A childless `@charset` is stripped at the top level but kept inside a rule.
+    assert_eq!(ours("@charset \"utf-8\";\na {b: c}\n"), "a {\n  b: c;\n}\n");
+    assert_eq!(
+        ours("a {\n  @charset \"x\";\n  b: c;\n}\n"),
+        "a {\n  @charset \"x\";\n  b: c;\n}\n"
+    );
+
+    assert_parity("a {\n  @b c;\n}\n");
+    assert_parity("a {\n  b {c: d}\n  @e f;\n  g {h: i}\n}\n");
+    assert_parity("a {\n  @charset \"x\";\n  b: c;\n}\n");
+}

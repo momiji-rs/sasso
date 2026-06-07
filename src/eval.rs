@@ -84,6 +84,13 @@ pub(crate) enum OutItem {
         important: bool,
     },
     Comment(String),
+    /// A childless at-rule (`@e f;`) that appears directly inside a style rule:
+    /// dart-sass keeps it in the parent block (interleaved with declarations),
+    /// unlike a block at-rule which bubbles out to the document root.
+    ChildlessAtRule {
+        name: String,
+        prelude: String,
+    },
 }
 
 /// Where evaluated statements deposit their output. At the top level each
@@ -112,6 +119,25 @@ impl Sink<'_> {
         matches!(self, Sink::Top(_))
     }
 
+    fn is_rule(&self) -> bool {
+        matches!(self, Sink::Rule { .. })
+    }
+
+    /// Deposit a childless at-rule (`@e f;`). Inside a style rule it joins the
+    /// parent's block (interleaved with declarations, in source order); at the
+    /// top level or inside an at-rule body it is a bubbled-out `OutNode`.
+    fn push_childless_at_rule(&mut self, name: String, prelude: String) {
+        match self {
+            Sink::Rule { items, .. } => items.push(OutItem::ChildlessAtRule { name, prelude }),
+            _ => self.push_at_rule(OutNode::AtRule {
+                name,
+                prelude,
+                body: Vec::new(),
+                has_block: false,
+            }),
+        }
+    }
+
     fn push_comment(&mut self, text: String) {
         match self {
             Sink::Top(out) => {
@@ -137,6 +163,12 @@ impl Sink<'_> {
                     important,
                 }),
                 OutItem::Comment(text) => body.push(OutNode::Comment(text)),
+                OutItem::ChildlessAtRule { name, prelude } => body.push(OutNode::AtRule {
+                    name,
+                    prelude,
+                    body: Vec::new(),
+                    has_block: false,
+                }),
             },
             Sink::Top(_) => {}
         }
@@ -1010,17 +1042,13 @@ impl<'a> Evaluator<'a> {
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         let prelude = self.eval_template(prelude)?;
-        // dart-sass strips a leading `@charset "utf-8";` entirely.
-        if name == "charset" && body.is_none() {
-            return Ok(());
-        }
         let Some(stmts) = body else {
-            sink.push_at_rule(OutNode::AtRule {
-                name: name.to_string(),
-                prelude,
-                body: Vec::new(),
-                has_block: false,
-            });
+            // dart-sass strips a top-level (or bubbled-out) `@charset` entirely,
+            // but keeps one that appears inside a style rule's block.
+            if name == "charset" && !sink.is_rule() {
+                return Ok(());
+            }
+            sink.push_childless_at_rule(name.to_string(), prelude);
             return Ok(());
         };
         // `@font-face` (exactly, case-sensitively, unprefixed) holds plain
