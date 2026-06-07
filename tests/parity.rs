@@ -192,3 +192,17 @@ fn parity_at_rule_bubbling() {
 fn parity_at_rule_nested_and_mixed() {
     assert_parity("@outer one {\n  @inner two {\n    .a { color: red; }\n  }\n}\n@foo {\n  a: 1;\n  b: 2;\n  .x { c: 3; }\n  d: 4;\n}\n");
 }
+
+#[test]
+fn parity_warn_debug_emit_no_css() {
+    // @warn/@debug write to stderr only; the emitted CSS must be identical
+    // to the same stylesheet without them.
+    assert_parity("@warn \"a heads up\";\n.a {\n  @debug 1 + 2;\n  color: red;\n}\n");
+}
+
+#[test]
+fn at_error_aborts_compilation() {
+    // @error must abort with an Error (not emit CSS). This runs offline.
+    let res = compile("@error \"boom\";\n.a { color: red; }\n", &Options::default());
+    assert!(res.is_err(), "@error should abort compilation");
+}

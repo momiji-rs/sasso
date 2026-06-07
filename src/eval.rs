@@ -450,6 +450,18 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                 }
+                Stmt::Warn(e) => {
+                    let v = self.eval_expr(e)?;
+                    eprintln!("WARNING: {}", v.to_interp());
+                }
+                Stmt::Debug(e) => {
+                    let v = self.eval_expr(e)?;
+                    eprintln!("DEBUG: {}", v.to_interp());
+                }
+                Stmt::Error(e) => {
+                    let v = self.eval_expr(e)?;
+                    return Err(Error::unpositioned(v.to_interp()));
+                }
                 _ => {
                     return Err(Error::unpositioned(
                         "only variable assignments, control flow and @return are allowed in a function.",
@@ -595,6 +607,18 @@ impl<'a> Evaluator<'a> {
                 },
                 Stmt::AtRule { name, prelude, body } => {
                     self.eval_at_rule(name, prelude, body.as_deref(), parents, sink)?;
+                }
+                Stmt::Warn(e) => {
+                    let v = self.eval_expr(e)?;
+                    eprintln!("WARNING: {}", v.to_interp());
+                }
+                Stmt::Debug(e) => {
+                    let v = self.eval_expr(e)?;
+                    eprintln!("DEBUG: {}", v.to_interp());
+                }
+                Stmt::Error(e) => {
+                    let v = self.eval_expr(e)?;
+                    return Err(Error::unpositioned(v.to_interp()));
                 }
             }
         }

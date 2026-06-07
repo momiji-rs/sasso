@@ -20,6 +20,12 @@ enum NextKind {
     Declaration,
 }
 
+enum MessageKind {
+    Warn,
+    Debug,
+    Error,
+}
+
 /// Trim leading/trailing whitespace from a parsed prelude template, dropping
 /// any whitespace-only literals at the ends. Interior interpolation is kept.
 fn trim_prelude(pieces: Vec<TplPiece>) -> Vec<TplPiece> {
@@ -359,8 +365,24 @@ impl Parser {
                 self.sc.eat(';');
                 Ok(Stmt::Content)
             }
+            "warn" => self.parse_message(MessageKind::Warn),
+            "debug" => self.parse_message(MessageKind::Debug),
+            "error" => self.parse_message(MessageKind::Error),
             _ => self.parse_generic_at_rule(name),
         }
+    }
+
+    /// Parse `@warn`/`@debug`/`@error <expr>;`.
+    fn parse_message(&mut self, kind: MessageKind) -> Result<Stmt, Error> {
+        self.skip_ws_inline();
+        let value = self.parse_value()?;
+        self.skip_ws_inline();
+        self.sc.eat(';');
+        Ok(match kind {
+            MessageKind::Warn => Stmt::Warn(value),
+            MessageKind::Debug => Stmt::Debug(value),
+            MessageKind::Error => Stmt::Error(value),
+        })
     }
 
     /// Parse a generic/unknown at-rule: `@name <prelude up to { or ;>` then

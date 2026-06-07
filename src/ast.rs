@@ -67,6 +67,12 @@ pub(crate) enum Stmt {
         prelude: Vec<TplPiece>,
         body: Option<Vec<Stmt>>,
     },
+    /// `@warn <expr>;` — writes to stderr, emits no CSS.
+    Warn(Expr),
+    /// `@debug <expr>;` — writes to stderr, emits no CSS.
+    Debug(Expr),
+    /// `@error <expr>;` — aborts compilation with the message.
+    Error(Expr),
 }
 
 /// One arm of an `@if` chain. `cond == None` is the trailing `@else`.
