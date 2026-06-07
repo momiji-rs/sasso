@@ -247,6 +247,11 @@ struct Channels {
     /// The original single channels value when this came from the one-argument
     /// form, used to re-serialize a verbatim passthrough.
     single: Option<Value>,
+    /// Whether `alpha` was peeled from the trailing item of `single` (a
+    /// `… / alpha` slash). A verbatim passthrough then re-serializes `single`
+    /// (which still holds the glued alpha) rather than reconstructing a comma
+    /// call from the components plus a separate alpha.
+    alpha_split: bool,
 }
 
 impl Channels {
@@ -271,6 +276,7 @@ impl Channels {
                 comps: vec![c0, c1, c2],
                 alpha,
                 single: None,
+                alpha_split: false,
             });
         }
         // One argument: a channels value. dart-sass also accepts this single
@@ -309,14 +315,22 @@ impl Channels {
             }
         }
         let extra_alpha = arg(params, pos_args, named, 1).cloned();
-        let (comps, mut alpha) = split_channels(&channels);
+        let SplitChannels {
+            comps,
+            mut alpha,
+            mut alpha_split,
+        } = split_channels(&channels);
         if extra_alpha.is_some() {
             alpha = extra_alpha;
+            // An explicit `$alpha` is not part of the `single` spelling, so a
+            // verbatim passthrough must reconstruct rather than re-serialize.
+            alpha_split = false;
         }
         Ok(Channels {
             comps,
             alpha,
             single: Some(channels),
+            alpha_split,
         })
     }
 
@@ -367,54 +381,66 @@ impl Channels {
     /// If these channels contain a special value (`var()`, `calc()`, …) or a
     /// `none` keyword, return the re-serialized passthrough call dart-sass
     /// would emit; otherwise `None` (the channels are all plain numbers and a
-    /// real color should be computed).
+    /// real color should be computed, or a count error should be raised).
     fn special_passthrough(&self, name: &str) -> Option<Value> {
         let comps_special = self.comps.iter().any(is_special_legacy);
-        let comps_none = self.comps.iter().any(is_none_keyword);
         let alpha_special = self.alpha.as_ref().is_some_and(is_special_legacy);
+        let comps_none = self.comps.iter().any(is_none_keyword);
         let alpha_none = self.alpha.as_ref().is_some_and(is_none_keyword);
         let has_special = comps_special || alpha_special;
         let has_none = comps_none || alpha_none;
         if !has_special && !has_none {
             return None;
         }
-        // Exactly three components with a special function (and no bare `none`)
-        // normalize to a comma-joined call. A different component count, or a
-        // `none` keyword, is preserved verbatim in its original spelling.
-        if self.comps.len() == 3 && has_special && !has_none {
-            let mut args: Vec<&Value> = self.comps.iter().collect();
-            if let Some(a) = &self.alpha {
-                args.push(a);
+        // A special function present forces the legacy comma form when the
+        // channel count is exactly three (a `none` is simply one of the three
+        // comma items). With a different count the *original* spelling is kept
+        // verbatim (so the `/` alpha separator stays glued).
+        if has_special {
+            if self.comps.len() == 3 {
+                let mut args: Vec<&Value> = self.comps.iter().collect();
+                if let Some(a) = &self.alpha {
+                    args.push(a);
+                }
+                return Some(special_call(name, &args));
             }
-            return Some(special_call(name, &args));
+            return Some(self.verbatim_passthrough(name));
         }
-        // hsl()/hsla() preserved with a `none` channel re-serialize the
-        // space/slash form, but a bare-number hue gains an explicit `deg`
-        // (`hsl(180 none 50%)` → `hsl(180deg none 50%)`).
+        // No special function, only a `none`: the space/slash form is kept when
+        // there are exactly three channels (hsl gives a bare hue a `deg`). A
+        // wrong channel count falls through to the count error.
+        if self.comps.len() != 3 {
+            return None;
+        }
         let is_hsl = name.eq_ignore_ascii_case("hsl") || name.eq_ignore_ascii_case("hsla");
-        if is_hsl && has_none && self.comps.len() == 3 {
-            return Some(self.hsl_none_verbatim(name));
-        }
-        // Verbatim: prefer the single channels value (preserves the space/slash
-        // spelling); fall back to reconstructing from the positional args.
+        Some(self.none_verbatim(name, is_hsl))
+    }
+
+    /// Re-serialize a special-value passthrough whose channel count is not the
+    /// canonical three. Prefer the *original* single channels value (which
+    /// keeps the glued `/` alpha spelling) when the alpha was peeled from it or
+    /// no alpha was supplied; otherwise reconstruct a comma call.
+    fn verbatim_passthrough(&self, name: &str) -> Value {
         if let Some(single) = &self.single {
-            if self.alpha.is_none() {
-                return Some(verbatim_call(name, single));
+            if self.alpha.is_none() || self.alpha_split {
+                return verbatim_call(name, single);
             }
         }
         let mut args: Vec<&Value> = self.comps.iter().collect();
         if let Some(a) = &self.alpha {
             args.push(a);
         }
-        Some(special_call(name, &args))
+        special_call(name, &args)
     }
 
-    /// Serialize an hsl()/hsla() call preserved because of a `none` channel,
-    /// in the space-separated (slash-alpha) form, suffixing a bare-number hue
-    /// with `deg` to match dart-sass.
-    fn hsl_none_verbatim(&self, name: &str) -> Value {
+    /// Serialize a legacy color call preserved because of a `none` channel, in
+    /// the space-separated (slash-alpha) form. For hsl/hsla a bare-number hue
+    /// gains an explicit `deg` (`hsl(180 none 50%)` → `hsl(180deg none 50%)`).
+    fn none_verbatim(&self, name: &str, is_hsl: bool) -> Value {
         let hue = match &self.comps[0] {
-            Value::Number(n) if n.unit.is_empty() => format!("{}deg", fmt_num(n.value, false)),
+            Value::Number(n) if is_hsl && n.unit.is_empty() => {
+                format!("{}deg", fmt_num(n.value, false))
+            }
             other => other.to_css(false),
         };
         let body = format!(
@@ -431,29 +457,119 @@ impl Channels {
     }
 }
 
+/// The components and optional alpha peeled off a one-argument channels value.
+struct SplitChannels {
+    /// The channel components (the alpha removed if one was found).
+    comps: Vec<Value>,
+    /// The alpha value, if a trailing `… / alpha` was peeled off.
+    alpha: Option<Value>,
+    /// Whether `alpha` was peeled from the trailing item of the original
+    /// channels value (rather than being absent). This drives the verbatim
+    /// passthrough, which prefers to re-serialize the *original* channels list
+    /// when the channel count is wrong.
+    alpha_split: bool,
+}
+
 /// Split a one-argument channels value into its components and optional alpha.
 /// A space list contributes its items; a trailing slash-division on the last
-/// item (`1 2 3 / 0.5`, parsed as `[1, 2, 3/0.5]`) peels off the alpha.
-fn split_channels(channels: &Value) -> (Vec<Value>, Option<Value>) {
-    match channels {
-        Value::List(l) if l.sep == ListSep::Space => {
-            let mut items: Vec<Value> = l.items.clone();
-            // A trailing `n / a` slash-division shows up as a `Slash` whose
-            // textual spelling contains `/`; recover the channel and alpha
-            // (each may carry a unit, e.g. `50%/0.4`).
-            if let Some(Value::Slash(_, repr)) = items.last() {
-                if let Some((lhs, rhs)) = repr.split_once('/') {
-                    if let (Some(last), Some(alpha)) = (parse_number_token(lhs), parse_number_token(rhs)) {
-                        items.pop();
-                        items.push(Value::Number(last));
-                        return (items, Some(Value::Number(alpha)));
-                    }
+/// item (`1 2 3 / 0.5`, parsed as `[1, 2, 3/0.5]`) peels off the alpha. When
+/// the trailing slash crosses a special value (`var()`, `calc()`, `none`, …)
+/// the division does not fold to a [`Value::Slash`] but to an unquoted string
+/// like `var(--x)/0.4` or `3/none`; that trailing `X/Y` string is split at its
+/// top-level slash into the last channel and the alpha (each becoming a plain
+/// [`Number`] or an unquoted string).
+fn split_channels(channels: &Value) -> SplitChannels {
+    let no_split = |comps: Vec<Value>| SplitChannels {
+        comps,
+        alpha: None,
+        alpha_split: false,
+    };
+    let Value::List(l) = channels else {
+        return no_split(vec![channels.clone()]);
+    };
+    if l.sep != ListSep::Space {
+        return no_split(l.items.clone());
+    }
+    let mut items: Vec<Value> = l.items.clone();
+    // A trailing `n / a` slash-division shows up as a `Slash` whose textual
+    // spelling contains `/`; recover the channel and alpha (each may carry a
+    // unit, e.g. `50%/0.4`).
+    if let Some(Value::Slash(_, repr)) = items.last() {
+        if let Some((lhs, rhs)) = repr.split_once('/') {
+            if let (Some(last), Some(alpha)) = (parse_number_token(lhs), parse_number_token(rhs)) {
+                items.pop();
+                items.push(Value::Number(last));
+                return SplitChannels {
+                    comps: items,
+                    alpha: Some(Value::Number(alpha)),
+                    alpha_split: true,
+                };
+            }
+        }
+    }
+    // A trailing unquoted `X/Y` string: the slash crossed a special value (or a
+    // `none`), so it evaluated to a string rather than a numeric `Slash`. Split
+    // it at the top-level slash into the last channel and the alpha.
+    if let Some(Value::Str(s)) = items.last() {
+        if !s.quoted {
+            if let Some(idx) = top_level_slash(&s.text) {
+                let lhs = s.text[..idx].trim();
+                let rhs = s.text[idx + 1..].trim();
+                if !lhs.is_empty() && !rhs.is_empty() {
+                    let last = channel_token(lhs);
+                    let alpha = channel_token(rhs);
+                    items.pop();
+                    items.push(last);
+                    return SplitChannels {
+                        comps: items,
+                        alpha: Some(alpha),
+                        alpha_split: true,
+                    };
                 }
             }
-            (items, None)
         }
-        other => (vec![other.clone()], None),
     }
+    no_split(items)
+}
+
+/// Find the byte index of the (single) top-level `/` in an unquoted channel
+/// string — the slash that separates the last channel from the alpha. Slashes
+/// inside parentheses (e.g. `calc(a/b)`) are skipped. Returns the last such
+/// slash, or `None` if there is none.
+fn top_level_slash(s: &str) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let mut found = None;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '/' if depth == 0 => found = Some(i),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Convert one side of a split `X/Y` channel string into a value: a numeric
+/// token (`0.4`, `50%`) becomes a [`Number`]; anything else (`var(--x)`,
+/// `none`, `calc(…)`) becomes an unquoted string.
+fn channel_token(s: &str) -> Value {
+    if let Some(n) = parse_number_token(s) {
+        // Reject a token that has leftover non-unit text (e.g. `1px2` would not
+        // round-trip); `parse_number_token` only consumes the numeric prefix.
+        if fmt_token_matches(&n, s) {
+            return Value::Number(n);
+        }
+    }
+    Value::Str(crate::value::SassStr {
+        text: s.to_string(),
+        quoted: false,
+    })
+}
+
+/// Whether `n` re-serializes to exactly `s` (so the whole token was numeric).
+fn fmt_token_matches(n: &Number, s: &str) -> bool {
+    format!("{}{}", fmt_num(n.value, false), n.unit) == s
 }
 
 /// Parse a CSS number token that may carry a unit (`"3"`, `"0.5"`, `"50%"`)
@@ -670,14 +786,32 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         ));
     }
     let channels = require(&params, pos_args, named, 0, "hwb", pos)?.clone();
-    let (comps, alpha) = split_channels(&channels);
-    // Any special/`none`/`from`-relative channel is preserved verbatim,
-    // space-joined, with a bare numeric hue rendered as `<n>deg`.
-    let comps_special = comps.iter().any(|v| is_special(v) || is_none_keyword(v));
-    let alpha_special = alpha
-        .as_ref()
-        .is_some_and(|v| is_special(v) || is_none_keyword(v));
-    if comps.len() != 3 || comps_special || alpha_special {
+    let SplitChannels { comps, alpha, .. } = split_channels(&channels);
+    // A special function (`var()`/`calc()`/…) anywhere preserves the *original*
+    // spelling verbatim (a bare numeric hue keeps its bare form, the `/` alpha
+    // separator stays glued), regardless of channel count.
+    let comps_func = comps.iter().any(is_special);
+    let alpha_func = alpha.as_ref().is_some_and(is_special);
+    if comps_func || alpha_func {
+        return Ok(verbatim_call("hwb", &channels));
+    }
+    // Without a special function, the channel count must be exactly three.
+    if comps.len() != 3 {
+        return Err(Error::at(
+            format!(
+                "$channels: The hwb color space has 3 channels but {} has {}.",
+                list_paren_css(&channels),
+                comps.len()
+            ),
+            pos,
+        ));
+    }
+    // A `none` missing-channel keyword (with otherwise plain numbers) keeps the
+    // space-separated spelling, but a bare numeric hue gains `deg` and the `/`
+    // alpha separator is spaced.
+    let comps_none = comps.iter().any(is_none_keyword);
+    let alpha_none = alpha.as_ref().is_some_and(is_none_keyword);
+    if comps_none || alpha_none {
         return Ok(hwb_verbatim(&comps, alpha.as_ref()));
     }
     let h = hsl_hue(&comps[0], pos)?;
@@ -817,7 +951,7 @@ fn fn_lab_family(
             ));
         }
     }
-    let (comps, alpha) = split_channels(&channels);
+    let SplitChannels { comps, alpha, .. } = split_channels(&channels);
     // A relative-color call (`lab(from … )`) or any special/`none` channel is
     // preserved verbatim.
     let is_relative = comps
@@ -953,7 +1087,9 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
             ));
         }
     }
-    let (items, alpha) = split_channels(&desc);
+    let SplitChannels {
+        comps: items, alpha, ..
+    } = split_channels(&desc);
     // The first item names the color space; the rest are channels.
     let space = items.first().ok_or_else(|| {
         Error::at(

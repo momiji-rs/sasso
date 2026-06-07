@@ -1503,3 +1503,58 @@ fn at_rule_prelude_comment_stripping() {
     assert_eq!(ours("@a b /**/ {}\n"), "@a b /**/ {}\n");
     assert_eq!(ours("@a b //\n  {}\n"), "@a b {}\n");
 }
+fn legacy_channels_special_slash_alpha() {
+    // When the trailing `channel / alpha` slash crosses a special value
+    // (var/calc/attr) or a `none`, it evaluates to an unquoted `X/Y` string
+    // rather than a numeric slash. The one-argument channels form must still
+    // peel off the alpha and emit dart-sass's normalized spelling. Byte-matched
+    // to `npx sass`. Offline.
+    // Three plain-or-special channels with a special channel or alpha → the
+    // legacy comma form (the alpha becomes the fourth comma item).
+    assert_eq!(
+        ours("a{x: rgb(1 2 var(--f) / 0.4)}\n"),
+        "a {\n  x: rgb(1, 2, var(--f), 0.4);\n}\n"
+    );
+    assert_eq!(
+        ours("a{x: rgb(1 2 3 / var(--f))}\n"),
+        "a {\n  x: rgb(1, 2, 3, var(--f));\n}\n"
+    );
+    assert_eq!(
+        ours("a{x: hsl(1 2% 3%/var(--a))}\n"),
+        "a {\n  x: hsl(1, 2%, 3%, var(--a));\n}\n"
+    );
+    // A wrong channel count with a special value keeps the original spelling
+    // verbatim (the `/` alpha separator stays glued).
+    assert_eq!(
+        ours("a{x: rgb(var(--f) 2 / 0.4)}\n"),
+        "a {\n  x: rgb(var(--f) 2/0.4);\n}\n"
+    );
+    assert_eq!(
+        ours("a{x: rgb(var(--f) / 0.4)}\n"),
+        "a {\n  x: rgb(var(--f)/0.4);\n}\n"
+    );
+    // A `none` keyword (no special function) keeps the space/slash spelling;
+    // hsl gives a bare-number hue an explicit `deg`.
+    assert_eq!(
+        ours("a{x: rgb(0 255 127 / none)}\n"),
+        "a {\n  x: rgb(0 255 127 / none);\n}\n"
+    );
+    assert_eq!(
+        ours("a{x: rgb(0 none 127 / 0.5)}\n"),
+        "a {\n  x: rgb(0 none 127 / 0.5);\n}\n"
+    );
+    assert_eq!(
+        ours("a{x: hsl(180 none 50% / 0.5)}\n"),
+        "a {\n  x: hsl(180deg none 50% / 0.5);\n}\n"
+    );
+    // hwb: a special function keeps the verbatim glued spelling; a `none`
+    // keeps the spaced `deg`/slash spelling.
+    assert_eq!(
+        ours("a{x: hwb(0 30% 40% / none)}\n"),
+        "a {\n  x: hwb(0deg 30% 40% / none);\n}\n"
+    );
+    assert_eq!(
+        ours("a{x: hwb(0 30% 40% / var(--a))}\n"),
+        "a {\n  x: hwb(0 30% 40%/var(--a));\n}\n"
+    );
+}
