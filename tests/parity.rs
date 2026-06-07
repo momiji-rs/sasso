@@ -206,3 +206,15 @@ fn at_error_aborts_compilation() {
     let res = compile("@error \"boom\";\n.a { color: red; }\n", &Options::default());
     assert!(res.is_err(), "@error should abort compilation");
 }
+
+#[test]
+fn parity_supports() {
+    assert_parity("@supports (display: grid) {\n  .a { display: grid; }\n}\n@supports (display: grid) and (gap: 1rem) {\n  .b { gap: 1rem; }\n}\n@supports not (display: grid) {\n  .c { float: left; }\n}\n@supports (a: b) or (c: d) {\n  .d { x: y; }\n}\n");
+}
+
+#[test]
+fn parity_supports_nested_and_blockless() {
+    assert_parity(
+        "@supports (a: b) and ((c: d) or (e: f)) {\n  .g { h: i; }\n}\n@supports (x: y) {@inner foo}\n",
+    );
+}

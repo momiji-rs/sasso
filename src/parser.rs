@@ -368,6 +368,12 @@ impl Parser {
             "warn" => self.parse_message(MessageKind::Warn),
             "debug" => self.parse_message(MessageKind::Debug),
             "error" => self.parse_message(MessageKind::Error),
+            // Known Sass features that are deliberately unimplemented in this
+            // build: keep erroring (the generic passthrough would silently
+            // accept them and lose their error specs).
+            "extend" | "use" | "forward" => {
+                Err(Error::at(format!("@{name} is not supported in this build"), pos))
+            }
             _ => self.parse_generic_at_rule(name),
         }
     }
@@ -385,12 +391,13 @@ impl Parser {
         })
     }
 
-    /// Parse a generic/unknown at-rule: `@name <prelude up to { or ;>` then
-    /// either a `{ … }` body or a terminating `;`. Covers `@font-face`,
+    /// Parse a generic/unknown at-rule: `@name <prelude up to { ; or }>` then
+    /// either a `{ … }` body or a terminating `;` (or an immediate `}` closing
+    /// the enclosing block, as in `@supports … {@g}`). Covers `@font-face`,
     /// `@page`, `@charset`, `@supports`, vendor `@foo`, and unknown directives.
     fn parse_generic_at_rule(&mut self, name: String) -> Result<Stmt, Error> {
         self.skip_ws_inline();
-        let prelude = self.parse_template(&['{', ';'])?;
+        let prelude = self.parse_template(&['{', ';', '}'])?;
         let prelude = trim_prelude(prelude);
         self.skip_ws_inline();
         let body = if self.sc.peek() == Some('{') {
