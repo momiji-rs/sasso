@@ -1646,3 +1646,21 @@ fn non_finite_number_serializes_as_calc() {
     // Interpolation produces the same calc form (no longer a bare `Infinity`).
     assert_eq!(ours("a {b: #{1e400}}\n"), "a {\n  b: calc(infinity);\n}\n");
 }
+
+#[test]
+fn list_is_bracketed_and_zip() {
+    // `is-bracketed` reports the bracket flag; a bare value, an empty list,
+    // and a plain space/comma list are all `false`.
+    assert_eq!(ours("a {b: is-bracketed([a b c])}\n"), "a {\n  b: true;\n}\n");
+    assert_eq!(ours("a {b: is-bracketed(a b c)}\n"), "a {\n  b: false;\n}\n");
+    assert_eq!(ours("a {b: is-bracketed(())}\n"), "a {\n  b: false;\n}\n");
+    // `zip` interleaves corresponding elements into a comma list of space
+    // lists, truncating to the shortest input.
+    assert_eq!(
+        ours("a {b: zip(1px 2px, solid dashed, red blue)}\n"),
+        "a {\n  b: 1px solid red, 2px dashed blue;\n}\n"
+    );
+    assert_eq!(ours("a {b: zip(1 2 3, c d)}\n"), "a {\n  b: 1 c, 2 d;\n}\n");
+    // A single list zips each element into its own one-element row.
+    assert_eq!(ours("a {b: zip(a b c)}\n"), "a {\n  b: a, b, c;\n}\n");
+}

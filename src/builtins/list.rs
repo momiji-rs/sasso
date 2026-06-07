@@ -26,6 +26,8 @@ pub(super) fn try_call(
         "append" => fn_append(pos_args, named, pos),
         "index" => fn_index(pos_args, named, pos),
         "list-separator" => fn_list_separator(pos_args, named, pos),
+        "is-bracketed" => fn_is_bracketed(pos_args, named, pos),
+        "zip" => fn_zip(pos_args, named),
         _ => return None,
     })
 }
@@ -260,6 +262,43 @@ fn fn_list_separator(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     }))
 }
 
+/// `is-bracketed($list)`: `true` when the list was written with square
+/// brackets. A bare value or an empty/non-bracketed list reports `false`.
+fn fn_is_bracketed(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let v = super::require(&["list"], pos_args, named, 0, "is-bracketed", pos)?;
+    let bracketed = matches!(v, Value::List(l) if l.bracketed);
+    Ok(Value::Bool(bracketed))
+}
+
+/// `zip($lists...)`: combine corresponding elements of each list into a
+/// comma-separated list of space-separated sublists, truncating to the
+/// shortest input. With a single element per row the row is that bare value;
+/// when any input is empty (length 0) the result is the empty list.
+fn fn_zip(pos_args: &[Value], named: &[(String, Value)]) -> Result<Value, Error> {
+    // `zip` takes only the variadic positional `$lists`; any trailing named
+    // arguments are treated as further lists, matching dart-sass's rest list.
+    let lists: Vec<Vec<Value>> = pos_args
+        .iter()
+        .chain(named.iter().map(|(_, v)| v))
+        .map(|v| as_items(v).0)
+        .collect();
+    let rows = lists.iter().map(|l| l.len()).min().unwrap_or(0);
+    let mut out = Vec::with_capacity(rows);
+    for i in 0..rows {
+        let row: Vec<Value> = lists.iter().map(|l| l[i].clone()).collect();
+        out.push(Value::List(List {
+            items: row,
+            sep: ListSep::Space,
+            bracketed: false,
+        }));
+    }
+    Ok(Value::List(List {
+        items: out,
+        sep: ListSep::Comma,
+        bracketed: false,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +480,40 @@ mod tests {
             call("list-separator", &[list(vec![], ListSep::Comma)]).to_css(false),
             "space"
         );
+    }
+
+    #[test]
+    fn is_bracketed_reports_flag() {
+        let bracketed = Value::List(List {
+            items: vec![s("a"), s("b")],
+            sep: ListSep::Space,
+            bracketed: true,
+        });
+        assert!(matches!(call("is-bracketed", &[bracketed]), Value::Bool(true)));
+        assert!(matches!(
+            call("is-bracketed", &[list(vec![s("a"), s("b")], ListSep::Space)]),
+            Value::Bool(false)
+        ));
+        // A bare value and an empty list are not bracketed.
+        assert!(matches!(call("is-bracketed", &[s("a")]), Value::Bool(false)));
+        assert!(matches!(
+            call("is-bracketed", &[list(vec![], ListSep::Space)]),
+            Value::Bool(false)
+        ));
+    }
+
+    #[test]
+    fn zip_interleaves_to_shortest() {
+        let a = list(vec![n(1.0), n(2.0), n(3.0)], ListSep::Space);
+        let b = list(vec![s("c"), s("d"), s("e")], ListSep::Space);
+        assert_eq!(call("zip", &[a, b]).to_css(false), "1 c, 2 d, 3 e");
+        // Truncates to the shortest input.
+        let a = list(vec![n(1.0), n(2.0), n(3.0)], ListSep::Space);
+        let b = list(vec![s("c"), s("d")], ListSep::Space);
+        assert_eq!(call("zip", &[a, b]).to_css(false), "1 c, 2 d");
+        // A single list yields one element per row.
+        let a = list(vec![s("a"), s("b"), s("c")], ListSep::Space);
+        assert_eq!(call("zip", &[a]).to_css(false), "a, b, c");
     }
 
     #[test]
