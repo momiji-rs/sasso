@@ -1859,4 +1859,29 @@ fn placeholder_inside_pseudo_arguments() {
     assert_eq!(ours("a:not(%b, c) {x: y}\n"), "a:not(c) {\n  x: y;\n}\n");
     // A solo `%placeholder` in a matches-any pseudo removes the whole rule.
     assert_eq!(ours("a:is(%b) {x: y}\n"), "");
+fn unquoted_value_escapes_are_canonicalized() {
+    // A CSS escape in an unquoted value decodes to its code point and then
+    // re-serializes per dart-sass's identifier rules: printable name chars
+    // become literal, control chars use the `\<hex> ` form, and other
+    // punctuation is backslash-escaped.
+    assert_eq!(ours("a {b: \\41}\n"), "a {\n  b: A;\n}\n");
+    assert_eq!(ours("a {b: \\41 BC}\n"), "a {\n  b: ABC;\n}\n");
+    assert_eq!(ours("a {b: \\9}\n"), "a {\n  b: \\9 ;\n}\n");
+    assert_eq!(ours("a {b: \\0}\n"), "a {\n  b: \\0 ;\n}\n");
+    // A leading digit (or one right after a leading hyphen) is hex-escaped;
+    // the same digit mid-identifier stays literal.
+    assert_eq!(ours("a {b: \\30 x}\n"), "a {\n  b: \\30 x;\n}\n");
+    assert_eq!(ours("a {b: q\\30 x}\n"), "a {\n  b: q0x;\n}\n");
+    assert_eq!(ours("a {b: -\\30 x}\n"), "a {\n  b: -\\30 x;\n}\n");
+    // A `-` produced by an escape at identifier start is backslash-escaped,
+    // but a literal leading `-` stays bare.
+    assert_eq!(ours("a {b: \\2d a}\n"), "a {\n  b: \\-a;\n}\n");
+    assert_eq!(ours("a {b: \\2d\\2d}\n"), "a {\n  b: \\--;\n}\n");
+    assert_eq!(ours("a {b: -\\2d}\n"), "a {\n  b: -\\-;\n}\n");
+    assert_eq!(ours("a {b: a\\2d}\n"), "a {\n  b: a-;\n}\n");
+    // Printable punctuation gets a literal backslash; a literal backslash
+    // round-trips.
+    assert_eq!(ours("a {b: \\21}\n"), "a {\n  b: \\!;\n}\n");
+    assert_eq!(ours("a {b: \\7f}\n"), "a {\n  b: \\7f ;\n}\n");
+    assert_eq!(ours("a {b: \\\\}\n"), "a {\n  b: \\\\;\n}\n");
 }

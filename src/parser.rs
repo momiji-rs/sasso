@@ -130,6 +130,46 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+/// Whether `c` may begin a CSS identifier *without* escaping: an ASCII letter,
+/// `_`, or any non-ASCII code point (matches dart-sass `isNameStart`).
+fn is_name_start_codepoint(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_' || (c as u32) >= 0x80
+}
+
+/// Whether `c` may appear in an identifier body without escaping (matches
+/// dart-sass `isName`): a name-start char, an ASCII digit, or `-`.
+fn is_name_codepoint(c: char) -> bool {
+    is_name_start_codepoint(c) || c.is_ascii_digit() || c == '-'
+}
+
+/// Append the canonical spelling of an *escaped* identifier code point to `out`,
+/// matching dart-sass's `escape()`. `identifier_start` is true when this escape
+/// is the first code point of the identifier (or the code point right after a
+/// single leading `-`), in which case digits and `-` are escaped and only a
+/// name-start char passes through literally.
+fn push_ident_escape(out: &mut String, c: char, identifier_start: bool) {
+    let cp = c as u32;
+    let literal_ok = if identifier_start {
+        is_name_start_codepoint(c)
+    } else {
+        is_name_codepoint(c)
+    };
+    if literal_ok {
+        out.push(c);
+    } else if cp <= 0x1F || cp == 0x7F || (identifier_start && c.is_ascii_digit()) {
+        // Control characters (and a leading digit) serialize as a hex escape
+        // with a trailing space, e.g. `\9 ` for a tab or `\30 ` for a leading 0.
+        out.push('\\');
+        out.push_str(&format!("{cp:x}"));
+        out.push(' ');
+    } else {
+        // Other printable ASCII punctuation: a backslash followed by the literal
+        // character (e.g. `\:`, `\@`, `\-`).
+        out.push('\\');
+        out.push(c);
+    }
+}
+
 /// Classify a function name (the identifier immediately before a `(`) as a
 /// "special" CSS function whose argument list must be preserved verbatim
 /// rather than parsed as SassScript. Matching is case-insensitive and the
@@ -1924,6 +1964,74 @@ impl Parser {
         Ok(pieces)
     }
 
+    /// Consume a CSS escape sequence. The opening `\` must be the next
+    /// character; it is consumed here. Returns the decoded code point, or `None`
+    /// for a line continuation (`\` immediately before a newline), which yields
+    /// no character. A backslash at end-of-input decodes to U+FFFD, matching
+    /// dart-sass. Errors on an out-of-range Unicode code point.
+    fn consume_escape(&mut self) -> Result<Option<char>, Error> {
+        let pos = self.sc.position();
+        self.sc.bump(); // the leading backslash
+        match self.sc.peek() {
+            // `\` before a CSS newline is a line continuation: the pair is
+            // dropped entirely.
+            Some('\n') => {
+                self.sc.bump();
+                Ok(None)
+            }
+            Some('\r') => {
+                self.sc.bump();
+                self.sc.eat('\n'); // CRLF
+                Ok(None)
+            }
+            Some('\u{c}') => {
+                self.sc.bump();
+                Ok(None)
+            }
+            Some(c) if c.is_ascii_hexdigit() => {
+                let mut value: u32 = 0;
+                let mut digits = 0;
+                while digits < 6 {
+                    match self.sc.peek() {
+                        Some(h) if h.is_ascii_hexdigit() => {
+                            value = value * 16 + h.to_digit(16).unwrap_or(0);
+                            self.sc.bump();
+                            digits += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                // A single trailing whitespace character terminates the escape
+                // and is consumed.
+                match self.sc.peek() {
+                    Some(' ' | '\t' | '\n' | '\u{c}') => {
+                        self.sc.bump();
+                    }
+                    Some('\r') => {
+                        self.sc.bump();
+                        self.sc.eat('\n');
+                    }
+                    _ => {}
+                }
+                if value > 0x10_FFFF {
+                    return Err(Error::at("Invalid Unicode code point.", pos));
+                }
+                // Surrogate code points cannot be represented and become the
+                // replacement char; NUL is kept (it serializes as `\0 `).
+                match char::from_u32(value) {
+                    Some(ch) => Ok(Some(ch)),
+                    None => Ok(Some('\u{FFFD}')),
+                }
+            }
+            // Any other character escapes to itself literally.
+            Some(c) => {
+                self.sc.bump();
+                Ok(Some(c))
+            }
+            None => Ok(Some('\u{FFFD}')),
+        }
+    }
+
     fn read_ident_name(&mut self) -> Result<String, Error> {
         let mut s = String::new();
         while matches!(self.sc.peek(), Some(c) if is_ident_char(c)) {
@@ -2336,6 +2444,9 @@ impl Parser {
                 Ok(Expr::Parent)
             }
             Some(c) if c.is_ascii_alphabetic() || c == '-' || c == '_' => self.parse_ident_or_call(),
+            // A value beginning with a CSS escape (`\41`, `\9`, …) is an
+            // identifier; let `parse_ident_or_call` consume the escape run.
+            Some('\\') => self.parse_ident_or_call(),
             // A lone `%` in value position (no left operand, so it is not the
             // modulo operator) is a standalone unquoted-string token, as in
             // dart-sass: `attr(c, %)` keeps the `%`, and `%foo` parses as the
@@ -2636,6 +2747,12 @@ impl Parser {
     fn parse_ident_template(&mut self) -> Result<Vec<TplPiece>, Error> {
         let mut pieces = Vec::new();
         let mut lit = String::new();
+        // `emitted` counts code points written to the identifier so far (across
+        // both literal and interpolation pieces) so the leading-digit / first
+        // -char escaping rules can be applied. `first_hyphen` records whether
+        // the identifier begins with `-` (a digit right after it is escaped).
+        let mut emitted = 0usize;
+        let mut first_hyphen = false;
         loop {
             match self.sc.peek() {
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
@@ -2650,10 +2767,25 @@ impl Parser {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
                     pieces.push(TplPiece::Interp(e));
+                    emitted += 1;
+                }
+                Some('\\') => {
+                    if let Some(c) = self.consume_escape()? {
+                        // The escape is at "identifier start" when it is the very
+                        // first code point, or the code point right after a single
+                        // leading literal/escaped `-`.
+                        let identifier_start = emitted == 0 || (emitted == 1 && first_hyphen);
+                        push_ident_escape(&mut lit, c, identifier_start);
+                        emitted += 1;
+                    }
                 }
                 Some(c) if is_ident_char(c) => {
                     lit.push(c);
                     self.sc.bump();
+                    if emitted == 0 && c == '-' {
+                        first_hyphen = true;
+                    }
+                    emitted += 1;
                 }
                 _ => break,
             }
