@@ -1737,21 +1737,33 @@ impl<'a> Evaluator<'a> {
                 match op {
                     // Unary minus negates a number; on any other operand
                     // dart-sass produces an unquoted `-<value>` string
-                    // (`- red` -> `-red`, `- "q"` -> `-"q"`).
+                    // (`- red` -> `-red`, `- "q"` -> `-"q"`). A calculation that
+                    // could not reduce to a number has no negation operator, so
+                    // dart-sass rejects it ("Undefined operation \"-calc(…)\".").
                     UnOp::Neg => match v {
                         Value::Number(n) => Ok(Value::Number(Number {
                             value: -n.value,
                             unit: n.unit,
                         })),
+                        Value::Calc(_) => Err(Error::unpositioned(format!(
+                            "Undefined operation \"-{}\".",
+                            v.to_css(false)
+                        ))),
                         other => Ok(Value::Str(SassStr {
                             text: format!("-{}", other.to_css(false)),
                             quoted: false,
                         })),
                     },
                     // Unary plus is numeric identity; on any other operand it
-                    // prepends `+` as an unquoted string (`+foo` -> `+foo`).
+                    // prepends `+` as an unquoted string (`+foo` -> `+foo`). A
+                    // residual calculation has no unary-plus operator and is
+                    // rejected the same way.
                     UnOp::Plus => match v {
                         Value::Number(_) => Ok(v),
+                        Value::Calc(_) => Err(Error::unpositioned(format!(
+                            "Undefined operation \"+{}\".",
+                            v.to_css(false)
+                        ))),
                         other => Ok(Value::Str(SassStr {
                             text: format!("+{}", other.to_css(false)),
                             quoted: false,

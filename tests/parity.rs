@@ -2864,3 +2864,13 @@ fn parity_abs_calc_vs_global() {
         "}\n",
     ));
 }
+
+#[test]
+fn parity_unary_on_unresolved_calculation_errors() {
+    // A unary `+`/`-` applied to a calculation that did not reduce to a number
+    // has no defined operation and is rejected, while negating a calculation
+    // that unwraps to a number still works.
+    assert!(compile("a {b: +calc(var(--c))}\n", &Options::default()).is_err());
+    assert!(compile("a {b: -(calc(var(--c)))}\n", &Options::default()).is_err());
+    assert_parity("a {b: -calc(1px)}\n");
+}
