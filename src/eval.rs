@@ -3359,26 +3359,21 @@ fn split_commas(s: &str) -> Vec<String> {
 
 /// Collapse whitespace and put single spaces around `>`/`+`/`~`
 /// combinators (at bracket depth 0), matching dart-sass's selector
-/// serialization.
+/// serialization. Also separates adjacent compounds: a bare type/element
+/// selector appearing mid-compound (`[a]b`, `:not(.x)b`) is joined to the
+/// preceding simple with a descendant combinator (`[a] b`), matching
+/// dart-sass's `[adjacent-compounds]` normalization.
 fn normalize_selector(s: &str) -> String {
     let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
     let chars: Vec<char> = collapsed.chars().collect();
     let mut out = String::new();
-    let mut paren = 0i32;
-    let mut bracket = 0i32;
     let mut i = 0;
+    // True when the current top-level compound already holds a simple selector.
+    let mut mid_compound = false;
     while i < chars.len() {
         let c = chars[i];
         match c {
-            '(' => {
-                paren += 1;
-                out.push(c);
-            }
-            ')' => {
-                paren -= 1;
-                out.push(c);
-            }
-            '[' if paren == 0 && bracket == 0 => {
+            '[' => {
                 let end = matching_bracket(&chars, i);
                 let inner: String = chars[i + 1..end.min(chars.len())].iter().collect();
                 out.push('[');
@@ -3387,17 +3382,33 @@ fn normalize_selector(s: &str) -> String {
                     out.push(']');
                 }
                 i = end + 1;
+                mid_compound = true;
                 continue;
             }
-            '[' => {
-                bracket += 1;
+            '.' | '#' | '%' => {
+                // A class/id/placeholder sigil plus its name (one simple).
                 out.push(c);
+                i += 1;
+                copy_name(&chars, &mut i, &mut out);
+                mid_compound = true;
+                continue;
             }
-            ']' => {
-                bracket -= 1;
-                out.push(c);
+            ':' => {
+                // A pseudo-class/element (with any `(...)` argument), copied
+                // verbatim. Its interior is not subject to compound separation.
+                copy_pseudo(&chars, &mut i, &mut out);
+                mid_compound = true;
+                continue;
             }
-            '>' | '~' | '+' if paren == 0 && bracket == 0 => {
+            '*' if chars.get(i + 1) != Some(&'|') || chars.get(i + 2) == Some(&'=') => {
+                // A bare universal `*` (not a `*|...` namespace prefix). It does
+                // not start a new adjacent compound on its own.
+                out.push('*');
+                i += 1;
+                mid_compound = true;
+                continue;
+            }
+            '>' | '~' | '+' => {
                 while out.ends_with(' ') {
                     out.pop();
                 }
@@ -3408,13 +3419,144 @@ fn normalize_selector(s: &str) -> String {
                 while i < chars.len() && chars[i] == ' ' {
                     i += 1;
                 }
+                mid_compound = false;
                 continue;
             }
-            _ => out.push(c),
+            ' ' | '\t' | '\n' | '\r' => {
+                out.push(c);
+                i += 1;
+                mid_compound = false;
+                continue;
+            }
+            _ if type_selector_starts_at(&chars, i) => {
+                // A type/namespaced-type selector. Mid-compound, it is a
+                // separate adjacent compound: join with a descendant space.
+                if mid_compound && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                copy_type_selector(&chars, &mut i, &mut out);
+                mid_compound = true;
+                continue;
+            }
+            _ => {
+                // Any other character (e.g. a digit or `%` in a keyframe stop
+                // like `1e2%`, which is not a real selector). It does NOT make a
+                // following identifier an adjacent compound, so clear the flag.
+                out.push(c);
+                i += 1;
+                mid_compound = false;
+            }
         }
-        i += 1;
     }
     out.trim().to_string()
+}
+
+/// Copy a CSS name (the part after a `.`/`#`/`%` sigil or a type name) starting
+/// at `*i`, honouring `\` escapes, advancing `*i` past it.
+fn copy_name(chars: &[char], i: &mut usize, out: &mut String) {
+    while *i < chars.len() {
+        let c = chars[*i];
+        if c == '\\' {
+            out.push(c);
+            *i += 1;
+            if *i < chars.len() {
+                out.push(chars[*i]);
+                *i += 1;
+            }
+        } else if is_name_char(c) {
+            out.push(c);
+            *i += 1;
+        } else {
+            break;
+        }
+    }
+}
+
+/// Copy a pseudo-class/element selector (`:name` / `::name` plus any balanced
+/// `(...)` argument) verbatim, advancing `*i` past it.
+fn copy_pseudo(chars: &[char], i: &mut usize, out: &mut String) {
+    out.push(chars[*i]); // first ':'
+    *i += 1;
+    if *i < chars.len() && chars[*i] == ':' {
+        out.push(':');
+        *i += 1;
+    }
+    copy_name(chars, i, out);
+    if *i < chars.len() && chars[*i] == '(' {
+        let mut depth = 0i32;
+        while *i < chars.len() {
+            let c = chars[*i];
+            match c {
+                '\\' => {
+                    out.push(c);
+                    *i += 1;
+                    if *i < chars.len() {
+                        out.push(chars[*i]);
+                        *i += 1;
+                    }
+                    continue;
+                }
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            out.push(c);
+            *i += 1;
+            if depth == 0 {
+                break;
+            }
+        }
+    }
+}
+
+/// Copy a type/element selector, including an optional `ns|`/`*|`/`|` namespace
+/// prefix and the type name (or `*`), advancing `*i` past it.
+fn copy_type_selector(chars: &[char], i: &mut usize, out: &mut String) {
+    // Optional namespace prefix.
+    if chars[*i] == '*' {
+        out.push('*');
+        *i += 1;
+    } else if chars[*i] == '|' {
+        // bare `|type` — no namespace, handled by falling through.
+    } else {
+        copy_name(chars, i, out);
+    }
+    if *i < chars.len() && chars[*i] == '|' && chars.get(*i + 1) != Some(&'=') {
+        out.push('|');
+        *i += 1;
+        if *i < chars.len() && chars[*i] == '*' {
+            out.push('*');
+            *i += 1;
+        } else {
+            copy_name(chars, i, out);
+        }
+    }
+}
+
+/// Whether a bare type/namespaced-type selector (an identifier, optionally
+/// preceded by a `*|`/`ns|`/`|` namespace) begins at `chars[i]`. Used to detect
+/// an adjacent compound (`[a]b` → `[a] b`). A `*` universal, the `.#%:` sigils,
+/// an attribute `[`, and a combinator are NOT type-selector starts. `*|type`
+/// and `|type` count as type starts.
+fn type_selector_starts_at(chars: &[char], i: usize) -> bool {
+    let c = chars[i];
+    // `*|...` is a namespaced type/universal (but not `*|=`, an operator).
+    if c == '*' {
+        return chars.get(i + 1) == Some(&'|') && chars.get(i + 2) != Some(&'=');
+    }
+    // `|type` (empty namespace) is a type selector (but not `|=`).
+    if c == '|' {
+        return chars.get(i + 1) != Some(&'=');
+    }
+    if is_name_start(c) {
+        return true;
+    }
+    // A leading `-` of an identifier (`-foo`, `--foo`) or an escape `\` begins
+    // an identifier-led type selector.
+    if c == '-' {
+        return matches!(chars.get(i + 1), Some(&n) if is_name_start(n) || n == '-' || n == '\\');
+    }
+    c == '\\'
 }
 
 // ---- media queries -----------------------------------------------------

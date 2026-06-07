@@ -2494,3 +2494,32 @@ fn nested_rule_declaration_comment_bubbling_order() {
     assert_parity("a {\n  b {c: d}\n  /* */\n  e {f: g}\n}\n");
     assert_parity("a {\n  w: x;\n  b {c: d}\n  y: z;\n}\n");
 }
+
+#[test]
+fn adjacent_compound_selector_separation() {
+    // A bare type/element selector appearing mid-compound is a separate adjacent
+    // compound that dart-sass joins with a descendant combinator (`[a]b` ->
+    // `[a] b`). This only fires for an identifier-led type, not for `*`, classes,
+    // ids, attributes, or pseudos.
+    assert_eq!(ours("[a]b {c: d}\n"), "[a] b {\n  c: d;\n}\n");
+    assert_eq!(ours("a[b]c {d: e}\n"), "a[b] c {\n  d: e;\n}\n");
+    assert_eq!(ours(":not(.x)b {c: d}\n"), ":not(.x) b {\n  c: d;\n}\n");
+    assert_eq!(ours(".x[a]b.c {d: e}\n"), ".x[a] b.c {\n  d: e;\n}\n");
+    assert_eq!(ours("[a]ns|b {c: d}\n"), "[a] ns|b {\n  c: d;\n}\n");
+    assert_eq!(ours("*b {c: d}\n"), "* b {\n  c: d;\n}\n");
+    // No separation before `*`, classes, ids, attributes, pseudos.
+    assert_eq!(ours("[a]* {c: d}\n"), "[a]* {\n  c: d;\n}\n");
+    assert_eq!(ours("[a].c {d: e}\n"), "[a].c {\n  d: e;\n}\n");
+    assert_eq!(ours("[a]#c {d: e}\n"), "[a]#c {\n  d: e;\n}\n");
+    assert_eq!(ours("[a][c] {d: e}\n"), "[a][c] {\n  d: e;\n}\n");
+    assert_eq!(ours("[a]:hover {c: d}\n"), "[a]:hover {\n  c: d;\n}\n");
+    // A keyframe stop like `1e2%` is NOT a selector and must stay verbatim.
+    assert_eq!(
+        ours("@keyframes a {\n  1e2% {c: d}\n}\n"),
+        "@keyframes a {\n  1e2% {\n    c: d;\n  }\n}\n"
+    );
+
+    assert_parity("[a]b {c: d}\n");
+    assert_parity(".x[a]b.c {d: e}\n");
+    assert_parity(":not(.x)b {c: d}\n");
+}
