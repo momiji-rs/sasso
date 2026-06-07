@@ -10,6 +10,9 @@ bench/grass_runner/target/
 # spec/fetch.sh and pinned via spec/SPEC_VERSION.txt — never commit the whole
 # upstream tree. The harness scripts (fetch.sh, run_spec.py, etc.) ARE tracked.
 /spec/sass-spec/
+# Also ignore the symlink form (a worktree agent may symlink it rather than
+# clone), so `git add -A` never stages the suite.
+/spec/sass-spec
 # Per-run artifacts produced by the runner.
 /spec/results.json
 /spec/results-*.json
