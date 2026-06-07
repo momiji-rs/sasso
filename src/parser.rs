@@ -2679,27 +2679,16 @@ impl Parser {
                     pieces.push(TplPiece::Interp(e));
                 }
                 Some('\\') => {
-                    // A backslash immediately followed by a CSS newline
-                    // (`\n`, `\r\n`, `\r`, or `\f`) is a *line continuation*:
-                    // both the backslash and the newline are removed, matching
-                    // dart-sass. Any other escape is kept verbatim (its decoding
-                    // is handled by the string serializer elsewhere).
-                    match self.sc.peek_at(1) {
-                        Some('\n' | '\r' | '\u{c}') => {
-                            self.sc.bump(); // '\\'
-                            let nl = self.sc.bump(); // the newline char
-                            if nl == Some('\r') && self.sc.peek() == Some('\n') {
-                                self.sc.bump(); // CRLF: consume the trailing LF
-                            }
-                        }
-                        _ => {
-                            if let Some(c) = self.sc.bump() {
-                                lit.push(c);
-                            }
-                            if let Some(c) = self.sc.bump() {
-                                lit.push(c);
-                            }
-                        }
+                    // Decode the escape to its code point and store it raw; the
+                    // string serializer re-escapes only what it must. A line
+                    // continuation (`\` before a CSS newline) yields no
+                    // character. `\#{...}` decodes the `#` literally, so the
+                    // sequence becomes a plain `#{` rather than interpolation.
+                    // Inside a quoted string a NUL escape becomes the Unicode
+                    // replacement character (unlike an identifier, where it
+                    // serializes as `\0 `).
+                    if let Some(c) = self.consume_escape()? {
+                        lit.push(if c == '\0' { '\u{FFFD}' } else { c });
                     }
                 }
                 Some(c) => {

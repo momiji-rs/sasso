@@ -1885,3 +1885,26 @@ fn unquoted_value_escapes_are_canonicalized() {
     assert_eq!(ours("a {b: \\7f}\n"), "a {\n  b: \\7f ;\n}\n");
     assert_eq!(ours("a {b: \\\\}\n"), "a {\n  b: \\\\;\n}\n");
 }
+
+#[test]
+fn quoted_string_escapes_are_normalized() {
+    // Quoted strings decode escapes to code points and re-serialize per
+    // dart-sass: printable chars pass through, `\#{` becomes a literal `#{`,
+    // and only the quote char, backslash, and control chars are re-escaped.
+    assert_eq!(ours("a {b: \"\\41\"}\n"), "a {\n  b: \"A\";\n}\n");
+    assert_eq!(ours("a {b: \"x\\#{y}\"}\n"), "a {\n  b: \"x#{y}\";\n}\n");
+    assert_eq!(ours("a {b: \"\\#{y}\"}\n"), "a {\n  b: \"#{y}\";\n}\n");
+    // Tab (0x09) stays literal inside quotes; DEL is hex-escaped.
+    assert_eq!(ours("a {b: \"\\9\"}\n"), "a {\n  b: \"\t\";\n}\n");
+    assert_eq!(ours("a {b: \"\\7f\"}\n"), "a {\n  b: \"\\7f\";\n}\n");
+    // A control escape gets a trailing space only when the next char would
+    // extend the escape (a hex digit).
+    assert_eq!(ours("a {b: \"\\1 0\"}\n"), "a {\n  b: \"\\1 0\";\n}\n");
+    assert_eq!(ours("a {b: \"\\1 a\"}\n"), "a {\n  b: \"\\1 a\";\n}\n");
+    // A string containing `\"` but no `'` is rewrapped in single quotes; one
+    // containing both keeps double quotes and escapes the inner `"`.
+    assert_eq!(ours("a {b: \"a\\\"b\"}\n"), "a {\n  b: 'a\"b';\n}\n");
+    assert_eq!(ours("a {b: \"a'b\\\"c\"}\n"), "a {\n  b: \"a'b\\\"c\";\n}\n");
+    // A literal backslash round-trips as `\\`.
+    assert_eq!(ours("a {b: \"\\\\\"}\n"), "a {\n  b: \"\\\\\";\n}\n");
+}

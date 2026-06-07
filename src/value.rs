@@ -179,6 +179,44 @@ pub(crate) struct SassStr {
     pub quoted: bool,
 }
 
+/// Serialize a string as a quoted CSS string, matching dart-sass's
+/// `_visitQuotedString`. The text holds decoded code points; this re-escapes
+/// only what it must: the chosen quote character, backslashes, and control
+/// characters (everything `0x00..=0x1F` except tab, plus `0x7F`). Double quotes
+/// are preferred; a string that contains `"` but no `'` is wrapped in `'`.
+pub(crate) fn serialize_quoted(text: &str) -> String {
+    let has_double = text.contains('"');
+    let has_single = text.contains('\'');
+    // Use single quotes only when the text has a `"` and no `'`.
+    let quote = if has_double && !has_single { '\'' } else { '"' };
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(quote);
+    for (i, &c) in chars.iter().enumerate() {
+        let cp = c as u32;
+        if c == quote || c == '\\' {
+            out.push('\\');
+            out.push(c);
+        } else if (cp <= 0x1F && c != '\t') || cp == 0x7F {
+            // Control character: `\<hex>` with a trailing space only when the
+            // next character would otherwise extend the escape (a hex digit,
+            // space, or tab).
+            out.push('\\');
+            out.push_str(&format!("{cp:x}"));
+            let needs_space = chars
+                .get(i + 1)
+                .is_some_and(|n| n.is_ascii_hexdigit() || *n == ' ' || *n == '\t');
+            if needs_space {
+                out.push(' ');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out.push(quote);
+    out
+}
+
 /// A list value.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct List {
@@ -242,7 +280,7 @@ impl Map {
 /// Serialize a map key (dart-sass uses the inspect form for keys/values).
 fn map_key_css(v: &Value) -> String {
     match v {
-        Value::Str(s) if s.quoted => format!("\"{}\"", s.text),
+        Value::Str(s) if s.quoted => serialize_quoted(&s.text),
         Value::Map(m) => m.to_map_css(false),
         other => other.to_css(false),
     }
@@ -252,7 +290,7 @@ fn map_key_css(v: &Value) -> String {
 /// parentheses to disambiguate from the entry separators.
 fn map_val_css(v: &Value) -> String {
     match v {
-        Value::Str(s) if s.quoted => format!("\"{}\"", s.text),
+        Value::Str(s) if s.quoted => serialize_quoted(&s.text),
         Value::Map(m) => m.to_map_css(false),
         Value::List(l) if l.sep == ListSep::Comma && !l.bracketed && l.items.len() >= 2 => {
             format!("({})", l.to_css(false))
@@ -291,7 +329,7 @@ impl Value {
             Value::Color(c) => c.to_css(compressed),
             Value::Str(s) => {
                 if s.quoted {
-                    format!("\"{}\"", s.text)
+                    serialize_quoted(&s.text)
                 } else {
                     s.text.clone()
                 }
