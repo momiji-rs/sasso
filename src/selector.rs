@@ -1521,12 +1521,14 @@ fn extend_component(comp: &ComplexComponent, extensions: &[Extension]) -> Vec<Ve
         return options;
     }
 
-    // Cartesian product of per-simple choices.
+    // Cartesian product of per-simple choices. The iteration order matches
+    // dart-sass `paths`: for each simple's options, the option is the outer loop
+    // and the accumulated paths the inner loop.
     let mut paths: Vec<Vec<&Option<Complex>>> = vec![Vec::new()];
     for opts in &per_simple {
         let mut next = Vec::new();
-        for path in &paths {
-            for opt in opts {
+        for opt in opts {
+            for path in &paths {
                 let mut p = path.clone();
                 p.push(opt);
                 next.push(p);
@@ -1545,7 +1547,7 @@ fn extend_component(comp: &ComplexComponent, extensions: &[Extension]) -> Vec<Ve
         if path.iter().all(|o| o.is_none()) {
             continue;
         }
-        if let Some(seq) = build_extended_compound(comp, simples, path) {
+        for seq in build_extended_compound(comp, simples, path) {
             let key = render_components(&seq);
             if seen.insert(key) {
                 options.push(seq);
@@ -1587,17 +1589,19 @@ fn collect_extenders(target: &Simple, extensions: &[Extension], stack: &mut Vec<
     out
 }
 
-/// Build the extended component sequence for one within-compound product path.
+/// Build the extended component sequences for one within-compound product path.
 /// `path[i]` is `None` to keep `simples[i]`, or `Some(extender)` to replace it.
-/// Self-kept simples come first (in order), then each extender's trailing
-/// compound is unified in. Multi-component extenders are supported only when
-/// exactly one simple is extended.
+/// The self-kept simples form an "original" compound that is unified together
+/// with every chosen extender via dart-sass `_unifyExtenders`/`unifyComplex`,
+/// which weaves any multi-component extenders (including several at once). The
+/// original component's incoming combinator is attached to each result's first
+/// component. May return several sequences (one per woven unification).
 fn build_extended_compound(
     comp: &ComplexComponent,
     simples: &[Simple],
     path: &[&Option<Complex>],
-) -> Option<Vec<ComplexComponent>> {
-    // Self-kept simples (originals not being extended).
+) -> Vec<Vec<ComplexComponent>> {
+    // Self-kept simples (originals not being extended) and the chosen extenders.
     let mut base: Vec<Simple> = Vec::new();
     let mut extenders: Vec<&Complex> = Vec::new();
     for (i, choice) in path.iter().enumerate() {
@@ -1607,44 +1611,38 @@ fn build_extended_compound(
         }
     }
 
-    if extenders.len() == 1 && extenders[0].components.len() > 1 {
-        // A single multi-component extender: splice its leading components in
-        // and unify its trailing compound with the base.
-        let extender = extenders[0];
-        let ext_last = extender.components.last()?;
-        let ext_lead = &extender.components[..extender.components.len() - 1];
-        let unified = unify_compounds(&base, &ext_last.compound.simples)?;
-        let mut seq: Vec<ComplexComponent> = Vec::new();
-        for (k, lead) in ext_lead.iter().enumerate() {
-            let combinator = if k == 0 { comp.combinator } else { lead.combinator };
-            seq.push(ComplexComponent {
-                combinator,
-                compound: lead.compound.clone(),
-            });
-        }
-        seq.push(ComplexComponent {
-            combinator: ext_last.combinator,
-            compound: Compound { simples: unified },
+    // `_unifyExtenders`: the self-kept base compound (if any) is an "original"
+    // selector unified first, then each extender complex.
+    let mut to_unify: Vec<Complex> = Vec::new();
+    if !base.is_empty() {
+        to_unify.push(Complex {
+            components: vec![ComplexComponent {
+                combinator: None,
+                compound: Compound {
+                    simples: base.clone(),
+                },
+            }],
         });
-        return Some(seq);
+    }
+    for ext in &extenders {
+        to_unify.push((*ext).clone());
     }
 
-    // All single-component extenders: unify their compounds into the base, in
-    // order, base simples first.
-    let mut acc = base;
-    for ext in &extenders {
-        if ext.components.len() != 1 {
-            return None; // can't combine multiple multi-component extenders
-        }
-        acc = unify_compounds(&acc, &ext.components[0].compound.simples)?;
-    }
-    if acc.is_empty() {
-        return None;
-    }
-    Some(vec![ComplexComponent {
-        combinator: comp.combinator,
-        compound: Compound { simples: acc },
-    }])
+    let Some(unified) = unify_complex_multi(&to_unify) else {
+        return Vec::new();
+    };
+
+    // Attach the original component's incoming combinator to the first component
+    // of each unified result.
+    unified
+        .into_iter()
+        .filter_map(|complex| {
+            let mut components = complex.components;
+            let first = components.first_mut()?;
+            first.combinator = comp.combinator;
+            Some(components)
+        })
+        .collect()
 }
 
 /// Render a component sequence to a stable string key (for dedup).
@@ -1881,6 +1879,78 @@ pub(crate) fn unify_complex(c1: &Complex, c2: &Complex) -> Option<Vec<Complex>> 
         return None;
     }
     Some(out)
+}
+
+/// Unify a list of complex selectors into the complex selectors matched by all
+/// of them (dart-sass `unifyComplex(List<ComplexSelector>)`). All final
+/// compounds are unified into a single base compound; the remaining parent
+/// components are woven together. Returns `None` if any pair can't unify.
+fn unify_complex_multi(complexes: &[Complex]) -> Option<Vec<Complex>> {
+    if complexes.is_empty() {
+        return None;
+    }
+    if complexes.len() == 1 {
+        return Some(complexes.to_vec());
+    }
+
+    // Accumulate the unified base (all final compounds unified together).
+    let mut unified_base: Option<Vec<Simple>> = None;
+    for complex in complexes {
+        let base = complex.components.last()?;
+        match &mut unified_base {
+            None => unified_base = Some(base.compound.simples.clone()),
+            Some(acc) => {
+                let mut next = acc.clone();
+                for simple in &base.compound.simples {
+                    next = simple_unify(simple, &next)?;
+                }
+                *acc = next;
+            }
+        }
+    }
+    let unified_base = unified_base?;
+
+    // The parents of each multi-component complex (all but the last component),
+    // in trailing form for the weave.
+    let mut without_bases: Vec<Complex> = Vec::new();
+    for complex in complexes {
+        if complex.components.len() > 1 {
+            without_bases.push(Complex {
+                components: complex.components[..complex.components.len() - 1].to_vec(),
+            });
+        }
+    }
+
+    let base_complex = Complex {
+        components: vec![ComplexComponent {
+            combinator: None,
+            compound: Compound {
+                simples: unified_base,
+            },
+        }],
+    };
+
+    // `weave(withoutBases.isEmpty ? [base] : [...exceptLast, last.concat(base)])`.
+    let path: Vec<Complex> = if without_bases.is_empty() {
+        vec![base_complex]
+    } else {
+        let mut p = without_bases.clone();
+        // Concatenate `base` onto the last parents complex as a descendant.
+        let last = p.pop()?;
+        let mut concatenated = last.components.clone();
+        concatenated.extend(base_complex.components.iter().cloned());
+        p.push(Complex {
+            components: concatenated,
+        });
+        p
+    };
+
+    let woven = weave(&path);
+    if woven.is_empty() {
+        None
+    } else {
+        Some(woven)
+    }
 }
 
 /// Unify two selector lists: the cartesian product of `unify_complex` over each

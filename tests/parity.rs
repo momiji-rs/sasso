@@ -2688,10 +2688,17 @@ fn extend_combinator_weave() {
         ours(".baz .foo {a: b}\nfoo > bar {@extend .foo}\n"),
         ".baz .foo, .baz foo > bar {\n  a: b;\n}\n"
     );
+    // Two multi-component extenders unify and weave their parents together
+    // (dart-sass `_unifyExtenders`/`unifyComplex`).
+    assert_eq!(
+        ours(".a .b {@extend .e}\n.c .d {@extend .f}\n.e.f {x: y}\n"),
+        ".e.f, .a .f.b, .c .e.d, .a .c .b.d, .c .a .b.d {\n  x: y;\n}\n"
+    );
 
     // Live parity for the same constructs.
     assert_parity(".a ~ x {a: b}\n.b ~ y {@extend x}\n");
     assert_parity(".a + x {a: b}\n.a.b ~ y {@extend x}\n");
     assert_parity(".a > .b + x {a: b}\n.c > .d + y {@extend x}\n");
     assert_parity("a + b c .c1 {a: b}\na c .c2 {@extend .c1}\n");
+    assert_parity(".a .b {@extend .e}\n.c .d {@extend .f}\n.e.f {x: y}\n");
 }
