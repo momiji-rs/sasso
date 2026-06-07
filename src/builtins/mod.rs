@@ -20,7 +20,7 @@ mod string;
 
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{Color, SassStr, Value};
+use crate::value::{Color, Number, SassStr, Value};
 
 /// Dispatch a function call by name across the builtin families.
 pub(crate) fn call(
@@ -162,4 +162,189 @@ fn plain_css_function(name: &str, pos_args: &[Value], named: &[(String, Value)])
         text: format!("{name}({})", parts.join(", ")),
         quoted: false,
     })
+}
+
+// ---- built-in module system (`@use "sass:<mod>"`) ----------------------
+
+/// Whether `module` names a built-in `sass:*` module this build supports.
+pub(crate) fn is_module(module: &str) -> bool {
+    matches!(
+        module,
+        "math" | "color" | "list" | "map" | "string" | "selector" | "meta"
+    )
+}
+
+/// Translate a `(module, member)` pair to the global builtin name that
+/// implements it, or `None` when the member is not a function this build can
+/// dispatch to a global implementation. The global implementations are reused
+/// verbatim — module members are just renamed views of them.
+fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
+    // Names returned as `Some` must be real global builtins (so the dispatcher
+    // finds them). Members handled specially (e.g. `math.div`) or unsupported
+    // (color-space math, first-class functions) are deliberately absent.
+    match module {
+        "math" => match member {
+            "abs" => Some("abs"),
+            "ceil" => Some("ceil"),
+            "floor" => Some("floor"),
+            "round" => Some("round"),
+            "max" => Some("max"),
+            "min" => Some("min"),
+            "clamp" => Some("clamp"),
+            "sqrt" => Some("sqrt"),
+            "pow" => Some("pow"),
+            "exp" => Some("exp"),
+            "log" => Some("log"),
+            "sin" => Some("sin"),
+            "cos" => Some("cos"),
+            "tan" => Some("tan"),
+            "asin" => Some("asin"),
+            "acos" => Some("acos"),
+            "atan" => Some("atan"),
+            "atan2" => Some("atan2"),
+            "hypot" => Some("hypot"),
+            "sign" => Some("sign"),
+            "percentage" => Some("percentage"),
+            "unit" => Some("unit"),
+            "is-unitless" => Some("unitless"),
+            "compatible" => Some("comparable"),
+            "random" => Some("random"),
+            // `div` is implemented directly in `call_module`; the module
+            // variables are resolved by `module_var`.
+            _ => None,
+        },
+        "map" => match member {
+            "get" => Some("map-get"),
+            "merge" => Some("map-merge"),
+            "remove" => Some("map-remove"),
+            "keys" => Some("map-keys"),
+            "values" => Some("map-values"),
+            "has-key" => Some("map-has-key"),
+            // `set`, `deep-merge`, `deep-remove` have no global equivalent in
+            // this build.
+            _ => None,
+        },
+        "string" => match member {
+            "length" => Some("str-length"),
+            "insert" => Some("str-insert"),
+            "index" => Some("str-index"),
+            "slice" => Some("str-slice"),
+            "quote" => Some("quote"),
+            "unquote" => Some("unquote"),
+            "to-upper-case" => Some("to-upper-case"),
+            "to-lower-case" => Some("to-lower-case"),
+            // `unique-id`, `split` have no global equivalent here.
+            _ => None,
+        },
+        "list" => match member {
+            "length" => Some("length"),
+            "nth" => Some("nth"),
+            "set-nth" => Some("set-nth"),
+            "append" => Some("append"),
+            "join" => Some("join"),
+            "zip" => Some("zip"),
+            "index" => Some("index"),
+            "separator" => Some("list-separator"),
+            "is-bracketed" => Some("is-bracketed"),
+            _ => None,
+        },
+        "selector" => match member {
+            "nest" => Some("selector-nest"),
+            "append" => Some("selector-append"),
+            "extend" => Some("selector-extend"),
+            "replace" => Some("selector-replace"),
+            "unify" => Some("selector-unify"),
+            "parse" => Some("selector-parse"),
+            "is-superselector" => Some("is-superselector"),
+            "simple-selectors" => Some("simple-selectors"),
+            _ => None,
+        },
+        "color" => match member {
+            // Legacy members map to the global color functions. The modern
+            // color-space members (channel/space/to-space/…) need color-space
+            // math this build can't compute; they are deliberately absent.
+            "adjust" => Some("adjust-color"),
+            "scale" => Some("scale-color"),
+            "change" => Some("change-color"),
+            "red" => Some("red"),
+            "green" => Some("green"),
+            "blue" => Some("blue"),
+            "hue" => Some("hue"),
+            "saturation" => Some("saturation"),
+            "lightness" => Some("lightness"),
+            "whiteness" => Some("whiteness"),
+            "blackness" => Some("blackness"),
+            "alpha" => Some("alpha"),
+            "opacity" => Some("opacity"),
+            "grayscale" => Some("grayscale"),
+            "complement" => Some("complement"),
+            "invert" => Some("invert"),
+            "mix" => Some("mix"),
+            "ie-hex-str" => Some("ie-hex-str"),
+            _ => None,
+        },
+        "meta" => match member {
+            "type-of" => Some("type-of"),
+            "inspect" => Some("inspect"),
+            "feature-exists" => Some("feature-exists"),
+            // `keywords`, `call`, `get-function`, the `*-exists`/`get-mixin`/
+            // `apply`/`module-*` members need evaluator context or first-class
+            // functions not available in this value-only dispatch — left
+            // unsupported (Undefined function).
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `module` exposes `member` as a callable function (used by the
+/// evaluator to resolve unprefixed `@use … as *` members).
+pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
+    if module == "math" && member == "div" {
+        return true;
+    }
+    module_member_to_global(module, member).is_some()
+}
+
+/// Call a module member `module.member(args)`, dispatching to the reused global
+/// implementation. An unknown member is "Undefined function." (dart-sass).
+pub(crate) fn call_module(
+    module: &str,
+    member: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Result<Value, Error> {
+    // `math.div(a, b)` is true (always-divide) division, unit-aware.
+    if module == "math" && member == "div" {
+        return math::module_div(pos_args, named, pos);
+    }
+    match module_member_to_global(module, member) {
+        Some(global) => call(global, pos_args, named, pos),
+        None => Err(Error::at("Undefined function.".to_string(), pos)),
+    }
+}
+
+/// Resolve a built-in module variable (`math.$pi`, etc.). dart-sass exposes
+/// these only on `sass:math`; an unknown member is "Undefined variable.".
+pub(crate) fn module_var(module: &str, name: &str, pos: Pos) -> Result<Value, Error> {
+    let number = |value: f64| {
+        Ok(Value::Number(Number {
+            value,
+            unit: String::new(),
+        }))
+    };
+    if module == "math" {
+        return match name {
+            "pi" => number(std::f64::consts::PI),
+            "e" => number(std::f64::consts::E),
+            "epsilon" => number(f64::EPSILON),
+            "max-safe-integer" => number(9_007_199_254_740_991.0),
+            "min-safe-integer" => number(-9_007_199_254_740_991.0),
+            "max-number" => number(f64::MAX),
+            "min-number" => number(f64::MIN_POSITIVE),
+            _ => Err(Error::at("Undefined variable.".to_string(), pos)),
+        };
+    }
+    Err(Error::at("Undefined variable.".to_string(), pos))
 }

@@ -290,6 +290,14 @@ pub(crate) struct Evaluator<'a> {
     /// `calc(1 + 2)` literal in `@supports (a: calc(1 + 2))`), matching
     /// dart-sass `_inSupportsDeclaration`.
     in_supports_declaration: bool,
+    /// Built-in modules made available via `@use "sass:<mod>"`, keyed by the
+    /// in-scope namespace (default = the part after `sass:`, or the `as ns`
+    /// override). The value is the canonical built-in module name (e.g.
+    /// `math`).
+    used_modules: HashMap<String, String>,
+    /// Built-in modules brought into scope unprefixed via `@use "sass:<mod>"
+    /// as *`. Their members resolve as bare calls/variables.
+    star_modules: Vec<String>,
 }
 
 /// A pending `@extend`, captured during eval and applied after flattening.
@@ -323,6 +331,8 @@ impl<'a> Evaluator<'a> {
             extends: Vec::new(),
             decl_prefix: None,
             in_supports_declaration: false,
+            used_modules: HashMap::new(),
+            star_modules: Vec::new(),
         }
     }
 
@@ -854,14 +864,27 @@ impl<'a> Evaluator<'a> {
 
     /// Execute an `@include`: bind args into a call frame, make the content
     /// block available, and run the mixin body into the current sink.
+    #[allow(clippy::too_many_arguments)]
     fn exec_include(
         &mut self,
         name: &str,
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
+        module: Option<&str>,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
+        // A namespaced `@include ns.mixin`: the built-in `sass:*` modules expose
+        // no mixins reachable in this build. Validate the namespace, then report
+        // the mixin as undefined.
+        if let Some(ns) = module {
+            if !self.used_modules.contains_key(ns) {
+                return Err(Error::unpositioned(format!(
+                    "There is no module with the namespace \"{ns}\"."
+                )));
+            }
+            return Err(Error::unpositioned(format!("Undefined mixin {name}.")));
+        }
         let mixin = self
             .mixins
             .get(name)
@@ -879,6 +902,36 @@ impl<'a> Evaluator<'a> {
         self.content_stack.pop();
         self.pop_scope();
         result
+    }
+
+    /// Process a `@use "<url>" [as ns|as *];`. Only built-in `sass:*` modules
+    /// are supported in this build.
+    fn exec_use(&mut self, url: &str, namespace: Option<&str>, star: bool, pos: Pos) -> Result<(), Error> {
+        let module = match url.strip_prefix("sass:") {
+            Some(m) if crate::builtins::is_module(m) => m.to_string(),
+            // A non-built-in URL (a user stylesheet) needs the module-system
+            // epic; reject it precisely rather than silently doing nothing.
+            Some(_) => {
+                return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
+            }
+            None => {
+                return Err(Error::at(
+                    "@use of non-built-in modules is not supported in this build".to_string(),
+                    pos,
+                ));
+            }
+        };
+        if star {
+            if !self.star_modules.contains(&module) {
+                self.star_modules.push(module);
+            }
+            return Ok(());
+        }
+        // The default namespace is the explicit `as ns` or the module's short
+        // name (the part after `sass:`).
+        let ns = namespace.unwrap_or(&module).to_string();
+        self.used_modules.insert(ns, module);
+        Ok(())
     }
 
     // ---- statements --------------------------------------------------
@@ -1023,8 +1076,26 @@ impl<'a> Evaluator<'a> {
                 Stmt::Return(_) => {
                     return Err(Error::unpositioned("@return is only allowed inside a function."));
                 }
-                Stmt::Include { name, args, content } => {
-                    self.exec_include(name, args, content.clone(), parents, sink)?;
+                Stmt::Include {
+                    name,
+                    args,
+                    content,
+                    module,
+                } => {
+                    self.exec_include(name, args, content.clone(), module.as_deref(), parents, sink)?;
+                }
+                Stmt::Use {
+                    url,
+                    namespace,
+                    star,
+                    pos,
+                } => self.exec_use(url, namespace.as_deref(), *star, *pos)?,
+                Stmt::Forward { url, pos } => {
+                    let _ = url;
+                    return Err(Error::at(
+                        "@forward is not supported in this build".to_string(),
+                        *pos,
+                    ));
                 }
                 Stmt::Content => {
                     if let Some(Some(block)) = self.content_stack.last().cloned() {
@@ -1762,8 +1833,18 @@ impl<'a> Evaluator<'a> {
             // Slashes nested inside a stored list are preserved.
             Expr::Var(name) => match self.lookup(name) {
                 Some(v) => Ok(v.clone().without_slash()),
-                None => Err(Error::unpositioned(format!("Undefined variable ${name}."))),
+                None => {
+                    // A module variable exposed unprefixed via `@use … as *`
+                    // (e.g. `$pi` from `sass:math`).
+                    for m in &self.star_modules {
+                        if let Ok(v) = crate::builtins::module_var(m, name, Pos { line: 1, col: 1 }) {
+                            return Ok(v);
+                        }
+                    }
+                    Err(Error::unpositioned(format!("Undefined variable ${name}.")))
+                }
             },
+            Expr::NsVar { module, name } => self.eval_module_var(module, name, Pos { line: 1, col: 1 }),
             // A string expression (quoted/unquoted/lone-interpolation) resolves
             // its interpolation in a context where the `@supports`-declaration
             // no-simplify flag is OFF, so `(a: #{calc(1 + 2)})` -> `(a: 3)`
@@ -1938,7 +2019,17 @@ impl<'a> Evaluator<'a> {
                     other => Ok(Value::Calc(other)),
                 }
             }
-            Expr::Func { name, args, pos } => {
+            Expr::Func {
+                name,
+                args,
+                pos,
+                module,
+            } => {
+                // A namespaced call `ns.fn(...)` resolves only against the used
+                // built-in module bound to `ns`.
+                if let Some(ns) = module {
+                    return self.eval_module_call(ns, name, args, *pos);
+                }
                 // Inside a `@supports` declaration, a CSS math function
                 // (`min`/`max`/`clamp`/…) is kept unsimplified: its arguments
                 // are resolved through the (non-folding) calc machinery and the
@@ -2051,6 +2142,24 @@ impl<'a> Evaluator<'a> {
                         quoted: false,
                     }));
                 }
+                // A member exposed unprefixed via `@use "sass:<mod>" as *`: when
+                // the bare name is not already a global builtin, route it to the
+                // first star module that owns it (e.g. `div` -> `math.div`,
+                // `set` -> `map.set`). Global builtins keep their own behaviour.
+                if !crate::builtins::is_builtin(name) {
+                    for m in self.star_modules.clone() {
+                        if crate::builtins::module_has_member(&m, name) {
+                            for v in &mut pos_args {
+                                *v = std::mem::replace(v, Value::Null).without_slash();
+                            }
+                            for (n, v) in &mut named {
+                                *v = std::mem::replace(v, Value::Null).without_slash();
+                                let _ = n;
+                            }
+                            return crate::builtins::call_module(&m, name, &pos_args, &named, *pos);
+                        }
+                    }
+                }
                 // A bare slash-division argument collapses to its number when
                 // passed to a real Sass function (dart-sass `withoutSlash`);
                 // plain CSS functions (`foo(1/2)`) keep the slash verbatim.
@@ -2064,6 +2173,45 @@ impl<'a> Evaluator<'a> {
                 }
                 crate::builtins::call(name, &pos_args, &named, *pos)
             }
+        }
+    }
+
+    /// Dispatch a namespaced call `ns.member(args)` against the built-in module
+    /// bound to `ns`. Errors when the namespace is not a used module.
+    fn eval_module_call(
+        &mut self,
+        ns: &str,
+        member: &str,
+        args: &[CallArg],
+        pos: Pos,
+    ) -> Result<Value, Error> {
+        let module = match self.used_modules.get(ns) {
+            Some(m) => m.clone(),
+            None => {
+                return Err(Error::at(
+                    format!("There is no module with the namespace \"{ns}\"."),
+                    pos,
+                ));
+            }
+        };
+        let (mut pos_args, mut named) = self.eval_call_args(args)?;
+        for v in &mut pos_args {
+            *v = std::mem::replace(v, Value::Null).without_slash();
+        }
+        for (_, v) in &mut named {
+            *v = std::mem::replace(v, Value::Null).without_slash();
+        }
+        crate::builtins::call_module(&module, member, &pos_args, &named, pos)
+    }
+
+    /// Resolve a namespaced module variable `ns.$name` (e.g. `math.$pi`).
+    fn eval_module_var(&self, ns: &str, name: &str, pos: Pos) -> Result<Value, Error> {
+        match self.used_modules.get(ns) {
+            Some(module) => crate::builtins::module_var(module, name, pos),
+            None => Err(Error::at(
+                format!("There is no module with the namespace \"{ns}\"."),
+                pos,
+            )),
         }
     }
 
@@ -2844,7 +2992,7 @@ fn calc_incompatible(a: &Number, b: &Number, pos: Pos) -> Error {
 /// Evaluate the `/` operator. When `slash` is set and both operands are
 /// numbers, produce a slash-separated value that serializes as `a/b` but
 /// behaves numerically as the quotient; otherwise perform real division.
-fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Value, Error> {
+pub(crate) fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Value, Error> {
     // The parser only sets `slash` when both operands are numeric literals
     // (or themselves slash divisions), so they are always numbers here. A
     // slash-separated value is kept only when the two units are compatible

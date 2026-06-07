@@ -69,6 +69,17 @@ fn unary_op(name: &str) -> Option<fn(f64) -> f64> {
     })
 }
 
+/// `math.div($number1, $number2)`: true division. Unlike the `/` operator it
+/// always divides (never produces a slash-separated value for two numbers),
+/// reusing the evaluator's division so unit handling matches exactly.
+pub(super) fn module_div(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["number1", "number2"];
+    check_max_args(pos_args, named, 2, pos)?;
+    let a = super::require(&params, pos_args, named, 0, "div", pos)?.clone();
+    let b = super::require(&params, pos_args, named, 1, "div", pos)?.clone();
+    crate::eval::eval_div(a, b, false, pos)
+}
+
 /// Reject a call with more positional/named arguments than a fixed-arity
 /// function accepts. dart-sass distinguishes the singular ("Only 1 argument
 /// allowed, but 2 were passed.") from the plural ("Only 2 arguments allowed,

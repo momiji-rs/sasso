@@ -34,6 +34,19 @@ pub(crate) enum Stmt {
     /// `@import "a", "b";` — each entry is either a Sass path to inline or a
     /// plain CSS import emitted verbatim.
     Import(Vec<ImportArg>),
+    /// `@use "<url>" [as <namespace>|as *];`. Only built-in `sass:*` modules
+    /// are supported in this build: the namespace defaults to the part after
+    /// `sass:` (e.g. `math`), `as ns` overrides it, and `as *` exposes the
+    /// members unprefixed.
+    Use {
+        url: String,
+        namespace: Option<String>,
+        star: bool,
+        pos: Pos,
+    },
+    /// `@forward "<url>" …;` — parked: not supported in this build (errors at
+    /// parse time), reserved for the module-system epic.
+    Forward { url: String, pos: Pos },
     /// `/* ... */` loud comment (inner text, without the delimiters).
     Comment(String),
     /// `@if`/`@else if`/`@else` — evaluated top to bottom, first match wins.
@@ -61,11 +74,13 @@ pub(crate) enum Stmt {
     Return(Expr),
     /// `@mixin name(params) { … }`.
     MixinDef(Rc<Callable>),
-    /// `@include name(args) [{ content }];`
+    /// `@include name(args) [{ content }];`. `module` is the namespace of a
+    /// `@include ns.mixin(...)` reference; `None` for an unqualified include.
     Include {
         name: String,
         args: Vec<CallArg>,
         content: Option<Rc<Vec<Stmt>>>,
+        module: Option<String>,
     },
     /// `@content;` — runs the `@include`'s content block.
     Content,
@@ -250,6 +265,9 @@ pub(crate) enum Expr {
     Null,
     /// `$name` variable reference.
     Var(String),
+    /// `ns.$name` — a module variable reference (e.g. `math.$pi`). Resolved by
+    /// the evaluator against the used module bound to `module`.
+    NsVar { module: String, name: String },
     /// The parent selector `&` used in value position. Resolves to the current
     /// resolved selector as a comma-separated list of space-separated
     /// compound-selector strings, or `null` at the document root.
@@ -277,11 +295,13 @@ pub(crate) enum Expr {
     Calc { inner: Box<Expr> },
     /// Unary negation.
     Unary { op: UnOp, operand: Box<Expr> },
-    /// Function call.
+    /// Function call. `module` is the namespace of a `ns.fn(...)` call (the
+    /// part before the dot); `None` for an ordinary unqualified call.
     Func {
         name: String,
         args: Vec<CallArg>,
         pos: Pos,
+        module: Option<String>,
     },
     /// A space- or comma-separated list. `bracketed` marks `[a b]`/`[a, b]`
     /// literals, which serialize wrapped in square brackets.
@@ -414,8 +434,9 @@ pub(crate) enum Conjunction {
 
 /// A single "media in parens": one operand of a media condition.
 pub(crate) enum MediaInParens {
-    /// `(<feature>)` — serialized wrapped in parentheses.
-    Feature(MediaFeature),
+    /// `(<feature>)` — serialized wrapped in parentheses. Boxed because a
+    /// [`MediaFeature`] is large relative to the other variants.
+    Feature(Box<MediaFeature>),
     /// `not <media-in-parens>` — serialized without wrapping parentheses.
     Not(Box<MediaInParens>),
     /// `(<cond> <and|or> <cond>…)` — a parenthesised sub-condition group,

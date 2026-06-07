@@ -175,6 +175,12 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+/// Whether a module member name is private (dart-sass: begins with `-` or
+/// `_`). Private members can't be accessed across module boundaries.
+fn is_private_member(name: &str) -> bool {
+    name.starts_with('-') || name.starts_with('_')
+}
+
 /// Whether `c` may begin a CSS identifier *without* escaping: an ASCII letter,
 /// `_`, or any non-ASCII code point (matches dart-sass `isNameStart`).
 fn is_name_start_codepoint(c: char) -> bool {
@@ -849,10 +855,9 @@ impl Parser {
             }
             "extend" => self.parse_extend(pos),
             "supports" => self.parse_supports(),
-            // Known Sass features that are deliberately unimplemented in this
-            // build: keep erroring (the generic passthrough would silently
-            // accept them and lose their error specs).
-            "use" | "forward" => Err(Error::at(format!("@{name} is not supported in this build"), pos)),
+            "use" => self.parse_use(pos),
+            // @forward is parked for the module-system epic.
+            "forward" => self.parse_forward(pos),
             // A non-lowercase spelling of `@function`/`@mixin` (e.g. `@FUNCTION`,
             // `@Mixin`) is never a Sass definition; dart-sass parses it as a
             // plain CSS custom function/mixin (verbatim body), regardless of
@@ -884,6 +889,73 @@ impl Parser {
         self.skip_ws_trivia();
         self.sc.eat(';');
         Ok(Stmt::Import(args))
+    }
+
+    /// Parse `@use "<url>" [as <namespace>|as *];`. The URL is a quoted string
+    /// without interpolation; an explicit `as ns` / `as *` overrides the
+    /// default namespace (the segment after the last `/`, or after `sass:`).
+    fn parse_use(&mut self, pos: Pos) -> Result<Stmt, Error> {
+        self.skip_ws_trivia();
+        let url = self.parse_module_url(pos)?;
+        self.skip_ws_trivia();
+        let mut namespace = None;
+        let mut star = false;
+        if self.try_keyword("as") {
+            self.skip_ws_inline();
+            if self.sc.eat('*') {
+                star = true;
+            } else {
+                namespace = Some(self.read_ident_name()?);
+            }
+            self.skip_ws_trivia();
+        }
+        // `with (...)` configuration is part of the user-module epic; reject it
+        // so its specs stay failing rather than silently mis-parsing.
+        if self.try_keyword("with") {
+            return Err(Error::at("@use ... with is not supported in this build", pos));
+        }
+        self.sc.eat(';');
+        Ok(Stmt::Use {
+            url,
+            namespace,
+            star,
+            pos,
+        })
+    }
+
+    /// Parse `@forward "<url>" …;` — parked for the module-system epic. The URL
+    /// is captured so the evaluator can emit a precise "not supported" error.
+    fn parse_forward(&mut self, pos: Pos) -> Result<Stmt, Error> {
+        self.skip_ws_trivia();
+        let url = self.parse_module_url(pos)?;
+        // Consume the rest of the statement verbatim.
+        while let Some(c) = self.sc.peek() {
+            self.sc.bump();
+            if c == ';' {
+                break;
+            }
+        }
+        Ok(Stmt::Forward { url, pos })
+    }
+
+    /// Read a quoted module URL (no interpolation allowed) for `@use`/`@forward`.
+    fn parse_module_url(&mut self, pos: Pos) -> Result<String, Error> {
+        match self.sc.peek() {
+            Some('"') | Some('\'') => {
+                let pieces = self.parse_quoted_string()?;
+                let mut url = String::new();
+                for p in &pieces {
+                    match p {
+                        TplPiece::Lit(s) => url.push_str(s),
+                        TplPiece::Interp(_) => {
+                            return Err(Error::at("dynamic module URLs are not supported", pos));
+                        }
+                    }
+                }
+                Ok(url)
+            }
+            _ => Err(Error::at("expected a string.", pos)),
+        }
     }
 
     /// Skip whitespace and `/* */` / `//` comments (discarding them); used
@@ -2046,7 +2118,7 @@ impl Parser {
         if !self.sc.eat(')') {
             return Err(Error::at("expected \")\".", self.sc.position()));
         }
-        Ok(MediaInParens::Feature(feature))
+        Ok(MediaInParens::Feature(Box::new(feature)))
     }
 
     /// Whether the cursor is at a raw `not` keyword (used to start a nested
@@ -2606,7 +2678,21 @@ impl Parser {
     /// Parse `@include name[(args)] [{ content }];`.
     fn parse_include(&mut self) -> Result<Stmt, Error> {
         self.skip_ws_inline();
-        let name = self.read_ident_name()?;
+        let mut name = self.read_ident_name()?;
+        // `@include ns.mixin(...)` — a namespaced mixin reference.
+        let mut module = None;
+        if self.sc.peek() == Some('.') {
+            self.sc.bump();
+            module = Some(name);
+            let member_pos = self.sc.position();
+            name = self.read_ident_name()?;
+            if is_private_member(&name) {
+                return Err(Error::at(
+                    "Private members can't be accessed from outside their modules.",
+                    member_pos,
+                ));
+            }
+        }
         self.skip_ws_inline();
         let args = if self.sc.peek() == Some('(') {
             self.sc.bump();
@@ -2621,7 +2707,12 @@ impl Parser {
             self.sc.eat(';');
             None
         };
-        Ok(Stmt::Include { name, args, content })
+        Ok(Stmt::Include {
+            name,
+            args,
+            content,
+            module,
+        })
     }
 
     /// `@for $i from <start> through|to <end> { … }`. Bounds are parsed at
@@ -3859,6 +3950,16 @@ impl Parser {
         if pieces.len() == 1 {
             if let Some(TplPiece::Lit(name)) = pieces.first() {
                 let name = name.clone();
+                // A `namespace.member` reference: a plain identifier followed by
+                // `.` and either `member(...)` (a namespaced function call) or
+                // `$var` (a namespaced variable). Only recognised when the `.`
+                // is directly followed by an identifier start or `$`; otherwise
+                // it is left for ordinary parsing.
+                if self.sc.peek() == Some('.') {
+                    if let Some(expr) = self.try_parse_namespaced(&name)? {
+                        return Ok(expr);
+                    }
+                }
                 if self.sc.peek() == Some('(') {
                     return self.parse_call(name);
                 }
@@ -3882,6 +3983,66 @@ impl Parser {
             }
         }
         Ok(Expr::Ident(pieces))
+    }
+
+    /// Try to parse a `namespace.member` reference after the namespace
+    /// identifier `ns` has been consumed and the next character is `.`.
+    /// Returns `Some(Expr)` for `ns.fn(...)` or `ns.$var`, or `None` (without
+    /// consuming the `.`) when the dot does not begin a namespaced member.
+    fn try_parse_namespaced(&mut self, ns: &str) -> Result<Option<Expr>, Error> {
+        let mark = self.sc.mark();
+        self.sc.bump(); // '.'
+        match self.sc.peek() {
+            // `ns.$var`
+            Some('$') => {
+                let var_pos = self.sc.position();
+                self.sc.bump();
+                let name = self.read_ident_name()?;
+                if is_private_member(&name) {
+                    return Err(Error::at(
+                        "Private members can't be accessed from outside their modules.",
+                        var_pos,
+                    ));
+                }
+                Ok(Some(Expr::NsVar {
+                    module: ns.to_string(),
+                    name,
+                }))
+            }
+            // `ns.member(...)` — the member must be an identifier immediately
+            // followed by `(`.
+            Some(c) if c.is_ascii_alphabetic() || c == '-' || c == '_' || c == '\\' => {
+                let member_pos = self.sc.position();
+                let member = self.read_ident_name()?;
+                if self.sc.peek() == Some('(') {
+                    if is_private_member(&member) {
+                        return Err(Error::at(
+                            "Private members can't be accessed from outside their modules.",
+                            member_pos,
+                        ));
+                    }
+                    let pos = self.sc.position();
+                    self.sc.bump(); // '('
+                    let args = self.parse_args_after_paren()?;
+                    Ok(Some(Expr::Func {
+                        name: member,
+                        args,
+                        pos,
+                        module: Some(ns.to_string()),
+                    }))
+                } else {
+                    // A namespaced reference that is not a call is not a value
+                    // (dart-sass only allows `ns.$var` and `ns.fn(...)`); back
+                    // off and let ordinary parsing handle the `.`.
+                    self.sc.reset(mark);
+                    Ok(None)
+                }
+            }
+            _ => {
+                self.sc.reset(mark);
+                Ok(None)
+            }
+        }
     }
 
     fn parse_ident_template(&mut self) -> Result<Vec<TplPiece>, Error> {
@@ -3979,7 +4140,12 @@ impl Parser {
             }
             self.sc.reset(mark);
             let args = self.parse_args_after_paren()?;
-            return Ok(Expr::Func { name, args, pos });
+            return Ok(Expr::Func {
+                name,
+                args,
+                pos,
+                module: None,
+            });
         }
         // `var()` and `env()` are plain CSS functions whose arguments are
         // ordinary SassScript: dart-sass evaluates the fallback/value
@@ -3994,7 +4160,12 @@ impl Parser {
             let lower = name.to_ascii_lowercase();
             if lower == "var" || lower == "env" {
                 let args = self.parse_args_after_paren_opt_empty_second(lower == "var")?;
-                return Ok(Expr::Func { name, args, pos });
+                return Ok(Expr::Func {
+                    name,
+                    args,
+                    pos,
+                    module: None,
+                });
             }
         }
         // Special CSS functions (`calc()`, `element()`, `expression()` with or
@@ -4018,7 +4189,12 @@ impl Parser {
             }
         }
         let args = self.parse_args_after_paren()?;
-        Ok(Expr::Func { name, args, pos })
+        Ok(Expr::Func {
+            name,
+            args,
+            pos,
+            module: None,
+        })
     }
 
     /// Capture the argument list of a special CSS function verbatim after the

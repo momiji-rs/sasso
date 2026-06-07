@@ -3006,3 +3006,20 @@ fn parity_unquoted_string_newline() {
     assert_parity(".a {\n  output: \"[#{\"\\0_\\a_\\A\"}]\";\n}\n");
     assert_parity("a { x: foo#{\"b\\a c\"}; }\n");
 }
+
+#[test]
+fn parity_use_builtin_modules() {
+    // `@use "sass:<mod>"` exposes the built-in module members under a namespace
+    // (default, `as ns`, and `as *`), reusing the existing global builtin
+    // implementations. Covers math functions/variables/`math.div`, string,
+    // list, map, color (legacy), and meta members.
+    assert_parity(
+        "@use \"sass:math\";\na {\n  pi: math.$pi;\n  e: math.$e;\n  div: math.div(10, 3);\n  divu: math.div(10px, 2);\n  abs: math.abs(-5);\n  pct: math.percentage(0.2);\n  unit: math.unit(5px);\n  iu: math.is-unitless(5);\n  comp: math.compatible(1px, 1cm);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:math\" as m;\n@use \"sass:string\";\n@use \"sass:list\" as *;\na {\n  s: string.length(\"abc\");\n  up: string.to-upper-case(\"ab\");\n  q: string.quote(foo);\n  sep: separator(1 2 3);\n  len: length(1 2 3);\n  nth: nth((a b c), 2);\n  round: m.round(1.6);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:map\";\n@use \"sass:color\";\n@use \"sass:meta\";\n$m: (a: 1, b: 2);\na {\n  g: map.get($m, a);\n  k: meta.inspect(map.keys($m));\n  adj: color.adjust(#123456, $red: 10);\n  mix: color.mix(red, blue);\n  ie: color.ie-hex-str(#abcdef);\n  tof: meta.type-of(5px);\n}\n",
+    );
+}
