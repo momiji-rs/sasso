@@ -136,6 +136,16 @@ pub(crate) enum Expr {
         rhs: Box<Expr>,
         pos: Pos,
     },
+    /// The `a / b` slash operator. When `slash` is true (both operands are
+    /// number literals or themselves slash divisions), it produces a
+    /// slash-separated value that serializes as `a/b`; otherwise it performs
+    /// real division.
+    Div {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        slash: bool,
+        pos: Pos,
+    },
     /// Unary negation.
     Unary { op: UnOp, operand: Box<Expr> },
     /// Function call.

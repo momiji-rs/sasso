@@ -307,7 +307,10 @@ impl<'a> Evaluator<'a> {
         let result = self.run_fn_body(&func.body);
         self.scopes.pop();
         match result? {
-            Some(v) => Ok(v),
+            // A bare slash-division returned from a function collapses to
+            // its number (dart-sass `withoutSlash`); slashes nested in a
+            // returned list are preserved.
+            Some(v) => Ok(v.without_slash()),
             None => Err(Error::unpositioned(format!(
                 "Function {}() did not @return a value.",
                 func.name
@@ -637,8 +640,11 @@ impl<'a> Evaluator<'a> {
             Expr::Color(c) => Ok(Value::Color(c.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),
+            // Reading a variable drops a bare slash-division's spelling
+            // (dart-sass `withoutSlash`): `$x: 1/2; a {b: $x}` is `0.5`.
+            // Slashes nested inside a stored list are preserved.
             Expr::Var(name) => match self.lookup(name) {
-                Some(v) => Ok(v.clone()),
+                Some(v) => Ok(v.clone().without_slash()),
                 None => Err(Error::unpositioned(format!("Undefined variable ${name}."))),
             },
             Expr::QuotedString(pieces) => {
@@ -656,7 +662,9 @@ impl<'a> Evaluator<'a> {
                     quoted: false,
                 }))
             }
-            Expr::Paren(inner) => self.eval_expr(inner),
+            // Parentheses force the deprecated slash to perform real
+            // division: `(1/2)` is `0.5`, not the slash value `1/2`.
+            Expr::Paren(inner) => Ok(self.eval_expr(inner)?.without_slash()),
             Expr::List { items, sep } => {
                 let mut vals = Vec::with_capacity(items.len());
                 for it in items {
@@ -668,7 +676,7 @@ impl<'a> Evaluator<'a> {
                 }))
             }
             Expr::Unary { op, operand } => {
-                let v = self.eval_expr(operand)?;
+                let v = self.eval_expr(operand)?.without_slash();
                 match op {
                     UnOp::Neg => match v {
                         Value::Number(n) => Ok(Value::Number(Number {
@@ -704,9 +712,14 @@ impl<'a> Evaluator<'a> {
                     }
                     _ => {
                         let r = self.eval_expr(rhs)?;
-                        eval_binary(*op, l, r, *pos)
+                        eval_binary(*op, l.without_slash(), r.without_slash(), *pos)
                     }
                 }
+            }
+            Expr::Div { lhs, rhs, slash, pos } => {
+                let l = self.eval_expr(lhs)?;
+                let r = self.eval_expr(rhs)?;
+                eval_div(l, r, *slash, *pos)
             }
             Expr::Func { name, args, pos } => {
                 // if() is lazy: only the selected branch is evaluated.
@@ -720,7 +733,14 @@ impl<'a> Evaluator<'a> {
                 let mut pos_args = Vec::new();
                 let mut named = Vec::new();
                 for a in args {
-                    let v = self.eval_expr(&a.value)?;
+                    // A bare slash-division argument collapses to its number
+                    // when passed to a real Sass function (dart-sass
+                    // `withoutSlash`); plain CSS functions (`foo(1/2)`) keep
+                    // the slash spelling verbatim.
+                    let mut v = self.eval_expr(&a.value)?;
+                    if crate::builtins::is_builtin(name) {
+                        v = v.without_slash();
+                    }
                     match &a.name {
                         Some(n) => named.push((n.clone(), v)),
                         None => pos_args.push(v),
@@ -754,17 +774,64 @@ impl<'a> Evaluator<'a> {
         let f_val = f_val.or_else(|| by_pos.get(2).copied());
         match (cond, t_val, f_val) {
             (Some(c), Some(t), Some(f)) => {
-                if self.eval_expr(c)?.is_truthy() {
-                    self.eval_expr(t)
-                } else {
-                    self.eval_expr(f)
-                }
+                // if() is a function boundary: a bare slash-division branch
+                // collapses to its number (dart-sass `withoutSlash`).
+                let branch = if self.eval_expr(c)?.is_truthy() { t } else { f };
+                Ok(self.eval_expr(branch)?.without_slash())
             }
             _ => Err(Error::at(
                 "if() requires arguments $condition, $if-true, $if-false.",
                 pos,
             )),
         }
+    }
+}
+
+/// Evaluate the `/` operator. When `slash` is set and both operands are
+/// numbers, produce a slash-separated value that serializes as `a/b` but
+/// behaves numerically as the quotient; otherwise perform real division.
+fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Value, Error> {
+    // The parser only sets `slash` when both operands are numeric literals
+    // (or themselves slash divisions), so they are always numbers here. A
+    // slash-separated value is kept only when the two units are compatible
+    // (equal, or at most one carries a unit), which covers every slash form
+    // dart-sass preserves in practice (`1/2`, `16px/1.5`, `10px/2px`,
+    // `0.3/0.4px`); a genuinely incompatible pair (`3deg/0.4px`) instead
+    // performs real division so its incompatible-units error still fires.
+    if let (true, Value::Number(a), Value::Number(b)) =
+        (slash, l.clone().without_slash(), r.clone().without_slash())
+    {
+        let units_compatible = a.unit == b.unit || a.unit.is_empty() || b.unit.is_empty();
+        if units_compatible {
+            let repr = format!("{}/{}", slash_repr(&l), slash_repr(&r));
+            // The carried numeric quotient is only used if the slash is later
+            // forced into arithmetic: matching units cancel (`px/px` ->
+            // unitless), otherwise the lone unit is kept.
+            let unit = if !a.unit.is_empty() && a.unit == b.unit {
+                String::new()
+            } else if a.unit.is_empty() {
+                b.unit.clone()
+            } else {
+                a.unit.clone()
+            };
+            return Ok(Value::Slash(
+                Number {
+                    value: a.value / b.value,
+                    unit,
+                },
+                repr,
+            ));
+        }
+    }
+    num_binop(l.without_slash(), r.without_slash(), pos, "/", |a, b| a / b)
+}
+
+/// The slash-spelling text of an operand: a slash value keeps its chained
+/// `a/b` text; any other value uses its plain CSS form.
+fn slash_repr(v: &Value) -> String {
+    match v {
+        Value::Slash(_, repr) => repr.clone(),
+        other => other.to_css(false),
     }
 }
 

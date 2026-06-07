@@ -20,6 +20,13 @@ pub(crate) enum Value {
     Bool(bool),
     /// The `null` value.
     Null,
+    /// A number produced by the deprecated `a / b` slash division of two
+    /// numeric literals. It behaves as `number` numerically (so arithmetic
+    /// and functions use `number`), but serializes as the original
+    /// `left/right` slash text. The slash is dropped (collapsing to
+    /// `number`) when the value crosses a variable, function/mixin, or
+    /// arithmetic boundary — matching dart-sass.
+    Slash(Number, String),
 }
 
 /// A number and its unit (`unit` is empty for unitless numbers).
@@ -81,6 +88,7 @@ impl Value {
             Value::List(l) => l.to_css(compressed),
             Value::Bool(b) => b.to_string(),
             Value::Null => String::new(),
+            Value::Slash(_, repr) => repr.clone(),
         }
     }
 
@@ -91,6 +99,7 @@ impl Value {
             Value::Str(s) => s.text.clone(),
             Value::Null => String::new(),
             Value::List(l) => l.to_interp(),
+            Value::Slash(_, repr) => repr.clone(),
             other => other.to_css(false),
         }
     }
@@ -103,6 +112,17 @@ impl Value {
             Value::List(_) => "list",
             Value::Bool(_) => "bool",
             Value::Null => "null",
+            Value::Slash(_, _) => "number",
+        }
+    }
+
+    /// Collapse a top-level slash-division value to its plain `number`,
+    /// matching dart-sass's `withoutSlash`. Numbers nested inside lists keep
+    /// their slash spelling, so lists are returned unchanged.
+    pub(crate) fn without_slash(self) -> Value {
+        match self {
+            Value::Slash(n, _) => Value::Number(n),
+            other => other,
         }
     }
 
@@ -114,6 +134,14 @@ impl Value {
     /// Sass `==` equality. Numbers compare by value and unit; strings by
     /// text (quotedness is ignored); colors by channel; lists structurally.
     pub(crate) fn sass_eq(&self, other: &Value) -> bool {
+        // A slash-division value compares as the plain number it wraps.
+        let unslash = |v: &Value| match v {
+            Value::Slash(n, _) => Value::Number(n.clone()),
+            other => other.clone(),
+        };
+        if matches!(self, Value::Slash(_, _)) || matches!(other, Value::Slash(_, _)) {
+            return unslash(self).sass_eq(&unslash(other));
+        }
         match (self, other) {
             (Value::Number(a), Value::Number(b)) => a.value == b.value && a.unit == b.unit,
             (Value::Str(a), Value::Str(b)) => a.text == b.text,

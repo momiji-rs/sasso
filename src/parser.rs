@@ -37,6 +37,22 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+/// Whether `expr` is eligible to keep the deprecated `/` slash spelling.
+/// dart-sass keeps the slash only between number literals (including a
+/// unary-signed literal) and chains of such slash divisions; variables,
+/// function calls, parentheses, and other operations force real division.
+fn is_slash_operand(expr: &Expr) -> bool {
+    match expr {
+        Expr::Number(_, _) => true,
+        Expr::Div { slash, .. } => *slash,
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+        } => is_slash_operand(operand),
+        _ => false,
+    }
+}
+
 impl Parser {
     fn parse_statements(&mut self, top: bool) -> Result<Vec<Stmt>, Error> {
         let mut stmts = Vec::new();
@@ -885,6 +901,26 @@ impl Parser {
                 Some('%') => Some(BinOp::Mod),
                 _ => None,
             };
+            // `/` is the deprecated slash operator (handled specially), but
+            // never treat `*/` or a `/` opening a comment as an operator.
+            if op.is_none()
+                && self.sc.peek() == Some('/')
+                && self.sc.peek_at(1) != Some('/')
+                && self.sc.peek_at(1) != Some('*')
+            {
+                let pos = self.sc.position();
+                self.sc.bump();
+                self.skip_ws_inline();
+                let rhs = self.unary()?;
+                let slash = is_slash_operand(&lhs) && is_slash_operand(&rhs);
+                lhs = Expr::Div {
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    slash,
+                    pos,
+                };
+                continue;
+            }
             match op {
                 Some(op) => {
                     let pos = self.sc.position();

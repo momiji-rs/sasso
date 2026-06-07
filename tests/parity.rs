@@ -98,3 +98,26 @@ fn parity_modulo_sign() {
         "a {\n  b: 1.2 % -4.7;\n  c: -1.2 % 4.7;\n  d: 5 % 3;\n  e: 10px % 3px;\n  f: -8 % 3;\n}\n",
     );
 }
+
+#[test]
+fn parity_slash_division() {
+    // The deprecated `/` keeps a slash spelling between number literals but
+    // performs real division once an operand is computed, parenthesized,
+    // read from a variable, or passed through a Sass function.
+    assert_parity(concat!(
+        "$x: 8px;\n",
+        "@function id($v) {@return $v}\n",
+        "a {\n",
+        "  keep: 16px/1.5;\n",
+        "  chain: 1/2/3;\n",
+        "  list: 1 2/3 4;\n",
+        "  comma: 1, 2/3, 4;\n",
+        "  same-unit: 10px/5px;\n",
+        "  paren: (10px / 2);\n",
+        "  computed: (1 + 1) / 2;\n",
+        "  var: $x / 2;\n",
+        "  func: inspect(10px / 2);\n",
+        "  unknown: foo(1/2);\n",
+        "}\n",
+    ));
+}

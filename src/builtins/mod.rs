@@ -48,6 +48,26 @@ pub(crate) fn call(
     Ok(plain_css_function(name, pos_args, named))
 }
 
+/// Whether `name` is a real Sass builtin function (as opposed to an unknown
+/// plain CSS function that is preserved verbatim). Used by the evaluator to
+/// decide whether a slash-division argument should collapse to its number:
+/// Sass functions collapse it, plain CSS functions keep the `a/b` spelling.
+///
+/// Each family's `try_call` returns `None` only for names it does not own,
+/// and the families are pure, so probing with empty arguments is a
+/// side-effect-free ownership test.
+pub(crate) fn is_builtin(name: &str) -> bool {
+    let pos: &[Value] = &[];
+    let named: &[(String, Value)] = &[];
+    let p = Pos { line: 1, col: 1 };
+    color::try_call(name, pos, named, p).is_some()
+        || color_ext::try_call(name, pos, named, p).is_some()
+        || math::try_call(name, pos, named, p).is_some()
+        || string::try_call(name, pos, named, p).is_some()
+        || list::try_call(name, pos, named, p).is_some()
+        || meta::try_call(name, pos, named, p).is_some()
+}
+
 // ---- shared argument helpers, available to every family module --------
 
 /// The argument at index `i`: positional first, then by name (`params[i]`).
