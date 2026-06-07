@@ -1688,3 +1688,25 @@ fn meta_feature_exists_known_set() {
     );
     assert_eq!(ours("a {b: feature-exists(nope)}\n"), "a {\n  b: false;\n}\n");
 }
+
+#[test]
+fn equality_is_unit_and_format_aware() {
+    // Numbers compare across convertible units (`1in == 96px`), but unitless
+    // vs unit-bearing and incompatible units stay unequal. Units are
+    // case-sensitive in `==` (`1PX != 1px`).
+    assert_eq!(ours("a {b: 1in == 96px}\n"), "a {\n  b: true;\n}\n");
+    assert_eq!(ours("a {b: 1cm == 10mm}\n"), "a {\n  b: true;\n}\n");
+    assert_eq!(ours("a {b: 100grad == 90deg}\n"), "a {\n  b: true;\n}\n");
+    assert_eq!(ours("a {b: 1s == 1000ms}\n"), "a {\n  b: true;\n}\n");
+    assert_eq!(ours("a {b: 1 == 1px}\n"), "a {\n  b: false;\n}\n");
+    assert_eq!(ours("a {b: 1px == 1em}\n"), "a {\n  b: false;\n}\n");
+    assert_eq!(ours("a {b: 1PX == 1px}\n"), "a {\n  b: false;\n}\n");
+    // Colors compare resolved channels fuzzily: a named color equals an HSL
+    // color that resolves to the same sRGB channels within epsilon.
+    assert_eq!(
+        ours("a {b: purple == hsl(300, 100%, 25.098039215686%)}\n"),
+        "a {\n  b: true;\n}\n"
+    );
+    // Genuinely different colors stay unequal.
+    assert_eq!(ours("a {b: red == hsl(0, 0%, 50%)}\n"), "a {\n  b: false;\n}\n");
+}

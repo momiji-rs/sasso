@@ -360,10 +360,12 @@ impl Value {
             return unslash(self).sass_eq(&unslash(other));
         }
         match (self, other) {
-            (Value::Number(a), Value::Number(b)) => a.value == b.value && a.unit == b.unit,
+            (Value::Number(a), Value::Number(b)) => numbers_eq(a, b),
             (Value::Calc(a), Value::Calc(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a.text == b.text,
-            (Value::Color(a), Value::Color(b)) => a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a,
+            (Value::Color(a), Value::Color(b)) => {
+                fuzzy_eq(a.r, b.r) && fuzzy_eq(a.g, b.g) && fuzzy_eq(a.b, b.b) && fuzzy_eq(a.a, b.a)
+            }
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (Value::List(a), Value::List(b)) => {
@@ -385,6 +387,47 @@ impl Value {
             }
             _ => false,
         }
+    }
+}
+
+/// dart-sass's numeric tolerance for `==` comparisons. Two finite numbers are
+/// equal when their difference is below this epsilon (so `1in == 96px` and a
+/// color channel like `127.99999999999861` equals `128`), mirroring
+/// dart-sass's `fuzzyEquals`.
+const FUZZY_EPSILON: f64 = 1e-11;
+
+/// dart-sass `fuzzyEquals`: exact equality (so `Infinity == Infinity`) or a
+/// finite difference within [`FUZZY_EPSILON`]. `NaN` is never equal to
+/// anything (matching dart-sass and IEEE semantics).
+fn fuzzy_eq(a: f64, b: f64) -> bool {
+    a == b || (a - b).abs() < FUZZY_EPSILON
+}
+
+/// Sass `==` for two numbers. Numbers with the *exact* same unit compare by
+/// value; numbers with different but convertible units compare after
+/// converting `b` into `a`'s unit (so `1in == 96px`, `100grad == 90deg`).
+/// Units are case-sensitive in `==` (dart-sass: `1PX != 1px`), so conversion
+/// only applies to canonical lowercase units. Unitless vs unit-bearing, or
+/// incompatible units, are never equal. Value comparisons are fuzzy
+/// ([`fuzzy_eq`]).
+fn numbers_eq(a: &Number, b: &Number) -> bool {
+    if a.unit == b.unit {
+        return fuzzy_eq(a.value, b.value);
+    }
+    // A unitless number is only equal to another unitless number; a differing
+    // unit (handled above) is the only remaining same-emptiness case.
+    if a.unit.is_empty() || b.unit.is_empty() {
+        return false;
+    }
+    // Conversion is keyed on canonical lowercase units, matching dart-sass's
+    // unit table; an authored uppercase unit (`IN`) is treated as unknown and
+    // never converts.
+    if a.unit.bytes().any(|c| c.is_ascii_uppercase()) || b.unit.bytes().any(|c| c.is_ascii_uppercase()) {
+        return false;
+    }
+    match convert_factor(&b.unit, &a.unit) {
+        Some(factor) => fuzzy_eq(a.value, b.value * factor),
+        None => false,
     }
 }
 
@@ -1171,5 +1214,52 @@ mod tests {
         // incompatible -> None.
         assert_eq!(convert_factor("px", "s"), None);
         assert_eq!(convert_factor("px", "vw"), None);
+    }
+
+    fn numval(value: f64, unit: &str) -> Value {
+        Value::Number(Number {
+            value,
+            unit: unit.to_string(),
+        })
+    }
+
+    #[test]
+    fn sass_eq_numbers_are_unit_aware_and_fuzzy() {
+        // Same unit, equal value.
+        assert!(numval(2.0, "px").sass_eq(&numval(2.0, "px")));
+        // Convertible units compare after conversion.
+        assert!(numval(1.0, "in").sass_eq(&numval(96.0, "px")));
+        assert!(numval(96.0, "px").sass_eq(&numval(1.0, "in")));
+        assert!(numval(1.0, "cm").sass_eq(&numval(10.0, "mm")));
+        assert!(numval(100.0, "grad").sass_eq(&numval(90.0, "deg")));
+        assert!(numval(1.0, "s").sass_eq(&numval(1000.0, "ms")));
+        // Fuzzy: tiny differences within epsilon are equal.
+        assert!(numval(1.000_000_000_000_1, "px").sass_eq(&numval(1.0, "px")));
+        // Just outside epsilon is not equal.
+        assert!(!numval(1.000_000_001, "px").sass_eq(&numval(1.0, "px")));
+        // Unitless vs unit-bearing, incompatible units, `%`, and uppercase
+        // units (case-sensitive) are never equal.
+        assert!(!numval(1.0, "").sass_eq(&numval(1.0, "px")));
+        assert!(!numval(1.0, "px").sass_eq(&numval(1.0, "em")));
+        assert!(!numval(50.0, "%").sass_eq(&numval(50.0, "")));
+        assert!(!numval(1.0, "PX").sass_eq(&numval(1.0, "px")));
+        assert!(!numval(1.0, "IN").sass_eq(&numval(96.0, "px")));
+    }
+
+    #[test]
+    fn sass_eq_colors_compare_channels_fuzzily() {
+        // `purple` (128,0,128) equals an HSL color that resolves to channels
+        // a tiny epsilon away (127.999999999998607...).
+        let purple = Value::Color(Color::rgb(128.0, 0.0, 128.0, 1.0));
+        let computed = Value::Color(Color::rgb(127.999_999_999_998_6, 0.0, 127.999_999_999_998_6, 1.0));
+        assert!(purple.sass_eq(&computed));
+        // Genuinely different channels are not equal.
+        assert!(!purple.sass_eq(&Value::Color(Color::rgb(255.0, 0.0, 0.0, 1.0))));
+        // A fractional channel is not equal to its rounded neighbour.
+        let frac = Value::Color(Color::rgb(0.4, 0.0, 0.0, 1.0));
+        assert!(!frac.sass_eq(&Value::Color(Color::rgb(0.0, 0.0, 0.0, 1.0))));
+        assert!(frac.sass_eq(&Value::Color(Color::rgb(0.4, 0.0, 0.0, 1.0))));
+        // Differing alpha is not equal.
+        assert!(!purple.sass_eq(&Value::Color(Color::rgb(128.0, 0.0, 128.0, 0.5))));
     }
 }
