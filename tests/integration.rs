@@ -289,6 +289,8 @@ fn undefined_variable_is_an_error() {
 
 #[test]
 fn incompatible_units_error() {
+    // dart-sass wording: "<a> and <b> have incompatible units." Mixing a
+    // known unit (px) with an unknown/relative one (em) is incompatible.
     let err = compile(".a { width: 1px + 1em; }", &Options::default()).unwrap_err();
-    assert!(err.message.contains("Incompatible units"));
+    assert!(err.message.contains("incompatible units"));
 }

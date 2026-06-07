@@ -1328,8 +1328,12 @@ impl Parser {
         }
         // CSS functions whose contents must be preserved verbatim (they may
         // contain arithmetic that is not Sass math), while still resolving
-        // any `#{...}` interpolation inside them.
-        if matches!(name.as_str(), "url" | "clamp" | "var" | "env" | "min" | "max") {
+        // any `#{...}` interpolation inside them. `min`/`max`/`clamp` are
+        // NOT here: they route to the math builtins, which evaluate their
+        // arguments as Sass values and reduce when every argument is a
+        // compatible-unit number, otherwise fall back to a preserved CSS
+        // `min()`/`max()`/`clamp()` form (so `min(1px, 2vw)` round-trips).
+        if matches!(name.as_str(), "url" | "var" | "env") {
             let mut pieces: Vec<TplPiece> = Vec::new();
             let mut lit = format!("{name}(");
             let mut depth = 1;
