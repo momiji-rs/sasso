@@ -3222,13 +3222,15 @@ fn validate_modify_unit(space: ColorSpace, idx: usize, name: &str, v: &Value, po
     Ok(())
 }
 
-/// Clamp an `adjust-color` result channel: lab/lch/oklab/oklch lightness is
-/// clamped to its range and lch/oklch chroma is floored at 0; all other
-/// channels are left unbounded (matching dart-sass).
+/// Clamp an `adjust-color` result channel: legacy rgb channels clamp to
+/// `[0,255]`, lab/lch/oklab/oklch lightness clamps to its range, and lch/oklch
+/// chroma is floored at 0. hsl/hwb percentages and the modern rgb-style spaces
+/// are left unbounded (matching dart-sass).
 fn clamp_adjust_channel(space: ColorSpace, idx: usize, v: f64) -> f64 {
     use ColorSpace::*;
     let names = space.channel_names();
     match (space, names[idx]) {
+        (Rgb, _) => v.clamp(0.0, 255.0),
         (Lab, "lightness") | (Lch, "lightness") => v.clamp(0.0, 100.0),
         (Oklab, "lightness") | (Oklch, "lightness") => v.clamp(0.0, 1.0),
         (Lch, "chroma") | (Oklch, "chroma") => v.max(0.0),

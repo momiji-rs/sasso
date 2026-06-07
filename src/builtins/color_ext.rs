@@ -721,24 +721,17 @@ fn fn_adjust_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
     if let Some(r) = modify_with_space(&c, named, super::color::ModifyOp::Adjust, pos) {
         return r;
     }
+    // Legacy color with no $space: detect the legacy space from the channel
+    // keywords, then run the modern adjust path (which clamps only rgb/[0,255]
+    // and the perceptual lightness/chroma, leaving hsl/hwb percentages free).
     let (space, chans) = resolve_channels("adjust-color", named, pos)?;
-    let mut tuple = decompose(&c, space);
-    let mut alpha = c.a;
-    for (n, v) in chans {
-        let amt = num(v, pos)?;
-        if n == "alpha" {
-            alpha = (alpha + amt).clamp(0.0, 1.0);
-        } else if let Some(i) = channel_index(space, n) {
-            let delta = if space == Space::Rgb {
-                rgb_amount(v, pos)?
-            } else {
-                amt
-            };
-            tuple[i] += delta;
-            tuple[i] = clamp_channel(space, i, tuple[i]);
-        }
-    }
-    Ok(Value::Color(recompose(space, tuple, alpha)))
+    let cspace = match space {
+        Space::Rgb => ColorSpace::Rgb,
+        Space::Hsl => ColorSpace::Hsl,
+        Space::Hwb => ColorSpace::Hwb,
+    };
+    let chan_args: Vec<(String, &Value)> = chans.iter().map(|(n, v)| (n.to_string(), *v)).collect();
+    modify_in_space(&c, cspace, &chan_args, super::color::ModifyOp::Adjust, pos)
 }
 
 /// `change-color($color, channels…)` — set each channel to the given value
@@ -839,32 +832,6 @@ fn scale_factor(name: &str, v: &Value, pos: Pos) -> Result<f64, Error> {
             format!("${name}: {} is not a number.", other.to_css(false)),
             pos,
         )),
-    }
-}
-
-/// An rgb channel amount: a `%` is taken as that fraction of 255, otherwise
-/// the raw number.
-fn rgb_amount(v: &Value, pos: Pos) -> Result<f64, Error> {
-    match v {
-        Value::Number(n) => Ok(if n.unit == "%" {
-            n.value / 100.0 * 255.0
-        } else {
-            n.value
-        }),
-        other => Err(Error::at(
-            format!("{} is not a number.", other.to_css(false)),
-            pos,
-        )),
-    }
-}
-
-/// Clamp a channel value to its valid range (rgb 0–255; hsl/hwb percentages
-/// 0–100; hue is left unwrapped, `from_hsl`/`from_hwb` normalize it).
-fn clamp_channel(space: Space, i: usize, v: f64) -> f64 {
-    match (space, i) {
-        (Space::Rgb, _) => v.clamp(0.0, 255.0),
-        (Space::Hsl, 0) | (Space::Hwb, 0) => v, // hue
-        _ => v.clamp(0.0, 100.0),
     }
 }
 
