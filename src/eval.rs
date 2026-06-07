@@ -1558,17 +1558,31 @@ impl<'a> Evaluator<'a> {
             }
             // A nested calc() flattens into the surrounding calculation.
             Expr::Calc { inner, .. } => self.eval_calc(inner),
+            // A space-separated list written directly in the calc interior is
+            // an "unparsed" run: it is only valid when it contains a `var()`/
+            // `env()` substitution or an interpolation, which dart-sass splices
+            // verbatim (`calc(var(--c) 1)`, `calc(#{"1 +"} 2)` -> `calc(1 +
+            // 2)`). A space-list of ordinary operands (`calc(1 2)`,
+            // `calc(c 1 2)`, `calc($c $d)`) has no operator between adjacent
+            // terms, which dart-sass rejects with "Missing math operator.".
+            Expr::List {
+                items,
+                sep: ListSep::Space,
+                bracketed: false,
+            } => {
+                if !items.iter().any(expr_has_substitution) {
+                    return Err(Error::unpositioned("Missing math operator."));
+                }
+                let mut parts = Vec::with_capacity(items.len());
+                for it in items {
+                    parts.push(self.eval_calc(it)?.to_calc_css(false));
+                }
+                Ok(CalcNode::Str(parts.join(" ")))
+            }
             // Any leaf (number, var(), interpolation, ident) evaluates to a
             // value and becomes a calc operand.
             other => {
                 let v = self.eval_expr(other)?;
-                // A map is not a valid calculation operand.
-                if let Value::Map(m) = &v {
-                    return Err(Error::unpositioned(format!(
-                        "Value {} can't be used in a calculation.",
-                        m.to_css(false)
-                    )));
-                }
                 // The calc constants `pi`/`e`/`infinity`/`-infinity`/`nan`
                 // (case-insensitive) resolve to their numeric values inside a
                 // calculation, so `calc(infinity * 2)` folds to `calc(infinity)`
@@ -1583,9 +1597,56 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                 }
+                // Only a number, a nested calculation, or an unquoted string
+                // (a `var()`, interpolation, ident, or other special CSS value)
+                // is a legal calculation operand. A null, bool, color, list,
+                // map, or quoted string evaluated into the calc — typically via
+                // a `$variable` or function call — is rejected the way
+                // dart-sass does ("Value … can't be used in a calculation.").
+                match &v {
+                    Value::Number(_) | Value::Calc(_) | Value::Slash(_, _) => {}
+                    Value::Str(s) if !s.quoted => {}
+                    other => {
+                        return Err(Error::unpositioned(format!(
+                            "Value {} can't be used in a calculation.",
+                            calc_value_repr(other)
+                        )));
+                    }
+                }
                 Ok(value_to_calc_node(v))
             }
         }
+    }
+}
+
+/// Whether a calc space-list item is a substitution that makes the unparsed
+/// run legal: a `#{…}` interpolation, or a `var()`/`env()` reference (which
+/// the parser lowers to an [`Expr::Ident`] whose text begins with `var(`/
+/// `env(`, possibly after a vendor prefix). A plain ident, number, nested
+/// calc, or variable is NOT a substitution.
+fn expr_has_substitution(e: &Expr) -> bool {
+    match e {
+        Expr::Interp(_) => true,
+        Expr::Ident(pieces) => pieces.iter().any(|p| match p {
+            TplPiece::Interp(_) => true,
+            TplPiece::Lit(s) => {
+                let lower = s.trim_start().to_ascii_lowercase();
+                lower.starts_with("var(") || lower.starts_with("env(")
+            }
+        }),
+        _ => false,
+    }
+}
+
+/// The inspect-style spelling of a value rejected from a calculation, for
+/// dart-sass's "Value … can't be used in a calculation." error. `null`
+/// spells out as `null`, a list is parenthesized (`(1 2 3)`, `(1, 2)`); every
+/// other type matches its plain CSS form (`true`, `blue`, `"foo"`, `(b: c)`).
+fn calc_value_repr(v: &Value) -> String {
+    match v {
+        Value::Null => "null".to_string(),
+        Value::List(_) => format!("({})", v.to_css(false)),
+        other => other.to_css(false),
     }
 }
 

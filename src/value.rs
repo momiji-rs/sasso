@@ -86,7 +86,7 @@ impl CalcNode {
     /// Serialize this node's interior (without the enclosing `calc(`...`)`),
     /// adding parentheses only where operator precedence/associativity
     /// requires them, matching dart-sass's canonical form.
-    fn to_calc_css(&self, compressed: bool) -> String {
+    pub(crate) fn to_calc_css(&self, compressed: bool) -> String {
         match self {
             CalcNode::Number(n) => calc_number_css(n, compressed),
             CalcNode::Str(s) => s.clone(),

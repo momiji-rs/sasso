@@ -1074,3 +1074,55 @@ fn calc_value_plus_strictness() {
     assert_parity("a { b: calc(var(--c)) + \"x\"; }\n");
     assert_parity("a { b: \"x\" + calc(var(--c)); }\n");
 }
+
+#[test]
+fn calc_operand_value_strictness() {
+    // A value resolved into a calc() that is not a number, calculation, or
+    // unquoted special string — a null, bool, color, list, map, or quoted
+    // string (typically via a `$variable`) — is rejected.
+    for src in [
+        "$a: null;\nb {c: calc($a)}\n",
+        "$a: true;\nb {c: calc($a)}\n",
+        "$a: blue;\nb {c: calc($a)}\n",
+        "$a: 1 2 3;\nb {c: calc($a)}\n",
+        "$a: (1, 2);\nb {c: calc($a)}\n",
+        "$a: (b: c);\nb {c: calc($a)}\n",
+        "$a: \"foo\";\nb {c: calc($a)}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected error for {src}"
+        );
+    }
+    // A number, var(), interpolation, or plain ident operand is fine.
+    assert_parity("a { b: calc(foo); }\n");
+    assert_parity("a { b: calc(var(--x)); }\n");
+    assert_parity("a { b: calc(#{foo}); }\n");
+}
+
+#[test]
+fn calc_space_list_grammar() {
+    // A space-separated run inside calc() is only legal when it carries a
+    // var()/env() substitution or interpolation (spliced verbatim); a run of
+    // ordinary operands has no operator between adjacent terms ("Missing math
+    // operator.").
+    assert_parity("a { b: calc(var(--c) 1); }\n");
+    assert_parity("a { b: calc(1 var(--c)); }\n");
+    assert_parity("a { b: calc(1 var(--c) 2); }\n");
+    assert_parity("a { b: calc(#{\"1 +\"} 2); }\n");
+    assert_parity("a { b: calc(1 #{\"+ 2\"}); }\n");
+    assert_parity("a { b: calc(1 #{\"+ 2 +\"} 3); }\n");
+    for src in [
+        "a {b: calc(1 2)}\n",
+        "a {b: calc(c 1 2)}\n",
+        "a {b: calc(1 2 c)}\n",
+        "a {b: calc(1 (3))}\n",
+        "a {b: calc(1 calc(1px + 1%))}\n",
+        "$c: 1;\n$d: 2;\na {b: calc($c $d)}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected error for {src}"
+        );
+    }
+}
