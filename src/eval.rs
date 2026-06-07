@@ -1142,10 +1142,12 @@ impl<'a> Evaluator<'a> {
             }
             Expr::Calc { inner, .. } => {
                 let node = self.eval_calc(inner)?;
-                // A calculation that reduces to a single number unwraps to it;
+                // A calculation that reduces to a single finite number unwraps
+                // to it; a non-finite result (infinity/NaN) stays a
+                // calculation so it serializes as `calc(infinity)` etc., and
                 // anything still containing an operation stays a calculation.
                 match node {
-                    CalcNode::Number(n) => Ok(Value::Number(n)),
+                    CalcNode::Number(n) if n.value.is_finite() => Ok(Value::Number(n)),
                     other => Ok(Value::Calc(other)),
                 }
             }

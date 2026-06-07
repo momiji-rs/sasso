@@ -602,3 +602,27 @@ fn comments_in_value_position() {
     assert_parity("a {\n  c: 1 +/**/ 2;\n}\n");
     assert_parity("a {\n  c: a /**/ b;\n}\n");
 }
+
+#[test]
+fn calc_and_math_infinity_nan() {
+    // Non-finite calc results serialize as `calc(infinity)` / `calc(NaN)` /
+    // `calc(-infinity)` (with `* 1unit` when they carry a unit), and the math
+    // functions accept the bare `infinity`/`-infinity`/`NaN`/`pi`/`e`
+    // constants and re-wrap non-finite results in a calculation.
+    assert_parity("a { b: calc(1/0); }\n");
+    assert_parity("a { b: calc(10px / 0); }\n");
+    assert_parity("a { b: calc(0/0); }\n");
+    assert_parity("a { b: calc(-1/0); }\n");
+    assert_parity("a { b: atan(infinity); }\n");
+    assert_parity("a { b: atan(-infinity); }\n");
+    assert_parity("a { b: sin(infinity); }\n");
+    assert_parity("a { b: abs(infinity); }\n");
+    assert_parity("a { b: sign(infinity); }\n");
+    assert_parity("a { b: exp(-infinity); }\n");
+    assert_parity("a { b: pow(infinity, 2); }\n");
+    assert_parity("a { b: min(infinity, 5); }\n");
+    assert_parity("a { b: max(5, infinity); }\n");
+    assert_parity("a { b: min(NaN, 5); }\n");
+    assert_parity("a { b: clamp(1, infinity, 10); }\n");
+    assert_parity("a { b: cos(pi); }\n");
+}

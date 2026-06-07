@@ -85,7 +85,7 @@ impl CalcNode {
     /// requires them, matching dart-sass's canonical form.
     fn to_calc_css(&self, compressed: bool) -> String {
         match self {
-            CalcNode::Number(n) => n.to_css(compressed),
+            CalcNode::Number(n) => calc_number_css(n, compressed),
             CalcNode::Str(s) => s.clone(),
             CalcNode::Op { op, left, right } => {
                 let l = self.fmt_operand(left, *op, false, compressed);
@@ -94,10 +94,12 @@ impl CalcNode {
                     (CalcOp::Mul | CalcOp::Div, true) => op.symbol().to_string(),
                     _ => format!(" {} ", op.symbol()),
                 };
-                // A `+ -n` / `- -n` numeric right operand flips the operator.
+                // A `+ -n` / `- -n` numeric right operand flips the operator
+                // (only for a finite negative; non-finite values keep their
+                // canonical `infinity`/`NaN` spelling).
                 if matches!(op, CalcOp::Add | CalcOp::Sub) && !compressed {
                     if let CalcNode::Number(n) = right.as_ref() {
-                        if n.value.is_sign_negative() && n.value != 0.0 {
+                        if n.value.is_finite() && n.value.is_sign_negative() && n.value != 0.0 {
                             let flipped = if *op == CalcOp::Add { "-" } else { "+" };
                             let pos = Number {
                                 value: -n.value,
@@ -125,6 +127,30 @@ impl CalcNode {
             }
         }
         operand.to_calc_css(compressed)
+    }
+}
+
+/// Render a number inside a `calc()` interior. Finite numbers use their
+/// ordinary CSS form; non-finite numbers use dart-sass's canonical lowercase
+/// constants — `infinity` / `-infinity` / `NaN` when unitless, and
+/// `infinity * 1px` / `NaN * 1px` (the operand spelled out) when they carry a
+/// unit.
+fn calc_number_css(n: &Number, compressed: bool) -> String {
+    if n.value.is_finite() {
+        return n.to_css(compressed);
+    }
+    let constant = if n.value.is_nan() {
+        "NaN"
+    } else if n.value > 0.0 {
+        "infinity"
+    } else {
+        "-infinity"
+    };
+    if n.unit.is_empty() {
+        constant.to_string()
+    } else {
+        let star = if compressed { "*" } else { " * " };
+        format!("{constant}{star}1{}", n.unit)
     }
 }
 

@@ -72,7 +72,7 @@ fn unary(
     op: fn(f64) -> f64,
 ) -> Result<Value, Error> {
     let n = require_num(&["number"], pos_args, named, 0, fname, pos)?;
-    Ok(Value::Number(Number {
+    Ok(num_value(Number {
         value: op(n.value),
         unit: n.unit.clone(),
     }))
@@ -92,15 +92,15 @@ fn sign(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value
         0.0
     };
     let unit = if s == 0.0 { String::new() } else { n.unit.clone() };
-    Ok(Value::Number(Number { value: s, unit }))
+    Ok(num_value(Number { value: s, unit }))
 }
 
 /// `pow(base, exp)`: both operands must be unitless; result is unitless.
 fn pow(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let base = require_num(&["base", "exponent"], pos_args, named, 0, "pow", pos)?;
     let exp = require_num(&["base", "exponent"], pos_args, named, 1, "pow", pos)?;
-    no_unit(base, pos)?;
-    no_unit(exp, pos)?;
+    no_unit(&base, pos)?;
+    no_unit(&exp, pos)?;
     Ok(unitless(base.value.powf(exp.value)))
 }
 
@@ -115,7 +115,7 @@ fn unitless_unary(
     op: fn(f64) -> f64,
 ) -> Result<Value, Error> {
     let n = require_num(&[param], pos_args, named, 0, fname, pos)?;
-    no_unit(n, pos)?;
+    no_unit(&n, pos)?;
     Ok(unitless(op(n.value)))
 }
 
@@ -123,11 +123,11 @@ fn unitless_unary(
 fn log(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = &["number", "base"];
     let x = require_num(params, pos_args, named, 0, "log", pos)?;
-    no_unit(x, pos)?;
+    no_unit(&x, pos)?;
     match super::arg(params, pos_args, named, 1) {
         Some(b) => {
             let b = as_num(b, pos)?;
-            no_unit(b, pos)?;
+            no_unit(&b, pos)?;
             Ok(unitless(x.value.ln() / b.value.ln()))
         }
         None => Ok(unitless(x.value.ln())),
@@ -147,7 +147,7 @@ fn hypot(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
         let v = coerce_to(n, &first, pos)?;
         sum += v * v;
     }
-    Ok(Value::Number(Number {
+    Ok(num_value(Number {
         value: sum.sqrt(),
         unit: first.unit.clone(),
     }))
@@ -163,7 +163,7 @@ fn trig(
     op: fn(f64) -> f64,
 ) -> Result<Value, Error> {
     let n = require_num(&["number"], pos_args, named, 0, fname, pos)?;
-    let radians = angle_to_radians(n, pos)?;
+    let radians = angle_to_radians(&n, pos)?;
     Ok(unitless(op(radians)))
 }
 
@@ -177,7 +177,7 @@ fn inverse_trig(
     op: fn(f64) -> f64,
 ) -> Result<Value, Error> {
     let n = require_num(&["number"], pos_args, named, 0, fname, pos)?;
-    no_unit(n, pos)?;
+    no_unit(&n, pos)?;
     Ok(degrees(op(n.value).to_degrees()))
 }
 
@@ -187,7 +187,7 @@ fn atan2(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
     let params = &["y", "x"];
     let y = require_num(params, pos_args, named, 0, "atan2", pos)?;
     let x = require_num(params, pos_args, named, 1, "atan2", pos)?;
-    let xv = coerce_to(x, y, pos)?;
+    let xv = coerce_to(&x, &y, pos)?;
     Ok(degrees(y.value.atan2(xv).to_degrees()))
 }
 
@@ -203,7 +203,7 @@ fn remainder(
     let params = &["dividend", "modulus"];
     let a = require_num(params, pos_args, named, 0, fname, pos)?;
     let b = require_num(params, pos_args, named, 1, fname, pos)?;
-    let bv = coerce_to(b, a, pos)?;
+    let bv = coerce_to(&b, &a, pos)?;
     let value = if bv == 0.0 {
         f64::NAN
     } else if truncated {
@@ -211,7 +211,7 @@ fn remainder(
     } else {
         a.value - bv * (a.value / bv).floor()
     };
-    Ok(Value::Number(Number {
+    Ok(num_value(Number {
         value,
         unit: a.unit.clone(),
     }))
@@ -228,12 +228,15 @@ fn min_max(
     pos: Pos,
     is_min: bool,
 ) -> Result<Value, Error> {
-    let args = all_args(pos_args, named);
+    let args: Vec<Value> = all_args(pos_args, named)
+        .into_iter()
+        .map(normalize_const)
+        .collect();
     if args.is_empty() {
         return Err(Error::at("Missing argument.", pos));
     }
     match reduce_min_max(&args, is_min) {
-        Some(n) => Ok(Value::Number(n)),
+        Some(n) => Ok(num_value(n)),
         None => Ok(preserved_call(fname, &args)),
     }
 }
@@ -241,7 +244,10 @@ fn min_max(
 /// `clamp(min, value, max)`: when all three are compatible-unit numbers,
 /// returns `max(min, min(value, max))`; otherwise preserves the CSS call.
 fn clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let args = all_args(pos_args, named);
+    let args: Vec<Value> = all_args(pos_args, named)
+        .into_iter()
+        .map(normalize_const)
+        .collect();
     if args.len() != 3 {
         return Err(Error::at(
             format!("3 arguments required, but {} were passed.", args.len()),
@@ -263,7 +269,7 @@ fn clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
         None => return Ok(preserved_call("clamp", &args)),
     };
     let clamped = lo.value.max(val_v.min(hi_v));
-    Ok(Value::Number(Number {
+    Ok(num_value(Number {
         value: clamped,
         unit: lo.unit.clone(),
     }))
@@ -275,6 +281,21 @@ fn clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
 fn all_args(pos_args: &[Value], named: &[(String, Value)]) -> Vec<Value> {
     let mut v: Vec<Value> = pos_args.to_vec();
     v.extend(named.iter().map(|(_, val)| val.clone()));
+    v
+}
+
+/// Replace a bare calc-constant string (`infinity`/`-infinity`/`NaN`/`pi`/`e`)
+/// with its numeric value; pass any other value through unchanged. Used by
+/// `min`/`max`/`clamp`, which accept the constants while still preserving a
+/// genuine non-number argument as a CSS call.
+fn normalize_const(v: Value) -> Value {
+    if let Value::Str(s) = &v {
+        if !s.quoted {
+            if let Some(n) = const_number(&s.text) {
+                return Value::Number(n);
+            }
+        }
+    }
     v
 }
 
@@ -364,15 +385,39 @@ fn collect_nums(
     }
     let mut out = Vec::with_capacity(args.len());
     for v in &args {
-        out.push(as_num(v, pos)?.clone());
+        out.push(as_num(v, pos)?);
     }
     Ok(out)
 }
 
-/// Borrow a value as a `Number`, erroring otherwise.
-fn as_num(v: &Value, pos: Pos) -> Result<&Number, Error> {
+/// Interpret an unquoted-string calc constant (`infinity`, `-infinity`,
+/// `nan`, `pi`, `e`, case-insensitive) as the matching unitless number. These
+/// are the same constants `calc()` recognizes; dart-sass's math functions
+/// accept them as numeric inputs too.
+fn const_number(text: &str) -> Option<Number> {
+    let value = match text.to_ascii_lowercase().as_str() {
+        "infinity" => f64::INFINITY,
+        "-infinity" => f64::NEG_INFINITY,
+        "nan" => f64::NAN,
+        "pi" => std::f64::consts::PI,
+        "e" => std::f64::consts::E,
+        _ => return None,
+    };
+    Some(Number {
+        value,
+        unit: String::new(),
+    })
+}
+
+/// Convert a value to a `Number`, also accepting the bare calc constants
+/// (`infinity`/`-infinity`/`NaN`/`pi`/`e`); erroring on any other non-number.
+fn as_num(v: &Value, pos: Pos) -> Result<Number, Error> {
     match v {
-        Value::Number(n) => Ok(n),
+        Value::Number(n) => Ok(n.clone()),
+        Value::Str(s) if !s.quoted => match const_number(&s.text) {
+            Some(n) => Ok(n),
+            None => Err(Error::at(format!("{} is not a number.", s.text), pos)),
+        },
         other => Err(Error::at(
             format!("{} is not a number.", other.to_css(false)),
             pos,
@@ -380,18 +425,30 @@ fn as_num(v: &Value, pos: Pos) -> Result<&Number, Error> {
     }
 }
 
-/// Fetch the argument at `i` and borrow it as a `Number`, erroring on a
-/// missing or non-number argument.
-fn require_num<'v>(
+/// Fetch the argument at `i` as a `Number`, erroring on a missing or
+/// non-number argument.
+fn require_num(
     params: &[&str],
-    pos_args: &'v [Value],
-    named: &'v [(String, Value)],
+    pos_args: &[Value],
+    named: &[(String, Value)],
     i: usize,
     fname: &str,
     pos: Pos,
-) -> Result<&'v Number, Error> {
+) -> Result<Number, Error> {
     let v = super::require(params, pos_args, named, i, fname, pos)?;
     as_num(v, pos)
+}
+
+/// Wrap a result number as a value: a finite number stays a plain `Number`,
+/// while a non-finite result (infinity/NaN) becomes a `calc()` so it
+/// serializes as `calc(infinity)` / `calc(NaN)` / `calc(-infinity)`, matching
+/// dart-sass.
+fn num_value(n: Number) -> Value {
+    if n.value.is_finite() {
+        Value::Number(n)
+    } else {
+        Value::Calc(crate::value::CalcNode::Number(n))
+    }
 }
 
 /// Ensure a number is unitless, erroring with dart-sass's wording.
@@ -407,14 +464,14 @@ fn no_unit(n: &Number, pos: Pos) -> Result<(), Error> {
 }
 
 fn unitless(value: f64) -> Value {
-    Value::Number(Number {
+    num_value(Number {
         value,
         unit: String::new(),
     })
 }
 
 fn degrees(value: f64) -> Value {
-    Value::Number(Number {
+    num_value(Number {
         value,
         unit: "deg".to_string(),
     })
