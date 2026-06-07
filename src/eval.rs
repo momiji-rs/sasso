@@ -774,6 +774,18 @@ impl<'a> Evaluator<'a> {
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
+        // Without an enclosing style rule, a bare declaration directly inside a
+        // media block is invalid (dart-sass: "expected \"{\".") — only rules and
+        // at-rules may appear there. With a style rule, declarations belong to
+        // its selector and are allowed.
+        if parents.is_empty() {
+            for stmt in body {
+                if matches!(stmt, Stmt::Decl(_)) {
+                    return Err(Error::unpositioned("expected \"{\"."));
+                }
+            }
+        }
+
         let queries = self.resolve_media_queries(query)?;
 
         // Merge with the enclosing media context (dart-sass `_mergeMediaQueries`).

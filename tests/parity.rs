@@ -331,3 +331,12 @@ fn media_rejects_malformed_queries() {
         assert!(res.is_err(), "expected error for malformed media: {src}");
     }
 }
+
+#[test]
+fn media_rejects_bare_declarations_at_root() {
+    // A bare declaration directly in a media block without an enclosing style
+    // rule is an error in dart-sass; with a style rule it is allowed.
+    assert!(compile("@media screen { color: red; }\n", &Options::default()).is_err());
+    assert!(compile("@media a { @media b { color: red; } }\n", &Options::default()).is_err());
+    assert_parity(".x {\n  @media screen {\n    color: red;\n  }\n}\n");
+}
