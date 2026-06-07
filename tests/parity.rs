@@ -1048,3 +1048,29 @@ fn calc_relative_length_cross_dimension_errors() {
     assert_parity("a { b: calc(1% + 1deg); }\n");
     assert_parity("a { b: calc(1foo + 1deg); }\n");
 }
+
+#[test]
+fn calc_value_plus_strictness() {
+    // A calculation may only be `+`-concatenated with a string; against any
+    // other operand (number, color, bool, list, another calculation)
+    // dart-sass raises "Undefined operation".
+    for src in [
+        "a {b: calc(var(--c)) + 1}\n",
+        "a {b: 1 + calc(var(--c))}\n",
+        "a {b: calc(var(--c)) + calc(var(--d))}\n",
+        "a {b: calc(var(--c)) + true}\n",
+        "a {b: calc(var(--c)) + red}\n",
+        "a {b: red + calc(var(--c))}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected error for {src}"
+        );
+    }
+    // Concatenation with a string is allowed; a calc on the left inherits the
+    // right string's quotedness.
+    assert_parity("a { b: calc(var(--c)) + foo; }\n");
+    assert_parity("a { b: foo + calc(var(--c)); }\n");
+    assert_parity("a { b: calc(var(--c)) + \"x\"; }\n");
+    assert_parity("a { b: \"x\" + calc(var(--c)); }\n");
+}

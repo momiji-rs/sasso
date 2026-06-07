@@ -1921,6 +1921,14 @@ fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
         let (av, bv, unit) = coerce_pair(a, b, pos)?;
         return Ok(Value::Number(Number { value: av + bv, unit }));
     }
+    // A calculation can only be `+`-concatenated with a string; against any
+    // other operand (number, color, bool, list, another calculation) dart-sass
+    // raises "Undefined operation" rather than string-concatenating.
+    let calc_with_nonstring = (matches!(&l, Value::Calc(_)) && !matches!(&r, Value::Str(_)))
+        || (matches!(&r, Value::Calc(_)) && !matches!(&l, Value::Str(_)));
+    if calc_with_nonstring {
+        return Err(undefined_op(&l, "+", &r, pos));
+    }
     // A map cannot be serialized for string concatenation, so `map + x`
     // errors like dart-sass with "(…) isn't a valid CSS value.".
     if let Some(m) = find_map(&l).or_else(|| find_map(&r)) {
@@ -1929,7 +1937,14 @@ fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
             pos,
         ));
     }
-    let quoted = matches!(&l, Value::Str(s) if s.quoted);
+    // String concatenation. The result is quoted when the left operand is a
+    // quoted string; a calculation on the left instead inherits the right
+    // string's quotedness (dart-sass's default `Value.plus`).
+    let quoted = match &l {
+        Value::Str(s) => s.quoted,
+        Value::Calc(_) => matches!(&r, Value::Str(s) if s.quoted),
+        _ => false,
+    };
     let text = format!("{}{}", concat_str(&l), concat_str(&r));
     Ok(Value::Str(SassStr { text, quoted }))
 }
