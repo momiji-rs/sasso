@@ -7,8 +7,14 @@
 //! out after it.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
+
+// The compiler's internal maps are all keyed on short identifiers taken from
+// the stylesheet being compiled, so they use the fast FxHash hasher rather than
+// std's DoS-resistant-but-slow SipHash. Aliased to `HashMap` so the many type
+// declarations below read normally; only the construction sites differ
+// (`HashMap::default()` rather than `::new()`, since the hasher is non-default).
+use crate::fxhash::FxHashMap as HashMap;
 
 use crate::ast::{
     BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, CustomDecl, Declaration, Expr,
@@ -478,14 +484,14 @@ struct PendingExtend {
 impl<'a> Evaluator<'a> {
     pub(crate) fn new(options: EvalOptions<'a>) -> Self {
         Evaluator {
-            scopes: vec![HashMap::new()],
+            scopes: vec![HashMap::default()],
             // The global scope is treated as semi-global so a top-level control
             // flow scope (its child) becomes semi-global too.
             scope_semi_global: vec![true],
             options,
             loading: Vec::new(),
-            functions: HashMap::new(),
-            mixins: HashMap::new(),
+            functions: HashMap::default(),
+            mixins: HashMap::default(),
             content_stack: Vec::new(),
             in_mixin: Vec::new(),
             media_queries: Vec::new(),
@@ -493,13 +499,13 @@ impl<'a> Evaluator<'a> {
             extends: Vec::new(),
             decl_prefix: None,
             in_supports_declaration: false,
-            used_modules: HashMap::new(),
+            used_modules: HashMap::default(),
             star_modules: Vec::new(),
-            used_user_modules: HashMap::new(),
+            used_user_modules: HashMap::default(),
             star_user_modules: Vec::new(),
-            module_cache: Rc::new(RefCell::new(HashMap::new())),
+            module_cache: Rc::new(RefCell::new(HashMap::default())),
             forwarded: Forwarded::default(),
-            pending_config: HashMap::new(),
+            pending_config: HashMap::default(),
             consumed_config: Vec::new(),
         }
     }
@@ -640,7 +646,7 @@ impl<'a> Evaluator<'a> {
     /// already semi-global (dart-sass `Environment.scope`).
     fn push_scope(&mut self, semi_global: bool) {
         let effective = semi_global && self.scope_semi_global.last().copied().unwrap_or(false);
-        self.scopes.push(HashMap::new());
+        self.scopes.push(HashMap::default());
         self.scope_semi_global.push(effective);
     }
 
@@ -964,11 +970,11 @@ impl<'a> Evaluator<'a> {
         name: &str,
     ) -> Result<HashMap<String, Value>, Error> {
         let (positional, keyword_vec) = evaled;
-        let mut keyword: HashMap<String, Value> = HashMap::new();
+        let mut keyword: HashMap<String, Value> = HashMap::default();
         for (n, v) in keyword_vec {
             keyword.insert(normalize_arg_name(&n), v);
         }
-        let mut frame = HashMap::new();
+        let mut frame = HashMap::default();
         let mut pos_iter = positional.into_iter();
         for param in &params.params {
             let val = if let Some(v) = pos_iter.next() {
@@ -1413,7 +1419,7 @@ impl<'a> Evaluator<'a> {
         &mut self,
         config: &[crate::ast::ConfigEntry],
     ) -> Result<HashMap<String, (Value, bool)>, Error> {
-        let mut map = HashMap::new();
+        let mut map = HashMap::default();
         for entry in config {
             let v = self.eval_expr(&entry.value)?.without_slash();
             // Variable names are dash/underscore-insensitive: store the
@@ -1498,7 +1504,7 @@ impl<'a> Evaluator<'a> {
         sink: &mut Sink<'_>,
     ) -> Result<(Module, Vec<String>), Error> {
         // Save and reset the per-module environment, then restore on the way out.
-        let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
+        let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::default()]);
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, vec![true]);
         let saved_funcs = std::mem::take(&mut self.functions);
         let saved_mixins = std::mem::take(&mut self.mixins);
@@ -1625,9 +1631,9 @@ impl<'a> Evaluator<'a> {
         // value tracks (upstream-name, downstream-name) so consumption maps back.
         let var_visible = forward_var_visibility(show, hide);
         let pfx_opt = prefix;
-        let mut passthrough: HashMap<String, (Value, bool)> = HashMap::new();
+        let mut passthrough: HashMap<String, (Value, bool)> = HashMap::default();
         // upstream config key -> downstream key it came from.
-        let mut passthrough_origin: HashMap<String, String> = HashMap::new();
+        let mut passthrough_origin: HashMap<String, String> = HashMap::default();
         for (dk, dv) in &downstream {
             // Map a downstream (prefixed) name back to the upstream member name.
             let upstream_name = match pfx_opt {

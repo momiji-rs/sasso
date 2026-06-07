@@ -33,6 +33,7 @@ mod builtins;
 mod emit;
 mod error;
 mod eval;
+mod fxhash;
 mod parser;
 mod sass_parser;
 mod scanner;
