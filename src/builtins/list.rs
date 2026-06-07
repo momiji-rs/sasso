@@ -143,6 +143,7 @@ fn parse_separator(v: &Value, pos: Pos) -> Result<Option<ListSep>, Error> {
 
 /// `length($list)`: the unitless element count.
 fn fn_length(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    validate_args(&["list"], pos_args, named, pos)?;
     let v = super::require(&["list"], pos_args, named, 0, "length", pos)?;
     Ok(unitless(list_len(v) as f64))
 }
@@ -150,6 +151,7 @@ fn fn_length(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<
 /// `nth($list, $n)`: the element at the 1-based (negative-from-end) index.
 fn fn_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "n"];
+    validate_args(&params, pos_args, named, pos)?;
     let list = super::require(&params, pos_args, named, 0, "nth", pos)?;
     let (items, _) = as_items(list);
     let idx = resolve_index(&params, pos_args, named, 1, "nth", items.len(), pos)?;
@@ -163,6 +165,7 @@ fn fn_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
 /// preserving the original separator.
 fn fn_set_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "n", "value"];
+    validate_args(&params, pos_args, named, pos)?;
     let list = super::require(&params, pos_args, named, 0, "set-nth", pos)?;
     let (mut items, sep) = as_items(list);
     let idx = resolve_index(&params, pos_args, named, 1, "set-nth", items.len(), pos)?;
@@ -170,10 +173,12 @@ fn fn_set_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
     if let Some(slot) = items.get_mut(idx) {
         *slot = value;
     }
+    // `set-nth` preserves the source list's bracketing (dart-sass).
+    let bracketed = matches!(list, Value::List(l) if l.bracketed);
     Ok(Value::List(List {
         items,
         sep,
-        bracketed: false,
+        bracketed,
     }))
 }
 
@@ -186,8 +191,13 @@ fn fn_set_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
 /// undecided.
 fn settled_sep(v: &Value) -> Option<ListSep> {
     match v {
-        Value::List(l) if !l.items.is_empty() => Some(l.sep),
+        // A comma list is always settled (the comma is an explicit choice),
+        // even when empty or single-element.
         Value::List(l) if l.sep == ListSep::Comma => Some(ListSep::Comma),
+        // A space list is only settled once it holds 2+ elements; a single
+        // element (or empty) space list has an *undecided* separator, so it
+        // defers to the other operand in `join`/`append`.
+        Value::List(l) if l.items.len() >= 2 => Some(l.sep),
         // A non-empty map behaves as a comma-separated list of its entries.
         Value::Map(m) if !m.entries.is_empty() => Some(ListSep::Comma),
         _ => None,
@@ -201,9 +211,7 @@ fn settled_sep(v: &Value) -> Option<ListSep> {
 /// true/false by a truthy/falsey argument.
 fn fn_join(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list1", "list2", "separator", "bracketed"];
-    if pos_args.len() > params.len() {
-        return Err(too_many(pos_args.len(), params.len(), pos));
-    }
+    validate_args(&params, pos_args, named, pos)?;
     let list1 = super::require(&params, pos_args, named, 0, "join", pos)?;
     let list2 = super::require(&params, pos_args, named, 1, "join", pos)?;
     let (items1, _) = as_items(list1);
@@ -250,6 +258,27 @@ fn too_many(passed: usize, max: usize, pos: Pos) -> Error {
     )
 }
 
+/// Validate a fixed-arity (non-variadic) builtin's argument list against its
+/// declared `params`: too many positional arguments is the dart-sass "Only N
+/// argument(s) allowed…" error (counting positional + named), and any named
+/// argument whose name is not a declared parameter is "No parameter named $X.".
+/// dart-sass reports the unknown-name error before the over-arity one.
+fn validate_args(
+    params: &[&str],
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Result<(), Error> {
+    if let Some((n, _)) = named.iter().find(|(n, _)| !params.contains(&n.as_str())) {
+        return Err(Error::at(format!("No parameter named ${n}."), pos));
+    }
+    let total = pos_args.len() + named.len();
+    if total > params.len() {
+        return Err(too_many(total, params.len(), pos));
+    }
+    Ok(())
+}
+
 /// `join`'s `auto` rule: list1's settled separator, else list2's, else space.
 fn join_auto_separator(list1: &Value, list2: &Value) -> ListSep {
     settled_sep(list1)
@@ -262,9 +291,7 @@ fn join_auto_separator(list1: &Value, list2: &Value) -> ListSep {
 /// space for a bare value or empty list.
 fn fn_append(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "val", "separator"];
-    if pos_args.len() > params.len() {
-        return Err(too_many(pos_args.len(), params.len(), pos));
-    }
+    validate_args(&params, pos_args, named, pos)?;
     let list = super::require(&params, pos_args, named, 0, "append", pos)?;
     let val = super::require(&params, pos_args, named, 1, "append", pos)?.clone();
     let (mut items, _) = as_items(list);
@@ -291,6 +318,7 @@ fn fn_append(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<
 /// `$value` (by Sass `==`), or `null` when absent.
 fn fn_index(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "value"];
+    validate_args(&params, pos_args, named, pos)?;
     let list = super::require(&params, pos_args, named, 0, "index", pos)?;
     let value = super::require(&params, pos_args, named, 1, "index", pos)?;
     let (items, _) = as_items(list);
@@ -303,6 +331,7 @@ fn fn_index(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
 /// `list-separator($list)`: the unquoted keyword `comma` or `space`. An empty
 /// list or a bare value is "undecided" and reports `space`.
 fn fn_list_separator(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    validate_args(&["list"], pos_args, named, pos)?;
     let v = super::require(&["list"], pos_args, named, 0, "list-separator", pos)?;
     // A bare value or empty list is "undecided", which dart-sass reports as
     // space; otherwise the list's own separator is authoritative.
@@ -320,6 +349,7 @@ fn fn_list_separator(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
 /// `is-bracketed($list)`: `true` when the list was written with square
 /// brackets. A bare value or an empty/non-bracketed list reports `false`.
 fn fn_is_bracketed(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    validate_args(&["list"], pos_args, named, pos)?;
     let v = super::require(&["list"], pos_args, named, 0, "is-bracketed", pos)?;
     let bracketed = matches!(v, Value::List(l) if l.bracketed);
     Ok(Value::Bool(bracketed))

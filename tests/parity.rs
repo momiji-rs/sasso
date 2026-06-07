@@ -3553,4 +3553,40 @@ fn parity_color_adjust_hue_non_legacy_error() {
         }
         None => eprintln!("skipping adjust-hue non-legacy parity case: dart-sass unavailable"),
     }
+fn parity_list_fn_arg_validation() {
+    // Fixed-arity list builtins reject extra positional arguments and unknown
+    // named arguments, matching dart-sass (which rejects them with the same
+    // "Only N argument(s) allowed…" / "No parameter named $X." errors). Both
+    // compilers must reject every case below; valid named calls still succeed.
+    for src in [
+        "@use \"sass:list\";\na {b: list.length((), 1)}\n",
+        "@use \"sass:list\";\na {b: list.nth(1 2, 1, 3)}\n",
+        "@use \"sass:list\";\na {b: list.index(1 2, 1, 3)}\n",
+        "@use \"sass:list\";\na {b: list.separator(1 2, 1)}\n",
+        "@use \"sass:list\";\na {b: list.is-bracketed(1 2, 1)}\n",
+        "@use \"sass:list\";\na {b: list.set-nth(c d, 1, 2, 3)}\n",
+        "@use \"sass:list\";\na {b: list.join(c, d, $invalid: true)}\n",
+        "@use \"sass:list\";\na {b: list.append(c, d, e, f)}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected error for {src}"
+        );
+        if enabled() {
+            assert!(dart_sass(src).is_none(), "dart-sass unexpectedly accepted {src}");
+        }
+    }
+    // A valid named-argument call still compiles in both implementations.
+    assert_parity("@use \"sass:list\";\na {b: list.join((1), (2), $separator: comma)}\n");
+}
+
+#[test]
+fn parity_list_separator_and_bracket_preservation() {
+    // `set-nth` keeps the source list's bracketing, and `join`/`append` treat a
+    // single-element (or empty) space list as having an *undecided* separator,
+    // so it defers to the other operand's separator — matching dart-sass.
+    assert_parity("@use \"sass:list\";\na {b: list.set-nth([c, d], 2, e)}\n");
+    assert_parity("@use \"sass:list\";\na {b: list.join([1], (2, 3, 4))}\n");
+    assert_parity("@use \"sass:list\";\na {b: list.join((1), (2 3 4))}\n");
+    assert_parity("@use \"sass:list\";\na {b: list.append((1), 2)}\n");
 }
