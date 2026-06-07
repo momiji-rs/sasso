@@ -796,14 +796,50 @@ fn is_supercombinator(c1: Option<Combinator>, c2: Option<Combinator>) -> bool {
         || (c1 == Some(Combinator::FollowingSibling) && c2 == Some(Combinator::NextSibling))
 }
 
-/// Whether compound `a` is a superselector of compound `b`.
+/// Whether compound `a` is a superselector of compound `b` (dart-sass
+/// `compoundIsSuperselector`). A pseudo-element effectively changes the target
+/// of a compound rather than narrowing it, so if either compound has a
+/// pseudo-element they must both have the *same* one (with matching simples on
+/// each side of it).
 fn compound_is_superselector(a: &Compound, b: &Compound) -> bool {
-    if a.simples.len() > b.simples.len() {
-        return false;
+    match (find_pseudo_element(a), find_pseudo_element(b)) {
+        (Some((pe1, i1)), Some((pe2, i2))) => {
+            pe1 == pe2
+                && compound_components_is_superselector(&a.simples[..i1], &b.simples[..i2])
+                && compound_components_is_superselector(&a.simples[i1 + 1..], &b.simples[i2 + 1..])
+        }
+        // Exactly one side has a pseudo-element: never a superselector.
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => a
+            .simples
+            .iter()
+            .all(|s1| b.simples.iter().any(|s2| simple_is_superselector(s1, s2))),
     }
-    a.simples
+}
+
+/// Like [`compound_is_superselector`] over raw simple-selector slices, treating
+/// an empty `b` as the universal selector (dart-sass
+/// `_compoundComponentsIsSuperselector`).
+fn compound_components_is_superselector(a: &[Simple], b: &[Simple]) -> bool {
+    if a.is_empty() {
+        return true;
+    }
+    let universal = [Simple::Universal { ns: None }];
+    let b = if b.is_empty() { &universal[..] } else { b };
+    compound_is_superselector(
+        &Compound { simples: a.to_vec() },
+        &Compound { simples: b.to_vec() },
+    )
+}
+
+/// If `compound` contains a pseudo-element, return it and its index.
+fn find_pseudo_element(compound: &Compound) -> Option<(&Simple, usize)> {
+    compound
+        .simples
         .iter()
-        .all(|s1| b.simples.iter().any(|s2| simple_is_superselector(s1, s2)))
+        .enumerate()
+        .find(|(_, s)| is_pseudo_element(s))
+        .map(|(i, s)| (s, i))
 }
 
 /// Whether simple `a` is a superselector of simple `b`.
@@ -1583,6 +1619,65 @@ fn collect_extenders(target: &Simple, extensions: &[Extension], stack: &mut Vec<
                 let deeper = collect_extenders(inner, extensions, stack);
                 stack.pop();
                 out.extend(deeper);
+            } else if extender.components.len() == 1 {
+                // A single multi-simple compound extender (e.g. `%y::fblthp`):
+                // expand any of its simples that are themselves extension
+                // targets, unifying each chain's trailing compound back into the
+                // extender's compound. This handles transitive extends through a
+                // multi-simple extender (dart-sass resolves these via its
+                // extension graph).
+                stack.push(target.clone());
+                out.extend(expand_compound_extender(
+                    &extender.components[0].compound,
+                    extensions,
+                    stack,
+                ));
+                stack.pop();
+            }
+        }
+    }
+    out
+}
+
+/// Expand a single-component, multi-simple extender compound by transitively
+/// extending each of its simple selectors. For every simple that is itself an
+/// extension target, the simple is replaced by each of its (transitively
+/// collected) extenders, unifying the extender's trailing compound back into the
+/// remaining simples. Returns the extra complex selectors so produced (the
+/// original compound is emitted by the caller).
+fn expand_compound_extender(
+    compound: &Compound,
+    extensions: &[Extension],
+    stack: &mut Vec<Simple>,
+) -> Vec<Complex> {
+    let mut out: Vec<Complex> = Vec::new();
+    let simples = &compound.simples;
+    for (i, simple) in simples.iter().enumerate() {
+        for inner_extender in collect_extenders(simple, extensions, stack) {
+            // Only single-component inner extenders can fold back into this
+            // compound; multi-component ones would need full weaving, which the
+            // common transitive cases here don't require.
+            let Some(last) = inner_extender.components.last() else {
+                continue;
+            };
+            if inner_extender.components.len() != 1 {
+                continue;
+            }
+            // The remaining simples (all but the one being replaced), unified
+            // with the inner extender's compound.
+            let remaining: Vec<Simple> = simples
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, s)| s.clone())
+                .collect();
+            if let Some(unified) = unify_compounds(&remaining, &last.compound.simples) {
+                out.push(Complex {
+                    components: vec![ComplexComponent {
+                        combinator: None,
+                        compound: Compound { simples: unified },
+                    }],
+                });
             }
         }
     }

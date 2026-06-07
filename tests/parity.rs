@@ -2702,3 +2702,22 @@ fn extend_combinator_weave() {
     assert_parity("a + b c .c1 {a: b}\na c .c2 {@extend .c1}\n");
     assert_parity(".a .b {@extend .e}\n.c .d {@extend .f}\n.e.f {x: y}\n");
 }
+
+#[test]
+fn extend_pseudo_element_superselector() {
+    // A compound extender that contains a pseudo-element must NOT be trimmed away
+    // by its pseudo-element-free sibling (a pseudo-element changes the target of
+    // a compound), and the extender's other simples are themselves extended
+    // transitively.
+    assert_eq!(
+        ours("x#bar {a: b}\ny, y::fblthp {@extend x}\nz {@extend y}\n"),
+        "z#bar, z#bar::fblthp {\n  a: b;\n}\n"
+    );
+    assert_eq!(
+        ours("x#bar {a: b}\ny, y:first-line {@extend x}\nz {@extend y}\n"),
+        "z#bar, z#bar:first-line {\n  a: b;\n}\n"
+    );
+
+    assert_parity("x#bar {a: b}\ny, y::fblthp {@extend x}\nz {@extend y}\n");
+    assert_parity("x#bar {a: b}\ny, y:before {@extend x}\nz {@extend y}\n");
+}
