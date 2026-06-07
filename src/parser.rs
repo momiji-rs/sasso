@@ -1300,6 +1300,9 @@ impl Parser {
                 self.sc.bump();
                 rest = Some(name);
                 self.skip_ws_inline();
+                // An optional trailing comma is allowed after `$rest...`.
+                self.sc.eat(',');
+                self.skip_ws_inline();
                 break;
             }
             let default = if self.sc.peek() == Some(':') {
@@ -1312,6 +1315,11 @@ impl Parser {
             params.push(Param { name, default });
             self.skip_ws_inline();
             if self.sc.eat(',') {
+                self.skip_ws_inline();
+                // A trailing comma before `)` ends the list.
+                if self.sc.peek() == Some(')') {
+                    break;
+                }
                 continue;
             }
             break;
