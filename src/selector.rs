@@ -1663,24 +1663,28 @@ fn expand_compound_extender(
     let simples = &compound.simples;
     for (i, simple) in simples.iter().enumerate() {
         for inner_extender in collect_extenders(simple, extensions, stack) {
-            // Only single-component inner extenders can fold back into this
-            // compound; multi-component ones would need full weaving, which the
-            // common transitive cases here don't require.
-            let Some(last) = inner_extender.components.last() else {
-                continue;
-            };
+            // Only fold in atomic chains: a single-component, single-simple
+            // inner extender (e.g. `%y` -> `a`). Folding in multi-simple
+            // extenders here would re-expand compounds that are themselves
+            // targets (a self-recursive `.a.mod1 {@extend .a}` family) and blow
+            // up combinatorially; dart-sass resolves those through its full
+            // extension graph + trimming, not this localized fold.
             if inner_extender.components.len() != 1 {
                 continue;
             }
+            let inner_compound = &inner_extender.components[0].compound;
+            if inner_compound.simples.len() != 1 {
+                continue;
+            }
             // The remaining simples (all but the one being replaced), unified
-            // with the inner extender's compound.
+            // with the inner extender's single simple.
             let remaining: Vec<Simple> = simples
                 .iter()
                 .enumerate()
                 .filter(|(j, _)| *j != i)
                 .map(|(_, s)| s.clone())
                 .collect();
-            if let Some(unified) = unify_compounds(&remaining, &last.compound.simples) {
+            if let Some(unified) = unify_compounds(&remaining, &inner_compound.simples) {
                 out.push(Complex {
                     components: vec![ComplexComponent {
                         combinator: None,
