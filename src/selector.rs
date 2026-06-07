@@ -959,6 +959,11 @@ fn weave(path: &[Complex]) -> Vec<Complex> {
     let Some((first, rest)) = path.split_first() else {
         return Vec::new();
     };
+    // The whole woven selector inherits the leading combinator of the first path
+    // element's first component (a "child selector hack" like `> .foo`). It is
+    // re-applied to every result at the end, since the trailing-combinator model
+    // can't carry it internally.
+    let leading = leading_combinator(first);
     // Work in the trailing-combinator representation throughout the weave; only
     // the prefixes accumulate, so converting once per step is cheap.
     //
@@ -1005,8 +1010,12 @@ fn weave(path: &[Complex]) -> Vec<Complex> {
     }
     prefixes
         .into_iter()
-        .map(|tcomps| Complex {
-            components: from_trailing(&tcomps),
+        .map(|tcomps| {
+            let mut components = from_trailing(&tcomps);
+            if let (Some(comb), Some(first)) = (leading, components.first_mut()) {
+                first.combinator = Some(comb);
+            }
+            Complex { components }
         })
         .collect()
 }

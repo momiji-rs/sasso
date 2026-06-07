@@ -2694,6 +2694,12 @@ fn extend_combinator_weave() {
         ours(".a .b {@extend .e}\n.e .x {x: y}\n"),
         ".e .x, .a .b .x {\n  x: y;\n}\n"
     );
+    // A leading-combinator "child selector hack" (`> .foo`) is preserved through
+    // extension, including a multi-component extender that keeps its combinator.
+    assert_eq!(
+        ours("> .foo {a: b}\nfoo > bar {@extend .foo}\n"),
+        "> .foo, > foo > bar {\n  a: b;\n}\n"
+    );
 
     // Live parity for the same constructs.
     assert_parity(".a ~ x {a: b}\n.b ~ y {@extend x}\n");
@@ -2701,6 +2707,7 @@ fn extend_combinator_weave() {
     assert_parity(".a > .b + x {a: b}\n.c > .d + y {@extend x}\n");
     assert_parity("a + b c .c1 {a: b}\na c .c2 {@extend .c1}\n");
     assert_parity(".a .b {@extend .e}\n.e .x {x: y}\n");
+    assert_parity("> .foo {a: b}\nfoo > bar {@extend .foo}\n");
 }
 
 #[test]
