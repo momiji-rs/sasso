@@ -2951,4 +2951,12 @@ fn parity_extend_graph_fixpoint() {
     // `:not(.c)` extends its own contained class.
     assert_parity(".c, .a .b .c, .a .c .b {x: y; @extend .c}\n");
     assert_parity(":not(.c) {@extend .c}\n.c {x: y}\n");
+fn parity_custom_property_whitespace() {
+    // A custom property emits its value verbatim after the colon: no space is
+    // inserted, leading/trailing whitespace is preserved, an inline whitespace
+    // run collapses to its last character, and a trailing newline becomes a
+    // single space. An empty value emits `--x:;`.
+    assert_parity(".a {\n  --empty:;\n  --interp:#{\"\"};\n  --lead: value;\n  --tight:value;\n  --trail: c ;\n  --collapse: 1  2\t\t3;\n  --func: foo(bar);\n}\n");
+    assert_parity("a {\n  --nl: c\n;\n}\n");
+    assert_parity("a {\n  --brace: c\n}\n");
 }

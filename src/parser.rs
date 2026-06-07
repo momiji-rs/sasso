@@ -412,26 +412,6 @@ fn expr_is_quoted_string(expr: &Expr) -> bool {
     matches!(expr, Expr::QuotedString(_))
 }
 
-/// Trim surrounding whitespace from a captured value template: leading
-/// whitespace from the first literal piece and trailing from the last, dropping
-/// any piece that becomes empty. (Interpolation pieces are never trimmed.)
-fn trim_value_pieces(pieces: &mut Vec<TplPiece>) {
-    if let Some(TplPiece::Lit(s)) = pieces.first_mut() {
-        let trimmed = s.trim_start().to_string();
-        *s = trimmed;
-    }
-    if matches!(pieces.first(), Some(TplPiece::Lit(s)) if s.is_empty()) {
-        pieces.remove(0);
-    }
-    if let Some(TplPiece::Lit(s)) = pieces.last_mut() {
-        let trimmed = s.trim_end().to_string();
-        *s = trimmed;
-    }
-    if matches!(pieces.last(), Some(TplPiece::Lit(s)) if s.is_empty()) {
-        pieces.pop();
-    }
-}
-
 /// Whether a property-name template begins, *literally*, with `--` (a custom
 /// property). A name whose first piece is `#{…}` interpolation is not literal,
 /// so `#{--b}` namespaces normally while a written `--b` is a custom property.
@@ -2429,6 +2409,15 @@ impl Parser {
         let mut pieces: Vec<TplPiece> = Vec::new();
         let mut lit = String::new();
         let mut depth = 0i32;
+        // dart-sass `_interpolatedDeclarationValue` writes whitespace lazily:
+        // a run of spaces/tabs collapses to its *last* character (a tab survives
+        // a tab-only run), while a run containing a newline emits one `\n` plus
+        // the following indentation verbatim. `wrote_newline` tracks whether the
+        // most recently written character was a newline so indentation after a
+        // newline is preserved and blank lines are not duplicated. The value is
+        // NOT trimmed — leading whitespace after the colon and trailing
+        // whitespace are both significant for a custom property.
+        let mut wrote_newline = false;
         loop {
             match self.sc.peek() {
                 None => break,
@@ -2446,6 +2435,7 @@ impl Parser {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
                     pieces.push(TplPiece::Interp(e));
+                    wrote_newline = false;
                 }
                 Some(q @ ('"' | '\'')) => {
                     // Capture the string, resolving interpolation inside it but
@@ -2485,33 +2475,60 @@ impl Parser {
                             }
                         }
                     }
+                    wrote_newline = false;
                 }
-                Some(c) if c.is_whitespace() => {
-                    while matches!(self.sc.peek(), Some(c) if c.is_whitespace()) {
+                Some(c @ ('\n' | '\r' | '\u{c}')) => {
+                    self.sc.bump();
+                    // Treat `\r\n` as one newline.
+                    if c == '\r' && self.sc.peek() == Some('\n') {
                         self.sc.bump();
                     }
-                    lit.push(' ');
+                    if !wrote_newline {
+                        lit.push('\n');
+                        wrote_newline = true;
+                    }
+                }
+                Some(c) if c == ' ' || c == '\t' => {
+                    // Write this space/tab only if we just emitted a newline (so
+                    // indentation is preserved) or it is the last whitespace of
+                    // the run (so an inline run collapses to its final char).
+                    let next_is_inline_ws = matches!(self.sc.peek_at(1), Some(' ') | Some('\t'));
+                    if wrote_newline || !next_is_inline_ws {
+                        lit.push(c);
+                    }
+                    self.sc.bump();
                 }
                 Some(c @ ('(' | '[' | '{')) => {
                     depth += 1;
                     lit.push(c);
                     self.sc.bump();
+                    wrote_newline = false;
                 }
                 Some(c @ (')' | ']' | '}')) => {
                     depth -= 1;
                     lit.push(c);
                     self.sc.bump();
+                    wrote_newline = false;
                 }
                 Some(c) => {
                     lit.push(c);
                     self.sc.bump();
+                    wrote_newline = false;
                 }
             }
         }
         if !lit.is_empty() {
             pieces.push(TplPiece::Lit(lit));
         }
-        trim_value_pieces(&mut pieces);
+        // A trailing newline-run collapses to a single space (dart-sass emits a
+        // trailing newline before the terminator as a space, not a line break).
+        if let Some(TplPiece::Lit(s)) = pieces.last_mut() {
+            if s.ends_with('\n') {
+                let trimmed_len = s.trim_end_matches([' ', '\t', '\n']).len();
+                s.truncate(trimmed_len);
+                s.push(' ');
+            }
+        }
         Ok(pieces)
     }
 

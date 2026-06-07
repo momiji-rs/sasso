@@ -59,14 +59,11 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize) {
             prop,
             value,
             important,
+            custom,
         } => {
             out.push_str(&indent);
             out.push_str(prop);
-            out.push_str(": ");
-            out.push_str(value);
-            if *important {
-                out.push_str(" !important");
-            }
+            emit_decl_value_expanded(out, value, *important, *custom, depth);
             out.push_str(";\n");
         }
         OutNode::AtRule {
@@ -107,14 +104,11 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
             prop,
             value,
             important,
+            custom,
         } => {
             out.push_str(&indent);
             out.push_str(prop);
-            out.push_str(": ");
-            out.push_str(value);
-            if *important {
-                out.push_str(" !important");
-            }
+            emit_decl_value_expanded(out, value, *important, *custom, depth);
             out.push_str(";\n");
         }
         OutItem::Comment(text) => {
@@ -133,6 +127,23 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
             }
             out.push_str(";\n");
         }
+    }
+}
+
+/// Append the `: value [!important]` portion of an expanded declaration. A
+/// custom property emits its value verbatim right after the colon (its leading
+/// whitespace is part of `value`, dart-sass adds no space) and never appends an
+/// `!important` flag; a normal declaration uses the canonical `: ` separator.
+fn emit_decl_value_expanded(out: &mut String, value: &str, important: bool, custom: bool, _depth: usize) {
+    if custom {
+        out.push(':');
+        out.push_str(value);
+        return;
+    }
+    out.push_str(": ");
+    out.push_str(value);
+    if important {
+        out.push_str(" !important");
     }
 }
 
@@ -173,8 +184,12 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
                         prop,
                         value,
                         important,
+                        custom,
                     } => {
-                        let imp = if *important { "!important" } else { "" };
+                        // A custom property emits its value verbatim (its
+                        // leading whitespace is part of `value`) and never gains
+                        // an `!important` flag.
+                        let imp = if *important && !*custom { "!important" } else { "" };
                         Some(format!("{prop}:{value}{imp}"))
                     }
                     OutItem::Comment(_) => None,
@@ -204,8 +219,9 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
             prop,
             value,
             important,
+            custom,
         } => {
-            let imp = if *important { "!important" } else { "" };
+            let imp = if *important && !*custom { "!important" } else { "" };
             out.push_str(prop);
             out.push(':');
             out.push_str(value);

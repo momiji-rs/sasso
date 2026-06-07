@@ -49,6 +49,9 @@ pub(crate) enum OutNode {
         prop: String,
         value: String,
         important: bool,
+        /// A custom property (`--x`) whose value is emitted verbatim after the
+        /// colon (no inserted space); its leading whitespace is part of `value`.
+        custom: bool,
     },
 }
 
@@ -82,6 +85,9 @@ pub(crate) enum OutItem {
         prop: String,
         value: String,
         important: bool,
+        /// A custom property (`--x`) whose value is emitted verbatim after the
+        /// colon (no inserted space); its leading whitespace is part of `value`.
+        custom: bool,
     },
     Comment(String),
     /// A childless at-rule (`@e f;`) that appears directly inside a style rule:
@@ -157,10 +163,12 @@ impl Sink<'_> {
                     prop,
                     value,
                     important,
+                    custom,
                 } => body.push(OutNode::AtDecl {
                     prop,
                     value,
                     important,
+                    custom,
                 }),
                 OutItem::Comment(text) => body.push(OutNode::Comment(text)),
                 OutItem::ChildlessAtRule { name, prelude } => body.push(OutNode::AtRule {
@@ -1485,6 +1493,7 @@ impl<'a> Evaluator<'a> {
             prop,
             value: vstr,
             important: d.important,
+            custom: false,
         }))
     }
 
@@ -1499,6 +1508,7 @@ impl<'a> Evaluator<'a> {
             prop,
             value,
             important: false,
+            custom: true,
         }))
     }
 
@@ -1540,6 +1550,7 @@ impl<'a> Evaluator<'a> {
                     prop: full.clone(),
                     value: vstr,
                     important: ps.important,
+                    custom: false,
                 });
             }
         }
