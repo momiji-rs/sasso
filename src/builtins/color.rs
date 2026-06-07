@@ -2568,18 +2568,58 @@ fn fn_to_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
         Some(v) => space_arg(v, pos)?,
         None => mc.space,
     };
+    // `$method` is required (forwards-compatibility with the CSS spec).
+    let method = match arg(&params, pos_args, named, 2) {
+        Some(v) => v,
+        None => {
+            return Err(Error::at(
+                "$method: color.to-gamut() requires a $method argument for \
+                 forwards-compatibility with changes in the CSS spec. Suggestion:\n\n\
+                 $method: local-minde"
+                    .to_string(),
+                pos,
+            ))
+        }
+    };
+    let clip = match method {
+        Value::Str(s) if !s.quoted && s.text.eq_ignore_ascii_case("clip") => true,
+        Value::Str(s) if !s.quoted && s.text.eq_ignore_ascii_case("local-minde") => false,
+        Value::Str(s) if s.quoted => {
+            return Err(Error::at(
+                format!("$method: Expected \"{}\" to be an unquoted string.", s.text),
+                pos,
+            ))
+        }
+        other => {
+            return Err(Error::at(
+                format!(
+                    "$method: {} must be either clip or local-minde.",
+                    other.to_css(false)
+                ),
+                pos,
+            ))
+        }
+    };
     if in_gamut(&mc, space) {
         return Ok(Value::Color(c));
     }
-    let mapped = gamut_map(&mc, space);
+    let mapped = if clip {
+        clamp_in_space(&mc, space)
+    } else {
+        gamut_map(&mc, space)
+    };
     // Re-express in the original space.
     let back = convert_modern(&mapped, mc.space);
     Ok(Value::Color(make_modern_in(back, mc.space)))
 }
 
-/// CSS Color 4 gamut mapping via oklch chroma reduction with local MINDE
-/// (binary search on chroma, clamping in the target space).
+/// CSS Color 4 gamut mapping (`local-minde`): reduce oklch chroma via binary
+/// search, clipping in the target space, until the clipped color is within a
+/// just-noticeable difference (deltaEOK). Ported from the CSS Color 4 spec /
+/// dart-sass.
 fn gamut_map(mc: &ModernColor, space: ColorSpace) -> ModernColor {
+    const JND: f64 = 0.02;
+    const EPS: f64 = 0.0001;
     let oklch = convert_modern(mc, ColorSpace::Oklch);
     let l = z(oklch.channels[0]);
     if l >= 1.0 {
@@ -2589,31 +2629,39 @@ fn gamut_map(mc: &ModernColor, space: ColorSpace) -> ModernColor {
         return clamp_in_space(&black_in(space), space);
     }
     let h = z(oklch.channels[2]);
-    let mut lo = 0.0;
-    let mut hi = z(oklch.channels[1]);
-    const JND: f64 = 0.02;
-    const EPS: f64 = 0.0001;
     let make = |c: f64| ModernColor {
         space: ColorSpace::Oklch,
         channels: [Some(l), Some(c), Some(h)],
         alpha: oklch.alpha,
     };
-    let mut current = make(hi);
-    while hi - lo > EPS {
-        let chroma = (lo + hi) / 2.0;
+    let mut current = oklch.clone();
+    let mut clipped = clamp_in_space(&current, space);
+    if delta_eok(&clipped, &current) < JND {
+        return convert_modern(&clipped, space);
+    }
+    let mut min = 0.0;
+    let mut max = z(oklch.channels[1]);
+    let mut min_in_gamut = true;
+    while max - min > EPS {
+        let chroma = (min + max) / 2.0;
         current = make(chroma);
-        if in_gamut(&current, space) {
-            lo = chroma;
+        if min_in_gamut && in_gamut(&current, space) {
+            min = chroma;
             continue;
         }
-        let clipped = clamp_in_space(&current, space);
-        if delta_eok(&clipped, &current) < JND {
-            current = clipped;
-            break;
+        clipped = clamp_in_space(&current, space);
+        let e = delta_eok(&clipped, &current);
+        if e < JND {
+            if JND - e < EPS {
+                return convert_modern(&clipped, space);
+            }
+            min_in_gamut = false;
+            min = chroma;
+        } else {
+            max = chroma;
         }
-        hi = chroma;
     }
-    convert_modern(&current, space)
+    convert_modern(&clipped, space)
 }
 
 fn white_in(space: ColorSpace) -> ModernColor {
