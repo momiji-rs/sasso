@@ -2459,3 +2459,38 @@ fn supports_condition_serialization() {
     assert_parity("@supports (a: calc(1 + 2)) and #{\"(c: d)\"} {x {y: z}}\n");
     assert_parity("@supports (--a: b //\n  ) {c {d: e}}\n");
 }
+
+#[test]
+fn nested_rule_declaration_comment_bubbling_order() {
+    // A declaration or loud comment that FOLLOWS a nested rule must emit AFTER
+    // the bubbled-out nested rule, in source order: dart-sass splits the parent
+    // block around each bubbled child rather than hoisting one combined block.
+    // Loud comment between two nested rules.
+    assert_eq!(
+        ours("a {\n  b {c: d}\n  /* */\n  e {f: g}\n}\n"),
+        "a b {\n  c: d;\n}\na {\n  /* */\n}\na e {\n  f: g;\n}\n"
+    );
+    // Loud comment then a declaration, both after the nested rule.
+    assert_eq!(
+        ours("a {\n  b {c: d}\n  /* */\n  e: f;\n}\n"),
+        "a b {\n  c: d;\n}\na {\n  /* */\n  e: f;\n}\n"
+    );
+    // A trailing loud comment after the nested rule.
+    assert_eq!(
+        ours("a {\n  b {c: d}\n  /* */\n}\n"),
+        "a b {\n  c: d;\n}\na {\n  /* */\n}\n"
+    );
+    // A declaration BEFORE the nested rule stays in the leading block.
+    assert_eq!(
+        ours("a {\n  x: y;\n  b {c: d}\n}\n"),
+        "a {\n  x: y;\n}\na b {\n  c: d;\n}\n"
+    );
+    // Declarations on both sides of the nested rule split into two blocks.
+    assert_eq!(
+        ours("a {\n  w: x;\n  b {c: d}\n  y: z;\n}\n"),
+        "a {\n  w: x;\n}\na b {\n  c: d;\n}\na {\n  y: z;\n}\n"
+    );
+
+    assert_parity("a {\n  b {c: d}\n  /* */\n  e {f: g}\n}\n");
+    assert_parity("a {\n  w: x;\n  b {c: d}\n  y: z;\n}\n");
+}

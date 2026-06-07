@@ -94,6 +94,10 @@ pub(crate) enum OutItem {
 enum Sink<'a> {
     Top(&'a mut Vec<OutNode>),
     Rule {
+        /// The enclosing rule's resolved selector list, used to build a block
+        /// node when the accumulated `items` must be flushed (i.e. when a nested
+        /// rule or at-rule interrupts the parent's own declarations).
+        selectors: &'a [String],
         items: &'a mut Vec<OutItem>,
         nested: &'a mut Vec<OutNode>,
     },
@@ -138,44 +142,63 @@ impl Sink<'_> {
         }
     }
 
-    /// Emit a produced style rule — its own declaration block (when
-    /// non-empty) plus the rules that bubbled out of it.
-    fn emit_style_rule(&mut self, block: Option<OutNode>, nested: Vec<OutNode>) {
+    /// Flush the parent rule's accumulated declarations/loud-comments into a
+    /// block node, in source order, before a nested rule or at-rule is emitted.
+    /// dart-sass splits the parent block around each bubbled child so that a
+    /// declaration (or loud comment) following a nested rule appears AFTER that
+    /// rule in the output. No-op for non-`Rule` sinks (which never accumulate a
+    /// block) and when there are no pending items.
+    fn flush_rule_block(&mut self) {
+        if let Sink::Rule {
+            selectors,
+            items,
+            nested,
+        } = self
+        {
+            if !items.is_empty() {
+                nested.push(OutNode::Rule {
+                    selectors: selectors.to_vec(),
+                    items: std::mem::take(*items),
+                });
+            }
+        }
+    }
+
+    /// Emit a produced style rule's fully interleaved output (its own block
+    /// fragments plus the rules that bubbled out of it, in source order).
+    fn emit_style_rule(&mut self, output: Vec<OutNode>) {
         match self {
             Sink::Top(out) => {
-                let mut group = Vec::new();
-                if let Some(b) = block {
-                    group.push(b);
-                }
-                group.extend(nested);
                 let out = &mut **out;
-                push_group(out, group);
+                push_group(out, output);
             }
-            Sink::Rule { nested: parent, .. } => {
-                if let Some(b) = block {
-                    parent.push(b);
+            Sink::Rule { .. } => {
+                // Split the enclosing rule's own block around this nested rule.
+                self.flush_rule_block();
+                if let Sink::Rule { nested, .. } = self {
+                    nested.extend(output);
                 }
-                parent.extend(nested);
             }
-            Sink::AtRoot(body) => {
-                if let Some(b) = block {
-                    body.push(b);
-                }
-                body.extend(nested);
-            }
+            Sink::AtRoot(body) => body.extend(output),
         }
     }
 
     /// Deposit a produced at-rule (or `@at-root` output). At the top level it
     /// forms its own group; inside a style rule it joins the rules that bubble
-    /// out to the document root; inside another at-rule's body it nests.
+    /// out to the document root (splitting the parent's own block around it);
+    /// inside another at-rule's body it nests.
     fn push_at_rule(&mut self, node: OutNode) {
         match self {
             Sink::Top(out) => {
                 let out = &mut **out;
                 push_group(out, vec![node]);
             }
-            Sink::Rule { nested, .. } => nested.push(node),
+            Sink::Rule { .. } => {
+                self.flush_rule_block();
+                if let Sink::Rule { nested, .. } = self {
+                    nested.push(node);
+                }
+            }
             Sink::AtRoot(body) => body.push(node),
         }
     }
@@ -936,23 +959,22 @@ impl<'a> Evaluator<'a> {
         let mut nested: Vec<OutNode> = Vec::new();
         let result = {
             let mut child = Sink::Rule {
+                selectors: &current,
                 items: &mut items,
                 nested: &mut nested,
             };
-            self.exec(&rule.body, &current, &mut child)
+            let r = self.exec(&rule.body, &current, &mut child);
+            // Flush any declarations/loud comments that follow the last nested
+            // rule, so they emit (in their own block) after the bubbled rules.
+            if r.is_ok() {
+                child.flush_rule_block();
+            }
+            r
         };
         self.current_selector = prev_selector;
         self.scopes.pop();
         result?;
-        let block = if items.is_empty() {
-            None
-        } else {
-            Some(OutNode::Rule {
-                selectors: current,
-                items,
-            })
-        };
-        sink.emit_style_rule(block, nested);
+        sink.emit_style_rule(nested);
         Ok(())
     }
 
@@ -1042,18 +1064,17 @@ impl<'a> Evaluator<'a> {
             let mut nested: Vec<OutNode> = Vec::new();
             let res = {
                 let mut child = Sink::Rule {
+                    selectors: parents,
                     items: &mut items,
                     nested: &mut nested,
                 };
-                self.exec(stmts, parents, &mut child)
+                let r = self.exec(stmts, parents, &mut child);
+                if r.is_ok() {
+                    child.flush_rule_block();
+                }
+                r
             };
             if res.is_ok() {
-                if !items.is_empty() {
-                    body.push(OutNode::Rule {
-                        selectors: parents.to_vec(),
-                        items,
-                    });
-                }
                 body.extend(nested);
             }
             res
