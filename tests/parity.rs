@@ -3418,3 +3418,21 @@ fn parity_sass_imports_scss_partial() {
     let theirs = String::from_utf8(out.stdout).expect("utf8");
     assert_eq!(ours, theirs, "\n--- input.sass ---\n{input}\n");
 }
+
+#[test]
+fn parity_selector_separators_in_groups() {
+    // Regression coverage for the borrowed-slice rewrite of `split_commas` and
+    // `tokenize_complex` (perf: drop per-part/per-token String allocation). A
+    // comma or `>`/`+`/`~` that lives inside a quoted string, an attribute
+    // selector, or a pseudo `(...)` argument must NOT be treated as a top-level
+    // separator — only genuine depth-0 ones are.
+    assert_parity("a[title=\"x, y\"] { color: red; }\n");
+    assert_parity("a[data-op=\"a > b\"] { color: red; }\n");
+    assert_parity(":is(.a > .b, .c + .d) .e { color: red; }\n");
+    assert_parity(".x:not(.a ~ .b) { color: red; }\n");
+    assert_parity(":where(.a, .b) .c { color: red; }\n");
+    // Genuine top-level list + combinators, with nesting: exercises
+    // split_commas on the parent list and tokenize_complex on the child.
+    assert_parity(".a, .b {\n  > .c + .d ~ .e { color: red; }\n}\n");
+    assert_parity(".a, .b {\n  .c, .d { color: red; }\n}\n");
+}

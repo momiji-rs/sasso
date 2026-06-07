@@ -5439,34 +5439,29 @@ fn resolve_selectors(sel: &str, parents: &[String]) -> Vec<String> {
     result
 }
 
-fn split_commas(s: &str) -> Vec<String> {
+/// Split `s` on top-level commas (paren/bracket depth 0), returning borrowed
+/// slices of `s` — no per-part allocation. Commas inside `(...)`/`[...]` stay
+/// within their part. Each part is a contiguous substring of `s`, so callers
+/// that need an owned `String` call `.to_string()` themselves.
+fn split_commas(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    let mut cur = String::new();
     let mut paren = 0i32;
     let mut bracket = 0i32;
-    for c in s.chars() {
+    let mut start = 0usize;
+    for (idx, c) in s.char_indices() {
         match c {
-            '(' => {
-                paren += 1;
-                cur.push(c);
+            '(' => paren += 1,
+            ')' => paren -= 1,
+            '[' => bracket += 1,
+            ']' => bracket -= 1,
+            ',' if paren == 0 && bracket == 0 => {
+                out.push(&s[start..idx]);
+                start = idx + 1; // ',' is ASCII (1 byte)
             }
-            ')' => {
-                paren -= 1;
-                cur.push(c);
-            }
-            '[' => {
-                bracket += 1;
-                cur.push(c);
-            }
-            ']' => {
-                bracket -= 1;
-                cur.push(c);
-            }
-            ',' if paren == 0 && bracket == 0 => out.push(std::mem::take(&mut cur)),
-            _ => cur.push(c),
+            _ => {}
         }
     }
-    out.push(cur);
+    out.push(&s[start..]);
     out
 }
 
@@ -5565,72 +5560,61 @@ fn normalize_selector(s: &str) -> String {
 }
 
 /// One token of a complex selector split at the top level (paren/bracket depth
-/// 0): either a combinator or a compound selector (verbatim text).
-enum SelToken {
+/// 0): either a combinator or a compound selector (a borrowed slice of the
+/// input, trimmed).
+enum SelToken<'a> {
     Combinator,
-    Compound(String),
+    Compound(&'a str),
 }
 
 /// Tokenize a complex selector into combinators and compounds at the top level,
 /// honouring `[...]`, `(...)`, strings, and escapes so combinators inside a
-/// pseudo argument or attribute aren't split out here.
-fn tokenize_complex(s: &str) -> Vec<SelToken> {
-    let chars: Vec<char> = s.chars().collect();
+/// pseudo argument or attribute aren't split out here. Compounds borrow `s`
+/// (no per-token allocation): each is a contiguous, trimmed substring.
+fn tokenize_complex(s: &str) -> Vec<SelToken<'_>> {
     let mut tokens = Vec::new();
-    let mut cur = String::new();
     let mut paren = 0i32;
     let mut bracket = 0i32;
-    let mut i = 0;
-    let flush = |cur: &mut String, tokens: &mut Vec<SelToken>| {
-        let t = cur.trim();
-        if !t.is_empty() {
-            tokens.push(SelToken::Compound(t.to_string()));
-        }
-        cur.clear();
-    };
-    while i < chars.len() {
-        let c = chars[i];
+    let mut start = 0usize; // byte start of the compound being accumulated
+    let mut it = s.char_indices();
+    while let Some((idx, c)) = it.next() {
         match c {
             '\\' => {
-                cur.push(c);
-                i += 1;
-                if i < chars.len() {
-                    cur.push(chars[i]);
-                    i += 1;
-                }
-                continue;
+                // An escape consumes the following character verbatim.
+                it.next();
             }
             '"' | '\'' => {
-                let end = skip_string(&chars, i);
-                cur.extend(&chars[i..end.min(chars.len())]);
-                i = end;
-                continue;
+                // Skip a quoted string (honouring `\` escapes) so combinators
+                // inside it aren't split out. Mirrors `skip_string`.
+                while let Some((_, c2)) = it.next() {
+                    match c2 {
+                        '\\' => {
+                            it.next();
+                        }
+                        q if q == c => break,
+                        _ => {}
+                    }
+                }
             }
-            '(' => {
-                paren += 1;
-                cur.push(c);
-            }
-            ')' => {
-                paren -= 1;
-                cur.push(c);
-            }
-            '[' => {
-                bracket += 1;
-                cur.push(c);
-            }
-            ']' => {
-                bracket -= 1;
-                cur.push(c);
-            }
+            '(' => paren += 1,
+            ')' => paren -= 1,
+            '[' => bracket += 1,
+            ']' => bracket -= 1,
             '>' | '+' | '~' if paren == 0 && bracket == 0 => {
-                flush(&mut cur, &mut tokens);
+                let t = s[start..idx].trim();
+                if !t.is_empty() {
+                    tokens.push(SelToken::Compound(t));
+                }
                 tokens.push(SelToken::Combinator);
+                start = idx + 1; // combinator char is ASCII (1 byte)
             }
-            _ => cur.push(c),
+            _ => {}
         }
-        i += 1;
     }
-    flush(&mut cur, &mut tokens);
+    let t = s[start..].trim();
+    if !t.is_empty() {
+        tokens.push(SelToken::Compound(t));
+    }
     tokens
 }
 
