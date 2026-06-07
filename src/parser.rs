@@ -32,6 +32,19 @@ enum CommentMode {
     /// dart-sass normalises selectors and structured grammars this way, so a
     /// comment behaves purely as whitespace (`a/**/b` → `a b`).
     Strip,
+    /// Strip only *top-level* (outside `()`/`[]`) comments, replacing them with
+    /// a single space; comments nested inside parentheses are kept verbatim.
+    /// dart-sass parses `@supports` and `@-moz-document` preludes with a
+    /// structured grammar that drops trivia comments between tokens while the
+    /// parenthesised content is captured raw (`(a /**/ b)` is preserved).
+    StripTopLevel,
+    /// Unknown / interpolation-prelude directives (`@page`, `@font-face`,
+    /// `@layer`, any unknown `@foo`, …): a `//` silent comment is dropped to
+    /// end of line (it acts as whitespace); a `/* */` loud comment is *kept*
+    /// verbatim. A leading comment is already removed by `skip_ws_inline`
+    /// before the prelude template starts. Applied only at the top level;
+    /// nested content is kept verbatim.
+    UnknownPrelude,
 }
 
 enum MessageKind {
@@ -890,7 +903,16 @@ impl Parser {
     /// `@page`, `@charset`, `@supports`, vendor `@foo`, and unknown directives.
     fn parse_generic_at_rule(&mut self, name: String) -> Result<Stmt, Error> {
         self.skip_ws_inline();
-        let prelude = self.parse_template(&['{', ';', '}'])?;
+        // dart-sass parses `@supports` and `@-moz-document` (only the exact
+        // lowercase spellings) with structured grammars that strip trivia
+        // comments between tokens; every other at-rule keeps loud comments
+        // verbatim and treats silent comments as whitespace.
+        let comment_mode = if name == "supports" || name == "-moz-document" {
+            CommentMode::StripTopLevel
+        } else {
+            CommentMode::UnknownPrelude
+        };
+        let prelude = self.parse_template_mode(&['{', ';', '}'], comment_mode)?;
         let prelude = trim_prelude(prelude);
         self.skip_ws_inline();
         let body = if self.sc.peek() == Some('{') {
@@ -1778,19 +1800,41 @@ impl Parser {
                 break;
             }
             // Comment handling depends on the mode and nesting depth.
-            if c == '/' && comments == CommentMode::Strip {
-                match self.sc.peek_at(1) {
-                    Some('*') => {
-                        let _ = self.consume_loud_comment();
-                        lit.push(' ');
-                        continue;
+            if c == '/' && comments != CommentMode::Keep {
+                let top = paren == 0 && bracket == 0;
+                let strip_here = match comments {
+                    CommentMode::Strip => true,
+                    CommentMode::StripTopLevel | CommentMode::UnknownPrelude => top,
+                    CommentMode::Keep => false,
+                };
+                if strip_here {
+                    match self.sc.peek_at(1) {
+                        Some('*') => {
+                            // A loud comment is kept verbatim for unknown
+                            // preludes (dart-sass preserves it); otherwise it
+                            // collapses to whitespace.
+                            if comments == CommentMode::UnknownPrelude {
+                                let text = self.consume_loud_comment();
+                                lit.push_str(&text);
+                            } else {
+                                let _ = self.consume_loud_comment();
+                                lit.push(' ');
+                            }
+                            continue;
+                        }
+                        Some('/') => {
+                            // A silent comment always acts as whitespace. For
+                            // unknown preludes nothing is inserted (the trailing
+                            // newline left in the source provides the gap and
+                            // edges are trimmed); otherwise a single space.
+                            self.consume_silent_comment();
+                            if comments != CommentMode::UnknownPrelude {
+                                lit.push(' ');
+                            }
+                            continue;
+                        }
+                        _ => {}
                     }
-                    Some('/') => {
-                        self.consume_silent_comment();
-                        lit.push(' ');
-                        continue;
-                    }
-                    _ => {}
                 }
             }
             match c {

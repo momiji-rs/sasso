@@ -1479,3 +1479,27 @@ fn declaration_property_comment_stripping() {
     assert_eq!(ours("a {b //\n  : c}\n"), "a {\n  b: c;\n}\n");
     assert_eq!(ours("a { color : red ; }\n"), "a {\n  color: red;\n}\n");
 }
+
+#[test]
+fn at_rule_prelude_comment_stripping() {
+    // `@supports` and `@-moz-document` use structured grammars: top-level
+    // trivia comments are dropped, but comments inside parentheses are kept.
+    assert_eq!(
+        ours("@supports (a: b) /**/ {c {d: e}}\n"),
+        "@supports (a: b) {\n  c {\n    d: e;\n  }\n}\n"
+    );
+    assert_eq!(
+        ours("@supports (a: b) //\n  {c {d: e}}\n"),
+        "@supports (a: b) {\n  c {\n    d: e;\n  }\n}\n"
+    );
+    assert_eq!(
+        ours("@supports (a /**/ b) {c {d: e}}\n"),
+        "@supports (a /**/ b) {\n  c {\n    d: e;\n  }\n}\n"
+    );
+    // Unknown directives keep a loud comment verbatim but drop a silent one.
+    assert_eq!(ours("@a b /**/\n"), "@a b /**/;\n");
+    assert_eq!(ours("@a b //\n"), "@a b;\n");
+    assert_eq!(ours("@a /**/ b\n"), "@a b;\n");
+    assert_eq!(ours("@a b /**/ {}\n"), "@a b /**/ {}\n");
+    assert_eq!(ours("@a b //\n  {}\n"), "@a b {}\n");
+}
