@@ -611,6 +611,9 @@ impl<'a> Evaluator<'a> {
                 Stmt::AtRoot { query, body } => {
                     self.eval_at_root(query.as_deref(), body, sink)?;
                 }
+                Stmt::Keyframes { name, prelude, body } => {
+                    self.eval_keyframes(name, prelude, body, sink)?;
+                }
                 Stmt::Warn(e) => {
                     let v = self.eval_expr(e)?;
                     eprintln!("WARNING: {}", v.to_interp());
@@ -726,6 +729,41 @@ impl<'a> Evaluator<'a> {
         self.scopes.pop();
         result?;
         Ok(body)
+    }
+
+    /// Evaluate `@keyframes`. The frame selectors are keyframe selectors, not
+    /// CSS selectors: no `&`/parent resolution. We run the body with the parent
+    /// context reset to root (empty parents), so frame blocks emit verbatim.
+    /// The whole node bubbles to the document root like any other at-rule.
+    fn eval_keyframes(
+        &mut self,
+        name: &str,
+        prelude: &[TplPiece],
+        body: &[Stmt],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        // A style rule nested inside a keyframe block is invalid; each frame
+        // (a top-level rule in the body) may only hold declarations.
+        for stmt in body {
+            if let Stmt::Rule(frame) = stmt {
+                for inner in &frame.body {
+                    if matches!(inner, Stmt::Rule(_)) {
+                        return Err(Error::unpositioned(
+                            "Style rules may not be used within keyframe blocks.",
+                        ));
+                    }
+                }
+            }
+        }
+        let prelude = self.eval_template(prelude)?;
+        let out_body = self.eval_at_body(body, &[])?;
+        sink.push_at_rule(OutNode::AtRule {
+            name: name.to_string(),
+            prelude,
+            body: out_body,
+            has_block: true,
+        });
+        Ok(())
     }
 
     /// Evaluate `@at-root`: run the body with the parent-selector context reset

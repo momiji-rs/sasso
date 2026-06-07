@@ -369,6 +369,9 @@ impl Parser {
             "debug" => self.parse_message(MessageKind::Debug),
             "error" => self.parse_message(MessageKind::Error),
             "at-root" => self.parse_at_root(),
+            "keyframes" | "-webkit-keyframes" | "-moz-keyframes" | "-o-keyframes" | "-ms-keyframes" => {
+                self.parse_keyframes(name)
+            }
             // Known Sass features that are deliberately unimplemented in this
             // build: keep erroring (the generic passthrough would silently
             // accept them and lose their error specs).
@@ -412,6 +415,17 @@ impl Parser {
         };
         let body = self.parse_braced_body()?;
         Ok(Stmt::AtRoot { query, body })
+    }
+
+    /// Parse `@keyframes <name> { from {…} 50% {…} … }`. The body is parsed as
+    /// ordinary statements; each frame block classifies as a rule (its keyframe
+    /// selector is terminated by `{`). Parent resolution is suppressed at eval
+    /// time so the frame selectors emit verbatim.
+    fn parse_keyframes(&mut self, name: String) -> Result<Stmt, Error> {
+        self.skip_ws_inline();
+        let prelude = trim_prelude(self.parse_template(&['{'])?);
+        let body = self.parse_braced_body()?;
+        Ok(Stmt::Keyframes { name, prelude, body })
     }
 
     /// Parse a generic/unknown at-rule: `@name <prelude up to { ; or }>` then

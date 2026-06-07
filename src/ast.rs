@@ -73,6 +73,14 @@ pub(crate) enum Stmt {
         query: Option<Vec<TplPiece>>,
         body: Vec<Stmt>,
     },
+    /// `@keyframes <name> { from {…} 50% {…} … }`. The inner block selectors
+    /// are keyframe selectors, not CSS selectors (no `&`/parent resolution),
+    /// so the body is run with the parent context reset to root.
+    Keyframes {
+        name: String,
+        prelude: Vec<TplPiece>,
+        body: Vec<Stmt>,
+    },
     /// `@warn <expr>;` — writes to stderr, emits no CSS.
     Warn(Expr),
     /// `@debug <expr>;` — writes to stderr, emits no CSS.
