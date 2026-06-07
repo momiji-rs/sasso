@@ -10,7 +10,8 @@ use std::rc::Rc;
 use crate::ast::{
     BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, CustomDecl, Declaration, Expr,
     IfBranch, IfClause, IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, Param,
-    ParamList, PropertySet, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+    ParamList, PropertySet, Rule, Stmt, Stylesheet, SupportsCondition, SupportsValue, TplPiece, UnOp,
+    VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::{Pos, Scanner};
@@ -90,6 +91,43 @@ fn media_ident_plain(pieces: &[TplPiece]) -> Option<&str> {
         [TplPiece::Lit(s)] => Some(s),
         [] => Some(""),
         _ => None,
+    }
+}
+
+/// The plain (non-interpolated) text of a template, or `None` if it contains
+/// any `#{…}` interpolation (dart-sass `Interpolation.asPlain`).
+fn tpl_plain(pieces: &[TplPiece]) -> Option<String> {
+    let mut s = String::new();
+    for p in pieces {
+        match p {
+            TplPiece::Lit(t) => s.push_str(t),
+            TplPiece::Interp(_) => return None,
+        }
+    }
+    Some(s)
+}
+
+/// If `pieces` is exactly one `#{…}` interpolation (no surrounding literal),
+/// return its expression; otherwise `None`.
+fn tpl_single_interp(pieces: Vec<TplPiece>) -> Option<Expr> {
+    if pieces.len() == 1 {
+        if let Some(TplPiece::Interp(e)) = pieces.into_iter().next() {
+            return Some(e);
+        }
+    }
+    None
+}
+
+/// Whether a `@supports` declaration name is a CSS custom property: an unquoted
+/// identifier whose plain text begins with `--` (dart-sass
+/// `SupportsDeclaration.isCustomProperty`).
+fn expr_is_custom_property(name: &Expr) -> bool {
+    match name {
+        Expr::Ident(pieces) => match pieces.first() {
+            Some(TplPiece::Lit(s)) => s.starts_with("--"),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -830,6 +868,7 @@ impl Parser {
                 self.parse_keyframes(name)
             }
             "extend" => self.parse_extend(pos),
+            "supports" => self.parse_supports(),
             // Known Sass features that are deliberately unimplemented in this
             // build: keep erroring (the generic passthrough would silently
             // accept them and lose their error specs).
@@ -1104,6 +1143,606 @@ impl Parser {
         })
     }
 
+    // ---- @supports --------------------------------------------------
+
+    /// Parse `@supports <condition> { body }`. The condition is parsed into a
+    /// structured [`SupportsCondition`] (dart-sass grammar) so it serializes
+    /// canonically and malformed conditions are rejected; the body bubbles like
+    /// any at-rule.
+    fn parse_supports(&mut self) -> Result<Stmt, Error> {
+        self.skip_ws_inline();
+        let condition = self.parse_supports_condition()?;
+        let body = self.parse_braced_body()?;
+        Ok(Stmt::Supports { condition, body })
+    }
+
+    /// dart-sass `_supportsCondition`: an optional leading `not`, otherwise a
+    /// condition-in-parens followed by a uniform `and`/`or` chain.
+    fn parse_supports_condition(&mut self) -> Result<SupportsCondition, Error> {
+        if self.scan_keyword_ci("not") {
+            self.skip_ws_inline();
+            let inner = self.parse_supports_condition_in_parens()?;
+            return Ok(SupportsCondition::Negation(Box::new(inner)));
+        }
+        let mut condition = self.parse_supports_condition_in_parens()?;
+        self.skip_ws_inline();
+        let mut operator: Option<Conjunction> = None;
+        while self.looking_at_plain_identifier() {
+            match operator {
+                Some(Conjunction::And) => self.expect_keyword_ci("and")?,
+                Some(Conjunction::Or) => self.expect_keyword_ci("or")?,
+                None => {
+                    if self.scan_keyword_ci("or") {
+                        operator = Some(Conjunction::Or);
+                    } else {
+                        self.expect_keyword_ci("and")?;
+                        operator = Some(Conjunction::And);
+                    }
+                }
+            }
+            self.skip_ws_inline();
+            let right = self.parse_supports_condition_in_parens()?;
+            condition = SupportsCondition::Operation {
+                left: Box::new(condition),
+                right: Box::new(right),
+                op: operator.unwrap_or(Conjunction::And),
+            };
+            self.skip_ws_inline();
+        }
+        Ok(condition)
+    }
+
+    /// dart-sass `_supportsConditionInParens`: a parenthesised condition, a
+    /// function call, or a lone interpolation.
+    fn parse_supports_condition_in_parens(&mut self) -> Result<SupportsCondition, Error> {
+        if self.looking_at_interpolated_identifier() {
+            let pos = self.sc.position();
+            let identifier = self.parse_interpolated_identifier()?;
+            if tpl_plain(&identifier).map(|s| s.eq_ignore_ascii_case("not")) == Some(true) {
+                return Err(Error::at("\"not\" is not a valid identifier here.", pos));
+            }
+            if self.sc.eat('(') {
+                let arguments = self.parse_supports_decl_value(true, true, true)?;
+                if !self.sc.eat(')') {
+                    return Err(Error::at("expected \")\"", self.sc.position()));
+                }
+                return Ok(SupportsCondition::Function {
+                    name: identifier,
+                    arguments,
+                });
+            } else if let Some(expr) = tpl_single_interp(identifier) {
+                return Ok(SupportsCondition::Interpolation(expr));
+            } else {
+                return Err(Error::at("Expected @supports condition.", pos));
+            }
+        }
+
+        let start = self.sc.position();
+        if !self.sc.eat('(') {
+            return Err(Error::at("expected \"(\"", start));
+        }
+        self.skip_ws_inline();
+        if self.scan_keyword_ci("not") {
+            self.skip_ws_inline();
+            let condition = self.parse_supports_condition_in_parens()?;
+            if !self.sc.eat(')') {
+                return Err(Error::at("expected \")\"", self.sc.position()));
+            }
+            return Ok(SupportsCondition::Negation(Box::new(condition)));
+        } else if self.sc.peek() == Some('(') {
+            let condition = self.parse_supports_condition()?;
+            if !self.sc.eat(')') {
+                return Err(Error::at("expected \")\"", self.sc.position()));
+            }
+            return Ok(condition);
+        }
+
+        // Backtracking branch: try `<expression> ":" <value>` (a declaration),
+        // and on failure re-parse as an interpolated identifier followed either
+        // by an `and`/`or` operation or by an arbitrary "anything" value.
+        let name_mark = self.sc.mark();
+        let parsed = match self.parse_supports_decl_name() {
+            Ok(name) => {
+                self.skip_ws_inline();
+                if self.sc.eat(':') {
+                    Ok(Some(name))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(e) => Err(e),
+        };
+        match parsed {
+            Ok(Some(name)) => {
+                let custom = expr_is_custom_property(&name);
+                let value = if custom {
+                    // A custom-property value is captured verbatim.
+                    let raw = self.parse_supports_decl_value(false, false, true)?;
+                    SupportsValue::Raw(raw)
+                } else {
+                    self.skip_ws_inline();
+                    let v = self.parse_value()?;
+                    // Consume any trailing whitespace/comments before `)`
+                    // (dart-sass `_expression` leaves the cursor at `)`).
+                    self.skip_ws_inline();
+                    SupportsValue::Expr(v)
+                };
+                if !self.sc.eat(')') {
+                    return Err(Error::at("expected \")\"", self.sc.position()));
+                }
+                Ok(SupportsCondition::Declaration {
+                    name,
+                    value: Box::new(value),
+                    custom,
+                })
+            }
+            _ => {
+                self.sc.reset(name_mark);
+                let identifier = self.parse_interpolated_identifier()?;
+                match self.try_supports_operation(identifier)? {
+                    Ok(op) => {
+                        if !self.sc.eat(')') {
+                            return Err(Error::at("expected \")\"", self.sc.position()));
+                        }
+                        Ok(op)
+                    }
+                    Err(mut contents) => {
+                        // Otherwise parse an `<anything>` value (forbidding a
+                        // top-level colon: a colon there means this was meant to
+                        // be a declaration, so we report the missing-`:` error).
+                        let rest = self.parse_supports_decl_value(true, true, false)?;
+                        contents.extend(rest);
+                        if self.sc.peek() == Some(':') {
+                            return Err(Error::at("expected \":\".", self.sc.position()));
+                        }
+                        if !self.sc.eat(')') {
+                            return Err(Error::at("expected \")\"", self.sc.position()));
+                        }
+                        Ok(SupportsCondition::Anything(contents))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Parse the name expression of a `@supports` declaration: a space-/comma-
+    /// separated SassScript expression that stops at a top-level `:` (dart-sass
+    /// `_expression`). Unlike the general value grammar, a trailing `:` cleanly
+    /// terminates the expression rather than erroring, so `(a /**/: b)` and
+    /// `(a : b)` parse as declarations.
+    fn parse_supports_decl_name(&mut self) -> Result<Expr, Error> {
+        let mut commas: Vec<Expr> = Vec::new();
+        loop {
+            let mut spaces: Vec<Expr> = vec![self.or_expr()?];
+            loop {
+                let mark = self.sc.mark();
+                let had_ws = self.skip_ws_inline();
+                // Stop the space-list before a top-level `:`, a `,`, or any
+                // value terminator; require whitespace to continue otherwise.
+                if !had_ws || self.sc.peek() == Some(':') || self.at_value_terminator() {
+                    self.sc.reset(mark);
+                    break;
+                }
+                spaces.push(self.or_expr()?);
+            }
+            let element = if spaces.len() == 1 {
+                spaces.pop().unwrap_or(Expr::Null)
+            } else {
+                Expr::List {
+                    items: spaces,
+                    sep: ListSep::Space,
+                    bracketed: false,
+                }
+            };
+            commas.push(element);
+            let mark = self.sc.mark();
+            self.skip_ws_inline();
+            if self.sc.peek() == Some(',') {
+                self.sc.bump();
+                self.skip_ws_inline();
+                if self.sc.peek() == Some(':') || self.at_value_terminator() {
+                    self.sc.reset(mark);
+                    break;
+                }
+                continue;
+            }
+            self.sc.reset(mark);
+            break;
+        }
+        Ok(if commas.len() == 1 {
+            commas.pop().unwrap_or(Expr::Null)
+        } else {
+            Expr::List {
+                items: commas,
+                sep: ListSep::Comma,
+                bracketed: false,
+            }
+        })
+    }
+
+    /// dart-sass `_trySupportsOperation`: if a single-interpolation identifier
+    /// is followed by `and`/`or`, parse the operation chain (`Ok`); otherwise
+    /// restore the scanner position and return the identifier for reuse (`Err`).
+    fn try_supports_operation(
+        &mut self,
+        mut identifier: Vec<TplPiece>,
+    ) -> Result<Result<SupportsCondition, Vec<TplPiece>>, Error> {
+        // Only a single-interpolation identifier can form an operation. Pull
+        // the lone interpolation expression out; if it isn't one, give back the
+        // identifier untouched.
+        let expr = if matches!(identifier.as_slice(), [TplPiece::Interp(_)]) {
+            match identifier.pop() {
+                Some(TplPiece::Interp(e)) => e,
+                other => {
+                    // Unreachable given the guard above, but stay panic-free.
+                    if let Some(p) = other {
+                        identifier.push(p);
+                    }
+                    return Ok(Err(identifier));
+                }
+            }
+        } else {
+            return Ok(Err(identifier));
+        };
+
+        let before_ws = self.sc.mark();
+        self.skip_ws_inline();
+        let mut operation: Option<SupportsCondition> = None;
+        let mut left_expr = Some(expr);
+        let mut operator: Option<Conjunction> = None;
+        while self.looking_at_plain_identifier() {
+            match operator {
+                Some(Conjunction::And) => self.expect_keyword_ci("and")?,
+                Some(Conjunction::Or) => self.expect_keyword_ci("or")?,
+                None => {
+                    if self.scan_keyword_ci("and") {
+                        operator = Some(Conjunction::And);
+                    } else if self.scan_keyword_ci("or") {
+                        operator = Some(Conjunction::Or);
+                    } else {
+                        self.sc.reset(before_ws);
+                        // Reconstruct the single-interpolation identifier.
+                        let e = left_expr.take().unwrap_or(Expr::Null);
+                        return Ok(Err(vec![TplPiece::Interp(e)]));
+                    }
+                }
+            }
+            self.skip_ws_inline();
+            let right = self.parse_supports_condition_in_parens()?;
+            let left = match operation.take() {
+                Some(op) => op,
+                None => SupportsCondition::Interpolation(left_expr.take().unwrap_or(Expr::Null)),
+            };
+            operation = Some(SupportsCondition::Operation {
+                left: Box::new(left),
+                right: Box::new(right),
+                op: operator.unwrap_or(Conjunction::And),
+            });
+            self.skip_ws_inline();
+        }
+        match operation {
+            Some(op) => Ok(Ok(op)),
+            None => {
+                let e = left_expr.take().unwrap_or(Expr::Null);
+                Ok(Err(vec![TplPiece::Interp(e)]))
+            }
+        }
+    }
+
+    /// dart-sass `_interpolatedDeclarationValue`, specialized for `@supports`
+    /// (silent comments are dropped, loud comments kept; whitespace collapses;
+    /// `#{…}` interpolation captured as template pieces). Stops at an unbalanced
+    /// `)`/`}`/`]`, at `;` (unless `allow_semicolon`), at a top-level `:` (unless
+    /// `allow_colon`), or at `{`. Errors "Expected token." when `!allow_empty`
+    /// and nothing was read.
+    fn parse_supports_decl_value(
+        &mut self,
+        allow_empty: bool,
+        allow_semicolon: bool,
+        allow_colon: bool,
+    ) -> Result<Vec<TplPiece>, Error> {
+        let start = self.sc.position();
+        let mut pieces: Vec<TplPiece> = Vec::new();
+        let mut lit = String::new();
+        let mut brackets: Vec<char> = Vec::new();
+        // Whether the immediately-preceding source character was a newline
+        // (dart-sass `wroteNewline`/`peekChar(-1).isNewline`): used to preserve
+        // indentation and collapse consecutive newlines.
+        let mut prev_newline = false;
+        let mut wrote_anything = false;
+        while let Some(c) = self.sc.peek() {
+            match c {
+                '\\' => {
+                    lit.push(c);
+                    self.sc.bump();
+                    if let Some(n) = self.sc.bump() {
+                        lit.push(n);
+                    }
+                    prev_newline = false;
+                    wrote_anything = true;
+                }
+                '"' | '\'' => {
+                    lit.push(c);
+                    self.sc.bump();
+                    while let Some(ch) = self.sc.peek() {
+                        lit.push(ch);
+                        self.sc.bump();
+                        if ch == '\\' {
+                            if let Some(n) = self.sc.bump() {
+                                lit.push(n);
+                            }
+                            continue;
+                        }
+                        if ch == c {
+                            break;
+                        }
+                    }
+                    prev_newline = false;
+                    wrote_anything = true;
+                }
+                '/' if self.sc.peek_at(1) == Some('*') => {
+                    lit.push_str(&self.consume_loud_comment());
+                    prev_newline = false;
+                    wrote_anything = true;
+                }
+                '/' if self.sc.peek_at(1) == Some('/') => {
+                    self.consume_silent_comment();
+                    prev_newline = false;
+                }
+                '#' if self.sc.peek_at(1) == Some('{') => {
+                    if !lit.is_empty() {
+                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                    }
+                    self.sc.bump();
+                    self.sc.bump();
+                    let e = self.parse_value()?;
+                    self.skip_ws_inline();
+                    if !self.sc.eat('}') {
+                        return Err(Error::at("expected \"}\"", self.sc.position()));
+                    }
+                    pieces.push(TplPiece::Interp(e));
+                    prev_newline = false;
+                    wrote_anything = true;
+                }
+                ' ' | '\t'
+                    if !prev_newline
+                        && matches!(self.sc.peek_at(1), Some(w) if w == ' ' || w == '\t' || w == '\n' || w == '\r' || w == '\u{c}') =>
+                {
+                    // Collapse runs of whitespace to a single character, unless
+                    // following a newline (then it's indentation, preserved).
+                    self.sc.bump();
+                }
+                ' ' | '\t' => {
+                    lit.push(c);
+                    self.sc.bump();
+                    wrote_anything = true;
+                }
+                '\n' | '\r' | '\u{c}' => {
+                    // Collapse multiple newlines into one.
+                    if !prev_newline {
+                        lit.push('\n');
+                        wrote_anything = true;
+                    }
+                    self.sc.bump();
+                    prev_newline = true;
+                }
+                '(' | '[' | '{' => {
+                    // Open brackets are always pushed (dart-sass
+                    // `allowOpenBrace` defaults true): a `@supports` value reader
+                    // always lives inside `(...)`, so the at-rule body `{` is
+                    // never reached here — it follows the unbalanced `)`.
+                    self.sc.bump();
+                    lit.push(c);
+                    brackets.push(match c {
+                        '(' => ')',
+                        '[' => ']',
+                        _ => '}',
+                    });
+                    prev_newline = false;
+                    wrote_anything = true;
+                }
+                ')' | ']' | '}' => {
+                    let Some(expected) = brackets.last().copied() else {
+                        break;
+                    };
+                    if c != expected {
+                        return Err(Error::at(format!("expected \"{expected}\"."), self.sc.position()));
+                    }
+                    brackets.pop();
+                    self.sc.bump();
+                    lit.push(c);
+                    prev_newline = false;
+                    wrote_anything = true;
+                }
+                ';' => {
+                    if !allow_semicolon && brackets.is_empty() {
+                        break;
+                    }
+                    lit.push(c);
+                    self.sc.bump();
+                    prev_newline = false;
+                    wrote_anything = true;
+                }
+                ':' => {
+                    if !allow_colon && brackets.is_empty() {
+                        break;
+                    }
+                    lit.push(c);
+                    self.sc.bump();
+                    prev_newline = false;
+                    wrote_anything = true;
+                }
+                _ => {
+                    lit.push(c);
+                    self.sc.bump();
+                    prev_newline = false;
+                    wrote_anything = true;
+                }
+            }
+        }
+        if let Some(expected) = brackets.last() {
+            return Err(Error::at(format!("expected \"{expected}\""), self.sc.position()));
+        }
+        if !lit.is_empty() {
+            pieces.push(TplPiece::Lit(lit));
+        }
+        if !allow_empty && !wrote_anything {
+            return Err(Error::at("Expected token.", start));
+        }
+        Ok(pieces)
+    }
+
+    /// dart-sass `_lookingAtInterpolatedIdentifier`: whether the cursor begins
+    /// an identifier (possibly with `#{…}` interpolation).
+    fn looking_at_interpolated_identifier(&self) -> bool {
+        match self.sc.peek() {
+            None => false,
+            Some('\\') => true,
+            Some('#') => self.sc.peek_at(1) == Some('{'),
+            Some('-') => match self.sc.peek_at(1) {
+                None => false,
+                Some('#') => self.sc.peek_at(2) == Some('{'),
+                Some('-') | Some('\\') => true,
+                Some(c) => is_name_start_codepoint(c),
+            },
+            Some(c) => is_name_start_codepoint(c),
+        }
+    }
+
+    /// Whether the cursor begins a plain (non-interpolated) identifier — used to
+    /// detect a trailing `and`/`or` keyword in a supports condition.
+    fn looking_at_plain_identifier(&self) -> bool {
+        match self.sc.peek() {
+            Some('\\') => true,
+            Some('-') => {
+                matches!(self.sc.peek_at(1), Some(c) if is_name_start_codepoint(c) || c == '-' || c == '\\')
+            }
+            Some(c) => is_name_start_codepoint(c),
+            None => false,
+        }
+    }
+
+    /// dart-sass `interpolatedIdentifier`: an identifier with optional `#{…}`
+    /// interpolation, returned as template pieces. Errors if no identifier.
+    fn parse_interpolated_identifier(&mut self) -> Result<Vec<TplPiece>, Error> {
+        let mut pieces: Vec<TplPiece> = Vec::new();
+        let mut lit = String::new();
+        // A leading `--` (custom-property-style) is always a valid start.
+        if self.sc.peek() == Some('-') {
+            lit.push('-');
+            self.sc.bump();
+            if self.sc.peek() == Some('-') {
+                lit.push('-');
+                self.sc.bump();
+                self.interpolated_identifier_body(&mut pieces, &mut lit)?;
+                if !lit.is_empty() {
+                    pieces.push(TplPiece::Lit(lit));
+                }
+                return Ok(pieces);
+            }
+        }
+        match self.sc.peek() {
+            None => return Err(Error::at("Expected identifier.", self.sc.position())),
+            Some('\\') => {
+                if let Some(ch) = self.consume_escape()? {
+                    lit.push(ch);
+                }
+            }
+            Some('#') if self.sc.peek_at(1) == Some('{') => {
+                self.sc.bump();
+                self.sc.bump();
+                let e = self.parse_value()?;
+                self.skip_ws_inline();
+                if !self.sc.eat('}') {
+                    return Err(Error::at("expected \"}\"", self.sc.position()));
+                }
+                if !lit.is_empty() {
+                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                }
+                pieces.push(TplPiece::Interp(e));
+            }
+            Some(c) if is_name_start_codepoint(c) => {
+                lit.push(c);
+                self.sc.bump();
+            }
+            _ => return Err(Error::at("Expected identifier.", self.sc.position())),
+        }
+        self.interpolated_identifier_body(&mut pieces, &mut lit)?;
+        if !lit.is_empty() {
+            pieces.push(TplPiece::Lit(lit));
+        }
+        Ok(pieces)
+    }
+
+    /// Consume the body of an interpolated identifier (name chars, escapes,
+    /// `#{…}`) into the given piece/literal accumulators.
+    fn interpolated_identifier_body(
+        &mut self,
+        pieces: &mut Vec<TplPiece>,
+        lit: &mut String,
+    ) -> Result<(), Error> {
+        loop {
+            match self.sc.peek() {
+                Some(c) if c == '_' || c == '-' || c.is_ascii_alphanumeric() || (c as u32) >= 0x80 => {
+                    lit.push(c);
+                    self.sc.bump();
+                }
+                Some('\\') => {
+                    if let Some(ch) = self.consume_escape()? {
+                        lit.push(ch);
+                    }
+                }
+                Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    self.sc.bump();
+                    self.sc.bump();
+                    let e = self.parse_value()?;
+                    self.skip_ws_inline();
+                    if !self.sc.eat('}') {
+                        return Err(Error::at("expected \"}\"", self.sc.position()));
+                    }
+                    if !lit.is_empty() {
+                        pieces.push(TplPiece::Lit(std::mem::take(lit)));
+                    }
+                    pieces.push(TplPiece::Interp(e));
+                }
+                _ => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// Scan a bare keyword (case-insensitive) when it stands as a complete
+    /// identifier; on a match consume it and return true, else leave the
+    /// position unchanged.
+    fn scan_keyword_ci(&mut self, kw: &str) -> bool {
+        let mark = self.sc.mark();
+        let cs = self.sc.rest();
+        let mut i = 0;
+        while i < cs.len() && is_ident_char(cs[i]) {
+            i += 1;
+        }
+        let word: String = cs[..i].iter().collect();
+        if word.eq_ignore_ascii_case(kw) {
+            for _ in 0..i {
+                self.sc.bump();
+            }
+            true
+        } else {
+            self.sc.reset(mark);
+            false
+        }
+    }
+
+    /// Expect a bare keyword (case-insensitive); error in dart-sass's spelling
+    /// (`Expected "and".`) when it doesn't match.
+    fn expect_keyword_ci(&mut self, kw: &str) -> Result<(), Error> {
+        if self.scan_keyword_ci(kw) {
+            Ok(())
+        } else {
+            Err(Error::at(format!("Expected \"{kw}\"."), self.sc.position()))
+        }
+    }
+
     /// Parse `@at-root [query] { body }`. The optional query is the
     /// parenthesised `(with: …)` / `(without: …)` form; an inline selector
     /// (`@at-root .x { … }`) is desugared into a single rule inside the body.
@@ -1139,15 +1778,15 @@ impl Parser {
 
     /// Parse a generic/unknown at-rule: `@name <prelude up to { ; or }>` then
     /// either a `{ … }` body or a terminating `;` (or an immediate `}` closing
-    /// the enclosing block, as in `@supports … {@g}`). Covers `@font-face`,
-    /// `@page`, `@charset`, `@supports`, vendor `@foo`, and unknown directives.
+    /// the enclosing block, as in `@page … {@g}`). Covers `@font-face`,
+    /// `@page`, `@charset`, vendor `@foo`, and unknown directives.
     fn parse_generic_at_rule(&mut self, name: String) -> Result<Stmt, Error> {
         self.skip_ws_inline();
-        // dart-sass parses `@supports` and `@-moz-document` (only the exact
-        // lowercase spellings) with structured grammars that strip trivia
-        // comments between tokens; every other at-rule keeps loud comments
-        // verbatim and treats silent comments as whitespace.
-        let comment_mode = if name == "supports" || name == "-moz-document" {
+        // dart-sass parses `@-moz-document` (only the exact lowercase spelling)
+        // with a structured grammar that strips trivia comments between tokens;
+        // every other at-rule keeps loud comments verbatim and treats silent
+        // comments as whitespace. (`@supports` has its own dedicated parser.)
+        let comment_mode = if name == "-moz-document" {
             CommentMode::StripTopLevel
         } else {
             CommentMode::UnknownPrelude

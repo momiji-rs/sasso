@@ -2379,4 +2379,80 @@ fn adjacent_quoted_string_schema() {
         ours("$m: (\"a\": 1); a {b: map-get($m, \"a\")}\n"),
         "a {\n  b: 1;\n}\n"
     );
+fn supports_condition_serialization() {
+    // A declaration condition normalizes spacing (`(a:b)` -> `(a: b)`) and
+    // evaluates SassScript on both sides.
+    assert_eq!(ours("@supports (a:b) {@c}\n"), "@supports (a: b) {\n  @c;\n}\n");
+    assert_eq!(
+        ours("@supports (1 + 1: b) {@c}\n"),
+        "@supports (2: b) {\n  @c;\n}\n"
+    );
+    assert_eq!(
+        ours("@supports (a: 1 + 1) {@c}\n"),
+        "@supports (a: 2) {\n  @c;\n}\n"
+    );
+    // Redundant nested parentheses around a declaration collapse.
+    assert_eq!(
+        ours("@supports ((((a: b)))) {@c}\n"),
+        "@supports (a: b) {\n  @c;\n}\n"
+    );
+    // `and`/`or`/`not` operators and grouping parentheses.
+    assert_eq!(
+        ours("@supports (a: b) and ((c: d) or (e: f)) {@g}\n"),
+        "@supports (a: b) and ((c: d) or (e: f)) {\n  @g;\n}\n"
+    );
+    assert_eq!(
+        ours("@supports not (a: b) {@c}\n"),
+        "@supports not (a: b) {\n  @c;\n}\n"
+    );
+    // A custom-property value keeps no space after the colon and stays verbatim.
+    assert_eq!(
+        ours("@supports (--a: b) {@c}\n"),
+        "@supports (--a: b) {\n  @c;\n}\n"
+    );
+    // A `calc()` (and `min`/`clamp`/…) is kept unsimplified inside a `@supports`
+    // declaration, while a `#{…}` interpolation simplifies as usual.
+    assert_eq!(
+        ours("@supports (a: calc(1 + 2)) {@d}\n"),
+        "@supports (a: calc(1 + 2)) {\n  @d;\n}\n"
+    );
+    assert_eq!(
+        ours("@supports (a: clamp(0, 1, 2)) {@d}\n"),
+        "@supports (a: clamp(0, 1, 2)) {\n  @d;\n}\n"
+    );
+    assert_eq!(
+        ours("@supports (a: #{calc(1 + 2)}) {@d}\n"),
+        "@supports (a: 3) {\n  @d;\n}\n"
+    );
+    // Trivia comments inside the condition are stripped; loud comments in an
+    // "anything" value are preserved.
+    assert_eq!(
+        ours("@supports (a /**/: b) {c {d: e}}\n"),
+        "@supports (a: b) {\n  c {\n    d: e;\n  }\n}\n"
+    );
+    // A `supports()`-style function call and an arbitrary "anything" value pass
+    // through verbatim.
+    assert_eq!(ours("@supports a(b) {@c}\n"), "@supports a(b) {\n  @c;\n}\n");
+    assert_eq!(ours("@supports (a b) {@c}\n"), "@supports (a b) {\n  @c;\n}\n");
+    // A lone interpolation is spliced in unquoted.
+    assert_eq!(
+        ours("@supports #{\"(a: b)\"} and (c: 1 + 1) {@d}\n"),
+        "@supports (a: b) and (c: 2) {\n  @d;\n}\n"
+    );
+    // An empty/placeholder-only body produces no output.
+    assert_eq!(ours("@supports (a: b) {}\n"), "");
+    assert_eq!(ours("@supports (a: b) { %c {d: e} }\n"), "");
+    // Malformed conditions are rejected.
+    assert!(compile("@supports a {@b}\n", &Options::default()).is_err());
+    assert!(compile("@supports (not a) {@b}\n", &Options::default()).is_err());
+    assert!(compile(
+        "@supports (a: b) and (c: d) or (e: f) {@g}\n",
+        &Options::default()
+    )
+    .is_err());
+
+    // Live parity for the same constructs.
+    assert_parity("@supports (a:b) {@c}\n");
+    assert_parity("@supports (a: calc(1 + 2)) and #{\"(c: d)\"} {x {y: z}}\n");
+    assert_parity("@supports (--a: b //\n  ) {c {d: e}}\n");
 }

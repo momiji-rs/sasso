@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::ast::{
     BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, CustomDecl, Declaration, Expr,
     IfClause, IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, ParamList,
-    PropertySet, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+    PropertySet, Rule, Stmt, Stylesheet, SupportsCondition, SupportsValue, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -211,6 +211,11 @@ pub(crate) struct Evaluator<'a> {
     /// Empty at the document root and inside ordinary rules; a child declaration
     /// emitted while this is non-empty is namespaced as `<prefix>-<name>`.
     decl_prefix: Option<String>,
+    /// Whether we are evaluating the value of a `@supports` declaration. When
+    /// set, `calc()` interiors are NOT simplified (dart-sass keeps
+    /// `calc(1 + 2)` literal in `@supports (a: calc(1 + 2))`), matching
+    /// dart-sass `_inSupportsDeclaration`.
+    in_supports_declaration: bool,
 }
 
 /// A pending `@extend`, captured during eval and applied after flattening.
@@ -240,6 +245,7 @@ impl<'a> Evaluator<'a> {
             current_selector: None,
             extends: Vec::new(),
             decl_prefix: None,
+            in_supports_declaration: false,
         }
     }
 
@@ -881,6 +887,9 @@ impl<'a> Evaluator<'a> {
                 Stmt::Media { query, body } => {
                     self.eval_media(query, body, parents, sink)?;
                 }
+                Stmt::Supports { condition, body } => {
+                    self.eval_supports(condition, body, parents, sink)?;
+                }
                 Stmt::AtRoot { query, body } => {
                     self.eval_at_root(query.as_deref(), body, sink)?;
                 }
@@ -1219,6 +1228,108 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// Evaluate `@supports <condition> { body }`: serialize the structured
+    /// condition canonically, run the body (bubbling like any at-rule), and emit
+    /// the node — skipping emission entirely when the body produces nothing
+    /// (dart-sass drops an empty/invisible `@supports`).
+    fn eval_supports(
+        &mut self,
+        condition: &SupportsCondition,
+        body: &[Stmt],
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        let prelude = self.serialize_supports_condition(condition)?;
+        let out_body = self.eval_at_body(body, parents)?;
+        if out_body.is_empty() {
+            return Ok(());
+        }
+        sink.push_at_rule(OutNode::AtRule {
+            name: "supports".to_string(),
+            prelude,
+            body: out_body,
+            has_block: true,
+        });
+        Ok(())
+    }
+
+    /// Serialize a `@supports` condition to its canonical CSS string
+    /// (dart-sass `_visitSupportsCondition`).
+    fn serialize_supports_condition(&mut self, condition: &SupportsCondition) -> Result<String, Error> {
+        match condition {
+            SupportsCondition::Operation { left, right, op } => {
+                let l = self.parenthesize_supports(left, Some(*op))?;
+                let r = self.parenthesize_supports(right, Some(*op))?;
+                let word = if matches!(op, Conjunction::And) {
+                    "and"
+                } else {
+                    "or"
+                };
+                Ok(format!("{l} {word} {r}"))
+            }
+            SupportsCondition::Negation(inner) => {
+                Ok(format!("not {}", self.parenthesize_supports(inner, None)?))
+            }
+            SupportsCondition::Interpolation(expr) => Ok(self.eval_expr(expr)?.to_interp()),
+            SupportsCondition::Declaration { name, value, custom } => {
+                // dart-sass evaluates BOTH the name and the value with
+                // `_inSupportsDeclaration` set, so a calc in the name
+                // (`(calc(0): a)`) is also kept unsimplified.
+                let saved = self.in_supports_declaration;
+                self.in_supports_declaration = true;
+                let result = (|| {
+                    let n = self.eval_expr(name)?.to_css(self.compressed());
+                    let v = match value.as_ref() {
+                        SupportsValue::Expr(e) => self.eval_expr(e)?.to_css(self.compressed()),
+                        // A custom-property value is an unquoted string: resolve
+                        // its interpolation, then apply unquoted-string
+                        // serialization (`\n` -> space, post-newline spaces
+                        // dropped), matching dart-sass `_visitUnquotedString`.
+                        SupportsValue::Raw(tpl) => unquoted_string_css(&self.eval_template(tpl)?),
+                    };
+                    Ok::<_, Error>((n, v))
+                })();
+                self.in_supports_declaration = saved;
+                let (n, v) = result?;
+                let sep = if *custom { "" } else { " " };
+                Ok(format!("({n}:{sep}{v})"))
+            }
+            SupportsCondition::Function { name, arguments } => {
+                let n = self.eval_template(name)?;
+                let args = self.eval_template(arguments)?;
+                Ok(format!("{n}({args})"))
+            }
+            SupportsCondition::Anything(contents) => {
+                let inner = self.eval_template(contents)?;
+                Ok(format!("({inner})"))
+            }
+        }
+    }
+
+    /// dart-sass `_parenthesize`: wrap a sub-condition in parentheses when it is
+    /// a negation, or an operation whose operator differs from the surrounding
+    /// one (or there is no surrounding operator).
+    fn parenthesize_supports(
+        &mut self,
+        condition: &SupportsCondition,
+        operator: Option<Conjunction>,
+    ) -> Result<String, Error> {
+        let needs_parens = match condition {
+            SupportsCondition::Negation(_) => true,
+            SupportsCondition::Operation { op, .. } => match operator {
+                None => true,
+                Some(outer) => outer != *op,
+            },
+            _ => false,
+        };
+        let inner = self.serialize_supports_condition(condition)?;
+        if needs_parens {
+            Ok(format!("({inner})"))
+        } else {
+            Ok(inner)
+        }
+    }
+
     /// Evaluate `@keyframes`. The frame selectors are keyframe selectors, not
     /// CSS selectors: no `&`/parent resolution. We run the body with the parent
     /// context reset to root (empty parents), so frame blocks emit verbatim.
@@ -1482,18 +1593,35 @@ impl<'a> Evaluator<'a> {
                 Some(v) => Ok(v.clone().without_slash()),
                 None => Err(Error::unpositioned(format!("Undefined variable ${name}."))),
             },
+            // A string expression (quoted/unquoted/lone-interpolation) resolves
+            // its interpolation in a context where the `@supports`-declaration
+            // no-simplify flag is OFF, so `(a: #{calc(1 + 2)})` -> `(a: 3)`
+            // (the interpolated calc simplifies), matching dart-sass
+            // `visitStringExpression`.
             Expr::QuotedString(pieces) => {
-                let text = self.eval_template(pieces)?;
-                Ok(Value::Str(SassStr { text, quoted: true }))
+                let saved = std::mem::replace(&mut self.in_supports_declaration, false);
+                let text = self.eval_template(pieces);
+                self.in_supports_declaration = saved;
+                Ok(Value::Str(SassStr {
+                    text: text?,
+                    quoted: true,
+                }))
             }
             Expr::Ident(pieces) => {
-                let text = self.eval_template(pieces)?;
-                Ok(Value::Str(SassStr { text, quoted: false }))
+                let saved = std::mem::replace(&mut self.in_supports_declaration, false);
+                let text = self.eval_template(pieces);
+                self.in_supports_declaration = saved;
+                Ok(Value::Str(SassStr {
+                    text: text?,
+                    quoted: false,
+                }))
             }
             Expr::Interp(inner) => {
-                let v = self.eval_expr(inner)?;
+                let saved = std::mem::replace(&mut self.in_supports_declaration, false);
+                let v = self.eval_expr(inner);
+                self.in_supports_declaration = saved;
                 Ok(Value::Str(SassStr {
-                    text: v.to_interp(),
+                    text: v?.to_interp(),
                     quoted: false,
                 }))
             }
@@ -1589,6 +1717,12 @@ impl<'a> Evaluator<'a> {
             }
             Expr::Calc { inner, .. } => {
                 let node = self.eval_calc(inner)?;
+                // Inside a `@supports` declaration the calculation is kept
+                // unsimplified: the `calc()` wrapper is always preserved (even
+                // around a single number), matching dart-sass `simplify: false`.
+                if self.in_supports_declaration {
+                    return Ok(Value::Calc(node));
+                }
                 // A calculation that reduces to a single finite number unwraps
                 // to it; a non-finite result (infinity/NaN) stays a
                 // calculation so it serializes as `calc(infinity)` etc., and
@@ -1622,6 +1756,18 @@ impl<'a> Evaluator<'a> {
                 }
             }
             Expr::Func { name, args, pos } => {
+                // Inside a `@supports` declaration, a CSS math function
+                // (`min`/`max`/`clamp`/…) is kept unsimplified: its arguments
+                // are resolved through the (non-folding) calc machinery and the
+                // call is serialized verbatim, matching dart-sass
+                // `simplify: false`. A user-defined function of the same name
+                // still wins, so this only applies to builtins.
+                if self.in_supports_declaration
+                    && is_supports_calc_function(name)
+                    && !self.functions.contains_key(name)
+                {
+                    return self.eval_supports_calc_func(name, args, *pos);
+                }
                 // if() is lazy: only the selected branch is evaluated.
                 if name == "if" {
                     return self.eval_if_function(args, *pos);
@@ -1818,6 +1964,30 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// Serialize a CSS math function (`min`/`max`/`clamp`/…) verbatim inside a
+    /// `@supports` declaration: each argument is resolved through the
+    /// (non-folding) calc machinery and joined with `, `. Used only when
+    /// `in_supports_declaration` is set.
+    fn eval_supports_calc_func(&mut self, name: &str, args: &[CallArg], pos: Pos) -> Result<Value, Error> {
+        if args.iter().any(|a| a.splat) {
+            return Err(Error::at("Rest arguments can't be used with calculations.", pos));
+        }
+        let mut parts = Vec::with_capacity(args.len());
+        for a in args {
+            let inner = self.eval_calc(&a.value)?.to_calc_css(self.compressed());
+            // A named argument (`min($a: 1)`) is not valid in a calculation, but
+            // we preserve any name verbatim to mirror the surface syntax.
+            match &a.name {
+                Some(n) => parts.push(format!("${n}: {inner}")),
+                None => parts.push(inner),
+            }
+        }
+        Ok(Value::Str(SassStr {
+            text: format!("{name}({})", parts.join(", ")),
+            quoted: false,
+        }))
+    }
+
     /// Evaluate the interior of a `calc()` into a simplified node tree.
     /// Numeric `number <op> number` subtrees with compatible units fold;
     /// everything else (variables, interpolations, incompatible units) is
@@ -1837,11 +2007,25 @@ impl<'a> Evaluator<'a> {
                 };
                 let l = self.eval_calc(lhs)?;
                 let r = self.eval_calc(rhs)?;
+                if self.in_supports_declaration {
+                    return Ok(CalcNode::Op {
+                        op: calc_op,
+                        left: Box::new(l),
+                        right: Box::new(r),
+                    });
+                }
                 fold_calc(calc_op, l, r, *pos)
             }
             Expr::Div { lhs, rhs, pos, .. } => {
                 let l = self.eval_calc(lhs)?;
                 let r = self.eval_calc(rhs)?;
+                if self.in_supports_declaration {
+                    return Ok(CalcNode::Op {
+                        op: CalcOp::Div,
+                        left: Box::new(l),
+                        right: Box::new(r),
+                    });
+                }
                 fold_calc(CalcOp::Div, l, r, *pos)
             }
             Expr::Unary {
@@ -1875,15 +2059,20 @@ impl<'a> Evaluator<'a> {
                     other => Ok(other),
                 }
             }
-            // A nested calc() flattens into the surrounding calculation, but
-            // an unresolved single-string operand (an interpolation or a
-            // `var()` substitution that is not a clean operand) is
+            // A nested calc() flattens into the surrounding calculation —
+            // except inside a `@supports` declaration, where dart-sass keeps the
+            // calculation unsimplified, so the inner `calc(...)` stays wrapped.
+            // Otherwise an unresolved single-string operand (an interpolation or
+            // a `var()` substitution that is not a clean operand) is
             // parenthesized: dart-sass writes `calc(calc(#{"c*"}))` as
-            // `calc((c*))` and `calc(1 + calc(var(--c)))` as
-            // `calc(1 + (var(--c)))`. A clean identifier (`calc(calc(c))` ->
-            // `calc(c)`), a number, an operation, or a complete sub-calculation
-            // (`calc(1 + calc(min(1%, 2px)))`) flattens without extra parens.
+            // `calc((c*))` and `calc(1 + calc(var(--c)))` as `calc(1 +
+            // (var(--c)))`. A clean identifier, number, operation, or complete
+            // sub-calculation flattens without extra parens.
             Expr::Calc { inner, .. } => {
+                if self.in_supports_declaration {
+                    let s = self.eval_calc(inner)?.to_calc_css(self.compressed());
+                    return Ok(CalcNode::Str(format!("calc({s})")));
+                }
                 let node = self.eval_calc(inner)?;
                 match node {
                     CalcNode::Str(s) if nested_calc_needs_parens(&s) => Ok(CalcNode::Str(format!("({s})"))),
@@ -2551,6 +2740,62 @@ fn is_calc_function(name: &str) -> bool {
     matches!(name, "clamp" | "hypot" | "atan2" | "log" | "pow")
 }
 
+/// Serialize an unquoted string as dart-sass `_visitUnquotedString` does: each
+/// newline becomes a single space, and any whitespace immediately following a
+/// newline is dropped. Used for `@supports` custom-property values.
+fn unquoted_string_css(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut after_newline = false;
+    for ch in s.chars() {
+        match ch {
+            '\n' => {
+                out.push(' ');
+                after_newline = true;
+            }
+            ' ' => {
+                if !after_newline {
+                    out.push(' ');
+                }
+            }
+            other => {
+                after_newline = false;
+                out.push(other);
+            }
+        }
+    }
+    out
+}
+
+/// Whether `name` is a CSS math function that dart-sass parses as a calculation
+/// (and so keeps unsimplified inside a `@supports` declaration). Matched
+/// case-insensitively, mirroring dart-sass's calculation-function set.
+fn is_supports_calc_function(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "min"
+            | "max"
+            | "clamp"
+            | "round"
+            | "mod"
+            | "rem"
+            | "abs"
+            | "sign"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "atan2"
+            | "exp"
+            | "sqrt"
+            | "pow"
+            | "log"
+            | "hypot"
+    )
+}
+
 /// Find a map anywhere in a value (including nested in a list), returning a
 /// reference to the first one. Used to reject maps in CSS output positions,
 /// where dart-sass errors with "(…) isn't a valid CSS value.".
@@ -2964,11 +3209,19 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extens
                     None => true,
                 }
             }
-            OutNode::AtRule { name, body, .. } => {
+            OutNode::AtRule {
+                name,
+                body,
+                has_block,
+                ..
+            } => {
                 if !is_keyframes_name(name) {
                     rewrite_nodes(body, extensions);
                 }
-                false
+                // A conditional group rule (`@media`/`@supports`) whose body is
+                // emptied by placeholder removal produces no CSS, so drop it
+                // (dart-sass omits empty `@media`/`@supports`).
+                *has_block && body.is_empty() && (name == "media" || name == "supports")
             }
             _ => false,
         };

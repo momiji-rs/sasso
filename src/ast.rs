@@ -93,6 +93,13 @@ pub(crate) enum Stmt {
     /// structured form so SassScript inside feature values is resolved and the
     /// query is re-serialized (and bubbled/merged) exactly like dart-sass.
     Media { query: MediaQueryList, body: Vec<Stmt> },
+    /// `@supports <condition> { body }`. The condition is parsed into a
+    /// structured form (`SupportsCondition`) so it serializes canonically and
+    /// malformed conditions are rejected; the body bubbles like any at-rule.
+    Supports {
+        condition: SupportsCondition,
+        body: Vec<Stmt>,
+    },
     /// `@at-root [query] { body }` — runs the body with the parent selector
     /// reset to the document root.
     AtRoot {
@@ -433,4 +440,48 @@ pub(crate) enum MediaFeature {
         second: Expr,
         rest: Option<(String, Expr)>,
     },
+}
+
+// ---- @supports conditions ----------------------------------------------
+
+/// A parsed `@supports` condition (dart-sass `SupportsCondition`). The
+/// condition is re-serialized canonically at eval time: `(a: b)` declaration
+/// spacing, stripped trivia comments, normalized whitespace.
+pub(crate) enum SupportsCondition {
+    /// `(<name>: <value>)`. `custom` is true when the name is a literal
+    /// unquoted identifier starting with `--`; its value is then captured
+    /// verbatim (a template) and serialized with no space after the colon.
+    Declaration {
+        name: Expr,
+        value: Box<SupportsValue>,
+        custom: bool,
+    },
+    /// `not <condition-in-parens>`.
+    Negation(Box<SupportsCondition>),
+    /// `<left> <and|or> <right>`.
+    Operation {
+        left: Box<SupportsCondition>,
+        right: Box<SupportsCondition>,
+        op: Conjunction,
+    },
+    /// A lone `#{…}` interpolation spliced in verbatim (unquoted).
+    Interpolation(Expr),
+    /// `<name>(<arguments>)` — a `supports()`-style function call. Both the
+    /// name and the arguments are templates captured verbatim.
+    Function {
+        name: Vec<TplPiece>,
+        arguments: Vec<TplPiece>,
+    },
+    /// `(<anything>)` — an arbitrary parenthesised value captured verbatim
+    /// (the declaration grammar didn't match, e.g. `(a b)` or `(a !&$)`).
+    Anything(Vec<TplPiece>),
+}
+
+/// The right-hand side of a `@supports` declaration condition.
+pub(crate) enum SupportsValue {
+    /// A normal SassScript expression value (`(a: 1 + 1)` -> `(a: 2)`).
+    Expr(Expr),
+    /// A custom-property value captured verbatim as a template (only `#{…}`
+    /// interpolation resolves); serialized with no space after the colon.
+    Raw(Vec<TplPiece>),
 }
