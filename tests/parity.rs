@@ -3369,3 +3369,52 @@ fn parity_sass_comments() {
 fn parity_sass_custom_property() {
     assert_sass_parity("a\n  --b: c d\n");
 }
+
+#[test]
+fn parity_sass_imports_scss_partial() {
+    // A `.sass` entrypoint importing a `.scss` partial: each file parses with
+    // the front-end matching its extension.
+    if !enabled() {
+        return;
+    }
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let id = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("sasso-xsyntax-{}-{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(dir.join("_pal.scss"), "$c: red;\n.a { color: $c; }\n").expect("write");
+    let input = "@import \"pal\"\nb\n  x: $c\n";
+    std::fs::write(dir.join("input.sass"), input).expect("write");
+    let importer = FsImporter::new(vec![dir.clone()]);
+    let ours = compile(
+        input,
+        &Options::default()
+            .with_syntax(sasso::Syntax::Sass)
+            .with_importer(&importer),
+    )
+    .expect("our cross-syntax compile failed");
+    let bin = std::env::var("SASS_BIN").unwrap_or_else(|_| "npx".to_string());
+    let mut cmd = if bin == "npx" {
+        let mut c = Command::new("npx");
+        c.args(["--yes", "sass", "--no-source-map", "input.sass"]);
+        c
+    } else {
+        let mut c = Command::new(bin);
+        c.args(["--no-source-map", "input.sass"]);
+        c
+    };
+    let out = cmd
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .expect("run dart-sass");
+    let _ = std::fs::remove_dir_all(&dir);
+    if !out.status.success() {
+        eprintln!("skipping cross-syntax parity case: dart-sass errored");
+        return;
+    }
+    let theirs = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(ours, theirs, "\n--- input.sass ---\n{input}\n");
+}

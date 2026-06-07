@@ -18,7 +18,15 @@ use crate::ast::{
 use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{CalcNode, CalcOp, List, ListSep, Map, Number, SassFunction, SassStr, Value};
-use crate::{Importer, OutputStyle};
+use crate::{Importer, OutputStyle, Syntax};
+
+/// Parse imported/`@use`d source with the front-end matching its file syntax.
+fn parse_with_syntax(src: &str, syntax: Syntax) -> Result<crate::ast::Stylesheet, Error> {
+    match syntax {
+        Syntax::Scss => crate::parser::parse(src),
+        Syntax::Sass => crate::sass_parser::parse(src),
+    }
+}
 
 /// A call's evaluated arguments, split into positional values and named
 /// `(name, value)` keyword pairs (after splat expansion).
@@ -1436,8 +1444,8 @@ impl<'a> Evaluator<'a> {
         sink: &mut Sink<'_>,
     ) -> Result<(Rc<Module>, Vec<String>), Error> {
         let importer = self.options.importer;
-        let (key, src) = match importer.and_then(|imp| imp.resolve_module(url)) {
-            Some(pair) => pair,
+        let (key, src, syntax) = match importer.and_then(|imp| imp.resolve_module_with_syntax(url)) {
+            Some(triple) => triple,
             None => {
                 return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
             }
@@ -1471,7 +1479,7 @@ impl<'a> Evaluator<'a> {
                 pos,
             ));
         }
-        let sheet = crate::parser::parse(&src)?;
+        let sheet = parse_with_syntax(&src, syntax)?;
         let (module, consumed) = self.eval_module(&key, &sheet, config, pos, sink)?;
         let module = Rc::new(module);
         self.module_cache.borrow_mut().insert(key, Rc::clone(&module));
@@ -2601,12 +2609,12 @@ impl<'a> Evaluator<'a> {
                         sink.push_at_rule(OutNode::Raw(format!("@import \"{path}\";")));
                         continue;
                     }
-                    match importer.and_then(|imp| imp.resolve(path)) {
-                        Some(src) => {
+                    match importer.and_then(|imp| imp.resolve_with_syntax(path)) {
+                        Some((src, syntax)) => {
                             if self.loading.iter().any(|p| p == path) {
                                 return Err(Error::unpositioned("This file is already being loaded."));
                             }
-                            let sheet = crate::parser::parse(&src)?;
+                            let sheet = parse_with_syntax(&src, syntax)?;
                             self.loading.push(path.clone());
                             // `@import` inlines the file's variables/functions/
                             // mixins into the current scope, but its module

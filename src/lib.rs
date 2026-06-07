@@ -18,13 +18,15 @@
 //!
 //! ## Scope
 //!
-//! This is an in-progress vertical slice: variables (`!default`/`!global`),
+//! This covers a large slice of Sass: variables (`!default`/`!global`),
 //! nesting and the `&` parent selector, `#{}` interpolation, `//` and
-//! `/* */` comments, unit arithmetic, a focused color-function set
-//! (`rgb`/`rgba`/`hsl`/`mix`/`lighten`/`darken`/`percentage`), and
-//! `@import` inlining. Control flow, mixins/functions, `@extend` and the
-//! module system are not yet implemented. The north-star target is 100%
-//! of the official `sass-spec` suite, tracked by the harness in `spec/`.
+//! `/* */` comments, unit arithmetic, the color functions, control flow,
+//! mixins/functions, `@extend`, `@import`, and the `@use`/`@forward` module
+//! system. Both input syntaxes are supported — the brace/semicolon SCSS
+//! syntax and the indented `.sass` syntax (selected via [`Options::with_syntax`]
+//! or, in the CLI, the input file's extension) — parsing into the same AST and
+//! sharing the evaluator and emitter. The north-star target is 100% of the
+//! official `sass-spec` suite, tracked by the harness in `spec/`.
 
 mod ast;
 mod builtins;
@@ -85,6 +87,22 @@ pub trait Importer {
     /// key (adequate when each distinct file is referenced by a single URL).
     fn resolve_module(&self, path: &str) -> Option<(String, String)> {
         self.resolve(path).map(|src| (path.to_string(), src))
+    }
+
+    /// Like [`Importer::resolve`], but also reports the syntax of the resolved
+    /// file so a `.sass` partial imported from `.scss` (or vice versa) is parsed
+    /// with the correct front-end. The default keeps backward compatibility by
+    /// resolving through [`Importer::resolve`] and reporting [`Syntax::Scss`].
+    fn resolve_with_syntax(&self, path: &str) -> Option<(String, Syntax)> {
+        self.resolve(path).map(|src| (src, Syntax::Scss))
+    }
+
+    /// Like [`Importer::resolve_module`], but also reports the resolved file's
+    /// syntax (see [`Importer::resolve_with_syntax`]). The default reports
+    /// [`Syntax::Scss`].
+    fn resolve_module_with_syntax(&self, path: &str) -> Option<(String, String, Syntax)> {
+        self.resolve_module(path)
+            .map(|(key, src)| (key, src, Syntax::Scss))
     }
 }
 
@@ -184,6 +202,26 @@ impl Importer for FsImporter {
     }
 
     fn resolve_module(&self, path: &str) -> Option<(String, String)> {
+        self.resolve_module_with_syntax(path)
+            .map(|(key, src, _)| (key, src))
+    }
+
+    fn resolve_with_syntax(&self, path: &str) -> Option<(String, Syntax)> {
+        for base in &self.load_paths {
+            match resolve_in_base(base, path, true) {
+                Resolution::Found(p) => {
+                    if let Ok(src) = std::fs::read_to_string(&p) {
+                        return Some((src, syntax_for_path(&p)));
+                    }
+                }
+                Resolution::Ambiguous => return None,
+                Resolution::NotFound => {}
+            }
+        }
+        None
+    }
+
+    fn resolve_module_with_syntax(&self, path: &str) -> Option<(String, String, Syntax)> {
         for base in &self.load_paths {
             // `@use`/`@forward` never consider `.import` files (those are an
             // `@import`-only escape hatch).
@@ -195,7 +233,7 @@ impl Importer for FsImporter {
                         let key = std::fs::canonicalize(&p)
                             .map(|c| c.to_string_lossy().into_owned())
                             .unwrap_or_else(|_| p.to_string_lossy().into_owned());
-                        return Some((key, src));
+                        return Some((key, src, syntax_for_path(&p)));
                     }
                 }
                 Resolution::Ambiguous => return None,
@@ -203,6 +241,19 @@ impl Importer for FsImporter {
             }
         }
         None
+    }
+}
+
+/// The syntax a resolved file should be parsed with, from its extension: a
+/// `.sass` file is the indented syntax, anything else (`.scss`) is SCSS.
+fn syntax_for_path(p: &Path) -> Syntax {
+    if p.extension()
+        .map(|e| e.eq_ignore_ascii_case("sass"))
+        .unwrap_or(false)
+    {
+        Syntax::Sass
+    } else {
+        Syntax::Scss
     }
 }
 
