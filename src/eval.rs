@@ -28,6 +28,22 @@ pub(crate) enum OutNode {
     Raw(String),
     /// A blank-line separator between top-level groups (expanded only).
     Blank,
+    /// An at-rule: `@name prelude { body }` (when `has_block`) or
+    /// `@name prelude;` (when not). The body holds the bubbled-out child
+    /// nodes; bare declarations appear as [`OutNode::AtDecl`].
+    AtRule {
+        name: String,
+        prelude: String,
+        body: Vec<OutNode>,
+        has_block: bool,
+    },
+    /// A bare declaration emitted directly inside an at-rule body (e.g.
+    /// `@font-face { font-family: x; }`).
+    AtDecl {
+        prop: String,
+        value: String,
+        important: bool,
+    },
 }
 
 /// An item inside a rule block.
@@ -51,6 +67,10 @@ enum Sink<'a> {
         items: &'a mut Vec<OutItem>,
         nested: &'a mut Vec<OutNode>,
     },
+    /// The body of a top-level at-rule (no enclosing selector): bare
+    /// declarations land here directly as [`OutNode::AtDecl`], interleaved
+    /// in source order with bubbled child rules and nested at-rules.
+    AtRoot(&'a mut Vec<OutNode>),
 }
 
 impl Sink<'_> {
@@ -65,12 +85,26 @@ impl Sink<'_> {
                 push_group(out, vec![OutNode::Comment(text)]);
             }
             Sink::Rule { items, .. } => items.push(OutItem::Comment(text)),
+            Sink::AtRoot(body) => body.push(OutNode::Comment(text)),
         }
     }
 
     fn push_item(&mut self, item: OutItem) {
-        if let Sink::Rule { items, .. } = self {
-            items.push(item);
+        match self {
+            Sink::Rule { items, .. } => items.push(item),
+            Sink::AtRoot(body) => match item {
+                OutItem::Decl {
+                    prop,
+                    value,
+                    important,
+                } => body.push(OutNode::AtDecl {
+                    prop,
+                    value,
+                    important,
+                }),
+                OutItem::Comment(text) => body.push(OutNode::Comment(text)),
+            },
+            Sink::Top(_) => {}
         }
     }
 
@@ -93,6 +127,26 @@ impl Sink<'_> {
                 }
                 parent.extend(nested);
             }
+            Sink::AtRoot(body) => {
+                if let Some(b) = block {
+                    body.push(b);
+                }
+                body.extend(nested);
+            }
+        }
+    }
+
+    /// Deposit a produced at-rule (or `@at-root` output). At the top level it
+    /// forms its own group; inside a style rule it joins the rules that bubble
+    /// out to the document root; inside another at-rule's body it nests.
+    fn push_at_rule(&mut self, node: OutNode) {
+        match self {
+            Sink::Top(out) => {
+                let out = &mut **out;
+                push_group(out, vec![node]);
+            }
+            Sink::Rule { nested, .. } => nested.push(node),
+            Sink::AtRoot(body) => body.push(node),
         }
     }
 }
@@ -533,12 +587,15 @@ impl<'a> Evaluator<'a> {
                         let out = &mut **out;
                         self.eval_imports(args, out)?;
                     }
-                    Sink::Rule { .. } => {
+                    Sink::Rule { .. } | Sink::AtRoot(_) => {
                         return Err(Error::unpositioned(
                             "nested @import is not supported in this build",
                         ));
                     }
                 },
+                Stmt::AtRule { name, prelude, body } => {
+                    self.eval_at_rule(name, prelude, body.as_deref(), parents, sink)?;
+                }
             }
         }
         Ok(())
@@ -571,6 +628,77 @@ impl<'a> Evaluator<'a> {
         };
         sink.emit_style_rule(block, nested);
         Ok(())
+    }
+
+    /// Evaluate a generic at-rule. The prelude template is resolved to a
+    /// string; the body (when present) is executed so that nested rules carry
+    /// the enclosing selectors INSIDE the at-rule, and the whole node hoists to
+    /// the document root (bubbling).
+    fn eval_at_rule(
+        &mut self,
+        name: &str,
+        prelude: &[TplPiece],
+        body: Option<&[Stmt]>,
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        let prelude = self.eval_template(prelude)?;
+        // dart-sass strips a leading `@charset "utf-8";` entirely.
+        if name == "charset" && body.is_none() {
+            return Ok(());
+        }
+        let Some(stmts) = body else {
+            sink.push_at_rule(OutNode::AtRule {
+                name: name.to_string(),
+                prelude,
+                body: Vec::new(),
+                has_block: false,
+            });
+            return Ok(());
+        };
+        let out_body = self.eval_at_body(stmts, parents)?;
+        sink.push_at_rule(OutNode::AtRule {
+            name: name.to_string(),
+            prelude,
+            body: out_body,
+            has_block: true,
+        });
+        Ok(())
+    }
+
+    /// Run an at-rule body, producing its output node list. When the at-rule
+    /// is nested under a style rule, bare declarations are wrapped in the
+    /// enclosing selectors; at the document root they emit directly.
+    fn eval_at_body(&mut self, stmts: &[Stmt], parents: &[String]) -> Result<Vec<OutNode>, Error> {
+        self.scopes.push(HashMap::new());
+        let mut body: Vec<OutNode> = Vec::new();
+        let result = if parents.is_empty() {
+            let mut child = Sink::AtRoot(&mut body);
+            self.exec(stmts, &[], &mut child)
+        } else {
+            let mut items: Vec<OutItem> = Vec::new();
+            let mut nested: Vec<OutNode> = Vec::new();
+            let res = {
+                let mut child = Sink::Rule {
+                    items: &mut items,
+                    nested: &mut nested,
+                };
+                self.exec(stmts, parents, &mut child)
+            };
+            if res.is_ok() {
+                if !items.is_empty() {
+                    body.push(OutNode::Rule {
+                        selectors: parents.to_vec(),
+                        items,
+                    });
+                }
+                body.extend(nested);
+            }
+            res
+        };
+        self.scopes.pop();
+        result?;
+        Ok(body)
     }
 
     fn eval_decl(&mut self, d: &Declaration) -> Result<Option<OutItem>, Error> {
@@ -1148,11 +1276,14 @@ fn is_css_import(arg: &str) -> bool {
 
 /// Append a top-level group's output, prefixing a blank-line separator
 /// when there is already prior output (and the group is non-empty).
+/// dart-sass omits the blank line after an at-rule, so two adjacent at-rules
+/// (or an at-rule followed by a style rule) pack together with no gap.
 fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     if group.is_empty() {
         return;
     }
-    if !out.is_empty() {
+    let prev_is_at_rule = matches!(out.last(), Some(OutNode::AtRule { .. }));
+    if !out.is_empty() && !prev_is_at_rule {
         out.push(OutNode::Blank);
     }
     out.append(&mut group);

@@ -20,6 +20,27 @@ enum NextKind {
     Declaration,
 }
 
+/// Trim leading/trailing whitespace from a parsed prelude template, dropping
+/// any whitespace-only literals at the ends. Interior interpolation is kept.
+fn trim_prelude(pieces: Vec<TplPiece>) -> Vec<TplPiece> {
+    let mut pieces = pieces;
+    if let Some(TplPiece::Lit(first)) = pieces.first_mut() {
+        let trimmed = first.trim_start().to_string();
+        *first = trimmed;
+        if first.is_empty() {
+            pieces.remove(0);
+        }
+    }
+    if let Some(TplPiece::Lit(last)) = pieces.last_mut() {
+        let trimmed = last.trim_end().to_string();
+        *last = trimmed;
+        if last.is_empty() {
+            pieces.pop();
+        }
+    }
+    pieces
+}
+
 struct Parser {
     sc: Scanner,
     /// Depth of enclosing `calc()`/math-function contexts. Inside one, `/`
@@ -338,8 +359,25 @@ impl Parser {
                 self.sc.eat(';');
                 Ok(Stmt::Content)
             }
-            other => Err(Error::at(format!("@{other} is not supported in this build"), pos)),
+            _ => self.parse_generic_at_rule(name),
         }
+    }
+
+    /// Parse a generic/unknown at-rule: `@name <prelude up to { or ;>` then
+    /// either a `{ … }` body or a terminating `;`. Covers `@font-face`,
+    /// `@page`, `@charset`, `@supports`, vendor `@foo`, and unknown directives.
+    fn parse_generic_at_rule(&mut self, name: String) -> Result<Stmt, Error> {
+        self.skip_ws_inline();
+        let prelude = self.parse_template(&['{', ';'])?;
+        let prelude = trim_prelude(prelude);
+        self.skip_ws_inline();
+        let body = if self.sc.peek() == Some('{') {
+            Some(self.parse_braced_body()?)
+        } else {
+            self.sc.eat(';');
+            None
+        };
+        Ok(Stmt::AtRule { name, prelude, body })
     }
 
     /// Parse a `@function name(params) { … }` or `@mixin name(params) { … }`.

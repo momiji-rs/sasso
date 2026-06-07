@@ -100,6 +100,18 @@ fn parity_modulo_sign() {
 }
 
 #[test]
+fn parity_at_rule_font_face() {
+    assert_parity("@font-face {\n  font-family: \"My Font\";\n  src: url(font.woff);\n}\n");
+}
+
+#[test]
+fn parity_at_rule_page_and_unknown() {
+    assert_parity(
+        "@page {\n  margin: 1cm;\n}\n@foo bar baz {\n  a: b;\n}\n@blockless;\n@with-prelude value;\n",
+    );
+}
+
+#[test]
 fn parity_large_numbers() {
     // Huge literals print as plain decimals, scientific notation expands,
     // and fractions round to ten places exactly like dart-sass.
@@ -167,4 +179,16 @@ fn parity_slash_division() {
         "  unknown: foo(1/2);\n",
         "}\n",
     ));
+}
+
+#[test]
+fn parity_at_rule_bubbling() {
+    assert_parity(
+        ".a {\n  color: black;\n  @media-like screen {\n    color: red;\n  }\n  .b { color: green; }\n}\n",
+    );
+}
+
+#[test]
+fn parity_at_rule_nested_and_mixed() {
+    assert_parity("@outer one {\n  @inner two {\n    .a { color: red; }\n  }\n}\n@foo {\n  a: 1;\n  b: 2;\n  .x { c: 3; }\n  d: 4;\n}\n");
 }

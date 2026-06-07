@@ -58,6 +58,15 @@ pub(crate) enum Stmt {
     },
     /// `@content;` — runs the `@include`'s content block.
     Content,
+    /// A generic at-rule: `@name <prelude> { body }` or `@name <prelude>;`.
+    /// `body == None` is the statement (`;`) form. Used for `@font-face`,
+    /// `@page`, `@charset`, `@supports`, vendor `@foo`, and unknown
+    /// directives alike.
+    AtRule {
+        name: String,
+        prelude: Vec<TplPiece>,
+        body: Option<Vec<Stmt>>,
+    },
 }
 
 /// One arm of an `@if` chain. `cond == None` is the trailing `@else`.
