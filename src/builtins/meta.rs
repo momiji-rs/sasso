@@ -24,6 +24,26 @@ pub(super) fn try_call(
     if name == "get-function" {
         return fn_get_function(pos_args, named, pos);
     }
+    // Fixed-arity members reject extra positional arguments before running.
+    let max = match name {
+        "type-of" | "unit" | "unitless" | "inspect" | "feature-exists" => Some(1),
+        "comparable" => Some(2),
+        _ => None,
+    };
+    if let Some(max) = max {
+        if pos_args.len() > max {
+            return Some(Err(Error::at(
+                format!(
+                    "Only {} argument{} allowed, but {} {} passed.",
+                    max,
+                    if max == 1 { "" } else { "s" },
+                    pos_args.len(),
+                    if pos_args.len() == 1 { "was" } else { "were" }
+                ),
+                pos,
+            )));
+        }
+    }
     Some(match name {
         "type-of" => fn_type_of(pos_args, named, pos),
         "unit" => fn_unit(pos_args, named, pos),
@@ -234,9 +254,10 @@ fn fn_inspect(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
     Ok(unquoted(inspect_value(v)))
 }
 
-/// Serialize a value as dart-sass `inspect()` would (top level — outer
-/// parentheses are only added for the empty list and a single-element comma
-/// list).
+/// Serialize a value as dart-sass `inspect()` would. Bracketed lists are
+/// wrapped in `[...]`; an unbracketed empty list is `()` and a single-element
+/// comma list keeps its trailing comma `(x,)`. Maps render `(k: v, …)` with
+/// nested keys/values inspected recursively.
 fn inspect_value(v: &Value) -> String {
     match v {
         Value::Null => "null".to_string(),
@@ -252,10 +273,17 @@ fn inspect_value(v: &Value) -> String {
                 ListSep::Comma => ", ",
                 ListSep::Space => " ",
             };
-            match l.items.len() {
-                0 => "()".to_string(),
+            let body = match l.items.len() {
+                0 => {
+                    // An unbracketed empty list is `()`; a bracketed one is `[]`.
+                    return if l.bracketed {
+                        "[]".to_string()
+                    } else {
+                        "()".to_string()
+                    };
+                }
                 1 if l.sep == ListSep::Comma => {
-                    format!("({},)", inspect_element(&l.items[0], l.sep))
+                    format!("{},", inspect_element(&l.items[0], l.sep))
                 }
                 _ => l
                     .items
@@ -263,7 +291,35 @@ fn inspect_value(v: &Value) -> String {
                     .map(|e| inspect_element(e, l.sep))
                     .collect::<Vec<_>>()
                     .join(sep_str),
+            };
+            if l.bracketed {
+                format!("[{body}]")
+            } else if l.items.len() == 1 && l.sep == ListSep::Comma {
+                // The unbracketed single-element comma list needs its own parens.
+                format!("({body})")
+            } else {
+                body
             }
+        }
+        Value::Map(m) => {
+            if m.entries.is_empty() {
+                return "()".to_string();
+            }
+            // Map keys and values sit in a comma-separated context, so a
+            // comma-list key/value is parenthesized (dart-sass).
+            let inner = m
+                .entries
+                .iter()
+                .map(|(k, val)| {
+                    format!(
+                        "{}: {}",
+                        inspect_element(k, ListSep::Comma),
+                        inspect_element(val, ListSep::Comma)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({inner})")
         }
         // Numbers, colors, and booleans inspect exactly as they serialize.
         other => other.to_css(false),
@@ -271,13 +327,14 @@ fn inspect_value(v: &Value) -> String {
 }
 
 /// Serialize a list element, adding surrounding parentheses when dart-sass
-/// would: a multi-element list nested in a comma parent needs parens only
-/// when it is itself comma-separated; nested in a space parent, any
-/// multi-element list needs them. Empty and single-element comma lists carry
-/// their own parens via [`inspect_value`].
+/// would: a multi-element *unbracketed* list nested in a comma parent needs
+/// parens only when it is itself comma-separated; nested in a space parent, any
+/// multi-element unbracketed list needs them. A bracketed list carries its own
+/// `[...]`, and empty / single-element comma lists carry their own parens via
+/// [`inspect_value`].
 fn inspect_element(v: &Value, parent_sep: ListSep) -> String {
     if let Value::List(l) = v {
-        if l.items.len() >= 2 {
+        if l.items.len() >= 2 && !l.bracketed {
             let needs_parens = match parent_sep {
                 ListSep::Comma => l.sep == ListSep::Comma,
                 ListSep::Space => true,

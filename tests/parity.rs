@@ -3101,3 +3101,16 @@ fn parity_map_module_gaps() {
         "@use \"sass:list\";\n@use \"sass:map\";\na {\n  sep: list.separator(map.keys(()));\n  sepv: list.separator(map.values(()));\n}\n",
     );
 }
+
+#[test]
+fn parity_string_split_and_inspect_brackets() {
+    // `string.split` returns a bracketed comma list preserving the input's
+    // quotedness, with an optional split `$limit`; `meta.inspect` renders
+    // bracketed lists and map keys/values with the right parenthesization.
+    assert_parity(
+        "@use \"sass:string\";\na {\n  s: string.split(\"a, b, c\", \", \");\n  l: string.split(\"a, b, c, d\", \", \", 2);\n  e: string.split(\"Helvetica\", \"\");\n  u: string.split(abc, \"\");\n  nf: string.split(\"a, b, c\", \"&\");\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:meta\";\na {\n  a: meta.inspect([1, 2, 3]);\n  b: meta.inspect([]);\n  c: meta.inspect([[1, 2] [3, 4]]);\n  d: meta.inspect(((1, 2): 3, (4, 5): 6));\n  e: meta.inspect((1: 2 3, 4: 5 6));\n}\n",
+    );
+}

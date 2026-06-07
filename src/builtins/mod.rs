@@ -233,7 +233,9 @@ fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
             "unquote" => Some("unquote"),
             "to-upper-case" => Some("to-upper-case"),
             "to-lower-case" => Some("to-lower-case"),
-            // `unique-id`, `split` have no global equivalent here.
+            "unique-id" => Some("unique-id"),
+            // `split` is module-only (no global alias); dispatched in
+            // `call_module`.
             _ => None,
         },
         "list" => match member {
@@ -316,6 +318,9 @@ pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
     if module == "map" && matches!(member, "set" | "deep-merge" | "deep-remove") {
         return true;
     }
+    if module == "string" && member == "split" {
+        return true;
+    }
     module_member_to_global(module, member).is_some()
 }
 
@@ -336,6 +341,12 @@ pub(crate) fn call_module(
     // `deep-remove`).
     if module == "map" {
         if let Some(r) = map::call_module_member(member, pos_args, named, pos) {
+            return r;
+        }
+    }
+    // `sass:string` members without a global alias (`split`).
+    if module == "string" {
+        if let Some(r) = string::call_module_member(member, pos_args, named, pos) {
             return r;
         }
     }

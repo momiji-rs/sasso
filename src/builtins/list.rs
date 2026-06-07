@@ -479,10 +479,17 @@ mod tests {
             call("list-separator", &[list(vec![s("a"), s("b")], ListSep::Space)]).to_css(false),
             "space"
         );
-        // <2 elements -> space.
+        // A bare value (not a list) -> space.
         assert_eq!(call("list-separator", &[s("a")]).to_css(false), "space");
+        // A deliberately comma-separated empty list (e.g. the result of
+        // `map.keys(())`) reports comma; a space-separated empty list (the
+        // literal `()`) stays undecided and reports space.
         assert_eq!(
             call("list-separator", &[list(vec![], ListSep::Comma)]).to_css(false),
+            "comma"
+        );
+        assert_eq!(
+            call("list-separator", &[list(vec![], ListSep::Space)]).to_css(false),
             "space"
         );
     }

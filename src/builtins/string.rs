@@ -10,7 +10,7 @@
 
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{Number, SassStr, Value};
+use crate::value::{List, ListSep, Number, SassStr, Value};
 
 pub(super) fn try_call(
     name: &str,
@@ -18,6 +18,20 @@ pub(super) fn try_call(
     named: &[(String, Value)],
     pos: Pos,
 ) -> Option<Result<Value, Error>> {
+    // Maximum positional arity per function; passing more is an error.
+    let max = match name {
+        "unique-id" => 0,
+        "quote" | "unquote" | "to-upper-case" | "to-lower-case" | "str-length" => 1,
+        "str-index" => 2,
+        "str-slice" | "str-insert" => 3,
+        _ => usize::MAX,
+    };
+    if let Err(e) = check_arity(pos_args, max, pos) {
+        // Only enforce for names this family actually owns.
+        if max != usize::MAX {
+            return Some(Err(e));
+        }
+    }
     Some(match name {
         "quote" => fn_set_quoted(pos_args, named, pos, true),
         "unquote" => fn_set_quoted(pos_args, named, pos, false),
@@ -27,8 +41,41 @@ pub(super) fn try_call(
         "str-index" => fn_str_index(pos_args, named, pos),
         "str-slice" => fn_str_slice(pos_args, named, pos),
         "str-insert" => fn_str_insert(pos_args, named, pos),
+        "unique-id" => Ok(fn_unique_id()),
         _ => return None,
     })
+}
+
+/// Dispatch a `sass:string` member that has no global alias (`split`). Returns
+/// `None` for any other member so the caller can report it as undefined.
+pub(super) fn call_module_member(
+    member: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Option<Result<Value, Error>> {
+    Some(match member {
+        "split" => fn_split(pos_args, named, pos),
+        _ => return None,
+    })
+}
+
+/// Reject more positional arguments than `max` (dart-sass "Only N argument(s)
+/// allowed, but M were passed.").
+fn check_arity(pos_args: &[Value], max: usize, pos: Pos) -> Result<(), Error> {
+    if pos_args.len() > max {
+        return Err(Error::at(
+            format!(
+                "Only {} argument{} allowed, but {} {} passed.",
+                max,
+                if max == 1 { "" } else { "s" },
+                pos_args.len(),
+                if pos_args.len() == 1 { "was" } else { "were" }
+            ),
+            pos,
+        ));
+    }
+    Ok(())
 }
 
 /// Extract `(text, quoted)` from a required string argument, erroring with
@@ -69,14 +116,24 @@ fn require_index(
     let pname = params.get(i).copied().unwrap_or("");
     match v {
         Value::Number(Number { value, unit }) => {
-            if unit.is_empty() {
-                Ok(value.round() as i64)
-            } else {
-                Err(Error::at(
+            if !unit.is_empty() {
+                return Err(Error::at(
                     format!("${pname}: Expected {} to have no units.", v.to_css(false)),
                     pos,
-                ))
+                ));
             }
+            // dart-sass requires an integer index (it rounds within a tiny
+            // tolerance, but a genuine fraction like `0.5` is an error).
+            if (value - value.round()).abs() > 1e-11 {
+                return Err(Error::at(
+                    format!(
+                        "${pname}: {} is not an int.",
+                        crate::value::fmt_num(*value, false)
+                    ),
+                    pos,
+                ));
+            }
+            Ok(value.round() as i64)
         }
         other => Err(Error::at(
             format!("${pname}: {} is not a number.", other.to_css(false)),
@@ -209,6 +266,146 @@ fn fn_str_insert(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
     out.push_str(insert);
     out.extend(chars[offset..].iter());
     Ok(quoted_str(out, quoted))
+}
+
+/// `unique-id()`: a randomly-generated unquoted string that is a valid CSS
+/// identifier (`u` + base-36 digits) and differs on every call. dart-sass
+/// exposes this both globally (deprecated) and as `string.unique-id`.
+fn fn_unique_id() -> Value {
+    use std::cell::Cell;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    thread_local! {
+        static STATE: Cell<u64> = const { Cell::new(0) };
+    }
+    let x = STATE.with(|s| {
+        let mut x = s.get();
+        if x == 0 {
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9E37_79B9_7F4A_7C15);
+            x = seed | 1;
+        }
+        // xorshift64*
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        s.set(x);
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    });
+    // dart-sass picks a value in [36^5, 36^6); render base-36 after a `u`.
+    let range = 36u64.pow(6) - 36u64.pow(5);
+    let n = 36u64.pow(5) + (x % range);
+    Value::Str(SassStr {
+        text: format!("u{}", to_base36(n)),
+        quoted: false,
+    })
+}
+
+/// Render `n` in lowercase base-36.
+fn to_base36(mut n: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if n == 0 {
+        return "0".to_string();
+    }
+    let mut buf = Vec::new();
+    while n > 0 {
+        buf.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+    }
+    buf.reverse();
+    String::from_utf8(buf).unwrap_or_default()
+}
+
+/// `string.split($string, $separator, $limit: null)`: split `$string` on each
+/// occurrence of `$separator`, returning a bracketed comma list of quoted
+/// substrings. An empty `$separator` splits into individual characters. A
+/// positive `$limit` caps the number of splits (so at most `limit + 1` parts).
+fn fn_split(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["string", "separator", "limit"];
+    check_arity(pos_args, 3, pos)?;
+    let (text, text_quoted) = require_string(&params, pos_args, named, 0, "split", pos)?;
+    let (sep, _) = require_string(&params, pos_args, named, 1, "split", pos)?;
+    // `$limit` is the maximum number of splits (not parts). `null`/absent means
+    // unlimited; it must be a positive integer otherwise.
+    let limit = match super::arg(&params, pos_args, named, 2) {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(num)) => {
+            if !num.unit.is_empty() || (num.value - num.value.round()).abs() > 1e-11 {
+                return Err(Error::at(
+                    format!(
+                        "$limit: {} is not an int.",
+                        crate::value::fmt_num(num.value, false)
+                    ),
+                    pos,
+                ));
+            }
+            let l = num.value.round() as i64;
+            if l < 1 {
+                return Err(Error::at(format!("$limit: Must be 1 or greater, was {l}."), pos));
+            }
+            Some(l as usize)
+        }
+        Some(other) => {
+            return Err(Error::at(
+                format!("$limit: {} is not a number.", other.to_css(false)),
+                pos,
+            ))
+        }
+    };
+
+    let parts = split_string(text, sep, limit);
+    // Each part inherits the input string's quotedness (dart-sass).
+    let items = parts
+        .into_iter()
+        .map(|p| {
+            Value::Str(SassStr {
+                text: p,
+                quoted: text_quoted,
+            })
+        })
+        .collect();
+    Ok(Value::List(List {
+        items,
+        sep: ListSep::Comma,
+        bracketed: true,
+    }))
+}
+
+/// Split `text` on `sep`, honouring an optional cap on the number of splits.
+/// An empty separator yields each character; an empty string yields no parts.
+fn split_string(text: &str, sep: &str, limit: Option<usize>) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if sep.is_empty() {
+        // Split into individual characters (capped by `limit` splits, so the
+        // tail beyond the cap stays joined).
+        let chars: Vec<char> = text.chars().collect();
+        return match limit {
+            Some(n) if n < chars.len() => {
+                let mut out: Vec<String> = chars[..n].iter().map(|c| c.to_string()).collect();
+                out.push(chars[n..].iter().collect());
+                out
+            }
+            _ => chars.iter().map(|c| c.to_string()).collect(),
+        };
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = text;
+    let mut splits = 0usize;
+    while let Some(idx) = rest.find(sep) {
+        if let Some(max) = limit {
+            if splits >= max {
+                break;
+            }
+        }
+        out.push(rest[..idx].to_string());
+        rest = &rest[idx + sep.len()..];
+        splits += 1;
+    }
+    out.push(rest.to_string());
+    out
 }
 
 #[cfg(test)]
