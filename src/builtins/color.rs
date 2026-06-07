@@ -1563,8 +1563,60 @@ fn fn_channel(name: &str, pos_args: &[Value], named: &[(String, Value)], pos: Po
     }))
 }
 
+/// Whether `text` is a Microsoft `alpha()` filter argument: ASCII letters,
+/// optional whitespace, then `=` (dart-sass's `^[a-zA-Z]+\s*=` shape).
+fn is_ms_filter_arg(text: &str) -> bool {
+    let mut chars = text.char_indices().peekable();
+    let mut saw_letter = false;
+    // One or more ASCII letters.
+    while let Some(&(_, c)) = chars.peek() {
+        if c.is_ascii_alphabetic() {
+            saw_letter = true;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if !saw_letter {
+        return false;
+    }
+    // Optional whitespace, then a `=`.
+    while let Some(&(_, c)) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    matches!(chars.peek(), Some(&(_, '=')))
+}
+
 fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
+    // The proprietary Microsoft `alpha()` filter overload: one or more
+    // unquoted-string positional arguments that each match `<identifier>=…`
+    // (an IE `alpha(opacity=80)` hack, produced by the single-`=` operator) are
+    // passed through verbatim as a CSS function instead of being treated as a
+    // color. dart-sass accepts this for `color.alpha()` too (with a deprecation
+    // warning to stderr) rather than enforcing the one-argument count. The part
+    // before the `=` must be ASCII letters (optionally followed by whitespace),
+    // so e.g. `1=c` is rejected as a non-color.
+    if named.is_empty()
+        && !pos_args.is_empty()
+        && pos_args
+            .iter()
+            .all(|v| matches!(v, Value::Str(s) if !s.quoted && is_ms_filter_arg(&s.text)))
+    {
+        let inner = pos_args
+            .iter()
+            .map(|v| v.to_css(false))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(Value::Str(crate::value::SassStr {
+            text: format!("alpha({inner})"),
+            quoted: false,
+        }));
+    }
     let n = pos_args.len() + named.len();
     if n > 1 {
         return Err(Error::at(

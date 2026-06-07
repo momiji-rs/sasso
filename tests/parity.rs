@@ -3451,3 +3451,17 @@ fn parity_color_modify_unit_leniency() {
         "}\n",
     ));
 }
+
+#[test]
+fn parity_color_alpha_ms_filter_overload() {
+    // `color.alpha()` with one or more `<identifier>=value` arguments is the
+    // proprietary Microsoft filter overload, passed through verbatim (dart-sass
+    // warns to stderr) rather than enforcing the one-argument color signature.
+    assert_parity(concat!(
+        "@use \"sass:color\";\n",
+        "a {\n",
+        "  b: color.alpha(c=d);\n",
+        "  c: color.alpha(c=d, e=f, g=h);\n",
+        "}\n",
+    ));
+}
