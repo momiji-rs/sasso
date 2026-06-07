@@ -1427,3 +1427,31 @@ fn math_min_max_clamp_unit_rules() {
     assert!(compile("a {b: clamp(1s, 2px, 3px)}\n", &Options::default()).is_err());
     assert!(compile("a {b: clamp(1px)}\n", &Options::default()).is_err());
 }
+
+#[test]
+fn math_round_strategy_preservation() {
+    // An explicit three-argument round() preserves its strategy keyword when
+    // the units keep it from simplifying (round(nearest, 1px, 10%) keeps
+    // `nearest`), while the implicit two-argument form does not. A strategy
+    // with an unsimplifiable value but no step preserves rather than erroring.
+    // Byte-matched to dart-sass. Offline.
+    assert_eq!(
+        ours("a {b: round(nearest, 1px, 10%)}\n"),
+        "a {\n  b: round(nearest, 1px, 10%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: round(1px, 10%)}\n"),
+        "a {\n  b: round(1px, 10%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: round(up, 1px, 10%)}\n"),
+        "a {\n  b: round(up, 1px, 10%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {c: round(up, var(--c))}\n"),
+        "a {\n  c: round(up, var(--c));\n}\n"
+    );
+    // A strategy with a real number but no step is still an error.
+    assert!(compile("a {b: round(nearest, 5)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: round(up, 5)}\n", &Options::default()).is_err());
+}

@@ -148,12 +148,16 @@ fn round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
             }
         }
         2 => {
-            // A bare strategy keyword as the first of two args is a missing
-            // step; a quoted-string operand falls back to the legacy
-            // one-argument `round()`, whose extra argument is an arity error.
+            // A bare strategy keyword as the first of two args means the step
+            // is missing: that errors when the value is a real number, but an
+            // unsimplifiable value (`round(up, var(--c))`) preserves the call
+            // verbatim, matching dart-sass.
             if let Value::Str(s) = &args[0] {
                 if !s.quoted && RoundStrategy::from_str(&s.text.to_ascii_lowercase()).is_some() {
-                    return Err(Error::at("If strategy is not null, step is required.", pos));
+                    return match round_operand(&args[1], pos)? {
+                        Some(_) => Err(Error::at("If strategy is not null, step is required.", pos)),
+                        None => Ok(preserved_round(&args)),
+                    };
                 }
             }
             if args.iter().any(is_quoted_str) {
@@ -163,7 +167,9 @@ fn round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
             let number = round_operand(&args[0], pos)?;
             let step = round_operand(&args[1], pos)?;
             match (number, step) {
-                (Some(number), Some(step)) => round_with_step(RoundStrategy::Nearest, &number, &step, pos),
+                (Some(number), Some(step)) => {
+                    round_with_step(RoundStrategy::Nearest, &number, &step, false, pos)
+                }
                 _ => Ok(preserved_round(&args)),
             }
         }
@@ -199,7 +205,7 @@ fn round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
             let number = round_operand(&args[1], pos)?;
             let step = round_operand(&args[2], pos)?;
             match (number, step) {
-                (Some(number), Some(step)) => round_with_step(strategy, &number, &step, pos),
+                (Some(number), Some(step)) => round_with_step(strategy, &number, &step, true, pos),
                 _ => Ok(preserved_round(&args)),
             }
         }
@@ -245,6 +251,7 @@ fn round_with_step(
     strategy: RoundStrategy,
     number: &Number,
     step: &Number,
+    explicit: bool,
     pos: Pos,
 ) -> Result<Value, Error> {
     let unit = number.unit.clone();
@@ -260,7 +267,7 @@ fn round_with_step(
     let step_v = match coerce_step(step, number, pos) {
         StepCoercion::Value(v) => v,
         StepCoercion::Preserve => {
-            return Ok(preserved_round_nums(strategy, number, step));
+            return Ok(preserved_round_nums(strategy, number, step, explicit));
         }
         StepCoercion::Error(e) => return Err(e),
     };
@@ -382,15 +389,18 @@ fn preserved_round(args: &[Value]) -> Value {
 }
 
 /// Build the preserved `round(strategy, number, step)` form when the operands
-/// are numbers but their units keep the call from simplifying.
-fn preserved_round_nums(strategy: RoundStrategy, number: &Number, step: &Number) -> Value {
+/// are numbers but their units keep the call from simplifying. The strategy
+/// keyword is emitted whenever it was authored explicitly (the three-argument
+/// form), or for any non-`nearest` strategy; the implicit-`nearest`
+/// two-argument form preserves as `round(number, step)`, matching dart-sass.
+fn preserved_round_nums(strategy: RoundStrategy, number: &Number, step: &Number, explicit: bool) -> Value {
     let kw = match strategy {
         RoundStrategy::Nearest => "nearest",
         RoundStrategy::Up => "up",
         RoundStrategy::Down => "down",
         RoundStrategy::ToZero => "to-zero",
     };
-    let text = if strategy == RoundStrategy::Nearest {
+    let text = if strategy == RoundStrategy::Nearest && !explicit {
         format!("round({}, {})", number.to_css(false), step.to_css(false))
     } else {
         format!("round({kw}, {}, {})", number.to_css(false), step.to_css(false))
