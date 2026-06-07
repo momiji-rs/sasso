@@ -3337,3 +3337,14 @@ fn invert_channels(space: ColorSpace, src: &ModernColor) -> ModernColor {
         alpha: src.alpha,
     }
 }
+
+/// `color.grayscale` for a non-legacy color: set the oklch chroma to 0 (a
+/// perceptual gray), then convert back to the color's own space.
+pub(super) fn grayscale_modern(c: &Color) -> Color {
+    let orig = legacy_to_modern(c);
+    let dest = orig.space;
+    let mut oklch = convert_modern(&orig, ColorSpace::Oklch);
+    oklch.channels[1] = Some(0.0);
+    let back = convert_modern(&oklch, dest);
+    make_modern_in(back, dest)
+}

@@ -433,6 +433,13 @@ fn fn_grayscale(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Opti
     }
     Some((|| {
         let c = as_color(color, pos)?;
+        // A non-legacy color is desaturated by setting its oklch chroma to 0
+        // and converting back to its own space; legacy colors set HSL
+        // saturation to 0.
+        let is_legacy = c.modern.as_ref().map(|m| m.space.is_legacy()).unwrap_or(true);
+        if !is_legacy {
+            return Ok(Value::Color(super::color::grayscale_modern(&c)));
+        }
         let (h, _s, l) = c.to_hsl();
         Ok(Value::Color(from_hsl(h, 0.0, l, c.a)))
     })())
