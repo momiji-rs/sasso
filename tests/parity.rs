@@ -1859,6 +1859,9 @@ fn placeholder_inside_pseudo_arguments() {
     assert_eq!(ours("a:not(%b, c) {x: y}\n"), "a:not(c) {\n  x: y;\n}\n");
     // A solo `%placeholder` in a matches-any pseudo removes the whole rule.
     assert_eq!(ours("a:is(%b) {x: y}\n"), "");
+}
+
+#[test]
 fn unquoted_value_escapes_are_canonicalized() {
     // A CSS escape in an unquoted value decodes to its code point and then
     // re-serializes per dart-sass's identifier rules: printable name chars
@@ -1950,6 +1953,9 @@ fn leading_utf8_bom_is_stripped() {
     // A leading UTF-8 BOM in the source is dropped before parsing, so it never
     // appears in the output and never triggers a spurious `@charset`.
     assert_eq!(ours("\u{FEFF}foo {bar: baz}\n"), "foo {\n  bar: baz;\n}\n");
+}
+
+#[test]
 fn unicode_range_tokens_parse_and_preserve() {
     // CSS unicode-range values: plain ranges, `-end` ranges, and `?`
     // wildcards. The original case is preserved (`u+1a2b` stays lowercase).
