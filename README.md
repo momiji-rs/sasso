@@ -185,6 +185,10 @@ $ cargo clippy --all-targets -- -D warnings
 $ cargo fmt --check
 ```
 
+## Changelog
+
+Notable changes are recorded in [`CHANGELOG.md`](CHANGELOG.md).
+
 ## License
 
 Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT)

@@ -1,0 +1,88 @@
+# Changelog
+
+All notable changes to **sasso** are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+Conformance is tracked separately as a ratchet against the official
+[sass-spec](https://github.com/sass/sass-spec) suite — see the
+[Conformance](README.md#conformance) section for the current pass rate.
+
+## [Unreleased]
+
+Everything since the initial `0.1.0` crates.io publish. This grew the compiler
+from an early vertical slice to roughly **81% of the official sass-spec suite**,
+matching current dart-sass (1.100) byte-for-byte on the implemented subset.
+
+### Added
+
+- **`@use` / `@forward` module system** — built-in `sass:*` modules and user
+  files, `with` configuration, namespacing, `@forward` prefix/`show`/`hide`,
+  dash-insensitive member access, forward conflict resolution, and star
+  (`as *`) modules.
+- **Indented `.sass` syntax** — a full front-end (`Options::with_syntax`, the
+  CLI `--indented` flag, `.sass` extension inference), including cross-syntax
+  `@import` of partials by file extension.
+- **CSS Color 4 color spaces** — `srgb`/`display-p3`/`lab`/`lch`/`oklab`/
+  `oklch`/`xyz` via `color()`, with modern color serialization.
+- **`@extend` and `%placeholder`s** — selector weaving with dart-sass-compatible
+  trailing-combinator handling and escape canonicalization.
+- **Built-in function modules** — `meta` (first-class function references via
+  `get-function`/`call`, existence predicates), `math` (`clamp`/`min`/`max`/
+  `round`/`log` and friends), `list` (bracket-preserving `join`/`append`),
+  `map` (nested key paths, `deep-merge`/`deep-remove`), `string`
+  (`split`/`unique-id`), and `selector` functions.
+- **CLI** — compile multiple input files in one process (`sasso a.scss b.scss`,
+  startup shared across files); `--loop <N>` for in-process throughput and
+  `-q`/`--quiet` to suppress stdout (used by the benchmark harness).
+- **Benchmark harness** — sasso registered as a first-class engine in `bench/`;
+  three-way report [`bench/three_way.md`](bench/three_way.md) (sasso vs
+  dart-sass vs grass).
+- **This CHANGELOG.**
+
+### Changed
+
+- Selector resolution now matches dart-sass on combinator normalization,
+  adjacent-compound separation, and bogus-combinator omission.
+- Unquoted string serialization collapses newlines to spaces; custom-property
+  values are emitted verbatim — both matching dart-sass.
+- Control-flow blocks use semi-global scoping with a global-write guard.
+
+### Performance
+
+- Selector helpers `split_commas` and `tokenize_complex` now return borrowed
+  `&str` slices instead of allocating a fresh `String` per comma part /
+  compound. These were two of the heaviest functions in the
+  allocation-dominated profile; the change is ~1.22× faster on the large
+  benchmark and ~1.12× on the handwritten one, with no behavior change.
+
+### Tooling
+
+- The conformance ratchet pins the sass-spec commit (`spec/SPEC_VERSION.txt`)
+  for reproducibility, with a `--latest`/`--canary` drift-detection mode.
+
+## [0.1.0] - 2026-06-06
+
+Initial crates.io publish — an early vertical slice that already compiled
+real-world SCSS byte-identically to dart-sass.
+
+### Added
+
+- `$variables` with lexical scoping, `!default` and `!global`.
+- Nesting, the `&` parent selector with selector-list multiplication, and
+  combinator normalization (`>`, `+`, `~`).
+- `#{}` interpolation in selectors, property names and values.
+- `//` (stripped) and `/* */` (preserved) comments.
+- Numbers with units and unit arithmetic.
+- A color model with fractional channels and author-spelling preservation;
+  color functions (`rgb`/`rgba`/`hsl`/`hsla`/`mix`/`lighten`/`darken`/
+  `percentage`/`red`/`green`/`blue`/`alpha`).
+- `@import` partial inlining through a pluggable `Importer` (CSS imports pass
+  through); a ready-made `FsImporter`.
+- `expanded` and `compressed` output styles.
+- Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
+  zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
+
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/momiji-rs/sasso/releases/tag/v0.1.0
