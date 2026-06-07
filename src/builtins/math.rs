@@ -25,6 +25,12 @@ pub(super) fn try_call(
     named: &[(String, Value)],
     pos: Pos,
 ) -> Option<Result<Value, Error>> {
+    // The math functions double as CSS calculation functions, which dart-sass
+    // matches case-insensitively (`SiN(1deg)` folds to `sin(1deg)`). Lowercase
+    // the name once and dispatch on that; every name this family owns is
+    // unambiguous, so this can never steal a name from another family.
+    let lname = name.to_ascii_lowercase();
+    let name = lname.as_str();
     // Simple unit-preserving unary ops.
     if let Some(op) = unary_op(name) {
         return Some(unary(name, pos_args, named, pos, op));
@@ -49,6 +55,7 @@ pub(super) fn try_call(
         "atan2" => Some(atan2(pos_args, named, pos)),
         "rem" => Some(remainder("rem", pos_args, named, pos, true)),
         "mod" => Some(remainder("mod", pos_args, named, pos, false)),
+        "random" => Some(random(pos_args, named, pos)),
         _ => None,
     }
 }
@@ -60,6 +67,27 @@ fn unary_op(name: &str) -> Option<fn(f64) -> f64> {
         "floor" => f64::floor,
         _ => return None,
     })
+}
+
+/// Reject a call with more positional/named arguments than a fixed-arity
+/// function accepts. dart-sass distinguishes the singular ("Only 1 argument
+/// allowed, but 2 were passed.") from the plural ("Only 2 arguments allowed,
+/// …"). `max_args` is the function's declared arity.
+fn check_max_args(
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    max_args: usize,
+    pos: Pos,
+) -> Result<(), Error> {
+    let total = pos_args.len() + named.len();
+    if total <= max_args {
+        return Ok(());
+    }
+    let noun = if max_args == 1 { "argument" } else { "arguments" };
+    Err(Error::at(
+        format!("Only {max_args} {noun} allowed, but {total} were passed."),
+        pos,
+    ))
 }
 
 /// The rounding strategy keyword of a `round()` call's first argument.
@@ -229,7 +257,7 @@ fn round_with_step(
     // Coerce the step into the number's unit; an incompatible pair preserves
     // the call (a real/unitless or known cross-dimension mix errors, matching
     // the two-argument unit rules).
-    let step_v = match coerce_step(step, number, pos)? {
+    let step_v = match coerce_step(step, number, pos) {
         StepCoercion::Value(v) => v,
         StepCoercion::Preserve => {
             return Ok(preserved_round_nums(strategy, number, step));
@@ -317,24 +345,34 @@ enum StepCoercion {
 /// Coerce `step` into `number`'s unit for `round()`. Equal/convertible units
 /// combine; a relative/unknown unit pair preserves the call; a real-vs-unitless
 /// or known cross-dimension mix is an error (matching dart-sass).
-fn coerce_step(step: &Number, number: &Number, pos: Pos) -> Result<StepCoercion, Error> {
+fn coerce_step(step: &Number, number: &Number, pos: Pos) -> StepCoercion {
     if step.unit.eq_ignore_ascii_case(&number.unit) {
-        return Ok(StepCoercion::Value(step.value));
+        return StepCoercion::Value(step.value);
     }
     if step.unit.is_empty() && number.unit.is_empty() {
-        return Ok(StepCoercion::Value(step.value));
+        return StepCoercion::Value(step.value);
     }
     // A unitless operand mixed with a real unit is incompatible.
     if step.unit.is_empty() != number.unit.is_empty() {
-        return Ok(StepCoercion::Error(incompatible(number, step, pos)));
+        return StepCoercion::Error(incompatible(number, step, pos));
     }
     if let Some(factor) = convert_factor(&step.unit, &number.unit) {
-        return Ok(StepCoercion::Value(step.value * factor));
+        return StepCoercion::Value(step.value * factor);
     }
     if crate::value::calc_units_incompatible(&number.unit, &step.unit) {
-        return Ok(StepCoercion::Error(incompatible(number, step, pos)));
+        return StepCoercion::Error(incompatible(number, step, pos));
     }
-    Ok(StepCoercion::Preserve)
+    StepCoercion::Preserve
+}
+
+/// Coerce `n` into `target`'s unit for the binary/variadic math functions
+/// (`atan2`, `hypot`, `mod`, `rem`), which behave like `calc()`:
+/// equal/convertible units combine; a real-vs-unitless or known
+/// cross-dimension mix is an error; any pair involving an unknown/relative
+/// unit (`%`, `foo`, `vw`) that can't be converted preserves the whole call.
+/// (Identical rules to [`coerce_step`], reused via the same outcome enum.)
+fn combine_into(n: &Number, target: &Number, pos: Pos) -> StepCoercion {
+    coerce_step(n, target, pos)
 }
 
 /// Build the preserved `round(...)` form over the original arguments (for an
@@ -368,6 +406,7 @@ fn unary(
     pos: Pos,
     op: fn(f64) -> f64,
 ) -> Result<Value, Error> {
+    check_max_args(pos_args, named, 1, pos)?;
     let n = require_num(&["number"], pos_args, named, 0, fname, pos)?;
     Ok(num_value(Number {
         value: op(n.value),
@@ -378,6 +417,7 @@ fn unary(
 /// `sign(x)`: -1, 0, or 1, preserving the operand's unit. `sign(0)` is `0`
 /// (not `0px`); dart-sass keeps the unit on non-zero results.
 fn sign(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    check_max_args(pos_args, named, 1, pos)?;
     let n = require_num(&["number"], pos_args, named, 0, "sign", pos)?;
     let s = if n.value.is_nan() {
         f64::NAN
@@ -394,6 +434,7 @@ fn sign(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value
 
 /// `pow(base, exp)`: both operands must be unitless; result is unitless.
 fn pow(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    check_max_args(pos_args, named, 2, pos)?;
     let base = require_num(&["base", "exponent"], pos_args, named, 0, "pow", pos)?;
     let exp = require_num(&["base", "exponent"], pos_args, named, 1, "pow", pos)?;
     no_unit(&base, pos)?;
@@ -411,6 +452,7 @@ fn unitless_unary(
     pos: Pos,
     op: fn(f64) -> f64,
 ) -> Result<Value, Error> {
+    check_max_args(pos_args, named, 1, pos)?;
     let n = require_num(&[param], pos_args, named, 0, fname, pos)?;
     no_unit(&n, pos)?;
     Ok(unitless(op(n.value)))
@@ -418,6 +460,7 @@ fn unitless_unary(
 
 /// `log(x)` (natural) or `log(x, base)`. Both operands must be unitless.
 fn log(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    check_max_args(pos_args, named, 2, pos)?;
     let params = &["number", "base"];
     let x = require_num(params, pos_args, named, 0, "log", pos)?;
     no_unit(&x, pos)?;
@@ -432,17 +475,32 @@ fn log(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value,
 }
 
 /// `hypot(a, b, ...)`: sqrt of the sum of squares, with unit coercion onto
-/// the first argument's unit (`hypot(3px, 4cm)` converts cm to px).
+/// the first argument's unit (`hypot(3px, 4cm)` converts cm to px). Coercion
+/// follows the `calc()` rules: a real-vs-unitless or known cross-dimension mix
+/// is an error, while an unknown/relative-unit pair that can't be converted
+/// preserves the whole call verbatim (`hypot(1%, 2%)`).
 fn hypot(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let nums = collect_nums("hypot", pos_args, named, pos)?;
     let first = match nums.first() {
         Some(n) => n.clone(),
         None => return Err(Error::at("At least one argument must be passed.", pos)),
     };
+    // A `%` operand makes the result context-dependent, so dart-sass preserves
+    // the call rather than folding (`hypot(1%, 2%)`, `hypot(1%, 2px)`).
+    if nums.iter().any(is_percent) {
+        let args: Vec<Value> = nums.into_iter().map(Value::Number).collect();
+        return Ok(preserved_call("hypot", &args));
+    }
     let mut sum = 0.0;
     for n in &nums {
-        let v = coerce_to(n, &first, pos)?;
-        sum += v * v;
+        match combine_into(n, &first, pos) {
+            StepCoercion::Value(v) => sum += v * v,
+            StepCoercion::Preserve => {
+                let args: Vec<Value> = nums.into_iter().map(Value::Number).collect();
+                return Ok(preserved_call("hypot", &args));
+            }
+            StepCoercion::Error(e) => return Err(e),
+        }
     }
     Ok(num_value(Number {
         value: sum.sqrt(),
@@ -459,6 +517,7 @@ fn trig(
     pos: Pos,
     op: fn(f64) -> f64,
 ) -> Result<Value, Error> {
+    check_max_args(pos_args, named, 1, pos)?;
     let n = require_num(&["number"], pos_args, named, 0, fname, pos)?;
     let radians = angle_to_radians(&n, pos)?;
     Ok(unitless(op(radians)))
@@ -473,23 +532,46 @@ fn inverse_trig(
     pos: Pos,
     op: fn(f64) -> f64,
 ) -> Result<Value, Error> {
+    check_max_args(pos_args, named, 1, pos)?;
     let n = require_num(&["number"], pos_args, named, 0, fname, pos)?;
     no_unit(&n, pos)?;
     Ok(degrees(op(n.value).to_degrees()))
 }
 
 /// `atan2(y, x)`: the two-argument arctangent, returned in degrees. The
-/// operands must share a unit dimension (they are coerced together).
+/// operands are coerced together like `calc()`: a real-vs-unitless or known
+/// cross-dimension mix is an error, while an unknown/relative-unit pair that
+/// can't be converted preserves the call verbatim (`atan2(1%, 2%)`).
 fn atan2(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    check_max_args(pos_args, named, 2, pos)?;
     let params = &["y", "x"];
     let y = require_num(params, pos_args, named, 0, "atan2", pos)?;
     let x = require_num(params, pos_args, named, 1, "atan2", pos)?;
-    let xv = coerce_to(&x, &y, pos)?;
+    // A `%` operand would produce a context-dependent result, so dart-sass
+    // preserves the call rather than folding (`atan2(1%, 2%)`).
+    if is_percent(&y) || is_percent(&x) {
+        return Ok(preserved_call("atan2", &[Value::Number(y), Value::Number(x)]));
+    }
+    let xv = match combine_into(&x, &y, pos) {
+        StepCoercion::Value(v) => v,
+        StepCoercion::Preserve => return Ok(preserved_call("atan2", &[Value::Number(y), Value::Number(x)])),
+        StepCoercion::Error(e) => return Err(e),
+    };
     Ok(degrees(y.value.atan2(xv).to_degrees()))
 }
 
+/// Whether a number's unit is `%` (case-insensitive). The geometric functions
+/// (`atan2`, `hypot`) preserve their call when any operand is a percentage,
+/// since the result would be context-dependent.
+fn is_percent(n: &Number) -> bool {
+    n.unit == "%"
+}
+
 /// `rem(a, b)` (truncated, sign of dividend) or `mod(a, b)` (floored, sign
-/// of divisor). The divisor is coerced into the dividend's unit.
+/// of divisor). The divisor is coerced into the dividend's unit under the
+/// `calc()` rules: a real-vs-unitless or known cross-dimension mix is an
+/// error, while an unknown/relative-unit pair that can't be converted
+/// preserves the call verbatim (`mod(1px, 2bar)`).
 fn remainder(
     fname: &str,
     pos_args: &[Value],
@@ -497,10 +579,15 @@ fn remainder(
     pos: Pos,
     truncated: bool,
 ) -> Result<Value, Error> {
+    check_max_args(pos_args, named, 2, pos)?;
     let params = &["dividend", "modulus"];
     let a = require_num(params, pos_args, named, 0, fname, pos)?;
     let b = require_num(params, pos_args, named, 1, fname, pos)?;
-    let bv = coerce_to(&b, &a, pos)?;
+    let bv = match combine_into(&b, &a, pos) {
+        StepCoercion::Value(v) => v,
+        StepCoercion::Preserve => return Ok(preserved_call(fname, &[Value::Number(a), Value::Number(b)])),
+        StepCoercion::Error(e) => return Err(e),
+    };
     let value = if bv == 0.0 {
         f64::NAN
     } else if truncated {
@@ -572,6 +659,76 @@ fn clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
     }))
 }
 
+/// `random()` — a pseudo-random float in `[0, 1)` — or `random($limit)` — a
+/// pseudo-random integer in `[1, $limit]`. `$limit` must be a positive
+/// integer (its unit is ignored, matching dart-sass's legacy behaviour); a
+/// non-number / non-integer / non-positive limit errors.
+fn random(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    check_max_args(pos_args, named, 1, pos)?;
+    let r = next_random();
+    match super::arg(&["limit"], pos_args, named, 0) {
+        None => Ok(unitless(round_to_precision(r))),
+        Some(Value::Null) => Ok(unitless(round_to_precision(r))),
+        Some(v) => {
+            let n = as_num(v, pos)?;
+            // dart-sass treats a value within the 1e-11 precision of an
+            // integer as that integer.
+            let rounded = n.value.round();
+            if (n.value - rounded).abs() >= 1e-11 {
+                return Err(Error::at(
+                    format!("$limit: {} is not an int.", n.to_css(false)),
+                    pos,
+                ));
+            }
+            if rounded < 1.0 {
+                return Err(Error::at(
+                    format!("$limit: Must be greater than 0, was {}.", n.to_css(false)),
+                    pos,
+                ));
+            }
+            // floor(r * limit) + 1 lands in [1, limit].
+            let pick = (r * rounded).floor() + 1.0;
+            Ok(unitless(pick.min(rounded)))
+        }
+    }
+}
+
+/// Round a `[0,1)` random draw to sasso's 10-digit output precision so its
+/// serialization is stable (dart-sass emits e.g. `0.8820566029`).
+fn round_to_precision(x: f64) -> f64 {
+    (x * 1e10).round() / 1e10
+}
+
+/// A pseudo-random `f64` in `[0, 1)` from a process-wide xorshift64* state,
+/// seeded once from the system clock. Pure Rust, no external dependency.
+fn next_random() -> f64 {
+    use std::cell::Cell;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    thread_local! {
+        static STATE: Cell<u64> = const { Cell::new(0) };
+    }
+    STATE.with(|s| {
+        let mut x = s.get();
+        if x == 0 {
+            // Seed from the clock; fall back to a fixed nonzero constant if
+            // the clock is unavailable (never zero, which would stick).
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9E37_79B9_7F4A_7C15);
+            x = seed | 1;
+        }
+        // xorshift64*
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        s.set(x);
+        let v = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        // Take the top 53 bits for a uniform double in [0, 1).
+        ((v >> 11) as f64) / ((1u64 << 53) as f64)
+    })
+}
+
 // ---- shared helpers --------------------------------------------------
 
 /// All positional arguments followed by all named-argument values, in order.
@@ -634,26 +791,6 @@ fn try_coerce(n: &Number, target: &Number) -> Option<f64> {
     convert_factor(&n.unit, &target.unit).map(|f| n.value * f)
 }
 
-/// Like [`try_coerce`] but errors (dart-sass "<a> and <b> are
-/// incompatible.") when the units cannot be combined. Used by `hypot`,
-/// `atan2`, `rem`, and `mod`, which — like `calc()` — reject a unitless/real
-/// mix as well as cross-dimension units.
-fn coerce_to(n: &Number, target: &Number, pos: Pos) -> Result<f64, Error> {
-    if n.unit.eq_ignore_ascii_case(&target.unit) {
-        return Ok(n.value);
-    }
-    if n.unit.is_empty() != target.unit.is_empty() {
-        return Err(incompatible(n, target, pos));
-    }
-    if n.unit.is_empty() && target.unit.is_empty() {
-        return Ok(n.value);
-    }
-    match convert_factor(&n.unit, &target.unit) {
-        Some(f) => Ok(n.value * f),
-        None => Err(incompatible(n, target, pos)),
-    }
-}
-
 /// Convert an angle number to radians, accepting `deg`/`grad`/`rad`/`turn`
 /// or a unitless value (already radians). Errors on any other unit.
 fn angle_to_radians(n: &Number, pos: Pos) -> Result<f64, Error> {
@@ -664,7 +801,15 @@ fn angle_to_radians(n: &Number, pos: Pos) -> Result<f64, Error> {
         "deg" => n.value,
         "grad" => n.value * 9.0 / 10.0,
         "turn" => n.value * 360.0,
-        _ => return Err(Error::at(format!("{} is not an angle.", n.to_css(false)), pos)),
+        _ => {
+            return Err(Error::at(
+                format!(
+                    "$number: Expected {} to have an angle unit (deg, grad, rad, turn).",
+                    n.to_css(false)
+                ),
+                pos,
+            ))
+        }
     };
     Ok(deg * PI / 180.0)
 }

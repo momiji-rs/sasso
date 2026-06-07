@@ -1314,3 +1314,85 @@ fn attribute_selector_emit_normalization() {
     assert_eq!(ours("[a=\"--b\"] {d: e}\n"), "[a=\"--b\"] {\n  d: e;\n}\n");
     assert_eq!(ours("[a=\"]\"] {d: e}\n"), "[a=\"]\"] {\n  d: e;\n}\n");
 }
+
+#[test]
+fn math_unit_rules_and_arity() {
+    // atan2/hypot preserve their call verbatim when an operand is a `%`
+    // (context-dependent) or an unknown/relative unit can't be combined; an
+    // all-compatible call still folds. Byte-matched to dart-sass. Offline.
+    assert_eq!(ours("a {b: atan2(1%, 2%)}\n"), "a {\n  b: atan2(1%, 2%);\n}\n");
+    assert_eq!(
+        ours("a {b: atan2(1px, 10%)}\n"),
+        "a {\n  b: atan2(1px, 10%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: atan2(1foo, 2bar)}\n"),
+        "a {\n  b: atan2(1foo, 2bar);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: atan2(1foo, 2foo)}\n"),
+        "a {\n  b: 26.5650511771deg;\n}\n"
+    );
+    assert_eq!(ours("a {b: hypot(1%, 2%)}\n"), "a {\n  b: hypot(1%, 2%);\n}\n");
+    assert_eq!(
+        ours("a {b: hypot(1foo, 2foo)}\n"),
+        "a {\n  b: 2.2360679775foo;\n}\n"
+    );
+    // mod/rem fold equal unknown units but preserve a real+unknown mix.
+    assert_eq!(ours("a {b: mod(1%, 2%)}\n"), "a {\n  b: 1%;\n}\n");
+    assert_eq!(ours("a {b: mod(5px, 3%)}\n"), "a {\n  b: mod(5px, 3%);\n}\n");
+    // Calc-style math names fold case-insensitively.
+    assert_eq!(ours("a {b: SiN(1deg)}\n"), "a {\n  b: 0.0174524064;\n}\n");
+    assert_eq!(ours("a {b: AbS(-2)}\n"), "a {\n  b: 2;\n}\n");
+    // A known cross-dimension or unitless/real mix is an error.
+    assert!(compile("a {b: atan2(1deg, 1px)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: atan2(1, 1px)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: mod(16px, 5deg)}\n", &Options::default()).is_err());
+    // Too many arguments to a fixed-arity function is an error.
+    assert!(compile("a {b: sin(0, 0)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: abs(1, 2)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: pow(1, 2, 3)}\n", &Options::default()).is_err());
+}
+
+#[test]
+fn math_random_in_range() {
+    // random() is a unitless float in [0, 1); random($limit) is an integer in
+    // [1, $limit]. The draw is nondeterministic, so assert range membership
+    // rather than an exact value. Offline.
+    for _ in 0..200 {
+        let css = ours("a {b: random()}\n");
+        let v: f64 = css
+            .trim()
+            .trim_start_matches("a {")
+            .trim()
+            .trim_start_matches("b:")
+            .trim()
+            .trim_end_matches('}')
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .parse()
+            .expect("random() should emit a bare number");
+        assert!((0.0..1.0).contains(&v), "random() out of range: {v}");
+
+        let css = ours("a {b: random(5)}\n");
+        let v: f64 = css
+            .trim()
+            .trim_start_matches("a {")
+            .trim()
+            .trim_start_matches("b:")
+            .trim()
+            .trim_end_matches('}')
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .parse()
+            .expect("random(5) should emit a bare integer");
+        assert!((1.0..=5.0).contains(&v), "random(5) out of range: {v}");
+        assert_eq!(v, v.round(), "random(5) must be an integer: {v}");
+    }
+    // A non-positive or non-integer limit errors.
+    assert!(compile("a {b: random(0)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: random(-1)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: random(1.5)}\n", &Options::default()).is_err());
+}
