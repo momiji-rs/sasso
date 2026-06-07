@@ -2960,3 +2960,18 @@ fn parity_custom_property_whitespace() {
     assert_parity("a {\n  --nl: c\n;\n}\n");
     assert_parity("a {\n  --brace: c\n}\n");
 }
+
+#[test]
+fn parity_selector_escape_canonicalization() {
+    // dart-sass re-serializes selector identifier escapes: a leading digit
+    // becomes a hex escape with a trailing space, a non-leading digit drops its
+    // escape, and a numeric escape of a printable non-name char (`$`, `(`)
+    // becomes the escaped character itself.
+    assert_parity(".\\31u {a: b;}\n");
+    assert_parity(".a\\31u {a: b;}\n");
+    assert_parity(".a\\31 u {a: b;}\n");
+    assert_parity(".u\\24 {a: b;}\n");
+    assert_parity(".u\\$ {a: b;}\n");
+    assert_parity(".u#{'\\\\28'} { a: b; }\n");
+    assert_parity("\\64iv {a: b;}\n");
+}
