@@ -1597,3 +1597,37 @@ fn color_function_degenerate_calc() {
         "a {\n  x: color(srgb calc(infinity) 0 0);\n}\n"
     );
 }
+
+#[test]
+fn legacy_channels_non_number_channel_error() {
+    // A one-argument channels list whose first channel is a non-`from`,
+    // non-number value (a quoted `"from"` or a bare keyword like `c`) reports
+    // a per-channel error before the channel-count check, matching dart-sass.
+    // The channel name is per-space (`red`/`hue`) for the first three and
+    // `channel <N>` beyond. Offline.
+    let err = |scss: &str| {
+        compile(scss, &Options::default())
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+    };
+    assert!(err("a{b: rgb(\"from\" #aaa r g b)}\n")
+        .contains("$channels: Expected red channel to be a number, was \"from\"."));
+    assert!(
+        err("a{b: rgb(c #aaa r g b)}\n").contains("$channels: Expected red channel to be a number, was c.")
+    );
+    assert!(
+        err("a{b: hsl(c #aaa h s l)}\n").contains("$channels: Expected hue channel to be a number, was c.")
+    );
+    assert!(
+        err("a{b: hwb(c #aaa h w b)}\n").contains("$channels: Expected hue channel to be a number, was c.")
+    );
+    assert!(err("a{b: rgb(1 c d)}\n").contains("$channels: Expected green channel to be a number, was c."));
+    assert!(err("a{b: rgb(1 2 3 c d)}\n").contains("$channels: Expected channel 4 to be a number, was c."));
+    // A `from`-relative call (even with a var() base and a slash alpha) is kept
+    // verbatim, not reported as an error.
+    assert_eq!(
+        ours("a{x: rgb(from var(--c) r g b / 25%)}\n"),
+        "a {\n  x: rgb(from var(--c) r g b/25%);\n}\n"
+    );
+}

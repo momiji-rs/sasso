@@ -73,6 +73,17 @@ fn verbatim_call(name: &str, channels: &Value) -> Value {
     })
 }
 
+/// The name of the channel at index `i` for a legacy color-function error
+/// message: a named channel for the first three (`red channel`,
+/// `hue channel`, …), or `channel <N>` (1-based) for any overflow position,
+/// matching dart-sass.
+fn legacy_channel_name(names: &[&str], i: usize) -> String {
+    match names.get(i) {
+        Some(name) => format!("{name} channel"),
+        None => format!("channel {}", i + 1),
+    }
+}
+
 pub(super) fn try_call(
     name: &str,
     pos_args: &[Value],
@@ -138,6 +149,7 @@ fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     if let Some(verbatim) = channels.special_passthrough("rgb") {
         return Ok(verbatim);
     }
+    channels.validate_numeric(&["red", "green", "blue"], pos)?;
     channels.validate_count("rgb", pos)?;
     let Channels { comps, alpha, .. } = channels;
     let r = rgb_channel(&comps[0], pos)?;
@@ -334,6 +346,36 @@ impl Channels {
         })
     }
 
+    /// Validate that every channel of a single-argument channels list is a
+    /// number, matching dart-sass's per-channel check. A non-number channel
+    /// (a plain string such as a non-`from` relative keyword, e.g.
+    /// `rgb(c #aaa r g b)`) reports `Expected <name> channel to be a number,
+    /// was X` before the channel-count check. Special/`none` channels are
+    /// handled earlier by [`Channels::special_passthrough`], so callers run
+    /// this only after it returns `None`; the positional forms (`single ==
+    /// None`) keep their own per-argument errors.
+    fn validate_numeric(&self, names: &[&str], pos: Pos) -> Result<(), Error> {
+        if self.single.is_none() {
+            return Ok(());
+        }
+        for (i, comp) in self.comps.iter().enumerate() {
+            // A degenerate `calc()` is a valid (NaN/infinity) channel value, so
+            // it is left for the count/compute path rather than reported here.
+            let numeric = matches!(comp, Value::Number(_) | Value::Slash(..)) || is_degenerate_calc(comp);
+            if !numeric {
+                return Err(Error::at(
+                    format!(
+                        "$channels: Expected {} to be a number, was {}.",
+                        legacy_channel_name(names, i),
+                        comp.to_css(false)
+                    ),
+                    pos,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate that a single-argument channels list holds exactly three
     /// components for a legacy color space. dart-sass only enforces this when
     /// all channels are plain (a special/`none` channel preserves the call), so
@@ -366,16 +408,7 @@ impl Channels {
         if !is_relative {
             return None;
         }
-        if let Some(single) = &self.single {
-            if self.alpha.is_none() {
-                return Some(verbatim_call(name, single));
-            }
-        }
-        let mut args: Vec<&Value> = self.comps.iter().collect();
-        if let Some(a) = &self.alpha {
-            args.push(a);
-        }
-        Some(special_call(name, &args))
+        Some(self.verbatim_passthrough(name))
     }
 
     /// If these channels contain a special value (`var()`, `calc()`, …) or a
@@ -650,6 +683,7 @@ fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     if channels.comps.len() == 3 && channels.comps.iter().any(is_degenerate_calc) {
         return hsl_degenerate(&channels, pos);
     }
+    channels.validate_numeric(&["hue", "saturation", "lightness"], pos)?;
     channels.validate_count("hsl", pos)?;
     let Channels { comps, alpha, .. } = channels;
     let h = hsl_hue(&comps[0], pos)?;
@@ -807,13 +841,34 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     }
     let channels = require(&params, pos_args, named, 0, "hwb", pos)?.clone();
     let SplitChannels { comps, alpha, .. } = split_channels(&channels);
-    // A special function (`var()`/`calc()`/…) anywhere preserves the *original*
-    // spelling verbatim (a bare numeric hue keeps its bare form, the `/` alpha
-    // separator stays glued), regardless of channel count.
+    // A relative-color call (`hwb(from … )`) or a special function
+    // (`var()`/`calc()`/…) anywhere preserves the *original* spelling verbatim
+    // (a bare numeric hue keeps its bare form, the `/` alpha separator stays
+    // glued), regardless of channel count.
+    let is_relative = comps
+        .first()
+        .is_some_and(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.eq_ignore_ascii_case("from")));
     let comps_func = comps.iter().any(is_special);
     let alpha_func = alpha.as_ref().is_some_and(is_special);
-    if comps_func || alpha_func {
+    if is_relative || comps_func || alpha_func {
         return Ok(verbatim_call("hwb", &channels));
+    }
+    // A non-number channel (a non-`from` keyword such as `c`, or a quoted
+    // string) is reported before the channel-count check, matching dart-sass.
+    for (i, comp) in comps.iter().enumerate() {
+        let numeric = matches!(comp, Value::Number(_) | Value::Slash(..))
+            || is_none_keyword(comp)
+            || is_degenerate_calc(comp);
+        if !numeric {
+            return Err(Error::at(
+                format!(
+                    "$channels: Expected {} to be a number, was {}.",
+                    legacy_channel_name(&["hue", "whiteness", "blackness"], i),
+                    comp.to_css(false)
+                ),
+                pos,
+            ));
+        }
     }
     // Without a special function, the channel count must be exactly three.
     if comps.len() != 3 {
