@@ -1415,15 +1415,26 @@ impl<'a> Evaluator<'a> {
                 return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
             }
         };
-        // A module evaluated once and cached is shared; its CSS is NOT re-emitted
-        // and a (non-empty) reconfiguration is an error.
+        // A module evaluated once and cached is shared; its CSS is NOT
+        // re-emitted. Re-loading it with configuration is an error — unless the
+        // configuration targets no variable the module actually defines (a
+        // module with no configurable variables may be loaded with or without
+        // config). The keys it *does* define count as consumed for the caller.
         if let Some(existing) = self.module_cache.borrow().get(&key).cloned() {
-            if !config.is_empty() {
+            let consumed: Vec<String> = config
+                .keys()
+                .filter(|k| existing.var(k).is_some())
+                .cloned()
+                .collect();
+            if !consumed.is_empty() {
                 return Err(Error::at(
                     "This module was already loaded, so it can't be configured using \"with\".".to_string(),
                     pos,
                 ));
             }
+            // The cached module consumed nothing (it defines none of the
+            // configured variables); the caller's own/forwarded handling decides
+            // whether the leftover configuration is an error.
             return Ok((existing, Vec::new()));
         }
         // Guard against a load cycle.
