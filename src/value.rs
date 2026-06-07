@@ -217,6 +217,36 @@ pub(crate) fn serialize_quoted(text: &str) -> String {
     out
 }
 
+/// Serialize an unquoted string for CSS / interpolation output (dart-sass
+/// `_visitUnquotedString`): a newline becomes a space, and a space directly
+/// after a newline is dropped so `"\a "`-style line breaks collapse to a single
+/// space; every other code point is written verbatim.
+pub(crate) fn serialize_unquoted(text: &str) -> String {
+    if !text.contains('\n') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut after_newline = false;
+    for c in text.chars() {
+        match c {
+            '\n' => {
+                out.push(' ');
+                after_newline = true;
+            }
+            ' ' => {
+                if !after_newline {
+                    out.push(' ');
+                }
+            }
+            _ => {
+                out.push(c);
+                after_newline = false;
+            }
+        }
+    }
+    out
+}
+
 /// A list value.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct List {
@@ -331,7 +361,7 @@ impl Value {
                 if s.quoted {
                     serialize_quoted(&s.text)
                 } else {
-                    s.text.clone()
+                    serialize_unquoted(&s.text)
                 }
             }
             Value::List(l) => l.to_css(compressed),

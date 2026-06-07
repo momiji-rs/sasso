@@ -2984,7 +2984,19 @@ fn parity_variable_scoping_semi_global() {
     // a global from inside a rule.
     assert_parity("$x: root;\ndiv { $x: local; v: $x; }\nafter { x: $x; }\n");
     assert_parity("div {\n  $x: 10;\n  span { $x: 20; }\n  v: $x;\n}\n");
-    assert_parity("$x: root;\ndiv {\n  @for $i from 1 through 1 { $x: looped; }\n  v: $x;\n}\nafter { x: $x; }\n");
+    assert_parity(
+        "$x: root;\ndiv {\n  @for $i from 1 through 1 { $x: looped; }\n  v: $x;\n}\nafter { x: $x; }\n",
+    );
     assert_parity("$x: 0;\n@for $i from 1 through 3 { $x: $x + 1; }\nafter { x: $x; }\n");
     assert_parity("div {\n  $y: 1;\n  @for $i from 1 through 3 { $y: $y + 5; y: $y; }\n  after: $y;\n}\n");
+}
+
+#[test]
+fn parity_unquoted_string_newline() {
+    // An unquoted string serializes a newline as a space, dropping a space that
+    // immediately follows it; inside a quoted string the same characters are
+    // re-escaped (`\a`) rather than collapsed.
+    assert_parity(".a {\n  output: #{\"\\0_\\a_\\A\"};\n}\n");
+    assert_parity(".a {\n  output: \"[#{\"\\0_\\a_\\A\"}]\";\n}\n");
+    assert_parity("a { x: foo#{\"b\\a c\"}; }\n");
 }
