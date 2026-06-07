@@ -502,6 +502,7 @@ impl<'a> Evaluator<'a> {
             self.exec(&sheet.stmts, &[], &mut sink)?;
         }
         self.apply_extends(out)?;
+        hoist_css_imports(out);
         Ok(())
     }
 
@@ -4664,6 +4665,49 @@ fn is_css_import(arg: &str) -> bool {
 /// when there is already prior output (and the group is non-empty).
 /// dart-sass omits the blank line after an at-rule, so two adjacent at-rules
 /// (or an at-rule followed by a style rule) pack together with no gap.
+/// Move every top-level plain-CSS `@import` (a `Raw` node) to the front of the
+/// document, preserving their relative order — dart-sass requires CSS `@import`
+/// rules to precede all style rules. Imports nested in `@media`/rules are not
+/// `Raw` top-level nodes and are unaffected. A no-op when there is at most one
+/// import or no rules precede any import.
+fn hoist_css_imports(out: &mut Vec<OutNode>) {
+    let is_import = |n: &OutNode| matches!(n, OutNode::Raw(s) if s.starts_with("@import"));
+    // Hoisting only kicks in when a CSS `@import` follows a *style-producing*
+    // node (a rule/at-rule/declaration). Imports interleaved only with comments
+    // and blanks keep their source order (dart-sass preserves comment context).
+    let produces_css = |n: &OutNode| !matches!(n, OutNode::Blank | OutNode::Comment(_)) && !is_import(n);
+    let mut seen_css = false;
+    let mut needs_hoist = false;
+    for n in out.iter() {
+        if is_import(n) {
+            if seen_css {
+                needs_hoist = true;
+                break;
+            }
+        } else if produces_css(n) {
+            seen_css = true;
+        }
+    }
+    if !needs_hoist {
+        return;
+    }
+    let original = std::mem::take(out);
+    let mut imports = Vec::new();
+    let mut rest = Vec::new();
+    for node in original {
+        match node {
+            n if is_import(&n) => imports.push(n),
+            OutNode::Blank => {}
+            other => rest.push(other),
+        }
+    }
+    // Imports first (tight, no blank between them), then a blank, then the rest.
+    out.extend(imports);
+    for node in rest {
+        push_group(out, vec![node]);
+    }
+}
+
 fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     if group.is_empty() {
         return;
