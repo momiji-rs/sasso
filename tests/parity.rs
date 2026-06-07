@@ -3589,4 +3589,11 @@ fn parity_list_separator_and_bracket_preservation() {
     assert_parity("@use \"sass:list\";\na {b: list.join([1], (2, 3, 4))}\n");
     assert_parity("@use \"sass:list\";\na {b: list.join((1), (2 3 4))}\n");
     assert_parity("@use \"sass:list\";\na {b: list.append((1), 2)}\n");
+fn parity_selector_extend_multiple_extendees() {
+    // selector.extend()'s extendee may be a list of compound selectors (as a
+    // string or a Sass list), each applied as a separate extension target and
+    // resolved to a fixpoint so a selector matching several targets collapses.
+    assert_parity("@use \"sass:selector\";\na { b: selector.extend(\"c.d\", \"c, .d\", \".e\"); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.extend(\"c.d.e.f\", \"c.d, .e.f\", \".g\"); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.extend(\"c.d\", (c, \".d\"), \".e\"); }\n");
 }

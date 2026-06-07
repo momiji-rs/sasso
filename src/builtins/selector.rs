@@ -402,29 +402,35 @@ fn extend_or_replace(
     let target_list = selector_list_arg(params, pos_args, named, 1, fname, pos)?;
     let extender = selector_list_arg(params, pos_args, named, 2, fname, pos)?;
 
-    // The extendee/original must be a single compound selector (dart-sass rejects
-    // a complex selector here).
-    let target = compound_target(&target_list, pos)?;
+    // The extendee/original is a list of compound selectors: each complex
+    // selector in it must be a single compound (dart-sass rejects a complex
+    // selector here). Every compound becomes a separate extension target.
+    let targets = compound_targets(&target_list, pos)?;
 
-    let complexes = selector::extend_compound_target(&selector, &target, &extender, replace);
+    let complexes = selector::extend_compound_target(&selector, &targets, &extender, replace);
     if complexes.is_empty() {
         return Err(Error::at(format!("{fname}() produced an empty selector."), pos));
     }
     Ok(selectors_to_value(&complexes))
 }
 
-/// Extract the single compound target of an extendee/original selector list. It
-/// must be a single complex selector with a single compound (dart-sass rejects a
-/// complex selector with `Can't extend complex selector <rendered>.`).
-fn compound_target(list: &[Complex], pos: Pos) -> Result<crate::selector::Compound, Error> {
-    if list.len() == 1 && list[0].components.len() == 1 && list[0].components[0].combinator.is_none() {
-        return Ok(list[0].components[0].compound.clone());
+/// Extract the compound targets of an extendee/original selector list. The list
+/// may contain several complex selectors, but each must itself be a single
+/// compound (dart-sass rejects a complex selector with a combinator or multiple
+/// components, erroring `Can't extend complex selector <rendered>.`).
+fn compound_targets(list: &[Complex], pos: Pos) -> Result<Vec<crate::selector::Compound>, Error> {
+    let mut out = Vec::with_capacity(list.len());
+    for complex in list {
+        if complex.components.len() == 1 && complex.components[0].combinator.is_none() {
+            out.push(complex.components[0].compound.clone());
+        } else {
+            return Err(Error::at(
+                format!("Can't extend complex selector {}.", complex.render()),
+                pos,
+            ));
+        }
     }
-    let rendered = list.iter().map(Complex::render).collect::<Vec<_>>().join(", ");
-    Err(Error::at(
-        format!("Can't extend complex selector {rendered}."),
-        pos,
-    ))
+    Ok(out)
 }
 
 // ---- unify ------------------------------------------------------------
