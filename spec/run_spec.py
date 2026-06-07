@@ -284,6 +284,16 @@ def options_for_dir(files: dict, dirpath: str) -> dict:
 
 def cases_from_files(files: dict, archive_id: str):
     """Yield Case objects from a {path: content} mapping (one HRX or one dir)."""
+    # Longest-first case dirs so each file is attributed to its NEAREST enclosing
+    # case (a partial under d/sub/ belongs to nested case d/sub, not d).
+    _by_len = sorted(collect_case_dirs(files), key=len, reverse=True)
+
+    def _owning_case(path: str) -> str:
+        for cd in _by_len:
+            if cd == "" or path == cd or path.startswith(cd + "/"):
+                return cd
+        return ""
+
     for d in collect_case_dirs(files):
         # locate the input file in this dir
         input_name = None
@@ -302,20 +312,27 @@ def cases_from_files(files: dict, archive_id: str):
 
         opts = options_for_dir(files, d)
 
-        # extra sibling files in the same dir (e.g. imported other.scss)
+        # Import partials for THIS case: every file under d/ that isn't claimed
+        # by a deeper nested case, so subdir partials (d/foo/_bar.scss for
+        # `@use "foo/bar"`) are materialized too — dart-sass's own runner
+        # extracts the whole case tree, not just direct siblings.
         extra = {}
         prefix = f"{d}/" if d else ""
         for path, content in files.items():
             if not path.startswith(prefix):
                 continue
+            if _owning_case(path) != d:
+                continue  # belongs to a deeper nested case
             rel = path[len(prefix):]
-            if "/" in rel:
-                continue  # only direct siblings
             if rel in INPUT_NAMES:
                 continue
-            if rel.startswith("output") or rel.startswith("error") or rel.startswith("warning"):
-                continue
-            if rel == "options.yml":
+            # expectation / config files live at the case-dir top level
+            if "/" not in rel and (
+                rel.startswith("output")
+                or rel.startswith("error")
+                or rel.startswith("warning")
+                or rel == "options.yml"
+            ):
                 continue
             extra[rel] = content
 
