@@ -1618,8 +1618,13 @@ impl<'a> Evaluator<'a> {
         let mut forward_shadowed: Vec<String> = Vec::new();
         for (name, (val, is_default)) in &forward_conf {
             if *is_default {
-                if passthrough.contains_key(name) {
-                    // Downstream override wins; the forward default is ignored.
+                // A downstream override wins over a `!default` forward entry —
+                // but a `null` downstream value counts as "not configured", so
+                // the forward default still applies.
+                let downstream_overrides = passthrough
+                    .get(name)
+                    .is_some_and(|(v, _)| !matches!(v, Value::Null));
+                if downstream_overrides {
                     forward_claimed.push(name.clone());
                 } else {
                     combined.insert(name.clone(), (val.clone(), false));
