@@ -945,3 +945,12 @@ fn mix_srgb_method_matches_legacy() {
     assert_parity("a { b: mix(red, blue, $method: rgb); }\n");
     assert_parity("a { b: mix(red, blue, 25%, $method: srgb); }\n");
 }
+
+#[test]
+fn relative_color_from_is_preserved() {
+    // A relative-color `rgb(from … )`/`hsl(from … )` call is kept verbatim
+    // rather than computed or rejected by the channel-count check.
+    assert_parity("a { b: rgb(from red r g b); }\n");
+    assert_parity("a { b: hsl(from red h s l); }\n");
+    assert_parity("a { b: rgb(from var(--c) r g b); }\n");
+}

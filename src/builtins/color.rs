@@ -132,6 +132,9 @@ fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     }
     // Otherwise gather the channel list and an optional alpha.
     let channels = Channels::collect("rgb", &params, pos_args, named, pos)?;
+    if let Some(verbatim) = channels.relative_passthrough("rgb") {
+        return Ok(verbatim);
+    }
     if let Some(verbatim) = channels.special_passthrough("rgb") {
         return Ok(verbatim);
     }
@@ -339,6 +342,28 @@ impl Channels {
         Ok(())
     }
 
+    /// If this is a relative-color call (`rgb(from … )`), preserve it verbatim.
+    /// dart-sass keeps the whole `from`-based form rather than computing it.
+    fn relative_passthrough(&self, name: &str) -> Option<Value> {
+        let is_relative = self
+            .comps
+            .first()
+            .is_some_and(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.eq_ignore_ascii_case("from")));
+        if !is_relative {
+            return None;
+        }
+        if let Some(single) = &self.single {
+            if self.alpha.is_none() {
+                return Some(verbatim_call(name, single));
+            }
+        }
+        let mut args: Vec<&Value> = self.comps.iter().collect();
+        if let Some(a) = &self.alpha {
+            args.push(a);
+        }
+        Some(special_call(name, &args))
+    }
+
     /// If these channels contain a special value (`var()`, `calc()`, …) or a
     /// `none` keyword, return the re-serialized passthrough call dart-sass
     /// would emit; otherwise `None` (the channels are all plain numbers and a
@@ -477,6 +502,9 @@ fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         ));
     }
     let channels = Channels::collect("hsl", &params, pos_args, named, pos)?;
+    if let Some(verbatim) = channels.relative_passthrough("hsl") {
+        return Ok(verbatim);
+    }
     if let Some(verbatim) = channels.special_passthrough("hsl") {
         return Ok(verbatim);
     }
