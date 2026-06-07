@@ -2650,6 +2650,9 @@ fn childless_at_rule_stays_in_rule_block() {
     assert_parity("a {\n  @b c;\n}\n");
     assert_parity("a {\n  b {c: d}\n  @e f;\n  g {h: i}\n}\n");
     assert_parity("a {\n  @charset \"x\";\n  b: c;\n}\n");
+}
+
+#[test]
 fn extend_combinator_weave() {
     // The @extend engine must weave extenders that contain combinators
     // (`>`, `+`, `~`) rather than falling back to plain concatenation, matching
@@ -2727,6 +2730,9 @@ fn extend_pseudo_element_superselector() {
 
     assert_parity("%x#bar {a: b}\n%y, %y::fblthp {@extend %x}\nz {@extend %y}\n");
     assert_parity("%x#bar {a: b}\n%y, %y:before {@extend %x}\nz {@extend %y}\n");
+}
+
+#[test]
 fn fs_importer_partial_extension_and_import_only_resolution() {
     use std::fs;
     use std::path::PathBuf;
