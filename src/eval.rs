@@ -23,7 +23,7 @@ use crate::ast::{
 };
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{CalcNode, CalcOp, List, ListSep, Map, Number, SassFunction, SassStr, Value};
+use crate::value::{CalcNode, CalcOp, List, ListSep, Map, Number, SassFunction, SassMixin, SassStr, Value};
 use crate::{Importer, OutputStyle, Syntax};
 
 /// Parse imported/`@use`d source with the front-end matching its file syntax.
@@ -1169,6 +1169,14 @@ impl<'a> Evaluator<'a> {
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
+        // The built-in `@include meta.apply($mixin, $args...)` invokes a
+        // first-class mixin reference. It is bound to the `sass:meta` module's
+        // namespace, so resolve it before the generic module path.
+        if let Some(ns) = module {
+            if name == "apply" && self.used_modules.get(ns).map(String::as_str) == Some("meta") {
+                return self.exec_apply(args, content, parents, sink);
+            }
+        }
         // A namespaced `@include ns.mixin`: resolve a user module bound to the
         // namespace, then a built-in (which exposes no mixins in this build).
         if let Some(ns) = module {
@@ -1265,6 +1273,115 @@ impl<'a> Evaluator<'a> {
         self.content_stack.pop();
         self.pop_scope();
         self.leave_module(saved);
+        result
+    }
+
+    /// `@include meta.apply($mixin, $args...)`: invoke a first-class mixin
+    /// reference. The first argument is the mixin reference; the rest are the
+    /// arguments passed on to that mixin (which may also accept a `@content`
+    /// block).
+    fn exec_apply(
+        &mut self,
+        args: &[CallArg],
+        content: Option<Rc<Vec<Stmt>>>,
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        // Evaluate apply's own arguments (expanding any `...` splat). The first
+        // positional (or named `$mixin`) is the mixin reference; the remainder
+        // are forwarded to the mixin.
+        let (mut pos_args, mut named) = self.eval_call_args(args)?;
+        for v in &mut pos_args {
+            *v = std::mem::replace(v, Value::Null).without_slash();
+        }
+        for (_, v) in &mut named {
+            *v = std::mem::replace(v, Value::Null).without_slash();
+        }
+        let (mixin_val, rest_pos): (Value, Vec<Value>) = if !pos_args.is_empty() {
+            let mut iter = pos_args.into_iter();
+            let first = iter.next().unwrap_or(Value::Null);
+            (first, iter.collect())
+        } else if let Some(idx) = named.iter().position(|(n, _)| n == "mixin") {
+            (named.remove(idx).1, Vec::new())
+        } else {
+            return Err(Error::unpositioned("Missing argument $mixin."));
+        };
+        let rest_named: Vec<(String, Value)> = named.into_iter().filter(|(n, _)| n != "mixin").collect();
+        let mixin = match mixin_val {
+            Value::Mixin(m) => m,
+            other => {
+                return Err(Error::unpositioned(format!(
+                    "$mixin: {} is not a mixin reference.",
+                    other.to_css(false)
+                )))
+            }
+        };
+        self.invoke_mixin_ref(&mixin, rest_pos, rest_named, content, parents, sink)
+    }
+
+    /// Invoke a resolved mixin reference with already-evaluated arguments and an
+    /// optional `@content` block, emitting into `sink`.
+    fn invoke_mixin_ref(
+        &mut self,
+        mixin: &SassMixin,
+        pos_args: Vec<Value>,
+        named: Vec<(String, Value)>,
+        content: Option<Rc<Vec<Stmt>>>,
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        // A captured user `@mixin`: recover the type-erased `Callable`.
+        let callable = match &mixin.user {
+            Some(any) => match Rc::clone(any).downcast::<Callable>() {
+                Ok(c) => c,
+                Err(_) => return Err(Error::unpositioned("Undefined mixin.")),
+            },
+            // A built-in mixin reference (`meta.load-css`/`meta.apply`). Only the
+            // content-block validation is observable in the supported cases.
+            None => {
+                if content.is_some() {
+                    return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+                }
+                return Err(Error::unpositioned("Undefined mixin."));
+            }
+        };
+        if content.is_some() && !body_uses_content(&callable.body) {
+            return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+        }
+        let frame = self.bind_evaled(&callable.params, (pos_args, named), &callable.name)?;
+        // A mixin captured from another module runs in that module's environment;
+        // its `@content` block runs back at the call site.
+        if let Some(module_any) = &mixin.module {
+            if let Ok(module) = Rc::clone(module_any).downcast::<Module>() {
+                let content_block = content.map(|stmts| {
+                    let snapshot = self.snapshot_env();
+                    ContentBlock {
+                        stmts,
+                        caller_env: Some(Box::new(snapshot)),
+                    }
+                });
+                let saved = self.enter_module(&module);
+                self.push_scope_frame(frame);
+                self.content_stack.push(content_block);
+                self.in_mixin.push(true);
+                let result = self.exec(&callable.body, parents, sink);
+                self.in_mixin.pop();
+                self.content_stack.pop();
+                self.pop_scope();
+                self.leave_module(saved);
+                return result;
+            }
+        }
+        self.push_scope_frame(frame);
+        self.content_stack.push(content.map(|stmts| ContentBlock {
+            stmts,
+            caller_env: None,
+        }));
+        self.in_mixin.push(true);
+        let result = self.exec(&callable.body, parents, sink);
+        self.in_mixin.pop();
+        self.content_stack.pop();
+        self.pop_scope();
         result
     }
 
@@ -2521,6 +2638,13 @@ impl<'a> Evaluator<'a> {
                 d.pos,
             ));
         }
+        // A first-class mixin reference is likewise not a valid CSS value.
+        if let Value::Mixin(m) = &value {
+            return Err(Error::at(
+                format!("{} isn't a valid CSS value.", m.inspect()),
+                d.pos,
+            ));
+        }
         let vstr = value.to_css(self.compressed());
         Ok(Some(OutItem::Decl {
             prop,
@@ -3217,6 +3341,7 @@ impl<'a> Evaluator<'a> {
             "function-exists" => Some(self.meta_function_exists(pos_args, named, pos)),
             "content-exists" => Some(self.meta_content_exists(pos_args, pos)),
             "get-function" => Some(self.meta_get_function(pos_args, named, pos)),
+            "get-mixin" => Some(self.meta_get_mixin(pos_args, named, pos)),
             "call" => Some(self.meta_call(pos_args, named, pos)),
             _ => None,
         }
@@ -3291,6 +3416,131 @@ impl<'a> Evaluator<'a> {
             }));
         }
         Err(Error::at(format!("Function not found: {name}"), pos))
+    }
+
+    /// `meta.get-mixin($name, $module: null)`: capture a reference to the named
+    /// mixin. A user `@mixin` is captured by identity (so a later redefinition
+    /// yields a distinct reference); the built-in `sass:meta` mixins
+    /// (`load-css`, `apply`) are captured by name. A `$module` argument resolves
+    /// the mixin from that `@use`d module's namespace.
+    fn meta_get_mixin(
+        &self,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+        pos: Pos,
+    ) -> Result<Value, Error> {
+        let params = ["name", "module"];
+        if pos_args.len() > params.len() {
+            return Err(Error::at(
+                format!(
+                    "Only {} arguments allowed, but {} were passed.",
+                    params.len(),
+                    pos_args.len()
+                ),
+                pos,
+            ));
+        }
+        let arg = |i: usize| -> Option<&Value> {
+            pos_args
+                .get(i)
+                .or_else(|| named.iter().find(|(n, _)| n == params[i]).map(|(_, v)| v))
+        };
+        let name = match arg(0) {
+            Some(Value::Str(s)) => s.text.clone(),
+            Some(other) => {
+                return Err(Error::at(
+                    format!("$name: {} is not a string.", other.to_css(false)),
+                    pos,
+                ))
+            }
+            None => return Err(Error::at("Missing argument $name.", pos)),
+        };
+        // A `$module` argument resolves the mixin from another module's scope.
+        if let Some(module_val) = arg(1) {
+            if !matches!(module_val, Value::Null) {
+                let module_name = match module_val {
+                    Value::Str(s) => s.text.clone(),
+                    other => {
+                        return Err(Error::at(
+                            format!("$module: {} is not a string.", other.to_css(false)),
+                            pos,
+                        ))
+                    }
+                };
+                return self.get_mixin_from_module(&name, &module_name, pos);
+            }
+        }
+        // A user `@mixin` of that name (dash/underscore-insensitive) wins.
+        let key = normalize_arg_name(&name);
+        if let Some((_, m)) = self.mixins.iter().find(|(k, _)| normalize_arg_name(k) == key) {
+            return Ok(Value::Mixin(SassMixin {
+                name,
+                user: Some(Rc::clone(m) as Rc<dyn std::any::Any>),
+                module: None,
+            }));
+        }
+        // A mixin exposed unprefixed via `@use … as *`. Its body runs in the
+        // owning module's environment, so capture that module too.
+        if !self.star_user_modules.is_empty() && !is_private_member(&name) {
+            let hits: Vec<&Rc<Module>> = self
+                .star_user_modules
+                .iter()
+                .filter(|m| m.mixin(&name).is_some())
+                .collect();
+            if hits.len() > 1 {
+                return Err(Error::at(
+                    "This mixin is available from multiple global modules.",
+                    pos,
+                ));
+            }
+            if let Some(module) = hits.into_iter().next() {
+                let m = module
+                    .mixin(&name)
+                    .ok_or_else(|| Error::at(format!("Mixin not found: {name}"), pos))?;
+                return Ok(Value::Mixin(SassMixin {
+                    name,
+                    user: Some(Rc::clone(&m) as Rc<dyn std::any::Any>),
+                    module: Some(Rc::clone(module) as Rc<dyn std::any::Any>),
+                }));
+            }
+        }
+        Err(Error::at(format!("Mixin not found: {name}"), pos))
+    }
+
+    /// Resolve a `$module`-qualified mixin reference for `meta.get-mixin`. The
+    /// namespace must name a currently-`@use`d module; a built-in module's
+    /// mixins (`meta.load-css`, `meta.apply`) resolve by name.
+    fn get_mixin_from_module(&self, name: &str, module_name: &str, pos: Pos) -> Result<Value, Error> {
+        if let Some(module) = self.used_user_modules.get(module_name) {
+            if is_private_member(name) {
+                return Err(Error::at(
+                    "Private members can't be accessed from outside their modules.".to_string(),
+                    pos,
+                ));
+            }
+            if let Some(m) = module.mixin(name) {
+                return Ok(Value::Mixin(SassMixin {
+                    name: name.to_string(),
+                    user: Some(Rc::clone(&m) as Rc<dyn std::any::Any>),
+                    module: Some(Rc::clone(module) as Rc<dyn std::any::Any>),
+                }));
+            }
+            return Err(Error::at(format!("Mixin not found: {name}"), pos));
+        }
+        if self.used_modules.contains_key(module_name) {
+            if is_builtin_mixin(module_name, name) {
+                return Ok(Value::Mixin(SassMixin {
+                    name: name.to_string(),
+                    user: None,
+                    module: None,
+                }));
+            }
+            return Err(Error::at(format!("Mixin not found: {name}"), pos));
+        }
+        Err(Error::at(
+            format!("There is no module with the namespace \"{module_name}\"."),
+            pos,
+        ))
     }
 
     /// `meta.call($function, $args...)`: invoke a function reference (or, when
@@ -5359,6 +5609,16 @@ fn normalize_var_name(name: &str) -> String {
 /// not accessible across module boundaries.
 fn is_private_member(name: &str) -> bool {
     name.starts_with('-') || name.starts_with('_')
+}
+
+/// Whether `module` exposes `name` as a built-in mixin. dart-sass's `sass:meta`
+/// module defines the `load-css` and `apply` mixins; no other built-in module
+/// exposes a mixin. Matched dash/underscore-insensitively.
+fn is_builtin_mixin(module: &str, name: &str) -> bool {
+    if module != "meta" {
+        return false;
+    }
+    matches!(normalize_arg_name(name).as_str(), "load-css" | "apply")
 }
 
 /// Collect the names from a `@forward` `show`/`hide` member list, selecting

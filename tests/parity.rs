@@ -3617,3 +3617,17 @@ fn parity_selector_append_type_suffix() {
     assert_parity("@use \"sass:selector\";\na { b: selector.append(\".c\", \"d\"); }\n");
     assert_parity("@use \"sass:selector\";\na { b: selector.append(\"d\", \".c\"); }\n");
 }
+fn parity_first_class_mixins_apply() {
+    // `meta.get-mixin` captures a mixin reference; `@include meta.apply(...)`
+    // invokes it with forwarded arguments and an optional `@content` block.
+    assert_parity(concat!(
+        "@use \"sass:meta\";\n",
+        "@mixin add-two($v) { b: $v + 2; }\n",
+        "$ref: meta.get-mixin(add-two);\n",
+        "a { @include meta.apply($ref, 10); }\n",
+        "@mixin wrap { c { @content; } }\n",
+        "d { @include meta.apply(meta.get-mixin(wrap)) { e: f; } }\n",
+        "g { h: meta.inspect(meta.get-mixin(add-two)); ",
+        "i: meta.get-mixin(add-two) == meta.get-mixin(add-two); }\n",
+    ));
+}

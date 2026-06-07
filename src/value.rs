@@ -38,6 +38,10 @@ pub(crate) enum Value {
     /// `meta.call`. Not a valid CSS value; `inspect` renders it as
     /// `get-function("name")`.
     Function(SassFunction),
+    /// A first-class mixin reference (`meta.get-mixin(...)`), invoked via
+    /// `@include meta.apply(...)`. Not a valid CSS value; `inspect` renders it
+    /// as `get-mixin("name")`.
+    Mixin(SassMixin),
 }
 
 /// A first-class function reference. Built-in references compare equal by name
@@ -84,6 +88,54 @@ impl SassFunction {
     /// The `inspect()` / debug form, `get-function("name")` (dart-sass).
     pub(crate) fn inspect(&self) -> String {
         format!("get-function(\"{}\")", self.name)
+    }
+}
+
+/// A first-class mixin reference, analogous to [`SassFunction`]. Built-in
+/// references (e.g. `meta.load-css`) compare equal by name; user references
+/// compare by identity of the captured `@mixin` definition (so a redefined
+/// `@mixin` yields a distinct reference). The captured user definition is held
+/// as a type-erased `Rc` (the concrete `Callable` lives in `ast`, which cannot
+/// be referenced from this module without a dependency cycle); the evaluator
+/// downcasts it when invoking.
+#[derive(Clone)]
+pub(crate) struct SassMixin {
+    /// The mixin's name (for `inspect` and error messages).
+    pub name: String,
+    /// The captured user `@mixin` definition, or `None` for a built-in
+    /// reference. Type-erased to break the `ast` ↔ `value` cycle.
+    pub user: Option<std::rc::Rc<dyn std::any::Any>>,
+    /// The module the captured mixin came from, when it was resolved from
+    /// another `@use`d module (so its body runs in that module's environment).
+    /// `None` for a same-module reference. Type-erased to break the cycle.
+    pub module: Option<std::rc::Rc<dyn std::any::Any>>,
+}
+
+impl std::fmt::Debug for SassMixin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SassMixin")
+            .field("name", &self.name)
+            .field("user", &self.user.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for SassMixin {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.user, &other.user) {
+            // User references: identity of the captured definition.
+            (Some(a), Some(b)) => std::rc::Rc::ptr_eq(a, b),
+            // Built-in references: same name.
+            (None, None) => self.name == other.name,
+            _ => false,
+        }
+    }
+}
+
+impl SassMixin {
+    /// The `inspect()` / debug form, `get-mixin("name")` (dart-sass).
+    pub(crate) fn inspect(&self) -> String {
+        format!("get-mixin(\"{}\")", self.name)
     }
 }
 
@@ -534,6 +586,7 @@ impl Value {
             // Not a valid CSS value; rendered for the "isn't a valid CSS value"
             // error and for `inspect`.
             Value::Function(func) => func.inspect(),
+            Value::Mixin(m) => m.inspect(),
         }
     }
 
@@ -563,6 +616,7 @@ impl Value {
             Value::Slash(_, _) => "number",
             Value::Calc(_) => "calculation",
             Value::Function(_) => "function",
+            Value::Mixin(_) => "mixin",
         }
     }
 
@@ -621,6 +675,9 @@ impl Value {
             // Function references: built-ins by name, user functions by the
             // identity of their captured definition (see `SassFunction`).
             (Value::Function(a), Value::Function(b)) => a == b,
+            // Mixin references: built-ins by name, user mixins by the identity
+            // of their captured definition (see `SassMixin`).
+            (Value::Mixin(a), Value::Mixin(b)) => a == b,
             _ => false,
         }
     }
