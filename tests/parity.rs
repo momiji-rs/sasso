@@ -871,3 +871,23 @@ fn css_custom_function_mixin_passthrough() {
     assert_parity("@function foo() { @return 1px * 2; }\na { b: foo(); }\n");
     assert_parity("@mixin foo { x: y; }\na { @include foo; }\n");
 }
+
+#[test]
+fn special_url_function_passthrough() {
+    // url() is recognised case-insensitively and with an optional vendor
+    // prefix. A plain unquoted URL is emitted as a bare lower-cased `url(...)`
+    // (the vendor prefix is dropped), tolerating `!` and other url-safe
+    // characters and resolving `#{}` (including inside quoted strings). When
+    // the contents are SassScript (a `$variable`) the call falls back to a
+    // normal function so its arguments evaluate, keeping the original name.
+    assert_parity("a { b: url(!); }\n");
+    assert_parity("a { b: URL(!); }\n");
+    assert_parity("a { b: URL(http://c.d/e!f); }\n");
+    assert_parity("a { b: -c-url(0); }\n");
+    assert_parity("a { b: -c-url(http://d.e/f!g); }\n");
+    assert_parity("a { b: -c-url(#{0}); }\n");
+    assert_parity("a { b: url(c, d); }\n");
+    assert_parity("$a: b;\nc { d: url($a); }\n");
+    assert_parity("$a: b;\nc { d: -e-url($a); }\n");
+    assert_parity("$f: bar;\na {\n  foo: url($f);\n  foo: url(#{$f});\n  foo: url(\"x?v=#{$f}\");\n}\n");
+}

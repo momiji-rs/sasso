@@ -143,6 +143,15 @@ fn strip_vendor_prefix(lower: &str) -> &str {
     lower
 }
 
+/// Whether `name` is a `url(` function — `url` itself or any vendor-prefixed
+/// `-x-url`, case-insensitively. dart-sass parses these with its special URL
+/// grammar (a plain, unquoted URL is preserved verbatim and the call is
+/// emitted as a bare `url(...)`).
+fn is_url_function(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    strip_vendor_prefix(&lower) == "url"
+}
+
 /// Validate a modern `if()` condition: an evaluated `sass()` may not coexist
 /// in an `and`/`or` chain with an *unparenthesised* multi-token "arbitrary
 /// substitution". Parenthesising the substitution shields it (a `sass()`
@@ -2490,7 +2499,23 @@ impl Parser {
         // arguments as Sass values and reduce when every argument is a
         // compatible-unit number, otherwise fall back to a preserved CSS
         // `min()`/`max()`/`clamp()` form (so `min(1px, 2vw)` round-trips).
-        if matches!(name.as_str(), "url" | "var" | "env") {
+        // A `url(` function (case-insensitively, with an optional vendor
+        // prefix): dart-sass tries to read a plain unquoted URL verbatim. If
+        // that succeeds the call is emitted as a bare lower-cased `url(...)`
+        // (the vendor prefix is dropped); if the contents contain SassScript
+        // (a `$variable`), the trial fails and the call is parsed as an
+        // ordinary function so its arguments evaluate (keeping the original
+        // name, e.g. `-e-url($a)` -> `-e-url(b)`).
+        if is_url_function(&name) {
+            let mark = self.sc.mark();
+            if let Some(pieces) = self.try_plain_url_contents()? {
+                return Ok(Expr::Ident(pieces));
+            }
+            self.sc.reset(mark);
+            let args = self.parse_args_after_paren()?;
+            return Ok(Expr::Func { name, args, pos });
+        }
+        if matches!(name.as_str(), "var" | "env") {
             let mut pieces: Vec<TplPiece> = Vec::new();
             let mut lit = format!("{name}(");
             let mut depth = 1;
@@ -2672,6 +2697,104 @@ impl Parser {
             pieces.push(TplPiece::Lit(lit));
         }
         Ok(Expr::Ident(pieces))
+    }
+
+    /// Try to read the contents of a `url(` as a plain unquoted URL (the `(`
+    /// is already consumed). Returns `Some(pieces)` emitting a canonical
+    /// `url(<contents>)` (vendor prefix dropped, name lower-cased) when the
+    /// contents are a plain URL — arbitrary url-safe characters plus `#{...}`
+    /// interpolation, balanced parentheses, and quoted strings. Returns `None`
+    /// (without committing the cursor — the caller resets) when a top-level
+    /// `$variable` appears, signalling that the call must instead be parsed as
+    /// an ordinary function so its arguments evaluate.
+    fn try_plain_url_contents(&mut self) -> Result<Option<Vec<TplPiece>>, Error> {
+        let mut pieces: Vec<TplPiece> = Vec::new();
+        let mut lit = String::from("url(");
+        let mut depth = 1i32;
+        loop {
+            match self.sc.peek() {
+                None => return Ok(None),
+                // A top-level `$variable` is SassScript, not a plain URL.
+                Some('$') => return Ok(None),
+                Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    if !lit.is_empty() {
+                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                    }
+                    self.sc.bump();
+                    self.sc.bump();
+                    let e = self.parse_value()?;
+                    self.skip_ws_inline();
+                    if !self.sc.eat('}') {
+                        return Err(Error::at("expected \"}\"", self.sc.position()));
+                    }
+                    pieces.push(TplPiece::Interp(e));
+                }
+                // A quoted string: copy verbatim but still resolve any `#{...}`
+                // interpolation inside it (matching dart-sass, which evaluates
+                // interpolation within URL string contents).
+                Some(q @ ('"' | '\'')) => {
+                    lit.push(q);
+                    self.sc.bump();
+                    loop {
+                        match self.sc.peek() {
+                            None => break,
+                            Some('#') if self.sc.peek_at(1) == Some('{') => {
+                                if !lit.is_empty() {
+                                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                                }
+                                self.sc.bump();
+                                self.sc.bump();
+                                let e = self.parse_value()?;
+                                self.skip_ws_inline();
+                                if !self.sc.eat('}') {
+                                    return Err(Error::at("expected \"}\"", self.sc.position()));
+                                }
+                                pieces.push(TplPiece::Interp(e));
+                            }
+                            Some('\\') => {
+                                if let Some(c) = self.sc.bump() {
+                                    lit.push(c);
+                                }
+                                if let Some(c) = self.sc.bump() {
+                                    lit.push(c);
+                                }
+                            }
+                            Some(ch) => {
+                                lit.push(ch);
+                                self.sc.bump();
+                                if ch == q {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                Some('(') => {
+                    depth += 1;
+                    lit.push('(');
+                    self.sc.bump();
+                }
+                Some(')') => {
+                    depth -= 1;
+                    lit.push(')');
+                    self.sc.bump();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Some(c) => {
+                    lit.push(c);
+                    self.sc.bump();
+                }
+            }
+        }
+        if depth != 0 {
+            return Ok(None);
+        }
+        if !lit.is_empty() {
+            pieces.push(TplPiece::Lit(lit));
+        }
+        Ok(Some(pieces))
     }
 
     /// Attempt to parse the modern `if()` grammar after the opening `(` was
