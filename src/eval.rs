@@ -1534,6 +1534,29 @@ impl<'a> Evaluator<'a> {
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.
                 let (mut pos_args, mut named) = self.eval_call_args(args)?;
+                // The proprietary Microsoft `alpha()` filter overload: when the
+                // global `alpha()` is called with one or more unquoted-string
+                // arguments that each contain a `=` (an IE `alpha(opacity=80)`
+                // hack, produced by the single-`=` operator), dart-sass passes
+                // the call through verbatim as a CSS function instead of
+                // treating the argument as a color.
+                if name == "alpha"
+                    && named.is_empty()
+                    && !pos_args.is_empty()
+                    && pos_args
+                        .iter()
+                        .all(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.contains('=')))
+                {
+                    let inner = pos_args
+                        .iter()
+                        .map(|v| v.to_css(false))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Ok(Value::Str(SassStr {
+                        text: format!("alpha({inner})"),
+                        quoted: false,
+                    }));
+                }
                 // A bare slash-division argument collapses to its number when
                 // passed to a real Sass function (dart-sass `withoutSlash`);
                 // plain CSS functions (`foo(1/2)`) keep the slash verbatim.
@@ -2151,6 +2174,13 @@ fn eval_binary(op: BinOp, l: Value, r: Value, pos: Pos) -> Result<Value, Error> 
         BinOp::And | BinOp::Or => Err(Error::unpositioned(
             "internal: and/or are short-circuited in eval_expr",
         )),
+        // The single-`=` Microsoft-filter operator joins both evaluated sides
+        // with `=` (no surrounding whitespace) into an unquoted string,
+        // matching dart-sass (`alpha(opacity=80)` -> `alpha(opacity=80)`).
+        BinOp::SingleEq => Ok(Value::Str(SassStr {
+            text: format!("{}={}", l.to_css(false), r.to_css(false)),
+            quoted: false,
+        })),
     }
 }
 

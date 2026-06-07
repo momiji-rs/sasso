@@ -2110,7 +2110,13 @@ impl Parser {
             }
             let mark = self.sc.mark();
             let had_ws = self.skip_ws_inline();
-            if !had_ws || self.at_value_terminator() {
+            // A lone `=` (not `==`) ends the space-list so an enclosing
+            // argument list can apply the single-`=` Microsoft-filter operator
+            // (`foo(a = b)`); `==` stays the equality operator, parsed above.
+            if !had_ws
+                || self.at_value_terminator()
+                || (self.sc.peek() == Some('=') && self.sc.peek_at(1) != Some('='))
+            {
                 self.sc.reset(mark);
                 break;
             }
@@ -3763,6 +3769,36 @@ impl Parser {
     /// Parse a call's argument list, assuming the opening `(` was already
     /// consumed, through the closing `)`. Args are positional or
     /// `$name: value`. Shared by function calls and `@include`.
+    /// A function-argument value: a space-list optionally followed by one or
+    /// more single-`=` Microsoft-filter operators (`alpha(opacity=80)`). The
+    /// `=` is the lowest-precedence value operator and is recognised only here,
+    /// inside an argument list (a lone `=` is a syntax error elsewhere). A
+    /// `==` is the equality operator and is handled at its own precedence, so
+    /// only a `=` not followed by `=` is consumed.
+    fn arg_value(&mut self) -> Result<Expr, Error> {
+        let mut lhs = self.space_list()?;
+        loop {
+            let mark = self.sc.mark();
+            self.skip_ws_inline();
+            if self.sc.peek() == Some('=') && self.sc.peek_at(1) != Some('=') {
+                let pos = self.sc.position();
+                self.sc.bump();
+                self.skip_ws_inline();
+                let rhs = self.space_list()?;
+                lhs = Expr::Binary {
+                    op: BinOp::SingleEq,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    pos,
+                };
+            } else {
+                self.sc.reset(mark);
+                break;
+            }
+        }
+        Ok(lhs)
+    }
+
     fn parse_args_after_paren(&mut self) -> Result<Vec<CallArg>, Error> {
         let mut args = Vec::new();
         self.skip_ws_inline();
@@ -3783,7 +3819,7 @@ impl Parser {
                         self.sc.reset(mark);
                     }
                 }
-                let value = self.space_list()?;
+                let value = self.arg_value()?;
                 // A trailing `...` marks a splat argument: a list spreads into
                 // positional args and a map into keyword args. A named arg may
                 // not be a splat.

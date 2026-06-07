@@ -1990,3 +1990,37 @@ fn minus_operator_string_joins_non_numbers() {
     assert_eq!(ours("a {b: 10 - 20}\n"), "a {\n  b: -10;\n}\n");
     assert_eq!(ours("a {b: 1px - 2px}\n"), "a {\n  b: -1px;\n}\n");
 }
+
+#[test]
+fn single_equals_ms_filter_operator_in_args() {
+    // A lone `=` inside a function argument list is the lowest-precedence
+    // Microsoft-filter operator: both sides are evaluated and joined with `=`
+    // (no spaces) into an unquoted string. Surrounding whitespace is dropped.
+    assert_eq!(ours("a {b: foo(a=b)}\n"), "a {\n  b: foo(a=b);\n}\n");
+    assert_eq!(ours("a {b: foo(1=2)}\n"), "a {\n  b: foo(1=2);\n}\n");
+    assert_eq!(ours("a {b: foo(a = b)}\n"), "a {\n  b: foo(a=b);\n}\n");
+    assert_eq!(ours("a {b: foo(a=b=c)}\n"), "a {\n  b: foo(a=b=c);\n}\n");
+    assert_eq!(ours("a {b: foo((1 + 2)=3)}\n"), "a {\n  b: foo(3=3);\n}\n");
+    assert_eq!(ours("a {b: foo(a b = c d)}\n"), "a {\n  b: foo(a b=c d);\n}\n");
+    assert_eq!(ours("a {b: foo(1 + 2 = 3 + 4)}\n"), "a {\n  b: foo(3=7);\n}\n");
+    // `==` stays the equality operator inside arguments.
+    assert_eq!(ours("a {b: foo(1 == 1)}\n"), "a {\n  b: foo(true);\n}\n");
+}
+
+#[test]
+fn global_alpha_microsoft_filter_overload() {
+    // The global `alpha()` with unquoted `name=value` arguments is the
+    // proprietary IE filter overload: it passes through verbatim as a CSS
+    // function rather than being treated as a color accessor.
+    assert_eq!(
+        ours("a {b: alpha(opacity=80)}\n"),
+        "a {\n  b: alpha(opacity=80);\n}\n"
+    );
+    assert_eq!(ours("a {b: alpha(c=d)}\n"), "a {\n  b: alpha(c=d);\n}\n");
+    assert_eq!(
+        ours("a {b: alpha(c=d, e=f, g=h)}\n"),
+        "a {\n  b: alpha(c=d, e=f, g=h);\n}\n"
+    );
+    // A real color argument still routes to the normal alpha accessor.
+    assert_eq!(ours("a {b: alpha(red)}\n"), "a {\n  b: 1;\n}\n");
+}

@@ -325,6 +325,11 @@ pub(crate) enum BinOp {
     Ge,
     And,
     Or,
+    /// The single-`=` Microsoft-filter operator, valid only inside a function
+    /// argument list (`alpha(opacity=80)`). It is the lowest-precedence value
+    /// operator: both sides are evaluated and joined with `=` (no spaces) as an
+    /// unquoted string.
+    SingleEq,
 }
 
 #[derive(Clone, Copy)]
