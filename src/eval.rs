@@ -1884,6 +1884,27 @@ impl<'a> Evaluator<'a> {
                 {
                     return self.eval_calc_size(args, *pos);
                 }
+                // `abs()` is a legacy global function that also exists as the CSS
+                // `abs()` calculation. When its single positional argument
+                // references a `var()`/interpolation it is parsed as a
+                // calculation and preserved with its numeric subtree folded
+                // (`abs(1px + 2px - var(--c))` -> `abs(3px - var(--c))`).
+                // Without such a substitution the argument resolves to a plain
+                // number, so the deprecated `math.abs` global handles it as
+                // before (`abs(1 + 1px)` -> `2px`, `abs(-3) -> 3`).
+                if name.eq_ignore_ascii_case("abs")
+                    && !self.functions.contains_key(name)
+                    && args.len() == 1
+                    && args[0].name.is_none()
+                    && !args[0].splat
+                    && expr_contains_calc_substitution(&args[0].value)
+                {
+                    let node = self.eval_calc(&args[0].value)?;
+                    return Ok(Value::Str(SassStr {
+                        text: format!("abs({})", node.to_calc_css(self.compressed())),
+                        quoted: false,
+                    }));
+                }
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.
                 let (mut pos_args, mut named) = self.eval_call_args(args)?;
@@ -2341,6 +2362,31 @@ fn expr_has_substitution(e: &Expr) -> bool {
                 lower.starts_with("var(") || lower.starts_with("env(")
             }
         }),
+        _ => false,
+    }
+}
+
+/// Whether an expression tree contains a calculation substitution — a
+/// `var()`/`env()` reference or an interpolation — anywhere within it
+/// (recursing through operations, parentheses, nested calculations, and
+/// lists). Used to decide whether a legacy global math function such as `abs()`
+/// is being used as a CSS calculation (so its argument is preserved) rather
+/// than as the deprecated Sass global.
+fn expr_contains_calc_substitution(e: &Expr) -> bool {
+    if expr_has_substitution(e) {
+        return true;
+    }
+    match e {
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_contains_calc_substitution(lhs) || expr_contains_calc_substitution(rhs)
+        }
+        Expr::Div { lhs, rhs, .. } => {
+            expr_contains_calc_substitution(lhs) || expr_contains_calc_substitution(rhs)
+        }
+        Expr::Unary { operand, .. } => expr_contains_calc_substitution(operand),
+        Expr::Paren(inner) => expr_contains_calc_substitution(inner),
+        Expr::Calc { inner } => expr_contains_calc_substitution(inner),
+        Expr::List { items, .. } => items.iter().any(expr_contains_calc_substitution),
         _ => false,
     }
 }

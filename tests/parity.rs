@@ -2848,3 +2848,19 @@ fn parity_calc_complex_unit_in_sum_errors() {
         "}\n",
     ));
 }
+
+#[test]
+fn parity_abs_calc_vs_global() {
+    // `abs()` preserves as the CSS calculation when its argument references a
+    // `var()` (folding the numeric subtree), but a plain-number argument keeps
+    // the legacy Sass global behaviour.
+    assert_parity(concat!(
+        "a {\n",
+        "  c1: abs(1px + 2px - var(--c));\n",
+        "  c2: abs(var(--c));\n",
+        "  g1: abs(1 + 1px);\n",
+        "  g2: abs(-3);\n",
+        "  g3: abs(-3px);\n",
+        "}\n",
+    ));
+}
