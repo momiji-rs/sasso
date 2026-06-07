@@ -1176,3 +1176,17 @@ fn progid_long_filter_syntax_is_preserved() {
     assert_parity("a { b: progid:foo.bar(x=1), progid:baz.qux(y=2); }\n");
     assert_parity("a { b: progid:c(opacity=20\\)); }\n");
 }
+
+#[test]
+fn lone_percent_is_a_value_token() {
+    // A `%` with no left operand is a standalone unquoted-string value (not the
+    // modulo operator), so the IE/CSS `attr(c, %)` placeholder round-trips and
+    // a bare `%` survives in any argument position. A whitespace-surrounded `%`
+    // remains the modulo operator.
+    assert_parity("a { b: %; }\n");
+    assert_parity("a { b: attr(c, %); }\n");
+    assert_parity("a { b: rgb(attr(c, %), 2, 3); }\n");
+    assert_parity("a { b: rgb(1, 2, attr(c, %)); }\n");
+    assert_parity("a { b: foo(1, %, 2); }\n");
+    assert_parity("a { b: 7 % 3; }\n");
+}

@@ -2195,6 +2195,15 @@ impl Parser {
             }
             Some('[') => self.parse_bracketed_list(),
             Some(c) if c.is_ascii_alphabetic() || c == '-' || c == '_' => self.parse_ident_or_call(),
+            // A lone `%` in value position (no left operand, so it is not the
+            // modulo operator) is a standalone unquoted-string token, as in
+            // dart-sass: `attr(c, %)` keeps the `%`, and `%foo` parses as the
+            // two space-list elements `%` and `foo`. Only a single `%` is
+            // consumed here.
+            Some('%') => {
+                self.sc.bump();
+                Ok(Expr::Ident(vec![TplPiece::Lit("%".to_string())]))
+            }
             Some(c) => Err(Error::at(
                 format!("unexpected character {c:?} in value"),
                 self.sc.position(),
