@@ -766,14 +766,21 @@ fn fn_lab_family(
     let channels = require(&params, pos_args, named, 0, name, pos)?.clone();
     // A comma-separated or bracketed list is not a valid channels list.
     if let Value::List(l) = &channels {
-        if l.sep == ListSep::Comma {
-            return Err(Error::at(
-                format!(
-                    "$channels: Expected a space- or slash-separated list, was {}",
-                    list_paren_css(&channels)
-                ),
-                pos,
-            ));
+        let comma = l.sep == ListSep::Comma;
+        if l.bracketed || comma {
+            let kind = if l.bracketed && comma {
+                "an unbracketed, space- or slash-separated list"
+            } else if l.bracketed {
+                "an unbracketed list"
+            } else {
+                "a space- or slash-separated list"
+            };
+            let shown = if l.bracketed {
+                channels.to_css(false)
+            } else {
+                list_paren_css(&channels)
+            };
+            return Err(Error::at(format!("$channels: Expected {kind}, was {shown}"), pos));
         }
         if l.items.is_empty() {
             return Err(Error::at(
@@ -898,12 +905,22 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
     }
     let desc = require(&params, pos_args, named, 0, "color", pos)?.clone();
     if let Value::List(l) = &desc {
-        if l.sep == ListSep::Comma {
+        let comma = l.sep == ListSep::Comma;
+        if l.bracketed || comma {
+            let kind = if l.bracketed && comma {
+                "an unbracketed, space- or slash-separated list"
+            } else if l.bracketed {
+                "an unbracketed list"
+            } else {
+                "a space- or slash-separated list"
+            };
+            let shown = if l.bracketed {
+                desc.to_css(false)
+            } else {
+                list_paren_css(&desc)
+            };
             return Err(Error::at(
-                format!(
-                    "$description: Expected a space- or slash-separated list, was {}",
-                    list_paren_css(&desc)
-                ),
+                format!("$description: Expected {kind}, was {shown}"),
                 pos,
             ));
         }
