@@ -11,8 +11,8 @@ use std::rc::Rc;
 
 use crate::ast::{
     BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, Declaration, Expr, IfClause,
-    IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, ParamList, Rule, Stmt,
-    Stylesheet, TplPiece, UnOp, VarDecl,
+    IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, ParamList, PropertySet, Rule,
+    Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -207,6 +207,10 @@ pub(crate) struct Evaluator<'a> {
     current_selector: Option<Vec<String>>,
     /// Collected `@extend` directives, applied in a post-eval extension pass.
     extends: Vec<PendingExtend>,
+    /// The current nested-property-set name prefix (e.g. `font` then `font-x`).
+    /// Empty at the document root and inside ordinary rules; a child declaration
+    /// emitted while this is non-empty is namespaced as `<prefix>-<name>`.
+    decl_prefix: Option<String>,
 }
 
 /// A pending `@extend`, captured during eval and applied after flattening.
@@ -235,6 +239,7 @@ impl<'a> Evaluator<'a> {
             media_queries: Vec::new(),
             current_selector: None,
             extends: Vec::new(),
+            decl_prefix: None,
         }
     }
 
@@ -765,6 +770,12 @@ impl<'a> Evaluator<'a> {
                         sink.push_item(oi);
                     }
                 }
+                Stmt::PropertySet(ps) => {
+                    if sink.is_top() {
+                        return Err(Error::at("top-level declarations aren't allowed", ps.pos));
+                    }
+                    self.eval_property_set(ps, parents, sink)?;
+                }
                 Stmt::Rule(r) => self.eval_style_rule(r, parents, sink)?,
                 Stmt::If(branches) => {
                     // Evaluate conditions top to bottom; run the first match's
@@ -1251,7 +1262,21 @@ impl<'a> Evaluator<'a> {
     }
 
     fn eval_decl(&mut self, d: &Declaration) -> Result<Option<OutItem>, Error> {
-        let prop = self.eval_template(&d.property)?.trim().to_string();
+        // Inside a nested property set, a declaration whose *literal* name (not
+        // produced by interpolation) begins with `--` is rejected, matching
+        // dart-sass ("Declarations whose names begin with `--` may not be
+        // nested.").
+        if self.decl_prefix.is_some() && literal_name_is_custom_property(&d.property) {
+            return Err(Error::at(
+                "Declarations whose names begin with \"--\" may not be nested.",
+                d.pos,
+            ));
+        }
+        let name = self.eval_template(&d.property)?.trim().to_string();
+        let prop = match &self.decl_prefix {
+            Some(prefix) => format!("{prefix}-{name}"),
+            None => name,
+        };
         let value = self.eval_expr(&d.value)?;
         if matches!(value, Value::Null) {
             return Ok(None);
@@ -1269,6 +1294,53 @@ impl<'a> Evaluator<'a> {
             value: vstr,
             important: d.important,
         }))
+    }
+
+    /// Evaluate a nested property set: resolve its (already prefixed) name,
+    /// emit the optional leading value as a declaration, then run the body with
+    /// that name installed as the child prefix so each child declaration is
+    /// namespaced `<name>-<child>` and emitted in source order.
+    fn eval_property_set(
+        &mut self,
+        ps: &PropertySet,
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        // A nested property set whose own literal name begins with `--` is
+        // rejected just like a plain `--` declaration would be when nested.
+        if self.decl_prefix.is_some() && literal_name_is_custom_property(&ps.property) {
+            return Err(Error::at(
+                "Declarations whose names begin with \"--\" may not be nested.",
+                ps.pos,
+            ));
+        }
+        let name = self.eval_template(&ps.property)?.trim().to_string();
+        let full = match &self.decl_prefix {
+            Some(prefix) => format!("{prefix}-{name}"),
+            None => name,
+        };
+        // The leading value (`b: c { … }`) emits `<full>: c;` before children.
+        if let Some(value_expr) = &ps.value {
+            let value = self.eval_expr(value_expr)?;
+            if !matches!(value, Value::Null) {
+                if let Some(m) = find_map(&value) {
+                    return Err(Error::at(
+                        format!("{} isn't a valid CSS value.", m.to_css(false)),
+                        ps.pos,
+                    ));
+                }
+                let vstr = value.to_css(self.compressed());
+                sink.push_item(OutItem::Decl {
+                    prop: full.clone(),
+                    value: vstr,
+                    important: ps.important,
+                });
+            }
+        }
+        let saved = self.decl_prefix.replace(full);
+        let result = self.exec(&ps.body, parents, sink);
+        self.decl_prefix = saved;
+        result
     }
 
     /// Evaluate an `@import` statement into `sink`. Sass arguments are parsed
@@ -1851,6 +1923,17 @@ impl<'a> Evaluator<'a> {
 /// the parser lowers to an [`Expr::Ident`] whose text begins with `var(`/
 /// `env(`, possibly after a vendor prefix). A plain ident, number, nested
 /// calc, or variable is NOT a substitution.
+/// Whether a property-name template begins, *literally*, with `--` (a custom
+/// property). A name whose first piece is `#{…}` interpolation is not literal,
+/// so `#{--b}` is allowed to namespace inside a property set while a written
+/// `--b` is not.
+fn literal_name_is_custom_property(property: &[TplPiece]) -> bool {
+    match property.first() {
+        Some(TplPiece::Lit(s)) => s.trim_start().starts_with("--"),
+        _ => false,
+    }
+}
+
 fn expr_has_substitution(e: &Expr) -> bool {
     match e {
         Expr::Interp(_) => true,

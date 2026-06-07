@@ -2213,4 +2213,23 @@ fn get_function_validates_arity_and_type() {
         ours("a {b: get-function(rgb)}\n"),
         "a {\n  b: get-function(rgb);\n}\n"
     );
+fn nested_property_sets() {
+    // A bare property set (`prop: { … }`) namespaces each child as
+    // `prop-<child>`; an empty value needs no whitespace after the colon.
+    assert_eq!(ours("a { b: { c: d } }\n"), "a {\n  b-c: d;\n}\n");
+    assert_eq!(ours("a { b:{ c: d } }\n"), "a {\n  b-c: d;\n}\n");
+    assert_eq!(ours("a { b: { -c: d } }\n"), "a {\n  b--c: d;\n}\n");
+    // The value-plus-block form (`prop: value { … }`) emits the value first,
+    // then the namespaced children — but only when whitespace follows the
+    // colon; `b:c { … }` is a style rule, not a property set.
+    assert_eq!(ours("a { b: c { d: e } }\n"), "a {\n  b: c;\n  b-d: e;\n}\n");
+    assert_eq!(ours("a { b:c { d: e } }\n"), "a b:c {\n  d: e;\n}\n");
+    // Property sets nest, joining each level with `-`, and interleave with a
+    // following sibling separated by `;`.
+    assert_eq!(
+        ours("a { b: { c: { d: e }; f: g } }\n"),
+        "a {\n  b-c-d: e;\n  b-f: g;\n}\n"
+    );
+    // A custom-property child (literal `--`) may not be nested.
+    assert!(compile("a { b: { --d: e } }\n", &Options::default()).is_err());
 }

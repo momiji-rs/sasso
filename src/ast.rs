@@ -21,6 +21,11 @@ pub(crate) enum Stmt {
     Rule(Rule),
     /// `property: value [!important];`
     Decl(Declaration),
+    /// A nested property set: `property: [value] { children }`. The optional
+    /// value is emitted as `property: value;` first, then each child
+    /// declaration is namespaced as `property-<child>` and emitted in source
+    /// order (dart-sass property-set / namespaced-declaration form).
+    PropertySet(PropertySet),
     /// `@import "a", "b";` — each entry is either a Sass path to inline or a
     /// plain CSS import emitted verbatim.
     Import(Vec<ImportArg>),
@@ -184,6 +189,19 @@ pub(crate) struct Declaration {
     pub property: Vec<TplPiece>,
     pub value: Expr,
     pub important: bool,
+    pub pos: Pos,
+}
+
+/// A nested property set: a declaration whose value (which may be empty) is
+/// followed by a `{ … }` block whose children are namespaced with the parent
+/// property name joined by `-`.
+pub(crate) struct PropertySet {
+    pub property: Vec<TplPiece>,
+    /// The optional leading value (`b: c { … }` keeps `c`; `b: { … }` is
+    /// `None`). When present it is emitted as `<property>: <value>;` first.
+    pub value: Option<Expr>,
+    pub important: bool,
+    pub body: Vec<Stmt>,
     pub pos: Pos,
 }
 

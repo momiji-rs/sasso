@@ -10,7 +10,7 @@ use std::rc::Rc;
 use crate::ast::{
     BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, Declaration, Expr, IfBranch,
     IfClause, IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, Param, ParamList,
-    Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+    PropertySet, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::{Pos, Scanner};
@@ -365,6 +365,32 @@ fn is_slash_operand(expr: &Expr) -> bool {
     }
 }
 
+/// Whether the span between a `property:` colon and the following `{` is empty
+/// of any value — only whitespace and `/* */` / `//` comments. Such a span
+/// makes `property: { … }` a bare nested property set (no leading value).
+fn value_is_only_comments(span: &[char]) -> bool {
+    let mut i = 0;
+    while i < span.len() {
+        let c = span[i];
+        if c.is_whitespace() {
+            i += 1;
+        } else if c == '/' && span.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < span.len() && !(span[i] == '*' && span[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+        } else if c == '/' && span.get(i + 1) == Some(&'/') {
+            while i < span.len() && span[i] != '\n' {
+                i += 1;
+            }
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
 impl Parser {
     fn parse_statements(&mut self, top: bool) -> Result<Vec<Stmt>, Error> {
         let mut stmts = Vec::new();
@@ -480,11 +506,21 @@ impl Parser {
     /// Look ahead to decide whether the next statement is a rule (a
     /// top-level `{` comes first) or a declaration (`;`/`}` comes first),
     /// skipping over strings, comments, interpolation and bracket pairs.
+    ///
+    /// A top-level `{` after a `property:` is a *nested property set* (a
+    /// declaration with a block) rather than a style rule when the value is
+    /// empty (`b: { … }` / `b:{ … }`) or whitespace/comment immediately
+    /// follows the colon (`b: c { … }`). Otherwise (`a:hover { … }`) the `{`
+    /// opens a style rule — matching dart-sass declaration disambiguation.
     fn classify(&self) -> NextKind {
         let cs = self.sc.rest();
         let mut i = 0;
         let mut paren = 0i32;
         let mut bracket = 0i32;
+        // Index just past the first top-level `:`, plus whether whitespace or a
+        // comment immediately follows it. `None` until the colon is seen.
+        let mut after_colon: Option<usize> = None;
+        let mut ws_after_colon = false;
         while i < cs.len() {
             let c = cs[i];
             match c {
@@ -531,7 +567,34 @@ impl Parser {
                 ')' => paren -= 1,
                 '[' => bracket += 1,
                 ']' => bracket -= 1,
-                '{' if paren == 0 && bracket == 0 => return NextKind::Rule,
+                ':' if paren == 0 && bracket == 0 && after_colon.is_none() => {
+                    after_colon = Some(i + 1);
+                    ws_after_colon = matches!(
+                        cs.get(i + 1),
+                        Some(c) if c.is_whitespace())
+                        || matches!(
+                            (cs.get(i + 1), cs.get(i + 2)),
+                            (Some('/'), Some('*')) | (Some('/'), Some('/'))
+                        );
+                }
+                '{' if paren == 0 && bracket == 0 => {
+                    return match after_colon {
+                        // No `property:` before this `{` — an ordinary rule.
+                        None => NextKind::Rule,
+                        // `property:` then a block: a nested property set if the
+                        // value is empty, or whitespace/comment followed the
+                        // colon; otherwise (`a:hover {`) a style rule.
+                        Some(start) => {
+                            let empty_value = cs[start..i].iter().all(|c| c.is_whitespace())
+                                || value_is_only_comments(&cs[start..i]);
+                            if empty_value || ws_after_colon {
+                                NextKind::Declaration
+                            } else {
+                                NextKind::Rule
+                            }
+                        }
+                    };
+                }
                 ';' if paren == 0 && bracket == 0 => return NextKind::Declaration,
                 '}' if paren == 0 && bracket == 0 => return NextKind::Declaration,
                 _ => {}
@@ -559,10 +622,21 @@ impl Parser {
         if !self.sc.eat(':') {
             return Err(Error::at("expected \":\" in declaration", self.sc.position()));
         }
-        self.skip_ws_inline();
+        let ws_after_colon = self.skip_ws_inline();
+        // Bare nested property set: `prop: { … }` / `prop:{ … }` (no value).
+        if self.sc.peek() == Some('{') {
+            let body = self.parse_property_set_body()?;
+            return Ok(Stmt::PropertySet(PropertySet {
+                property,
+                value: None,
+                important: false,
+                body,
+                pos,
+            }));
+        }
         let value = self.parse_value()?;
-        self.skip_ws_inline();
         let mut important = false;
+        self.skip_ws_inline();
         if self.sc.peek() == Some('!') {
             let mark = self.sc.mark();
             self.sc.bump();
@@ -574,6 +648,24 @@ impl Parser {
                 self.sc.reset(mark);
             }
         }
+        // Value-plus-block nested property set: `prop: value [!important] { … }`.
+        // Only a value separated from the colon by whitespace (or comment)
+        // qualifies — `prop:value { … }` is a style rule.
+        if ws_after_colon {
+            let mark = self.sc.mark();
+            self.skip_ws_inline();
+            if self.sc.peek() == Some('{') {
+                let body = self.parse_property_set_body()?;
+                return Ok(Stmt::PropertySet(PropertySet {
+                    property,
+                    value: Some(value),
+                    important,
+                    body,
+                    pos,
+                }));
+            }
+            self.sc.reset(mark);
+        }
         self.skip_ws_inline();
         self.sc.eat(';');
         Ok(Stmt::Decl(Declaration {
@@ -582,6 +674,23 @@ impl Parser {
             important,
             pos,
         }))
+    }
+
+    /// Parse the `{ … }` block of a nested property set (the cursor is at `{`),
+    /// consuming an optional trailing `;` so a following sibling parses cleanly
+    /// (`b: { c: { d: e }; f: g }`).
+    fn parse_property_set_body(&mut self) -> Result<Vec<Stmt>, Error> {
+        self.sc.bump(); // '{'
+        let body = self.parse_statements(false)?;
+        if !self.sc.eat('}') {
+            return Err(Error::at("expected \"}\".", self.sc.position()));
+        }
+        let mark = self.sc.mark();
+        self.skip_ws_inline();
+        if !self.sc.eat(';') {
+            self.sc.reset(mark);
+        }
+        Ok(body)
     }
 
     fn parse_var_decl(&mut self) -> Result<Stmt, Error> {
