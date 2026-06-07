@@ -3195,6 +3195,11 @@ fn validate_modify_unit(space: ColorSpace, idx: usize, name: &str, v: &Value, po
         }
     };
     if space.is_polar(idx) {
+        // Legacy hsl/hwb treat any hue unit leniently (as degrees); the modern
+        // spaces require a real angle unit.
+        if space.is_legacy() {
+            return Ok(());
+        }
         let ok = num.unit.is_empty() || matches!(num.unit.as_str(), "deg" | "grad" | "rad" | "turn");
         if !ok {
             return Err(Error::at(

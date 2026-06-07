@@ -594,7 +594,12 @@ fn resolve_channels<'v>(
     named: &'v [(String, Value)],
     pos: Pos,
 ) -> Result<(Space, Vec<ChannelArg<'v>>), Error> {
-    let chans: Vec<ChannelArg<'v>> = named.iter().map(|(n, v)| (n.as_str(), v)).collect();
+    // The `$color` argument may be passed by name; it is not a channel.
+    let chans: Vec<ChannelArg<'v>> = named
+        .iter()
+        .filter(|(n, _)| n != "color")
+        .map(|(n, v)| (n.as_str(), v))
+        .collect();
     // Determine the space from the first space-specific channel. If only the
     // shared `hue` channel is given, default to HSL; with no recognized
     // channel at all, dart-sass falls back to RGB.
