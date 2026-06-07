@@ -1454,4 +1454,18 @@ fn math_round_strategy_preservation() {
     // A strategy with a real number but no step is still an error.
     assert!(compile("a {b: round(nearest, 5)}\n", &Options::default()).is_err());
     assert!(compile("a {b: round(up, 5)}\n", &Options::default()).is_err());
+fn selector_comment_stripping() {
+    // dart-sass treats a loud `/* */` or silent `//` comment inside a selector
+    // as whitespace: it is dropped and a separator is left, so the selector
+    // normaliser collapses it. Byte-matched to dart-sass. Offline.
+    assert_eq!(ours("a /**/ {b: c}\n"), "a {\n  b: c;\n}\n");
+    assert_eq!(ours("a /**/ b {x: y}\n"), "a b {\n  x: y;\n}\n");
+    assert_eq!(ours("a/**/b {x: y}\n"), "a b {\n  x: y;\n}\n");
+    assert_eq!(ours("a /***/ b {x: y}\n"), "a b {\n  x: y;\n}\n");
+    assert_eq!(ours("a //\n  {b: c}\n"), "a {\n  b: c;\n}\n");
+    // A loud comment that is a standalone statement is still emitted.
+    assert_eq!(
+        ours("a {\n  /* keep */\n  b: c;\n}\n"),
+        "a {\n  /* keep */\n  b: c;\n}\n"
+    );
 }

@@ -21,6 +21,19 @@ enum NextKind {
     Declaration,
 }
 
+/// How [`Parser::parse_template_mode`] treats `/* */` (loud) and `//` (silent)
+/// comments encountered while scanning a selector / prelude / property.
+#[derive(Clone, Copy, PartialEq)]
+enum CommentMode {
+    /// Keep every comment verbatim in the literal (legacy behaviour: values
+    /// and grammars that capture text exactly).
+    Keep,
+    /// Drop every comment, replacing it with a single space, at any nesting.
+    /// dart-sass normalises selectors and structured grammars this way, so a
+    /// comment behaves purely as whitespace (`a/**/b` → `a b`).
+    Strip,
+}
+
 enum MessageKind {
     Warn,
     Debug,
@@ -469,7 +482,7 @@ impl Parser {
     }
 
     fn parse_rule(&mut self) -> Result<Stmt, Error> {
-        let selector = self.parse_template(&['{'])?;
+        let selector = self.parse_template_mode(&['{'], CommentMode::Strip)?;
         if !self.sc.eat('{') {
             return Err(Error::at("expected \"{\"", self.sc.position()));
         }
@@ -1716,6 +1729,46 @@ impl Parser {
     /// Parse an interpolated template (selector or property name) up to,
     /// but not including, one of `stops` at bracket depth 0.
     fn parse_template(&mut self, stops: &[char]) -> Result<Vec<TplPiece>, Error> {
+        self.parse_template_mode(stops, CommentMode::Keep)
+    }
+
+    /// Consume the `/* ... */` loud comment at the cursor (the leading `/*`
+    /// must already be confirmed by the caller) and return its inner text
+    /// including the surrounding delimiters, i.e. the full `/* ... */`.
+    fn consume_loud_comment(&mut self) -> String {
+        let mut s = String::from("/*");
+        self.sc.bump();
+        self.sc.bump();
+        loop {
+            match self.sc.peek() {
+                None => break,
+                Some('*') if self.sc.peek_at(1) == Some('/') => {
+                    self.sc.bump();
+                    self.sc.bump();
+                    s.push_str("*/");
+                    break;
+                }
+                Some(c) => {
+                    s.push(c);
+                    self.sc.bump();
+                }
+            }
+        }
+        s
+    }
+
+    /// Consume the `// ...` silent comment at the cursor up to (but not
+    /// including) the newline; the leading `//` must already be confirmed.
+    fn consume_silent_comment(&mut self) {
+        while let Some(c) = self.sc.peek() {
+            if c == '\n' {
+                break;
+            }
+            self.sc.bump();
+        }
+    }
+
+    fn parse_template_mode(&mut self, stops: &[char], comments: CommentMode) -> Result<Vec<TplPiece>, Error> {
         let mut pieces = Vec::new();
         let mut lit = String::new();
         let mut paren = 0i32;
@@ -1723,6 +1776,22 @@ impl Parser {
         while let Some(c) = self.sc.peek() {
             if paren == 0 && bracket == 0 && stops.contains(&c) {
                 break;
+            }
+            // Comment handling depends on the mode and nesting depth.
+            if c == '/' && comments == CommentMode::Strip {
+                match self.sc.peek_at(1) {
+                    Some('*') => {
+                        let _ = self.consume_loud_comment();
+                        lit.push(' ');
+                        continue;
+                    }
+                    Some('/') => {
+                        self.consume_silent_comment();
+                        lit.push(' ');
+                        continue;
+                    }
+                    _ => {}
+                }
             }
             match c {
                 '#' if self.sc.peek_at(1) == Some('{') => {
