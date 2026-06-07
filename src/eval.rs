@@ -729,6 +729,32 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
+        // A top-level assignment to a name not in scope but exposed by exactly
+        // one `@use … as *` module updates that module's variable (so the
+        // module's own functions/mixins observe the change).
+        if self.scopes.len() == 1 && !is_private_member(&v.name) {
+            if let Some(g) = self.scopes.first() {
+                if !g.contains_key(&v.name) {
+                    let targets: Vec<Rc<Module>> = self
+                        .star_user_modules
+                        .iter()
+                        .filter(|m| m.var(&v.name).is_some())
+                        .cloned()
+                        .collect();
+                    if targets.len() == 1 {
+                        if v.is_default {
+                            if let Some(existing) = targets[0].var(&v.name) {
+                                if !matches!(existing, Value::Null) {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        targets[0].vars.borrow_mut().insert(v.name.clone(), val);
+                        return Ok(());
+                    }
+                }
+            }
+        }
         if v.is_global {
             if let Some(g) = self.scopes.first_mut() {
                 g.insert(v.name.clone(), val);
