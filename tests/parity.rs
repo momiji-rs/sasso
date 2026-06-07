@@ -340,3 +340,91 @@ fn media_rejects_bare_declarations_at_root() {
     assert!(compile("@media a { @media b { color: red; } }\n", &Options::default()).is_err());
     assert_parity(".x {\n  @media screen {\n    color: red;\n  }\n}\n");
 }
+
+/// Compile `scss` and return our CSS (panicking on error), for direct
+/// expected-output assertions that do not need a live dart-sass.
+fn ours(scss: &str) -> String {
+    compile(scss, &Options::default()).expect("our compile failed")
+}
+
+#[test]
+fn rgb_hsl_special_value_passthrough() {
+    // A special channel argument (var/env/calc) preserves the call,
+    // comma-joined, when there are three components.
+    assert_eq!(
+        ours("a {b: rgb(var(--foo), 2, 3)}\n"),
+        "a {\n  b: rgb(var(--foo), 2, 3);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(var(--foo) 2 3)}\n"),
+        "a {\n  b: rgb(var(--foo), 2, 3);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(calc(1px + 1%), 2, 3, 0.4)}\n"),
+        "a {\n  b: rgb(calc(1px + 1%), 2, 3, 0.4);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hsl(var(--x) 50% 50%)}\n"),
+        "a {\n  b: hsl(var(--x), 50%, 50%);\n}\n"
+    );
+    // A concrete color plus a special alpha decomposes to channels.
+    assert_eq!(
+        ours("a {b: rgb(blue, var(--foo))}\n"),
+        "a {\n  b: rgb(0, 0, 255, var(--foo));\n}\n"
+    );
+    // Wrong component count is preserved verbatim (space-joined).
+    assert_eq!(
+        ours("a {b: rgb(var(--foo) 2)}\n"),
+        "a {\n  b: rgb(var(--foo) 2);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(var(--foo))}\n"),
+        "a {\n  b: rgb(var(--foo));\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(var(--foo), 0.4)}\n"),
+        "a {\n  b: rgb(var(--foo), 0.4);\n}\n"
+    );
+}
+
+#[test]
+fn rgb_hsl_plain_number_channels_keep_function_spelling() {
+    // The one-argument channels list computes a color but keeps the rgb()/hsl()
+    // spelling (it never collapses to hex).
+    assert_eq!(ours("a {b: rgb(18 52 86)}\n"), "a {\n  b: rgb(18, 52, 86);\n}\n");
+    assert_eq!(
+        ours("a {b: rgb(1 2 3 / 0.5)}\n"),
+        "a {\n  b: rgba(1, 2, 3, 0.5);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(190 173 237 / 1)}\n"),
+        "a {\n  b: rgb(190, 173, 237);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hsl(120 50% 50% / 0.4)}\n"),
+        "a {\n  b: hsla(120, 50%, 50%, 0.4);\n}\n"
+    );
+    // Two-argument (color, alpha) form still collapses to a computed color.
+    assert_eq!(ours("a {b: rgb(#123, 1)}\n"), "a {\n  b: #112233;\n}\n");
+    assert_eq!(
+        ours("a {b: rgb(#123, 0.5)}\n"),
+        "a {\n  b: rgba(17, 34, 51, 0.5);\n}\n"
+    );
+    // hsl saturation floors at 0, lightness is left unclamped, hue normalizes.
+    assert_eq!(
+        ours("a {b: hsl(0, 500%, 50%)}\n"),
+        "a {\n  b: hsl(0, 500%, 50%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hsl(0, -100%, 50%)}\n"),
+        "a {\n  b: hsl(0, 0%, 50%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hsl(0, 100%, -100%)}\n"),
+        "a {\n  b: hsl(0, 100%, -100%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hsl(360, 50%, 50%)}\n"),
+        "a {\n  b: hsl(0, 50%, 50%);\n}\n"
+    );
+}
