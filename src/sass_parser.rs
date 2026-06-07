@@ -162,6 +162,15 @@ impl Transpiler {
             return self.parse_loud_comment(indent);
         }
 
+        // A custom-property declaration (`--name: …`) takes its value verbatim
+        // (a `//` is *not* a comment inside it), so handle it from the raw line
+        // before the logical-line assembly strips silent comments.
+        if trimmed.starts_with("--") {
+            if let Some(()) = self.try_parse_custom_property_stmt(indent, line_no)? {
+                return Ok(());
+            }
+        }
+
         // --- assemble the logical line (bracket / trailing-comma / `\`
         //     continuations) ---------------------------------------------
         let (mut logical, child_indent) = self.assemble_logical_line(indent)?;
@@ -227,43 +236,52 @@ impl Transpiler {
             return Ok(());
         }
         // Unterminated on this line: gather the deeper-indented block as comment
-        // body, normalising to a single collapsed comment.
-        let mut text = content.trim_end().to_string();
+        // body. dart-sass reindents a multi-line loud comment so the first
+        // content line follows `/* ` and each subsequent line is prefixed with
+        // ` * ` (aligning the `*` under the opening `/*`).
+        let mut content_lines: Vec<String> = Vec::new();
+        // Line 0 content after the `/*` marker (drop it if only whitespace).
+        let first = content.trim_start_matches("/*");
+        if !first.trim().is_empty() {
+            content_lines.push(first.trim_start().to_string());
+        }
         self.idx = start + 1;
         let mut closed = false;
         while let Some(i) = self.next_nonblank(self.idx) {
             if self.lines[i].indent <= indent {
                 break;
             }
-            let body = self.lines[i].content.trim();
+            let body = self.lines[i].content.trim_start().to_string();
             self.idx = i + 1;
-            if let Some(end) = body.find("*/") {
-                let piece = body[..end].trim_end();
-                if !piece.is_empty() {
-                    text.push(' ');
-                    text.push_str(piece);
-                }
-                text.push_str(" */");
+            content_lines.push(body.clone());
+            if body.contains("*/") {
                 closed = true;
-                // strip duplicate trailing if comment already ended in */
                 break;
             }
-            if !body.is_empty() {
-                text.push(' ');
-                text.push_str(body);
-            }
+        }
+        if content_lines.is_empty() {
+            content_lines.push(String::new());
         }
         if !closed {
             // dart-sass auto-closes an unterminated loud comment at the end of
-            // its block.
-            text.push_str(" */");
+            // its block, appending ` */` to the last line.
+            if let Some(last) = content_lines.last_mut() {
+                if last.is_empty() {
+                    *last = "*/".to_string();
+                } else {
+                    last.push_str(" */");
+                }
+            }
         }
-        // Collapse the leading "/*" + following text. `text` already starts
-        // with "/*"; ensure exactly one space after it.
-        let inner = text.trim_start_matches("/*").trim();
-        self.out.push_str("/* ");
-        self.out.push_str(inner);
-        self.out.push('\n');
+        for (i, line) in content_lines.iter().enumerate() {
+            if i == 0 {
+                self.out.push_str("/* ");
+            } else {
+                self.out.push_str(" * ");
+            }
+            self.out.push_str(line);
+            self.out.push('\n');
+        }
         Ok(())
     }
 
@@ -441,14 +459,6 @@ impl Transpiler {
             return Ok(());
         }
 
-        // A custom-property declaration: `--name: value`. The value is captured
-        // verbatim (including any deeper-indented block lines) and emitted with
-        // a trailing `;` so the SCSS parser sees a custom declaration.
-        if let Some(decl) = self.try_custom_property(logical, indent, line_no)? {
-            self.out.push_str(&decl);
-            return Ok(());
-        }
-
         // Whether this logical line wants a brace block (a rule / directive) or
         // a `;` terminator (a declaration / leaf directive) is decided after we
         // know whether a child block follows. We emit the prelude, then either a
@@ -469,28 +479,31 @@ impl Transpiler {
         Ok(())
     }
 
-    /// If `logical` is a custom-property declaration (`--name:` …), emit it as a
-    /// verbatim SCSS custom declaration (consuming any child block as part of
-    /// the value), returning the SCSS text. Otherwise `None`.
-    fn try_custom_property(
+    /// Parse a custom-property declaration (`--name: value`) from the raw lines
+    /// starting at `self.idx`. The value is captured verbatim — a `//` is not a
+    /// comment inside it, and a deeper-indented child block continues the value
+    /// — and emitted as an SCSS custom declaration. Returns `Some(())` when the
+    /// line really is a custom property; otherwise leaves `self.idx` untouched
+    /// and returns `None` so normal statement handling proceeds.
+    fn try_parse_custom_property_stmt(
         &mut self,
-        logical: &str,
         indent: usize,
         _line_no: usize,
-    ) -> Result<Option<String>, Error> {
-        if !logical.starts_with("--") {
-            return Ok(None);
-        }
+    ) -> Result<Option<()>, Error> {
+        let start = self.idx;
+        let raw = self.lines[start].content.trim_start().to_string();
         // Confirm a top-level colon follows the `--name` token.
-        let Some(colon) = find_decl_colon(logical) else {
+        let Some(colon) = find_decl_colon(&raw) else {
             return Ok(None);
         };
-        let name = logical[..colon].trim_end();
-        if !name.starts_with("--") || name.len() < 2 {
+        let name = raw[..colon].trim_end();
+        if !name.starts_with("--") || name.len() < 2 || name.contains(char::is_whitespace) {
             return Ok(None);
         }
-        let mut value = logical[colon + 1..].trim_start().to_string();
-        // A child block continues the custom-property value verbatim.
+        self.idx = start + 1;
+        let mut value = raw[colon + 1..].trim_start().to_string();
+        // A child block continues the custom-property value verbatim, preserving
+        // each line's original source indentation.
         if let Some(i) = self.next_nonblank(self.idx) {
             let child_indent = self.lines[i].indent;
             if child_indent > indent {
@@ -499,20 +512,18 @@ impl Transpiler {
                     if self.lines[j].indent <= indent {
                         break;
                     }
-                    if !value.is_empty() {
-                        value.push('\n');
-                    }
+                    value.push('\n');
+                    value.push_str(&self.lines[j].indent_str);
                     value.push_str(&self.lines[j].content);
                     self.idx = j + 1;
                 }
             }
         }
-        let mut s = String::new();
-        s.push_str(name);
-        s.push_str(": ");
-        s.push_str(value.trim());
-        s.push_str(";\n");
-        Ok(Some(s))
+        self.out.push_str(name);
+        self.out.push_str(": ");
+        self.out.push_str(value.trim_end());
+        self.out.push_str(";\n");
+        Ok(Some(()))
     }
 }
 
