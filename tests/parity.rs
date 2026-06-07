@@ -3435,6 +3435,9 @@ fn parity_selector_separators_in_groups() {
     // split_commas on the parent list and tokenize_complex on the child.
     assert_parity(".a, .b {\n  > .c + .d ~ .e { color: red; }\n}\n");
     assert_parity(".a, .b {\n  .c, .d { color: red; }\n}\n");
+}
+
+#[test]
 fn parity_color_modify_unit_leniency() {
     // dart-sass does not hard-error on a non-`%` unit for the legacy hsl
     // `lightness`/`saturation` channels of `color.adjust`/`color.change`, nor on
@@ -3553,6 +3556,55 @@ fn parity_color_adjust_hue_non_legacy_error() {
         }
         None => eprintln!("skipping adjust-hue non-legacy parity case: dart-sass unavailable"),
     }
+}
+
+#[test]
+fn parity_selector_extend_multiple_extendees() {
+    // selector.extend()'s extendee may be a list of compound selectors (as a
+    // string or a Sass list), each applied as a separate extension target and
+    // resolved to a fixpoint so a selector matching several targets collapses.
+    assert_parity("@use \"sass:selector\";\na { b: selector.extend(\"c.d\", \"c, .d\", \".e\"); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.extend(\"c.d.e.f\", \"c.d, .e.f\", \".g\"); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.extend(\"c.d\", (c, \".d\"), \".e\"); }\n");
+}
+
+#[test]
+fn parity_selector_arg_coercion_lists() {
+    // Selector arguments may be a Sass list (comma list of strings, or a comma
+    // list whose items are space lists of strings), coerced to a selector the
+    // same way dart-sass does for selector.parse/nest/is-superselector.
+    assert_parity("@use \"sass:selector\";\na { b: selector.parse((c d, e f)); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.parse((c \"d\", e \"f\")); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.nest((c, d e), \"f\"); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.is-superselector((c, d e), (c, d e)); }\n");
+}
+
+#[test]
+fn parity_selector_append_type_suffix() {
+    // selector.append accepts a plain type selector as the suffix's leading
+    // simple (`.c` + `d` -> `.cd`); a universal or namespaced type is rejected
+    // (tested for errors via the spec suite, not here).
+    assert_parity("@use \"sass:selector\";\na { b: selector.append(\".c\", \"d\"); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.append(\"d\", \".c\"); }\n");
+}
+
+#[test]
+fn parity_first_class_mixins_apply() {
+    // `meta.get-mixin` captures a mixin reference; `@include meta.apply(...)`
+    // invokes it with forwarded arguments and an optional `@content` block.
+    assert_parity(concat!(
+        "@use \"sass:meta\";\n",
+        "@mixin add-two($v) { b: $v + 2; }\n",
+        "$ref: meta.get-mixin(add-two);\n",
+        "a { @include meta.apply($ref, 10); }\n",
+        "@mixin wrap { c { @content; } }\n",
+        "d { @include meta.apply(meta.get-mixin(wrap)) { e: f; } }\n",
+        "g { h: meta.inspect(meta.get-mixin(add-two)); ",
+        "i: meta.get-mixin(add-two) == meta.get-mixin(add-two); }\n",
+    ));
+}
+
+#[test]
 fn parity_list_fn_arg_validation() {
     // Fixed-arity list builtins reject extra positional arguments and unknown
     // named arguments, matching dart-sass (which rejects them with the same
@@ -3589,45 +3641,4 @@ fn parity_list_separator_and_bracket_preservation() {
     assert_parity("@use \"sass:list\";\na {b: list.join([1], (2, 3, 4))}\n");
     assert_parity("@use \"sass:list\";\na {b: list.join((1), (2 3 4))}\n");
     assert_parity("@use \"sass:list\";\na {b: list.append((1), 2)}\n");
-fn parity_selector_extend_multiple_extendees() {
-    // selector.extend()'s extendee may be a list of compound selectors (as a
-    // string or a Sass list), each applied as a separate extension target and
-    // resolved to a fixpoint so a selector matching several targets collapses.
-    assert_parity("@use \"sass:selector\";\na { b: selector.extend(\"c.d\", \"c, .d\", \".e\"); }\n");
-    assert_parity("@use \"sass:selector\";\na { b: selector.extend(\"c.d.e.f\", \"c.d, .e.f\", \".g\"); }\n");
-    assert_parity("@use \"sass:selector\";\na { b: selector.extend(\"c.d\", (c, \".d\"), \".e\"); }\n");
-}
-
-#[test]
-fn parity_selector_arg_coercion_lists() {
-    // Selector arguments may be a Sass list (comma list of strings, or a comma
-    // list whose items are space lists of strings), coerced to a selector the
-    // same way dart-sass does for selector.parse/nest/is-superselector.
-    assert_parity("@use \"sass:selector\";\na { b: selector.parse((c d, e f)); }\n");
-    assert_parity("@use \"sass:selector\";\na { b: selector.parse((c \"d\", e \"f\")); }\n");
-    assert_parity("@use \"sass:selector\";\na { b: selector.nest((c, d e), \"f\"); }\n");
-    assert_parity("@use \"sass:selector\";\na { b: selector.is-superselector((c, d e), (c, d e)); }\n");
-}
-
-#[test]
-fn parity_selector_append_type_suffix() {
-    // selector.append accepts a plain type selector as the suffix's leading
-    // simple (`.c` + `d` -> `.cd`); a universal or namespaced type is rejected
-    // (tested for errors via the spec suite, not here).
-    assert_parity("@use \"sass:selector\";\na { b: selector.append(\".c\", \"d\"); }\n");
-    assert_parity("@use \"sass:selector\";\na { b: selector.append(\"d\", \".c\"); }\n");
-}
-fn parity_first_class_mixins_apply() {
-    // `meta.get-mixin` captures a mixin reference; `@include meta.apply(...)`
-    // invokes it with forwarded arguments and an optional `@content` block.
-    assert_parity(concat!(
-        "@use \"sass:meta\";\n",
-        "@mixin add-two($v) { b: $v + 2; }\n",
-        "$ref: meta.get-mixin(add-two);\n",
-        "a { @include meta.apply($ref, 10); }\n",
-        "@mixin wrap { c { @content; } }\n",
-        "d { @include meta.apply(meta.get-mixin(wrap)) { e: f; } }\n",
-        "g { h: meta.inspect(meta.get-mixin(add-two)); ",
-        "i: meta.get-mixin(add-two) == meta.get-mixin(add-two); }\n",
-    ));
 }
