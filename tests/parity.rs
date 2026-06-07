@@ -1774,3 +1774,18 @@ fn extend_trim_and_chain_order() {
         ".foo, .baz, .bar {\n  a: b;\n}\n"
     );
 }
+
+#[test]
+fn extend_weaves_multi_component_extenders() {
+    // A multi-component extender interweaves its parents with the matched
+    // selector's parents in all order-preserving ways (dart-sass `weave`).
+    assert_eq!(
+        ours(".baz .bip .foo {a: b}\nfoo .grank bar {@extend .foo}\n"),
+        ".baz .bip .foo, .baz .bip foo .grank bar, foo .grank .baz .bip bar {\n  a: b;\n}\n"
+    );
+    // Identical parent prefixes unify to a single woven selector.
+    assert_eq!(
+        ours(".baz .bip .foo {a: b}\n.baz .bip bar {@extend .foo}\n"),
+        ".baz .bip .foo, .baz .bip bar {\n  a: b;\n}\n"
+    );
+}

@@ -747,14 +747,27 @@ fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
         return vec![complex.clone()];
     }
 
-    // Cartesian product of the per-component option lists, concatenated.
-    let mut combos: Vec<Vec<ComplexComponent>> = vec![Vec::new()];
-    for opts in &per_component {
-        let mut next: Vec<Vec<ComplexComponent>> = Vec::new();
+    // Each component's options become candidate complex selectors. Take the
+    // Cartesian product across components and `weave` each path into one or
+    // more complete complex selectors (dart-sass `paths` + `weave`).
+    let per_component_complex: Vec<Vec<Complex>> = per_component
+        .iter()
+        .map(|opts| {
+            opts.iter()
+                .map(|seq| Complex {
+                    components: seq.clone(),
+                })
+                .collect()
+        })
+        .collect();
+
+    let mut combos: Vec<Vec<Complex>> = vec![Vec::new()];
+    for opts in &per_component_complex {
+        let mut next: Vec<Vec<Complex>> = Vec::new();
         for combo in &combos {
             for opt in opts {
                 let mut c = combo.clone();
-                c.extend(opt.iter().cloned());
+                c.push(opt.clone());
                 next.push(c);
             }
         }
@@ -766,14 +779,235 @@ fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
 
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for components in combos {
-        let c = Complex { components };
-        let r = c.render();
-        if seen.insert(r) {
-            out.push(c);
+    for path in combos {
+        for c in weave(&path) {
+            let r = c.render();
+            if seen.insert(r) {
+                out.push(c);
+            }
         }
     }
     out
+}
+
+/// Weave a path of complex selectors (one per original component) into complete
+/// complex selectors. Single-component path elements are simply appended;
+/// multi-component ones have their parent components interwoven with the
+/// accumulated prefix (dart-sass `weave`). Combinators in parent components are
+/// not woven (we fall back to plain concatenation), but the common
+/// descendant-only case is handled fully.
+fn weave(path: &[Complex]) -> Vec<Complex> {
+    let Some((first, rest)) = path.split_first() else {
+        return Vec::new();
+    };
+    let mut prefixes: Vec<Vec<ComplexComponent>> = vec![first.components.clone()];
+    for complex in rest {
+        if complex.components.len() == 1 {
+            for prefix in prefixes.iter_mut() {
+                prefix.extend(complex.components.iter().cloned());
+            }
+            continue;
+        }
+        let last = match complex.components.last() {
+            Some(l) => l.clone(),
+            None => continue,
+        };
+        let base_parents = &complex.components[..complex.components.len() - 1];
+        let mut next: Vec<Vec<ComplexComponent>> = Vec::new();
+        for prefix in &prefixes {
+            for mut woven in weave_parents(prefix, base_parents) {
+                woven.push(last.clone());
+                next.push(woven);
+            }
+        }
+        prefixes = next;
+        if prefixes.len() > 100_000 {
+            break;
+        }
+    }
+    prefixes
+        .into_iter()
+        .map(|components| Complex { components })
+        .collect()
+}
+
+/// Interweave `prefix`'s components with `parents` (the parent components of a
+/// multi-component extender), returning all order-preserving interleavings
+/// (with unification of equal/superselector groups), per dart-sass
+/// `_weaveParents`. Only the descendant-combinator case is supported; if any
+/// component carries a combinator, fall back to a single concatenation.
+fn weave_parents(prefix: &[ComplexComponent], parents: &[ComplexComponent]) -> Vec<Vec<ComplexComponent>> {
+    if parents.is_empty() {
+        return vec![prefix.to_vec()];
+    }
+    // Fall back to plain concatenation when combinators are involved (the full
+    // grouping/trailing-combinator logic isn't ported).
+    let has_combinator = prefix
+        .iter()
+        .chain(parents.iter())
+        .any(|c| c.combinator.is_some());
+    if has_combinator {
+        let mut out = prefix.to_vec();
+        out.extend(parents.iter().cloned());
+        return vec![out];
+    }
+
+    // Each component is its own group (descendant-only). Compute the longest
+    // common subsequence of the two component lists, unifying equal /
+    // superselector groups, then interleave the remaining chunks around the LCS.
+    let lcs = longest_common_subsequence(parents, prefix);
+
+    let mut q1: std::collections::VecDeque<ComplexComponent> = prefix.iter().cloned().collect();
+    let mut q2: std::collections::VecDeque<ComplexComponent> = parents.iter().cloned().collect();
+
+    let mut choices: Vec<Vec<Vec<ComplexComponent>>> = Vec::new();
+    for group in &lcs {
+        // Chunk: drain from each queue until we reach the LCS group, then
+        // produce the two orderings of the drained prefixes.
+        let chunk = chunks(&mut q1, &mut q2, |q| {
+            q.front()
+                .map(|c| component_is_superselector(c, group))
+                .unwrap_or(false)
+        });
+        if !chunk.is_empty() {
+            choices.push(chunk);
+        }
+        choices.push(vec![vec![group.clone()]]);
+        q1.pop_front();
+        q2.pop_front();
+    }
+    let tail = chunks(&mut q1, &mut q2, |q| q.is_empty());
+    if !tail.is_empty() {
+        choices.push(tail);
+    }
+
+    // Cartesian product of the choices, flattening each path.
+    let mut results: Vec<Vec<ComplexComponent>> = vec![Vec::new()];
+    for choice in &choices {
+        let mut next = Vec::new();
+        for path in &results {
+            for option in choice {
+                let mut p = path.clone();
+                p.extend(option.iter().cloned());
+                next.push(p);
+            }
+        }
+        results = next;
+        if results.len() > 100_000 {
+            break;
+        }
+    }
+    results
+}
+
+/// `_chunks`: drain the leading subsequence of each queue (up to where `done`
+/// first holds) and return the two orderings of the combined drained items, or
+/// a single ordering when one side is empty.
+fn chunks<F>(
+    q1: &mut std::collections::VecDeque<ComplexComponent>,
+    q2: &mut std::collections::VecDeque<ComplexComponent>,
+    done: F,
+) -> Vec<Vec<ComplexComponent>>
+where
+    F: Fn(&std::collections::VecDeque<ComplexComponent>) -> bool,
+{
+    let mut chunk1 = Vec::new();
+    while !done(q1) {
+        match q1.pop_front() {
+            Some(c) => chunk1.push(c),
+            None => break,
+        }
+    }
+    let mut chunk2 = Vec::new();
+    while !done(q2) {
+        match q2.pop_front() {
+            Some(c) => chunk2.push(c),
+            None => break,
+        }
+    }
+    match (chunk1.is_empty(), chunk2.is_empty()) {
+        (true, true) => Vec::new(),
+        (true, false) => vec![chunk2],
+        (false, true) => vec![chunk1],
+        (false, false) => {
+            let mut a = chunk1.clone();
+            a.extend(chunk2.clone());
+            let mut b = chunk2;
+            b.extend(chunk1);
+            vec![a, b]
+        }
+    }
+}
+
+/// Longest common subsequence of two component lists, where two components are
+/// "equal" for LCS purposes if they're identical or one is a superselector of
+/// the other (the more specific is selected). Mirrors dart-sass's `select`.
+fn longest_common_subsequence(
+    list1: &[ComplexComponent],
+    list2: &[ComplexComponent],
+) -> Vec<ComplexComponent> {
+    let n = list1.len();
+    let m = list2.len();
+    let mut lengths = vec![vec![0usize; m + 1]; n + 1];
+    let mut selections: Vec<Vec<Option<ComplexComponent>>> = vec![vec![None; m]; n];
+    for i in 0..n {
+        for j in 0..m {
+            let sel = lcs_select(&list1[i], &list2[j]);
+            let has = sel.is_some();
+            selections[i][j] = sel;
+            lengths[i + 1][j + 1] = if has {
+                lengths[i][j] + 1
+            } else {
+                lengths[i + 1][j].max(lengths[i][j + 1])
+            };
+        }
+    }
+    let mut out = Vec::new();
+    backtrack(n as isize - 1, m as isize - 1, &lengths, &selections, &mut out);
+    out
+}
+
+fn backtrack(
+    i: isize,
+    j: isize,
+    lengths: &[Vec<usize>],
+    selections: &[Vec<Option<ComplexComponent>>],
+    out: &mut Vec<ComplexComponent>,
+) {
+    if i == -1 || j == -1 {
+        return;
+    }
+    let (ui, uj) = (i as usize, j as usize);
+    if let Some(sel) = &selections[ui][uj] {
+        backtrack(i - 1, j - 1, lengths, selections, out);
+        out.push(sel.clone());
+        return;
+    }
+    if lengths[ui + 1][uj] > lengths[ui][uj + 1] {
+        backtrack(i, j - 1, lengths, selections, out);
+    } else {
+        backtrack(i - 1, j, lengths, selections, out);
+    }
+}
+
+/// The LCS selection function for two parent components.
+fn lcs_select(a: &ComplexComponent, b: &ComplexComponent) -> Option<ComplexComponent> {
+    if a == b {
+        return Some(a.clone());
+    }
+    if component_is_superselector(a, b) {
+        return Some(b.clone());
+    }
+    if component_is_superselector(b, a) {
+        return Some(a.clone());
+    }
+    None
+}
+
+/// Whether one parent component is a superselector of another (compound-level,
+/// descendant context).
+fn component_is_superselector(a: &ComplexComponent, b: &ComplexComponent) -> bool {
+    a.combinator.is_none() && b.combinator.is_none() && compound_is_superselector(&a.compound, &b.compound)
 }
 
 /// Compute the replacement options for one component. The first option is the
