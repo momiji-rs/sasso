@@ -42,9 +42,44 @@ zero-dependency, sandbox-friendly core. See
 - Verbatim preservation of CSS functions it doesn't own (`calc`, `var`,
   `clamp`, `translateX`, …)
 
-Not yet implemented: `@mixin`/`@function`, control flow (`@if`/`@each`/
-`@for`/`@while`), `@extend`/placeholders, the `@use`/`@forward` module
-system, and the indented `.sass` syntax. These are the next ratchet steps.
+Since this slice was written the ratchet has added a great deal more —
+`@mixin`/`@function`, control flow (`@if`/`@each`/`@for`/`@while`), `@extend`
+and `%placeholder`s, a `calc()` engine, the CSS unit system + math functions,
+structured `@media`/`@supports`, maps, and the `@use`/`@forward` module system
+(built-in `sass:*` modules + user files). Remaining: full CSS Color 4
+color-space math, the indented `.sass` syntax, and a long tail of edge cases —
+see [Conformance](#conformance).
+
+## Install
+
+**CLI — prebuilt binaries.** Every release ships static binaries for Linux
+(gnu + musl), macOS and Windows (x86_64 / aarch64), built with
+[cargo-dist](https://github.com/axodotdev/cargo-dist). Grab one from the
+[Releases](https://github.com/momiji-rs/sasso/releases) page, or:
+
+```console
+$ curl -fsSL https://github.com/momiji-rs/sasso/releases/latest/download/sasso-installer.sh | sh   # Linux/macOS
+$ cargo binstall sasso        # fetch the prebuilt binary
+$ cargo install sasso         # build from source (needs a Rust toolchain)
+```
+
+**Library — crates.io.**
+
+```console
+$ cargo add sasso
+```
+
+**WebAssembly — npm.** A tiny, dependency-free wasm build for JS build tools
+and the browser (no wasm-bindgen, no native add-ons):
+
+```console
+$ npm install @momiji-rs/sasso
+```
+
+```js
+import { compile } from "@momiji-rs/sasso";
+compile("a { color: #ffffff }", { style: "compressed" }); // a{color:#fff}
+```
 
 ## Library usage
 

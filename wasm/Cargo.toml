@@ -1,0 +1,28 @@
+# The wasm-export wrapper: a tiny cdylib around `sasso::compile`, published to
+# npm as `@momiji-rs/sasso` (NOT to crates.io). It is deliberately OUTSIDE the
+# `sasso` workspace (see ../Cargo.toml `[workspace] exclude = ["wasm"]`) so the
+# core crate keeps `unsafe_code = "forbid"` while this thin FFI layer may use
+# the `unsafe` needed for the raw `extern "C"` ABI. No wasm-bindgen — the JS
+# loader (npm/sasso.mjs) marshals UTF-8 through linear memory by hand, keeping
+# the module tiny and dependency-free.
+[package]
+name = "sasso-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sasso = { path = ".." }
+
+# Size-first profile (then `wasm-opt -Oz` on top in build.sh / CI).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

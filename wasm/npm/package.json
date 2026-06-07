@@ -1,0 +1,38 @@
+{
+  "name": "@momiji-rs/sasso",
+  "version": "0.1.0",
+  "description": "A pure-Rust SCSS to CSS compiler (a dart-sass alternative), as a tiny dependency-free WebAssembly module.",
+  "type": "module",
+  "main": "./sasso.mjs",
+  "module": "./sasso.mjs",
+  "types": "./sasso.d.ts",
+  "exports": {
+    ".": {
+      "types": "./sasso.d.ts",
+      "import": "./sasso.mjs"
+    }
+  },
+  "files": [
+    "sasso.mjs",
+    "sasso.wasm",
+    "sasso.d.ts",
+    "README.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT"
+  ],
+  "keywords": ["sass", "scss", "css", "compiler", "wasm", "webassembly", "dart-sass"],
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/momiji-rs/sasso.git",
+    "directory": "wasm"
+  },
+  "homepage": "https://github.com/momiji-rs/sasso#readme",
+  "bugs": "https://github.com/momiji-rs/sasso/issues",
+  "engines": {
+    "node": ">=16"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

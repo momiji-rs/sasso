@@ -1,0 +1,6 @@
+# Build artifacts — the wasm module is built in CI before `npm publish`.
+/target
+/npm/sasso.wasm
+/npm/LICENSE-APACHE
+/npm/LICENSE-MIT
+/Cargo.lock
