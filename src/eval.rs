@@ -218,6 +218,8 @@ struct PendingExtend {
     /// The enclosing rule's resolved selector list (the extenders).
     extenders: Vec<String>,
     optional: bool,
+    /// Whether this `@extend` was registered inside a `@media` context.
+    in_media: bool,
     pos: Pos,
 }
 
@@ -247,14 +249,25 @@ impl<'a> Evaluator<'a> {
 
     /// Register an `@extend` directive: validate the (interpolation-resolved)
     /// target, then record one [`PendingExtend`] per comma-separated target.
-    fn register_extend(&mut self, selector: &[TplPiece], optional: bool, pos: Pos) -> Result<(), Error> {
-        let Some(extenders) = self.current_selector.clone() else {
+    /// `parents` is the enclosing style-rule selector list; `@extend` outside a
+    /// style rule (top level or directly inside `@at-root`/an at-rule) is an
+    /// error.
+    fn register_extend(
+        &mut self,
+        selector: &[TplPiece],
+        optional: bool,
+        pos: Pos,
+        parents: &[String],
+    ) -> Result<(), Error> {
+        if parents.is_empty() {
             return Err(Error::at("@extend may only be used within style rules.", pos));
-        };
+        }
+        let extenders = self.current_selector.clone().unwrap_or_else(|| parents.to_vec());
         let target = self.eval_template(selector)?;
         if target.trim().is_empty() {
             return Err(Error::at("expected selector.", pos));
         }
+        let in_media = !self.media_queries.is_empty();
         for t in split_commas(&target) {
             let t = t.trim();
             if t.is_empty() {
@@ -267,6 +280,7 @@ impl<'a> Evaluator<'a> {
                         target_str: t.to_string(),
                         extenders: extenders.clone(),
                         optional,
+                        in_media,
                         pos,
                     });
                 }
@@ -307,6 +321,19 @@ impl<'a> Evaluator<'a> {
                 optional: pe.optional,
                 matched: std::cell::Cell::new(false),
             });
+        }
+
+        // An `@extend` registered inside `@media` may not extend a selector
+        // outside any media context (dart-sass "You may not @extend selectors
+        // across media queries."). Detect when an in-media extend's target
+        // matches a root-level (non-media) rule.
+        for pe in &self.extends {
+            if pe.in_media && root_rule_contains_target(out, &pe.target) {
+                return Err(Error::at(
+                    "You may not @extend selectors across media queries.",
+                    pe.pos,
+                ));
+            }
         }
 
         rewrite_nodes(out, &extensions);
@@ -837,7 +864,7 @@ impl<'a> Evaluator<'a> {
                     selector,
                     optional,
                     pos,
-                } => self.register_extend(selector, *optional, *pos)?,
+                } => self.register_extend(selector, *optional, *pos, parents)?,
                 Stmt::Warn(e) => {
                     let v = self.eval_expr(e)?;
                     eprintln!("WARNING: {}", v.to_interp());
@@ -2695,6 +2722,20 @@ fn unquote_plain_attribute_value(raw: &str) -> String {
         }
     }
     raw.to_string()
+}
+
+/// Whether any TOP-LEVEL style rule (not nested inside an at-rule such as
+/// `@media`) contains the extend `target` simple selector. Used to detect an
+/// `@extend` that crosses a media-query boundary.
+fn root_rule_contains_target(nodes: &[OutNode], target: &crate::selector::Simple) -> bool {
+    nodes.iter().any(|node| match node {
+        OutNode::Rule { selectors, .. } => selectors.iter().any(|s| {
+            crate::selector::parse_list(s)
+                .map(|cs| crate::selector::list_contains_simple(&cs, target))
+                .unwrap_or(false)
+        }),
+        _ => false,
+    })
 }
 
 /// Walk the flattened output tree, rewriting each style-rule selector list per

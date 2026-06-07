@@ -1827,3 +1827,25 @@ fn extend_pseudo_class_and_element_ordering() {
         "-a :not(.foo).baz, -a :not(.foo):not(.bar) {\n  a: b;\n}\n"
     );
 }
+
+#[test]
+fn extend_across_media_is_an_error() {
+    // An `@extend` inside `@media` may not extend a selector defined at the
+    // document root.
+    assert!(compile(
+        ".foo { a: b }\n@media print { .bar { @extend .foo } }\n",
+        &Options::default()
+    )
+    .is_err());
+    // Both target and extender inside the same media context is fine.
+    assert_eq!(
+        ours("@media print { .a { x: y } .b { @extend .a } }\n"),
+        "@media print {\n  .a, .b {\n    x: y;\n  }\n}\n"
+    );
+    // A bare `@extend` directly inside `@at-root` (no enclosing rule) errors.
+    assert!(compile(
+        ".a { x: y }\n.b { @at-root (with: media) { @extend .a } }\n",
+        &Options::default()
+    )
+    .is_err());
+}

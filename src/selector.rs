@@ -461,6 +461,15 @@ pub(crate) fn parse_complex_one(s: &str) -> Option<Complex> {
     parse_complex(s.trim())
 }
 
+/// Whether any compound in any complex selector of `list` contains `target`.
+pub(crate) fn list_contains_simple(list: &[Complex], target: &Simple) -> bool {
+    list.iter().any(|c| {
+        c.components
+            .iter()
+            .any(|comp| comp.compound.simples.contains(target))
+    })
+}
+
 /// How an `@extend` target string classifies.
 pub(crate) enum TargetClass {
     /// A valid single-simple-selector target.
