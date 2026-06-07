@@ -753,15 +753,23 @@ impl Color {
             _ => return None,
         };
         let a = a / 255.0;
-        // Opaque hex round-trips as a canonical lowercase 6-digit hex,
-        // matching dart-sass; alpha hex falls back to computed rgba().
-        let repr = if (a - 1.0).abs() < f64::EPSILON {
-            Some(format!(
-                "#{:02x}{:02x}{:02x}",
-                r.round() as u8,
-                g.round() as u8,
-                b.round() as u8
-            ))
+        let opaque = (a - 1.0).abs() < f64::EPSILON;
+        // dart-sass preserves the *authored* spelling of an opaque 3- or
+        // 6-digit hex literal verbatim — `#fff` stays `#fff`, `#FFAA00` keeps
+        // its uppercase. The alpha-channel forms (4/8 digits) are always
+        // canonicalized: opaque ones round-trip as lowercase 6-digit hex
+        // (`#abcf` -> `#aabbcc`), while partial-alpha ones fall back to a
+        // computed `rgba()`.
+        let repr = if opaque {
+            match digits.len() {
+                3 | 6 => Some(format!("#{digits}")),
+                _ => Some(format!(
+                    "#{:02x}{:02x}{:02x}",
+                    r.round() as u8,
+                    g.round() as u8,
+                    b.round() as u8
+                )),
+            }
         } else {
             None
         };
@@ -1172,11 +1180,24 @@ mod tests {
 
     #[test]
     fn hex_parsing_and_serialization() {
+        // dart-sass preserves the authored spelling of opaque 3-/6-digit hex.
         let c = Color::from_hex("336699").expect("valid hex");
         assert_eq!(c.to_css(false), "#336699");
-        // 3-digit expands to canonical 6-digit lowercase.
         let short = Color::from_hex("369").expect("valid hex");
-        assert_eq!(short.to_css(false), "#336699");
+        assert_eq!(short.to_css(false), "#369");
+        // Uppercase and mixed case round-trip verbatim.
+        let upper = Color::from_hex("FFAA00").expect("valid hex");
+        assert_eq!(upper.to_css(false), "#FFAA00");
+        let upper_short = Color::from_hex("ABC").expect("valid hex");
+        assert_eq!(upper_short.to_css(false), "#ABC");
+        // Compressed mode ignores the authored form and shortens.
+        assert_eq!(upper.to_css(true), "#fa0");
+        // 4-/8-digit alpha forms are canonicalized, not preserved. An opaque
+        // one collapses to lowercase 6-digit hex; partial alpha -> rgba().
+        let opaque4 = Color::from_hex("369f").expect("valid hex");
+        assert_eq!(opaque4.to_css(false), "#336699");
+        let partial = Color::from_hex("33669980").expect("valid hex");
+        assert!(partial.to_css(false).starts_with("rgba("));
     }
 
     #[test]

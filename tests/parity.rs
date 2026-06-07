@@ -2070,3 +2070,28 @@ fn number_rounds_half_away_from_zero_at_tenth_place() {
         "a {\n  b: 123456789.12345679;\n}\n"
     );
 }
+
+#[test]
+fn opaque_hex_literals_preserve_authored_spelling() {
+    // dart-sass emits an opaque 3-/6-digit hex literal exactly as authored,
+    // keeping its length and case. The 4-/8-digit alpha forms, by contrast,
+    // are canonicalized. Verified byte-for-byte against
+    // `npx sass --no-source-map --stdin`.
+    assert_eq!(ours("a {b: #fff}\n"), "a {\n  b: #fff;\n}\n");
+    assert_eq!(ours("a {b: #FFF}\n"), "a {\n  b: #FFF;\n}\n");
+    assert_eq!(ours("a {b: #aaa}\n"), "a {\n  b: #aaa;\n}\n");
+    assert_eq!(ours("a {b: #FFAA00}\n"), "a {\n  b: #FFAA00;\n}\n");
+    assert_eq!(ours("a {b: #ABCABC}\n"), "a {\n  b: #ABCABC;\n}\n");
+    assert_eq!(ours("a {b: #aaaaaa}\n"), "a {\n  b: #aaaaaa;\n}\n");
+    // 4-/8-digit opaque alpha forms canonicalize to lowercase 6-digit hex.
+    assert_eq!(ours("a {b: #369f}\n"), "a {\n  b: #336699;\n}\n");
+    assert_eq!(ours("a {b: #112233ff}\n"), "a {\n  b: #112233;\n}\n");
+    // Compressed output ignores the authored spelling and shortens.
+    use sasso::OutputStyle;
+    let compressed = compile(
+        "a {b: #FFAA00}\n",
+        &Options::default().with_style(OutputStyle::Compressed),
+    )
+    .expect("compile failed");
+    assert_eq!(compressed, "a{b:#fa0}");
+}
