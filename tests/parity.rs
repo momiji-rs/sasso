@@ -3141,3 +3141,13 @@ fn parity_meta_first_class_functions() {
         "@use \"sass:meta\";\n@function ud() { @return null; }\na {\n  eq_builtin: meta.get-function(lighten) == meta.get-function(lighten);\n  ne_builtin: meta.get-function(lighten) == meta.get-function(darken);\n  eq_user: meta.get-function(ud) == meta.get-function(ud);\n}\n",
     );
 }
+
+#[test]
+fn parity_list_join_append_brackets_and_maps() {
+    // `list.join` inherits list1's bracketing (overridable via `$bracketed`)
+    // and `list.append` keeps the source list's brackets; both treat a map as a
+    // comma list of `key value` entries.
+    assert_parity(
+        "@use \"sass:list\";\na {\n  jb_both: list.join([c d], [e f]);\n  jb_first: list.join([c d], e f);\n  jb_second: list.join(c d, [e f]);\n  jb_force_t: list.join(c, d, $bracketed: true);\n  jb_force_f: list.join([c], [d], $bracketed: false);\n  jb_pos: list.join(c, d, comma, true);\n  jmap: list.join((c: d, e: f), (g: h));\n  ap_b: list.append([], 1);\n  ap_map: list.append((c: d, e: f), g);\n}\n",
+    );
+}

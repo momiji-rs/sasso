@@ -33,11 +33,26 @@ pub(super) fn try_call(
 }
 
 /// Borrow a value as a list of elements and its separator. A list yields its
-/// own items and separator; any other value (including `null`) is a
+/// own items and separator; a map yields its entries as `key value` space
+/// lists (comma-separated); any other value (including `null`) is a
 /// single-element list. dart-sass reports a lone non-list as space-separated.
 fn as_items(v: &Value) -> (Vec<Value>, ListSep) {
     match v {
         Value::List(l) => (l.items.clone(), l.sep),
+        Value::Map(m) => {
+            let items = m
+                .entries
+                .iter()
+                .map(|(k, val)| {
+                    Value::List(List {
+                        items: vec![k.clone(), val.clone()],
+                        sep: ListSep::Space,
+                        bracketed: false,
+                    })
+                })
+                .collect();
+            (items, ListSep::Comma)
+        }
         other => (vec![other.clone()], ListSep::Space),
     }
 }
@@ -173,16 +188,22 @@ fn settled_sep(v: &Value) -> Option<ListSep> {
     match v {
         Value::List(l) if !l.items.is_empty() => Some(l.sep),
         Value::List(l) if l.sep == ListSep::Comma => Some(ListSep::Comma),
+        // A non-empty map behaves as a comma-separated list of its entries.
+        Value::Map(m) if !m.entries.is_empty() => Some(ListSep::Comma),
         _ => None,
     }
 }
 
 /// `join($list1, $list2, $separator: auto, $bracketed: auto)`: concatenated
 /// list. With `auto`, the separator is list1's settled separator (or list2's
-/// when list1 has none), defaulting to space when neither is settled.
-/// `$bracketed` is accepted but ignored (this list model has no bracket flag).
+/// when list1 has none), defaulting to space when neither is settled. The
+/// `$bracketed` flag defaults to list1's bracketing (`auto`), or is forced
+/// true/false by a truthy/falsey argument.
 fn fn_join(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list1", "list2", "separator", "bracketed"];
+    if pos_args.len() > params.len() {
+        return Err(too_many(pos_args.len(), params.len(), pos));
+    }
     let list1 = super::require(&params, pos_args, named, 0, "join", pos)?;
     let list2 = super::require(&params, pos_args, named, 1, "join", pos)?;
     let (items1, _) = as_items(list1);
@@ -196,13 +217,37 @@ fn fn_join(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
         None => join_auto_separator(list1, list2),
     };
 
+    // `$bracketed`: `auto` (default) inherits list1's brackets; any other value
+    // is truthy/falsey.
+    let bracketed = match super::arg(&params, pos_args, named, 3) {
+        None => matches!(list1, Value::List(l) if l.bracketed),
+        Some(Value::Str(s)) if !s.quoted && s.text == "auto" => {
+            matches!(list1, Value::List(l) if l.bracketed)
+        }
+        Some(v) => v.is_truthy(),
+    };
+
     let mut items = items1;
     items.extend(items2);
     Ok(Value::List(List {
         items,
         sep,
-        bracketed: false,
+        bracketed,
     }))
+}
+
+/// The dart-sass "Only N argument(s) allowed, but M were passed." error.
+fn too_many(passed: usize, max: usize, pos: Pos) -> Error {
+    Error::at(
+        format!(
+            "Only {} argument{} allowed, but {} {} passed.",
+            max,
+            if max == 1 { "" } else { "s" },
+            passed,
+            if passed == 1 { "was" } else { "were" }
+        ),
+        pos,
+    )
 }
 
 /// `join`'s `auto` rule: list1's settled separator, else list2's, else space.
@@ -217,6 +262,9 @@ fn join_auto_separator(list1: &Value, list2: &Value) -> ListSep {
 /// space for a bare value or empty list.
 fn fn_append(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "val", "separator"];
+    if pos_args.len() > params.len() {
+        return Err(too_many(pos_args.len(), params.len(), pos));
+    }
     let list = super::require(&params, pos_args, named, 0, "append", pos)?;
     let val = super::require(&params, pos_args, named, 1, "append", pos)?.clone();
     let (mut items, _) = as_items(list);
@@ -228,12 +276,14 @@ fn fn_append(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<
         },
         None => settled_sep(list).unwrap_or(ListSep::Space),
     };
+    // `append` keeps the source list's bracketing (dart-sass).
+    let bracketed = matches!(list, Value::List(l) if l.bracketed);
 
     items.push(val);
     Ok(Value::List(List {
         items,
         sep,
-        bracketed: false,
+        bracketed,
     }))
 }
 
