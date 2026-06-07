@@ -8,10 +8,10 @@
 use std::rc::Rc;
 
 use crate::ast::{
-    BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, CustomDecl, Declaration, Expr,
-    IfBranch, IfClause, IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, Param,
-    ParamList, PropertySet, Rule, Stmt, Stylesheet, SupportsCondition, SupportsValue, TplPiece, UnOp,
-    VarDecl,
+    BinOp, CallArg, Callable, ConfigEntry, Conjunction, CssCustomItem, CssCustomValue, CustomDecl,
+    Declaration, Expr, ForwardMember, IfBranch, IfClause, IfCond, ImportArg, MediaFeature, MediaInParens,
+    MediaQuery, MediaQueryList, Param, ParamList, PropertySet, Rule, Stmt, Stylesheet, SupportsCondition,
+    SupportsValue, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::{Pos, Scanner};
@@ -957,22 +957,23 @@ impl Parser {
             }
             self.skip_ws_trivia();
         }
-        // `with (...)` configuration is part of the user-module epic; reject it
-        // so its specs stay failing rather than silently mis-parsing.
+        // `with (...)` overrides the module's `!default` variables.
+        let mut config = Vec::new();
         if self.try_keyword("with") {
-            return Err(Error::at("@use ... with is not supported in this build", pos));
+            config = self.parse_config_clause(pos)?;
         }
+        self.skip_ws_trivia();
         self.sc.eat(';');
         Ok(Stmt::Use {
             url,
             namespace,
             star,
+            config,
             pos,
         })
     }
 
-    /// Parse `@forward "<url>" …;` — parked for the module-system epic. The URL
-    /// is captured so the evaluator can emit a precise "not supported" error.
+    /// Parse `@forward "<url>" [as <prefix>-*] [show ...|hide ...] [with (...)];`.
     fn parse_forward(&mut self, pos: Pos) -> Result<Stmt, Error> {
         if self.block_depth > 0 {
             return Err(Error::at("This at-rule is not allowed here.", pos));
@@ -985,14 +986,120 @@ impl Parser {
         }
         self.skip_ws_trivia();
         let url = self.parse_module_url(pos)?;
-        // Consume the rest of the statement verbatim.
-        while let Some(c) = self.sc.peek() {
-            self.sc.bump();
-            if c == ';' {
+        self.skip_ws_trivia();
+        let mut prefix = None;
+        if self.try_keyword("as") {
+            self.skip_ws_inline();
+            let name = self.read_ident_name()?;
+            if !self.sc.eat('*') {
+                return Err(Error::at("expected \"*\".", self.sc.position()));
+            }
+            prefix = Some(name);
+            self.skip_ws_trivia();
+        }
+        let mut show = None;
+        let mut hide = None;
+        if self.try_keyword("show") {
+            show = Some(self.parse_forward_members(pos)?);
+            self.skip_ws_trivia();
+        } else if self.try_keyword("hide") {
+            hide = Some(self.parse_forward_members(pos)?);
+            self.skip_ws_trivia();
+        }
+        let mut config = Vec::new();
+        if self.try_keyword("with") {
+            config = self.parse_config_clause(pos)?;
+        }
+        self.skip_ws_trivia();
+        self.sc.eat(';');
+        Ok(Stmt::Forward {
+            url,
+            prefix,
+            show,
+            hide,
+            config,
+            pos,
+        })
+    }
+
+    /// Parse a `with ( $name: value [!default], ... )` configuration clause.
+    fn parse_config_clause(&mut self, pos: Pos) -> Result<Vec<ConfigEntry>, Error> {
+        self.skip_ws_trivia();
+        if !self.sc.eat('(') {
+            return Err(Error::at("expected \"(\".", self.sc.position()));
+        }
+        let mut entries = Vec::new();
+        loop {
+            self.skip_ws_trivia();
+            if self.sc.eat(')') {
                 break;
             }
+            let entry_pos = self.sc.position();
+            if self.sc.peek() != Some('$') {
+                return Err(Error::at("expected \"$\".", entry_pos));
+            }
+            self.sc.bump();
+            let name = self.read_ident_name()?;
+            self.skip_ws_trivia();
+            if !self.sc.eat(':') {
+                return Err(Error::at("expected \":\".", self.sc.position()));
+            }
+            self.skip_ws_trivia();
+            let value = self.parse_value()?;
+            let mut is_default = false;
+            self.skip_ws_inline();
+            if self.sc.peek() == Some('!') {
+                self.sc.bump();
+                let flag = self.read_ident_name()?;
+                if flag == "default" {
+                    is_default = true;
+                } else {
+                    return Err(Error::at("Invalid flag name.".to_string(), entry_pos));
+                }
+            }
+            entries.push(ConfigEntry {
+                name,
+                value,
+                is_default,
+            });
+            self.skip_ws_trivia();
+            if self.sc.eat(',') {
+                continue;
+            }
+            self.skip_ws_trivia();
+            if self.sc.eat(')') {
+                break;
+            }
+            return Err(Error::at("expected \")\".", self.sc.position()));
         }
-        Ok(Stmt::Forward { url, pos })
+        let _ = pos;
+        Ok(entries)
+    }
+
+    /// Parse a `show`/`hide` member list: comma-separated identifiers and
+    /// `$variable` names.
+    fn parse_forward_members(&mut self, pos: Pos) -> Result<Vec<ForwardMember>, Error> {
+        let mut members = Vec::new();
+        loop {
+            self.skip_ws_trivia();
+            if self.sc.peek() == Some('$') {
+                self.sc.bump();
+                let name = self.read_ident_name()?;
+                members.push(ForwardMember::Var(name));
+            } else {
+                let name = self.read_ident_name()?;
+                members.push(ForwardMember::Name(name));
+            }
+            self.skip_ws_trivia();
+            if self.sc.eat(',') {
+                continue;
+            }
+            break;
+        }
+        if members.is_empty() {
+            return Err(Error::at("Expected variable, mixin, or function name", pos));
+        }
+        Ok(members)
     }
 
     /// Read a quoted module URL (no interpolation allowed) for `@use`/`@forward`.

@@ -34,19 +34,28 @@ pub(crate) enum Stmt {
     /// `@import "a", "b";` — each entry is either a Sass path to inline or a
     /// plain CSS import emitted verbatim.
     Import(Vec<ImportArg>),
-    /// `@use "<url>" [as <namespace>|as *];`. Only built-in `sass:*` modules
-    /// are supported in this build: the namespace defaults to the part after
-    /// `sass:` (e.g. `math`), `as ns` overrides it, and `as *` exposes the
-    /// members unprefixed.
+    /// `@use "<url>" [as <namespace>|as *] [with (...)];`. Built-in `sass:*`
+    /// modules and user stylesheets are both supported: the namespace defaults
+    /// to the final URL segment (or the part after `sass:`), `as ns` overrides
+    /// it, and `as *` exposes the members unprefixed. `with (...)` overrides the
+    /// loaded module's `!default` variables before it is evaluated.
     Use {
         url: String,
         namespace: Option<String>,
         star: bool,
+        config: Vec<ConfigEntry>,
         pos: Pos,
     },
-    /// `@forward "<url>" …;` — parked: not supported in this build (errors at
-    /// parse time), reserved for the module-system epic.
-    Forward { url: String, pos: Pos },
+    /// `@forward "<url>" [as <prefix>-*] [show ...|hide ...] [with (...)];` —
+    /// re-export another module's members from the current module.
+    Forward {
+        url: String,
+        prefix: Option<String>,
+        show: Option<Vec<ForwardMember>>,
+        hide: Option<Vec<ForwardMember>>,
+        config: Vec<ConfigEntry>,
+        pos: Pos,
+    },
     /// `/* ... */` loud comment (inner text, without the delimiters).
     Comment(String),
     /// `@if`/`@else if`/`@else` — evaluated top to bottom, first match wins.
@@ -143,6 +152,25 @@ pub(crate) enum Stmt {
     Debug(Expr),
     /// `@error <expr>;` — aborts compilation with the message.
     Error(Expr),
+}
+
+/// One `$name: value [!default]` entry in a `@use`/`@forward` `with (...)`
+/// configuration clause.
+pub(crate) struct ConfigEntry {
+    pub name: String,
+    pub value: Expr,
+    /// `!default` on a `@forward ... with` entry: the override only applies if
+    /// the downstream module does not configure the variable itself.
+    pub is_default: bool,
+}
+
+/// A member name in a `@forward ... show/hide` clause. Variables keep their
+/// leading `$`; functions/mixins are bare identifiers.
+pub(crate) enum ForwardMember {
+    /// A `$variable` name (stored without the `$`).
+    Var(String),
+    /// A function or mixin name.
+    Name(String),
 }
 
 /// One entry in an `@import` statement.

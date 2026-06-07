@@ -59,6 +59,17 @@ pub trait Importer {
     /// Resolve an `@import` argument (e.g. `"minima/base"`) to SCSS
     /// source, or `None` if it cannot be found.
     fn resolve(&self, path: &str) -> Option<String>;
+
+    /// Resolve a `@use`/`@forward` module URL to a `(canonical_key, source)`
+    /// pair, or `None` if it cannot be found. The canonical key uniquely
+    /// identifies the loaded file so the module system can evaluate it once and
+    /// share the instance between every `@use`/`@forward` of the same file
+    /// (regardless of the spelling of the URL). The default implementation
+    /// resolves through [`Importer::resolve`] and uses the URL itself as the
+    /// key (adequate when each distinct file is referenced by a single URL).
+    fn resolve_module(&self, path: &str) -> Option<(String, String)> {
+        self.resolve(path).map(|src| (path.to_string(), src))
+    }
 }
 
 /// Compilation options.
@@ -128,7 +139,7 @@ impl FsImporter {
 impl Importer for FsImporter {
     fn resolve(&self, path: &str) -> Option<String> {
         for base in &self.load_paths {
-            match resolve_in_base(base, path) {
+            match resolve_in_base(base, path, true) {
                 Resolution::Found(p) => {
                     if let Ok(src) = std::fs::read_to_string(&p) {
                         return Some(src);
@@ -137,6 +148,28 @@ impl Importer for FsImporter {
                 // An ambiguous match is an error in dart-sass; we surface it as
                 // "not found" (the eval layer turns that into an import error),
                 // which is enough for callers that only care about pass/fail.
+                Resolution::Ambiguous => return None,
+                Resolution::NotFound => {}
+            }
+        }
+        None
+    }
+
+    fn resolve_module(&self, path: &str) -> Option<(String, String)> {
+        for base in &self.load_paths {
+            // `@use`/`@forward` never consider `.import` files (those are an
+            // `@import`-only escape hatch).
+            match resolve_in_base(base, path, false) {
+                Resolution::Found(p) => {
+                    if let Ok(src) = std::fs::read_to_string(&p) {
+                        // The canonical key is the resolved absolute path so the
+                        // same file loaded via different URLs is cached once.
+                        let key = std::fs::canonicalize(&p)
+                            .map(|c| c.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| p.to_string_lossy().into_owned());
+                        return Some((key, src));
+                    }
+                }
                 Resolution::Ambiguous => return None,
                 Resolution::NotFound => {}
             }
@@ -179,7 +212,7 @@ enum Resolution {
 /// shape — re-exporting another module) is treated as unusable and skipped,
 /// since this build has no module system; resolution then falls through to the
 /// normal file, matching the output we can actually produce.
-fn resolve_in_base(base: &Path, path: &str) -> Resolution {
+fn resolve_in_base(base: &Path, path: &str, allow_import_only: bool) -> Resolution {
     let p = Path::new(path);
     let dir = match p.parent() {
         Some(par) if !par.as_os_str().is_empty() => base.join(par),
@@ -196,10 +229,12 @@ fn resolve_in_base(base: &Path, path: &str) -> Resolution {
         // Strip the leading dot so `ext` is e.g. "scss".
         let ext = &ext[1..];
         // Tier 1: import-only override for the explicit extension.
-        match tier_exact(&dir, stem, &[ext], true) {
-            Tier::One(p) => return Resolution::Found(p),
-            Tier::Many => return Resolution::Ambiguous,
-            Tier::None => {}
+        if allow_import_only {
+            match tier_exact(&dir, stem, &[ext], true) {
+                Tier::One(p) => return Resolution::Found(p),
+                Tier::Many => return Resolution::Ambiguous,
+                Tier::None => {}
+            }
         }
         // Tier 2: the file as written (+ partial).
         return match tier_exact(&dir, stem, &[ext], false) {
@@ -210,11 +245,11 @@ fn resolve_in_base(base: &Path, path: &str) -> Resolution {
     }
 
     // Extensionless: scss/sass are equal precedence, css is a fallback.
-    let non_index = [
-        // (stem, import_only)
-        (file.to_string(), true),
-        (file.to_string(), false),
-    ];
+    let mut non_index: Vec<(&str, bool)> = Vec::with_capacity(2);
+    if allow_import_only {
+        non_index.push((file, true));
+    }
+    non_index.push((file, false));
     for (stem, import_only) in &non_index {
         match tier_with_extensions(&dir, stem, *import_only) {
             Tier::One(p) => return Resolution::Found(p),
@@ -225,8 +260,13 @@ fn resolve_in_base(base: &Path, path: &str) -> Resolution {
 
     // Index files live in a subdirectory named after the import path.
     let index_dir = dir.join(file);
-    for import_only in [true, false] {
-        match tier_with_extensions(&index_dir, "index", import_only) {
+    let index_modes: &[bool] = if allow_import_only {
+        &[true, false]
+    } else {
+        &[false]
+    };
+    for import_only in index_modes {
+        match tier_with_extensions(&index_dir, "index", *import_only) {
             Tier::One(p) => return Resolution::Found(p),
             Tier::Many => return Resolution::Ambiguous,
             Tier::None => {}

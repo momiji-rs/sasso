@@ -6,6 +6,7 @@
 //! gathered into a single block emitted *before* its nested rules bubble
 //! out after it.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -271,7 +272,7 @@ pub(crate) struct Evaluator<'a> {
     functions: HashMap<String, Rc<Callable>>,
     mixins: HashMap<String, Rc<Callable>>,
     /// Stack of `@content` blocks, one per active `@include`.
-    content_stack: Vec<Option<Rc<Vec<Stmt>>>>,
+    content_stack: Vec<Option<ContentBlock>>,
     /// Whether we are *directly* executing a mixin body (dart-sass `_inMixin`).
     /// `true` is pushed while a mixin body runs; running a `@content` block or a
     /// function body pushes `false` (those execute in the caller's context), so
@@ -303,6 +304,95 @@ pub(crate) struct Evaluator<'a> {
     /// Built-in modules brought into scope unprefixed via `@use "sass:<mod>"
     /// as *`. Their members resolve as bare calls/variables.
     star_modules: Vec<String>,
+    /// User stylesheet modules brought into scope via `@use "<file>" [as ns]`,
+    /// keyed by the in-scope namespace.
+    used_user_modules: HashMap<String, Rc<Module>>,
+    /// User modules brought into scope unprefixed via `@use "<file>" as *`.
+    star_user_modules: Vec<Rc<Module>>,
+    /// All user modules loaded so far, keyed by the importer's canonical key so
+    /// each file is evaluated once and shared between every `@use`/`@forward`.
+    /// Shared so a module's own forwarded sub-modules see the same cache.
+    module_cache: Rc<RefCell<HashMap<String, Rc<Module>>>>,
+    /// Members re-exported from the module currently being evaluated, collected
+    /// from its `@forward` rules. Empty when not evaluating a module.
+    forwarded: Forwarded,
+    /// Configuration (`@use/@forward ... with`) supplied for the module
+    /// currently being evaluated, consumed by its `!default` declarations.
+    /// Maps variable name -> (value, is_default_override).
+    pending_config: HashMap<String, (Value, bool)>,
+    /// Config keys actually consumed by a `!default` declaration in the module
+    /// currently being evaluated (used to reject unused configuration).
+    consumed_config: Vec<String>,
+}
+
+/// An evaluated user module: its public members plus the bindings it itself
+/// `@use`d (so a `ns.member` lookup can recurse through forwards).
+struct Module {
+    /// Top-level variables (global scope after evaluation), by name.
+    vars: HashMap<String, Value>,
+    functions: HashMap<String, Rc<Callable>>,
+    mixins: HashMap<String, Rc<Callable>>,
+    /// Namespaced user modules this module `@use`d (for transitive `ns.fn()`
+    /// calls evaluated inside this module's own functions/mixins).
+    used_user_modules: HashMap<String, Rc<Module>>,
+    star_user_modules: Vec<Rc<Module>>,
+    /// Built-in modules this module `@use`d, by namespace, and unprefixed.
+    used_builtin_modules: HashMap<String, String>,
+    star_builtin_modules: Vec<String>,
+    /// Built-in `sass:*` modules re-exported via `@forward`, as (module name,
+    /// optional `prefix-`). A `ns.member` that misses every captured member is
+    /// retried against these.
+    forwarded_builtins: Vec<(String, Option<String>)>,
+}
+
+impl Module {
+    /// Look up a public variable, following `@forward` re-exports. Private
+    /// members (leading `-`/`_`) are excluded.
+    fn var(&self, name: &str) -> Option<Value> {
+        self.vars.get(name).cloned()
+    }
+    fn function(&self, name: &str) -> Option<Rc<Callable>> {
+        self.functions.get(name).cloned()
+    }
+    fn mixin(&self, name: &str) -> Option<Rc<Callable>> {
+        self.mixins.get(name).cloned()
+    }
+}
+
+/// A `@content` block plus, when the enclosing `@include` targets a mixin from
+/// another module, a snapshot of the call-site environment in which the content
+/// must run (dart-sass: a content block closes over its definition site).
+struct ContentBlock {
+    stmts: Rc<Vec<Stmt>>,
+    /// `Some` only for a cross-module include: the environment to install while
+    /// the block runs, so the content resolves against the call site, not the
+    /// mixin's module.
+    caller_env: Option<Box<SavedModuleEnv>>,
+}
+
+/// The caller-side environment saved while a cross-module member call runs in
+/// the callee module's environment.
+#[derive(Clone)]
+struct SavedModuleEnv {
+    scopes: Vec<HashMap<String, Value>>,
+    scope_semi_global: Vec<bool>,
+    functions: HashMap<String, Rc<Callable>>,
+    mixins: HashMap<String, Rc<Callable>>,
+    used_modules: HashMap<String, String>,
+    star_modules: Vec<String>,
+    used_user_modules: HashMap<String, Rc<Module>>,
+    star_user_modules: Vec<Rc<Module>>,
+}
+
+/// Members a module re-exports via `@forward`, accumulated while it evaluates.
+#[derive(Default)]
+struct Forwarded {
+    vars: HashMap<String, Value>,
+    functions: HashMap<String, Rc<Callable>>,
+    mixins: HashMap<String, Rc<Callable>>,
+    /// Built-in `sass:*` modules re-exported wholesale via `@forward "sass:x"`,
+    /// stored as (builtin module name, optional `prefix-`).
+    builtins: Vec<(String, Option<String>)>,
 }
 
 /// A pending `@extend`, captured during eval and applied after flattening.
@@ -339,6 +429,12 @@ impl<'a> Evaluator<'a> {
             in_supports_declaration: false,
             used_modules: HashMap::new(),
             star_modules: Vec::new(),
+            used_user_modules: HashMap::new(),
+            star_user_modules: Vec::new(),
+            module_cache: Rc::new(RefCell::new(HashMap::new())),
+            forwarded: Forwarded::default(),
+            pending_config: HashMap::new(),
+            consumed_config: Vec::new(),
         }
     }
 
@@ -525,6 +621,23 @@ impl<'a> Evaluator<'a> {
     }
 
     fn apply_var(&mut self, v: &VarDecl) -> Result<(), Error> {
+        // A top-level `!default` variable in a module being evaluated with
+        // configuration: the supplied value overrides the default (unless the
+        // override itself is `!default` and the variable already has a value).
+        if v.is_default && self.scopes.len() == 1 {
+            if let Some((cfg_val, cfg_is_default)) = self.pending_config.get(&v.name).cloned() {
+                self.consumed_config.push(v.name.clone());
+                let already_set = matches!(self.lookup(&v.name), Some(x) if !matches!(x, Value::Null));
+                // `@forward ... with ($x !default)`: only apply if the module
+                // hasn't already defined the variable.
+                if !(cfg_is_default && already_set) {
+                    if let Some(g) = self.scopes.first_mut() {
+                        g.insert(v.name.clone(), cfg_val);
+                    }
+                    return Ok(());
+                }
+            }
+        }
         let val = self.eval_expr(&v.value)?;
         if v.is_default {
             if let Some(existing) = self.lookup(&v.name) {
@@ -896,16 +1009,26 @@ impl<'a> Evaluator<'a> {
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
-        // A namespaced `@include ns.mixin`: the built-in `sass:*` modules expose
-        // no mixins reachable in this build. Validate the namespace, then report
-        // the mixin as undefined.
+        // A namespaced `@include ns.mixin`: resolve a user module bound to the
+        // namespace, then a built-in (which exposes no mixins in this build).
         if let Some(ns) = module {
+            if let Some(target) = self.used_user_modules.get(ns).cloned() {
+                if is_private_member(name) {
+                    return Err(Error::unpositioned(
+                        "Private members can't be accessed from outside their modules.",
+                    ));
+                }
+                let mixin = target
+                    .mixin(name)
+                    .ok_or_else(|| Error::unpositioned("Undefined mixin."))?;
+                return self.run_module_mixin(&target, &mixin, args, content, parents, sink);
+            }
             if !self.used_modules.contains_key(ns) {
                 return Err(Error::unpositioned(format!(
                     "There is no module with the namespace \"{ns}\"."
                 )));
             }
-            return Err(Error::unpositioned(format!("Undefined mixin {name}.")));
+            return Err(Error::unpositioned("Undefined mixin."));
         }
         let mixin = self
             .mixins
@@ -919,7 +1042,10 @@ impl<'a> Evaluator<'a> {
         }
         let frame = self.bind_args(&mixin.params, args, &mixin.name)?;
         self.push_scope_frame(frame);
-        self.content_stack.push(content);
+        self.content_stack.push(content.map(|stmts| ContentBlock {
+            stmts,
+            caller_env: None,
+        }));
         self.in_mixin.push(true);
         let result = self.exec(&mixin.body, parents, sink);
         self.in_mixin.pop();
@@ -928,33 +1054,451 @@ impl<'a> Evaluator<'a> {
         result
     }
 
-    /// Process a `@use "<url>" [as ns|as *];`. Only built-in `sass:*` modules
-    /// are supported in this build.
-    fn exec_use(&mut self, url: &str, namespace: Option<&str>, star: bool, pos: Pos) -> Result<(), Error> {
-        let module = match url.strip_prefix("sass:") {
-            Some(m) if crate::builtins::is_module(m) => m.to_string(),
-            // A non-built-in URL (a user stylesheet) needs the module-system
-            // epic; reject it precisely rather than silently doing nothing.
-            Some(_) => {
+    /// Execute an `@include ns.mixin` where `ns` is a user module: run the mixin
+    /// body in the module's own environment, while its `@content` block (if any)
+    /// runs back in the call site's environment.
+    #[allow(clippy::too_many_arguments)]
+    fn run_module_mixin(
+        &mut self,
+        module: &Rc<Module>,
+        mixin: &Rc<Callable>,
+        args: &[CallArg],
+        content: Option<Rc<Vec<Stmt>>>,
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        if content.is_some() && !body_uses_content(&mixin.body) {
+            return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+        }
+        // Bind the arguments at the call site (so they resolve in the caller's
+        // scope), then enter the module's environment for the body. Snapshot the
+        // call-site env so a `@content` block runs there, not in the module.
+        let frame = self.bind_args(&mixin.params, args, &mixin.name)?;
+        let content_block = content.map(|stmts| {
+            let snapshot = self.snapshot_env();
+            ContentBlock {
+                stmts,
+                caller_env: Some(Box::new(snapshot)),
+            }
+        });
+        let saved = self.enter_module(module);
+        self.push_scope_frame(frame);
+        self.content_stack.push(content_block);
+        let result = self.exec(&mixin.body, parents, sink);
+        self.content_stack.pop();
+        self.pop_scope();
+        self.leave_module(saved);
+        result
+    }
+
+    /// Run the innermost active `@content` block. For a cross-module include the
+    /// block carries a snapshot of the call-site environment, which is installed
+    /// for the duration so the content resolves there rather than in the mixin's
+    /// module.
+    fn exec_content(&mut self, parents: &[String], sink: &mut Sink<'_>) -> Result<(), Error> {
+        let (stmts, caller_env) = match self.content_stack.last() {
+            Some(Some(block)) => (
+                Rc::clone(&block.stmts),
+                block.caller_env.as_ref().map(|e| (**e).clone()),
+            ),
+            _ => return Ok(()),
+        };
+        match caller_env {
+            None => self.exec(&stmts, parents, sink),
+            Some(env) => {
+                let restore = self.install_env(env);
+                let result = self.exec(&stmts, parents, sink);
+                self.leave_module(restore);
+                result
+            }
+        }
+    }
+
+    /// Install a saved environment snapshot, returning the displaced one to
+    /// restore afterwards.
+    fn install_env(&mut self, env: SavedModuleEnv) -> SavedModuleEnv {
+        SavedModuleEnv {
+            scopes: std::mem::replace(&mut self.scopes, env.scopes),
+            scope_semi_global: std::mem::replace(&mut self.scope_semi_global, env.scope_semi_global),
+            functions: std::mem::replace(&mut self.functions, env.functions),
+            mixins: std::mem::replace(&mut self.mixins, env.mixins),
+            used_modules: std::mem::replace(&mut self.used_modules, env.used_modules),
+            star_modules: std::mem::replace(&mut self.star_modules, env.star_modules),
+            used_user_modules: std::mem::replace(&mut self.used_user_modules, env.used_user_modules),
+            star_user_modules: std::mem::replace(&mut self.star_user_modules, env.star_user_modules),
+        }
+    }
+
+    /// Clone the current per-module environment (for capturing a content block's
+    /// call-site closure).
+    fn snapshot_env(&self) -> SavedModuleEnv {
+        SavedModuleEnv {
+            scopes: self.scopes.clone(),
+            scope_semi_global: self.scope_semi_global.clone(),
+            functions: self.functions.clone(),
+            mixins: self.mixins.clone(),
+            used_modules: self.used_modules.clone(),
+            star_modules: self.star_modules.clone(),
+            used_user_modules: self.used_user_modules.clone(),
+            star_user_modules: self.star_user_modules.clone(),
+        }
+    }
+
+    /// Process a `@use "<url>" [as ns|as *] [with (...)];` for a built-in
+    /// `sass:*` module or a user stylesheet.
+    fn exec_use(
+        &mut self,
+        url: &str,
+        namespace: Option<&str>,
+        star: bool,
+        config: &[crate::ast::ConfigEntry],
+        pos: Pos,
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        // Built-in `sass:<mod>` modules.
+        if let Some(m) = url.strip_prefix("sass:") {
+            if !crate::builtins::is_module(m) {
                 return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
             }
-            None => {
+            if !config.is_empty() {
                 return Err(Error::at(
-                    "@use of non-built-in modules is not supported in this build".to_string(),
+                    "Built-in modules can't be configured.".to_string(),
                     pos,
                 ));
             }
-        };
-        if star {
-            if !self.star_modules.contains(&module) {
-                self.star_modules.push(module);
+            let module = m.to_string();
+            if star {
+                if !self.star_modules.contains(&module) {
+                    self.star_modules.push(module);
+                }
+                return Ok(());
             }
+            let ns = namespace.unwrap_or(&module).to_string();
+            self.check_namespace_free(&ns, pos)?;
+            self.used_modules.insert(ns, module);
             return Ok(());
         }
-        // The default namespace is the explicit `as ns` or the module's short
-        // name (the part after `sass:`).
-        let ns = namespace.unwrap_or(&module).to_string();
-        self.used_modules.insert(ns, module);
+
+        // A user stylesheet module.
+        let conf = self.eval_config(config)?;
+        let conf_keys: Vec<String> = conf.keys().cloned().collect();
+        let (module, consumed) = self.load_module(url, conf, pos, sink)?;
+        // Any configured variable the module did not consume via a `!default`
+        // declaration is an error.
+        if conf_keys.iter().any(|k| !consumed.contains(k)) {
+            return Err(Error::at(
+                "This variable was not declared with !default in the @used module.".to_string(),
+                pos,
+            ));
+        }
+        if star {
+            self.star_user_modules.push(module);
+            return Ok(());
+        }
+        let ns = match namespace {
+            Some(n) => n.to_string(),
+            None => default_namespace(url, pos)?,
+        };
+        self.check_namespace_free(&ns, pos)?;
+        self.used_user_modules.insert(ns, module);
+        Ok(())
+    }
+
+    /// Reject a namespace already bound by another `@use` in the same sheet.
+    fn check_namespace_free(&self, ns: &str, pos: Pos) -> Result<(), Error> {
+        if self.used_modules.contains_key(ns) || self.used_user_modules.contains_key(ns) {
+            return Err(Error::at(
+                format!("There's already a module with namespace \"{ns}\"."),
+                pos,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Evaluate a `with (...)` configuration clause into a name -> (value,
+    /// is_default) map.
+    fn eval_config(
+        &mut self,
+        config: &[crate::ast::ConfigEntry],
+    ) -> Result<HashMap<String, (Value, bool)>, Error> {
+        let mut map = HashMap::new();
+        for entry in config {
+            let v = self.eval_expr(&entry.value)?.without_slash();
+            map.insert(entry.name.clone(), (v, entry.is_default));
+        }
+        Ok(map)
+    }
+
+    /// Load (and cache) a user module: resolve its URL, evaluate it once into an
+    /// isolated environment with `config` applied to its `!default` variables,
+    /// emit its CSS into `sink`, and return the shared module instance plus the
+    /// list of config keys the module consumed (for `@forward ... with`
+    /// pass-through).
+    fn load_module(
+        &mut self,
+        url: &str,
+        config: HashMap<String, (Value, bool)>,
+        pos: Pos,
+        sink: &mut Sink<'_>,
+    ) -> Result<(Rc<Module>, Vec<String>), Error> {
+        let importer = self.options.importer;
+        let (key, src) = match importer.and_then(|imp| imp.resolve_module(url)) {
+            Some(pair) => pair,
+            None => {
+                return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
+            }
+        };
+        // A module evaluated once and cached is shared; its CSS is NOT re-emitted
+        // and a (non-empty) reconfiguration is an error.
+        if let Some(existing) = self.module_cache.borrow().get(&key).cloned() {
+            if !config.is_empty() {
+                return Err(Error::at(
+                    "This module was already loaded, so it can't be configured using \"with\".".to_string(),
+                    pos,
+                ));
+            }
+            return Ok((existing, Vec::new()));
+        }
+        // Guard against a load cycle.
+        if self.loading.iter().any(|p| p == &key) {
+            return Err(Error::at(
+                "Module loop: this module is already being loaded.".to_string(),
+                pos,
+            ));
+        }
+        let sheet = crate::parser::parse(&src)?;
+        let (module, consumed) = self.eval_module(&key, &sheet, config, pos, sink)?;
+        let module = Rc::new(module);
+        self.module_cache.borrow_mut().insert(key, Rc::clone(&module));
+        Ok((module, consumed))
+    }
+
+    /// Evaluate a parsed module sheet in an isolated environment. The module's
+    /// top-level CSS is emitted into `sink`; its members are captured into a
+    /// [`Module`]. `config` overrides its `!default` variables.
+    fn eval_module(
+        &mut self,
+        key: &str,
+        sheet: &Stylesheet,
+        config: HashMap<String, (Value, bool)>,
+        pos: Pos,
+        sink: &mut Sink<'_>,
+    ) -> Result<(Module, Vec<String>), Error> {
+        // Save and reset the per-module environment, then restore on the way out.
+        let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
+        let saved_semi = std::mem::replace(&mut self.scope_semi_global, vec![true]);
+        let saved_funcs = std::mem::take(&mut self.functions);
+        let saved_mixins = std::mem::take(&mut self.mixins);
+        let saved_used = std::mem::take(&mut self.used_modules);
+        let saved_star = std::mem::take(&mut self.star_modules);
+        let saved_used_user = std::mem::take(&mut self.used_user_modules);
+        let saved_star_user = std::mem::take(&mut self.star_user_modules);
+        let saved_fwd = std::mem::take(&mut self.forwarded);
+        let saved_config = std::mem::replace(&mut self.pending_config, config);
+        let saved_consumed = std::mem::take(&mut self.consumed_config);
+        let saved_selector = self.current_selector.take();
+        self.loading.push(key.to_string());
+
+        let result = self.exec(&sheet.stmts, &[], sink);
+
+        self.loading.pop();
+        // Capture this module's evaluated members before restoring the caller's
+        // environment.
+        let mut vars = std::mem::take(&mut self.scopes)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let mut functions = std::mem::take(&mut self.functions);
+        let mut mixins = std::mem::take(&mut self.mixins);
+        let used_user_modules = std::mem::take(&mut self.used_user_modules);
+        let star_user_modules = std::mem::take(&mut self.star_user_modules);
+        let used_builtin_modules = std::mem::take(&mut self.used_modules);
+        let star_builtin_modules = std::mem::take(&mut self.star_modules);
+        let forwarded = std::mem::take(&mut self.forwarded);
+        // Config keys this module actually consumed (via a `!default` declaration
+        // or by passing them through a `@forward ... with`).
+        let consumed = std::mem::take(&mut self.consumed_config);
+
+        // Restore the caller's environment.
+        self.scopes = saved_scopes;
+        self.scope_semi_global = saved_semi;
+        self.functions = saved_funcs;
+        self.mixins = saved_mixins;
+        self.used_modules = saved_used;
+        self.star_modules = saved_star;
+        self.used_user_modules = saved_used_user;
+        self.star_user_modules = saved_star_user;
+        self.forwarded = saved_fwd;
+        self.pending_config = saved_config;
+        self.consumed_config = saved_consumed;
+        self.current_selector = saved_selector;
+
+        result?;
+        let _ = pos;
+
+        // Merge `@forward`ed members (lower precedence than the module's own).
+        for (k, v) in forwarded.vars {
+            vars.entry(k).or_insert(v);
+        }
+        for (k, v) in forwarded.functions {
+            functions.entry(k).or_insert(v);
+        }
+        for (k, v) in forwarded.mixins {
+            mixins.entry(k).or_insert(v);
+        }
+
+        Ok((
+            Module {
+                vars,
+                functions,
+                mixins,
+                used_user_modules,
+                star_user_modules,
+                used_builtin_modules,
+                star_builtin_modules,
+                forwarded_builtins: forwarded.builtins,
+            },
+            consumed,
+        ))
+    }
+
+    /// Process a `@forward "<url>" [as p-*] [show ..|hide ..] [with (..)];`:
+    /// load the target module (emitting its CSS), then re-export its public
+    /// members from the module currently being evaluated, applying prefix and
+    /// show/hide filters.
+    #[allow(clippy::too_many_arguments)]
+    fn exec_forward(
+        &mut self,
+        url: &str,
+        prefix: Option<&str>,
+        show: &Option<Vec<crate::ast::ForwardMember>>,
+        hide: &Option<Vec<crate::ast::ForwardMember>>,
+        config: &[crate::ast::ConfigEntry],
+        pos: Pos,
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        // `@forward "sass:<mod>"` re-exports a built-in module wholesale.
+        if let Some(m) = url.strip_prefix("sass:") {
+            if !crate::builtins::is_module(m) {
+                return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
+            }
+            self.forwarded
+                .builtins
+                .push((m.to_string(), prefix.map(str::to_string)));
+            return Ok(());
+        }
+
+        // Build the configuration passed to the forwarded module. The forward's
+        // own `with (...)` entries combine with the configuration of the module
+        // currently being evaluated (`pending_config`): a non-`!default` forward
+        // entry hard-overrides; a `!default` forward entry yields to a matching
+        // downstream override; downstream entries for variables the forward does
+        // not mention flow through unchanged.
+        let forward_conf = self.eval_config(config)?;
+        let downstream = self.pending_config.clone();
+        let mut combined: HashMap<String, (Value, bool)> = downstream.clone();
+        // Keys whose downstream entry a `!default` forward override consumed.
+        let mut forward_claimed: Vec<String> = Vec::new();
+        // The forward's own (non-passthrough) keys, which the forwarded module
+        // must consume (else configuring a non-`!default` variable -> error).
+        let mut forward_own: Vec<String> = Vec::new();
+        // Downstream keys a non-`!default` forward entry hard-overrode: these
+        // shadow the downstream configuration, so the downstream entry stays
+        // unconsumed (-> error if the user supplied it).
+        let mut forward_shadowed: Vec<String> = Vec::new();
+        for (name, (val, is_default)) in &forward_conf {
+            if *is_default {
+                if downstream.contains_key(name) {
+                    // Downstream override wins; the forward default is ignored.
+                    forward_claimed.push(name.clone());
+                } else {
+                    combined.insert(name.clone(), (val.clone(), false));
+                    forward_own.push(name.clone());
+                }
+            } else {
+                if downstream.contains_key(name) {
+                    forward_shadowed.push(name.clone());
+                }
+                combined.insert(name.clone(), (val.clone(), false));
+                forward_own.push(name.clone());
+            }
+        }
+
+        let (module, consumed) = self.load_module(url, combined, pos, sink)?;
+
+        // A non-passthrough forward entry the module never consumed configured a
+        // variable that isn't `!default` in the forwarded module.
+        if forward_own.iter().any(|k| !consumed.contains(k)) {
+            return Err(Error::at(
+                "This variable was not declared with !default in the @used module.".to_string(),
+                pos,
+            ));
+        }
+        // Mark the downstream config keys this forward consumed (passthrough +
+        // `!default`-claimed) as consumed in the enclosing module, so they are
+        // not reported as unused. A key a non-`!default` forward entry shadowed
+        // stays unconsumed (the downstream override is then an error).
+        for k in consumed.iter().chain(forward_claimed.iter()) {
+            if downstream.contains_key(k)
+                && !forward_shadowed.contains(k)
+                && !self.consumed_config.contains(k)
+            {
+                self.consumed_config.push(k.clone());
+            }
+        }
+
+        let show_vars = member_set(show, true);
+        let show_names = member_set(show, false);
+        let hide_vars = member_set(hide, true);
+        let hide_names = member_set(hide, false);
+        let has_show = show.is_some();
+
+        let visible_var = |name: &str| -> bool {
+            if is_private_member(name) {
+                return false;
+            }
+            if has_show {
+                show_vars.as_ref().map(|s| s.contains(name)).unwrap_or(false)
+            } else {
+                !hide_vars.as_ref().map(|s| s.contains(name)).unwrap_or(false)
+            }
+        };
+        let visible_name = |name: &str| -> bool {
+            if is_private_member(name) {
+                return false;
+            }
+            if has_show {
+                show_names.as_ref().map(|s| s.contains(name)).unwrap_or(false)
+            } else {
+                !hide_names.as_ref().map(|s| s.contains(name)).unwrap_or(false)
+            }
+        };
+
+        let pfx = prefix.unwrap_or("");
+        for (name, val) in &module.vars {
+            if visible_var(name) {
+                self.forwarded
+                    .vars
+                    .entry(format!("{pfx}{name}"))
+                    .or_insert_with(|| val.clone());
+            }
+        }
+        for (name, f) in &module.functions {
+            if visible_name(name) {
+                self.forwarded
+                    .functions
+                    .entry(format!("{pfx}{name}"))
+                    .or_insert_with(|| Rc::clone(f));
+            }
+        }
+        for (name, m) in &module.mixins {
+            if visible_name(name) {
+                self.forwarded
+                    .mixins
+                    .entry(format!("{pfx}{name}"))
+                    .or_insert_with(|| Rc::clone(m));
+            }
+        }
         Ok(())
     }
 
@@ -1112,25 +1656,25 @@ impl<'a> Evaluator<'a> {
                     url,
                     namespace,
                     star,
+                    config,
                     pos,
-                } => self.exec_use(url, namespace.as_deref(), *star, *pos)?,
-                Stmt::Forward { url, pos } => {
-                    let _ = url;
-                    return Err(Error::at(
-                        "@forward is not supported in this build".to_string(),
-                        *pos,
-                    ));
-                }
+                } => self.exec_use(url, namespace.as_deref(), *star, config, *pos, sink)?,
+                Stmt::Forward {
+                    url,
+                    prefix,
+                    show,
+                    hide,
+                    config,
+                    pos,
+                } => self.exec_forward(url, prefix.as_deref(), show, hide, config, *pos, sink)?,
                 Stmt::Content => {
-                    if let Some(Some(block)) = self.content_stack.last().cloned() {
-                        // The content block runs in the caller's context, so it
-                        // is no longer "directly in a mixin" (dart-sass): a
-                        // `meta.content-exists()` inside it is an error.
-                        self.in_mixin.push(false);
-                        let result = self.exec(&block, parents, sink);
-                        self.in_mixin.pop();
-                        result?;
-                    }
+                    // The content block runs in the caller's context, so it is no
+                    // longer "directly in a mixin" (dart-sass): a
+                    // `meta.content-exists()` inside it is an error.
+                    self.in_mixin.push(false);
+                    let result = self.exec_content(parents, sink);
+                    self.in_mixin.pop();
+                    result?;
                 }
                 Stmt::Import(args) => self.eval_imports(args, parents, sink)?,
                 Stmt::AtRule { name, prelude, body } => {
@@ -2237,8 +2781,8 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// Dispatch a namespaced call `ns.member(args)` against the built-in module
-    /// bound to `ns`. Errors when the namespace is not a used module.
+    /// Dispatch a namespaced call `ns.member(args)`. Resolves a user module
+    /// first, then a built-in module bound to `ns`.
     fn eval_module_call(
         &mut self,
         ns: &str,
@@ -2246,6 +2790,24 @@ impl<'a> Evaluator<'a> {
         args: &[CallArg],
         pos: Pos,
     ) -> Result<Value, Error> {
+        // A user module bound to this namespace.
+        if let Some(module) = self.used_user_modules.get(ns).cloned() {
+            if is_private_member(member) {
+                return Err(Error::at(
+                    "Private members can't be accessed from outside their modules.".to_string(),
+                    pos,
+                ));
+            }
+            if let Some(func) = module.function(member) {
+                return self.call_user_module_function(&module, &func, args);
+            }
+            // Fall back to a built-in re-exported by this module via @forward.
+            if let Some(v) = self.try_forwarded_builtin_call(&module, member, args, pos)? {
+                return Ok(v);
+            }
+            return Err(Error::at("Undefined function.".to_string(), pos));
+        }
+        // A built-in module bound to this namespace.
         let module = match self.used_modules.get(ns) {
             Some(m) => m.clone(),
             None => {
@@ -2547,8 +3109,111 @@ impl<'a> Evaluator<'a> {
         Ok(Value::Bool(has))
     }
 
-    /// Resolve a namespaced module variable `ns.$name` (e.g. `math.$pi`).
+    /// Try `member` against a built-in module re-exported by `module` via
+    /// `@forward "sass:x"` (honouring an `as p-*` prefix).
+    fn try_forwarded_builtin_call(
+        &mut self,
+        module: &Rc<Module>,
+        member: &str,
+        args: &[CallArg],
+        pos: Pos,
+    ) -> Result<Option<Value>, Error> {
+        for (m, prefix) in &module.forwarded_builtins {
+            let bare = match prefix {
+                Some(p) => match member.strip_prefix(p.as_str()) {
+                    Some(rest) => rest,
+                    None => continue,
+                },
+                None => member,
+            };
+            if crate::builtins::module_has_member(m, bare) {
+                let (mut pos_args, mut named) = self.eval_call_args(args)?;
+                for v in &mut pos_args {
+                    *v = std::mem::replace(v, Value::Null).without_slash();
+                }
+                for (_, v) in &mut named {
+                    *v = std::mem::replace(v, Value::Null).without_slash();
+                }
+                return Ok(Some(crate::builtins::call_module(
+                    m, bare, &pos_args, &named, pos,
+                )?));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Call a user module's function in the module's own environment: bind the
+    /// arguments in the caller's context, then swap in the module's globals/
+    /// functions/mixins/used-modules so the body resolves against the module.
+    fn call_user_module_function(
+        &mut self,
+        module: &Rc<Module>,
+        func: &Rc<Callable>,
+        args: &[CallArg],
+    ) -> Result<Value, Error> {
+        let frame = self.bind_args(&func.params, args, &func.name)?;
+        let saved = self.enter_module(module);
+        self.push_scope_frame(frame);
+        let result = self.run_fn_body(&func.body);
+        self.pop_scope();
+        self.leave_module(saved);
+        match result? {
+            Some(v) => Ok(v.without_slash()),
+            None => Err(Error::unpositioned(format!(
+                "Function {}() did not @return a value.",
+                func.name
+            ))),
+        }
+    }
+
+    /// Install `module`'s environment for a cross-module member invocation,
+    /// returning the previous environment to restore with [`leave_module`].
+    fn enter_module(&mut self, module: &Rc<Module>) -> SavedModuleEnv {
+        SavedModuleEnv {
+            scopes: std::mem::replace(&mut self.scopes, vec![module.vars.clone()]),
+            scope_semi_global: std::mem::replace(&mut self.scope_semi_global, vec![true]),
+            functions: std::mem::replace(&mut self.functions, module.functions.clone()),
+            mixins: std::mem::replace(&mut self.mixins, module.mixins.clone()),
+            used_modules: std::mem::replace(&mut self.used_modules, module.used_builtin_modules.clone()),
+            star_modules: std::mem::replace(&mut self.star_modules, module.star_builtin_modules.clone()),
+            used_user_modules: std::mem::replace(
+                &mut self.used_user_modules,
+                module.used_user_modules.clone(),
+            ),
+            star_user_modules: std::mem::replace(
+                &mut self.star_user_modules,
+                module.star_user_modules.clone(),
+            ),
+        }
+    }
+
+    /// Restore the environment captured by [`enter_module`].
+    fn leave_module(&mut self, saved: SavedModuleEnv) {
+        self.scopes = saved.scopes;
+        self.scope_semi_global = saved.scope_semi_global;
+        self.functions = saved.functions;
+        self.mixins = saved.mixins;
+        self.used_modules = saved.used_modules;
+        self.star_modules = saved.star_modules;
+        self.used_user_modules = saved.used_user_modules;
+        self.star_user_modules = saved.star_user_modules;
+    }
+
+    /// Resolve a namespaced module variable `ns.$name`. Resolves a user module
+    /// first, then a built-in module bound to `ns`.
     fn eval_module_var(&self, ns: &str, name: &str, pos: Pos) -> Result<Value, Error> {
+        if let Some(module) = self.used_user_modules.get(ns) {
+            if is_private_member(name) {
+                return Err(Error::at(
+                    "Private members can't be accessed from outside their modules.".to_string(),
+                    pos,
+                ));
+            }
+            return match module.var(name) {
+                Some(v) => Ok(v.without_slash()),
+                None => Err(Error::at("Undefined variable.".to_string(), pos)),
+            };
+        }
         match self.used_modules.get(ns) {
             Some(module) => crate::builtins::module_var(module, name, pos),
             None => Err(Error::at(
@@ -4224,6 +4889,58 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extens
 fn is_keyframes_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower == "keyframes" || lower.ends_with("-keyframes")
+}
+
+/// Derive the default namespace for `@use "<url>"`: the final path component
+/// with any directory, leading `_`, and `.scss`/`.sass` extension removed.
+/// dart-sass rejects a result that is not a valid Sass identifier.
+fn default_namespace(url: &str, pos: Pos) -> Result<String, Error> {
+    let last = url.rsplit('/').next().unwrap_or(url);
+    let stem = last
+        .strip_suffix(".scss")
+        .or_else(|| last.strip_suffix(".sass"))
+        .unwrap_or(last);
+    let stem = stem.strip_prefix('_').unwrap_or(stem);
+    if !is_valid_namespace(stem) {
+        return Err(Error::at(
+            format!("The default namespace \"{stem}\" is not a valid Sass identifier."),
+            pos,
+        ));
+    }
+    Ok(stem.to_string())
+}
+
+/// Whether a member name is private (dart-sass: a leading `-` or `_`), so it is
+/// not accessible across module boundaries.
+fn is_private_member(name: &str) -> bool {
+    name.starts_with('-') || name.starts_with('_')
+}
+
+/// Collect the names from a `@forward` `show`/`hide` member list, selecting
+/// either the `$variable` entries (`vars == true`) or the function/mixin names.
+fn member_set(
+    members: &Option<Vec<crate::ast::ForwardMember>>,
+    vars: bool,
+) -> Option<std::collections::HashSet<String>> {
+    members.as_ref().map(|list| {
+        list.iter()
+            .filter_map(|m| match (m, vars) {
+                (crate::ast::ForwardMember::Var(n), true) => Some(n.clone()),
+                (crate::ast::ForwardMember::Name(n), false) => Some(n.clone()),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// Whether `s` is a valid Sass identifier usable as a module namespace.
+fn is_valid_namespace(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c == '-' || c.is_ascii_alphabetic() || !c.is_ascii() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c == '-' || c.is_ascii_alphanumeric() || !c.is_ascii())
 }
 
 /// Compute the extended selector list for a rule. Returns `None` when, after
