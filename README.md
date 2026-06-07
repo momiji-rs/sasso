@@ -97,7 +97,7 @@ pass rate; we ratchet it upward over time.
 | sass-spec commit | `c6ac9a3` (dart-sass 1.100.0) |
 | Total cases | 13,904 |
 | Attempted (excl. `@use`/`@forward`/indented) | 4,632 |
-| **Passing** | **3,649 (78.8% of attempted)** |
+| **Passing** | **3,746 (80.9% of attempted)** |
 
 Run it yourself:
 

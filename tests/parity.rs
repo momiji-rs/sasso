@@ -2068,6 +2068,35 @@ fn number_rounds_half_away_from_zero_at_tenth_place() {
     assert_eq!(
         ours("a {b: 123456789.12345678905}\n"),
         "a {\n  b: 123456789.12345679;\n}\n"
+    );
+}
+
+#[test]
+fn opaque_hex_literals_preserve_authored_spelling() {
+    // dart-sass emits an opaque 3-/6-digit hex literal exactly as authored,
+    // keeping its length and case. The 4-/8-digit alpha forms, by contrast,
+    // are canonicalized. Verified byte-for-byte against
+    // `npx sass --no-source-map --stdin`.
+    assert_eq!(ours("a {b: #fff}\n"), "a {\n  b: #fff;\n}\n");
+    assert_eq!(ours("a {b: #FFF}\n"), "a {\n  b: #FFF;\n}\n");
+    assert_eq!(ours("a {b: #aaa}\n"), "a {\n  b: #aaa;\n}\n");
+    assert_eq!(ours("a {b: #FFAA00}\n"), "a {\n  b: #FFAA00;\n}\n");
+    assert_eq!(ours("a {b: #ABCABC}\n"), "a {\n  b: #ABCABC;\n}\n");
+    assert_eq!(ours("a {b: #aaaaaa}\n"), "a {\n  b: #aaaaaa;\n}\n");
+    // 4-/8-digit opaque alpha forms canonicalize to lowercase 6-digit hex.
+    assert_eq!(ours("a {b: #369f}\n"), "a {\n  b: #336699;\n}\n");
+    assert_eq!(ours("a {b: #112233ff}\n"), "a {\n  b: #112233;\n}\n");
+    // Compressed output ignores the authored spelling and shortens.
+    use sasso::OutputStyle;
+    let compressed = compile(
+        "a {b: #FFAA00}\n",
+        &Options::default().with_style(OutputStyle::Compressed),
+    )
+    .expect("compile failed");
+    assert_eq!(compressed, "a{b:#fa0}");
+}
+
+#[test]
 fn selector_nest_and_append() {
     // `selector-nest` joins selectors as descendants and resolves `&`; the
     // result is a comma list of space lists rendered as the usual selector
@@ -2099,28 +2128,6 @@ fn selector_nest_and_append() {
 }
 
 #[test]
-fn opaque_hex_literals_preserve_authored_spelling() {
-    // dart-sass emits an opaque 3-/6-digit hex literal exactly as authored,
-    // keeping its length and case. The 4-/8-digit alpha forms, by contrast,
-    // are canonicalized. Verified byte-for-byte against
-    // `npx sass --no-source-map --stdin`.
-    assert_eq!(ours("a {b: #fff}\n"), "a {\n  b: #fff;\n}\n");
-    assert_eq!(ours("a {b: #FFF}\n"), "a {\n  b: #FFF;\n}\n");
-    assert_eq!(ours("a {b: #aaa}\n"), "a {\n  b: #aaa;\n}\n");
-    assert_eq!(ours("a {b: #FFAA00}\n"), "a {\n  b: #FFAA00;\n}\n");
-    assert_eq!(ours("a {b: #ABCABC}\n"), "a {\n  b: #ABCABC;\n}\n");
-    assert_eq!(ours("a {b: #aaaaaa}\n"), "a {\n  b: #aaaaaa;\n}\n");
-    // 4-/8-digit opaque alpha forms canonicalize to lowercase 6-digit hex.
-    assert_eq!(ours("a {b: #369f}\n"), "a {\n  b: #336699;\n}\n");
-    assert_eq!(ours("a {b: #112233ff}\n"), "a {\n  b: #112233;\n}\n");
-    // Compressed output ignores the authored spelling and shortens.
-    use sasso::OutputStyle;
-    let compressed = compile(
-        "a {b: #FFAA00}\n",
-        &Options::default().with_style(OutputStyle::Compressed),
-    )
-    .expect("compile failed");
-    assert_eq!(compressed, "a{b:#fa0}");
 fn selector_extend_and_replace() {
     // `selector-extend` adds the extender wherever the (compound) extendee
     // matches, keeping the original; `selector-replace` drops the matched
@@ -2189,6 +2196,10 @@ fn selector_unify_superselector_simple_and_parse() {
     assert_eq!(
         ours("a {b: selector-parse(\".a > .b, .c + .d\")}\n"),
         "a {\n  b: .a > .b, .c + .d;\n}\n"
+    );
+}
+
+#[test]
 fn function_exists_recognizes_builtins() {
     // `function-exists` reports `true` for a built-in function and `false`
     // for an unknown name (dart-sass `function-exists`).
@@ -2213,6 +2224,9 @@ fn get_function_validates_arity_and_type() {
         ours("a {b: get-function(rgb)}\n"),
         "a {\n  b: get-function(rgb);\n}\n"
     );
+}
+
+#[test]
 fn nested_property_sets() {
     // A bare property set (`prop: { … }`) namespaces each child as
     // `prop-<child>`; an empty value needs no whitespace after the colon.
