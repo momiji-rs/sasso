@@ -644,6 +644,23 @@ impl<'a> Evaluator<'a> {
     }
 
     fn apply_var(&mut self, v: &VarDecl) -> Result<(), Error> {
+        // A top-level `!default` declaration whose name is exposed by more than
+        // one `@use … as *` module can't resolve which global it shadows.
+        if v.is_default
+            && self.scopes.len() == 1
+            && self.lookup(&v.name).is_none()
+            && !is_private_member(&v.name)
+            && self
+                .star_user_modules
+                .iter()
+                .filter(|m| m.var(&v.name).is_some())
+                .count()
+                > 1
+        {
+            return Err(Error::unpositioned(
+                "This variable is available from multiple global modules.",
+            ));
+        }
         // A top-level `!default` variable in a module being evaluated with
         // configuration: the supplied value overrides the default (unless the
         // override itself is `!default` and the variable already has a value).
@@ -1232,6 +1249,20 @@ impl<'a> Evaluator<'a> {
             ));
         }
         if star {
+            // A member the new global module exposes that the current sheet
+            // already defines at the top level is a conflict.
+            if let Some(g) = self.scopes.first() {
+                for name in module.vars.keys() {
+                    if !is_private_member(name) && g.contains_key(name) {
+                        return Err(Error::at(
+                            format!(
+                                "This module and the new module both define a variable named \"${name}\"."
+                            ),
+                            pos,
+                        ));
+                    }
+                }
+            }
             self.star_user_modules.push(module);
             return Ok(());
         }
@@ -1442,23 +1473,45 @@ impl<'a> Evaluator<'a> {
         // own `with (...)` entries combine with the configuration of the module
         // currently being evaluated (`pending_config`): a non-`!default` forward
         // entry hard-overrides; a `!default` forward entry yields to a matching
-        // downstream override; downstream entries for variables the forward does
-        // not mention flow through unchanged.
+        // downstream override; downstream entries for variables the forward
+        // re-exports (visible and matching its `as` prefix) flow through.
         let forward_conf = self.eval_config(config)?;
         let downstream = self.pending_config.clone();
-        let mut combined: HashMap<String, (Value, bool)> = downstream.clone();
+        // Only downstream config for variables this forward actually re-exports
+        // flows through. A `show`/`hide` filter or an `as p-*` prefix that hides
+        // a variable also makes it unconfigurable through this forward. The map
+        // value tracks (upstream-name, downstream-name) so consumption maps back.
+        let var_visible = forward_var_visibility(show, hide);
+        let pfx_opt = prefix;
+        let mut passthrough: HashMap<String, (Value, bool)> = HashMap::new();
+        // upstream config key -> downstream key it came from.
+        let mut passthrough_origin: HashMap<String, String> = HashMap::new();
+        for (dk, dv) in &downstream {
+            // Map a downstream (prefixed) name back to the upstream member name.
+            let upstream_name = match pfx_opt {
+                Some(p) => match dk.strip_prefix(p) {
+                    Some(rest) => rest.to_string(),
+                    None => continue,
+                },
+                None => dk.clone(),
+            };
+            if is_private_member(&upstream_name) || !var_visible(&upstream_name) {
+                continue;
+            }
+            passthrough.insert(upstream_name.clone(), dv.clone());
+            passthrough_origin.insert(upstream_name, dk.clone());
+        }
+        let mut combined: HashMap<String, (Value, bool)> = passthrough.clone();
         // Keys whose downstream entry a `!default` forward override consumed.
         let mut forward_claimed: Vec<String> = Vec::new();
         // The forward's own (non-passthrough) keys, which the forwarded module
         // must consume (else configuring a non-`!default` variable -> error).
         let mut forward_own: Vec<String> = Vec::new();
-        // Downstream keys a non-`!default` forward entry hard-overrode: these
-        // shadow the downstream configuration, so the downstream entry stays
-        // unconsumed (-> error if the user supplied it).
+        // Keys (upstream-side) a non-`!default` forward entry hard-overrode.
         let mut forward_shadowed: Vec<String> = Vec::new();
         for (name, (val, is_default)) in &forward_conf {
             if *is_default {
-                if downstream.contains_key(name) {
+                if passthrough.contains_key(name) {
                     // Downstream override wins; the forward default is ignored.
                     forward_claimed.push(name.clone());
                 } else {
@@ -1466,7 +1519,7 @@ impl<'a> Evaluator<'a> {
                     forward_own.push(name.clone());
                 }
             } else {
-                if downstream.contains_key(name) {
+                if passthrough.contains_key(name) {
                     forward_shadowed.push(name.clone());
                 }
                 combined.insert(name.clone(), (val.clone(), false));
@@ -1487,13 +1540,16 @@ impl<'a> Evaluator<'a> {
         // Mark the downstream config keys this forward consumed (passthrough +
         // `!default`-claimed) as consumed in the enclosing module, so they are
         // not reported as unused. A key a non-`!default` forward entry shadowed
-        // stays unconsumed (the downstream override is then an error).
-        for k in consumed.iter().chain(forward_claimed.iter()) {
-            if downstream.contains_key(k)
-                && !forward_shadowed.contains(k)
-                && !self.consumed_config.contains(k)
-            {
-                self.consumed_config.push(k.clone());
+        // stays unconsumed (the downstream override is then an error). The
+        // consumed keys are upstream-side; map them back to downstream names.
+        for up in consumed.iter().chain(forward_claimed.iter()) {
+            if forward_shadowed.contains(up) {
+                continue;
+            }
+            if let Some(dk) = passthrough_origin.get(up) {
+                if !self.consumed_config.contains(dk) {
+                    self.consumed_config.push(dk.clone());
+                }
             }
         }
 
@@ -5006,6 +5062,25 @@ fn default_namespace(url: &str, pos: Pos) -> Result<String, Error> {
         ));
     }
     Ok(stem.to_string())
+}
+
+/// Build a predicate deciding whether an upstream `$variable` (by bare name) is
+/// re-exported through a `@forward`'s `show`/`hide` clause.
+fn forward_var_visibility(
+    show: &Option<Vec<crate::ast::ForwardMember>>,
+    hide: &Option<Vec<crate::ast::ForwardMember>>,
+) -> impl Fn(&str) -> bool {
+    let show = member_set(show, true);
+    let hide = member_set(hide, true);
+    move |name: &str| -> bool {
+        if let Some(s) = &show {
+            return s.contains(name);
+        }
+        if let Some(h) = &hide {
+            return !h.contains(name);
+        }
+        true
+    }
 }
 
 /// Whether a member name is private (dart-sass: a leading `-` or `_`), so it is
