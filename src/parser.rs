@@ -158,6 +158,15 @@ struct Parser {
     /// implicit separator (`U+A?BCDE` -> `U+A? BCDE`); `space_list` consumes
     /// the flag to continue without requiring whitespace.
     pending_unicode_split: bool,
+    /// Depth of enclosing `{ … }` blocks. `@use`/`@forward` are only valid at
+    /// the top level (depth 0); inside any block they are "This at-rule is not
+    /// allowed here.".
+    block_depth: u32,
+    /// Set once a top-level statement that is *not* a variable declaration,
+    /// comment, `@charset`, `@use`, or `@forward` has been parsed. A later
+    /// `@use`/`@forward` then errors ("@use rules must be written before any
+    /// other rules.").
+    seen_non_module_stmt: bool,
 }
 
 /// Parse a complete stylesheet.
@@ -166,6 +175,8 @@ pub(crate) fn parse(src: &str) -> Result<Stylesheet, Error> {
         sc: Scanner::new(src),
         calc_depth: 0,
         pending_unicode_split: false,
+        block_depth: 0,
+        seen_non_module_stmt: false,
     };
     let stmts = p.parse_statements(true)?;
     Ok(Stylesheet { stmts })
@@ -179,6 +190,17 @@ fn is_ident_char(c: char) -> bool {
 /// `_`). Private members can't be accessed across module boundaries.
 fn is_private_member(name: &str) -> bool {
     name.starts_with('-') || name.starts_with('_')
+}
+
+/// Whether a top-level statement may legally appear *before* a `@use` rule.
+/// dart-sass permits variable declarations, loud comments, `@charset`, `@use`,
+/// and `@forward`; everything else means a following `@use` is too late.
+fn stmt_allowed_before_use(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::VarDecl(_) | Stmt::Comment(_) | Stmt::Use { .. } | Stmt::Forward { .. } => true,
+        Stmt::AtRule { name, .. } => name.eq_ignore_ascii_case("charset"),
+        _ => false,
+    }
 }
 
 /// Whether `c` may begin a CSS identifier *without* escaping: an ASCII letter,
@@ -482,6 +504,17 @@ impl Parser {
                     NextKind::Declaration => stmts.push(self.parse_declaration()?),
                 },
             }
+            // Track, at the top level, whether anything that must follow `@use`
+            // has been seen. A variable declaration, `@charset`, `@use`, and
+            // `@forward` (and comments, which `skip_trivia` collects) are
+            // permitted before `@use`; anything else "uses up" the position.
+            if top {
+                if let Some(last) = stmts.last() {
+                    if !stmt_allowed_before_use(last) {
+                        self.seen_non_module_stmt = true;
+                    }
+                }
+            }
         }
         Ok(stmts)
     }
@@ -684,7 +717,10 @@ impl Parser {
         if !self.sc.eat('{') {
             return Err(Error::at("expected \"{\"", self.sc.position()));
         }
-        let body = self.parse_statements(false)?;
+        self.block_depth += 1;
+        let body = self.parse_statements(false);
+        self.block_depth -= 1;
+        let body = body?;
         if !self.sc.eat('}') {
             return Err(Error::at("expected \"}\"", self.sc.position()));
         }
@@ -765,7 +801,10 @@ impl Parser {
     /// (`b: { c: { d: e }; f: g }`).
     fn parse_property_set_body(&mut self) -> Result<Vec<Stmt>, Error> {
         self.sc.bump(); // '{'
-        let body = self.parse_statements(false)?;
+        self.block_depth += 1;
+        let body = self.parse_statements(false);
+        self.block_depth -= 1;
+        let body = body?;
         if !self.sc.eat('}') {
             return Err(Error::at("expected \"}\".", self.sc.position()));
         }
@@ -895,6 +934,15 @@ impl Parser {
     /// without interpolation; an explicit `as ns` / `as *` overrides the
     /// default namespace (the segment after the last `/`, or after `sass:`).
     fn parse_use(&mut self, pos: Pos) -> Result<Stmt, Error> {
+        if self.block_depth > 0 {
+            return Err(Error::at("This at-rule is not allowed here.", pos));
+        }
+        if self.seen_non_module_stmt {
+            return Err(Error::at(
+                "@use rules must be written before any other rules.",
+                pos,
+            ));
+        }
         self.skip_ws_trivia();
         let url = self.parse_module_url(pos)?;
         self.skip_ws_trivia();
@@ -926,6 +974,15 @@ impl Parser {
     /// Parse `@forward "<url>" …;` — parked for the module-system epic. The URL
     /// is captured so the evaluator can emit a precise "not supported" error.
     fn parse_forward(&mut self, pos: Pos) -> Result<Stmt, Error> {
+        if self.block_depth > 0 {
+            return Err(Error::at("This at-rule is not allowed here.", pos));
+        }
+        if self.seen_non_module_stmt {
+            return Err(Error::at(
+                "@forward rules must be written before any other rules.",
+                pos,
+            ));
+        }
         self.skip_ws_trivia();
         let url = self.parse_module_url(pos)?;
         // Consume the rest of the statement verbatim.
@@ -2826,7 +2883,10 @@ impl Parser {
         if !self.sc.eat('{') {
             return Err(Error::at("expected \"{\"", self.sc.position()));
         }
-        let body = self.parse_statements(false)?;
+        self.block_depth += 1;
+        let body = self.parse_statements(false);
+        self.block_depth -= 1;
+        let body = body?;
         if !self.sc.eat('}') {
             return Err(Error::at("expected \"}\"", self.sc.position()));
         }
