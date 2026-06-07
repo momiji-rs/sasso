@@ -1251,3 +1251,21 @@ fn parent_selector_placement_strictness() {
     assert!(compile("p {\n  & > & {c: d}\n}\n", &Options::default()).is_ok());
     assert!(compile("p {\n  &[a~=b] {c: d}\n}\n", &Options::default()).is_ok());
 }
+
+#[test]
+fn placeholder_selector_must_be_named() {
+    // A bare `%` (or `%` not followed by an identifier name-start char) is
+    // "Expected identifier." in dart-sass. Keyframe percentage selectors
+    // (`10%`, `1e2%`) are not placeholders and must still compile.
+    assert!(compile("% {\n  a: b;\n}\n", &Options::default()).is_err());
+    assert!(compile("%.bar {\n  a: b;\n}\n", &Options::default()).is_err());
+    assert!(compile(".a % {\n  c: d;\n}\n", &Options::default()).is_err());
+    assert_eq!(
+        ours("@keyframes a {\n  10% {\n    c: d;\n  }\n}\n"),
+        "@keyframes a {\n  10% {\n    c: d;\n  }\n}\n"
+    );
+    assert_eq!(
+        ours("@keyframes a {\n  from, 15%, to {\n    c: d;\n  }\n}\n"),
+        "@keyframes a {\n  from, 15%, to {\n    c: d;\n  }\n}\n"
+    );
+}

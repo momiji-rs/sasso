@@ -2319,6 +2319,22 @@ fn validate_parent_usage(sel: &str, has_parent: bool) -> Result<(), Error> {
                     }
                     at_compound_start = false;
                 }
+                // A `%` placeholder must be followed directly by an identifier
+                // name-start character; a bare `%` (or `%` before `.`, a digit,
+                // whitespace, …) is "Expected identifier." in dart-sass. A `%`
+                // immediately after a digit is a percentage (a keyframe
+                // selector such as `10%`), not a placeholder, so it is skipped.
+                '%' => {
+                    let prev_is_digit = i > 0 && chars[i - 1].is_ascii_digit();
+                    if !prev_is_digit {
+                        let next = chars.get(i + 1).copied();
+                        let starts_ident = matches!(next, Some(n) if n.is_ascii_alphabetic() || n == '-' || n == '_' || n == '\\');
+                        if !starts_ident {
+                            return Err(Error::unpositioned("Expected identifier."));
+                        }
+                    }
+                    at_compound_start = false;
+                }
                 _ => at_compound_start = false,
             }
             i += 1;
