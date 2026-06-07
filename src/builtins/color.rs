@@ -2484,6 +2484,13 @@ fn fn_is_missing(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
 
 fn fn_is_in_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "space"];
+    let n = pos_args.len() + named.len();
+    if n > 2 {
+        return Err(Error::at(
+            format!("Only 2 arguments allowed, but {n} were passed."),
+            pos,
+        ));
+    }
     let c = as_color(require(&params, pos_args, named, 0, "is-in-gamut", pos)?, pos)?;
     let mc = legacy_to_modern(&c);
     let space = match arg(&params, pos_args, named, 1) {
@@ -2493,26 +2500,38 @@ fn fn_is_in_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
     Ok(Value::Bool(in_gamut(&mc, space)))
 }
 
-/// Whether `mc` is within the gamut of `space` (only the bounded RGB-style and
-/// legacy spaces have a gamut; others are always in gamut).
+/// Whether `mc` is within the gamut of `space`. The bounded RGB-style spaces
+/// check their own channels; the legacy hsl/hwb spaces share the sRGB gamut
+/// (their rgb representation must fit `[0,255]`); the unbounded perceptual/xyz
+/// spaces are always in gamut.
 fn in_gamut(mc: &ModernColor, space: ColorSpace) -> bool {
     use ColorSpace::*;
-    let conv = convert_modern(mc, space);
-    let bound = |lo: f64, hi: f64| {
+    let bound = |conv: &ModernColor, lo: f64, hi: f64| {
         conv.channels
             .iter()
             .all(|c| matches!(c, Some(v) if *v >= lo - 1e-7 && *v <= hi + 1e-7) || c.is_none())
     };
     match space {
-        Rgb => bound(0.0, 255.0),
-        Srgb | SrgbLinear | DisplayP3 | DisplayP3Linear | A98Rgb | ProphotoRgb | Rec2020 => bound(0.0, 1.0),
-        // hsl/hwb and the unbounded perceptual/xyz spaces are always in gamut.
+        Rgb => bound(&convert_modern(mc, space), 0.0, 255.0),
+        Srgb | SrgbLinear | DisplayP3 | DisplayP3Linear | A98Rgb | ProphotoRgb | Rec2020 => {
+            bound(&convert_modern(mc, space), 0.0, 1.0)
+        }
+        // hsl/hwb share sRGB's gamut.
+        Hsl | Hwb => bound(&convert_modern(mc, Rgb), 0.0, 255.0),
+        // The unbounded perceptual/xyz spaces are always in gamut.
         _ => true,
     }
 }
 
 fn fn_is_powerless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "channel", "space"];
+    let n = pos_args.len() + named.len();
+    if n > 3 {
+        return Err(Error::at(
+            format!("Only 3 arguments allowed, but {n} were passed."),
+            pos,
+        ));
+    }
     let c = as_color(require(&params, pos_args, named, 0, "is-powerless", pos)?, pos)?;
     let chan = channel_name_arg(require(&params, pos_args, named, 1, "is-powerless", pos)?, pos)?;
     let mc = legacy_to_modern(&c);
@@ -2521,24 +2540,32 @@ fn fn_is_powerless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
         None => mc.space,
     };
     let conv = convert_modern(&mc, space);
-    let idx = match channel_index_in(space, &chan) {
-        Some(i) => i,
-        None => return Ok(Value::Bool(false)),
-    };
+    if chan == "alpha" {
+        return Ok(Value::Bool(false));
+    }
+    let idx = channel_index_in(space, &chan).ok_or_else(|| {
+        Error::at(
+            format!(
+                "$channel: Color {} doesn't have a channel named \"{chan}\".",
+                c.to_css(false)
+            ),
+            pos,
+        )
+    })?;
     Ok(Value::Bool(channel_powerless(space, idx, &conv)))
 }
 
-/// dart-sass powerless rules: hsl hue is powerless at saturation 0; hsl
-/// saturation is powerless at lightness 0/100; hwb hue is powerless when
-/// whiteness+blackness >= 100; lch/oklch hue is powerless at chroma 0.
+/// dart-sass powerless rules (with fuzzy comparison): hsl hue is powerless at
+/// saturation ~0; hwb hue is powerless when whiteness+blackness >= 100;
+/// lch/oklch hue is powerless at chroma ~0. (hsl saturation is never powerless.)
 fn channel_powerless(space: ColorSpace, idx: usize, conv: &ModernColor) -> bool {
     use ColorSpace::*;
     let ch = |i: usize| conv.channels[i].unwrap_or(0.0);
+    let fuzzy_zero = |v: f64| v.abs() < 1e-11;
     match (space, idx) {
-        (Hsl, 0) => ch(1) == 0.0,
-        (Hsl, 1) => ch(2) == 0.0 || ch(2) == 100.0,
-        (Hwb, 0) => ch(1) + ch(2) >= 100.0,
-        (Lch, 2) | (Oklch, 2) => ch(1) == 0.0,
+        (Hsl, 0) => fuzzy_zero(ch(1)),
+        (Hwb, 0) => ch(1) + ch(2) >= 100.0 - 1e-11,
+        (Lch, 2) | (Oklch, 2) => fuzzy_zero(ch(1)),
         _ => false,
     }
 }
