@@ -156,10 +156,16 @@ impl Sink<'_> {
         } = self
         {
             if !items.is_empty() {
-                nested.push(OutNode::Rule {
-                    selectors: selectors.to_vec(),
-                    items: std::mem::take(*items),
-                });
+                // A rule whose every complex selector was a dropped bogus
+                // combinator has no selectors left, so it emits no block.
+                if selectors.is_empty() {
+                    items.clear();
+                } else {
+                    nested.push(OutNode::Rule {
+                        selectors: selectors.to_vec(),
+                        items: std::mem::take(*items),
+                    });
+                }
             }
         }
     }
@@ -953,13 +959,26 @@ impl<'a> Evaluator<'a> {
         }
         validate_selector(&sel_str, !parents.is_empty())?;
         let current = resolve_selectors(&sel_str, parents);
+        // Drop "bogus combinator" complex selectors from the emitted block;
+        // dart-sass omits them from the generated CSS. A top-level TRAILING
+        // combinator (`a >`) is bogus as a leaf (its own declaration block is
+        // dropped) but valid for NESTING, so the full `current` list — including
+        // such selectors — is still used for `&` resolution and as the `parents`
+        // for nested rules (`a >` + `b` -> `a > b`). A nested rule that inherits
+        // a genuinely bogus combinator (double, or leading/trailing in a pseudo)
+        // is dropped in turn.
+        let emit_selectors: Vec<String> = current
+            .iter()
+            .filter(|s| !complex_selector_block_is_bogus(s))
+            .cloned()
+            .collect();
         self.scopes.push(HashMap::new());
         let prev_selector = self.current_selector.replace(current.clone());
         let mut items: Vec<OutItem> = Vec::new();
         let mut nested: Vec<OutNode> = Vec::new();
         let result = {
             let mut child = Sink::Rule {
-                selectors: &current,
+                selectors: &emit_selectors,
                 items: &mut items,
                 nested: &mut nested,
             };
@@ -3449,6 +3468,225 @@ fn normalize_selector(s: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// One token of a complex selector split at the top level (paren/bracket depth
+/// 0): either a combinator or a compound selector (verbatim text).
+enum SelToken {
+    Combinator,
+    Compound(String),
+}
+
+/// Tokenize a complex selector into combinators and compounds at the top level,
+/// honouring `[...]`, `(...)`, strings, and escapes so combinators inside a
+/// pseudo argument or attribute aren't split out here.
+fn tokenize_complex(s: &str) -> Vec<SelToken> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut paren = 0i32;
+    let mut bracket = 0i32;
+    let mut i = 0;
+    let flush = |cur: &mut String, tokens: &mut Vec<SelToken>| {
+        let t = cur.trim();
+        if !t.is_empty() {
+            tokens.push(SelToken::Compound(t.to_string()));
+        }
+        cur.clear();
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' => {
+                cur.push(c);
+                i += 1;
+                if i < chars.len() {
+                    cur.push(chars[i]);
+                    i += 1;
+                }
+                continue;
+            }
+            '"' | '\'' => {
+                let end = skip_string(&chars, i);
+                cur.extend(&chars[i..end.min(chars.len())]);
+                i = end;
+                continue;
+            }
+            '(' => {
+                paren += 1;
+                cur.push(c);
+            }
+            ')' => {
+                paren -= 1;
+                cur.push(c);
+            }
+            '[' => {
+                bracket += 1;
+                cur.push(c);
+            }
+            ']' => {
+                bracket -= 1;
+                cur.push(c);
+            }
+            '>' | '+' | '~' if paren == 0 && bracket == 0 => {
+                flush(&mut cur, &mut tokens);
+                tokens.push(SelToken::Combinator);
+            }
+            _ => cur.push(c),
+        }
+        i += 1;
+    }
+    flush(&mut cur, &mut tokens);
+    tokens
+}
+
+/// Whether a resolved complex selector is a "bogus combinator" that dart-sass
+/// omits from the generated CSS: two combinators in a row anywhere, or — inside
+/// a pseudo argument (`in_pseudo`) — a trailing combinator, or a leading
+/// combinator unless `allow_leading` (true only for `:has`, a relative selector
+/// list). A single leading/trailing combinator at the top level is NOT bogus
+/// here (it is kept, or handled separately by the nesting rules). The check
+/// recurses into selector pseudo arguments (`:is()`, `:not()`, …).
+fn complex_selector_is_bogus(s: &str, in_pseudo: bool, allow_leading: bool) -> bool {
+    let tokens = tokenize_complex(s);
+    if tokens.is_empty() {
+        return false;
+    }
+    // Two adjacent combinators (no compound between) is always invalid.
+    let mut prev_combinator = false;
+    for t in &tokens {
+        match t {
+            SelToken::Combinator => {
+                if prev_combinator {
+                    return true;
+                }
+                prev_combinator = true;
+            }
+            SelToken::Compound(_) => prev_combinator = false,
+        }
+    }
+    if in_pseudo {
+        if !allow_leading && matches!(tokens.first(), Some(SelToken::Combinator)) {
+            return true;
+        }
+        if matches!(tokens.last(), Some(SelToken::Combinator)) {
+            return true;
+        }
+    }
+    // Recurse into selector pseudo arguments of each compound.
+    for t in &tokens {
+        if let SelToken::Compound(comp) = t {
+            if compound_has_bogus_pseudo(comp) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether a resolved complex selector should be dropped from its own emitted
+/// declaration block. This is [`complex_selector_is_bogus`] (double combinators,
+/// pseudo leading/trailing combinators) PLUS a top-level trailing combinator
+/// (`a >`): a trailing combinator is valid only for nesting, so the leaf block
+/// it would head is omitted while the selector still serves as a parent.
+fn complex_selector_block_is_bogus(s: &str) -> bool {
+    if complex_selector_is_bogus(s, false, false) {
+        return true;
+    }
+    let tokens = tokenize_complex(s);
+    matches!(tokens.last(), Some(SelToken::Combinator))
+}
+
+/// Whether `name` (a pseudo-class/element name, case-insensitive, without the
+/// leading colon(s)) is one whose argument dart-sass parses as a selector list,
+/// and so is subject to bogus-combinator checking. Mirrors dart-sass's
+/// `_selectorPseudoClasses`/`_selectorPseudoElements`. Notably this EXCLUDES
+/// `:global`/`:local` (CSS-modules pseudos kept verbatim).
+fn is_selector_pseudo(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "not" | "is" | "matches" | "where" | "current" | "any" | "has" | "host" | "host-context" | "slotted"
+    )
+}
+
+/// Whether any selector-pseudo argument (`:is(...)`, `:has(...)`, `:not(...)`,
+/// `:where(...)`, …) inside a compound contains a bogus-combinator complex
+/// selector. Only pseudos in [`is_selector_pseudo`] are scanned (others, like
+/// `:nth-child(2n)` or `:global(> a)`, keep their argument verbatim). `:has` is
+/// a relative selector list, so a leading combinator there is allowed.
+fn compound_has_bogus_pseudo(compound: &str) -> bool {
+    let chars: Vec<char> = compound.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            i += 2;
+            continue;
+        }
+        if c == '[' {
+            // Skip an attribute selector verbatim.
+            i = matching_bracket(&chars, i) + 1;
+            continue;
+        }
+        if c == ':' {
+            // A pseudo with a `(...)` argument: extract and scan the argument as
+            // a selector list (each comma part is one complex selector).
+            let mut j = i + 1;
+            if j < chars.len() && chars[j] == ':' {
+                j += 1;
+            }
+            let name_start = j;
+            while j < chars.len() && (is_name_char(chars[j]) || chars[j] == '\\') {
+                if chars[j] == '\\' {
+                    j += 1;
+                }
+                j += 1;
+            }
+            let name: String = chars[name_start..j.min(chars.len())].iter().collect();
+            if j < chars.len() && chars[j] == '(' {
+                let open = j;
+                let mut depth = 0i32;
+                let mut k = open;
+                while k < chars.len() {
+                    match chars[k] {
+                        '\\' => {
+                            k += 2;
+                            continue;
+                        }
+                        '"' | '\'' => {
+                            k = skip_string(&chars, k);
+                            continue;
+                        }
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                if is_selector_pseudo(&name) {
+                    let allow_leading = name.eq_ignore_ascii_case("has");
+                    let arg: String = chars[open + 1..k.min(chars.len())].iter().collect();
+                    for part in split_commas(&arg) {
+                        let part = part.trim();
+                        if !part.is_empty() && complex_selector_is_bogus(part, true, allow_leading) {
+                            return true;
+                        }
+                    }
+                }
+                i = k + 1;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Copy a CSS name (the part after a `.`/`#`/`%` sigil or a type name) starting

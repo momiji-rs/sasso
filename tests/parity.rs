@@ -2523,3 +2523,45 @@ fn adjacent_compound_selector_separation() {
     assert_parity(".x[a]b.c {d: e}\n");
     assert_parity(":not(.x)b {c: d}\n");
 }
+
+#[test]
+fn bogus_combinator_selectors_are_omitted() {
+    // Double combinators are always invalid CSS: the complex selector is omitted.
+    assert_eq!(ours("> > a {b: c}\n"), "");
+    assert_eq!(ours("+ ~ a {b: c}\n"), "");
+    assert_eq!(ours("a > + b {c: d}\n"), "");
+    assert_eq!(ours("a~>b {c: d}\n"), "");
+    assert_eq!(ours("a + ~ {b: c}\n"), "");
+    // A trailing combinator is valid only for nesting: the leaf block is dropped
+    // but the selector still serves as a parent for nested rules.
+    assert_eq!(ours("a > {b: c}\n"), "");
+    assert_eq!(ours("a + {b: c}\n"), "");
+    assert_eq!(ours("a > {b: c; d {e: f}}\n"), "a > d {\n  e: f;\n}\n");
+    // A leading combinator at the top level is kept (nesting deprecation only).
+    assert_eq!(ours("> a {b: c}\n"), "> a {\n  b: c;\n}\n");
+    // In a comma list, only the bogus complex selector is dropped.
+    assert_eq!(ours("a, > > b {x: y}\n"), "a {\n  x: y;\n}\n");
+    // Selector pseudos: leading/trailing/double combinators inside `:is()` etc.
+    // are bogus; a valid interior selector is kept.
+    assert_eq!(ours(":is(> a) {b: c}\n"), "");
+    assert_eq!(ours(":is(a >) {b: c}\n"), "");
+    assert_eq!(ours(":is(a > + b) {c: d}\n"), "");
+    assert_eq!(ours(":is(a > b) {c: d}\n"), ":is(a > b) {\n  c: d;\n}\n");
+    assert_eq!(ours(":not(a >) {b: c}\n"), "");
+    // `:has()` is a relative selector list: a single leading combinator is OK,
+    // but double/trailing combinators are still bogus.
+    assert_eq!(ours(":has(> a) {b: c}\n"), ":has(> a) {\n  b: c;\n}\n");
+    assert_eq!(ours(":has(+ a) {b: c}\n"), ":has(+ a) {\n  b: c;\n}\n");
+    assert_eq!(ours(":has(+ ~ a) {b: c}\n"), "");
+    assert_eq!(ours(":has(a >) {b: c}\n"), "");
+    // `:global`/`:local` keep their argument verbatim (not selector-parsed).
+    assert_eq!(ours(":global(> a) {b: c}\n"), ":global(> a) {\n  b: c;\n}\n");
+    assert_eq!(ours(":local(> a) {b: c}\n"), ":local(> a) {\n  b: c;\n}\n");
+
+    assert_parity("> > a {b: c}\n");
+    assert_parity("a > {b: c; d {e: f}}\n");
+    assert_parity(":is(> a) {b: c}\n");
+    assert_parity(":has(> a) {b: c}\n");
+    assert_parity(":global(> a) {b: c}\n");
+    assert_parity("a, > > b {x: y}\n");
+}
