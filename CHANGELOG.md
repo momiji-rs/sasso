@@ -51,11 +51,17 @@ matching current dart-sass (1.100) byte-for-byte on the implemented subset.
 
 ### Performance
 
-- Selector helpers `split_commas` and `tokenize_complex` now return borrowed
-  `&str` slices instead of allocating a fresh `String` per comma part /
-  compound. These were two of the heaviest functions in the
-  allocation-dominated profile; the change is ~1.22× faster on the large
-  benchmark and ~1.12× on the handwritten one, with no behavior change.
+Profiling showed the compiler is allocation- and hashing-bound; a series of
+hot-path cuts followed, with no behavior change (cumulative **~1.29×** faster on
+the large benchmark and **~1.14×** on the handwritten one, in-process):
+
+- Selector helpers `split_commas`/`tokenize_complex` return borrowed `&str`
+  slices, and `copy_name`/`normalize_selector` avoid their intermediate
+  `String`/`Vec` — no per-part/per-token/per-name heap allocation on the hot
+  selector-resolution path.
+- The compiler's internal `String`-keyed maps (variable scope, function/mixin
+  tables, module maps) use a small inline FxHash hasher instead of std's
+  DoS-resistant-but-slow SipHash. (Still zero runtime dependencies.)
 
 ### Tooling
 
