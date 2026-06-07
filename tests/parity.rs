@@ -2189,5 +2189,28 @@ fn selector_unify_superselector_simple_and_parse() {
     assert_eq!(
         ours("a {b: selector-parse(\".a > .b, .c + .d\")}\n"),
         "a {\n  b: .a > .b, .c + .d;\n}\n"
+fn function_exists_recognizes_builtins() {
+    // `function-exists` reports `true` for a built-in function and `false`
+    // for an unknown name (dart-sass `function-exists`).
+    assert_eq!(ours("a {b: function-exists(rgb)}\n"), "a {\n  b: true;\n}\n");
+    assert_eq!(ours("a {b: function-exists(\"rgb\")}\n"), "a {\n  b: true;\n}\n");
+    assert_eq!(ours("a {b: function-exists(c)}\n"), "a {\n  b: false;\n}\n");
+    // Arity and type validation matches dart-sass.
+    assert!(compile("a {b: function-exists()}\n", &Options::default()).is_err());
+    assert!(compile("a {b: function-exists(a, b, c)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: function-exists(2px)}\n", &Options::default()).is_err());
+}
+
+#[test]
+fn get_function_validates_arity_and_type() {
+    // `get-function` raises dart-sass's arity / type errors before resolution.
+    assert!(compile("a {b: get-function()}\n", &Options::default()).is_err());
+    assert!(compile("a {b: get-function(c, true, d, e)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: get-function(2px)}\n", &Options::default()).is_err());
+    // A well-formed call has no function-reference value at this layer, so it
+    // is preserved verbatim as a plain CSS function.
+    assert_eq!(
+        ours("a {b: get-function(rgb)}\n"),
+        "a {\n  b: get-function(rgb);\n}\n"
     );
 }

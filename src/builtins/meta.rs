@@ -18,6 +18,12 @@ pub(super) fn try_call(
     named: &[(String, Value)],
     pos: Pos,
 ) -> Option<Result<Value, Error>> {
+    // `get-function` validates arity/type here; a well-formed call needs a
+    // function reference, which this value-only layer cannot construct, so
+    // `fn_get_function` returns `None` to fall through to verbatim CSS.
+    if name == "get-function" {
+        return fn_get_function(pos_args, named, pos);
+    }
     Some(match name {
         "type-of" => fn_type_of(pos_args, named, pos),
         "unit" => fn_unit(pos_args, named, pos),
@@ -25,6 +31,7 @@ pub(super) fn try_call(
         "comparable" => fn_comparable(pos_args, named, pos),
         "inspect" => fn_inspect(pos_args, named, pos),
         "feature-exists" => fn_feature_exists(pos_args, named, pos),
+        "function-exists" => fn_function_exists(pos_args, named, pos),
         _ => return None,
     })
 }
@@ -150,6 +157,72 @@ fn fn_feature_exists(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
             | "custom-property"
     );
     Ok(Value::Bool(known))
+}
+
+/// `function-exists($name, $module: null)`: whether a function with the given
+/// name is available. dart-sass validates arity (1–2 args) and that `$name` is
+/// a string, then checks the current scope. This value-only layer cannot see
+/// user-defined functions, so it recognizes built-in functions via the
+/// dispatcher's ownership probe and reports `false` otherwise — which matches
+/// dart-sass for built-ins and for genuinely-absent names. (A `$module`
+/// argument requires `@use`, which is unsupported, so it is accepted and
+/// ignored.)
+fn fn_function_exists(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["name", "module"];
+    if pos_args.len() > params.len() {
+        return Err(Error::at(
+            format!(
+                "Only {} arguments allowed, but {} were passed.",
+                params.len(),
+                pos_args.len()
+            ),
+            pos,
+        ));
+    }
+    let v = super::require(&params, pos_args, named, 0, "function-exists", pos)?;
+    let name = match v {
+        Value::Str(s) => &s.text,
+        other => {
+            return Err(Error::at(
+                format!("$name: {} is not a string.", other.to_css(false)),
+                pos,
+            ))
+        }
+    };
+    Ok(Value::Bool(super::is_builtin(name)))
+}
+
+/// `get-function($name, $css: false, $module: null)`: returns a reference to
+/// the named function. This value-only layer has no function-reference value
+/// and no view of user-defined functions, so it only enforces the validation
+/// dart-sass performs *before* resolution — arity (1–3 args) and that `$name`
+/// is a string — and otherwise declines (`None`), letting a well-formed call
+/// fall through to verbatim CSS. Returning `Some(Err(..))` for the bad-arity /
+/// bad-type cases converts those spec cases from a silent pass-through into the
+/// error dart-sass raises.
+fn fn_get_function(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option<Result<Value, Error>> {
+    let params = ["name", "css", "module"];
+    if pos_args.len() > params.len() {
+        return Some(Err(Error::at(
+            format!(
+                "Only {} arguments allowed, but {} were passed.",
+                params.len(),
+                pos_args.len()
+            ),
+            pos,
+        )));
+    }
+    let v = match super::arg(&params, pos_args, named, 0) {
+        Some(v) => v,
+        None => return Some(Err(Error::at("Missing argument $name.", pos))),
+    };
+    match v {
+        Value::Str(_) => None,
+        other => Some(Err(Error::at(
+            format!("$name: {} is not a string.", other.to_css(false)),
+            pos,
+        ))),
+    }
 }
 
 /// `inspect($value)`: an unquoted string with the value's debug
