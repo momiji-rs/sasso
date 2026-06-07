@@ -152,6 +152,17 @@ fn is_url_function(name: &str) -> bool {
     strip_vendor_prefix(&lower) == "url"
 }
 
+/// Whether `name` (the identifier immediately before a `:`) introduces an IE
+/// `progid:` special function — `progid` itself or any vendor-prefixed
+/// `-x-progid`, case-insensitively. dart-sass recognises a value-position
+/// token of the form `[-vendor-]progid:Name(...)` and preserves its argument
+/// list verbatim. The whole `[-vendor-]progid` prefix is lower-cased on emit
+/// (the `Name` after the `:` keeps its original case).
+fn is_progid_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    strip_vendor_prefix(&lower) == "progid"
+}
+
 /// Validate a modern `if()` condition: an evaluated `sass()` may not coexist
 /// in an `and`/`or` chain with an *unparenthesised* multi-token "arbitrary
 /// substitution". Parenthesising the substitution shields it (a `sass()`
@@ -2434,6 +2445,14 @@ impl Parser {
                 if self.sc.peek() == Some('(') {
                     return self.parse_call(name);
                 }
+                // IE `progid:` special function: `[-vendor-]progid:Name(...)`.
+                // The identifier `progid` (or a vendor-prefixed `-x-progid`) is
+                // recognised only when immediately followed by a `:`. The
+                // argument list (and any further `.Name` chain) is preserved
+                // verbatim with only `#{...}` interpolation resolved.
+                if self.sc.peek() == Some(':') && is_progid_name(&name) {
+                    return self.parse_progid(&name);
+                }
                 match name.as_str() {
                     "true" => return Ok(Expr::Bool(true)),
                     "false" => return Ok(Expr::Bool(false)),
@@ -2603,8 +2622,47 @@ impl Parser {
     ///
     /// Nested parentheses are balanced.
     fn parse_special_function(&mut self, canonical: &str) -> Result<Expr, Error> {
-        let mut pieces: Vec<TplPiece> = Vec::new();
-        let mut lit = format!("{canonical}(");
+        let pieces: Vec<TplPiece> = Vec::new();
+        let lit = format!("{canonical}(");
+        self.capture_verbatim_args(pieces, lit)
+    }
+
+    /// Parse an IE `progid:` special function whose `[-vendor-]progid` prefix
+    /// (passed as `name`, with the `:` not yet consumed) has been recognised.
+    /// The prefix is lower-cased on emit; a `.`-separated chain of ASCII-letter
+    /// name segments follows the `:` (kept verbatim, case preserved), then an
+    /// opening `(` is required and the argument list is captured verbatim
+    /// (resolving only `#{...}` interpolation). Mirrors dart-sass's `progid`
+    /// branch of `_trySpecialFunction`.
+    fn parse_progid(&mut self, name: &str) -> Result<Expr, Error> {
+        let mut lit = name.to_ascii_lowercase();
+        self.sc.bump(); // ':'
+        lit.push(':');
+        // The name chain: ASCII letters and `.` only (e.g.
+        // `DXImageTransform.Microsoft.gradient`). Anything else stops the chain
+        // and the required `(` check below produces dart-sass's error.
+        while let Some(c) = self.sc.peek() {
+            if c.is_ascii_alphabetic() || c == '.' {
+                lit.push(c);
+                self.sc.bump();
+            } else {
+                break;
+            }
+        }
+        if !self.sc.eat('(') {
+            return Err(Error::at("expected \"(\".", self.sc.position()));
+        }
+        lit.push('(');
+        self.capture_verbatim_args(Vec::new(), lit)
+    }
+
+    /// Continue capturing a verbatim special-function argument list, given the
+    /// already-accumulated template `pieces`/`lit` (which must end with the
+    /// opening `(` that has just been consumed). The closing `)` is consumed.
+    /// Used by both the named special functions (`calc()`, `element()`, …) and
+    /// the IE `progid:` form, which share dart-sass's interpolated-declaration
+    /// value grammar.
+    fn capture_verbatim_args(&mut self, mut pieces: Vec<TplPiece>, mut lit: String) -> Result<Expr, Error> {
         let mut depth = 1i32;
         loop {
             match self.sc.peek() {
@@ -2671,6 +2729,17 @@ impl Parser {
                             break;
                         }
                         self.sc.bump();
+                    }
+                }
+                // A backslash escapes the next character: both are emitted
+                // verbatim, and the escaped character (e.g. `\(` or `\)`) does
+                // NOT affect parenthesis nesting. Mirrors dart-sass's
+                // `_interpolatedDeclarationValue` escape handling.
+                Some('\\') => {
+                    lit.push('\\');
+                    self.sc.bump();
+                    if let Some(c) = self.sc.bump() {
+                        lit.push(c);
                     }
                 }
                 // Whitespace run collapses to a single space.

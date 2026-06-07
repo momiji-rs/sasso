@@ -1162,4 +1162,17 @@ fn slash_chain_keeps_spelling_through_special_value() {
     // collapsed quotient `0.5/foo()`.
     assert_parity("a { b: 1 / 2 / foo(); }\n");
     assert_parity("a { b: 1/2/foo(); }\n");
+fn progid_long_filter_syntax_is_preserved() {
+    // IE `progid:Name.Name(...)` long-filter syntax (with `:`, `.`, `=`, and
+    // `#hex` inside the arg list) is preserved verbatim; the `progid` keyword
+    // and any vendor prefix are lower-cased while the `.Name` chain keeps its
+    // case. Interpolation resolves; a backslash escapes the next character so
+    // an escaped `\(`/`\)` does not affect parenthesis nesting.
+    assert_parity(
+        "foo { filter: progid:DXImageTransform.Microsoft.gradient(GradientType=1, startColorstr=#c0ff3300, endColorstr=#ff000000); }\n",
+    );
+    assert_parity("a { b: -C-PROGID:D(#{0}); }\n");
+    assert_parity("a { b: progid:c(/**/ d); }\n");
+    assert_parity("a { b: progid:foo.bar(x=1), progid:baz.qux(y=2); }\n");
+    assert_parity("a { b: progid:c(opacity=20\\)); }\n");
 }
