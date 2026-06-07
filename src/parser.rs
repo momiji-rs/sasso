@@ -8,9 +8,9 @@
 use std::rc::Rc;
 
 use crate::ast::{
-    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfBranch, IfClause, IfCond, ImportArg,
-    MediaFeature, MediaInParens, MediaQuery, MediaQueryList, Param, ParamList, Rule, Stmt, Stylesheet,
-    TplPiece, UnOp, VarDecl,
+    BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, Declaration, Expr, IfBranch,
+    IfClause, IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, Param, ParamList,
+    Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::{Pos, Scanner};
@@ -534,6 +534,16 @@ impl Parser {
             "for" => self.parse_for(),
             "each" => self.parse_each(),
             "while" => self.parse_while(),
+            // Lowercase `@function`/`@mixin` define Sass callables — UNLESS the
+            // name begins with `--`, which dart-sass reserves for plain CSS
+            // custom functions/mixins (a function then passes through verbatim;
+            // a mixin is a hard error).
+            "function" if self.peek_callable_name_is_custom() => self.parse_css_custom_callable(name),
+            "mixin" if self.peek_callable_name_is_custom() => Err(Error::at(
+                "Sass @mixin names beginning with -- are forbidden for \
+                     forward-compatibility with plain CSS mixins.",
+                pos,
+            )),
             "function" => self.parse_callable_def(true),
             "mixin" => self.parse_callable_def(false),
             "return" => self.parse_return(),
@@ -556,6 +566,13 @@ impl Parser {
             // accept them and lose their error specs).
             "extend" | "use" | "forward" => {
                 Err(Error::at(format!("@{name} is not supported in this build"), pos))
+            }
+            // A non-lowercase spelling of `@function`/`@mixin` (e.g. `@FUNCTION`,
+            // `@Mixin`) is never a Sass definition; dart-sass parses it as a
+            // plain CSS custom function/mixin (verbatim body), regardless of
+            // whether the name begins with `--`.
+            _ if name.eq_ignore_ascii_case("function") || name.eq_ignore_ascii_case("mixin") => {
+                self.parse_css_custom_callable(name)
             }
             _ => self.parse_generic_at_rule(name),
         }
@@ -1306,6 +1323,158 @@ impl Parser {
         } else {
             Stmt::MixinDef(callable)
         })
+    }
+
+    /// After a lowercase `@function`/`@mixin` keyword, peek whether the name
+    /// that follows begins with `--` (a plain CSS custom function/mixin).
+    fn peek_callable_name_is_custom(&self) -> bool {
+        let cs = self.sc.rest();
+        let mut i = 0;
+        while i < cs.len() && cs[i].is_whitespace() {
+            i += 1;
+        }
+        cs.get(i) == Some(&'-') && cs.get(i + 1) == Some(&'-')
+    }
+
+    /// Parse a plain CSS custom `@function`/`@mixin` (`keyword` is the literal
+    /// at-rule name, e.g. `function`/`FUNCTION`/`mixin`). The prelude (the name,
+    /// optional parameter list, and optional `returns <type>` clause) is
+    /// captured as a template up to `{`; the body's top-level declarations keep
+    /// their values verbatim. Only `#{...}` interpolation is resolved.
+    fn parse_css_custom_callable(&mut self, keyword: String) -> Result<Stmt, Error> {
+        self.skip_ws_inline();
+        let prelude = trim_prelude(self.parse_template(&['{', ';', '}'])?);
+        self.skip_ws_inline();
+        if self.sc.peek() != Some('{') {
+            // A bodyless form (`@mixin --a;`) is not valid CSS here.
+            return Err(Error::at("expected \"{\".", self.sc.position()));
+        }
+        self.sc.bump(); // '{'
+        let body = self.parse_css_custom_body()?;
+        Ok(Stmt::CssCustomAtRule {
+            name: keyword,
+            prelude,
+            body,
+        })
+    }
+
+    /// Parse the `{ … }` body of a plain CSS custom `@function`/`@mixin` after
+    /// the `{` has been consumed, up to and including the matching `}`. Each
+    /// top-level item is a declaration `property: value`. When the property is
+    /// a plain literal the value is captured verbatim (a template); when it
+    /// contains interpolation the value is parsed as SassScript.
+    fn parse_css_custom_body(&mut self) -> Result<Vec<CssCustomItem>, Error> {
+        let mut items = Vec::new();
+        loop {
+            self.skip_ws_inline();
+            match self.sc.peek() {
+                None => return Err(Error::at("expected \"}\".", self.sc.position())),
+                Some('}') => {
+                    self.sc.bump();
+                    break;
+                }
+                Some(';') => {
+                    self.sc.bump();
+                    continue;
+                }
+                _ => {}
+            }
+            // Property name up to `:` (interpolation allowed).
+            let property = trim_prelude(self.parse_template(&[':', '{', ';', '}'])?);
+            if !self.sc.eat(':') {
+                return Err(Error::at("expected \":\".", self.sc.position()));
+            }
+            let has_interp = property.iter().any(|p| matches!(p, TplPiece::Interp(_)));
+            let value = if has_interp {
+                self.skip_ws_inline();
+                let expr = self.parse_value()?;
+                self.skip_ws_inline();
+                self.sc.eat(';');
+                CssCustomValue::Script(expr)
+            } else {
+                let raw = self.parse_css_custom_value()?;
+                CssCustomValue::Raw(raw)
+            };
+            items.push(CssCustomItem { property, value });
+        }
+        Ok(items)
+    }
+
+    /// Capture a verbatim CSS custom declaration value after the `:`, up to the
+    /// terminating top-level `;` or `}`. Whitespace runs collapse to a single
+    /// space (matching dart-sass serialization); `#{...}` interpolation is
+    /// resolved; nested `()`/`[]`/`{}` are balanced so a braced value such as
+    /// `{b: c}` is captured whole. The terminating `;` is consumed; a `}` is
+    /// left for the body loop.
+    fn parse_css_custom_value(&mut self) -> Result<Vec<TplPiece>, Error> {
+        let mut pieces: Vec<TplPiece> = Vec::new();
+        let mut lit = String::new();
+        let mut depth = 0i32;
+        loop {
+            match self.sc.peek() {
+                None => break,
+                Some(';') if depth == 0 => {
+                    self.sc.bump();
+                    break;
+                }
+                Some('}') if depth == 0 => break,
+                Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    if !lit.is_empty() {
+                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                    }
+                    self.sc.bump();
+                    self.sc.bump();
+                    let e = self.parse_value()?;
+                    self.skip_ws_inline();
+                    if !self.sc.eat('}') {
+                        return Err(Error::at("expected \"}\"", self.sc.position()));
+                    }
+                    pieces.push(TplPiece::Interp(e));
+                }
+                Some(q @ ('"' | '\'')) => {
+                    lit.push(q);
+                    self.sc.bump();
+                    while let Some(ch) = self.sc.peek() {
+                        lit.push(ch);
+                        self.sc.bump();
+                        if ch == '\\' {
+                            if let Some(esc) = self.sc.peek() {
+                                lit.push(esc);
+                                self.sc.bump();
+                            }
+                            continue;
+                        }
+                        if ch == q {
+                            break;
+                        }
+                    }
+                }
+                Some(c) if c.is_whitespace() => {
+                    while matches!(self.sc.peek(), Some(c) if c.is_whitespace()) {
+                        self.sc.bump();
+                    }
+                    lit.push(' ');
+                }
+                Some(c @ ('(' | '[' | '{')) => {
+                    depth += 1;
+                    lit.push(c);
+                    self.sc.bump();
+                }
+                Some(c @ (')' | ']' | '}')) => {
+                    depth -= 1;
+                    lit.push(c);
+                    self.sc.bump();
+                }
+                Some(c) => {
+                    lit.push(c);
+                    self.sc.bump();
+                }
+            }
+        }
+        if !lit.is_empty() {
+            pieces.push(TplPiece::Lit(lit));
+        }
+        Ok(pieces)
     }
 
     /// Parse a declared parameter list `($a, $b: default, $rest...)`.

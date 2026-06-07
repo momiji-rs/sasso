@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::{
-    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfClause, IfCond, ImportArg, MediaFeature,
-    MediaInParens, MediaQuery, MediaQueryList, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+    BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, Declaration, Expr, IfClause,
+    IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, ParamList, Rule, Stmt,
+    Stylesheet, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -710,6 +711,9 @@ impl<'a> Evaluator<'a> {
                 Stmt::AtRule { name, prelude, body } => {
                     self.eval_at_rule(name, prelude, body.as_deref(), parents, sink)?;
                 }
+                Stmt::CssCustomAtRule { name, prelude, body } => {
+                    self.eval_css_custom_at_rule(name, prelude, body, sink)?;
+                }
                 Stmt::Media { query, body } => {
                     self.eval_media(query, body, parents, sink)?;
                 }
@@ -792,6 +796,42 @@ impl<'a> Evaluator<'a> {
             return Ok(());
         };
         let out_body = self.eval_at_body(stmts, parents)?;
+        sink.push_at_rule(OutNode::AtRule {
+            name: name.to_string(),
+            prelude,
+            body: out_body,
+            has_block: true,
+        });
+        Ok(())
+    }
+
+    /// Evaluate a plain CSS custom `@function`/`@mixin`: resolve the prelude
+    /// and each body declaration (verbatim values keep their literal text;
+    /// interpolated-property declarations evaluate as SassScript), then emit the
+    /// whole construct verbatim as a generic at-rule.
+    fn eval_css_custom_at_rule(
+        &mut self,
+        name: &str,
+        prelude: &[TplPiece],
+        body: &[CssCustomItem],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        let prelude = self.eval_template(prelude)?;
+        let mut out_body: Vec<OutNode> = Vec::new();
+        for item in body {
+            let prop = self.eval_template(&item.property)?;
+            let line = match &item.value {
+                CssCustomValue::Raw(tpl) => {
+                    let raw = self.eval_template(tpl)?;
+                    format!("{prop}:{raw};")
+                }
+                CssCustomValue::Script(expr) => {
+                    let value = self.eval_expr(expr)?.to_css(self.compressed());
+                    format!("{prop}: {value};")
+                }
+            };
+            out_body.push(OutNode::Raw(line));
+        }
         sink.push_at_rule(OutNode::AtRule {
             name: name.to_string(),
             prelude,

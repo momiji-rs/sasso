@@ -846,3 +846,28 @@ fn special_css_functions_verbatim() {
     assert_parity("a { b: -C-EXPRESSION(#{1 + 1}); }\n");
     assert_parity("a { b: -a-calc(  c   d  ); }\n");
 }
+
+#[test]
+fn css_custom_function_mixin_passthrough() {
+    // A `@function`/`@mixin` whose name begins with `--`, or any non-lowercase
+    // spelling of the keyword, is a plain CSS custom function/mixin: emitted
+    // verbatim. Top-level declaration values stay literal (`$b`, `1 + 1`,
+    // arbitrary characters) with whitespace collapsed; interpolated properties
+    // evaluate as SassScript; `#{}` resolves. Byte-matched to dart-sass.
+    assert_parity("@function --a(--b <color>) {result: c}\n");
+    assert_parity("@function --a() returns <ident> {result: b}\n");
+    assert_parity("@function --#{a}() {result: b}\n");
+    assert_parity("@function --a() {\n  result: $b;\n}\n");
+    assert_parity("@function --a() {\n  result: 1 + 1;\n}\n");
+    assert_parity("@function --a() {\n  result: #{1 + 1};\n}\n");
+    assert_parity("@function --a() {\n  result: {}#&%^*;\n}\n");
+    assert_parity("@function --a() {\n  RESULT: {b: c};\n}\n");
+    assert_parity("@function --a() {\n  #{result}: 1 + 1;\n}\n");
+    assert_parity("@FUNCTION --a() {\n  result: $b;\n}\n");
+    assert_parity("@FUNCTION foo() {\n  result: $b;\n}\n");
+    assert_parity("@MIXIN foo {}\n");
+    assert_parity("@MIXIN --a {}\n");
+    // A non-custom lowercase `@function`/`@mixin` is still a Sass definition.
+    assert_parity("@function foo() { @return 1px * 2; }\na { b: foo(); }\n");
+    assert_parity("@mixin foo { x: y; }\na { @include foo; }\n");
+}

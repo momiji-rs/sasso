@@ -68,6 +68,17 @@ pub(crate) enum Stmt {
         prelude: Vec<TplPiece>,
         body: Option<Vec<Stmt>>,
     },
+    /// A plain-CSS custom `@function`/`@mixin` whose name begins with `--`.
+    /// dart-sass does not treat these as Sass definitions: the whole construct
+    /// is emitted verbatim as a generic at-rule. `name` is the keyword exactly
+    /// as written (`function`/`FUNCTION`/`mixin`). The prelude (`--a(...)
+    /// [returns ...]`) and each body declaration value are preserved literally;
+    /// only `#{...}` interpolation is resolved.
+    CssCustomAtRule {
+        name: String,
+        prelude: Vec<TplPiece>,
+        body: Vec<CssCustomItem>,
+    },
     /// `@media <media-query-list> { body }`. The query is parsed into a
     /// structured form so SassScript inside feature values is resolved and the
     /// query is re-serialized (and bubbled/merged) exactly like dart-sass.
@@ -140,6 +151,25 @@ pub(crate) struct VarDecl {
 pub(crate) struct Rule {
     pub selector: Vec<TplPiece>,
     pub body: Vec<Stmt>,
+}
+
+/// One top-level item in a plain-CSS custom `@function`/`@mixin` body. The
+/// value is captured as a template (preserving arbitrary CSS characters
+/// verbatim, resolving only `#{...}`) when the property is a plain literal,
+/// or as a SassScript expression when the property contains interpolation —
+/// matching dart-sass's declaration parsing inside these constructs.
+pub(crate) struct CssCustomItem {
+    pub property: Vec<TplPiece>,
+    /// `Err` holds the verbatim value template; `Ok` holds a SassScript value.
+    pub value: CssCustomValue,
+}
+
+pub(crate) enum CssCustomValue {
+    /// Verbatim value template (literal property): whitespace runs collapse to
+    /// single spaces and `#{...}` resolves, otherwise emitted exactly.
+    Raw(Vec<TplPiece>),
+    /// SassScript value (interpolated property): evaluated normally.
+    Script(Expr),
 }
 
 pub(crate) struct Declaration {
