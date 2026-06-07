@@ -619,19 +619,28 @@ fn min_max(
     if args.is_empty() {
         return Err(Error::at("Missing argument.", pos));
     }
-    match reduce_min_max(&args, is_min) {
+    match reduce_min_max(&args, is_min, pos)? {
         Some(n) => Ok(num_value(n)),
         None => Ok(preserved_call(fname, &args)),
     }
 }
 
-/// `clamp(min, value, max)`: when all three are compatible-unit numbers,
-/// returns `max(min, min(value, max))`; otherwise preserves the CSS call.
+/// `clamp(min, value, max)`. A single non-number argument is a preserved CSS
+/// calculation (`clamp(var(--c))`); any other arity is an error. With three
+/// numbers, dart-sass clamps `value` against `min`/`max` checking `min` first
+/// (`value < min` → `min`; else `value > max` → `max`; else `value`), keeping
+/// the winning argument's own unit. A known cross-dimension pair errors; an
+/// unconvertible-but-not-incompatible pair (`clamp(1px, 2vw, 3px)`) preserves.
 fn clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let args: Vec<Value> = all_args(pos_args, named)
         .into_iter()
         .map(normalize_const)
         .collect();
+    if args.len() == 1 && !matches!(args[0], Value::Number(_)) {
+        // A lone `var()`, interpolation, or bare identifier is a preserved
+        // CSS `clamp()` calculation rather than an arity error.
+        return Ok(preserved_call("clamp", &args));
+    }
     if args.len() != 3 {
         return Err(Error::at(
             format!("3 arguments required, but {} were passed.", args.len()),
@@ -642,8 +651,16 @@ fn clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
         (Value::Number(a), Value::Number(b), Value::Number(c)) => (a, b, c),
         _ => return Ok(preserved_call("clamp", &args)),
     };
-    // Coerce `value` and `hi` into `lo`'s unit; bail to preserved form if
-    // any unit pair is incompatible.
+    // A known cross-dimension pair (against `min`) is an error, matching
+    // dart-sass; an unconvertible relative/unknown unit preserves the call.
+    if crate::value::calc_units_incompatible(&lo.unit, &val.unit) {
+        return Err(incompatible(lo, val, pos));
+    }
+    if crate::value::calc_units_incompatible(&lo.unit, &hi.unit) {
+        return Err(incompatible(lo, hi, pos));
+    }
+    // Coerce `value` and `hi` into `lo`'s unit; preserve if any pair is not
+    // convertible (but not a hard incompatibility, e.g. `1px`/`2vw`).
     let val_v = match try_coerce(val, lo) {
         Some(v) => v,
         None => return Ok(preserved_call("clamp", &args)),
@@ -652,11 +669,16 @@ fn clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
         Some(v) => v,
         None => return Ok(preserved_call("clamp", &args)),
     };
-    let clamped = lo.value.max(val_v.min(hi_v));
-    Ok(num_value(Number {
-        value: clamped,
-        unit: lo.unit.clone(),
-    }))
+    // dart-sass checks `min` before `max` (so `clamp(3, 5, 1)` is `1`, not the
+    // CSS `max(min, min(value, max))` result), keeping the winner's own unit.
+    let winner = if val_v < lo.value {
+        lo
+    } else if val_v > hi_v {
+        hi
+    } else {
+        val
+    };
+    Ok(num_value(winner.clone()))
 }
 
 /// `random()` — a pseudo-random float in `[0, 1)` — or `random($limit)` — a
@@ -753,32 +775,51 @@ fn normalize_const(v: Value) -> Value {
     v
 }
 
-/// Reduce a list of values to the min/max number, or `None` if any argument
-/// is not a number or any unit pair is incompatible. The result keeps the
-/// winning argument's own unit, matching dart-sass.
-fn reduce_min_max(args: &[Value], is_min: bool) -> Option<Number> {
-    let mut best: Option<Number> = None;
+/// Reduce a list of values to the min/max number under dart-sass's calc
+/// `min()`/`max()` simplification:
+///
+/// - `Ok(Some(n))` — every argument folds into one number; the result keeps
+///   the winning argument's own unit (`min(1in, 2cm)` → `2cm`).
+/// - `Ok(None)` — two or more mutually-incomparable clusters remain
+///   (`min(1px, 2vw)`, `min(1c, 2d)`), so the call is preserved.
+/// - `Err` — a known cross-dimension pair is genuinely incompatible
+///   (`min(1s, 2px)`), matching dart-sass's "<a> and <b> are incompatible."
+///
+/// Each new value is folded into the first existing cluster it is comparable
+/// to (equal/convertible units, or a unitless operand against anything);
+/// otherwise it starts a new cluster. (The unitless-vs-multiple-cluster
+/// "potentially incompatible" error case is left preserved rather than
+/// errored — a strict subset of dart's behaviour that never folds wrongly.)
+fn reduce_min_max(args: &[Value], is_min: bool, pos: Pos) -> Result<Option<Number>, Error> {
+    let mut clusters: Vec<Number> = Vec::new();
     for v in args {
         let n = match v {
             Value::Number(n) => n.clone(),
-            _ => return None,
+            _ => return Ok(None),
         };
-        best = Some(match best {
-            None => n,
-            Some(cur) => {
-                // Compare `n` in `cur`'s unit; pick whichever wins, keeping
-                // the winner's authored unit.
-                let nv = try_coerce(&n, &cur)?;
-                let pick_n = if is_min { nv < cur.value } else { nv > cur.value };
-                if pick_n {
-                    n
-                } else {
-                    cur
-                }
+        let mut folded = false;
+        for c in &mut clusters {
+            if crate::value::calc_units_incompatible(&c.unit, &n.unit) {
+                return Err(incompatible(c, &n, pos));
             }
-        });
+            if let Some(nv) = try_coerce(&n, c) {
+                // Pick the winner, keeping its own authored unit.
+                let pick_n = if is_min { nv < c.value } else { nv > c.value };
+                if pick_n {
+                    *c = n.clone();
+                }
+                folded = true;
+                break;
+            }
+        }
+        if !folded {
+            clusters.push(n);
+        }
     }
-    best
+    match clusters.len() {
+        1 => Ok(Some(clusters.remove(0))),
+        _ => Ok(None),
+    }
 }
 
 /// Convert `n` into `target`'s unit, returning the converted scalar, or

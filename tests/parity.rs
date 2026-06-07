@@ -1396,3 +1396,34 @@ fn math_random_in_range() {
     assert!(compile("a {b: random(-1)}\n", &Options::default()).is_err());
     assert!(compile("a {b: random(1.5)}\n", &Options::default()).is_err());
 }
+
+#[test]
+fn math_min_max_clamp_unit_rules() {
+    // min/max fold compatible/convertible units to the winning argument's own
+    // unit, preserve mutually-incomparable clusters, and error on a known
+    // cross-dimension pair. Byte-matched to dart-sass. Offline.
+    assert_eq!(ours("a {b: min(1px, 1in, 1cm)}\n"), "a {\n  b: 1px;\n}\n");
+    assert_eq!(ours("a {b: max(1px, 1in, 1cm)}\n"), "a {\n  b: 1in;\n}\n");
+    assert_eq!(ours("a {b: min(3d, 2, 1e)}\n"), "a {\n  b: 1e;\n}\n");
+    assert_eq!(ours("a {b: min(1px, 2vw)}\n"), "a {\n  b: min(1px, 2vw);\n}\n");
+    assert_eq!(ours("a {b: min(1c, 2d)}\n"), "a {\n  b: min(1c, 2d);\n}\n");
+    assert_eq!(ours("a {b: min(1%, 2%)}\n"), "a {\n  b: 1%;\n}\n");
+    assert!(compile("a {b: min(1s, 2px)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: max(1px, 2px, 3s)}\n", &Options::default()).is_err());
+    // clamp checks `min` first (so `clamp(3, 5, 1)` is `1`), keeps the winning
+    // argument's unit, errors on a known cross-dimension pair, and preserves a
+    // lone non-number argument.
+    assert_eq!(ours("a {b: clamp(1px, 1in, 1cm)}\n"), "a {\n  b: 1cm;\n}\n");
+    assert_eq!(ours("a {b: clamp(3, 5, 1)}\n"), "a {\n  b: 1;\n}\n");
+    assert_eq!(ours("a {b: clamp(5, 1, 3)}\n"), "a {\n  b: 5;\n}\n");
+    assert_eq!(
+        ours("a {b: clamp(1px, 2vw, 3px)}\n"),
+        "a {\n  b: clamp(1px, 2vw, 3px);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: clamp(var(--c))}\n"),
+        "a {\n  b: clamp(var(--c));\n}\n"
+    );
+    assert!(compile("a {b: clamp(1s, 2px, 3px)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: clamp(1px)}\n", &Options::default()).is_err());
+}
