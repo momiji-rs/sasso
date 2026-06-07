@@ -2671,6 +2671,18 @@ fn channel_powerless(space: ColorSpace, idx: usize, conv: &ModernColor) -> bool 
     }
 }
 
+/// Return `mc` with any powerless channel (e.g. an hsl hue at zero saturation)
+/// set to missing, so the missing-channel error serializes it as `none`.
+fn null_powerless(mc: &ModernColor, space: ColorSpace) -> ModernColor {
+    let mut out = mc.clone();
+    for idx in 0..3 {
+        if channel_powerless(space, idx, mc) {
+            out.channels[idx] = None;
+        }
+    }
+    out
+}
+
 fn fn_same(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color1", "color2"];
     let c1 = as_color(require(&params, pos_args, named, 0, "same", pos)?, pos)?;
@@ -3147,11 +3159,48 @@ pub(super) fn modify_in_space(
     op: ModifyOp,
     pos: Pos,
 ) -> Result<Value, Error> {
+    modify_in_space_opt(c, space, chans, op, false, pos)
+}
+
+/// As [`modify_in_space`], but with control over whether a *powerless* channel
+/// (e.g. an hsl hue at zero saturation) counts as missing. The explicit-`$space`
+/// path treats powerless channels as missing (erroring on `adjust`/`scale`); the
+/// legacy keyword path operates on the color's stored channels and does not.
+pub(super) fn modify_in_space_opt(
+    c: &Color,
+    space: ColorSpace,
+    chans: &[(String, &Value)],
+    op: ModifyOp,
+    powerless_check: bool,
+    pos: Pos,
+) -> Result<Value, Error> {
     let orig = legacy_to_modern(c);
     let dest = orig.space;
     let mut work = convert_modern(&orig, space);
+    // `adjust`/`scale` combine each amount with the channel's current value, so
+    // a missing (`none`) channel is unsupported (dart-sass errors rather than
+    // guessing). `change` *sets* the channel, so a missing channel is fine. The
+    // error serializes the source color in the working space.
+    let combining = matches!(op, ModifyOp::Adjust | ModifyOp::Scale);
+    // A channel only becomes powerless-as-missing through a *conversion* (an
+    // achromatic source whose hue collapses); a color already in the working
+    // space keeps its explicit (if powerless) channels.
+    let powerless_active = powerless_check && orig.space != space;
+    // For the error message, such a powerless channel is serialized as `none`.
+    let orig_work = work.clone();
+    let missing_channel_error = |name: &str| {
+        let color = if powerless_active {
+            make_modern(null_powerless(&orig_work, space))
+        } else {
+            make_modern(orig_work.clone())
+        };
+        missing_channel_err(name, &Value::Color(color), pos)
+    };
     for (name, v) in chans {
         if name == "alpha" {
+            if combining && orig_work.alpha.is_none() {
+                return Err(missing_channel_error(name));
+            }
             work.alpha = apply_alpha(work.alpha.unwrap_or(1.0), v, op, pos)?;
             continue;
         }
@@ -3168,6 +3217,14 @@ pub(super) fn modify_in_space(
         // `none` change keyword, handled below).
         if !matches!(op, ModifyOp::Scale) && !is_none_keyword(v) {
             validate_modify_unit(space, idx, name, v, pos)?;
+        }
+        // `adjust`/`scale` combine each amount with the channel's current value,
+        // so a missing (`none`) — or, on a conversion's powerless — channel of
+        // the source color is unsupported (checked against the original, like
+        // dart-sass).
+        let powerless = powerless_active && channel_powerless(space, idx, &orig_work);
+        if combining && (orig_work.channels[idx].is_none() || powerless) {
+            return Err(missing_channel_error(name));
         }
         match op {
             ModifyOp::Change => {
@@ -3193,6 +3250,40 @@ pub(super) fn modify_in_space(
     }
     let back = convert_modern(&work, dest);
     Ok(Value::Color(make_modern_in(back, dest)))
+}
+
+/// The "modifying a missing channel" error dart-sass raises when `adjust`/
+/// `scale` is applied to a `none` channel. `color` is the source color
+/// serialized in the working space.
+pub(super) fn missing_channel_err(name: &str, color: &Value, pos: Pos) -> Error {
+    Error::at(
+        format!(
+            "${name}: Because the CSS working group is still deciding on the best \
+             behavior, Sass doesn't currently support modifying missing channels \
+             (color: {}).",
+            color.to_css(false)
+        ),
+        pos,
+    )
+}
+
+/// For the legacy `scale-color`/`adjust-color` keyword path: if the channel
+/// `name` (or `alpha`) of `c` is missing (`none`) in the legacy `space`, return
+/// the source color (serialized in that space) for a missing-channel error.
+pub(super) fn missing_legacy_channel(c: &Color, space: ColorSpace, name: &str) -> Option<Value> {
+    let work = convert_modern(&legacy_to_modern(c), space);
+    // The legacy keyword path only rejects a *literally* missing (`none`)
+    // channel, not a powerless one.
+    let missing = if name == "alpha" {
+        work.alpha.is_none()
+    } else {
+        channel_index_in(space, name).is_some_and(|idx| work.channels[idx].is_none())
+    };
+    if missing {
+        Some(Value::Color(make_modern(work)))
+    } else {
+        None
+    }
 }
 
 /// Apply a change/adjust/scale to the alpha channel. Returns `None` for a
@@ -3352,10 +3443,38 @@ fn clamp_adjust_channel(space: ColorSpace, idx: usize, v: f64) -> f64 {
 /// CSS Color 4 `color.invert($color, $weight, $space)`: invert each channel in
 /// `space` (mixing toward the original by `1 - weight`), then convert back to
 /// the color's original space.
-pub(super) fn invert_in_space(c: &Color, space: ColorSpace, weight: f64) -> Color {
+pub(super) fn invert_in_space(
+    c: &Color,
+    space: ColorSpace,
+    weight: f64,
+    powerless_check: bool,
+    pos: Pos,
+) -> Result<Color, Error> {
     let orig = legacy_to_modern(c);
     let dest = orig.space;
     let src = convert_modern(&orig, space);
+    // A channel only becomes powerless-as-missing through a *conversion*.
+    let powerless_active = powerless_check && orig.space != space;
+    // Inverting transforms each *modified* channel using its current value, so a
+    // missing (`none`) — or, after a conversion, powerless — channel is
+    // unsupported. Pass-through channels (e.g. hsl saturation, lch chroma, the
+    // hwb whiteness/blackness swap) are exempt. Report the first offending
+    // channel in storage order, like dart-sass.
+    for idx in 0..3 {
+        if !invert_modifies(space, idx) {
+            continue;
+        }
+        let powerless = powerless_active && channel_powerless(space, idx, &src);
+        if src.channels[idx].is_none() || powerless {
+            let name = space.channel_names()[idx];
+            let color = if powerless_active {
+                make_modern(null_powerless(&src, space))
+            } else {
+                make_modern(src.clone())
+            };
+            return Err(missing_channel_err(name, &Value::Color(color), pos));
+        }
+    }
     let inverted = invert_channels(space, &src);
     // Mix the inverted color toward the original by `1 - weight` (per channel).
     let mix = |a: Option<f64>, b: Option<f64>, hue: bool| -> Option<f64> {
@@ -3386,7 +3505,7 @@ pub(super) fn invert_in_space(c: &Color, space: ColorSpace, weight: f64) -> Colo
         alpha: src.alpha,
     };
     let back = convert_modern(&mc, dest);
-    make_modern_in(back, dest)
+    Ok(make_modern_in(back, dest))
 }
 
 /// Invert each channel of `src` (already in `space`) per CSS Color 4: rgb-style
@@ -3418,6 +3537,18 @@ fn invert_channels(space: ColorSpace, src: &ModernColor) -> ModernColor {
         channels,
         alpha: src.alpha,
     }
+}
+
+/// Whether `invert` transforms the channel at `idx` of `space` using its value
+/// (so a missing/powerless value is an error), as opposed to passing it through
+/// unchanged (hsl saturation, lch/oklch chroma) or merely swapping it (hwb
+/// whiteness/blackness).
+fn invert_modifies(space: ColorSpace, idx: usize) -> bool {
+    use ColorSpace::*;
+    !matches!(
+        (space, idx),
+        (Hsl, 1) | (Hwb, 1) | (Hwb, 2) | (Lch, 1) | (Oklch, 1)
+    )
 }
 
 /// `color.grayscale` for a non-legacy color: set the oklch chroma to 0 (a

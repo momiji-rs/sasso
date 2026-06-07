@@ -3465,3 +3465,67 @@ fn parity_color_alpha_ms_filter_overload() {
         "}\n",
     ));
 }
+
+/// Compile `scss` with dart-sass, returning its first `Error:` line (the
+/// message), or `None` if dart-sass succeeded or is unavailable.
+fn dart_sass_error(scss: &str) -> Option<String> {
+    let bin = std::env::var("SASS_BIN").unwrap_or_else(|_| "npx".to_string());
+    let mut cmd = if bin == "npx" {
+        let mut c = Command::new("npx");
+        c.args(["--yes", "sass", "--no-source-map", "--stdin"]);
+        c
+    } else {
+        let mut c = Command::new(bin);
+        c.args(["--no-source-map", "--stdin"]);
+        c
+    };
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(scss.as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if out.status.success() {
+        return None;
+    }
+    let stderr = String::from_utf8(out.stderr).ok()?;
+    stderr
+        .lines()
+        .find(|l| l.starts_with("Error: "))
+        .map(|l| l.trim_start_matches("Error: ").to_string())
+}
+
+#[test]
+fn parity_color_modify_missing_channel_errors() {
+    // `adjust`/`scale`/`invert` reject a missing (`none`) channel — and, after a
+    // conversion to an explicit `$space`, a powerless one — with dart-sass's
+    // exact "modifying missing channels" message.
+    if !enabled() {
+        return;
+    }
+    let cases = [
+        "@use \"sass:color\";\na {b: color.adjust(rgb(none 0 0), $red: 10)}\n",
+        "@use \"sass:color\";\na {b: color.adjust(rgb(0 0 0 / none), $alpha: 0.1)}\n",
+        "@use \"sass:color\";\na {b: color.adjust(grey, $hue: 10deg, $space: hsl)}\n",
+        "@use \"sass:color\";\na {b: color.scale(rgb(none 0 0), $red: 10%)}\n",
+        "@use \"sass:color\";\na {b: color.invert(grey, $space: hsl)}\n",
+    ];
+    for scss in cases {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                // Strip our leading `Error: ` and trailing `(line:col)` so the
+                // core message can be compared against dart-sass's.
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping missing-channel parity case: dart-sass unavailable"),
+        }
+    }
+}

@@ -6,7 +6,9 @@
 //! [`Color::from_hsl`] and left with `repr = None`, so they serialize via
 //! the normal `rgb()`/`rgba()`/hex rule, matching dart-sass.
 
-use super::color::{modify_in_space, space_arg, ModifyOp};
+use super::color::{
+    missing_channel_err, missing_legacy_channel, modify_in_space, modify_in_space_opt, space_arg, ModifyOp,
+};
 use super::{arg, as_color, clamp01, num, require};
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -38,7 +40,15 @@ fn modify_with_space(
         .filter(|(n, _)| n != "space")
         .map(|(n, v)| (n.clone(), v))
         .collect();
-    Some(modify_in_space(c, space, &chans, op, pos))
+    // An explicit `$space` enables the powerless-channel missing check.
+    Some(modify_in_space_opt(
+        c,
+        space,
+        &chans,
+        op,
+        space_arg_v.is_some(),
+        pos,
+    ))
 }
 
 /// Build a *computed* color, tagging it with a CSS named-color spelling when
@@ -337,12 +347,20 @@ fn fn_complement(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
             pos,
         ));
     }
-    // complement = adjust the hue by +180deg in the space.
+    // complement = adjust the hue by +180deg in the space. An explicit `$space`
+    // enables the powerless-channel missing check.
     let deg = Value::Number(Number {
         value: 180.0,
         unit: "deg".to_string(),
     });
-    modify_in_space(&c, space, &[("hue".to_string(), &deg)], ModifyOp::Adjust, pos)
+    modify_in_space_opt(
+        &c,
+        space,
+        &[("hue".to_string(), &deg)],
+        ModifyOp::Adjust,
+        space_v.is_some(),
+        pos,
+    )
 }
 
 fn rotate_hue(c: &Color, degrees: f64) -> Color {
@@ -408,12 +426,24 @@ fn fn_invert(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option<
                     ))
                 }
             };
-            return Ok(Value::Color(super::color::invert_in_space(&c, space, w)));
+            // An explicit `$space` enables the powerless-channel missing check.
+            return Ok(Value::Color(super::color::invert_in_space(
+                &c,
+                space,
+                w,
+                space_v.is_some(),
+                pos,
+            )?));
         }
-        let r = (255.0 - c.r) * w + c.r * (1.0 - w);
-        let g = (255.0 - c.g) * w + c.g * (1.0 - w);
-        let b = (255.0 - c.b) * w + c.b * (1.0 - w);
-        Ok(Value::Color(computed(r, g, b, c.a)))
+        // Legacy color, no `$space`: invert in rgb (which still rejects a missing
+        // rgb channel, but has no powerless channels).
+        Ok(Value::Color(super::color::invert_in_space(
+            &c,
+            ColorSpace::Rgb,
+            w,
+            false,
+            pos,
+        )?))
     })())
 }
 
@@ -873,11 +903,21 @@ fn fn_scale_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
         return r;
     }
     let (space, chans) = resolve_channels("scale-color", named, pos)?;
+    let cspace = match space {
+        Space::Rgb => ColorSpace::Rgb,
+        Space::Hsl => ColorSpace::Hsl,
+        Space::Hwb => ColorSpace::Hwb,
+    };
     let mut tuple = decompose(&c, space);
     let mut alpha = c.a;
     for (n, v) in chans {
         if n == "hue" {
             return Err(Error::at(format!("${n}: Channel isn't scalable."), pos));
+        }
+        // `scale` combines with the channel's current value, so a missing
+        // (`none`) channel is unsupported (dart-sass errors).
+        if let Some(color) = missing_legacy_channel(&c, cspace, n) {
+            return Err(missing_channel_err(n, &color, pos));
         }
         let factor = scale_factor(n, v, pos)?;
         if n == "alpha" {
