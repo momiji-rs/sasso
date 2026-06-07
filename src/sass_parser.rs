@@ -294,8 +294,14 @@ impl Transpiler {
         let start = self.idx;
         let mut logical = strip_silent_comment(self.lines[start].content.trim_start());
         self.idx = start + 1;
+        // A trailing `,` continues the line only in a selector context — a bare
+        // declaration value (`b: c,`) does *not* wrap onto the next line in the
+        // indented syntax. A directive prelude handles its own continuation
+        // later, so a trailing comma there is also not consumed here.
+        let comma_continues =
+            !logical.starts_with('@') && !logical.starts_with('$') && find_decl_colon(&logical).is_none();
         loop {
-            if continuation_pending(&logical) {
+            if continuation_pending(&logical, comma_continues) {
                 // Need a following line to continue. Continuations join the
                 // *immediate next physical line* (dart-sass does not skip blanks
                 // here).
@@ -372,8 +378,9 @@ impl Transpiler {
                 logical.push(' ');
             }
             logical.push_str(&piece);
-            // Pull in any bracket / comma continuations of this new line too.
-            while continuation_pending(logical) {
+            // Pull in any bracket / comma continuations of this new line too
+            // (a directive prelude permits trailing-comma continuation).
+            while continuation_pending(logical, true) {
                 let Some(j) = self.next_nonblank(self.idx) else {
                     break;
                 };
@@ -457,6 +464,22 @@ impl Transpiler {
                 self.out.push_str(";\n");
             }
             return Ok(());
+        }
+
+        // A leaf directive (e.g. `@import`, `@return`, `@extend`, `@charset`)
+        // may not have anything indented beneath it.
+        if let Some(name) = forbids_indented_child(logical) {
+            if let Some(i) = self.next_nonblank(self.idx) {
+                if self.lines[i].indent > indent {
+                    return Err(Error::at(
+                        format!("Nothing may be indented beneath a @{name} rule."),
+                        Pos {
+                            line: self.lines[i].line,
+                            col: self.lines[i].indent + 1,
+                        },
+                    ));
+                }
+            }
         }
 
         // Whether this logical line wants a brace block (a rule / directive) or
@@ -562,11 +585,25 @@ fn directive_prelude_can_span(logical: &str) -> bool {
                 | "extend"
                 | "use"
                 | "forward"
-                | "import"
                 | "at-root"
                 | "content",
         )
     )
+}
+
+/// If `logical` is a leaf directive that forbids anything indented beneath it,
+/// return its keyword (without the `@`). dart-sass: `@import`, `@charset`,
+/// `@return`, `@extend`, `@error`, `@warn`, `@debug` and `@content` take no
+/// child block. (`@use`/`@forward` permit a continued prelude, handled
+/// separately, but no body either.)
+fn forbids_indented_child(logical: &str) -> Option<String> {
+    match directive_name(logical).as_deref() {
+        Some(
+            name @ ("import" | "charset" | "return" | "extend" | "error" | "warn" | "debug" | "content"
+            | "use" | "forward"),
+        ) => Some(name.to_string()),
+        _ => None,
+    }
 }
 
 /// Whether `c` is an operator/structural character that, when it ends a prelude
@@ -736,13 +773,16 @@ fn empty_form(logical: &str) -> EmptyForm {
 /// Whether a logical line, as assembled so far, needs another physical line to
 /// continue: an unbalanced bracket, an unterminated `#{…}` interpolation or
 /// `/* … */` loud comment, or a trailing `,` or `\`.
-fn continuation_pending(s: &str) -> bool {
+fn continuation_pending(s: &str, comma_continues: bool) -> bool {
     let st = scan_state(s);
     if st.bracket_depth > 0 || st.in_interp || st.in_loud_comment {
         return true;
     }
     let t = s.trim_end();
-    t.ends_with(',') || t.ends_with('\\')
+    if t.ends_with('\\') {
+        return true;
+    }
+    comma_continues && t.ends_with(',')
 }
 
 /// Strip a trailing `//` silent comment from a single line, respecting quoted
