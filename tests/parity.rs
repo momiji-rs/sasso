@@ -2975,3 +2975,16 @@ fn parity_selector_escape_canonicalization() {
     assert_parity(".u#{'\\\\28'} { a: b; }\n");
     assert_parity("\\64iv {a: b;}\n");
 }
+
+#[test]
+fn parity_variable_scoping_semi_global() {
+    // A rule-scoped assignment to a variable that exists only globally creates a
+    // local instead of rewriting the global; a control-flow scope is
+    // semi-global so it updates an existing enclosing variable but cannot create
+    // a global from inside a rule.
+    assert_parity("$x: root;\ndiv { $x: local; v: $x; }\nafter { x: $x; }\n");
+    assert_parity("div {\n  $x: 10;\n  span { $x: 20; }\n  v: $x;\n}\n");
+    assert_parity("$x: root;\ndiv {\n  @for $i from 1 through 1 { $x: looped; }\n  v: $x;\n}\nafter { x: $x; }\n");
+    assert_parity("$x: 0;\n@for $i from 1 through 3 { $x: $x + 1; }\nafter { x: $x; }\n");
+    assert_parity("div {\n  $y: 1;\n  @for $i from 1 through 3 { $y: $y + 5; y: $y; }\n  after: $y;\n}\n");
+}

@@ -258,6 +258,11 @@ pub(crate) struct EvalOptions<'a> {
 
 pub(crate) struct Evaluator<'a> {
     scopes: Vec<HashMap<String, Value>>,
+    /// Whether each scope in `scopes` is "semi-global" (dart-sass): a control
+    /// flow scope (`@for`/`@each`/`@while`/`@if`) that lets a fresh assignment
+    /// reach the global scope, but only when every enclosing scope up to the
+    /// root is itself semi-global. Rule/mixin/function scopes are not.
+    scope_semi_global: Vec<bool>,
     options: EvalOptions<'a>,
     /// Import paths currently being loaded, deepest last. Re-entering one is a
     /// load cycle (dart-sass "This file is already being loaded."); a path that
@@ -305,6 +310,9 @@ impl<'a> Evaluator<'a> {
     pub(crate) fn new(options: EvalOptions<'a>) -> Self {
         Evaluator {
             scopes: vec![HashMap::new()],
+            // The global scope is treated as semi-global so a top-level control
+            // flow scope (its child) becomes semi-global too.
+            scope_semi_global: vec![true],
             options,
             loading: Vec::new(),
             functions: HashMap::new(),
@@ -448,15 +456,55 @@ impl<'a> Evaluator<'a> {
         None
     }
 
+    /// Push a new scope. `semi_global` requests semi-global behavior (control
+    /// flow), which only takes effect when the current innermost scope is
+    /// already semi-global (dart-sass `Environment.scope`).
+    fn push_scope(&mut self, semi_global: bool) {
+        let effective = semi_global && self.scope_semi_global.last().copied().unwrap_or(false);
+        self.scopes.push(HashMap::new());
+        self.scope_semi_global.push(effective);
+    }
+
+    /// Push a pre-populated, non-semi-global scope (a mixin/function argument
+    /// frame).
+    fn push_scope_frame(&mut self, frame: HashMap<String, Value>) {
+        self.scopes.push(frame);
+        self.scope_semi_global.push(false);
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+        self.scope_semi_global.pop();
+    }
+
+    /// Assign a non-global variable (dart-sass `Environment.setVariable`). The
+    /// value updates the variable at the innermost scope where it already
+    /// exists; if it exists only in the global scope and the current scope is
+    /// not semi-global, a new local is created instead so a nested rule cannot
+    /// silently rewrite a global.
     fn assign(&mut self, name: &str, val: Value) {
-        for scope in self.scopes.iter_mut().rev() {
+        if self.scopes.len() == 1 {
+            if let Some(g) = self.scopes.first_mut() {
+                g.insert(name.to_string(), val);
+            }
+            return;
+        }
+        // Innermost scope index holding the variable (None if undeclared).
+        let mut index = None;
+        for (i, scope) in self.scopes.iter().enumerate().rev() {
             if scope.contains_key(name) {
-                scope.insert(name.to_string(), val);
-                return;
+                index = Some(i);
+                break;
             }
         }
-        if let Some(cur) = self.scopes.last_mut() {
-            cur.insert(name.to_string(), val);
+        let in_semi_global = self.scope_semi_global.last().copied().unwrap_or(false);
+        let target = match index {
+            Some(0) if !in_semi_global => self.scopes.len() - 1,
+            Some(i) => i,
+            None => self.scopes.len() - 1,
+        };
+        if let Some(scope) = self.scopes.get_mut(target) {
+            scope.insert(name.to_string(), val);
         }
     }
 
@@ -481,25 +529,12 @@ impl<'a> Evaluator<'a> {
 
     // ---- loop helpers ------------------------------------------------
 
-    /// Set a variable in the innermost scope (loop variables live there,
-    /// alongside the surroundings — flow control adds no scope).
+    /// Set a variable in the innermost scope. A loop pushes its own scope, so a
+    /// loop variable bound here lives in the loop's scope and is re-bound each
+    /// iteration (dart-sass `setLocalVariable`).
     fn set_local(&mut self, name: &str, val: Value) {
         if let Some(sc) = self.scopes.last_mut() {
             sc.insert(name.to_string(), val);
-        }
-    }
-
-    /// Restore (or clear) a loop variable to its value before the loop.
-    fn restore_local(&mut self, name: &str, saved: Option<Value>) {
-        if let Some(sc) = self.scopes.last_mut() {
-            match saved {
-                Some(v) => {
-                    sc.insert(name.to_string(), v);
-                }
-                None => {
-                    sc.remove(name);
-                }
-            }
         }
     }
 
@@ -550,12 +585,6 @@ impl<'a> Evaluator<'a> {
         for (i, v) in vars.iter().enumerate() {
             let val = elems.get(i).cloned().unwrap_or(Value::Null);
             self.set_local(v, val);
-        }
-    }
-
-    fn restore_each(&mut self, vars: &[String], saved: &[Option<Value>]) {
-        for (v, sv) in vars.iter().zip(saved) {
-            self.restore_local(v, sv.clone());
         }
     }
 
@@ -682,9 +711,9 @@ impl<'a> Evaluator<'a> {
     /// Call a user-defined `@function`, returning its `@return` value.
     fn call_function(&mut self, func: &Rc<Callable>, args: &[CallArg]) -> Result<Value, Error> {
         let frame = self.bind_args(&func.params, args, &func.name)?;
-        self.scopes.push(frame);
+        self.push_scope_frame(frame);
         let result = self.run_fn_body(&func.body);
-        self.scopes.pop();
+        self.pop_scope();
         match result? {
             // A bare slash-division returned from a function collapses to
             // its number (dart-sass `withoutSlash`); slashes nested in a
@@ -716,7 +745,10 @@ impl<'a> Evaluator<'a> {
                             Some(c) => self.eval_expr(c)?.is_truthy(),
                         };
                         if take {
-                            if let Some(v) = self.run_fn_body(&branch.body)? {
+                            self.push_scope(true);
+                            let result = self.run_fn_body(&branch.body);
+                            self.pop_scope();
+                            if let Some(v) = result? {
                                 return Ok(Some(v));
                             }
                             break;
@@ -732,7 +764,8 @@ impl<'a> Evaluator<'a> {
                 } => {
                     let start = self.eval_index(from)?;
                     let end = self.eval_index(to)?;
-                    let saved = self.scopes.last().and_then(|sc| sc.get(var).cloned());
+                    self.push_scope(true);
+                    let mut result = Ok(None);
                     for i in for_indices(start, end, *inclusive) {
                         self.set_local(
                             var,
@@ -741,38 +774,60 @@ impl<'a> Evaluator<'a> {
                                 unit: String::new(),
                             }),
                         );
-                        if let Some(v) = self.run_fn_body(body)? {
-                            self.restore_local(var, saved);
-                            return Ok(Some(v));
+                        result = self.run_fn_body(body);
+                        if matches!(result, Ok(None)) {
+                            continue;
                         }
+                        break;
                     }
-                    self.restore_local(var, saved);
+                    self.pop_scope();
+                    if let Some(v) = result? {
+                        return Ok(Some(v));
+                    }
                 }
                 Stmt::Each { vars, list, body } => {
                     let items = self.eval_each_items(list)?;
-                    let saved: Vec<Option<Value>> = vars
-                        .iter()
-                        .map(|v| self.scopes.last().and_then(|sc| sc.get(v).cloned()))
-                        .collect();
+                    self.push_scope(true);
+                    let mut result = Ok(None);
                     for item in items {
                         self.bind_each(vars, item);
-                        if let Some(v) = self.run_fn_body(body)? {
-                            self.restore_each(vars, &saved);
-                            return Ok(Some(v));
+                        result = self.run_fn_body(body);
+                        if matches!(result, Ok(None)) {
+                            continue;
                         }
+                        break;
                     }
-                    self.restore_each(vars, &saved);
+                    self.pop_scope();
+                    if let Some(v) = result? {
+                        return Ok(Some(v));
+                    }
                 }
                 Stmt::While { cond, body } => {
+                    self.push_scope(true);
+                    let mut result: Result<Option<Value>, Error> = Ok(None);
                     let mut guard = 0u32;
-                    while self.eval_expr(cond)?.is_truthy() {
-                        if let Some(v) = self.run_fn_body(body)? {
-                            return Ok(Some(v));
+                    loop {
+                        match self.eval_expr(cond) {
+                            Ok(v) if v.is_truthy() => {}
+                            Ok(_) => break,
+                            Err(e) => {
+                                result = Err(e);
+                                break;
+                            }
+                        }
+                        result = self.run_fn_body(body);
+                        if !matches!(result, Ok(None)) {
+                            break;
                         }
                         guard += 1;
                         if guard >= 100_000 {
-                            return Err(Error::unpositioned("@while exceeded 100000 iterations"));
+                            result = Err(Error::unpositioned("@while exceeded 100000 iterations"));
+                            break;
                         }
+                    }
+                    self.pop_scope();
+                    if let Some(v) = result? {
+                        return Ok(Some(v));
                     }
                 }
                 Stmt::Warn(e) => {
@@ -818,11 +873,11 @@ impl<'a> Evaluator<'a> {
             return Err(Error::unpositioned("Mixin doesn't accept a content block."));
         }
         let frame = self.bind_args(&mixin.params, args, &mixin.name)?;
-        self.scopes.push(frame);
+        self.push_scope_frame(frame);
         self.content_stack.push(content);
         let result = self.exec(&mixin.body, parents, sink);
         self.content_stack.pop();
-        self.scopes.pop();
+        self.pop_scope();
         result
     }
 
@@ -870,15 +925,21 @@ impl<'a> Evaluator<'a> {
                 Stmt::Rule(r) => self.eval_style_rule(r, parents, sink)?,
                 Stmt::If(branches) => {
                     // Evaluate conditions top to bottom; run the first match's
-                    // body into the same sink. Flow control adds no scope, so
-                    // its assignments are visible to the surroundings (Sass).
+                    // body in a fresh semi-global scope so an assignment to an
+                    // existing outer variable updates it (and can reach the
+                    // global scope when every enclosing scope is semi-global),
+                    // while a freshly declared variable stays local to the
+                    // branch (dart-sass `visitIf`).
                     for branch in branches {
                         let take = match &branch.cond {
                             None => true,
                             Some(c) => self.eval_expr(c)?.is_truthy(),
                         };
                         if take {
-                            self.exec(&branch.body, parents, sink)?;
+                            self.push_scope(true);
+                            let result = self.exec(&branch.body, parents, sink);
+                            self.pop_scope();
+                            result?;
                             break;
                         }
                     }
@@ -892,7 +953,11 @@ impl<'a> Evaluator<'a> {
                 } => {
                     let start = self.eval_index(from)?;
                     let end = self.eval_index(to)?;
-                    let saved = self.scopes.last().and_then(|sc| sc.get(var).cloned());
+                    // The loop body runs in its own semi-global scope: the loop
+                    // variable and any fresh assignments live there and vanish
+                    // when the loop ends (dart-sass `visitForRule`).
+                    self.push_scope(true);
+                    let mut result = Ok(());
                     for i in for_indices(start, end, *inclusive) {
                         self.set_local(
                             var,
@@ -901,33 +966,53 @@ impl<'a> Evaluator<'a> {
                                 unit: String::new(),
                             }),
                         );
-                        self.exec(body, parents, sink)?;
+                        result = self.exec(body, parents, sink);
+                        if result.is_err() {
+                            break;
+                        }
                     }
-                    self.restore_local(var, saved);
+                    self.pop_scope();
+                    result?;
                 }
                 Stmt::Each { vars, list, body } => {
                     let items = self.eval_each_items(list)?;
-                    let saved: Vec<Option<Value>> = vars
-                        .iter()
-                        .map(|v| self.scopes.last().and_then(|sc| sc.get(v).cloned()))
-                        .collect();
+                    self.push_scope(true);
+                    let mut result = Ok(());
                     for item in items {
                         self.bind_each(vars, item);
-                        self.exec(body, parents, sink)?;
-                    }
-                    for (v, sv) in vars.iter().zip(saved) {
-                        self.restore_local(v, sv);
-                    }
-                }
-                Stmt::While { cond, body } => {
-                    let mut guard = 0u32;
-                    while self.eval_expr(cond)?.is_truthy() {
-                        self.exec(body, parents, sink)?;
-                        guard += 1;
-                        if guard >= 100_000 {
-                            return Err(Error::unpositioned("@while exceeded 100000 iterations"));
+                        result = self.exec(body, parents, sink);
+                        if result.is_err() {
+                            break;
                         }
                     }
+                    self.pop_scope();
+                    result?;
+                }
+                Stmt::While { cond, body } => {
+                    self.push_scope(true);
+                    let mut result = Ok(());
+                    let mut guard = 0u32;
+                    loop {
+                        match self.eval_expr(cond) {
+                            Ok(v) if v.is_truthy() => {}
+                            Ok(_) => break,
+                            Err(e) => {
+                                result = Err(e);
+                                break;
+                            }
+                        }
+                        result = self.exec(body, parents, sink);
+                        if result.is_err() {
+                            break;
+                        }
+                        guard += 1;
+                        if guard >= 100_000 {
+                            result = Err(Error::unpositioned("@while exceeded 100000 iterations"));
+                            break;
+                        }
+                    }
+                    self.pop_scope();
+                    result?;
                 }
                 Stmt::FunctionDef(callable) => {
                     self.functions.insert(callable.name.clone(), Rc::clone(callable));
@@ -1012,7 +1097,7 @@ impl<'a> Evaluator<'a> {
             .filter(|s| !complex_selector_block_is_bogus(s))
             .cloned()
             .collect();
-        self.scopes.push(HashMap::new());
+        self.push_scope(false);
         let prev_selector = self.current_selector.replace(current.clone());
         let mut items: Vec<OutItem> = Vec::new();
         let mut nested: Vec<OutNode> = Vec::new();
@@ -1031,7 +1116,7 @@ impl<'a> Evaluator<'a> {
             r
         };
         self.current_selector = prev_selector;
-        self.scopes.pop();
+        self.pop_scope();
         result?;
         sink.emit_style_rule(nested);
         Ok(())
@@ -1116,7 +1201,7 @@ impl<'a> Evaluator<'a> {
     /// is nested under a style rule, bare declarations are wrapped in the
     /// enclosing selectors; at the document root they emit directly.
     fn eval_at_body(&mut self, stmts: &[Stmt], parents: &[String]) -> Result<Vec<OutNode>, Error> {
-        self.scopes.push(HashMap::new());
+        self.push_scope(false);
         let mut body: Vec<OutNode> = Vec::new();
         let result = if parents.is_empty() {
             let mut child = Sink::AtRoot(&mut body);
@@ -1141,7 +1226,7 @@ impl<'a> Evaluator<'a> {
             }
             res
         };
-        self.scopes.pop();
+        self.pop_scope();
         result?;
         Ok(body)
     }
@@ -1457,13 +1542,13 @@ impl<'a> Evaluator<'a> {
         body: &[Stmt],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
-        self.scopes.push(HashMap::new());
+        self.push_scope(false);
         let mut out: Vec<OutNode> = Vec::new();
         let res = {
             let mut child = Sink::AtRoot(&mut out);
             self.exec(body, &[], &mut child)
         };
-        self.scopes.pop();
+        self.pop_scope();
         res?;
         for node in out {
             sink.push_at_rule(node);
