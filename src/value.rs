@@ -893,9 +893,20 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
     let mut s = if n.fract() == 0.0 {
         format!("{n}")
     } else {
-        // Round to 10 decimal places via fixed formatting (correct at every
-        // magnitude), then re-emit the shortest decimal that round-trips.
-        let rounded: f64 = format!("{n:.10}").parse().unwrap_or(n);
+        // Round to 10 decimal places the way dart-sass does: scale by 1e10,
+        // round half away from zero (`f64::round`), then re-emit the shortest
+        // decimal that round-trips. `{n:.10}` rounds half to even, which
+        // disagrees with dart-sass on exact halfway digits (e.g. `1.5e-10`
+        // must become `0.0000000002`, not `0.0000000001`). Any value with a
+        // non-zero fractional part has magnitude below `2^53`, so `n * 1e10`
+        // (< ~9e25) never overflows; the `is_finite` guard is defensive.
+        let factor = 1e10_f64;
+        let scaled = n * factor;
+        let rounded = if scaled.is_finite() {
+            scaled.round() / factor
+        } else {
+            format!("{n:.10}").parse().unwrap_or(n)
+        };
         format!("{rounded}")
     };
     if s == "-0" {
@@ -1101,6 +1112,11 @@ mod tests {
         assert_eq!(fmt_num(123456.78901234567, false), "123456.7890123457");
         // Below the tenth decimal place rounds away entirely.
         assert_eq!(fmt_num(1e-11, false), "0");
+        // Halfway digits round away from zero (dart-sass), not to even.
+        assert_eq!(fmt_num(0.00000000015, false), "0.0000000002");
+        assert_eq!(fmt_num(0.00000000035, false), "0.0000000004");
+        assert_eq!(fmt_num(0.99999999995, false), "1");
+        assert_eq!(fmt_num(0.30000000005, false), "0.3000000001");
     }
 
     #[test]

@@ -2050,3 +2050,23 @@ fn unary_plus_and_minus_on_non_numbers() {
     // A `-` glued to an identifier stays part of the identifier.
     assert_eq!(ours("a {b: -webkit-box}\n"), "a {\n  b: -webkit-box;\n}\n");
 }
+
+#[test]
+fn number_rounds_half_away_from_zero_at_tenth_place() {
+    // dart-sass rounds to 10 decimal places half away from zero, not half to
+    // even. `1.5e-10` -> `0.0000000002`, `0.99999999995` -> `1`, and
+    // `0.30000000005` -> `0.3000000001`. Verified byte-for-byte against
+    // `npx sass --no-source-map --stdin`.
+    assert_eq!(ours("a {b: 0.00000000015}\n"), "a {\n  b: 0.0000000002;\n}\n");
+    assert_eq!(ours("a {b: 0.00000000035}\n"), "a {\n  b: 0.0000000004;\n}\n");
+    assert_eq!(ours("a {b: 0.99999999995}\n"), "a {\n  b: 1;\n}\n");
+    assert_eq!(ours("a {b: 1.99999999995}\n"), "a {\n  b: 2;\n}\n");
+    assert_eq!(ours("a {b: 0.30000000005}\n"), "a {\n  b: 0.3000000001;\n}\n");
+    // Values that already round-tripped correctly must stay unchanged.
+    assert_eq!(ours("a {b: 0.0000000001}\n"), "a {\n  b: 0.0000000001;\n}\n");
+    assert_eq!(ours("a {b: 0.1}\n"), "a {\n  b: 0.1;\n}\n");
+    assert_eq!(
+        ours("a {b: 123456789.12345678905}\n"),
+        "a {\n  b: 123456789.12345679;\n}\n"
+    );
+}
