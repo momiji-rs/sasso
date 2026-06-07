@@ -3321,6 +3321,14 @@ impl Parser {
     }
 
     fn unary(&mut self) -> Result<Expr, Error> {
+        // Inside a calculation a unary `+`/`-` is only legal as the sign of a
+        // numeric literal written tight against the digit (`-1px`, `+3`,
+        // `2 * +3`). Any other unary form — separated by whitespace (`- 1px`),
+        // or applied to a parenthesis/variable (`-(1px)`, `-$x`) — is rejected
+        // by dart-sass ("This expression can't be used in a calculation."). A
+        // tight `-`/`+` before an identifier (`-var(--c)`, `-webkit-x`) is part
+        // of the identifier and is handled by `primary`, not here.
+        let in_calc = self.calc_depth > 0;
         match self.sc.peek() {
             Some('-') => {
                 // `-` directly before a number/paren/variable is numeric
@@ -3331,6 +3339,12 @@ impl Parser {
                 // falls through to `primary`.
                 if matches!(self.sc.peek_at(1), Some(c) if c.is_ascii_digit() || c == '.' || c == '$' || c == '(')
                 {
+                    if in_calc && matches!(self.sc.peek_at(1), Some('$') | Some('(')) {
+                        return Err(Error::at(
+                            "This expression can't be used in a calculation.",
+                            self.sc.position(),
+                        ));
+                    }
                     self.sc.bump();
                     let operand = self.unary()?;
                     return Ok(Expr::Unary {
@@ -3339,6 +3353,12 @@ impl Parser {
                     });
                 }
                 if matches!(self.sc.peek_at(1), Some(c) if c.is_whitespace()) {
+                    if in_calc {
+                        return Err(Error::at(
+                            "This expression can't be used in a calculation.",
+                            self.sc.position(),
+                        ));
+                    }
                     self.sc.bump();
                     self.skip_ws_inline();
                     let operand = self.unary()?;
@@ -3356,6 +3376,22 @@ impl Parser {
                 // no following operand falls through to `primary` (which reports
                 // the error).
                 let next = self.sc.peek_at(1);
+                if in_calc {
+                    // Only a tight `+` against a numeric literal is a legal sign
+                    // inside a calculation; everything else is rejected.
+                    if matches!(next, Some(c) if c.is_ascii_digit() || c == '.') {
+                        self.sc.bump();
+                        let operand = self.unary()?;
+                        return Ok(Expr::Unary {
+                            op: UnOp::Plus,
+                            operand: Box::new(operand),
+                        });
+                    }
+                    return Err(Error::at(
+                        "This expression can't be used in a calculation.",
+                        self.sc.position(),
+                    ));
+                }
                 let starts_operand = matches!(next, Some(c)
                     if c.is_ascii_digit()
                         || c == '.'

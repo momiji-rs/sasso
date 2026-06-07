@@ -2874,3 +2874,31 @@ fn parity_unary_on_unresolved_calculation_errors() {
     assert!(compile("a {b: -(calc(var(--c)))}\n", &Options::default()).is_err());
     assert_parity("a {b: -calc(1px)}\n");
 }
+
+#[test]
+fn parity_calc_unary_operator() {
+    // Inside a calculation only a tight sign on a numeric literal is legal; a
+    // whitespace-separated or parenthesised/variable unary `+`/`-` is rejected.
+    for src in [
+        "a {b: calc(+ 1px)}\n",
+        "a {b: calc(- 1px)}\n",
+        "a {b: calc(1px + - 2px)}\n",
+        "a {b: calc(-(1px))}\n",
+        "a {b: calc(+(1px))}\n",
+        "a {b: calc(-(1 + 2))}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected calc unary operator to error: {src}"
+        );
+    }
+    assert_parity(concat!(
+        "a {\n",
+        "  k1: calc(+1px);\n",
+        "  k2: calc(-1px);\n",
+        "  k3: calc(2 * +3);\n",
+        "  k4: calc(2 + +3);\n",
+        "  k5: calc(-var(--c));\n",
+        "}\n",
+    ));
+}
