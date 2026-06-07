@@ -1154,3 +1154,12 @@ fn calc_name_is_case_insensitive() {
     assert_parity("a { b: CALC(1px + 1%); }\n");
     assert_parity("a { b: -webkit-calc(1px + 1%); }\n");
 }
+
+#[test]
+fn slash_chain_keeps_spelling_through_special_value() {
+    // A slash-division operand keeps its chained spelling when the other side
+    // of a `/` is a special value: `1 / 2 / foo()` -> `1/2/foo()`, not the
+    // collapsed quotient `0.5/foo()`.
+    assert_parity("a { b: 1 / 2 / foo(); }\n");
+    assert_parity("a { b: 1/2/foo(); }\n");
+}

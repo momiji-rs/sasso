@@ -1881,19 +1881,20 @@ fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Value, Error> {
             ));
         }
     }
-    match (l.without_slash(), r.without_slash()) {
+    match (l.clone().without_slash(), r.clone().without_slash()) {
         (Value::Number(a), Value::Number(b)) => divide_numbers(&a, &b, pos),
         // dart-sass: `SassColor.dividedBy` throws "Undefined operation"; a
         // color on the *left* of `/` is the one error case here.
-        (l @ Value::Color(_), r) => Err(undefined_op(&l, "/", &r, pos)),
+        (lv @ Value::Color(_), rv) => Err(undefined_op(&lv, "/", &rv, pos)),
         // Every other left/right pair (a calculation, `var()`, unquoted
         // string, list, `true`/`null`, or a number divided by a non-number)
         // forms a slash-separated unquoted string `left/right`, mirroring
         // dart-sass's default `Value.dividedBy`. This is what lets a `/` next
         // to a `calc()`/`var()` special value survive (and what carries the
-        // alpha slash through `rgb(1 2 var(--x) / 0.4)`).
-        (l, r) => Ok(Value::Str(SassStr {
-            text: format!("{}/{}", l.to_css(false), r.to_css(false)),
+        // alpha slash through `rgb(1 2 var(--x) / 0.4)`). A slash-division
+        // operand keeps its chained spelling (`1/2/foo()`, not `0.5/foo()`).
+        _ => Ok(Value::Str(SassStr {
+            text: format!("{}/{}", slash_repr(&l), slash_repr(&r)),
             quoted: false,
         })),
     }
