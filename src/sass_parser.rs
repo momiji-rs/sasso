@@ -286,29 +286,38 @@ impl Transpiler {
                 }
                 let next_content = self.lines[self.idx].content.clone();
                 let next_indent_str = self.lines[self.idx].indent_str.clone();
+                let st = scan_state(&logical);
+                // Inside an open interpolation or loud comment, the next line's
+                // text is captured verbatim (a `//` there is not a comment).
+                let verbatim = st.in_interp || st.in_loud_comment;
                 if next_content.trim().is_empty() {
-                    if self.bracket_depth(&logical) > 0 {
-                        // A blank line inside brackets joins as a newline.
+                    if st.bracket_depth > 0 || verbatim {
+                        // A blank line inside brackets/interp/comment joins as a
+                        // newline.
                         logical.push('\n');
                         self.idx += 1;
                         continue;
                     }
                     break;
                 }
+                let joined = if verbatim {
+                    next_content.clone()
+                } else {
+                    strip_silent_comment(&next_content)
+                };
                 // Backslash continuation: drop the trailing backslash and join
                 // with a single space (the line "wraps").
                 if logical.ends_with('\\') {
                     logical.pop();
                     logical.push(' ');
-                    logical.push_str(strip_silent_comment(next_content.trim_start()).trim_start());
+                    logical.push_str(joined.trim_start());
                 } else {
-                    // Bracket / trailing-comma continuation: preserve the
-                    // newline and the line's original indentation so the SCSS
-                    // parser sees (and re-serializes) the same whitespace as
-                    // dart-sass.
+                    // Bracket / trailing-comma / interp / comment continuation:
+                    // preserve the newline and the line's original indentation so
+                    // the SCSS parser sees the same whitespace as dart-sass.
                     logical.push('\n');
                     logical.push_str(&next_indent_str);
-                    logical.push_str(&strip_silent_comment(&next_content));
+                    logical.push_str(&joined);
                 }
                 self.idx += 1;
                 continue;
@@ -316,12 +325,6 @@ impl Transpiler {
             break;
         }
         Ok((logical, indent))
-    }
-
-    /// Net bracket depth (`(`+`[` minus `)`+`]`) of `s`, ignoring strings,
-    /// comments and interpolation.
-    fn bracket_depth(&self, s: &str) -> i32 {
-        bracket_depth(s)
     }
 
     /// While the directive prelude in `logical` is grammatically incomplete,
@@ -392,7 +395,31 @@ impl Transpiler {
         indent: usize,
         line_no: usize,
     ) -> Result<(), Error> {
-        let logical = logical.trim();
+        let mut logical = logical.trim();
+
+        // A single trailing `;` ends a statement and is tolerated; a `;` with
+        // further (non-comment) content after it means two statements share a
+        // line, which the indented syntax forbids. An explicit trailing `;`
+        // also means "no block" — even an otherwise block-owning directive
+        // (`@a b;`) is then a leaf statement.
+        let mut explicit_semicolon = false;
+        if let Some(semi) = find_top_level_semicolon(logical) {
+            let after = logical[semi + 1..].trim();
+            if !after.is_empty() {
+                let col = logical[..semi].chars().count();
+                return Err(Error::at(
+                    "multiple statements on one line are not supported in the indented syntax.".to_string(),
+                    Pos {
+                        line: line_no,
+                        col: indent + col + 1,
+                    },
+                ));
+            }
+            // Drop the harmless trailing `;` (the transform re-adds the right
+            // terminator).
+            logical = logical[..semi].trim_end();
+            explicit_semicolon = true;
+        }
 
         // `=name(args)` defines a mixin; `+name(args)` includes one.
         if let Some(rest) = logical.strip_prefix('=') {
@@ -422,18 +449,6 @@ impl Transpiler {
             return Ok(());
         }
 
-        // Reject `.sass`-illegal punctuation up front to surface dart-sass-style
-        // errors (a literal `{` / `;` is not allowed in indented syntax).
-        if let Some(col) = illegal_punctuation(logical) {
-            return Err(Error::at(
-                "expected newline.".to_string(),
-                Pos {
-                    line: line_no,
-                    col: indent + col + 1,
-                },
-            ));
-        }
-
         // Whether this logical line wants a brace block (a rule / directive) or
         // a `;` terminator (a declaration / leaf directive) is decided after we
         // know whether a child block follows. We emit the prelude, then either a
@@ -441,7 +456,12 @@ impl Transpiler {
         // the statement kind (an empty `{}` for block constructs, `;` otherwise).
         self.out.push_str(logical);
         if !self.parse_child_into_braces(indent)? {
-            match empty_form(logical) {
+            let form = if explicit_semicolon {
+                EmptyForm::Semicolon
+            } else {
+                empty_form(logical)
+            };
+            match form {
                 EmptyForm::Braces => self.out.push_str(" {}\n"),
                 EmptyForm::Semicolon => self.out.push_str(";\n"),
             }
@@ -703,9 +723,11 @@ fn empty_form(logical: &str) -> EmptyForm {
 }
 
 /// Whether a logical line, as assembled so far, needs another physical line to
-/// continue: an unbalanced bracket, or a trailing `,` or `\`.
+/// continue: an unbalanced bracket, an unterminated `#{…}` interpolation or
+/// `/* … */` loud comment, or a trailing `,` or `\`.
 fn continuation_pending(s: &str) -> bool {
-    if bracket_depth(s) > 0 {
+    let st = scan_state(s);
+    if st.bracket_depth > 0 || st.in_interp || st.in_loud_comment {
         return true;
     }
     let t = s.trim_end();
@@ -785,8 +807,25 @@ fn strip_silent_comment(s: &str) -> String {
 /// Net bracket depth of `s` ignoring strings, `//`/`/* */` comments and `#{}`
 /// interpolation.
 fn bracket_depth(s: &str) -> i32 {
+    scan_state(s).bracket_depth
+}
+
+/// The "openness" of a logical line: how many brackets remain open, whether the
+/// line ends inside an unterminated `#{…}` interpolation, and whether it ends
+/// inside an unterminated `/* … */` loud comment.
+struct ScanState {
+    bracket_depth: i32,
+    in_interp: bool,
+    in_loud_comment: bool,
+}
+
+/// Scan `s` once, tracking strings, `//`/`/* */` comments and `#{…}`
+/// interpolation, to report its closing state.
+fn scan_state(s: &str) -> ScanState {
     let cs: Vec<char> = s.chars().collect();
     let mut depth = 0i32;
+    // Stack of `#{` interpolation brace depths still open.
+    let mut interp_depth = 0i32;
     let mut i = 0;
     while i < cs.len() {
         let c = cs[i];
@@ -807,28 +846,35 @@ fn bracket_depth(s: &str) -> i32 {
                 while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
                     i += 1;
                 }
-                i += 1;
+                if i + 1 >= cs.len() && !(cs.get(i) == Some(&'*') && cs.get(i + 1) == Some(&'/')) {
+                    // Reached end of line without closing the loud comment.
+                    return ScanState {
+                        bracket_depth: depth,
+                        in_interp: interp_depth > 0,
+                        in_loud_comment: true,
+                    };
+                }
+                i += 2;
+                continue;
             }
             '#' if cs.get(i + 1) == Some(&'{') => {
                 i += 2;
-                let mut d = 1;
-                while i < cs.len() && d > 0 {
-                    match cs[i] {
-                        '{' => d += 1,
-                        '}' => d -= 1,
-                        _ => {}
-                    }
-                    i += 1;
-                }
+                interp_depth += 1;
                 continue;
             }
+            '{' if interp_depth > 0 => interp_depth += 1,
+            '}' if interp_depth > 0 => interp_depth -= 1,
             '(' | '[' => depth += 1,
             ')' | ']' => depth -= 1,
             _ => {}
         }
         i += 1;
     }
-    depth
+    ScanState {
+        bracket_depth: depth,
+        in_interp: interp_depth > 0,
+        in_loud_comment: false,
+    }
 }
 
 /// Find the byte index of the top-level declaration colon in `logical` (the
@@ -891,31 +937,53 @@ fn find_decl_colon(logical: &str) -> Option<usize> {
     None
 }
 
-/// If `logical` contains a `.sass`-illegal `{` or `;` at top level (outside
-/// strings/brackets/interpolation), return its char column (0-based). The
-/// indented syntax never uses braces or semicolons; their appearance is an
-/// error. A `;` is permitted only as the harmless `@content;` / trailing form
-/// — but dart-sass errors on a bare `;`, so we report it too.
-fn illegal_punctuation(logical: &str) -> Option<usize> {
+/// Byte index of the first top-level `;` in `logical` (outside strings,
+/// brackets, `#{…}` interpolation and `/* */` comments), or `None`. A single
+/// trailing `;` ends a statement; a `;` with further content is "multiple
+/// statements on one line", which the indented syntax forbids.
+fn find_top_level_semicolon(logical: &str) -> Option<usize> {
     let cs: Vec<char> = logical.chars().collect();
     let mut paren = 0i32;
     let mut bracket = 0i32;
+    let mut byte = 0usize;
     let mut i = 0;
     while i < cs.len() {
         let c = cs[i];
         match c {
             '"' | '\'' => {
                 let q = c;
+                byte += c.len_utf8();
                 i += 1;
                 while i < cs.len() && cs[i] != q {
-                    if cs[i] == '\\' {
+                    if cs[i] == '\\' && i + 1 < cs.len() {
+                        byte += cs[i].len_utf8();
                         i += 1;
                     }
+                    byte += cs[i].len_utf8();
                     i += 1;
                 }
+                if i < cs.len() {
+                    byte += cs[i].len_utf8();
+                    i += 1;
+                }
+                continue;
             }
             '/' if cs.get(i + 1) == Some(&'/') => break,
+            '/' if cs.get(i + 1) == Some(&'*') => {
+                byte += 2;
+                i += 2;
+                while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
+                    byte += cs[i].len_utf8();
+                    i += 1;
+                }
+                if i + 1 < cs.len() {
+                    byte += 2;
+                    i += 2;
+                }
+                continue;
+            }
             '#' if cs.get(i + 1) == Some(&'{') => {
+                byte += c.len_utf8() + '{'.len_utf8();
                 i += 2;
                 let mut d = 1;
                 while i < cs.len() && d > 0 {
@@ -924,6 +992,7 @@ fn illegal_punctuation(logical: &str) -> Option<usize> {
                         '}' => d -= 1,
                         _ => {}
                     }
+                    byte += cs[i].len_utf8();
                     i += 1;
                 }
                 continue;
@@ -932,10 +1001,11 @@ fn illegal_punctuation(logical: &str) -> Option<usize> {
             ')' => paren -= 1,
             '[' => bracket += 1,
             ']' => bracket -= 1,
+            ';' if paren == 0 && bracket == 0 => return Some(byte),
             _ => {}
         }
+        byte += c.len_utf8();
         i += 1;
     }
-    let _ = (paren, bracket);
     None
 }
