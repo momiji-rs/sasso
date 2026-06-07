@@ -67,6 +67,10 @@ pub(crate) enum Stmt {
         prelude: Vec<TplPiece>,
         body: Option<Vec<Stmt>>,
     },
+    /// `@media <media-query-list> { body }`. The query is parsed into a
+    /// structured form so SassScript inside feature values is resolved and the
+    /// query is re-serialized (and bubbled/merged) exactly like dart-sass.
+    Media { query: MediaQueryList, body: Vec<Stmt> },
     /// `@at-root [query] { body }` — runs the body with the parent selector
     /// reset to the document root.
     AtRoot {
@@ -222,4 +226,65 @@ pub(crate) enum BinOp {
 pub(crate) enum UnOp {
     Neg,
     Not,
+}
+
+// ---- media queries -----------------------------------------------------
+
+/// A `@media` prelude: a comma-separated list of media queries.
+pub(crate) struct MediaQueryList {
+    pub queries: Vec<MediaQuery>,
+}
+
+/// One media query: either a media-type form (`[not|only]? <type> [and
+/// <cond>]*`) or a condition-only form (`<cond> [<and|or> <cond>]*`).
+pub(crate) enum MediaQuery {
+    /// `[modifier]? <type> [and <cond>]*`. The modifier (`not`/`only`,
+    /// already lowercased) and type may contain interpolation.
+    Type {
+        modifier: Option<String>,
+        mtype: Vec<TplPiece>,
+        conditions: Vec<MediaInParens>,
+    },
+    /// `<cond> [<and|or> <cond>]*`.
+    Condition {
+        conditions: Vec<MediaInParens>,
+        conjunction: Conjunction,
+    },
+}
+
+/// `and` / `or`, the conjunction joining media conditions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Conjunction {
+    And,
+    Or,
+}
+
+/// A single "media in parens": one operand of a media condition.
+pub(crate) enum MediaInParens {
+    /// `(<feature>)` — serialized wrapped in parentheses.
+    Feature(MediaFeature),
+    /// `not <media-in-parens>` — serialized without wrapping parentheses.
+    Not(Box<MediaInParens>),
+    /// `(<cond> <and|or> <cond>…)` — a parenthesised sub-condition group,
+    /// serialized keeping its parentheses.
+    Group {
+        conditions: Vec<MediaInParens>,
+        conjunction: Conjunction,
+    },
+    /// Raw interpolation spliced into the query verbatim, e.g.
+    /// `(a) and #{"(b) and (c)"}`.
+    Interp(Expr),
+}
+
+/// The interior of a single `(...)` media feature.
+pub(crate) enum MediaFeature {
+    /// `(<name>)` or `(<name>: <value>)`.
+    Decl { name: Expr, value: Option<Expr> },
+    /// A range feature: `<first> <op1> <second> [<op2> <third>]`.
+    Range {
+        first: Expr,
+        op1: String,
+        second: Expr,
+        rest: Option<(String, Expr)>,
+    },
 }

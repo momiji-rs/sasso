@@ -8,8 +8,8 @@
 use std::rc::Rc;
 
 use crate::ast::{
-    BinOp, CallArg, Callable, Declaration, Expr, IfBranch, Param, ParamList, Rule, Stmt, Stylesheet,
-    TplPiece, UnOp, VarDecl,
+    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfBranch, MediaFeature, MediaInParens,
+    MediaQuery, MediaQueryList, Param, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Scanner;
@@ -45,6 +45,40 @@ fn trim_prelude(pieces: Vec<TplPiece>) -> Vec<TplPiece> {
         }
     }
     pieces
+}
+
+/// Whether a parsed media identifier template is exactly the plain keyword
+/// `kw` (case-insensitively). Interpolation never matches a keyword.
+fn media_ident_is(pieces: &[TplPiece], kw: &str) -> bool {
+    match media_ident_plain(pieces) {
+        Some(s) => s.eq_ignore_ascii_case(kw),
+        None => false,
+    }
+}
+
+/// The plain text of a media identifier template, or `None` if it contains
+/// interpolation.
+fn media_ident_plain(pieces: &[TplPiece]) -> Option<&str> {
+    match pieces {
+        [TplPiece::Lit(s)] => Some(s),
+        [] => Some(""),
+        _ => None,
+    }
+}
+
+/// Whether two range comparison operators form a valid range: both must point
+/// the same direction (`<`/`<=` then `<`/`<=`, or `>`/`>=` then `>`/`>=`), and
+/// neither may be `=`.
+fn range_ops_compatible(op1: &str, op2: &str) -> bool {
+    let dir = |op: &str| match op {
+        "<" | "<=" => Some(true),
+        ">" | ">=" => Some(false),
+        _ => None,
+    };
+    match (dir(op1), dir(op2)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 struct Parser {
@@ -369,6 +403,7 @@ impl Parser {
             "debug" => self.parse_message(MessageKind::Debug),
             "error" => self.parse_message(MessageKind::Error),
             "at-root" => self.parse_at_root(),
+            "media" => self.parse_media(),
             "keyframes" | "-webkit-keyframes" | "-moz-keyframes" | "-o-keyframes" | "-ms-keyframes" => {
                 self.parse_keyframes(name)
             }
@@ -444,6 +479,454 @@ impl Parser {
             None
         };
         Ok(Stmt::AtRule { name, prelude, body })
+    }
+
+    // ---- @media -----------------------------------------------------
+
+    /// Parse `@media <media-query-list> { body }`. The query is parsed into a
+    /// structured form: a comma list of queries, each a media-type form
+    /// (`[not|only]? <type> (and <cond>)*`) or a condition form (one or more
+    /// parenthesised conditions joined by `and`/`or`). SassScript expressions
+    /// inside feature values are kept as `Expr`s for eval-time resolution.
+    /// Malformed queries are rejected, matching dart-sass.
+    fn parse_media(&mut self) -> Result<Stmt, Error> {
+        let query = self.parse_media_query_list()?;
+        let body = self.parse_braced_body()?;
+        Ok(Stmt::Media { query, body })
+    }
+
+    /// Skip whitespace and `/* */` / `//` comments (allowed between media
+    /// query tokens). Reports whether any whitespace or comment was consumed.
+    fn skip_media_ws(&mut self) -> bool {
+        let mut any = false;
+        loop {
+            match self.sc.peek() {
+                Some(c) if c.is_whitespace() => {
+                    self.sc.bump();
+                    any = true;
+                }
+                Some('/') if self.sc.peek_at(1) == Some('*') => {
+                    self.sc.bump();
+                    self.sc.bump();
+                    while let Some(c) = self.sc.peek() {
+                        if c == '*' && self.sc.peek_at(1) == Some('/') {
+                            self.sc.bump();
+                            self.sc.bump();
+                            break;
+                        }
+                        self.sc.bump();
+                    }
+                    any = true;
+                }
+                Some('/') if self.sc.peek_at(1) == Some('/') => {
+                    while let Some(c) = self.sc.peek() {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.sc.bump();
+                    }
+                    any = true;
+                }
+                _ => break,
+            }
+        }
+        any
+    }
+
+    fn parse_media_query_list(&mut self) -> Result<MediaQueryList, Error> {
+        let mut queries = Vec::new();
+        loop {
+            self.skip_media_ws();
+            queries.push(self.parse_media_query()?);
+            self.skip_media_ws();
+            if self.sc.eat(',') {
+                continue;
+            }
+            break;
+        }
+        Ok(MediaQueryList { queries })
+    }
+
+    /// Parse one media query (dart-sass `_mediaQuery`).
+    fn parse_media_query(&mut self) -> Result<MediaQuery, Error> {
+        // Condition-only form: a leading `(` (a media-in-parens).
+        if self.sc.peek() == Some('(') {
+            let first = self.parse_media_in_parens()?;
+            let (conditions, conjunction) = self.parse_media_logic_sequence(first)?;
+            return Ok(MediaQuery::Condition {
+                conditions,
+                conjunction,
+            });
+        }
+
+        let ident1 = self.parse_media_identifier()?;
+        // `not (...)` → condition form (only when `not` is a raw keyword and a
+        // media-in-parens follows rather than another identifier). dart-sass
+        // requires whitespace after `not`.
+        if media_ident_is(&ident1, "not") {
+            self.parse_media_keyword_whitespace()?;
+            if !self.looking_at_media_identifier() {
+                let inner = self.parse_media_or_interp()?;
+                let first = MediaInParens::Not(Box::new(inner));
+                let (conditions, conjunction) = self.parse_media_logic_sequence(first)?;
+                return Ok(MediaQuery::Condition {
+                    conditions,
+                    conjunction,
+                });
+            }
+        }
+        self.skip_media_ws();
+        if !self.looking_at_media_identifier() {
+            // `@media screen { … }` — bare media type.
+            return Ok(MediaQuery::Type {
+                modifier: None,
+                mtype: ident1,
+                conditions: Vec::new(),
+            });
+        }
+        let ident2 = self.parse_media_identifier()?;
+        let (modifier, mtype) = if media_ident_is(&ident2, "and") {
+            // `@media screen and …` — ident1 is the type, "and" begins the
+            // condition sequence.
+            (None, ident1)
+        } else {
+            self.skip_media_ws();
+            // `@media only screen [and …]` — ident1 is the modifier.
+            let modifier = media_ident_plain(&ident1).map(|s| s.to_ascii_lowercase());
+            if !self.try_media_keyword("and") {
+                return Ok(MediaQuery::Type {
+                    modifier,
+                    mtype: ident2,
+                    conditions: Vec::new(),
+                });
+            }
+            (modifier, ident2)
+        };
+        // We have consumed `and`; parse the condition sequence (and-only).
+        let conditions = self.parse_media_and_conditions()?;
+        Ok(MediaQuery::Type {
+            modifier,
+            mtype,
+            conditions,
+        })
+    }
+
+    /// After a leading condition, parse the rest of an `and`/`or` sequence.
+    /// All conjunctions in one condition must match (no mixing `and`/`or`).
+    fn parse_media_logic_sequence(
+        &mut self,
+        first: MediaInParens,
+    ) -> Result<(Vec<MediaInParens>, Conjunction), Error> {
+        let mut conditions = vec![first];
+        let mut conjunction = Conjunction::And;
+        let mut chosen: Option<Conjunction> = None;
+        loop {
+            let mark = self.sc.mark();
+            self.skip_media_ws();
+            let next = if self.try_media_keyword("and") {
+                Conjunction::And
+            } else if self.try_media_keyword("or") {
+                Conjunction::Or
+            } else {
+                self.sc.reset(mark);
+                break;
+            };
+            if let Some(prev) = chosen {
+                if prev != next {
+                    return Err(Error::at("expected \"{\".", self.sc.position()));
+                }
+            }
+            chosen = Some(next);
+            conjunction = next;
+            self.parse_media_keyword_whitespace()?;
+            conditions.push(self.parse_media_or_interp()?);
+        }
+        Ok((conditions, conjunction))
+    }
+
+    /// Parse one or more `and`-separated media-in-parens (used after a media
+    /// type's `and`). `or` is not allowed here. The first operand may be a
+    /// `not <media-in-parens>`, which terminates the query (no more conditions).
+    fn parse_media_and_conditions(&mut self) -> Result<Vec<MediaInParens>, Error> {
+        self.parse_media_keyword_whitespace()?;
+        // `<type> and not (<feature>)` — a single negated condition, nothing
+        // may follow it (matching dart-sass).
+        if self.try_media_keyword("not") {
+            self.parse_media_keyword_whitespace()?;
+            let inner = self.parse_media_or_interp()?;
+            return Ok(vec![MediaInParens::Not(Box::new(inner))]);
+        }
+        let mut conditions = vec![self.parse_media_or_interp()?];
+        loop {
+            let mark = self.sc.mark();
+            self.skip_media_ws();
+            if self.try_media_keyword("and") {
+                self.parse_media_keyword_whitespace()?;
+                conditions.push(self.parse_media_or_interp()?);
+            } else if self.try_media_keyword("or") {
+                // `or` after a media type's `and` chain is invalid.
+                return Err(Error::at("expected \"{\".", self.sc.position()));
+            } else {
+                self.sc.reset(mark);
+                break;
+            }
+        }
+        Ok(conditions)
+    }
+
+    /// Parse a `_mediaOrInterp`: a raw `#{…}` interpolation operand or a single
+    /// `(...)` media-in-parens.
+    fn parse_media_or_interp(&mut self) -> Result<MediaInParens, Error> {
+        self.skip_media_ws();
+        if self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{') {
+            self.sc.bump();
+            self.sc.bump();
+            let e = self.parse_value()?;
+            self.skip_ws_inline();
+            if !self.sc.eat('}') {
+                return Err(Error::at("expected \"}\"", self.sc.position()));
+            }
+            return Ok(MediaInParens::Interp(e));
+        }
+        self.parse_media_in_parens()
+    }
+
+    /// Parse a single media-in-parens (dart-sass `_mediaInParens`): `(feature)`,
+    /// `(not <in-parens>)` → `not <in-parens>`, `((cond) and/or (cond)…)` group,
+    /// or a raw `#{…}` interpolation operand.
+    fn parse_media_in_parens(&mut self) -> Result<MediaInParens, Error> {
+        self.skip_media_ws();
+        // A raw interpolation operand is spliced verbatim.
+        if self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{') {
+            self.sc.bump();
+            self.sc.bump();
+            let e = self.parse_value()?;
+            self.skip_ws_inline();
+            if !self.sc.eat('}') {
+                return Err(Error::at("expected \"}\"", self.sc.position()));
+            }
+            return Ok(MediaInParens::Interp(e));
+        }
+        if !self.sc.eat('(') {
+            return Err(Error::at(
+                "expected media condition in parentheses.",
+                self.sc.position(),
+            ));
+        }
+        self.skip_media_ws();
+        // `(not (...))` → `not (...)`: the wrapping parens are dropped.
+        if self.media_at_not_keyword() {
+            self.parse_media_identifier()?; // consume "not"
+            self.parse_media_keyword_whitespace()?;
+            let inner = self.parse_media_in_parens()?;
+            self.skip_media_ws();
+            if !self.sc.eat(')') {
+                return Err(Error::at("expected \")\".", self.sc.position()));
+            }
+            return Ok(MediaInParens::Not(Box::new(inner)));
+        }
+        // Nested parens → a sub-condition group, kept wrapped.
+        if self.sc.peek() == Some('(') {
+            let first = self.parse_media_in_parens()?;
+            let (conditions, conjunction) = self.parse_media_logic_sequence(first)?;
+            self.skip_media_ws();
+            if !self.sc.eat(')') {
+                return Err(Error::at("expected \")\".", self.sc.position()));
+            }
+            return Ok(MediaInParens::Group {
+                conditions,
+                conjunction,
+            });
+        }
+        // Otherwise a media feature: `<expr> [: <expr> | <op> <expr> [<op> <expr>]]`.
+        let feature = self.parse_media_feature()?;
+        self.skip_media_ws();
+        if !self.sc.eat(')') {
+            return Err(Error::at("expected \")\".", self.sc.position()));
+        }
+        Ok(MediaInParens::Feature(feature))
+    }
+
+    /// Whether the cursor is at a raw `not` keyword (used to start a nested
+    /// `(not (...))` group).
+    fn media_at_not_keyword(&self) -> bool {
+        let mut i = 0;
+        let mut word = String::new();
+        while let Some(c) = self.sc.peek_at(i) {
+            if is_ident_char(c) {
+                word.push(c);
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        word.eq_ignore_ascii_case("not")
+    }
+
+    /// Parse the interior of a single `(...)` media feature.
+    fn parse_media_feature(&mut self) -> Result<MediaFeature, Error> {
+        let first = self.media_expression()?;
+        self.skip_media_ws();
+        match self.sc.peek() {
+            Some(':') => {
+                self.sc.bump();
+                self.skip_media_ws();
+                let value = self.parse_value()?;
+                Ok(MediaFeature::Decl {
+                    name: first,
+                    value: Some(value),
+                })
+            }
+            Some('<') | Some('>') | Some('=') => {
+                let op1 = self.parse_media_comparison()?;
+                self.skip_media_ws();
+                let second = self.media_expression()?;
+                self.skip_media_ws();
+                let rest = match self.sc.peek() {
+                    Some('<') | Some('>') | Some('=') => {
+                        let op2 = self.parse_media_comparison()?;
+                        // A range must use a consistent direction. `=` may not
+                        // be the second operator either.
+                        if !range_ops_compatible(&op1, &op2) {
+                            return Err(Error::at("expected \")\".", self.sc.position()));
+                        }
+                        self.skip_media_ws();
+                        let third = self.media_expression()?;
+                        self.skip_media_ws();
+                        // A third comparison operator is invalid.
+                        if matches!(self.sc.peek(), Some('<') | Some('>') | Some('=')) {
+                            return Err(Error::at("expected \")\".", self.sc.position()));
+                        }
+                        Some((op2, third))
+                    }
+                    _ => None,
+                };
+                Ok(MediaFeature::Range {
+                    first,
+                    op1,
+                    second,
+                    rest,
+                })
+            }
+            _ => Ok(MediaFeature::Decl {
+                name: first,
+                value: None,
+            }),
+        }
+    }
+
+    /// Parse a comparison operator (`<`, `<=`, `>`, `>=`, `=`). The two-char
+    /// forms may not contain whitespace (`< =` is rejected).
+    fn parse_media_comparison(&mut self) -> Result<String, Error> {
+        match self.sc.peek() {
+            Some('=') => {
+                self.sc.bump();
+                Ok("=".to_string())
+            }
+            Some('<') | Some('>') => {
+                let c = self.sc.bump().unwrap_or('<');
+                if self.sc.peek() == Some('=') {
+                    self.sc.bump();
+                    Ok(format!("{c}="))
+                } else {
+                    Ok(c.to_string())
+                }
+            }
+            _ => Err(Error::at("Expected expression.", self.sc.position())),
+        }
+    }
+
+    /// Parse a media-feature expression (a SassScript expression that stops
+    /// before a top-level comparison operator: the additive level).
+    fn media_expression(&mut self) -> Result<Expr, Error> {
+        self.skip_media_ws();
+        // `=` directly here (e.g. after `<` with a space) is invalid.
+        if matches!(self.sc.peek(), Some('=')) {
+            return Err(Error::at("Expected expression.", self.sc.position()));
+        }
+        self.additive()
+    }
+
+    /// Parse an identifier/template that may include interpolation, used for a
+    /// media modifier or type. Stops at whitespace, `,`, `(`, `{`, or `;`.
+    fn parse_media_identifier(&mut self) -> Result<Vec<TplPiece>, Error> {
+        let mut pieces = Vec::new();
+        let mut lit = String::new();
+        loop {
+            match self.sc.peek() {
+                Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    if !lit.is_empty() {
+                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                    }
+                    self.sc.bump();
+                    self.sc.bump();
+                    let e = self.parse_value()?;
+                    self.skip_ws_inline();
+                    if !self.sc.eat('}') {
+                        return Err(Error::at("expected \"}\"", self.sc.position()));
+                    }
+                    pieces.push(TplPiece::Interp(e));
+                }
+                Some(c) if is_ident_char(c) => {
+                    lit.push(c);
+                    self.sc.bump();
+                }
+                _ => break,
+            }
+        }
+        if !lit.is_empty() {
+            pieces.push(TplPiece::Lit(lit));
+        }
+        if pieces.is_empty() {
+            return Err(Error::at("Expected identifier.", self.sc.position()));
+        }
+        Ok(pieces)
+    }
+
+    /// Whether the cursor is positioned at the start of a media identifier
+    /// (a letter, `-`, `_`, or interpolation) — used to distinguish a type
+    /// from a following condition.
+    fn looking_at_media_identifier(&self) -> bool {
+        match self.sc.peek() {
+            Some('#') if self.sc.peek_at(1) == Some('{') => true,
+            Some(c) => c.is_ascii_alphabetic() || c == '-' || c == '_',
+            None => false,
+        }
+    }
+
+    /// Consume the bare keyword `kw` (`and`/`or`) if it is next as a whole
+    /// identifier; restores the cursor and returns false otherwise. Matched
+    /// case-insensitively.
+    fn try_media_keyword(&mut self, kw: &str) -> bool {
+        let mark = self.sc.mark();
+        if !matches!(self.sc.peek(), Some(c) if c.is_ascii_alphabetic()) {
+            self.sc.reset(mark);
+            return false;
+        }
+        let mut word = String::new();
+        while matches!(self.sc.peek(), Some(c) if is_ident_char(c)) {
+            if let Some(c) = self.sc.bump() {
+                word.push(c);
+            }
+        }
+        if word.eq_ignore_ascii_case(kw) {
+            true
+        } else {
+            self.sc.reset(mark);
+            false
+        }
+    }
+
+    /// After a media `and`/`or`/`not` keyword, dart-sass requires whitespace
+    /// (or a comment) before the next operand: `and(b)` is an error.
+    fn parse_media_keyword_whitespace(&mut self) -> Result<(), Error> {
+        if !self.skip_media_ws() {
+            // An interpolation operand needs no space; `(` does.
+            if !(self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{')) {
+                return Err(Error::at("Expected whitespace.", self.sc.position()));
+            }
+        }
+        Ok(())
     }
 
     /// Parse a `@function name(params) { … }` or `@mixin name(params) { … }`.

@@ -289,3 +289,45 @@ fn parity_color_legacy_named_and_alpha() {
         "a {\n  b: lighten(red, 100%);\n  c: darken(red, 100%);\n  d: lighten(red, 14%);\n  e: mix(red, red);\n  f: mix(red, white, 50%);\n  g: rgba(red, 1);\n  h: rgba(#102030, 1);\n  i: rgba(red, 0.5);\n}\n",
     );
 }
+
+#[test]
+fn parity_media_query_grammar() {
+    // Logic operators, modifiers, ranges, nested parens, interpolation and
+    // SassScript inside feature values; an empty body produces no output.
+    assert_parity(concat!(
+        "$w: width;\n",
+        "@media (a) and (b) { x { y: z; } }\n",
+        "@media (a)or (b) { x { y: z; } }\n",
+        "@media not a { x { y: z; } }\n",
+        "@media not (a) { x { y: z; } }\n",
+        "@media only screen and (color) { x { y: z; } }\n",
+        "@media a AnD nOt (b) { x { y: z; } }\n",
+        "@media (not (a)) { x { y: z; } }\n",
+        "@media ((a) and (b)) { x { y: z; } }\n",
+        "@media (min-width: 100px + 50px) { x { y: z; } }\n",
+        "@media ($w < 600px) { x { y: z; } }\n",
+        "@media (50px + 50px < width < 600px) { x { y: z; } }\n",
+        "@media (a) and #{\"(b) and (c)\"} { x { y: z; } }\n",
+        "@media screen { }\n",
+        "@media screen, print { x { y: z; } }\n",
+    ));
+}
+
+#[test]
+fn media_rejects_malformed_queries() {
+    // dart-sass rejects these; sasso must error rather than pass them through.
+    for src in [
+        "@media a or (b) { x { y: z; } }\n",
+        "@media (a) and (b) or (c) { x { y: z; } }\n",
+        "@media a and { x { y: z; } }\n",
+        "@media not { x { y: z; } }\n",
+        "@media not(a) { x { y: z; } }\n",
+        "@media (a) and(b) { x { y: z; } }\n",
+        "@media (1 < width < 2 < 3) { x { y: z; } }\n",
+        "@media (1px > width < 2px) { x { y: z; } }\n",
+        "@media (width < = 100px) { x { y: z; } }\n",
+    ] {
+        let res = compile(src, &Options::default());
+        assert!(res.is_err(), "expected error for malformed media: {src}");
+    }
+}

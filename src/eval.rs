@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{
-    BinOp, CallArg, Callable, Declaration, Expr, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, MediaFeature, MediaInParens, MediaQuery,
+    MediaQueryList, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -44,6 +45,30 @@ pub(crate) enum OutNode {
         value: String,
         important: bool,
     },
+}
+
+/// A media query resolved to its final string components, ready to serialize
+/// and to merge with nested queries (dart-sass `CssMediaQuery`).
+#[derive(Clone, PartialEq, Eq)]
+struct ResolvedQuery {
+    /// `not`/`only`, already lowercased; `None` for a condition-only query.
+    modifier: Option<String>,
+    /// The media type (e.g. `screen`); `None` for a condition-only query.
+    mtype: Option<String>,
+    /// Serialized condition strings (e.g. `(a)`, `not (b)`, `((a) or (b))`).
+    conditions: Vec<String>,
+    /// Whether the conditions are joined by `and` (true) or `or` (false).
+    conjunction_and: bool,
+}
+
+/// The result of merging two media queries (dart-sass `MediaQueryMergeResult`).
+enum MergeResult {
+    /// Mutually exclusive — the merged query selects nothing.
+    Empty,
+    /// The merge can't be represented as a single query; keep them nested.
+    Unrepresentable,
+    /// A single merged query.
+    Query(ResolvedQuery),
 }
 
 /// An item inside a rule block.
@@ -165,6 +190,9 @@ pub(crate) struct Evaluator<'a> {
     mixins: HashMap<String, Rc<Callable>>,
     /// Stack of `@content` blocks, one per active `@include`.
     content_stack: Vec<Option<Rc<Vec<Stmt>>>>,
+    /// The resolved query list of the enclosing `@media` context (empty at the
+    /// document root). Used to merge nested `@media` queries.
+    media_queries: Vec<ResolvedQuery>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -176,6 +204,7 @@ impl<'a> Evaluator<'a> {
             functions: HashMap::new(),
             mixins: HashMap::new(),
             content_stack: Vec::new(),
+            media_queries: Vec::new(),
         }
     }
 
@@ -608,6 +637,9 @@ impl<'a> Evaluator<'a> {
                 Stmt::AtRule { name, prelude, body } => {
                     self.eval_at_rule(name, prelude, body.as_deref(), parents, sink)?;
                 }
+                Stmt::Media { query, body } => {
+                    self.eval_media(query, body, parents, sink)?;
+                }
                 Stmt::AtRoot { query, body } => {
                     self.eval_at_root(query.as_deref(), body, sink)?;
                 }
@@ -729,6 +761,159 @@ impl<'a> Evaluator<'a> {
         self.scopes.pop();
         result?;
         Ok(body)
+    }
+
+    /// Evaluate `@media`: resolve the query list (SassScript inside feature
+    /// values is evaluated), merge with any enclosing `@media`, run the body
+    /// carrying enclosing selectors inside, then emit the at-rule (which bubbles
+    /// to the document root). An empty body produces no output.
+    fn eval_media(
+        &mut self,
+        query: &MediaQueryList,
+        body: &[Stmt],
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        let queries = self.resolve_media_queries(query)?;
+
+        // Merge with the enclosing media context (dart-sass `_mergeMediaQueries`).
+        let merged = if self.media_queries.is_empty() {
+            None
+        } else {
+            match merge_media_query_lists(&self.media_queries, &queries) {
+                // Mutually exclusive everywhere — emit nothing.
+                Some(m) if m.is_empty() => return Ok(()),
+                other => other,
+            }
+        };
+
+        // Children see the merged queries when mergeable, else just our own.
+        let child_queries = merged.clone().unwrap_or_else(|| queries.clone());
+        // The emitted node carries the merged queries (when mergeable) and
+        // bubbles past the enclosing media; otherwise it stays nested.
+        let bubble_out = merged.is_some();
+        let node_queries = if bubble_out { &child_queries } else { &queries };
+        let prelude = serialize_media_queries(node_queries);
+
+        let saved = std::mem::replace(&mut self.media_queries, child_queries);
+        let out_body = self.eval_at_body(body, parents);
+        self.media_queries = saved;
+        let out_body = out_body?;
+
+        // An empty body produces no output.
+        if out_body.is_empty() {
+            return Ok(());
+        }
+
+        sink.push_at_rule(OutNode::AtRule {
+            name: "media".to_string(),
+            prelude,
+            body: out_body,
+            has_block: true,
+        });
+        Ok(())
+    }
+
+    /// Resolve a parsed media query list to its final string components,
+    /// evaluating SassScript inside feature values.
+    fn resolve_media_queries(&mut self, list: &MediaQueryList) -> Result<Vec<ResolvedQuery>, Error> {
+        let mut out = Vec::with_capacity(list.queries.len());
+        for q in &list.queries {
+            out.push(self.resolve_media_query(q)?);
+        }
+        Ok(out)
+    }
+
+    fn resolve_media_query(&mut self, q: &MediaQuery) -> Result<ResolvedQuery, Error> {
+        match q {
+            MediaQuery::Type {
+                modifier,
+                mtype,
+                conditions,
+            } => {
+                let mtype = self.eval_template(mtype)?;
+                let conditions = self.resolve_conditions(conditions)?;
+                Ok(ResolvedQuery {
+                    modifier: modifier.clone(),
+                    mtype: Some(mtype),
+                    conditions,
+                    conjunction_and: true,
+                })
+            }
+            MediaQuery::Condition {
+                conditions,
+                conjunction,
+            } => Ok(ResolvedQuery {
+                modifier: None,
+                mtype: None,
+                conditions: self.resolve_conditions(conditions)?,
+                conjunction_and: matches!(conjunction, Conjunction::And),
+            }),
+        }
+    }
+
+    fn resolve_conditions(&mut self, conds: &[MediaInParens]) -> Result<Vec<String>, Error> {
+        let mut out = Vec::with_capacity(conds.len());
+        for c in conds {
+            out.push(self.serialize_media_in_parens(c)?);
+        }
+        Ok(out)
+    }
+
+    fn serialize_media_in_parens(&mut self, c: &MediaInParens) -> Result<String, Error> {
+        match c {
+            MediaInParens::Feature(f) => {
+                let inner = self.serialize_media_feature(f)?;
+                Ok(format!("({inner})"))
+            }
+            MediaInParens::Not(inner) => Ok(format!("not {}", self.serialize_media_in_parens(inner)?)),
+            MediaInParens::Group {
+                conditions,
+                conjunction,
+            } => {
+                let parts = self.resolve_conditions(conditions)?;
+                let sep = if matches!(conjunction, Conjunction::And) {
+                    " and "
+                } else {
+                    " or "
+                };
+                Ok(format!("({})", parts.join(sep)))
+            }
+            MediaInParens::Interp(e) => {
+                let v = self.eval_expr(e)?;
+                Ok(v.to_interp())
+            }
+        }
+    }
+
+    fn serialize_media_feature(&mut self, f: &MediaFeature) -> Result<String, Error> {
+        match f {
+            MediaFeature::Decl { name, value } => {
+                let n = self.eval_expr(name)?.to_css(self.compressed());
+                match value {
+                    Some(v) => {
+                        let val = self.eval_expr(v)?.to_css(self.compressed());
+                        Ok(format!("{n}: {val}"))
+                    }
+                    None => Ok(n),
+                }
+            }
+            MediaFeature::Range {
+                first,
+                op1,
+                second,
+                rest,
+            } => {
+                let a = self.eval_expr(first)?.to_css(self.compressed());
+                let b = self.eval_expr(second)?.to_css(self.compressed());
+                let mut s = format!("{a} {op1} {b}");
+                if let Some((op2, third)) = rest {
+                    let c = self.eval_expr(third)?.to_css(self.compressed());
+                    s.push_str(&format!(" {op2} {c}"));
+                }
+                Ok(s)
+            }
+        }
     }
 
     /// Evaluate `@keyframes`. The frame selectors are keyframe selectors, not
@@ -1609,4 +1794,158 @@ fn normalize_selector(s: &str) -> String {
         i += 1;
     }
     out.trim().to_string()
+}
+
+// ---- media queries -----------------------------------------------------
+
+impl ResolvedQuery {
+    /// Serialize one query (dart-sass `CssMediaQuery.toString`).
+    fn render(&self) -> String {
+        let mut s = String::new();
+        if let Some(m) = &self.modifier {
+            s.push_str(m);
+            s.push(' ');
+        }
+        if let Some(t) = &self.mtype {
+            s.push_str(t);
+            if !self.conditions.is_empty() {
+                s.push_str(" and ");
+            }
+        }
+        let sep = if self.conjunction_and { " and " } else { " or " };
+        s.push_str(&self.conditions.join(sep));
+        s
+    }
+}
+
+/// Serialize a comma list of media queries.
+fn serialize_media_queries(queries: &[ResolvedQuery]) -> String {
+    queries
+        .iter()
+        .map(ResolvedQuery::render)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Merge an enclosing query list with a nested query list (dart-sass
+/// `_mergeMediaQueries`). Returns `None` if any pair is unrepresentable (keep
+/// the nested rule in place); otherwise the merged list, which is empty when
+/// every pair is mutually exclusive (the rule is dropped).
+fn merge_media_query_lists(outer: &[ResolvedQuery], inner: &[ResolvedQuery]) -> Option<Vec<ResolvedQuery>> {
+    let mut merged = Vec::new();
+    for a in outer {
+        for b in inner {
+            match merge_media_query(a, b) {
+                MergeResult::Empty => continue,
+                MergeResult::Unrepresentable => return None,
+                MergeResult::Query(q) => merged.push(q),
+            }
+        }
+    }
+    Some(merged)
+}
+
+/// Merge two media queries (dart-sass `CssMediaQuery.merge`).
+fn merge_media_query(this: &ResolvedQuery, other: &ResolvedQuery) -> MergeResult {
+    if !this.conjunction_and || !other.conjunction_and {
+        return MergeResult::Unrepresentable;
+    }
+    let our_modifier = this.modifier.as_ref().map(|s| s.to_ascii_lowercase());
+    let our_type = this.mtype.as_ref().map(|s| s.to_ascii_lowercase());
+    let their_modifier = other.modifier.as_ref().map(|s| s.to_ascii_lowercase());
+    let their_type = other.mtype.as_ref().map(|s| s.to_ascii_lowercase());
+
+    if our_type.is_none() && their_type.is_none() {
+        let mut conditions = this.conditions.clone();
+        conditions.extend(other.conditions.iter().cloned());
+        return MergeResult::Query(ResolvedQuery {
+            modifier: None,
+            mtype: None,
+            conditions,
+            conjunction_and: true,
+        });
+    }
+
+    let our_not = our_modifier.as_deref() == Some("not");
+    let their_not = their_modifier.as_deref() == Some("not");
+    let is_all = |t: &Option<String>| t.as_deref() == Some("all");
+
+    let (modifier, mtype, conditions): (Option<String>, Option<String>, Vec<String>);
+    if our_not != their_not {
+        if our_type == their_type {
+            let (neg, pos) = if our_not {
+                (&this.conditions, &other.conditions)
+            } else {
+                (&other.conditions, &this.conditions)
+            };
+            if neg.iter().all(|c| pos.contains(c)) {
+                return MergeResult::Empty;
+            }
+            return MergeResult::Unrepresentable;
+        } else if our_type.is_none() || is_all(&our_type) || their_type.is_none() || is_all(&their_type) {
+            return MergeResult::Unrepresentable;
+        }
+        if our_not {
+            modifier = their_modifier.clone();
+            mtype = their_type.clone();
+            conditions = other.conditions.clone();
+        } else {
+            modifier = our_modifier.clone();
+            mtype = our_type.clone();
+            conditions = this.conditions.clone();
+        }
+    } else if our_not {
+        if our_type != their_type {
+            return MergeResult::Unrepresentable;
+        }
+        let (more, fewer) = if this.conditions.len() > other.conditions.len() {
+            (&this.conditions, &other.conditions)
+        } else {
+            (&other.conditions, &this.conditions)
+        };
+        if !fewer.iter().all(|c| more.contains(c)) {
+            return MergeResult::Unrepresentable;
+        }
+        modifier = our_modifier.clone();
+        mtype = our_type.clone();
+        conditions = more.clone();
+    } else if our_type.is_none() || is_all(&our_type) {
+        mtype = if (their_type.is_none() || is_all(&their_type)) && our_type.is_none() {
+            None
+        } else {
+            their_type.clone()
+        };
+        let mut c = this.conditions.clone();
+        c.extend(other.conditions.iter().cloned());
+        conditions = c;
+        modifier = their_modifier.clone();
+    } else if their_type.is_none() || is_all(&their_type) {
+        let mut c = this.conditions.clone();
+        c.extend(other.conditions.iter().cloned());
+        conditions = c;
+        modifier = our_modifier.clone();
+        mtype = our_type.clone();
+    } else if our_type != their_type {
+        return MergeResult::Empty;
+    } else {
+        modifier = our_modifier.clone().or_else(|| their_modifier.clone());
+        let mut c = this.conditions.clone();
+        c.extend(other.conditions.iter().cloned());
+        conditions = c;
+        mtype = our_type.clone();
+    }
+
+    // dart-sass keeps the raw (original-case) type of whichever query
+    // contributed it.
+    let final_type = match &mtype {
+        None => None,
+        Some(_) if mtype == our_type => this.mtype.clone(),
+        Some(_) => other.mtype.clone(),
+    };
+    MergeResult::Query(ResolvedQuery {
+        modifier,
+        mtype: final_type,
+        conditions,
+        conjunction_and: true,
+    })
 }
