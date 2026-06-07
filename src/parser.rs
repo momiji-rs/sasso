@@ -505,6 +505,8 @@ impl Parser {
                 }
                 Some('$') => stmts.push(self.parse_var_decl()?),
                 Some('@') => stmts.push(self.parse_at_rule()?),
+                // A namespaced variable assignment `ns.$name: value`.
+                _ if self.peek_namespaced_var_decl() => stmts.push(self.parse_var_decl()?),
                 _ => match self.classify() {
                     NextKind::Rule => stmts.push(self.parse_rule()?),
                     NextKind::Declaration => stmts.push(self.parse_declaration()?),
@@ -824,6 +826,13 @@ impl Parser {
 
     fn parse_var_decl(&mut self) -> Result<Stmt, Error> {
         let pos = self.sc.position();
+        // An optional `ns.` prefix: `ns.$name: value` assigns to a module
+        // variable. `peek_namespaced_var_decl` guarantees the shape.
+        let mut namespace = None;
+        if self.sc.peek() != Some('$') {
+            namespace = Some(self.read_ident_name()?);
+            self.sc.eat('.');
+        }
         self.sc.bump(); // '$'
         let name = self.read_ident_name()?;
         self.skip_ws_inline();
@@ -858,7 +867,26 @@ impl Parser {
             value,
             is_default,
             is_global,
+            namespace,
         }))
+    }
+
+    /// Whether the scanner is at the start of a namespaced variable assignment
+    /// `ns.$name` (an identifier, then `.`, then `$`). Does not consume input.
+    fn peek_namespaced_var_decl(&self) -> bool {
+        let mut i = 0;
+        // Leading identifier.
+        match self.sc.peek_at(0) {
+            Some(c) if c == '-' || c == '_' || c.is_ascii_alphabetic() || !c.is_ascii() => {}
+            _ => return false,
+        }
+        while matches!(self.sc.peek_at(i), Some(c) if is_ident_char(c)) {
+            i += 1;
+        }
+        if i == 0 || self.sc.peek_at(i) != Some('.') {
+            return false;
+        }
+        self.sc.peek_at(i + 1) == Some('$')
     }
 
     fn parse_at_rule(&mut self) -> Result<Stmt, Error> {

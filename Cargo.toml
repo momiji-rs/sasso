@@ -1,3 +1,9 @@
+# This crate is its own workspace root (an empty `[workspace]` table). It lives
+# inside a parallel git worktree under the parent repo, whose Cargo.toml is also
+# a package; without this, cargo treats this crate as a member of that package's
+# workspace and refuses to build.
+[workspace]
+
 [package]
 name = "sasso"
 version = "0.1.0"

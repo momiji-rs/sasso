@@ -328,8 +328,10 @@ pub(crate) struct Evaluator<'a> {
 /// An evaluated user module: its public members plus the bindings it itself
 /// `@use`d (so a `ns.member` lookup can recurse through forwards).
 struct Module {
-    /// Top-level variables (global scope after evaluation), by name.
-    vars: HashMap<String, Value>,
+    /// Top-level variables (the module's global scope). Shared and mutable so an
+    /// outside `ns.$var: value` assignment updates the module and its own
+    /// functions/mixins observe the new value on their next call.
+    vars: RefCell<HashMap<String, Value>>,
     functions: HashMap<String, Rc<Callable>>,
     mixins: HashMap<String, Rc<Callable>>,
     /// Namespaced user modules this module `@use`d (for transitive `ns.fn()`
@@ -345,10 +347,10 @@ struct Module {
 }
 
 impl Module {
-    /// Look up a public variable, following `@forward` re-exports. Private
-    /// members (leading `-`/`_`) are excluded.
+    /// Look up a public variable. Private members (leading `-`/`_`) are the
+    /// caller's responsibility to exclude.
     fn var(&self, name: &str) -> Option<Value> {
-        self.vars.get(name).cloned()
+        self.vars.borrow().get(name).cloned()
     }
     fn function(&self, name: &str) -> Option<Rc<Callable>> {
         self.functions.get(name).cloned()
@@ -381,6 +383,10 @@ struct SavedModuleEnv {
     star_modules: Vec<String>,
     used_user_modules: HashMap<String, Rc<Module>>,
     star_user_modules: Vec<Rc<Module>>,
+    /// When set (a cross-module call), the module whose global scope was
+    /// installed: `leave_module` writes the (possibly mutated) global scope back
+    /// so a `!global` assignment inside the module persists.
+    write_back: Option<Rc<Module>>,
 }
 
 /// Members a module re-exports via `@forward`, accumulated while it evaluates.
@@ -650,6 +656,11 @@ impl<'a> Evaluator<'a> {
     }
 
     fn apply_var(&mut self, v: &VarDecl) -> Result<(), Error> {
+        // A namespaced assignment `ns.$name: value` updates the variable in the
+        // `@use`d module bound to `ns`.
+        if let Some(ns) = &v.namespace {
+            return self.assign_module_var(ns, v);
+        }
         // A top-level `!default` declaration whose name is exposed by more than
         // one `@use … as *` module can't resolve which global it shadows.
         if v.is_default
@@ -702,6 +713,42 @@ impl<'a> Evaluator<'a> {
         } else {
             self.assign(&v.name, val);
         }
+        Ok(())
+    }
+
+    /// Assign to a `@use`d module's variable (`ns.$name: value`). The variable
+    /// must already exist in the module and be public; `!default` only assigns
+    /// when the existing value is null; built-in modules are immutable.
+    fn assign_module_var(&mut self, ns: &str, v: &VarDecl) -> Result<(), Error> {
+        if is_private_member(&v.name) {
+            return Err(Error::unpositioned(
+                "Private members can't be accessed from outside their modules.",
+            ));
+        }
+        let module = match self.used_user_modules.get(ns).cloned() {
+            Some(m) => m,
+            None => {
+                if self.used_modules.contains_key(ns) {
+                    return Err(Error::unpositioned("Cannot modify built-in variable."));
+                }
+                return Err(Error::unpositioned(format!(
+                    "There is no module with the namespace \"{ns}\"."
+                )));
+            }
+        };
+        let exists = module.var(&v.name).is_some();
+        if !exists {
+            return Err(Error::unpositioned("Undefined variable."));
+        }
+        if v.is_default {
+            if let Some(existing) = module.var(&v.name) {
+                if !matches!(existing, Value::Null) {
+                    return Ok(());
+                }
+            }
+        }
+        let val = self.eval_expr(&v.value)?.without_slash();
+        module.vars.borrow_mut().insert(v.name.clone(), val);
         Ok(())
     }
 
@@ -1192,6 +1239,7 @@ impl<'a> Evaluator<'a> {
             star_modules: std::mem::replace(&mut self.star_modules, env.star_modules),
             used_user_modules: std::mem::replace(&mut self.used_user_modules, env.used_user_modules),
             star_user_modules: std::mem::replace(&mut self.star_user_modules, env.star_user_modules),
+            write_back: None,
         }
     }
 
@@ -1207,6 +1255,7 @@ impl<'a> Evaluator<'a> {
             star_modules: self.star_modules.clone(),
             used_user_modules: self.used_user_modules.clone(),
             star_user_modules: self.star_user_modules.clone(),
+            write_back: None,
         }
     }
 
@@ -1261,7 +1310,7 @@ impl<'a> Evaluator<'a> {
             // A member the new global module exposes that the current sheet
             // already defines at the top level is a conflict.
             if let Some(g) = self.scopes.first() {
-                for name in module.vars.keys() {
+                for name in module.vars.borrow().keys() {
                     if !is_private_member(name) && g.contains_key(name) {
                         return Err(Error::at(
                             format!(
@@ -1444,7 +1493,7 @@ impl<'a> Evaluator<'a> {
 
         Ok((
             Module {
-                vars,
+                vars: RefCell::new(vars),
                 functions,
                 mixins,
                 used_user_modules,
@@ -1611,7 +1660,13 @@ impl<'a> Evaluator<'a> {
         // Private members (by their ORIGINAL name) are never re-exported.
         let src: *const Module = Rc::as_ptr(&module);
         let pfx = prefix.unwrap_or("");
-        for (name, val) in &module.vars {
+        let module_vars: Vec<(String, Value)> = module
+            .vars
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (name, val) in &module_vars {
             let key = format!("{pfx}{name}");
             if !is_private_member(name) && visible_var(&key) {
                 if let Some(prev) = self.forwarded.var_src.get(&key) {
@@ -3372,8 +3427,9 @@ impl<'a> Evaluator<'a> {
     /// Install `module`'s environment for a cross-module member invocation,
     /// returning the previous environment to restore with [`leave_module`].
     fn enter_module(&mut self, module: &Rc<Module>) -> SavedModuleEnv {
+        let module_scope = module.vars.borrow().clone();
         SavedModuleEnv {
-            scopes: std::mem::replace(&mut self.scopes, vec![module.vars.clone()]),
+            scopes: std::mem::replace(&mut self.scopes, vec![module_scope]),
             scope_semi_global: std::mem::replace(&mut self.scope_semi_global, vec![true]),
             functions: std::mem::replace(&mut self.functions, module.functions.clone()),
             mixins: std::mem::replace(&mut self.mixins, module.mixins.clone()),
@@ -3387,11 +3443,19 @@ impl<'a> Evaluator<'a> {
                 &mut self.star_user_modules,
                 module.star_user_modules.clone(),
             ),
+            write_back: Some(Rc::clone(module)),
         }
     }
 
-    /// Restore the environment captured by [`enter_module`].
+    /// Restore the environment captured by [`enter_module`]. If the saved env
+    /// recorded a module, its (possibly mutated) global scope is written back so
+    /// a `!global` assignment inside the module persists.
     fn leave_module(&mut self, saved: SavedModuleEnv) {
+        if let Some(module) = &saved.write_back {
+            if let Some(scope0) = self.scopes.first() {
+                *module.vars.borrow_mut() = scope0.clone();
+            }
+        }
         self.scopes = saved.scopes;
         self.scope_semi_global = saved.scope_semi_global;
         self.functions = saved.functions;
@@ -5094,16 +5158,18 @@ fn is_keyframes_name(name: &str) -> bool {
     lower == "keyframes" || lower.ends_with("-keyframes")
 }
 
-/// Derive the default namespace for `@use "<url>"`: the final path component
-/// with any directory, leading `_`, and `.scss`/`.sass` extension removed.
-/// dart-sass rejects a result that is not a valid Sass identifier.
+/// Derive the default namespace for `@use "<url>"`: the final path component,
+/// with any leading `_` removed and everything from the first `.` (i.e. all
+/// extensions) discarded. dart-sass rejects a result that is not a valid Sass
+/// identifier.
 fn default_namespace(url: &str, pos: Pos) -> Result<String, Error> {
     let last = url.rsplit('/').next().unwrap_or(url);
-    let stem = last
-        .strip_suffix(".scss")
-        .or_else(|| last.strip_suffix(".sass"))
-        .unwrap_or(last);
-    let stem = stem.strip_prefix('_').unwrap_or(stem);
+    let last = last.strip_prefix('_').unwrap_or(last);
+    // Strip every extension: the namespace is the basename up to its first dot.
+    let stem = match last.split_once('.') {
+        Some((before, _)) => before,
+        None => last,
+    };
     if !is_valid_namespace(stem) {
         return Err(Error::at(
             format!("The default namespace \"{stem}\" is not a valid Sass identifier."),

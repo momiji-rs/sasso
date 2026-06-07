@@ -214,6 +214,9 @@ pub(crate) struct VarDecl {
     pub value: Expr,
     pub is_default: bool,
     pub is_global: bool,
+    /// `Some(ns)` for a namespaced assignment `ns.$name: value`, which updates
+    /// the variable in the `@use`d module bound to `ns`.
+    pub namespace: Option<String>,
 }
 
 pub(crate) struct Rule {
