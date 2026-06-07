@@ -3597,3 +3597,14 @@ fn parity_selector_extend_multiple_extendees() {
     assert_parity("@use \"sass:selector\";\na { b: selector.extend(\"c.d.e.f\", \"c.d, .e.f\", \".g\"); }\n");
     assert_parity("@use \"sass:selector\";\na { b: selector.extend(\"c.d\", (c, \".d\"), \".e\"); }\n");
 }
+
+#[test]
+fn parity_selector_arg_coercion_lists() {
+    // Selector arguments may be a Sass list (comma list of strings, or a comma
+    // list whose items are space lists of strings), coerced to a selector the
+    // same way dart-sass does for selector.parse/nest/is-superselector.
+    assert_parity("@use \"sass:selector\";\na { b: selector.parse((c d, e f)); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.parse((c \"d\", e \"f\")); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.nest((c, d e), \"f\"); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.is-superselector((c, d e), (c, d e)); }\n");
+}

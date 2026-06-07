@@ -40,36 +40,75 @@ pub(super) fn try_call(
     })
 }
 
+// ---- arity validation -------------------------------------------------
+
+/// Reject more positional arguments than `max` (dart-sass "Only N argument(s)
+/// allowed, but M were passed."). Used by the fixed-arity selector functions;
+/// `selector-nest` and `selector-append` are variadic and skip this.
+fn check_arity(pos_args: &[Value], max: usize, pos: Pos) -> Result<(), Error> {
+    if pos_args.len() > max {
+        return Err(Error::at(
+            format!(
+                "Only {} argument{} allowed, but {} {} passed.",
+                max,
+                if max == 1 { "" } else { "s" },
+                pos_args.len(),
+                if pos_args.len() == 1 { "was" } else { "were" }
+            ),
+            pos,
+        ));
+    }
+    Ok(())
+}
+
 // ---- value <-> selector-string marshalling ----------------------------
 
 /// Convert a Sass value into its selector-string form (dart-sass
-/// `_selectorString`). Strings contribute their text; a comma list joins its
-/// elements with `, ` and a space list with ` `; anything else is an error.
-fn value_to_selector_string(v: &Value, pos: Pos) -> Result<String, Error> {
+/// `_selectorString`). The structure is restricted to at most two list levels:
+/// a string; a space list of strings; or a comma list whose items are each a
+/// string or a space list of strings. A slash list, a deeper nesting, or any
+/// non-string/list value is rejected — matching dart-sass exactly (a comma
+/// inside a space list, or a list inside a space list, is *not* valid).
+fn value_to_selector_string(v: &Value, pname: &str, pos: Pos) -> Result<String, Error> {
+    /// A space list of strings → ` `-joined; a lone string → its text. Returns
+    /// `None` for anything else (a comma/slash list, or a nested list).
+    fn space_or_string(v: &Value) -> Option<String> {
+        match v {
+            Value::Str(s) => Some(s.text.clone()),
+            Value::List(l) if l.sep == ListSep::Space && !l.items.is_empty() => {
+                let mut parts = Vec::with_capacity(l.items.len());
+                for item in &l.items {
+                    match item {
+                        Value::Str(s) => parts.push(s.text.clone()),
+                        _ => return None,
+                    }
+                }
+                Some(parts.join(" "))
+            }
+            _ => None,
+        }
+    }
     fn render(v: &Value) -> Option<String> {
         match v {
             Value::Str(s) => Some(s.text.clone()),
-            Value::List(l) => {
-                if l.items.is_empty() {
-                    return None;
+            Value::List(l) if l.items.is_empty() => None,
+            Value::List(l) => match l.sep {
+                ListSep::Comma => {
+                    let mut parts = Vec::with_capacity(l.items.len());
+                    for item in &l.items {
+                        parts.push(space_or_string(item)?);
+                    }
+                    Some(parts.join(", "))
                 }
-                let sep = match l.sep {
-                    ListSep::Comma => ", ",
-                    ListSep::Space => " ",
-                };
-                let mut parts = Vec::with_capacity(l.items.len());
-                for item in &l.items {
-                    parts.push(render(item)?);
-                }
-                Some(parts.join(sep))
-            }
+                ListSep::Space => space_or_string(v),
+            },
             _ => None,
         }
     }
     render(v).ok_or_else(|| {
         Error::at(
             format!(
-                "{} is not a valid selector: it must be a string,\na list of strings, or a list of lists of strings.",
+                "${pname}: {} is not a valid selector: it must be a string,\na list of strings, or a list of lists of strings.",
                 v.to_css(true)
             ),
             pos,
@@ -89,7 +128,7 @@ fn selector_list_arg(
 ) -> Result<Vec<Complex>, Error> {
     let v = super::require(params, pos_args, named, i, fname, pos)?;
     let pname = params.get(i).copied().unwrap_or("selector");
-    let text = value_to_selector_string(v, pos)?;
+    let text = value_to_selector_string(v, pname, pos)?;
     parse_selector_text(&text, pname, pos)
 }
 
@@ -308,7 +347,7 @@ fn fn_nest(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
     // The first selector is the base (it may not contain `&`).
     let mut acc = parse_arg_selector(&all[0], pos)?;
     for v in &all[1..] {
-        let child = value_to_selector_string(v, pos)?;
+        let child = value_to_selector_string(v, "selectors", pos)?;
         acc = resolve_parents(&child, &acc, "selector-nest", pos)?;
     }
     Ok(selectors_to_value(&acc))
@@ -316,7 +355,7 @@ fn fn_nest(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
 
 /// Parse a single selector value argument into a complex-selector list.
 fn parse_arg_selector(v: &Value, pos: Pos) -> Result<Vec<Complex>, Error> {
-    let text = value_to_selector_string(v, pos)?;
+    let text = value_to_selector_string(v, "selectors", pos)?;
     parse_selector_text(&text, "selectors", pos)
 }
 
@@ -398,6 +437,7 @@ fn extend_or_replace(
     } else {
         &["selector", "extendee", "extender"]
     };
+    check_arity(pos_args, 3, pos)?;
     let selector = selector_list_arg(params, pos_args, named, 0, fname, pos)?;
     let target_list = selector_list_arg(params, pos_args, named, 1, fname, pos)?;
     let extender = selector_list_arg(params, pos_args, named, 2, fname, pos)?;
@@ -439,6 +479,7 @@ fn compound_targets(list: &[Complex], pos: Pos) -> Result<Vec<crate::selector::C
 /// or `null` when no combination unifies (dart-sass `unify`).
 fn fn_unify(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = &["selector1", "selector2"];
+    check_arity(pos_args, 2, pos)?;
     let s1 = selector_list_arg(params, pos_args, named, 0, "selector-unify", pos)?;
     let s2 = selector_list_arg(params, pos_args, named, 1, "selector-unify", pos)?;
     match selector::unify_lists(&s1, &s2) {
@@ -453,6 +494,7 @@ fn fn_unify(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
 /// `$sub` matches (dart-sass `is-superselector`).
 fn fn_is_superselector(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = &["super", "sub"];
+    check_arity(pos_args, 2, pos)?;
     let sup = selector_list_arg(params, pos_args, named, 0, "is-superselector", pos)?;
     let sub = selector_list_arg(params, pos_args, named, 1, "is-superselector", pos)?;
     Ok(Value::Bool(selector::list_is_superselector(&sup, &sub)))
@@ -464,8 +506,9 @@ fn fn_is_superselector(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
 /// selector, as a comma list of unquoted strings (dart-sass `simple-selectors`).
 fn fn_simple_selectors(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = &["selector"];
+    check_arity(pos_args, 1, pos)?;
     let v = super::require(params, pos_args, named, 0, "simple-selectors", pos)?;
-    let text = value_to_selector_string(v, pos)?;
+    let text = value_to_selector_string(v, "selector", pos)?;
     if text.trim().is_empty() {
         return Err(Error::at("$selector: expected selector.".to_string(), pos));
     }
@@ -488,6 +531,7 @@ fn fn_simple_selectors(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
 /// value (dart-sass `parse`).
 fn fn_parse(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = &["selector"];
+    check_arity(pos_args, 1, pos)?;
     let list = selector_list_arg(params, pos_args, named, 0, "selector-parse", pos)?;
     Ok(selectors_to_value(&list))
 }
