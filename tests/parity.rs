@@ -1630,4 +1630,19 @@ fn legacy_channels_non_number_channel_error() {
         ours("a{x: rgb(from var(--c) r g b / 25%)}\n"),
         "a {\n  x: rgb(from var(--c) r g b/25%);\n}\n"
     );
+fn non_finite_number_serializes_as_calc() {
+    // A bare non-finite number value serializes like dart-sass: a unitless
+    // infinity/-infinity/NaN prints as `calc(infinity)`/`calc(-infinity)`/
+    // `calc(NaN)`, and a unit-bearing one as `calc(infinity * 1px)`.
+    // `1e400` overflows the f64 literal to +Infinity, `-1e400` to -Infinity.
+    assert_eq!(ours("a {b: 1e400}\n"), "a {\n  b: calc(infinity);\n}\n");
+    assert_eq!(ours("a {b: -1e400}\n"), "a {\n  b: calc(-infinity);\n}\n");
+    // Unit-bearing non-finite values keep their unit as a `* 1<unit>` operand.
+    assert_eq!(
+        ours("a {b: (1px / 0) * 1}\n"),
+        "a {\n  b: calc(infinity * 1px);\n}\n"
+    );
+    assert_eq!(ours("a {b: (0px / 0) * 1}\n"), "a {\n  b: calc(NaN * 1px);\n}\n");
+    // Interpolation produces the same calc form (no longer a bare `Infinity`).
+    assert_eq!(ours("a {b: #{1e400}}\n"), "a {\n  b: calc(infinity);\n}\n");
 }

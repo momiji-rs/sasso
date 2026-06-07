@@ -390,6 +390,12 @@ impl Value {
 
 impl Number {
     pub(crate) fn to_css(&self, compressed: bool) -> String {
+        // A bare non-finite number serializes as a `calc()` constant, matching
+        // dart-sass: a unitless `infinity`/`-infinity`/`NaN` prints as
+        // `calc(infinity)` etc., and a unit-bearing one as `calc(infinity * 1px)`.
+        if !self.value.is_finite() {
+            return format!("calc({})", calc_number_css(self, compressed));
+        }
         format!("{}{}", fmt_num(self.value, compressed), self.unit)
     }
 }
