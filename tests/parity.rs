@@ -3060,3 +3060,20 @@ fn parity_color_mix_interpolation() {
         "@use \"sass:color\";\na {\n  pl: color.mix(lch(30% 0% 0deg), lch(50% 10% 120deg), $method: hsl);\n}\n",
     );
 }
+
+#[test]
+fn parity_color_modify_in_space() {
+    // color.change/adjust/scale with an explicit $space convert to that space,
+    // apply the per-channel operation (with adjust clamping lightness/chroma,
+    // scale moving toward the channel bound), and convert back to the color's
+    // original space. Byte-matched to `npx sass`.
+    assert_parity(
+        "@use \"sass:color\";\na {\n  c1: color.change(red, $lightness: 50%, $space: oklch);\n  c2: color.change(color(srgb 0.2 0.5 0.7), $red: 0.9, $space: srgb);\n  c3: color.change(oklch(0.5 0.1 90), $lightness: 0.7);\n  c4: color.change(red, $lightness: 50%);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:color\";\na {\n  a1: color.adjust(red, $lightness: 0.1, $space: oklch);\n  a2: color.adjust(oklch(0.8 0.1 90), $lightness: 0.5, $space: oklch);\n  a3: color.adjust(oklch(0.5 0.1 90), $chroma: -0.5, $space: oklch);\n  a4: color.adjust(lab(80 0 0), $lightness: 50, $space: lab);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:color\";\na {\n  s1: color.scale(red, $lightness: 50%, $space: oklch);\n  s2: color.scale(oklch(0.5 0.1 90), $chroma: 50%, $space: oklch);\n  s3: color.scale(lab(50 40 30), $a: 50%, $space: lab);\n  s4: color.scale(color(srgb 0.5 0.5 0.5), $red: 50%, $space: srgb);\n}\n",
+    );
+}

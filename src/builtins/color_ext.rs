@@ -6,10 +6,40 @@
 //! [`Color::from_hsl`] and left with `repr = None`, so they serialize via
 //! the normal `rgb()`/`rgba()`/hex rule, matching dart-sass.
 
+use super::color::{modify_in_space, space_arg, ModifyOp};
 use super::{arg, as_color, clamp01, num, require};
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{Color, Number, SassStr, Value};
+use crate::value::{Color, ColorSpace, Number, SassStr, Value};
+
+/// The modern change/adjust/scale path: used when `$space` is given, or when
+/// the color is non-legacy (its own space is the default). Returns `None` for a
+/// legacy color with no `$space`, so the caller runs the legacy path.
+fn modify_with_space(
+    c: &Color,
+    named: &[(String, Value)],
+    op: ModifyOp,
+    pos: Pos,
+) -> Option<Result<Value, Error>> {
+    let space_arg_v = named.iter().find(|(n, _)| n == "space").map(|(_, v)| v);
+    let is_legacy = c.modern.as_ref().map(|m| m.space.is_legacy()).unwrap_or(true);
+    if space_arg_v.is_none() && is_legacy {
+        return None;
+    }
+    let space = match space_arg_v {
+        Some(v) => match space_arg(v, pos) {
+            Ok(s) => s,
+            Err(e) => return Some(Err(e)),
+        },
+        None => c.modern.as_ref().map(|m| m.space).unwrap_or(ColorSpace::Rgb),
+    };
+    let chans: Vec<(String, &Value)> = named
+        .iter()
+        .filter(|(n, _)| n != "space")
+        .map(|(n, v)| (n.clone(), v))
+        .collect();
+    Some(modify_in_space(c, space, &chans, op, pos))
+}
 
 /// Build a *computed* color, tagging it with a CSS named-color spelling when
 /// its rounded RGB exactly matches one of the 148 CSS color names and it is
@@ -683,6 +713,9 @@ fn fn_adjust_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
             pos,
         ));
     }
+    if let Some(r) = modify_with_space(&c, named, super::color::ModifyOp::Adjust, pos) {
+        return r;
+    }
     let (space, chans) = resolve_channels("adjust-color", named, pos)?;
     let mut tuple = decompose(&c, space);
     let mut alpha = c.a;
@@ -715,6 +748,9 @@ fn fn_change_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
             pos,
         ));
     }
+    if let Some(r) = modify_with_space(&c, named, super::color::ModifyOp::Change, pos) {
+        return r;
+    }
     let (space, chans) = resolve_channels("change-color", named, pos)?;
     let mut tuple = decompose(&c, space);
     let mut alpha = c.a;
@@ -745,6 +781,9 @@ fn fn_scale_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
                 .to_string(),
             pos,
         ));
+    }
+    if let Some(r) = modify_with_space(&c, named, super::color::ModifyOp::Scale, pos) {
+        return r;
     }
     let (space, chans) = resolve_channels("scale-color", named, pos)?;
     let mut tuple = decompose(&c, space);

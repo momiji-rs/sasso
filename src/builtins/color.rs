@@ -48,7 +48,7 @@ fn degenerate_const(node: &CalcNode) -> Option<f64> {
 }
 
 /// Whether a value is the `none` missing-channel keyword (an unquoted `none`).
-fn is_none_keyword(v: &Value) -> bool {
+pub(super) fn is_none_keyword(v: &Value) -> bool {
     matches!(v, Value::Str(s) if !s.quoted && s.text.eq_ignore_ascii_case("none"))
 }
 
@@ -2074,7 +2074,7 @@ fn channel_category(space: ColorSpace, idx: usize) -> Option<ChannelCategory> {
 
 /// Convert a [`ModernColor`] to a new space, preserving alpha and carrying
 /// over missing channels into analogous channels of the target (CSS Color 4).
-fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColor {
+pub(super) fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColor {
     if mc.space == target {
         return mc.clone();
     }
@@ -2140,7 +2140,7 @@ fn direct_convert(from: ColorSpace, to: ColorSpace, c: [f64; 3]) -> Option<[f64;
 
 /// Build a [`ModernColor`] from a legacy [`Color`] (its current space is
 /// `rgb`/`hsl`/`hwb` per `mc.modern`, or plain sRGB → `rgb`).
-fn legacy_to_modern(c: &Color) -> ModernColor {
+pub(super) fn legacy_to_modern(c: &Color) -> ModernColor {
     if let Some(m) = &c.modern {
         return m.clone();
     }
@@ -2187,7 +2187,7 @@ fn predefined_space(name: &str) -> Option<ColorSpace> {
 /// canonical channel value, or `None` for a `none` channel. `pct_base` scales a
 /// `%` value (e.g. 1.0 for rgb channels in 0..1, 100.0 for lab lightness).
 /// Degenerate calc constants fold to infinity/NaN. The result is NOT clamped.
-fn modern_channel(v: &Value, pct_base: f64) -> Option<f64> {
+pub(super) fn modern_channel(v: &Value, pct_base: f64) -> Option<f64> {
     if is_none_keyword(v) {
         return None;
     }
@@ -2210,7 +2210,7 @@ fn modern_channel(v: &Value, pct_base: f64) -> Option<f64> {
 }
 
 /// Parse a hue channel (degrees), converting angle units. `none` → `None`.
-fn modern_hue(v: &Value) -> Option<f64> {
+pub(super) fn modern_hue(v: &Value) -> Option<f64> {
     if is_none_keyword(v) {
         return None;
     }
@@ -2232,7 +2232,7 @@ fn modern_hue(v: &Value) -> Option<f64> {
 }
 
 /// Parse a modern alpha channel. `none` → `None`; otherwise clamp to 0..1.
-fn modern_alpha(v: Option<&Value>) -> Option<f64> {
+pub(super) fn modern_alpha(v: Option<&Value>) -> Option<f64> {
     match v {
         None => Some(1.0),
         Some(a) if is_none_keyword(a) => None,
@@ -2293,7 +2293,7 @@ pub(super) fn try_call_modern(
 
 /// Look up a channel name within `space`, returning its index (and the special
 /// `"alpha"`/missing handling left to the caller).
-fn channel_index_in(space: ColorSpace, channel: &str) -> Option<usize> {
+pub(super) fn channel_index_in(space: ColorSpace, channel: &str) -> Option<usize> {
     space.channel_names().iter().position(|n| *n == channel)
 }
 
@@ -2317,7 +2317,7 @@ fn channel_name_arg(v: &Value, pos: Pos) -> Result<String, Error> {
 /// Parse a `$space` argument into a [`ColorSpace`]. dart-sass requires an
 /// *unquoted* string: a quoted one errors "Expected … to be an unquoted
 /// string".
-fn space_arg(v: &Value, pos: Pos) -> Result<ColorSpace, Error> {
+pub(super) fn space_arg(v: &Value, pos: Pos) -> Result<ColorSpace, Error> {
     let name = match v {
         Value::Str(s) if !s.quoted => s.text.clone(),
         Value::Str(s) => {
@@ -2374,7 +2374,7 @@ fn fn_to_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
 /// Build a [`Color`] for `mc` already in `space`, choosing whether to leave the
 /// `modern` tag attached. Plain-legacy rgb (no missing channels) drops the
 /// `modern` field so it serializes like a normal sRGB color.
-fn make_modern_in(mc: ModernColor, _space: ColorSpace) -> Color {
+pub(super) fn make_modern_in(mc: ModernColor, _space: ColorSpace) -> Color {
     if mc.space == ColorSpace::Rgb && mc.channels.iter().all(|c| c.is_some()) {
         let r = mc.channels[0].unwrap_or(0.0);
         let g = mc.channels[1].unwrap_or(0.0);
@@ -2860,7 +2860,7 @@ fn interpolate_hue(h1: f64, h2: f64, p: f64, method: HueMethod) -> f64 {
 /// Set a powerless channel to missing (`None`) for interpolation: the hue of
 /// hsl (at zero saturation), hwb (whiteness+blackness >= 100) and lch/oklch
 /// (at zero chroma) carries no information.
-fn blank_powerless(mut mc: ModernColor) -> ModernColor {
+pub(super) fn blank_powerless(mut mc: ModernColor) -> ModernColor {
     let ch = |i: usize| mc.channels[i].unwrap_or(0.0);
     match mc.space {
         ColorSpace::Hsl if ch(1) == 0.0 => mc.channels[0] = None,
@@ -2869,4 +2869,259 @@ fn blank_powerless(mut mc: ModernColor) -> ModernColor {
         _ => {}
     }
     mc
+}
+
+// ---- modern change / adjust / scale (with $space) -------------------
+
+/// The kind of modify operation for the modern change/adjust/scale path.
+#[derive(Clone, Copy)]
+pub(super) enum ModifyOp {
+    Change,
+    Adjust,
+    Scale,
+}
+
+/// The scaling bounds [min, max] for a channel of `space` (used by
+/// `scale-color`). `None` for the hue channel (not scalable).
+fn scale_bounds(space: ColorSpace, idx: usize) -> Option<(f64, f64)> {
+    use ColorSpace::*;
+    let names = space.channel_names();
+    if names[idx] == "hue" {
+        return None;
+    }
+    Some(match space {
+        Rgb => (0.0, 255.0),
+        Srgb | SrgbLinear | DisplayP3 | DisplayP3Linear | A98Rgb | ProphotoRgb | Rec2020 => (0.0, 1.0),
+        Hsl | Hwb => (0.0, 100.0),
+        Lab => {
+            if idx == 0 {
+                (0.0, 100.0)
+            } else {
+                (-125.0, 125.0)
+            }
+        }
+        Lch => {
+            if idx == 0 {
+                (0.0, 100.0)
+            } else {
+                (0.0, 150.0)
+            }
+        }
+        Oklab => {
+            if idx == 0 {
+                (0.0, 1.0)
+            } else {
+                (-0.4, 0.4)
+            }
+        }
+        Oklch => {
+            if idx == 0 {
+                (0.0, 1.0)
+            } else {
+                (0.0, 0.4)
+            }
+        }
+        XyzD65 | XyzD50 => (0.0, 1.0),
+    })
+}
+
+/// Read a channel value argument for the modern modify path, in the channel's
+/// canonical unit. `idx` selects whether it is the polar hue channel.
+fn modify_channel_value(space: ColorSpace, idx: usize, v: &Value) -> Option<f64> {
+    if space.is_polar(idx) {
+        modern_hue(v)
+    } else {
+        modern_channel(v, channel_pct_base(space, idx))
+    }
+}
+
+impl ColorSpace {
+    /// Whether the channel at `index` is a polar hue channel.
+    fn is_polar(self, index: usize) -> bool {
+        self.channel_names()[index] == "hue"
+    }
+}
+
+/// The percentage reference (100% = ?) for a channel of `space`.
+fn channel_pct_base(space: ColorSpace, idx: usize) -> f64 {
+    use ColorSpace::*;
+    let names = space.channel_names();
+    match (space, names[idx]) {
+        (Rgb, _) => 255.0,
+        (Srgb | SrgbLinear | DisplayP3 | DisplayP3Linear | A98Rgb | ProphotoRgb | Rec2020, _) => 1.0,
+        (Hsl | Hwb, _) => 100.0,
+        (Lab, "lightness") | (Lch, "lightness") => 100.0,
+        (Oklab, "lightness") | (Oklch, "lightness") => 1.0,
+        (Lab, _) => 125.0,
+        (Oklab, _) => 0.4,
+        (Lch, "chroma") => 150.0,
+        (Oklch, "chroma") => 0.4,
+        (XyzD65 | XyzD50, _) => 1.0,
+        _ => 1.0,
+    }
+}
+
+/// The modern `color.change`/`adjust`/`scale` with an explicit `$space`:
+/// convert the color to `space`, apply the per-channel operation, convert back
+/// to the color's original space.
+pub(super) fn modify_in_space(
+    c: &Color,
+    space: ColorSpace,
+    chans: &[(String, &Value)],
+    op: ModifyOp,
+    pos: Pos,
+) -> Result<Value, Error> {
+    let orig = legacy_to_modern(c);
+    let dest = orig.space;
+    let mut work = convert_modern(&orig, space);
+    for (name, v) in chans {
+        if name == "alpha" {
+            work.alpha = Some(apply_alpha(work.alpha.unwrap_or(1.0), v, op, pos)?);
+            continue;
+        }
+        let idx = channel_index_in(space, name).ok_or_else(|| {
+            Error::at(
+                format!(
+                    "${name}: Color space {} doesn't have a channel with this name.",
+                    space.name()
+                ),
+                pos,
+            )
+        })?;
+        // Validate the channel value's unit (skipped for a scale `%` and for a
+        // `none` change keyword, handled below).
+        if !matches!(op, ModifyOp::Scale) && !is_none_keyword(v) {
+            validate_modify_unit(space, idx, name, v, pos)?;
+        }
+        match op {
+            ModifyOp::Change => {
+                if is_none_keyword(v) {
+                    work.channels[idx] = None;
+                } else {
+                    work.channels[idx] = modify_channel_value(space, idx, v);
+                }
+            }
+            ModifyOp::Adjust => {
+                let amt = modify_channel_value(space, idx, v).unwrap_or(0.0);
+                let cur = work.channels[idx].unwrap_or(0.0);
+                work.channels[idx] = Some(clamp_adjust_channel(space, idx, cur + amt));
+            }
+            ModifyOp::Scale => {
+                let bounds = scale_bounds(space, idx)
+                    .ok_or_else(|| Error::at(format!("${name}: Channel isn't scalable."), pos))?;
+                let factor = scale_pct(v, pos)?;
+                let cur = work.channels[idx].unwrap_or(0.0);
+                work.channels[idx] = Some(scale_to(cur, factor, bounds));
+            }
+        }
+    }
+    let back = convert_modern(&work, dest);
+    Ok(Value::Color(make_modern_in(back, dest)))
+}
+
+/// Apply a change/adjust/scale to the alpha channel.
+fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<f64, Error> {
+    Ok(match op {
+        ModifyOp::Change => modern_alpha(Some(v)).unwrap_or(cur),
+        ModifyOp::Adjust => {
+            let amt = match v {
+                Value::Number(n) => {
+                    if n.unit == "%" {
+                        n.value / 100.0
+                    } else {
+                        n.value
+                    }
+                }
+                _ => 0.0,
+            };
+            (cur + amt).clamp(0.0, 1.0)
+        }
+        ModifyOp::Scale => {
+            let factor = scale_pct(v, pos)?;
+            scale_to(cur, factor, (0.0, 1.0))
+        }
+    })
+}
+
+/// Read a `scale-color` percentage factor in `[-1, 1]`.
+fn scale_pct(v: &Value, pos: Pos) -> Result<f64, Error> {
+    match v {
+        Value::Number(n) if n.unit == "%" => {
+            if n.value < -100.0 || n.value > 100.0 {
+                return Err(Error::at(
+                    format!("Expected {} to be within -100% and 100%.", n.to_css(false)),
+                    pos,
+                ));
+            }
+            Ok(n.value / 100.0)
+        }
+        Value::Number(n) => Err(Error::at(
+            format!("$amount: Expected {} to have unit \"%\".", n.to_css(false)),
+            pos,
+        )),
+        other => Err(Error::at(
+            format!("$amount: {} is not a number.", other.to_css(false)),
+            pos,
+        )),
+    }
+}
+
+/// Scale `current` by `factor` (`-1..=1`) toward `bounds.1` (positive) or
+/// `bounds.0` (negative).
+fn scale_to(current: f64, factor: f64, bounds: (f64, f64)) -> f64 {
+    if factor > 0.0 {
+        current + (bounds.1 - current) * factor
+    } else {
+        current + (current - bounds.0) * factor
+    }
+}
+
+/// Validate a channel value's unit for the modern change/adjust path. A hue
+/// requires an angle unit (or none); other channels accept `%` or no unit.
+fn validate_modify_unit(space: ColorSpace, idx: usize, name: &str, v: &Value, pos: Pos) -> Result<(), Error> {
+    let num = match v {
+        Value::Number(n) => n,
+        Value::Slash(..) | Value::Calc(_) => return Ok(()),
+        other => {
+            return Err(Error::at(
+                format!("${name}: {} is not a number.", other.to_css(false)),
+                pos,
+            ))
+        }
+    };
+    if space.is_polar(idx) {
+        let ok = num.unit.is_empty() || matches!(num.unit.as_str(), "deg" | "grad" | "rad" | "turn");
+        if !ok {
+            return Err(Error::at(
+                format!(
+                    "${name}: Expected {} to have an angle unit (deg, grad, rad, turn).",
+                    num.to_css(false)
+                ),
+                pos,
+            ));
+        }
+    } else if !num.unit.is_empty() && num.unit != "%" {
+        return Err(Error::at(
+            format!(
+                "${name}: Expected {} to have unit \"%\" or no units.",
+                num.to_css(false)
+            ),
+            pos,
+        ));
+    }
+    Ok(())
+}
+
+/// Clamp an `adjust-color` result channel: lab/lch/oklab/oklch lightness is
+/// clamped to its range and lch/oklch chroma is floored at 0; all other
+/// channels are left unbounded (matching dart-sass).
+fn clamp_adjust_channel(space: ColorSpace, idx: usize, v: f64) -> f64 {
+    use ColorSpace::*;
+    let names = space.channel_names();
+    match (space, names[idx]) {
+        (Lab, "lightness") | (Lch, "lightness") => v.clamp(0.0, 100.0),
+        (Oklab, "lightness") | (Oklch, "lightness") => v.clamp(0.0, 1.0),
+        (Lch, "chroma") | (Oklch, "chroma") => v.max(0.0),
+        _ => v,
+    }
 }
