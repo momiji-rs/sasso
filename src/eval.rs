@@ -2475,11 +2475,69 @@ fn fold_calc(op: CalcOp, left: CalcNode, right: CalcNode, pos: Pos) -> Result<Ca
             return Ok(CalcNode::Number(n));
         }
     }
+    // An addition/subtraction operand that is a purely-numeric multiplication of
+    // two unit operands (a compound unit like `1px * 1px`) or a division by a
+    // unit operand (an inverse unit like `1 / 1px`) is a number with complex
+    // units, which CSS calculations cannot mix into a sum. dart-sass rejects it
+    // ("Number calc(1px * 1px) isn't compatible with CSS calculations."). A
+    // standalone `calc(1px * 1px)` is fine — only the `+`/`-` context checks.
+    if matches!(op, CalcOp::Add | CalcOp::Sub) {
+        for operand in [&left, &right] {
+            if let Some(node) = calc_complex_unit_operand(operand) {
+                return Err(Error::at(
+                    format!(
+                        "Number calc({}) isn't compatible with CSS calculations.",
+                        node.to_calc_css(false)
+                    ),
+                    pos,
+                ));
+            }
+        }
+    }
     Ok(CalcNode::Op {
         op,
         left: Box::new(left),
         right: Box::new(right),
     })
+}
+
+/// If `node` is a purely-numeric calc operation that produces a number with
+/// complex units — a multiplication of two unit-bearing numeric operands
+/// (`1px * 1px`), or a division whose denominator carries a unit (`1 / 1px`) —
+/// return the offending node. An operation involving a `var()`/interpolation
+/// (opaque) operand is not a resolved number and is left preserved, so it never
+/// triggers this check.
+fn calc_complex_unit_operand(node: &CalcNode) -> Option<&CalcNode> {
+    match node {
+        CalcNode::Op {
+            op: CalcOp::Mul,
+            left,
+            right,
+        } if calc_node_carries_unit(left) && calc_node_carries_unit(right) => Some(node),
+        CalcNode::Op {
+            op: CalcOp::Div,
+            right,
+            ..
+        } if calc_node_carries_unit(right) => Some(node),
+        _ => None,
+    }
+}
+
+/// Whether a resolved (no opaque operand) calc node carries a real unit: a
+/// unit-bearing number, or a `*`/`/` chain of such numbers. A node containing a
+/// `var()`/interpolation is opaque (unknown unit) and reported as not carrying
+/// a unit, so it does not count toward a compound/inverse unit.
+fn calc_node_carries_unit(node: &CalcNode) -> bool {
+    match node {
+        CalcNode::Number(n) => !n.unit.is_empty(),
+        CalcNode::Str(_) => false,
+        CalcNode::Op {
+            op: CalcOp::Mul | CalcOp::Div,
+            left,
+            right,
+        } => calc_node_carries_unit(left) || calc_node_carries_unit(right),
+        CalcNode::Op { .. } => false,
+    }
 }
 
 /// Try to combine two numbers under a calc operator.

@@ -2819,3 +2819,32 @@ fn parity_calc_size() {
         "}\n",
     ));
 }
+
+#[test]
+fn parity_calc_complex_unit_in_sum_errors() {
+    // A `+`/`-` operand that resolves to a number with complex units — a
+    // compound unit (`1px * 1px`) or an inverse unit (`1 / 1px`) — is rejected
+    // ("Number calc(...) isn't compatible with CSS calculations."), while a
+    // standalone compound/inverse calculation and a `var()`-bearing product
+    // stay preserved.
+    for src in [
+        "a {b: calc(1px + 1px*1px)}\n",
+        "a {b: calc(1px + 1/1px)}\n",
+        "a {b: calc(1 + 1/1px)}\n",
+        "a {b: calc(1% + 1s / 2px)}\n",
+        "a {b: calc(1px*1s + 1px*1px)}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected complex-unit sum to error: {src}"
+        );
+    }
+    assert_parity(concat!(
+        "a {\n",
+        "  k1: calc(1px * 1px);\n",
+        "  k2: calc(1 / 1px);\n",
+        "  k3: calc(1px + 2% * var(--c));\n",
+        "  k4: calc(1px + 100% / var(--x));\n",
+        "}\n",
+    ));
+}
