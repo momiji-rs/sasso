@@ -2921,6 +2921,9 @@ fn parity_clamp_calculation() {
         "  p1: clamp(1px, 2vw, 3px);\n",
         "}\n",
     ));
+}
+
+#[test]
 fn parity_extend_into_pseudo_arguments() {
     // Extending a target buried inside a `:not()`/`:is()` selector-pseudo
     // argument (dart-sass `_extendPseudo`): `:not()` with a single-complex arg
@@ -2951,6 +2954,9 @@ fn parity_extend_graph_fixpoint() {
     // `:not(.c)` extends its own contained class.
     assert_parity(".c, .a .b .c, .a .c .b {x: y; @extend .c}\n");
     assert_parity(":not(.c) {@extend .c}\n.c {x: y}\n");
+}
+
+#[test]
 fn parity_custom_property_whitespace() {
     // A custom property emits its value verbatim after the colon: no space is
     // inserted, leading/trailing whitespace is preserved, an inline whitespace
