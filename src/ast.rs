@@ -335,6 +335,10 @@ pub(crate) enum BinOp {
 #[derive(Clone, Copy)]
 pub(crate) enum UnOp {
     Neg,
+    /// Unary `+`: numeric identity (`+5` -> `5`); on any other operand an
+    /// unquoted string prefixed with `+` (`+foo` -> `+foo`), matching
+    /// dart-sass's `unaryPlus`.
+    Plus,
     Not,
 }
 

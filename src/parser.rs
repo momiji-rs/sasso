@@ -2386,6 +2386,12 @@ impl Parser {
     fn unary(&mut self) -> Result<Expr, Error> {
         match self.sc.peek() {
             Some('-') => {
+                // `-` directly before a number/paren/variable is numeric
+                // negation (`-5`, `-(1)`, `-$x`); when separated by whitespace
+                // it is the unary-minus operator over any value (`- red` ->
+                // `-red`). A `-` immediately followed by an identifier char is
+                // instead part of an identifier (`-webkit-foo`, `-red`) and
+                // falls through to `primary`.
                 if matches!(self.sc.peek_at(1), Some(c) if c.is_ascii_digit() || c == '.' || c == '$' || c == '(')
                 {
                     self.sc.bump();
@@ -2395,12 +2401,43 @@ impl Parser {
                         operand: Box::new(operand),
                     });
                 }
+                if matches!(self.sc.peek_at(1), Some(c) if c.is_whitespace()) {
+                    self.sc.bump();
+                    self.skip_ws_inline();
+                    let operand = self.unary()?;
+                    return Ok(Expr::Unary {
+                        op: UnOp::Neg,
+                        operand: Box::new(operand),
+                    });
+                }
             }
             Some('+') => {
-                if matches!(self.sc.peek_at(1), Some(c) if c.is_ascii_digit() || c == '.' || c == '$' || c == '(')
-                {
+                // `+` is never part of an identifier, so a leading `+` in value
+                // position is always the unary-plus operator (numeric identity
+                // for a number, otherwise an unquoted `+<value>` string).
+                // Optional whitespace separates it from its operand. A `+` with
+                // no following operand falls through to `primary` (which reports
+                // the error).
+                let next = self.sc.peek_at(1);
+                let starts_operand = matches!(next, Some(c)
+                    if c.is_ascii_digit()
+                        || c == '.'
+                        || c == '$'
+                        || c == '('
+                        || c == '"'
+                        || c == '\''
+                        || c == '#'
+                        || c == '+'
+                        || c == '-'
+                        || is_ident_char(c));
+                if starts_operand || matches!(next, Some(c) if c.is_whitespace()) {
                     self.sc.bump();
-                    return self.unary();
+                    self.skip_ws_inline();
+                    let operand = self.unary()?;
+                    return Ok(Expr::Unary {
+                        op: UnOp::Plus,
+                        operand: Box::new(operand),
+                    });
                 }
             }
             _ => {}

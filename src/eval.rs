@@ -1440,15 +1440,27 @@ impl<'a> Evaluator<'a> {
             Expr::Unary { op, operand } => {
                 let v = self.eval_expr(operand)?.without_slash();
                 match op {
+                    // Unary minus negates a number; on any other operand
+                    // dart-sass produces an unquoted `-<value>` string
+                    // (`- red` -> `-red`, `- "q"` -> `-"q"`).
                     UnOp::Neg => match v {
                         Value::Number(n) => Ok(Value::Number(Number {
                             value: -n.value,
                             unit: n.unit,
                         })),
-                        other => Err(Error::unpositioned(format!(
-                            "-{} is not a number",
-                            other.type_name()
-                        ))),
+                        other => Ok(Value::Str(SassStr {
+                            text: format!("-{}", other.to_css(false)),
+                            quoted: false,
+                        })),
+                    },
+                    // Unary plus is numeric identity; on any other operand it
+                    // prepends `+` as an unquoted string (`+foo` -> `+foo`).
+                    UnOp::Plus => match v {
+                        Value::Number(_) => Ok(v),
+                        other => Ok(Value::Str(SassStr {
+                            text: format!("+{}", other.to_css(false)),
+                            quoted: false,
+                        })),
                     },
                     UnOp::Not => Ok(Value::Bool(!v.is_truthy())),
                 }

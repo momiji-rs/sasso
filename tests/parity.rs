@@ -2024,3 +2024,23 @@ fn global_alpha_microsoft_filter_overload() {
     // A real color argument still routes to the normal alpha accessor.
     assert_eq!(ours("a {b: alpha(red)}\n"), "a {\n  b: 1;\n}\n");
 }
+
+#[test]
+fn unary_plus_and_minus_on_non_numbers() {
+    // Unary `-`/`+` negate / identity a number, but on any other operand they
+    // prepend the sign as an unquoted string (dart-sass `unaryMinus`/
+    // `unaryPlus`). Whitespace may separate the operator from its operand.
+    assert_eq!(ours("a {b: (- red)}\n"), "a {\n  b: -red;\n}\n");
+    assert_eq!(ours("a {b: (+ red)}\n"), "a {\n  b: +red;\n}\n");
+    assert_eq!(ours("a {b: +hello}\n"), "a {\n  b: +hello;\n}\n");
+    assert_eq!(ours("a {b: + hello}\n"), "a {\n  b: +hello;\n}\n");
+    assert_eq!(ours("a {b: (+- red)}\n"), "a {\n  b: +-red;\n}\n");
+    assert_eq!(ours("a {b: (- \"q\")}\n"), "a {\n  b: -\"q\";\n}\n");
+    assert_eq!(ours("a {b: (+ \"q\")}\n"), "a {\n  b: +\"q\";\n}\n");
+    // Numbers keep arithmetic semantics.
+    assert_eq!(ours("a {b: +10}\n"), "a {\n  b: 10;\n}\n");
+    assert_eq!(ours("a {b: (- 5)}\n"), "a {\n  b: -5;\n}\n");
+    assert_eq!(ours("a {b: -10px + 10px}\n"), "a {\n  b: 0px;\n}\n");
+    // A `-` glued to an identifier stays part of the identifier.
+    assert_eq!(ours("a {b: -webkit-box}\n"), "a {\n  b: -webkit-box;\n}\n");
+}
