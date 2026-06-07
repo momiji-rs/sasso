@@ -590,3 +590,15 @@ fn bracketed_list_literals() {
     assert_parity("x { b: [(c,)]; }\n");
     assert_parity("x { b: [(c,) (d e)]; }\n");
 }
+
+#[test]
+fn comments_in_value_position() {
+    // Loud `/* */` and silent `//` comments act as whitespace between value
+    // tokens, and as operator separators (`1 /**/+/**/ 2`).
+    assert_parity("a {\n  b: c // d\n}\n");
+    assert_parity("a {\n  b: c /* d */ e;\n}\n");
+    assert_parity("a {\n  c: 1 /**/+/**/ 2;\n}\n");
+    assert_parity("a {\n  c: 1/**/+/**/2;\n}\n");
+    assert_parity("a {\n  c: 1 +/**/ 2;\n}\n");
+    assert_parity("a {\n  c: a /**/ b;\n}\n");
+}

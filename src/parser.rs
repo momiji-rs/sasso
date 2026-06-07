@@ -195,9 +195,38 @@ impl Parser {
     /// Skip inline whitespace; report whether any was consumed.
     fn skip_ws_inline(&mut self) -> bool {
         let mut any = false;
-        while matches!(self.sc.peek(), Some(c) if c.is_whitespace()) {
-            self.sc.bump();
-            any = true;
+        loop {
+            match self.sc.peek() {
+                Some(c) if c.is_whitespace() => {
+                    self.sc.bump();
+                    any = true;
+                }
+                // `/* ... */` loud and `// ...` silent comments act as
+                // whitespace between value tokens (`c /* d */ e`, `c // d`).
+                Some('/') if self.sc.peek_at(1) == Some('*') => {
+                    self.sc.bump();
+                    self.sc.bump();
+                    while let Some(c) = self.sc.peek() {
+                        if c == '*' && self.sc.peek_at(1) == Some('/') {
+                            self.sc.bump();
+                            self.sc.bump();
+                            break;
+                        }
+                        self.sc.bump();
+                    }
+                    any = true;
+                }
+                Some('/') if self.sc.peek_at(1) == Some('/') => {
+                    while let Some(c) = self.sc.peek() {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.sc.bump();
+                    }
+                    any = true;
+                }
+                _ => break,
+            }
         }
         any
     }
@@ -1459,7 +1488,12 @@ impl Parser {
             };
             match op {
                 Some(op) => {
-                    let ws_after = matches!(self.sc.peek_at(1), Some(c) if c.is_whitespace());
+                    // Whitespace OR a comment (`/* */`, `//`) immediately
+                    // after the operator counts as separation, matching
+                    // dart-sass's `1 /**/+/**/ 2` handling.
+                    let ws_after = matches!(self.sc.peek_at(1), Some(c) if c.is_whitespace())
+                        || (self.sc.peek_at(1) == Some('/')
+                            && matches!(self.sc.peek_at(2), Some('*') | Some('/')));
                     if had_ws && ws_after {
                         let pos = self.sc.position();
                         self.sc.bump();
