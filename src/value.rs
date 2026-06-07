@@ -34,6 +34,57 @@ pub(crate) enum Value {
     /// (e.g. it contains `var()`, an interpolation, or incompatible units).
     /// Stored as its simplified operand tree for canonical serialization.
     Calc(CalcNode),
+    /// A first-class function reference (`meta.get-function(...)`), invoked via
+    /// `meta.call`. Not a valid CSS value; `inspect` renders it as
+    /// `get-function("name")`.
+    Function(SassFunction),
+}
+
+/// A first-class function reference. Built-in references compare equal by name
+/// (and CSS flag); user references compare by identity of the captured
+/// definition (so a redefined `@function` yields a distinct reference). The
+/// captured user definition is held as a type-erased `Rc` (the concrete
+/// `Callable` lives in `ast`, which cannot be referenced from this module
+/// without a dependency cycle); the evaluator downcasts it when invoking.
+#[derive(Clone)]
+pub(crate) struct SassFunction {
+    /// The function's name (for `inspect` and error messages).
+    pub name: String,
+    /// Whether this is a plain-CSS reference (`$css: true`), which is preserved
+    /// verbatim instead of dispatched to a Sass builtin.
+    pub css: bool,
+    /// The captured user `@function` definition, or `None` for a built-in /
+    /// plain-CSS reference. Type-erased to break the `ast` ↔ `value` cycle.
+    pub user: Option<std::rc::Rc<dyn std::any::Any>>,
+}
+
+impl std::fmt::Debug for SassFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SassFunction")
+            .field("name", &self.name)
+            .field("css", &self.css)
+            .field("user", &self.user.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for SassFunction {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.user, &other.user) {
+            // User references: identity of the captured definition.
+            (Some(a), Some(b)) => std::rc::Rc::ptr_eq(a, b),
+            // Built-in / plain-CSS references: same name and CSS flag.
+            (None, None) => self.name == other.name && self.css == other.css,
+            _ => false,
+        }
+    }
+}
+
+impl SassFunction {
+    /// The `inspect()` / debug form, `get-function("name")` (dart-sass).
+    pub(crate) fn inspect(&self) -> String {
+        format!("get-function(\"{}\")", self.name)
+    }
 }
 
 /// A node in a simplified `calc()` tree. Numeric subtrees are folded during
@@ -480,6 +531,9 @@ impl Value {
             Value::Null => String::new(),
             Value::Slash(_, repr) => repr.clone(),
             Value::Calc(node) => format!("calc({})", node.to_calc_css(compressed)),
+            // Not a valid CSS value; rendered for the "isn't a valid CSS value"
+            // error and for `inspect`.
+            Value::Function(func) => func.inspect(),
         }
     }
 
@@ -508,6 +562,7 @@ impl Value {
             Value::Null => "null",
             Value::Slash(_, _) => "number",
             Value::Calc(_) => "calculation",
+            Value::Function(_) => "function",
         }
     }
 
@@ -563,6 +618,9 @@ impl Value {
             (Value::Map(m), Value::List(l)) | (Value::List(l), Value::Map(m)) => {
                 m.entries.is_empty() && l.items.is_empty()
             }
+            // Function references: built-ins by name, user functions by the
+            // identity of their captured definition (see `SassFunction`).
+            (Value::Function(a), Value::Function(b)) => a == b,
             _ => false,
         }
     }

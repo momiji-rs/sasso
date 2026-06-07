@@ -3127,3 +3127,17 @@ fn parity_meta_exists_predicates() {
         "@use \"sass:meta\";\n@mixin outer() {\n  @if meta.content-exists() { @content; }\n  @else { had: none; }\n}\na { @include outer() { got: yes; } }\nb { @include outer(); }\n",
     );
 }
+
+#[test]
+fn parity_meta_first_class_functions() {
+    // `meta.get-function` returns a first-class reference (built-in, user, or
+    // plain-CSS), `meta.call` invokes it (positional / named / splat), and the
+    // reference inspects as `get-function("name")`, has type `function`, and
+    // compares by built-in name / user-definition identity.
+    assert_parity(
+        "@use \"sass:meta\";\n@function add-two($v) { @return $v + 2; }\n$u: meta.get-function(add-two);\n$b: meta.get-function(round);\n$c: meta.get-function(round, $css: true);\na {\n  user: meta.call($u, 10);\n  builtin: meta.call($b, 0.6);\n  css: meta.call($c, 0.6);\n  rgb_pos: meta.call(meta.get-function(\"rgb\"), 1, 2, 3);\n  rgb_named: meta.call(meta.get-function(\"rgb\"), $blue: 1, $green: 2, $red: 3);\n  insp: meta.inspect($b);\n  tof: meta.type-of($b);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:meta\";\n@function ud() { @return null; }\na {\n  eq_builtin: meta.get-function(lighten) == meta.get-function(lighten);\n  ne_builtin: meta.get-function(lighten) == meta.get-function(darken);\n  eq_user: meta.get-function(ud) == meta.get-function(ud);\n}\n",
+    );
+}

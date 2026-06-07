@@ -16,7 +16,7 @@ use crate::ast::{
 };
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{CalcNode, CalcOp, List, ListSep, Map, Number, SassStr, Value};
+use crate::value::{CalcNode, CalcOp, List, ListSep, Map, Number, SassFunction, SassStr, Value};
 use crate::{Importer, OutputStyle};
 
 /// A call's evaluated arguments, split into positional values and named
@@ -684,7 +684,19 @@ impl<'a> Evaluator<'a> {
         args: &[CallArg],
         name: &str,
     ) -> Result<HashMap<String, Value>, Error> {
-        let (positional, keyword_vec) = self.eval_call_args(args)?;
+        let evaled = self.eval_call_args(args)?;
+        self.bind_evaled(params, evaled, name)
+    }
+
+    /// Bind already-evaluated `(positional, keyword)` arguments into a call
+    /// frame. Used by `meta.call`, which has only evaluated values to pass on.
+    fn bind_evaled(
+        &mut self,
+        params: &ParamList,
+        evaled: EvaledArgs,
+        name: &str,
+    ) -> Result<HashMap<String, Value>, Error> {
+        let (positional, keyword_vec) = evaled;
         let mut keyword: HashMap<String, Value> = HashMap::new();
         for (n, v) in keyword_vec {
             keyword.insert(normalize_arg_name(&n), v);
@@ -1662,6 +1674,13 @@ impl<'a> Evaluator<'a> {
                 d.pos,
             ));
         }
+        // A first-class function reference is likewise not a valid CSS value.
+        if let Value::Function(f) = &value {
+            return Err(Error::at(
+                format!("{} isn't a valid CSS value.", f.inspect()),
+                d.pos,
+            ));
+        }
         let vstr = value.to_css(self.compressed());
         Ok(Some(OutItem::Decl {
             prop,
@@ -2148,6 +2167,8 @@ impl<'a> Evaluator<'a> {
                         | "mixin-exists"
                         | "function-exists"
                         | "content-exists"
+                        | "get-function"
+                        | "call"
                 ) {
                     for v in &mut pos_args {
                         *v = std::mem::replace(v, Value::Null).without_slash();
@@ -2256,7 +2277,7 @@ impl<'a> Evaluator<'a> {
     /// member this layer does not own, so the caller falls back to the
     /// value-only `call_module`. The arguments are already evaluated.
     fn try_meta_eval_call(
-        &self,
+        &mut self,
         member: &str,
         pos_args: &[Value],
         named: &[(String, Value)],
@@ -2268,8 +2289,163 @@ impl<'a> Evaluator<'a> {
             "mixin-exists" => Some(self.meta_mixin_exists(pos_args, named, pos)),
             "function-exists" => Some(self.meta_function_exists(pos_args, named, pos)),
             "content-exists" => Some(self.meta_content_exists(pos_args, pos)),
+            "get-function" => Some(self.meta_get_function(pos_args, named, pos)),
+            "call" => Some(self.meta_call(pos_args, named, pos)),
             _ => None,
         }
+    }
+
+    /// `meta.get-function($name, $css: false, $module: null)`: capture a
+    /// reference to the named function. A `$module` argument needs the user
+    /// module loader (unsupported here) and is reported as an error. A user
+    /// `@function` is captured by identity; otherwise a built-in (or, with
+    /// `$css: true`, a plain-CSS) reference is returned.
+    fn meta_get_function(
+        &self,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+        pos: Pos,
+    ) -> Result<Value, Error> {
+        let params = ["name", "css", "module"];
+        if pos_args.len() > params.len() {
+            return Err(Error::at(
+                format!(
+                    "Only {} arguments allowed, but {} were passed.",
+                    params.len(),
+                    pos_args.len()
+                ),
+                pos,
+            ));
+        }
+        let arg = |i: usize| -> Option<&Value> {
+            pos_args
+                .get(i)
+                .or_else(|| named.iter().find(|(n, _)| n == params[i]).map(|(_, v)| v))
+        };
+        let name = match arg(0) {
+            Some(Value::Str(s)) => s.text.clone(),
+            Some(other) => {
+                return Err(Error::at(
+                    format!("$name: {} is not a string.", other.to_css(false)),
+                    pos,
+                ))
+            }
+            None => return Err(Error::at("Missing argument $name.", pos)),
+        };
+        let css = matches!(arg(1), Some(v) if v.is_truthy());
+        // A `$module` argument requires the user-module system this build lacks.
+        if matches!(arg(2), Some(v) if !matches!(v, Value::Null)) {
+            return Err(Error::at(
+                "$module: modules are not supported for get-function in this build.",
+                pos,
+            ));
+        }
+        if css {
+            return Ok(Value::Function(SassFunction {
+                name,
+                css: true,
+                user: None,
+            }));
+        }
+        // A user `@function` of that name (dash/underscore-insensitive) wins.
+        let key = normalize_arg_name(&name);
+        if let Some((_, f)) = self.functions.iter().find(|(k, _)| normalize_arg_name(k) == key) {
+            return Ok(Value::Function(SassFunction {
+                name,
+                css: false,
+                user: Some(Rc::clone(f) as Rc<dyn std::any::Any>),
+            }));
+        }
+        if crate::builtins::is_builtin(&name) {
+            return Ok(Value::Function(SassFunction {
+                name,
+                css: false,
+                user: None,
+            }));
+        }
+        Err(Error::at(format!("Function not found: {name}"), pos))
+    }
+
+    /// `meta.call($function, $args...)`: invoke a function reference (or, when
+    /// `$function` is a string, the named function). The trailing arguments were
+    /// already splat-expanded by `eval_call_args`.
+    fn meta_call(&mut self, pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+        // `$function` is the first positional argument, or the named `$function`.
+        let (func_val, rest_pos): (Value, Vec<Value>) = if let Some(first) = pos_args.first() {
+            (first.clone(), pos_args[1..].to_vec())
+        } else if let Some((_, v)) = named.iter().find(|(n, _)| n == "function") {
+            (v.clone(), Vec::new())
+        } else {
+            return Err(Error::at("Missing argument $function.", pos));
+        };
+        // The remaining named args (excluding `$function`) are call keywords.
+        let rest_named: Vec<(String, Value)> =
+            named.iter().filter(|(n, _)| n != "function").cloned().collect();
+
+        match func_val {
+            // A first-class function reference.
+            Value::Function(f) => self.invoke_function_ref(&f, rest_pos, rest_named, pos),
+            // The deprecated string form: look up by name.
+            Value::Str(s) => {
+                let f = SassFunction {
+                    name: s.text.clone(),
+                    css: false,
+                    user: self
+                        .functions
+                        .iter()
+                        .find(|(k, _)| normalize_arg_name(k) == normalize_arg_name(&s.text))
+                        .map(|(_, c)| Rc::clone(c) as Rc<dyn std::any::Any>),
+                };
+                self.invoke_function_ref(&f, rest_pos, rest_named, pos)
+            }
+            other => Err(Error::at(
+                format!("$function: {} is not a function reference.", other.to_css(false)),
+                pos,
+            )),
+        }
+    }
+
+    /// Invoke a resolved function reference with already-evaluated arguments.
+    fn invoke_function_ref(
+        &mut self,
+        f: &SassFunction,
+        pos_args: Vec<Value>,
+        named: Vec<(String, Value)>,
+        pos: Pos,
+    ) -> Result<Value, Error> {
+        // A captured user `@function`: bind the evaluated args and run its body.
+        // The payload is a type-erased `Rc<Callable>`; recover it (cloning the
+        // `Rc` so the borrow on `f` is released before running the body).
+        if let Some(any) = &f.user {
+            if let Ok(callable) = Rc::clone(any).downcast::<Callable>() {
+                let frame = self.bind_evaled(&callable.params, (pos_args, named), &callable.name)?;
+                self.push_scope_frame(frame);
+                self.in_mixin.push(false);
+                let result = self.run_fn_body(&callable.body);
+                self.in_mixin.pop();
+                self.pop_scope();
+                return match result? {
+                    Some(v) => Ok(v.without_slash()),
+                    None => Err(Error::unpositioned(format!(
+                        "Function {}() did not @return a value.",
+                        callable.name
+                    ))),
+                };
+            }
+        }
+        // A plain-CSS reference is preserved verbatim as a CSS function call.
+        if f.css {
+            let mut parts: Vec<String> = pos_args.iter().map(|v| v.to_css(false)).collect();
+            for (n, v) in &named {
+                parts.push(format!("${n}: {}", v.to_css(false)));
+            }
+            return Ok(Value::Str(SassStr {
+                text: format!("{}({})", f.name, parts.join(", ")),
+                quoted: false,
+            }));
+        }
+        // A built-in reference: dispatch through the builtin library.
+        crate::builtins::call(&f.name, &pos_args, &named, pos)
     }
 
     /// Read the single string `$name` argument of an existence predicate,
