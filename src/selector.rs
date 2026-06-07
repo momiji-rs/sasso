@@ -2419,29 +2419,37 @@ pub(crate) fn extend_compound_target(
 
     let mut result: Vec<Complex> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    // Worklist so that a selector produced by one target can be re-extended by
-    // another target (dart-sass applies all extensions simultaneously). Bounded
-    // to guarantee termination on pathological inputs.
-    let mut queue: std::collections::VecDeque<Complex> = selectors.iter().cloned().collect();
-    let mut iterations = 0usize;
-    while let Some(complex) = queue.pop_front() {
-        iterations += 1;
-        if iterations > 100_000 || result.len() > 100_000 {
-            break;
-        }
-        let extended = extend_complex_compound(&complex, targets, extenders, replace);
-        // Whether this complex produced anything other than itself: only then do
-        // we re-feed the new selectors (re-feeding an unchanged selector would
-        // loop forever).
-        let is_self_only =
-            extended.len() == 1 && extended.first().map(Complex::render) == Some(complex.render());
-        for c in extended {
-            let rendered = c.render();
-            if seen.insert(rendered.clone()) {
-                if !is_self_only && rendered != complex.render() {
+    // Each input complex is extended independently and its results emitted
+    // consecutively (dart-sass groups a selector's extensions right after it),
+    // so the per-complex fixpoint stays local to its input.
+    for complex in selectors {
+        // Worklist so that a selector produced by one target can itself be
+        // re-extended by another target (dart-sass applies all extensions
+        // simultaneously). Bounded to guarantee termination.
+        let mut queue: std::collections::VecDeque<Complex> = std::collections::VecDeque::new();
+        queue.push_back(complex.clone());
+        let mut local_seen: HashSet<String> = HashSet::new();
+        let mut iterations = 0usize;
+        while let Some(cur) = queue.pop_front() {
+            iterations += 1;
+            if iterations > 100_000 || result.len() > 100_000 {
+                break;
+            }
+            let cur_rendered = cur.render();
+            let extended = extend_complex_compound(&cur, targets, extenders, replace);
+            // Whether this complex produced anything other than itself: only
+            // then do we re-feed the new selectors (re-feeding an unchanged
+            // selector would loop forever).
+            let is_self_only = extended.len() == 1
+                && extended.first().map(Complex::render).as_deref() == Some(cur_rendered.as_str());
+            for c in extended {
+                let rendered = c.render();
+                if !is_self_only && rendered != cur_rendered && local_seen.insert(rendered.clone()) {
                     queue.push_back(c.clone());
                 }
-                result.push(c);
+                if seen.insert(rendered) {
+                    result.push(c);
+                }
             }
         }
     }
