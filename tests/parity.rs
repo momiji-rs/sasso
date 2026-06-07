@@ -2650,4 +2650,48 @@ fn childless_at_rule_stays_in_rule_block() {
     assert_parity("a {\n  @b c;\n}\n");
     assert_parity("a {\n  b {c: d}\n  @e f;\n  g {h: i}\n}\n");
     assert_parity("a {\n  @charset \"x\";\n  b: c;\n}\n");
+fn extend_combinator_weave() {
+    // The @extend engine must weave extenders that contain combinators
+    // (`>`, `+`, `~`) rather than falling back to plain concatenation, matching
+    // dart-sass's `_weaveParents` / `_mergeTrailingCombinators` algorithm.
+
+    // Two following-sibling combinators interleave in all orderings, plus the
+    // unified compound.
+    assert_eq!(
+        ours(".a ~ x {a: b}\n.b ~ y {@extend x}\n"),
+        ".a ~ x, .a ~ .b ~ y, .b ~ .a ~ y, .a.b ~ y {\n  a: b;\n}\n"
+    );
+    // `~` extending a `+` target: sibling/next-sibling merge.
+    assert_eq!(
+        ours(".a + x {a: b}\n.b ~ y {@extend x}\n"),
+        ".a + x, .b ~ .a + y, .b.a + y {\n  a: b;\n}\n"
+    );
+    // A `+` target with a `.a.b ~` extender yields both the woven and the
+    // merged-compound branch (a regression guard for trailing-combinator
+    // superselector/trim handling).
+    assert_eq!(
+        ours(".a + x {a: b}\n.a.b ~ y {@extend x}\n"),
+        ".a + x, .a.b ~ .a + y, .a.b + y {\n  a: b;\n}\n"
+    );
+    // Child combinator: the sibling extender is woven after the child.
+    assert_eq!(
+        ours(".a > x {a: b}\n.b ~ y {@extend x}\n"),
+        ".a > x, .a > .b ~ y {\n  a: b;\n}\n"
+    );
+    // Two child combinators in extendee and extender unify their compounds.
+    assert_eq!(
+        ours(".a > .b + x {a: b}\n.c > .d + y {@extend x}\n"),
+        ".a > .b + x, .a.c > .b.d + y {\n  a: b;\n}\n"
+    );
+    // A nested extender with a child selector weaves around the child.
+    assert_eq!(
+        ours(".baz .foo {a: b}\nfoo > bar {@extend .foo}\n"),
+        ".baz .foo, .baz foo > bar {\n  a: b;\n}\n"
+    );
+
+    // Live parity for the same constructs.
+    assert_parity(".a ~ x {a: b}\n.b ~ y {@extend x}\n");
+    assert_parity(".a + x {a: b}\n.a.b ~ y {@extend x}\n");
+    assert_parity(".a > .b + x {a: b}\n.c > .d + y {@extend x}\n");
+    assert_parity("a + b c .c1 {a: b}\na c .c2 {@extend .c1}\n");
 }

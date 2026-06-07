@@ -669,54 +669,76 @@ fn trim(selectors: Vec<Complex>, originals: &HashSet<String>) -> Vec<Complex> {
 // ---- superselector checks ---------------------------------------------
 
 /// Whether `c1` is a superselector of `c2` (matches every element `c2` does).
+/// Operates in the trailing-combinator model (a faithful port of dart-sass
+/// `complexIsSuperselector`), where each component carries the combinator that
+/// joins it to the *next* component.
 fn complex_is_superselector(c1: &Complex, c2: &Complex) -> bool {
-    let comps1 = &c1.components;
-    let comps2 = &c2.components;
-    // Trailing combinators make a selector neither super- nor subselector; our
-    // model never has trailing combinators, so skip that check.
+    complex_is_superselector_trailing(&to_trailing(&c1.components), &to_trailing(&c2.components))
+}
+
+/// dart-sass `complexIsSuperselector` over trailing-combinator component lists.
+fn complex_is_superselector_trailing(complex1: &[TComp], complex2: &[TComp]) -> bool {
+    // Selectors with trailing operators are neither super- nor subselectors.
+    if complex1.last().map(|c| !c.combinators.is_empty()).unwrap_or(true) {
+        return false;
+    }
+    if complex2.last().map(|c| !c.combinators.is_empty()).unwrap_or(true) {
+        return false;
+    }
+
     let mut i1 = 0usize;
     let mut i2 = 0usize;
     let mut previous_combinator: Option<Combinator> = None;
     loop {
-        let remaining1 = comps1.len() - i1;
-        let remaining2 = comps2.len() - i2;
+        let remaining1 = complex1.len() - i1;
+        let remaining2 = complex2.len() - i2;
         if remaining1 == 0 || remaining2 == 0 {
             return false;
         }
         if remaining1 > remaining2 {
             return false;
         }
-        let component1 = &comps1[i1];
+        let component1 = &complex1[i1];
+        if component1.combinators.len() > 1 {
+            return false;
+        }
         if remaining1 == 1 {
-            let Some(last2) = comps2.last() else {
+            let parents = &complex2[i2..complex2.len() - 1];
+            if parents.iter().any(|p| p.combinators.len() > 1) {
+                return false;
+            }
+            let Some(last2) = complex2.last() else {
                 return false;
             };
             return compound_is_superselector(&component1.compound, &last2.compound);
         }
 
-        // Find the first index in comps2 whose compound is a subselector of
-        // component1's compound.
+        // Find the first index `end` in complex2 whose compound is a subselector
+        // of component1's compound.
         let mut end = i2;
         loop {
-            let component2 = &comps2[end];
+            let component2 = &complex2[end];
+            if component2.combinators.len() > 1 {
+                return false;
+            }
             if compound_is_superselector(&component1.compound, &component2.compound) {
                 break;
             }
             end += 1;
-            if end == comps2.len() - 1 {
+            if end == complex2.len() - 1 {
                 return false;
             }
         }
 
-        // Intervening components (between i2 and end) must be compatible with
-        // the previous combinator.
-        if !compatible_with_previous_combinator(previous_combinator, &comps2[i2..end]) {
+        // Intervening components (between i2 and end) must be compatible with the
+        // previous combinator.
+        if !compatible_with_previous_combinator(previous_combinator, &complex2[i2..end]) {
             return false;
         }
 
-        let component2 = &comps2[end];
-        let combinator1 = component1.combinator;
-        let combinator2 = component2.combinator;
+        let component2 = &complex2[end];
+        let combinator1 = component1.combinators.first().copied();
+        let combinator2 = component2.combinators.first().copied();
         if !is_supercombinator(combinator1, combinator2) {
             return false;
         }
@@ -725,39 +747,43 @@ fn complex_is_superselector(c1: &Complex, c2: &Complex) -> bool {
         i2 = end + 1;
         previous_combinator = combinator1;
 
-        if comps1.len() - i1 == 1 {
+        if complex1.len() - i1 == 1 {
             match combinator1 {
                 Some(Combinator::FollowingSibling) => {
                     // `.foo ~ .bar` only supersedes selectors whose intervening
-                    // combinators are all sibling combinators.
-                    let upto = comps2.len() - 1;
-                    if !comps2[i2..upto]
+                    // combinators are all subcombinators of `~`.
+                    let upto = complex2.len() - 1;
+                    if !complex2[i2..upto]
                         .iter()
-                        .all(|c| is_supercombinator(combinator1, c.combinator))
+                        .all(|c| is_supercombinator(combinator1, c.combinators.first().copied()))
                     {
                         return false;
                     }
                 }
-                Some(_) if comps2.len() - i2 > 1 => return false,
+                Some(_) if complex2.len() - i2 > 1 => return false,
                 _ => {}
             }
         }
     }
 }
 
-fn compatible_with_previous_combinator(previous: Option<Combinator>, parents: &[ComplexComponent]) -> bool {
+fn compatible_with_previous_combinator(previous: Option<Combinator>, parents: &[TComp]) -> bool {
     if parents.is_empty() {
         return true;
     }
     let Some(prev) = previous else {
         return true;
     };
+    // The child and next-sibling combinators require the *immediate* following
+    // component be a superselector.
     if prev != Combinator::FollowingSibling {
         return false;
     }
+    // The following-sibling combinator allows intermediate components, but only
+    // if they're all siblings.
     parents.iter().all(|c| {
         matches!(
-            c.combinator,
+            c.combinators.first().copied(),
             Some(Combinator::FollowingSibling) | Some(Combinator::NextSibling)
         )
     })
@@ -890,29 +916,48 @@ fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
 /// Weave a path of complex selectors (one per original component) into complete
 /// complex selectors. Single-component path elements are simply appended;
 /// multi-component ones have their parent components interwoven with the
-/// accumulated prefix (dart-sass `weave`). Combinators in parent components are
-/// not woven (we fall back to plain concatenation), but the common
-/// descendant-only case is handled fully.
+/// accumulated prefix (dart-sass `weave`). This faithfully handles combinators
+/// (`>`, `+`, `~`) in parent components via a trailing-combinator model and
+/// dart-sass's `_mergeTrailingCombinators` logic.
 fn weave(path: &[Complex]) -> Vec<Complex> {
     let Some((first, rest)) = path.split_first() else {
         return Vec::new();
     };
-    let mut prefixes: Vec<Vec<ComplexComponent>> = vec![first.components.clone()];
+    // Work in the trailing-combinator representation throughout the weave; only
+    // the prefixes accumulate, so converting once per step is cheap.
+    //
+    // In the public model the combinator joining component `i-1` to component
+    // `i` is stored as the *leading* combinator of `i`. dart-sass stores it as
+    // the *trailing* combinator of `i-1`. Each path element is the extension of
+    // one original component, so the leading combinator of a later path
+    // element's first component must be moved onto the trailing position of the
+    // accumulated prefix's last component before weaving.
+    let mut prefixes: Vec<Vec<TComp>> = vec![to_trailing(&first.components)];
     for complex in rest {
-        if complex.components.len() == 1 {
+        let lead = leading_combinator(complex);
+        if let Some(comb) = lead {
             for prefix in prefixes.iter_mut() {
-                prefix.extend(complex.components.iter().cloned());
+                if let Some(last) = prefix.last_mut() {
+                    last.combinators = vec![comb];
+                }
+            }
+        }
+        if complex.components.len() == 1 {
+            // `concatenate`: append the single component. `to_trailing` already
+            // drops the first component's leading combinator (moved above).
+            let appended = to_trailing(&complex.components);
+            for prefix in prefixes.iter_mut() {
+                prefix.extend(appended.iter().cloned());
             }
             continue;
         }
-        let last = match complex.components.last() {
-            Some(l) => l.clone(),
-            None => continue,
+        let base = to_trailing(&complex.components);
+        let Some((last, parents)) = base.split_last() else {
+            continue;
         };
-        let base_parents = &complex.components[..complex.components.len() - 1];
-        let mut next: Vec<Vec<ComplexComponent>> = Vec::new();
+        let mut next: Vec<Vec<TComp>> = Vec::new();
         for prefix in &prefixes {
-            for mut woven in weave_parents(prefix, base_parents) {
+            for mut woven in weave_parents_trailing(prefix, parents) {
                 woven.push(last.clone());
                 next.push(woven);
             }
@@ -924,66 +969,149 @@ fn weave(path: &[Complex]) -> Vec<Complex> {
     }
     prefixes
         .into_iter()
-        .map(|components| Complex { components })
+        .map(|tcomps| Complex {
+            components: from_trailing(&tcomps),
+        })
         .collect()
 }
 
-/// Interweave `prefix`'s components with `parents` (the parent components of a
-/// multi-component extender), returning all order-preserving interleavings
-/// (with unification of equal/superselector groups), per dart-sass
-/// `_weaveParents`. Only the descendant-combinator case is supported; if any
-/// component carries a combinator, fall back to a single concatenation.
-fn weave_parents(prefix: &[ComplexComponent], parents: &[ComplexComponent]) -> Vec<Vec<ComplexComponent>> {
-    if parents.is_empty() {
-        return vec![prefix.to_vec()];
-    }
-    // Fall back to plain concatenation when combinators are involved (the full
-    // grouping/trailing-combinator logic isn't ported).
-    let has_combinator = prefix
+/// The leading combinator of a complex selector's first component, if any. In
+/// the public model this represents how the complex attaches to whatever
+/// precedes it.
+fn leading_combinator(complex: &Complex) -> Option<Combinator> {
+    complex.components.first().and_then(|c| c.combinator)
+}
+
+/// A complex-selector component in the *trailing-combinator* representation
+/// dart-sass uses for weaving: a compound followed by zero or more combinators
+/// that join it to the *next* component. (The current public model attaches a
+/// single combinator to the *following* compound; we convert at the boundary.)
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct TComp {
+    compound: Compound,
+    combinators: Vec<Combinator>,
+}
+
+/// Convert a leading-combinator component slice into the trailing-combinator
+/// form. A combinator on leading component `i` becomes a trailing combinator on
+/// component `i-1`. The last component never has a trailing combinator.
+fn to_trailing(comps: &[ComplexComponent]) -> Vec<TComp> {
+    let mut out: Vec<TComp> = comps
         .iter()
-        .chain(parents.iter())
-        .any(|c| c.combinator.is_some());
-    if has_combinator {
-        let mut out = prefix.to_vec();
-        out.extend(parents.iter().cloned());
-        return vec![out];
+        .map(|c| TComp {
+            compound: c.compound.clone(),
+            combinators: Vec::new(),
+        })
+        .collect();
+    for i in 1..comps.len() {
+        if let Some(comb) = comps[i].combinator {
+            out[i - 1].combinators.push(comb);
+        }
+    }
+    out
+}
+
+/// Convert a trailing-combinator component slice back into the public
+/// leading-combinator form. A trailing combinator on component `i` becomes the
+/// leading combinator of component `i+1`. A component carrying more than one
+/// trailing combinator (a "bogus" run like `> +`) only keeps the last; such
+/// selectors are filtered out elsewhere, so the exact rendering is unimportant.
+fn from_trailing(tcomps: &[TComp]) -> Vec<ComplexComponent> {
+    let mut out: Vec<ComplexComponent> = tcomps
+        .iter()
+        .map(|t| ComplexComponent {
+            combinator: None,
+            compound: t.compound.clone(),
+        })
+        .collect();
+    for i in 0..tcomps.len() {
+        if let Some(comb) = tcomps[i].combinators.last() {
+            if i + 1 < out.len() {
+                out[i + 1].combinator = Some(*comb);
+            }
+        }
+    }
+    out
+}
+
+/// Interweave `prefix`'s components with `parents` (the parent components of a
+/// multi-component extender) in the trailing-combinator model, returning all
+/// order-preserving interleavings (with unification of equal/superselector
+/// groups and combinator merging). A faithful port of dart-sass `_weaveParents`.
+/// Returns an empty list when the two can't be woven (dart-sass returns null).
+fn weave_parents_trailing(prefix: &[TComp], parents: &[TComp]) -> Vec<Vec<TComp>> {
+    // `_mergeLeadingCombinators`: our complexes never carry leading combinators,
+    // so this always succeeds with an empty list — nothing to do.
+
+    let mut queue1: std::collections::VecDeque<TComp> = prefix.iter().cloned().collect();
+    let mut queue2: std::collections::VecDeque<TComp> = parents.iter().cloned().collect();
+
+    let Some(trailing_combinators) = merge_trailing_combinators(&mut queue1, &mut queue2) else {
+        return Vec::new();
+    };
+
+    // `_firstIfRootish`: ensure rootish selectors (`:root` etc.) are unified and
+    // pinned to the front.
+    let rootish1 = first_if_rootish(&mut queue1);
+    let rootish2 = first_if_rootish(&mut queue2);
+    match (rootish1, rootish2) {
+        (Some(r1), Some(r2)) => {
+            let Some(rootish) = unify_compounds(&r1.compound.simples, &r2.compound.simples) else {
+                return Vec::new();
+            };
+            let comp = Compound { simples: rootish };
+            queue1.push_front(TComp {
+                compound: comp.clone(),
+                combinators: r1.combinators,
+            });
+            queue2.push_front(TComp {
+                compound: comp,
+                combinators: r2.combinators,
+            });
+        }
+        (Some(r), None) | (None, Some(r)) => {
+            queue1.push_front(r.clone());
+            queue2.push_front(r);
+        }
+        (None, None) => {}
     }
 
-    // Each component is its own group (descendant-only). Compute the longest
-    // common subsequence of the two component lists, unifying equal /
-    // superselector groups, then interleave the remaining chunks around the LCS.
-    let lcs = longest_common_subsequence(parents, prefix);
+    let mut groups1 = group_selectors(queue1.iter().cloned());
+    let mut groups2 = group_selectors(queue2.iter().cloned());
 
-    let mut q1: std::collections::VecDeque<ComplexComponent> = prefix.iter().cloned().collect();
-    let mut q2: std::collections::VecDeque<ComplexComponent> = parents.iter().cloned().collect();
+    // LCS of the two group lists (dart-sass passes groups2, groups1).
+    let groups1_vec: Vec<Vec<TComp>> = groups1.iter().cloned().collect();
+    let groups2_vec: Vec<Vec<TComp>> = groups2.iter().cloned().collect();
+    let lcs = lcs_groups(&groups2_vec, &groups1_vec);
 
-    let mut choices: Vec<Vec<Vec<ComplexComponent>>> = Vec::new();
+    let mut choices: Vec<Vec<Vec<TComp>>> = Vec::new();
     for group in &lcs {
-        // Chunk: drain from each queue until we reach the LCS group, then
-        // produce the two orderings of the drained prefixes.
-        let chunk = chunks(&mut q1, &mut q2, |q| {
-            q.front()
-                .map(|c| component_is_superselector(c, group))
+        let chunk = chunks_groups(&mut groups1, &mut groups2, |seq| {
+            seq.front()
+                .map(|g| complex_is_parent_superselector(g, group))
                 .unwrap_or(false)
         });
-        if !chunk.is_empty() {
-            choices.push(chunk);
-        }
-        choices.push(vec![vec![group.clone()]]);
-        q1.pop_front();
-        q2.pop_front();
+        // Flatten each chunk (a list of groups) into a flat component list.
+        let flattened: Vec<Vec<TComp>> = chunk.into_iter().map(flatten_groups).collect();
+        choices.push(flattened);
+        choices.push(vec![group.clone()]);
+        groups1.pop_front();
+        groups2.pop_front();
     }
-    let tail = chunks(&mut q1, &mut q2, |q| q.is_empty());
-    if !tail.is_empty() {
-        choices.push(tail);
+    let tail = chunks_groups(&mut groups1, &mut groups2, |seq| seq.is_empty());
+    choices.push(tail.into_iter().map(flatten_groups).collect());
+    for tc in trailing_combinators {
+        choices.push(tc);
     }
 
-    // Cartesian product of the choices, flattening each path.
-    let mut results: Vec<Vec<ComplexComponent>> = vec![Vec::new()];
-    for choice in &choices {
+    // Cartesian product of the non-empty choices, flattening each path. The
+    // iteration order matches dart-sass `paths`: for each choice, the option is
+    // the outer loop and the accumulated paths the inner loop.
+    let mut results: Vec<Vec<TComp>> = vec![Vec::new()];
+    for choice in choices.iter().filter(|c| !c.is_empty()) {
         let mut next = Vec::new();
-        for path in &results {
-            for option in choice {
+        for option in choice {
+            for path in &results {
                 let mut p = path.clone();
                 p.extend(option.iter().cloned());
                 next.push(p);
@@ -997,28 +1125,255 @@ fn weave_parents(prefix: &[ComplexComponent], parents: &[ComplexComponent]) -> V
     results
 }
 
-/// `_chunks`: drain the leading subsequence of each queue (up to where `done`
-/// first holds) and return the two orderings of the combined drained items, or
-/// a single ordering when one side is empty.
-fn chunks<F>(
-    q1: &mut std::collections::VecDeque<ComplexComponent>,
-    q2: &mut std::collections::VecDeque<ComplexComponent>,
+/// Flatten a list of groups (each itself a component list) into a single
+/// component list.
+fn flatten_groups(groups: Vec<Vec<TComp>>) -> Vec<TComp> {
+    groups.into_iter().flatten().collect()
+}
+
+/// dart-sass `_firstIfRootish`: if the first queue element's compound contains a
+/// rootish pseudo-class (`:root`/`:scope`/`:host`/`:host-context`), remove and
+/// return it.
+fn first_if_rootish(queue: &mut std::collections::VecDeque<TComp>) -> Option<TComp> {
+    let first = queue.front()?;
+    let is_rootish = first.compound.simples.iter().any(|s| {
+        if let Simple::Pseudo(text) = s {
+            is_rootish_pseudo_class(text)
+        } else {
+            false
+        }
+    });
+    if is_rootish {
+        queue.pop_front()
+    } else {
+        None
+    }
+}
+
+/// Whether a pseudo text is a rootish *class* (single colon) named one of
+/// `root`/`scope`/`host`/`host-context`.
+fn is_rootish_pseudo_class(text: &str) -> bool {
+    if text.starts_with("::") {
+        return false;
+    }
+    let name = text.trim_start_matches(':');
+    let base = name.split(['(', ' ']).next().unwrap_or(name).to_ascii_lowercase();
+    matches!(base.as_str(), "root" | "scope" | "host" | "host-context")
+}
+
+/// dart-sass `_mergeTrailingCombinators`: extract trailing combinators from the
+/// ends of `components1`/`components2` and merge them into a list of choice
+/// groups (each a list of component lists). Returns `None` if they can't be
+/// merged. Iterative port of the recursive Dart original.
+#[allow(clippy::type_complexity)]
+fn merge_trailing_combinators(
+    components1: &mut std::collections::VecDeque<TComp>,
+    components2: &mut std::collections::VecDeque<TComp>,
+) -> Option<Vec<Vec<Vec<TComp>>>> {
+    let mut result: std::collections::VecDeque<Vec<Vec<TComp>>> = std::collections::VecDeque::new();
+    loop {
+        let combinators1 = components1
+            .back()
+            .map(|c| c.combinators.clone())
+            .unwrap_or_default();
+        let combinators2 = components2
+            .back()
+            .map(|c| c.combinators.clone())
+            .unwrap_or_default();
+        if combinators1.is_empty() && combinators2.is_empty() {
+            return Some(result.into_iter().collect());
+        }
+        if combinators1.len() > 1 || combinators2.len() > 1 {
+            return None;
+        }
+        let c1 = combinators1.first().copied();
+        let c2 = combinators2.first().copied();
+        // Each popped component retains its trailing combinators (mirroring
+        // dart-sass `removeLast()`), so a sibling/child combinator that "wins" a
+        // case is preserved on the resulting component.
+        match (c1, c2) {
+            (Some(Combinator::FollowingSibling), Some(Combinator::FollowingSibling)) => {
+                let component1 = components1.pop_back()?;
+                let component2 = components2.pop_back()?;
+                if compound_is_superselector(&component1.compound, &component2.compound) {
+                    result.push_front(vec![vec![component2]]);
+                } else if compound_is_superselector(&component2.compound, &component1.compound) {
+                    result.push_front(vec![vec![component1]]);
+                } else {
+                    let mut choices = vec![
+                        vec![component1.clone(), component2.clone()],
+                        vec![component2.clone(), component1.clone()],
+                    ];
+                    if let Some(unified) =
+                        unify_compounds(&component1.compound.simples, &component2.compound.simples)
+                    {
+                        choices.push(vec![TComp {
+                            compound: Compound { simples: unified },
+                            combinators: vec![Combinator::FollowingSibling],
+                        }]);
+                    }
+                    result.push_front(choices);
+                }
+            }
+            (Some(Combinator::FollowingSibling), Some(Combinator::NextSibling))
+            | (Some(Combinator::NextSibling), Some(Combinator::FollowingSibling)) => {
+                // Identify which side is `+` (next) and which is `~` (following).
+                let following_first = c1 == Some(Combinator::FollowingSibling);
+                let following = if following_first {
+                    components1.pop_back()?
+                } else {
+                    components2.pop_back()?
+                };
+                let next = if following_first {
+                    components2.pop_back()?
+                } else {
+                    components1.pop_back()?
+                };
+                if compound_is_superselector(&following.compound, &next.compound) {
+                    result.push_front(vec![vec![next]]);
+                } else {
+                    let mut choices = vec![vec![following.clone(), next.clone()]];
+                    if let Some(unified) =
+                        unify_compounds(&following.compound.simples, &next.compound.simples)
+                    {
+                        choices.push(vec![TComp {
+                            compound: Compound { simples: unified },
+                            combinators: next.combinators.clone(),
+                        }]);
+                    }
+                    result.push_front(choices);
+                }
+            }
+            (Some(Combinator::Child), Some(Combinator::NextSibling))
+            | (Some(Combinator::Child), Some(Combinator::FollowingSibling)) => {
+                // The sibling component wins (kept with its combinator); the
+                // child component is dropped.
+                let sibling = components2.pop_back()?;
+                result.push_front(vec![vec![sibling]]);
+            }
+            (Some(Combinator::NextSibling), Some(Combinator::Child))
+            | (Some(Combinator::FollowingSibling), Some(Combinator::Child)) => {
+                let sibling = components1.pop_back()?;
+                result.push_front(vec![vec![sibling]]);
+            }
+            (Some(comb1), Some(comb2)) if comb1 == comb2 => {
+                let comp1 = components1.pop_back()?;
+                let comp2 = components2.pop_back()?;
+                let unified = unify_compounds(&comp1.compound.simples, &comp2.compound.simples)?;
+                result.push_front(vec![vec![TComp {
+                    compound: Compound { simples: unified },
+                    combinators: vec![comb1],
+                }]]);
+            }
+            (Some(combinator), None) => {
+                if combinator == Combinator::Child
+                    && components2
+                        .back()
+                        .map(|d| {
+                            components1
+                                .back()
+                                .map(|c| compound_is_superselector(&d.compound, &c.compound))
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false)
+                {
+                    components2.pop_back();
+                }
+                let comp = components1.pop_back()?;
+                result.push_front(vec![vec![comp]]);
+            }
+            (None, Some(combinator)) => {
+                if combinator == Combinator::Child
+                    && components1
+                        .back()
+                        .map(|d| {
+                            components2
+                                .back()
+                                .map(|c| compound_is_superselector(&d.compound, &c.compound))
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false)
+                {
+                    components1.pop_back();
+                }
+                let comp = components2.pop_back()?;
+                result.push_front(vec![vec![comp]]);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// dart-sass `_groupSelectors`: group components into the longest possible
+/// sub-lists such that components without trailing combinators only appear at
+/// the end of a sub-list. E.g. `A B > C D + E ~ G` → `[(A) (B > C) (D + E ~ G)]`.
+fn group_selectors<I: IntoIterator<Item = TComp>>(components: I) -> std::collections::VecDeque<Vec<TComp>> {
+    let mut groups: std::collections::VecDeque<Vec<TComp>> = std::collections::VecDeque::new();
+    let mut group: Vec<TComp> = Vec::new();
+    for component in components {
+        let ends_group = component.combinators.is_empty();
+        group.push(component);
+        if ends_group {
+            groups.push_back(std::mem::take(&mut group));
+        }
+    }
+    if !group.is_empty() {
+        groups.push_back(group);
+    }
+    groups
+}
+
+/// dart-sass `_mustUnify`: whether two component lists share a unique simple
+/// selector (an id or pseudo-element) and so must be unified.
+fn must_unify(complex1: &[TComp], complex2: &[TComp]) -> bool {
+    let mut unique: Vec<&Simple> = Vec::new();
+    for component in complex1 {
+        for simple in &component.compound.simples {
+            if is_unique_simple(simple) && !unique.contains(&simple) {
+                unique.push(simple);
+            }
+        }
+    }
+    if unique.is_empty() {
+        return false;
+    }
+    complex2.iter().any(|component| {
+        component
+            .compound
+            .simples
+            .iter()
+            .any(|simple| is_unique_simple(simple) && unique.contains(&simple))
+    })
+}
+
+/// dart-sass `_isUnique`: a compound may contain only one of these per type — an
+/// id selector or a pseudo-element.
+fn is_unique_simple(simple: &Simple) -> bool {
+    matches!(simple, Simple::Id(_)) || is_pseudo_element(simple)
+}
+
+/// dart-sass `_chunks` over group lists: drain the leading subsequence of each
+/// queue (up to where `done` first holds) and return the two orderings of the
+/// combined drained groups, or a single ordering when one side is empty.
+fn chunks_groups<F>(
+    q1: &mut std::collections::VecDeque<Vec<TComp>>,
+    q2: &mut std::collections::VecDeque<Vec<TComp>>,
     done: F,
-) -> Vec<Vec<ComplexComponent>>
+) -> Vec<Vec<Vec<TComp>>>
 where
-    F: Fn(&std::collections::VecDeque<ComplexComponent>) -> bool,
+    F: Fn(&std::collections::VecDeque<Vec<TComp>>) -> bool,
 {
-    let mut chunk1 = Vec::new();
+    let mut chunk1: Vec<Vec<TComp>> = Vec::new();
     while !done(q1) {
         match q1.pop_front() {
-            Some(c) => chunk1.push(c),
+            Some(g) => chunk1.push(g),
             None => break,
         }
     }
-    let mut chunk2 = Vec::new();
+    let mut chunk2: Vec<Vec<TComp>> = Vec::new();
     while !done(q2) {
         match q2.pop_front() {
-            Some(c) => chunk2.push(c),
+            Some(g) => chunk2.push(g),
             None => break,
         }
     }
@@ -1036,20 +1391,17 @@ where
     }
 }
 
-/// Longest common subsequence of two component lists, where two components are
-/// "equal" for LCS purposes if they're identical or one is a superselector of
-/// the other (the more specific is selected). Mirrors dart-sass's `select`.
-fn longest_common_subsequence(
-    list1: &[ComplexComponent],
-    list2: &[ComplexComponent],
-) -> Vec<ComplexComponent> {
+/// LCS over group lists with dart-sass's `select`: two groups match if they're
+/// equal, one is a parent-superselector of the other (then the more specific is
+/// chosen), or they must-unify and unify to a single complex.
+fn lcs_groups(list1: &[Vec<TComp>], list2: &[Vec<TComp>]) -> Vec<Vec<TComp>> {
     let n = list1.len();
     let m = list2.len();
     let mut lengths = vec![vec![0usize; m + 1]; n + 1];
-    let mut selections: Vec<Vec<Option<ComplexComponent>>> = vec![vec![None; m]; n];
+    let mut selections: Vec<Vec<Option<Vec<TComp>>>> = vec![vec![None; m]; n];
     for i in 0..n {
         for j in 0..m {
-            let sel = lcs_select(&list1[i], &list2[j]);
+            let sel = lcs_select_groups(&list1[i], &list2[j]);
             let has = sel.is_some();
             selections[i][j] = sel;
             lengths[i + 1][j + 1] = if has {
@@ -1060,51 +1412,81 @@ fn longest_common_subsequence(
         }
     }
     let mut out = Vec::new();
-    backtrack(n as isize - 1, m as isize - 1, &lengths, &selections, &mut out);
+    backtrack_groups(n as isize - 1, m as isize - 1, &lengths, &selections, &mut out);
     out
 }
 
-fn backtrack(
+fn backtrack_groups(
     i: isize,
     j: isize,
     lengths: &[Vec<usize>],
-    selections: &[Vec<Option<ComplexComponent>>],
-    out: &mut Vec<ComplexComponent>,
+    selections: &[Vec<Option<Vec<TComp>>>],
+    out: &mut Vec<Vec<TComp>>,
 ) {
     if i == -1 || j == -1 {
         return;
     }
     let (ui, uj) = (i as usize, j as usize);
     if let Some(sel) = &selections[ui][uj] {
-        backtrack(i - 1, j - 1, lengths, selections, out);
+        backtrack_groups(i - 1, j - 1, lengths, selections, out);
         out.push(sel.clone());
         return;
     }
     if lengths[ui + 1][uj] > lengths[ui][uj + 1] {
-        backtrack(i, j - 1, lengths, selections, out);
+        backtrack_groups(i, j - 1, lengths, selections, out);
     } else {
-        backtrack(i - 1, j, lengths, selections, out);
+        backtrack_groups(i - 1, j, lengths, selections, out);
     }
 }
 
-/// The LCS selection function for two parent components.
-fn lcs_select(a: &ComplexComponent, b: &ComplexComponent) -> Option<ComplexComponent> {
-    if a == b {
-        return Some(a.clone());
+/// The LCS selection for two groups (component lists), per dart-sass.
+fn lcs_select_groups(group1: &[TComp], group2: &[TComp]) -> Option<Vec<TComp>> {
+    if group1 == group2 {
+        return Some(group1.to_vec());
     }
-    if component_is_superselector(a, b) {
-        return Some(b.clone());
+    if complex_is_parent_superselector(group1, group2) {
+        return Some(group2.to_vec());
     }
-    if component_is_superselector(b, a) {
-        return Some(a.clone());
+    if complex_is_parent_superselector(group2, group1) {
+        return Some(group1.to_vec());
     }
-    None
+    if !must_unify(group1, group2) {
+        return None;
+    }
+    // Unify the two groups as complete complex selectors; keep only if the
+    // unification yields a single complex selector.
+    let c1 = Complex {
+        components: from_trailing(group1),
+    };
+    let c2 = Complex {
+        components: from_trailing(group2),
+    };
+    let unified = unify_complex(&c1, &c2)?;
+    if unified.len() == 1 {
+        Some(to_trailing(&unified[0].components))
+    } else {
+        None
+    }
 }
 
-/// Whether one parent component is a superselector of another (compound-level,
-/// descendant context).
-fn component_is_superselector(a: &ComplexComponent, b: &ComplexComponent) -> bool {
-    a.combinator.is_none() && b.combinator.is_none() && compound_is_superselector(&a.compound, &b.compound)
+/// dart-sass `_complexIsParentSuperselector`: like `complexIsSuperselector` but
+/// as though both shared an implicit trailing base compound. Implemented by
+/// appending a shared placeholder component to each and testing superselection.
+fn complex_is_parent_superselector(complex1: &[TComp], complex2: &[TComp]) -> bool {
+    if complex1.len() > complex2.len() {
+        return false;
+    }
+    let base = ComplexComponent {
+        combinator: None,
+        compound: Compound {
+            simples: vec![Simple::Placeholder("<temp>".to_string())],
+        },
+    };
+    let mut c1 = from_trailing(complex1);
+    c1.push(base.clone());
+    let mut c2 = from_trailing(complex2);
+    c2.push(base);
+    complex_is_superselector(&Complex { components: c1 }, &Complex { components: c2 })
 }
 
 /// Compute the replacement options for one component. The first option is the
@@ -1470,27 +1852,27 @@ pub(crate) fn list_is_superselector(sup: &[Complex], sub: &[Complex]) -> bool {
 
 /// Unify two complex selectors into the (possibly several) complex selectors
 /// they jointly match, or `None` if their trailing compounds can't unify
-/// (dart-sass `unifyComplex` for the two-selector case). Only descendant
-/// combinators in the parents are fully woven; a combinator falls back to plain
-/// concatenation (matching the engine's `weave_parents`).
+/// (dart-sass `unifyComplex` for the two-selector case). The parents are woven
+/// with full combinator support via the trailing-combinator weave.
 pub(crate) fn unify_complex(c1: &Complex, c2: &Complex) -> Option<Vec<Complex>> {
-    let last1 = c1.components.last()?;
-    let last2 = c2.components.last()?;
-    // Trailing compounds must unify.
+    let t1 = to_trailing(&c1.components);
+    let t2 = to_trailing(&c2.components);
+    let (last1, parents1) = t1.split_last()?;
+    let (last2, parents2) = t2.split_last()?;
+    // The base (final) compounds must unify; the trailing components in our
+    // model never carry combinators, so the base has none either.
     let unified = unify_compounds(&last1.compound.simples, &last2.compound.simples)?;
-    let base = ComplexComponent {
-        // The unified trailing component keeps whichever explicit combinator is
-        // present (they must agree for a successful unify; prefer the first).
-        combinator: last1.combinator.or(last2.combinator),
+    let base = TComp {
         compound: Compound { simples: unified },
+        combinators: Vec::new(),
     };
-    let parents1 = &c1.components[..c1.components.len() - 1];
-    let parents2 = &c2.components[..c2.components.len() - 1];
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for mut woven in weave_parents(parents1, parents2) {
+    for mut woven in weave_parents_trailing(parents1, parents2) {
         woven.push(base.clone());
-        let complex = Complex { components: woven };
+        let complex = Complex {
+            components: from_trailing(&woven),
+        };
         if seen.insert(complex.render()) {
             out.push(complex);
         }
