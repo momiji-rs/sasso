@@ -138,6 +138,10 @@ fn parity_calc() {
         "  k7: calc(1px + (2% * var(--c)));\n",
         "  k8: calc(1px - (2% + var(--c)));\n",
         "  k9: calc(1px + (var(--c)));\n",
+        "  pi: calc(pi);\n",
+        "  e: calc(e);\n",
+        "  pi2: calc(pi * 2);\n",
+        "  pimix: calc(pi * (1% + 1px));\n",
         "}\n",
     ));
 }

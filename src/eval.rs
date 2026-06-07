@@ -859,6 +859,27 @@ impl<'a> Evaluator<'a> {
             // value and becomes a calc operand.
             other => {
                 let v = self.eval_expr(other)?;
+                // The calc constants `pi`/`e` (case-insensitive) resolve to
+                // their numeric values inside a calculation.
+                if let Value::Str(s) = &v {
+                    if !s.quoted {
+                        match s.text.to_ascii_lowercase().as_str() {
+                            "pi" => {
+                                return Ok(CalcNode::Number(Number {
+                                    value: std::f64::consts::PI,
+                                    unit: String::new(),
+                                }))
+                            }
+                            "e" => {
+                                return Ok(CalcNode::Number(Number {
+                                    value: std::f64::consts::E,
+                                    unit: String::new(),
+                                }))
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 Ok(value_to_calc_node(v))
             }
         }
