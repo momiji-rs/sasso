@@ -538,14 +538,102 @@ pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension]) -
     // originals (dart-sass `_trim`).
     let result = trim(result, &originals);
 
-    // Drop complex selectors that still contain a placeholder.
-    let kept: Vec<&Complex> = result.iter().filter(|c| !c.has_placeholder()).collect();
+    // Simplify placeholders inside `:is()/:where()/:not()`-style pseudo
+    // arguments, dropping selectors whose pseudo can never match.
+    let mut simplified: Vec<Complex> = Vec::new();
+    for c in result {
+        if let Some(c) = simplify_pseudo_placeholders(&c) {
+            simplified.push(c);
+        }
+    }
+
+    // Drop complex selectors that still contain a (top-level) placeholder.
+    let kept: Vec<&Complex> = simplified.iter().filter(|c| !c.has_placeholder()).collect();
     let all_placeholders = kept.is_empty();
     let selectors: Vec<String> = kept.iter().map(|c| c.render()).collect();
     ExtendResult {
         selectors,
         all_placeholders,
     }
+}
+
+/// Simplify placeholder selectors inside pseudo-class arguments
+/// (`:is()`/`:where()`/`:matches()`/`:not()` etc.): remove placeholder complex
+/// selectors from the argument list. For "matches-any" pseudos an empty
+/// argument means the whole compound matches nothing (return `None` to drop the
+/// selector); for `:not()` an empty argument means the pseudo excludes nothing
+/// and is removed (a now-empty compound becomes `*`). Returns the rewritten
+/// complex selector, or `None` if it can never match.
+fn simplify_pseudo_placeholders(complex: &Complex) -> Option<Complex> {
+    let mut components = Vec::new();
+    for comp in &complex.components {
+        let mut simples: Vec<Simple> = Vec::new();
+        for s in &comp.compound.simples {
+            match s {
+                Simple::Pseudo(text) if text.contains('%') => {
+                    match simplify_one_pseudo(text) {
+                        PseudoResult::Keep(new) => simples.push(Simple::Pseudo(new)),
+                        PseudoResult::Remove => { /* `:not()` with empty arg */ }
+                        PseudoResult::NeverMatches => return None,
+                    }
+                }
+                other => simples.push(other.clone()),
+            }
+        }
+        // A compound emptied by removing a `:not()` becomes the universal `*`.
+        if simples.is_empty() {
+            simples.push(Simple::Universal { ns: None });
+        }
+        components.push(ComplexComponent {
+            combinator: comp.combinator,
+            compound: Compound { simples },
+        });
+    }
+    Some(Complex { components })
+}
+
+enum PseudoResult {
+    /// Keep the pseudo, rewritten to this text.
+    Keep(String),
+    /// Remove the pseudo entirely (e.g. `:not()` with no remaining args).
+    Remove,
+    /// The pseudo can never match — drop the whole selector.
+    NeverMatches,
+}
+
+/// Simplify a single pseudo selector text whose argument contains a
+/// `%placeholder`. Only `:is/:where/:matches/:any/:-*-any/:not` take a selector
+/// argument we process; others are kept verbatim.
+fn simplify_one_pseudo(text: &str) -> PseudoResult {
+    // Split into `:name(` ... `)`.
+    let Some(open) = text.find('(') else {
+        return PseudoResult::Keep(text.to_string());
+    };
+    if !text.ends_with(')') {
+        return PseudoResult::Keep(text.to_string());
+    }
+    let head = &text[..open]; // e.g. `:not`
+    let arg = &text[open + 1..text.len() - 1];
+    let name = head.trim_start_matches(':').to_ascii_lowercase();
+    let is_matchish = matches!(name.as_str(), "is" | "where" | "matches" | "any") || name.ends_with("-any");
+    let is_not = name == "not";
+    if !is_matchish && !is_not {
+        return PseudoResult::Keep(text.to_string());
+    }
+    // Parse the argument selector list and drop placeholder-bearing complexes.
+    let Some(list) = parse_list(arg) else {
+        return PseudoResult::Keep(text.to_string());
+    };
+    let kept: Vec<&Complex> = list.iter().filter(|c| !c.has_placeholder()).collect();
+    if kept.is_empty() {
+        return if is_not {
+            PseudoResult::Remove
+        } else {
+            PseudoResult::NeverMatches
+        };
+    }
+    let inner = kept.iter().map(|c| c.render()).collect::<Vec<_>>().join(", ");
+    PseudoResult::Keep(format!("{head}({inner})"))
 }
 
 /// Remove complex selectors that are subselectors of another in the list,

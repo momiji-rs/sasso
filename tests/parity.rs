@@ -1849,3 +1849,14 @@ fn extend_across_media_is_an_error() {
     )
     .is_err());
 }
+
+#[test]
+fn placeholder_inside_pseudo_arguments() {
+    // A nonexistent `%placeholder` is removed from `:is()`/`:not()` arguments.
+    assert_eq!(ours("a:not(%b) {x: y}\n"), "a {\n  x: y;\n}\n");
+    assert_eq!(ours(":not(%b) {x: y}\n"), "* {\n  x: y;\n}\n");
+    assert_eq!(ours("a:is(%b, c) {x: y}\n"), "a:is(c) {\n  x: y;\n}\n");
+    assert_eq!(ours("a:not(%b, c) {x: y}\n"), "a:not(c) {\n  x: y;\n}\n");
+    // A solo `%placeholder` in a matches-any pseudo removes the whole rule.
+    assert_eq!(ours("a:is(%b) {x: y}\n"), "");
+}
