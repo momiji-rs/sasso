@@ -575,7 +575,10 @@ def main():
               file=sys.stderr)
         sys.exit(2)
 
-    enabled_tags = set(SKIP_TAGS)
+    # `extend` is implemented now, so its cases are attempted by default (the
+    # tag remains available via --run-skipped / for opting back in, but is no
+    # longer enabled out of the box).
+    enabled_tags = set(SKIP_TAGS) - {"extend"}
     for t in args.no_skip:
         enabled_tags.discard(t)
     if args.run_skipped:
