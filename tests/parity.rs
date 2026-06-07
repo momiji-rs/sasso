@@ -2312,3 +2312,38 @@ fn var_env_argument_evaluation() {
     // A trailing comma after a rest argument is normal (no empty arg).
     assert_eq!(ours("$n: --c; a {b: var($n...,)}\n"), "a {\n  b: var(--c);\n}\n");
 }
+
+#[test]
+fn calc_nested_parenthesization() {
+    // A nested calc() whose interior is an unresolved interpolation that is
+    // not a clean single token is parenthesized when spliced into the
+    // surrounding calculation (whitespace / `*` / `/` are ambiguous).
+    assert_eq!(
+        ours("a {b: calc(calc(#{\"c*\"}))}\n"),
+        "a {\n  b: calc((c*));\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: calc(calc(#{\"c/\"}))}\n"),
+        "a {\n  b: calc((c/));\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: calc(calc(#{\"c \"}))}\n"),
+        "a {\n  b: calc((c ));\n}\n"
+    );
+    // A `var()` substitution inside a nested calc is always grouped.
+    assert_eq!(
+        ours("a {b: calc(1 + calc(var(--c)))}\n"),
+        "a {\n  b: calc(1 + (var(--c)));\n}\n"
+    );
+    // A clean identifier, a hyphenated token, a number, an operation, and a
+    // complete sub-calculation all flatten without extra parentheses.
+    assert_eq!(ours("a {b: calc(calc(#{c}))}\n"), "a {\n  b: calc(c);\n}\n");
+    assert_eq!(ours("a {b: calc(calc(c-d))}\n"), "a {\n  b: calc(c-d);\n}\n");
+    assert_eq!(ours("a {b: calc(calc(c + d))}\n"), "a {\n  b: calc(c + d);\n}\n");
+    assert_eq!(
+        ours("a {b: calc(1 + calc(min(1%, 2px)))}\n"),
+        "a {\n  b: calc(1 + min(1%, 2px));\n}\n"
+    );
+    // A top-level (non-nested) calc keeps its own interpolation bare.
+    assert_eq!(ours("a {b: calc(#{\"c*\"})}\n"), "a {\n  b: calc(c*);\n}\n");
+}

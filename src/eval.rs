@@ -1875,8 +1875,21 @@ impl<'a> Evaluator<'a> {
                     other => Ok(other),
                 }
             }
-            // A nested calc() flattens into the surrounding calculation.
-            Expr::Calc { inner, .. } => self.eval_calc(inner),
+            // A nested calc() flattens into the surrounding calculation, but
+            // an unresolved single-string operand (an interpolation or a
+            // `var()` substitution that is not a clean operand) is
+            // parenthesized: dart-sass writes `calc(calc(#{"c*"}))` as
+            // `calc((c*))` and `calc(1 + calc(var(--c)))` as
+            // `calc(1 + (var(--c)))`. A clean identifier (`calc(calc(c))` ->
+            // `calc(c)`), a number, an operation, or a complete sub-calculation
+            // (`calc(1 + calc(min(1%, 2px)))`) flattens without extra parens.
+            Expr::Calc { inner, .. } => {
+                let node = self.eval_calc(inner)?;
+                match node {
+                    CalcNode::Str(s) if nested_calc_needs_parens(&s) => Ok(CalcNode::Str(format!("({s})"))),
+                    other => Ok(other),
+                }
+            }
             // A space-separated list written directly in the calc interior is
             // an "unparsed" run: it is only valid when it contains a `var()`/
             // `env()` substitution or an interpolation, which dart-sass splices
@@ -2000,6 +2013,28 @@ fn calc_constant(text: &str) -> Option<f64> {
 /// wrapping a single already-complete calculation (`calc(min(1%, 2px))`)
 /// drops its redundant outer `calc()`, matching dart-sass. A non-calculation
 /// leaf (`var(--x)`, an unknown function) keeps its wrapper.
+/// Whether a single-string operand produced by a *nested* `calc()` must be
+/// wrapped in parentheses when spliced into the surrounding calculation.
+///
+/// dart-sass keeps a nested calc's unresolved interpolation/`var()` operand
+/// grouped (`calc(calc(#{"c*"}))` -> `calc((c*))`, `calc(1 + calc(var(--c)))`
+/// -> `calc(1 + (var(--c)))`), but a clean single token flattens bare
+/// (`calc(calc(c))` -> `calc(c)`, `calc(calc(c-d))` -> `calc(c-d)`). The
+/// operand needs grouping when it is not already a complete sub-calculation
+/// (`min(…)`, `clamp(…)`, …) and either contains a character that would be
+/// ambiguous unparenthesized — whitespace, `*`, `/`, or `\` — or is a `var()`
+/// substitution (which dart-sass always treats as an opaque group).
+fn nested_calc_needs_parens(s: &str) -> bool {
+    if is_complete_calculation(s) {
+        return false;
+    }
+    let trimmed = s.trim_start();
+    let is_var = trimmed.len() >= 4 && trimmed[..4].eq_ignore_ascii_case("var(");
+    is_var
+        || s.chars()
+            .any(|c| c.is_whitespace() || matches!(c, '*' | '/' | '\\'))
+}
+
 fn is_complete_calculation(s: &str) -> bool {
     let s = s.trim();
     let Some(open) = s.find('(') else { return false };
