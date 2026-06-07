@@ -1004,3 +1004,19 @@ fn calc_infinity_nan_constants() {
     assert_parity("a { b: rgb(calc(infinity), 0, 0, 0.5); }\n");
     assert_parity("a { b: rgb(calc(NaN), 0, 0, 0.5); }\n");
 }
+
+#[test]
+fn calc_wrapping_complete_calculation_flattens() {
+    // `calc()` wrapping a single already-complete calculation drops the
+    // redundant outer `calc()` (dart-sass): `calc(min(1%, 2px))` -> `min(…)`.
+    // A real operation inside keeps the wrapper, and a non-calculation leaf
+    // (`var()`, unknown function) keeps its `calc()`.
+    assert_parity("a { b: calc(min(1%, 2px)); }\n");
+    assert_parity("a { b: calc(max(1%, 2px)); }\n");
+    assert_parity("a { b: calc(clamp(1%, 2px, 3%)); }\n");
+    assert_parity("a { b: calc(round(1%, 2px)); }\n");
+    assert_parity("a { b: calc(calc-size(1%, 2px)); }\n");
+    assert_parity("a { b: calc(min(1%, 2px) + 1px); }\n");
+    assert_parity("a { b: calc(var(--x)); }\n");
+    assert_parity("a { b: calc(unknownfn(1%, 2px)); }\n");
+}

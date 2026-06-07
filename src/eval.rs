@@ -1312,6 +1312,15 @@ impl<'a> Evaluator<'a> {
                         };
                         Ok(Value::Calc(CalcNode::Str(spelling.to_string())))
                     }
+                    // `calc()` wrapping a single already-complete calculation
+                    // (`calc(min(1%, 2px))`, `calc(clamp(…))`, etc.) is
+                    // redundant: dart-sass drops the outer `calc()` and emits
+                    // the inner calculation directly. (A non-calculation leaf
+                    // such as `calc(var(--x))` keeps its wrapper.)
+                    CalcNode::Str(s) if is_complete_calculation(&s) => Ok(Value::Str(SassStr {
+                        text: s,
+                        quoted: false,
+                    })),
                     other => Ok(Value::Calc(other)),
                 }
             }
@@ -1592,6 +1601,66 @@ fn calc_constant(text: &str) -> Option<f64> {
         "nan" => Some(f64::NAN),
         _ => None,
     }
+}
+
+/// Whether `s` is exactly one complete CSS-calculation function call —
+/// `name(...)` for a recognized calculation function, with the closing paren
+/// at the very end (balanced, nothing trailing). Used so that a `calc()`
+/// wrapping a single already-complete calculation (`calc(min(1%, 2px))`)
+/// drops its redundant outer `calc()`, matching dart-sass. A non-calculation
+/// leaf (`var(--x)`, an unknown function) keeps its wrapper.
+fn is_complete_calculation(s: &str) -> bool {
+    let s = s.trim();
+    let Some(open) = s.find('(') else { return false };
+    if !s.ends_with(')') {
+        return false;
+    }
+    let name = s[..open].trim().to_ascii_lowercase();
+    let is_calc_name = matches!(
+        name.as_str(),
+        "calc"
+            | "min"
+            | "max"
+            | "clamp"
+            | "round"
+            | "mod"
+            | "rem"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "atan2"
+            | "pow"
+            | "sqrt"
+            | "exp"
+            | "log"
+            | "hypot"
+            | "abs"
+            | "sign"
+            | "calc-size"
+    );
+    if !is_calc_name {
+        return false;
+    }
+    // The opening paren must match the final paren (one balanced call that
+    // spans the whole string), so `min(1%, 2px)` qualifies but
+    // `min(1%, 2px) + min(…)` (extra trailing content) does not.
+    let mut depth = 0u32;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i == s.len() - 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Convert an evaluated value into a calc operand node. Numbers stay numeric
