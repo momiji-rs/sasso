@@ -8,7 +8,7 @@
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-use sasso::{compile, Options};
+use sasso::{compile, FsImporter, Options};
 
 fn enabled() -> bool {
     std::env::var("SASSO_PARITY").map(|v| v != "0").unwrap_or(false)
@@ -3165,4 +3165,113 @@ fn parity_math_numeric_module_members() {
         "@use \"sass:math\";\na {\n  cl_num: math.clamp(0, 1, 2);\n  cl_max: math.clamp(0, 2, 1);\n  cl_inv: math.clamp(1, 2, 0);\n  cl_unit: math.clamp(180deg, 1turn, 360deg);\n  mn: math.min(3px, 1px, 2px);\n  mn_conv: math.min(1cm, 5mm);\n  mx: math.max(1, 2, 3);\n  rnd: math.round(1.6);\n  ln: math.log(2, null);\n}\n",
     );
     assert_parity("@use \"sass:math\";\na { b: math.$min-number * 1e300 * 1e39; }\n");
+/// Compile `files["input.scss"]` with the on-disk module system (writing every
+/// entry to a temp dir, resolving `@use`/`@forward` through `FsImporter`) and
+/// assert byte-parity with dart-sass run on the same directory.
+fn assert_module_parity(files: &[(&str, &str)]) {
+    if !enabled() {
+        return;
+    }
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let id = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("sasso-modtest-{}-{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (name, content) in files {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create subdir");
+        }
+        std::fs::write(&path, content).expect("write module file");
+    }
+    let input = std::fs::read_to_string(dir.join("input.scss")).expect("read input");
+    let importer = FsImporter::new(vec![dir.clone()]);
+    let ours = compile(&input, &Options::default().with_importer(&importer)).expect("our compile failed");
+
+    let bin = std::env::var("SASS_BIN").unwrap_or_else(|_| "npx".to_string());
+    let mut cmd = if bin == "npx" {
+        let mut c = Command::new("npx");
+        c.args(["--yes", "sass", "--no-source-map", "input.scss"]);
+        c
+    } else {
+        let mut c = Command::new(bin);
+        c.args(["--no-source-map", "input.scss"]);
+        c
+    };
+    let out = cmd
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .expect("run dart-sass");
+    let _ = std::fs::remove_dir_all(&dir);
+    if !out.status.success() {
+        eprintln!("skipping module parity case: dart-sass errored");
+        return;
+    }
+    let theirs = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(ours, theirs, "\n--- input ---\n{input}\n");
+}
+
+#[test]
+fn parity_use_user_module() {
+    // `@use "file"` loads a user partial once, emits its CSS, and exposes its
+    // variables, functions, and mixins under the default namespace.
+    assert_module_parity(&[
+        (
+            "_other.scss",
+            "$color: red;\n@function double($x) { @return $x * 2; }\n@mixin box { border: 1px solid; }\n.from-other { content: \"o\"; }\n",
+        ),
+        (
+            "input.scss",
+            "@use \"other\";\n.a {\n  color: other.$color;\n  width: other.double(5px);\n  @include other.box;\n}\n",
+        ),
+    ]);
+}
+
+#[test]
+fn parity_use_namespace_and_star() {
+    // `as ns` overrides the namespace; `as *` exposes members unprefixed.
+    assert_module_parity(&[
+        ("_lib.scss", "$v: 7;\n@function f($x) { @return $x + 1; }\n"),
+        (
+            "input.scss",
+            "@use \"lib\" as l;\n@use \"lib\" as *;\n.a { x: l.$v; y: f(9); z: $v; }\n",
+        ),
+    ]);
+}
+
+#[test]
+fn parity_forward_reexport() {
+    // `@forward` re-exports another module's members; `as prefix-*` prefixes
+    // them and `show`/`hide` filter them.
+    assert_module_parity(&[
+        (
+            "_lib.scss",
+            "$color: red;\n@function double($x) { @return $x * 2; }\n@mixin m { x: 1; }\n",
+        ),
+        ("_mid.scss", "@forward \"lib\" as lib-*;\n"),
+        (
+            "input.scss",
+            "@use \"mid\";\n.a { c: mid.$lib-color; w: mid.lib-double(3); @include mid.lib-m; }\n",
+        ),
+    ]);
+}
+
+#[test]
+fn parity_use_and_forward_with_config() {
+    // `with (...)` overrides a module's `!default` variables; a `@forward ...
+    // with` default yields to a downstream `@use ... with` override.
+    assert_module_parity(&[
+        (
+            "_conf.scss",
+            "$a: 1 !default;\n$b: 2 !default;\n.c { x: $a; y: $b; }\n",
+        ),
+        ("_midw.scss", "@forward \"conf\" with ($a: 100 !default);\n"),
+        (
+            "input.scss",
+            "@use \"midw\" with ($a: 999, $b: 200);\n.r { v: midw.$a; w: midw.$b; }\n",
+        ),
+    ]);
 }

@@ -1045,7 +1045,9 @@ impl Parser {
                 return Err(Error::at("expected \":\".", self.sc.position()));
             }
             self.skip_ws_trivia();
-            let value = self.parse_value()?;
+            // A configuration value is a single (space-list) expression: a
+            // comma is the entry separator, so a comma-list value needs parens.
+            let value = self.space_list()?;
             let mut is_default = false;
             self.skip_ws_inline();
             if self.sc.peek() == Some('!') {
