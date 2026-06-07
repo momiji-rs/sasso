@@ -2784,3 +2784,24 @@ fn fs_importer_partial_extension_and_import_only_resolution() {
     // Cleanup (best effort).
     let _: Result<(), _> = fs::remove_dir_all(PathBuf::from(&dir));
 }
+
+#[test]
+fn parity_calc_math_function_simplification() {
+    // The math calculations evaluate their arguments as calculations: a
+    // fully-numeric argument computes, but an argument still carrying a
+    // `var()` keeps the whole call as a preserved calculation with its numeric
+    // subtree folded.
+    assert_parity(concat!(
+        "a {\n",
+        "  a1: sqrt(2);\n",
+        "  a2: sin(1deg);\n",
+        "  a3: pow(2, 3);\n",
+        "  a4: hypot(3, 4);\n",
+        "  b1: sqrt(1px + 2px - var(--c));\n",
+        "  b2: sin(3px - 1px + var(--c));\n",
+        "  b3: sin(var(--c));\n",
+        "  b4: pow(3px - 1px + var(--c), 4px + 10px);\n",
+        "  b5: log(3px - 1px + var(--c), var(--e));\n",
+        "}\n",
+    ));
+}

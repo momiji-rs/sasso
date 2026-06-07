@@ -1856,6 +1856,26 @@ impl<'a> Evaluator<'a> {
                 if is_calc_function(name) && args.iter().any(|a| a.splat) {
                     return Err(Error::at("Rest arguments can't be used with calculations.", *pos));
                 }
+                // The single-/double-argument math calculations (`sin`, `cos`,
+                // `sqrt`, `pow`, `log`, `hypot`, …) parse their arguments as
+                // calculation expressions, not ordinary SassScript. That means a
+                // disallowed operator (`%`, comparison) inside an argument is
+                // rejected ("This operation can't be used in a calculation."),
+                // and an argument that does not reduce to a single number — it
+                // still references a `var()`/interpolation/unknown ident — keeps
+                // the whole call as a preserved calculation
+                // (`sin(2px + var(--c))`) rather than erroring. When every
+                // argument reduces to a plain number the normal builtin path
+                // computes the result (and applies its unit checks), so this only
+                // changes the two calc-specific behaviours above.
+                if is_pure_calc_math_function(name)
+                    && !self.functions.contains_key(name)
+                    && !args.iter().any(|a| a.splat || a.name.is_some())
+                {
+                    if let Some(v) = self.try_eval_calc_math_call(name, args, *pos)? {
+                        return Ok(v);
+                    }
+                }
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.
                 let (mut pos_args, mut named) = self.eval_call_args(args)?;
@@ -2061,6 +2081,50 @@ impl<'a> Evaluator<'a> {
             text: format!("{name}({})", parts.join(", ")),
             quoted: false,
         }))
+    }
+
+    /// Try to evaluate a single-/double-argument math calculation (`sin`,
+    /// `sqrt`, `pow`, `log`, `hypot`, …) as a calculation. Each argument is
+    /// evaluated through the calc machinery, which rejects disallowed operators
+    /// (`%`, comparisons) the way dart-sass does.
+    ///
+    /// - When *every* argument folds to a single number, returns `Ok(None)`:
+    ///   the caller falls through to the ordinary builtin, which computes the
+    ///   result and applies its unit checks (so `sqrt(2)`, `sin(1deg)`,
+    ///   `sin(1px)`-the-error all behave exactly as before).
+    /// - When an argument still carries an opaque operand — a `var()`,
+    ///   interpolation, or unknown identifier — the whole call is preserved as a
+    ///   calculation string (`sin(2px + var(--c))`).
+    /// - When an argument reduces to a numeric operation we cannot collapse to a
+    ///   single number (compound/inverse units), returns `Ok(None)` so the
+    ///   builtin re-evaluates and reports its own error, rather than silently
+    ///   preserving a value dart-sass would reject.
+    fn try_eval_calc_math_call(
+        &mut self,
+        name: &str,
+        args: &[CallArg],
+        _pos: Pos,
+    ) -> Result<Option<Value>, Error> {
+        let mut nodes = Vec::with_capacity(args.len());
+        for a in args {
+            nodes.push(self.eval_calc(&a.value)?);
+        }
+        // Every argument is a plain number: let the builtin compute.
+        if nodes.iter().all(|n| matches!(n, CalcNode::Number(_))) {
+            return Ok(None);
+        }
+        // No opaque operand anywhere: the calculation is purely numeric but did
+        // not collapse (compound/inverse units). Defer to the builtin so it can
+        // raise the dart-sass error instead of us preserving an invalid value.
+        if !nodes.iter().any(calc_node_has_opaque) {
+            return Ok(None);
+        }
+        let lname = name.to_ascii_lowercase();
+        let parts: Vec<String> = nodes.iter().map(|n| n.to_calc_css(self.compressed())).collect();
+        Ok(Some(Value::Str(SassStr {
+            text: format!("{lname}({})", parts.join(", ")),
+            quoted: false,
+        })))
     }
 
     /// Evaluate the interior of a `calc()` into a simplified node tree.
@@ -2813,6 +2877,47 @@ fn normalize_arg_name(name: &str) -> String {
 /// they are variadic Sass functions that also accept a splat.
 fn is_calc_function(name: &str) -> bool {
     matches!(name, "clamp" | "hypot" | "atan2" | "log" | "pow")
+}
+
+/// Whether `name` is a fixed-arity math calculation (`sin`, `cos`, `sqrt`,
+/// `pow`, `log`, `hypot`, …) that dart-sass parses as a calculation rather than
+/// an ordinary SassScript function. Matched case-insensitively. The legacy
+/// global functions `abs`/`round`/`min`/`max`/`ceil`/`floor` are deliberately
+/// excluded: they fall back to the Sass math builtin (with a deprecation
+/// warning) instead of rejecting non-calculation operands, and `clamp`/`min`/
+/// `max` keep their dedicated builtin preservation.
+fn is_pure_calc_math_function(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "atan2"
+            | "exp"
+            | "log"
+            | "pow"
+            | "hypot"
+            | "sqrt"
+            | "sign"
+            | "mod"
+            | "rem"
+    )
+}
+
+/// Whether a calc node carries an opaque operand — a `var()`, interpolation, or
+/// unknown identifier preserved verbatim — anywhere in its tree. Such a node
+/// cannot reduce to a single number, so a math calculation containing it stays
+/// preserved (`sin(2px + var(--c))`).
+fn calc_node_has_opaque(node: &CalcNode) -> bool {
+    match node {
+        CalcNode::Number(_) => false,
+        CalcNode::Str(_) => true,
+        CalcNode::Op { left, right, .. } => calc_node_has_opaque(left) || calc_node_has_opaque(right),
+    }
 }
 
 /// Serialize an unquoted string as dart-sass `_visitUnquotedString` does: each
