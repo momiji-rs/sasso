@@ -391,6 +391,12 @@ struct Forwarded {
     mixins: HashMap<String, Rc<Callable>>,
     /// Built-in `sass:*` modules re-exported via `@forward "sass:x"`.
     builtins: Vec<ForwardedBuiltin>,
+    /// For each re-exported member name, the source module it came from (by
+    /// pointer). Re-forwarding the SAME module is idempotent (no conflict);
+    /// forwarding a same-named member from a DIFFERENT module is a conflict.
+    var_src: HashMap<String, *const Module>,
+    fn_src: HashMap<String, *const Module>,
+    mixin_src: HashMap<String, *const Module>,
 }
 
 /// A built-in module re-exported via `@forward "sass:x" [as p-*] [show|hide ...]`.
@@ -1580,43 +1586,56 @@ impl<'a> Evaluator<'a> {
             }
         };
 
-        // Two `@forward`s of the same member name conflict — an error reported
-        // immediately, even when the member is never used.
+        // Two `@forward`s that bring the same member name from DIFFERENT modules
+        // conflict — an error reported immediately, even when the member is
+        // never used. Re-forwarding the SAME module is idempotent.
+        // With a prefix, `show`/`hide` names match the PREFIXED member name.
+        // Private members (by their ORIGINAL name) are never re-exported.
+        let src: *const Module = Rc::as_ptr(&module);
         let pfx = prefix.unwrap_or("");
         for (name, val) in &module.vars {
-            if visible_var(name) {
-                let key = format!("{pfx}{name}");
-                if self.forwarded.vars.contains_key(&key) {
-                    return Err(Error::at(
-                        format!("Two forwarded modules both define a variable named ${key}."),
-                        pos,
-                    ));
+            let key = format!("{pfx}{name}");
+            if !is_private_member(name) && visible_var(&key) {
+                if let Some(prev) = self.forwarded.var_src.get(&key) {
+                    if *prev != src {
+                        return Err(Error::at(
+                            format!("Two forwarded modules both define a variable named ${key}."),
+                            pos,
+                        ));
+                    }
                 }
-                self.forwarded.vars.insert(key, val.clone());
+                self.forwarded.vars.insert(key.clone(), val.clone());
+                self.forwarded.var_src.insert(key, src);
             }
         }
         for (name, f) in &module.functions {
-            if visible_name(name) {
-                let key = format!("{pfx}{name}");
-                if self.forwarded.functions.contains_key(&key) {
-                    return Err(Error::at(
-                        format!("Two forwarded modules both define a function named {key}."),
-                        pos,
-                    ));
+            let key = format!("{pfx}{name}");
+            if !is_private_member(name) && visible_name(&key) {
+                if let Some(prev) = self.forwarded.fn_src.get(&key) {
+                    if *prev != src {
+                        return Err(Error::at(
+                            format!("Two forwarded modules both define a function named {key}."),
+                            pos,
+                        ));
+                    }
                 }
-                self.forwarded.functions.insert(key, Rc::clone(f));
+                self.forwarded.functions.insert(key.clone(), Rc::clone(f));
+                self.forwarded.fn_src.insert(key, src);
             }
         }
         for (name, m) in &module.mixins {
-            if visible_name(name) {
-                let key = format!("{pfx}{name}");
-                if self.forwarded.mixins.contains_key(&key) {
-                    return Err(Error::at(
-                        format!("Two forwarded modules both define a mixin named {key}."),
-                        pos,
-                    ));
+            let key = format!("{pfx}{name}");
+            if !is_private_member(name) && visible_name(&key) {
+                if let Some(prev) = self.forwarded.mixin_src.get(&key) {
+                    if *prev != src {
+                        return Err(Error::at(
+                            format!("Two forwarded modules both define a mixin named {key}."),
+                            pos,
+                        ));
+                    }
                 }
-                self.forwarded.mixins.insert(key, Rc::clone(m));
+                self.forwarded.mixins.insert(key.clone(), Rc::clone(m));
+                self.forwarded.mixin_src.insert(key, src);
             }
         }
         Ok(())
