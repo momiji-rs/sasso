@@ -1925,3 +1925,29 @@ fn unquoted_url_contents_escapes_are_canonicalized() {
     assert_eq!(ours("a {b: url(\\))}\n"), "a {\n  b: url(\\));\n}\n");
     assert_eq!(ours("a {b: url(\\#{})}\n"), "a {\n  b: url(\\#{});\n}\n");
 }
+
+#[test]
+fn non_ascii_output_declares_utf8_charset() {
+    use sasso::OutputStyle;
+    // Non-ASCII output (here produced by a unicode escape) gets a leading
+    // `@charset "UTF-8";` in expanded output and a UTF-8 BOM in compressed
+    // output, matching dart-sass. Pure-ASCII output gets neither.
+    assert_eq!(
+        ours("a {b: url(\\2603)}\n"),
+        "@charset \"UTF-8\";\na {\n  b: url(\u{2603});\n}\n"
+    );
+    assert_eq!(ours("a {b: c}\n"), "a {\n  b: c;\n}\n");
+    let compressed = compile(
+        "a {b: url(\\2603)}\n",
+        &Options::default().with_style(OutputStyle::Compressed),
+    )
+    .expect("compile failed");
+    assert_eq!(compressed, "\u{FEFF}a{b:url(\u{2603})}");
+}
+
+#[test]
+fn leading_utf8_bom_is_stripped() {
+    // A leading UTF-8 BOM in the source is dropped before parsing, so it never
+    // appears in the output and never triggers a spurious `@charset`.
+    assert_eq!(ours("\u{FEFF}foo {bar: baz}\n"), "foo {\n  bar: baz;\n}\n");
+}

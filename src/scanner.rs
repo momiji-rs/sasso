@@ -31,6 +31,10 @@ pub(crate) struct Scanner {
 
 impl Scanner {
     pub(crate) fn new(src: &str) -> Self {
+        // A leading UTF-8 byte-order mark is part of the encoding, not the
+        // document; dart-sass strips it before parsing so it never reaches the
+        // output (and never triggers a spurious `@charset`).
+        let src = src.strip_prefix('\u{FEFF}').unwrap_or(src);
         Scanner {
             chars: src.chars().collect(),
             pos: 0,

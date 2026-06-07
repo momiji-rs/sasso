@@ -4,9 +4,19 @@ use crate::eval::{OutItem, OutNode};
 use crate::OutputStyle;
 
 pub(crate) fn emit(nodes: &[OutNode], style: OutputStyle) -> String {
-    match style {
+    let body = match style {
         OutputStyle::Expanded => emit_expanded(nodes),
         OutputStyle::Compressed => emit_compressed(nodes),
+    };
+    // dart-sass declares UTF-8 when the output contains any non-ASCII code
+    // point: expanded output gets a leading `@charset "UTF-8";`, compressed
+    // output gets a UTF-8 byte-order mark instead.
+    if body.is_ascii() {
+        return body;
+    }
+    match style {
+        OutputStyle::Expanded => format!("@charset \"UTF-8\";\n{body}"),
+        OutputStyle::Compressed => format!("\u{FEFF}{body}"),
     }
 }
 
