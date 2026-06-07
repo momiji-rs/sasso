@@ -2269,3 +2269,46 @@ fn custom_property_declarations() {
         "a {\n  --x: value !important;\n}\n"
     );
 }
+
+#[test]
+fn var_env_argument_evaluation() {
+    // `var()`/`env()` are plain CSS functions whose arguments are real
+    // SassScript: the fallback evaluates, whitespace normalises, and a
+    // `var($args...)` splat expands — matching dart-sass byte for byte.
+    assert_eq!(ours("a {b: var()}\n"), "a {\n  b: var();\n}\n");
+    assert_eq!(ours("a {b: var(--c)}\n"), "a {\n  b: var(--c);\n}\n");
+    // The fallback argument is evaluated.
+    assert_eq!(ours("a {b: var(--c, 1 + 2)}\n"), "a {\n  b: var(--c, 3);\n}\n");
+    assert_eq!(
+        ours("a {b: var(--c, \"d\" + \"e\")}\n"),
+        "a {\n  b: var(--c, \"de\");\n}\n"
+    );
+    // Surrounding whitespace around the trailing comma normalises.
+    assert_eq!(ours("a {b: var(--c , )}\n"), "a {\n  b: var(--c, );\n}\n");
+    assert_eq!(ours("a {b: var(--c ,)}\n"), "a {\n  b: var(--c, );\n}\n");
+    // `allowEmptySecondArg`: a trailing comma after exactly the first argument
+    // keeps an empty second argument — but only for the name `var`
+    // (case-insensitively), never for `env`.
+    assert_eq!(ours("a {b: var(--c,)}\n"), "a {\n  b: var(--c, );\n}\n");
+    assert_eq!(ours("a {b: VaR(--c,)}\n"), "a {\n  b: VaR(--c, );\n}\n");
+    assert_eq!(ours("a {b: env(--c, )}\n"), "a {\n  b: env(--c);\n}\n");
+    // A trailing comma after the *second* argument is an ordinary ignorable
+    // trailing comma (no empty arg added).
+    assert_eq!(ours("a {b: var(--c, d,)}\n"), "a {\n  b: var(--c, d);\n}\n");
+    // A parenthesised comma list spreads its items as separate arguments.
+    assert_eq!(
+        ours("a {b: var(--c, (1, 2))}\n"),
+        "a {\n  b: var(--c, 1, 2);\n}\n"
+    );
+    // `var($args...)` splat expands list/single rest arguments.
+    assert_eq!(
+        ours("$name: --c; a {b: var($name...)}\n"),
+        "a {\n  b: var(--c);\n}\n"
+    );
+    assert_eq!(
+        ours("$args: --c, d; a {b: var($args...)}\n"),
+        "a {\n  b: var(--c, d);\n}\n"
+    );
+    // A trailing comma after a rest argument is normal (no empty arg).
+    assert_eq!(ours("$n: --c; a {b: var($n...,)}\n"), "a {\n  b: var(--c);\n}\n");
+}

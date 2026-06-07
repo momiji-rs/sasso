@@ -3249,49 +3249,21 @@ impl Parser {
             let args = self.parse_args_after_paren()?;
             return Ok(Expr::Func { name, args, pos });
         }
-        if matches!(name.as_str(), "var" | "env") {
-            let mut pieces: Vec<TplPiece> = Vec::new();
-            let mut lit = format!("{name}(");
-            let mut depth = 1;
-            loop {
-                match self.sc.peek() {
-                    None => break,
-                    Some('#') if self.sc.peek_at(1) == Some('{') => {
-                        if !lit.is_empty() {
-                            pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
-                        }
-                        self.sc.bump();
-                        self.sc.bump();
-                        let e = self.parse_value()?;
-                        self.skip_ws_inline();
-                        if !self.sc.eat('}') {
-                            return Err(Error::at("expected \"}\"", self.sc.position()));
-                        }
-                        pieces.push(TplPiece::Interp(e));
-                    }
-                    Some('(') => {
-                        depth += 1;
-                        lit.push('(');
-                        self.sc.bump();
-                    }
-                    Some(')') => {
-                        depth -= 1;
-                        lit.push(')');
-                        self.sc.bump();
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    Some(c) => {
-                        lit.push(c);
-                        self.sc.bump();
-                    }
-                }
+        // `var()` and `env()` are plain CSS functions whose arguments are
+        // ordinary SassScript: dart-sass evaluates the fallback/value
+        // arguments, normalises surrounding whitespace, and expands a
+        // `var($args...)` splat. They route through the regular function-call
+        // eval path (neither is a Sass builtin, so the result is preserved
+        // verbatim as `var(...)`/`env(...)`). The single exception is `var`'s
+        // `allowEmptySecondArg`: `var(--c,)` keeps a trailing empty argument
+        // (`var(--c, )`), case-insensitively for the name `var` only — `env`
+        // and every other case follow the normal trailing-comma rules.
+        {
+            let lower = name.to_ascii_lowercase();
+            if lower == "var" || lower == "env" {
+                let args = self.parse_args_after_paren_opt_empty_second(lower == "var")?;
+                return Ok(Expr::Func { name, args, pos });
             }
-            if !lit.is_empty() {
-                pieces.push(TplPiece::Lit(lit));
-            }
-            return Ok(Expr::Ident(pieces));
         }
         // Special CSS functions (`calc()`, `element()`, `expression()` with or
         // without a vendor prefix; `type()` unprefixed) preserve their
@@ -4095,6 +4067,19 @@ impl Parser {
     }
 
     fn parse_args_after_paren(&mut self) -> Result<Vec<CallArg>, Error> {
+        self.parse_args_after_paren_opt_empty_second(false)
+    }
+
+    /// Parse a comma-separated argument list after a consumed `(`.
+    ///
+    /// When `allow_empty_second_arg` is set (dart-sass's `var()` special case),
+    /// a `,` immediately followed by `)` right after the *first* argument adds
+    /// an empty unquoted-string second argument (`var(--c,)` -> `var(--c, )`)
+    /// instead of being treated as a normal ignorable trailing comma.
+    fn parse_args_after_paren_opt_empty_second(
+        &mut self,
+        allow_empty_second_arg: bool,
+    ) -> Result<Vec<CallArg>, Error> {
         let mut args = Vec::new();
         self.skip_ws_inline();
         if self.sc.peek() != Some(')') {
@@ -4127,6 +4112,7 @@ impl Parser {
                     self.sc.bump();
                     self.sc.bump();
                 }
+                let is_first = args.is_empty();
                 args.push(CallArg {
                     name: name_opt,
                     value,
@@ -4136,6 +4122,16 @@ impl Parser {
                 if self.sc.eat(',') {
                     self.skip_ws_inline();
                     if self.sc.peek() == Some(')') {
+                        // `var(<first>,)`: the trailing comma after exactly the
+                        // first positional (non-splat) argument introduces an
+                        // empty second argument rather than being ignored.
+                        if allow_empty_second_arg && is_first && !splat {
+                            args.push(CallArg {
+                                name: None,
+                                value: Expr::Ident(Vec::new()),
+                                splat: false,
+                            });
+                        }
                         break;
                     }
                     continue;
