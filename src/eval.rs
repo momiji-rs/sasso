@@ -2589,13 +2589,36 @@ impl<'a> Evaluator<'a> {
                             let saved_star = std::mem::take(&mut self.star_modules);
                             let saved_used_user = std::mem::take(&mut self.used_user_modules);
                             let saved_star_user = std::mem::take(&mut self.star_user_modules);
+                            // The imported file's own `@forward`s expose members
+                            // as if defined in the importer; collect them
+                            // separately, then merge into the current scope.
+                            let saved_fwd = std::mem::take(&mut self.forwarded);
                             let result = self.exec(&sheet.stmts, parents, sink);
+                            let imported_fwd = std::mem::replace(&mut self.forwarded, saved_fwd);
                             self.used_modules = saved_used;
                             self.star_modules = saved_star;
                             self.used_user_modules = saved_used_user;
                             self.star_user_modules = saved_star_user;
                             self.loading.pop();
                             result?;
+                            // A `@forward`ed member from the imported file becomes
+                            // an ordinary member of the importing scope. This
+                            // build's functions/mixins are global, so only a
+                            // top-level `@import` exposes them (a nested import's
+                            // members stay scoped to the enclosing rule).
+                            if self.scopes.len() == 1 {
+                                for (k, f) in imported_fwd.functions {
+                                    self.functions.insert(k, f);
+                                }
+                                for (k, m) in imported_fwd.mixins {
+                                    self.mixins.insert(k, m);
+                                }
+                                if let Some(g) = self.scopes.first_mut() {
+                                    for (k, val) in imported_fwd.vars {
+                                        g.entry(k).or_insert(val);
+                                    }
+                                }
+                            }
                         }
                         None => {
                             return Err(Error::unpositioned(format!(
