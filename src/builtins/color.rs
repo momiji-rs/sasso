@@ -6,7 +6,7 @@ use super::color_ext::{computed, named_repr};
 use super::{arg, as_color, channel, num, require};
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{fmt_num, Color, ListSep, Number, Value};
+use crate::value::{fmt_num, CalcNode, Color, ListSep, Number, Value};
 
 /// Whether a value is a "special" channel argument that cannot be evaluated
 /// to a plain number — a `var()`/`env()`/`attr()` (an unquoted string holding
@@ -19,6 +19,32 @@ fn is_special(v: &Value) -> bool {
         Value::Str(s) => !s.quoted && s.text.contains('('),
         _ => false,
     }
+}
+
+/// Like [`is_special`] but for the legacy `rgb`/`hsl` channels, where a
+/// `calc()` that folds to a degenerate constant (`infinity`, `-infinity`,
+/// `NaN`) is *not* special — dart-sass folds it to that floating point value
+/// and computes/clamps the real channel rather than preserving the call.
+fn is_special_legacy(v: &Value) -> bool {
+    match v {
+        Value::Calc(node) => degenerate_const(node).is_none(),
+        other => is_special(other),
+    }
+}
+
+/// The floating-point value of a degenerate `calc()` constant
+/// (`calc(infinity)`, `calc(-infinity)`, `calc(NaN)`), or `None` for any other
+/// calculation. dart-sass folds these constants to the corresponding `f64`.
+fn degenerate_const(node: &CalcNode) -> Option<f64> {
+    if let CalcNode::Str(s) = node {
+        return match s.trim().to_ascii_lowercase().as_str() {
+            "infinity" => Some(f64::INFINITY),
+            "-infinity" => Some(f64::NEG_INFINITY),
+            "nan" => Some(f64::NAN),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// Whether a value is the `none` missing-channel keyword (an unquoted `none`).
@@ -84,7 +110,7 @@ fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     // call is preserved verbatim instead.
     if pos_args.len() == 2 {
         if let Value::Color(c) = &pos_args[0] {
-            if is_special(&pos_args[1]) {
+            if is_special_legacy(&pos_args[1]) {
                 // rgb(blue, calc(0.4)) → rgb(0, 0, 255, calc(0.4)).
                 let r = Value::Number(int_num(c.r));
                 let g = Value::Number(int_num(c.g));
@@ -128,6 +154,11 @@ fn int_num(v: f64) -> Number {
 /// directly, and the result is clamped to `[0, 1]`. NaN clamps to 0. Any
 /// other unit is an error (`Expected … to have unit "%" or no units.`).
 fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
+    if let Value::Calc(node) = v {
+        if let Some(c) = degenerate_const(node) {
+            return Ok(clamp_alpha(c));
+        }
+    }
     match v {
         Value::Number(num) => {
             let raw = if num.unit == "%" {
@@ -168,6 +199,11 @@ fn clamp_alpha(v: f64) -> f64 {
 fn rgb_channel(v: &Value, pos: Pos) -> Result<f64, Error> {
     if let Value::Slash(num, _) = v {
         return Ok(clamp_finite(num.value, 0.0, 255.0));
+    }
+    if let Value::Calc(node) = v {
+        if let Some(c) = degenerate_const(node) {
+            return Ok(clamp_finite(c, 0.0, 255.0));
+        }
     }
     if let Value::Number(num) = v {
         if num.value.is_nan() {
@@ -244,9 +280,9 @@ impl Channels {
     /// would emit; otherwise `None` (the channels are all plain numbers and a
     /// real color should be computed).
     fn special_passthrough(&self, name: &str) -> Option<Value> {
-        let comps_special = self.comps.iter().any(is_special);
+        let comps_special = self.comps.iter().any(is_special_legacy);
         let comps_none = self.comps.iter().any(is_none_keyword);
-        let alpha_special = self.alpha.as_ref().is_some_and(is_special);
+        let alpha_special = self.alpha.as_ref().is_some_and(is_special_legacy);
         let alpha_none = self.alpha.as_ref().is_some_and(is_none_keyword);
         let has_special = comps_special || alpha_special;
         let has_none = comps_none || alpha_none;

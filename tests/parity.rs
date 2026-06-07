@@ -535,3 +535,43 @@ fn color_function_validation_and_passthrough() {
         );
     }
 }
+
+#[test]
+fn rgb_degenerate_calc_constants_fold() {
+    // calc(infinity)/calc(-infinity)/calc(NaN) fold to floating-point channel
+    // and alpha values for the legacy rgb function (clamped, NaN -> bound).
+    assert_eq!(
+        ours("a {b: rgb(calc(infinity), 0, 0, 0.5)}\n"),
+        "a {\n  b: rgba(255, 0, 0, 0.5);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(calc(-infinity), 0, 0, 0.5)}\n"),
+        "a {\n  b: rgba(0, 0, 0, 0.5);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(calc(NaN), 0, 0, 0.5)}\n"),
+        "a {\n  b: rgba(0, 0, 0, 0.5);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(0, 0, 0, calc(infinity))}\n"),
+        "a {\n  b: rgb(0, 0, 0);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(0, 0, 0, calc(-infinity))}\n"),
+        "a {\n  b: rgba(0, 0, 0, 0);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(0, 0, 0, calc(NaN))}\n"),
+        "a {\n  b: rgba(0, 0, 0, 0);\n}\n"
+    );
+    // A non-degenerate calc is still a special value preserved verbatim, and a
+    // degenerate calc in a modern color function (color()) is preserved too.
+    assert_eq!(
+        ours("a {b: rgb(calc(1px + 1%), 2, 3, 0.4)}\n"),
+        "a {\n  b: rgb(calc(1px + 1%), 2, 3, 0.4);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: color(srgb calc(infinity) 0 0)}\n"),
+        "a {\n  b: color(srgb calc(infinity) 0 0);\n}\n"
+    );
+}
