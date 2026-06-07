@@ -340,6 +340,13 @@ pub(crate) enum ListSep {
 
 /// An sRGB color. Channels are `0..=255` and may be fractional; alpha is
 /// `0..=1`.
+///
+/// A color may also carry a *modern* color-space representation in
+/// [`Color::modern`]. When present, the color belongs to a non-legacy CSS
+/// Color 4 space (or a legacy space stored in canonical units, e.g. `hsl`),
+/// and serialization/channel access use that representation. The legacy
+/// `r`/`g`/`b`/`a` fields still hold an sRGB-byte approximation so the large
+/// body of legacy color builtins keep working unchanged.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Color {
     pub r: f64,
@@ -349,6 +356,109 @@ pub(crate) struct Color {
     /// The authored spelling (`"red"`, `"#336699"`). Used verbatim when
     /// the color is emitted unchanged; `None` for computed colors.
     pub repr: Option<String>,
+    /// Modern CSS Color 4 representation. `None` for plain legacy sRGB
+    /// colors (the common case); `Some` once the color is space-aware.
+    pub modern: Option<ModernColor>,
+}
+
+/// A CSS Color 4 color space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColorSpace {
+    Rgb,
+    Hsl,
+    Hwb,
+    Srgb,
+    SrgbLinear,
+    DisplayP3,
+    DisplayP3Linear,
+    A98Rgb,
+    ProphotoRgb,
+    Rec2020,
+    XyzD65,
+    XyzD50,
+    Lab,
+    Lch,
+    Oklab,
+    Oklch,
+}
+
+impl ColorSpace {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            ColorSpace::Rgb => "rgb",
+            ColorSpace::Hsl => "hsl",
+            ColorSpace::Hwb => "hwb",
+            ColorSpace::Srgb => "srgb",
+            ColorSpace::SrgbLinear => "srgb-linear",
+            ColorSpace::DisplayP3 => "display-p3",
+            ColorSpace::DisplayP3Linear => "display-p3-linear",
+            ColorSpace::A98Rgb => "a98-rgb",
+            ColorSpace::ProphotoRgb => "prophoto-rgb",
+            ColorSpace::Rec2020 => "rec2020",
+            ColorSpace::XyzD65 => "xyz",
+            ColorSpace::XyzD50 => "xyz-d50",
+            ColorSpace::Lab => "lab",
+            ColorSpace::Lch => "lch",
+            ColorSpace::Oklab => "oklab",
+            ColorSpace::Oklch => "oklch",
+        }
+    }
+
+    pub(crate) fn from_name(s: &str) -> Option<ColorSpace> {
+        Some(match s {
+            "rgb" => ColorSpace::Rgb,
+            "hsl" => ColorSpace::Hsl,
+            "hwb" => ColorSpace::Hwb,
+            "srgb" => ColorSpace::Srgb,
+            "srgb-linear" => ColorSpace::SrgbLinear,
+            "display-p3" => ColorSpace::DisplayP3,
+            "display-p3-linear" => ColorSpace::DisplayP3Linear,
+            "a98-rgb" => ColorSpace::A98Rgb,
+            "prophoto-rgb" => ColorSpace::ProphotoRgb,
+            "rec2020" => ColorSpace::Rec2020,
+            "xyz" | "xyz-d65" => ColorSpace::XyzD65,
+            "xyz-d50" => ColorSpace::XyzD50,
+            "lab" => ColorSpace::Lab,
+            "lch" => ColorSpace::Lch,
+            "oklab" => ColorSpace::Oklab,
+            "oklch" => ColorSpace::Oklch,
+            _ => return None,
+        })
+    }
+
+    /// Whether this is a legacy space (`rgb`/`hsl`/`hwb`).
+    pub(crate) fn is_legacy(self) -> bool {
+        matches!(self, ColorSpace::Rgb | ColorSpace::Hsl | ColorSpace::Hwb)
+    }
+
+    /// The three channel names for this space (in storage order).
+    pub(crate) fn channel_names(self) -> [&'static str; 3] {
+        match self {
+            ColorSpace::Rgb
+            | ColorSpace::Srgb
+            | ColorSpace::SrgbLinear
+            | ColorSpace::DisplayP3
+            | ColorSpace::DisplayP3Linear
+            | ColorSpace::A98Rgb
+            | ColorSpace::ProphotoRgb
+            | ColorSpace::Rec2020 => ["red", "green", "blue"],
+            ColorSpace::Hsl => ["hue", "saturation", "lightness"],
+            ColorSpace::Hwb => ["hue", "whiteness", "blackness"],
+            ColorSpace::XyzD65 | ColorSpace::XyzD50 => ["x", "y", "z"],
+            ColorSpace::Lab | ColorSpace::Oklab => ["lightness", "a", "b"],
+            ColorSpace::Lch | ColorSpace::Oklch => ["lightness", "chroma", "hue"],
+        }
+    }
+}
+
+/// A color-space-aware color. Channels are stored in CSS Color 4 canonical
+/// units (e.g. lab lightness `0..=100`, oklab lightness `0..=1`, hues in
+/// degrees, rgb channels `0..=1`). A `None` channel is a missing channel.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ModernColor {
+    pub space: ColorSpace,
+    pub channels: [Option<f64>; 3],
+    pub alpha: Option<f64>,
 }
 
 impl Value {
@@ -742,6 +852,7 @@ impl Color {
             b,
             a,
             repr: None,
+            modern: None,
         }
     }
 
@@ -803,7 +914,14 @@ impl Color {
         } else {
             None
         };
-        Some(Color { r, g, b, a, repr })
+        Some(Color {
+            r,
+            g,
+            b,
+            a,
+            repr,
+            modern: None,
+        })
     }
 
     /// Convert to HSL: hue in degrees `[0,360)`, saturation/lightness in
@@ -861,6 +979,9 @@ impl Color {
     }
 
     pub(crate) fn to_css(&self, compressed: bool) -> String {
+        if let Some(m) = &self.modern {
+            return m.to_css(compressed);
+        }
         if !compressed {
             if let Some(repr) = &self.repr {
                 return repr.clone();
@@ -908,6 +1029,240 @@ fn shorten_hex(hex: &str) -> String {
         format!("#{}{}{}", b[1] as char, b[3] as char, b[5] as char)
     } else {
         hex.to_string()
+    }
+}
+
+impl ModernColor {
+    /// Whether any of the three channels (or alpha) is a missing channel.
+    fn has_missing(&self) -> bool {
+        self.channels.iter().any(|c| c.is_none()) || self.alpha.is_none()
+    }
+
+    fn is_opaque(&self) -> bool {
+        matches!(self.alpha, Some(a) if (a - 1.0).abs() < f64::EPSILON)
+    }
+
+    /// Serialize a single channel, rendering a missing channel as `none`.
+    fn chan(&self, i: usize, compressed: bool) -> String {
+        match self.channels[i] {
+            None => "none".to_string(),
+            Some(v) => fmt_num(v, compressed),
+        }
+    }
+
+    /// Serialize a channel as a percentage of `denom` (e.g. lab lightness over
+    /// 100, oklab lightness over 1). Missing → `none`.
+    fn chan_pct(&self, i: usize, denom: f64, compressed: bool) -> String {
+        match self.channels[i] {
+            None => "none".to_string(),
+            Some(v) => format!("{}%", fmt_num(v / denom * 100.0, compressed)),
+        }
+    }
+
+    /// Serialize a hue channel with the `deg` suffix. Missing → `none`.
+    fn chan_hue(&self, i: usize, compressed: bool) -> String {
+        match self.channels[i] {
+            None => "none".to_string(),
+            Some(v) => format!("{}deg", fmt_num(v, compressed)),
+        }
+    }
+
+    /// The trailing `/ alpha` (modern form) or `, alpha` (handled by caller).
+    fn alpha_str(&self, compressed: bool) -> String {
+        match self.alpha {
+            None => "none".to_string(),
+            Some(a) => fmt_num(a, compressed),
+        }
+    }
+
+    pub(crate) fn to_css(&self, compressed: bool) -> String {
+        use ColorSpace::*;
+        let sp = if compressed { "" } else { " " };
+        // Legacy spaces with no missing channel use the comma legacy form.
+        if self.space.is_legacy() && !self.has_missing() {
+            return self.legacy_css(compressed);
+        }
+        match self.space {
+            Rgb | Hsl | Hwb => {
+                // Legacy space with a missing channel: modern space-separated
+                // form keeping the space's own name. rgb channels are plain;
+                // hsl/hwb use hue+deg and percentages for the other two.
+                let body = match self.space {
+                    Hsl => format!(
+                        "{} {} {}",
+                        self.chan_hue(0, compressed),
+                        self.pct_or_none(1, compressed),
+                        self.pct_or_none(2, compressed),
+                    ),
+                    Hwb => format!(
+                        "{} {} {}",
+                        self.chan_hue(0, compressed),
+                        self.pct_or_none(1, compressed),
+                        self.pct_or_none(2, compressed),
+                    ),
+                    _ => format!(
+                        "{} {} {}",
+                        self.chan(0, compressed),
+                        self.chan(1, compressed),
+                        self.chan(2, compressed),
+                    ),
+                };
+                self.wrap_modern(self.space.name(), &body, compressed)
+            }
+            Lab => {
+                let body = format!(
+                    "{} {} {}",
+                    self.chan_pct(0, 100.0, compressed),
+                    self.chan(1, compressed),
+                    self.chan(2, compressed),
+                );
+                self.wrap_modern("lab", &body, compressed)
+            }
+            Lch => {
+                let body = format!(
+                    "{} {} {}",
+                    self.chan_pct(0, 100.0, compressed),
+                    self.chan(1, compressed),
+                    self.chan_hue(2, compressed),
+                );
+                self.wrap_modern("lch", &body, compressed)
+            }
+            Oklab => {
+                let body = format!(
+                    "{} {} {}",
+                    self.chan_pct(0, 1.0, compressed),
+                    self.chan(1, compressed),
+                    self.chan(2, compressed),
+                );
+                self.wrap_modern("oklab", &body, compressed)
+            }
+            Oklch => {
+                let body = format!(
+                    "{} {} {}",
+                    self.chan_pct(0, 1.0, compressed),
+                    self.chan(1, compressed),
+                    self.chan_hue(2, compressed),
+                );
+                self.wrap_modern("oklch", &body, compressed)
+            }
+            // Predefined color() spaces.
+            _ => {
+                let body = format!(
+                    "{}{sp}{}{sp}{}",
+                    self.chan(0, compressed),
+                    self.chan(1, compressed),
+                    self.chan(2, compressed),
+                );
+                let space = self.space.name();
+                if self.is_opaque() {
+                    format!("color({space}{sp}{body})")
+                } else {
+                    format!("color({space}{sp}{body}{sp}/{sp}{})", self.alpha_str(compressed))
+                }
+            }
+        }
+    }
+
+    /// A non-hue percentage channel for the legacy modern form (saturation,
+    /// lightness, whiteness, blackness).
+    fn pct_or_none(&self, i: usize, compressed: bool) -> String {
+        match self.channels[i] {
+            None => "none".to_string(),
+            Some(v) => format!("{}%", fmt_num(v, compressed)),
+        }
+    }
+
+    /// Wrap a function-form modern color (`lab(...)`, `hsl(none ...)`) adding a
+    /// `/ alpha` when not opaque.
+    fn wrap_modern(&self, name: &str, body: &str, compressed: bool) -> String {
+        let sp = if compressed { "" } else { " " };
+        if self.is_opaque() && self.alpha.is_some() {
+            format!("{name}({body})")
+        } else {
+            format!("{name}({body}{sp}/{sp}{})", self.alpha_str(compressed))
+        }
+    }
+
+    /// Serialize a legacy color (rgb/hsl/hwb) with no missing channels in the
+    /// classic comma form. rgb may collapse to hex; hwb routes through hsl.
+    fn legacy_css(&self, compressed: bool) -> String {
+        let a = self.alpha.unwrap_or(1.0);
+        let opaque = (a - 1.0).abs() < f64::EPSILON;
+        match self.space {
+            ColorSpace::Rgb => {
+                let r = self.channels[0].unwrap_or(0.0);
+                let g = self.channels[1].unwrap_or(0.0);
+                let b = self.channels[2].unwrap_or(0.0);
+                // A legacy rgb color whose channels exceed the [0,255] gamut is
+                // serialized via hsl(), matching dart-sass.
+                let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
+                if !(in_gamut(r) && in_gamut(g) && in_gamut(b)) {
+                    let c = Color::rgb(r, g, b, 1.0);
+                    let (h, s, l) = c.to_hsl();
+                    let hh = fmt_num(h, compressed);
+                    let ss = fmt_num(s * 100.0, compressed);
+                    let ll = fmt_num(l * 100.0, compressed);
+                    let comma = if compressed { "," } else { ", " };
+                    return if opaque {
+                        format!("hsl({hh}{comma}{ss}%{comma}{ll}%)")
+                    } else {
+                        let aa = fmt_num(a, compressed);
+                        format!("hsla({hh}{comma}{ss}%{comma}{ll}%{comma}{aa})")
+                    };
+                }
+                Color {
+                    r,
+                    g,
+                    b,
+                    a,
+                    repr: None,
+                    modern: None,
+                }
+                .to_css(compressed)
+            }
+            ColorSpace::Hsl | ColorSpace::Hwb => {
+                let (h, s, l) = self.legacy_hsl_triple();
+                let hh = fmt_num(h, compressed);
+                let ss = fmt_num(s, compressed);
+                let ll = fmt_num(l, compressed);
+                let comma = if compressed { "," } else { ", " };
+                if opaque {
+                    format!("hsl({hh}{comma}{ss}%{comma}{ll}%)")
+                } else {
+                    let aa = fmt_num(a, compressed);
+                    format!("hsla({hh}{comma}{ss}%{comma}{ll}%{comma}{aa})")
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// The (hue, saturation%, lightness%) triple for legacy hsl/hwb
+    /// serialization. hwb is first converted to hsl via sRGB.
+    fn legacy_hsl_triple(&self) -> (f64, f64, f64) {
+        match self.space {
+            ColorSpace::Hsl => (
+                self.channels[0].unwrap_or(0.0),
+                self.channels[1].unwrap_or(0.0),
+                self.channels[2].unwrap_or(0.0),
+            ),
+            ColorSpace::Hwb => {
+                let h = self.channels[0].unwrap_or(0.0);
+                let mut w = self.channels[1].unwrap_or(0.0) / 100.0;
+                let mut bl = self.channels[2].unwrap_or(0.0) / 100.0;
+                if w + bl > 1.0 {
+                    let sum = w + bl;
+                    w /= sum;
+                    bl /= sum;
+                }
+                let base = Color::from_hsl(h, 1.0, 0.5, 1.0);
+                let mix = |v: f64| ((v / 255.0) * (1.0 - w - bl) + w) * 255.0;
+                let c = Color::rgb(mix(base.r), mix(base.g), mix(base.b), 1.0);
+                let (hh, ss, ll) = c.to_hsl();
+                (hh, ss * 100.0, ll * 100.0)
+            }
+            _ => (0.0, 0.0, 0.0),
+        }
     }
 }
 
@@ -1112,6 +1467,7 @@ pub(crate) fn named_color(name: &str) -> Option<Color> {
         b: b as f64,
         a,
         repr: Some(name.to_string()),
+        modern: None,
     })
 }
 

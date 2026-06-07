@@ -404,6 +404,7 @@ mod tests {
             b: 0.0,
             a: 1.0,
             repr: Some("red".to_string()),
+            modern: None,
         };
         assert_eq!(call("inspect", &[Value::Color(red)]).to_css(false), "red");
         // A computed color inspects as its css form.

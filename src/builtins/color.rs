@@ -102,7 +102,7 @@ pub(super) fn try_call(
         "percentage" => fn_percentage(pos_args, named, pos),
         "red" | "green" | "blue" => fn_channel(name, pos_args, named, pos),
         "alpha" => fn_alpha(pos_args, named, pos),
-        _ => return None,
+        _ => return try_call_modern(name, pos_args, named, pos),
     })
 }
 
@@ -145,6 +145,9 @@ fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     let channels = Channels::collect("rgb", &params, pos_args, named, pos)?;
     if let Some(verbatim) = channels.relative_passthrough("rgb") {
         return Ok(verbatim);
+    }
+    if let Some(c) = legacy_none_color(&channels, ColorSpace::Rgb, pos)? {
+        return Ok(c);
     }
     if let Some(verbatim) = channels.special_passthrough("rgb") {
         return Ok(verbatim);
@@ -674,6 +677,11 @@ fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     if let Some(verbatim) = channels.relative_passthrough("hsl") {
         return Ok(verbatim);
     }
+    // A `none` channel (with no real special function) builds a modern legacy
+    // hsl color rather than a verbatim string.
+    if let Some(c) = legacy_none_color(&channels, ColorSpace::Hsl, pos)? {
+        return Ok(c);
+    }
     if let Some(verbatim) = channels.special_passthrough("hsl") {
         return Ok(verbatim);
     }
@@ -706,23 +714,14 @@ fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     );
     // hsl()/hsla() literals keep their function representation, matching
     // dart-sass (e.g. `hsl(120, 50%, 40%)` does not collapse to hex). The hue
-    // is normalized to degrees in `[0, 360)`.
+    // is normalized to degrees in `[0, 360)`. The modern Hsl tag carries the
+    // space so `color.space`/`color.channel` work; serialization uses the
+    // classic comma form via `ModernColor::legacy_css`.
     let h_norm = h.rem_euclid(360.0);
-    c.repr = Some(if (a - 1.0).abs() < f64::EPSILON {
-        format!(
-            "hsl({}, {}%, {}%)",
-            fmt_num(h_norm, false),
-            fmt_num(s_pct, false),
-            fmt_num(l_pct, false)
-        )
-    } else {
-        format!(
-            "hsla({}, {}%, {}%, {})",
-            fmt_num(h_norm, false),
-            fmt_num(s_pct, false),
-            fmt_num(l_pct, false),
-            fmt_num(a, false)
-        )
+    c.modern = Some(ModernColor {
+        space: ColorSpace::Hsl,
+        channels: [Some(h_norm), Some(s_pct), Some(l_pct)],
+        alpha: Some(a),
     });
     Ok(Value::Color(c))
 }
@@ -881,13 +880,24 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
             pos,
         ));
     }
-    // A `none` missing-channel keyword (with otherwise plain numbers) keeps the
-    // space-separated spelling, but a bare numeric hue gains `deg` and the `/`
-    // alpha separator is spaced.
+    // A `none` missing-channel keyword (with otherwise plain numbers) builds a
+    // modern legacy hwb color.
     let comps_none = comps.iter().any(is_none_keyword);
     let alpha_none = alpha.as_ref().is_some_and(is_none_keyword);
     if comps_none || alpha_none {
-        return Ok(hwb_verbatim(&comps, alpha.as_ref()));
+        let h = if is_none_keyword(&comps[0]) {
+            None
+        } else {
+            modern_hue(&comps[0])
+        };
+        let w = modern_channel(&comps[1], 100.0);
+        let bl = modern_channel(&comps[2], 100.0);
+        let mc = ModernColor {
+            space: ColorSpace::Hwb,
+            channels: [h, w, bl],
+            alpha: modern_alpha(alpha.as_ref()),
+        };
+        return Ok(Value::Color(make_modern(mc)));
     }
     let h = hsl_hue(&comps[0], pos)?;
     let w_pct = num(&comps[1], pos)?;
@@ -896,25 +906,14 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         Some(v) => alpha_value(v, pos)?,
         None => 1.0,
     };
-    let c = hwb_to_color(h, w_pct, b_pct, a);
-    // Emit the HSL spelling, derived from the converted color's HSL channels.
-    let (hh, ss, ll) = c.to_hsl();
-    let mut out = c;
-    out.repr = Some(if (a - 1.0).abs() < f64::EPSILON {
-        format!(
-            "hsl({}, {}%, {}%)",
-            fmt_num(hh, false),
-            fmt_num(ss * 100.0, false),
-            fmt_num(ll * 100.0, false)
-        )
-    } else {
-        format!(
-            "hsla({}, {}%, {}%, {})",
-            fmt_num(hh, false),
-            fmt_num(ss * 100.0, false),
-            fmt_num(ll * 100.0, false),
-            fmt_num(a, false)
-        )
+    let mut out = hwb_to_color(h, w_pct, b_pct, a);
+    // Carry the modern Hwb tag (so `color.space`/`color.channel` work);
+    // serialization uses the classic hsl comma form via `legacy_css`.
+    let h_norm = h.rem_euclid(360.0);
+    out.modern = Some(ModernColor {
+        space: ColorSpace::Hwb,
+        channels: [Some(h_norm), Some(w_pct), Some(b_pct)],
+        alpha: Some(a),
     });
     Ok(Value::Color(out))
 }
@@ -932,39 +931,6 @@ fn hwb_to_color(h: f64, w_pct: f64, b_pct: f64, a: f64) -> Color {
     let base = Color::from_hsl(h, 1.0, 0.5, a);
     let mix = |v: f64| ((v / 255.0) * (1.0 - w - b) + w) * 255.0;
     Color::rgb(mix(base.r), mix(base.g), mix(base.b), a)
-}
-
-/// Re-serialize an hwb passthrough call: `hwb(h w b)` or `hwb(h w b / a)`,
-/// space-joined, with a bare numeric hue rendered with a `deg` unit.
-fn hwb_verbatim(comps: &[Value], alpha: Option<&Value>) -> Value {
-    // Reconstruct from the components (not the original list) so a bare numeric
-    // hue gains its `deg` unit.
-    let parts: Vec<String> = comps
-        .iter()
-        .enumerate()
-        .map(|(i, v)| if i == 0 { hwb_hue_css(v) } else { v.to_css(false) })
-        .collect();
-    let mut text = parts.join(" ");
-    if let Some(a) = alpha {
-        text.push_str(" / ");
-        text.push_str(&a.to_css(false));
-    }
-    Value::Str(crate::value::SassStr {
-        text: format!("hwb({text})"),
-        quoted: false,
-    })
-}
-
-/// Render an hwb hue channel for a verbatim call: a bare unitless number is
-/// suffixed `deg`; everything else (already-unit numbers, `none`, `var()`)
-/// serializes normally.
-fn hwb_hue_css(v: &Value) -> String {
-    if let Value::Number(num) = v {
-        if num.unit.is_empty() {
-            return format!("{}deg", fmt_num(num.value, false));
-        }
-    }
-    v.to_css(false)
 }
 
 /// The three channel names of a CIE/OK color space, for error messages.
@@ -1027,15 +993,14 @@ fn fn_lab_family(
         }
     }
     let SplitChannels { comps, alpha, .. } = split_channels(&channels);
-    // A relative-color call (`lab(from … )`) or any special/`none` channel is
-    // preserved verbatim.
+    // A relative-color call (`lab(from … )`) or a special function
+    // (`var()`/non-degenerate `calc()`) is preserved verbatim. A `none`
+    // channel is computed (it produces a missing channel).
     let is_relative = comps
         .first()
         .is_some_and(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.eq_ignore_ascii_case("from")));
-    let has_special = comps.iter().any(|v| is_special(v) || is_none_keyword(v))
-        || alpha
-            .as_ref()
-            .is_some_and(|v| is_special(v) || is_none_keyword(v));
+    let special = |v: &Value| is_special(v) && !is_degenerate_calc(v);
+    let has_special = comps.iter().any(special) || alpha.as_ref().is_some_and(special);
     if is_relative || has_special {
         return Ok(verbatim_call(name, &channels));
     }
@@ -1054,6 +1019,9 @@ fn fn_lab_family(
     }
     let is_hue = |i: usize| matches!(name, "lch" | "oklch") && i == 2;
     for (i, comp) in comps.iter().enumerate() {
+        if is_none_keyword(comp) || is_degenerate_calc(comp) {
+            continue;
+        }
         match comp {
             Value::Number(num) => {
                 if is_hue(i) {
@@ -1094,10 +1062,51 @@ fn fn_lab_family(
     }
     if let Some(a) = &alpha {
         // Validate the alpha's unit (errors on e.g. `0.4px`).
-        alpha_value(a, pos)?;
+        if !is_none_keyword(a) {
+            alpha_value(a, pos)?;
+        }
     }
-    // Well-formed and fully numeric: preserve the call verbatim (no math).
-    Ok(verbatim_call(name, &channels))
+    // Compute the modern color. Lightness is clamped (lab/lch 0..100, oklab/oklch
+    // 0..1); chroma is floored at 0; a/b and the hue are unclamped.
+    let (space, l_max, l_base) = match name {
+        "lab" => (ColorSpace::Lab, 100.0, 100.0),
+        "lch" => (ColorSpace::Lch, 100.0, 100.0),
+        "oklab" => (ColorSpace::Oklab, 1.0, 1.0),
+        _ => (ColorSpace::Oklch, 1.0, 1.0),
+    };
+    // A degenerate `calc()` in a non-lightness channel is preserved verbatim
+    // (dart-sass keeps the `calc(...)` text); only the clamped lightness and
+    // alpha are folded.
+    if comps[1..].iter().any(is_degenerate_calc) {
+        return Ok(lab_degenerate(name, &comps, alpha.as_ref(), l_base, l_max, pos));
+    }
+    let is_polar = matches!(name, "lch" | "oklch");
+    // Percentage references per CSS Color 4: lab a/b 100% = 125, oklab a/b
+    // 100% = 0.4, lch chroma 100% = 150, oklch chroma 100% = 0.4.
+    let (ab_base, chroma_base) = match name {
+        "lab" => (125.0, 0.0),
+        "lch" => (0.0, 150.0),
+        "oklab" => (0.4, 0.0),
+        _ => (0.0, 0.4), // oklch
+    };
+    let l = modern_channel(&comps[0], l_base).map(|v| v.clamp(0.0, l_max));
+    let c1;
+    let c2;
+    if is_polar {
+        // [lightness, chroma, hue]
+        c1 = modern_channel(&comps[1], chroma_base).map(|v| v.max(0.0));
+        c2 = modern_hue(&comps[2]);
+    } else {
+        // [lightness, a, b]
+        c1 = modern_channel(&comps[1], ab_base);
+        c2 = modern_channel(&comps[2], ab_base);
+    }
+    let mc = ModernColor {
+        space,
+        channels: [l, c1, c2],
+        alpha: modern_alpha(alpha.as_ref()),
+    };
+    Ok(Value::Color(make_modern(mc)))
 }
 
 /// Serialize a list value wrapped in parentheses, as dart-sass does in its
@@ -1194,7 +1203,7 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
     // parses the color, so it flows through validation and the modern
     // (space-around-`/`) serialization below.
     let is_relative = space_name.eq_ignore_ascii_case("from");
-    let special_chan = |v: &Value| (is_special(v) && !is_degenerate_calc(v)) || is_none_keyword(v);
+    let special_chan = |v: &Value| is_special(v) && !is_degenerate_calc(v);
     let has_special = channels.iter().any(special_chan) || alpha.as_ref().is_some_and(special_chan);
     if is_relative || has_special {
         return Ok(verbatim_call("color", &desc));
@@ -1212,6 +1221,9 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
     let names = ["red", "green", "blue"];
     for (i, comp) in channels.iter().enumerate() {
         let name = names.get(i).copied().unwrap_or("");
+        if is_none_keyword(comp) || is_degenerate_calc(comp) {
+            continue;
+        }
         match comp {
             Value::Number(num) => {
                 if !num.unit.is_empty() && num.unit != "%" {
@@ -1249,26 +1261,46 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
         ));
     }
     if let Some(a) = &alpha {
-        alpha_value(a, pos)?;
+        if !is_none_keyword(a) {
+            alpha_value(a, pos)?;
+        }
     }
-    // When a degenerate `calc()` is present, dart-sass parses the color and
-    // serializes it in the modern form: the `/` alpha separator is spaced and a
-    // degenerate `calc()` alpha is folded (`infinity` → 1 = opaque/omitted,
-    // `-infinity`/`NaN` → 0). The other cases keep the original glued spelling.
+    // `display-p3-linear` is accepted but not a real CSS Color 4 space in
+    // dart-sass; it is preserved verbatim.
+    let space = match predefined_space(&space_name) {
+        Some(s) => s,
+        None => return Ok(verbatim_call("color", &desc)),
+    };
+    // A degenerate `calc()` channel (`calc(infinity)`/`calc(-infinity)`/
+    // `calc(NaN)`) is preserved verbatim in `color()`'s channels (dart-sass
+    // keeps the `calc(...)` text), while a degenerate alpha is folded.
     let degenerate =
         channels.iter().any(is_degenerate_calc) || alpha.as_ref().is_some_and(is_degenerate_calc);
     if degenerate {
         return Ok(modern_color(&space_name, channels, alpha.as_ref(), pos));
     }
-    Ok(verbatim_call("color", &desc))
+    // Compute the color: predefined `color()` spaces store red/green/blue (and
+    // xyz x/y/z) channels in 0..1 with no clamping.
+    let ch = [
+        modern_channel(&channels[0], 1.0),
+        modern_channel(&channels[1], 1.0),
+        modern_channel(&channels[2], 1.0),
+    ];
+    let mc = ModernColor {
+        space,
+        channels: ch,
+        alpha: modern_alpha(alpha.as_ref()),
+    };
+    Ok(Value::Color(make_modern(mc)))
 }
 
-/// Serialize a parsed `color()` in dart-sass's modern form: the space name,
-/// each channel via `to_css`, and—if the (folded) alpha is not fully opaque—a
-/// space-padded `/ alpha`. A degenerate `calc()` alpha folds to a number
-/// (`infinity` → 1, `-infinity`/`NaN` → 0); a plain numeric alpha is clamped.
+/// Serialize a `color()` whose channels contain a degenerate `calc()` constant
+/// preserved verbatim: the space name, each channel via `to_css`, and—if the
+/// (folded) alpha is not fully opaque—a space-padded `/ alpha`. A degenerate
+/// `calc()` alpha folds (`infinity` → 1 = opaque, `-infinity`/`NaN` → 0).
 fn modern_color(space: &str, channels: &[Value], alpha: Option<&Value>, pos: Pos) -> Value {
     let a = match alpha {
+        Some(v) if is_none_keyword(v) => 1.0,
         Some(v) => alpha_value(v, pos).unwrap_or(1.0),
         None => 1.0,
     };
@@ -1510,4 +1542,1146 @@ fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
         value: c.a,
         unit: String::new(),
     }))
+}
+
+// =====================================================================
+// CSS Color 4 color-space conversion engine.
+//
+// Channels are stored in each space's canonical units:
+//   * rgb/srgb/srgb-linear/display-p3/a98-rgb/prophoto-rgb/rec2020:
+//       red/green/blue in 0..=1 (the legacy `rgb` space additionally keeps a
+//       0..=255 mirror in Color::{r,g,b}).
+//   * hsl: hue deg, saturation/lightness in percent (0..=100).
+//   * hwb: hue deg, whiteness/blackness in percent (0..=100).
+//   * xyz / xyz-d50: x/y/z unbounded.
+//   * lab: lightness 0..=100, a/b unbounded; lch: lightness 0..=100,
+//       chroma >= 0, hue deg.
+//   * oklab: lightness 0..=1, a/b unbounded; oklch: lightness 0..=1,
+//       chroma >= 0, hue deg.
+// A `None` channel is a missing channel; conversions treat it as 0.
+// =====================================================================
+
+use crate::value::{ColorSpace, ModernColor};
+
+/// Replace a missing (`None`) channel with `0.0` for arithmetic.
+fn z(v: Option<f64>) -> f64 {
+    v.unwrap_or(0.0)
+}
+
+/// Matrix * vector (3x3 * 3).
+fn mat3(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    [
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    ]
+}
+
+// ---- sRGB transfer functions ----------------------------------------
+
+fn srgb_to_linear(c: f64) -> f64 {
+    let sign = c.signum();
+    let abs = c.abs();
+    if abs <= 0.04045 {
+        c / 12.92
+    } else {
+        sign * ((abs + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(c: f64) -> f64 {
+    let sign = c.signum();
+    let abs = c.abs();
+    if abs <= 0.0031308 {
+        c * 12.92
+    } else {
+        sign * (1.055 * abs.powf(1.0 / 2.4) - 0.055)
+    }
+}
+
+// ---- rec2020 transfer functions -------------------------------------
+
+fn rec2020_to_linear(c: f64) -> f64 {
+    const ALPHA: f64 = 1.09929682680944;
+    const BETA: f64 = 0.018053968510807;
+    let sign = c.signum();
+    let abs = c.abs();
+    if abs < BETA * 4.5 {
+        c / 4.5
+    } else {
+        sign * ((abs + ALPHA - 1.0) / ALPHA).powf(1.0 / 0.45)
+    }
+}
+
+fn linear_to_rec2020(c: f64) -> f64 {
+    const ALPHA: f64 = 1.09929682680944;
+    const BETA: f64 = 0.018053968510807;
+    let sign = c.signum();
+    let abs = c.abs();
+    if abs < BETA {
+        c * 4.5
+    } else {
+        sign * (ALPHA * abs.powf(0.45) - (ALPHA - 1.0))
+    }
+}
+
+// ---- a98-rgb transfer functions -------------------------------------
+
+fn a98_to_linear(c: f64) -> f64 {
+    c.signum() * c.abs().powf(563.0 / 256.0)
+}
+
+fn linear_to_a98(c: f64) -> f64 {
+    c.signum() * c.abs().powf(256.0 / 563.0)
+}
+
+// ---- prophoto-rgb transfer functions --------------------------------
+
+fn prophoto_to_linear(c: f64) -> f64 {
+    const ET2: f64 = 16.0 / 512.0;
+    let sign = c.signum();
+    let abs = c.abs();
+    if abs <= ET2 {
+        c / 16.0
+    } else {
+        sign * abs.powf(1.8)
+    }
+}
+
+fn linear_to_prophoto(c: f64) -> f64 {
+    const ET: f64 = 1.0 / 512.0;
+    let sign = c.signum();
+    let abs = c.abs();
+    if abs >= ET {
+        sign * abs.powf(1.0 / 1.8)
+    } else {
+        c * 16.0
+    }
+}
+
+// ---- linear-light RGB <-> XYZ (D65) matrices ------------------------
+
+// All matrices are byte-for-byte the values dart-sass uses in
+// `lib/src/value/color/conversions.dart`, so conversions round-trip exactly.
+const SRGB_TO_XYZ: [[f64; 3]; 3] = [
+    [0.4123907992659595, 0.35758433938387796, 0.1804807884018343],
+    [0.21263900587151036, 0.7151686787677559, 0.07219231536073371],
+    [0.01933081871559185, 0.11919477979462598, 0.9505321522496606],
+];
+const XYZ_TO_SRGB: [[f64; 3]; 3] = [
+    [3.2409699419045213, -1.5373831775700935, -0.4986107602930033],
+    [-0.9692436362808798, 1.8759675015077206, 0.04155505740717561],
+    [0.0556300796969936, -0.20397695888897657, 1.0569715142428786],
+];
+
+const P3_TO_XYZ: [[f64; 3]; 3] = [
+    [0.48657094864821626, 0.26566769316909294, 0.1982172852343625],
+    [0.22897456406974884, 0.6917385218365062, 0.079286914093745],
+    [0.0, 0.04511338185890257, 1.0439443689009757],
+];
+const XYZ_TO_P3: [[f64; 3]; 3] = [
+    [2.4934969119414245, -0.9313836179191236, -0.40271078445071684],
+    [-0.8294889695615749, 1.7626640603183468, 0.02362468584194359],
+    [0.03584583024378433, -0.0761723892680417, 0.9568845240076873],
+];
+
+const A98_TO_XYZ: [[f64; 3]; 3] = [
+    [0.5766690429101308, 0.18555823790654627, 0.18822864623499472],
+    [0.29734497525053616, 0.627363566255466, 0.07529145849399789],
+    [0.02703136138641237, 0.07068885253582714, 0.9913375368376389],
+];
+const XYZ_TO_A98: [[f64; 3]; 3] = [
+    [2.041587903810746, -0.5650069742788596, -0.3447313507783295],
+    [-0.9692436362808798, 1.8759675015077206, 0.04155505740717561],
+    [0.01344428063203102, -0.11836239223101823, 1.0151749943912054],
+];
+
+const PROPHOTO_TO_XYZ_D50: [[f64; 3]; 3] = [
+    [0.7977666449006423, 0.13518129740053308, 0.0313477341283922],
+    [0.2880748288194013, 0.711835234241873, 0.00008993693872564],
+    [0.0, 0.0, 0.8251046025104602],
+];
+const XYZ_D50_TO_PROPHOTO: [[f64; 3]; 3] = [
+    [1.3457868816471583, -0.25557208737979464, -0.05110186497554526],
+    [-0.5446307051249019, 1.5082477428451468, 0.02052744743642139],
+    [0.0, 0.0, 1.2119675456389452],
+];
+
+const REC2020_TO_XYZ: [[f64; 3]; 3] = [
+    [0.6369580483012913, 0.14461690358620838, 0.16888097516417205],
+    [0.26270021201126703, 0.677998071518871, 0.05930171646986194],
+    [0.0, 0.0280726930490875, 1.0609850577107909],
+];
+const XYZ_TO_REC2020: [[f64; 3]; 3] = [
+    [1.7166511879712676, -0.3556707837763924, -0.2533662813736598],
+    [-0.666684351832489, 1.616481236634939, 0.01576854581391113],
+    [0.01763985744531091, -0.04277061325780865, 0.942103121235474],
+];
+
+// Bradford chromatic adaptation D65<->D50.
+const D65_TO_D50: [[f64; 3]; 3] = [
+    [1.0479297925449966, 0.02294687060160952, -0.05019226628920519],
+    [0.02962780877005567, 0.99043442675388, -0.01707379906341879],
+    [-0.00924304064620452, 0.01505519149029816, 0.751874281428137],
+];
+const D50_TO_D65: [[f64; 3]; 3] = [
+    [0.9554734214880752, -0.02309845494876452, 0.06325924320057065],
+    [-0.02836970933386358, 1.0099953980813041, 0.0210414411919173],
+    [0.01231401486448199, -0.02050764929889898, 1.330365926242124],
+];
+
+// oklab matrices.
+const XYZ_TO_LMS: [[f64; 3]; 3] = [
+    [0.819022437996703, 0.36190626005289034, -0.12887378152098788],
+    [0.03298365393238846, 0.9292868615863433, 0.03614466635064235],
+    [0.0481771893596242, 0.2642395317527308, 0.6335478284694308],
+];
+const LMS_TO_OKLAB: [[f64; 3]; 3] = [
+    [0.210454268309314, 0.7936177747023054, -0.0040720430116193],
+    [1.9779985324311684, -2.42859224204858, 0.450593709617411],
+    [0.0259040424655478, 0.7827717124575296, -0.8086757549230774],
+];
+const LMS_TO_XYZ: [[f64; 3]; 3] = [
+    [1.2268798758459243, -0.5578149944602171, 0.2813910456659646],
+    [-0.04057574521480084, 1.1122868032803173, -0.07171105806551635],
+    [-0.07637293667466007, -0.42149333240224324, 1.5869240198367818],
+];
+const OKLAB_TO_LMS: [[f64; 3]; 3] = [
+    [1.0, 0.3963377773761749, 0.2158037573099136],
+    [0.9999999999999998, -0.10556134581565854, -0.06385417282581334],
+    [0.9999999999999999, -0.0894841775298118, -1.2914855480194094],
+];
+
+// ---- per-space <-> XYZ D65 conversions ------------------------------
+
+/// Convert a color's three (missing-as-0) channels in `space` to XYZ D65.
+fn to_xyz_d65(space: ColorSpace, c: [f64; 3]) -> [f64; 3] {
+    match space {
+        ColorSpace::Rgb => {
+            let lin = [
+                srgb_to_linear(c[0] / 255.0),
+                srgb_to_linear(c[1] / 255.0),
+                srgb_to_linear(c[2] / 255.0),
+            ];
+            mat3(SRGB_TO_XYZ, lin)
+        }
+        ColorSpace::Srgb => {
+            let lin = [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])];
+            mat3(SRGB_TO_XYZ, lin)
+        }
+        ColorSpace::SrgbLinear => mat3(SRGB_TO_XYZ, c),
+        ColorSpace::DisplayP3 => {
+            let lin = [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])];
+            mat3(P3_TO_XYZ, lin)
+        }
+        ColorSpace::DisplayP3Linear => mat3(P3_TO_XYZ, c),
+        ColorSpace::A98Rgb => {
+            let lin = [a98_to_linear(c[0]), a98_to_linear(c[1]), a98_to_linear(c[2])];
+            mat3(A98_TO_XYZ, lin)
+        }
+        ColorSpace::ProphotoRgb => {
+            let lin = [
+                prophoto_to_linear(c[0]),
+                prophoto_to_linear(c[1]),
+                prophoto_to_linear(c[2]),
+            ];
+            mat3(D50_TO_D65, mat3(PROPHOTO_TO_XYZ_D50, lin))
+        }
+        ColorSpace::Rec2020 => {
+            let lin = [
+                rec2020_to_linear(c[0]),
+                rec2020_to_linear(c[1]),
+                rec2020_to_linear(c[2]),
+            ];
+            mat3(REC2020_TO_XYZ, lin)
+        }
+        ColorSpace::XyzD65 => c,
+        ColorSpace::XyzD50 => mat3(D50_TO_D65, c),
+        ColorSpace::Hsl => to_xyz_d65(ColorSpace::Rgb, hsl_to_rgb255(c)),
+        ColorSpace::Hwb => to_xyz_d65(ColorSpace::Rgb, hwb_to_rgb255(c)),
+        ColorSpace::Lab => mat3(D50_TO_D65, lab_to_xyz(c)),
+        ColorSpace::Lch => to_xyz_d65(ColorSpace::Lab, lch_to_lab(c)),
+        ColorSpace::Oklab => oklab_to_xyz(c),
+        ColorSpace::Oklch => oklab_to_xyz(lch_to_lab(c)),
+    }
+}
+
+/// Convert XYZ D65 to a color's three channels in `space`.
+fn from_xyz_d65(space: ColorSpace, xyz: [f64; 3]) -> [f64; 3] {
+    match space {
+        ColorSpace::Rgb => {
+            let lin = mat3(XYZ_TO_SRGB, xyz);
+            [
+                linear_to_srgb(lin[0]) * 255.0,
+                linear_to_srgb(lin[1]) * 255.0,
+                linear_to_srgb(lin[2]) * 255.0,
+            ]
+        }
+        ColorSpace::Srgb => {
+            let lin = mat3(XYZ_TO_SRGB, xyz);
+            [
+                linear_to_srgb(lin[0]),
+                linear_to_srgb(lin[1]),
+                linear_to_srgb(lin[2]),
+            ]
+        }
+        ColorSpace::SrgbLinear => mat3(XYZ_TO_SRGB, xyz),
+        ColorSpace::DisplayP3 => {
+            let lin = mat3(XYZ_TO_P3, xyz);
+            [
+                linear_to_srgb(lin[0]),
+                linear_to_srgb(lin[1]),
+                linear_to_srgb(lin[2]),
+            ]
+        }
+        ColorSpace::DisplayP3Linear => mat3(XYZ_TO_P3, xyz),
+        ColorSpace::A98Rgb => {
+            let lin = mat3(XYZ_TO_A98, xyz);
+            [
+                linear_to_a98(lin[0]),
+                linear_to_a98(lin[1]),
+                linear_to_a98(lin[2]),
+            ]
+        }
+        ColorSpace::ProphotoRgb => {
+            let lin = mat3(XYZ_D50_TO_PROPHOTO, mat3(D65_TO_D50, xyz));
+            [
+                linear_to_prophoto(lin[0]),
+                linear_to_prophoto(lin[1]),
+                linear_to_prophoto(lin[2]),
+            ]
+        }
+        ColorSpace::Rec2020 => {
+            let lin = mat3(XYZ_TO_REC2020, xyz);
+            [
+                linear_to_rec2020(lin[0]),
+                linear_to_rec2020(lin[1]),
+                linear_to_rec2020(lin[2]),
+            ]
+        }
+        ColorSpace::XyzD65 => xyz,
+        ColorSpace::XyzD50 => mat3(D65_TO_D50, xyz),
+        ColorSpace::Hsl => rgb255_to_hsl(from_xyz_d65(ColorSpace::Rgb, xyz)),
+        ColorSpace::Hwb => rgb255_to_hwb(from_xyz_d65(ColorSpace::Rgb, xyz)),
+        ColorSpace::Lab => xyz_to_lab(mat3(D65_TO_D50, xyz)),
+        ColorSpace::Lch => lab_to_lch(xyz_to_lab(mat3(D65_TO_D50, xyz))),
+        ColorSpace::Oklab => xyz_to_oklab(xyz),
+        ColorSpace::Oklch => lab_to_lch(xyz_to_oklab(xyz)),
+    }
+}
+
+// ---- lab / lch (D50) ------------------------------------------------
+
+const D50: [f64; 3] = [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
+
+fn lab_to_xyz(lab: [f64; 3]) -> [f64; 3] {
+    const KAPPA: f64 = 24389.0 / 27.0;
+    const EPSILON: f64 = 216.0 / 24389.0;
+    let fy = (lab[0] + 16.0) / 116.0;
+    let fx = lab[1] / 500.0 + fy;
+    let fz = fy - lab[2] / 200.0;
+    let x = if fx.powi(3) > EPSILON {
+        fx.powi(3)
+    } else {
+        (116.0 * fx - 16.0) / KAPPA
+    };
+    let y = if lab[0] > KAPPA * EPSILON {
+        ((lab[0] + 16.0) / 116.0).powi(3)
+    } else {
+        lab[0] / KAPPA
+    };
+    let zz = if fz.powi(3) > EPSILON {
+        fz.powi(3)
+    } else {
+        (116.0 * fz - 16.0) / KAPPA
+    };
+    [x * D50[0], y * D50[1], zz * D50[2]]
+}
+
+fn xyz_to_lab(xyz: [f64; 3]) -> [f64; 3] {
+    const KAPPA: f64 = 24389.0 / 27.0;
+    const EPSILON: f64 = 216.0 / 24389.0;
+    let xr = xyz[0] / D50[0];
+    let yr = xyz[1] / D50[1];
+    let zr = xyz[2] / D50[2];
+    let f = |t: f64| {
+        if t > EPSILON {
+            t.cbrt()
+        } else {
+            (KAPPA * t + 16.0) / 116.0
+        }
+    };
+    let fx = f(xr);
+    let fy = f(yr);
+    let fz = f(zr);
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// lch -> lab (lightness, chroma, hue-deg) -> (lightness, a, b).
+fn lch_to_lab(lch: [f64; 3]) -> [f64; 3] {
+    let h = lch[2].to_radians();
+    [lch[0], lch[1] * h.cos(), lch[1] * h.sin()]
+}
+
+/// lab -> lch.
+fn lab_to_lch(lab: [f64; 3]) -> [f64; 3] {
+    let c = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
+    let mut h = lab[2].atan2(lab[1]).to_degrees();
+    if h < 0.0 {
+        h += 360.0;
+    }
+    [lab[0], c, h]
+}
+
+// ---- oklab / oklch --------------------------------------------------
+
+fn xyz_to_oklab(xyz: [f64; 3]) -> [f64; 3] {
+    let lms = mat3(XYZ_TO_LMS, xyz);
+    let lms_ = [lms[0].cbrt(), lms[1].cbrt(), lms[2].cbrt()];
+    mat3(LMS_TO_OKLAB, lms_)
+}
+
+fn oklab_to_xyz(oklab: [f64; 3]) -> [f64; 3] {
+    let lms_ = mat3(OKLAB_TO_LMS, oklab);
+    let lms = [lms_[0].powi(3), lms_[1].powi(3), lms_[2].powi(3)];
+    mat3(LMS_TO_XYZ, lms)
+}
+
+// ---- hsl / hwb (legacy, channels in canonical units) ----------------
+
+/// hsl [hue-deg, sat-%, light-%] -> rgb [0..255, 0..255, 0..255].
+fn hsl_to_rgb255(hsl: [f64; 3]) -> [f64; 3] {
+    let c = Color::from_hsl(hsl[0], hsl[1] / 100.0, hsl[2] / 100.0, 1.0);
+    [c.r, c.g, c.b]
+}
+
+/// rgb [0..255] -> hsl [hue-deg, sat-%, light-%].
+fn rgb255_to_hsl(rgb: [f64; 3]) -> [f64; 3] {
+    let c = Color::rgb(rgb[0], rgb[1], rgb[2], 1.0);
+    let (h, s, l) = c.to_hsl();
+    [h, s * 100.0, l * 100.0]
+}
+
+/// hwb [hue-deg, white-%, black-%] -> rgb [0..255].
+fn hwb_to_rgb255(hwb: [f64; 3]) -> [f64; 3] {
+    let h = hwb[0];
+    let mut w = hwb[1] / 100.0;
+    let mut bl = hwb[2] / 100.0;
+    if w + bl > 1.0 {
+        let sum = w + bl;
+        w /= sum;
+        bl /= sum;
+    }
+    let base = Color::from_hsl(h, 1.0, 0.5, 1.0);
+    let mix = |v: f64| ((v / 255.0) * (1.0 - w - bl) + w) * 255.0;
+    [mix(base.r), mix(base.g), mix(base.b)]
+}
+
+/// rgb [0..255] -> hwb [hue-deg, white-%, black-%].
+fn rgb255_to_hwb(rgb: [f64; 3]) -> [f64; 3] {
+    let (h, _s, _l) = Color::rgb(rgb[0], rgb[1], rgb[2], 1.0).to_hsl();
+    let w = rgb[0].min(rgb[1]).min(rgb[2]) / 255.0 * 100.0;
+    let bl = (1.0 - rgb[0].max(rgb[1]).max(rgb[2]) / 255.0) * 100.0;
+    [h, w, bl]
+}
+
+/// The CSS Color 4 "analogous component" category of a channel, used to carry
+/// a missing channel through a color-space conversion. `None` for channels that
+/// are never analogous to a differently-named channel.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum ChannelCategory {
+    Red,
+    Green,
+    Blue,
+    Lightness,
+    Colorfulness, // saturation / chroma
+    Hue,
+    LabA,
+    LabB,
+    Whiteness,
+    Blackness,
+    X,
+    Y,
+    Z,
+}
+
+fn channel_category(space: ColorSpace, idx: usize) -> Option<ChannelCategory> {
+    use ChannelCategory::*;
+    use ColorSpace::*;
+    Some(match (space, idx) {
+        (Rgb, 0)
+        | (Srgb, 0)
+        | (SrgbLinear, 0)
+        | (DisplayP3, 0)
+        | (DisplayP3Linear, 0)
+        | (A98Rgb, 0)
+        | (ProphotoRgb, 0)
+        | (Rec2020, 0) => Red,
+        (Rgb, 1)
+        | (Srgb, 1)
+        | (SrgbLinear, 1)
+        | (DisplayP3, 1)
+        | (DisplayP3Linear, 1)
+        | (A98Rgb, 1)
+        | (ProphotoRgb, 1)
+        | (Rec2020, 1) => Green,
+        (Rgb, 2)
+        | (Srgb, 2)
+        | (SrgbLinear, 2)
+        | (DisplayP3, 2)
+        | (DisplayP3Linear, 2)
+        | (A98Rgb, 2)
+        | (ProphotoRgb, 2)
+        | (Rec2020, 2) => Blue,
+        (Hsl, 0) | (Hwb, 0) | (Lch, 2) | (Oklch, 2) => Hue,
+        (Hsl, 1) | (Lch, 1) | (Oklch, 1) => Colorfulness,
+        (Hsl, 2) | (Lab, 0) | (Lch, 0) | (Oklab, 0) | (Oklch, 0) => Lightness,
+        (Hwb, 1) => Whiteness,
+        (Hwb, 2) => Blackness,
+        (Lab, 1) | (Oklab, 1) => LabA,
+        (Lab, 2) | (Oklab, 2) => LabB,
+        (XyzD65, 0) | (XyzD50, 0) => X,
+        (XyzD65, 1) | (XyzD50, 1) => Y,
+        (XyzD65, 2) | (XyzD50, 2) => Z,
+        _ => return None,
+    })
+}
+
+/// Convert a [`ModernColor`] to a new space, preserving alpha and carrying
+/// over missing channels into analogous channels of the target (CSS Color 4).
+fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColor {
+    if mc.space == target {
+        return mc.clone();
+    }
+    let src = [z(mc.channels[0]), z(mc.channels[1]), z(mc.channels[2])];
+    let xyz = to_xyz_d65(mc.space, src);
+    let out = from_xyz_d65(target, xyz);
+    // For each output channel, become missing if the analogous source channel
+    // was missing.
+    let missing_in_src = |cat: ChannelCategory| {
+        (0..3).any(|i| mc.channels[i].is_none() && channel_category(mc.space, i) == Some(cat))
+    };
+    let mk = |i: usize| match channel_category(target, i) {
+        Some(cat) if missing_in_src(cat) => None,
+        _ => Some(out[i]),
+    };
+    ModernColor {
+        space: target,
+        channels: [mk(0), mk(1), mk(2)],
+        alpha: mc.alpha,
+    }
+}
+
+/// Build a [`ModernColor`] from a legacy [`Color`] (its current space is
+/// `rgb`/`hsl`/`hwb` per `mc.modern`, or plain sRGB → `rgb`).
+fn legacy_to_modern(c: &Color) -> ModernColor {
+    if let Some(m) = &c.modern {
+        return m.clone();
+    }
+    ModernColor {
+        space: ColorSpace::Rgb,
+        channels: [Some(c.r), Some(c.g), Some(c.b)],
+        alpha: Some(c.a),
+    }
+}
+
+/// Wrap a [`ModernColor`] in a [`Color`], deriving an in-gamut sRGB-byte
+/// approximation for the legacy `r`/`g`/`b`/`a` fields (so legacy code paths
+/// that read them keep working). The modern representation drives
+/// serialization and channel access.
+fn make_modern(mc: ModernColor) -> Color {
+    let srgb = convert_modern(&mc, ColorSpace::Rgb);
+    let mut c = Color::rgb(
+        z(srgb.channels[0]).clamp(0.0, 255.0),
+        z(srgb.channels[1]).clamp(0.0, 255.0),
+        z(srgb.channels[2]).clamp(0.0, 255.0),
+        mc.alpha.unwrap_or(1.0),
+    );
+    c.modern = Some(mc);
+    c
+}
+
+/// The known predefined `color()` spaces and their [`ColorSpace`].
+fn predefined_space(name: &str) -> Option<ColorSpace> {
+    match name {
+        "srgb" => Some(ColorSpace::Srgb),
+        "srgb-linear" => Some(ColorSpace::SrgbLinear),
+        "display-p3" => Some(ColorSpace::DisplayP3),
+        "display-p3-linear" => Some(ColorSpace::DisplayP3Linear),
+        "a98-rgb" => Some(ColorSpace::A98Rgb),
+        "prophoto-rgb" => Some(ColorSpace::ProphotoRgb),
+        "rec2020" => Some(ColorSpace::Rec2020),
+        "xyz" | "xyz-d65" => Some(ColorSpace::XyzD65),
+        "xyz-d50" => Some(ColorSpace::XyzD50),
+        _ => None,
+    }
+}
+
+/// Parse a numeric channel value for a modern `color()`/lab-family call into a
+/// canonical channel value, or `None` for a `none` channel. `pct_base` scales a
+/// `%` value (e.g. 1.0 for rgb channels in 0..1, 100.0 for lab lightness).
+/// Degenerate calc constants fold to infinity/NaN. The result is NOT clamped.
+fn modern_channel(v: &Value, pct_base: f64) -> Option<f64> {
+    if is_none_keyword(v) {
+        return None;
+    }
+    if let Value::Calc(node) = v {
+        if let Some(c) = degenerate_const(node) {
+            return Some(c);
+        }
+    }
+    match v {
+        Value::Number(num) => {
+            if num.unit == "%" {
+                Some(num.value / 100.0 * pct_base)
+            } else {
+                Some(num.value)
+            }
+        }
+        Value::Slash(num, _) => Some(num.value),
+        _ => Some(0.0),
+    }
+}
+
+/// Parse a hue channel (degrees), converting angle units. `none` → `None`.
+fn modern_hue(v: &Value) -> Option<f64> {
+    if is_none_keyword(v) {
+        return None;
+    }
+    if let Value::Calc(node) = v {
+        if let Some(c) = degenerate_const(node) {
+            return Some(c);
+        }
+    }
+    match v {
+        Value::Number(num) => Some(match num.unit.as_str() {
+            "rad" => num.value.to_degrees(),
+            "grad" => num.value * 360.0 / 400.0,
+            "turn" => num.value * 360.0,
+            _ => num.value,
+        }),
+        Value::Slash(num, _) => Some(num.value),
+        _ => Some(0.0),
+    }
+}
+
+/// Parse a modern alpha channel. `none` → `None`; otherwise clamp to 0..1.
+fn modern_alpha(v: Option<&Value>) -> Option<f64> {
+    match v {
+        None => Some(1.0),
+        Some(a) if is_none_keyword(a) => None,
+        Some(a) => {
+            if let Value::Calc(node) = a {
+                if let Some(c) = degenerate_const(node) {
+                    return Some(if c.is_nan() { 0.0 } else { c.clamp(0.0, 1.0) });
+                }
+            }
+            match a {
+                Value::Number(num) => {
+                    let val = if num.unit == "%" {
+                        num.value / 100.0
+                    } else {
+                        num.value
+                    };
+                    Some(val.clamp(0.0, 1.0))
+                }
+                Value::Slash(num, _) => Some(num.value.clamp(0.0, 1.0)),
+                _ => Some(1.0),
+            }
+        }
+    }
+}
+
+// =====================================================================
+// Modern `sass:color` module members (color.space / color.channel /
+// color.to-space / color.is-legacy / color.is-missing / color.is-in-gamut /
+// color.is-powerless / color.to-gamut / color.same). These are dispatched
+// from the module seam under the global names `color-space`, `color-channel`,
+// etc.
+// =====================================================================
+
+/// The space of a [`Color`] as a [`ColorSpace`] (`rgb` for plain legacy).
+fn color_space_of(c: &Color) -> ColorSpace {
+    c.modern.as_ref().map(|m| m.space).unwrap_or(ColorSpace::Rgb)
+}
+
+pub(super) fn try_call_modern(
+    name: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Option<Result<Value, Error>> {
+    Some(match name {
+        "color-space" => fn_space(pos_args, named, pos),
+        "color-channel" => fn_color_channel(pos_args, named, pos),
+        "color-to-space" => fn_to_space(pos_args, named, pos),
+        "color-is-legacy" => fn_is_legacy(pos_args, named, pos),
+        "color-is-missing" => fn_is_missing(pos_args, named, pos),
+        "color-is-in-gamut" => fn_is_in_gamut(pos_args, named, pos),
+        "color-is-powerless" => fn_is_powerless(pos_args, named, pos),
+        "color-to-gamut" => fn_to_gamut(pos_args, named, pos),
+        "color-same" => fn_same(pos_args, named, pos),
+        _ => return None,
+    })
+}
+
+/// Look up a channel name within `space`, returning its index (and the special
+/// `"alpha"`/missing handling left to the caller).
+fn channel_index_in(space: ColorSpace, channel: &str) -> Option<usize> {
+    space.channel_names().iter().position(|n| *n == channel)
+}
+
+/// Read a channel-name argument. dart-sass requires it to be a *quoted*
+/// string: an unquoted string (`hue`) errors "Expected … to be a quoted
+/// string"; a non-string errors "… is not a string".
+fn channel_name_arg(v: &Value, pos: Pos) -> Result<String, Error> {
+    match v {
+        Value::Str(s) if s.quoted => Ok(s.text.clone()),
+        Value::Str(s) => Err(Error::at(
+            format!("$channel: Expected {} to be a quoted string.", s.text),
+            pos,
+        )),
+        other => Err(Error::at(
+            format!("$channel: {} is not a string.", other.to_css(false)),
+            pos,
+        )),
+    }
+}
+
+/// Parse a `$space` argument into a [`ColorSpace`]. dart-sass requires an
+/// *unquoted* string: a quoted one errors "Expected … to be an unquoted
+/// string".
+fn space_arg(v: &Value, pos: Pos) -> Result<ColorSpace, Error> {
+    let name = match v {
+        Value::Str(s) if !s.quoted => s.text.clone(),
+        Value::Str(s) => {
+            return Err(Error::at(
+                format!("$space: Expected \"{}\" to be an unquoted string.", s.text),
+                pos,
+            ))
+        }
+        other => {
+            return Err(Error::at(
+                format!("$space: {} is not a string.", other.to_css(false)),
+                pos,
+            ))
+        }
+    };
+    ColorSpace::from_name(&name)
+        .ok_or_else(|| Error::at(format!("$space: Unknown color space \"{name}\"."), pos))
+}
+
+fn fn_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["color"];
+    let c = as_color(require(&params, pos_args, named, 0, "space", pos)?, pos)?;
+    Ok(Value::Str(crate::value::SassStr {
+        text: color_space_of(&c).name().to_string(),
+        quoted: false,
+    }))
+}
+
+fn fn_is_legacy(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["color"];
+    let c = as_color(require(&params, pos_args, named, 0, "is-legacy", pos)?, pos)?;
+    Ok(Value::Bool(color_space_of(&c).is_legacy()))
+}
+
+fn fn_to_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["color", "space"];
+    let n = pos_args.len() + named.len();
+    if n > 2 {
+        return Err(Error::at(
+            format!("Only 2 arguments allowed, but {n} were passed."),
+            pos,
+        ));
+    }
+    let c = as_color(require(&params, pos_args, named, 0, "to-space", pos)?, pos)?;
+    let space = space_arg(require(&params, pos_args, named, 1, "to-space", pos)?, pos)?;
+    let mc = legacy_to_modern(&c);
+    if mc.space == space {
+        return Ok(Value::Color(c));
+    }
+    let out = convert_to_space(&mc, space);
+    Ok(Value::Color(make_modern_in(out, space)))
+}
+
+/// Build a [`Color`] for `mc` already in `space`, choosing whether to leave the
+/// `modern` tag attached. Plain-legacy rgb (no missing channels) drops the
+/// `modern` field so it serializes like a normal sRGB color.
+fn make_modern_in(mc: ModernColor, _space: ColorSpace) -> Color {
+    if mc.space == ColorSpace::Rgb && mc.channels.iter().all(|c| c.is_some()) {
+        let r = mc.channels[0].unwrap_or(0.0);
+        let g = mc.channels[1].unwrap_or(0.0);
+        let b = mc.channels[2].unwrap_or(0.0);
+        let mut c = Color::rgb(r, g, b, mc.alpha.unwrap_or(1.0));
+        // Out-of-gamut legacy rgb serializes via hsl; attach modern so the
+        // serializer can apply that rule.
+        let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
+        if !(in_gamut(r) && in_gamut(g) && in_gamut(b)) {
+            c.modern = Some(mc);
+        }
+        return c;
+    }
+    make_modern(mc)
+}
+
+/// Convert `mc` to `space`, carrying over the hue of a polar source when the
+/// chroma/saturation is zero (powerless), matching dart-sass's missing-channel
+/// behavior is not applied here — only the plain numeric conversion.
+fn convert_to_space(mc: &ModernColor, space: ColorSpace) -> ModernColor {
+    convert_modern(mc, space)
+}
+
+fn fn_color_channel(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["color", "channel", "space"];
+    let n = pos_args.len() + named.len();
+    if n > 3 {
+        return Err(Error::at(
+            format!("Only 3 arguments allowed, but {n} were passed."),
+            pos,
+        ));
+    }
+    let c = as_color(require(&params, pos_args, named, 0, "channel", pos)?, pos)?;
+    let chan = channel_name_arg(require(&params, pos_args, named, 1, "channel", pos)?, pos)?;
+    let mc = legacy_to_modern(&c);
+    // The space to read the channel in: explicit `$space`, else the color's own.
+    let space = match arg(&params, pos_args, named, 2) {
+        Some(v) => space_arg(v, pos)?,
+        None => mc.space,
+    };
+    if chan == "alpha" {
+        let a = mc.alpha.unwrap_or(0.0);
+        return Ok(Value::Number(Number {
+            value: a,
+            unit: String::new(),
+        }));
+    }
+    let target = convert_modern(&mc, space);
+    let idx = channel_index_in(space, &chan).ok_or_else(|| {
+        Error::at(
+            format!("$channel: Color {} has no channel named {chan}.", c.to_css(false)),
+            pos,
+        )
+    })?;
+    let raw = target.channels[idx].unwrap_or(0.0);
+    Ok(Value::Number(channel_number(space, idx, raw)))
+}
+
+/// Build the [`Number`] for a channel value, applying dart-sass's per-channel
+/// unit: percentage for lightness/saturation/lightness/whiteness/blackness,
+/// `deg` for hue, plain otherwise. Legacy rgb red/green/blue are 0..255.
+fn channel_number(space: ColorSpace, idx: usize, raw: f64) -> Number {
+    use ColorSpace::*;
+    let names = space.channel_names();
+    let cname = names[idx];
+    let pct = |v: f64| Number {
+        value: v,
+        unit: "%".to_string(),
+    };
+    let deg = |v: f64| Number {
+        value: v,
+        unit: "deg".to_string(),
+    };
+    let plain = |v: f64| Number {
+        value: v,
+        unit: String::new(),
+    };
+    match (space, cname) {
+        (Hsl, "saturation") | (Hsl, "lightness") => pct(raw),
+        (Hwb, "whiteness") | (Hwb, "blackness") => pct(raw),
+        (Lab, "lightness") | (Lch, "lightness") => pct(raw),
+        (Oklab, "lightness") | (Oklch, "lightness") => pct(raw * 100.0),
+        (_, "hue") => deg(raw),
+        _ => plain(raw),
+    }
+}
+
+fn fn_is_missing(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["color", "channel"];
+    let c = as_color(require(&params, pos_args, named, 0, "is-missing", pos)?, pos)?;
+    let chan = channel_name_arg(require(&params, pos_args, named, 1, "is-missing", pos)?, pos)?;
+    let mc = legacy_to_modern(&c);
+    let missing = if chan == "alpha" {
+        mc.alpha.is_none()
+    } else {
+        match channel_index_in(mc.space, &chan) {
+            Some(idx) => mc.channels[idx].is_none(),
+            None => false,
+        }
+    };
+    Ok(Value::Bool(missing))
+}
+
+fn fn_is_in_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["color", "space"];
+    let c = as_color(require(&params, pos_args, named, 0, "is-in-gamut", pos)?, pos)?;
+    let mc = legacy_to_modern(&c);
+    let space = match arg(&params, pos_args, named, 1) {
+        Some(v) => space_arg(v, pos)?,
+        None => mc.space,
+    };
+    Ok(Value::Bool(in_gamut(&mc, space)))
+}
+
+/// Whether `mc` is within the gamut of `space` (only the bounded RGB-style and
+/// legacy spaces have a gamut; others are always in gamut).
+fn in_gamut(mc: &ModernColor, space: ColorSpace) -> bool {
+    use ColorSpace::*;
+    let conv = convert_modern(mc, space);
+    let bound = |lo: f64, hi: f64| {
+        conv.channels
+            .iter()
+            .all(|c| matches!(c, Some(v) if *v >= lo - 1e-7 && *v <= hi + 1e-7) || c.is_none())
+    };
+    match space {
+        Rgb => bound(0.0, 255.0),
+        Srgb | SrgbLinear | DisplayP3 | DisplayP3Linear | A98Rgb | ProphotoRgb | Rec2020 => bound(0.0, 1.0),
+        // hsl/hwb and the unbounded perceptual/xyz spaces are always in gamut.
+        _ => true,
+    }
+}
+
+fn fn_is_powerless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["color", "channel", "space"];
+    let c = as_color(require(&params, pos_args, named, 0, "is-powerless", pos)?, pos)?;
+    let chan = channel_name_arg(require(&params, pos_args, named, 1, "is-powerless", pos)?, pos)?;
+    let mc = legacy_to_modern(&c);
+    let space = match arg(&params, pos_args, named, 2) {
+        Some(v) => space_arg(v, pos)?,
+        None => mc.space,
+    };
+    let conv = convert_modern(&mc, space);
+    let idx = match channel_index_in(space, &chan) {
+        Some(i) => i,
+        None => return Ok(Value::Bool(false)),
+    };
+    Ok(Value::Bool(channel_powerless(space, idx, &conv)))
+}
+
+/// dart-sass powerless rules: hsl hue is powerless at saturation 0; hsl
+/// saturation is powerless at lightness 0/100; hwb hue is powerless when
+/// whiteness+blackness >= 100; lch/oklch hue is powerless at chroma 0.
+fn channel_powerless(space: ColorSpace, idx: usize, conv: &ModernColor) -> bool {
+    use ColorSpace::*;
+    let ch = |i: usize| conv.channels[i].unwrap_or(0.0);
+    match (space, idx) {
+        (Hsl, 0) => ch(1) == 0.0,
+        (Hsl, 1) => ch(2) == 0.0 || ch(2) == 100.0,
+        (Hwb, 0) => ch(1) + ch(2) >= 100.0,
+        (Lch, 2) | (Oklch, 2) => ch(1) == 0.0,
+        _ => false,
+    }
+}
+
+fn fn_same(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["color1", "color2"];
+    let c1 = as_color(require(&params, pos_args, named, 0, "same", pos)?, pos)?;
+    let c2 = as_color(require(&params, pos_args, named, 1, "same", pos)?, pos)?;
+    let m1 = legacy_to_modern(&c1);
+    let m2 = legacy_to_modern(&c2);
+    // Compare in xyz-d65 (a canonical space) with alpha.
+    let x1 = convert_modern(&m1, ColorSpace::XyzD65);
+    let x2 = convert_modern(&m2, ColorSpace::XyzD65);
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-7;
+    let same = close(z(x1.channels[0]), z(x2.channels[0]))
+        && close(z(x1.channels[1]), z(x2.channels[1]))
+        && close(z(x1.channels[2]), z(x2.channels[2]))
+        && close(m1.alpha.unwrap_or(1.0), m2.alpha.unwrap_or(1.0));
+    Ok(Value::Bool(same))
+}
+
+fn fn_to_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["color", "space", "method"];
+    let c = as_color(require(&params, pos_args, named, 0, "to-gamut", pos)?, pos)?;
+    let mc = legacy_to_modern(&c);
+    let space = match arg(&params, pos_args, named, 1) {
+        Some(v) => space_arg(v, pos)?,
+        None => mc.space,
+    };
+    if in_gamut(&mc, space) {
+        return Ok(Value::Color(c));
+    }
+    let mapped = gamut_map(&mc, space);
+    // Re-express in the original space.
+    let back = convert_modern(&mapped, mc.space);
+    Ok(Value::Color(make_modern_in(back, mc.space)))
+}
+
+/// CSS Color 4 gamut mapping via oklch chroma reduction with local MINDE
+/// (binary search on chroma, clamping in the target space).
+fn gamut_map(mc: &ModernColor, space: ColorSpace) -> ModernColor {
+    let oklch = convert_modern(mc, ColorSpace::Oklch);
+    let l = z(oklch.channels[0]);
+    if l >= 1.0 {
+        return clamp_in_space(&white_in(space), space);
+    }
+    if l <= 0.0 {
+        return clamp_in_space(&black_in(space), space);
+    }
+    let h = z(oklch.channels[2]);
+    let mut lo = 0.0;
+    let mut hi = z(oklch.channels[1]);
+    const JND: f64 = 0.02;
+    const EPS: f64 = 0.0001;
+    let make = |c: f64| ModernColor {
+        space: ColorSpace::Oklch,
+        channels: [Some(l), Some(c), Some(h)],
+        alpha: oklch.alpha,
+    };
+    let mut current = make(hi);
+    while hi - lo > EPS {
+        let chroma = (lo + hi) / 2.0;
+        current = make(chroma);
+        if in_gamut(&current, space) {
+            lo = chroma;
+            continue;
+        }
+        let clipped = clamp_in_space(&current, space);
+        if delta_eok(&clipped, &current) < JND {
+            current = clipped;
+            break;
+        }
+        hi = chroma;
+    }
+    convert_modern(&current, space)
+}
+
+fn white_in(space: ColorSpace) -> ModernColor {
+    let mc = ModernColor {
+        space: ColorSpace::Oklch,
+        channels: [Some(1.0), Some(0.0), Some(0.0)],
+        alpha: Some(1.0),
+    };
+    convert_modern(&mc, space)
+}
+
+fn black_in(space: ColorSpace) -> ModernColor {
+    let mc = ModernColor {
+        space: ColorSpace::Oklch,
+        channels: [Some(0.0), Some(0.0), Some(0.0)],
+        alpha: Some(1.0),
+    };
+    convert_modern(&mc, space)
+}
+
+/// Clamp each channel of a color (already convertible) into `space`'s bounds.
+fn clamp_in_space(mc: &ModernColor, space: ColorSpace) -> ModernColor {
+    use ColorSpace::*;
+    let conv = convert_modern(mc, space);
+    let (lo, hi) = match space {
+        Rgb => (0.0, 255.0),
+        Srgb | SrgbLinear | DisplayP3 | DisplayP3Linear | A98Rgb | ProphotoRgb | Rec2020 => (0.0, 1.0),
+        _ => return conv,
+    };
+    ModernColor {
+        space,
+        channels: [
+            conv.channels[0].map(|v| v.clamp(lo, hi)),
+            conv.channels[1].map(|v| v.clamp(lo, hi)),
+            conv.channels[2].map(|v| v.clamp(lo, hi)),
+        ],
+        alpha: conv.alpha,
+    }
+}
+
+/// The deltaEOK (Euclidean distance in oklab) between two colors.
+fn delta_eok(a: &ModernColor, b: &ModernColor) -> f64 {
+    let a = convert_modern(a, ColorSpace::Oklab);
+    let b = convert_modern(b, ColorSpace::Oklab);
+    let dl = z(a.channels[0]) - z(b.channels[0]);
+    let da = z(a.channels[1]) - z(b.channels[1]);
+    let db = z(a.channels[2]) - z(b.channels[2]);
+    (dl * dl + da * da + db * db).sqrt()
+}
+
+/// Build a modern legacy color (rgb/hsl) from a [`Channels`] set when it
+/// contains a `none` channel (and no real special function), matching
+/// dart-sass's modern parsing. Returns `Ok(None)` when there is no `none`
+/// channel or a real special function is present (the caller falls through to
+/// its existing handling).
+fn legacy_none_color(channels: &Channels, space: ColorSpace, _pos: Pos) -> Result<Option<Value>, Error> {
+    let comps_special = channels.comps.iter().any(is_special_legacy);
+    let alpha_special = channels.alpha.as_ref().is_some_and(is_special_legacy);
+    if comps_special || alpha_special {
+        return Ok(None);
+    }
+    let comps_none = channels.comps.iter().any(is_none_keyword);
+    let alpha_none = channels.alpha.as_ref().is_some_and(is_none_keyword);
+    if !(comps_none || alpha_none) {
+        return Ok(None);
+    }
+    if channels.comps.len() != 3 {
+        return Ok(None);
+    }
+    let comps = &channels.comps;
+    let ch = match space {
+        ColorSpace::Hsl => [
+            if is_none_keyword(&comps[0]) {
+                None
+            } else {
+                modern_hue(&comps[0])
+            },
+            modern_channel(&comps[1], 100.0),
+            modern_channel(&comps[2], 100.0),
+        ],
+        // rgb: channels in 0..255.
+        _ => [
+            modern_channel(&comps[0], 255.0),
+            modern_channel(&comps[1], 255.0),
+            modern_channel(&comps[2], 255.0),
+        ],
+    };
+    let mc = ModernColor {
+        space,
+        channels: ch,
+        alpha: modern_alpha(channels.alpha.as_ref()),
+    };
+    Ok(Some(Value::Color(make_modern(mc))))
+}
+
+/// Serialize a lab-family call (`lab`/`lch`/`oklab`/`oklch`) that has a
+/// degenerate `calc()` in a non-lightness channel: lightness folds and is
+/// rendered as a percentage, the alpha folds, and the chroma/a/b/hue channels
+/// keep their authored spelling (e.g. `calc(infinity)`).
+fn lab_degenerate(
+    name: &str,
+    comps: &[Value],
+    alpha: Option<&Value>,
+    l_base: f64,
+    l_max: f64,
+    pos: Pos,
+) -> Value {
+    let l = modern_channel(&comps[0], l_base)
+        .map(|v| v.clamp(0.0, l_max))
+        .unwrap_or(0.0);
+    let l_pct = fmt_num(l / l_base * 100.0, false);
+    // The chroma channel of lch/oklch is floored at 0: a degenerate calc whose
+    // floored value differs (`-infinity`/`NaN` → 0) folds to that number;
+    // `+infinity` is unchanged so its `calc(...)` text is kept.
+    let is_polar = matches!(name, "lch" | "oklch");
+    let degenerate_chroma = if is_polar {
+        match &comps[1] {
+            Value::Calc(node) => degenerate_const(node),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let c1 = match degenerate_chroma {
+        Some(raw) if raw.is_nan() || raw.max(0.0) != raw => fmt_num(raw.max(0.0), false),
+        _ => comps[1].to_css(false),
+    };
+    let c2 = comps[2].to_css(false);
+    let a = match alpha {
+        Some(v) if is_none_keyword(v) => 1.0,
+        Some(v) => alpha_value(v, pos).unwrap_or(1.0),
+        None => 1.0,
+    };
+    let body = format!("{l_pct}% {c1} {c2}");
+    let text = if (a - 1.0).abs() < f64::EPSILON {
+        format!("{name}({body})")
+    } else {
+        format!("{name}({body} / {})", fmt_num(a, false))
+    };
+    Value::Str(crate::value::SassStr { text, quoted: false })
 }

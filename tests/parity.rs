@@ -3023,3 +3023,24 @@ fn parity_use_builtin_modules() {
         "@use \"sass:map\";\n@use \"sass:color\";\n@use \"sass:meta\";\n$m: (a: 1, b: 2);\na {\n  g: map.get($m, a);\n  k: meta.inspect(map.keys($m));\n  adj: color.adjust(#123456, $red: 10);\n  mix: color.mix(red, blue);\n  ie: color.ie-hex-str(#abcdef);\n  tof: meta.type-of(5px);\n}\n",
     );
 }
+
+#[test]
+fn parity_colorspace_math() {
+    // CSS Color 4 color-space-aware colors: `color()` predefined spaces,
+    // lab/lch/oklab/oklch with real values (lightness as a percentage,
+    // clamping, `deg` hues), and the `sass:color` modern members
+    // `space`/`channel`/`to-space`/`is-legacy`/`is-missing`/`is-in-gamut`/
+    // `same`. All byte-matched to `npx sass`.
+    assert_parity(
+        "@use \"sass:color\";\na {\n  c1: color(srgb 0.2 0.5 0.7);\n  c2: color(srgb 1.1 -0.2 0.3);\n  c3: color(srgb 10% 20% 30% / 0.5);\n  c4: oklch(0.1 0.2 3deg);\n  c5: oklch(1.1 0.2 3deg);\n  c6: lab(50 40 30);\n  c7: lch(50 40 270);\n  c8: oklab(0.5 0.1 -0.05);\n  c9: color(xyz 0.1 0.2 0.3);\n  c10: color(xyz-d50 0.1 0.2 0.3);\n  c11: color(display-p3-linear 0.5 0.6 0.7);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:color\";\na {\n  o1: color.to-space(red, oklch);\n  o2: color.to-space(red, lab);\n  o3: color.to-space(red, display-p3);\n  o4: color.to-space(red, xyz);\n  o5: color.to-space(red, xyz-d50);\n  o6: color.to-space(red, prophoto-rgb);\n  o7: color.to-space(red, rec2020);\n  o8: color.to-space(red, lch);\n  o9: color.to-space(red, oklab);\n  o10: color.to-space(red, srgb-linear);\n  o11: color.to-space(red, hsl);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:color\";\na {\n  s1: color.space(red);\n  s2: color.space(oklch(0.5 0.1 90deg));\n  ch1: color.channel(red, \"red\", $space: srgb);\n  ch2: color.channel(color.to-space(red, oklch), \"lightness\");\n  ch3: color.channel(oklch(0.5 0.1 90deg), \"hue\");\n  leg1: color.is-legacy(red);\n  leg2: color.is-legacy(oklch(0.5 0.1 90deg));\n  miss: color.is-missing(color(srgb none 0.5 0.7), \"red\");\n  gam1: color.is-in-gamut(color(srgb 1.5 0 0));\n  gam2: color.is-in-gamut(red);\n  same1: color.same(red, color.to-space(red, oklch));\n  same2: color.same(red, blue);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:color\";\na {\n  n1: oklch(none 0.2 3deg);\n  n2: color(srgb none 0.5 0.7);\n  n3: hsl(none 50% 40%);\n  n4: hsl(120 none 40%);\n  n5: rgb(none 100 100);\n  n6: rgb(100 100 100 / none);\n  n7: hwb(none 30% 40%);\n}\n",
+    );
+}

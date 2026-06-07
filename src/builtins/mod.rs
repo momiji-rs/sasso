@@ -260,9 +260,7 @@ fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
             _ => None,
         },
         "color" => match member {
-            // Legacy members map to the global color functions. The modern
-            // color-space members (channel/space/to-space/…) need color-space
-            // math this build can't compute; they are deliberately absent.
+            // Legacy members map to the global color functions.
             "adjust" => Some("adjust-color"),
             "scale" => Some("scale-color"),
             "change" => Some("change-color"),
@@ -281,6 +279,18 @@ fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
             "invert" => Some("invert"),
             "mix" => Some("mix"),
             "ie-hex-str" => Some("ie-hex-str"),
+            // Modern CSS Color 4 color-space members. These dispatch to the
+            // color-space-aware implementations in the color builtin family
+            // under disambiguated global names.
+            "space" => Some("color-space"),
+            "channel" => Some("color-channel"),
+            "to-space" => Some("color-to-space"),
+            "is-legacy" => Some("color-is-legacy"),
+            "is-missing" => Some("color-is-missing"),
+            "is-in-gamut" => Some("color-is-in-gamut"),
+            "is-powerless" => Some("color-is-powerless"),
+            "to-gamut" => Some("color-to-gamut"),
+            "same" => Some("color-same"),
             _ => None,
         },
         "meta" => match member {
