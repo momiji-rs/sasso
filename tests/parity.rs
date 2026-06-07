@@ -1469,3 +1469,13 @@ fn selector_comment_stripping() {
         "a {\n  /* keep */\n  b: c;\n}\n"
     );
 }
+
+#[test]
+fn declaration_property_comment_stripping() {
+    // A loud or silent comment between a declaration's property name and the
+    // `:` is dropped (the property template strips it as whitespace, and the
+    // emitter trims). Byte-matched to dart-sass. Offline.
+    assert_eq!(ours("a {b /**/ : c}\n"), "a {\n  b: c;\n}\n");
+    assert_eq!(ours("a {b //\n  : c}\n"), "a {\n  b: c;\n}\n");
+    assert_eq!(ours("a { color : red ; }\n"), "a {\n  color: red;\n}\n");
+}

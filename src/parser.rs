@@ -495,7 +495,7 @@ impl Parser {
 
     fn parse_declaration(&mut self) -> Result<Stmt, Error> {
         let pos = self.sc.position();
-        let property = self.parse_template(&[':'])?;
+        let property = self.parse_template_mode(&[':'], CommentMode::Strip)?;
         if !self.sc.eat(':') {
             return Err(Error::at("expected \":\" in declaration", self.sc.position()));
         }
