@@ -523,16 +523,7 @@ pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension]) -
         originals.insert(complex.render());
     }
 
-    let mut result: Vec<Complex> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for complex in original {
-        for c in extend_complex(complex, extensions) {
-            let rendered = c.render();
-            if seen.insert(rendered) {
-                result.push(c);
-            }
-        }
-    }
+    let result = extend_to_fixpoint(original, extensions);
 
     // Remove selectors that are subselectors of another (redundant), keeping
     // originals (dart-sass `_trim`).
@@ -897,7 +888,10 @@ fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
     let mut any_extended = false;
     for comp in &complex.components {
         let opts = extend_component(comp, extensions);
-        if opts.len() > 1 {
+        // The component changed if there are alternatives, or if its single
+        // option differs from the original (a pseudo argument was extended in
+        // place, e.g. `:not(.c)` → `:not(.c):not(.a)`).
+        if opts.len() > 1 || opts.first().map(|s| s.as_slice()) != Some(std::slice::from_ref(comp)) {
             any_extended = true;
         }
         per_component.push(opts);
@@ -1543,7 +1537,247 @@ fn complex_is_parent_superselector(complex1: &[TComp], complex2: &[TComp]) -> bo
 /// isolation first, so the per-simple option set already contains the whole
 /// chain. The within-compound product is then computed once (no re-extension of
 /// the original simples, which would spuriously double-count combinations).
+/// A parsed selector-bearing pseudo: `:name(arg)`.
+struct PseudoParts {
+    /// The verbatim head including the leading colon(s), e.g. `:not` or `::is`.
+    head: String,
+    /// The lowercased name without colons, e.g. `not`, `is`.
+    name: String,
+    /// The raw argument text inside the parentheses.
+    arg: String,
+}
+
+/// Parse a pseudo simple's text into its head/name/argument if it carries a
+/// selector argument. Returns `None` for argument-less pseudos or non-pseudos.
+fn parse_pseudo_parts(text: &str) -> Option<PseudoParts> {
+    let open = text.find('(')?;
+    if !text.ends_with(')') {
+        return None;
+    }
+    let head = text[..open].to_string();
+    let name = head.trim_start_matches(':').to_ascii_lowercase();
+    let arg = text[open + 1..text.len() - 1].to_string();
+    Some(PseudoParts { head, name, arg })
+}
+
+/// Whether a pseudo name takes a selector list we should extend.
+fn is_selector_pseudo(name: &str) -> bool {
+    matches!(
+        name,
+        "not" | "is" | "matches" | "where" | "any" | "current" | "has" | "host" | "host-context"
+    ) || name.ends_with("-any")
+}
+
+/// dart-sass `_extendList`: recursively extend a list of complex selectors,
+/// dedup, and trim redundant superselectors. Used for pseudo arguments.
+fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
+    let mut originals: HashSet<String> = HashSet::new();
+    for complex in list {
+        originals.insert(complex.render());
+    }
+    let result = extend_to_fixpoint(list, extensions);
+    trim(result, &originals)
+}
+
+/// Run the extension to a fixpoint: extend each selector, then feed every
+/// newly-produced selector back through extension until nothing new appears.
+/// This realizes dart-sass's extension-graph behavior where an extender produced
+/// by one `@extend` can itself be extended by another (transitively, including
+/// targets buried in pseudo arguments). Bounded to guarantee termination.
+fn extend_to_fixpoint(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
+    let mut result: Vec<Complex> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    // Worklist of selectors still to extend (originals first).
+    let mut queue: std::collections::VecDeque<Complex> = list.iter().cloned().collect();
+    let mut iterations = 0usize;
+    while let Some(complex) = queue.pop_front() {
+        iterations += 1;
+        if iterations > 100_000 || result.len() > 100_000 {
+            break;
+        }
+        for c in extend_complex(&complex, extensions) {
+            let rendered = c.render();
+            if seen.insert(rendered) {
+                // Re-extend this freshly-produced selector to chase transitive
+                // extensions (e.g. a target inside a `:is()` extender).
+                queue.push_back(c.clone());
+                result.push(c);
+            }
+        }
+    }
+    result
+}
+
+/// dart-sass `_extendPseudo`: extend the selector argument of a selector-bearing
+/// pseudo. Returns the replacement simple selectors for this pseudo position, or
+/// `None` if nothing changed (keep the original simple unchanged).
+///
+/// For `:not()` with a single-complex original argument, the result is the set of
+/// `:not()` simples to merge into the surrounding compound (older browsers can't
+/// parse a complex/compound inside `:not`, so each becomes its own `:not`). For
+/// every other pseudo (and `:not` whose argument was already a list), the result
+/// is a single rewritten pseudo carrying the extended argument list.
+fn extend_pseudo(text: &str, extensions: &[Extension]) -> Option<Vec<Simple>> {
+    let parts = parse_pseudo_parts(text)?;
+    if !is_selector_pseudo(&parts.name) {
+        return None;
+    }
+    let original = parse_list(&parts.arg)?;
+    let extended = extend_list(&original, extensions);
+    // Nothing changed.
+    if extended.len() == original.len()
+        && extended
+            .iter()
+            .zip(original.iter())
+            .all(|(a, b)| a.render() == b.render())
+    {
+        return None;
+    }
+
+    // For `:not`, drop complex selectors from the extension result unless the
+    // original argument itself contained a complex selector (otherwise we'd
+    // produce a `:not()` no browser can parse). We can keep them if every
+    // extension result is complex, since then nothing already-working breaks.
+    let original_has_complex = original.iter().any(|c| c.components.len() > 1);
+    let mut complexes: Vec<Complex> =
+        if parts.name == "not" && !original_has_complex && extended.iter().any(|c| c.components.len() == 1) {
+            extended.into_iter().filter(|c| c.components.len() <= 1).collect()
+        } else {
+            extended
+        };
+
+    // Unwrap nested matching pseudos in single-compound results, mirroring
+    // dart-sass: e.g. for `:not`, a result `:is(...)`/`:matches`/`:where` is
+    // unwrapped to its inner selectors; for matchish pseudos, a result of the
+    // same name+argument is likewise unwrapped.
+    let mut unwrapped: Vec<Complex> = Vec::new();
+    for complex in complexes.drain(..) {
+        let inner = single_pseudo_inner(&complex, &parts.name);
+        match inner {
+            PseudoUnwrap::Keep => unwrapped.push(complex),
+            PseudoUnwrap::Drop => {}
+            PseudoUnwrap::Replace(list) => unwrapped.extend(list),
+        }
+    }
+    let complexes = unwrapped;
+
+    // `:not` with a single-complex original argument splits into separate
+    // `:not()` simples merged into the surrounding compound.
+    if parts.name == "not" && original.len() == 1 {
+        let result: Vec<Simple> = complexes
+            .into_iter()
+            .map(|c| Simple::Pseudo(format!("{}({})", parts.head, c.render())))
+            .collect();
+        if result.is_empty() {
+            return None;
+        }
+        return Some(result);
+    }
+
+    if complexes.is_empty() {
+        return None;
+    }
+    let inner = complexes
+        .iter()
+        .map(|c| c.render())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(vec![Simple::Pseudo(format!("{}({})", parts.head, inner))])
+}
+
+enum PseudoUnwrap {
+    /// Keep the complex as-is.
+    Keep,
+    /// Drop the complex (nested pseudo we can't safely unwrap).
+    Drop,
+    /// Replace with these inner complex selectors.
+    Replace(Vec<Complex>),
+}
+
+/// For a single-compound complex whose sole simple is a nested selector-pseudo,
+/// decide how `_extendPseudo` should treat it relative to the outer pseudo
+/// `outer_name`.
+fn single_pseudo_inner(complex: &Complex, outer_name: &str) -> PseudoUnwrap {
+    if complex.components.len() != 1 {
+        return PseudoUnwrap::Keep;
+    }
+    let compound = &complex.components[0].compound;
+    if compound.simples.len() != 1 {
+        return PseudoUnwrap::Keep;
+    }
+    let Simple::Pseudo(text) = &compound.simples[0] else {
+        return PseudoUnwrap::Keep;
+    };
+    let Some(inner) = parse_pseudo_parts(text) else {
+        return PseudoUnwrap::Keep;
+    };
+    let Some(inner_list) = parse_list(&inner.arg) else {
+        return PseudoUnwrap::Keep;
+    };
+    match outer_name {
+        "not" => {
+            // `:not(:is(...))` etc. unwraps; other nested pseudos can't be
+            // expanded (each layer adds semantics) so the selector is dropped.
+            if matches!(inner.name.as_str(), "is" | "matches" | "where") {
+                PseudoUnwrap::Replace(inner_list)
+            } else {
+                PseudoUnwrap::Drop
+            }
+        }
+        "is" | "matches" | "where" | "any" | "current" | "nth-child" | "nth-last-child" => {
+            if inner.name == outer_name {
+                PseudoUnwrap::Replace(inner_list)
+            } else {
+                PseudoUnwrap::Drop
+            }
+        }
+        _ => PseudoUnwrap::Keep,
+    }
+}
+
+/// Expand selector-pseudo arguments inside a compound in place, returning the
+/// effective compound. `:not()` (single-complex arg) contributes extra `:not()`
+/// simples merged at the pseudo's position; other matchish pseudos rewrite their
+/// argument list. Non-pseudo simples and argument-less pseudos pass through.
+fn expand_pseudos_in_compound(compound: &Compound, extensions: &[Extension]) -> Compound {
+    let mut simples: Vec<Simple> = Vec::new();
+    // A `:not()` expanded from one simple may collide with another `:not()`
+    // already present in the compound (e.g. `:not(.c)` extends `.c`→`.b` while a
+    // sibling `:not(.b)` is also present). Dedup pseudo simples so the expansion
+    // is idempotent and the fixpoint terminates.
+    for s in &compound.simples {
+        match s {
+            Simple::Pseudo(text) => {
+                let replacement = match extend_pseudo(text, extensions) {
+                    Some(r) => r,
+                    None => vec![s.clone()],
+                };
+                for r in replacement {
+                    if !simples.contains(&r) {
+                        simples.push(r);
+                    }
+                }
+            }
+            other => simples.push(other.clone()),
+        }
+    }
+    Compound { simples }
+}
+
 fn extend_component(comp: &ComplexComponent, extensions: &[Extension]) -> Vec<Vec<ComplexComponent>> {
+    // First, extend any selector-pseudo arguments (`:not(...)`, `:is(...)`,
+    // etc.) in place, producing an "effective" compound. For `:not()` with a
+    // single-complex argument this *adds* simples to the compound (dart-sass
+    // `_extendPseudo` merges them rather than creating an alternative);
+    // matchish pseudos (`:is`/`:matches`/`:where`/...) rewrite their argument
+    // list in place. The resulting compound is then run through the normal
+    // per-simple extension below.
+    let effective = expand_pseudos_in_compound(&comp.compound, extensions);
+    let comp = ComplexComponent {
+        combinator: comp.combinator,
+        compound: effective,
+    };
+    let comp = &comp;
     let simples = &comp.compound.simples;
     // Per-simple option list: index 0 is "keep self" (None); the rest are
     // (transitively expanded) extender complex selectors targeting this simple.

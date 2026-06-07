@@ -2921,4 +2921,32 @@ fn parity_clamp_calculation() {
         "  p1: clamp(1px, 2vw, 3px);\n",
         "}\n",
     ));
+fn parity_extend_into_pseudo_arguments() {
+    // Extending a target buried inside a `:not()`/`:is()` selector-pseudo
+    // argument (dart-sass `_extendPseudo`): `:not()` with a single-complex arg
+    // splits into multiple `:not()`s merged into the compound, while matchish
+    // pseudos rewrite their argument list in place.
+    assert_parity(".a {@extend .c}\n:not(.c) {x: y}\n");
+    assert_parity(".a {@extend .c}\n.b {@extend .d}\n:not(.c):not(.d) {x: y}\n");
+    assert_parity(".a {@extend .c}\n:is(.c) {x: y}\n");
+    assert_parity(".a .b {@extend .c}\n:is(.c) {x: y}\n");
+    // `:not` drops complex extension results when the original arg had none.
+    assert_parity(".a .b {@extend .c}\n:not(.c) {x: y}\n");
+    // Regression test for sass/dart-sass#191: nested `:not(:not(...))` isn't
+    // expanded.
+    assert_parity(":not(:not(.x)) {a: b}\n:not(.y) {@extend .x}\n");
+}
+
+#[test]
+fn parity_extend_graph_fixpoint() {
+    // An extender produced by one `@extend` is itself extended by another,
+    // transitively — including targets inside pseudo arguments (the
+    // extension-graph fixpoint). `:is(midstream)` extends `upstream`, and
+    // `midstream` (inside that `:is`) is then extended by `downstream`.
+    assert_parity(
+        ":is(midstream) {@extend upstream}\ndownstream {@extend midstream}\nupstream {a: b}\n",
+    );
+    // The result of `:not(.c)` being extended is itself extendable: `:not(.b)`
+    // (produced by extending `.c`) is a target extended by `.a`.
+    assert_parity(".a {@extend :not(.b)}\n.b {@extend .c}\n:not(.c) {x: y}\n");
 }
