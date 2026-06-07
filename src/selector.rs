@@ -500,9 +500,16 @@ pub(crate) struct ExtendResult {
 /// dart-sass order). Placeholder-only complex selectors are dropped from the
 /// output.
 pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension]) -> ExtendResult {
+    // The set of "original" rendered selectors — the unextended input. Original
+    // selectors are never trimmed (dart-sass keeps them so the rule still
+    // matches what it always matched).
+    let mut originals: HashSet<String> = HashSet::new();
+    for complex in original {
+        originals.insert(complex.render());
+    }
+
     let mut result: Vec<Complex> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-
     for complex in original {
         for c in extend_complex(complex, extensions) {
             let rendered = c.render();
@@ -512,6 +519,10 @@ pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension]) -
         }
     }
 
+    // Remove selectors that are subselectors of another (redundant), keeping
+    // originals (dart-sass `_trim`).
+    let result = trim(result, &originals);
+
     // Drop complex selectors that still contain a placeholder.
     let kept: Vec<&Complex> = result.iter().filter(|c| !c.has_placeholder()).collect();
     let all_placeholders = kept.is_empty();
@@ -520,6 +531,193 @@ pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension]) -
         selectors,
         all_placeholders,
     }
+}
+
+/// Remove complex selectors that are subselectors of another in the list,
+/// preserving original selectors. Mirrors dart-sass `ExtensionStore._trim`:
+/// iterate last-to-first, dropping a selector when an already-kept (or
+/// later-in-input) selector is its superselector. Originals are always kept.
+fn trim(selectors: Vec<Complex>, originals: &HashSet<String>) -> Vec<Complex> {
+    // Quadratic; dart-sass bails above 100 to avoid pathological cost.
+    if selectors.len() > 100 {
+        return selectors;
+    }
+    let mut result: Vec<Complex> = Vec::new();
+    let n = selectors.len();
+    for i in (0..n).rev() {
+        let c1 = &selectors[i];
+        if originals.contains(&c1.render()) {
+            // Keep originals, avoiding duplicate originals.
+            if !result.iter().any(|c| c.render() == c1.render()) {
+                result.insert(0, c1.clone());
+            }
+            continue;
+        }
+        // Drop c1 if any already-kept selector is its superselector.
+        let superseded = result.iter().any(|c2| complex_is_superselector(c2, c1))
+            || selectors[..i].iter().any(|c2| complex_is_superselector(c2, c1));
+        if !superseded {
+            result.insert(0, c1.clone());
+        }
+    }
+    result
+}
+
+// ---- superselector checks ---------------------------------------------
+
+/// Whether `c1` is a superselector of `c2` (matches every element `c2` does).
+fn complex_is_superselector(c1: &Complex, c2: &Complex) -> bool {
+    let comps1 = &c1.components;
+    let comps2 = &c2.components;
+    // Trailing combinators make a selector neither super- nor subselector; our
+    // model never has trailing combinators, so skip that check.
+    let mut i1 = 0usize;
+    let mut i2 = 0usize;
+    let mut previous_combinator: Option<Combinator> = None;
+    loop {
+        let remaining1 = comps1.len() - i1;
+        let remaining2 = comps2.len() - i2;
+        if remaining1 == 0 || remaining2 == 0 {
+            return false;
+        }
+        if remaining1 > remaining2 {
+            return false;
+        }
+        let component1 = &comps1[i1];
+        if remaining1 == 1 {
+            let Some(last2) = comps2.last() else {
+                return false;
+            };
+            return compound_is_superselector(&component1.compound, &last2.compound);
+        }
+
+        // Find the first index in comps2 whose compound is a subselector of
+        // component1's compound.
+        let mut end = i2;
+        loop {
+            let component2 = &comps2[end];
+            if compound_is_superselector(&component1.compound, &component2.compound) {
+                break;
+            }
+            end += 1;
+            if end == comps2.len() - 1 {
+                return false;
+            }
+        }
+
+        // Intervening components (between i2 and end) must be compatible with
+        // the previous combinator.
+        if !compatible_with_previous_combinator(previous_combinator, &comps2[i2..end]) {
+            return false;
+        }
+
+        let component2 = &comps2[end];
+        let combinator1 = component1.combinator;
+        let combinator2 = component2.combinator;
+        if !is_supercombinator(combinator1, combinator2) {
+            return false;
+        }
+
+        i1 += 1;
+        i2 = end + 1;
+        previous_combinator = combinator1;
+
+        if comps1.len() - i1 == 1 {
+            match combinator1 {
+                Some(Combinator::FollowingSibling) => {
+                    // `.foo ~ .bar` only supersedes selectors whose intervening
+                    // combinators are all sibling combinators.
+                    let upto = comps2.len() - 1;
+                    if !comps2[i2..upto]
+                        .iter()
+                        .all(|c| is_supercombinator(combinator1, c.combinator))
+                    {
+                        return false;
+                    }
+                }
+                Some(_) if comps2.len() - i2 > 1 => return false,
+                _ => {}
+            }
+        }
+    }
+}
+
+fn compatible_with_previous_combinator(previous: Option<Combinator>, parents: &[ComplexComponent]) -> bool {
+    if parents.is_empty() {
+        return true;
+    }
+    let Some(prev) = previous else {
+        return true;
+    };
+    if prev != Combinator::FollowingSibling {
+        return false;
+    }
+    parents.iter().all(|c| {
+        matches!(
+            c.combinator,
+            Some(Combinator::FollowingSibling) | Some(Combinator::NextSibling)
+        )
+    })
+}
+
+/// Whether `combinator1` is a supercombinator of `combinator2`.
+fn is_supercombinator(c1: Option<Combinator>, c2: Option<Combinator>) -> bool {
+    c1 == c2
+        || (c1.is_none() && c2 == Some(Combinator::Child))
+        || (c1 == Some(Combinator::FollowingSibling) && c2 == Some(Combinator::NextSibling))
+}
+
+/// Whether compound `a` is a superselector of compound `b`.
+fn compound_is_superselector(a: &Compound, b: &Compound) -> bool {
+    if a.simples.len() > b.simples.len() {
+        return false;
+    }
+    a.simples
+        .iter()
+        .all(|s1| b.simples.iter().any(|s2| simple_is_superselector(s1, s2)))
+}
+
+/// Whether simple `a` is a superselector of simple `b`.
+fn simple_is_superselector(a: &Simple, b: &Simple) -> bool {
+    if a == b {
+        return true;
+    }
+    match a {
+        // `*` (no namespace) matches everything.
+        Simple::Universal { ns: None } => true,
+        // `*|*` matches everything.
+        Simple::Universal { ns: Some(n) } if n == "*" => true,
+        // `ns|*` matches `ns|type` and `ns|*` (same namespace).
+        Simple::Universal { ns: Some(n) } => match b {
+            Simple::Type(t) => type_namespace(t).as_deref() == Some(n.as_str()),
+            Simple::Universal { ns: Some(m) } => n == m,
+            _ => false,
+        },
+        // A type selector `t` supersedes a matching type selector, honoring
+        // a `*` namespace wildcard.
+        Simple::Type(t) => match b {
+            Simple::Type(u) => {
+                let (n1, name1) = split_type(t);
+                let (n2, name2) = split_type(u);
+                name1 == name2 && (n1.as_deref() == Some("*") || n1 == n2)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Split a (possibly namespaced) type name into `(namespace, local)`.
+fn split_type(t: &str) -> (Option<String>, String) {
+    match t.split_once('|') {
+        Some((ns, name)) => (Some(ns.to_string()), name.to_string()),
+        None => (None, t.to_string()),
+    }
+}
+
+/// The namespace component of a type selector string, if any.
+fn type_namespace(t: &str) -> Option<String> {
+    t.split_once('|').map(|(ns, _)| ns.to_string())
 }
 
 /// Extend a single complex selector: compute, for each component, the list of
@@ -646,14 +844,13 @@ fn collect_extenders(target: &Simple, extensions: &[Extension], stack: &mut Vec<
         return Vec::new();
     }
     let mut out: Vec<Complex> = Vec::new();
-    let mut found = false;
-    for ext in extensions {
+    // dart-sass emits same-target extenders in reverse registration order.
+    for ext in extensions.iter().rev() {
         let Some(t) = &ext.target else { continue };
         if t != target {
             continue;
         }
         ext.matched.set(true);
-        found = true;
         for extender in &ext.extenders {
             // The direct extender selector itself.
             out.push(extender.clone());
@@ -668,7 +865,6 @@ fn collect_extenders(target: &Simple, extensions: &[Extension], stack: &mut Vec<
             }
         }
     }
-    let _ = found;
     out
 }
 

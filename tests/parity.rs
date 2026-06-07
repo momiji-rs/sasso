@@ -1749,3 +1749,28 @@ fn extend_basic_and_placeholders() {
         ".a {\n  x: y;\n}\n"
     );
 }
+
+#[test]
+fn extend_trim_and_chain_order() {
+    // Redundant subselectors are trimmed: `.baz` supersedes `.foo.baz` etc.
+    assert_eq!(
+        ours(".foo.bar {a: b}\n.baz {@extend .foo; @extend .bar}\n"),
+        ".foo.bar, .baz {\n  a: b;\n}\n"
+    );
+    // The universal selector supersedes the bare class, so only `-a *` remains.
+    assert_eq!(
+        ours("%-a .foo {a: b}\n* {@extend .foo} -a {@extend %-a}\n"),
+        "-a * {\n  a: b;\n}\n"
+    );
+    // Chained extends keep dart-sass's reverse-registration ordering of
+    // same-target extenders.
+    assert_eq!(
+        ours(".foo {a: b}\n.bar {@extend .foo}\n.baz {@extend .bar}\n.bip {@extend .bar}\n"),
+        ".foo, .bar, .bip, .baz {\n  a: b;\n}\n"
+    );
+    // Two direct extenders of the same target also come out reversed.
+    assert_eq!(
+        ours(".foo {a: b}\n.bar {@extend .foo}\n.baz {@extend .foo}\n"),
+        ".foo, .baz, .bar {\n  a: b;\n}\n"
+    );
+}
