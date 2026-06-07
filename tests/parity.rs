@@ -626,3 +626,26 @@ fn calc_and_math_infinity_nan() {
     assert_parity("a { b: clamp(1, infinity, 10); }\n");
     assert_parity("a { b: cos(pi); }\n");
 }
+
+#[test]
+fn round_strategies_and_steps() {
+    // round() as a CSS calculation: strategy keyword + step, the two-argument
+    // nearest-with-step form, unit coercion, a zero step (NaN), and the
+    // non-finite cases — all byte-matched to dart-sass.
+    assert_parity("a { b: round(nearest, 117px, 25px); }\n");
+    assert_parity("a { b: round(up, 101px, 25px); }\n");
+    assert_parity("a { b: round(down, 122px, 25px); }\n");
+    assert_parity("a { b: round(to-zero, 120px, 25px); }\n");
+    assert_parity("a { b: round(to-zero, -120px, -25px); }\n");
+    assert_parity("a { b: round(up, 12px, -7px); }\n");
+    assert_parity("a { b: round(117, 25); }\n");
+    assert_parity("a { b: round(117cm, 25mm); }\n");
+    assert_parity("a { b: round(4.6); }\n");
+    assert_parity("a { b: round(nearest, 10px, 0px); }\n");
+    assert_parity("a { b: round(nearest, infinity, 5); }\n");
+    assert_parity("a { b: round(nearest, -infinity, 5); }\n");
+    assert_parity("a { b: round(nearest, infinity, infinity); }\n");
+    assert_parity("a { b: round(1px, 10%); }\n");
+    assert_parity("a { b: round(1%, 2%); }\n");
+    assert_parity("a { b: round(1foo, 2bar); }\n");
+}

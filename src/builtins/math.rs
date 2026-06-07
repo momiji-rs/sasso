@@ -30,6 +30,7 @@ pub(super) fn try_call(
         return Some(unary(name, pos_args, named, pos, op));
     }
     match name {
+        "round" => Some(round(pos_args, named, pos)),
         "min" => Some(min_max(name, pos_args, named, pos, true)),
         "max" => Some(min_max(name, pos_args, named, pos, false)),
         "clamp" => Some(clamp(pos_args, named, pos)),
@@ -57,10 +58,306 @@ fn unary_op(name: &str) -> Option<fn(f64) -> f64> {
         "abs" => f64::abs,
         "ceil" => f64::ceil,
         "floor" => f64::floor,
-        // dart-sass rounds half away from zero, matching `f64::round`.
-        "round" => f64::round,
         _ => return None,
     })
+}
+
+/// The rounding strategy keyword of a `round()` call's first argument.
+#[derive(Clone, Copy, PartialEq)]
+enum RoundStrategy {
+    Nearest,
+    Up,
+    Down,
+    ToZero,
+}
+
+impl RoundStrategy {
+    fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "nearest" => RoundStrategy::Nearest,
+            "up" => RoundStrategy::Up,
+            "down" => RoundStrategy::Down,
+            "to-zero" => RoundStrategy::ToZero,
+            _ => return None,
+        })
+    }
+}
+
+/// `round()` as dart-sass's CSS `round()` calculation:
+/// - `round(number)` — nearest, no step (half away from zero);
+/// - `round(number, step)` — nearest with a step;
+/// - `round(strategy, number, step)` — explicit strategy with a step.
+///
+/// Step is converted into the number's unit; non-finite operands and a zero
+/// step follow the CSS spec (see `round_with_step`). Genuinely unsimplifiable
+/// arguments (a `var()`, an unknown/incompatible unit pair, etc.) fall back to
+/// a preserved `round(...)` form.
+fn round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    // A named argument (`round($number: …)`) forces the legacy one-argument
+    // `math.round`, which requires an actual number rather than the CSS
+    // `round()` calculation's preserve-on-unsimplifiable behaviour. Any other
+    // named-argument shape falls through to the positional handling below,
+    // which reports the arity/name error.
+    if pos_args.is_empty() && named.len() == 1 && named[0].0 == "number" {
+        let n = as_num(&named[0].1, pos)?;
+        return Ok(num_value(Number {
+            value: n.value.round(),
+            unit: n.unit,
+        }));
+    }
+    let args = all_args(pos_args, named);
+    match args.len() {
+        0 => Err(Error::at("Missing argument.", pos)),
+        1 => {
+            // One-argument form: nearest, unit preserved. An unsimplifiable
+            // argument (a `var()`, interpolation, …) preserves the call.
+            match round_operand(&args[0], pos)? {
+                Some(n) => Ok(num_value(Number {
+                    value: n.value.round(),
+                    unit: n.unit,
+                })),
+                None => Ok(preserved_round(&args)),
+            }
+        }
+        2 => {
+            // A bare strategy keyword as the first of two args is a missing
+            // step; a quoted-string operand falls back to the legacy
+            // one-argument `round()`, whose extra argument is an arity error.
+            if let Value::Str(s) = &args[0] {
+                if !s.quoted && RoundStrategy::from_str(&s.text.to_ascii_lowercase()).is_some() {
+                    return Err(Error::at("If strategy is not null, step is required.", pos));
+                }
+            }
+            if args.iter().any(is_quoted_str) {
+                return Err(Error::at("Only 1 argument allowed, but 2 were passed.", pos));
+            }
+            // `round(number, step)`: nearest with a step.
+            let number = round_operand(&args[0], pos)?;
+            let step = round_operand(&args[1], pos)?;
+            match (number, step) {
+                (Some(number), Some(step)) => round_with_step(RoundStrategy::Nearest, &number, &step, pos),
+                _ => Ok(preserved_round(&args)),
+            }
+        }
+        3 => {
+            // The first argument must be a strategy keyword. A quoted string
+            // can't be used in a calculation; any other non-strategy value is
+            // a "must be either nearest, up, down or to-zero" error.
+            let strategy = match &args[0] {
+                Value::Str(s) if !s.quoted => {
+                    match RoundStrategy::from_str(&s.text.to_ascii_lowercase()) {
+                        Some(st) => st,
+                        // A non-strategy unquoted string (e.g. `var()`) leaves
+                        // the whole call unsimplified.
+                        None => return Ok(preserved_round(&args)),
+                    }
+                }
+                Value::Str(s) => {
+                    return Err(Error::at(
+                        format!("Value \"{}\" can't be used in a calculation.", s.text),
+                        pos,
+                    ))
+                }
+                other => {
+                    return Err(Error::at(
+                        format!(
+                            "{} must be either nearest, up, down or to-zero.",
+                            other.to_css(false)
+                        ),
+                        pos,
+                    ))
+                }
+            };
+            let number = round_operand(&args[1], pos)?;
+            let step = round_operand(&args[2], pos)?;
+            match (number, step) {
+                (Some(number), Some(step)) => round_with_step(strategy, &number, &step, pos),
+                _ => Ok(preserved_round(&args)),
+            }
+        }
+        n => Err(Error::at(
+            format!("Only 3 arguments allowed, but {n} were passed."),
+            pos,
+        )),
+    }
+}
+
+/// Whether a value is a quoted string (which can never be a calc operand).
+fn is_quoted_str(v: &Value) -> bool {
+    matches!(v, Value::Str(s) if s.quoted)
+}
+
+/// Interpret a `round()` number/step operand. A plain number (or one of the
+/// bare `infinity`/`-infinity`/`NaN`/`pi`/`e` constants, or a folded calc
+/// number) yields `Some(n)`. An unquoted non-constant string — a `var()`, an
+/// interpolation, a bare identifier — or a preserved calc yields `Ok(None)`,
+/// meaning the call should be preserved verbatim. A quoted string can't be
+/// used in a calculation and is an error.
+fn round_operand(v: &Value, pos: Pos) -> Result<Option<Number>, Error> {
+    match v {
+        Value::Number(n) => Ok(Some(n.clone())),
+        Value::Calc(crate::value::CalcNode::Number(n)) => Ok(Some(n.clone())),
+        Value::Str(s) if !s.quoted => Ok(const_number(&s.text)),
+        Value::Calc(_) => Ok(None),
+        Value::Str(s) => Err(Error::at(
+            format!("Value \"{}\" can't be used in a calculation.", s.text),
+            pos,
+        )),
+        other => Err(Error::at(
+            format!("Value {} can't be used in a calculation.", other.to_css(false)),
+            pos,
+        )),
+    }
+}
+
+/// dart-sass's `_roundWithStep`: round `number` to a multiple of `step`
+/// (converted into `number`'s unit) under `strategy`, handling non-finite
+/// operands and a zero step exactly as the CSS spec requires.
+fn round_with_step(
+    strategy: RoundStrategy,
+    number: &Number,
+    step: &Number,
+    pos: Pos,
+) -> Result<Value, Error> {
+    let unit = number.unit.clone();
+    let with_unit = |value: f64| {
+        num_value(Number {
+            value,
+            unit: unit.clone(),
+        })
+    };
+    // Coerce the step into the number's unit; an incompatible pair preserves
+    // the call (a real/unitless or known cross-dimension mix errors, matching
+    // the two-argument unit rules).
+    let step_v = match coerce_step(step, number, pos)? {
+        StepCoercion::Value(v) => v,
+        StepCoercion::Preserve => {
+            return Ok(preserved_round_nums(strategy, number, step));
+        }
+        StepCoercion::Error(e) => return Err(e),
+    };
+
+    let nv = number.value;
+    // NaN when number and step are both infinite, or step is 0, or either is
+    // NaN.
+    if (nv.is_infinite() && step_v.is_infinite()) || step_v == 0.0 || nv.is_nan() || step_v.is_nan() {
+        return Ok(with_unit(f64::NAN));
+    }
+    // An infinite number rounds to itself.
+    if nv.is_infinite() {
+        return Ok(with_unit(nv));
+    }
+    // An infinite step collapses to a signed zero / signed infinity by
+    // strategy and sign.
+    if step_v.is_infinite() {
+        if nv == 0.0 {
+            return Ok(with_unit(nv));
+        }
+        let value = match strategy {
+            RoundStrategy::Nearest | RoundStrategy::ToZero => {
+                if nv > 0.0 {
+                    0.0
+                } else {
+                    -0.0
+                }
+            }
+            RoundStrategy::Up => {
+                if nv > 0.0 {
+                    f64::INFINITY
+                } else {
+                    -0.0
+                }
+            }
+            RoundStrategy::Down => {
+                if nv < 0.0 {
+                    f64::NEG_INFINITY
+                } else {
+                    0.0
+                }
+            }
+        };
+        return Ok(with_unit(value));
+    }
+
+    let q = nv / step_v;
+    let rounded = match strategy {
+        RoundStrategy::Nearest => q.round(),
+        RoundStrategy::Up => {
+            if step_v < 0.0 {
+                q.floor()
+            } else {
+                q.ceil()
+            }
+        }
+        RoundStrategy::Down => {
+            if step_v < 0.0 {
+                q.ceil()
+            } else {
+                q.floor()
+            }
+        }
+        RoundStrategy::ToZero => {
+            if nv < 0.0 {
+                q.ceil()
+            } else {
+                q.floor()
+            }
+        }
+    };
+    Ok(with_unit(rounded * step_v))
+}
+
+/// The outcome of coercing a `round()` step into the number's unit.
+enum StepCoercion {
+    Value(f64),
+    Preserve,
+    Error(Error),
+}
+
+/// Coerce `step` into `number`'s unit for `round()`. Equal/convertible units
+/// combine; a relative/unknown unit pair preserves the call; a real-vs-unitless
+/// or known cross-dimension mix is an error (matching dart-sass).
+fn coerce_step(step: &Number, number: &Number, pos: Pos) -> Result<StepCoercion, Error> {
+    if step.unit.eq_ignore_ascii_case(&number.unit) {
+        return Ok(StepCoercion::Value(step.value));
+    }
+    if step.unit.is_empty() && number.unit.is_empty() {
+        return Ok(StepCoercion::Value(step.value));
+    }
+    // A unitless operand mixed with a real unit is incompatible.
+    if step.unit.is_empty() != number.unit.is_empty() {
+        return Ok(StepCoercion::Error(incompatible(number, step, pos)));
+    }
+    if let Some(factor) = convert_factor(&step.unit, &number.unit) {
+        return Ok(StepCoercion::Value(step.value * factor));
+    }
+    if crate::value::calc_units_incompatible(&number.unit, &step.unit) {
+        return Ok(StepCoercion::Error(incompatible(number, step, pos)));
+    }
+    Ok(StepCoercion::Preserve)
+}
+
+/// Build the preserved `round(...)` form over the original arguments (for an
+/// argument that cannot be simplified to a number, e.g. a `var()`).
+fn preserved_round(args: &[Value]) -> Value {
+    preserved_call("round", args)
+}
+
+/// Build the preserved `round(strategy, number, step)` form when the operands
+/// are numbers but their units keep the call from simplifying.
+fn preserved_round_nums(strategy: RoundStrategy, number: &Number, step: &Number) -> Value {
+    let kw = match strategy {
+        RoundStrategy::Nearest => "nearest",
+        RoundStrategy::Up => "up",
+        RoundStrategy::Down => "down",
+        RoundStrategy::ToZero => "to-zero",
+    };
+    let text = if strategy == RoundStrategy::Nearest {
+        format!("round({}, {})", number.to_css(false), step.to_css(false))
+    } else {
+        format!("round({kw}, {}, {})", number.to_css(false), step.to_css(false))
+    };
+    Value::Str(SassStr { text, quoted: false })
 }
 
 /// Apply a unit-preserving unary numeric operation, requiring a number.
@@ -537,6 +834,54 @@ mod tests {
         assert_eq!(call("round", &[n(2.5, "")]).to_css(false), "3");
         assert_eq!(call("round", &[n(-2.5, "deg")]).to_css(false), "-3deg");
         assert_eq!(call("round", &[n(0.5, "")]).to_css(false), "1");
+    }
+
+    #[test]
+    fn round_strategies_with_step() {
+        let kw = |s: &str| {
+            Value::Str(SassStr {
+                text: s.to_string(),
+                quoted: false,
+            })
+        };
+        assert_eq!(
+            call("round", &[kw("nearest"), n(117.0, "px"), n(25.0, "px")]).to_css(false),
+            "125px"
+        );
+        assert_eq!(
+            call("round", &[kw("up"), n(101.0, "px"), n(25.0, "px")]).to_css(false),
+            "125px"
+        );
+        assert_eq!(
+            call("round", &[kw("down"), n(122.0, "px"), n(25.0, "px")]).to_css(false),
+            "100px"
+        );
+        // to-zero with a negative step keeps the step's sign in the rounding.
+        assert_eq!(
+            call("round", &[kw("to-zero"), n(-120.0, "px"), n(-25.0, "px")]).to_css(false),
+            "-125px"
+        );
+        // Two-argument nearest-with-step and unit coercion.
+        assert_eq!(call("round", &[n(117.0, ""), n(25.0, "")]).to_css(false), "125");
+        assert_eq!(
+            call("round", &[n(117.0, "cm"), n(25.0, "mm")]).to_css(false),
+            "117.5cm"
+        );
+        // A zero step yields NaN, serialized as a calculation.
+        assert_eq!(
+            call("round", &[kw("nearest"), n(10.0, "px"), n(0.0, "px")]).to_css(false),
+            "calc(NaN * 1px)"
+        );
+        // An infinite number rounds to itself (a calculation).
+        assert_eq!(
+            call("round", &[kw("nearest"), kw("infinity"), n(5.0, "")]).to_css(false),
+            "calc(infinity)"
+        );
+        // A bare strategy with no step, a unit mismatch, and a missing arg all
+        // error.
+        assert!(err("round", &[kw("nearest"), n(5.0, "")]));
+        assert!(err("round", &[n(10.0, "px"), n(5.0, "")]));
+        assert!(err("round", &[]));
     }
 
     #[test]
