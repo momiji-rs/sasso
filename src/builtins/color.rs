@@ -56,6 +56,7 @@ pub(super) fn try_call(
     Some(match name {
         "rgb" | "rgba" => fn_rgb(pos_args, named, pos),
         "hsl" | "hsla" => fn_hsl(pos_args, named, pos),
+        "hwb" => fn_hwb(pos_args, named, pos),
         "mix" => fn_mix(pos_args, named, pos),
         "lighten" => fn_adjust_lightness(name, pos_args, named, pos, 1.0),
         "darken" => fn_adjust_lightness(name, pos_args, named, pos, -1.0),
@@ -408,6 +409,110 @@ fn hsl_hue(v: &Value, pos: Pos) -> Result<f64, Error> {
             pos,
         )),
     }
+}
+
+/// The global `hwb()` function. It takes a single channels argument
+/// (`hwb(h w b)`, `hwb(h w b / a)`). With all plain numeric channels it
+/// converts HWB → sRGB → HSL and emits the `hsl()`/`hsla()` spelling that
+/// dart-sass uses for legacy hwb colors. With a special value (`var()`,
+/// `calc()`) or a `none` missing-channel keyword it preserves the call
+/// verbatim, space-joined, with a bare numeric hue suffixed `deg`.
+fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["channels"];
+    let n = pos_args.len() + named.len();
+    if n != 1 {
+        return Err(Error::at(
+            format!("Only 1 argument allowed, but {n} were passed."),
+            pos,
+        ));
+    }
+    let channels = require(&params, pos_args, named, 0, "hwb", pos)?.clone();
+    let (comps, alpha) = split_channels(&channels);
+    // Any special/`none`/`from`-relative channel is preserved verbatim,
+    // space-joined, with a bare numeric hue rendered as `<n>deg`.
+    let comps_special = comps.iter().any(|v| is_special(v) || is_none_keyword(v));
+    let alpha_special = alpha
+        .as_ref()
+        .is_some_and(|v| is_special(v) || is_none_keyword(v));
+    if comps.len() != 3 || comps_special || alpha_special {
+        return Ok(hwb_verbatim(&comps, alpha.as_ref()));
+    }
+    let h = hsl_hue(&comps[0], pos)?;
+    let w_pct = num(&comps[1], pos)?;
+    let b_pct = num(&comps[2], pos)?;
+    let a = match &alpha {
+        Some(v) => alpha_value(v, pos)?,
+        None => 1.0,
+    };
+    let c = hwb_to_color(h, w_pct, b_pct, a);
+    // Emit the HSL spelling, derived from the converted color's HSL channels.
+    let (hh, ss, ll) = c.to_hsl();
+    let mut out = c;
+    out.repr = Some(if (a - 1.0).abs() < f64::EPSILON {
+        format!(
+            "hsl({}, {}%, {}%)",
+            fmt_num(hh, false),
+            fmt_num(ss * 100.0, false),
+            fmt_num(ll * 100.0, false)
+        )
+    } else {
+        format!(
+            "hsla({}, {}%, {}%, {})",
+            fmt_num(hh, false),
+            fmt_num(ss * 100.0, false),
+            fmt_num(ll * 100.0, false),
+            fmt_num(a, false)
+        )
+    });
+    Ok(Value::Color(out))
+}
+
+/// Convert HWB (hue degrees, whiteness/blackness percentages) to an sRGB
+/// color. Whiteness and blackness are normalized when their sum exceeds 100.
+fn hwb_to_color(h: f64, w_pct: f64, b_pct: f64, a: f64) -> Color {
+    let mut w = w_pct / 100.0;
+    let mut b = b_pct / 100.0;
+    if w + b > 1.0 {
+        let sum = w + b;
+        w /= sum;
+        b /= sum;
+    }
+    let base = Color::from_hsl(h, 1.0, 0.5, a);
+    let mix = |v: f64| ((v / 255.0) * (1.0 - w - b) + w) * 255.0;
+    Color::rgb(mix(base.r), mix(base.g), mix(base.b), a)
+}
+
+/// Re-serialize an hwb passthrough call: `hwb(h w b)` or `hwb(h w b / a)`,
+/// space-joined, with a bare numeric hue rendered with a `deg` unit.
+fn hwb_verbatim(comps: &[Value], alpha: Option<&Value>) -> Value {
+    // Reconstruct from the components (not the original list) so a bare numeric
+    // hue gains its `deg` unit.
+    let parts: Vec<String> = comps
+        .iter()
+        .enumerate()
+        .map(|(i, v)| if i == 0 { hwb_hue_css(v) } else { v.to_css(false) })
+        .collect();
+    let mut text = parts.join(" ");
+    if let Some(a) = alpha {
+        text.push_str(" / ");
+        text.push_str(&a.to_css(false));
+    }
+    Value::Str(crate::value::SassStr {
+        text: format!("hwb({text})"),
+        quoted: false,
+    })
+}
+
+/// Render an hwb hue channel for a verbatim call: a bare unitless number is
+/// suffixed `deg`; everything else (already-unit numbers, `none`, `var()`)
+/// serializes normally.
+fn hwb_hue_css(v: &Value) -> String {
+    if let Value::Number(num) = v {
+        if num.unit.is_empty() {
+            return format!("{}deg", fmt_num(num.value, false));
+        }
+    }
+    v.to_css(false)
 }
 
 fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {

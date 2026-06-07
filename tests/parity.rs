@@ -428,3 +428,38 @@ fn rgb_hsl_plain_number_channels_keep_function_spelling() {
         "a {\n  b: hsl(0, 50%, 50%);\n}\n"
     );
 }
+
+#[test]
+fn hwb_global_conversion_and_passthrough() {
+    // Plain-number channels convert HWB -> HSL spelling.
+    assert_eq!(
+        ours("a {b: hwb(180 30% 40%)}\n"),
+        "a {\n  b: hsl(180, 33.3333333333%, 45%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hwb(180 30% 40% / 0.5)}\n"),
+        "a {\n  b: hsla(180, 33.3333333333%, 45%, 0.5);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hwb(180 30% 40% / 1)}\n"),
+        "a {\n  b: hsl(180, 33.3333333333%, 45%);\n}\n"
+    );
+    // Special and `none` channels preserve the call verbatim, space-joined,
+    // with a bare numeric hue suffixed `deg`.
+    assert_eq!(
+        ours("a {b: hwb(var(--c) 30% 40%)}\n"),
+        "a {\n  b: hwb(var(--c) 30% 40%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hwb(none 30% 40%)}\n"),
+        "a {\n  b: hwb(none 30% 40%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hwb(0 none 40%)}\n"),
+        "a {\n  b: hwb(0deg none 40%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hwb(0 30% none)}\n"),
+        "a {\n  b: hwb(0deg 30% none);\n}\n"
+    );
+}
