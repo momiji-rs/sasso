@@ -2565,3 +2565,24 @@ fn bogus_combinator_selectors_are_omitted() {
     assert_parity(":global(> a) {b: c}\n");
     assert_parity("a, > > b {x: y}\n");
 }
+
+#[test]
+fn top_level_parent_selector_is_literal() {
+    // At the document root (no enclosing style rule) a parent selector `&` has
+    // no parent to substitute, so dart-sass keeps it literal rather than
+    // dropping it.
+    assert_eq!(ours("& {a: b}\n"), "& {\n  a: b;\n}\n");
+    assert_eq!(ours("&.foo {a: b}\n"), "&.foo {\n  a: b;\n}\n");
+    assert_eq!(ours("& .foo {a: b}\n"), "& .foo {\n  a: b;\n}\n");
+    assert_eq!(ours("a & {b: c}\n"), "a & {\n  b: c;\n}\n");
+    assert_eq!(ours("& & {a: b}\n"), "& & {\n  a: b;\n}\n");
+    // The same holds inside a bare unknown at-rule (no selector context).
+    assert_eq!(ours("@a {\n  & {b: c}\n}\n"), "@a {\n  & {\n    b: c;\n  }\n}\n");
+    // A `&` with a suffix is still rejected at the top level.
+    assert!(compile("&foo {a: b}\n", &Options::default()).is_err());
+    assert!(compile("&-foo {a: b}\n", &Options::default()).is_err());
+
+    assert_parity("& {a: b}\n");
+    assert_parity("&.foo {a: b}\n");
+    assert_parity("@a {\n  & {b: c}\n}\n");
+}

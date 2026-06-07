@@ -3322,13 +3322,12 @@ fn resolve_selectors(sel: &str, parents: &[String]) -> Vec<String> {
         .collect();
     let mut result = Vec::new();
     if parents.is_empty() {
+        // At the document root (no enclosing style rule) a parent selector `&`
+        // has no parent to substitute, so dart-sass keeps it literal: `& {a: b}`
+        // emits `& {…}` and `&.foo {…}` emits `&.foo {…}`. (A `&`-with-suffix
+        // such as `&foo` is rejected earlier by `validate_selector`.)
         for part in &parts {
-            let combined = if part.contains('&') {
-                part.replace('&', "")
-            } else {
-                part.clone()
-            };
-            result.push(normalize_selector(&combined));
+            result.push(normalize_selector(part));
         }
     } else {
         for parent in parents {
