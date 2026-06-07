@@ -1664,3 +1664,27 @@ fn list_is_bracketed_and_zip() {
     // A single list zips each element into its own one-element row.
     assert_eq!(ours("a {b: zip(a b c)}\n"), "a {\n  b: a, b, c;\n}\n");
 }
+
+#[test]
+fn meta_feature_exists_known_set() {
+    // `feature-exists` is `true` for dart-sass's fixed feature set (quoted or
+    // unquoted), and `false` for any other name.
+    assert_eq!(ours("a {b: feature-exists(at-error)}\n"), "a {\n  b: true;\n}\n");
+    assert_eq!(
+        ours("a {b: feature-exists(global-variable-shadowing)}\n"),
+        "a {\n  b: true;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: feature-exists(\"custom-property\")}\n"),
+        "a {\n  b: true;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: feature-exists(units-level-3)}\n"),
+        "a {\n  b: true;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: feature-exists(extend-selector-pseudoclass)}\n"),
+        "a {\n  b: true;\n}\n"
+    );
+    assert_eq!(ours("a {b: feature-exists(nope)}\n"), "a {\n  b: false;\n}\n");
+}

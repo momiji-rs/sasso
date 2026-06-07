@@ -24,6 +24,7 @@ pub(super) fn try_call(
         "unitless" => fn_unitless(pos_args, named, pos),
         "comparable" => fn_comparable(pos_args, named, pos),
         "inspect" => fn_inspect(pos_args, named, pos),
+        "feature-exists" => fn_feature_exists(pos_args, named, pos),
         _ => return None,
     })
 }
@@ -122,6 +123,33 @@ fn fn_comparable(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
         || ua == ub
         || matches!((unit_group(&ua), unit_group(&ub)), (Some(x), Some(y)) if x == y);
     Ok(Value::Bool(compatible))
+}
+
+/// `feature-exists($feature)`: `true` when `$feature` names a Sass language
+/// feature this implementation supports. dart-sass recognizes a fixed set of
+/// feature names (accepting both quoted and unquoted strings); any other name
+/// is `false`, and a non-string argument is an error.
+fn fn_feature_exists(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let v = super::require(&["feature"], pos_args, named, 0, "feature-exists", pos)?;
+    let name = match v {
+        Value::Str(s) => &s.text,
+        other => {
+            return Err(Error::at(
+                format!("$feature: {} is not a string.", other.to_css(false)),
+                pos,
+            ))
+        }
+    };
+    // The canonical dart-sass feature set (all long-stable language features).
+    let known = matches!(
+        name.as_str(),
+        "global-variable-shadowing"
+            | "extend-selector-pseudoclass"
+            | "units-level-3"
+            | "at-error"
+            | "custom-property"
+    );
+    Ok(Value::Bool(known))
 }
 
 /// `inspect($value)`: an unquoted string with the value's debug
@@ -410,6 +438,27 @@ mod tests {
             call("inspect", &[comma2(list(vec![], ListSep::Space), n(1.0, ""))]).to_css(false),
             "(), 1"
         );
+    }
+
+    #[test]
+    fn feature_exists_known_set() {
+        let t = |name: &str, quoted: bool| {
+            call(
+                "feature-exists",
+                &[Value::Str(SassStr {
+                    text: name.to_string(),
+                    quoted,
+                })],
+            )
+        };
+        assert!(matches!(t("at-error", false), Value::Bool(true)));
+        assert!(matches!(t("custom-property", true), Value::Bool(true)));
+        assert!(matches!(t("global-variable-shadowing", false), Value::Bool(true)));
+        assert!(matches!(t("nope", false), Value::Bool(false)));
+        // A non-string argument errors.
+        assert!(call_err("feature-exists", &[n(1.0, "")])
+            .message
+            .contains("is not a string"));
     }
 
     #[test]
