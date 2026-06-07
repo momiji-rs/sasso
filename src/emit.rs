@@ -203,7 +203,12 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
-                out.push(' ');
+                // Compressed `@supports` omits the space before a prelude that
+                // begins with `(` (dart-sass `visitCssSupportsRule`).
+                let omit_space = name == "supports" && prelude.starts_with('(');
+                if !omit_space {
+                    out.push(' ');
+                }
                 out.push_str(prelude);
             }
             if !has_block {
