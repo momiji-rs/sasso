@@ -97,6 +97,14 @@ pub(crate) enum Stmt {
         prelude: Vec<TplPiece>,
         body: Vec<Stmt>,
     },
+    /// `@extend <selector> [!optional];` — registers an extension of the
+    /// enclosing rule onto the target selector. The selector is a template
+    /// so `#{...}` interpolation resolves at eval time.
+    Extend {
+        selector: Vec<TplPiece>,
+        optional: bool,
+        pos: Pos,
+    },
     /// `@warn <expr>;` — writes to stderr, emits no CSS.
     Warn(Expr),
     /// `@debug <expr>;` — writes to stderr, emits no CSS.

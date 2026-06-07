@@ -33,6 +33,7 @@ mod error;
 mod eval;
 mod parser;
 mod scanner;
+mod selector;
 mod value;
 
 pub use error::Error;

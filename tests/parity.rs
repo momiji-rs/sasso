@@ -1718,3 +1718,34 @@ fn equality_is_unit_and_format_aware() {
     // Genuinely different colors stay unequal.
     assert_eq!(ours("a {b: red == hsl(0, 0%, 50%)}\n"), "a {\n  b: false;\n}\n");
 }
+
+#[test]
+fn extend_basic_and_placeholders() {
+    // A class extend adds the extender as an alternative selector.
+    assert_eq!(
+        ours(".foo {a: b}\n.bar {@extend .foo}\n"),
+        ".foo, .bar {\n  a: b;\n}\n"
+    );
+    // A placeholder rule emits nothing on its own, but its body surfaces under
+    // the extending selector(s).
+    assert_eq!(ours("%p {color: red}\n"), "");
+    assert_eq!(
+        ours("%p {color: red}\n.a {@extend %p}\n"),
+        ".a {\n  color: red;\n}\n"
+    );
+    // Nested target: the extender replaces the matched compound in place.
+    assert_eq!(
+        ours(".foo .bar {a: b}\n.baz {@extend .bar}\n"),
+        ".foo .bar, .foo .baz {\n  a: b;\n}\n"
+    );
+    // Compound unification across two extends, with the within-compound product.
+    assert_eq!(
+        ours(".foo.bar {a: b}\n.baz {@extend .foo}\n.bang {@extend .bar}\n"),
+        ".foo.bar, .foo.bang, .bar.baz, .baz.bang {\n  a: b;\n}\n"
+    );
+    // !optional suppresses the "target not found" error.
+    assert_eq!(
+        ours(".a {x: y; @extend .missing !optional}\n"),
+        ".a {\n  x: y;\n}\n"
+    );
+}

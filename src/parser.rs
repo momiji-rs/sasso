@@ -613,12 +613,11 @@ impl Parser {
             "keyframes" | "-webkit-keyframes" | "-moz-keyframes" | "-o-keyframes" | "-ms-keyframes" => {
                 self.parse_keyframes(name)
             }
+            "extend" => self.parse_extend(pos),
             // Known Sass features that are deliberately unimplemented in this
             // build: keep erroring (the generic passthrough would silently
             // accept them and lose their error specs).
-            "extend" | "use" | "forward" => {
-                Err(Error::at(format!("@{name} is not supported in this build"), pos))
-            }
+            "use" | "forward" => Err(Error::at(format!("@{name} is not supported in this build"), pos)),
             // A non-lowercase spelling of `@function`/`@mixin` (e.g. `@FUNCTION`,
             // `@Mixin`) is never a Sass definition; dart-sass parses it as a
             // plain CSS custom function/mixin (verbatim body), regardless of
@@ -861,6 +860,31 @@ impl Parser {
             MessageKind::Warn => Stmt::Warn(value),
             MessageKind::Debug => Stmt::Debug(value),
             MessageKind::Error => Stmt::Error(value),
+        })
+    }
+
+    /// Parse `@extend <selector> [!optional];`. The selector is captured as a
+    /// template (resolving `#{...}` at eval time); a trailing `!optional`
+    /// suppresses the "didn't match" error.
+    fn parse_extend(&mut self, pos: Pos) -> Result<Stmt, Error> {
+        self.skip_ws_inline();
+        let selector = trim_prelude(self.parse_template_mode(&['!', ';', '}', '{'], CommentMode::Strip)?);
+        let mut optional = false;
+        if self.sc.peek() == Some('!') {
+            self.sc.bump();
+            self.skip_ws_inline();
+            let flag = self.read_ident_name()?;
+            if !flag.eq_ignore_ascii_case("optional") {
+                return Err(Error::at(format!("Invalid flag name: !{flag}"), pos));
+            }
+            optional = true;
+        }
+        self.skip_ws_inline();
+        self.sc.eat(';');
+        Ok(Stmt::Extend {
+            selector,
+            optional,
+            pos,
         })
     }
 

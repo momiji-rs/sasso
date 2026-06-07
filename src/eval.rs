@@ -205,6 +205,20 @@ pub(crate) struct Evaluator<'a> {
     /// `&` in value position. `None` at the document root (where `&` is `null`).
     /// Each element is one resolved complex selector (space-joined).
     current_selector: Option<Vec<String>>,
+    /// Collected `@extend` directives, applied in a post-eval extension pass.
+    extends: Vec<PendingExtend>,
+}
+
+/// A pending `@extend`, captured during eval and applied after flattening.
+struct PendingExtend {
+    /// The resolved target simple selector (e.g. `.foo`, `%bar`).
+    target: crate::selector::Simple,
+    /// The resolved target selector string, for error messages.
+    target_str: String,
+    /// The enclosing rule's resolved selector list (the extenders).
+    extenders: Vec<String>,
+    optional: bool,
+    pos: Pos,
 }
 
 impl<'a> Evaluator<'a> {
@@ -218,12 +232,98 @@ impl<'a> Evaluator<'a> {
             content_stack: Vec::new(),
             media_queries: Vec::new(),
             current_selector: None,
+            extends: Vec::new(),
         }
     }
 
     pub(crate) fn eval_sheet(&mut self, sheet: &Stylesheet, out: &mut Vec<OutNode>) -> Result<(), Error> {
-        let mut sink = Sink::Top(out);
-        self.exec(&sheet.stmts, &[], &mut sink)
+        {
+            let mut sink = Sink::Top(out);
+            self.exec(&sheet.stmts, &[], &mut sink)?;
+        }
+        self.apply_extends(out)?;
+        Ok(())
+    }
+
+    /// Register an `@extend` directive: validate the (interpolation-resolved)
+    /// target, then record one [`PendingExtend`] per comma-separated target.
+    fn register_extend(&mut self, selector: &[TplPiece], optional: bool, pos: Pos) -> Result<(), Error> {
+        let Some(extenders) = self.current_selector.clone() else {
+            return Err(Error::at("@extend may only be used within style rules.", pos));
+        };
+        let target = self.eval_template(selector)?;
+        if target.trim().is_empty() {
+            return Err(Error::at("expected selector.", pos));
+        }
+        for t in split_commas(&target) {
+            let t = t.trim();
+            if t.is_empty() {
+                continue;
+            }
+            match crate::selector::classify_target(t) {
+                crate::selector::TargetClass::Simple(simple) => {
+                    self.extends.push(PendingExtend {
+                        target: simple,
+                        target_str: t.to_string(),
+                        extenders: extenders.clone(),
+                        optional,
+                        pos,
+                    });
+                }
+                crate::selector::TargetClass::Complex => {
+                    return Err(Error::at("complex selectors may not be extended.", pos));
+                }
+                crate::selector::TargetClass::Compound => {
+                    return Err(Error::at(
+                        "compound selectors may no longer be extended.\n\
+                         Consider `@extend a, :hover` instead.\n\
+                         See https://sass-lang.com/d/extend-compound for details.",
+                        pos,
+                    ));
+                }
+                crate::selector::TargetClass::Invalid => {
+                    return Err(Error::at("expected selector.", pos));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Post-eval extension pass: rewrite every emitted style-rule selector list
+    /// according to the collected `@extend` directives, drop placeholder-only
+    /// rules, and error on an unmatched non-`!optional` extend.
+    fn apply_extends(&mut self, out: &mut Vec<OutNode>) -> Result<(), Error> {
+        let mut extensions: Vec<crate::selector::Extension> = Vec::new();
+        for pe in &self.extends {
+            let mut extenders = Vec::new();
+            for ext in &pe.extenders {
+                if let Some(c) = crate::selector::parse_complex_one(ext) {
+                    extenders.push(c);
+                }
+            }
+            extensions.push(crate::selector::Extension {
+                target: Some(pe.target.clone()),
+                extenders,
+                optional: pe.optional,
+                matched: std::cell::Cell::new(false),
+            });
+        }
+
+        rewrite_nodes(out, &extensions);
+
+        // Report the first unmatched non-optional extend.
+        for (pe, ext) in self.extends.iter().zip(extensions.iter()) {
+            if !ext.optional && !ext.matched.get() {
+                return Err(Error::at(
+                    format!(
+                        "The target selector was not found.\nUse \"@extend {} !optional\" to avoid this error.",
+                        pe.target_str
+                    ),
+                    pe.pos,
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn compressed(&self) -> bool {
@@ -733,6 +833,11 @@ impl<'a> Evaluator<'a> {
                 Stmt::Keyframes { name, prelude, body } => {
                     self.eval_keyframes(name, prelude, body, sink)?;
                 }
+                Stmt::Extend {
+                    selector,
+                    optional,
+                    pos,
+                } => self.register_extend(selector, *optional, *pos)?,
                 Stmt::Warn(e) => {
                     let v = self.eval_expr(e)?;
                     eprintln!("WARNING: {}", v.to_interp());
@@ -2592,8 +2697,82 @@ fn unquote_plain_attribute_value(raw: &str) -> String {
     raw.to_string()
 }
 
-/// Resolve a (possibly comma-separated) selector against the parent
-/// selector list: substitute `&`, or prepend the parent as a descendant.
+/// Walk the flattened output tree, rewriting each style-rule selector list per
+/// the collected extensions and dropping rules whose every complex selector
+/// still contains a placeholder. Recurses into at-rule bodies (e.g. `@media`),
+/// but NOT into `@keyframes` (whose "selectors" are keyframe stops like `50%`).
+fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extension]) {
+    let mut i = 0;
+    while i < nodes.len() {
+        let drop = match &mut nodes[i] {
+            OutNode::Rule { selectors, .. } => {
+                let new_sel = extend_selector_list(selectors, extensions);
+                match new_sel {
+                    Some(s) => {
+                        *selectors = s;
+                        false
+                    }
+                    // None means the rule is entirely placeholders → drop.
+                    None => true,
+                }
+            }
+            OutNode::AtRule { name, body, .. } => {
+                if !is_keyframes_name(name) {
+                    rewrite_nodes(body, extensions);
+                }
+                false
+            }
+            _ => false,
+        };
+        if drop {
+            nodes.remove(i);
+            // Removing a rule can leave a dangling Blank separator; drop a
+            // leading Blank so adjacent groups don't collapse to a blank line.
+            if i < nodes.len() && matches!(nodes[i], OutNode::Blank) {
+                nodes.remove(i);
+            } else if i > 0 && matches!(nodes[i - 1], OutNode::Blank) {
+                nodes.remove(i - 1);
+                continue;
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// True for `@keyframes` and its vendor-prefixed spellings, whose block
+/// selectors are keyframe stops, not real selectors.
+fn is_keyframes_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "keyframes" || lower.ends_with("-keyframes")
+}
+
+/// Compute the extended selector list for a rule. Returns `None` when, after
+/// extension, every complex selector still contains a placeholder (the rule
+/// emits no CSS). Returns `Some(unchanged)` when the selector needs no change.
+fn extend_selector_list(
+    selectors: &[String],
+    extensions: &[crate::selector::Extension],
+) -> Option<Vec<String>> {
+    let has_placeholder = selectors.iter().any(|s| s.contains('%'));
+    // Fast path: no extensions and no placeholder → the selector is untouched.
+    // Crucially this leaves selectors we don't model (keyframe stops are handled
+    // separately, but also unusual selectors) byte-for-byte intact.
+    if extensions.is_empty() && !has_placeholder {
+        return Some(selectors.to_vec());
+    }
+    let joined = selectors.join(", ");
+    let Some(parsed) = crate::selector::parse_list(&joined) else {
+        // Unparseable selector: never lose it; leave untouched.
+        return Some(selectors.to_vec());
+    };
+    let result = crate::selector::extend_selectors(&parsed, extensions);
+    if result.all_placeholders {
+        return None;
+    }
+    Some(result.selectors)
+}
+
 fn resolve_selectors(sel: &str, parents: &[String]) -> Vec<String> {
     let parts: Vec<String> = split_commas(sel)
         .into_iter()
