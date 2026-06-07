@@ -6,7 +6,7 @@
 //! gathered into a single block emitted *before* its nested rules bubble
 //! out after it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::{
@@ -186,7 +186,10 @@ pub(crate) struct EvalOptions<'a> {
 pub(crate) struct Evaluator<'a> {
     scopes: Vec<HashMap<String, Value>>,
     options: EvalOptions<'a>,
-    imported: HashSet<String>,
+    /// Import paths currently being loaded, deepest last. Re-entering one is a
+    /// load cycle (dart-sass "This file is already being loaded."); a path that
+    /// has finished loading may be imported again (`@import` re-evaluates).
+    loading: Vec<String>,
     functions: HashMap<String, Rc<Callable>>,
     mixins: HashMap<String, Rc<Callable>>,
     /// Stack of `@content` blocks, one per active `@include`.
@@ -201,7 +204,7 @@ impl<'a> Evaluator<'a> {
         Evaluator {
             scopes: vec![HashMap::new()],
             options,
-            imported: HashSet::new(),
+            loading: Vec::new(),
             functions: HashMap::new(),
             mixins: HashMap::new(),
             content_stack: Vec::new(),
@@ -1016,11 +1019,14 @@ impl<'a> Evaluator<'a> {
                     }
                     match importer.and_then(|imp| imp.resolve(path)) {
                         Some(src) => {
-                            if !self.imported.insert(path.clone()) {
-                                continue;
+                            if self.loading.iter().any(|p| p == path) {
+                                return Err(Error::unpositioned("This file is already being loaded."));
                             }
                             let sheet = crate::parser::parse(&src)?;
-                            self.exec(&sheet.stmts, parents, sink)?;
+                            self.loading.push(path.clone());
+                            let result = self.exec(&sheet.stmts, parents, sink);
+                            self.loading.pop();
+                            result?;
                         }
                         None => {
                             return Err(Error::unpositioned(format!(

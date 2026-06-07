@@ -767,3 +767,21 @@ fn import_inlines_sass_partials() {
         "a b {\n  color: red;\n}\na b nested {\n  x: y;\n}\n"
     );
 }
+
+#[test]
+fn import_reimports_and_detects_cycles() {
+    let mut files = std::collections::HashMap::new();
+    files.insert("p".to_string(), "x { y: z }".to_string());
+    files.insert("alpha".to_string(), "@import \"beta\";".to_string());
+    files.insert("beta".to_string(), "@import \"alpha\";".to_string());
+    let imp = MapImporter(files);
+    let opts = Options::default().with_importer(&imp);
+
+    // Re-importing an already-finished file emits its content again (`@import`
+    // re-evaluates), rather than being silently deduplicated.
+    let css = compile("@import \"p\", \"p\";\n", &opts).expect("import compile failed");
+    assert_eq!(css, "x {\n  y: z;\n}\n\nx {\n  y: z;\n}\n");
+
+    // A load cycle is an error rather than a silent skip or an infinite loop.
+    assert!(compile("@import \"alpha\";\n", &opts).is_err());
+}
