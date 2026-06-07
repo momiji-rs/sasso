@@ -272,6 +272,11 @@ pub(crate) struct Evaluator<'a> {
     mixins: HashMap<String, Rc<Callable>>,
     /// Stack of `@content` blocks, one per active `@include`.
     content_stack: Vec<Option<Rc<Vec<Stmt>>>>,
+    /// Whether we are *directly* executing a mixin body (dart-sass `_inMixin`).
+    /// `true` is pushed while a mixin body runs; running a `@content` block or a
+    /// function body pushes `false` (those execute in the caller's context), so
+    /// `meta.content-exists()` errors there. Empty at the document root.
+    in_mixin: Vec<bool>,
     /// The resolved query list of the enclosing `@media` context (empty at the
     /// document root). Used to merge nested `@media` queries.
     media_queries: Vec<ResolvedQuery>,
@@ -326,6 +331,7 @@ impl<'a> Evaluator<'a> {
             functions: HashMap::new(),
             mixins: HashMap::new(),
             content_stack: Vec::new(),
+            in_mixin: Vec::new(),
             media_queries: Vec::new(),
             current_selector: None,
             extends: Vec::new(),
@@ -722,7 +728,11 @@ impl<'a> Evaluator<'a> {
     fn call_function(&mut self, func: &Rc<Callable>, args: &[CallArg]) -> Result<Value, Error> {
         let frame = self.bind_args(&func.params, args, &func.name)?;
         self.push_scope_frame(frame);
+        // A function body is not a mixin body: `meta.content-exists()` called
+        // from a function (even one invoked by a mixin) is an error.
+        self.in_mixin.push(false);
         let result = self.run_fn_body(&func.body);
+        self.in_mixin.pop();
         self.pop_scope();
         match result? {
             // A bare slash-division returned from a function collapses to
@@ -898,7 +908,9 @@ impl<'a> Evaluator<'a> {
         let frame = self.bind_args(&mixin.params, args, &mixin.name)?;
         self.push_scope_frame(frame);
         self.content_stack.push(content);
+        self.in_mixin.push(true);
         let result = self.exec(&mixin.body, parents, sink);
+        self.in_mixin.pop();
         self.content_stack.pop();
         self.pop_scope();
         result
@@ -1099,7 +1111,13 @@ impl<'a> Evaluator<'a> {
                 }
                 Stmt::Content => {
                     if let Some(Some(block)) = self.content_stack.last().cloned() {
-                        self.exec(&block, parents, sink)?;
+                        // The content block runs in the caller's context, so it
+                        // is no longer "directly in a mixin" (dart-sass): a
+                        // `meta.content-exists()` inside it is an error.
+                        self.in_mixin.push(false);
+                        let result = self.exec(&block, parents, sink);
+                        self.in_mixin.pop();
+                        result?;
                     }
                 }
                 Stmt::Import(args) => self.eval_imports(args, parents, sink)?,
@@ -2119,6 +2137,28 @@ impl<'a> Evaluator<'a> {
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.
                 let (mut pos_args, mut named) = self.eval_call_args(args)?;
+                // The global (deprecated) aliases of the `sass:meta` existence
+                // predicates resolve against the evaluator state, not the
+                // value-only builtin layer. A user-defined function of the same
+                // name still wins (checked above).
+                if matches!(
+                    name.as_str(),
+                    "variable-exists"
+                        | "global-variable-exists"
+                        | "mixin-exists"
+                        | "function-exists"
+                        | "content-exists"
+                ) {
+                    for v in &mut pos_args {
+                        *v = std::mem::replace(v, Value::Null).without_slash();
+                    }
+                    for (_, v) in &mut named {
+                        *v = std::mem::replace(v, Value::Null).without_slash();
+                    }
+                    if let Some(r) = self.try_meta_eval_call(name, &pos_args, &named, *pos) {
+                        return r;
+                    }
+                }
                 // The proprietary Microsoft `alpha()` filter overload: when the
                 // global `alpha()` is called with one or more unquoted-string
                 // arguments that each contain a `=` (an IE `alpha(opacity=80)`
@@ -2201,7 +2241,134 @@ impl<'a> Evaluator<'a> {
         for (_, v) in &mut named {
             *v = std::mem::replace(v, Value::Null).without_slash();
         }
+        // The `sass:meta` introspection predicates need the evaluator's scopes /
+        // definitions, which the value-only `call_module` cannot see.
+        if module == "meta" {
+            if let Some(r) = self.try_meta_eval_call(member, &pos_args, &named, pos) {
+                return r;
+            }
+        }
         crate::builtins::call_module(&module, member, &pos_args, &named, pos)
+    }
+
+    /// Handle a `sass:meta` member that depends on the evaluator's state
+    /// (variable/function/mixin/content existence). Returns `None` for any
+    /// member this layer does not own, so the caller falls back to the
+    /// value-only `call_module`. The arguments are already evaluated.
+    fn try_meta_eval_call(
+        &self,
+        member: &str,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+        pos: Pos,
+    ) -> Option<Result<Value, Error>> {
+        match member {
+            "variable-exists" => Some(self.meta_variable_exists(pos_args, named, pos, false)),
+            "global-variable-exists" => Some(self.meta_variable_exists(pos_args, named, pos, true)),
+            "mixin-exists" => Some(self.meta_mixin_exists(pos_args, named, pos)),
+            "function-exists" => Some(self.meta_function_exists(pos_args, named, pos)),
+            "content-exists" => Some(self.meta_content_exists(pos_args, pos)),
+            _ => None,
+        }
+    }
+
+    /// Read the single string `$name` argument of an existence predicate,
+    /// enforcing arity (1 positional, or `$name`) and the string type.
+    fn exists_name_arg(
+        &self,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+        fname: &str,
+        pos: Pos,
+    ) -> Result<String, Error> {
+        if pos_args.len() > 1 {
+            return Err(Error::at(
+                format!("Only 1 argument allowed, but {} were passed.", pos_args.len()),
+                pos,
+            ));
+        }
+        let v = pos_args
+            .first()
+            .or_else(|| named.iter().find(|(n, _)| n == "name").map(|(_, v)| v))
+            .ok_or_else(|| Error::at(format!("Missing argument $name for {fname}()."), pos))?;
+        match v {
+            Value::Str(s) => Ok(s.text.clone()),
+            other => Err(Error::at(
+                format!("$name: {} is not a string.", other.to_css(false)),
+                pos,
+            )),
+        }
+    }
+
+    /// `meta.variable-exists($name)` / `meta.global-variable-exists($name)`:
+    /// whether a variable of that name is in scope (globally only when
+    /// `global`). Names are matched dash/underscore-insensitively.
+    fn meta_variable_exists(
+        &self,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+        pos: Pos,
+        global: bool,
+    ) -> Result<Value, Error> {
+        let fname = if global {
+            "global-variable-exists"
+        } else {
+            "variable-exists"
+        };
+        let name = self.exists_name_arg(pos_args, named, fname, pos)?;
+        let key = normalize_arg_name(&name);
+        let scopes: &[HashMap<String, Value>] = if global { &self.scopes[..1] } else { &self.scopes };
+        let found = scopes
+            .iter()
+            .any(|s| s.keys().any(|k| normalize_arg_name(k) == key));
+        Ok(Value::Bool(found))
+    }
+
+    /// `meta.mixin-exists($name)`: whether a mixin of that name is defined.
+    fn meta_mixin_exists(
+        &self,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+        pos: Pos,
+    ) -> Result<Value, Error> {
+        let name = self.exists_name_arg(pos_args, named, "mixin-exists", pos)?;
+        let key = normalize_arg_name(&name);
+        Ok(Value::Bool(
+            self.mixins.keys().any(|k| normalize_arg_name(k) == key),
+        ))
+    }
+
+    /// `meta.function-exists($name)`: whether a user `@function` or a built-in
+    /// of that name exists.
+    fn meta_function_exists(
+        &self,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+        pos: Pos,
+    ) -> Result<Value, Error> {
+        let name = self.exists_name_arg(pos_args, named, "function-exists", pos)?;
+        let key = normalize_arg_name(&name);
+        let user = self.functions.keys().any(|k| normalize_arg_name(k) == key);
+        Ok(Value::Bool(user || crate::builtins::is_builtin(&name)))
+    }
+
+    /// `meta.content-exists()`: whether the enclosing mixin was passed a
+    /// `@content` block. It is an error to call this outside a mixin body.
+    fn meta_content_exists(&self, pos_args: &[Value], pos: Pos) -> Result<Value, Error> {
+        if !pos_args.is_empty() {
+            return Err(Error::at(
+                format!("Only 0 arguments allowed, but {} were passed.", pos_args.len()),
+                pos,
+            ));
+        }
+        if self.in_mixin.last().copied() != Some(true) {
+            return Err(Error::at(
+                "content-exists() may only be called within a mixin.",
+                pos,
+            ));
+        }
+        let has = matches!(self.content_stack.last(), Some(Some(_)));
+        Ok(Value::Bool(has))
     }
 
     /// Resolve a namespaced module variable `ns.$name` (e.g. `math.$pi`).

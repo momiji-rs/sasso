@@ -3114,3 +3114,16 @@ fn parity_string_split_and_inspect_brackets() {
         "@use \"sass:meta\";\na {\n  a: meta.inspect([1, 2, 3]);\n  b: meta.inspect([]);\n  c: meta.inspect([[1, 2] [3, 4]]);\n  d: meta.inspect(((1, 2): 3, (4, 5): 6));\n  e: meta.inspect((1: 2 3, 4: 5 6));\n}\n",
     );
 }
+
+#[test]
+fn parity_meta_exists_predicates() {
+    // The `sass:meta` existence predicates resolve against the evaluator's
+    // scopes / definitions: variable-exists / global-variable-exists,
+    // mixin-exists, function-exists (user and built-in), and content-exists.
+    assert_parity(
+        "@use \"sass:meta\";\n$g: 1;\n@mixin gm() {}\n@function gf() { @return 1; }\na {\n  $l: 2;\n  v_local: meta.variable-exists(l);\n  v_global: meta.variable-exists(g);\n  v_none: meta.variable-exists(nope);\n  gv_yes: meta.global-variable-exists(g);\n  gv_no: meta.global-variable-exists(l);\n  mx: meta.mixin-exists(gm);\n  mx_no: meta.mixin-exists(nope);\n  fn_user: meta.function-exists(gf);\n  fn_builtin: meta.function-exists(rgb);\n  fn_no: meta.function-exists(nope);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:meta\";\n@mixin outer() {\n  @if meta.content-exists() { @content; }\n  @else { had: none; }\n}\na { @include outer() { got: yes; } }\nb { @include outer(); }\n",
+    );
+}
