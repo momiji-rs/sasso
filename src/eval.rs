@@ -5472,7 +5472,15 @@ fn split_commas(s: &str) -> Vec<&str> {
 /// preceding simple with a descendant combinator (`[a] b`), matching
 /// dart-sass's `[adjacent-compounds]` normalization.
 fn normalize_selector(s: &str) -> String {
-    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Collapse runs of whitespace to single spaces (and trim) without the
+    // intermediate Vec<&str> that `split_whitespace().collect().join()` builds.
+    let mut collapsed = String::with_capacity(s.len());
+    for word in s.split_whitespace() {
+        if !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(word);
+    }
     let chars: Vec<char> = collapsed.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -5773,39 +5781,45 @@ fn compound_has_bogus_pseudo(compound: &str) -> bool {
 /// character becomes the escaped character, an inline digit drops its escape,
 /// etc.).
 fn copy_name(chars: &[char], i: &mut usize, out: &mut String) {
-    let mut raw = String::new();
+    let start = *i;
+    let mut has_escape = false;
     while *i < chars.len() {
         let c = chars[*i];
         if c == '\\' {
-            raw.push(c);
+            has_escape = true;
             *i += 1;
             if *i < chars.len() {
-                raw.push(chars[*i]);
+                let esc = chars[*i];
                 *i += 1;
                 // A hex escape continues for up to six hex digits plus one
-                // optional trailing whitespace; capture the rest of it so it
+                // optional trailing whitespace; consume the rest of it so it
                 // decodes as a single code point.
-                if raw.ends_with(|ch: char| ch.is_ascii_hexdigit()) {
+                if esc.is_ascii_hexdigit() {
                     let mut digits = 1;
                     while digits < 6 && *i < chars.len() && chars[*i].is_ascii_hexdigit() {
-                        raw.push(chars[*i]);
                         *i += 1;
                         digits += 1;
                     }
                     if *i < chars.len() && chars[*i].is_whitespace() {
-                        raw.push(chars[*i]);
                         *i += 1;
                     }
                 }
             }
         } else if is_name_char(c) {
-            raw.push(c);
             *i += 1;
         } else {
             break;
         }
     }
-    out.push_str(&canonicalize_ident(&raw));
+    // Fast path: a plain name (no escapes) round-trips through
+    // `canonicalize_ident` unchanged, so copy the slice straight out with no
+    // intermediate String allocation.
+    if has_escape {
+        let raw: String = chars[start..*i].iter().collect();
+        out.push_str(&canonicalize_ident(&raw));
+    } else {
+        out.extend(chars[start..*i].iter());
+    }
 }
 
 /// Decode a CSS identifier's `\` escapes to their literal characters, then
