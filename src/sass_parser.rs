@@ -356,19 +356,17 @@ impl Transpiler {
     /// newline acts as whitespace inside a directive prelude, so a directive may
     /// span several indented lines before its body block (which is whatever
     /// deeper-indented lines remain afterwards).
-    fn extend_directive_prelude(&mut self, logical: &mut String, indent: usize) -> Result<(), Error> {
-        if !directive_prelude_can_span(logical) {
+    fn extend_directive_prelude(&mut self, logical: &mut String, _indent: usize) -> Result<(), Error> {
+        if !prelude_can_span(logical) {
             return Ok(());
         }
         while prelude_incomplete(logical) {
+            // An incomplete prelude consumes the next non-blank line regardless
+            // of its indentation: a newline acts as whitespace inside a prelude,
+            // so the expression/clause grammar keeps reading until satisfied.
             let Some(i) = self.next_nonblank(self.idx) else {
                 break;
             };
-            // Only a deeper-indented line continues the prelude (a same/shallower
-            // line is a sibling/dedent).
-            if self.lines[i].indent <= indent {
-                break;
-            }
             let piece = strip_silent_comment(self.lines[i].content.trim_start());
             self.idx = i + 1;
             if piece.is_empty() {
@@ -563,10 +561,14 @@ fn directive_name(logical: &str) -> Option<String> {
     }
 }
 
-/// Whether a directive's prelude may span multiple indented lines (the prelude
-/// is an expression / structured clause that the indented parser reads with the
-/// real grammar, treating newlines as whitespace).
-fn directive_prelude_can_span(logical: &str) -> bool {
+/// Whether a statement's prelude may span multiple lines (the prelude is an
+/// expression / structured clause that the indented parser reads with the real
+/// grammar, treating newlines as whitespace). True for the expression-bearing
+/// directives and for `$variable` declarations.
+fn prelude_can_span(logical: &str) -> bool {
+    if logical.trim_start().starts_with('$') {
+        return true;
+    }
     matches!(
         directive_name(logical).as_deref(),
         Some(
@@ -652,6 +654,18 @@ fn prelude_incomplete(logical: &str) -> bool {
     // An unbalanced bracket always continues.
     if bracket_depth(logical) > 0 {
         return true;
+    }
+    // A `$variable` declaration continues until it has `$name: <value>` with a
+    // non-empty value (`$a:` and `$a` both continue; `$a: b` is complete).
+    let t = logical.trim_start();
+    if t.starts_with('$') {
+        if ends_with_pending_operator(t) {
+            return true;
+        }
+        return match find_decl_colon(t) {
+            Some(colon) => t[colon + 1..].trim().is_empty(),
+            None => true,
+        };
     }
     let Some(name) = directive_name(logical) else {
         return false;
