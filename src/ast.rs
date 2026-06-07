@@ -203,6 +203,10 @@ pub(crate) enum Expr {
     Null,
     /// `$name` variable reference.
     Var(String),
+    /// The parent selector `&` used in value position. Resolves to the current
+    /// resolved selector as a comma-separated list of space-separated
+    /// compound-selector strings, or `null` at the document root.
+    Parent,
     /// Binary arithmetic / string concatenation.
     Binary {
         op: BinOp,

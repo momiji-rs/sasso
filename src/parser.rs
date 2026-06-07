@@ -2194,6 +2194,10 @@ impl Parser {
                 Ok(Expr::Paren(Box::new(e)))
             }
             Some('[') => self.parse_bracketed_list(),
+            Some('&') => {
+                self.sc.bump();
+                Ok(Expr::Parent)
+            }
             Some(c) if c.is_ascii_alphabetic() || c == '-' || c == '_' => self.parse_ident_or_call(),
             // A lone `%` in value position (no left operand, so it is not the
             // modulo operator) is a standalone unquoted-string token, as in

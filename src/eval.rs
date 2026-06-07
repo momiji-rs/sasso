@@ -201,6 +201,10 @@ pub(crate) struct Evaluator<'a> {
     /// The resolved query list of the enclosing `@media` context (empty at the
     /// document root). Used to merge nested `@media` queries.
     media_queries: Vec<ResolvedQuery>,
+    /// The resolved selector list of the enclosing style rule, used to resolve
+    /// `&` in value position. `None` at the document root (where `&` is `null`).
+    /// Each element is one resolved complex selector (space-joined).
+    current_selector: Option<Vec<String>>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -213,6 +217,7 @@ impl<'a> Evaluator<'a> {
             mixins: HashMap::new(),
             content_stack: Vec::new(),
             media_queries: Vec::new(),
+            current_selector: None,
         }
     }
 
@@ -600,6 +605,11 @@ impl<'a> Evaluator<'a> {
             .get(name)
             .cloned()
             .ok_or_else(|| Error::unpositioned(format!("Undefined mixin {name}.")))?;
+        // dart-sass: passing a content block to a mixin that never uses
+        // `@content` is an error, even when the block is empty.
+        if content.is_some() && !body_uses_content(&mixin.body) {
+            return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+        }
         let frame = self.bind_args(&mixin.params, args, &mixin.name)?;
         self.scopes.push(frame);
         self.content_stack.push(content);
@@ -745,18 +755,26 @@ impl<'a> Evaluator<'a> {
     /// rules that bubbled out of it to the enclosing `sink`.
     fn eval_style_rule(&mut self, rule: &Rule, parents: &[String], sink: &mut Sink<'_>) -> Result<(), Error> {
         let sel_str = self.eval_template(&rule.selector)?;
+        // A selector that resolves to nothing (e.g. `#{&}` at the document root,
+        // where `&` is null) is rejected by dart-sass with "expected selector".
+        if sel_str.trim().is_empty() {
+            return Err(Error::unpositioned("expected selector."));
+        }
         let current = resolve_selectors(&sel_str, parents);
         self.scopes.push(HashMap::new());
+        let prev_selector = self.current_selector.replace(current.clone());
         let mut items: Vec<OutItem> = Vec::new();
         let mut nested: Vec<OutNode> = Vec::new();
-        {
+        let result = {
             let mut child = Sink::Rule {
                 items: &mut items,
                 nested: &mut nested,
             };
-            self.exec(&rule.body, &current, &mut child)?;
-        }
+            self.exec(&rule.body, &current, &mut child)
+        };
+        self.current_selector = prev_selector;
         self.scopes.pop();
+        result?;
         let block = if items.is_empty() {
             None
         } else {
@@ -1181,6 +1199,47 @@ impl<'a> Evaluator<'a> {
         Ok(s)
     }
 
+    /// The value of `&` in value position: the current resolved selector list
+    /// as a comma-separated Sass list where each item is one complex selector
+    /// (a space-separated list of compound-selector strings). At the document
+    /// root (no enclosing style rule) this is `null`. This matches dart-sass,
+    /// where `&` is always a comma list even for a single selector.
+    fn parent_selector_value(&self) -> Value {
+        let Some(selectors) = &self.current_selector else {
+            return Value::Null;
+        };
+        if selectors.is_empty() {
+            return Value::Null;
+        }
+        let items: Vec<Value> = selectors
+            .iter()
+            .map(|complex| {
+                let mut compounds: Vec<Value> = complex
+                    .split_whitespace()
+                    .map(|c| {
+                        Value::Str(SassStr {
+                            text: c.to_string(),
+                            quoted: false,
+                        })
+                    })
+                    .collect();
+                match compounds.len() {
+                    1 => compounds.remove(0),
+                    _ => Value::List(List {
+                        items: compounds,
+                        sep: ListSep::Space,
+                        bracketed: false,
+                    }),
+                }
+            })
+            .collect();
+        Value::List(List {
+            items,
+            sep: ListSep::Comma,
+            bracketed: false,
+        })
+    }
+
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, Error> {
         match expr {
             Expr::Number(v, unit) => Ok(Value::Number(Number {
@@ -1190,6 +1249,7 @@ impl<'a> Evaluator<'a> {
             Expr::Color(c) => Ok(Value::Color(c.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),
+            Expr::Parent => Ok(self.parent_selector_value()),
             // Reading a variable drops a bare slash-division's spelling
             // (dart-sass `withoutSlash`): `$x: 1/2; a {b: $x}` is `0.5`.
             // Slashes nested inside a stored list are preserved.
@@ -2180,6 +2240,34 @@ fn for_indices(start: i64, end: i64, inclusive: bool) -> Vec<i64> {
         }
     }
     out
+}
+
+/// Whether a mixin body contains a reachable `@content`. dart-sass scans the
+/// whole body tree — control flow, at-rules, nested style rules, and nested
+/// `@include` content blocks all count (nested mixin/function definitions are
+/// disallowed by the grammar, so there is no separate scope to exclude).
+fn body_uses_content(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_uses_content)
+}
+
+fn stmt_uses_content(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Content => true,
+        Stmt::Rule(r) => body_uses_content(&r.body),
+        Stmt::If(branches) => branches.iter().any(|b| body_uses_content(&b.body)),
+        Stmt::For { body, .. }
+        | Stmt::Each { body, .. }
+        | Stmt::While { body, .. }
+        | Stmt::Media { body, .. }
+        | Stmt::AtRoot { body, .. }
+        | Stmt::Keyframes { body, .. } => body_uses_content(body),
+        Stmt::AtRule { body: Some(body), .. } => body_uses_content(body),
+        Stmt::Include {
+            content: Some(content),
+            ..
+        } => body_uses_content(content),
+        _ => false,
+    }
 }
 
 /// Resolve a (possibly comma-separated) selector against the parent

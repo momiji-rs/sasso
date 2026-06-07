@@ -1200,4 +1200,32 @@ fn quoted_string_line_continuation_is_removed() {
     assert_parity("a { b: \"line1 \\\n      line2\"; }\n");
     assert_parity("a { b: \"x\\\ny\"; }\n");
     assert_parity("a { b: 'a\\\nb\\\nc'; }\n");
+fn parent_selector_as_value() {
+    // `&` in value position resolves to the current selector: a single
+    // selector, a comma list, and a nested/descendant selector. At the
+    // document root `&` is `null` (interpolates to empty). A content block
+    // passed to a mixin without `@content` is an error.
+    assert_eq!(ours("a {\n  b: &;\n}\n"), "a {\n  b: a;\n}\n");
+    assert_eq!(ours(".x, .y {\n  c: &;\n}\n"), ".x, .y {\n  c: .x, .y;\n}\n");
+    assert_eq!(
+        ours(".foo {\n  .bar {\n    d: &;\n  }\n}\n"),
+        ".foo .bar {\n  d: .foo .bar;\n}\n"
+    );
+    // `&` is always a comma list, so `nth(&, 1)` is the first complex
+    // selector and a descendant selector reports two space-separated items.
+    assert_eq!(ours(".x, .y {\n  c: nth(&, 1);\n}\n"), ".x, .y {\n  c: .x;\n}\n");
+    assert_eq!(
+        ours(".a .b {\n  c: length(nth(&, 1));\n}\n"),
+        ".a .b {\n  c: 2;\n}\n"
+    );
+    // Interpolation of the root `&` (null) yields the empty string.
+    assert_eq!(ours("a {\n  c: \"#{&}!\";\n}\n"), "a {\n  c: \"a!\";\n}\n");
+    // A selector that resolves to nothing (`#{&}` at the root) is rejected.
+    assert!(compile("#{&} {\n  foo {\n    bar: baz;\n  }\n}\n", &Options::default()).is_err());
+    // A content block for a mixin that never uses `@content` is an error.
+    assert!(compile(
+        "@mixin m() { x: 1; }\na { @include m { y: 2; } }\n",
+        &Options::default()
+    )
+    .is_err());
 }
