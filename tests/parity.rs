@@ -903,3 +903,18 @@ fn extended_named_colors() {
     assert_parity("a { b: rgba(mediumspringgreen, 0.75); }\n");
     assert_parity("a { b: rgba(lightgoldenrodyellow, 1); }\n");
 }
+
+#[test]
+fn legacy_color_argument_forms() {
+    // The single-argument `$channels` list form, the `rgb($color, $alpha)`
+    // two-argument form (positional and named), and the `none`-channel
+    // verbatim spelling (a bare hue gains `deg`) — all byte-matched.
+    assert_parity("a { b: hsl($channels: 0 100% 50%); }\n");
+    assert_parity("a { b: rgb($channels: 1 2 3); }\n");
+    assert_parity("a { b: rgb($color: #123, $alpha: 0.5); }\n");
+    assert_parity("a { b: rgb($alpha: 0.5, $color: blue); }\n");
+    assert_parity("a { b: rgb(red, 0.5); }\n");
+    assert_parity("a { b: hsl(0 none 50%); }\n");
+    assert_parity("a { b: hsl(0 100% none); }\n");
+    assert_parity("a { b: hsl(none 100% 50%); }\n");
+}

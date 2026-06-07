@@ -107,18 +107,27 @@ fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     // rgb($color, $alpha) two-argument form: a concrete color and an alpha.
     // The result is a computed color (serialized by name/hex/rgba), not the
     // literal rgb() spelling. When either argument is a special value the
-    // call is preserved verbatim instead.
-    if pos_args.len() == 2 {
-        if let Value::Color(c) = &pos_args[0] {
-            if is_special_legacy(&pos_args[1]) {
-                // rgb(blue, calc(0.4)) → rgb(0, 0, 255, calc(0.4)).
-                let r = Value::Number(int_num(c.r));
-                let g = Value::Number(int_num(c.g));
-                let b = Value::Number(int_num(c.b));
-                return Ok(special_call("rgb", &[&r, &g, &b, &pos_args[1]]));
+    // call is preserved verbatim instead. The arguments may be passed by name
+    // (`rgb($color: red, $alpha: 0.5)`).
+    if n == 2 {
+        let color = pos_args
+            .first()
+            .or_else(|| named.iter().find(|(k, _)| k == "color").map(|(_, v)| v));
+        if let Some(Value::Color(c)) = color {
+            let alpha = pos_args
+                .get(1)
+                .or_else(|| named.iter().find(|(k, _)| k == "alpha").map(|(_, v)| v));
+            if let Some(alpha) = alpha {
+                if is_special_legacy(alpha) {
+                    // rgb(blue, calc(0.4)) → rgb(0, 0, 255, calc(0.4)).
+                    let r = Value::Number(int_num(c.r));
+                    let g = Value::Number(int_num(c.g));
+                    let b = Value::Number(int_num(c.b));
+                    return Ok(special_call("rgb", &[&r, &g, &b, alpha]));
+                }
+                let a = alpha_value(alpha, pos)?;
+                return Ok(Value::Color(computed(c.r, c.g, c.b, a)));
             }
-            let a = alpha_value(&pos_args[1], pos)?;
-            return Ok(Value::Color(computed(c.r, c.g, c.b, a)));
         }
     }
     // Otherwise gather the channel list and an optional alpha.
@@ -126,6 +135,7 @@ fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     if let Some(verbatim) = channels.special_passthrough("rgb") {
         return Ok(verbatim);
     }
+    channels.validate_count("rgb", pos)?;
     let Channels { comps, alpha, .. } = channels;
     let r = rgb_channel(&comps[0], pos)?;
     let g = rgb_channel(&comps[1], pos)?;
@@ -260,9 +270,41 @@ impl Channels {
                 single: None,
             });
         }
-        // One argument: a channels value. A second argument (when present) is
-        // an explicit alpha for a special-value channels list.
-        let channels = require(params, pos_args, named, 0, fname, pos)?.clone();
+        // One argument: a channels value. dart-sass also accepts this single
+        // value under the name `$channels` (`hsl($channels: 0 100% 50%)`); a
+        // second positional/`$alpha` argument is an explicit alpha for a
+        // special-value channels list.
+        let channels = match arg(params, pos_args, named, 0) {
+            Some(v) => v.clone(),
+            None => named
+                .iter()
+                .find(|(n, _)| n == "channels")
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| Error::at(format!("Missing argument $channels for {fname}()."), pos))?,
+        };
+        // A channels list must be unbracketed and space/slash-separated. A
+        // bracketed and/or comma list is rejected with dart-sass's message.
+        if let Value::List(l) = &channels {
+            let comma = l.sep == ListSep::Comma;
+            if l.bracketed || comma {
+                let kind = if l.bracketed && comma {
+                    "an unbracketed, space- or slash-separated list"
+                } else if l.bracketed {
+                    "an unbracketed list"
+                } else {
+                    "a space- or slash-separated list"
+                };
+                // A bracketed list serializes with its own `[...]`; a bare
+                // (unbracketed) comma list is shown parenthesized, matching
+                // dart-sass (`(1, 2, 3)`).
+                let shown = if l.bracketed {
+                    channels.to_css(false)
+                } else {
+                    list_paren_css(&channels)
+                };
+                return Err(Error::at(format!("$channels: Expected {kind}, was {shown}"), pos));
+            }
+        }
         let extra_alpha = arg(params, pos_args, named, 1).cloned();
         let (comps, mut alpha) = split_channels(&channels);
         if extra_alpha.is_some() {
@@ -273,6 +315,28 @@ impl Channels {
             alpha,
             single: Some(channels),
         })
+    }
+
+    /// Validate that a single-argument channels list holds exactly three
+    /// components for a legacy color space. dart-sass only enforces this when
+    /// all channels are plain (a special/`none` channel preserves the call), so
+    /// callers must run this *after* [`Channels::special_passthrough`] returns
+    /// `None`. The three/four-positional forms (`single == None`) skip the
+    /// check — their arity is validated by the argument count.
+    fn validate_count(&self, space: &str, pos: Pos) -> Result<(), Error> {
+        if let Some(single) = &self.single {
+            if self.comps.len() != 3 {
+                return Err(Error::at(
+                    format!(
+                        "$channels: The {space} color space has 3 channels but {} has {}.",
+                        list_paren_css(single),
+                        self.comps.len()
+                    ),
+                    pos,
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// If these channels contain a special value (`var()`, `calc()`, …) or a
@@ -299,6 +363,13 @@ impl Channels {
             }
             return Some(special_call(name, &args));
         }
+        // hsl()/hsla() preserved with a `none` channel re-serialize the
+        // space/slash form, but a bare-number hue gains an explicit `deg`
+        // (`hsl(180 none 50%)` → `hsl(180deg none 50%)`).
+        let is_hsl = name.eq_ignore_ascii_case("hsl") || name.eq_ignore_ascii_case("hsla");
+        if is_hsl && has_none && self.comps.len() == 3 {
+            return Some(self.hsl_none_verbatim(name));
+        }
         // Verbatim: prefer the single channels value (preserves the space/slash
         // spelling); fall back to reconstructing from the positional args.
         if let Some(single) = &self.single {
@@ -311,6 +382,27 @@ impl Channels {
             args.push(a);
         }
         Some(special_call(name, &args))
+    }
+
+    /// Serialize an hsl()/hsla() call preserved because of a `none` channel,
+    /// in the space-separated (slash-alpha) form, suffixing a bare-number hue
+    /// with `deg` to match dart-sass.
+    fn hsl_none_verbatim(&self, name: &str) -> Value {
+        let hue = match &self.comps[0] {
+            Value::Number(n) if n.unit.is_empty() => format!("{}deg", fmt_num(n.value, false)),
+            other => other.to_css(false),
+        };
+        let body = format!(
+            "{} {} {}",
+            hue,
+            self.comps[1].to_css(false),
+            self.comps[2].to_css(false)
+        );
+        let text = match &self.alpha {
+            Some(a) => format!("{name}({body} / {})", a.to_css(false)),
+            None => format!("{name}({body})"),
+        };
+        Value::Str(crate::value::SassStr { text, quoted: false })
     }
 }
 
@@ -388,6 +480,7 @@ fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     if let Some(verbatim) = channels.special_passthrough("hsl") {
         return Ok(verbatim);
     }
+    channels.validate_count("hsl", pos)?;
     let Channels { comps, alpha, .. } = channels;
     let h = hsl_hue(&comps[0], pos)?;
     // The repr preserves the supplied saturation/lightness percentages, except
