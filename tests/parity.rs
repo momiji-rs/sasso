@@ -2233,3 +2233,25 @@ fn nested_property_sets() {
     // A custom-property child (literal `--`) may not be nested.
     assert!(compile("a { b: { --d: e } }\n", &Options::default()).is_err());
 }
+
+#[test]
+fn custom_property_declarations() {
+    // A literal `--` name takes a verbatim value: SassScript is not evaluated,
+    // only `#{…}` interpolation resolves.
+    assert_eq!(ours("a { --x: 1 + 2; }\n"), "a {\n  --x: 1 + 2;\n}\n");
+    assert_eq!(ours("a { --x: #{1 + 2}; }\n"), "a {\n  --x: 3;\n}\n");
+    // Interpolation resolves even inside a quoted string in the value.
+    assert_eq!(ours("a { --x: \"c#{1 + 2}d\"; }\n"), "a {\n  --x: \"c3d\";\n}\n");
+    // A partially interpolated name beginning literally with `--` keeps the
+    // raw value, while a fully/initially interpolated name is real SassScript.
+    assert_eq!(
+        ours("a { --#{only}-name: 1 + 2; }\n"),
+        "a {\n  --only-name: 1 + 2;\n}\n"
+    );
+    assert_eq!(ours("a { #{--entire}: 1 + 2; }\n"), "a {\n  --entire: 3;\n}\n");
+    // `!important` in a custom-property value is a literal value character.
+    assert_eq!(
+        ours("a { --x: value !important; }\n"),
+        "a {\n  --x: value !important;\n}\n"
+    );
+}

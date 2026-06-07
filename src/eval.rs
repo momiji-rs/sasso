@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::{
-    BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, Declaration, Expr, IfClause,
-    IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, ParamList, PropertySet, Rule,
-    Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+    BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, CustomDecl, Declaration, Expr,
+    IfClause, IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, ParamList,
+    PropertySet, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -776,6 +776,22 @@ impl<'a> Evaluator<'a> {
                     }
                     self.eval_property_set(ps, parents, sink)?;
                 }
+                Stmt::CustomDecl(d) => {
+                    if sink.is_top() {
+                        return Err(Error::at("top-level declarations aren't allowed", d.pos));
+                    }
+                    // A literal `--` name may never be nested inside a property
+                    // set (dart-sass parse-time error).
+                    if self.decl_prefix.is_some() {
+                        return Err(Error::at(
+                            "Declarations whose names begin with \"--\" may not be nested.",
+                            d.pos,
+                        ));
+                    }
+                    if let Some(oi) = self.eval_custom_decl(d)? {
+                        sink.push_item(oi);
+                    }
+                }
                 Stmt::Rule(r) => self.eval_style_rule(r, parents, sink)?,
                 Stmt::If(branches) => {
                     // Evaluate conditions top to bottom; run the first match's
@@ -1262,16 +1278,6 @@ impl<'a> Evaluator<'a> {
     }
 
     fn eval_decl(&mut self, d: &Declaration) -> Result<Option<OutItem>, Error> {
-        // Inside a nested property set, a declaration whose *literal* name (not
-        // produced by interpolation) begins with `--` is rejected, matching
-        // dart-sass ("Declarations whose names begin with `--` may not be
-        // nested.").
-        if self.decl_prefix.is_some() && literal_name_is_custom_property(&d.property) {
-            return Err(Error::at(
-                "Declarations whose names begin with \"--\" may not be nested.",
-                d.pos,
-            ));
-        }
         let name = self.eval_template(&d.property)?.trim().to_string();
         let prop = match &self.decl_prefix {
             Some(prefix) => format!("{prefix}-{name}"),
@@ -1293,6 +1299,20 @@ impl<'a> Evaluator<'a> {
             prop,
             value: vstr,
             important: d.important,
+        }))
+    }
+
+    /// Evaluate a custom-property declaration: the name and verbatim value are
+    /// templates whose `#{…}` interpolation resolves; the value is otherwise
+    /// emitted exactly as written (no SassScript evaluation). An empty value
+    /// (`--x: ;`) still emits.
+    fn eval_custom_decl(&mut self, d: &CustomDecl) -> Result<Option<OutItem>, Error> {
+        let prop = self.eval_template(&d.property)?.trim().to_string();
+        let value = self.eval_template(&d.value)?;
+        Ok(Some(OutItem::Decl {
+            prop,
+            value,
+            important: false,
         }))
     }
 

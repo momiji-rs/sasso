@@ -26,6 +26,11 @@ pub(crate) enum Stmt {
     /// declaration is namespaced as `property-<child>` and emitted in source
     /// order (dart-sass property-set / namespaced-declaration form).
     PropertySet(PropertySet),
+    /// A custom-property declaration (`--name: value`) whose name *literally*
+    /// begins with `--`. Its value is captured verbatim (a template) — only
+    /// `#{…}` interpolation is resolved, never SassScript — matching dart-sass
+    /// `_interpolatedDeclarationValue`.
+    CustomDecl(CustomDecl),
     /// `@import "a", "b";` — each entry is either a Sass path to inline or a
     /// plain CSS import emitted verbatim.
     Import(Vec<ImportArg>),
@@ -189,6 +194,15 @@ pub(crate) struct Declaration {
     pub property: Vec<TplPiece>,
     pub value: Expr,
     pub important: bool,
+    pub pos: Pos,
+}
+
+/// A custom-property declaration (`--name: value`). The name and the value
+/// are both templates so `#{…}` interpolation resolves at eval time; the value
+/// is otherwise emitted verbatim (no SassScript evaluation).
+pub(crate) struct CustomDecl {
+    pub property: Vec<TplPiece>,
+    pub value: Vec<TplPiece>,
     pub pos: Pos,
 }
 

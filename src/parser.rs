@@ -8,9 +8,9 @@
 use std::rc::Rc;
 
 use crate::ast::{
-    BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, Declaration, Expr, IfBranch,
-    IfClause, IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, Param, ParamList,
-    PropertySet, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+    BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, CustomDecl, Declaration, Expr,
+    IfBranch, IfClause, IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, Param,
+    ParamList, PropertySet, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::{Pos, Scanner};
@@ -365,6 +365,36 @@ fn is_slash_operand(expr: &Expr) -> bool {
     }
 }
 
+/// Trim surrounding whitespace from a captured value template: leading
+/// whitespace from the first literal piece and trailing from the last, dropping
+/// any piece that becomes empty. (Interpolation pieces are never trimmed.)
+fn trim_value_pieces(pieces: &mut Vec<TplPiece>) {
+    if let Some(TplPiece::Lit(s)) = pieces.first_mut() {
+        let trimmed = s.trim_start().to_string();
+        *s = trimmed;
+    }
+    if matches!(pieces.first(), Some(TplPiece::Lit(s)) if s.is_empty()) {
+        pieces.remove(0);
+    }
+    if let Some(TplPiece::Lit(s)) = pieces.last_mut() {
+        let trimmed = s.trim_end().to_string();
+        *s = trimmed;
+    }
+    if matches!(pieces.last(), Some(TplPiece::Lit(s)) if s.is_empty()) {
+        pieces.pop();
+    }
+}
+
+/// Whether a property-name template begins, *literally*, with `--` (a custom
+/// property). A name whose first piece is `#{…}` interpolation is not literal,
+/// so `#{--b}` namespaces normally while a written `--b` is a custom property.
+fn property_is_literal_custom(property: &[TplPiece]) -> bool {
+    match property.first() {
+        Some(TplPiece::Lit(s)) => s.trim_start().starts_with("--"),
+        _ => false,
+    }
+}
+
 /// Whether the span between a `property:` colon and the following `{` is empty
 /// of any value — only whitespace and `/* */` / `//` comments. Such a span
 /// makes `property: { … }` a bare nested property set (no leading value).
@@ -521,6 +551,13 @@ impl Parser {
         // comment immediately follows it. `None` until the colon is seen.
         let mut after_colon: Option<usize> = None;
         let mut ws_after_colon = false;
+        // Whether the statement's first non-whitespace characters are `--`: a
+        // custom-property name. With a top-level `:` it is always a custom
+        // declaration (`--ambiguous:foo {…}`), never a style rule.
+        let starts_custom = {
+            let first = cs.iter().position(|c| !c.is_whitespace());
+            matches!(first, Some(p) if cs.get(p) == Some(&'-') && cs.get(p + 1) == Some(&'-'))
+        };
         while i < cs.len() {
             let c = cs[i];
             match c {
@@ -568,6 +605,11 @@ impl Parser {
                 '[' => bracket += 1,
                 ']' => bracket -= 1,
                 ':' if paren == 0 && bracket == 0 && after_colon.is_none() => {
+                    // A custom-property name with a `:` is always a declaration,
+                    // even when a `{` follows (`--ambiguous:foo {…}`).
+                    if starts_custom {
+                        return NextKind::Declaration;
+                    }
                     after_colon = Some(i + 1);
                     ws_after_colon = matches!(
                         cs.get(i + 1),
@@ -621,6 +663,15 @@ impl Parser {
         let property = self.parse_template_mode(&[':'], CommentMode::Strip)?;
         if !self.sc.eat(':') {
             return Err(Error::at("expected \":\" in declaration", self.sc.position()));
+        }
+        // A declaration whose name *literally* begins with `--` is a custom
+        // property: its value is captured verbatim (only `#{…}` interpolation
+        // resolves, no SassScript), and a trailing `{` is part of the value —
+        // never a nested property set.
+        if property_is_literal_custom(&property) {
+            let value = self.parse_custom_property_value()?;
+            self.sc.eat(';');
+            return Ok(Stmt::CustomDecl(CustomDecl { property, value, pos }));
         }
         let ws_after_colon = self.skip_ws_inline();
         // Bare nested property set: `prop: { … }` / `prop:{ … }` (no value).
@@ -1715,6 +1766,104 @@ impl Parser {
         if !lit.is_empty() {
             pieces.push(TplPiece::Lit(lit));
         }
+        Ok(pieces)
+    }
+
+    /// Capture a custom-property (`--name`) declaration value verbatim, from
+    /// just after the colon up to the terminating top-level `;` or `}`. This
+    /// mirrors dart-sass `_interpolatedDeclarationValue`: `#{…}` interpolation
+    /// resolves *everywhere* (including inside strings), `//` and `/* */` are
+    /// literal value characters (not comments), strings and `()`/`[]`/`{}` keep
+    /// their delimiters, and whitespace runs collapse to a single space. The
+    /// captured pieces are trimmed of surrounding whitespace; the terminating
+    /// `;` is left for the caller.
+    fn parse_custom_property_value(&mut self) -> Result<Vec<TplPiece>, Error> {
+        let mut pieces: Vec<TplPiece> = Vec::new();
+        let mut lit = String::new();
+        let mut depth = 0i32;
+        loop {
+            match self.sc.peek() {
+                None => break,
+                Some(';') if depth == 0 => break,
+                Some('}') if depth == 0 => break,
+                Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    if !lit.is_empty() {
+                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                    }
+                    self.sc.bump();
+                    self.sc.bump();
+                    let e = self.parse_value()?;
+                    self.skip_ws_inline();
+                    if !self.sc.eat('}') {
+                        return Err(Error::at("expected \"}\"", self.sc.position()));
+                    }
+                    pieces.push(TplPiece::Interp(e));
+                }
+                Some(q @ ('"' | '\'')) => {
+                    // Capture the string, resolving interpolation inside it but
+                    // keeping the quotes and other characters verbatim.
+                    lit.push(q);
+                    self.sc.bump();
+                    loop {
+                        match self.sc.peek() {
+                            None => break,
+                            Some('\\') => {
+                                lit.push('\\');
+                                self.sc.bump();
+                                if let Some(esc) = self.sc.peek() {
+                                    lit.push(esc);
+                                    self.sc.bump();
+                                }
+                            }
+                            Some('#') if self.sc.peek_at(1) == Some('{') => {
+                                if !lit.is_empty() {
+                                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                                }
+                                self.sc.bump();
+                                self.sc.bump();
+                                let e = self.parse_value()?;
+                                self.skip_ws_inline();
+                                if !self.sc.eat('}') {
+                                    return Err(Error::at("expected \"}\"", self.sc.position()));
+                                }
+                                pieces.push(TplPiece::Interp(e));
+                            }
+                            Some(c) => {
+                                lit.push(c);
+                                self.sc.bump();
+                                if c == q {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(c) if c.is_whitespace() => {
+                    while matches!(self.sc.peek(), Some(c) if c.is_whitespace()) {
+                        self.sc.bump();
+                    }
+                    lit.push(' ');
+                }
+                Some(c @ ('(' | '[' | '{')) => {
+                    depth += 1;
+                    lit.push(c);
+                    self.sc.bump();
+                }
+                Some(c @ (')' | ']' | '}')) => {
+                    depth -= 1;
+                    lit.push(c);
+                    self.sc.bump();
+                }
+                Some(c) => {
+                    lit.push(c);
+                    self.sc.bump();
+                }
+            }
+        }
+        if !lit.is_empty() {
+            pieces.push(TplPiece::Lit(lit));
+        }
+        trim_value_pieces(&mut pieces);
         Ok(pieces)
     }
 
