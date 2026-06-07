@@ -175,6 +175,21 @@ impl Transpiler {
         //     continuations) ---------------------------------------------
         let (mut logical, child_indent) = self.assemble_logical_line(indent)?;
 
+        // Rewrite the indented-syntax mixin shorthands to their `@mixin`/
+        // `@include` equivalents *before* prelude continuation, so a shorthand
+        // whose name spills onto the next line (`=` / `+` alone) continues like
+        // the directive it stands for. `=name` defines a mixin; `+name` (no
+        // space before the name) includes one (a `+ a` with a space is the next-
+        // sibling combinator selector, left untouched).
+        if let Some(rest) = logical.strip_prefix('=') {
+            logical = format!("@mixin {}", rest.trim_start());
+        } else if logical == "+"
+            || matches!(logical.strip_prefix('+'), Some(r) if r.starts_with(|c: char| is_ident_char(c) || c == '#' || c == '\\'))
+        {
+            let rest = logical[1..].trim_start();
+            logical = format!("@include {rest}");
+        }
+
         // A directive whose prelude is grammatically incomplete at the end of
         // its line continues onto the next (deeper-indented) line(s) — the
         // newline acts as whitespace inside the prelude. The remaining
@@ -182,7 +197,7 @@ impl Transpiler {
         self.extend_directive_prelude(&mut logical, indent)?;
 
         // The statement keyword decides whether a `;` or a `{ … }` block is
-        // appropriate, and handles the `=`/`+` shorthands and custom props.
+        // appropriate, and handles custom props.
         self.emit_statement(&logical, child_indent, indent, line_no)
     }
 
@@ -442,26 +457,6 @@ impl Transpiler {
             // terminator).
             logical = logical[..semi].trim_end();
             explicit_semicolon = true;
-        }
-
-        // `=name(args)` defines a mixin; `+name(args)` includes one.
-        if let Some(rest) = logical.strip_prefix('=') {
-            let body = rest.trim_start();
-            self.out.push_str("@mixin ");
-            self.out.push_str(body);
-            if !self.parse_child_into_braces(indent)? {
-                self.out.push_str(" {}\n");
-            }
-            return Ok(());
-        }
-        if let Some(rest) = logical.strip_prefix('+') {
-            let body = rest.trim_start();
-            self.out.push_str("@include ");
-            self.out.push_str(body);
-            if !self.parse_child_into_braces(indent)? {
-                self.out.push_str(";\n");
-            }
-            return Ok(());
         }
 
         // A leaf directive (e.g. `@import`, `@return`, `@extend`, `@charset`)
