@@ -751,22 +751,17 @@ fn fn_change_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
     if let Some(r) = modify_with_space(&c, named, super::color::ModifyOp::Change, pos) {
         return r;
     }
+    // Legacy color with no $space: detect the legacy space from the channel
+    // keywords, then run the modern (non-clamping, `none`-aware) modify path so
+    // out-of-range channels and missing channels match dart-sass.
     let (space, chans) = resolve_channels("change-color", named, pos)?;
-    let mut tuple = decompose(&c, space);
-    let mut alpha = c.a;
-    for (n, v) in chans {
-        if n == "alpha" {
-            alpha = bounded_named("alpha", v, 0.0, 1.0, pos)?;
-        } else if let Some(i) = channel_index(space, n) {
-            let val = if space == Space::Rgb {
-                rgb_amount(v, pos)?
-            } else {
-                num(v, pos)?
-            };
-            tuple[i] = clamp_channel(space, i, val);
-        }
-    }
-    Ok(Value::Color(recompose(space, tuple, alpha)))
+    let cspace = match space {
+        Space::Rgb => ColorSpace::Rgb,
+        Space::Hsl => ColorSpace::Hsl,
+        Space::Hwb => ColorSpace::Hwb,
+    };
+    let chan_args: Vec<(String, &Value)> = chans.iter().map(|(n, v)| (n.to_string(), *v)).collect();
+    modify_in_space(&c, cspace, &chan_args, super::color::ModifyOp::Change, pos)
 }
 
 /// `scale-color($color, channels…)` — fluidly scale each channel a percentage
@@ -853,31 +848,6 @@ fn rgb_amount(v: &Value, pos: Pos) -> Result<f64, Error> {
         }),
         other => Err(Error::at(
             format!("{} is not a number.", other.to_css(false)),
-            pos,
-        )),
-    }
-}
-
-/// Like [`bounded`] but with a caller-supplied channel name in the message.
-fn bounded_named(name: &str, v: &Value, lo: f64, hi: f64, pos: Pos) -> Result<f64, Error> {
-    match v {
-        Value::Number(n) => {
-            if n.value < lo || n.value > hi {
-                Err(Error::at(
-                    format!(
-                        "${name}: Expected {} to be within {} and {}.",
-                        n.to_css(false),
-                        fmt_bound(lo),
-                        fmt_bound(hi),
-                    ),
-                    pos,
-                ))
-            } else {
-                Ok(n.value)
-            }
-        }
-        other => Err(Error::at(
-            format!("${name}: {} is not a number.", other.to_css(false)),
             pos,
         )),
     }

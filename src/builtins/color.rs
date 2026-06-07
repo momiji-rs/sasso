@@ -2156,6 +2156,7 @@ pub(super) fn legacy_to_modern(c: &Color) -> ModernColor {
 /// that read them keep working). The modern representation drives
 /// serialization and channel access.
 fn make_modern(mc: ModernColor) -> Color {
+    let mc = normalize_polar(mc);
     let srgb = convert_modern(&mc, ColorSpace::Rgb);
     let mut c = Color::rgb(
         z(srgb.channels[0]).clamp(0.0, 255.0),
@@ -2165,6 +2166,35 @@ fn make_modern(mc: ModernColor) -> Color {
     );
     c.modern = Some(mc);
     c
+}
+
+/// Normalize a polar color's stored channels: lch/oklch negate-chroma folds to
+/// positive chroma with a 180-degree hue shift, and the hue is reduced to
+/// `[0, 360)`. Other spaces are returned unchanged.
+fn normalize_polar(mut mc: ModernColor) -> ModernColor {
+    if matches!(mc.space, ColorSpace::Lch | ColorSpace::Oklch) {
+        if let Some(c) = mc.channels[1] {
+            if c < 0.0 {
+                mc.channels[1] = Some(-c);
+                if let Some(h) = mc.channels[2] {
+                    mc.channels[2] = Some(h + 180.0);
+                }
+            }
+        }
+    }
+    let hue_idx = match mc.space {
+        ColorSpace::Hsl | ColorSpace::Hwb => Some(0),
+        ColorSpace::Lch | ColorSpace::Oklch => Some(2),
+        _ => None,
+    };
+    if let Some(i) = hue_idx {
+        if let Some(h) = mc.channels[i] {
+            if h.is_finite() {
+                mc.channels[i] = Some(h.rem_euclid(360.0));
+            }
+        }
+    }
+    mc
 }
 
 /// The known predefined `color()` spaces and their [`ColorSpace`].
