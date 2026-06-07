@@ -3324,10 +3324,17 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
         }
         ModifyOp::Adjust => {
             // Alpha is natively unitless: dart-sass strips any unit (warning to
-            // stderr for `%`/other units) and uses the raw number directly.
+            // stderr for `%`/other units) and uses the raw number directly. A
+            // non-number amount (including `none`) is an error.
             let amt = match v {
                 Value::Number(n) => n.value,
-                _ => 0.0,
+                Value::Slash(n, _) => n.value,
+                other => {
+                    return Err(Error::at(
+                        format!("$alpha: {} is not a number.", other.to_css(false)),
+                        pos,
+                    ))
+                }
             };
             Some((cur + amt).clamp(0.0, 1.0))
         }

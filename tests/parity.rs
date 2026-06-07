@@ -3511,6 +3511,9 @@ fn parity_color_modify_missing_channel_errors() {
         "@use \"sass:color\";\na {b: color.adjust(grey, $hue: 10deg, $space: hsl)}\n",
         "@use \"sass:color\";\na {b: color.scale(rgb(none 0 0), $red: 10%)}\n",
         "@use \"sass:color\";\na {b: color.invert(grey, $space: hsl)}\n",
+        // A non-number `adjust` alpha (including `none`) is a type error.
+        "@use \"sass:color\";\na {b: color.adjust(red, $alpha: c)}\n",
+        "@use \"sass:color\";\na {b: color.adjust(red, $alpha: none)}\n",
     ];
     for scss in cases {
         let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
