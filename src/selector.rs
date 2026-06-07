@@ -1237,7 +1237,36 @@ fn simple_unify(this: &Simple, compound: &[Simple]) -> Option<Vec<Simple>> {
                 Some(out)
             }
         },
-        // Class / id / attribute / placeholder / pseudo.
+        // A pseudo selector inserts before the first pseudo-ELEMENT (so pseudo
+        // classes stay ahead of pseudo elements); two distinct pseudo elements
+        // can't share a compound.
+        Simple::Pseudo(_) => {
+            if compound.len() == 1 && matches!(compound[0], Simple::Universal { .. }) {
+                return simple_unify(&compound[0], std::slice::from_ref(this));
+            }
+            if compound.contains(this) {
+                return Some(compound.to_vec());
+            }
+            let this_is_element = is_pseudo_element(this);
+            let mut out = Vec::new();
+            let mut added = false;
+            for s in compound {
+                if !added && is_pseudo_element(s) {
+                    // Only one pseudo-element allowed per compound.
+                    if this_is_element {
+                        return None;
+                    }
+                    out.push(this.clone());
+                    added = true;
+                }
+                out.push(s.clone());
+            }
+            if !added {
+                out.push(this.clone());
+            }
+            Some(out)
+        }
+        // Class / id / attribute / placeholder: insert before the first pseudo.
         _ => {
             if compound.len() == 1 && matches!(compound[0], Simple::Universal { .. }) {
                 // `other.unify([this])` where other is the universal.

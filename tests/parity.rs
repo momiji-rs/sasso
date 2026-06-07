@@ -1808,3 +1808,22 @@ fn extend_universal_and_element_unification() {
         "-a *.foo, -a a {\n  a: b;\n}\n"
     );
 }
+
+#[test]
+fn extend_pseudo_class_and_element_ordering() {
+    // A unified pseudo-class keeps its order after an existing pseudo-class.
+    assert_eq!(
+        ours("%-a :foo.baz {a: b}\n:bar {@extend .baz} -a {@extend %-a}\n"),
+        "-a :foo.baz, -a :foo:bar {\n  a: b;\n}\n"
+    );
+    // Pseudo-classes always sort before a pseudo-element in the result.
+    assert_eq!(
+        ours(".foo:bar {a: b}\n.baz::bang {@extend .foo}\n"),
+        ".foo:bar, .baz:bar::bang {\n  a: b;\n}\n"
+    );
+    // `:not()` unifies as an ordinary pseudo-class.
+    assert_eq!(
+        ours("%-a :not(.foo).baz {a: b}\n:not(.bar) {@extend .baz} -a {@extend %-a}\n"),
+        "-a :not(.foo).baz, -a :not(.foo):not(.bar) {\n  a: b;\n}\n"
+    );
+}
