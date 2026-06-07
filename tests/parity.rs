@@ -918,3 +918,20 @@ fn legacy_color_argument_forms() {
     assert_parity("a { b: hsl(0 100% none); }\n");
     assert_parity("a { b: hsl(none 100% 50%); }\n");
 }
+
+#[test]
+fn hsl_degenerate_calc_channels() {
+    // A degenerate calc() channel keeps the hsl() spelling, coercing each
+    // channel like dart-sass: hue reduces mod 360 to calc(NaN); saturation
+    // and lightness gain `* 1%`, with saturation clamping non-positive/NaN
+    // to 0%. Byte-matched to dart-sass.
+    assert_parity("a { b: hsl(calc(infinity), 100%, 50%); }\n");
+    assert_parity("a { b: hsl(calc(-infinity), 100%, 50%); }\n");
+    assert_parity("a { b: hsl(calc(NaN), 100%, 50%); }\n");
+    assert_parity("a { b: hsl(0, calc(infinity), 50%); }\n");
+    assert_parity("a { b: hsl(0, calc(-infinity), 50%); }\n");
+    assert_parity("a { b: hsl(0, calc(NaN), 50%); }\n");
+    assert_parity("a { b: hsl(0, 100%, calc(infinity)); }\n");
+    assert_parity("a { b: hsl(0, 100%, calc(-infinity)); }\n");
+    assert_parity("a { b: hsl(0, 100%, calc(NaN)); }\n");
+}

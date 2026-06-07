@@ -480,6 +480,12 @@ fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     if let Some(verbatim) = channels.special_passthrough("hsl") {
         return Ok(verbatim);
     }
+    // A degenerate `calc()` channel (`calc(infinity)`, `calc(-infinity)`,
+    // `calc(NaN)`) keeps the whole call as a special hsl() spelling, with each
+    // channel coerced per dart-sass's modern parsing (see `hsl_degenerate`).
+    if channels.comps.len() == 3 && channels.comps.iter().any(is_degenerate_calc) {
+        return hsl_degenerate(&channels, pos);
+    }
     channels.validate_count("hsl", pos)?;
     let Channels { comps, alpha, .. } = channels;
     let h = hsl_hue(&comps[0], pos)?;
@@ -540,6 +546,84 @@ fn hsl_hue(v: &Value, pos: Pos) -> Result<f64, Error> {
             pos,
         )),
     }
+}
+
+/// Whether a value is a `calc()` that folds to a degenerate constant
+/// (`infinity`, `-infinity`, `NaN`).
+fn is_degenerate_calc(v: &Value) -> bool {
+    matches!(v, Value::Calc(node) if degenerate_const(node).is_some())
+}
+
+/// Serialize an `hsl()`/`hsla()` call that carries a degenerate `calc()`
+/// channel. dart-sass keeps the legacy comma spelling and coerces each
+/// channel: the hue is reduced modulo 360 (so any non-finite becomes
+/// `calc(NaN)`); saturation/lightness gain an implicit `%` (`calc(X * 1%)`),
+/// with saturation additionally clamped at 0 (so `-infinity`/`NaN` → `0%`).
+fn hsl_degenerate(channels: &Channels, pos: Pos) -> Result<Value, Error> {
+    let hue = hsl_degenerate_hue(&channels.comps[0], pos)?;
+    let sat = hsl_degenerate_pct(&channels.comps[1], true, pos)?;
+    let light = hsl_degenerate_pct(&channels.comps[2], false, pos)?;
+    let name = match &channels.alpha {
+        Some(a) => {
+            let av = alpha_value(a, pos)?;
+            return Ok(Value::Str(crate::value::SassStr {
+                text: format!("hsla({hue}, {sat}, {light}, {})", fmt_num(av, false)),
+                quoted: false,
+            }));
+        }
+        None => "hsl",
+    };
+    Ok(Value::Str(crate::value::SassStr {
+        text: format!("{name}({hue}, {sat}, {light})"),
+        quoted: false,
+    }))
+}
+
+/// Serialize the hue channel of a degenerate hsl() call: a degenerate `calc()`
+/// reduces modulo 360 to `NaN` (emitted as `calc(NaN)`); any plain value keeps
+/// its normalized degree spelling.
+fn hsl_degenerate_hue(v: &Value, pos: Pos) -> Result<String, Error> {
+    if is_degenerate_calc(v) {
+        // infinity/-infinity/NaN, all reduced mod 360 → NaN.
+        return Ok("calc(NaN)".to_string());
+    }
+    let h = hsl_hue(v, pos)?;
+    Ok(fmt_num(h.rem_euclid(360.0), false))
+}
+
+/// Serialize a saturation/lightness channel of a degenerate hsl() call. A
+/// degenerate `calc()` is treated as a `%` value: saturation clamps a
+/// non-positive/`NaN` result to `0%`, otherwise both emit `calc(X * 1%)`. A
+/// plain number keeps its literal `%` spelling (saturation floored at 0).
+fn hsl_degenerate_pct(v: &Value, is_saturation: bool, pos: Pos) -> Result<String, Error> {
+    if let Value::Calc(node) = v {
+        if let Some(c) = degenerate_const(node) {
+            if is_saturation && (c.is_nan() || c <= 0.0) {
+                return Ok("0%".to_string());
+            }
+            let token = if c.is_nan() {
+                "NaN"
+            } else if c.is_sign_negative() {
+                "-infinity"
+            } else {
+                "infinity"
+            };
+            return Ok(format!("calc({token} * 1%)"));
+        }
+    }
+    let raw = num(v, pos)?;
+    let pct = if is_saturation {
+        if raw.is_nan() {
+            0.0
+        } else {
+            raw.max(0.0)
+        }
+    } else if raw.is_nan() {
+        0.0
+    } else {
+        raw
+    };
+    Ok(format!("{}%", fmt_num(pct, false)))
 }
 
 /// The global `hwb()` function. It takes a single channels argument
