@@ -368,6 +368,7 @@ impl Parser {
             "warn" => self.parse_message(MessageKind::Warn),
             "debug" => self.parse_message(MessageKind::Debug),
             "error" => self.parse_message(MessageKind::Error),
+            "at-root" => self.parse_at_root(),
             // Known Sass features that are deliberately unimplemented in this
             // build: keep erroring (the generic passthrough would silently
             // accept them and lose their error specs).
@@ -389,6 +390,28 @@ impl Parser {
             MessageKind::Debug => Stmt::Debug(value),
             MessageKind::Error => Stmt::Error(value),
         })
+    }
+
+    /// Parse `@at-root [query] { body }`. The optional query is the
+    /// parenthesised `(with: …)` / `(without: …)` form; an inline selector
+    /// (`@at-root .x { … }`) is desugared into a single rule inside the body.
+    fn parse_at_root(&mut self) -> Result<Stmt, Error> {
+        self.skip_ws_inline();
+        let query = if self.sc.peek() == Some('(') {
+            let q = self.parse_template(&['{'])?;
+            Some(trim_prelude(q))
+        } else if self.sc.peek() == Some('{') {
+            None
+        } else {
+            let selector = self.parse_template(&['{'])?;
+            let body = self.parse_braced_body()?;
+            return Ok(Stmt::AtRoot {
+                query: None,
+                body: vec![Stmt::Rule(Rule { selector, body })],
+            });
+        };
+        let body = self.parse_braced_body()?;
+        Ok(Stmt::AtRoot { query, body })
     }
 
     /// Parse a generic/unknown at-rule: `@name <prelude up to { ; or }>` then

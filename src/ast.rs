@@ -67,6 +67,12 @@ pub(crate) enum Stmt {
         prelude: Vec<TplPiece>,
         body: Option<Vec<Stmt>>,
     },
+    /// `@at-root [query] { body }` — runs the body with the parent selector
+    /// reset to the document root.
+    AtRoot {
+        query: Option<Vec<TplPiece>>,
+        body: Vec<Stmt>,
+    },
     /// `@warn <expr>;` — writes to stderr, emits no CSS.
     Warn(Expr),
     /// `@debug <expr>;` — writes to stderr, emits no CSS.

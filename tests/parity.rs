@@ -218,3 +218,15 @@ fn parity_supports_nested_and_blockless() {
         "@supports (a: b) and ((c: d) or (e: f)) {\n  .g { h: i; }\n}\n@supports (x: y) {@inner foo}\n",
     );
 }
+
+#[test]
+fn parity_at_root_inline() {
+    assert_parity(
+        ".a {\n  color: red;\n  @at-root .b {\n    color: green;\n  }\n}\n@at-root .c {\n  color: blue;\n}\n",
+    );
+}
+
+#[test]
+fn parity_at_root_block() {
+    assert_parity(".a {\n  .b {\n    @at-root .c {\n      x: y;\n    }\n  }\n}\n.outer {\n  @at-root {\n    .single { z: 1; }\n  }\n}\n");
+}

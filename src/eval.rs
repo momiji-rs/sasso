@@ -608,6 +608,9 @@ impl<'a> Evaluator<'a> {
                 Stmt::AtRule { name, prelude, body } => {
                     self.eval_at_rule(name, prelude, body.as_deref(), parents, sink)?;
                 }
+                Stmt::AtRoot { query, body } => {
+                    self.eval_at_root(query.as_deref(), body, sink)?;
+                }
                 Stmt::Warn(e) => {
                     let v = self.eval_expr(e)?;
                     eprintln!("WARNING: {}", v.to_interp());
@@ -723,6 +726,29 @@ impl<'a> Evaluator<'a> {
         self.scopes.pop();
         result?;
         Ok(body)
+    }
+
+    /// Evaluate `@at-root`: run the body with the parent-selector context reset
+    /// to the document root, then hoist its output. The optional query is
+    /// accepted but not yet honoured (the common no-query case is supported).
+    fn eval_at_root(
+        &mut self,
+        _query: Option<&[TplPiece]>,
+        body: &[Stmt],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        self.scopes.push(HashMap::new());
+        let mut out: Vec<OutNode> = Vec::new();
+        let res = {
+            let mut child = Sink::AtRoot(&mut out);
+            self.exec(body, &[], &mut child)
+        };
+        self.scopes.pop();
+        res?;
+        for node in out {
+            sink.push_at_rule(node);
+        }
+        Ok(())
     }
 
     fn eval_decl(&mut self, d: &Declaration) -> Result<Option<OutItem>, Error> {
