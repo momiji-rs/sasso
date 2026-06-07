@@ -2005,39 +2005,49 @@ fn unify_complex_multi(complexes: &[Complex]) -> Option<Vec<Complex>> {
     }
     let unified_base = unified_base?;
 
-    // The parents of each multi-component complex (all but the last component),
-    // in trailing form for the weave.
-    let mut without_bases: Vec<Complex> = Vec::new();
+    // The parents of each multi-component complex (all but the last component).
+    // Build them in the trailing-combinator form first so the combinator that
+    // joined the (removed) last component stays attached to the new last parent,
+    // then convert back to leading form for the weave.
+    let mut without_bases: Vec<Vec<TComp>> = Vec::new();
     for complex in complexes {
         if complex.components.len() > 1 {
-            without_bases.push(Complex {
-                components: complex.components[..complex.components.len() - 1].to_vec(),
-            });
+            let trailing = to_trailing(&complex.components);
+            without_bases.push(trailing[..trailing.len() - 1].to_vec());
         }
     }
 
-    let base_complex = Complex {
-        components: vec![ComplexComponent {
-            combinator: None,
-            compound: Compound {
-                simples: unified_base,
-            },
-        }],
+    let base_tcomp = TComp {
+        compound: Compound {
+            simples: unified_base,
+        },
+        combinators: Vec::new(),
     };
 
     // `weave(withoutBases.isEmpty ? [base] : [...exceptLast, last.concat(base)])`.
+    // `concatenate` appends the base as a descendant onto the last parents
+    // complex; the last parent keeps its own trailing combinator.
     let path: Vec<Complex> = if without_bases.is_empty() {
-        vec![base_complex]
+        vec![Complex {
+            components: from_trailing(&[base_tcomp]),
+        }]
     } else {
-        let mut p = without_bases.clone();
-        // Concatenate `base` onto the last parents complex as a descendant.
-        let last = p.pop()?;
-        let mut concatenated = last.components.clone();
-        concatenated.extend(base_complex.components.iter().cloned());
-        p.push(Complex {
-            components: concatenated,
-        });
-        p
+        let mut path = Vec::new();
+        let last_idx = without_bases.len() - 1;
+        for (i, parents) in without_bases.iter().enumerate() {
+            if i == last_idx {
+                let mut concatenated = parents.clone();
+                concatenated.push(base_tcomp.clone());
+                path.push(Complex {
+                    components: from_trailing(&concatenated),
+                });
+            } else {
+                path.push(Complex {
+                    components: from_trailing(parents),
+                });
+            }
+        }
+        path
     };
 
     let woven = weave(&path);
