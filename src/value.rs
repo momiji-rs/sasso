@@ -120,7 +120,15 @@ impl CalcNode {
     /// Format `operand` as a child of a parent `op`, wrapping in parens when
     /// the child binds more loosely (or equally on the right of `-`/`/`).
     fn fmt_operand(&self, operand: &CalcNode, parent: CalcOp, is_right: bool, compressed: bool) -> String {
-        if let CalcNode::Op { op: child_op, .. } = operand {
+        // A unit-carrying non-finite number renders as a `*` operation
+        // (`infinity * 1px`), so it parenthesizes like a `Mul`-precedence
+        // child rather than a bare leaf number.
+        let child_op = match operand {
+            CalcNode::Op { op, .. } => Some(*op),
+            CalcNode::Number(n) if !n.value.is_finite() && !n.unit.is_empty() => Some(CalcOp::Mul),
+            _ => None,
+        };
+        if let Some(child_op) = child_op {
             let needs_paren = child_op.precedence() < parent.precedence()
                 || (child_op.precedence() == parent.precedence()
                     && is_right

@@ -1298,6 +1298,20 @@ impl<'a> Evaluator<'a> {
                 // anything still containing an operation stays a calculation.
                 match node {
                     CalcNode::Number(n) if n.value.is_finite() => Ok(Value::Number(n)),
+                    // A bare unitless non-finite result canonicalizes to its
+                    // constant spelling (`infinity`/`-infinity`/`NaN`). This is
+                    // also the form the color builtins inspect for degenerate
+                    // `calc()` channels (`rgb(calc(infinity), …)`).
+                    CalcNode::Number(n) if n.unit.is_empty() => {
+                        let spelling = if n.value.is_nan() {
+                            "NaN"
+                        } else if n.value > 0.0 {
+                            "infinity"
+                        } else {
+                            "-infinity"
+                        };
+                        Ok(Value::Calc(CalcNode::Str(spelling.to_string())))
+                    }
                     other => Ok(Value::Calc(other)),
                 }
             }
@@ -1546,30 +1560,37 @@ impl<'a> Evaluator<'a> {
                         m.to_css(false)
                     )));
                 }
-                // The calc constants `pi`/`e` (case-insensitive) resolve to
-                // their numeric values inside a calculation.
+                // The calc constants `pi`/`e`/`infinity`/`-infinity`/`nan`
+                // (case-insensitive) resolve to their numeric values inside a
+                // calculation, so `calc(infinity * 2)` folds to `calc(infinity)`
+                // and `calc(NaN)` canonicalizes its spelling.
                 if let Value::Str(s) = &v {
                     if !s.quoted {
-                        match s.text.to_ascii_lowercase().as_str() {
-                            "pi" => {
-                                return Ok(CalcNode::Number(Number {
-                                    value: std::f64::consts::PI,
-                                    unit: String::new(),
-                                }))
-                            }
-                            "e" => {
-                                return Ok(CalcNode::Number(Number {
-                                    value: std::f64::consts::E,
-                                    unit: String::new(),
-                                }))
-                            }
-                            _ => {}
+                        if let Some(value) = calc_constant(&s.text) {
+                            return Ok(CalcNode::Number(Number {
+                                value,
+                                unit: String::new(),
+                            }));
                         }
                     }
                 }
                 Ok(value_to_calc_node(v))
             }
         }
+    }
+}
+
+/// Resolve a calc() numeric constant from its (unquoted) ident spelling,
+/// case-insensitively: `pi`, `e`, `infinity`/`-infinity`, and `nan`. Returns
+/// `None` for any other identifier, which is then kept verbatim.
+fn calc_constant(text: &str) -> Option<f64> {
+    match text.to_ascii_lowercase().as_str() {
+        "pi" => Some(std::f64::consts::PI),
+        "e" => Some(std::f64::consts::E),
+        "infinity" => Some(f64::INFINITY),
+        "-infinity" => Some(f64::NEG_INFINITY),
+        "nan" => Some(f64::NAN),
+        _ => None,
     }
 }
 

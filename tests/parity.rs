@@ -981,3 +981,26 @@ fn slash_with_special_value_forms_slash() {
     assert_parity("a { b: (1 2) / 3; }\n");
     assert_parity("a { b: 2 / red; }\n");
 }
+
+#[test]
+fn calc_infinity_nan_constants() {
+    // `infinity`/`-infinity`/`nan` are calc() numeric constants (like
+    // `pi`/`e`), resolved case-insensitively. They fold through arithmetic
+    // (`infinity * 2` -> `infinity`) and canonicalize their spelling; a
+    // unit-carrying non-finite renders (and parenthesizes) as `infinity * 1px`.
+    assert_parity("a { b: calc(infinity * 2); }\n");
+    assert_parity("a { b: calc(-infinity * 2); }\n");
+    assert_parity("a { b: calc(NAN * 2); }\n");
+    assert_parity("a { b: calc(InFiNiTy); }\n");
+    assert_parity("a { b: calc(nan); }\n");
+    assert_parity("a { b: calc(infinity * (1% + 1px)); }\n");
+    assert_parity("a { b: calc((1/0) * (1% + 1px)); }\n");
+    assert_parity("a { b: calc(infinity * 1px); }\n");
+    assert_parity("a { b: calc(2 * infinity * 1px); }\n");
+    assert_parity("a { b: calc(var(--c) / (infinity * 1px)); }\n");
+    assert_parity("a { b: calc(var(--c) - (infinity * 1px)); }\n");
+    // The degenerate-constant color channels still resolve (the calc value
+    // keeps the spelling the color builtins inspect).
+    assert_parity("a { b: rgb(calc(infinity), 0, 0, 0.5); }\n");
+    assert_parity("a { b: rgb(calc(NaN), 0, 0, 0.5); }\n");
+}
