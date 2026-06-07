@@ -1269,7 +1269,12 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
-            self.star_user_modules.push(module);
+            // `@use`ing the same module twice as `*` is idempotent (no
+            // ambiguity), so de-duplicate by module identity.
+            let ptr = Rc::as_ptr(&module);
+            if !self.star_user_modules.iter().any(|m| Rc::as_ptr(m) == ptr) {
+                self.star_user_modules.push(module);
+            }
             return Ok(());
         }
         let ns = match namespace {
@@ -2465,7 +2470,19 @@ impl<'a> Evaluator<'a> {
                             }
                             let sheet = crate::parser::parse(&src)?;
                             self.loading.push(path.clone());
+                            // `@import` inlines the file's variables/functions/
+                            // mixins into the current scope, but its module
+                            // bindings (`@use`/`@forward`) stay local to the
+                            // imported file and must not leak to the importer.
+                            let saved_used = std::mem::take(&mut self.used_modules);
+                            let saved_star = std::mem::take(&mut self.star_modules);
+                            let saved_used_user = std::mem::take(&mut self.used_user_modules);
+                            let saved_star_user = std::mem::take(&mut self.star_user_modules);
                             let result = self.exec(&sheet.stmts, parents, sink);
+                            self.used_modules = saved_used;
+                            self.star_modules = saved_star;
+                            self.used_user_modules = saved_used_user;
+                            self.star_user_modules = saved_star_user;
                             self.loading.pop();
                             result?;
                         }

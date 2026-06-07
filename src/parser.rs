@@ -497,6 +497,12 @@ impl Parser {
                     }
                     break;
                 }
+                // A stray `;` (e.g. after a `}` rule block) is an empty
+                // statement: dart-sass accepts and ignores it.
+                Some(';') => {
+                    self.sc.bump();
+                    continue;
+                }
                 Some('$') => stmts.push(self.parse_var_decl()?),
                 Some('@') => stmts.push(self.parse_at_rule()?),
                 _ => match self.classify() {
