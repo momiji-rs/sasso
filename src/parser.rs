@@ -3134,6 +3134,15 @@ impl Parser {
                         }
                     }
                 }
+                // A CSS escape in unquoted URL contents is decoded and
+                // re-serialized with the identifier rules (always in body
+                // position, so a leading digit or `-` stays literal). This also
+                // makes `\#{}` a literal `#{}` rather than interpolation.
+                Some('\\') => {
+                    if let Some(c) = self.consume_escape()? {
+                        push_ident_escape(&mut lit, c, false);
+                    }
+                }
                 Some('(') => {
                     depth += 1;
                     lit.push('(');

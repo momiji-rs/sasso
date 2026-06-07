@@ -1908,3 +1908,20 @@ fn quoted_string_escapes_are_normalized() {
     // A literal backslash round-trips as `\\`.
     assert_eq!(ours("a {b: \"\\\\\"}\n"), "a {\n  b: \"\\\\\";\n}\n");
 }
+
+#[test]
+fn unquoted_url_contents_escapes_are_canonicalized() {
+    // CSS escapes inside plain (unquoted) `url(...)` contents decode and
+    // re-serialize with the identifier body rules: name chars (including a
+    // leading digit or `-`) stay literal, control chars use `\<hex> `, and
+    // other punctuation is backslash-escaped. `\#{` stays a literal `#{`.
+    assert_eq!(ours("a {b: url(\\41)}\n"), "a {\n  b: url(A);\n}\n");
+    assert_eq!(ours("a {b: url(\\41 bc)}\n"), "a {\n  b: url(Abc);\n}\n");
+    assert_eq!(ours("a {b: url(\\30)}\n"), "a {\n  b: url(0);\n}\n");
+    assert_eq!(ours("a {b: url(\\2d)}\n"), "a {\n  b: url(-);\n}\n");
+    assert_eq!(ours("a {b: url(\\9)}\n"), "a {\n  b: url(\\9 );\n}\n");
+    assert_eq!(ours("a {b: url(\\7f)}\n"), "a {\n  b: url(\\7f );\n}\n");
+    assert_eq!(ours("a {b: url(\\21)}\n"), "a {\n  b: url(\\!);\n}\n");
+    assert_eq!(ours("a {b: url(\\))}\n"), "a {\n  b: url(\\));\n}\n");
+    assert_eq!(ours("a {b: url(\\#{})}\n"), "a {\n  b: url(\\#{});\n}\n");
+}
