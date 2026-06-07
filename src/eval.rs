@@ -1970,6 +1970,9 @@ fn literal_name_is_custom_property(property: &[TplPiece]) -> bool {
 fn expr_has_substitution(e: &Expr) -> bool {
     match e {
         Expr::Interp(_) => true,
+        // `var()`/`env()` are parsed as plain function calls; inside a calc
+        // space-list they are legal substitutions (`calc(var(--c) 1)`).
+        Expr::Func { name, .. } => name.eq_ignore_ascii_case("var") || name.eq_ignore_ascii_case("env"),
         Expr::Ident(pieces) => pieces.iter().any(|p| match p {
             TplPiece::Interp(_) => true,
             TplPiece::Lit(s) => {

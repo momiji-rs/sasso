@@ -365,6 +365,15 @@ fn is_slash_operand(expr: &Expr) -> bool {
     }
 }
 
+/// Whether `expr` is a bare quoted-string atom. dart-sass forms an implicit
+/// space-separated list when a quoted string abuts an adjacent value atom with
+/// no whitespace, so the space-list parser uses this to decide whether a
+/// no-whitespace boundary continues the list (`"["'foo'"]"` -> a three-element
+/// list) rather than ending it.
+fn expr_is_quoted_string(expr: &Expr) -> bool {
+    matches!(expr, Expr::QuotedString(_))
+}
+
 /// Trim surrounding whitespace from a captured value template: leading
 /// whitespace from the first literal piece and trailing from the last, dropping
 /// any piece that becomes empty. (Interpolation pieces are never trimmed.)
@@ -2323,6 +2332,22 @@ impl Parser {
         )
     }
 
+    /// Whether the scanner is positioned at the start of a value atom (the
+    /// dispatch set of [`primary`]/[`unary`]). Used to decide whether a quoted
+    /// string adjacency continues a space-list: only when a real atom follows,
+    /// not a separator/operator such as `:` (a map key-value colon) or `=`.
+    fn at_value_atom_start(&self) -> bool {
+        match self.sc.peek() {
+            Some('.') => matches!(self.sc.peek_at(1), Some(d) if d.is_ascii_digit()),
+            Some(c) => {
+                c.is_ascii_digit()
+                    || matches!(c, '$' | '#' | '"' | '\'' | '(' | '[' | '&' | '+' | '-' | '\\')
+                    || is_ident_char(c)
+            }
+            None => false,
+        }
+    }
+
     fn comma_list(&mut self) -> Result<Expr, Error> {
         let first = self.space_list()?;
         let mut rest = Vec::new();
@@ -2357,28 +2382,43 @@ impl Parser {
 
     fn space_list(&mut self) -> Result<Expr, Error> {
         let first = self.or_expr()?;
+        let mut prev_was_string = expr_is_quoted_string(&first);
         let mut rest = Vec::new();
         loop {
             // A `?`-wildcard unicode-range token immediately followed by an
             // identifier inserts an implicit space separator (`U+A?BCDE` ->
             // `U+A? BCDE`), so continue without consuming whitespace.
             if std::mem::take(&mut self.pending_unicode_split) {
-                rest.push(self.or_expr()?);
+                let e = self.or_expr()?;
+                prev_was_string = expr_is_quoted_string(&e);
+                rest.push(e);
                 continue;
             }
             let mark = self.sc.mark();
             let had_ws = self.skip_ws_inline();
+            // Two atoms that touch with no whitespace normally end the list, but
+            // dart-sass forms an implicit space-separated list when a quoted
+            // string abuts an adjacent atom: `"["'foo'"]"` -> `"[" "foo" "]"`,
+            // `gamme "'"delta` -> `gamme "'" delta`. This applies when the
+            // previous atom was a quoted string, or the next atom begins one
+            // (any binary operator was already consumed by `or_expr`, so a
+            // remaining non-terminator atom here is a genuine list element).
+            let adjacent_string = !had_ws
+                && self.at_value_atom_start()
+                && (prev_was_string || matches!(self.sc.peek(), Some('"') | Some('\'')));
             // A lone `=` (not `==`) ends the space-list so an enclosing
             // argument list can apply the single-`=` Microsoft-filter operator
             // (`foo(a = b)`); `==` stays the equality operator, parsed above.
-            if !had_ws
+            if (!had_ws && !adjacent_string)
                 || self.at_value_terminator()
                 || (self.sc.peek() == Some('=') && self.sc.peek_at(1) != Some('='))
             {
                 self.sc.reset(mark);
                 break;
             }
-            rest.push(self.or_expr()?);
+            let e = self.or_expr()?;
+            prev_was_string = expr_is_quoted_string(&e);
+            rest.push(e);
         }
         if rest.is_empty() {
             Ok(first)

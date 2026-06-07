@@ -2347,3 +2347,36 @@ fn calc_nested_parenthesization() {
     // A top-level (non-nested) calc keeps its own interpolation bare.
     assert_eq!(ours("a {b: calc(#{\"c*\"})}\n"), "a {\n  b: calc(c*);\n}\n");
 }
+
+#[test]
+fn adjacent_quoted_string_schema() {
+    // A quoted string that abuts an adjacent atom with no whitespace forms an
+    // implicit space-separated list — including same-type quotes nested inside
+    // interpolation, which dart-sass parses as a "string schema".
+    assert_eq!(
+        ours("a {b: \"[\"'foo'\"]\"}\n"),
+        "a {\n  b: \"[\" \"foo\" \"]\";\n}\n"
+    );
+    assert_eq!(ours("a {b: \"x\"\"y\"}\n"), "a {\n  b: \"x\" \"y\";\n}\n");
+    // A string followed by, or preceded by, a non-string atom also lists.
+    assert_eq!(ours("a {b: \"x\"foo}\n"), "a {\n  b: \"x\" foo;\n}\n");
+    assert_eq!(ours("a {b: foo\"x\"}\n"), "a {\n  b: foo \"x\";\n}\n");
+    assert_eq!(ours("a {b: 1\"x\"}\n"), "a {\n  b: 1 \"x\";\n}\n");
+    assert_eq!(
+        ours("a {b: gamme \"x\"delta}\n"),
+        "a {\n  b: gamme \"x\" delta;\n}\n"
+    );
+    // A same-type quote nested inside interpolation: the inner string schema
+    // resolves and re-quotes around the surrounding string.
+    assert_eq!(
+        ours("a {b: \"[#{\"[\"'foo'\"]\"}]\"}\n"),
+        "a {\n  b: \"[[ foo ]]\";\n}\n"
+    );
+    assert_eq!(ours("a {b: #{\"[\"'foo'\"]\"}}\n"), "a {\n  b: [ foo ];\n}\n");
+    // Adjacency must not swallow a map key-value colon: a quoted-string map
+    // key still parses (`("a": 1)`).
+    assert_eq!(
+        ours("$m: (\"a\": 1); a {b: map-get($m, \"a\")}\n"),
+        "a {\n  b: 1;\n}\n"
+    );
+}
