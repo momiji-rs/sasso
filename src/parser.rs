@@ -1035,6 +1035,29 @@ impl Parser {
                 }
             }
         }
+        // Scientific notation: `e`/`E` is an exponent only when followed by
+        // (an optionally-signed) digit; otherwise it begins a unit (`1em`).
+        if matches!(self.sc.peek(), Some('e' | 'E')) {
+            let after = self.sc.peek_at(1);
+            let exp_digit = matches!(after, Some(c) if c.is_ascii_digit())
+                || (matches!(after, Some('+' | '-'))
+                    && matches!(self.sc.peek_at(2), Some(c) if c.is_ascii_digit()));
+            if exp_digit {
+                if let Some(c) = self.sc.bump() {
+                    s.push(c);
+                }
+                if matches!(self.sc.peek(), Some('+' | '-')) {
+                    if let Some(c) = self.sc.bump() {
+                        s.push(c);
+                    }
+                }
+                while matches!(self.sc.peek(), Some(c) if c.is_ascii_digit()) {
+                    if let Some(c) = self.sc.bump() {
+                        s.push(c);
+                    }
+                }
+            }
+        }
         let value: f64 = s
             .parse()
             .map_err(|_| Error::at(format!("invalid number {s:?}"), self.sc.position()))?;

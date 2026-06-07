@@ -100,6 +100,25 @@ fn parity_modulo_sign() {
 }
 
 #[test]
+fn parity_large_numbers() {
+    // Huge literals print as plain decimals, scientific notation expands,
+    // and fractions round to ten places exactly like dart-sass.
+    assert_parity(concat!(
+        "a {\n",
+        "  big: 99999999999999999999999999999;\n",
+        "  bigdec: 1234567890123456789;\n",
+        "  neg: -123456789012345;\n",
+        "  sci: 1e20;\n",
+        "  sci2: 1.5e3;\n",
+        "  sci3: 1e-3;\n",
+        "  unit: 1e3px;\n",
+        "  third: (1 / 3);\n",
+        "  precise: 0.1 + 0.2;\n",
+        "}\n",
+    ));
+}
+
+#[test]
 fn parity_slash_division() {
     // The deprecated `/` keeps a slash spelling between number literals but
     // performs real division once an operand is computed, parenthesized,

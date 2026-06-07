@@ -375,16 +375,18 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
             "-Infinity".to_string()
         };
     }
-    let rounded = (n * 1e10).round() / 1e10;
-    let mut s = format!("{rounded:.10}");
-    if s.contains('.') {
-        while s.ends_with('0') {
-            s.pop();
-        }
-        if s.ends_with('.') {
-            s.pop();
-        }
-    }
+    // Integers (including huge literals well beyond `2^53`) print via the
+    // shortest round-tripping form, which never overflows into exponential
+    // notation and matches dart-sass. Multiplying by `1e10` to round would
+    // corrupt large magnitudes, so it is reserved for fractional values.
+    let mut s = if n.fract() == 0.0 {
+        format!("{n}")
+    } else {
+        // Round to 10 decimal places via fixed formatting (correct at every
+        // magnitude), then re-emit the shortest decimal that round-trips.
+        let rounded: f64 = format!("{n:.10}").parse().unwrap_or(n);
+        format!("{rounded}")
+    };
     if s == "-0" {
         s = "0".to_string();
     }
@@ -456,6 +458,30 @@ mod tests {
         assert_eq!(fmt_num(0.5, false), "0.5");
         assert_eq!(fmt_num(-0.0, false), "0");
         assert_eq!(fmt_num(16.0, false), "16");
+    }
+
+    #[test]
+    fn fmt_num_large_values_stay_plain_decimals() {
+        // Exact integers print in full, never exponential.
+        assert_eq!(fmt_num(123456789012345.0, false), "123456789012345");
+        assert_eq!(fmt_num(-123456789012345.0, false), "-123456789012345");
+        assert_eq!(fmt_num(1e20, false), "100000000000000000000");
+        // Beyond 2^53 the shortest round-tripping form matches dart-sass.
+        assert_eq!(fmt_num(1234567890123456789.0, false), "1234567890123456800");
+        assert_eq!(
+            fmt_num(99999999999999999999999999999.0, false),
+            "100000000000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn fmt_num_rounds_fractions_to_ten_places() {
+        assert_eq!(fmt_num(0.1 + 0.2, false), "0.3");
+        assert_eq!(fmt_num(1.0 / 3.0, false), "0.3333333333");
+        assert_eq!(fmt_num(2.0 / 3.0, false), "0.6666666667");
+        assert_eq!(fmt_num(123456.78901234567, false), "123456.7890123457");
+        // Below the tenth decimal place rounds away entirely.
+        assert_eq!(fmt_num(1e-11, false), "0");
     }
 
     #[test]
