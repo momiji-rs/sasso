@@ -1190,3 +1190,14 @@ fn lone_percent_is_a_value_token() {
     assert_parity("a { b: foo(1, %, 2); }\n");
     assert_parity("a { b: 7 % 3; }\n");
 }
+
+#[test]
+fn quoted_string_line_continuation_is_removed() {
+    // A backslash immediately followed by a CSS newline inside a quoted string
+    // is a line continuation: both the backslash and the newline are dropped,
+    // joining the two physical lines (leading whitespace on the next line is
+    // preserved). Byte-matched to dart-sass.
+    assert_parity("a { b: \"line1 \\\n      line2\"; }\n");
+    assert_parity("a { b: \"x\\\ny\"; }\n");
+    assert_parity("a { b: 'a\\\nb\\\nc'; }\n");
+}
