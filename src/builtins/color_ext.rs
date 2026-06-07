@@ -306,12 +306,43 @@ fn angle_degrees(v: &Value, pos: Pos) -> Result<f64, Error> {
     }
 }
 
-/// `complement($color)` — rotate the hue by 180 degrees.
+/// `complement($color, $space)` — rotate the hue by 180 degrees in `$space`
+/// (default `hsl` for legacy colors; required for non-legacy colors).
 fn fn_complement(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let params = ["color"];
+    let params = ["color", "space"];
     check_max_args(pos_args, named, 2, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, "complement", pos)?, pos)?;
-    Ok(Value::Color(rotate_hue(&c, 180.0)))
+    let space_v = arg(&params, pos_args, named, 1);
+    let is_legacy = c.modern.as_ref().map(|m| m.space.is_legacy()).unwrap_or(true);
+    let space = match space_v {
+        Some(v) => space_arg(v, pos)?,
+        None if is_legacy => ColorSpace::Hsl,
+        None => {
+            return Err(Error::at(
+                format!(
+                    "$space: To use color.complement() with non-legacy color {}, you must provide a $space.",
+                    c.to_css(false)
+                ),
+                pos,
+            ))
+        }
+    };
+    // The space must have a hue channel.
+    if !matches!(
+        space,
+        ColorSpace::Hsl | ColorSpace::Hwb | ColorSpace::Lch | ColorSpace::Oklch
+    ) {
+        return Err(Error::at(
+            format!("$space: Color space {} doesn't have a hue channel.", space.name()),
+            pos,
+        ));
+    }
+    // complement = adjust the hue by +180deg in the space.
+    let deg = Value::Number(Number {
+        value: 180.0,
+        unit: "deg".to_string(),
+    });
+    modify_in_space(&c, space, &[("hue".to_string(), &deg)], ModifyOp::Adjust, pos)
 }
 
 fn rotate_hue(c: &Color, degrees: f64) -> Color {
@@ -367,13 +398,15 @@ fn fn_invert(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option<
         if space_v.is_some() || !is_legacy {
             let space = match space_v {
                 Some(v) => space_arg(v, pos)?,
-                None => return Err(Error::at(
-                    format!(
+                None => {
+                    return Err(Error::at(
+                        format!(
                         "$color: To use color.invert() with non-legacy color {}, you must provide a $space.",
                         c.to_css(false)
                     ),
-                    pos,
-                )),
+                        pos,
+                    ))
+                }
             };
             return Ok(Value::Color(super::color::invert_in_space(&c, space, w)));
         }
