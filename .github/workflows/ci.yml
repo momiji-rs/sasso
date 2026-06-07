@@ -14,7 +14,7 @@ jobs:
     name: fmt · clippy · test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -30,12 +30,12 @@ jobs:
     name: dart-sass parity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
       - name: install dart-sass
         run: npm install -g sass
       - name: parity tests vs dart-sass
@@ -45,7 +45,7 @@ jobs:
     name: wasm32-wasip1 build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
@@ -57,7 +57,7 @@ jobs:
     name: sass-spec ratchet
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: fetch sass-spec
