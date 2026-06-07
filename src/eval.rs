@@ -670,13 +670,16 @@ impl<'a> Evaluator<'a> {
         // A top-level `!default` variable in a module being evaluated with
         // configuration: the supplied value overrides the default (unless the
         // override itself is `!default` and the variable already has a value).
+        // Configuration is keyed by the canonical (dashed) variable name.
         if v.is_default && self.scopes.len() == 1 {
-            if let Some((cfg_val, cfg_is_default)) = self.pending_config.get(&v.name).cloned() {
-                self.consumed_config.push(v.name.clone());
+            let key = normalize_var_name(&v.name);
+            if let Some((cfg_val, cfg_is_default)) = self.pending_config.get(&key).cloned() {
+                self.consumed_config.push(key);
                 let already_set = matches!(self.lookup(&v.name), Some(x) if !matches!(x, Value::Null));
-                // `@forward ... with ($x !default)`: only apply if the module
+                // A `null` configuration value leaves the `!default` in place;
+                // a `@forward ... with ($x !default)` only applies if the module
                 // hasn't already defined the variable.
-                if !(cfg_is_default && already_set) {
+                if !(matches!(cfg_val, Value::Null) || cfg_is_default && already_set) {
                     if let Some(g) = self.scopes.first_mut() {
                         g.insert(v.name.clone(), cfg_val);
                     }
@@ -1306,7 +1309,17 @@ impl<'a> Evaluator<'a> {
         let mut map = HashMap::new();
         for entry in config {
             let v = self.eval_expr(&entry.value)?.without_slash();
-            map.insert(entry.name.clone(), (v, entry.is_default));
+            // Variable names are dash/underscore-insensitive: store the
+            // canonical (dashed) form so `$a_b` and `$a-b` configure the same
+            // variable. A duplicate key is an error.
+            let key = normalize_var_name(&entry.name);
+            if map.contains_key(&key) {
+                return Err(Error::unpositioned(format!(
+                    "The variable ${} was configured twice.",
+                    entry.name
+                )));
+            }
+            map.insert(key, (v, entry.is_default));
         }
         Ok(map)
     }
@@ -5117,6 +5130,12 @@ fn forward_var_visibility(
         }
         true
     }
+}
+
+/// Canonicalize a Sass variable name: `-` and `_` are interchangeable, so the
+/// canonical form replaces every `_` with `-` (dart-sass dash-insensitivity).
+fn normalize_var_name(name: &str) -> String {
+    name.replace('_', "-")
 }
 
 /// Whether a member name is private (dart-sass: a leading `-` or `_`), so it is
