@@ -18,7 +18,7 @@ pub(crate) enum Combinator {
 }
 
 impl Combinator {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Combinator::Child => ">",
             Combinator::NextSibling => "+",
@@ -48,7 +48,7 @@ pub(crate) enum Simple {
 }
 
 impl Simple {
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         match self {
             Simple::Universal { ns: None } => "*".to_string(),
             Simple::Universal { ns: Some(n) } => format!("{n}|*"),
@@ -74,7 +74,7 @@ pub(crate) struct Compound {
 }
 
 impl Compound {
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         self.simples.iter().map(Simple::render).collect()
     }
 
@@ -99,7 +99,7 @@ pub(crate) struct Complex {
 }
 
 impl Complex {
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         let mut out = String::new();
         for (i, comp) in self.components.iter().enumerate() {
             if i > 0 {
@@ -1452,4 +1452,271 @@ fn is_pseudo_element(s: &Simple) -> bool {
     let name = text.trim_start_matches(':');
     let base = name.split(['(', ' ']).next().unwrap_or(name).to_ascii_lowercase();
     matches!(base.as_str(), "before" | "after" | "first-line" | "first-letter")
+}
+
+// ---- public helpers for the `sass:selector` builtin family -------------
+//
+// These are thin, additive re-exports of the engine internals above. They add
+// no new behavior to the `@extend` directive path; they only expose the
+// algorithms (superselector test, compound/complex unification, parent
+// weaving) to `crate::builtins::selector`.
+
+/// Whether selector list `sup` is a superselector of `sub`: every complex in
+/// `sub` must be matched by some complex in `sup` (dart-sass `listIsSuperselector`).
+pub(crate) fn list_is_superselector(sup: &[Complex], sub: &[Complex]) -> bool {
+    sub.iter()
+        .all(|c2| sup.iter().any(|c1| complex_is_superselector(c1, c2)))
+}
+
+/// Unify two complex selectors into the (possibly several) complex selectors
+/// they jointly match, or `None` if their trailing compounds can't unify
+/// (dart-sass `unifyComplex` for the two-selector case). Only descendant
+/// combinators in the parents are fully woven; a combinator falls back to plain
+/// concatenation (matching the engine's `weave_parents`).
+pub(crate) fn unify_complex(c1: &Complex, c2: &Complex) -> Option<Vec<Complex>> {
+    let last1 = c1.components.last()?;
+    let last2 = c2.components.last()?;
+    // Trailing compounds must unify.
+    let unified = unify_compounds(&last1.compound.simples, &last2.compound.simples)?;
+    let base = ComplexComponent {
+        // The unified trailing component keeps whichever explicit combinator is
+        // present (they must agree for a successful unify; prefer the first).
+        combinator: last1.combinator.or(last2.combinator),
+        compound: Compound { simples: unified },
+    };
+    let parents1 = &c1.components[..c1.components.len() - 1];
+    let parents2 = &c2.components[..c2.components.len() - 1];
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for mut woven in weave_parents(parents1, parents2) {
+        woven.push(base.clone());
+        let complex = Complex { components: woven };
+        if seen.insert(complex.render()) {
+            out.push(complex);
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Unify two selector lists: the cartesian product of `unify_complex` over each
+/// pair of complex selectors, dropping pairs that don't unify (dart-sass
+/// `SelectorList.unify`). Returns `None` if nothing unifies.
+pub(crate) fn unify_lists(list1: &[Complex], list2: &[Complex]) -> Option<Vec<Complex>> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for c1 in list1 {
+        for c2 in list2 {
+            if let Some(unified) = unify_complex(c1, c2) {
+                for c in unified {
+                    if seen.insert(c.render()) {
+                        out.push(c);
+                    }
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Render a complex selector as the items of a Sass space-separated list:
+/// compound strings interleaved with combinator strings (`>`/`+`/`~`), matching
+/// dart-sass's `ComplexSelector.asSassList`.
+pub(crate) fn complex_to_list_parts(c: &Complex) -> Vec<String> {
+    let mut parts = Vec::new();
+    for comp in &c.components {
+        if let Some(comb) = comp.combinator {
+            parts.push(comb.as_str().to_string());
+        }
+        parts.push(comp.compound.render());
+    }
+    parts
+}
+
+/// Parse a single compound selector (no combinators, no commas). Returns the
+/// list of simple-selector strings, or `None` if the text isn't a single valid
+/// compound (dart-sass `simple-selectors` parses a `CompoundSelector`).
+pub(crate) fn parse_compound_simples(s: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = s.trim().chars().collect();
+    let mut i = 0;
+    let compound = parse_compound(&chars, &mut i)?;
+    skip_ws(&chars, &mut i);
+    if i != chars.len() {
+        return None; // trailing combinator / second compound / garbage
+    }
+    Some(compound.simples.iter().map(Simple::render).collect())
+}
+
+/// Extend a selector list against a single *compound* target (used by the
+/// `selector-extend` / `selector-replace` builtins, which — unlike the
+/// `@extend` directive — allow a multi-simple compound extendee). Wherever the
+/// `target` compound is a subselector of a component's compound, the `extender`
+/// selectors are woven in. With `replace` true the matched original is dropped
+/// (`selector-replace`); otherwise it is kept (`selector-extend`). This mirrors
+/// dart-sass `_extendComplex`/`_extendCompound` for the single-extension case.
+pub(crate) fn extend_compound_target(
+    selectors: &[Complex],
+    target: &Compound,
+    extenders: &[Complex],
+    replace: bool,
+) -> Vec<Complex> {
+    // Originals are never trimmed away (dart-sass keeps the input selectors so a
+    // rule still matches what it always matched). In replace mode the matched
+    // originals are dropped before this point, so the set is the surviving ones.
+    let mut originals: HashSet<String> = HashSet::new();
+    if !replace {
+        for complex in selectors {
+            originals.insert(complex.render());
+        }
+    }
+
+    let mut result: Vec<Complex> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for complex in selectors {
+        for c in extend_complex_compound(complex, target, extenders, replace) {
+            let rendered = c.render();
+            if seen.insert(rendered) {
+                result.push(c);
+            }
+        }
+    }
+    // Drop selectors made redundant by a superselector elsewhere in the list
+    // (dart-sass `_trim`), keeping originals.
+    trim(result, &originals)
+}
+
+/// Extend one complex selector against a compound target: compute each
+/// component's options (original first unless replaced), take the Cartesian
+/// product, and `weave` each path — the same shape as `extend_complex`.
+fn extend_complex_compound(
+    complex: &Complex,
+    target: &Compound,
+    extenders: &[Complex],
+    replace: bool,
+) -> Vec<Complex> {
+    let mut per_component: Vec<Vec<Complex>> = Vec::new();
+    let mut any_extended = false;
+    for comp in &complex.components {
+        let opts = extend_component_compound(comp, target, extenders, replace);
+        if opts.len() != 1 || opts.first().map(|c| &c.components) != Some(&vec![comp.clone()]) {
+            any_extended = true;
+        }
+        per_component.push(opts);
+    }
+    if !any_extended {
+        return vec![complex.clone()];
+    }
+
+    // dart-sass `paths`: for each component's options, the *option* is the outer
+    // loop and the accumulated paths the inner loop, so the first component's
+    // choice varies fastest in the output order.
+    let mut combos: Vec<Vec<Complex>> = vec![Vec::new()];
+    for opts in &per_component {
+        let mut next: Vec<Vec<Complex>> = Vec::new();
+        for opt in opts {
+            for combo in &combos {
+                let mut c = combo.clone();
+                c.push(opt.clone());
+                next.push(c);
+            }
+        }
+        combos = next;
+        if combos.len() > 100_000 {
+            break;
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for path in combos {
+        for c in weave(&path) {
+            let r = c.render();
+            if seen.insert(r) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// Options for one component against a compound target. The original component
+/// is option 0 in extend mode (and in replace mode when it does not match);
+/// each matching extender contributes the woven replacement.
+fn extend_component_compound(
+    comp: &ComplexComponent,
+    target: &Compound,
+    extenders: &[Complex],
+    replace: bool,
+) -> Vec<Complex> {
+    let matches = compound_is_superselector(target, &comp.compound);
+    // The original component (as a one-component complex).
+    let original = Complex {
+        components: vec![comp.clone()],
+    };
+    if !matches {
+        return vec![original];
+    }
+
+    // The simples of this compound not covered by the target.
+    let remaining: Vec<Simple> = comp
+        .compound
+        .simples
+        .iter()
+        .filter(|s| !target.simples.contains(s))
+        .cloned()
+        .collect();
+
+    let mut options: Vec<Complex> = Vec::new();
+    if !replace {
+        options.push(original);
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    for ext in extenders {
+        let Some(last) = ext.components.last() else {
+            continue;
+        };
+        let Some(unified) = unify_compounds(&remaining, &last.compound.simples) else {
+            continue;
+        };
+        // Build the extended component sequence: the extender's leading
+        // components, then the unified trailing compound (carrying this
+        // component's incoming combinator on its first element).
+        let mut components: Vec<ComplexComponent> = Vec::new();
+        let lead = &ext.components[..ext.components.len() - 1];
+        for (k, l) in lead.iter().enumerate() {
+            let combinator = if k == 0 { comp.combinator } else { l.combinator };
+            components.push(ComplexComponent {
+                combinator,
+                compound: l.compound.clone(),
+            });
+        }
+        let trail_combinator = if lead.is_empty() {
+            comp.combinator
+        } else {
+            last.combinator
+        };
+        components.push(ComplexComponent {
+            combinator: trail_combinator,
+            compound: Compound { simples: unified },
+        });
+        let candidate = Complex { components };
+        let key = candidate.render();
+        if seen.insert(key) {
+            options.push(candidate);
+        }
+    }
+    if options.is_empty() {
+        // Replace mode with no successful unification: keep the original so the
+        // selector isn't silently dropped (dart-sass leaves an unmatched
+        // component intact).
+        options.push(Complex {
+            components: vec![comp.clone()],
+        });
+    }
+    options
 }

@@ -2068,6 +2068,33 @@ fn number_rounds_half_away_from_zero_at_tenth_place() {
     assert_eq!(
         ours("a {b: 123456789.12345678905}\n"),
         "a {\n  b: 123456789.12345679;\n}\n"
+fn selector_nest_and_append() {
+    // `selector-nest` joins selectors as descendants and resolves `&`; the
+    // result is a comma list of space lists rendered as the usual selector
+    // string. `selector-append` joins with no descendant combinator (the
+    // leading compound of each suffix merges onto the prefix's trailing one).
+    // All outputs byte-verified against dart-sass.
+    assert_eq!(ours("a {b: selector-nest(c, d)}\n"), "a {\n  b: c d;\n}\n");
+    assert_eq!(
+        ours("a {b: selector-nest(\".a, .b\", \".c, .d\")}\n"),
+        "a {\n  b: .a .c, .a .d, .b .c, .b .d;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: selector-nest(\".a .b\", \"&:hover\")}\n"),
+        "a {\n  b: .a .b:hover;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: selector-nest(\".p1 .p2\", \".x & .y\")}\n"),
+        "a {\n  b: .x .p1 .p2 .y;\n}\n"
+    );
+    assert_eq!(ours("a {b: selector-append(c, d)}\n"), "a {\n  b: cd;\n}\n");
+    assert_eq!(
+        ours("a {b: selector-append(\".a .b\", \".c .d\")}\n"),
+        "a {\n  b: .a .b.c .d;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: selector-append(\".a, .b\", \".c .d, .e\")}\n"),
+        "a {\n  b: .a.c .d, .a.e, .b.c .d, .b.e;\n}\n"
     );
 }
 
@@ -2094,4 +2121,73 @@ fn opaque_hex_literals_preserve_authored_spelling() {
     )
     .expect("compile failed");
     assert_eq!(compressed, "a{b:#fa0}");
+fn selector_extend_and_replace() {
+    // `selector-extend` adds the extender wherever the (compound) extendee
+    // matches, keeping the original; `selector-replace` drops the matched
+    // original. Compound extendees (`.a.b`) match a compound only when all
+    // their simples are present. All outputs byte-verified against dart-sass.
+    assert_eq!(ours("a {b: selector-extend(c, c, d)}\n"), "a {\n  b: c, d;\n}\n");
+    assert_eq!(
+        ours("a {b: selector-extend(\".a .b\", \".b\", \".c\")}\n"),
+        "a {\n  b: .a .b, .a .c;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: selector-extend(\".a.b .c\", \".a.b\", \".x\")}\n"),
+        "a {\n  b: .a.b .c, .x .c;\n}\n"
+    );
+    // `.a .c` does NOT match the compound `.a.b`, so it is unchanged.
+    assert_eq!(
+        ours("a {b: selector-extend(\".a .c\", \".a.b\", \".x\")}\n"),
+        "a {\n  b: .a .c;\n}\n"
+    );
+    assert_eq!(ours("a {b: selector-replace(c, c, d)}\n"), "a {\n  b: d;\n}\n");
+    assert_eq!(
+        ours("a {b: selector-replace(\".a.b.c\", \".a.b\", \".x\")}\n"),
+        "a {\n  b: .c.x;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: selector-replace(\".x\", \".c\", \".d\")}\n"),
+        "a {\n  b: .x;\n}\n"
+    );
+}
+
+#[test]
+fn selector_unify_superselector_simple_and_parse() {
+    // `selector-unify` yields the selectors matching both inputs (or `null`
+    // when nothing unifies — the declaration is then dropped). `is-superselector`
+    // tests selector-list containment. `simple-selectors` splits one compound
+    // into its simples; `selector-parse` round-trips a selector string. All
+    // outputs byte-verified against dart-sass.
+    assert_eq!(
+        ours("a {b: selector-unify(\".c\", \".d\")}\n"),
+        "a {\n  b: .c.d;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: selector-unify(\".a .b\", \".c .d\")}\n"),
+        "a {\n  b: .a .c .b.d, .c .a .b.d;\n}\n"
+    );
+    // Incompatible type selectors don't unify; `null` drops the declaration,
+    // leaving the rule empty and therefore omitted entirely (as dart-sass does).
+    assert_eq!(ours("a {b: selector-unify(a, b)}\n"), "");
+    assert_eq!(ours("a {b: is-superselector(c, d)}\n"), "a {\n  b: false;\n}\n");
+    assert_eq!(
+        ours("a {b: is-superselector(\".a\", \".a.b\")}\n"),
+        "a {\n  b: true;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: simple-selectors(\".c.d\")}\n"),
+        "a {\n  b: .c, .d;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: simple-selectors(\"a.b.c:hover\")}\n"),
+        "a {\n  b: a, .b, .c, :hover;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: selector-parse(\".c, .d\")}\n"),
+        "a {\n  b: .c, .d;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: selector-parse(\".a > .b, .c + .d\")}\n"),
+        "a {\n  b: .a > .b, .c + .d;\n}\n"
+    );
 }

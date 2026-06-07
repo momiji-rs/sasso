@@ -15,6 +15,7 @@ mod list;
 mod map;
 mod math;
 mod meta;
+mod selector;
 mod string;
 
 use crate::error::Error;
@@ -51,6 +52,9 @@ pub(crate) fn call(
     if let Some(r) = meta::try_call(name, pos_args, named, pos) {
         return r;
     }
+    if let Some(r) = selector::try_call(name, pos_args, named, pos) {
+        return r;
+    }
     Ok(plain_css_function(name, pos_args, named))
 }
 
@@ -73,6 +77,7 @@ pub(crate) fn is_builtin(name: &str) -> bool {
         || map::try_call(name, pos, named, p).is_some()
         || list::try_call(name, pos, named, p).is_some()
         || meta::try_call(name, pos, named, p).is_some()
+        || selector::try_call(name, pos, named, p).is_some()
 }
 
 // ---- shared argument helpers, available to every family module --------
