@@ -213,12 +213,18 @@ fn parse_compound(chars: &[char], i: &mut usize) -> Option<Compound> {
             }
             '*' => {
                 *i += 1;
-                // namespace: `*|name` is unusual; handle `*` then optional `|`.
+                // `*|...` uses `*` as a namespace prefix.
                 if *i < chars.len() && chars[*i] == '|' && chars.get(*i + 1) != Some(&'=') {
-                    // `*|type`
                     *i += 1;
-                    let rest = read_type_after_ns(chars, i)?;
-                    simples.push(rest);
+                    match read_type_after_ns(chars, i)? {
+                        // `*|*`
+                        Simple::Universal { .. } => simples.push(Simple::Universal {
+                            ns: Some("*".to_string()),
+                        }),
+                        // `*|type`
+                        Simple::Type(t) => simples.push(Simple::Type(format!("*|{t}"))),
+                        other => simples.push(other),
+                    }
                 } else {
                     simples.push(Simple::Universal { ns: None });
                 }
@@ -938,63 +944,56 @@ fn render_components(seq: &[ComplexComponent]) -> String {
 
 /// Unify two compound selectors into one, returning `None` if they can't be
 /// combined into a single valid compound (e.g. two different type selectors,
-/// two different ids). The result orders type/universal first, then the
-/// existing simples, then the new ones (deduplicated), matching dart-sass's
-/// rendered output for the common cases.
+/// two different ids). Type/universal selectors merge; remaining non-pseudo
+/// simples keep insertion order (base then extra, deduplicated); pseudo
+/// selectors are always emitted last (dart-sass `SimpleSelector.unify` keeps
+/// pseudos at the end of a compound).
 fn unify_compounds(base: &[Simple], extra: &[Simple]) -> Option<Vec<Simple>> {
-    // Collect type/universal selectors from both; they must unify.
     let mut type_sel: Option<Simple> = None;
     let mut id_sel: Option<Simple> = None;
-    let mut rest: Vec<Simple> = Vec::new();
+    let mut non_pseudo: Vec<Simple> = Vec::new();
+    let mut pseudos: Vec<Simple> = Vec::new();
 
-    let push = |s: &Simple,
-                type_sel: &mut Option<Simple>,
-                id_sel: &mut Option<Simple>,
-                rest: &mut Vec<Simple>|
-     -> Option<()> {
+    for s in base.iter().chain(extra.iter()) {
         match s {
-            Simple::Type(_) | Simple::Universal { .. } => match type_sel {
-                None => *type_sel = Some(s.clone()),
-                Some(existing) => {
-                    let merged = unify_type(existing, s)?;
-                    *type_sel = Some(merged);
-                }
+            Simple::Type(_) | Simple::Universal { .. } => match &type_sel {
+                None => type_sel = Some(s.clone()),
+                Some(existing) => type_sel = Some(unify_type(existing, s)?),
             },
-            Simple::Id(_) => match id_sel {
-                None => *id_sel = Some(s.clone()),
+            Simple::Id(_) => match &id_sel {
+                None => {
+                    id_sel = Some(s.clone());
+                    non_pseudo.push(s.clone());
+                }
                 Some(existing) => {
                     if existing != s {
                         return None; // two different ids can't unify
                     }
                 }
             },
+            Simple::Pseudo(_) => {
+                if !pseudos.contains(s) {
+                    pseudos.push(s.clone());
+                }
+            }
             _ => {
-                if !rest.contains(s) {
-                    rest.push(s.clone());
+                if !non_pseudo.contains(s) {
+                    non_pseudo.push(s.clone());
                 }
             }
         }
-        Some(())
-    };
-
-    for s in base {
-        push(s, &mut type_sel, &mut id_sel, &mut rest)?;
-    }
-    for s in extra {
-        push(s, &mut type_sel, &mut id_sel, &mut rest)?;
     }
 
     let mut out = Vec::new();
     if let Some(t) = type_sel {
         // A bare universal `*` is dropped when other simples are present.
-        if !(matches!(t, Simple::Universal { ns: None }) && (!rest.is_empty() || id_sel.is_some())) {
+        let others = !non_pseudo.is_empty() || !pseudos.is_empty();
+        if !(matches!(t, Simple::Universal { ns: None }) && others) {
             out.push(t);
         }
     }
-    out.extend(rest);
-    if let Some(id) = id_sel {
-        out.push(id);
-    }
+    out.extend(non_pseudo);
+    out.extend(pseudos);
     if out.is_empty() {
         return None;
     }
