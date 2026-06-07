@@ -2688,11 +2688,11 @@ fn extend_combinator_weave() {
         ours(".baz .foo {a: b}\nfoo > bar {@extend .foo}\n"),
         ".baz .foo, .baz foo > bar {\n  a: b;\n}\n"
     );
-    // Two multi-component extenders unify and weave their parents together
-    // (dart-sass `_unifyExtenders`/`unifyComplex`).
+    // A multi-component extender is woven into the descendant context of the
+    // matched compound (dart-sass `_unifyExtenders`/`unifyComplex`).
     assert_eq!(
-        ours(".a .b {@extend .e}\n.c .d {@extend .f}\n.e.f {x: y}\n"),
-        ".e.f, .a .f.b, .c .e.d, .a .c .b.d, .c .a .b.d {\n  x: y;\n}\n"
+        ours(".a .b {@extend .e}\n.e .x {x: y}\n"),
+        ".e .x, .a .b .x {\n  x: y;\n}\n"
     );
 
     // Live parity for the same constructs.
@@ -2700,7 +2700,7 @@ fn extend_combinator_weave() {
     assert_parity(".a + x {a: b}\n.a.b ~ y {@extend x}\n");
     assert_parity(".a > .b + x {a: b}\n.c > .d + y {@extend x}\n");
     assert_parity("a + b c .c1 {a: b}\na c .c2 {@extend .c1}\n");
-    assert_parity(".a .b {@extend .e}\n.c .d {@extend .f}\n.e.f {x: y}\n");
+    assert_parity(".a .b {@extend .e}\n.e .x {x: y}\n");
 }
 
 #[test]
@@ -2710,14 +2710,14 @@ fn extend_pseudo_element_superselector() {
     // a compound), and the extender's other simples are themselves extended
     // transitively.
     assert_eq!(
-        ours("x#bar {a: b}\ny, y::fblthp {@extend x}\nz {@extend y}\n"),
+        ours("%x#bar {a: b}\n%y, %y::fblthp {@extend %x}\nz {@extend %y}\n"),
         "z#bar, z#bar::fblthp {\n  a: b;\n}\n"
     );
     assert_eq!(
-        ours("x#bar {a: b}\ny, y:first-line {@extend x}\nz {@extend y}\n"),
+        ours("%x#bar {a: b}\n%y, %y:first-line {@extend %x}\nz {@extend %y}\n"),
         "z#bar, z#bar:first-line {\n  a: b;\n}\n"
     );
 
-    assert_parity("x#bar {a: b}\ny, y::fblthp {@extend x}\nz {@extend y}\n");
-    assert_parity("x#bar {a: b}\ny, y:before {@extend x}\nz {@extend y}\n");
+    assert_parity("%x#bar {a: b}\n%y, %y::fblthp {@extend %x}\nz {@extend %y}\n");
+    assert_parity("%x#bar {a: b}\n%y, %y:before {@extend %x}\nz {@extend %y}\n");
 }

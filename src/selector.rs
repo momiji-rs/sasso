@@ -1557,14 +1557,14 @@ fn extend_component(comp: &ComplexComponent, extensions: &[Extension]) -> Vec<Ve
         return options;
     }
 
-    // Cartesian product of per-simple choices. The iteration order matches
-    // dart-sass `paths`: for each simple's options, the option is the outer loop
-    // and the accumulated paths the inner loop.
+    // Cartesian product of per-simple choices (path outer, option inner) so the
+    // first simple's choice varies slowest — matching dart-sass's observed
+    // output order for within-compound extension.
     let mut paths: Vec<Vec<&Option<Complex>>> = vec![Vec::new()];
     for opts in &per_simple {
         let mut next = Vec::new();
-        for opt in opts {
-            for path in &paths {
+        for path in &paths {
+            for opt in opts {
                 let mut p = path.clone();
                 p.push(opt);
                 next.push(p);
