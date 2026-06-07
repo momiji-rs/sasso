@@ -2054,8 +2054,15 @@ fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColor {
         return mc.clone();
     }
     let src = [z(mc.channels[0]), z(mc.channels[1]), z(mc.channels[2])];
-    let xyz = to_xyz_d65(mc.space, src);
-    let out = from_xyz_d65(target, xyz);
+    // Same-primary conversions avoid an XYZ round-trip (which would introduce
+    // tiny floating-point error): rgb (0..255) and srgb (0..1) differ only by a
+    // 255 scale, and hsl/hwb share rgb's primaries.
+    let out = if let Some(direct) = direct_convert(mc.space, target, src) {
+        direct
+    } else {
+        let xyz = to_xyz_d65(mc.space, src);
+        from_xyz_d65(target, xyz)
+    };
     // For each output channel, become missing if the analogous source channel
     // was missing.
     let missing_in_src = |cat: ChannelCategory| {
@@ -2065,11 +2072,45 @@ fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColor {
         Some(cat) if missing_in_src(cat) => None,
         _ => Some(out[i]),
     };
+    let mut channels = [mk(0), mk(1), mk(2)];
+    // An lch/oklch hue that is powerless in the result (zero chroma) becomes a
+    // missing channel, matching dart-sass's conversion behavior. (hsl keeps a
+    // numeric hue at zero saturation.)
+    if matches!(target, ColorSpace::Lch | ColorSpace::Oklch) && out[1].abs() < 1e-10 {
+        channels[2] = None;
+    }
     ModernColor {
         space: target,
-        channels: [mk(0), mk(1), mk(2)],
+        channels,
         alpha: mc.alpha,
     }
+}
+
+/// Direct (no XYZ round-trip) conversion for same-primary spaces, returning the
+/// three target channels, or `None` if the pair needs the general path.
+fn direct_convert(from: ColorSpace, to: ColorSpace, c: [f64; 3]) -> Option<[f64; 3]> {
+    use ColorSpace::*;
+    Some(match (from, to) {
+        (Rgb, Srgb) => [c[0] / 255.0, c[1] / 255.0, c[2] / 255.0],
+        (Srgb, Rgb) => [c[0] * 255.0, c[1] * 255.0, c[2] * 255.0],
+        (Rgb, Hsl) => rgb255_to_hsl(c),
+        (Hsl, Rgb) => hsl_to_rgb255(c),
+        (Rgb, Hwb) => rgb255_to_hwb(c),
+        (Hwb, Rgb) => hwb_to_rgb255(c),
+        (Srgb, Hsl) => rgb255_to_hsl([c[0] * 255.0, c[1] * 255.0, c[2] * 255.0]),
+        (Hsl, Srgb) => {
+            let r = hsl_to_rgb255(c);
+            [r[0] / 255.0, r[1] / 255.0, r[2] / 255.0]
+        }
+        (Srgb, Hwb) => rgb255_to_hwb([c[0] * 255.0, c[1] * 255.0, c[2] * 255.0]),
+        (Hwb, Srgb) => {
+            let r = hwb_to_rgb255(c);
+            [r[0] / 255.0, r[1] / 255.0, r[2] / 255.0]
+        }
+        (Hsl, Hwb) => rgb255_to_hwb(hsl_to_rgb255(c)),
+        (Hwb, Hsl) => rgb255_to_hsl(hwb_to_rgb255(c)),
+        _ => return None,
+    })
 }
 
 /// Build a [`ModernColor`] from a legacy [`Color`] (its current space is
@@ -2313,12 +2354,16 @@ fn make_modern_in(mc: ModernColor, _space: ColorSpace) -> Color {
         let r = mc.channels[0].unwrap_or(0.0);
         let g = mc.channels[1].unwrap_or(0.0);
         let b = mc.channels[2].unwrap_or(0.0);
-        let mut c = Color::rgb(r, g, b, mc.alpha.unwrap_or(1.0));
+        let a = mc.alpha.unwrap_or(1.0);
+        let mut c = Color::rgb(r, g, b, a);
         // Out-of-gamut legacy rgb serializes via hsl; attach modern so the
-        // serializer can apply that rule.
+        // serializer can apply that rule. Otherwise a computed in-gamut rgb
+        // uses its CSS named-color spelling when it matches one.
         let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
         if !(in_gamut(r) && in_gamut(g) && in_gamut(b)) {
             c.modern = Some(mc);
+        } else {
+            c.repr = named_repr(r, g, b, a);
         }
         return c;
     }

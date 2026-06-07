@@ -1022,6 +1022,161 @@ impl Color {
     }
 }
 
+/// The CSS named-color spelling for an exact, fully-opaque integer RGB
+/// triple (dart-sass canonical names). `None` if the triple has no name.
+pub(crate) fn rgb_name(r: f64, g: f64, b: f64) -> Option<&'static str> {
+    let int = |v: f64| {
+        if (v - v.round()).abs() < 1e-9 && (0.0..=255.0).contains(&v) {
+            Some(v.round() as u16)
+        } else {
+            None
+        }
+    };
+    let (r, g, b) = (int(r)?, int(g)?, int(b)?);
+    match (r, g, b) {
+        (0, 0, 0) => Some("black"),
+        (0, 0, 128) => Some("navy"),
+        (0, 0, 139) => Some("darkblue"),
+        (0, 0, 205) => Some("mediumblue"),
+        (0, 0, 255) => Some("blue"),
+        (0, 100, 0) => Some("darkgreen"),
+        (0, 128, 0) => Some("green"),
+        (0, 128, 128) => Some("teal"),
+        (0, 139, 139) => Some("darkcyan"),
+        (0, 191, 255) => Some("deepskyblue"),
+        (0, 206, 209) => Some("darkturquoise"),
+        (0, 250, 154) => Some("mediumspringgreen"),
+        (0, 255, 0) => Some("lime"),
+        (0, 255, 127) => Some("springgreen"),
+        (0, 255, 255) => Some("aqua"),
+        (25, 25, 112) => Some("midnightblue"),
+        (30, 144, 255) => Some("dodgerblue"),
+        (32, 178, 170) => Some("lightseagreen"),
+        (34, 139, 34) => Some("forestgreen"),
+        (46, 139, 87) => Some("seagreen"),
+        (47, 79, 79) => Some("darkslategray"),
+        (50, 205, 50) => Some("limegreen"),
+        (60, 179, 113) => Some("mediumseagreen"),
+        (64, 224, 208) => Some("turquoise"),
+        (65, 105, 225) => Some("royalblue"),
+        (70, 130, 180) => Some("steelblue"),
+        (72, 61, 139) => Some("darkslateblue"),
+        (72, 209, 204) => Some("mediumturquoise"),
+        (75, 0, 130) => Some("indigo"),
+        (85, 107, 47) => Some("darkolivegreen"),
+        (95, 158, 160) => Some("cadetblue"),
+        (100, 149, 237) => Some("cornflowerblue"),
+        (102, 51, 153) => Some("rebeccapurple"),
+        (102, 205, 170) => Some("mediumaquamarine"),
+        (105, 105, 105) => Some("dimgray"),
+        (106, 90, 205) => Some("slateblue"),
+        (107, 142, 35) => Some("olivedrab"),
+        (112, 128, 144) => Some("slategray"),
+        (119, 136, 153) => Some("lightslategray"),
+        (123, 104, 238) => Some("mediumslateblue"),
+        (124, 252, 0) => Some("lawngreen"),
+        (127, 255, 0) => Some("chartreuse"),
+        (127, 255, 212) => Some("aquamarine"),
+        (128, 0, 0) => Some("maroon"),
+        (128, 0, 128) => Some("purple"),
+        (128, 128, 0) => Some("olive"),
+        (128, 128, 128) => Some("gray"),
+        (135, 206, 235) => Some("skyblue"),
+        (135, 206, 250) => Some("lightskyblue"),
+        (138, 43, 226) => Some("blueviolet"),
+        (139, 0, 0) => Some("darkred"),
+        (139, 0, 139) => Some("darkmagenta"),
+        (139, 69, 19) => Some("saddlebrown"),
+        (143, 188, 143) => Some("darkseagreen"),
+        (144, 238, 144) => Some("lightgreen"),
+        (147, 112, 219) => Some("mediumpurple"),
+        (148, 0, 211) => Some("darkviolet"),
+        (152, 251, 152) => Some("palegreen"),
+        (153, 50, 204) => Some("darkorchid"),
+        (154, 205, 50) => Some("yellowgreen"),
+        (160, 82, 45) => Some("sienna"),
+        (165, 42, 42) => Some("brown"),
+        (169, 169, 169) => Some("darkgray"),
+        (173, 216, 230) => Some("lightblue"),
+        (173, 255, 47) => Some("greenyellow"),
+        (175, 238, 238) => Some("paleturquoise"),
+        (176, 196, 222) => Some("lightsteelblue"),
+        (176, 224, 230) => Some("powderblue"),
+        (178, 34, 34) => Some("firebrick"),
+        (184, 134, 11) => Some("darkgoldenrod"),
+        (186, 85, 211) => Some("mediumorchid"),
+        (188, 143, 143) => Some("rosybrown"),
+        (189, 183, 107) => Some("darkkhaki"),
+        (192, 192, 192) => Some("silver"),
+        (199, 21, 133) => Some("mediumvioletred"),
+        (205, 92, 92) => Some("indianred"),
+        (205, 133, 63) => Some("peru"),
+        (210, 105, 30) => Some("chocolate"),
+        (210, 180, 140) => Some("tan"),
+        (211, 211, 211) => Some("lightgray"),
+        (216, 191, 216) => Some("thistle"),
+        (218, 112, 214) => Some("orchid"),
+        (218, 165, 32) => Some("goldenrod"),
+        (219, 112, 147) => Some("palevioletred"),
+        (220, 20, 60) => Some("crimson"),
+        (220, 220, 220) => Some("gainsboro"),
+        (221, 160, 221) => Some("plum"),
+        (222, 184, 135) => Some("burlywood"),
+        (224, 255, 255) => Some("lightcyan"),
+        (230, 230, 250) => Some("lavender"),
+        (233, 150, 122) => Some("darksalmon"),
+        (238, 130, 238) => Some("violet"),
+        (238, 232, 170) => Some("palegoldenrod"),
+        (240, 128, 128) => Some("lightcoral"),
+        (240, 230, 140) => Some("khaki"),
+        (240, 248, 255) => Some("aliceblue"),
+        (240, 255, 240) => Some("honeydew"),
+        (240, 255, 255) => Some("azure"),
+        (244, 164, 96) => Some("sandybrown"),
+        (245, 222, 179) => Some("wheat"),
+        (245, 245, 220) => Some("beige"),
+        (245, 245, 245) => Some("whitesmoke"),
+        (245, 255, 250) => Some("mintcream"),
+        (248, 248, 255) => Some("ghostwhite"),
+        (250, 128, 114) => Some("salmon"),
+        (250, 235, 215) => Some("antiquewhite"),
+        (250, 240, 230) => Some("linen"),
+        (250, 250, 210) => Some("lightgoldenrodyellow"),
+        (253, 245, 230) => Some("oldlace"),
+        (255, 0, 0) => Some("red"),
+        (255, 0, 255) => Some("fuchsia"),
+        (255, 20, 147) => Some("deeppink"),
+        (255, 69, 0) => Some("orangered"),
+        (255, 99, 71) => Some("tomato"),
+        (255, 105, 180) => Some("hotpink"),
+        (255, 127, 80) => Some("coral"),
+        (255, 140, 0) => Some("darkorange"),
+        (255, 160, 122) => Some("lightsalmon"),
+        (255, 165, 0) => Some("orange"),
+        (255, 182, 193) => Some("lightpink"),
+        (255, 192, 203) => Some("pink"),
+        (255, 215, 0) => Some("gold"),
+        (255, 218, 185) => Some("peachpuff"),
+        (255, 222, 173) => Some("navajowhite"),
+        (255, 228, 181) => Some("moccasin"),
+        (255, 228, 196) => Some("bisque"),
+        (255, 228, 225) => Some("mistyrose"),
+        (255, 235, 205) => Some("blanchedalmond"),
+        (255, 239, 213) => Some("papayawhip"),
+        (255, 240, 245) => Some("lavenderblush"),
+        (255, 245, 238) => Some("seashell"),
+        (255, 248, 220) => Some("cornsilk"),
+        (255, 250, 205) => Some("lemonchiffon"),
+        (255, 250, 240) => Some("floralwhite"),
+        (255, 250, 250) => Some("snow"),
+        (255, 255, 0) => Some("yellow"),
+        (255, 255, 224) => Some("lightyellow"),
+        (255, 255, 240) => Some("ivory"),
+        (255, 255, 255) => Some("white"),
+        _ => None,
+    }
+}
+
 fn shorten_hex(hex: &str) -> String {
     // `#aabbcc` -> `#abc` when each channel's nibbles match.
     let b = hex.as_bytes();
@@ -1220,21 +1375,70 @@ impl ModernColor {
                 }
                 .to_css(compressed)
             }
-            ColorSpace::Hsl | ColorSpace::Hwb => {
+            ColorSpace::Hsl => {
                 let (h, s, l) = self.legacy_hsl_triple();
-                let hh = fmt_num(h, compressed);
-                let ss = fmt_num(s, compressed);
-                let ll = fmt_num(l, compressed);
-                let comma = if compressed { "," } else { ", " };
-                if opaque {
-                    format!("hsl({hh}{comma}{ss}%{comma}{ll}%)")
-                } else {
-                    let aa = fmt_num(a, compressed);
-                    format!("hsla({hh}{comma}{ss}%{comma}{ll}%{comma}{aa})")
+                self.hsl_comma_css(h, s, l, a, opaque, compressed)
+            }
+            ColorSpace::Hwb => {
+                // hwb serializes through its sRGB representation: an
+                // integer, in-gamut rgb becomes hex/named; otherwise the
+                // classic hsl comma form is used.
+                let (rgb, h, s, l) = self.hwb_rgb_and_hsl();
+                let int = |v: f64| (v - v.round()).abs() < 1e-9;
+                let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
+                let rgb_ok = rgb.iter().all(|&v| int(v) && in_gamut(v));
+                if rgb_ok {
+                    // A fully-opaque named color uses its name (uncompressed).
+                    if opaque && !compressed {
+                        if let Some(name) = rgb_name(rgb[0], rgb[1], rgb[2]) {
+                            return name.to_string();
+                        }
+                    }
+                    return Color {
+                        r: rgb[0],
+                        g: rgb[1],
+                        b: rgb[2],
+                        a,
+                        repr: None,
+                        modern: None,
+                    }
+                    .to_css(compressed);
                 }
+                self.hsl_comma_css(h, s, l, a, opaque, compressed)
             }
             _ => String::new(),
         }
+    }
+
+    /// Serialize the classic `hsl(h, s%, l%)` / `hsla(…)` comma form.
+    fn hsl_comma_css(&self, h: f64, s: f64, l: f64, a: f64, opaque: bool, compressed: bool) -> String {
+        let hh = fmt_num(h, compressed);
+        let ss = fmt_num(s, compressed);
+        let ll = fmt_num(l, compressed);
+        let comma = if compressed { "," } else { ", " };
+        if opaque {
+            format!("hsl({hh}{comma}{ss}%{comma}{ll}%)")
+        } else {
+            let aa = fmt_num(a, compressed);
+            format!("hsla({hh}{comma}{ss}%{comma}{ll}%{comma}{aa})")
+        }
+    }
+
+    /// The sRGB-byte triple and the (hue, sat%, light%) for an hwb color.
+    fn hwb_rgb_and_hsl(&self) -> ([f64; 3], f64, f64, f64) {
+        let h = self.channels[0].unwrap_or(0.0);
+        let mut w = self.channels[1].unwrap_or(0.0) / 100.0;
+        let mut bl = self.channels[2].unwrap_or(0.0) / 100.0;
+        if w + bl > 1.0 {
+            let sum = w + bl;
+            w /= sum;
+            bl /= sum;
+        }
+        let base = Color::from_hsl(h, 1.0, 0.5, 1.0);
+        let mix = |v: f64| ((v / 255.0) * (1.0 - w - bl) + w) * 255.0;
+        let c = Color::rgb(mix(base.r), mix(base.g), mix(base.b), 1.0);
+        let (hh, ss, ll) = c.to_hsl();
+        ([c.r, c.g, c.b], hh, ss * 100.0, ll * 100.0)
     }
 
     /// The (hue, saturation%, lightness%) triple for legacy hsl/hwb
