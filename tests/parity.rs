@@ -1558,3 +1558,42 @@ fn legacy_channels_special_slash_alpha() {
         "a {\n  x: hwb(0 30% 40%/var(--a));\n}\n"
     );
 }
+
+#[test]
+fn color_function_degenerate_calc() {
+    // A degenerate `calc()` (`NaN`/`infinity`/`-infinity`) in a `color()` call
+    // is folded the way dart-sass folds it, and the result serializes in the
+    // modern (space-around-`/`) form. A degenerate channel is preserved; a
+    // degenerate alpha folds to a number (`infinity` = opaque/omitted,
+    // `-infinity`/`NaN` = 0). Byte-matched to `npx sass`. Offline.
+    assert_eq!(
+        ours("a{x: color(srgb 0 0 calc(infinity) / 0.5)}\n"),
+        "a {\n  x: color(srgb 0 0 calc(infinity) / 0.5);\n}\n"
+    );
+    assert_eq!(
+        ours("a{x: color(srgb 0 0 calc(NaN) / 0.5)}\n"),
+        "a {\n  x: color(srgb 0 0 calc(NaN) / 0.5);\n}\n"
+    );
+    assert_eq!(
+        ours("a{x: color(srgb 0 0 0 / calc(infinity))}\n"),
+        "a {\n  x: color(srgb 0 0 0);\n}\n"
+    );
+    assert_eq!(
+        ours("a{x: color(srgb 0 0 0 / calc(-infinity))}\n"),
+        "a {\n  x: color(srgb 0 0 0 / 0);\n}\n"
+    );
+    assert_eq!(
+        ours("a{x: color(srgb 0 0 0 / calc(NaN))}\n"),
+        "a {\n  x: color(srgb 0 0 0 / 0);\n}\n"
+    );
+    // A non-degenerate special channel/alpha keeps the original glued spelling.
+    assert_eq!(
+        ours("a{x: color(srgb 0 0 var(--x) / 0.5)}\n"),
+        "a {\n  x: color(srgb 0 0 var(--x)/0.5);\n}\n"
+    );
+    // A degenerate channel with no alpha is unchanged.
+    assert_eq!(
+        ours("a{x: color(srgb calc(infinity) 0 0)}\n"),
+        "a {\n  x: color(srgb calc(infinity) 0 0);\n}\n"
+    );
+}

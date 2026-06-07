@@ -551,8 +551,10 @@ fn top_level_slash(s: &str) -> Option<usize> {
 }
 
 /// Convert one side of a split `X/Y` channel string into a value: a numeric
-/// token (`0.4`, `50%`) becomes a [`Number`]; anything else (`var(--x)`,
-/// `none`, `calc(…)`) becomes an unquoted string.
+/// token (`0.4`, `50%`) becomes a [`Number`]; a degenerate calculation
+/// (`calc(NaN)`, `calc(infinity)`, `calc(-infinity)`) is recovered as a
+/// [`Value::Calc`] so it folds/serializes like the original; anything else
+/// (`var(--x)`, `none`, other `calc(…)`) becomes an unquoted string.
 fn channel_token(s: &str) -> Value {
     if let Some(n) = parse_number_token(s) {
         // Reject a token that has leftover non-unit text (e.g. `1px2` would not
@@ -561,10 +563,28 @@ fn channel_token(s: &str) -> Value {
             return Value::Number(n);
         }
     }
+    if let Some(inner) = degenerate_calc_str(s) {
+        return Value::Calc(CalcNode::Str(inner));
+    }
     Value::Str(crate::value::SassStr {
         text: s.to_string(),
         quoted: false,
     })
+}
+
+/// The inner constant of a `calc(<const>)` string when `<const>` is a
+/// degenerate constant (`NaN`, `infinity`, `-infinity`), or `None` otherwise.
+/// Used to recover a [`Value::Calc`] from a split channel/alpha string.
+fn degenerate_calc_str(s: &str) -> Option<String> {
+    let s = s.trim();
+    if !s.to_ascii_lowercase().starts_with("calc(") || !s.ends_with(')') {
+        return None;
+    }
+    let inner = s[5..s.len() - 1].trim();
+    match inner.to_ascii_lowercase().as_str() {
+        "nan" | "infinity" | "-infinity" => Some(inner.to_string()),
+        _ => None,
+    }
 }
 
 /// Whether `n` re-serializes to exactly `s` (so the whole token was numeric).
@@ -1114,12 +1134,13 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
     };
     let channels = &items[1..];
     // A relative-color call (`color(from … )`) or any special/`none` channel
-    // is preserved verbatim.
+    // is preserved verbatim. A *degenerate* `calc()` (`calc(NaN)`/`infinity`)
+    // is not special here: dart-sass folds it to a finite/NaN channel value and
+    // parses the color, so it flows through validation and the modern
+    // (space-around-`/`) serialization below.
     let is_relative = space_name.eq_ignore_ascii_case("from");
-    let has_special = channels.iter().any(|v| is_special(v) || is_none_keyword(v))
-        || alpha
-            .as_ref()
-            .is_some_and(|v| is_special(v) || is_none_keyword(v));
+    let special_chan = |v: &Value| (is_special(v) && !is_degenerate_calc(v)) || is_none_keyword(v);
+    let has_special = channels.iter().any(special_chan) || alpha.as_ref().is_some_and(special_chan);
     if is_relative || has_special {
         return Ok(verbatim_call("color", &desc));
     }
@@ -1131,7 +1152,8 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
     }
     // Type-check each supplied channel (with its index-based name) before the
     // count check, matching dart-sass (`color(srgb (0.1 0.2 0.3))` reports a
-    // non-number channel rather than a wrong count).
+    // non-number channel rather than a wrong count). A degenerate `calc()` is
+    // accepted as a number channel.
     let names = ["red", "green", "blue"];
     for (i, comp) in channels.iter().enumerate() {
         let name = names.get(i).copied().unwrap_or("");
@@ -1148,6 +1170,7 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
                 }
             }
             Value::Slash(..) => {}
+            Value::Calc(_) if is_degenerate_calc(comp) => {}
             other => {
                 return Err(Error::at(
                     format!(
@@ -1173,7 +1196,35 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
     if let Some(a) = &alpha {
         alpha_value(a, pos)?;
     }
+    // When a degenerate `calc()` is present, dart-sass parses the color and
+    // serializes it in the modern form: the `/` alpha separator is spaced and a
+    // degenerate `calc()` alpha is folded (`infinity` → 1 = opaque/omitted,
+    // `-infinity`/`NaN` → 0). The other cases keep the original glued spelling.
+    let degenerate =
+        channels.iter().any(is_degenerate_calc) || alpha.as_ref().is_some_and(is_degenerate_calc);
+    if degenerate {
+        return Ok(modern_color(&space_name, channels, alpha.as_ref(), pos));
+    }
     Ok(verbatim_call("color", &desc))
+}
+
+/// Serialize a parsed `color()` in dart-sass's modern form: the space name,
+/// each channel via `to_css`, and—if the (folded) alpha is not fully opaque—a
+/// space-padded `/ alpha`. A degenerate `calc()` alpha folds to a number
+/// (`infinity` → 1, `-infinity`/`NaN` → 0); a plain numeric alpha is clamped.
+fn modern_color(space: &str, channels: &[Value], alpha: Option<&Value>, pos: Pos) -> Value {
+    let a = match alpha {
+        Some(v) => alpha_value(v, pos).unwrap_or(1.0),
+        None => 1.0,
+    };
+    let body: Vec<String> = channels.iter().map(|v| v.to_css(false)).collect();
+    let body = body.join(" ");
+    let text = if (a - 1.0).abs() < f64::EPSILON {
+        format!("color({space} {body})")
+    } else {
+        format!("color({space} {body} / {})", fmt_num(a, false))
+    };
+    Value::Str(crate::value::SassStr { text, quoted: false })
 }
 
 /// Serialize a `color()` description for its channel-count error message:
