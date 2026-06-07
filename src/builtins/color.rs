@@ -2405,7 +2405,7 @@ fn fn_to_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
 /// `modern` tag attached. Plain-legacy rgb (no missing channels) drops the
 /// `modern` field so it serializes like a normal sRGB color.
 pub(super) fn make_modern_in(mc: ModernColor, _space: ColorSpace) -> Color {
-    if mc.space == ColorSpace::Rgb && mc.channels.iter().all(|c| c.is_some()) {
+    if mc.space == ColorSpace::Rgb && mc.channels.iter().all(|c| c.is_some()) && mc.alpha.is_some() {
         let r = mc.channels[0].unwrap_or(0.0);
         let g = mc.channels[1].unwrap_or(0.0);
         let b = mc.channels[2].unwrap_or(0.0);
@@ -3081,7 +3081,7 @@ pub(super) fn modify_in_space(
     let mut work = convert_modern(&orig, space);
     for (name, v) in chans {
         if name == "alpha" {
-            work.alpha = Some(apply_alpha(work.alpha.unwrap_or(1.0), v, op, pos)?);
+            work.alpha = apply_alpha(work.alpha.unwrap_or(1.0), v, op, pos)?;
             continue;
         }
         let idx = channel_index_in(space, name).ok_or_else(|| {
@@ -3124,10 +3124,39 @@ pub(super) fn modify_in_space(
     Ok(Value::Color(make_modern_in(back, dest)))
 }
 
-/// Apply a change/adjust/scale to the alpha channel.
-fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<f64, Error> {
+/// Apply a change/adjust/scale to the alpha channel. Returns `None` for a
+/// `change` to `none`.
+fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64>, Error> {
     Ok(match op {
-        ModifyOp::Change => modern_alpha(Some(v)).unwrap_or(cur),
+        ModifyOp::Change => {
+            if is_none_keyword(v) {
+                return Ok(None);
+            }
+            // `change` validates the alpha is within [0,1] (or [0%,100%]).
+            match v {
+                Value::Number(n) => {
+                    let (max_disp, b0, b1) = if n.unit == "%" {
+                        (100.0, "0%", "100%")
+                    } else {
+                        (1.0, "0", "1")
+                    };
+                    if n.value < 0.0 || n.value > max_disp {
+                        return Err(Error::at(
+                            format!("$alpha: Expected {} to be within {b0} and {b1}.", n.to_css(false)),
+                            pos,
+                        ));
+                    }
+                    Some(if n.unit == "%" { n.value / 100.0 } else { n.value })
+                }
+                Value::Slash(n, _) => Some(n.value),
+                other => {
+                    return Err(Error::at(
+                        format!("$alpha: {} is not a number.", other.to_css(false)),
+                        pos,
+                    ))
+                }
+            }
+        }
         ModifyOp::Adjust => {
             let amt = match v {
                 Value::Number(n) => {
@@ -3139,11 +3168,11 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<f64, Error
                 }
                 _ => 0.0,
             };
-            (cur + amt).clamp(0.0, 1.0)
+            Some((cur + amt).clamp(0.0, 1.0))
         }
         ModifyOp::Scale => {
             let factor = scale_pct(v, pos)?;
-            scale_to(cur, factor, (0.0, 1.0))
+            Some(scale_to(cur, factor, (0.0, 1.0)))
         }
     })
 }
