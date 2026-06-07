@@ -3741,6 +3741,9 @@ impl Parser {
             Some('#') if self.sc.peek_at(1) == Some('{') => {
                 self.sc.bump();
                 self.sc.bump();
+                // Whitespace (including newlines) is permitted around the
+                // interpolated expression: `#{ x }` / `#{\n  x\n}`.
+                self.skip_ws_inline();
                 let e = self.parse_value()?;
                 self.skip_ws_inline();
                 if !self.sc.eat('}') {
