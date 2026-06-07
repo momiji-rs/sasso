@@ -1018,7 +1018,7 @@ impl<'a> Evaluator<'a> {
     /// "only simplify number+number" rule.
     fn eval_calc(&mut self, expr: &Expr) -> Result<CalcNode, Error> {
         match expr {
-            Expr::Binary { op, lhs, rhs, .. } => {
+            Expr::Binary { op, lhs, rhs, pos } => {
                 let calc_op = match op {
                     BinOp::Add => CalcOp::Add,
                     BinOp::Sub => CalcOp::Sub,
@@ -1031,12 +1031,12 @@ impl<'a> Evaluator<'a> {
                 };
                 let l = self.eval_calc(lhs)?;
                 let r = self.eval_calc(rhs)?;
-                Ok(fold_calc(calc_op, l, r))
+                fold_calc(calc_op, l, r, *pos)
             }
-            Expr::Div { lhs, rhs, .. } => {
+            Expr::Div { lhs, rhs, pos, .. } => {
                 let l = self.eval_calc(lhs)?;
                 let r = self.eval_calc(rhs)?;
-                Ok(fold_calc(CalcOp::Div, l, r))
+                fold_calc(CalcOp::Div, l, r, *pos)
             }
             Expr::Unary {
                 op: UnOp::Neg,
@@ -1113,40 +1113,67 @@ fn value_to_calc_node(v: Value) -> CalcNode {
     }
 }
 
-/// Fold a calc operation: combine two compatible numbers into one; otherwise
-/// keep the operation. Matches dart-sass's limited "number <op> number"
-/// simplification (only the immediate operands are considered).
-fn fold_calc(op: CalcOp, left: CalcNode, right: CalcNode) -> CalcNode {
+/// Fold a calc operation: combine two compatible numbers into one; raise
+/// dart-sass's incompatible-units error for two known-but-cross-dimension
+/// operands of `+`/`-`; otherwise keep the operation for canonical
+/// serialization. Only the immediate numeric operands are considered, like
+/// dart-sass's limited simplification.
+fn fold_calc(op: CalcOp, left: CalcNode, right: CalcNode, pos: Pos) -> Result<CalcNode, Error> {
     if let (CalcNode::Number(a), CalcNode::Number(b)) = (&left, &right) {
-        if let Some(n) = fold_numbers(op, a, b) {
-            return CalcNode::Number(n);
+        if let Some(n) = fold_numbers(op, a, b, pos)? {
+            return Ok(CalcNode::Number(n));
         }
     }
-    CalcNode::Op {
+    Ok(CalcNode::Op {
         op,
         left: Box::new(left),
         right: Box::new(right),
-    }
+    })
 }
 
-/// Try to combine two numbers under a calc operator. `+`/`-` need equal
-/// units; `*`/`/` need at least one unitless operand. Returns `None` when
-/// the operands are unit-incompatible (so the operation is preserved).
-fn fold_numbers(op: CalcOp, a: &Number, b: &Number) -> Option<Number> {
+/// Try to combine two numbers under a calc operator.
+///
+/// `Ok(Some(n))` folds them; `Ok(None)` preserves the operation verbatim;
+/// `Err` is dart-sass's "<a> and <b> are incompatible." rejection.
+///
+/// For `+`/`-` dart-sass folds equal units and convertible units (converting
+/// the right into the left), but — unlike Sass arithmetic — treats a unitless
+/// operand mixed with any real unit as an error, and rejects two known
+/// absolute units of different dimensions (`1px + 1s`). Two distinct units
+/// where at least one is relative/unknown (`1px + 1vw`, `100% - 10px`) or
+/// that share a class but are not convertible (`1khz + 1hz`) are preserved.
+///
+/// `*`/`/` fold when one operand is unitless (or, for `/`, the units cancel
+/// after conversion); compound results (`6px * 1s`) are out of scope and
+/// preserved.
+fn fold_numbers(op: CalcOp, a: &Number, b: &Number, pos: Pos) -> Result<Option<Number>, Error> {
     match op {
         CalcOp::Add | CalcOp::Sub => {
-            if a.unit != b.unit {
-                return None;
+            let apply = |x: f64, y: f64| if op == CalcOp::Add { x + y } else { x - y };
+            // Equal units (incl. `%`, relative units, both unitless) fold.
+            if a.unit.eq_ignore_ascii_case(&b.unit) {
+                return Ok(Some(Number {
+                    value: apply(a.value, b.value),
+                    unit: a.unit.clone(),
+                }));
             }
-            let value = if op == CalcOp::Add {
-                a.value + b.value
+            // A unitless operand mixed with a real unit is an error in calc.
+            if a.unit.is_empty() || b.unit.is_empty() {
+                return Err(calc_incompatible(a, b, pos));
+            }
+            // Two distinct real units: convert when in the same convertible
+            // group; error when both are known but cross-dimension; otherwise
+            // preserve (a relative/unknown unit is involved).
+            if let Some(factor) = crate::value::convert_factor(&b.unit, &a.unit) {
+                Ok(Some(Number {
+                    value: apply(a.value, b.value * factor),
+                    unit: a.unit.clone(),
+                }))
+            } else if crate::value::calc_units_incompatible(&a.unit, &b.unit) {
+                Err(calc_incompatible(a, b, pos))
             } else {
-                a.value - b.value
-            };
-            Some(Number {
-                value,
-                unit: a.unit.clone(),
-            })
+                Ok(None)
+            }
         }
         CalcOp::Mul => {
             let unit = if a.unit.is_empty() {
@@ -1154,27 +1181,47 @@ fn fold_numbers(op: CalcOp, a: &Number, b: &Number) -> Option<Number> {
             } else if b.unit.is_empty() {
                 a.unit.clone()
             } else {
-                return None;
+                // Compound units (`px * s`) are out of scope; preserve.
+                return Ok(None);
             };
-            Some(Number {
+            Ok(Some(Number {
                 value: a.value * b.value,
                 unit,
-            })
+            }))
         }
         CalcOp::Div => {
-            let unit = if b.unit.is_empty() {
-                a.unit.clone()
-            } else if a.unit == b.unit {
-                String::new()
-            } else {
-                return None;
-            };
-            Some(Number {
-                value: a.value / b.value,
-                unit,
-            })
+            if b.unit.is_empty() {
+                return Ok(Some(Number {
+                    value: a.value / b.value,
+                    unit: a.unit.clone(),
+                }));
+            }
+            if a.unit.eq_ignore_ascii_case(&b.unit) {
+                return Ok(Some(Number {
+                    value: a.value / b.value,
+                    unit: String::new(),
+                }));
+            }
+            // Convertible units cancel to a unitless quotient; anything else
+            // (inverse or compound units) is out of scope and preserved.
+            match crate::value::convert_factor(&b.unit, &a.unit) {
+                Some(factor) => Ok(Some(Number {
+                    value: a.value / (b.value * factor),
+                    unit: String::new(),
+                })),
+                None => Ok(None),
+            }
         }
     }
+}
+
+/// dart-sass's `calc()` incompatible-units error (note: "are incompatible.",
+/// distinct from the arithmetic "have incompatible units." wording).
+fn calc_incompatible(a: &Number, b: &Number, pos: Pos) -> Error {
+    Error::at(
+        format!("{} and {} are incompatible.", a.to_css(false), b.to_css(false)),
+        pos,
+    )
 }
 
 /// Evaluate the `/` operator. When `slash` is set and both operands are

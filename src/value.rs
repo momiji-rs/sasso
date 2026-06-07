@@ -356,6 +356,40 @@ pub(crate) fn units_compatible(a: &str, b: &str) -> bool {
     }
 }
 
+/// The broad class a unit belongs to for `calc()` compatibility decisions.
+/// Unlike [`Dim`] (the *convertible* groups), this includes frequency, whose
+/// `hz`/`khz` dart-sass recognises as absolute units but does not convert
+/// between. Returns `None` for relative units (`em`, `vw`, `%`, `fr`, …) and
+/// genuinely unknown units, which `calc()` preserves verbatim rather than
+/// rejecting.
+fn known_calc_class(unit: &str) -> Option<u8> {
+    if let Some(d) = unit_dimension(unit) {
+        return Some(match d {
+            Dim::Length => 0,
+            Dim::Angle => 1,
+            Dim::Time => 2,
+            Dim::Resolution => 3,
+        });
+    }
+    match unit.to_ascii_lowercase().as_str() {
+        "hz" | "khz" => Some(4), // frequency: known, but not inter-convertible
+        _ => None,
+    }
+}
+
+/// Whether two distinct real units make a `calc()` `+`/`-` an error rather
+/// than a preserved expression. dart-sass errors only when BOTH units are
+/// known absolute units of DIFFERENT classes (`calc(1px + 1s)`,
+/// `calc(1px + 1hz)`); when either unit is relative/unknown
+/// (`calc(1px + 1vw)`, `calc(100% - 10px)`) or they share a class but are
+/// not convertible (`calc(1khz + 1hz)`), the expression is kept verbatim.
+pub(crate) fn calc_units_incompatible(a: &str, b: &str) -> bool {
+    match (known_calc_class(a), known_calc_class(b)) {
+        (Some(ca), Some(cb)) => ca != cb,
+        _ => false,
+    }
+}
+
 impl List {
     fn to_css(&self, compressed: bool) -> String {
         let sep = match (self.sep, compressed) {
