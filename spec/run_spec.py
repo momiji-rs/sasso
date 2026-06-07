@@ -97,6 +97,10 @@ class Case:
     extra_files: dict = field(default_factory=dict)  # other .scss/.css siblings
     options: dict = field(default_factory=dict)      # merged options.yml
     precision: Optional[int] = None
+    archive_id: str = ""                             # the case's archive/dir, suite-relative
+    archive_files: dict = field(default_factory=dict)  # whole archive {rel: content} — for
+    # load-path-relative imports like `@use 'core_functions/.../utils'` that resolve against
+    # the suite root rather than the case dir (materialized under <tmp>/<archive_id>/ + -I <tmp>).
 
 
 @dataclass
@@ -346,6 +350,8 @@ def cases_from_files(files: dict, archive_id: str):
             extra_files=extra,
             options=opts,
             precision=opts.get("precision"),
+            archive_id=archive_id,
+            archive_files=files,
         )
 
 
@@ -406,6 +412,8 @@ def iter_all_cases(suite: Path, suite_root: Path):
             extra_files=extra,
             options=merged_opts,
             precision=merged_opts.get("precision"),
+            archive_id=rel,
+            archive_files=files,
         )
 
 
@@ -487,9 +495,27 @@ def compile_case(case: Case, sass_bin: str, style: str):
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
 
+        # Also reproduce the whole archive under <tmp>/<archive_id>/ and add it as
+        # a load path, so suite-root-relative imports (e.g. shared fixtures like
+        # `@use 'core_functions/.../utils'` that live outside the case dir) resolve
+        # the way dart-sass's runner sees them. The flat layout above keeps
+        # sibling/relative imports byte-identical, so currently-passing cases are
+        # unaffected.
+        load_paths = []
+        if case.archive_files:
+            base = tdp / case.archive_id if case.archive_id else tdp
+            for rel, content in case.archive_files.items():
+                fp = base / rel
+                fp.parent.mkdir(parents=True, exist_ok=True)
+                if not fp.exists():
+                    fp.write_text(content, encoding="utf-8")
+            load_paths = [tdp] + ([base] if case.archive_id else [])
+
         cmd = [sass_bin]
         # style flag (dart-sass accepts --style=...; sasso should too)
         cmd.append(f"--style={style}")
+        for lp in load_paths:
+            cmd += ["-I", str(lp)]
         if case.precision is not None:
             # dart-sass ignores --precision (fixed at 10); sasso may use it.
             # Pass it only if the bin is not our dart wrapper to avoid noise.
