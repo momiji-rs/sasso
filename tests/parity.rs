@@ -1144,3 +1144,13 @@ fn calc_rejects_non_arithmetic_operators() {
         );
     }
 }
+
+#[test]
+fn calc_name_is_case_insensitive() {
+    // `calc` is recognized case-insensitively and its interior simplified;
+    // a vendor-prefixed form stays a verbatim special function.
+    assert_parity("a { b: CaLc(1px); }\n");
+    assert_parity("a { b: Calc(2); }\n");
+    assert_parity("a { b: CALC(1px + 1%); }\n");
+    assert_parity("a { b: -webkit-calc(1px + 1%); }\n");
+}

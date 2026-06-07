@@ -2483,8 +2483,11 @@ impl Parser {
         let pos = self.sc.position();
         self.sc.bump(); // '('
                         // `calc()` interior is parsed as a real arithmetic
-                        // expression and simplified at evaluation time.
-        if name == "calc" {
+                        // expression and simplified at evaluation time. The
+                        // name is matched case-insensitively (`CaLc(1px)` ->
+                        // `1px`); a vendor-prefixed `-webkit-calc(…)` does not
+                        // match and stays a verbatim special function.
+        if name.eq_ignore_ascii_case("calc") {
             self.calc_depth += 1;
             self.skip_ws_inline();
             let inner = self.parse_value();
