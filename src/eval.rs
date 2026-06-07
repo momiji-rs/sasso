@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{
-    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfClause, IfCond, MediaFeature, MediaInParens,
+    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfClause, IfCond, ImportArg, MediaFeature,
+    MediaInParens,
     MediaQuery, MediaQueryList, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
@@ -624,17 +625,7 @@ impl<'a> Evaluator<'a> {
                         self.exec(&block, parents, sink)?;
                     }
                 }
-                Stmt::Import(args) => match sink {
-                    Sink::Top(out) => {
-                        let out = &mut **out;
-                        self.eval_imports(args, out)?;
-                    }
-                    Sink::Rule { .. } | Sink::AtRoot(_) => {
-                        return Err(Error::unpositioned(
-                            "nested @import is not supported in this build",
-                        ));
-                    }
-                },
+                Stmt::Import(args) => self.eval_imports(args, parents, sink)?,
                 Stmt::AtRule { name, prelude, body } => {
                     self.eval_at_rule(name, prelude, body.as_deref(), parents, sink)?;
                 }
@@ -1001,28 +992,42 @@ impl<'a> Evaluator<'a> {
         }))
     }
 
-    /// Inline `@import`s into the top-level output. Each imported top-level
-    /// statement becomes its own group; genuine CSS imports pass through.
-    fn eval_imports(&mut self, args: &[String], out: &mut Vec<OutNode>) -> Result<(), Error> {
+    /// Evaluate an `@import` statement into `sink`. Sass arguments are parsed
+    /// and inlined under the current `parents` (so a nested `@import` bubbles
+    /// like an inline block); plain CSS arguments are emitted verbatim as
+    /// `@import …;` in source order.
+    fn eval_imports(
+        &mut self,
+        args: &[ImportArg],
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
         let importer = self.options.importer;
         for arg in args {
-            if is_css_import(arg) {
-                push_group(out, vec![OutNode::Raw(format!("@import \"{arg}\";"))]);
-                continue;
-            }
-            match importer.and_then(|imp| imp.resolve(arg)) {
-                Some(src) => {
-                    if !self.imported.insert(arg.clone()) {
+            match arg {
+                ImportArg::Css(tpl) => {
+                    let text = self.eval_template(tpl)?;
+                    sink.push_at_rule(OutNode::Raw(format!("@import {text};")));
+                }
+                ImportArg::Sass(path) => {
+                    if is_css_import(path) {
+                        sink.push_at_rule(OutNode::Raw(format!("@import \"{path}\";")));
                         continue;
                     }
-                    let sheet = crate::parser::parse(&src)?;
-                    let mut sink = Sink::Top(&mut *out);
-                    self.exec(&sheet.stmts, &[], &mut sink)?;
-                }
-                None => {
-                    return Err(Error::unpositioned(format!(
-                        "Can't find stylesheet to import: {arg}"
-                    )));
+                    match importer.and_then(|imp| imp.resolve(path)) {
+                        Some(src) => {
+                            if !self.imported.insert(path.clone()) {
+                                continue;
+                            }
+                            let sheet = crate::parser::parse(&src)?;
+                            self.exec(&sheet.stmts, parents, sink)?;
+                        }
+                        None => {
+                            return Err(Error::unpositioned(format!(
+                                "Can't find stylesheet to import: {path}"
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -1781,7 +1786,9 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     if group.is_empty() {
         return;
     }
-    let prev_is_at_rule = matches!(out.last(), Some(OutNode::AtRule { .. }));
+    // dart-sass packs a passed-through CSS `@import` (a `Raw` at-rule) tight
+    // with the following group, just like a real `@rule`.
+    let prev_is_at_rule = matches!(out.last(), Some(OutNode::AtRule { .. }) | Some(OutNode::Raw(_)));
     if !out.is_empty() && !prev_is_at_rule {
         out.push(OutNode::Blank);
     }

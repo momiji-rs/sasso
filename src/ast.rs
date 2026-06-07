@@ -21,8 +21,9 @@ pub(crate) enum Stmt {
     Rule(Rule),
     /// `property: value [!important];`
     Decl(Declaration),
-    /// `@import "a", "b";` — the args are the raw (unquoted) paths.
-    Import(Vec<String>),
+    /// `@import "a", "b";` — each entry is either a Sass path to inline or a
+    /// plain CSS import emitted verbatim.
+    Import(Vec<ImportArg>),
     /// `/* ... */` loud comment (inner text, without the delimiters).
     Comment(String),
     /// `@if`/`@else if`/`@else` — evaluated top to bottom, first match wins.
@@ -91,6 +92,16 @@ pub(crate) enum Stmt {
     Debug(Expr),
     /// `@error <expr>;` — aborts compilation with the message.
     Error(Expr),
+}
+
+/// One entry in an `@import` statement.
+pub(crate) enum ImportArg {
+    /// A Sass import: the (unquoted) path of a partial to resolve and inline.
+    Sass(String),
+    /// A plain CSS `@import`: emitted verbatim as `@import <text>;`. Stored as
+    /// a template so `#{…}` interpolation in the URL/modifiers resolves at
+    /// eval time. The text is everything between `@import ` and the `;`.
+    Css(Vec<TplPiece>),
 }
 
 /// One arm of an `@if` chain. `cond == None` is the trailing `@else`.

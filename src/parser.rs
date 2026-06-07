@@ -8,12 +8,13 @@
 use std::rc::Rc;
 
 use crate::ast::{
-    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfBranch, IfClause, IfCond, MediaFeature,
+    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfBranch, IfClause, IfCond, ImportArg,
+    MediaFeature,
     MediaInParens, MediaQuery, MediaQueryList, Param, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp,
     VarDecl,
 };
 use crate::error::Error;
-use crate::scanner::Scanner;
+use crate::scanner::{Pos, Scanner};
 use crate::value::{named_color, Color, ListSep};
 
 enum NextKind {
@@ -139,6 +140,76 @@ fn validate_if_cond(cond: &IfCond) -> Result<(bool, bool), Error> {
         ));
     }
     Ok((sass, multi))
+}
+
+/// Whether a quoted `@import` URL (parsed into template pieces) is a *plain
+/// CSS* URL — one ending in `.css`, or beginning with a protocol/`//`. Such
+/// URLs are emitted verbatim rather than inlined as Sass partials. Only the
+/// leading/trailing literal text is inspected (interpolated URLs are dynamic
+/// Sass paths and handled elsewhere).
+fn import_url_is_css(pieces: &[TplPiece]) -> bool {
+    let mut head = "";
+    if let Some(TplPiece::Lit(s)) = pieces.first() {
+        head = s.as_str();
+    }
+    let mut tail = String::new();
+    if let Some(TplPiece::Lit(s)) = pieces.last() {
+        tail = s.clone();
+    }
+    tail.ends_with(".css")
+        || head.starts_with("http://")
+        || head.starts_with("https://")
+        || head.starts_with("//")
+}
+
+/// Drop trailing whitespace-only literal pieces and trim the last literal.
+fn trim_trailing_ws(mut pieces: Vec<TplPiece>) -> Vec<TplPiece> {
+    if let Some(TplPiece::Lit(s)) = pieces.last_mut() {
+        *s = strip_trailing_trivia(s);
+    }
+    while let Some(TplPiece::Lit(s)) = pieces.last() {
+        if s.is_empty() {
+            pieces.pop();
+        } else {
+            break;
+        }
+    }
+    pieces
+}
+
+/// Strip trailing whitespace and a single trailing `/* */` or `//…` comment
+/// from `s` (an `@import` modifier run). A comment in the *middle* of the run
+/// (e.g. inside `b(/**/ c)`) is preserved because it is not at the very end.
+fn strip_trailing_trivia(s: &str) -> String {
+    let mut out = s.trim_end().to_string();
+    loop {
+        if out.ends_with("*/") {
+            if let Some(start) = out.rfind("/*") {
+                out.truncate(start);
+                out = out.trim_end().to_string();
+                continue;
+            }
+        }
+        // A line comment runs to end-of-text once captured (no newline left).
+        if let Some(start) = find_trailing_line_comment(&out) {
+            out.truncate(start);
+            out = out.trim_end().to_string();
+            continue;
+        }
+        break;
+    }
+    out
+}
+
+/// If the final line of `s` begins (after optional whitespace) a `//` line
+/// comment, return the byte index where the comment's whitespace run starts.
+fn find_trailing_line_comment(s: &str) -> Option<usize> {
+    let last_line_start = s.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line = &s[last_line_start..];
+    // Find `//` that is not inside a string; the modifier run never contains a
+    // bare `//` except as a comment, so a simple search suffices.
+    let idx = line.find("//")?;
+    Some(last_line_start + idx)
 }
 
 /// Whether `expr` is eligible to keep the deprecated `/` slash spelling.
@@ -420,39 +491,7 @@ impl Parser {
         self.sc.bump(); // '@'
         let name = self.read_ident_name()?;
         match name.as_str() {
-            "import" => {
-                let mut args = Vec::new();
-                loop {
-                    self.skip_ws_inline();
-                    match self.sc.peek() {
-                        Some('"') | Some('\'') => {
-                            let pieces = self.parse_quoted_string()?;
-                            let mut path = String::new();
-                            for p in &pieces {
-                                match p {
-                                    TplPiece::Lit(s) => path.push_str(s),
-                                    TplPiece::Interp(_) => {
-                                        return Err(Error::at(
-                                            "dynamic @import paths are not supported",
-                                            pos,
-                                        ));
-                                    }
-                                }
-                            }
-                            args.push(path);
-                        }
-                        _ => return Err(Error::at("expected a string after @import", self.sc.position())),
-                    }
-                    self.skip_ws_inline();
-                    if self.sc.eat(',') {
-                        continue;
-                    }
-                    break;
-                }
-                self.skip_ws_inline();
-                self.sc.eat(';');
-                Ok(Stmt::Import(args))
-            }
+            "import" => self.parse_import(pos),
             "if" => self.parse_if(),
             "for" => self.parse_for(),
             "each" => self.parse_each(),
@@ -481,6 +520,227 @@ impl Parser {
                 Err(Error::at(format!("@{name} is not supported in this build"), pos))
             }
             _ => self.parse_generic_at_rule(name),
+        }
+    }
+
+    /// Parse `@import <arg> [, <arg>]* ;`. Each argument is either a Sass
+    /// import (a bare quoted string with no modifiers and a non-CSS URL,
+    /// which is inlined) or a plain CSS `@import` (a `url(...)` URL, a `.css`/
+    /// protocol URL, or a URL followed by media-query/`supports()` modifiers,
+    /// which is emitted verbatim).
+    fn parse_import(&mut self, pos: Pos) -> Result<Stmt, Error> {
+        let mut args = Vec::new();
+        loop {
+            self.skip_ws_trivia();
+            let arg = self.parse_import_arg(pos)?;
+            args.push(arg);
+            self.skip_ws_trivia();
+            if self.sc.eat(',') {
+                continue;
+            }
+            break;
+        }
+        self.skip_ws_trivia();
+        self.sc.eat(';');
+        Ok(Stmt::Import(args))
+    }
+
+    /// Skip whitespace and `/* */` / `//` comments (discarding them); used
+    /// between the `@import` keyword, URLs, modifiers, and commas.
+    fn skip_ws_trivia(&mut self) {
+        loop {
+            match self.sc.peek() {
+                Some(c) if c.is_whitespace() => {
+                    self.sc.bump();
+                }
+                Some('/') if self.sc.peek_at(1) == Some('/') => {
+                    while let Some(c) = self.sc.peek() {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.sc.bump();
+                    }
+                }
+                Some('/') if self.sc.peek_at(1) == Some('*') => {
+                    self.sc.bump();
+                    self.sc.bump();
+                    loop {
+                        match self.sc.peek() {
+                            None => break,
+                            Some('*') if self.sc.peek_at(1) == Some('/') => {
+                                self.sc.bump();
+                                self.sc.bump();
+                                break;
+                            }
+                            Some(_) => {
+                                self.sc.bump();
+                            }
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Parse one `@import` argument and classify it as Sass or plain CSS.
+    fn parse_import_arg(&mut self, pos: Pos) -> Result<ImportArg, Error> {
+        // `url(...)` form — always a plain CSS import.
+        if self.peek_is_url_func() {
+            let mut tpl = self.parse_import_url_func()?;
+            self.skip_ws_trivia();
+            let modifiers = self.parse_import_modifiers()?;
+            if !modifiers.is_empty() {
+                tpl.push(TplPiece::Lit(" ".to_string()));
+                tpl.extend(modifiers);
+            }
+            return Ok(ImportArg::Css(tpl));
+        }
+        // Quoted-string form.
+        match self.sc.peek() {
+            Some('"') | Some('\'') => {
+                let mark = self.sc.mark();
+                let pieces = self.parse_quoted_string()?;
+                let raw_url = self.sc.slice_from(mark);
+                self.skip_ws_trivia();
+                let modifiers = self.parse_import_modifiers()?;
+                let css_url = import_url_is_css(&pieces);
+                if modifiers.is_empty() && !css_url {
+                    // A bare Sass path. Reject interpolation (dynamic paths).
+                    let mut path = String::new();
+                    for p in &pieces {
+                        match p {
+                            TplPiece::Lit(s) => path.push_str(s),
+                            TplPiece::Interp(_) => {
+                                return Err(Error::at("dynamic @import paths are not supported", pos));
+                            }
+                        }
+                    }
+                    Ok(ImportArg::Sass(path))
+                } else {
+                    let mut tpl = vec![TplPiece::Lit(raw_url)];
+                    if !modifiers.is_empty() {
+                        tpl.push(TplPiece::Lit(" ".to_string()));
+                        tpl.extend(modifiers);
+                    }
+                    Ok(ImportArg::Css(tpl))
+                }
+            }
+            _ => Err(Error::at("expected a string after @import", self.sc.position())),
+        }
+    }
+
+    /// Whether the cursor is at a `url(` (case-insensitive) function call.
+    fn peek_is_url_func(&self) -> bool {
+        let cs = self.sc.rest();
+        if cs.len() < 4 {
+            return false;
+        }
+        cs[0].eq_ignore_ascii_case(&'u')
+            && cs[1].eq_ignore_ascii_case(&'r')
+            && cs[2].eq_ignore_ascii_case(&'l')
+            && cs[3] == '('
+    }
+
+    /// Capture a `url(...)` argument verbatim (parens may nest; quoted
+    /// strings inside are passed through). Interpolation is not expanded here
+    /// (none of the spec URLs use it); the run is emitted as a single literal.
+    fn parse_import_url_func(&mut self) -> Result<Vec<TplPiece>, Error> {
+        let mark = self.sc.mark();
+        self.sc.bump(); // u
+        self.sc.bump(); // r
+        self.sc.bump(); // l
+        self.sc.bump(); // (
+        let mut depth = 1i32;
+        while let Some(c) = self.sc.peek() {
+            match c {
+                '"' | '\'' => {
+                    let q = c;
+                    self.sc.bump();
+                    while let Some(ch) = self.sc.peek() {
+                        self.sc.bump();
+                        if ch == '\\' {
+                            self.sc.bump();
+                            continue;
+                        }
+                        if ch == q {
+                            break;
+                        }
+                    }
+                }
+                '(' => {
+                    depth += 1;
+                    self.sc.bump();
+                }
+                ')' => {
+                    depth -= 1;
+                    self.sc.bump();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {
+                    self.sc.bump();
+                }
+            }
+        }
+        if depth != 0 {
+            return Err(Error::at("expected \")\"", self.sc.position()));
+        }
+        Ok(vec![TplPiece::Lit(self.sc.slice_from(mark))])
+    }
+
+    /// Parse the optional `supports(...)` and media-query-list modifiers that
+    /// follow an `@import` URL, captured verbatim. Returns empty when there
+    /// are none (the next char is `,`, `;`, `}`, or EOF).
+    ///
+    /// A media query *list* consumes following top-level commas as part of the
+    /// same import. dart-sass enters list mode only when the first modifier
+    /// token is a media query (a bare identifier media type, or a parenthesised
+    /// `(feature)` group) — not a `supports(...)` or a `name(...)` URL-modifier
+    /// function, after which a top-level comma starts a fresh import argument.
+    fn parse_import_modifiers(&mut self) -> Result<Vec<TplPiece>, Error> {
+        match self.sc.peek() {
+            None | Some(',') | Some(';') | Some('}') => return Ok(Vec::new()),
+            _ => {}
+        }
+        let media_list_mode = self.import_modifier_starts_media_list();
+        let mut pieces = self.parse_template(&[',', ';', '}'])?;
+        if media_list_mode {
+            while self.sc.peek() == Some(',') {
+                self.sc.bump();
+                pieces.push(TplPiece::Lit(", ".to_string()));
+                self.skip_ws_inline();
+                let more = self.parse_template(&[',', ';', '}'])?;
+                pieces.extend(more);
+            }
+        }
+        Ok(trim_trailing_ws(pieces))
+    }
+
+    /// Whether the modifier at the cursor begins a media query list (so that a
+    /// following top-level comma continues the same `@import`). True for a bare
+    /// identifier not immediately followed by `(` (a media type) and for a `(`
+    /// (a media feature); false for `supports(...)` and `name(...)`.
+    fn import_modifier_starts_media_list(&self) -> bool {
+        match self.sc.peek() {
+            Some('(') => true,
+            Some(c) if is_ident_char(c) && !c.is_ascii_digit() => {
+                // Read the identifier and check what follows.
+                let cs = self.sc.rest();
+                let mut i = 0;
+                while i < cs.len() && is_ident_char(cs[i]) {
+                    i += 1;
+                }
+                let ident: String = cs[..i].iter().collect();
+                if ident.eq_ignore_ascii_case("supports") {
+                    return false;
+                }
+                // A function call (`name(`) is a URL modifier, not a media
+                // type; a bare identifier is a media type.
+                cs.get(i) != Some(&'(')
+            }
+            _ => false,
         }
     }
 

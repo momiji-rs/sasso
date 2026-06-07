@@ -151,10 +151,12 @@ fn import_inlining() {
 
 #[test]
 fn css_import_passes_through() {
+    // dart-sass packs a passed-through CSS `@import` tight against the
+    // following rule, with no blank-line separator.
     let out = css("@import \"https://fonts.example/x.css\";\n.a { color: red; }");
     assert_eq!(
         out,
-        "@import \"https://fonts.example/x.css\";\n\n.a {\n  color: red;\n}\n"
+        "@import \"https://fonts.example/x.css\";\n.a {\n  color: red;\n}\n"
     );
 }
 

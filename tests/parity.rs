@@ -545,6 +545,36 @@ fn modern_if_function() {
         "a {b: if(false, 1px, 2px)}\n",
     ] {
         assert_parity(src);
+#[test]
+fn parity_plain_css_import_passthrough() {
+    // A `url(...)` URL, a `.css`/protocol URL, or any URL with trailing
+    // media-query / `supports()` modifiers is a plain CSS `@import`, emitted
+    // verbatim in source order rather than inlined.
+    assert_parity("@import url(\"a.css\") print;\n");
+    assert_parity("@import url(whatever);\n");
+    assert_parity("@import \"a.css\";\n");
+    assert_parity("@import \"http://foo.com/bar\";\n");
+    assert_parity("@import \"a\" b;\n");
+    assert_parity("@import \"a.css\" supports(calc(1));\n");
+    assert_parity("@import \"a.css\" supports(--a: );\n");
+    assert_parity("@import \"a\" b, (c: d) and (e: f), g;\n");
+    // A `supports()`/function modifier ends the argument at a top-level comma,
+    // so the following URL starts a fresh `@import`; a bare media type does not.
+    assert_parity("@import \"a\" supports(b: c), \"d.css\";\n");
+    assert_parity("@import \"b\" c(d), \"e.css\";\n");
+    // Comments around the URL and modifiers are stripped.
+    assert_parity("@import \"a.css\" /**/ b;\n");
+    assert_parity("@import \"a.css\" b /**/;\n");
+    // Interpolation inside a CSS-import modifier is resolved.
+    assert_parity("@import \"b\" c#{\"a\"}d;\n");
+}
+
+/// A trivial in-memory [`Importer`] for offline `@import` inlining tests.
+struct MapImporter(std::collections::HashMap<String, String>);
+
+impl sasso::Importer for MapImporter {
+    fn resolve(&self, path: &str) -> Option<String> {
+        self.0.get(path).cloned()
     }
 }
 
@@ -715,4 +745,25 @@ fn modern_if_rejects_invalid_conditions() {
             "expected error for invalid modern if(): {src}"
         );
     }
+fn import_inlines_sass_partials() {
+    let mut files = std::collections::HashMap::new();
+    files.insert("p".to_string(), "x { y: z }".to_string());
+    files.insert(
+        "nested".to_string(),
+        "b { color: red; nested { x: y } }".to_string(),
+    );
+    let imp = MapImporter(files);
+    let opts = Options::default().with_importer(&imp);
+
+    // A bare quoted string with no modifiers is inlined at the top level.
+    let css = compile("@import \"p\";\n", &opts).expect("import compile failed");
+    assert_eq!(css, "x {\n  y: z;\n}\n");
+
+    // A nested `@import` runs the imported statements under the current parent
+    // selector, so the imported rules nest beneath it.
+    let css = compile("a {\n  @import \"nested\";\n}\n", &opts).expect("nested import failed");
+    assert_eq!(
+        css,
+        "a b {\n  color: red;\n}\na b nested {\n  x: y;\n}\n"
+    );
 }

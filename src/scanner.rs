@@ -88,6 +88,14 @@ impl Scanner {
         c
     }
 
+    /// The source text consumed since `m` was taken (for verbatim capture,
+    /// e.g. a plain CSS `@import` URL emitted unchanged).
+    pub(crate) fn slice_from(&self, m: Mark) -> String {
+        let start = m.pos.min(self.chars.len());
+        let end = self.pos.min(self.chars.len());
+        self.chars[start..end].iter().collect()
+    }
+
     /// Consume `c` if it is next; report whether it was consumed.
     pub(crate) fn eat(&mut self, c: char) -> bool {
         if self.peek() == Some(c) {
