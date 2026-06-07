@@ -826,4 +826,23 @@ fn map_literals_and_builtins() {
     assert_parity("a { b: map-values((c: 1, d: 2)); }\n");
     assert_parity("a { b: map-has-key((c: d), c); }\n");
     assert_parity("@each $k, $v in (a: 1, b: 2) { x-#{$k} { y: $v; } }\n");
+fn special_css_functions_verbatim() {
+    // calc/element/expression (with/without vendor prefix) and unprefixed
+    // type() preserve their arguments verbatim: vendor-prefixed and uppercase
+    // names lower-case, `%`/`@`/`=`/punctuation and IE-hack syntax pass
+    // through, loud comments survive, silent comments drop, whitespace
+    // collapses, and `#{}` resolves — all byte-matched to dart-sass.
+    assert_parity("a { b: -a-calc(/**/ c); }\n");
+    assert_parity("a { b: -a-calc(c /**/); }\n");
+    assert_parity("a {\n  b: -a-calc(//\n    c);\n}\n");
+    assert_parity("a {\n  b: -a-calc(c //\n    );\n}\n");
+    assert_parity("a { b: element(c d); }\n");
+    assert_parity("a { b: expression(a=b); }\n");
+    assert_parity("a { b: expression(opacity=80); }\n");
+    assert_parity("a { b: TYPE(0); }\n");
+    assert_parity("a { b: type(@#$%^&*({[]})_-+=); }\n");
+    assert_parity("a { b: -A-CALC(0); }\n");
+    assert_parity("a { b: -C-ELEMENT(0); }\n");
+    assert_parity("a { b: -C-EXPRESSION(#{1 + 1}); }\n");
+    assert_parity("a { b: -a-calc(  c   d  ); }\n");
 }

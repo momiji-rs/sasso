@@ -104,6 +104,45 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+/// Classify a function name (the identifier immediately before a `(`) as a
+/// "special" CSS function whose argument list must be preserved verbatim
+/// rather than parsed as SassScript. Matching is case-insensitive and the
+/// returned name is the dart-sass canonical (lower-cased) spelling that is
+/// emitted.
+///
+/// `calc`, `element`, and `expression` are special with or without a single
+/// vendor prefix (`-x-`). `type` is special only when *un*prefixed. `url`,
+/// `var`, and `env` are handled separately (they have their own raw paths).
+fn special_function_name(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    // Strip a single leading vendor prefix: `-<vendor>-`.
+    let unprefixed = strip_vendor_prefix(&lower);
+    match unprefixed {
+        "calc" | "element" | "expression" => Some(lower),
+        // `type` is special only with no vendor prefix.
+        "type" if unprefixed == lower => Some(lower),
+        _ => None,
+    }
+}
+
+/// Strip a single leading `-<vendor>-` prefix from an already-lower-cased
+/// identifier, returning the remainder. A vendor prefix is `-`, one or more
+/// identifier characters, then `-` (e.g. `-webkit-`). If no such prefix is
+/// present the whole string is returned unchanged.
+fn strip_vendor_prefix(lower: &str) -> &str {
+    let bytes = lower.as_bytes();
+    if bytes.first() != Some(&b'-') {
+        return lower;
+    }
+    // Find the second `-` after at least one inner character.
+    if let Some(rel) = lower[1..].find('-') {
+        if rel >= 1 {
+            return &lower[1 + rel + 1..];
+        }
+    }
+    lower
+}
+
 /// Validate a modern `if()` condition: an evaluated `sass()` may not coexist
 /// in an `and`/`or` chain with an *unparenthesised* multi-token "arbitrary
 /// substitution". Parenthesising the substitution shields it (a `sass()`
@@ -2326,6 +2365,14 @@ impl Parser {
             }
             return Ok(Expr::Ident(pieces));
         }
+        // Special CSS functions (`calc()`, `element()`, `expression()` with or
+        // without a vendor prefix; `type()` unprefixed) preserve their
+        // arguments verbatim — they may contain `%`, `@`, `=`, IE-hack syntax,
+        // comments, and other non-SassScript characters. Only `#{...}`
+        // interpolation is resolved; the function name is lower-cased.
+        if let Some(canonical) = special_function_name(&name) {
+            return self.parse_special_function(&canonical);
+        }
         // The modern CSS `if()` uses `:`/`;` clause syntax and `css()`/
         // `sass()` wrappers, which the comma-arg parser cannot handle. Try
         // the modern grammar first; if it does not match, reset and fall
@@ -2340,6 +2387,122 @@ impl Parser {
         }
         let args = self.parse_args_after_paren()?;
         Ok(Expr::Func { name, args, pos })
+    }
+
+    /// Capture the argument list of a special CSS function verbatim after the
+    /// opening `(` has been consumed. `canonical` is the lower-cased function
+    /// name to emit. The contents are preserved literally except that:
+    ///   - `#{...}` interpolation is resolved;
+    ///   - runs of whitespace collapse to a single space;
+    ///   - silent `//` comments are dropped (the whitespace around them stays);
+    ///   - loud `/* */` comments, quoted strings, and all other characters
+    ///     (`%`, `@`, `=`, punctuation, …) are emitted verbatim.
+    ///
+    /// Nested parentheses are balanced.
+    fn parse_special_function(&mut self, canonical: &str) -> Result<Expr, Error> {
+        let mut pieces: Vec<TplPiece> = Vec::new();
+        let mut lit = format!("{canonical}(");
+        let mut depth = 1i32;
+        loop {
+            match self.sc.peek() {
+                None => break,
+                Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    if !lit.is_empty() {
+                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                    }
+                    self.sc.bump();
+                    self.sc.bump();
+                    let e = self.parse_value()?;
+                    self.skip_ws_inline();
+                    if !self.sc.eat('}') {
+                        return Err(Error::at("expected \"}\"", self.sc.position()));
+                    }
+                    pieces.push(TplPiece::Interp(e));
+                }
+                // Quoted strings: copy verbatim (parens inside do not nest).
+                Some(q @ ('"' | '\'')) => {
+                    lit.push(q);
+                    self.sc.bump();
+                    while let Some(ch) = self.sc.peek() {
+                        lit.push(ch);
+                        self.sc.bump();
+                        if ch == '\\' {
+                            if let Some(esc) = self.sc.peek() {
+                                lit.push(esc);
+                                self.sc.bump();
+                            }
+                            continue;
+                        }
+                        if ch == q {
+                            break;
+                        }
+                    }
+                }
+                // Loud comment: emit verbatim.
+                Some('/') if self.sc.peek_at(1) == Some('*') => {
+                    lit.push('/');
+                    lit.push('*');
+                    self.sc.bump();
+                    self.sc.bump();
+                    loop {
+                        match self.sc.peek() {
+                            None => break,
+                            Some('*') if self.sc.peek_at(1) == Some('/') => {
+                                lit.push('*');
+                                lit.push('/');
+                                self.sc.bump();
+                                self.sc.bump();
+                                break;
+                            }
+                            Some(c) => {
+                                lit.push(c);
+                                self.sc.bump();
+                            }
+                        }
+                    }
+                }
+                // Silent comment: drop it (surrounding whitespace is kept).
+                Some('/') if self.sc.peek_at(1) == Some('/') => {
+                    while let Some(c) = self.sc.peek() {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.sc.bump();
+                    }
+                }
+                // Whitespace run collapses to a single space.
+                Some(c) if c.is_whitespace() => {
+                    while matches!(self.sc.peek(), Some(c) if c.is_whitespace()) {
+                        self.sc.bump();
+                    }
+                    lit.push(' ');
+                }
+                Some('(') => {
+                    depth += 1;
+                    lit.push('(');
+                    self.sc.bump();
+                }
+                Some(')') => {
+                    depth -= 1;
+                    lit.push(')');
+                    self.sc.bump();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Some(c) => {
+                    lit.push(c);
+                    self.sc.bump();
+                }
+            }
+        }
+        if depth != 0 {
+            return Err(Error::at("expected \")\"", self.sc.position()));
+        }
+        if !lit.is_empty() {
+            pieces.push(TplPiece::Lit(lit));
+        }
+        Ok(Expr::Ident(pieces))
     }
 
     /// Attempt to parse the modern `if()` grammar after the opening `(` was
