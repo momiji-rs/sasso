@@ -267,6 +267,102 @@ impl Number {
     }
 }
 
+/// A CSS dimension group whose units can be converted into one another.
+///
+/// Units in the same group are mutually convertible via [`convert_factor`];
+/// units in different groups (or unknown units, `%`, etc.) are incompatible.
+///
+/// Note: dart-sass does NOT treat the frequency units `hz`/`khz` as
+/// convertible in arithmetic (`1khz + 500hz` is an error), so frequency is
+/// deliberately omitted here to match its behaviour byte-for-byte.
+// `dead_code` is allowed only until the arithmetic/calc/math-builtin batches
+// wire these in; the table lands first with unit tests and no behaviour change.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dim {
+    Length,
+    Angle,
+    Time,
+    Resolution,
+}
+
+/// The dimension group a unit belongs to, or `None` for `%`, an unknown
+/// unit, or a unitless number. Unit names compare case-insensitively, as in
+/// dart-sass (`PX` and `px` are the same unit).
+#[allow(dead_code)]
+pub(crate) fn unit_dimension(unit: &str) -> Option<Dim> {
+    match unit.to_ascii_lowercase().as_str() {
+        "px" | "in" | "cm" | "mm" | "q" | "pt" | "pc" => Some(Dim::Length),
+        "deg" | "grad" | "rad" | "turn" => Some(Dim::Angle),
+        "s" | "ms" => Some(Dim::Time),
+        "dpi" | "dpcm" | "dppx" => Some(Dim::Resolution),
+        _ => None,
+    }
+}
+
+/// The canonical factor for a unit: a value of `1<unit>` equals
+/// `canonical_factor(unit)` canonical units of its group. `None` for any
+/// unit not in a convertible dimension group.
+///
+/// Canonical bases (verified against dart-sass):
+/// length → px, angle → deg, time → s, resolution → dpi.
+#[allow(dead_code)]
+fn canonical_factor(unit: &str) -> Option<f64> {
+    use std::f64::consts::PI;
+    Some(match unit.to_ascii_lowercase().as_str() {
+        // length (canonical: px)
+        "px" => 1.0,
+        "in" => 96.0,
+        "cm" => 96.0 / 2.54,
+        "mm" => 96.0 / 25.4,
+        "q" => 96.0 / 101.6,
+        "pt" => 96.0 / 72.0,
+        "pc" => 16.0,
+        // angle (canonical: deg)
+        "deg" => 1.0,
+        "grad" => 9.0 / 10.0,
+        "rad" => 180.0 / PI,
+        "turn" => 360.0,
+        // time (canonical: s)
+        "s" => 1.0,
+        "ms" => 1.0 / 1000.0,
+        // resolution (canonical: dpi)
+        "dpi" => 1.0,
+        "dpcm" => 2.54,
+        "dppx" => 96.0,
+        _ => return None,
+    })
+}
+
+/// The multiplier to convert a value in `from` units to `to` units
+/// (`value_in_to = value_in_from * convert_factor(from, to)`). Returns
+/// `None` when the two units are not in the same convertible group.
+#[allow(dead_code)]
+pub(crate) fn convert_factor(from: &str, to: &str) -> Option<f64> {
+    if !units_compatible(from, to) {
+        return None;
+    }
+    let f = canonical_factor(from)?;
+    let t = canonical_factor(to)?;
+    Some(f / t)
+}
+
+/// Whether two units can be combined in arithmetic. Equal units (case
+/// insensitively, as dart-sass does) are always compatible; otherwise both
+/// must be non-empty and share a dimension group. An empty unit (unitless)
+/// is handled by the caller, not here — this is the strict "two real units"
+/// test, mirroring dart-sass's `isComparableTo`.
+#[allow(dead_code)]
+pub(crate) fn units_compatible(a: &str, b: &str) -> bool {
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    match (unit_dimension(a), unit_dimension(b)) {
+        (Some(da), Some(db)) => da == db,
+        _ => false,
+    }
+}
+
 impl List {
     fn to_css(&self, compressed: bool) -> String {
         let sep = match (self.sep, compressed) {
@@ -677,5 +773,55 @@ mod tests {
         let red = named_color("red").expect("named");
         assert_eq!(red.to_css(false), "red");
         assert!(named_color("definitely-not-a-color").is_none());
+    }
+
+    #[test]
+    fn unit_dimensions_group_known_units() {
+        assert_eq!(unit_dimension("px"), Some(Dim::Length));
+        assert_eq!(unit_dimension("PT"), Some(Dim::Length));
+        assert_eq!(unit_dimension("deg"), Some(Dim::Angle));
+        assert_eq!(unit_dimension("ms"), Some(Dim::Time));
+        assert_eq!(unit_dimension("dppx"), Some(Dim::Resolution));
+        // `%`, unknown viewport units, frequency, and unitless have no group.
+        assert_eq!(unit_dimension("%"), None);
+        assert_eq!(unit_dimension("vw"), None);
+        assert_eq!(unit_dimension("khz"), None);
+        assert_eq!(unit_dimension(""), None);
+    }
+
+    #[test]
+    fn units_compatible_within_groups_only() {
+        assert!(units_compatible("in", "cm"));
+        assert!(units_compatible("px", "PX"));
+        assert!(units_compatible("deg", "turn"));
+        assert!(units_compatible("s", "ms"));
+        assert!(units_compatible("dpi", "dppx"));
+        // equal units are always compatible, even `%` and unknown units.
+        assert!(units_compatible("%", "%"));
+        // cross-group and unknown units are incompatible.
+        assert!(!units_compatible("px", "s"));
+        assert!(!units_compatible("px", "vw"));
+        assert!(!units_compatible("khz", "hz"));
+    }
+
+    #[test]
+    fn convert_factor_matches_dart_sass() {
+        // length: 1in == 96px, 1cm == 96/2.54 px.
+        assert_eq!(convert_factor("in", "px"), Some(96.0));
+        assert_eq!(convert_factor("px", "px"), Some(1.0));
+        let cm_to_in = convert_factor("cm", "in").expect("compatible");
+        assert!((cm_to_in - (1.0 / 2.54)).abs() < 1e-12);
+        // 1in + 1cm in inches: 1 + 1*(1/2.54) == 1.3937007874...
+        assert!((1.0 + cm_to_in - 1.393700787401575).abs() < 1e-12);
+        // time: 1ms == 0.001s.
+        assert_eq!(convert_factor("ms", "s"), Some(0.001));
+        // angle: 1turn == 360deg, 100grad == 90deg.
+        assert_eq!(convert_factor("turn", "deg"), Some(360.0));
+        assert_eq!(convert_factor("grad", "deg"), Some(0.9));
+        // resolution: 1dppx == 96dpi.
+        assert_eq!(convert_factor("dppx", "dpi"), Some(96.0));
+        // incompatible -> None.
+        assert_eq!(convert_factor("px", "s"), None);
+        assert_eq!(convert_factor("px", "vw"), None);
     }
 }
