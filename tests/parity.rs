@@ -1229,3 +1229,25 @@ fn parent_selector_as_value() {
     )
     .is_err());
 }
+
+#[test]
+fn parent_selector_placement_strictness() {
+    // `&` must begin a compound selector and a top-level `&` may not carry an
+    // identifier suffix — matching dart-sass's parser rules. These run offline.
+    // Non-initial `&` is always an error (parent or not).
+    assert!(compile("p {\n  b& {c: d}\n}\n", &Options::default()).is_err());
+    assert!(compile("p {\n  [b]& {c: d}\n}\n", &Options::default()).is_err());
+    assert!(compile("p {\n  .x& {c: d}\n}\n", &Options::default()).is_err());
+    assert!(compile(":not(a > b)& {c: d}\n", &Options::default()).is_err());
+    // A top-level `&` with an identifier suffix is an error.
+    assert!(compile("&a {b: c}\n", &Options::default()).is_err());
+    assert!(compile("&-x {b: c}\n", &Options::default()).is_err());
+    assert!(compile("@at-rule {\n  &b {c: d}\n}\n", &Options::default()).is_err());
+    // But a suffix under a real parent is allowed (it concatenates).
+    assert_eq!(ours(".x {\n  &a {c: d}\n}\n"), ".xa {\n  c: d;\n}\n");
+    // And these valid placements still compile (each `&` begins a compound).
+    assert!(compile("p {\n  &.foo {c: d}\n}\n", &Options::default()).is_ok());
+    assert!(compile("p {\n  &:hover {c: d}\n}\n", &Options::default()).is_ok());
+    assert!(compile("p {\n  & > & {c: d}\n}\n", &Options::default()).is_ok());
+    assert!(compile("p {\n  &[a~=b] {c: d}\n}\n", &Options::default()).is_ok());
+}

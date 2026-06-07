@@ -760,6 +760,7 @@ impl<'a> Evaluator<'a> {
         if sel_str.trim().is_empty() {
             return Err(Error::unpositioned("expected selector."));
         }
+        validate_parent_usage(&sel_str, !parents.is_empty())?;
         let current = resolve_selectors(&sel_str, parents);
         self.scopes.push(HashMap::new());
         let prev_selector = self.current_selector.replace(current.clone());
@@ -2268,6 +2269,62 @@ fn stmt_uses_content(stmt: &Stmt) -> bool {
         } => body_uses_content(content),
         _ => false,
     }
+}
+
+/// Validate the placement of `&` in a (post-interpolation) selector string,
+/// matching dart-sass's parser rules:
+///   * `&` may appear only at the beginning of a compound selector (so `b&`,
+///     `[x]&`, `.y&` are all errors).
+///   * A `&` followed directly by an identifier-name character (`a`, `-`, `_`,
+///     digit, `\`) is a "suffix"; at the document root (no parent) this is an
+///     error, but inside a style rule it concatenates onto the parent.
+///
+/// Bracket (`[...]`) and parenthesis (`(...)`) contents are skipped so that
+/// `~`/`+`/`>` inside `[a~=b]` or `:not(a > b)` are not treated as top-level
+/// combinators.
+fn validate_parent_usage(sel: &str, has_parent: bool) -> Result<(), Error> {
+    for part in split_commas(sel) {
+        let chars: Vec<char> = part.chars().collect();
+        let mut i = 0;
+        // True at the start of each compound selector (start of the part and
+        // immediately after any combinator or whitespace).
+        let mut at_compound_start = true;
+        let mut depth = 0i32; // inside `[...]` or `(...)`
+        while i < chars.len() {
+            let c = chars[i];
+            match c {
+                '[' | '(' => {
+                    depth += 1;
+                    at_compound_start = false;
+                }
+                ']' | ')' => {
+                    depth -= 1;
+                    at_compound_start = false;
+                }
+                _ if depth > 0 => {}
+                ' ' | '\t' | '\n' | '\r' => at_compound_start = true,
+                '>' | '+' | '~' => at_compound_start = true,
+                '&' => {
+                    if !at_compound_start {
+                        return Err(Error::unpositioned(
+                            "\"&\" may only used at the beginning of a compound selector.",
+                        ));
+                    }
+                    let next = chars.get(i + 1).copied();
+                    let is_suffix = matches!(next, Some(n) if n.is_ascii_alphanumeric() || n == '-' || n == '_' || n == '\\');
+                    if is_suffix && !has_parent {
+                        return Err(Error::unpositioned(
+                            "A top-level selector may not contain a parent selector with a suffix.",
+                        ));
+                    }
+                    at_compound_start = false;
+                }
+                _ => at_compound_start = false,
+            }
+            i += 1;
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a (possibly comma-separated) selector against the parent
