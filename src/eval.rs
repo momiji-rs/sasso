@@ -1023,7 +1023,14 @@ impl<'a> Evaluator<'a> {
             });
             return Ok(());
         };
-        let out_body = self.eval_at_body(stmts, parents)?;
+        // `@font-face` (exactly, case-sensitively, unprefixed) holds plain
+        // declarations: dart-sass does NOT carry the enclosing style-rule
+        // selector into its body — `a { @font-face { d: e } }` emits a bare
+        // `@font-face { d: e }`. Every other at-rule (including `@page`,
+        // `@-moz-font-face`, and unknown directives) wraps its body in the
+        // enclosing selector.
+        let body_parents: &[String] = if name == "font-face" { &[] } else { parents };
+        let out_body = self.eval_at_body(stmts, body_parents)?;
         sink.push_at_rule(OutNode::AtRule {
             name: name.to_string(),
             prelude,

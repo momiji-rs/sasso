@@ -2596,3 +2596,32 @@ fn reference_combinator_is_rejected() {
     // A `/` inside an attribute value is fine.
     assert_eq!(ours("a[href^=\"/\"] {x: y}\n"), "a[href^=\"/\"] {\n  x: y;\n}\n");
 }
+
+#[test]
+fn font_face_does_not_carry_parent_selector() {
+    // `@font-face` (exactly, unprefixed) holds plain declarations: dart-sass does
+    // NOT carry the enclosing style-rule selector into its body, unlike `@page`,
+    // `@-moz-font-face`, or an unknown directive.
+    assert_eq!(
+        ours("a {\n  b: c;\n  @font-face { d: e }\n}\n"),
+        "a {\n  b: c;\n}\n@font-face {\n  d: e;\n}\n"
+    );
+    assert_eq!(
+        ours("a { b { c { @font-face { e: f } g: h; } } }\n"),
+        "@font-face {\n  e: f;\n}\na b c {\n  g: h;\n}\n"
+    );
+    // `@page` and unknown directives DO carry the parent selector into their
+    // (bubbled-out) body.
+    assert_eq!(
+        ours("a {\n  @page { d: e }\n}\n"),
+        "@page {\n  a {\n    d: e;\n  }\n}\n"
+    );
+    assert_eq!(
+        ours("a {\n  @foo { d: e }\n}\n"),
+        "@foo {\n  a {\n    d: e;\n  }\n}\n"
+    );
+
+    assert_parity("a {\n  b: c;\n  @font-face { d: e }\n}\n");
+    assert_parity("a { b { c { @font-face { e: f } g: h; } } }\n");
+    assert_parity("a {\n  @page { d: e }\n}\n");
+}
