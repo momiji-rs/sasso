@@ -890,4 +890,16 @@ fn special_url_function_passthrough() {
     assert_parity("$a: b;\nc { d: url($a); }\n");
     assert_parity("$a: b;\nc { d: -e-url($a); }\n");
     assert_parity("$f: bar;\na {\n  foo: url($f);\n  foo: url(#{$f});\n  foo: url(\"x?v=#{$f}\");\n}\n");
+fn extended_named_colors() {
+    // Every one of the 148 CSS named colors must resolve and feed color
+    // functions; previously extended names like `plum` errored as "not a
+    // color". Each rule round-trips through rgba() so the exact channel
+    // values are byte-matched to dart-sass.
+    assert_parity("a { b: rgba(plum, 0.5); }\n");
+    assert_parity("a { b: rgba(rebeccapurple, 0.5); }\n");
+    assert_parity("a { b: rgba(darkslategray, 0.5); }\n");
+    assert_parity("a { b: desaturate(plum, 14%); }\n");
+    assert_parity("a { b: rgba(cornflowerblue, 0.25); }\n");
+    assert_parity("a { b: rgba(mediumspringgreen, 0.75); }\n");
+    assert_parity("a { b: rgba(lightgoldenrodyellow, 1); }\n");
 }
