@@ -3044,3 +3044,19 @@ fn parity_colorspace_math() {
         "@use \"sass:color\";\na {\n  n1: oklch(none 0.2 3deg);\n  n2: color(srgb none 0.5 0.7);\n  n3: hsl(none 50% 40%);\n  n4: hsl(120 none 40%);\n  n5: rgb(none 100 100);\n  n6: rgb(100 100 100 / none);\n  n7: hwb(none 30% 40%);\n}\n",
     );
 }
+
+#[test]
+fn parity_color_mix_interpolation() {
+    // color.mix() with a CSS Color 4 $method interpolates in the named space
+    // with premultiplied alpha and the hue interpolation methods, returning a
+    // result in the first color's space. Byte-matched to `npx sass`.
+    assert_parity(
+        "@use \"sass:color\";\na {\n  m1: color.mix(red, blue, 25%, oklch);\n  m2: color.mix(red, blue, $method: lab);\n  m3: color.mix(red, blue, 25%, srgb);\n  m4: color.mix(red, green, $method: xyz);\n  m5: color.mix(rgba(red, 0.5), blue, $method: srgb);\n  m6: color.mix(oklch(0.5 0.1 90), oklch(0.7 0.2 200), $method: oklch);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:color\";\na {\n  s: color.mix(oklch(0.5 0.1 30), oklch(0.5 0.1 190), $method: oklch shorter hue);\n  l: color.mix(oklch(0.5 0.1 30), oklch(0.5 0.1 190), $method: oklch longer hue);\n  i: color.mix(oklch(0.5 0.1 30), oklch(0.5 0.1 190), $method: oklch increasing hue);\n  d: color.mix(oklch(0.5 0.1 30), oklch(0.5 0.1 190), $method: oklch decreasing hue);\n  w: color.mix(red, green, 20%, lch longer hue);\n  ci: color.mix(oklch(0.5 0.1 30), oklch(0.5 0.1 190), $method: oKlCh LONger HUE);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:color\";\na {\n  pl: color.mix(lch(30% 0% 0deg), lch(50% 10% 120deg), $method: hsl);\n}\n",
+    );
+}

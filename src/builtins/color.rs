@@ -1353,12 +1353,24 @@ fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         }
         None => 50.0,
     };
-    // A $method (CSS Color 4 interpolation method) is validated here. Only
-    // `rgb`/`srgb` reproduce the legacy mix this path computes; the other
-    // (non-legacy) spaces require full color-space interpolation, so those
-    // cases are skipped upstream. Invalid methods report dart-sass's errors.
+    // A $method (CSS Color 4 interpolation method) triggers real color-space
+    // interpolation in the named space; without it, the legacy mix runs (which
+    // requires both colors to be legacy).
     if let Some(method) = arg(&params, pos_args, named, 3) {
-        validate_mix_method(method, pos)?;
+        let (space, hue_method) = validate_mix_method(method, pos)?;
+        return Ok(Value::Color(interpolate_mix(&c1, &c2, weight, space, hue_method)));
+    }
+    for (i, c) in [&c1, &c2].iter().enumerate() {
+        if !color_space_of(c).is_legacy() {
+            return Err(Error::at(
+                format!(
+                    "$color{}: To use color.mix() with non-legacy color {}, you must provide a $method.",
+                    i + 1,
+                    c.to_css(false)
+                ),
+                pos,
+            ));
+        }
     }
     let p = weight / 100.0;
     let w = p * 2.0 - 1.0;
@@ -1389,11 +1401,19 @@ fn mix_method_space(name: &str) -> Option<bool> {
     }
 }
 
+/// The hue interpolation method for a polar `mix()` `$method`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HueMethod {
+    Shorter,
+    Longer,
+    Increasing,
+    Decreasing,
+}
+
 /// Validate a `mix()` `$method` value (a CSS Color 4 interpolation method:
-/// `srgb`, `oklch longer hue`, …). Errors match dart-sass exactly. A valid
-/// method returns `Ok(())`; the caller then runs the legacy mix (correct for
-/// `rgb`/`srgb`, the only reachable non-skipped methods).
-fn validate_mix_method(method: &Value, pos: Pos) -> Result<(), Error> {
+/// `srgb`, `oklch longer hue`, …). Errors match dart-sass exactly. Returns the
+/// resolved interpolation space and hue method.
+fn validate_mix_method(method: &Value, pos: Pos) -> Result<(ColorSpace, HueMethod), Error> {
     let err = |msg: String| Err(Error::at(msg, pos));
     // The method is either a bare color-space string or a space-separated
     // list `space [<hue> hue]`.
@@ -1414,13 +1434,15 @@ fn validate_mix_method(method: &Value, pos: Pos) -> Result<(), Error> {
             return err(format!("$method: {} is not a string.", other.to_css(false)));
         }
     };
+    let space = space.to_ascii_lowercase();
     let polar = match mix_method_space(&space) {
         Some(p) => p,
         None => return err(format!("$method: Unknown color space \"{space}\".")),
     };
+    let cspace = ColorSpace::from_name(&space).unwrap_or(ColorSpace::Srgb);
     // A bare color space (no trailing hue method) is always valid.
     if items.len() == 1 {
-        return Ok(());
+        return Ok((cspace, HueMethod::Shorter));
     }
     // `space <hue-method> hue`: the second token names a hue interpolation
     // method and the list must end with the literal `hue`.
@@ -1432,11 +1454,14 @@ fn validate_mix_method(method: &Value, pos: Pos) -> Result<(), Error> {
     };
     // The hue-method keyword is validated before the trailing `hue` keyword,
     // matching dart-sass's error order.
-    match method_token.to_ascii_lowercase().as_str() {
-        "shorter" | "longer" | "increasing" | "decreasing" => {}
+    let hue_method = match method_token.to_ascii_lowercase().as_str() {
+        "shorter" => HueMethod::Shorter,
+        "longer" => HueMethod::Longer,
+        "increasing" => HueMethod::Increasing,
+        "decreasing" => HueMethod::Decreasing,
         "specified" => return err("$method: Unknown hue interpolation method specified.".to_string()),
         other => return err(format!("$method: Unknown hue interpolation method {other}.")),
-    }
+    };
     // The list must end with an unquoted `hue` keyword.
     let last = items[items.len() - 1];
     let last_is_hue = matches!(last, Value::Str(s) if !s.quoted && s.text.eq_ignore_ascii_case("hue"));
@@ -1461,7 +1486,7 @@ fn validate_mix_method(method: &Value, pos: Pos) -> Result<(), Error> {
              may not be set for rectangular color space {space}."
         ));
     }
-    Ok(())
+    Ok((cspace, hue_method))
 }
 
 fn fn_adjust_lightness(
@@ -2729,4 +2754,119 @@ fn lab_degenerate(
         format!("{name}({body} / {})", fmt_num(a, false))
     };
     Value::Str(crate::value::SassStr { text, quoted: false })
+}
+
+/// CSS Color 4 `color.mix($c1, $c2, $weight, $method)` interpolation in
+/// `space`. `weight` is the percentage (0..100) of `c1`. Channels are
+/// interpolated with premultiplied alpha (except the hue, which uses
+/// `hue_method`); a channel missing in one color takes the other's value.
+fn interpolate_mix(c1: &Color, c2: &Color, weight: f64, space: ColorSpace, hue_method: HueMethod) -> Color {
+    let p = weight / 100.0;
+    // Powerless channels are blanked in each color's own space first, so the
+    // missing carries through the conversion to the interpolation space.
+    let m1 = convert_modern(&blank_powerless(legacy_to_modern(c1)), space);
+    let m2 = convert_modern(&blank_powerless(legacy_to_modern(c2)), space);
+    let a1 = m1.alpha;
+    let a2 = m2.alpha;
+    // Result alpha (missing treated as the other's, else 1).
+    let ra1 = a1.unwrap_or_else(|| a2.unwrap_or(1.0));
+    let ra2 = a2.unwrap_or_else(|| a1.unwrap_or(1.0));
+    let result_alpha = ra1 * p + ra2 * (1.0 - p);
+    let hue_idx = match space {
+        ColorSpace::Hsl | ColorSpace::Hwb => Some(0),
+        ColorSpace::Lch | ColorSpace::Oklch => Some(2),
+        _ => None,
+    };
+    let mut out = [None; 3];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let v1 = m1.channels[i];
+        let v2 = m2.channels[i];
+        // A channel missing in both stays missing.
+        if v1.is_none() && v2.is_none() {
+            *slot = None;
+            continue;
+        }
+        // Missing in one: take the other's value (carry).
+        let x1 = v1.unwrap_or_else(|| v2.unwrap_or(0.0));
+        let x2 = v2.unwrap_or_else(|| v1.unwrap_or(0.0));
+        if Some(i) == hue_idx {
+            *slot = Some(interpolate_hue(x1, x2, p, hue_method));
+        } else {
+            // Premultiplied-alpha interpolation. A missing alpha counts as 1.
+            let pa1 = a1.unwrap_or(1.0);
+            let pa2 = a2.unwrap_or(1.0);
+            let premul = x1 * pa1 * p + x2 * pa2 * (1.0 - p);
+            *slot = Some(if result_alpha.abs() < 1e-12 {
+                x1 * p + x2 * (1.0 - p)
+            } else {
+                premul / result_alpha
+            });
+        }
+    }
+    let alpha = if a1.is_none() && a2.is_none() {
+        None
+    } else {
+        Some(result_alpha)
+    };
+    let mc = ModernColor {
+        space,
+        channels: out,
+        alpha,
+    };
+    // The result is expressed in c1's original space (CSS Color 4 / dart-sass):
+    // a legacy c1 yields a legacy result, a modern c1 keeps its own space.
+    let dest = legacy_to_modern(c1).space;
+    let back = convert_modern(&mc, dest);
+    make_modern_in(back, dest)
+}
+
+/// Interpolate two hue angles (degrees) by `p` (fraction of `h1`) using the
+/// CSS Color 4 hue interpolation method.
+fn interpolate_hue(h1: f64, h2: f64, p: f64, method: HueMethod) -> f64 {
+    let mut a = h1.rem_euclid(360.0);
+    let mut b = h2.rem_euclid(360.0);
+    match method {
+        HueMethod::Shorter => {
+            let diff = b - a;
+            if diff > 180.0 {
+                a += 360.0;
+            } else if diff < -180.0 {
+                b += 360.0;
+            }
+        }
+        HueMethod::Longer => {
+            // The longer arc: take the complement of the shorter direction.
+            let diff = b - a;
+            if (0.0..180.0).contains(&diff) {
+                b += 360.0;
+            } else if (-180.0..0.0).contains(&diff) {
+                a += 360.0;
+            }
+        }
+        HueMethod::Increasing => {
+            if b < a {
+                b += 360.0;
+            }
+        }
+        HueMethod::Decreasing => {
+            if a < b {
+                a += 360.0;
+            }
+        }
+    }
+    a * p + b * (1.0 - p)
+}
+
+/// Set a powerless channel to missing (`None`) for interpolation: the hue of
+/// hsl (at zero saturation), hwb (whiteness+blackness >= 100) and lch/oklch
+/// (at zero chroma) carries no information.
+fn blank_powerless(mut mc: ModernColor) -> ModernColor {
+    let ch = |i: usize| mc.channels[i].unwrap_or(0.0);
+    match mc.space {
+        ColorSpace::Hsl if ch(1) == 0.0 => mc.channels[0] = None,
+        ColorSpace::Hwb if ch(1) + ch(2) >= 100.0 => mc.channels[0] = None,
+        ColorSpace::Lch | ColorSpace::Oklch if ch(1) == 0.0 => mc.channels[2] = None,
+        _ => {}
+    }
+    mc
 }
