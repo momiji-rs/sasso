@@ -3281,3 +3281,91 @@ fn parity_use_and_forward_with_config() {
         ),
     ]);
 }
+
+// ---------------------------------------------------------------------------
+// Indented (`.sass`) syntax parity.
+// ---------------------------------------------------------------------------
+
+/// Compile `sass` (indented syntax) with dart-sass via `--stdin --indented`.
+fn dart_sass_indented(sass: &str) -> Option<String> {
+    let bin = std::env::var("SASS_BIN").unwrap_or_else(|_| "npx".to_string());
+    let mut cmd = if bin == "npx" {
+        let mut c = Command::new("npx");
+        c.args(["--yes", "sass", "--no-source-map", "--stdin", "--indented"]);
+        c
+    } else {
+        let mut c = Command::new(bin);
+        c.args(["--no-source-map", "--stdin", "--indented"]);
+        c
+    };
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(sass.as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
+/// Byte-verify our indented-syntax output against dart-sass.
+fn assert_sass_parity(sass: &str) {
+    if !enabled() {
+        return;
+    }
+    let ours = compile(sass, &Options::default().with_syntax(sasso::Syntax::Sass))
+        .expect("our indented compile failed");
+    match dart_sass_indented(sass) {
+        Some(theirs) => assert_eq!(ours, theirs, "\n--- sass ---\n{sass}\n"),
+        None => eprintln!("skipping indented parity case: dart-sass unavailable"),
+    }
+}
+
+#[test]
+fn parity_sass_basic_rule_and_decls() {
+    assert_sass_parity("a\n  b: c\n  d: e\n");
+    assert_sass_parity("$x: 1\n\ne\n  f: $x + 2\n");
+}
+
+#[test]
+fn parity_sass_nesting_and_parent() {
+    assert_sass_parity("a\n  color: red\n  &:hover\n    color: blue\n");
+}
+
+#[test]
+fn parity_sass_control_flow() {
+    assert_sass_parity("@for $i from 1 through 3\n  .c-#{$i}\n    width: $i * 10px\n");
+    assert_sass_parity("@each $c in red, green\n  .#{$c}\n    color: $c\n");
+}
+
+#[test]
+fn parity_sass_callables() {
+    assert_sass_parity("@function double($x)\n  @return $x * 2\n\na\n  width: double(5px)\n");
+    assert_sass_parity("@mixin box($w)\n  width: $w\n  height: $w\n\na\n  @include box(4px)\n");
+}
+
+#[test]
+fn parity_sass_shorthand_mixin() {
+    // `=name` defines a mixin, `+name` includes it.
+    assert_sass_parity("=box($w)\n  width: $w\n\na\n  +box(4px)\n");
+}
+
+#[test]
+fn parity_sass_multiline_continuation() {
+    assert_sass_parity("@function a($b,\n            $c)\n  @return $b + $c\n\nd\n  e: a(1, 2)\n");
+}
+
+#[test]
+fn parity_sass_comments() {
+    assert_sass_parity("// silent\na\n  b: c // trailing\n");
+    assert_sass_parity("/* loud */\na\n  b: c\n");
+}
+
+#[test]
+fn parity_sass_custom_property() {
+    assert_sass_parity("a\n  --b: c d\n");
+}

@@ -164,7 +164,13 @@ impl Transpiler {
 
         // --- assemble the logical line (bracket / trailing-comma / `\`
         //     continuations) ---------------------------------------------
-        let (logical, child_indent) = self.assemble_logical_line(indent)?;
+        let (mut logical, child_indent) = self.assemble_logical_line(indent)?;
+
+        // A directive whose prelude is grammatically incomplete at the end of
+        // its line continues onto the next (deeper-indented) line(s) — the
+        // newline acts as whitespace inside the prelude. The remaining
+        // deeper-indented lines after the prelude completes are its body.
+        self.extend_directive_prelude(&mut logical, indent)?;
 
         // The statement keyword decides whether a `;` or a `{ … }` block is
         // appropriate, and handles the `=`/`+` shorthands and custom props.
@@ -268,32 +274,42 @@ impl Transpiler {
     /// line. Errors on tab/space indentation mixing within the continuation.
     fn assemble_logical_line(&mut self, indent: usize) -> Result<(String, usize), Error> {
         let start = self.idx;
-        let mut logical = self.lines[start].content.trim_start().to_string();
+        let mut logical = strip_silent_comment(self.lines[start].content.trim_start());
         self.idx = start + 1;
         loop {
             if continuation_pending(&logical) {
-                // Need a following line to continue. Use the next *physical*
-                // line (continuations join physically, even across blanks is
-                // disallowed; dart-sass joins the immediate next line).
+                // Need a following line to continue. Continuations join the
+                // *immediate next physical line* (dart-sass does not skip blanks
+                // here).
                 if self.idx >= self.lines.len() {
                     break;
                 }
-                let next = &self.lines[self.idx];
-                if next.content.trim().is_empty() && self.bracket_depth(&logical) > 0 {
-                    // blank line inside brackets — join as a space.
-                    logical.push(' ');
-                    self.idx += 1;
-                    continue;
-                }
-                if next.content.trim().is_empty() {
+                let next_content = self.lines[self.idx].content.clone();
+                let next_indent_str = self.lines[self.idx].indent_str.clone();
+                if next_content.trim().is_empty() {
+                    if self.bracket_depth(&logical) > 0 {
+                        // A blank line inside brackets joins as a newline.
+                        logical.push('\n');
+                        self.idx += 1;
+                        continue;
+                    }
                     break;
                 }
-                // Backslash continuation: drop the trailing backslash.
+                // Backslash continuation: drop the trailing backslash and join
+                // with a single space (the line "wraps").
                 if logical.ends_with('\\') {
                     logical.pop();
+                    logical.push(' ');
+                    logical.push_str(strip_silent_comment(next_content.trim_start()).trim_start());
+                } else {
+                    // Bracket / trailing-comma continuation: preserve the
+                    // newline and the line's original indentation so the SCSS
+                    // parser sees (and re-serializes) the same whitespace as
+                    // dart-sass.
+                    logical.push('\n');
+                    logical.push_str(&next_indent_str);
+                    logical.push_str(&strip_silent_comment(&next_content));
                 }
-                logical.push(' ');
-                logical.push_str(next.content.trim_start());
                 self.idx += 1;
                 continue;
             }
@@ -306,6 +322,47 @@ impl Transpiler {
     /// comments and interpolation.
     fn bracket_depth(&self, s: &str) -> i32 {
         bracket_depth(s)
+    }
+
+    /// While the directive prelude in `logical` is grammatically incomplete,
+    /// pull in the next deeper-indented line(s) as prelude continuation. A
+    /// newline acts as whitespace inside a directive prelude, so a directive may
+    /// span several indented lines before its body block (which is whatever
+    /// deeper-indented lines remain afterwards).
+    fn extend_directive_prelude(&mut self, logical: &mut String, indent: usize) -> Result<(), Error> {
+        if !directive_prelude_can_span(logical) {
+            return Ok(());
+        }
+        while prelude_incomplete(logical) {
+            let Some(i) = self.next_nonblank(self.idx) else {
+                break;
+            };
+            // Only a deeper-indented line continues the prelude (a same/shallower
+            // line is a sibling/dedent).
+            if self.lines[i].indent <= indent {
+                break;
+            }
+            let piece = strip_silent_comment(self.lines[i].content.trim_start());
+            self.idx = i + 1;
+            if piece.is_empty() {
+                continue;
+            }
+            if !logical.is_empty() && !logical.ends_with(char::is_whitespace) {
+                logical.push(' ');
+            }
+            logical.push_str(&piece);
+            // Pull in any bracket / comma continuations of this new line too.
+            while continuation_pending(logical) {
+                let Some(j) = self.next_nonblank(self.idx) else {
+                    break;
+                };
+                let cont = strip_silent_comment(self.lines[j].content.trim_start());
+                self.idx = j + 1;
+                logical.push(' ');
+                logical.push_str(&cont);
+            }
+        }
+        Ok(())
     }
 
     /// Parse the child block of the statement that begins at `self.idx`'s
@@ -439,6 +496,143 @@ impl Transpiler {
     }
 }
 
+/// The lowercased directive keyword of a logical line (`@for` -> `"for"`), or
+/// `None` if the line is not an at-rule.
+fn directive_name(logical: &str) -> Option<String> {
+    let t = logical.trim_start();
+    let rest = t.strip_prefix('@')?;
+    let name: String = rest.chars().take_while(|c| is_ident_char(*c)).collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_ascii_lowercase())
+    }
+}
+
+/// Whether a directive's prelude may span multiple indented lines (the prelude
+/// is an expression / structured clause that the indented parser reads with the
+/// real grammar, treating newlines as whitespace).
+fn directive_prelude_can_span(logical: &str) -> bool {
+    matches!(
+        directive_name(logical).as_deref(),
+        Some(
+            "for"
+                | "each"
+                | "if"
+                | "else"
+                | "while"
+                | "function"
+                | "mixin"
+                | "include"
+                | "return"
+                | "warn"
+                | "debug"
+                | "error"
+                | "extend"
+                | "use"
+                | "forward"
+                | "import"
+                | "at-root"
+                | "content",
+        )
+    )
+}
+
+/// Whether `c` is an operator/structural character that, when it ends a prelude
+/// line, demands a following operand (so the prelude continues).
+fn ends_with_pending_operator(t: &str) -> bool {
+    let t = t.trim_end();
+    if t.ends_with(',') || t.ends_with('\\') {
+        return true;
+    }
+    // Trailing binary/relational/arithmetic operators.
+    for op in ["+", "-", "*", "/", "%", "<", ">", "=", ":"] {
+        if t.ends_with(op) {
+            return true;
+        }
+    }
+    // Trailing keyword that requires more (case-insensitive whole word).
+    let last_word: String = t
+        .chars()
+        .rev()
+        .take_while(|c| is_ident_char(*c))
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    matches!(
+        last_word.to_ascii_lowercase().as_str(),
+        "from"
+            | "through"
+            | "to"
+            | "in"
+            | "and"
+            | "or"
+            | "not"
+            | "using"
+            | "as"
+            | "with"
+            | "show"
+            | "hide"
+            | "if"
+    )
+}
+
+/// Whether a directive prelude (the whole logical line so far) is grammatically
+/// incomplete and therefore continues onto the next indented line.
+fn prelude_incomplete(logical: &str) -> bool {
+    // An unbalanced bracket always continues.
+    if bracket_depth(logical) > 0 {
+        return true;
+    }
+    let Some(name) = directive_name(logical) else {
+        return false;
+    };
+    // The prelude text after the directive keyword.
+    let t = logical.trim_start();
+    let after_at = &t[1..]; // skip '@'
+    let prelude = after_at.strip_prefix(name.as_str()).unwrap_or(after_at).trim();
+    if ends_with_pending_operator(prelude) {
+        return true;
+    }
+    match name.as_str() {
+        // `@for $i from <a> (through|to) <b>` — incomplete until both the
+        // `from`/`through`/`to` keywords and operands are present.
+        "for" => {
+            let lower = prelude.to_ascii_lowercase();
+            // Need the variable, `from`, an operand, `through`/`to`, an operand.
+            if !lower.contains(" from ") && !lower.ends_with(" from") {
+                // No `from` yet — but `@for $i` alone should continue.
+                return !lower.contains("from");
+            }
+            // Have `from`; need `through`/`to` with an operand after it.
+            let has_bound = lower.contains(" through ") || lower.contains(" to ");
+            !has_bound
+        }
+        // `@each $v[, $k] in <list>` — incomplete until ` in ` appears.
+        "each" => {
+            let lower = prelude.to_ascii_lowercase();
+            !(lower.contains(" in ") || lower.ends_with(" in"))
+        }
+        // `@if`/`@while`/`@else if` need a non-empty condition.
+        "if" | "while" => prelude.is_empty(),
+        "else" => {
+            // `@else` is complete; `@else if` (no condition yet) needs more.
+            let lower = prelude.to_ascii_lowercase();
+            lower == "if" || lower.ends_with(" if")
+        }
+        // `@function`/`@mixin` need a name (and balanced parens if any).
+        "function" | "mixin" => prelude.is_empty(),
+        // `@return`/`@warn`/`@debug`/`@error`/`@extend` need an expression.
+        "return" | "warn" | "debug" | "error" | "extend" => prelude.is_empty(),
+        // `@include` needs a name.
+        "include" => prelude.is_empty(),
+        // `@use`/`@forward`/`@import` need a URL.
+        "use" | "forward" | "import" => prelude.is_empty(),
+        _ => false,
+    }
+}
+
 /// Which empty form a child-less statement takes in the reconstructed SCSS.
 enum EmptyForm {
     /// A block construct with no body: append ` {}` (style rules, `@function`,
@@ -516,6 +710,76 @@ fn continuation_pending(s: &str) -> bool {
     }
     let t = s.trim_end();
     t.ends_with(',') || t.ends_with('\\')
+}
+
+/// Strip a trailing `//` silent comment from a single line, respecting quoted
+/// strings, `#{…}` interpolation and `/* */` loud comments (a `//` inside a
+/// loud comment is not a silent comment). Returns the line with the comment (if
+/// any) removed and trailing whitespace trimmed.
+fn strip_silent_comment(s: &str) -> String {
+    let cs: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    let mut byte = 0usize;
+    while i < cs.len() {
+        let c = cs[i];
+        match c {
+            '"' | '\'' => {
+                let q = c;
+                byte += c.len_utf8();
+                i += 1;
+                while i < cs.len() && cs[i] != q {
+                    if cs[i] == '\\' && i + 1 < cs.len() {
+                        byte += cs[i].len_utf8();
+                        i += 1;
+                    }
+                    byte += cs[i].len_utf8();
+                    i += 1;
+                }
+                if i < cs.len() {
+                    byte += cs[i].len_utf8();
+                    i += 1;
+                }
+                continue;
+            }
+            '/' if cs.get(i + 1) == Some(&'*') => {
+                // A loud comment: skip to its close (it may not close on this
+                // line, in which case the rest is comment body — leave it).
+                byte += 2;
+                i += 2;
+                while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
+                    byte += cs[i].len_utf8();
+                    i += 1;
+                }
+                if i + 1 < cs.len() {
+                    byte += 2;
+                    i += 2;
+                }
+                continue;
+            }
+            '/' if cs.get(i + 1) == Some(&'/') => {
+                return s[..byte].trim_end().to_string();
+            }
+            '#' if cs.get(i + 1) == Some(&'{') => {
+                byte += c.len_utf8() + '{'.len_utf8();
+                i += 2;
+                let mut d = 1;
+                while i < cs.len() && d > 0 {
+                    match cs[i] {
+                        '{' => d += 1,
+                        '}' => d -= 1,
+                        _ => {}
+                    }
+                    byte += cs[i].len_utf8();
+                    i += 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        byte += c.len_utf8();
+        i += 1;
+    }
+    s.trim_end().to_string()
 }
 
 /// Net bracket depth of `s` ignoring strings, `//`/`/* */` comments and `#{}`
@@ -674,9 +938,4 @@ fn illegal_punctuation(logical: &str) -> Option<usize> {
     }
     let _ = (paren, bracket);
     None
-}
-
-#[allow(dead_code)]
-fn _ident_guard(c: char) -> bool {
-    is_ident_char(c)
 }
