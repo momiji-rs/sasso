@@ -10,8 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{
-    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, MediaFeature, MediaInParens, MediaQuery,
-    MediaQueryList, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfClause, IfCond, MediaFeature, MediaInParens,
+    MediaQuery, MediaQueryList, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -1076,6 +1076,7 @@ impl<'a> Evaluator<'a> {
                     quoted: false,
                 }))
             }
+            Expr::ModernIf(clauses) => self.eval_modern_if(clauses),
             // Parentheses force the deprecated slash to perform real
             // division: `(1/2)` is `0.5`, not the slash value `1/2`.
             Expr::Paren(inner) => Ok(self.eval_expr(inner)?.without_slash()),
@@ -1213,6 +1214,112 @@ impl<'a> Evaluator<'a> {
                 "if() requires arguments $condition, $if-true, $if-false.",
                 pos,
             )),
+        }
+    }
+
+    /// Evaluate a modern CSS `if()`: a `;`-separated list of clauses, each
+    /// `<condition>: <value>` (or `else: <value>`). Conditions mix evaluated
+    /// `sass(<expr>)` with non-evaluable `css(...)` / arbitrary substitution
+    /// pieces. If every reachable condition resolves statically, the matching
+    /// value is returned; otherwise the whole `if()` is re-serialized
+    /// verbatim (with statically-true/false conditions folded away) as an
+    /// unquoted string.
+    fn eval_modern_if(&mut self, clauses: &[IfClause]) -> Result<Value, Error> {
+        let mut verbatim: Option<Vec<String>> = None;
+        for clause in clauses {
+            // The `else` clause has no condition: it always matches.
+            let result = match &clause.condition {
+                None => CondEval::Bool(true),
+                Some(cond) => self.eval_if_cond(cond)?,
+            };
+            match (&mut verbatim, result) {
+                // Not yet verbatim: a static-true (or `else`) clause wins.
+                (None, CondEval::Bool(true)) => {
+                    return Ok(self.eval_expr(&clause.value)?.without_slash());
+                }
+                // Not yet verbatim: a static-false clause is skipped.
+                (None, CondEval::Bool(false)) => {}
+                // First non-evaluable condition: enter verbatim mode.
+                (None, CondEval::Css(rc)) => {
+                    let value = self.eval_if_value(&clause.value)?;
+                    verbatim = Some(vec![format!("{}: {}", rc.to_css(), value)]);
+                }
+                // Already verbatim: fold each remaining clause.
+                (Some(out), CondEval::Bool(true)) => {
+                    let value = self.eval_if_value(&clause.value)?;
+                    out.push(format!("else: {value}"));
+                }
+                (Some(_), CondEval::Bool(false)) => {}
+                (Some(out), CondEval::Css(rc)) => {
+                    let value = self.eval_if_value(&clause.value)?;
+                    out.push(format!("{}: {}", rc.to_css(), value));
+                }
+            }
+        }
+        match verbatim {
+            Some(parts) => Ok(Value::Str(SassStr {
+                text: format!("if({})", parts.join("; ")),
+                quoted: false,
+            })),
+            // No clause matched and no `else`: the modern `if()` is null.
+            None => Ok(Value::Null),
+        }
+    }
+
+    /// Evaluate an `if()` clause value. dart-sass serializes the value in a
+    /// parenthesized-expression context, so lists are wrapped in parens and
+    /// a bare slash-division collapses to its number.
+    fn eval_if_value(&mut self, expr: &Expr) -> Result<String, Error> {
+        let v = self.eval_expr(expr)?.without_slash();
+        Ok(serialize_if_value(&v))
+    }
+
+    /// Evaluate a modern `if()` condition into a tri-state result: a static
+    /// boolean (from `sass(...)` atoms) or a residual non-evaluable CSS
+    /// condition that must be re-serialized verbatim.
+    fn eval_if_cond(&mut self, cond: &IfCond) -> Result<CondEval, Error> {
+        match cond {
+            IfCond::Sass(expr) => Ok(CondEval::Bool(self.eval_expr(expr)?.is_truthy())),
+            IfCond::Raw { pieces, .. } => {
+                let text = self.eval_template(pieces)?;
+                Ok(CondEval::Css(RCond::Css(text)))
+            }
+            IfCond::Not(inner) => match self.eval_if_cond(inner)? {
+                CondEval::Bool(b) => Ok(CondEval::Bool(!b)),
+                CondEval::Css(rc) => Ok(CondEval::Css(RCond::Not(Box::new(rc)))),
+            },
+            IfCond::Paren(inner) => match self.eval_if_cond(inner)? {
+                CondEval::Bool(b) => Ok(CondEval::Bool(b)),
+                CondEval::Css(rc) => Ok(CondEval::Css(RCond::Paren(Box::new(rc)))),
+            },
+            IfCond::And(items) => {
+                let mut residuals: Vec<RCond> = Vec::new();
+                for item in items {
+                    match self.eval_if_cond(item)? {
+                        // A statically-false operand makes the whole `and`
+                        // false and short-circuits the rest.
+                        CondEval::Bool(false) => return Ok(CondEval::Bool(false)),
+                        // A statically-true operand drops out of the `and`.
+                        CondEval::Bool(true) => {}
+                        CondEval::Css(rc) => residuals.push(rc),
+                    }
+                }
+                Ok(combine_residuals(residuals, true))
+            }
+            IfCond::Or(items) => {
+                let mut residuals: Vec<RCond> = Vec::new();
+                for item in items {
+                    match self.eval_if_cond(item)? {
+                        // A statically-true operand makes the whole `or`
+                        // true and short-circuits the rest.
+                        CondEval::Bool(true) => return Ok(CondEval::Bool(true)),
+                        // A statically-false operand drops out of the `or`.
+                        CondEval::Bool(false) => {}
+                        CondEval::Css(rc) => residuals.push(rc),
+                    }
+                }
+                Ok(combine_residuals(residuals, false))
+            }
         }
     }
 
@@ -1968,4 +2075,78 @@ fn merge_media_query(this: &ResolvedQuery, other: &ResolvedQuery) -> MergeResult
         conditions,
         conjunction_and: true,
     })
+}
+
+// ---- modern if() condition evaluation ----------------------------------
+
+/// The tri-state outcome of evaluating a modern `if()` condition: a static
+/// boolean, or a residual non-evaluable CSS condition kept for verbatim
+/// serialization.
+enum CondEval {
+    Bool(bool),
+    Css(RCond),
+}
+
+/// A residual (non-evaluable) modern `if()` condition tree. The raw text of
+/// each `Css` leaf already has interpolation resolved; the tree is preserved
+/// so `and`/`or`/`not`/parentheses serialize canonically.
+enum RCond {
+    /// A serialized raw substitution sequence (`css(...)`, `var(...)`, ...).
+    Css(String),
+    Not(Box<RCond>),
+    And(Vec<RCond>),
+    Or(Vec<RCond>),
+    Paren(Box<RCond>),
+}
+
+impl RCond {
+    fn to_css(&self) -> String {
+        match self {
+            RCond::Css(s) => s.clone(),
+            RCond::Not(c) => format!("not {}", c.to_css()),
+            RCond::And(items) => items.iter().map(RCond::to_css).collect::<Vec<_>>().join(" and "),
+            RCond::Or(items) => items.iter().map(RCond::to_css).collect::<Vec<_>>().join(" or "),
+            RCond::Paren(c) => format!("({})", c.to_css()),
+        }
+    }
+}
+
+/// Combine the residual operands of an `and`/`or` whose statically-known
+/// operands were already folded away. When a single residual remains, the
+/// operation collapses to it (and a redundant outer paren is dropped, as in
+/// dart-sass); otherwise it stays an `and`/`or` chain.
+fn combine_residuals(mut residuals: Vec<RCond>, is_and: bool) -> CondEval {
+    match residuals.len() {
+        // No residuals: every operand was statically known. An `and` that
+        // reached here had no false operand (all true) -> true; an `or`
+        // that reached here had no true operand (all false) -> false.
+        0 => CondEval::Bool(is_and),
+        1 => {
+            let single = residuals.pop().unwrap_or(RCond::Css(String::new()));
+            // A single surviving operand drops a redundant outer paren.
+            let unwrapped = match single {
+                RCond::Paren(inner) => *inner,
+                other => other,
+            };
+            CondEval::Css(unwrapped)
+        }
+        _ => {
+            if is_and {
+                CondEval::Css(RCond::And(residuals))
+            } else {
+                CondEval::Css(RCond::Or(residuals))
+            }
+        }
+    }
+}
+
+/// Serialize a value for the modern `if()` value position, where dart-sass
+/// uses a parenthesized-expression context: lists (including the empty list)
+/// are wrapped in parentheses; other values serialize as usual.
+fn serialize_if_value(v: &Value) -> String {
+    match v {
+        Value::List(_) => format!("({})", v.to_css(false)),
+        Value::Null => "null".to_string(),
+        other => other.to_css(false),
+    }
 }

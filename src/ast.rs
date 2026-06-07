@@ -203,6 +203,43 @@ pub(crate) enum Expr {
     /// `#{ expr }` used in value position — always yields an unquoted
     /// string.
     Interp(Box<Expr>),
+    /// The modern CSS `if()` conditional: a `;`-separated list of clauses,
+    /// each `<condition>: <value>` (or `else: <value>`). Conditions mix
+    /// `sass(<expr>)` (evaluated) and `css(...)`/other "arbitrary
+    /// substitution" pieces (kept verbatim). Distinct from the legacy
+    /// `if($cond, $t, $f)` builtin, which routes through [`Expr::Func`].
+    ModernIf(Vec<IfClause>),
+}
+
+/// One clause of a modern `if()`: an optional condition (absent for the
+/// trailing `else` clause) and its value expression.
+pub(crate) struct IfClause {
+    /// `None` for the `else` clause; otherwise the parsed condition tree.
+    pub condition: Option<IfCond>,
+    pub value: Expr,
+}
+
+/// A modern `if()` condition tree. Atoms are either an evaluated
+/// `sass(<expr>)` or a verbatim "raw" CSS sequence (`css(...)`, `var(...)`,
+/// nested `if(...)`, interpolation, ...); combined with `not`/`and`/`or`
+/// and parentheses.
+pub(crate) enum IfCond {
+    /// `sass(<expr>)` — evaluated for truthiness.
+    Sass(Box<Expr>),
+    /// One or more space-separated raw substitution tokens forming a single
+    /// non-evaluable CSS condition (each token is a template so embedded
+    /// `#{...}` resolves at eval time). `multi` is true when the sequence has
+    /// more than one token (an "arbitrary substitution", which may not
+    /// coexist with `sass()` in the same condition).
+    Raw { pieces: Vec<TplPiece>, multi: bool },
+    /// `not <cond>`.
+    Not(Box<IfCond>),
+    /// `<cond> and <cond>` (one or more, left-associative chain).
+    And(Vec<IfCond>),
+    /// `<cond> or <cond>` (one or more, left-associative chain).
+    Or(Vec<IfCond>),
+    /// `( <cond> )`.
+    Paren(Box<IfCond>),
 }
 
 /// A call argument, optionally named (`$name: value`).

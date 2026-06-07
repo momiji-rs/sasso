@@ -8,8 +8,9 @@
 use std::rc::Rc;
 
 use crate::ast::{
-    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfBranch, MediaFeature, MediaInParens,
-    MediaQuery, MediaQueryList, Param, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+    BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfBranch, IfClause, IfCond, MediaFeature,
+    MediaInParens, MediaQuery, MediaQueryList, Param, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp,
+    VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Scanner;
@@ -101,6 +102,43 @@ pub(crate) fn parse(src: &str) -> Result<Stylesheet, Error> {
 
 fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+/// Validate a modern `if()` condition: an evaluated `sass()` may not coexist
+/// in an `and`/`or` chain with an *unparenthesised* multi-token "arbitrary
+/// substitution". Parenthesising the substitution shields it (a `sass()`
+/// nested in parens is NOT shielded). Returns `(sass_anywhere, direct_multi)`
+/// where `sass_anywhere` is true if any `sass()` exists in the subtree
+/// (descending through parens), and `direct_multi` is true if an
+/// unparenthesised multi-token raw exists at this boolean level.
+fn validate_if_cond(cond: &IfCond) -> Result<(bool, bool), Error> {
+    let (sass, multi) = match cond {
+        IfCond::Sass(_) => (true, false),
+        IfCond::Raw { multi, .. } => (false, *multi),
+        IfCond::Not(inner) => validate_if_cond(inner)?,
+        // A paren shields a multi-token substitution from the parent level,
+        // but a `sass()` inside still propagates.
+        IfCond::Paren(inner) => {
+            let (s, _) = validate_if_cond(inner)?;
+            (s, false)
+        }
+        IfCond::And(items) | IfCond::Or(items) => {
+            let mut sass = false;
+            let mut multi = false;
+            for it in items {
+                let (s, m) = validate_if_cond(it)?;
+                sass |= s;
+                multi |= m;
+            }
+            (sass, multi)
+        }
+    };
+    if sass && multi {
+        return Err(Error::unpositioned(
+            "if() conditions with arbitrary substitutions may not contain sass() expressions.",
+        ));
+    }
+    Ok((sass, multi))
 }
 
 /// Whether `expr` is eligible to keep the deprecated `/` slash spelling.
@@ -1940,8 +1978,491 @@ impl Parser {
             }
             return Ok(Expr::Ident(pieces));
         }
+        // The modern CSS `if()` uses `:`/`;` clause syntax and `css()`/
+        // `sass()` wrappers, which the comma-arg parser cannot handle. Try
+        // the modern grammar first; if it does not match, reset and fall
+        // back to the legacy `if($cond, $t, $f)` builtin.
+        if name == "if" {
+            let mark = self.sc.mark();
+            match self.try_parse_modern_if() {
+                Ok(Some(clauses)) => return Ok(Expr::ModernIf(clauses)),
+                Ok(None) => self.sc.reset(mark),
+                Err(_) => self.sc.reset(mark),
+            }
+        }
         let args = self.parse_args_after_paren()?;
         Ok(Expr::Func { name, args, pos })
+    }
+
+    /// Attempt to parse the modern `if()` grammar after the opening `(` was
+    /// consumed. Returns `Ok(Some(_))` if the input matches the modern
+    /// clause syntax (consuming through the closing `)`), `Ok(None)` if it
+    /// is clearly the legacy comma-arg form, or `Err` on a genuine modern
+    /// syntax error (which surfaces to the caller as a hard error after the
+    /// trial succeeds in committing to modern).
+    fn try_parse_modern_if(&mut self) -> Result<Option<Vec<IfClause>>, Error> {
+        self.skip_ws_inline();
+        // Recognise the first clause to decide between modern and legacy.
+        // A modern clause starts with `else` or a condition atom; if the
+        // first token cannot begin a condition, this is the legacy form.
+        let first = match self.parse_if_clause(true)? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        let mut clauses = vec![first];
+        loop {
+            self.skip_ws_inline();
+            if self.sc.eat(';') {
+                self.skip_ws_inline();
+                if self.sc.peek() == Some(')') {
+                    break; // trailing semicolon
+                }
+                match self.parse_if_clause(false)? {
+                    Some(c) => clauses.push(c),
+                    None => return Err(Error::at("Expected identifier.", self.sc.position())),
+                }
+                continue;
+            }
+            break;
+        }
+        self.skip_ws_inline();
+        if !self.sc.eat(')') {
+            return Err(Error::at("expected \")\".", self.sc.position()));
+        }
+        Ok(Some(clauses))
+    }
+
+    /// Parse one `if()` clause: `<condition>: <value>` or `else: <value>`.
+    /// When `probe` is true a failure to recognise the leading condition
+    /// returns `Ok(None)` (signalling a fall-back to legacy) rather than an
+    /// error.
+    fn parse_if_clause(&mut self, probe: bool) -> Result<Option<IfClause>, Error> {
+        self.skip_ws_inline();
+        // `else` clause: bare keyword, no condition.
+        let else_mark = self.sc.mark();
+        if self.try_keyword("else") {
+            self.skip_ws_inline();
+            if self.sc.peek() == Some(':') {
+                self.sc.bump();
+                self.skip_ws_inline();
+                let value = self.space_list()?;
+                return Ok(Some(IfClause {
+                    condition: None,
+                    value,
+                }));
+            }
+            // `else` not followed by `:` — not a modern else clause.
+            self.sc.reset(else_mark);
+        }
+        let condition = match self.parse_if_cond(probe)? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        // A condition may not mix an evaluated `sass()` with a multi-token
+        // "arbitrary substitution" raw sequence at the same boolean level.
+        validate_if_cond(&condition)?;
+        self.skip_ws_inline();
+        if !self.sc.eat(':') {
+            return Err(Error::at("expected \":\".", self.sc.position()));
+        }
+        self.skip_ws_inline();
+        let value = self.space_list()?;
+        Ok(Some(IfClause {
+            condition: Some(condition),
+            value,
+        }))
+    }
+
+    /// Parse a full `if()` condition. dart-sass's grammar:
+    ///   `not <operand>`                        (a single negated operand)
+    ///   `<operand> (and <operand>)+`           (an `and` chain)
+    ///   `<operand> (or <operand>)+`            (an `or` chain)
+    ///   `<operand>`                            (a lone operand)
+    /// Mixing `and` and `or` at the same level is an error; `not` only
+    /// applies to a single non-multi-token operand and cannot be chained.
+    /// Keywords (`not`/`and`/`or`) are matched case-insensitively.
+    fn parse_if_cond(&mut self, probe: bool) -> Result<Option<IfCond>, Error> {
+        self.skip_ws_inline();
+        // Leading `not`: a single operand, no following `and`/`or`.
+        if self.eat_if_keyword("not") {
+            self.require_paren_whitespace_after("not")?;
+            self.skip_ws_inline();
+            let operand = self.parse_if_operand(false, true)?;
+            return Ok(Some(IfCond::Not(Box::new(self.expect_operand(operand)?))));
+        }
+        let first = match self.parse_if_operand(probe, false)? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        // Peek for a conjunction (case-insensitive).
+        let mark = self.sc.mark();
+        self.skip_ws_inline();
+        let conj = self.peek_if_conjunction();
+        self.sc.reset(mark);
+        match conj {
+            Some(is_and) => {
+                let kw = if is_and { "and" } else { "or" };
+                let other = if is_and { "or" } else { "and" };
+                let mut items = vec![first];
+                loop {
+                    let mark = self.sc.mark();
+                    self.skip_ws_inline();
+                    if self.eat_if_keyword(kw) {
+                        self.require_paren_whitespace_after(kw)?;
+                        self.skip_ws_inline();
+                        let operand = self.parse_if_operand(false, false)?;
+                        items.push(self.expect_operand(operand)?);
+                        continue;
+                    }
+                    // Mixing the other conjunction is an error.
+                    if self.peek_word_is_ci(other) {
+                        return Err(Error::at("expected \":\".", self.sc.position()));
+                    }
+                    self.sc.reset(mark);
+                    break;
+                }
+                if is_and {
+                    Ok(Some(IfCond::And(items)))
+                } else {
+                    Ok(Some(IfCond::Or(items)))
+                }
+            }
+            None => Ok(Some(first)),
+        }
+    }
+
+    /// Unwrap an operand that may have failed to parse.
+    fn expect_operand(&self, operand: Option<IfCond>) -> Result<IfCond, Error> {
+        operand.ok_or_else(|| Error::at("expected \"(\".", self.sc.position()))
+    }
+
+    /// Parse one condition operand: a parenthesised condition, `sass(<expr>)`,
+    /// or a raw substitution sequence. When `single` is true (the operand of
+    /// `not`), only a single raw token is consumed (a paren or one function
+    /// call), not a multi-token sequence. Returns `Ok(None)` (when probing)
+    /// if the position cannot begin an operand.
+    fn parse_if_operand(&mut self, probe: bool, single: bool) -> Result<Option<IfCond>, Error> {
+        self.skip_ws_inline();
+        match self.sc.peek() {
+            Some('(') => {
+                self.sc.bump();
+                self.skip_ws_inline();
+                let inner = match self.parse_if_cond(false)? {
+                    Some(c) => c,
+                    None => return Err(Error::at("Expected identifier.", self.sc.position())),
+                };
+                self.skip_ws_inline();
+                if !self.sc.eat(')') {
+                    return Err(Error::at("expected \")\".", self.sc.position()));
+                }
+                Ok(Some(IfCond::Paren(Box::new(inner))))
+            }
+            _ if self.peek_keyword_paren_ci("sass") => {
+                for _ in 0.."sass".chars().count() {
+                    self.sc.bump();
+                }
+                self.sc.bump(); // '('
+                self.skip_ws_inline();
+                let expr = self.space_list()?;
+                self.skip_ws_inline();
+                if !self.sc.eat(')') {
+                    return Err(Error::at("expected \")\".", self.sc.position()));
+                }
+                // A `sass()` atom may not be space-adjacent to a raw token
+                // ("arbitrary substitution"): `sass(true) var(--x)` is illegal.
+                let mark = self.sc.mark();
+                let had_ws = self.skip_ws_inline();
+                let next_is_raw = had_ws && self.peek_starts_raw_token();
+                self.sc.reset(mark);
+                if next_is_raw {
+                    return Err(Error::at(
+                        "if() conditions with arbitrary substitutions may not contain sass() expressions.",
+                        self.sc.position(),
+                    ));
+                }
+                Ok(Some(IfCond::Sass(Box::new(expr))))
+            }
+            _ => self.parse_if_raw_sequence(probe, single),
+        }
+    }
+
+    /// Parse a sequence of raw substitution tokens (`css(...)`,
+    /// `<ident>(...)`, `#{...}`) joined by spaces into a single non-evaluable
+    /// condition. When `single` is true, at most one token is read. A
+    /// `sass()` token inside the sequence is the "arbitrary substitution"
+    /// error. Returns `Ok(None)` (when probing) if the input cannot begin a
+    /// raw token.
+    fn parse_if_raw_sequence(&mut self, probe: bool, single: bool) -> Result<Option<IfCond>, Error> {
+        let mut pieces: Vec<TplPiece> = Vec::new();
+        if !self.read_if_raw_token(&mut pieces)? {
+            if probe {
+                return Ok(None);
+            }
+            return Err(Error::at("expected \"(\".", self.sc.position()));
+        }
+        let mut token_count = 1usize;
+        if !single {
+            loop {
+                let mark = self.sc.mark();
+                let had_ws = self.skip_ws_inline();
+                if !had_ws || !self.peek_starts_raw_token() {
+                    self.sc.reset(mark);
+                    break;
+                }
+                // A `sass()` token adjacent to raw substitution is illegal.
+                if self.peek_keyword_paren_ci("sass") {
+                    return Err(Error::at(
+                        "if() conditions with arbitrary substitutions may not contain sass() expressions.",
+                        self.sc.position(),
+                    ));
+                }
+                pieces.push(TplPiece::Lit(" ".to_string()));
+                if !self.read_if_raw_token(&mut pieces)? {
+                    self.sc.reset(mark);
+                    break;
+                }
+                token_count += 1;
+            }
+        }
+        Ok(Some(IfCond::Raw {
+            pieces,
+            multi: token_count > 1,
+        }))
+    }
+
+    /// Whether the next token starts a raw substitution token: an
+    /// interpolation or an identifier (which must be followed by `(`).
+    fn peek_starts_raw_token(&self) -> bool {
+        match self.sc.peek() {
+            Some('#') if self.sc.peek_at(1) == Some('{') => true,
+            Some(c) if is_ident_char(c) => {
+                // A bare keyword (`and`/`or`/`not`) is not a raw token.
+                !(self.peek_word_is_ci("and") || self.peek_word_is_ci("or") || self.peek_word_is_ci("not"))
+            }
+            _ => false,
+        }
+    }
+
+    /// Read one raw substitution token (`<ident>(...)` or `#{...}`),
+    /// appending its serialized pieces. A bare interpolation token is valid;
+    /// a bare identifier (not followed by `(`) is not. Returns false if the
+    /// position does not start such a token.
+    fn read_if_raw_token(&mut self, pieces: &mut Vec<TplPiece>) -> Result<bool, Error> {
+        match self.sc.peek() {
+            Some('#') if self.sc.peek_at(1) == Some('{') => {
+                self.sc.bump();
+                self.sc.bump();
+                let e = self.parse_value()?;
+                self.skip_ws_inline();
+                if !self.sc.eat('}') {
+                    return Err(Error::at("expected \"}\"", self.sc.position()));
+                }
+                pieces.push(TplPiece::Interp(e));
+                // An interpolation followed immediately by `(` is a function.
+                if self.sc.peek() == Some('(') {
+                    self.read_if_raw_parens(pieces)?;
+                }
+                Ok(true)
+            }
+            // `not`/`and`/`or` are reserved: written as `not(`/`and(`/`or(`
+            // (no space) they are the "whitespace required" error, not a
+            // function call.
+            Some(c)
+                if (c.is_ascii_alphabetic())
+                    && (self.peek_keyword_paren_ci("not")
+                        || self.peek_keyword_paren_ci("and")
+                        || self.peek_keyword_paren_ci("or")) =>
+            {
+                let kw = if self.peek_keyword_paren_ci("not") {
+                    "not"
+                } else if self.peek_keyword_paren_ci("and") {
+                    "and"
+                } else {
+                    "or"
+                };
+                // Skip the keyword to point the error at the `(`.
+                for _ in 0..kw.chars().count() {
+                    self.sc.bump();
+                }
+                Err(Error::at(
+                    format!("Whitespace is required between \"{kw}\" and \"(\""),
+                    self.sc.position(),
+                ))
+            }
+            Some(c) if is_ident_char(c) => {
+                let mark = self.sc.mark();
+                let name_pieces = self.read_ident_template()?;
+                if self.sc.peek() != Some('(') {
+                    // Bare identifier — not a raw token unless it contained
+                    // interpolation (e.g. `#{"x"}`), which is a valid token.
+                    if name_pieces.iter().all(|p| matches!(p, TplPiece::Lit(_))) {
+                        self.sc.reset(mark);
+                        return Ok(false);
+                    }
+                    pieces.extend(name_pieces);
+                    return Ok(true);
+                }
+                pieces.extend(name_pieces);
+                self.read_if_raw_parens(pieces)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Read a balanced `( ... )` group verbatim (resolving interpolation),
+    /// appending to `pieces`. Assumes the next char is `(`.
+    fn read_if_raw_parens(&mut self, pieces: &mut Vec<TplPiece>) -> Result<(), Error> {
+        let mut lit = String::new();
+        let mut depth = 0u32;
+        loop {
+            match self.sc.peek() {
+                None => return Err(Error::at("expected \")\".", self.sc.position())),
+                Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    if !lit.is_empty() {
+                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                    }
+                    self.sc.bump();
+                    self.sc.bump();
+                    let e = self.parse_value()?;
+                    self.skip_ws_inline();
+                    if !self.sc.eat('}') {
+                        return Err(Error::at("expected \"}\"", self.sc.position()));
+                    }
+                    pieces.push(TplPiece::Interp(e));
+                }
+                Some('(') => {
+                    depth += 1;
+                    lit.push('(');
+                    self.sc.bump();
+                }
+                Some(')') => {
+                    depth -= 1;
+                    lit.push(')');
+                    self.sc.bump();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Some(c) => {
+                    lit.push(c);
+                    self.sc.bump();
+                }
+            }
+        }
+        if !lit.is_empty() {
+            pieces.push(TplPiece::Lit(lit));
+        }
+        Ok(())
+    }
+
+    /// Read an identifier that may contain leading/embedded `#{...}`
+    /// interpolation (e.g. `#{css}`), as a template.
+    fn read_ident_template(&mut self) -> Result<Vec<TplPiece>, Error> {
+        let mut pieces: Vec<TplPiece> = Vec::new();
+        let mut lit = String::new();
+        loop {
+            match self.sc.peek() {
+                Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    if !lit.is_empty() {
+                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                    }
+                    self.sc.bump();
+                    self.sc.bump();
+                    let e = self.parse_value()?;
+                    self.skip_ws_inline();
+                    if !self.sc.eat('}') {
+                        return Err(Error::at("expected \"}\"", self.sc.position()));
+                    }
+                    pieces.push(TplPiece::Interp(e));
+                }
+                Some(c) if is_ident_char(c) => {
+                    lit.push(c);
+                    self.sc.bump();
+                }
+                _ => break,
+            }
+        }
+        if !lit.is_empty() {
+            pieces.push(TplPiece::Lit(lit));
+        }
+        if pieces.is_empty() {
+            return Err(Error::at("Expected identifier.", self.sc.position()));
+        }
+        Ok(pieces)
+    }
+
+    /// Peek whether the next word equals `kw` case-insensitively (followed
+    /// by a non-ident char). `if()` keywords are case-insensitive.
+    fn peek_word_is_ci(&self, kw: &str) -> bool {
+        let rest = self.sc.rest();
+        let kw_chars: Vec<char> = kw.chars().collect();
+        if rest.len() < kw_chars.len() {
+            return false;
+        }
+        for (i, &kc) in kw_chars.iter().enumerate() {
+            if !rest[i].eq_ignore_ascii_case(&kc) {
+                return false;
+            }
+        }
+        match rest.get(kw_chars.len()) {
+            Some(&c) => !is_ident_char(c),
+            None => true,
+        }
+    }
+
+    /// At the current position, peek whether a conjunction follows.
+    /// `Some(true)` for `and`, `Some(false)` for `or`, `None` otherwise.
+    fn peek_if_conjunction(&self) -> Option<bool> {
+        if self.peek_word_is_ci("and") {
+            Some(true)
+        } else if self.peek_word_is_ci("or") {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Consume the keyword `kw` (case-insensitively) if it is the next word
+    /// (followed by a non-ident char). Does not skip leading whitespace.
+    fn eat_if_keyword(&mut self, kw: &str) -> bool {
+        if self.peek_word_is_ci(kw) {
+            for _ in 0..kw.chars().count() {
+                self.sc.bump();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// After consuming `not`/`and`/`or`, dart-sass requires whitespace
+    /// before a following `(` (otherwise `and(` etc. is a function call,
+    /// which is an error in condition position).
+    fn require_paren_whitespace_after(&mut self, kw: &str) -> Result<(), Error> {
+        if self.sc.peek() == Some('(') {
+            return Err(Error::at(
+                format!("Whitespace is required between \"{kw}\" and \"(\""),
+                self.sc.position(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Peek whether the next word is `kw` (case-insensitive) immediately
+    /// followed by `(`.
+    fn peek_keyword_paren_ci(&self, kw: &str) -> bool {
+        let rest = self.sc.rest();
+        let kw_chars: Vec<char> = kw.chars().collect();
+        if rest.len() <= kw_chars.len() {
+            return false;
+        }
+        for (i, &kc) in kw_chars.iter().enumerate() {
+            if !rest[i].eq_ignore_ascii_case(&kc) {
+                return false;
+            }
+        }
+        rest.get(kw_chars.len()) == Some(&'(')
     }
 
     /// Parse a call's argument list, assuming the opening `(` was already

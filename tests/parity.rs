@@ -498,6 +498,53 @@ fn lab_family_validation_and_passthrough() {
             compile(src, &Options::default()).is_err(),
             "expected error for {src}"
         );
+#[test]
+fn modern_if_function() {
+    // The modern CSS `if()` conditional: `css()` conditions emit the whole
+    // call verbatim; `sass()`/bare conditions are evaluated (first truthy
+    // clause wins, else otherwise); the legacy `if($c, $t, $f)` builtin still
+    // works. Each case byte-matches dart-sass.
+    for src in [
+        // verbatim css() forms (single, else, raw chars, not, and/or, parens)
+        "a {b: if(css(): c)}\n",
+        "a {b: if(css(): c; else: d)}\n",
+        "a {b: if(css(!@#$%^&*(){}[]_-+=|:;''\"\"<>,./?): c)}\n",
+        "a {b: if(not css(): c)}\n",
+        "a {b: if(not (css()): c)}\n",
+        "a {b: if(css(1) and css(2): c)}\n",
+        "a {b: if(css(1) and (css(2)): c)}\n",
+        "a {b: if(css(1) or css(2) or css(3): c)}\n",
+        "a {b: if((css()): c)}\n",
+        "a {b: if((css(1) and css(2)): c)}\n",
+        // arbitrary substitutions (var/attr/nested if/interpolation), verbatim
+        "a {b: if(var(--not) css(): c)}\n",
+        "a {b: if(css(1) var(--and) css(2): c)}\n",
+        "a {b: if(css() if(else: var(--and-clause)): c)}\n",
+        "a {b: if(css(1) #{\"and\"} css(2): c)}\n",
+        "a {b: if(#{css}(): c)}\n",
+        "a {b: if(css(#{1 + 1}): c)}\n",
+        // evaluated sass()/bare conditions
+        "a {b: if(sass(true): c; else: d)}\n",
+        "a {b: if(sass(false): c; else: d)}\n",
+        "$a: true;\nb {c: if(sass($a): d; else: e)}\n",
+        "a {b: if(not sass(true): c; else: d)}\n",
+        "a {b: if(sass(true) and sass(false): c; else: d)}\n",
+        "a {b: if(sass(false) or sass(true): c; else: d)}\n",
+        // sass folded into a verbatim css() chain
+        "a {b: if(sass(true) and css(): c; else: d)}\n",
+        "a {b: if(sass(false) or css(): c; else: d)}\n",
+        "a {b: if(css(1) and sass(true) and css(2): c; else: d)}\n",
+        "a {b: if(sass(true) and (var(--not) css()): c)}\n",
+        // short-circuit, else-only, evaluated values
+        "a {b: if(sass(true): c; sass($undefined): d)}\n",
+        "a {b: if(else: c)}\n",
+        "a {b: if(css(): 1 + 2)}\n",
+        "a {b: if(css(): (1 2 3))}\n",
+        // legacy builtin stays intact
+        "a {b: if(true, 1px, 2px)}\n",
+        "a {b: if(false, 1px, 2px)}\n",
+    ] {
+        assert_parity(src);
     }
 }
 
@@ -648,4 +695,24 @@ fn round_strategies_and_steps() {
     assert_parity("a { b: round(1px, 10%); }\n");
     assert_parity("a { b: round(1%, 2%); }\n");
     assert_parity("a { b: round(1foo, 2bar); }\n");
+}
+fn modern_if_rejects_invalid_conditions() {
+    // dart-sass rejects these; sasso must error too (mixing and/or, `not`
+    // after a conjunction, reserved keyword as a function, and a `sass()`
+    // sharing a boolean level with an unparenthesised arbitrary substitution).
+    for src in [
+        "a {b: if(css(1) and css(2) or css(3): c)}\n",
+        "a {b: if(css(1) and not css(2): c)}\n",
+        "a {b: if(not not css(): c)}\n",
+        "a {b: if(not and(): d)}\n",
+        "a {b: if(css(1) and(css(2)): d)}\n",
+        "a {b: if(sass(true) and css(1) var(--and) css(2): c)}\n",
+        "a {b: if((sass(true)) and css(1) var(--and) css(2): c)}\n",
+        "a {b: if(css(1): c, css(2): d)}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected error for invalid modern if(): {src}"
+        );
+    }
 }
