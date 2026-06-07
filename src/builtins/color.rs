@@ -2,6 +2,7 @@
 //! `lighten`/`darken`, `percentage`, and the channel getters
 //! `red`/`green`/`blue`/`alpha`.
 
+use super::color_ext::{computed, named_repr};
 use super::{arg, as_color, channel, clamp01, num, require};
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -17,8 +18,8 @@ pub(super) fn try_call(
         "rgb" | "rgba" => fn_rgb(pos_args, named, pos),
         "hsl" | "hsla" => fn_hsl(pos_args, named, pos),
         "mix" => fn_mix(pos_args, named, pos),
-        "lighten" => fn_adjust_lightness(pos_args, named, pos, 1.0),
-        "darken" => fn_adjust_lightness(pos_args, named, pos, -1.0),
+        "lighten" => fn_adjust_lightness(name, pos_args, named, pos, 1.0),
+        "darken" => fn_adjust_lightness(name, pos_args, named, pos, -1.0),
         "percentage" => fn_percentage(pos_args, named, pos),
         "red" | "green" | "blue" => fn_channel(name, pos_args, named, pos),
         "alpha" => fn_alpha(pos_args, named, pos),
@@ -28,14 +29,12 @@ pub(super) fn try_call(
 
 fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["red", "green", "blue", "alpha"];
-    // rgba($color, $alpha) two-argument form.
+    // rgba($color, $alpha) two-argument form. The result is a computed color
+    // (serialized by name/hex/rgba), not the literal rgb() spelling.
     if pos_args.len() == 2 {
         if let Value::Color(c) = &pos_args[0] {
             let a = clamp01(num(&pos_args[1], pos)?);
-            let mut nc = c.clone();
-            nc.a = a;
-            nc.repr = Some(rgb_repr(nc.r, nc.g, nc.b, nc.a));
-            return Ok(Value::Color(nc));
+            return Ok(Value::Color(computed(c.r, c.g, c.b, a)));
         }
     }
     let r = channel(require(&params, pos_args, named, 0, "rgb", pos)?, pos)?;
@@ -108,11 +107,32 @@ fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
 }
 
 fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let params = ["color1", "color2", "weight"];
+    let params = ["color1", "color2", "weight", "method"];
+    let n = pos_args.len() + named.len();
+    if n > 4 {
+        return Err(Error::at(
+            format!("Only 4 arguments allowed, but {n} were passed."),
+            pos,
+        ));
+    }
     let c1 = as_color(require(&params, pos_args, named, 0, "mix", pos)?, pos)?;
     let c2 = as_color(require(&params, pos_args, named, 1, "mix", pos)?, pos)?;
     let weight = match arg(&params, pos_args, named, 2) {
-        Some(v) => num(v, pos)?,
+        Some(Value::Number(w)) => {
+            if w.value < 0.0 || w.value > 100.0 {
+                return Err(Error::at(
+                    format!("$weight: Expected {} to be within 0% and 100%.", w.to_css(false)),
+                    pos,
+                ));
+            }
+            w.value
+        }
+        Some(other) => {
+            return Err(Error::at(
+                format!("$weight: {} is not a number.", other.to_css(false)),
+                pos,
+            ))
+        }
         None => 50.0,
     };
     let p = weight / 100.0;
@@ -129,21 +149,47 @@ fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     let g = c1.g * w1 + c2.g * w2;
     let b = c1.b * w1 + c2.b * w2;
     let alpha = c1.a * p + c2.a * (1.0 - p);
-    Ok(Value::Color(Color::rgb(r, g, b, alpha)))
+    Ok(Value::Color(computed(r, g, b, alpha)))
 }
 
 fn fn_adjust_lightness(
+    name: &str,
     pos_args: &[Value],
     named: &[(String, Value)],
     pos: Pos,
     sign: f64,
 ) -> Result<Value, Error> {
     let params = ["color", "amount"];
-    let c = as_color(require(&params, pos_args, named, 0, "lightness", pos)?, pos)?;
-    let amount = num(require(&params, pos_args, named, 1, "lightness", pos)?, pos)?;
+    let n = pos_args.len() + named.len();
+    if n > 2 {
+        return Err(Error::at(
+            format!("Only 2 arguments allowed, but {n} were passed."),
+            pos,
+        ));
+    }
+    let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
+    let amount = match require(&params, pos_args, named, 1, name, pos)? {
+        Value::Number(num) => {
+            if num.value < 0.0 || num.value > 100.0 {
+                return Err(Error::at(
+                    format!("$amount: Expected {} to be within 0 and 100.", num.to_css(false)),
+                    pos,
+                ));
+            }
+            num.value
+        }
+        other => {
+            return Err(Error::at(
+                format!("$amount: {} is not a number.", other.to_css(false)),
+                pos,
+            ))
+        }
+    };
     let (h, s, l) = c.to_hsl();
     let new_l = (l + sign * amount / 100.0).clamp(0.0, 1.0);
-    Ok(Value::Color(Color::from_hsl(h, s, new_l, c.a)))
+    let mut out = Color::from_hsl(h, s, new_l, c.a);
+    out.repr = named_repr(out.r, out.g, out.b, out.a);
+    Ok(Value::Color(out))
 }
 
 fn fn_percentage(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
@@ -172,6 +218,13 @@ fn fn_channel(name: &str, pos_args: &[Value], named: &[(String, Value)], pos: Po
 
 fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
+    let n = pos_args.len() + named.len();
+    if n > 1 {
+        return Err(Error::at(
+            format!("Only 1 argument allowed, but {n} were passed."),
+            pos,
+        ));
+    }
     let c = as_color(require(&params, pos_args, named, 0, "alpha", pos)?, pos)?;
     Ok(Value::Number(Number {
         value: c.a,
