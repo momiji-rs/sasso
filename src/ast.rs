@@ -211,6 +211,11 @@ pub(crate) enum Expr {
     },
     /// `( expr )`.
     Paren(Box<Expr>),
+    /// A map literal `(k1: v1, k2: v2)`. Disambiguated from a parenthesised
+    /// expression / list by the `:` after the first key. An empty map is
+    /// written `()` but parses as the empty list; only a non-empty
+    /// `(k: v, …)` produces this node.
+    Map(Vec<(Expr, Expr)>),
     /// `#{ expr }` used in value position — always yields an unquoted
     /// string.
     Interp(Box<Expr>),
@@ -254,9 +259,14 @@ pub(crate) enum IfCond {
 }
 
 /// A call argument, optionally named (`$name: value`).
+///
+/// A `splat` argument (`$list...`) is expanded at call time: a list spreads
+/// into positional arguments and a map spreads into keyword arguments. A
+/// splat argument never carries a `name`.
 pub(crate) struct CallArg {
     pub name: Option<String>,
     pub value: Expr,
+    pub splat: bool,
 }
 
 #[derive(Clone, Copy)]

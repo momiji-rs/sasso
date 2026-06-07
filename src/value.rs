@@ -16,6 +16,9 @@ pub(crate) enum Value {
     Str(SassStr),
     /// A space- or comma-separated list.
     List(List),
+    /// A map of key/value pairs, preserving insertion order. Keys are
+    /// compared by Sass `==`. An empty map serializes (and inspects) as `()`.
+    Map(Map),
     /// A boolean.
     Bool(bool),
     /// The `null` value.
@@ -179,6 +182,77 @@ pub(crate) struct List {
     pub bracketed: bool,
 }
 
+/// A map value: an ordered list of key/value entries. Insertion order is
+/// preserved (dart-sass maps are ordered); duplicate keys are resolved by the
+/// constructor so at most one entry exists per Sass-equal key.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Map {
+    pub entries: Vec<(Value, Value)>,
+}
+
+impl Map {
+    /// Look up a value by key (Sass `==`), or `None` when absent.
+    pub(crate) fn get(&self, key: &Value) -> Option<&Value> {
+        self.entries.iter().find(|(k, _)| k.sass_eq(key)).map(|(_, v)| v)
+    }
+
+    /// Insert or overwrite an entry, preserving the position of an existing
+    /// key (matching dart-sass map ordering).
+    pub(crate) fn insert(&mut self, key: Value, value: Value) {
+        if let Some(slot) = self.entries.iter_mut().find(|(k, _)| k.sass_eq(&key)) {
+            slot.1 = value;
+        } else {
+            self.entries.push((key, value));
+        }
+    }
+
+    /// Serialize the map for CSS / error messages: `(k1: v1, k2: v2)`, with
+    /// the empty map rendered as `()`.
+    pub(crate) fn to_css(&self, compressed: bool) -> String {
+        self.to_map_css(compressed)
+    }
+
+    /// Serialize the map as dart-sass does: `(k1: v1, k2: v2)`, with the empty
+    /// map rendered as `()`. Keys and values use their inspect form so nested
+    /// quoted strings keep their quotes.
+    fn to_map_css(&self, compressed: bool) -> String {
+        if self.entries.is_empty() {
+            return "()".to_string();
+        }
+        let sep = if compressed { "," } else { ", " };
+        let pair_sep = if compressed { ":" } else { ": " };
+        let inner = self
+            .entries
+            .iter()
+            .map(|(k, v)| format!("{}{pair_sep}{}", map_key_css(k), map_val_css(v)))
+            .collect::<Vec<_>>()
+            .join(sep);
+        format!("({inner})")
+    }
+}
+
+/// Serialize a map key (dart-sass uses the inspect form for keys/values).
+fn map_key_css(v: &Value) -> String {
+    match v {
+        Value::Str(s) if s.quoted => format!("\"{}\"", s.text),
+        Value::Map(m) => m.to_map_css(false),
+        other => other.to_css(false),
+    }
+}
+
+/// Serialize a map value entry. A bare comma list inside a map is wrapped in
+/// parentheses to disambiguate from the entry separators.
+fn map_val_css(v: &Value) -> String {
+    match v {
+        Value::Str(s) if s.quoted => format!("\"{}\"", s.text),
+        Value::Map(m) => m.to_map_css(false),
+        Value::List(l) if l.sep == ListSep::Comma && !l.bracketed && l.items.len() >= 2 => {
+            format!("({})", l.to_css(false))
+        }
+        other => other.to_css(false),
+    }
+}
+
 /// List separator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ListSep {
@@ -215,6 +289,7 @@ impl Value {
                 }
             }
             Value::List(l) => l.to_css(compressed),
+            Value::Map(m) => m.to_map_css(compressed),
             Value::Bool(b) => b.to_string(),
             Value::Null => String::new(),
             Value::Slash(_, repr) => repr.clone(),
@@ -229,6 +304,7 @@ impl Value {
             Value::Str(s) => s.text.clone(),
             Value::Null => String::new(),
             Value::List(l) => l.to_interp(),
+            Value::Map(m) => m.to_map_css(false),
             Value::Slash(_, repr) => repr.clone(),
             Value::Calc(node) => format!("calc({})", node.to_calc_css(false)),
             other => other.to_css(false),
@@ -241,6 +317,7 @@ impl Value {
             Value::Color(_) => "color",
             Value::Str(_) => "string",
             Value::List(_) => "list",
+            Value::Map(_) => "map",
             Value::Bool(_) => "bool",
             Value::Null => "null",
             Value::Slash(_, _) => "number",
@@ -286,6 +363,17 @@ impl Value {
                     && a.bracketed == b.bracketed
                     && a.items.len() == b.items.len()
                     && a.items.iter().zip(&b.items).all(|(x, y)| x.sass_eq(y))
+            }
+            // Maps compare by content regardless of entry order.
+            (Value::Map(a), Value::Map(b)) => {
+                a.entries.len() == b.entries.len()
+                    && a.entries
+                        .iter()
+                        .all(|(k, v)| b.get(k).is_some_and(|bv| bv.sass_eq(v)))
+            }
+            // An empty map and an empty list are equal in dart-sass.
+            (Value::Map(m), Value::List(l)) | (Value::List(l), Value::Map(m)) => {
+                m.entries.is_empty() && l.items.is_empty()
             }
             _ => false,
         }

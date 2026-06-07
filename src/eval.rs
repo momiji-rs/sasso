@@ -15,8 +15,12 @@ use crate::ast::{
 };
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{CalcNode, CalcOp, List, ListSep, Number, SassStr, Value};
+use crate::value::{CalcNode, CalcOp, List, ListSep, Map, Number, SassStr, Value};
 use crate::{Importer, OutputStyle};
+
+/// A call's evaluated arguments, split into positional values and named
+/// `(name, value)` keyword pairs (after splat expansion).
+type EvaledArgs = (Vec<Value>, Vec<(String, Value)>);
 
 /// A flattened output node.
 pub(crate) enum OutNode {
@@ -301,6 +305,19 @@ impl<'a> Evaluator<'a> {
     fn eval_each_items(&mut self, e: &Expr) -> Result<Vec<Value>, Error> {
         match self.eval_expr(e)? {
             Value::List(l) => Ok(l.items),
+            // `@each` over a map yields each `key value` pair as a two-element
+            // space list, so `@each $k, $v in $map` destructures correctly.
+            Value::Map(m) => Ok(m
+                .entries
+                .into_iter()
+                .map(|(k, v)| {
+                    Value::List(List {
+                        items: vec![k, v],
+                        sep: ListSep::Space,
+                        bracketed: false,
+                    })
+                })
+                .collect()),
             Value::Null => Ok(Vec::new()),
             other => Ok(vec![other]),
         }
@@ -335,29 +352,91 @@ impl<'a> Evaluator<'a> {
     /// the call frame: positional args fill params in order, then keyword
     /// args by name, then declared defaults; extra positionals collect into
     /// a `$rest...` parameter or are an error.
+    /// Evaluate a call's argument list into separate positional and keyword
+    /// vectors, expanding any `...` splat (a list spreads into positional
+    /// args, a map into keyword args). Duplicate keyword names (after
+    /// hyphen/underscore normalization) are rejected, and a positional arg
+    /// after a keyword arg is an error — matching dart-sass.
+    fn eval_call_args(&mut self, args: &[CallArg]) -> Result<EvaledArgs, Error> {
+        // Explicit positional args are gathered first; positionals spread from
+        // a `...` splat are appended after them, so `f([1, 2]..., 3)` binds
+        // `3` before `1, 2` (matching dart-sass's misplaced-rest behaviour).
+        let mut explicit_pos = Vec::new();
+        let mut splat_pos = Vec::new();
+        let mut keyword: Vec<(String, Value)> = Vec::new();
+        let mut seen_named = false;
+        let push_named = |keyword: &mut Vec<(String, Value)>, name: String, v: Value| -> Result<(), Error> {
+            let norm = normalize_arg_name(&name);
+            if keyword.iter().any(|(n, _)| normalize_arg_name(n) == norm) {
+                return Err(Error::unpositioned("Duplicate argument."));
+            }
+            keyword.push((name, v));
+            Ok(())
+        };
+        for a in args {
+            let v = self.eval_expr(&a.value)?;
+            if a.splat {
+                // A splat list spreads into positional args; a map spreads
+                // into keyword args (string keys only). A single non-list/map
+                // value acts as one positional arg; `null` spreads to nothing.
+                match v {
+                    Value::Map(m) => {
+                        for (k, val) in m.entries {
+                            let key = match &k {
+                                Value::Str(s) => s.text.clone(),
+                                other => {
+                                    return Err(Error::unpositioned(format!(
+                                        "{} is not a string in $args.",
+                                        other.to_css(false)
+                                    )))
+                                }
+                            };
+                            push_named(&mut keyword, key, val)?;
+                        }
+                    }
+                    Value::List(l) => splat_pos.extend(l.items),
+                    Value::Null => {}
+                    other => splat_pos.push(other),
+                }
+                continue;
+            }
+            match &a.name {
+                Some(n) => {
+                    push_named(&mut keyword, n.clone(), v)?;
+                    seen_named = true;
+                }
+                None => {
+                    // A plain positional arg may not follow a keyword arg.
+                    if seen_named {
+                        return Err(Error::unpositioned(
+                            "Positional arguments must come before keyword arguments.",
+                        ));
+                    }
+                    explicit_pos.push(v);
+                }
+            }
+        }
+        explicit_pos.extend(splat_pos);
+        Ok((explicit_pos, keyword))
+    }
+
     fn bind_args(
         &mut self,
         params: &ParamList,
         args: &[CallArg],
         name: &str,
     ) -> Result<HashMap<String, Value>, Error> {
-        let mut positional = Vec::new();
+        let (positional, keyword_vec) = self.eval_call_args(args)?;
         let mut keyword: HashMap<String, Value> = HashMap::new();
-        for a in args {
-            let v = self.eval_expr(&a.value)?;
-            match &a.name {
-                Some(n) => {
-                    keyword.insert(n.clone(), v);
-                }
-                None => positional.push(v),
-            }
+        for (n, v) in keyword_vec {
+            keyword.insert(normalize_arg_name(&n), v);
         }
         let mut frame = HashMap::new();
         let mut pos_iter = positional.into_iter();
         for param in &params.params {
             let val = if let Some(v) = pos_iter.next() {
                 v
-            } else if let Some(v) = keyword.remove(&param.name) {
+            } else if let Some(v) = keyword.remove(&normalize_arg_name(&param.name)) {
                 v
             } else if let Some(def) = &param.default {
                 self.eval_expr(def)?
@@ -986,6 +1065,13 @@ impl<'a> Evaluator<'a> {
         if matches!(value, Value::Null) {
             return Ok(None);
         }
+        // A map is not a valid CSS value (even when nested inside a list).
+        if let Some(m) = find_map(&value) {
+            return Err(Error::at(
+                format!("{} isn't a valid CSS value.", m.to_css(false)),
+                d.pos,
+            ));
+        }
         let vstr = value.to_css(self.compressed());
         Ok(Some(OutItem::Decl {
             prop,
@@ -1105,6 +1191,19 @@ impl<'a> Evaluator<'a> {
                     bracketed: *bracketed,
                 }))
             }
+            Expr::Map(entries) => {
+                let mut map = Map { entries: Vec::new() };
+                for (k, v) in entries {
+                    let key = self.eval_expr(k)?.without_slash();
+                    let val = self.eval_expr(v)?;
+                    // A duplicate literal key is an error in dart-sass.
+                    if map.get(&key).is_some() {
+                        return Err(Error::unpositioned("Duplicate key."));
+                    }
+                    map.insert(key, val);
+                }
+                Ok(Value::Map(map))
+            }
             Expr::Unary { op, operand } => {
                 let v = self.eval_expr(operand)?.without_slash();
                 match op {
@@ -1171,20 +1270,23 @@ impl<'a> Evaluator<'a> {
                 if let Some(func) = self.functions.get(name).cloned() {
                     return self.call_function(&func, args);
                 }
-                let mut pos_args = Vec::new();
-                let mut named = Vec::new();
-                for a in args {
-                    // A bare slash-division argument collapses to its number
-                    // when passed to a real Sass function (dart-sass
-                    // `withoutSlash`); plain CSS functions (`foo(1/2)`) keep
-                    // the slash spelling verbatim.
-                    let mut v = self.eval_expr(&a.value)?;
-                    if crate::builtins::is_builtin(name) {
-                        v = v.without_slash();
+                // The pure CSS-calculation functions are parsed as
+                // calculations, which cannot take a `...` rest argument.
+                if is_calc_function(name) && args.iter().any(|a| a.splat) {
+                    return Err(Error::at("Rest arguments can't be used with calculations.", *pos));
+                }
+                // Evaluate args, expanding any `...` splat into positional /
+                // keyword arguments.
+                let (mut pos_args, mut named) = self.eval_call_args(args)?;
+                // A bare slash-division argument collapses to its number when
+                // passed to a real Sass function (dart-sass `withoutSlash`);
+                // plain CSS functions (`foo(1/2)`) keep the slash verbatim.
+                if crate::builtins::is_builtin(name) {
+                    for v in &mut pos_args {
+                        *v = std::mem::replace(v, Value::Null).without_slash();
                     }
-                    match &a.name {
-                        Some(n) => named.push((n.clone(), v)),
-                        None => pos_args.push(v),
+                    for (_, v) in &mut named {
+                        *v = std::mem::replace(v, Value::Null).without_slash();
                     }
                 }
                 crate::builtins::call(name, &pos_args, &named, *pos)
@@ -1397,6 +1499,13 @@ impl<'a> Evaluator<'a> {
             // value and becomes a calc operand.
             other => {
                 let v = self.eval_expr(other)?;
+                // A map is not a valid calculation operand.
+                if let Value::Map(m) = &v {
+                    return Err(Error::unpositioned(format!(
+                        "Value {} can't be used in a calculation.",
+                        m.to_css(false)
+                    )));
+                }
                 // The calc constants `pi`/`e` (case-insensitive) resolve to
                 // their numeric values inside a calculation.
                 if let Value::Str(s) = &v {
@@ -1670,6 +1779,14 @@ fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
         let (av, bv, unit) = coerce_pair(a, b, pos)?;
         return Ok(Value::Number(Number { value: av + bv, unit }));
     }
+    // A map cannot be serialized for string concatenation, so `map + x`
+    // errors like dart-sass with "(…) isn't a valid CSS value.".
+    if let Some(m) = find_map(&l).or_else(|| find_map(&r)) {
+        return Err(Error::at(
+            format!("{} isn't a valid CSS value.", m.to_css(false)),
+            pos,
+        ));
+    }
     let quoted = matches!(&l, Value::Str(s) if s.quoted);
     let text = format!("{}{}", concat_str(&l), concat_str(&r));
     Ok(Value::Str(SassStr { text, quoted }))
@@ -1802,6 +1919,31 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
 
 /// The integer indices a `@for` iterates: ascending or descending, with the
 /// end included (`through`) or excluded (`to`).
+/// Normalize a Sass argument/parameter name: hyphens and underscores are
+/// interchangeable, so `$b-c` and `$b_c` refer to the same parameter.
+fn normalize_arg_name(name: &str) -> String {
+    name.replace('_', "-")
+}
+
+/// Whether `name` is a global CSS-calculation function that dart-sass parses
+/// as a calculation expression, and so cannot accept a `...` rest argument
+/// (`clamp`, `hypot`, the exponent/trig functions). `min`/`max` are excluded:
+/// they are variadic Sass functions that also accept a splat.
+fn is_calc_function(name: &str) -> bool {
+    matches!(name, "clamp" | "hypot" | "atan2" | "log" | "pow")
+}
+
+/// Find a map anywhere in a value (including nested in a list), returning a
+/// reference to the first one. Used to reject maps in CSS output positions,
+/// where dart-sass errors with "(…) isn't a valid CSS value.".
+fn find_map(v: &Value) -> Option<&Map> {
+    match v {
+        Value::Map(m) => Some(m),
+        Value::List(l) => l.items.iter().find_map(find_map),
+        _ => None,
+    }
+}
+
 fn for_indices(start: i64, end: i64, inclusive: bool) -> Vec<i64> {
     let mut out = Vec::new();
     if start <= end {

@@ -1944,7 +1944,15 @@ impl Parser {
                         bracketed: false,
                     });
                 }
-                let e = self.parse_value()?;
+                // Parse the first sub-expression at the space-list level. A
+                // following `:` makes this a map literal `(k: v, …)`; anything
+                // else is an ordinary parenthesised expression / list.
+                let first = self.space_list()?;
+                self.skip_ws_inline();
+                if self.sc.peek() == Some(':') && self.sc.peek_at(1) != Some(':') {
+                    return self.parse_map_after_first_key(first);
+                }
+                let e = self.finish_paren_list(first)?;
                 self.skip_ws_inline();
                 if !self.sc.eat(')') {
                     return Err(Error::at("expected \")\"", self.sc.position()));
@@ -1959,6 +1967,79 @@ impl Parser {
             )),
             None => Err(Error::at("unexpected end of input in value", self.sc.position())),
         }
+    }
+
+    /// Continue a comma list whose first element (`first`) has already been
+    /// parsed at the space-list level, stopping before the closing `)`. Used
+    /// when the leading element of a parenthesised group turned out not to be
+    /// a map key. With no following commas this is just `first`.
+    fn finish_paren_list(&mut self, first: Expr) -> Result<Expr, Error> {
+        let mut rest = Vec::new();
+        let mut trailing = false;
+        loop {
+            let mark = self.sc.mark();
+            self.skip_ws_inline();
+            if self.sc.peek() == Some(',') {
+                self.sc.bump();
+                self.skip_ws_inline();
+                if self.sc.peek() == Some(')') {
+                    trailing = true;
+                    break;
+                }
+                rest.push(self.space_list()?);
+            } else {
+                self.sc.reset(mark);
+                break;
+            }
+        }
+        if rest.is_empty() && !trailing {
+            return Ok(first);
+        }
+        let mut items = Vec::with_capacity(rest.len() + 1);
+        items.push(first);
+        items.extend(rest);
+        Ok(Expr::List {
+            items,
+            sep: ListSep::Comma,
+            bracketed: false,
+        })
+    }
+
+    /// Parse the remaining entries of a map literal after the first key was
+    /// parsed and the `:` separator confirmed (but not yet consumed). Each
+    /// entry is `key: value` at the space-list level, comma-separated, with an
+    /// optional trailing comma before `)`.
+    fn parse_map_after_first_key(&mut self, first_key: Expr) -> Result<Expr, Error> {
+        let mut entries = Vec::new();
+        // Consume the `:` for the first entry and read its value.
+        self.sc.bump();
+        self.skip_ws_inline();
+        let first_val = self.space_list()?;
+        entries.push((first_key, first_val));
+        loop {
+            self.skip_ws_inline();
+            if !self.sc.eat(',') {
+                break;
+            }
+            self.skip_ws_inline();
+            if self.sc.peek() == Some(')') {
+                break; // trailing comma
+            }
+            let key = self.space_list()?;
+            self.skip_ws_inline();
+            if !(self.sc.peek() == Some(':') && self.sc.peek_at(1) != Some(':')) {
+                return Err(Error::at("expected \":\".", self.sc.position()));
+            }
+            self.sc.bump();
+            self.skip_ws_inline();
+            let val = self.space_list()?;
+            entries.push((key, val));
+        }
+        self.skip_ws_inline();
+        if !self.sc.eat(')') {
+            return Err(Error::at("expected \")\"", self.sc.position()));
+        }
+        Ok(Expr::Map(entries))
     }
 
     /// Parse a bracketed list literal `[ ... ]`. An empty `[]` is a bracketed
@@ -2756,9 +2837,22 @@ impl Parser {
                     }
                 }
                 let value = self.space_list()?;
+                // A trailing `...` marks a splat argument: a list spreads into
+                // positional args and a map into keyword args. A named arg may
+                // not be a splat.
+                let splat = name_opt.is_none()
+                    && self.sc.peek() == Some('.')
+                    && self.sc.peek_at(1) == Some('.')
+                    && self.sc.peek_at(2) == Some('.');
+                if splat {
+                    self.sc.bump();
+                    self.sc.bump();
+                    self.sc.bump();
+                }
                 args.push(CallArg {
                     name: name_opt,
                     value,
+                    splat,
                 });
                 self.skip_ws_inline();
                 if self.sc.eat(',') {

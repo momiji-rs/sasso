@@ -12,6 +12,7 @@
 mod color;
 mod color_ext;
 mod list;
+mod map;
 mod math;
 mod meta;
 mod string;
@@ -39,6 +40,11 @@ pub(crate) fn call(
     if let Some(r) = string::try_call(name, pos_args, named, pos) {
         return r;
     }
+    // Map runs before list so `length`/`nth` on a map are handled here; the
+    // map family declines those names for non-map arguments, falling through.
+    if let Some(r) = map::try_call(name, pos_args, named, pos) {
+        return r;
+    }
     if let Some(r) = list::try_call(name, pos_args, named, pos) {
         return r;
     }
@@ -64,6 +70,7 @@ pub(crate) fn is_builtin(name: &str) -> bool {
         || color_ext::try_call(name, pos, named, p).is_some()
         || math::try_call(name, pos, named, p).is_some()
         || string::try_call(name, pos, named, p).is_some()
+        || map::try_call(name, pos, named, p).is_some()
         || list::try_call(name, pos, named, p).is_some()
         || meta::try_call(name, pos, named, p).is_some()
 }

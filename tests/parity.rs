@@ -795,3 +795,35 @@ fn round_strategies_and_steps() {
     assert_parity("a { b: round(1%, 2%); }\n");
     assert_parity("a { b: round(1foo, 2bar); }\n");
 }
+
+#[test]
+fn trailing_commas_in_params_and_args() {
+    // Trailing commas are allowed after ordinary params, defaulted params, the
+    // rest param, and call arguments.
+    assert_parity("@function a($b, ) { @return $b; }\nc { d: a(e, ); }\n");
+    assert_parity("@function a($b: 1, ) { @return $b; }\nc { d: a(); }\n");
+    assert_parity("@mixin m($b, $c..., ) { d: $b; e: $c; }\nf { @include m(1, 2, 3); }\n");
+}
+
+#[test]
+fn splat_argument_expansion() {
+    // A list splat spreads into positional args (with explicit positionals
+    // bound first), and a map splat spreads into keyword args.
+    assert_parity("a { b: rgb([1, 2]..., 3); }\n");
+    assert_parity("a { b: rgb([1, 2]..., $blue: 3); }\n");
+    assert_parity("@function id($a, $b, $c) { @return $a $b $c; }\nx { y: id(1, [2, 3]...); }\n");
+    assert_parity("@function f($a, $b) { @return $a $b; }\nx { y: f((a: 1, b: 2)...); }\n");
+}
+
+#[test]
+fn map_literals_and_builtins() {
+    // Map literals serialize via inspect(); the global map functions and
+    // @each over a map all byte-match dart-sass.
+    assert_parity("a { b: inspect((c: 1, d: 2)); }\n");
+    assert_parity("a { b: inspect((c: (d: 1), \"e\": f g)); }\n");
+    assert_parity("a { b: map-get((c: d), c); }\n");
+    assert_parity("a { b: map-keys((c: 1, d: 2)); }\n");
+    assert_parity("a { b: map-values((c: 1, d: 2)); }\n");
+    assert_parity("a { b: map-has-key((c: d), c); }\n");
+    assert_parity("@each $k, $v in (a: 1, b: 2) { x-#{$k} { y: $v; } }\n");
+}
