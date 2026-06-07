@@ -1291,3 +1291,20 @@ fn attribute_selector_modifier_strictness() {
     assert!(compile("[*|a=b i] {c: d}\n", &Options::default()).is_ok());
     assert!(compile("[a=\"]\"] {c: d}\n", &Options::default()).is_ok());
 }
+
+#[test]
+fn attribute_selector_emit_normalization() {
+    // Expanded-mode attribute selectors serialize canonically: whitespace
+    // around the operator and at the edges is removed, a quoted value that is
+    // a plain CSS identifier is unquoted, and a trailing modifier is preceded
+    // by a single space — byte-matched to dart-sass.
+    assert_eq!(ours("a[\n  b]\n  {c: d}\n"), "a[b] {\n  c: d;\n}\n");
+    assert_eq!(ours("a[b=\n  c]\n  {d: e}\n"), "a[b=c] {\n  d: e;\n}\n");
+    assert_eq!(ours("a[b\n  =c]\n  {d: e}\n"), "a[b=c] {\n  d: e;\n}\n");
+    assert_eq!(ours("[a=\"b\"i] {c: d}\n"), "[a=b i] {\n  c: d;\n}\n");
+    assert_eq!(ours("[a=\"b\"] {c: d}\n"), "[a=b] {\n  c: d;\n}\n");
+    // Non-identifier values stay quoted; `]` inside a value is preserved.
+    assert_eq!(ours("[a=\"b c\"] {d: e}\n"), "[a=\"b c\"] {\n  d: e;\n}\n");
+    assert_eq!(ours("[a=\"--b\"] {d: e}\n"), "[a=\"--b\"] {\n  d: e;\n}\n");
+    assert_eq!(ours("[a=\"]\"] {d: e}\n"), "[a=\"]\"] {\n  d: e;\n}\n");
+}

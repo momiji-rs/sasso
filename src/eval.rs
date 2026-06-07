@@ -2465,6 +2465,133 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_' || !c.is_ascii()
 }
 
+fn is_name_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_' || !c.is_ascii()
+}
+
+/// Whether `s` is a plain CSS identifier that needs no escaping — so a quoted
+/// attribute value `"<s>"` can be emitted unquoted as `<s>` by simply dropping
+/// the quotes. Matches dart-sass's `_isIdentifier` for the escape-free case:
+/// a leading `-` must be followed by a name-start char (`--x`, `-1`, `-` alone
+/// are not identifiers), the first significant char is a name-start, and the
+/// rest are name chars. Strings containing escapes or non-name characters are
+/// conservatively treated as non-identifiers (kept quoted) so nothing
+/// regresses.
+fn is_plain_css_identifier(s: &str) -> bool {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    if chars[0] == '-' {
+        i = 1;
+    }
+    match chars.get(i) {
+        Some(&c) if is_name_start(c) => i += 1,
+        _ => return false,
+    }
+    chars[i..].iter().all(|&c| is_name_char(c))
+}
+
+/// Canonicalize the interior of an `[…]` attribute selector for emit, matching
+/// dart-sass's `[name op value modifier]` form: whitespace around the operator
+/// and at the edges is removed, and a trailing single-letter modifier is
+/// preceded by exactly one space. The value text is preserved verbatim (no
+/// unquoting). On any parse uncertainty the original (trimmed) text is kept so
+/// no currently-passing selector regresses.
+fn normalize_attribute_text(inner: &str) -> String {
+    let chars: Vec<char> = inner.chars().collect();
+    let fallback = || inner.trim().to_string();
+    let mut i = 0;
+    let skip_ws = |i: &mut usize| {
+        while *i < chars.len() && chars[*i].is_whitespace() {
+            *i += 1;
+        }
+    };
+    skip_ws(&mut i);
+    // Namespace + name.
+    let name_start = i;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            i += 2;
+        } else if is_name_char(c) || c == '|' || c == '*' {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if i == name_start {
+        return fallback();
+    }
+    let name: String = chars[name_start..i.min(chars.len())].iter().collect();
+    skip_ws(&mut i);
+    if i >= chars.len() {
+        return name; // `[name]`
+    }
+    // Operator.
+    let op: String = match chars[i] {
+        '=' => {
+            i += 1;
+            "=".to_string()
+        }
+        c @ ('~' | '|' | '^' | '$' | '*') if chars.get(i + 1) == Some(&'=') => {
+            i += 2;
+            format!("{c}=")
+        }
+        _ => return fallback(),
+    };
+    skip_ws(&mut i);
+    // Value (quoted string or unquoted run), preserved verbatim.
+    let value_start = i;
+    match chars.get(i) {
+        Some('"') | Some('\'') => i = skip_string(&chars, i),
+        Some(_) => {
+            while i < chars.len() {
+                let c = chars[i];
+                if c == '\\' {
+                    i += 2;
+                } else if c.is_whitespace() {
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        None => return fallback(),
+    }
+    let raw_value: String = chars[value_start..i.min(chars.len())].iter().collect();
+    // dart-sass emits a quoted value unquoted when its content is a plain CSS
+    // identifier (`[a="b"]` -> `[a=b]`). Only the escape-free, plain case is
+    // unquoted here; anything needing re-escaping is kept verbatim.
+    let value = unquote_plain_attribute_value(&raw_value);
+    skip_ws(&mut i);
+    if i >= chars.len() {
+        return format!("{name}{op}{value}");
+    }
+    // A single-letter modifier (case-insensitive) before the close.
+    if chars[i].is_ascii_alphabetic() && i + 1 == chars.len() {
+        return format!("{name}{op}{value} {}", chars[i]);
+    }
+    fallback()
+}
+
+/// Drop the quotes from an attribute value when its content is a plain CSS
+/// identifier; otherwise return it unchanged.
+fn unquote_plain_attribute_value(raw: &str) -> String {
+    let bytes: Vec<char> = raw.chars().collect();
+    if bytes.len() >= 2 {
+        let q = bytes[0];
+        if (q == '"' || q == '\'') && bytes[bytes.len() - 1] == q {
+            let content: String = bytes[1..bytes.len() - 1].iter().collect();
+            if is_plain_css_identifier(&content) {
+                return content;
+            }
+        }
+    }
+    raw.to_string()
+}
+
 /// Resolve a (possibly comma-separated) selector against the parent
 /// selector list: substitute `&`, or prepend the parent as a descendant.
 fn resolve_selectors(sel: &str, parents: &[String]) -> Vec<String> {
@@ -2549,6 +2676,17 @@ fn normalize_selector(s: &str) -> String {
             ')' => {
                 paren -= 1;
                 out.push(c);
+            }
+            '[' if paren == 0 && bracket == 0 => {
+                let end = matching_bracket(&chars, i);
+                let inner: String = chars[i + 1..end.min(chars.len())].iter().collect();
+                out.push('[');
+                out.push_str(&normalize_attribute_text(&inner));
+                if end < chars.len() {
+                    out.push(']');
+                }
+                i = end + 1;
+                continue;
             }
             '[' => {
                 bracket += 1;
