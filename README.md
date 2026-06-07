@@ -45,10 +45,11 @@ zero-dependency, sandbox-friendly core. See
 Since this slice was written the ratchet has added a great deal more —
 `@mixin`/`@function`, control flow (`@if`/`@each`/`@for`/`@while`), `@extend`
 and `%placeholder`s, a `calc()` engine, the CSS unit system + math functions,
-structured `@media`/`@supports`, maps, and the `@use`/`@forward` module system
-(built-in `sass:*` modules + user files). Remaining: full CSS Color 4
-color-space math, the indented `.sass` syntax, and a long tail of edge cases —
-see [Conformance](#conformance).
+full CSS Color 4 color spaces (`oklch`/`lab`/`color()`…), structured
+`@media`/`@supports`, maps, the `@use`/`@forward` module system (built-in
+`sass:*` modules + user files), and the indented `.sass` syntax. **81% of the
+official sass-spec suite now passes** (see [Conformance](#conformance)); what
+remains is a long tail of byte-level edge cases.
 
 ## Install
 
@@ -153,11 +154,12 @@ effectively free (vs ~140 ms for the dart-sass binary and ~1 s for
 
 Because the library is zero-dependency and pure `std`, it compiles to
 `wasm32-unknown-unknown` and `wasm32-wasip1` out of the box (built in CI).
-A whole SCSS compiler stays small: the deployable `.wasm` cdylib is
-**~124 KB** (`opt-level = "z"` + LTO + `panic = "abort"` + `strip` +
-`wasm-opt -Oz`), i.e. **~52 KB brotli / ~59 KB gzip** over the wire — an
-order of magnitude smaller than shipping dart-sass as JavaScript. A
-browser playground is tracked in the issues.
+A whole SCSS compiler stays small: the deployable `.wasm` cdylib
+(`opt-level = "z"` + LTO + `panic = "abort"` + `strip` + `wasm-opt -Oz`) is
+**~447 KB / ~184 KB gzip** over the wire — published to npm as
+[`@momiji-rs/sasso`](https://www.npmjs.com/package/@momiji-rs/sasso), an order
+of magnitude smaller than shipping dart-sass as JavaScript. A browser
+playground is tracked in the issues.
 
 ## Testing & coverage
 
