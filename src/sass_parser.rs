@@ -737,10 +737,11 @@ fn empty_form(logical: &str) -> EmptyForm {
             // the newline (a child block, if present, is its content).
             "include" | "return" | "import" | "use" | "forward" | "extend" | "content" | "warn" | "debug"
             | "error" | "charset" => EmptyForm::Semicolon,
-            // Unknown / generic at-rules (`@font-face`, `@page`, vendor, …) own a
-            // block in dart-sass's `.sass` parser unless written as a statement.
-            // We default them to a block so an empty `@foo` round-trips.
-            _ => EmptyForm::Braces,
+            // Unknown / generic at-rules (`@font-face`, `@page`, `@namespace`,
+            // vendor `@-foo`, …) are statements when nothing is indented beneath
+            // them (`@namespace url(x)` -> `@namespace url(x);`); a child block,
+            // when present, is handled before this point.
+            _ => EmptyForm::Semicolon,
         };
     }
     // A `$variable: …` declaration is a leaf.
