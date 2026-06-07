@@ -1541,6 +1541,16 @@ fn fn_percentage(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
 fn fn_channel(name: &str, pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
     let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
+    // The legacy red/green/blue getters only support legacy colors.
+    if c.modern.as_ref().is_some_and(|m| !m.space.is_legacy()) {
+        return Err(Error::at(
+            format!(
+                "color.{name}() is only supported for legacy colors. Please use color.channel() \
+                 instead with an explicit $space argument."
+            ),
+            pos,
+        ));
+    }
     let v = match name {
         "red" => c.r,
         "green" => c.g,
@@ -1563,6 +1573,15 @@ fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
         ));
     }
     let c = as_color(require(&params, pos_args, named, 0, "alpha", pos)?, pos)?;
+    // The legacy alpha getter only supports legacy colors.
+    if c.modern.as_ref().is_some_and(|m| !m.space.is_legacy()) {
+        return Err(Error::at(
+            "color.alpha() is only supported for legacy colors. Please use color.channel() \
+             instead."
+                .to_string(),
+            pos,
+        ));
+    }
     Ok(Value::Number(Number {
         value: c.a,
         unit: String::new(),

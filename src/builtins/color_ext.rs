@@ -552,6 +552,42 @@ fn fn_hsl_getter(
     let params = ["color"];
     check_max_args(pos_args, named, 1, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
+    // These legacy getters only support legacy colors.
+    let is_legacy = c.modern.as_ref().map(|m| m.space.is_legacy()).unwrap_or(true);
+    if !is_legacy {
+        let space = if matches!(name, "whiteness" | "blackness") {
+            "hwb"
+        } else {
+            "hsl"
+        };
+        return Err(Error::at(
+            format!(
+                "color.{name}() is only supported for legacy colors. Please use color.channel() \
+                 instead with an explicit $space argument.\n\n\
+                 color.channel($color, \"{name}\", $space: {space})"
+            ),
+            pos,
+        ));
+    }
+    // Prefer the stored hsl/hwb channels (exact) over re-deriving from rgb.
+    if let Some(m) = &c.modern {
+        let idx = match (m.space, name) {
+            (crate::value::ColorSpace::Hsl, "hue") | (crate::value::ColorSpace::Hwb, "hue") => {
+                Some((0, "deg"))
+            }
+            (crate::value::ColorSpace::Hsl, "saturation") => Some((1, "%")),
+            (crate::value::ColorSpace::Hsl, "lightness") => Some((2, "%")),
+            (crate::value::ColorSpace::Hwb, "whiteness") => Some((1, "%")),
+            (crate::value::ColorSpace::Hwb, "blackness") => Some((2, "%")),
+            _ => None,
+        };
+        if let Some((i, unit)) = idx {
+            return Ok(Value::Number(Number {
+                value: m.channels[i].unwrap_or(0.0),
+                unit: unit.to_string(),
+            }));
+        }
+    }
     let (h, s, l) = c.to_hsl();
     let (value, unit) = match name {
         "hue" => (h, "deg"),
