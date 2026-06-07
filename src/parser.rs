@@ -266,6 +266,12 @@ fn find_trailing_line_comment(s: &str) -> Option<usize> {
 fn is_slash_operand(expr: &Expr) -> bool {
     match expr {
         Expr::Number(_, _) => true,
+        // dart-sass also keeps the slash spelling when an operand is a
+        // `calc()` (and the math-function family parsed as calculations):
+        // `calc(1)/2` -> `1/2`, `calc(2px)/calc(4px)` -> `2px/4px`. The calc
+        // operand folds to a number at eval time, so the slash repr is its
+        // serialized value.
+        Expr::Calc { .. } => true,
         Expr::Div { slash, .. } => *slash,
         Expr::Unary {
             op: UnOp::Neg,

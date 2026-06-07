@@ -960,3 +960,24 @@ fn relative_color_from_is_preserved() {
     assert_parity("a { b: hsl(from red h s l); }\n");
     assert_parity("a { b: rgb(from var(--c) r g b); }\n");
 }
+
+#[test]
+fn slash_with_special_value_forms_slash() {
+    // dart-sass: `/` between non-number operands (a calc()/var()/unquoted
+    // string/list, or a number divided by a non-number) does not divide — it
+    // forms a slash-separated unquoted string `left/right`. A `calc()` that
+    // folds to a number keeps the slash spelling too. A color on the *left*
+    // of `/` is the one case that still errors ("Undefined operation").
+    assert_parity("a { b: calc(1)/2; }\n");
+    assert_parity("a { b: 1/calc(2); }\n");
+    assert_parity("a { b: calc(1)/calc(2); }\n");
+    assert_parity("a { b: calc(2px)/calc(4px); }\n");
+    assert_parity("a { b: calc(1px + 1%)/2; }\n");
+    assert_parity("a { b: 2/calc(1px + 1%); }\n");
+    assert_parity("a { b: calc(1px + 1%)/calc(2px + 2%); }\n");
+    assert_parity("a { b: foo / 2; }\n");
+    assert_parity("a { b: var(--x) / 2; }\n");
+    assert_parity("a { b: 2 / var(--x); }\n");
+    assert_parity("a { b: (1 2) / 3; }\n");
+    assert_parity("a { b: 2 / red; }\n");
+}
