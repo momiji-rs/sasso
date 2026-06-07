@@ -11,8 +11,7 @@ use std::rc::Rc;
 
 use crate::ast::{
     BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfClause, IfCond, ImportArg, MediaFeature,
-    MediaInParens,
-    MediaQuery, MediaQueryList, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
+    MediaInParens, MediaQuery, MediaQueryList, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Pos;

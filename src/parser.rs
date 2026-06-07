@@ -9,9 +9,8 @@ use std::rc::Rc;
 
 use crate::ast::{
     BinOp, CallArg, Callable, Conjunction, Declaration, Expr, IfBranch, IfClause, IfCond, ImportArg,
-    MediaFeature,
-    MediaInParens, MediaQuery, MediaQueryList, Param, ParamList, Rule, Stmt, Stylesheet, TplPiece, UnOp,
-    VarDecl,
+    MediaFeature, MediaInParens, MediaQuery, MediaQueryList, Param, ParamList, Rule, Stmt, Stylesheet,
+    TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::{Pos, Scanner};

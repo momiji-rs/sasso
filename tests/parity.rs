@@ -498,83 +498,6 @@ fn lab_family_validation_and_passthrough() {
             compile(src, &Options::default()).is_err(),
             "expected error for {src}"
         );
-#[test]
-fn modern_if_function() {
-    // The modern CSS `if()` conditional: `css()` conditions emit the whole
-    // call verbatim; `sass()`/bare conditions are evaluated (first truthy
-    // clause wins, else otherwise); the legacy `if($c, $t, $f)` builtin still
-    // works. Each case byte-matches dart-sass.
-    for src in [
-        // verbatim css() forms (single, else, raw chars, not, and/or, parens)
-        "a {b: if(css(): c)}\n",
-        "a {b: if(css(): c; else: d)}\n",
-        "a {b: if(css(!@#$%^&*(){}[]_-+=|:;''\"\"<>,./?): c)}\n",
-        "a {b: if(not css(): c)}\n",
-        "a {b: if(not (css()): c)}\n",
-        "a {b: if(css(1) and css(2): c)}\n",
-        "a {b: if(css(1) and (css(2)): c)}\n",
-        "a {b: if(css(1) or css(2) or css(3): c)}\n",
-        "a {b: if((css()): c)}\n",
-        "a {b: if((css(1) and css(2)): c)}\n",
-        // arbitrary substitutions (var/attr/nested if/interpolation), verbatim
-        "a {b: if(var(--not) css(): c)}\n",
-        "a {b: if(css(1) var(--and) css(2): c)}\n",
-        "a {b: if(css() if(else: var(--and-clause)): c)}\n",
-        "a {b: if(css(1) #{\"and\"} css(2): c)}\n",
-        "a {b: if(#{css}(): c)}\n",
-        "a {b: if(css(#{1 + 1}): c)}\n",
-        // evaluated sass()/bare conditions
-        "a {b: if(sass(true): c; else: d)}\n",
-        "a {b: if(sass(false): c; else: d)}\n",
-        "$a: true;\nb {c: if(sass($a): d; else: e)}\n",
-        "a {b: if(not sass(true): c; else: d)}\n",
-        "a {b: if(sass(true) and sass(false): c; else: d)}\n",
-        "a {b: if(sass(false) or sass(true): c; else: d)}\n",
-        // sass folded into a verbatim css() chain
-        "a {b: if(sass(true) and css(): c; else: d)}\n",
-        "a {b: if(sass(false) or css(): c; else: d)}\n",
-        "a {b: if(css(1) and sass(true) and css(2): c; else: d)}\n",
-        "a {b: if(sass(true) and (var(--not) css()): c)}\n",
-        // short-circuit, else-only, evaluated values
-        "a {b: if(sass(true): c; sass($undefined): d)}\n",
-        "a {b: if(else: c)}\n",
-        "a {b: if(css(): 1 + 2)}\n",
-        "a {b: if(css(): (1 2 3))}\n",
-        // legacy builtin stays intact
-        "a {b: if(true, 1px, 2px)}\n",
-        "a {b: if(false, 1px, 2px)}\n",
-    ] {
-        assert_parity(src);
-#[test]
-fn parity_plain_css_import_passthrough() {
-    // A `url(...)` URL, a `.css`/protocol URL, or any URL with trailing
-    // media-query / `supports()` modifiers is a plain CSS `@import`, emitted
-    // verbatim in source order rather than inlined.
-    assert_parity("@import url(\"a.css\") print;\n");
-    assert_parity("@import url(whatever);\n");
-    assert_parity("@import \"a.css\";\n");
-    assert_parity("@import \"http://foo.com/bar\";\n");
-    assert_parity("@import \"a\" b;\n");
-    assert_parity("@import \"a.css\" supports(calc(1));\n");
-    assert_parity("@import \"a.css\" supports(--a: );\n");
-    assert_parity("@import \"a\" b, (c: d) and (e: f), g;\n");
-    // A `supports()`/function modifier ends the argument at a top-level comma,
-    // so the following URL starts a fresh `@import`; a bare media type does not.
-    assert_parity("@import \"a\" supports(b: c), \"d.css\";\n");
-    assert_parity("@import \"b\" c(d), \"e.css\";\n");
-    // Comments around the URL and modifiers are stripped.
-    assert_parity("@import \"a.css\" /**/ b;\n");
-    assert_parity("@import \"a.css\" b /**/;\n");
-    // Interpolation inside a CSS-import modifier is resolved.
-    assert_parity("@import \"b\" c#{\"a\"}d;\n");
-}
-
-/// A trivial in-memory [`Importer`] for offline `@import` inlining tests.
-struct MapImporter(std::collections::HashMap<String, String>);
-
-impl sasso::Importer for MapImporter {
-    fn resolve(&self, path: &str) -> Option<String> {
-        self.0.get(path).cloned()
     }
 }
 
@@ -651,6 +574,152 @@ fn rgb_degenerate_calc_constants_fold() {
         ours("a {b: color(srgb calc(infinity) 0 0)}\n"),
         "a {\n  b: color(srgb calc(infinity) 0 0);\n}\n"
     );
+}
+
+#[test]
+fn modern_if_function() {
+    // The modern CSS `if()` conditional: `css()` conditions emit the whole
+    // call verbatim; `sass()`/bare conditions are evaluated (first truthy
+    // clause wins, else otherwise); the legacy `if($c, $t, $f)` builtin still
+    // works. Each case byte-matches dart-sass.
+    for src in [
+        // verbatim css() forms (single, else, raw chars, not, and/or, parens)
+        "a {b: if(css(): c)}\n",
+        "a {b: if(css(): c; else: d)}\n",
+        "a {b: if(css(!@#$%^&*(){}[]_-+=|:;''\"\"<>,./?): c)}\n",
+        "a {b: if(not css(): c)}\n",
+        "a {b: if(not (css()): c)}\n",
+        "a {b: if(css(1) and css(2): c)}\n",
+        "a {b: if(css(1) and (css(2)): c)}\n",
+        "a {b: if(css(1) or css(2) or css(3): c)}\n",
+        "a {b: if((css()): c)}\n",
+        "a {b: if((css(1) and css(2)): c)}\n",
+        // arbitrary substitutions (var/attr/nested if/interpolation), verbatim
+        "a {b: if(var(--not) css(): c)}\n",
+        "a {b: if(css(1) var(--and) css(2): c)}\n",
+        "a {b: if(css() if(else: var(--and-clause)): c)}\n",
+        "a {b: if(css(1) #{\"and\"} css(2): c)}\n",
+        "a {b: if(#{css}(): c)}\n",
+        "a {b: if(css(#{1 + 1}): c)}\n",
+        // evaluated sass()/bare conditions
+        "a {b: if(sass(true): c; else: d)}\n",
+        "a {b: if(sass(false): c; else: d)}\n",
+        "$a: true;\nb {c: if(sass($a): d; else: e)}\n",
+        "a {b: if(not sass(true): c; else: d)}\n",
+        "a {b: if(sass(true) and sass(false): c; else: d)}\n",
+        "a {b: if(sass(false) or sass(true): c; else: d)}\n",
+        // sass folded into a verbatim css() chain
+        "a {b: if(sass(true) and css(): c; else: d)}\n",
+        "a {b: if(sass(false) or css(): c; else: d)}\n",
+        "a {b: if(css(1) and sass(true) and css(2): c; else: d)}\n",
+        "a {b: if(sass(true) and (var(--not) css()): c)}\n",
+        // short-circuit, else-only, evaluated values
+        "a {b: if(sass(true): c; sass($undefined): d)}\n",
+        "a {b: if(else: c)}\n",
+        "a {b: if(css(): 1 + 2)}\n",
+        "a {b: if(css(): (1 2 3))}\n",
+        // legacy builtin stays intact
+        "a {b: if(true, 1px, 2px)}\n",
+        "a {b: if(false, 1px, 2px)}\n",
+    ] {
+        assert_parity(src);
+    }
+}
+
+#[test]
+fn modern_if_rejects_invalid_conditions() {
+    // dart-sass rejects these; sasso must error too (mixing and/or, `not`
+    // after a conjunction, reserved keyword as a function, and a `sass()`
+    // sharing a boolean level with an unparenthesised arbitrary substitution).
+    for src in [
+        "a {b: if(css(1) and css(2) or css(3): c)}\n",
+        "a {b: if(css(1) and not css(2): c)}\n",
+        "a {b: if(not not css(): c)}\n",
+        "a {b: if(not and(): d)}\n",
+        "a {b: if(css(1) and(css(2)): d)}\n",
+        "a {b: if(sass(true) and css(1) var(--and) css(2): c)}\n",
+        "a {b: if((sass(true)) and css(1) var(--and) css(2): c)}\n",
+        "a {b: if(css(1): c, css(2): d)}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected error for invalid modern if(): {src}"
+        );
+    }
+}
+
+#[test]
+fn parity_plain_css_import_passthrough() {
+    // A `url(...)` URL, a `.css`/protocol URL, or any URL with trailing
+    // media-query / `supports()` modifiers is a plain CSS `@import`, emitted
+    // verbatim in source order rather than inlined.
+    assert_parity("@import url(\"a.css\") print;\n");
+    assert_parity("@import url(whatever);\n");
+    assert_parity("@import \"a.css\";\n");
+    assert_parity("@import \"http://foo.com/bar\";\n");
+    assert_parity("@import \"a\" b;\n");
+    assert_parity("@import \"a.css\" supports(calc(1));\n");
+    assert_parity("@import \"a.css\" supports(--a: );\n");
+    assert_parity("@import \"a\" b, (c: d) and (e: f), g;\n");
+    // A `supports()`/function modifier ends the argument at a top-level comma,
+    // so the following URL starts a fresh `@import`; a bare media type does not.
+    assert_parity("@import \"a\" supports(b: c), \"d.css\";\n");
+    assert_parity("@import \"b\" c(d), \"e.css\";\n");
+    // Comments around the URL and modifiers are stripped.
+    assert_parity("@import \"a.css\" /**/ b;\n");
+    assert_parity("@import \"a.css\" b /**/;\n");
+    // Interpolation inside a CSS-import modifier is resolved.
+    assert_parity("@import \"b\" c#{\"a\"}d;\n");
+}
+
+/// A trivial in-memory [`Importer`] for offline `@import` inlining tests.
+struct MapImporter(std::collections::HashMap<String, String>);
+
+impl sasso::Importer for MapImporter {
+    fn resolve(&self, path: &str) -> Option<String> {
+        self.0.get(path).cloned()
+    }
+}
+
+#[test]
+fn import_inlines_sass_partials() {
+    let mut files = std::collections::HashMap::new();
+    files.insert("p".to_string(), "x { y: z }".to_string());
+    files.insert(
+        "nested".to_string(),
+        "b { color: red; nested { x: y } }".to_string(),
+    );
+    let imp = MapImporter(files);
+    let opts = Options::default().with_importer(&imp);
+
+    // A bare quoted string with no modifiers is inlined at the top level.
+    let css = compile("@import \"p\";\n", &opts).expect("import compile failed");
+    assert_eq!(css, "x {\n  y: z;\n}\n");
+
+    // A nested `@import` runs the imported statements under the current parent
+    // selector, so the imported rules nest beneath it.
+    let css = compile("a {\n  @import \"nested\";\n}\n", &opts).expect("nested import failed");
+    assert_eq!(css, "a b {\n  color: red;\n}\na b nested {\n  x: y;\n}\n");
+}
+
+#[test]
+fn import_reimports_and_detects_cycles() {
+    let mut files = std::collections::HashMap::new();
+    files.insert("p".to_string(), "x { y: z }".to_string());
+    files.insert("alpha".to_string(), "@import \"beta\";".to_string());
+    files.insert("beta".to_string(), "@import \"alpha\";".to_string());
+    let imp = MapImporter(files);
+    let opts = Options::default().with_importer(&imp);
+
+    // Re-importing an already-finished file emits its content again (`@import`
+    // re-evaluates), rather than being silently deduplicated.
+    let css = compile("@import \"p\", \"p\";\n", &opts).expect("import compile failed");
+    assert_eq!(css, "x {\n  y: z;\n}\n\nx {\n  y: z;\n}\n");
+
+    // A load cycle is an error rather than a silent skip or an infinite loop.
+    assert!(compile("@import \"alpha\";\n", &opts).is_err());
+}
+
 #[test]
 fn bracketed_list_literals() {
     // `[ ... ]` produces a bracketed list that serializes wrapped in square
@@ -725,63 +794,4 @@ fn round_strategies_and_steps() {
     assert_parity("a { b: round(1px, 10%); }\n");
     assert_parity("a { b: round(1%, 2%); }\n");
     assert_parity("a { b: round(1foo, 2bar); }\n");
-}
-fn modern_if_rejects_invalid_conditions() {
-    // dart-sass rejects these; sasso must error too (mixing and/or, `not`
-    // after a conjunction, reserved keyword as a function, and a `sass()`
-    // sharing a boolean level with an unparenthesised arbitrary substitution).
-    for src in [
-        "a {b: if(css(1) and css(2) or css(3): c)}\n",
-        "a {b: if(css(1) and not css(2): c)}\n",
-        "a {b: if(not not css(): c)}\n",
-        "a {b: if(not and(): d)}\n",
-        "a {b: if(css(1) and(css(2)): d)}\n",
-        "a {b: if(sass(true) and css(1) var(--and) css(2): c)}\n",
-        "a {b: if((sass(true)) and css(1) var(--and) css(2): c)}\n",
-        "a {b: if(css(1): c, css(2): d)}\n",
-    ] {
-        assert!(
-            compile(src, &Options::default()).is_err(),
-            "expected error for invalid modern if(): {src}"
-        );
-    }
-fn import_inlines_sass_partials() {
-    let mut files = std::collections::HashMap::new();
-    files.insert("p".to_string(), "x { y: z }".to_string());
-    files.insert(
-        "nested".to_string(),
-        "b { color: red; nested { x: y } }".to_string(),
-    );
-    let imp = MapImporter(files);
-    let opts = Options::default().with_importer(&imp);
-
-    // A bare quoted string with no modifiers is inlined at the top level.
-    let css = compile("@import \"p\";\n", &opts).expect("import compile failed");
-    assert_eq!(css, "x {\n  y: z;\n}\n");
-
-    // A nested `@import` runs the imported statements under the current parent
-    // selector, so the imported rules nest beneath it.
-    let css = compile("a {\n  @import \"nested\";\n}\n", &opts).expect("nested import failed");
-    assert_eq!(
-        css,
-        "a b {\n  color: red;\n}\na b nested {\n  x: y;\n}\n"
-    );
-}
-
-#[test]
-fn import_reimports_and_detects_cycles() {
-    let mut files = std::collections::HashMap::new();
-    files.insert("p".to_string(), "x { y: z }".to_string());
-    files.insert("alpha".to_string(), "@import \"beta\";".to_string());
-    files.insert("beta".to_string(), "@import \"alpha\";".to_string());
-    let imp = MapImporter(files);
-    let opts = Options::default().with_importer(&imp);
-
-    // Re-importing an already-finished file emits its content again (`@import`
-    // re-evaluates), rather than being silently deduplicated.
-    let css = compile("@import \"p\", \"p\";\n", &opts).expect("import compile failed");
-    assert_eq!(css, "x {\n  y: z;\n}\n\nx {\n  y: z;\n}\n");
-
-    // A load cycle is an error rather than a silent skip or an infinite loop.
-    assert!(compile("@import \"alpha\";\n", &opts).is_err());
 }
