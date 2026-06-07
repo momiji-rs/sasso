@@ -3435,4 +3435,19 @@ fn parity_selector_separators_in_groups() {
     // split_commas on the parent list and tokenize_complex on the child.
     assert_parity(".a, .b {\n  > .c + .d ~ .e { color: red; }\n}\n");
     assert_parity(".a, .b {\n  .c, .d { color: red; }\n}\n");
+fn parity_color_modify_unit_leniency() {
+    // dart-sass does not hard-error on a non-`%` unit for the legacy hsl
+    // `lightness`/`saturation` channels of `color.adjust`/`color.change`, nor on
+    // a unit for `$alpha` (it warns to stderr and uses the value); legacy hwb
+    // `whiteness`/`blackness` still strictly require `%`.
+    assert_parity(concat!(
+        "@use \"sass:color\";\n",
+        "a {\n",
+        "  b: color.adjust(red, $lightness: 10in);\n",
+        "  c: color.adjust(red, $saturation: -10in);\n",
+        "  d: color.adjust(red, $alpha: -0.3%);\n",
+        "  e: color.adjust(red, $alpha: -0.3px);\n",
+        "  f: color.change(red, $lightness: 50in);\n",
+        "}\n",
+    ));
 }

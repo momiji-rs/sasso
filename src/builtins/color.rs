@@ -3151,15 +3151,18 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
             if is_none_keyword(v) {
                 return Ok(None);
             }
-            // `change` validates the alpha is within [0,1] (or [0%,100%]).
+            // `change` validates the alpha is within [0,1] (or [0%,100%]). A
+            // non-`%` unit is used as a raw value (within [0,1]); the bounds in
+            // the error message carry that unit (e.g. `0px and 1px`).
             match v {
                 Value::Number(n) => {
-                    let (max_disp, b0, b1) = if n.unit == "%" {
-                        (100.0, "0%", "100%")
-                    } else {
-                        (1.0, "0", "1")
-                    };
+                    let max_disp = if n.unit == "%" { 100.0 } else { 1.0 };
                     if n.value < 0.0 || n.value > max_disp {
+                        let (b0, b1) = if n.unit == "%" {
+                            ("0%".to_string(), "100%".to_string())
+                        } else {
+                            (format!("0{}", n.unit), format!("1{}", n.unit))
+                        };
                         return Err(Error::at(
                             format!("$alpha: Expected {} to be within {b0} and {b1}.", n.to_css(false)),
                             pos,
@@ -3177,14 +3180,10 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
             }
         }
         ModifyOp::Adjust => {
+            // Alpha is natively unitless: dart-sass strips any unit (warning to
+            // stderr for `%`/other units) and uses the raw number directly.
             let amt = match v {
-                Value::Number(n) => {
-                    if n.unit == "%" {
-                        n.value / 100.0
-                    } else {
-                        n.value
-                    }
-                }
+                Value::Number(n) => n.value,
                 _ => 0.0,
             };
             Some((cur + amt).clamp(0.0, 1.0))
@@ -3255,6 +3254,18 @@ fn validate_modify_unit(space: ColorSpace, idx: usize, name: &str, v: &Value, po
                     "${name}: Expected {} to have an angle unit (deg, grad, rad, turn).",
                     num.to_css(false)
                 ),
+                pos,
+            ));
+        }
+    } else if space == ColorSpace::Hsl {
+        // Legacy hsl `saturation`/`lightness` accept any unit: dart-sass emits a
+        // deprecation warning (to stderr) for a non-`%` unit but uses the value.
+    } else if space == ColorSpace::Hwb {
+        // Legacy hwb `whiteness`/`blackness` strictly require `%` (note: the
+        // error message has no "or no units" — unitless is also rejected).
+        if num.unit != "%" {
+            return Err(Error::at(
+                format!("${name}: Expected {} to have unit \"%\".", num.to_css(false)),
                 pos,
             ));
         }
