@@ -760,7 +760,7 @@ impl<'a> Evaluator<'a> {
         if sel_str.trim().is_empty() {
             return Err(Error::unpositioned("expected selector."));
         }
-        validate_parent_usage(&sel_str, !parents.is_empty())?;
+        validate_selector(&sel_str, !parents.is_empty())?;
         let current = resolve_selectors(&sel_str, parents);
         self.scopes.push(HashMap::new());
         let prev_selector = self.current_selector.replace(current.clone());
@@ -2271,18 +2271,23 @@ fn stmt_uses_content(stmt: &Stmt) -> bool {
     }
 }
 
-/// Validate the placement of `&` in a (post-interpolation) selector string,
-/// matching dart-sass's parser rules:
+/// Validate a (post-interpolation) selector string against the subset of
+/// dart-sass's parser rules this build can safely enforce:
 ///   * `&` may appear only at the beginning of a compound selector (so `b&`,
-///     `[x]&`, `.y&` are all errors).
-///   * A `&` followed directly by an identifier-name character (`a`, `-`, `_`,
-///     digit, `\`) is a "suffix"; at the document root (no parent) this is an
-///     error, but inside a style rule it concatenates onto the parent.
+///     `[x]&`, `.y&` are all errors). A `&` followed directly by an
+///     identifier-name character (`a`, `-`, `_`, digit, `\`) is a "suffix":
+///     at the document root (no parent) that is an error, but inside a style
+///     rule it concatenates onto the parent.
+///   * A `%` placeholder must be followed directly by an identifier name-start
+///     character; a bare `%` (or `%` before `.`, a digit, whitespace, …) is
+///     "Expected identifier.". A `%` right after a digit is a percentage
+///     keyframe selector (`10%`), not a placeholder.
+///   * An `[…]` attribute selector's modifier must be a single ASCII letter
+///     immediately before the closing `]`.
 ///
-/// Bracket (`[...]`) and parenthesis (`(...)`) contents are skipped so that
-/// `~`/`+`/`>` inside `[a~=b]` or `:not(a > b)` are not treated as top-level
-/// combinators.
-fn validate_parent_usage(sel: &str, has_parent: bool) -> Result<(), Error> {
+/// Quoted strings (with `\` escapes) and the contents of nested `[…]`/`(…)`
+/// groups are skipped so combinators/`&`/`%` inside them are not misread.
+fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
     for part in split_commas(sel) {
         let chars: Vec<char> = part.chars().collect();
         let mut i = 0;
@@ -2293,6 +2298,24 @@ fn validate_parent_usage(sel: &str, has_parent: bool) -> Result<(), Error> {
         while i < chars.len() {
             let c = chars[i];
             match c {
+                '\\' => {
+                    // An escape consumes the following character verbatim.
+                    i += 2;
+                    at_compound_start = false;
+                    continue;
+                }
+                '"' | '\'' => {
+                    i = skip_string(&chars, i);
+                    at_compound_start = false;
+                    continue;
+                }
+                '[' if depth == 0 => {
+                    let end = matching_bracket(&chars, i);
+                    validate_attribute(&chars[i + 1..end])?;
+                    i = end + 1;
+                    at_compound_start = false;
+                    continue;
+                }
                 '[' | '(' => {
                     depth += 1;
                     at_compound_start = false;
@@ -2319,11 +2342,6 @@ fn validate_parent_usage(sel: &str, has_parent: bool) -> Result<(), Error> {
                     }
                     at_compound_start = false;
                 }
-                // A `%` placeholder must be followed directly by an identifier
-                // name-start character; a bare `%` (or `%` before `.`, a digit,
-                // whitespace, …) is "Expected identifier." in dart-sass. A `%`
-                // immediately after a digit is a percentage (a keyframe
-                // selector such as `10%`), not a placeholder, so it is skipped.
                 '%' => {
                     let prev_is_digit = i > 0 && chars[i - 1].is_ascii_digit();
                     if !prev_is_digit {
@@ -2341,6 +2359,110 @@ fn validate_parent_usage(sel: &str, has_parent: bool) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// Index just past a quoted string starting at `start` (a `"` or `'`),
+/// honouring `\` escapes. Returns `chars.len()` for an unterminated string.
+fn skip_string(chars: &[char], start: usize) -> usize {
+    let quote = chars[start];
+    let mut i = start + 1;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            c if c == quote => return i + 1,
+            _ => i += 1,
+        }
+    }
+    chars.len()
+}
+
+/// Index of the `]` matching the `[` at `open`, skipping quoted strings and
+/// escapes. Returns `chars.len()` when unmatched.
+fn matching_bracket(chars: &[char], open: usize) -> usize {
+    let mut i = open + 1;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '"' | '\'' => i = skip_string(chars, i),
+            ']' => return i,
+            _ => i += 1,
+        }
+    }
+    chars.len()
+}
+
+/// Validate the inner content of an `[…]` attribute selector. dart-sass allows
+/// at most a single trailing ASCII-letter modifier, directly before the close
+/// bracket: `[a]`, `[a=b]`, `[a=b ]`, `[a="b"i]`, and `[a=b i]` are valid, but
+/// `[a b]` (no operator), `[a=b cd]` (too long), `[a=b 1]`/`[a=b _]`/`[a=b ï]`
+/// (non-letter), and `[a=b i ]` (trailing space after the modifier) are not.
+fn validate_attribute(inner: &[char]) -> Result<(), Error> {
+    let err = || Error::unpositioned("expected \"]\".");
+    let mut i = 0;
+    let skip_ws = |i: &mut usize| {
+        while *i < inner.len() && inner[*i].is_whitespace() {
+            *i += 1;
+        }
+    };
+    // Namespace + attribute name (identifiers, escapes, and a `|` namespace
+    // separator); interpolation has already been resolved to literal text.
+    skip_ws(&mut i);
+    while i < inner.len() {
+        let c = inner[i];
+        if c == '\\' {
+            i += 2;
+        } else if is_name_char(c) || c == '|' || c == '*' {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    skip_ws(&mut i);
+    if i >= inner.len() {
+        return Ok(()); // bare `[name]`
+    }
+    // An operator must follow the name; anything else (e.g. a second
+    // identifier in `[a b]`) is invalid.
+    let op_ok = match inner[i] {
+        '=' => true,
+        '~' | '|' | '^' | '$' | '*' => inner.get(i + 1) == Some(&'='),
+        _ => false,
+    };
+    if !op_ok {
+        return Err(err());
+    }
+    i += if inner[i] == '=' { 1 } else { 2 };
+    skip_ws(&mut i);
+    // The value: a quoted string or an unquoted identifier (with escapes).
+    match inner.get(i) {
+        Some('"') | Some('\'') => i = skip_string(inner, i),
+        Some(_) => {
+            while i < inner.len() {
+                let c = inner[i];
+                if c == '\\' {
+                    i += 2;
+                } else if c.is_whitespace() {
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        None => return Err(err()),
+    }
+    skip_ws(&mut i);
+    if i >= inner.len() {
+        return Ok(()); // value, no modifier
+    }
+    // A modifier: exactly one ASCII letter, immediately before the close.
+    if inner[i].is_ascii_alphabetic() && i + 1 == inner.len() {
+        return Ok(());
+    }
+    Err(err())
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_' || !c.is_ascii()
 }
 
 /// Resolve a (possibly comma-separated) selector against the parent

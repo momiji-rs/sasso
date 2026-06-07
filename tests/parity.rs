@@ -1269,3 +1269,25 @@ fn placeholder_selector_must_be_named() {
         "@keyframes a {\n  from, 15%, to {\n    c: d;\n  }\n}\n"
     );
 }
+
+#[test]
+fn attribute_selector_modifier_strictness() {
+    // An attribute modifier must be a single ASCII letter directly before the
+    // closing `]`. Invalid forms (no operator, too long, non-letter, trailing
+    // space) error with `expected "]"`; valid forms still compile. Offline.
+    assert!(compile("[a b] {c: d}\n", &Options::default()).is_err());
+    assert!(compile("[a=b cd] {c: d}\n", &Options::default()).is_err());
+    assert!(compile("[a=b _] {c: d}\n", &Options::default()).is_err());
+    assert!(compile("[a=b 1] {c: d}\n", &Options::default()).is_err());
+    assert!(compile("[a=b i ] {c: d}\n", &Options::default()).is_err());
+    assert!(compile("[charset i] {c: d}\n", &Options::default()).is_err());
+    // Valid attribute selectors compile, including single-letter modifiers,
+    // a modifier glued to a quoted value, namespaces, and `]` inside a value.
+    assert!(compile("[a] {c: d}\n", &Options::default()).is_ok());
+    assert!(compile("[a=b i] {c: d}\n", &Options::default()).is_ok());
+    assert!(compile("[a=b I] {c: d}\n", &Options::default()).is_ok());
+    assert!(compile("[a=b c] {c: d}\n", &Options::default()).is_ok());
+    assert!(compile("[a=\"b\"i] {c: d}\n", &Options::default()).is_ok());
+    assert!(compile("[*|a=b i] {c: d}\n", &Options::default()).is_ok());
+    assert!(compile("[a=\"]\"] {c: d}\n", &Options::default()).is_ok());
+}
