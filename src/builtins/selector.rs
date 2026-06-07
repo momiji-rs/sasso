@@ -191,6 +191,11 @@ fn render_list(complexes: &[Complex]) -> String {
 fn resolve_parents(child: &str, parents: &[Complex], fname: &str, pos: Pos) -> Result<Vec<Complex>, Error> {
     let parent_str = render_list(parents);
     let child_complexes = split_top_commas(child);
+    // dart-sass parses each nested selector with parent references allowed, so a
+    // `&` that is not at the start of a compound selector is rejected up front.
+    for cc in &child_complexes {
+        validate_parent_placement(cc)?;
+    }
     let mut out: Vec<Complex> = Vec::new();
     for parent in parents {
         let parent_one = parent.render();
@@ -214,6 +219,67 @@ fn resolve_parents(child: &str, parents: &[Complex], fname: &str, pos: Pos) -> R
         return parse_selector_text(&parent_str, "selectors", pos);
     }
     Ok(out)
+}
+
+/// Validate that every top-level `&` in a child complex selector appears at the
+/// start of a compound selector (start of the part, or right after a combinator
+/// or whitespace), matching dart-sass's parser. A `&` elsewhere (e.g. `d&`,
+/// `[d]&`) errors with `"&" may only used at the beginning of a compound
+/// selector.`. Quoted strings and the contents of `[…]`/`(…)` groups are
+/// skipped.
+fn validate_parent_placement(s: &str) -> Result<(), Error> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    let mut at_compound_start = true;
+    let mut depth = 0i32;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' => {
+                i += 2;
+                at_compound_start = false;
+                continue;
+            }
+            '"' | '\'' => {
+                let q = c;
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if chars[i] == q {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                at_compound_start = false;
+                continue;
+            }
+            '[' | '(' => {
+                depth += 1;
+                at_compound_start = false;
+            }
+            ']' | ')' => {
+                depth -= 1;
+                at_compound_start = false;
+            }
+            _ if depth > 0 => {}
+            ' ' | '\t' | '\n' | '\r' | '>' | '+' | '~' => at_compound_start = true,
+            '&' => {
+                if !at_compound_start {
+                    return Err(Error::unpositioned(
+                        "\"&\" may only used at the beginning of a compound selector.",
+                    ));
+                }
+                at_compound_start = false;
+            }
+            _ => at_compound_start = false,
+        }
+        i += 1;
+    }
+    Ok(())
 }
 
 /// Whether a complex-selector string has a top-level `&` (outside brackets,
@@ -392,10 +458,20 @@ fn append_lists(prefix: &[Complex], suffix: &[Complex], pos: Pos) -> Result<Vec<
     for p in prefix {
         let p_one = p.render();
         for s in suffix {
-            // The first component of the suffix must have no combinator.
+            // The first component of the suffix must have no combinator, and its
+            // leading simple may not be a universal selector or a namespaced type
+            // selector (those can't suffix another compound), matching dart-sass
+            // `_prependParent`.
             let s_str = s.render();
             if let Some(first) = s.components.first() {
-                if first.combinator.is_some() {
+                let leading_blocks_append = matches!(
+                    first.compound.simples.first(),
+                    Some(crate::selector::Simple::Universal { .. })
+                ) || matches!(
+                    first.compound.simples.first(),
+                    Some(crate::selector::Simple::Type(t)) if t.contains('|')
+                );
+                if first.combinator.is_some() || leading_blocks_append {
                     return Err(Error::at(format!("Can't append {s_str} to {p_one}."), pos));
                 }
             }

@@ -3608,3 +3608,12 @@ fn parity_selector_arg_coercion_lists() {
     assert_parity("@use \"sass:selector\";\na { b: selector.nest((c, d e), \"f\"); }\n");
     assert_parity("@use \"sass:selector\";\na { b: selector.is-superselector((c, d e), (c, d e)); }\n");
 }
+
+#[test]
+fn parity_selector_append_type_suffix() {
+    // selector.append accepts a plain type selector as the suffix's leading
+    // simple (`.c` + `d` -> `.cd`); a universal or namespaced type is rejected
+    // (tested for errors via the spec suite, not here).
+    assert_parity("@use \"sass:selector\";\na { b: selector.append(\".c\", \"d\"); }\n");
+    assert_parity("@use \"sass:selector\";\na { b: selector.append(\"d\", \".c\"); }\n");
+}
