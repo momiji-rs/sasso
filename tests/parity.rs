@@ -500,3 +500,38 @@ fn lab_family_validation_and_passthrough() {
         );
     }
 }
+
+#[test]
+fn color_function_validation_and_passthrough() {
+    // Well-formed and special/relative calls are preserved verbatim.
+    assert_eq!(
+        ours("a {b: color(srgb 0.1 0.2 0.3)}\n"),
+        "a {\n  b: color(srgb 0.1 0.2 0.3);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: color(srgb calc(infinity) 0 0)}\n"),
+        "a {\n  b: color(srgb calc(infinity) 0 0);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: color(from var(--c) srgb r g b)}\n"),
+        "a {\n  b: color(from var(--c) srgb r g b);\n}\n"
+    );
+    // Malformed calls raise validation errors.
+    for src in [
+        "a {b: color()}\n",
+        "a {b: color(srgb)}\n",
+        "a {b: color(1 2 3)}\n",
+        "a {b: color(foo 1 2 3)}\n",
+        "a {b: color(srgb 0.1 0.2)}\n",
+        "a {b: color(srgb 0.1 0.2 0.3 0.4)}\n",
+        "a {b: color(srgb c 0.2 0.3)}\n",
+        "a {b: color(srgb 0.1px 0.2 0.3)}\n",
+        "a {b: color((srgb, 0.1, 0.2, 0.3))}\n",
+        "a {b: color(srgb (0.1 0.2 0.3))}\n",
+    ] {
+        assert!(
+            compile(src, &Options::default()).is_err(),
+            "expected error for {src}"
+        );
+    }
+}

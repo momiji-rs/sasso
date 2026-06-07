@@ -58,6 +58,7 @@ pub(super) fn try_call(
         "hsl" | "hsla" => fn_hsl(pos_args, named, pos),
         "hwb" => fn_hwb(pos_args, named, pos),
         "lab" | "lch" | "oklab" | "oklch" => fn_lab_family(name, pos_args, named, pos),
+        "color" => fn_color(pos_args, named, pos),
         "mix" => fn_mix(pos_args, named, pos),
         "lighten" => fn_adjust_lightness(name, pos_args, named, pos, 1.0),
         "darken" => fn_adjust_lightness(name, pos_args, named, pos, -1.0),
@@ -646,6 +647,149 @@ fn fn_lab_family(
 /// channel-list error messages (`(1%, 2, 3)`, `(1% 2)`).
 fn list_paren_css(v: &Value) -> String {
     format!("({})", v.to_css(false))
+}
+
+/// The known predefined color spaces accepted by `color()`. All have three
+/// channels, so the channel-count message is uniform.
+fn is_known_color_space(name: &str) -> bool {
+    matches!(
+        name,
+        "srgb"
+            | "srgb-linear"
+            | "display-p3"
+            | "display-p3-linear"
+            | "a98-rgb"
+            | "prophoto-rgb"
+            | "rec2020"
+            | "xyz"
+            | "xyz-d50"
+            | "xyz-d65"
+    )
+}
+
+/// The `color()` function for predefined color spaces
+/// (`color(srgb 0.1 0.2 0.3)`). Full color-space math is out of scope: a
+/// well-formed call (and any special/`none`/`from`-relative call) is preserved
+/// verbatim, while malformed calls raise dart-sass's validation errors.
+fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["description"];
+    let n = pos_args.len() + named.len();
+    if n == 0 {
+        return Err(Error::at("Missing argument $description.".to_string(), pos));
+    }
+    if n > 1 {
+        return Err(Error::at(
+            format!("Only 1 argument allowed, but {n} were passed."),
+            pos,
+        ));
+    }
+    let desc = require(&params, pos_args, named, 0, "color", pos)?.clone();
+    if let Value::List(l) = &desc {
+        if l.sep == ListSep::Comma {
+            return Err(Error::at(
+                format!(
+                    "$description: Expected a space- or slash-separated list, was {}",
+                    list_paren_css(&desc)
+                ),
+                pos,
+            ));
+        }
+    }
+    let (items, alpha) = split_channels(&desc);
+    // The first item names the color space; the rest are channels.
+    let space = items.first().ok_or_else(|| {
+        Error::at(
+            "$description: Color component list may not be empty.".to_string(),
+            pos,
+        )
+    })?;
+    let space_name = match space {
+        Value::Str(s) if !s.quoted => s.text.clone(),
+        Value::Str(s) => {
+            return Err(Error::at(
+                format!("$description: Expected \"{}\" to be an unquoted string.", s.text),
+                pos,
+            ));
+        }
+        other => {
+            return Err(Error::at(
+                format!("$description: {} is not a string.", other.to_css(false)),
+                pos,
+            ));
+        }
+    };
+    let channels = &items[1..];
+    // A relative-color call (`color(from … )`) or any special/`none` channel
+    // is preserved verbatim.
+    let is_relative = space_name.eq_ignore_ascii_case("from");
+    let has_special = channels.iter().any(|v| is_special(v) || is_none_keyword(v))
+        || alpha
+            .as_ref()
+            .is_some_and(|v| is_special(v) || is_none_keyword(v));
+    if is_relative || has_special {
+        return Ok(verbatim_call("color", &desc));
+    }
+    if !is_known_color_space(&space_name) {
+        return Err(Error::at(
+            format!("$description: Unknown color space \"{space_name}\"."),
+            pos,
+        ));
+    }
+    // Type-check each supplied channel (with its index-based name) before the
+    // count check, matching dart-sass (`color(srgb (0.1 0.2 0.3))` reports a
+    // non-number channel rather than a wrong count).
+    let names = ["red", "green", "blue"];
+    for (i, comp) in channels.iter().enumerate() {
+        let name = names.get(i).copied().unwrap_or("");
+        match comp {
+            Value::Number(num) => {
+                if !num.unit.is_empty() && num.unit != "%" {
+                    return Err(Error::at(
+                        format!(
+                            "${name}: Expected {} to have unit \"%\" or no units.",
+                            num.to_css(false)
+                        ),
+                        pos,
+                    ));
+                }
+            }
+            Value::Slash(..) => {}
+            other => {
+                return Err(Error::at(
+                    format!(
+                        "$description: Expected {name} channel to be a number, was {}.",
+                        other.to_css(false)
+                    ),
+                    pos,
+                ));
+            }
+        }
+    }
+    if channels.len() != 3 {
+        return Err(Error::at(
+            format!(
+                "$description: The {} color space has 3 channels but {} has {}.",
+                space_name,
+                color_desc_css(&desc),
+                channels.len()
+            ),
+            pos,
+        ));
+    }
+    if let Some(a) = &alpha {
+        alpha_value(a, pos)?;
+    }
+    Ok(verbatim_call("color", &desc))
+}
+
+/// Serialize a `color()` description for its channel-count error message:
+/// wrapped in parentheses for a multi-item list, bare for a single value
+/// (`color(srgb)` → `srgb`).
+fn color_desc_css(desc: &Value) -> String {
+    match desc {
+        Value::List(l) if l.items.len() > 1 => list_paren_css(desc),
+        _ => desc.to_css(false),
+    }
 }
 
 fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
