@@ -1454,6 +1454,9 @@ fn math_round_strategy_preservation() {
     // A strategy with a real number but no step is still an error.
     assert!(compile("a {b: round(nearest, 5)}\n", &Options::default()).is_err());
     assert!(compile("a {b: round(up, 5)}\n", &Options::default()).is_err());
+}
+
+#[test]
 fn selector_comment_stripping() {
     // dart-sass treats a loud `/* */` or silent `//` comment inside a selector
     // as whitespace: it is dropped and a separator is left, so the selector
@@ -1503,6 +1506,8 @@ fn at_rule_prelude_comment_stripping() {
     assert_eq!(ours("@a b /**/ {}\n"), "@a b /**/ {}\n");
     assert_eq!(ours("@a b //\n  {}\n"), "@a b {}\n");
 }
+
+#[test]
 fn legacy_channels_special_slash_alpha() {
     // When the trailing `channel / alpha` slash crosses a special value
     // (var/calc/attr) or a `none`, it evaluates to an unquoted `X/Y` string
@@ -1630,6 +1635,9 @@ fn legacy_channels_non_number_channel_error() {
         ours("a{x: rgb(from var(--c) r g b / 25%)}\n"),
         "a {\n  x: rgb(from var(--c) r g b/25%);\n}\n"
     );
+}
+
+#[test]
 fn non_finite_number_serializes_as_calc() {
     // A bare non-finite number value serializes like dart-sass: a unitless
     // infinity/-infinity/NaN prints as `calc(infinity)`/`calc(-infinity)`/
