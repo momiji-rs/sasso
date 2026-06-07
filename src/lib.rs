@@ -32,6 +32,7 @@ mod emit;
 mod error;
 mod eval;
 mod parser;
+mod sass_parser;
 mod scanner;
 mod selector;
 mod value;
@@ -48,6 +49,21 @@ pub enum OutputStyle {
     Expanded,
     /// Minified, single-line output.
     Compressed,
+}
+
+/// The input syntax flavour.
+///
+/// Both flavours parse into the same AST and share the evaluator and emitter;
+/// only the *block structure* differs (`{}`/`;` for SCSS, indentation +
+/// newlines for the indented `.sass` syntax).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Syntax {
+    /// The brace/semicolon SCSS syntax (the default).
+    #[default]
+    Scss,
+    /// The indented `.sass` syntax: blocks come from indentation, statements
+    /// end at a newline.
+    Sass,
 }
 
 /// Resolves `@import` arguments to SCSS source.
@@ -77,12 +93,14 @@ pub trait Importer {
 pub struct Options<'a> {
     /// Output style.
     pub style: OutputStyle,
+    /// Input syntax (SCSS or indented `.sass`).
+    pub syntax: Syntax,
     /// Importer used to resolve `@import`; `None` disables file imports.
     pub importer: Option<&'a dyn Importer>,
 }
 
 impl<'a> Options<'a> {
-    /// Create default options (expanded, no importer).
+    /// Create default options (expanded, SCSS, no importer).
     pub fn new() -> Self {
         Self::default()
     }
@@ -91,6 +109,13 @@ impl<'a> Options<'a> {
     #[must_use]
     pub fn with_style(mut self, style: OutputStyle) -> Self {
         self.style = style;
+        self
+    }
+
+    /// Builder: set the input syntax.
+    #[must_use]
+    pub fn with_syntax(mut self, syntax: Syntax) -> Self {
+        self.syntax = syntax;
         self
     }
 
@@ -109,7 +134,10 @@ impl<'a> Options<'a> {
 /// Returns [`Error`] on a parse or evaluation failure (with a 1-based
 /// source position when known).
 pub fn compile(source: &str, options: &Options<'_>) -> Result<String, Error> {
-    let sheet = parser::parse(source)?;
+    let sheet = match options.syntax {
+        Syntax::Scss => parser::parse(source)?,
+        Syntax::Sass => sass_parser::parse(source)?,
+    };
     let mut ev = eval::Evaluator::new(eval::EvalOptions {
         style: options.style,
         importer: options.importer,

@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use sasso::{compile, FsImporter, Options, OutputStyle};
+use sasso::{compile, FsImporter, Options, OutputStyle, Syntax};
 
 const USAGE: &str = "\
 sasso — a pure-Rust SCSS to CSS compiler
@@ -29,6 +29,7 @@ OPTIONS:
     -s, --style <expanded|compressed>   output style (default: expanded)
     -I, --load-path <dir>               add an @import search path (repeatable)
         --stdin                         read SCSS from standard input
+        --indented                      parse the indented .sass syntax
         --version                       print version and exit
     -h, --help                          print this help and exit
 ";
@@ -38,6 +39,9 @@ struct Cli {
     use_stdin: bool,
     style: OutputStyle,
     load_paths: Vec<PathBuf>,
+    /// Force the indented `.sass` syntax (otherwise inferred from the input
+    /// path's extension; `--stdin` defaults to SCSS).
+    indented: bool,
 }
 
 fn main() -> ExitCode {
@@ -72,6 +76,7 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
         use_stdin: false,
         style: OutputStyle::Expanded,
         load_paths: Vec::new(),
+        indented: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -80,6 +85,7 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
             "-h" | "--help" => return Ok(Action::Help),
             "--version" => return Ok(Action::Version),
             "--stdin" => cli.use_stdin = true,
+            "--indented" => cli.indented = true,
             "-s" | "--style" => {
                 i += 1;
                 let v = args.get(i).ok_or("--style requires a value")?;
@@ -118,6 +124,20 @@ fn parse_style(s: &str) -> Result<OutputStyle, String> {
 }
 
 fn run(mut cli: Cli) -> ExitCode {
+    // Pick the input syntax: the `--indented` flag forces `.sass`, otherwise the
+    // input path's extension decides (`.sass` -> indented, anything else SCSS);
+    // `--stdin` without `--indented` is SCSS.
+    let ext_is_sass = cli
+        .input
+        .as_ref()
+        .and_then(|p| p.extension())
+        .map(|e| e.eq_ignore_ascii_case("sass"))
+        .unwrap_or(false);
+    let syntax = if cli.indented || ext_is_sass {
+        Syntax::Sass
+    } else {
+        Syntax::Scss
+    };
     let source = if cli.use_stdin {
         match read_stdin() {
             Ok(s) => s,
@@ -156,7 +176,10 @@ fn run(mut cli: Cli) -> ExitCode {
         cli.load_paths.push(PathBuf::from("."));
     }
     let importer = FsImporter::new(cli.load_paths);
-    let options = Options::default().with_style(cli.style).with_importer(&importer);
+    let options = Options::default()
+        .with_style(cli.style)
+        .with_syntax(syntax)
+        .with_importer(&importer);
 
     match compile(&source, &options) {
         Ok(css) => {

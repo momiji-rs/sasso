@@ -578,7 +578,7 @@ def main():
     # `extend` is implemented now, so its cases are attempted by default (the
     # tag remains available via --run-skipped / for opting back in, but is no
     # longer enabled out of the box).
-    enabled_tags = set(SKIP_TAGS) - {"extend", "use", "forward"}
+    enabled_tags = set(SKIP_TAGS) - {"extend", "use", "forward", "indented-syntax"}
     for t in args.no_skip:
         enabled_tags.discard(t)
     if args.run_skipped:
