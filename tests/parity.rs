@@ -1789,3 +1789,22 @@ fn extend_weaves_multi_component_extenders() {
         ".baz .bip .foo, .baz .bip bar {\n  a: b;\n}\n"
     );
 }
+
+#[test]
+fn extend_universal_and_element_unification() {
+    // `*|*` unified into a compound with a class drops the universal entirely.
+    assert_eq!(
+        ours("%-a .foo.bar {a: b}\n*|* {@extend .foo} -a {@extend %-a}\n"),
+        "-a .bar {\n  a: b;\n}\n"
+    );
+    // A namespaced universal target keeps its namespace where it can't unify away.
+    assert_eq!(
+        ours("%-a ns|*.foo {a: b}\n* {@extend .foo} -a {@extend %-a}\n"),
+        "-a ns|*.foo {\n  a: b;\n}\n"
+    );
+    // A namespaced type extender unifies with `*` to the concrete element.
+    assert_eq!(
+        ours("%-a *.foo {a: b}\n*|a {@extend .foo} -a {@extend %-a}\n"),
+        "-a *.foo, -a a {\n  a: b;\n}\n"
+    );
+}

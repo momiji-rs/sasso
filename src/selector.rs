@@ -1176,73 +1176,154 @@ fn render_components(seq: &[ComplexComponent]) -> String {
     .render()
 }
 
-/// Unify two compound selectors into one, returning `None` if they can't be
-/// combined into a single valid compound (e.g. two different type selectors,
-/// two different ids). Type/universal selectors merge; remaining non-pseudo
-/// simples keep insertion order (base then extra, deduplicated); pseudo
-/// selectors are always emitted last (dart-sass `SimpleSelector.unify` keeps
-/// pseudos at the end of a compound).
+/// Unify a `base` compound with `extra` (the extender's trailing compound),
+/// returning the combined compound or `None` if they can't unify. A faithful
+/// port of dart-sass `unifyCompound`: start from `base`, then fold each `extra`
+/// simple in via `simple_unify`, keeping pseudo-classes after a pseudo-element
+/// in `pseudo_result` to preserve their relative order.
 fn unify_compounds(base: &[Simple], extra: &[Simple]) -> Option<Vec<Simple>> {
-    let mut type_sel: Option<Simple> = None;
-    let mut id_sel: Option<Simple> = None;
-    let mut non_pseudo: Vec<Simple> = Vec::new();
-    let mut pseudos: Vec<Simple> = Vec::new();
-
-    for s in base.iter().chain(extra.iter()) {
-        match s {
-            Simple::Type(_) | Simple::Universal { .. } => match &type_sel {
-                None => type_sel = Some(s.clone()),
-                Some(existing) => type_sel = Some(unify_type(existing, s)?),
-            },
-            Simple::Id(_) => match &id_sel {
-                None => {
-                    id_sel = Some(s.clone());
-                    non_pseudo.push(s.clone());
-                }
-                Some(existing) => {
-                    if existing != s {
-                        return None; // two different ids can't unify
-                    }
-                }
-            },
-            Simple::Pseudo(_) => {
-                if !pseudos.contains(s) {
-                    pseudos.push(s.clone());
-                }
+    let mut result: Vec<Simple> = base.to_vec();
+    let mut pseudo_result: Vec<Simple> = Vec::new();
+    let mut pseudo_element_found = false;
+    for simple in extra {
+        if pseudo_element_found && matches!(simple, Simple::Pseudo(_)) {
+            pseudo_result = simple_unify(simple, &pseudo_result)?;
+        } else {
+            if is_pseudo_element(simple) {
+                pseudo_element_found = true;
             }
-            _ => {
-                if !non_pseudo.contains(s) {
-                    non_pseudo.push(s.clone());
-                }
-            }
+            result = simple_unify(simple, &result)?;
         }
     }
-
-    let mut out = Vec::new();
-    if let Some(t) = type_sel {
-        // A bare universal `*` is dropped when other simples are present.
-        let others = !non_pseudo.is_empty() || !pseudos.is_empty();
-        if !(matches!(t, Simple::Universal { ns: None }) && others) {
-            out.push(t);
-        }
-    }
-    out.extend(non_pseudo);
-    out.extend(pseudos);
-    if out.is_empty() {
+    result.extend(pseudo_result);
+    if result.is_empty() {
         return None;
     }
-    Some(out)
+    Some(result)
 }
 
-/// Unify two type/universal selectors. `*` unifies with anything (yielding the
-/// more specific). Two distinct named types don't unify.
-fn unify_type(a: &Simple, b: &Simple) -> Option<Simple> {
-    match (a, b) {
-        (Simple::Universal { ns: None }, other) | (other, Simple::Universal { ns: None }) => {
-            Some(other.clone())
+/// Unify a single simple selector into a compound (`SimpleSelector.unify`).
+fn simple_unify(this: &Simple, compound: &[Simple]) -> Option<Vec<Simple>> {
+    match this {
+        Simple::Universal { .. } => match compound.split_first() {
+            Some((first @ (Simple::Universal { .. } | Simple::Type(_)), rest)) => {
+                let unified = unify_universal_and_element(this, first)?;
+                let mut out = vec![unified];
+                out.extend_from_slice(rest);
+                Some(out)
+            }
+            None => Some(vec![this.clone()]),
+            Some(_) => {
+                // A `null` or `*` namespace adds nothing; drop the universal.
+                if universal_ns_droppable(this) {
+                    Some(compound.to_vec())
+                } else {
+                    let mut out = vec![this.clone()];
+                    out.extend_from_slice(compound);
+                    Some(out)
+                }
+            }
+        },
+        Simple::Type(_) => match compound.first() {
+            Some(first @ (Simple::Universal { .. } | Simple::Type(_))) => {
+                let unified = unify_universal_and_element(this, first)?;
+                let mut out = vec![unified];
+                out.extend_from_slice(&compound[1..]);
+                Some(out)
+            }
+            _ => {
+                let mut out = vec![this.clone()];
+                out.extend_from_slice(compound);
+                Some(out)
+            }
+        },
+        // Class / id / attribute / placeholder / pseudo.
+        _ => {
+            if compound.len() == 1 && matches!(compound[0], Simple::Universal { .. }) {
+                // `other.unify([this])` where other is the universal.
+                return simple_unify(&compound[0], std::slice::from_ref(this));
+            }
+            if compound.contains(this) {
+                return Some(compound.to_vec());
+            }
+            // Insert `this` before the first pseudo selector.
+            let mut out = Vec::new();
+            let mut added = false;
+            for s in compound {
+                if !added && matches!(s, Simple::Pseudo(_)) {
+                    out.push(this.clone());
+                    added = true;
+                }
+                out.push(s.clone());
+            }
+            if !added {
+                out.push(this.clone());
+            }
+            Some(out)
         }
-        (Simple::Type(x), Simple::Type(y)) if x == y => Some(a.clone()),
-        (Simple::Universal { ns: x }, Simple::Universal { ns: y }) if x == y => Some(a.clone()),
+    }
+}
+
+/// Whether a universal selector contributes nothing to a compound that already
+/// has other simples (namespace `null` or `*`).
+fn universal_ns_droppable(s: &Simple) -> bool {
+    matches!(s, Simple::Universal { ns } if ns.is_none() || ns.as_deref() == Some("*"))
+}
+
+/// Unify two universal/type selectors (`unifyUniversalAndElement`). Each is a
+/// `(namespace, name)` pair where a universal has `name == None`.
+fn unify_universal_and_element(a: &Simple, b: &Simple) -> Option<Simple> {
+    let (ns1, name1) = namespace_and_name(a)?;
+    let (ns2, name2) = namespace_and_name(b)?;
+
+    let namespace = if ns1 == ns2 || ns2.as_deref() == Some("*") {
+        ns1.clone()
+    } else if ns1.as_deref() == Some("*") {
+        ns2.clone()
+    } else {
+        return None;
+    };
+
+    let name = if name1 == name2 || name2.is_none() {
+        name1.clone()
+    } else if name1.is_none() || name1.as_deref() == Some("*") {
+        name2.clone()
+    } else {
+        return None;
+    };
+
+    Some(match name {
+        None => Simple::Universal { ns: namespace },
+        Some(n) => match namespace {
+            Some(ns) => Simple::Type(format!("{ns}|{n}")),
+            None => Simple::Type(n),
+        },
+    })
+}
+
+/// Decompose a universal/type selector into `(namespace, name)`.
+fn namespace_and_name(s: &Simple) -> Option<(Option<String>, Option<String>)> {
+    match s {
+        Simple::Universal { ns } => Some((ns.clone(), None)),
+        Simple::Type(t) => {
+            let (ns, name) = split_type(t);
+            Some((ns, Some(name)))
+        }
         _ => None,
     }
+}
+
+/// Whether a pseudo selector is a pseudo-element (`::name` or a legacy
+/// single-colon pseudo-element).
+fn is_pseudo_element(s: &Simple) -> bool {
+    let Simple::Pseudo(text) = s else {
+        return false;
+    };
+    if text.starts_with("::") {
+        return true;
+    }
+    // Legacy single-colon pseudo-elements.
+    let name = text.trim_start_matches(':');
+    let base = name.split(['(', ' ']).next().unwrap_or(name).to_ascii_lowercase();
+    matches!(base.as_str(), "before" | "after" | "first-line" | "first-letter")
 }
