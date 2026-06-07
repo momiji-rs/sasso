@@ -486,12 +486,13 @@ fn log(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value,
     let x = require_num(params, pos_args, named, 0, "log", pos)?;
     no_unit(&x, pos)?;
     match super::arg(params, pos_args, named, 1) {
-        Some(b) => {
+        // An explicit `null` base means the natural logarithm (dart-sass).
+        Some(b) if !matches!(b, Value::Null) => {
             let b = as_num(b, pos)?;
             no_unit(&b, pos)?;
             Ok(unitless(x.value.ln() / b.value.ln()))
         }
-        None => Ok(unitless(x.value.ln())),
+        _ => Ok(unitless(x.value.ln())),
     }
 }
 
@@ -700,6 +701,145 @@ fn clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
         val
     };
     Ok(num_value(winner.clone()))
+}
+
+/// `math.round($number)`: the legacy single-argument numeric round (nearest,
+/// unit preserved). dart-sass requires exactly one number; a non-number or
+/// extra arguments are an error (unlike the global CSS `round()` calculation,
+/// which accepts a rounding strategy and step and preserves unknown args).
+pub(super) fn module_round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    if pos_args.len() > 1 {
+        return Err(Error::at(
+            format!("Only 1 argument allowed, but {} were passed.", pos_args.len()),
+            pos,
+        ));
+    }
+    let v = super::require(&["number"], pos_args, named, 0, "round", pos)?;
+    let n = as_num(v, pos)?;
+    Ok(num_value(Number {
+        value: n.value.round(),
+        unit: n.unit,
+    }))
+}
+
+/// `math.min(...)` / `math.max(...)`: the numeric (not CSS-calc) reductions.
+/// Every argument must be a number with a compatible unit; a non-number or a
+/// non-convertible unit pair is an error (unlike the global `min`/`max`, which
+/// preserve such calls as CSS calculations).
+pub(super) fn module_min_max(
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+    is_min: bool,
+) -> Result<Value, Error> {
+    let args = all_args(pos_args, named);
+    if args.is_empty() {
+        return Err(Error::at("At least one argument must be passed.", pos));
+    }
+    // Every argument must be a number (dart-sass: "<v> is not a number.").
+    for v in &args {
+        if !matches!(v, Value::Number(_)) {
+            return Err(Error::at(format!("{} is not a number.", v.to_css(false)), pos));
+        }
+    }
+    match reduce_min_max(&args, is_min, pos)? {
+        Some(n) => Ok(num_value(n)),
+        // All numbers but >1 cluster: a non-convertible unit pair is an error
+        // for the numeric form. Find a representative incompatible pair.
+        None => {
+            let nums: Vec<&Number> = args
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Number(n) => Some(n),
+                    _ => None,
+                })
+                .collect();
+            for (i, a) in nums.iter().enumerate() {
+                for b in &nums[i + 1..] {
+                    if try_coerce(b, a).is_none() {
+                        return Err(incompatible(a, b, pos));
+                    }
+                }
+            }
+            // Should be unreachable (a single cluster would have returned
+            // `Some`); fall back to the first value.
+            Ok(num_value((*nums[0]).clone()))
+        }
+    }
+}
+
+/// `math.clamp($min, $number, $max)`: the numeric (not CSS-calc) clamp. All
+/// three arguments must be numbers with compatible units (mixing a unitless
+/// value with a real unit is an error). dart-sass: `min >= max` → `min`;
+/// `number <= min` → `min`; `number >= max` → `max`; otherwise `number`,
+/// keeping the winning argument's own unit.
+pub(super) fn module_clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let params = ["min", "number", "max"];
+    if pos_args.len() > params.len() {
+        return Err(Error::at(
+            format!(
+                "Only {} arguments allowed, but {} were passed.",
+                params.len(),
+                pos_args.len()
+            ),
+            pos,
+        ));
+    }
+    let want = |i: usize, label: &str| -> Result<Number, Error> {
+        let v = super::require(&params, pos_args, named, i, "clamp", pos)?;
+        match v {
+            Value::Number(n) => Ok(n.clone()),
+            other => Err(Error::at(
+                format!("${label}: {} is not a number.", other.to_css(false)),
+                pos,
+            )),
+        }
+    };
+    let min = want(0, "min")?;
+    let number = want(1, "number")?;
+    let max = want(2, "max")?;
+    // Coerce `number` and `max` into `min`'s unit; mixing unitless with a real
+    // unit (or a hard cross-dimension pair) is an error.
+    let number_v = coerce_for_clamp(&min, &number, "min", "number", pos)?;
+    let max_v = coerce_for_clamp(&min, &max, "min", "max", pos)?;
+    // dart-sass precedence: an inverted range or a value at/below `min` yields
+    // `min`; a value at/above `max` yields `max`; otherwise the value itself.
+    // Both boundary checks are inclusive.
+    let winner = if min.value >= max_v || number_v <= min.value {
+        min
+    } else if number_v >= max_v {
+        max
+    } else {
+        number
+    };
+    Ok(num_value(winner))
+}
+
+/// Coerce `n` into `base`'s unit for `math.clamp`, raising dart-sass's
+/// "incompatible units" error when one side is unitless and the other is not,
+/// or when the units are a hard cross-dimension mismatch.
+fn coerce_for_clamp(
+    base: &Number,
+    n: &Number,
+    base_label: &str,
+    n_label: &str,
+    pos: Pos,
+) -> Result<f64, Error> {
+    let unitless_mix = base.unit.is_empty() != n.unit.is_empty();
+    if unitless_mix {
+        return Err(Error::at(
+            format!(
+                "${n_label}: {} and ${base_label}: {} have incompatible units (one has units and the other doesn't).",
+                n.to_css(false),
+                base.to_css(false)
+            ),
+            pos,
+        ));
+    }
+    match try_coerce(n, base) {
+        Some(v) => Ok(v),
+        None => Err(incompatible(base, n, pos)),
+    }
 }
 
 /// `random()` — a pseudo-random float in `[0, 1)` — or `random($limit)` — a

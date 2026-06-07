@@ -187,10 +187,9 @@ fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
             "abs" => Some("abs"),
             "ceil" => Some("ceil"),
             "floor" => Some("floor"),
-            "round" => Some("round"),
-            "max" => Some("max"),
-            "min" => Some("min"),
-            "clamp" => Some("clamp"),
+            // `math.min`/`math.max`/`math.clamp`/`math.round` are the numeric
+            // forms (dispatched directly in `call_module`), distinct from the
+            // global CSS-calc functions which preserve unknown args.
             "sqrt" => Some("sqrt"),
             "pow" => Some("pow"),
             "exp" => Some("exp"),
@@ -312,7 +311,7 @@ fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
 /// Whether `module` exposes `member` as a callable function (used by the
 /// evaluator to resolve unprefixed `@use … as *` members).
 pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
-    if module == "math" && member == "div" {
+    if module == "math" && matches!(member, "div" | "clamp" | "min" | "max") {
         return true;
     }
     if module == "map" && matches!(member, "set" | "deep-merge" | "deep-remove") {
@@ -336,6 +335,17 @@ pub(crate) fn call_module(
     // `math.div(a, b)` is true (always-divide) division, unit-aware.
     if module == "math" && member == "div" {
         return math::module_div(pos_args, named, pos);
+    }
+    // `math.clamp`/`math.min`/`math.max` are the numeric forms, not the
+    // CSS-calc functions of the same name.
+    if module == "math" {
+        match member {
+            "clamp" => return math::module_clamp(pos_args, named, pos),
+            "min" => return math::module_min_max(pos_args, named, pos, true),
+            "max" => return math::module_min_max(pos_args, named, pos, false),
+            "round" => return math::module_round(pos_args, named, pos),
+            _ => {}
+        }
     }
     // `sass:map` members without a global alias (`set`, `deep-merge`,
     // `deep-remove`).
@@ -373,7 +383,9 @@ pub(crate) fn module_var(module: &str, name: &str, pos: Pos) -> Result<Value, Er
             "max-safe-integer" => number(9_007_199_254_740_991.0),
             "min-safe-integer" => number(-9_007_199_254_740_991.0),
             "max-number" => number(f64::MAX),
-            "min-number" => number(f64::MIN_POSITIVE),
+            // The smallest positive (subnormal) double, matching dart-sass's
+            // `$min-number` (`5e-324`), not the smallest *normal* value.
+            "min-number" => number(f64::from_bits(1)),
             _ => Err(Error::at("Undefined variable.".to_string(), pos)),
         };
     }

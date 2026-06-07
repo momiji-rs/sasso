@@ -3151,3 +3151,15 @@ fn parity_list_join_append_brackets_and_maps() {
         "@use \"sass:list\";\na {\n  jb_both: list.join([c d], [e f]);\n  jb_first: list.join([c d], e f);\n  jb_second: list.join(c d, [e f]);\n  jb_force_t: list.join(c, d, $bracketed: true);\n  jb_force_f: list.join([c], [d], $bracketed: false);\n  jb_pos: list.join(c, d, comma, true);\n  jmap: list.join((c: d, e: f), (g: h));\n  ap_b: list.append([], 1);\n  ap_map: list.append((c: d, e: f), g);\n}\n",
     );
 }
+
+#[test]
+fn parity_math_numeric_module_members() {
+    // `math.clamp` / `math.min` / `math.max` / `math.round` are the numeric
+    // forms (unit-aware, error on non-numbers / incompatible units), distinct
+    // from the global CSS-calc functions; plus `math.log($x, null)` (natural
+    // log) and the `math.$min-number` subnormal constant.
+    assert_parity(
+        "@use \"sass:math\";\na {\n  cl_num: math.clamp(0, 1, 2);\n  cl_max: math.clamp(0, 2, 1);\n  cl_inv: math.clamp(1, 2, 0);\n  cl_unit: math.clamp(180deg, 1turn, 360deg);\n  mn: math.min(3px, 1px, 2px);\n  mn_conv: math.min(1cm, 5mm);\n  mx: math.max(1, 2, 3);\n  rnd: math.round(1.6);\n  ln: math.log(2, null);\n}\n",
+    );
+    assert_parity("@use \"sass:math\";\na { b: math.$min-number * 1e300 * 1e39; }\n");
+}
