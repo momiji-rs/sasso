@@ -162,12 +162,17 @@ fn fn_set_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
     }))
 }
 
-/// The "settled" separator of a value, or `None` when undecided. A `List`
-/// value carries its own separator (even when short); a bare value or an empty
-/// list has no settled separator, which dart-sass defaults to space.
+/// The "settled" separator of a value, or `None` when undecided. A non-empty
+/// `List` value carries its own separator; a bare value defaults to space.
+/// An empty list is normally undecided (dart-sass defaults it to space), but an
+/// empty *comma* list is one that was deliberately built comma-separated
+/// (e.g. the result of `map.keys(())`/`map.values(())`), so its separator is
+/// settled to comma — a literal empty `()` is stored space-separated and stays
+/// undecided.
 fn settled_sep(v: &Value) -> Option<ListSep> {
     match v {
         Value::List(l) if !l.items.is_empty() => Some(l.sep),
+        Value::List(l) if l.sep == ListSep::Comma => Some(ListSep::Comma),
         _ => None,
     }
 }

@@ -3086,5 +3086,18 @@ fn parity_color_invert_in_space() {
     // (1 - weight). Byte-matched to `npx sass`.
     assert_parity(
         "@use \"sass:color\";\na {\n  s: color.invert(color(srgb 0.2 0.5 0.8), $space: srgb);\n  lab: color.invert(lab(20% -30 110), $space: lab);\n  lch: color.invert(lch(20% 80 50deg), $space: lch);\n  hsl: color.invert(hsl(120 50% 40%), $space: hsl);\n  hwb: color.invert(hwb(120 30% 40%), $space: hwb);\n  w: color.invert(color(a98-rgb 0.1 0.4 0.8), 0%, $space: a98-rgb);\n  legacy: color.invert(#123456);\n  legacy_w: color.invert(#123456, 30%);\n}\n",
+fn parity_map_module_gaps() {
+    // `map.set`/`map.deep-merge`/`map.deep-remove` plus the nested key-path
+    // overloads of `map.get`/`map.has-key`/`map.merge`/`map.remove`, all
+    // serialized via `meta.inspect`. Also the empty-list separator of
+    // `map.keys(())`/`map.values(())` (comma, not space).
+    assert_parity(
+        "@use \"sass:meta\";\n@use \"sass:map\";\na {\n  set: meta.inspect(map.set((c: (d: e)), c, f, g));\n  setn: meta.inspect(map.set($map: (c: d), $key: c, $value: e));\n  dm: meta.inspect(map.deep-merge((c: (d: e, f: g)), (c: (j: 1, f: 2))));\n  dr: meta.inspect(map.deep-remove((c: (d: e, f: g, h: i)), c, f));\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:meta\";\n@use \"sass:map\";\na {\n  get: map.get((c: (d: (e: f))), c, d, e);\n  getp: meta.inspect(map.get((c: (d: (e: f))), c, d));\n  has: map.has-key((c: (d: (e: f))), c, d, e);\n  hasn: map.has-key((c: (d: (e: f))), c, d, g);\n  merge: meta.inspect(map.merge((c: 1), c, d, (e: f)));\n  rem: meta.inspect(map.remove($map: (c: d, e: f), $key: c));\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:list\";\n@use \"sass:map\";\na {\n  sep: list.separator(map.keys(()));\n  sepv: list.separator(map.values(()));\n}\n",
     );
 }

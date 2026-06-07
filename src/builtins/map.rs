@@ -34,6 +34,23 @@ pub(super) fn try_call(
     })
 }
 
+/// Dispatch a `sass:map` member that has no global alias (`set`, `deep-merge`,
+/// `deep-remove`). Returns `None` for any other member so the caller can report
+/// it as undefined.
+pub(super) fn call_module_member(
+    member: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Option<Result<Value, Error>> {
+    Some(match member {
+        "set" => fn_map_set(pos_args, named, pos),
+        "deep-merge" => fn_map_deep_merge(pos_args, named, pos),
+        "deep-remove" => fn_map_deep_remove(pos_args, named, pos),
+        _ => return None,
+    })
+}
+
 /// Whether the first argument (positional or by the conventional first
 /// parameter name) is a map. Used to decide whether `length`/`nth` belong to
 /// this family or fall through to the list family.
@@ -67,36 +84,89 @@ fn unitless(value: f64) -> Value {
     })
 }
 
-/// A comma list of the given items, or the empty (space) list when empty —
-/// matching dart-sass `map-keys`/`map-values` serialization.
+/// A comma list of the given items. dart-sass `map-keys`/`map-values` always
+/// return a comma-separated list, even when empty (so `list.separator()` of an
+/// empty result reports `comma`).
 fn comma_list(items: Vec<Value>) -> Value {
-    let sep = if items.is_empty() {
-        ListSep::Space
-    } else {
-        ListSep::Comma
-    };
     Value::List(List {
         items,
-        sep,
+        sep: ListSep::Comma,
         bracketed: false,
     })
 }
 
-/// `map-get($map, $key)`: the value for `$key`, or `null` when absent.
+/// Collect the `($key, $keys...)` arguments of a nested map accessor. The first
+/// key is `$key` (positional or named), the rest is the `$keys...` splat (all
+/// further positional arguments). dart-sass requires at least the one `$key`.
+fn key_path<'v>(
+    pos_args: &'v [Value],
+    named: &'v [(String, Value)],
+    fname: &str,
+    pos: Pos,
+) -> Result<Vec<&'v Value>, Error> {
+    let mut keys: Vec<&Value> = Vec::new();
+    if let Some(first) = pos_args.get(1) {
+        keys.push(first);
+    } else if let Some((_, v)) = named.iter().find(|(n, _)| n == "key") {
+        keys.push(v);
+    }
+    if keys.is_empty() {
+        return Err(Error::at(format!("Missing argument $key for {fname}()."), pos));
+    }
+    keys.extend(pos_args.iter().skip(2));
+    Ok(keys)
+}
+
+/// `map-get($map, $key, $keys...)`: the value at the nested key path, or `null`
+/// when any key along the path is absent (or an intermediate value is not a map).
 fn fn_map_get(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let params = ["map", "key"];
-    let map_v = super::require(&params, pos_args, named, 0, "map-get", pos)?;
-    let entries = as_map(map_v, "map-get", pos)?;
-    let key = super::require(&params, pos_args, named, 1, "map-get", pos)?;
-    Ok(entries
-        .iter()
-        .find(|(k, _)| k.sass_eq(key))
-        .map(|(_, v)| v.clone())
-        .unwrap_or(Value::Null))
+    let map_v = super::require(&["map"], pos_args, named, 0, "map-get", pos)?;
+    let mut entries = as_map(map_v, "map-get", pos)?;
+    let keys = key_path(pos_args, named, "map-get", pos)?;
+    for (i, key) in keys.iter().enumerate() {
+        let found = entries
+            .iter()
+            .find(|(k, _)| k.sass_eq(key))
+            .map(|(_, v)| v.clone());
+        match found {
+            Some(v) => {
+                if i + 1 == keys.len() {
+                    return Ok(v);
+                }
+                // Descend; a non-map intermediate value means "not found".
+                match &v {
+                    Value::Map(m) => entries = m.entries.clone(),
+                    Value::List(l) if l.items.is_empty() => entries = Vec::new(),
+                    _ => return Ok(Value::Null),
+                }
+            }
+            None => return Ok(Value::Null),
+        }
+    }
+    Ok(Value::Null)
+}
+
+/// Reject more positional arguments than a fixed-arity function accepts
+/// (dart-sass "Only N argument(s) allowed, but M were passed.").
+fn check_arity(pos_args: &[Value], max: usize, pos: Pos) -> Result<(), Error> {
+    if pos_args.len() > max {
+        return Err(Error::at(
+            format!(
+                "Only {} argument{} allowed, but {} {} passed.",
+                max,
+                if max == 1 { "" } else { "s" },
+                pos_args.len(),
+                if pos_args.len() == 1 { "was" } else { "were" }
+            ),
+            pos,
+        ));
+    }
+    Ok(())
 }
 
 /// `map-keys($map)`: a comma list of the map's keys in order.
 fn fn_map_keys(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    check_arity(pos_args, 1, pos)?;
     let map_v = super::require(&["map"], pos_args, named, 0, "map-keys", pos)?;
     let entries = as_map(map_v, "map-keys", pos)?;
     Ok(comma_list(entries.into_iter().map(|(k, _)| k).collect()))
@@ -104,44 +174,272 @@ fn fn_map_keys(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
 
 /// `map-values($map)`: a comma list of the map's values in order.
 fn fn_map_values(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    check_arity(pos_args, 1, pos)?;
     let map_v = super::require(&["map"], pos_args, named, 0, "map-values", pos)?;
     let entries = as_map(map_v, "map-values", pos)?;
     Ok(comma_list(entries.into_iter().map(|(_, v)| v).collect()))
 }
 
-/// `map-has-key($map, $key)`: whether the map contains `$key`.
+/// `map-has-key($map, $key, $keys...)`: whether the map contains the nested key
+/// path.
 fn fn_map_has_key(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let params = ["map", "key"];
-    let map_v = super::require(&params, pos_args, named, 0, "map-has-key", pos)?;
-    let entries = as_map(map_v, "map-has-key", pos)?;
-    let key = super::require(&params, pos_args, named, 1, "map-has-key", pos)?;
-    Ok(Value::Bool(entries.iter().any(|(k, _)| k.sass_eq(key))))
+    let map_v = super::require(&["map"], pos_args, named, 0, "map-has-key", pos)?;
+    let mut entries = as_map(map_v, "map-has-key", pos)?;
+    let keys = key_path(pos_args, named, "map-has-key", pos)?;
+    for (i, key) in keys.iter().enumerate() {
+        let found = entries
+            .iter()
+            .find(|(k, _)| k.sass_eq(key))
+            .map(|(_, v)| v.clone());
+        match found {
+            Some(v) => {
+                if i + 1 == keys.len() {
+                    return Ok(Value::Bool(true));
+                }
+                match &v {
+                    Value::Map(m) => entries = m.entries.clone(),
+                    Value::List(l) if l.items.is_empty() => entries = Vec::new(),
+                    _ => return Ok(Value::Bool(false)),
+                }
+            }
+            None => return Ok(Value::Bool(false)),
+        }
+    }
+    Ok(Value::Bool(false))
 }
 
-/// `map-merge($map1, $map2)`: `$map1` with `$map2`'s entries added/overwriting,
-/// keeping `$map1`'s ordering for shared keys.
-fn fn_map_merge(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let params = ["map1", "map2"];
-    let map1_v = super::require(&params, pos_args, named, 0, "map-merge", pos)?;
-    let map2_v = super::require(&params, pos_args, named, 1, "map-merge", pos)?;
-    let mut map = Map {
-        entries: as_map(map1_v, "map-merge", pos)?,
-    };
-    for (k, v) in as_map(map2_v, "map-merge", pos)? {
+/// Merge `b`'s entries into `a` (shallow): `a` keeps its order, shared keys take
+/// `b`'s value, and `b`'s new keys append in order.
+fn shallow_merge(a: Vec<(Value, Value)>, b: Vec<(Value, Value)>) -> Map {
+    let mut map = Map { entries: a };
+    for (k, v) in b {
         map.insert(k, v);
     }
-    Ok(Value::Map(map))
+    map
 }
 
-/// `map-remove($map, $keys...)`: the map without any entries whose key matches
-/// one of `$keys`.
+/// Borrow a value's map entries when it is a map (or the empty list, which
+/// doubles as the empty map), else `None`.
+fn entries_of(v: &Value) -> Option<Vec<(Value, Value)>> {
+    match v {
+        Value::Map(m) => Some(m.entries.clone()),
+        Value::List(l) if l.items.is_empty() => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+/// Recursively merge `b` into `a`: a value that is a map in *both* operands is
+/// merged in turn; otherwise `b`'s value wins (dart-sass `deepMergeImpl`). The
+/// empty list `()` counts as the empty map on either side.
+fn deep_merge(a: Vec<(Value, Value)>, b: Vec<(Value, Value)>) -> Map {
+    let mut map = Map { entries: a };
+    for (k, v) in b {
+        let merged = match (map.get(&k).and_then(entries_of), entries_of(&v)) {
+            (Some(existing), Some(incoming)) => Value::Map(deep_merge(existing, incoming)),
+            _ => v,
+        };
+        map.insert(k, merged);
+    }
+    map
+}
+
+/// Navigate `entries` along `keys`, build maps for missing/non-map nodes, apply
+/// `transform` to the value at the leaf, and rebuild the map spine. With an
+/// empty `keys` the transform applies to the whole map directly.
+fn modify_map(
+    entries: Vec<(Value, Value)>,
+    keys: &[&Value],
+    transform: &mut dyn FnMut(Option<Value>) -> Value,
+) -> Vec<(Value, Value)> {
+    match keys.split_first() {
+        None => {
+            // No keys: transform receives the whole map and replaces it.
+            match transform(Some(Value::Map(Map { entries }))) {
+                Value::Map(m) => m.entries,
+                // A non-map result at the root degrades to an empty map spine;
+                // callers always pass at least the map itself for this case.
+                _ => Vec::new(),
+            }
+        }
+        Some((key, rest)) => {
+            let mut map = Map { entries };
+            let child = map.get(key).cloned();
+            let new_child = if rest.is_empty() {
+                transform(child)
+            } else {
+                let child_entries = match child {
+                    Some(Value::Map(m)) => m.entries,
+                    Some(Value::List(l)) if l.items.is_empty() => Vec::new(),
+                    _ => Vec::new(),
+                };
+                Value::Map(Map {
+                    entries: modify_map(child_entries, rest, transform),
+                })
+            };
+            map.insert((*key).clone(), new_child);
+            map.entries
+        }
+    }
+}
+
+/// `map-merge($map1, $map2)` or the nested `map-merge($map1, $keys..., $map2)`:
+/// merge `$map2` into the (possibly nested) submap of `$map1` at the key path.
+fn fn_map_merge(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    merge_impl(pos_args, named, pos, "map-merge", false)
+}
+
+/// `map-deep-merge($map1, $map2)`: like `map-merge` but recursive.
+fn fn_map_deep_merge(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    merge_impl(pos_args, named, pos, "map-deep-merge", true)
+}
+
+/// Shared body for `map.merge` / `map.deep-merge`. With named `$map1`/`$map2`
+/// the call is the simple two-map form; otherwise the first positional argument
+/// is `$map1`, the last is `$map2`, and the keys in between form the nested path.
+fn merge_impl(
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+    fname: &str,
+    deep: bool,
+) -> Result<Value, Error> {
+    let merge = |a: Vec<(Value, Value)>, b: Vec<(Value, Value)>| {
+        if deep {
+            deep_merge(a, b)
+        } else {
+            shallow_merge(a, b)
+        }
+    };
+    // Resolve `$map1` (positional 0 or named) and the path/`$map2`.
+    let map1_v = super::require(&["map1"], pos_args, named, 0, fname, pos)?;
+    let map1 = as_map_named(map1_v, "map1", pos)?;
+    if pos_args.len() <= 1 {
+        // Two-map form via named `$map2`.
+        let map2_v = named
+            .iter()
+            .find(|(n, _)| n == "map2")
+            .map(|(_, v)| v)
+            .ok_or_else(|| Error::at(format!("Missing argument $map2 for {fname}()."), pos))?;
+        let map2 = as_map_named(map2_v, "map2", pos)?;
+        return Ok(Value::Map(merge(map1, map2)));
+    }
+    // Positional form: last arg is `$map2`, middle args are the key path.
+    let map2_v = &pos_args[pos_args.len() - 1];
+    let map2 = as_map_named(map2_v, "map2", pos)?;
+    let keys: Vec<&Value> = pos_args[1..pos_args.len() - 1].iter().collect();
+    if keys.is_empty() {
+        return Ok(Value::Map(merge(map1, map2)));
+    }
+    let mut transform = |child: Option<Value>| {
+        let child_entries = match child {
+            Some(Value::Map(m)) => m.entries,
+            Some(Value::List(l)) if l.items.is_empty() => Vec::new(),
+            _ => Vec::new(),
+        };
+        Value::Map(merge(child_entries, map2.clone()))
+    };
+    Ok(Value::Map(Map {
+        entries: modify_map(map1, &keys, &mut transform),
+    }))
+}
+
+/// `map-set($map, $key, $keys..., $value)`: set the value at the nested key
+/// path, creating maps along the way. Requires the map, at least one key, and a
+/// value (the last argument).
+fn fn_map_set(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let map_v = super::require(&["map"], pos_args, named, 0, "map-set", pos)?;
+    let entries = as_map_named(map_v, "map", pos)?;
+    // Named two-arg form `map.set($map, $key, $value)` via $key/$value.
+    let named_key = named.iter().find(|(n, _)| n == "key").map(|(_, v)| v);
+    let named_value = named.iter().find(|(n, _)| n == "value").map(|(_, v)| v);
+    let (keys, value): (Vec<&Value>, &Value) = match (named_key, named_value) {
+        (Some(k), Some(v)) => (vec![k], v),
+        _ => {
+            // Positional: $map, then keys..., then $value (the last positional).
+            if pos_args.len() < 3 {
+                return Err(Error::at("Expected $args to contain a key.", pos));
+            }
+            let value = &pos_args[pos_args.len() - 1];
+            let keys = pos_args[1..pos_args.len() - 1].iter().collect();
+            (keys, value)
+        }
+    };
+    let mut transform = |_old: Option<Value>| value.clone();
+    Ok(Value::Map(Map {
+        entries: modify_map(entries, &keys, &mut transform),
+    }))
+}
+
+/// `map-remove($map, $keys...)`: drop every entry whose key matches one of the
+/// `$keys`. The `$keys` rest is positional; a single key may also be passed as
+/// the named `$key` (but not mixed with positional keys).
 fn fn_map_remove(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let map_v = super::require(&["map"], pos_args, named, 0, "map-remove", pos)?;
-    let mut entries = as_map(map_v, "map-remove", pos)?;
-    // Every argument after the map is a key to remove (the `$keys...` rest).
-    let keys: Vec<Value> = pos_args.iter().skip(1).cloned().collect();
+    let mut entries = as_map_named(map_v, "map", pos)?;
+    // Every argument after the map is a positional key to remove.
+    let mut keys: Vec<Value> = pos_args.iter().skip(1).cloned().collect();
+    // A named `$key` provides a single key, but mixing it with positional rest
+    // keys is the same argument supplied twice (dart-sass errors).
+    if let Some((_, v)) = named.iter().find(|(n, _)| n == "key") {
+        if !keys.is_empty() {
+            return Err(Error::at(
+                "Argument $keys was passed both by position and by name.",
+                pos,
+            ));
+        }
+        keys.push(v.clone());
+    }
     entries.retain(|(k, _)| !keys.iter().any(|rk| rk.sass_eq(k)));
     Ok(Value::Map(Map { entries }))
+}
+
+/// `map-deep-remove($map, $key, $keys...)`: remove the entry at the nested key
+/// path. Needs at least one key (dart-sass).
+fn fn_map_deep_remove(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let map_v = super::require(&["map"], pos_args, named, 0, "map-deep-remove", pos)?;
+    let entries = as_map_named(map_v, "map", pos)?;
+    let keys = key_path(pos_args, named, "map-deep-remove", pos)?;
+    // The last key is removed; the keys before it locate the parent submap.
+    let (last, parents) = match keys.split_last() {
+        Some(pair) => pair,
+        None => return Ok(Value::Map(Map { entries })),
+    };
+    Ok(Value::Map(Map {
+        entries: deep_remove(entries, parents, last),
+    }))
+}
+
+/// Navigate `entries` along `parents`; at the located submap, drop `last`. A
+/// missing intermediate map leaves the structure unchanged.
+fn deep_remove(entries: Vec<(Value, Value)>, parents: &[&Value], last: &Value) -> Vec<(Value, Value)> {
+    match parents.split_first() {
+        None => {
+            let mut entries = entries;
+            entries.retain(|(k, _)| !k.sass_eq(last));
+            entries
+        }
+        Some((key, rest)) => {
+            let mut map = Map { entries };
+            if let Some(Value::Map(child)) = map.get(key).cloned().as_ref() {
+                let new_child = deep_remove(child.entries.clone(), rest, last);
+                map.insert((*key).clone(), Value::Map(Map { entries: new_child }));
+            }
+            map.entries
+        }
+    }
+}
+
+/// Coerce a value into map entries with a parameter-named error message
+/// (`$map1: 1 is not a map.`) matching dart-sass.
+fn as_map_named(v: &Value, param: &str, pos: Pos) -> Result<Vec<(Value, Value)>, Error> {
+    match v {
+        Value::Map(m) => Ok(m.entries.clone()),
+        Value::List(l) if l.items.is_empty() => Ok(Vec::new()),
+        other => Err(Error::at(
+            format!("${param}: {} is not a map.", other.to_css(false)),
+            pos,
+        )),
+    }
 }
 
 /// `length($map)`: the number of entries.

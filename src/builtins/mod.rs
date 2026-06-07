@@ -220,8 +220,8 @@ fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
             "keys" => Some("map-keys"),
             "values" => Some("map-values"),
             "has-key" => Some("map-has-key"),
-            // `set`, `deep-merge`, `deep-remove` have no global equivalent in
-            // this build.
+            // `set`/`deep-merge`/`deep-remove` are module-only (no global alias
+            // in dart-sass); they are dispatched directly in `call_module`.
             _ => None,
         },
         "string" => match member {
@@ -313,6 +313,9 @@ pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
     if module == "math" && member == "div" {
         return true;
     }
+    if module == "map" && matches!(member, "set" | "deep-merge" | "deep-remove") {
+        return true;
+    }
     module_member_to_global(module, member).is_some()
 }
 
@@ -328,6 +331,13 @@ pub(crate) fn call_module(
     // `math.div(a, b)` is true (always-divide) division, unit-aware.
     if module == "math" && member == "div" {
         return math::module_div(pos_args, named, pos);
+    }
+    // `sass:map` members without a global alias (`set`, `deep-merge`,
+    // `deep-remove`).
+    if module == "map" {
+        if let Some(r) = map::call_module_member(member, pos_args, named, pos) {
+            return r;
+        }
     }
     match module_member_to_global(module, member) {
         Some(global) => call(global, pos_args, named, pos),
