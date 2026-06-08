@@ -148,18 +148,19 @@ $ SASS_BIN=target/release/sasso python3 spec/run_spec.py
 `sasso` is a native, in-process library — no subprocess, no Node, no Dart VM —
 so startup is effectively free, which dominates when a build compiles many
 files. On an Apple M2 Max it is the **fastest** of the three engines measured,
-beating dart-sass by 8–16× end-to-end and edging out `grass` (the incumbent
-Rust compiler) too:
+beating dart-sass by 10–19× end-to-end and leading `grass` (the incumbent Rust
+compiler) by ~1.5×:
 
 | Axis | sasso | grass | dart-sass (bin) | npx sass |
 | --- | --- | --- | --- | --- |
-| Startup | **2.0 ms** | 2.3 ms | 143.8 ms | 1.09 s |
-| Cold single large file | **22.8 ms** | 28.0 ms | 364.5 ms | 1.70 s |
-| Batch (40 files, 1 process) | **113 ms** | 143 ms | 960 ms | — |
-| Pure compile (startup removed) | **18.2 ms** | 22.4 ms | ~220 ms¹ | — |
+| Startup | **1.7 ms** | 1.8 ms | 142 ms | 567 ms |
+| Cold single large file | **18.9 ms** | 27.8 ms | 363 ms | 1.05 s |
+| Batch (40 files, 1 process) | **90.9 ms** | 139 ms | 943 ms | — |
+| Pure compile (startup removed) | **14.0 ms** | 21.8 ms | ~221 ms¹ | — |
 
 ¹ derived (cold − startup) — dart-sass has no in-process loop mode. So sasso is
-~12× faster than dart-sass on **pure compute** and ~72× on startup. Full
+~16× faster than dart-sass on **pure compute**, ~19× on a cold single file, and
+~82× on startup; vs `grass` it is ~1.5× across cold/batch/pure-throughput. Full
 methodology, per-file numbers and the correctness diff are in
 [`bench/three_way.md`](bench/three_way.md); run it yourself with
 `cd bench && RUNS=12 WARMUP=3 LOOP_N=200 bash scripts/run_bench.sh`.
