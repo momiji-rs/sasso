@@ -670,9 +670,7 @@ impl Value {
             (Value::Number(a), Value::Number(b)) => numbers_eq(a, b),
             (Value::Calc(a), Value::Calc(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a.text == b.text,
-            (Value::Color(a), Value::Color(b)) => {
-                fuzzy_eq(a.r, b.r) && fuzzy_eq(a.g, b.g) && fuzzy_eq(a.b, b.b) && fuzzy_eq(a.a, b.a)
-            }
+            (Value::Color(a), Value::Color(b)) => color_sass_eq(a, b),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (Value::List(a), Value::List(b)) => {
@@ -714,6 +712,42 @@ const FUZZY_EPSILON: f64 = 1e-11;
 /// anything (matching dart-sass and IEEE semantics).
 fn fuzzy_eq(a: f64, b: f64) -> bool {
     a == b || (a - b).abs() < FUZZY_EPSILON
+}
+
+/// Sass `==` for two colors (dart-sass). Legacy colors with no missing channel
+/// compare by their sRGB bytes, so they're space-agnostic
+/// (`rgb(255 0 0) == hsl(0 100% 50%)`). Otherwise — a non-legacy space on either
+/// side, or any missing (`none`) channel — they must share a color space and
+/// have channel-by-channel equal (and equally-missing) channels and alpha.
+fn color_sass_eq(a: &Color, b: &Color) -> bool {
+    let space = |c: &Color| c.modern.as_ref().map(|m| m.space).unwrap_or(ColorSpace::Rgb);
+    let chan_eq = |x: Option<f64>, y: Option<f64>| match (x, y) {
+        (Some(p), Some(q)) => fuzzy_eq(p, q),
+        (None, None) => true,
+        _ => false,
+    };
+    // An untagged color is a plain legacy rgb with no missing channel.
+    let channels = |c: &Color| -> [Option<f64>; 3] {
+        match &c.modern {
+            Some(m) => m.channels,
+            None => [Some(c.r), Some(c.g), Some(c.b)],
+        }
+    };
+    let alpha = |c: &Color| c.modern.as_ref().map_or(Some(c.a), |m| m.alpha);
+    let (sa, sb) = (space(a), space(b));
+    if sa != sb {
+        // Different spaces are equal only when BOTH are legacy, compared via
+        // their sRGB bytes (with `none` resolved); a non-legacy space never
+        // equals a different space.
+        if sa.is_legacy() && sb.is_legacy() {
+            return fuzzy_eq(a.r, b.r) && fuzzy_eq(a.g, b.g) && fuzzy_eq(a.b, b.b) && fuzzy_eq(a.a, b.a);
+        }
+        return false;
+    }
+    // Same space: compare channel-by-channel, where a missing (`none`) channel
+    // equals only another missing channel.
+    let (ca, cb) = (channels(a), channels(b));
+    (0..3).all(|i| chan_eq(ca[i], cb[i])) && chan_eq(alpha(a), alpha(b))
 }
 
 /// Sass `==` for two numbers. Numbers with the *exact* same unit compare by

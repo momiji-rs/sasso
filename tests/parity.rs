@@ -3977,3 +3977,16 @@ fn parity_for_loop_unit() {
     assert_parity("a {\n  @for $i from 1px through 5 {b: $i}\n}\n");
     assert_parity("a {\n  @for $i from 1 through 5px {b: $i}\n}\n");
 }
+
+#[test]
+fn parity_color_equality_space_and_none() {
+    // `==` compares color space + missing channels, not just sRGB.
+    assert_parity("a {b: color(srgb 0 0 0) == color(srgb-linear 0 0 0)}\n");
+    assert_parity("a {b: hsl(0 0% 80%) == hsl(none 0% 80%)}\n");
+    assert_parity("a {b: hwb(0 0% 0%) == hwb(none 0% 0%)}\n");
+    assert_parity("a {b: hsl(0 0% 50%) == hsl(120 0% 50%)}\n");
+    // Different LEGACY spaces still compare via sRGB; non-legacy never crosses.
+    assert_parity("a {b: rgb(255 0 0) == hsl(0 100% 50%)}\n");
+    assert_parity("a {b: gray == hsl(none 0% 50.196078431373%)}\n");
+    assert_parity("a {b: rgb(none 0 0) == rgb(0 0 0)}\n");
+}
