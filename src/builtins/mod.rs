@@ -151,6 +151,23 @@ pub(super) fn as_color(v: &Value, pos: Pos) -> Result<Color, Error> {
     }
 }
 
+/// Reject a non-legacy color passed to a legacy-only modification function
+/// (`darken`/`lighten`/`saturate`/`desaturate`/`opacify`/`transparentize`/
+/// `adjust-hue`), matching dart-sass's "<fn>() is only supported for legacy
+/// colors." error. `fname` is the called name (hyphenated, no `()`).
+pub(super) fn require_legacy_color(c: &Color, fname: &str, pos: Pos) -> Result<(), Error> {
+    if c.modern.as_ref().is_some_and(|m| !m.space.is_legacy()) {
+        return Err(Error::at(
+            format!(
+                "{fname}() is only supported for legacy colors. Please use color.adjust() \
+                 instead with an explicit $space argument."
+            ),
+            pos,
+        ));
+    }
+    Ok(())
+}
+
 /// Extract an RGB channel value (`0..=255`), converting a percentage.
 pub(super) fn channel(v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {

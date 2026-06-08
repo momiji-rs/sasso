@@ -9,7 +9,7 @@
 use super::color::{
     missing_channel_err, missing_legacy_channel, modify_in_space, modify_in_space_opt, space_arg, ModifyOp,
 };
-use super::{arg, as_color, clamp01, num, require};
+use super::{arg, as_color, clamp01, num, require, require_legacy_color};
 use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{Color, ColorSpace, Number, SassStr, Value};
@@ -294,15 +294,7 @@ fn fn_adjust_hue(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
     let params = ["color", "degrees"];
     check_max_args(pos_args, named, 2, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, "adjust-hue", pos)?, pos)?;
-    // The legacy `adjust-hue()` getter only supports legacy colors.
-    if c.modern.as_ref().is_some_and(|m| !m.space.is_legacy()) {
-        return Err(Error::at(
-            "adjust-hue() is only supported for legacy colors. Please use color.adjust() \
-             instead with an explicit $space argument."
-                .to_string(),
-            pos,
-        ));
-    }
+    require_legacy_color(&c, "adjust-hue", pos)?;
     let degrees = angle_degrees(require(&params, pos_args, named, 1, "adjust-hue", pos)?, pos)?;
     Ok(Value::Color(rotate_hue(&c, degrees)))
 }
@@ -528,6 +520,7 @@ fn fn_saturate_two(
     let params = ["color", "amount"];
     check_max_args(pos_args, named, 2, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
+    require_legacy_color(&c, name, pos)?;
     let amount = require(&params, pos_args, named, 1, name, pos)?;
     let amount = bounded(amount, 0.0, 100.0, pos)?;
     let (h, s, l) = c.to_hsl();
@@ -583,6 +576,7 @@ fn fn_fade(
     let params = ["color", "amount"];
     check_max_args(pos_args, named, 2, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
+    require_legacy_color(&c, name, pos)?;
     let amount = require(&params, pos_args, named, 1, name, pos)?;
     let amount = bounded(amount, 0.0, 1.0, pos)?;
     let a = clamp01(c.a + sign * amount);

@@ -3,7 +3,7 @@
 //! `red`/`green`/`blue`/`alpha`.
 
 use super::color_ext::{computed, named_repr};
-use super::{arg, as_color, channel, max_positional, num, require};
+use super::{arg, as_color, channel, max_positional, num, require, require_legacy_color};
 use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{fmt_num, CalcNode, Color, List, ListSep, Number, Value};
@@ -1623,6 +1623,7 @@ fn fn_adjust_lightness(
         ));
     }
     let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
+    require_legacy_color(&c, name, pos)?;
     let amount = match require(&params, pos_args, named, 1, name, pos)? {
         Value::Number(num) => {
             if num.value < 0.0 || num.value > 100.0 {

@@ -4398,3 +4398,40 @@ fn parity_color_module_grayscale_opacity_strict() {
     assert_parity("@use \"sass:color\";\na {b: color.grayscale(50%)}\n");
     assert_parity("@use \"sass:color\";\na {b: color.opacity(red)}\n");
 }
+
+#[test]
+fn parity_legacy_color_functions_reject_non_legacy() {
+    // The legacy color modifiers darken/lighten/(de)saturate/fade-in/fade-out/
+    // adjust-hue reject a non-legacy color ("<fn>() is only supported for
+    // legacy colors. …"); a legacy color is still computed.
+    if !enabled() {
+        return;
+    }
+    let err_cases = [
+        "a {b: darken(color(srgb 1 1 1), 10%)}\n",
+        "a {b: lighten(color(srgb 0 0 0), 10%)}\n",
+        "a {b: desaturate(color(srgb 1 1 1), 10%)}\n",
+        "a {b: saturate(color(srgb 1 1 1), 10%)}\n",
+        "a {b: fade-in(color(srgb 1 1 1 / 0.1), 0.1)}\n",
+        "a {b: fade-out(color(srgb 1 1 1), 0.1)}\n",
+        "a {b: adjust-hue(color(srgb 1 1 1), 10deg)}\n",
+    ];
+    for scss in err_cases {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping legacy-color parity case: dart-sass unavailable"),
+        }
+    }
+    // Legacy colors still compute.
+    assert_parity("a {b: darken(#888, 10%)}\n");
+    assert_parity("a {b: lighten(red, 10%)}\n");
+    assert_parity("a {b: fade-out(rgba(0, 0, 0, 0.5), 0.1)}\n");
+}
