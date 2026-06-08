@@ -3669,3 +3669,51 @@ fn parity_list_slash_and_slash_color_channels() {
     assert_parity("@use \"sass:list\";\na { b: lab(list.slash(1% 2 3, 0.5)); }\n");
     assert_parity("@use \"sass:list\";\na { b: rgb(list.slash(1 2 3, 0.5)); }\n");
 }
+
+#[test]
+fn parity_color_module_hwb_comma_and_validation() {
+    // `sass:color` exposes a comma-form `color.hwb($hue, $whiteness, $blackness,
+    // $alpha: 1)` (the global `hwb()` is modern-only). It accepts the comma and
+    // the single space-list forms; the gamut-normalized whiteness/blackness are
+    // reported by channel introspection while serialization keeps an exact sRGB
+    // round-trip (so an out-of-gamut achromatic hwb stays hue 0, not flipped
+    // 180 degrees by the negative-saturation path).
+    assert_parity("@use \"sass:color\";\na {b: color.hwb(0, 50%, 0%)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.hwb(0 50% 0%)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.hwb(0, 50%, 0%, 0.5)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.hwb(0, 150%, 0%)}\n");
+    assert_parity("a {b: hwb(0 80% 50%)}\n");
+    assert_parity("a {b: hwb(120 80% 50%)}\n");
+    assert_parity(
+        "@use \"sass:color\";\na {b: color.channel(color.hwb(0, 150%, 0%), \"whiteness\", $space: hwb)}\n",
+    );
+
+    if !enabled() {
+        return;
+    }
+    // Both color.hwb and the modern global hwb reject unitless/wrong-unit
+    // whiteness/blackness, bracketed/comma single lists, and (for the module
+    // form) more than four arguments — with dart-sass's exact messages.
+    for scss in [
+        "@use \"sass:color\";\na {b: color.hwb(0, 30, 40%, 0.5)}\n",
+        "@use \"sass:color\";\na {b: color.hwb(0, 30%, 40px, 0.5)}\n",
+        "a {b: hwb(0 30 40%)}\n",
+        "a {b: hwb(0 30% 40)}\n",
+        "@use \"sass:color\";\na {b: color.hwb([0 30% 40%])}\n",
+        "@use \"sass:color\";\na {b: color.hwb((0, 30%, 40%))}\n",
+        "@use \"sass:color\";\na {b: color.hwb(0, 30%, 40%, 0.5, 0)}\n",
+    ] {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping hwb error parity case: dart-sass unavailable"),
+        }
+    }
+}

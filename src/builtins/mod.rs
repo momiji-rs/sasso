@@ -324,6 +324,9 @@ pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
     if module == "string" && member == "split" {
         return true;
     }
+    if module == "color" && member == "hwb" {
+        return true;
+    }
     module_member_to_global(module, member).is_some()
 }
 
@@ -367,6 +370,12 @@ pub(crate) fn call_module(
     // `sass:list` members without a global alias (`slash`).
     if module == "list" {
         if let Some(r) = list::call_module_member(member, pos_args, named, pos) {
+            return r;
+        }
+    }
+    // `sass:color` members without a global alias (the comma-form `hwb`).
+    if module == "color" {
+        if let Some(r) = color::call_module_member(member, pos_args, named, pos) {
             return r;
         }
     }

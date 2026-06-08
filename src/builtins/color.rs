@@ -6,7 +6,7 @@ use super::color_ext::{computed, named_repr};
 use super::{arg, as_color, channel, num, require};
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{fmt_num, CalcNode, Color, ListSep, Number, Value};
+use crate::value::{fmt_num, CalcNode, Color, List, ListSep, Number, Value};
 
 /// Whether a value is a "special" channel argument that cannot be evaluated
 /// to a plain number — a `var()`/`env()`/`attr()` (an unquoted string holding
@@ -859,6 +859,26 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         ));
     }
     let channels = require(&params, pos_args, named, 0, "hwb", pos)?.clone();
+    // A single channels list must be unbracketed and space/slash-separated; a
+    // bracketed and/or comma list is rejected with dart-sass's message.
+    if let Value::List(l) = &channels {
+        let comma = l.sep == ListSep::Comma;
+        if l.bracketed || comma {
+            let kind = if l.bracketed && comma {
+                "an unbracketed, space- or slash-separated list"
+            } else if l.bracketed {
+                "an unbracketed list"
+            } else {
+                "a space- or slash-separated list"
+            };
+            let shown = if l.bracketed {
+                channels.to_css(false)
+            } else {
+                list_paren_css(&channels)
+            };
+            return Err(Error::at(format!("$channels: Expected {kind}, was {shown}"), pos));
+        }
+    }
     let SplitChannels { comps, alpha, .. } = split_channels(&channels);
     // A relative-color call (`hwb(from … )`) or a special function
     // (`var()`/`calc()`/…) anywhere preserves the *original* spelling verbatim
@@ -919,6 +939,21 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         };
         return Ok(Value::Color(make_modern(mc)));
     }
+    // Whiteness and blackness must carry a `%` unit (dart-sass), reported per
+    // channel before the value is read. The hue may be unitless or an angle.
+    for (i, cname) in [(1usize, "whiteness"), (2usize, "blackness")] {
+        if let Value::Number(num) = &comps[i] {
+            if num.unit != "%" {
+                return Err(Error::at(
+                    format!(
+                        "${cname}: Expected {} to have unit \"%\".",
+                        comps[i].to_css(false)
+                    ),
+                    pos,
+                ));
+            }
+        }
+    }
     let h = hsl_hue(&comps[0], pos)?;
     let w_pct = num(&comps[1], pos)?;
     let b_pct = num(&comps[2], pos)?;
@@ -928,7 +963,10 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     };
     let mut out = hwb_to_color(h, w_pct, b_pct, a);
     // Carry the modern Hwb tag (so `color.space`/`color.channel` work);
-    // serialization uses the classic hsl comma form via `legacy_css`.
+    // serialization uses the classic hsl comma form via `legacy_css`. Raw
+    // whiteness/blackness are stored verbatim so serialization keeps its exact
+    // sRGB round-trip; the out-of-gamut normalization (scaling a >100% sum back
+    // to 100%) is applied on the introspection read path instead.
     let h_norm = h.rem_euclid(360.0);
     out.modern = Some(ModernColor {
         space: ColorSpace::Hwb,
@@ -936,6 +974,54 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         alpha: Some(a),
     });
     Ok(Value::Color(out))
+}
+
+/// `sass:color` members without a global alias. The global `hwb()` is
+/// modern-only (`hwb($channels)`), but `sass:color` additionally exposes the
+/// Sass-legacy comma form `color.hwb($hue, $whiteness, $blackness, $alpha: 1)`,
+/// so it cannot reuse the global dispatch.
+pub(super) fn call_module_member(
+    member: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Option<Result<Value, Error>> {
+    match member {
+        "hwb" => Some(fn_color_hwb(pos_args, named, pos)),
+        _ => None,
+    }
+}
+
+/// `color.hwb()`: the modern single-argument channels form delegates to the
+/// global `hwb()`; the comma form rebuilds an `h w b` (+ ` / alpha`) channels
+/// value so the global's none/special/compute paths apply unchanged.
+fn fn_color_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let n = pos_args.len() + named.len();
+    if n > 4 {
+        return Err(Error::at(
+            format!("Only 4 arguments allowed, but {n} were passed."),
+            pos,
+        ));
+    }
+    if n <= 1 {
+        return fn_hwb(pos_args, named, pos);
+    }
+    let params = ["hue", "whiteness", "blackness", "alpha"];
+    let ch = Channels::collect("hwb", &params, pos_args, named, pos)?;
+    let space = Value::List(List {
+        items: ch.comps,
+        sep: ListSep::Space,
+        bracketed: false,
+    });
+    let channels = match ch.alpha {
+        Some(a) => Value::List(List {
+            items: vec![space, a],
+            sep: ListSep::Slash,
+            bracketed: false,
+        }),
+        None => space,
+    };
+    fn_hwb(&[channels], &[], pos)
 }
 
 /// Convert HWB (hue degrees, whiteness/blackness percentages) to an sRGB
@@ -2566,6 +2652,17 @@ fn fn_color_channel(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> 
         )
     })?;
     let raw = target.channels[idx].unwrap_or(0.0);
+    // dart-sass reports the gamut-normalized whiteness/blackness: when their
+    // sum exceeds 100%, both are scaled to sum to 100%. Storage keeps the raw
+    // inputs (for an exact serialization round-trip), so normalize on read.
+    let raw = if space == ColorSpace::Hwb && (idx == 1 || idx == 2) {
+        match (target.channels[1], target.channels[2]) {
+            (Some(w), Some(bl)) if w + bl > 100.0 => raw / (w + bl) * 100.0,
+            _ => raw,
+        }
+    } else {
+        raw
+    };
     Ok(Value::Number(channel_number(space, idx, raw)))
 }
 
