@@ -4236,3 +4236,39 @@ fn parity_declaration_context_errors() {
     assert_parity("a {\n  @function foo() {@return 1}\n  b: foo();\n}\n");
     assert_parity("@media x {\n  a {b: c}\n}\n");
 }
+
+#[test]
+fn parity_sass_import_context_errors() {
+    // A Sass `@import` (inlining a partial) is forbidden inside a control
+    // directive or a function/mixin body ("This at-rule is not allowed
+    // here."); a plain-CSS `@import` is always allowed.
+    if !enabled() {
+        return;
+    }
+    let err_cases = [
+        "@if true {\n  @import \"_include\";\n}\n",
+        "@if false {\n} @else {\n  @import \"_include\";\n}\n",
+        "@each $i in (1) {\n  @import \"_include\";\n}\n",
+        "@for $i from 1 through 2 {\n  @import \"_include\";\n}\n",
+        "@while false {\n  @import \"_include\";\n}\n",
+        "@mixin m {\n  @import \"_include\";\n}\n@include m;\n",
+        "@function f() {\n  @import \"_include\";\n  @return 1\n}\na {b: f()}\n",
+        "@if true {\n  a {\n    @import \"_include\";\n  }\n}\n",
+    ];
+    for scss in err_cases {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping import-context parity case: dart-sass unavailable"),
+        }
+    }
+    // A plain-CSS `@import` in a control directive is fine.
+    assert_parity("@if true {\n  @import url(x);\n}\n");
+}

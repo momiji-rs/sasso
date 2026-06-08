@@ -5896,6 +5896,17 @@ fn validate_decl_scope(stmts: &[Stmt], scope: DeclScope) -> Result<(), Error> {
                 content: Some(content),
                 ..
             } => validate_decl_scope(content, scope)?,
+            // A Sass `@import` (one that inlines a partial) is forbidden inside
+            // a control directive or a function/mixin body; a plain-CSS
+            // `@import` is always allowed (passed through verbatim).
+            Stmt::Import(args)
+                if scope != DeclScope::Allowed
+                    && args.iter().any(|a| matches!(a, ImportArg::Sass { .. })) =>
+            {
+                return Err(Error::unpositioned(
+                    "This at-rule is not allowed here.".to_string(),
+                ));
+            }
             _ => {}
         }
     }
