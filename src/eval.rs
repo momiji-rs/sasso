@@ -5707,13 +5707,13 @@ fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
             pos,
         ));
     }
-    // String concatenation. The result is quoted when the left operand is a
-    // quoted string; a calculation on the left instead inherits the right
-    // string's quotedness (dart-sass's default `Value.plus`).
+    // String concatenation. When the left operand is a string the result keeps
+    // the left string's quotedness; for any other left operand dart-sass's
+    // default `Value.plus` quotes the result iff the right operand is a quoted
+    // string (`1 + "x"` -> `"1x"`, `red + "x"` -> `"redx"`).
     let quoted = match &l {
         Value::Str(s) => s.quoted,
-        Value::Calc(_) => matches!(&r, Value::Str(s) if s.quoted),
-        _ => false,
+        _ => matches!(&r, Value::Str(s) if s.quoted),
     };
     let text = format!("{}{}", concat_str(&l), concat_str(&r));
     Ok(Value::Str(SassStr { text, quoted }))

@@ -4130,3 +4130,21 @@ fn parity_color_arithmetic_removed() {
     assert_parity("a {b: foo + red}\n");
     assert_parity("a {b: red + foo}\n");
 }
+
+#[test]
+fn parity_plus_quotes_from_right_string() {
+    // dart-sass's default `Value.plus` (used when the left operand is not a
+    // string) quotes the concatenated result iff the RIGHT operand is a quoted
+    // string: `1 + "x"` -> `"1x"`, `red + "x"` -> `"redx"`. An unquoted right
+    // keeps the result unquoted (`foo + "x"` is quoted, `1 + foo` is not).
+    assert_parity("a {b: 1 + \"x\"}\n");
+    assert_parity("a {b: red + \"x\"}\n");
+    assert_parity("a {b: true + \"x\"}\n");
+    assert_parity("a {b: 1px + \"x\"}\n");
+    assert_parity("a {b: (1 2) + \"x\"}\n");
+    assert_parity("a {b: null + \"x\"}\n");
+    assert_parity("a {b: calc(1px + 1px) + \"x\"}\n");
+    // Unquoted right operand → unquoted result.
+    assert_parity("a {b: 1 + foo}\n");
+    assert_parity("a {b: red + foo}\n");
+}
