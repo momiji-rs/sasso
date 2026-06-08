@@ -1483,17 +1483,23 @@ impl<'a> Evaluator<'a> {
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
         module: Option<&str>,
+        pos: Pos,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         // NOTE: the diagnostic call frame for this `@include` is pushed by the
         // caller (the `Stmt::Include` arm) so it wraps every resolution path.
-        // The built-in `@include meta.apply($mixin, $args...)` invokes a
-        // first-class mixin reference. It is bound to the `sass:meta` module's
-        // namespace, so resolve it before the generic module path.
+        // The built-in `@include meta.apply(...)` / `meta.load-css(...)` are
+        // bound to the `sass:meta` namespace, so resolve them before the generic
+        // module path.
         if let Some(ns) = module {
-            if name == "apply" && self.used_modules.get(ns).map(String::as_str) == Some("meta") {
-                return self.exec_apply(args, content, parents, sink);
+            if self.used_modules.get(ns).map(String::as_str) == Some("meta") {
+                if name == "apply" {
+                    return self.exec_apply(args, content, parents, sink);
+                }
+                if name == "load-css" {
+                    return self.exec_load_css(args, content, pos, parents, sink);
+                }
             }
         }
         // A namespaced `@include ns.mixin`: resolve a user module bound to the
@@ -1638,6 +1644,108 @@ impl<'a> Evaluator<'a> {
             }
         };
         self.invoke_mixin_ref(&mixin, rest_pos, rest_named, content, parents, sink)
+    }
+
+    /// `@include meta.load-css($url, $with: (...))`: load the module at `$url`
+    /// and emit its CSS into the current sink, optionally configuring it with
+    /// `$with`. Unlike `@use`, it binds no namespace and exposes no members; it
+    /// reuses the shared `load_module` machinery (cache, cycle guard, CSS emit).
+    fn exec_load_css(
+        &mut self,
+        args: &[CallArg],
+        content: Option<Rc<Vec<Stmt>>>,
+        pos: Pos,
+        _parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        if content.is_some() {
+            return Err(Error::at(
+                "Mixin doesn't accept a content block.".to_string(),
+                pos,
+            ));
+        }
+        let (pos_args, named) = self.eval_call_args(args)?;
+        let mut iter = pos_args.into_iter();
+        let mut url_val = iter.next();
+        let mut with_val = iter.next();
+        if iter.next().is_some() {
+            return Err(Error::at(
+                "Only 2 arguments allowed, but 3 were passed.".to_string(),
+                pos,
+            ));
+        }
+        for (n, v) in named {
+            match n.as_str() {
+                "url" => url_val = Some(v),
+                "with" => with_val = Some(v),
+                other => return Err(Error::at(format!("No argument named ${other}."), pos)),
+            }
+        }
+        let url = match url_val {
+            Some(Value::Str(s)) => s.text,
+            Some(other) => {
+                return Err(Error::at(
+                    format!("$url: {} is not a string.", other.to_css(false)),
+                    pos,
+                ))
+            }
+            None => return Err(Error::at("Missing argument $url.".to_string(), pos)),
+        };
+        // Build the configuration from the `$with` map (string keys → variables).
+        let mut config: HashMap<String, (Value, bool)> = HashMap::default();
+        match with_val.take() {
+            None => {}
+            // An empty literal `()` parses as an empty list, not a map.
+            Some(Value::List(l)) if l.items.is_empty() => {}
+            Some(Value::Map(m)) => {
+                for (k, v) in m.entries {
+                    let key = match k {
+                        Value::Str(s) => normalize_var_name(&s.text),
+                        other => {
+                            return Err(Error::at(
+                                format!("$with key: {} is not a string.", other.to_css(false)),
+                                pos,
+                            ))
+                        }
+                    };
+                    // Dash/underscore-insensitive: `a-b` and `a_b` collide.
+                    if config.contains_key(&key) {
+                        return Err(Error::at(
+                            format!("The variable ${key} was configured twice."),
+                            pos,
+                        ));
+                    }
+                    config.insert(key, (v.without_slash(), false));
+                }
+            }
+            Some(other) => {
+                return Err(Error::at(
+                    format!("$with: {} is not a map.", other.to_css(false)),
+                    pos,
+                ))
+            }
+        }
+        let conf_keys: Vec<String> = config.keys().cloned().collect();
+        // Evaluate the module into a fresh TOP-LEVEL buffer so its body runs in
+        // its own top-level context — a module top-level declaration errors no
+        // matter where load-css is invoked (dart-sass) — then splice the emitted
+        // nodes into the caller's position.
+        let mut buf: Vec<OutNode> = Vec::new();
+        let consumed = {
+            let mut module_sink = Sink::Top(&mut buf);
+            let (_module, consumed) = self.load_module(&url, config, pos, &mut module_sink)?;
+            consumed
+        };
+        if conf_keys.iter().any(|k| !consumed.contains(k)) {
+            return Err(Error::at(
+                "This variable was not declared with !default in the @used module.".to_string(),
+                pos,
+            ));
+        }
+        for node in buf {
+            sink.push_at_rule(node);
+        }
+        Ok(())
     }
 
     /// Invoke a resolved mixin reference with already-evaluated arguments and an
@@ -2413,7 +2521,15 @@ impl<'a> Evaluator<'a> {
                     // Push a diagnostic call frame so an error/warning raised in
                     // the mixin body unwinds through this `@include` call site.
                     let saved = self.enter_call(*pos, *length, &mixin_frame_name(name, module));
-                    let r = self.exec_include(name, args, content.clone(), module.as_deref(), parents, sink);
+                    let r = self.exec_include(
+                        name,
+                        args,
+                        content.clone(),
+                        module.as_deref(),
+                        *pos,
+                        parents,
+                        sink,
+                    );
                     self.leave_call(saved);
                     r?;
                 }

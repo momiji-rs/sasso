@@ -3820,3 +3820,32 @@ fn parity_selector_unify_id_conflict() {
     assert_parity("@use \"sass:selector\";\na {b: selector.unify(\"#a\", \".d\")}\n");
     assert_parity("@use \"sass:selector\";\na {b: selector.unify(\".c\", \".d\")}\n");
 }
+
+#[test]
+fn parity_meta_load_css() {
+    // `@include meta.load-css($url)` loads a module and emits its CSS without
+    // binding a namespace; `$with` configures its !default variables.
+    assert_module_parity(&[
+        ("_other.scss", "$color: blue !default;\na { color: $color; }\n"),
+        (
+            "input.scss",
+            "@use \"sass:meta\";\n@include meta.load-css(\"other\");\n",
+        ),
+    ]);
+    assert_module_parity(&[
+        ("_other.scss", "$color: blue !default;\na { color: $color; }\n"),
+        (
+            "input.scss",
+            "@use \"sass:meta\";\n@include meta.load-css(\"other\", $with: (\"color\": green));\n",
+        ),
+    ]);
+    // A module loaded for its CSS may itself @use other modules.
+    assert_module_parity(&[
+        ("_dep.scss", "@function two() { @return 2; }\n"),
+        ("_mid.scss", "@use \"dep\";\nb { width: dep.two() * 1px; }\n"),
+        (
+            "input.scss",
+            "@use \"sass:meta\";\n@include meta.load-css(\"mid\");\n",
+        ),
+    ]);
+}
