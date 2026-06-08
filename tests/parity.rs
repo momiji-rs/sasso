@@ -4366,3 +4366,35 @@ fn parity_meta_exists_global_module_conflict() {
         ("_other1.scss", other),
     ]);
 }
+
+#[test]
+fn parity_color_module_grayscale_opacity_strict() {
+    // The module `color.grayscale`/`color.opacity` reject a CSS-special string
+    // argument ("$color: var(--c) is not a color."), while a number still
+    // passes through the deprecated filter overload and a color is computed.
+    if !enabled() {
+        return;
+    }
+    let err_cases = [
+        "@use \"sass:color\";\na {b: color.grayscale(var(--c))}\n",
+        "@use \"sass:color\";\na {b: color.opacity(var(--c))}\n",
+        "@use \"sass:color\";\na {b: color.grayscale($color: var(--c))}\n",
+    ];
+    for scss in err_cases {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping grayscale/opacity strict parity case: dart-sass unavailable"),
+        }
+    }
+    // A number passes through; a color is computed.
+    assert_parity("@use \"sass:color\";\na {b: color.grayscale(50%)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.opacity(red)}\n");
+}

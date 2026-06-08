@@ -395,6 +395,23 @@ pub(crate) fn call_module(
         if let Some(r) = color::call_module_member(member, pos_args, named, pos) {
             return r;
         }
+        // The module `color.grayscale`/`color.opacity` keep the global filter
+        // overload only for a number (passed through, deprecated); a CSS-special
+        // *string* argument (`var(--c)`, `env(...)`) is rejected as not a color,
+        // unlike the global functions which pass it through verbatim.
+        if matches!(member, "grayscale" | "opacity") {
+            let arg = pos_args
+                .first()
+                .or_else(|| named.iter().find(|(n, _)| n == "color").map(|(_, v)| v));
+            if let Some(v @ Value::Str(s)) = arg {
+                if !s.quoted {
+                    return Err(Error::at(
+                        format!("$color: {} is not a color.", v.to_css(false)),
+                        pos,
+                    ));
+                }
+            }
+        }
     }
     match module_member_to_global(module, member) {
         Some(global) => call(global, pos_args, named, pos),
