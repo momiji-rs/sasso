@@ -5897,10 +5897,15 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     if group.is_empty() {
         return;
     }
-    // dart-sass packs a passed-through CSS `@import` (a `Raw` at-rule) tight
-    // with the following group, just like a real `@rule`.
-    let prev_is_at_rule = matches!(out.last(), Some(OutNode::AtRule { .. }) | Some(OutNode::Raw(_)));
-    if !out.is_empty() && !prev_is_at_rule {
+    // dart-sass never prefixes a blank line after an at-rule, a passed-through
+    // CSS `@import` (a `Raw` at-rule), or a loud comment: the next group packs
+    // tight against them. A blank line is only inserted after a style rule (or
+    // top-level declaration) that already emitted CSS.
+    let prev_packs_tight = matches!(
+        out.last(),
+        Some(OutNode::AtRule { .. } | OutNode::Raw(_) | OutNode::Comment(_))
+    );
+    if !out.is_empty() && !prev_packs_tight {
         out.push(OutNode::Blank);
     }
     out.append(&mut group);
