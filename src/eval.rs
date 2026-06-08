@@ -114,6 +114,15 @@ pub(crate) enum OutItem {
     },
 }
 
+/// Which kind of module member an existence predicate (`function-exists`,
+/// `mixin-exists`, `global-variable-exists` with a `$module`) queries.
+#[derive(Clone, Copy)]
+enum MemberKind {
+    Function,
+    Mixin,
+    Variable,
+}
+
 /// Where evaluated statements deposit their output. At the top level each
 /// statement forms its own blank-separated group; inside a style rule,
 /// declarations join the rule's block and nested rules bubble out after it.
@@ -4113,30 +4122,82 @@ impl<'a> Evaluator<'a> {
 
     /// Read the single string `$name` argument of an existence predicate,
     /// enforcing arity (1 positional, or `$name`) and the string type.
-    fn exists_name_arg(
+    /// Parse the `$name` (and optional `$module` namespace, when `allow_module`)
+    /// arguments of an existence predicate. A `null` `$module` is treated as
+    /// absent. Returns `(name, module)`.
+    fn exists_name_module_args(
         &self,
         pos_args: &[Value],
         named: &[(String, Value)],
         fname: &str,
         pos: Pos,
-    ) -> Result<String, Error> {
-        if pos_args.len() > 1 {
+        allow_module: bool,
+    ) -> Result<(String, Option<String>), Error> {
+        let max = if allow_module { 2 } else { 1 };
+        if pos_args.len() > max {
             return Err(Error::at(
-                format!("Only 1 argument allowed, but {} were passed.", pos_args.len()),
+                format!(
+                    "Only {max} argument{} allowed, but {} were passed.",
+                    if max == 1 { "" } else { "s" },
+                    pos_args.len()
+                ),
                 pos,
             ));
         }
-        let v = pos_args
+        let name_v = pos_args
             .first()
             .or_else(|| named.iter().find(|(n, _)| n == "name").map(|(_, v)| v))
             .ok_or_else(|| Error::at(format!("Missing argument $name for {fname}()."), pos))?;
-        match v {
-            Value::Str(s) => Ok(s.text.clone()),
-            other => Err(Error::at(
-                format!("$name: {} is not a string.", other.to_css(false)),
-                pos,
-            )),
+        let name = match name_v {
+            Value::Str(s) => s.text.clone(),
+            other => {
+                return Err(Error::at(
+                    format!("$name: {} is not a string.", other.to_css(false)),
+                    pos,
+                ))
+            }
+        };
+        let module = if allow_module {
+            let m = pos_args
+                .get(1)
+                .or_else(|| named.iter().find(|(n, _)| n == "module").map(|(_, v)| v));
+            match m {
+                None | Some(Value::Null) => None,
+                Some(Value::Str(s)) => Some(s.text.clone()),
+                Some(other) => {
+                    return Err(Error::at(
+                        format!("$module: {} is not a string.", other.to_css(false)),
+                        pos,
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+        Ok((name, module))
+    }
+
+    /// Whether the module bound to namespace `ns` defines a member `name` of the
+    /// given kind (function/mixin/variable). An unknown namespace is an error.
+    fn module_member_exists(&self, ns: &str, name: &str, kind: MemberKind, pos: Pos) -> Result<bool, Error> {
+        if let Some(m) = self.used_user_modules.get(ns) {
+            return Ok(match kind {
+                MemberKind::Function => m.function(name).is_some(),
+                MemberKind::Mixin => m.mixin(name).is_some(),
+                MemberKind::Variable => m.var(name).is_some(),
+            });
         }
+        if let Some(builtin) = self.used_modules.get(ns).cloned() {
+            return Ok(match kind {
+                MemberKind::Function => crate::builtins::module_has_member(&builtin, name),
+                MemberKind::Mixin => builtin == "meta" && matches!(name, "load-css" | "apply"),
+                MemberKind::Variable => crate::builtins::module_var(&builtin, name, pos).is_ok(),
+            });
+        }
+        Err(Error::at(
+            format!("There is no module with the namespace \"{ns}\"."),
+            pos,
+        ))
     }
 
     /// `meta.variable-exists($name)` / `meta.global-variable-exists($name)`:
@@ -4154,13 +4215,24 @@ impl<'a> Evaluator<'a> {
         } else {
             "variable-exists"
         };
-        let name = self.exists_name_arg(pos_args, named, fname, pos)?;
+        // Only `global-variable-exists` takes the optional `$module` namespace.
+        let (name, module) = self.exists_name_module_args(pos_args, named, fname, pos, global)?;
+        if let Some(ns) = module {
+            return Ok(Value::Bool(self.module_member_exists(
+                &ns,
+                &name,
+                MemberKind::Variable,
+                pos,
+            )?));
+        }
         let key = normalize_arg_name(&name);
         let scopes: &[HashMap<String, Value>] = if global { &self.scopes[..1] } else { &self.scopes };
         let found = scopes
             .iter()
             .any(|s| s.keys().any(|k| normalize_arg_name(k) == key));
-        Ok(Value::Bool(found))
+        // A variable exposed unprefixed via `@use … as *` (or forwarded into one).
+        let star = !is_private_member(&name) && self.star_user_modules.iter().any(|m| m.var(&name).is_some());
+        Ok(Value::Bool(found || star))
     }
 
     /// `meta.mixin-exists($name)`: whether a mixin of that name is defined.
@@ -4170,11 +4242,20 @@ impl<'a> Evaluator<'a> {
         named: &[(String, Value)],
         pos: Pos,
     ) -> Result<Value, Error> {
-        let name = self.exists_name_arg(pos_args, named, "mixin-exists", pos)?;
+        let (name, module) = self.exists_name_module_args(pos_args, named, "mixin-exists", pos, true)?;
+        if let Some(ns) = module {
+            return Ok(Value::Bool(self.module_member_exists(
+                &ns,
+                &name,
+                MemberKind::Mixin,
+                pos,
+            )?));
+        }
         let key = normalize_arg_name(&name);
-        Ok(Value::Bool(
-            self.mixins.keys().any(|k| normalize_arg_name(k) == key),
-        ))
+        let local = self.mixins.keys().any(|k| normalize_arg_name(k) == key);
+        let star =
+            !is_private_member(&name) && self.star_user_modules.iter().any(|m| m.mixin(&name).is_some());
+        Ok(Value::Bool(local || star))
     }
 
     /// `meta.function-exists($name)`: whether a user `@function` or a built-in
@@ -4185,10 +4266,22 @@ impl<'a> Evaluator<'a> {
         named: &[(String, Value)],
         pos: Pos,
     ) -> Result<Value, Error> {
-        let name = self.exists_name_arg(pos_args, named, "function-exists", pos)?;
+        let (name, module) = self.exists_name_module_args(pos_args, named, "function-exists", pos, true)?;
+        if let Some(ns) = module {
+            return Ok(Value::Bool(self.module_member_exists(
+                &ns,
+                &name,
+                MemberKind::Function,
+                pos,
+            )?));
+        }
         let key = normalize_arg_name(&name);
         let user = self.functions.keys().any(|k| normalize_arg_name(k) == key);
-        Ok(Value::Bool(user || crate::builtins::is_builtin(&name)))
+        // A function exposed unprefixed via `@use … as *` (or forwarded into a
+        // module that is itself `@use`d as `*`).
+        let star =
+            !is_private_member(&name) && self.star_user_modules.iter().any(|m| m.function(&name).is_some());
+        Ok(Value::Bool(user || star || crate::builtins::is_builtin(&name)))
     }
 
     /// `meta.content-exists()`: whether the enclosing mixin was passed a

@@ -3876,3 +3876,28 @@ fn parity_extend_source_extender_not_trimmed() {
     // generated selector (the transitive `:is(midstream, downstream)`).
     assert_parity(":is(midstream) {@extend upstream}\ndownstream {@extend midstream}\nupstream {a: b}\n");
 }
+
+#[test]
+fn parity_meta_exists_module_and_star() {
+    // The optional `$module` namespace arg looks the member up in that module.
+    assert_module_parity(&[
+        ("_other.scss", "$d: 1;\n@function f() {@return 2}\n@mixin m {}\n"),
+        (
+            "input.scss",
+            "@use \"sass:meta\";\n@use \"other\" as o;\na {\n  f: meta.function-exists(\"f\", \"o\");\n  m: meta.mixin-exists(\"m\", \"o\");\n  v: meta.global-variable-exists(\"d\", \"o\");\n  n: meta.function-exists(\"nope\", \"o\");\n}\n",
+        ),
+    ]);
+    // The no-`$module` forms see members exposed via `@use … as *`.
+    assert_module_parity(&[
+        ("_other.scss", "$d: 1;\n@function f() {@return 2}\n@mixin m {}\n"),
+        (
+            "input.scss",
+            "@use \"sass:meta\";\n@use \"other\" as *;\na {\n  f: meta.function-exists(\"f\");\n  m: meta.mixin-exists(\"m\");\n  v: meta.variable-exists(\"d\");\n}\n",
+        ),
+    ]);
+    // A built-in module member via the namespace.
+    assert_module_parity(&[(
+        "input.scss",
+        "@use \"sass:meta\";\n@use \"sass:color\" as c;\na {r: meta.function-exists(\"red\", \"c\")}\n",
+    )]);
+}
