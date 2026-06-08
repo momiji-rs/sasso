@@ -509,7 +509,7 @@ impl Parser {
     fn parse_statements(&mut self, top: bool) -> Result<Vec<Stmt>, Error> {
         let mut stmts = Vec::new();
         loop {
-            self.skip_trivia(&mut stmts);
+            self.skip_trivia(&mut stmts)?;
             match self.sc.peek() {
                 None => {
                     if top {
@@ -558,7 +558,7 @@ impl Parser {
 
     /// Skip whitespace and comments, collecting loud `/* */` comments into
     /// the statement stream so they emit in source order.
-    fn skip_trivia(&mut self, out: &mut Vec<Stmt>) {
+    fn skip_trivia(&mut self, out: &mut Vec<Stmt>) -> Result<(), Error> {
         loop {
             match self.sc.peek() {
                 Some(c) if c.is_whitespace() => {
@@ -575,26 +575,12 @@ impl Parser {
                 Some('/') if self.sc.peek_at(1) == Some('*') => {
                     self.sc.bump();
                     self.sc.bump();
-                    let mut inner = String::new();
-                    loop {
-                        match self.sc.peek() {
-                            None => break,
-                            Some('*') if self.sc.peek_at(1) == Some('/') => {
-                                self.sc.bump();
-                                self.sc.bump();
-                                break;
-                            }
-                            Some(c) => {
-                                inner.push(c);
-                                self.sc.bump();
-                            }
-                        }
-                    }
-                    out.push(Stmt::Comment(inner));
+                    out.push(Stmt::Comment(self.parse_loud_comment_body()?));
                 }
                 _ => break,
             }
         }
+        Ok(())
     }
 
     /// Skip inline whitespace; report whether any was consumed.
@@ -1922,6 +1908,46 @@ impl Parser {
         }
     }
 
+    /// Parse a loud comment's body — the text after `/*`, consuming the closing
+    /// `*/` — into template pieces so `#{…}` interpolation resolves at eval
+    /// time. Literal text (including newlines) is preserved verbatim. An
+    /// unterminated comment ends at EOF, matching dart-sass.
+    fn parse_loud_comment_body(&mut self) -> Result<Vec<TplPiece>, Error> {
+        let mut pieces = Vec::new();
+        let mut lit = String::new();
+        loop {
+            match self.sc.peek() {
+                None => break,
+                Some('*') if self.sc.peek_at(1) == Some('/') => {
+                    self.sc.bump();
+                    self.sc.bump();
+                    break;
+                }
+                Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    if !lit.is_empty() {
+                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                    }
+                    self.sc.bump();
+                    self.sc.bump();
+                    let e = self.parse_value()?;
+                    self.skip_ws_inline();
+                    if !self.sc.eat('}') {
+                        return Err(Error::at("expected \"}\".", self.sc.position()));
+                    }
+                    pieces.push(TplPiece::Interp(e));
+                }
+                Some(c) => {
+                    lit.push(c);
+                    self.sc.bump();
+                }
+            }
+        }
+        if !lit.is_empty() {
+            pieces.push(TplPiece::Lit(lit));
+        }
+        Ok(pieces)
+    }
+
     /// dart-sass `interpolatedIdentifier`: an identifier with optional `#{…}`
     /// interpolation, returned as template pieces. Errors if no identifier.
     fn parse_interpolated_identifier(&mut self) -> Result<Vec<TplPiece>, Error> {
@@ -3075,7 +3101,7 @@ impl Parser {
         loop {
             let mark = self.sc.mark();
             let mut discard = Vec::new();
-            self.skip_trivia(&mut discard);
+            self.skip_trivia(&mut discard)?;
             if self.sc.peek() != Some('@') {
                 self.sc.reset(mark);
                 break;

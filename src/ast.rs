@@ -56,8 +56,9 @@ pub(crate) enum Stmt {
         config: Vec<ConfigEntry>,
         pos: Pos,
     },
-    /// `/* ... */` loud comment (inner text, without the delimiters).
-    Comment(String),
+    /// `/* ... */` loud comment (inner text, without the delimiters). The body
+    /// is a template so `#{…}` interpolation is resolved at eval time.
+    Comment(Vec<TplPiece>),
     /// `@if`/`@else if`/`@else` — evaluated top to bottom, first match wins.
     If(Vec<IfBranch>),
     /// `@for $i from A through|to B { … }`.

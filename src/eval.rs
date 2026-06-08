@@ -2508,7 +2508,10 @@ impl<'a> Evaluator<'a> {
         for stmt in stmts {
             match stmt {
                 Stmt::VarDecl(v) => self.apply_var(v)?,
-                Stmt::Comment(c) => sink.push_comment(c.clone()),
+                Stmt::Comment(c) => {
+                    let text = self.eval_template(c)?;
+                    sink.push_comment(text);
+                }
                 Stmt::Decl(d) => {
                     if sink.is_top() {
                         return Err(Error::at("top-level declarations aren't allowed", d.pos));

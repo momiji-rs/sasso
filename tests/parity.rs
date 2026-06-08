@@ -4435,3 +4435,25 @@ fn parity_legacy_color_functions_reject_non_legacy() {
     assert_parity("a {b: lighten(red, 10%)}\n");
     assert_parity("a {b: fade-out(rgba(0, 0, 0, 0.5), 0.1)}\n");
 }
+
+#[test]
+fn parity_loud_comment_interpolation() {
+    // `#{…}` interpolation inside a loud comment is resolved at eval time,
+    // and an undefined variable / unterminated interpolation errors.
+    assert_parity("/* a #{1 + 2} b */\nx {y: z}\n");
+    assert_parity("$v: hi;\n/* value: #{$v} */\nx {y: z}\n");
+    assert_parity("x {\n  /* in #{1 + 1} rule */\n  y: z;\n}\n");
+    assert_parity("/* no interp here */\nx {y: z}\n");
+    if enabled() {
+        for scss in ["/* #{$undefined} */\n", "/* #{broken */\n"] {
+            assert!(
+                compile(scss, &Options::default()).is_err(),
+                "expected comment-interpolation error: {scss}"
+            );
+            assert!(
+                dart_sass(scss).is_none(),
+                "dart-sass unexpectedly accepted: {scss}"
+            );
+        }
+    }
+}
