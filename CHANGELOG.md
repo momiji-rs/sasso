@@ -17,6 +17,14 @@ matching current dart-sass (1.100) byte-for-byte on the implemented subset.
 
 ### Added
 
+- **Byte-exact diagnostics** — errors, `@error`, `@warn`, and `@debug` now
+  reproduce dart-sass's stderr byte-for-byte: source-span `╷│╵` snippets with
+  carets and right-aligned gutters (tab→4 spaces), aligned stack frames
+  (`root stylesheet` / `name()` / `@import`), a `--no-unicode` flag, and the
+  `@import` deprecation warning (with a per-id cap/dedup deprecation registry).
+  238 of the suite's 3,256 stderr expectations now match byte-for-byte (a
+  `spec/run_spec.py --check-stderr` metric tracks it); the rest (other
+  deprecations, multi-span layouts) build on this foundation.
 - **`@use` / `@forward` module system** — built-in `sass:*` modules and user
   files, `with` configuration, namespacing, `@forward` prefix/`show`/`hide`,
   dash-insensitive member access, forward conflict resolution, and star
