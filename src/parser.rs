@@ -947,8 +947,15 @@ impl Parser {
             "include" => self.parse_include(pos, start_mark),
             "content" => {
                 self.skip_ws_inline();
+                let args = if self.sc.peek() == Some('(') {
+                    self.sc.bump();
+                    self.parse_args_after_paren()?
+                } else {
+                    Vec::new()
+                };
+                self.skip_ws_inline();
                 self.sc.eat(';');
-                Ok(Stmt::Content)
+                Ok(Stmt::Content(args))
             }
             "warn" => self.parse_message(MessageKind::Warn, pos, start_mark),
             "debug" => self.parse_message(MessageKind::Debug, pos, start_mark),
@@ -2951,8 +2958,30 @@ impl Parser {
         // end of the name), excluding the content block / trailing `;`.
         let length = self.sc.byte_len_from(start_mark);
         self.skip_ws_inline();
+        // An optional `using (params)` clause names the content block's
+        // parameters, bound from the `@content(args)` call.
+        let using_mark = self.sc.mark();
+        let content_params = if self
+            .read_ident_name()
+            .ok()
+            .is_some_and(|kw| kw.eq_ignore_ascii_case("using"))
+        {
+            self.skip_ws_inline();
+            // `using` must be followed by a parenthesized parameter list.
+            if self.sc.peek() != Some('(') {
+                return Err(Error::at("expected \"(\".", self.sc.position()));
+            }
+            Some(Rc::new(self.parse_param_list()?))
+        } else {
+            self.sc.reset(using_mark);
+            None
+        };
+        self.skip_ws_inline();
         let content = if self.sc.peek() == Some('{') {
             Some(Rc::new(self.parse_braced_body()?))
+        } else if content_params.is_some() {
+            // A `using (params)` clause requires a content block to bind into.
+            return Err(Error::at("expected \"{\".", self.sc.position()));
         } else {
             self.sc.eat(';');
             None
@@ -2961,6 +2990,7 @@ impl Parser {
             name,
             args,
             content,
+            content_params,
             module,
             pos,
             length,

@@ -4037,3 +4037,59 @@ fn parity_user_function_calc_override() {
         assert!(dart_sass(scss).is_none());
     }
 }
+
+#[test]
+fn parity_content_using_clause() {
+    // A `@content(args)` call binds its arguments to the content block's
+    // `using (params)`, which become locally visible inside the block.
+    assert_parity(
+        "@mixin m {\n  @content(1, 2);\n}\na {\n  @include m using ($x, $y) {\n    p: $x;\n    q: $y;\n  }\n}\n",
+    );
+    // Default values in the `using` list fill un-passed arguments.
+    assert_parity(
+        "@mixin m {\n  @content(10);\n}\na {\n  @include m using ($x, $y: 20) {\n    p: $x;\n    q: $y;\n  }\n}\n",
+    );
+    // `@content` with no parens and no `using` clause is a plain content block.
+    assert_parity("@mixin m {\n  @content;\n}\na {\n  @include m {\n    p: 1;\n  }\n}\n");
+    // Whitespace and case quirks around `using` / the arglist.
+    assert_parity(
+        "a {\n  @mixin m {\n    @content(1, 2);\n  }\n  @include m()UsInG ($x, $y) {\n    p: $x;\n    q: $y;\n  }\n}\n",
+    );
+    assert_parity(
+        "a {\n  @mixin m {\n    @content (1, 2);\n  }\n  @include m using($x, $y){\n    p: $x;\n    q: $y;\n  }\n}\n",
+    );
+}
+
+#[test]
+fn parity_content_using_errors() {
+    // Validation around `@content(args)` / `using (params)` matches dart-sass.
+    if !enabled() {
+        return;
+    }
+    let cases = [
+        // A content block with no `using` accepts no arguments.
+        "@mixin m {\n  @content(1);\n}\na {\n  @include m {}\n}\n",
+        // An unknown named argument to the content block.
+        "@mixin m {\n  @content($bogus: 1);\n}\na {\n  @include m using ($x) {}\n}\n",
+        // `using` without a content block.
+        "@mixin m {\n  @content;\n}\na {\n  @include m using ();\n}\n",
+        // `using` without a parenthesized parameter list.
+        "@mixin m {\n  @content;\n}\na {\n  @include m using {}\n}\n",
+        // An unknown named argument to a plain mixin call.
+        "@mixin m($a) {\n  x: $a;\n}\na {\n  @include m(1, $b: 2);\n}\n",
+    ];
+    for scss in cases {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping content-using error parity case: dart-sass unavailable"),
+        }
+    }
+}

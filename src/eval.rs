@@ -462,6 +462,9 @@ impl Module {
 /// must run (dart-sass: a content block closes over its definition site).
 struct ContentBlock {
     stmts: Rc<Vec<Stmt>>,
+    /// The `using (params)` clause's parameters; `@content(args)` binds its
+    /// arguments to these before the block runs.
+    params: Option<Rc<ParamList>>,
     /// `Some` only for a cross-module include: the environment to install while
     /// the block runs, so the content resolves against the call site, not the
     /// mixin's module.
@@ -1340,8 +1343,15 @@ impl<'a> Evaluator<'a> {
     ) -> Result<HashMap<String, Value>, Error> {
         let (positional, keyword_vec) = evaled;
         let mut keyword: HashMap<String, Value> = HashMap::default();
+        // Track the order and source spelling of keyword names so an
+        // "unknown parameter" error can list them as the caller wrote them.
+        let mut keyword_order: Vec<(String, String)> = Vec::new();
         for (n, v) in keyword_vec {
-            keyword.insert(normalize_arg_name(&n), v);
+            let norm = normalize_arg_name(&n);
+            if !keyword.contains_key(&norm) {
+                keyword_order.push((norm.clone(), n));
+            }
+            keyword.insert(norm, v);
         }
         let mut frame = HashMap::default();
         let mut pos_iter = positional.into_iter();
@@ -1353,10 +1363,7 @@ impl<'a> Evaluator<'a> {
             } else if let Some(def) = &param.default {
                 self.eval_expr(def)?
             } else {
-                return Err(Error::unpositioned(format!(
-                    "Missing argument ${} for {name}.",
-                    param.name
-                )));
+                return Err(Error::unpositioned(format!("Missing argument ${}.", param.name)));
             };
             frame.insert(param.name.clone(), val);
         }
@@ -1374,6 +1381,29 @@ impl<'a> Evaluator<'a> {
             return Err(Error::unpositioned(format!(
                 "{name} was passed too many arguments."
             )));
+        }
+        // Reject keyword arguments that name no declared parameter. A `...`
+        // rest parameter would absorb them into an arglist (whose keywords
+        // are not yet modelled), so only validate when there is no rest.
+        if params.rest.is_none() && !keyword.is_empty() {
+            let leftover: Vec<&str> = keyword_order
+                .iter()
+                .filter(|(norm, _)| keyword.contains_key(norm))
+                .map(|(_, orig)| orig.as_str())
+                .collect();
+            if let Some((last, init)) = leftover.split_last() {
+                let msg = if init.is_empty() {
+                    format!("No parameter named ${last}.")
+                } else {
+                    let head = init
+                        .iter()
+                        .map(|n| format!("${n}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("No parameters named {head} or ${last}.")
+                };
+                return Err(Error::unpositioned(msg));
+            }
         }
         Ok(frame)
     }
@@ -1537,6 +1567,7 @@ impl<'a> Evaluator<'a> {
         name: &str,
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
+        content_params: Option<Rc<ParamList>>,
         module: Option<&str>,
         pos: Pos,
         parents: &[String],
@@ -1550,7 +1581,7 @@ impl<'a> Evaluator<'a> {
         if let Some(ns) = module {
             if self.used_modules.get(ns).map(String::as_str) == Some("meta") {
                 if name == "apply" {
-                    return self.exec_apply(args, content, parents, sink);
+                    return self.exec_apply(args, content, content_params, parents, sink);
                 }
                 if name == "load-css" {
                     return self.exec_load_css(args, content, pos, parents, sink);
@@ -1569,7 +1600,7 @@ impl<'a> Evaluator<'a> {
                 let mixin = target
                     .mixin(name)
                     .ok_or_else(|| Error::unpositioned("Undefined mixin."))?;
-                return self.run_module_mixin(&target, &mixin, args, content, parents, sink);
+                return self.run_module_mixin(&target, &mixin, args, content, content_params, parents, sink);
             }
             if !self.used_modules.contains_key(ns) {
                 return Err(Error::unpositioned(format!(
@@ -1592,7 +1623,7 @@ impl<'a> Evaluator<'a> {
                 ));
             }
             if let Some((m, mx)) = hits.into_iter().next() {
-                return self.run_module_mixin(&m, &mx, args, content, parents, sink);
+                return self.run_module_mixin(&m, &mx, args, content, content_params, parents, sink);
             }
         }
         let mixin = self
@@ -1609,6 +1640,7 @@ impl<'a> Evaluator<'a> {
         self.push_scope_frame(frame);
         self.content_stack.push(content.map(|stmts| ContentBlock {
             stmts,
+            params: content_params.clone(),
             caller_env: None,
         }));
         self.in_mixin.push(true);
@@ -1629,6 +1661,7 @@ impl<'a> Evaluator<'a> {
         mixin: &Rc<Callable>,
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
+        content_params: Option<Rc<ParamList>>,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -1643,6 +1676,7 @@ impl<'a> Evaluator<'a> {
             let snapshot = self.snapshot_env();
             ContentBlock {
                 stmts,
+                params: content_params.clone(),
                 caller_env: Some(Box::new(snapshot)),
             }
         });
@@ -1666,6 +1700,7 @@ impl<'a> Evaluator<'a> {
         &mut self,
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
+        content_params: Option<Rc<ParamList>>,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -1698,7 +1733,15 @@ impl<'a> Evaluator<'a> {
                 )))
             }
         };
-        self.invoke_mixin_ref(&mixin, rest_pos, rest_named, content, parents, sink)
+        self.invoke_mixin_ref(
+            &mixin,
+            rest_pos,
+            rest_named,
+            content,
+            content_params,
+            parents,
+            sink,
+        )
     }
 
     /// `@include meta.load-css($url, $with: (...))`: load the module at `$url`
@@ -1805,12 +1848,14 @@ impl<'a> Evaluator<'a> {
 
     /// Invoke a resolved mixin reference with already-evaluated arguments and an
     /// optional `@content` block, emitting into `sink`.
+    #[allow(clippy::too_many_arguments)]
     fn invoke_mixin_ref(
         &mut self,
         mixin: &SassMixin,
         pos_args: Vec<Value>,
         named: Vec<(String, Value)>,
         content: Option<Rc<Vec<Stmt>>>,
+        content_params: Option<Rc<ParamList>>,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -1841,6 +1886,7 @@ impl<'a> Evaluator<'a> {
                     let snapshot = self.snapshot_env();
                     ContentBlock {
                         stmts,
+                        params: content_params.clone(),
                         caller_env: Some(Box::new(snapshot)),
                     }
                 });
@@ -1859,6 +1905,7 @@ impl<'a> Evaluator<'a> {
         self.push_scope_frame(frame);
         self.content_stack.push(content.map(|stmts| ContentBlock {
             stmts,
+            params: content_params.clone(),
             caller_env: None,
         }));
         self.in_mixin.push(true);
@@ -1873,23 +1920,51 @@ impl<'a> Evaluator<'a> {
     /// block carries a snapshot of the call-site environment, which is installed
     /// for the duration so the content resolves there rather than in the mixin's
     /// module.
-    fn exec_content(&mut self, parents: &[String], sink: &mut Sink<'_>) -> Result<(), Error> {
-        let (stmts, caller_env) = match self.content_stack.last() {
+    fn exec_content(
+        &mut self,
+        args: &[CallArg],
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
+        let (stmts, params, caller_env) = match self.content_stack.last() {
             Some(Some(block)) => (
                 Rc::clone(&block.stmts),
+                block.params.clone(),
                 block.caller_env.as_ref().map(|e| (**e).clone()),
             ),
             _ => return Ok(()),
         };
-        match caller_env {
-            None => self.exec(&stmts, parents, sink),
-            Some(env) => {
-                let restore = self.install_env(env);
-                let result = self.exec(&stmts, parents, sink);
-                self.leave_module(restore);
-                result
+        // `@content(args)` evaluates its arguments at the call site (the mixin
+        // body), then binds them to the content block's `using (params)`, which
+        // become visible inside the block.
+        let frame = match &params {
+            Some(p) => Some(self.bind_args(p, args, "@content")?),
+            None => {
+                // A content block with no `using (params)` accepts no
+                // arguments; passing any is an error (dart-sass).
+                if !args.is_empty() {
+                    let n = args.len();
+                    let verb = if n == 1 { "was" } else { "were" };
+                    return Err(Error::unpositioned(format!(
+                        "Only 0 arguments allowed, but {n} {verb} passed."
+                    )));
+                }
+                None
             }
+        };
+        let restore = caller_env.map(|env| self.install_env(env));
+        let pushed = frame.is_some();
+        if let Some(frame) = frame {
+            self.push_scope_frame(frame);
         }
+        let result = self.exec(&stmts, parents, sink);
+        if pushed {
+            self.pop_scope();
+        }
+        if let Some(restore) = restore {
+            self.leave_module(restore);
+        }
+        result
     }
 
     /// Install a saved environment snapshot, returning the displaced one to
@@ -2568,6 +2643,7 @@ impl<'a> Evaluator<'a> {
                     name,
                     args,
                     content,
+                    content_params,
                     module,
                     pos,
                     length,
@@ -2579,6 +2655,7 @@ impl<'a> Evaluator<'a> {
                         name,
                         args,
                         content.clone(),
+                        content_params.clone(),
                         module.as_deref(),
                         *pos,
                         parents,
@@ -2602,12 +2679,12 @@ impl<'a> Evaluator<'a> {
                     config,
                     pos,
                 } => self.exec_forward(url, prefix.as_deref(), show, hide, config, *pos, sink)?,
-                Stmt::Content => {
+                Stmt::Content(content_args) => {
                     // The content block runs in the caller's context, so it is no
                     // longer "directly in a mixin" (dart-sass): a
                     // `meta.content-exists()` inside it is an error.
                     self.in_mixin.push(false);
-                    let result = self.exec_content(parents, sink);
+                    let result = self.exec_content(content_args, parents, sink);
                     self.in_mixin.pop();
                     result?;
                 }
@@ -5989,7 +6066,7 @@ fn body_uses_content(body: &[Stmt]) -> bool {
 
 fn stmt_uses_content(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Content => true,
+        Stmt::Content(_) => true,
         Stmt::Rule(r) => body_uses_content(&r.body),
         Stmt::If(branches) => branches.iter().any(|b| body_uses_content(&b.body)),
         Stmt::For { body, .. }

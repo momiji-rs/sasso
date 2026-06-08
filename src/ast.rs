@@ -89,6 +89,9 @@ pub(crate) enum Stmt {
         name: String,
         args: Vec<CallArg>,
         content: Option<Rc<Vec<Stmt>>>,
+        /// The `using (params)` clause's parameters, if any — the content block
+        /// declares these and they're bound from the `@content(args)` call.
+        content_params: Option<Rc<ParamList>>,
         module: Option<String>,
         /// 1-based position of the `@include` keyword (the `@`), used as the
         /// call-site span for diagnostic stack frames.
@@ -97,8 +100,9 @@ pub(crate) enum Stmt {
         /// trailing `;` or content block), used to size the diagnostic caret.
         length: usize,
     },
-    /// `@content;` — runs the `@include`'s content block.
-    Content,
+    /// `@content;` or `@content(args)` — runs the `@include`'s content block,
+    /// passing any arguments to its `using (params)`.
+    Content(Vec<CallArg>),
     /// A generic at-rule: `@name <prelude> { body }` or `@name <prelude>;`.
     /// `body == None` is the statement (`;`) form. Used for `@font-face`,
     /// `@page`, `@charset`, `@supports`, vendor `@foo`, and unknown
