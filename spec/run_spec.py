@@ -630,31 +630,30 @@ def compile_case(case: Case, sass_bin: str, style: str,
         if case.suite_root is not None:
             load_paths.append(case.suite_root)
 
-        # A case may import a PHYSICAL sibling partial of its .hrx via a relative
-        # path (e.g. `@use '../test-hue'`, where `_test-hue.scss` lives next to
-        # the archive in the real suite, not inside it). Mirror those siblings
-        # into the tmp tree and run the archive's own copy of the input so the
-        # relative path resolves against the mirrored layout rather than escaping
-        # the temp dir. Only done for `../`-importing cases, so the flat layout
-        # (and every currently-passing case) is otherwise untouched.
+        # A case may import a sibling partial via a relative `../` path — either
+        # one INSIDE the archive (a shared `generated/_utils.scss` reached from a
+        # `generated/<sub>/input.scss` sub-case) or a PHYSICAL sibling of the .hrx
+        # itself (a `_test-hue.scss` next to the archive in the real suite). The
+        # flat tmp layout makes `../` escape the temp dir, so run the archive's
+        # own copy of the input — at its real sub-case path — and mirror any
+        # hrx-external physical siblings next to the archive. Only `../`-importing
+        # cases are touched, so the flat layout (and passing cases) is unaffected.
         input_to_run = in_path
-        if (
-            case.archive_files
-            and case.archive_id
-            and case.suite_root is not None
-            and "../" in case.input_text
-        ):
-            nested_input = base / case.input_name
-            real_dir = case.suite_root / Path(case.archive_id).parent
-            if nested_input.exists() and real_dir.is_dir():
-                for f in real_dir.iterdir():
-                    if f.is_file() and f.suffix in (".scss", ".sass", ".css"):
-                        dst = base.parent / f.name
-                        if not dst.exists():
-                            dst.parent.mkdir(parents=True, exist_ok=True)
-                            dst.write_text(
-                                f.read_text(encoding="utf-8"), encoding="utf-8"
-                            )
+        if case.archive_files and case.archive_id and "../" in case.input_text:
+            subdir = case.name.split(":", 1)[1] if ":" in case.name else ""
+            nested_input = base / subdir / case.input_name if subdir else base / case.input_name
+            if nested_input.exists():
+                if case.suite_root is not None:
+                    real_dir = case.suite_root / Path(case.archive_id).parent
+                    if real_dir.is_dir():
+                        for f in real_dir.iterdir():
+                            if f.is_file() and f.suffix in (".scss", ".sass", ".css"):
+                                dst = base.parent / f.name
+                                if not dst.exists():
+                                    dst.parent.mkdir(parents=True, exist_ok=True)
+                                    dst.write_text(
+                                        f.read_text(encoding="utf-8"), encoding="utf-8"
+                                    )
                 input_to_run = nested_input
 
         cmd = [sass_bin]
