@@ -3794,3 +3794,17 @@ fn parity_color_hwb_serialization_and_alpha_fold() {
     assert_parity("@use \"sass:color\";\na {b: color.hwb(0, 30%, 40%, calc(infinity))}\n");
     assert_parity("@use \"sass:color\";\na {b: color.hwb(0, 30%, 40%, calc(-infinity))}\n");
 }
+
+#[test]
+fn parity_color_hwb_achromatic_serialization() {
+    // An achromatic hwb (whiteness+blackness fills the gamut, collapsing chroma
+    // to grey) has a powerless hue; dart-sass serializes it with hue 0, not the
+    // floating-point residue of the hwb→rgb round-trip.
+    assert_parity("a {b: hwb(90 0% 100%)}\n");
+    assert_parity("a {b: hwb(270 80% 100%)}\n");
+    assert_parity("a {b: hwb(0 50% 50%)}\n");
+    assert_parity("a {b: hwb(200 60% 60%)}\n");
+    // A chromatic hwb keeps its hue.
+    assert_parity("a {b: hwb(90 0% 0%)}\n");
+    assert_parity("a {b: hwb(120 30% 20%)}\n");
+}

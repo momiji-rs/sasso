@@ -1605,7 +1605,13 @@ impl ModernColor {
         let base = Color::from_hsl(h, 1.0, 0.5, 1.0);
         let mix = |v: f64| ((v / 255.0) * (1.0 - w - bl) + w) * 255.0;
         let c = Color::rgb(mix(base.r), mix(base.g), mix(base.b), 1.0);
-        let (hh, ss, ll) = c.to_hsl();
+        let (mut hh, ss, ll) = c.to_hsl();
+        // An achromatic result (the chroma collapses when whiteness+blackness
+        // fills the gamut) has a powerless hue; dart-sass canonicalizes it to 0
+        // rather than the floating-point residue of the hwb->rgb round-trip.
+        if c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b) < 1e-6 {
+            hh = 0.0;
+        }
         ([c.r, c.g, c.b], hh, ss * 100.0, ll * 100.0)
     }
 
@@ -1619,19 +1625,10 @@ impl ModernColor {
                 self.channels[2].unwrap_or(0.0),
             ),
             ColorSpace::Hwb => {
-                let h = self.channels[0].unwrap_or(0.0);
-                let mut w = self.channels[1].unwrap_or(0.0) / 100.0;
-                let mut bl = self.channels[2].unwrap_or(0.0) / 100.0;
-                if w + bl > 1.0 {
-                    let sum = w + bl;
-                    w /= sum;
-                    bl /= sum;
-                }
-                let base = Color::from_hsl(h, 1.0, 0.5, 1.0);
-                let mix = |v: f64| ((v / 255.0) * (1.0 - w - bl) + w) * 255.0;
-                let c = Color::rgb(mix(base.r), mix(base.g), mix(base.b), 1.0);
-                let (hh, ss, ll) = c.to_hsl();
-                (hh, ss * 100.0, ll * 100.0)
+                // Share the hwb->hsl conversion (and its achromatic-hue
+                // canonicalization) with hwb_rgb_and_hsl.
+                let (_, h, s, l) = self.hwb_rgb_and_hsl();
+                (h, s, l)
             }
             _ => (0.0, 0.0, 0.0),
         }
