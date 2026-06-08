@@ -4194,3 +4194,45 @@ fn parity_builtin_argument_validation() {
         "@use \"sass:color\";\na {b: color.invert(red, 50%)}\n",
     )]);
 }
+
+#[test]
+fn parity_declaration_context_errors() {
+    // `@function`/`@mixin` declarations are rejected in control directives,
+    // function bodies, and mixin bodies (a compile-time restriction).
+    if !enabled() {
+        return;
+    }
+    let err_cases = [
+        "@each $i in (a, b) {\n  @function foo() {@return 1}\n}\n",
+        "@for $i from 1 through 1 {\n  @function foo() {@return 1}\n}\n",
+        "@if true {\n  @function foo() {@return 1}\n}\n",
+        "@while false {\n  @function foo() {@return 1}\n}\n",
+        "@each $i in (a, b) {\n  @mixin foo() {}\n}\n",
+        "@if true {\n  @mixin foo() {}\n}\n",
+        "@function foo() {\n  @function bar() {@return 1}\n}\n",
+        "@function foo() {\n  @mixin bar() {}\n}\n",
+        "@mixin m {\n  @mixin n {}\n}\n",
+        "@mixin m {\n  @function f() {@return 1}\n}\n",
+        // The control-directive restriction propagates through style rules.
+        "@if true {\n  a {\n    @function f() {@return 1}\n  }\n}\n",
+        // A function body's scope sticks through a nested control directive.
+        "@function f() {\n  @if true {\n    @function g() {@return 1}\n  }\n  @return 1\n}\n",
+    ];
+    for scss in err_cases {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping declaration-context parity case: dart-sass unavailable"),
+        }
+    }
+    // Valid placements still compile.
+    assert_parity("a {\n  @function foo() {@return 1}\n  b: foo();\n}\n");
+    assert_parity("@media x {\n  a {b: c}\n}\n");
+}

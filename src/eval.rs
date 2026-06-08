@@ -5837,6 +5837,93 @@ fn concat_str(v: &Value) -> String {
     }
 }
 
+/// The declaration scope a statement is nested in, for validating that
+/// `@function`/`@mixin` declarations appear only where dart-sass allows them.
+#[derive(Clone, Copy, PartialEq)]
+enum DeclScope {
+    /// Top level, a style rule, or a plain at-rule (`@media`): declarations OK.
+    Allowed,
+    /// Inside `@if`/`@each`/`@for`/`@while` (propagates through style rules).
+    Control,
+    /// Inside a `@function` body.
+    Function,
+    /// Inside a `@mixin` body.
+    Mixin,
+}
+
+/// Reject `@function`/`@mixin` declarations nested where dart-sass forbids
+/// them: inside control directives, function bodies, or mixin bodies. Runs once
+/// after parsing, so an unexecuted `@while (false) { @function … }` still
+/// errors (it is a compile-time, not run-time, restriction).
+pub(crate) fn validate_declarations(sheet: &Stylesheet) -> Result<(), Error> {
+    validate_decl_scope(&sheet.stmts, DeclScope::Allowed)
+}
+
+fn validate_decl_scope(stmts: &[Stmt], scope: DeclScope) -> Result<(), Error> {
+    for stmt in stmts {
+        match stmt {
+            Stmt::FunctionDef(c) => {
+                if let Some(msg) = decl_error(scope, "function") {
+                    return Err(Error::unpositioned(msg));
+                }
+                validate_decl_scope(&c.body, DeclScope::Function)?;
+            }
+            Stmt::MixinDef(c) => {
+                if let Some(msg) = decl_error(scope, "mixin") {
+                    return Err(Error::unpositioned(msg));
+                }
+                validate_decl_scope(&c.body, DeclScope::Mixin)?;
+            }
+            // Control directives establish (or keep) the control/function/mixin
+            // scope; a `@function`/`@mixin` body's scope sticks through them.
+            Stmt::If(branches) => {
+                let inner = enter_control(scope);
+                for b in branches {
+                    validate_decl_scope(&b.body, inner)?;
+                }
+            }
+            Stmt::For { body, .. } | Stmt::Each { body, .. } | Stmt::While { body, .. } => {
+                validate_decl_scope(body, enter_control(scope))?;
+            }
+            // Style rules and plain at-rules preserve the current scope.
+            Stmt::Rule(r) => validate_decl_scope(&r.body, scope)?,
+            Stmt::AtRule { body: Some(body), .. }
+            | Stmt::Media { body, .. }
+            | Stmt::Supports { body, .. }
+            | Stmt::AtRoot { body, .. }
+            | Stmt::Keyframes { body, .. } => validate_decl_scope(body, scope)?,
+            Stmt::Include {
+                content: Some(content),
+                ..
+            } => validate_decl_scope(content, scope)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Entering a control directive: a `@function`/`@mixin` body keeps its own
+/// scope (declarations inside still get the function/mixin message); otherwise
+/// control flow establishes the `Control` scope.
+fn enter_control(scope: DeclScope) -> DeclScope {
+    match scope {
+        DeclScope::Function | DeclScope::Mixin => scope,
+        _ => DeclScope::Control,
+    }
+}
+
+fn decl_error(scope: DeclScope, kind: &str) -> Option<String> {
+    match scope {
+        DeclScope::Allowed => None,
+        DeclScope::Control => Some(format!(
+            "{} may not be declared in control directives.",
+            if kind == "function" { "Functions" } else { "Mixins" }
+        )),
+        DeclScope::Function => Some("This at-rule is not allowed here.".to_string()),
+        DeclScope::Mixin => Some(format!("Mixins may not contain {kind} declarations.")),
+    }
+}
+
 /// Whether a `+`/`-` operation is the removed color arithmetic that dart-sass
 /// rejects with "Undefined operation": a color combined with another color or a
 /// number. A color with a string (or other type) still string-concatenates via

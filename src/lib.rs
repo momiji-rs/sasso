@@ -267,6 +267,9 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
             return Err(e);
         }
     };
+    // Reject `@function`/`@mixin` declarations in control directives or
+    // function/mixin bodies (a compile-time restriction, checked before eval).
+    eval::validate_declarations(&sheet)?;
     // Diagnostics are enabled only when the caller supplies a display URL; then
     // the evaluator renders byte-exact `Error:`/`WARNING:` blocks against the
     // source. Without a URL it falls back to the legacy one-liner.
