@@ -1544,9 +1544,11 @@ impl ModernColor {
                 let int = |v: f64| (v - v.round()).abs() < 1e-9;
                 let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
                 let rgb_ok = rgb.iter().all(|&v| int(v) && in_gamut(v));
-                if rgb_ok {
-                    // A fully-opaque named color uses its name (uncompressed).
-                    if opaque && !compressed {
+                // Only a fully-OPAQUE integer hwb collapses to a named color or
+                // hex; a non-opaque hwb always uses the hsl comma form (dart-sass
+                // never emits rgba() for an hwb color).
+                if rgb_ok && opaque {
+                    if !compressed {
                         if let Some(name) = rgb_name(rgb[0], rgb[1], rgb[2]) {
                             return name.to_string();
                         }

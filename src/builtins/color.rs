@@ -888,7 +888,11 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         .first()
         .is_some_and(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.eq_ignore_ascii_case("from")));
     let comps_func = comps.iter().any(is_special);
-    let alpha_func = alpha.as_ref().is_some_and(is_special);
+    // A degenerate `calc()` alpha (`calc(NaN)`/`calc(±infinity)`) folds to a
+    // clamped number rather than being preserved verbatim (dart-sass).
+    let alpha_func = alpha
+        .as_ref()
+        .is_some_and(|v| is_special(v) && !is_degenerate_calc(v));
     if is_relative || comps_func || alpha_func {
         return Ok(verbatim_call("hwb", &channels));
     }

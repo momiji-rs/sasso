@@ -3778,3 +3778,19 @@ fn parity_color_lab_degenerate_calc_channels() {
     assert_parity("@use \"sass:meta\";\na {b: meta.type-of(lab(1% calc(NaN) -3))}\n");
     assert_parity("@use \"sass:color\";\na {b: color.space(lch(50% calc(infinity) 30))}\n");
 }
+
+#[test]
+fn parity_color_hwb_serialization_and_alpha_fold() {
+    // A non-opaque integer hwb (pure red, sRGB 255 0 0) uses the hsl comma form
+    // hsla(...), not rgba(); only a fully-opaque integer hwb collapses to a
+    // named/hex color.
+    assert_parity("@use \"sass:color\";\na {b: color.hwb(0, 0%, 0%, 0.5)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.hwb(0, 0%, 0%, 45.6%)}\n");
+    assert_parity("a {b: hwb(0 0% 0% / 0.5)}\n");
+    assert_parity("a {b: hwb(0 0% 0%)}\n");
+    assert_parity("a {b: hwb(120 0% 0%)}\n");
+    // A degenerate calc() alpha folds to a clamped number (NaN→0, +inf→1, -inf→0).
+    assert_parity("@use \"sass:color\";\na {b: color.hwb(0, 30%, 40%, calc(NaN))}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.hwb(0, 30%, 40%, calc(infinity))}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.hwb(0, 30%, 40%, calc(-infinity))}\n");
+}
