@@ -106,6 +106,10 @@ class Case:
     archive_files: dict = field(default_factory=dict)  # whole archive {rel: content} — for
     # load-path-relative imports like `@use 'core_functions/.../utils'` that resolve against
     # the suite root rather than the case dir (materialized under <tmp>/<archive_id>/ + -I <tmp>).
+    suite_root: Optional[Path] = None  # the real suite root, added as a LOWEST-priority
+    # load path so shared partials that live outside the case archive (e.g.
+    # core_functions/color/_utils.scss) resolve like dart-sass's runner — the per-case
+    # tmp materialization above is searched first, so relative imports are unaffected.
 
 
 @dataclass
@@ -336,7 +340,7 @@ def options_for_dir(files: dict, dirpath: str) -> dict:
     return merged
 
 
-def cases_from_files(files: dict, archive_id: str):
+def cases_from_files(files: dict, archive_id: str, suite_root=None):
     """Yield Case objects from a {path: content} mapping (one HRX or one dir)."""
     # Longest-first case dirs so each file is attributed to its NEAREST enclosing
     # case (a partial under d/sub/ belongs to nested case d/sub, not d).
@@ -406,6 +410,7 @@ def cases_from_files(files: dict, archive_id: str):
             precision=opts.get("precision"),
             archive_id=archive_id,
             archive_files=files,
+            suite_root=suite_root,
         )
 
 
@@ -421,7 +426,7 @@ def iter_all_cases(suite: Path, suite_root: Path):
             text = hrx.read_text(encoding="utf-8", errors="replace")
         files = parse_hrx(text)
         # HRX-applicable options.yml may also live as a *physical* sibling.
-        yield from cases_from_files(files, archive_id)
+        yield from cases_from_files(files, archive_id, suite_root)
 
     # 2) directory-style cases (physical input.scss / input.sass on disk)
     for inp in sorted(list(suite.rglob("input.scss")) + list(suite.rglob("input.sass"))):
@@ -471,6 +476,7 @@ def iter_all_cases(suite: Path, suite_root: Path):
             precision=merged_opts.get("precision"),
             archive_id=rel,
             archive_files=files,
+            suite_root=suite_root,
         )
 
 
@@ -617,6 +623,12 @@ def compile_case(case: Case, sass_bin: str, style: str,
                 if not fp.exists():
                     fp.write_text(content, encoding="utf-8")
             load_paths = [tdp] + ([base] if case.archive_id else [])
+
+        # The real suite root is the LOWEST-priority load path: shared partials
+        # outside the case archive (e.g. core_functions/color/_utils.scss) resolve
+        # here, while the per-case tmp tree above still wins for relative imports.
+        if case.suite_root is not None:
+            load_paths.append(case.suite_root)
 
         cmd = [sass_bin]
         # style flag (dart-sass accepts --style=...; sasso should too)
