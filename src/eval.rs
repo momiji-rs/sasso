@@ -363,6 +363,15 @@ pub(crate) struct Evaluator<'a> {
     /// Sources of every file seen so far, keyed by URL, so a stack trace can
     /// render a snippet that points into a file other than the current one.
     file_sources: Rc<RefCell<HashMap<String, Rc<str>>>>,
+    /// Per-id count of deprecation warnings already *printed* (capped at 5 each,
+    /// dart-sass). Keyed by the deprecation `[id]`.
+    deprecations_shown: HashMap<&'static str, u32>,
+    /// Total deprecation warnings *omitted* by the per-id cap, summed across
+    /// ids; rendered into the aggregate footer at the end of the compile.
+    deprecations_omitted: u32,
+    /// Per-location dedup: a `(id, url, line, col)` already warned about is not
+    /// warned about again (dart-sass collapses identical repeated warnings).
+    deprecations_seen: std::collections::HashSet<(&'static str, String, usize, usize)>,
 }
 
 /// One frame of the diagnostic call stack: the call site (file + 1-based
@@ -535,6 +544,9 @@ impl<'a> Evaluator<'a> {
             current_url: url,
             current_source: source,
             file_sources: Rc::new(RefCell::new(file_sources)),
+            deprecations_shown: HashMap::default(),
+            deprecations_omitted: 0,
+            deprecations_seen: std::collections::HashSet::new(),
             scopes: vec![HashMap::default()],
             // The global scope is treated as semi-global so a top-level control
             // flow scope (its child) becomes semi-global too.
@@ -568,11 +580,14 @@ impl<'a> Evaluator<'a> {
             // At the outermost boundary, finalize any error into a rendered
             // diagnostic block (header + snippet + frames) if we have a span.
             if let Err(e) = r {
-                return Err(self.finalize_error(e));
+                let e = self.finalize_error(e);
+                self.emit_deprecation_footer();
+                return Err(e);
             }
         }
         self.apply_extends(out)?;
         hoist_css_imports(out);
+        self.emit_deprecation_footer();
         Ok(())
     }
 
@@ -681,6 +696,60 @@ impl<'a> Evaluator<'a> {
         out.push('\n');
         out.push_str(&Self::render_frame_block(frames, 2));
         out
+    }
+
+    /// Emit a deprecation warning at `pos` (caret length `len`): the header
+    /// block + a snippet pointing at the deprecated construct + a 4-space stack
+    /// trace + a trailing blank line. Honours dart-sass's per-location dedup and
+    /// per-id cap of 5 (further occurrences are counted into the aggregate
+    /// footer rendered by [`Self::emit_deprecation_footer`]). No-op when
+    /// diagnostics are disabled.
+    fn emit_deprecation(&mut self, dep: &crate::deprecation::Deprecation, pos: Pos, len: usize) {
+        if !self.diag_enabled() {
+            return;
+        }
+        // Per-location dedup: an identical (id, file, line, col) warning fires
+        // only once.
+        let key = (dep.id, self.current_url.clone(), pos.line, pos.col);
+        if !self.deprecations_seen.insert(key) {
+            return;
+        }
+        let count = self.deprecations_shown.entry(dep.id).or_insert(0);
+        if *count >= 5 {
+            self.deprecations_omitted += 1;
+            return;
+        }
+        *count += 1;
+
+        let frames = self.frames_for(pos);
+        let span = crate::diag::Span {
+            line: pos.line,
+            col: pos.col,
+            length: len,
+        };
+        let source = self.source_for(&self.current_url.clone());
+        let mut block = dep.render_header();
+        block.push_str(&crate::diag::render_snippet(
+            &source,
+            span,
+            &[],
+            self.options.glyphs,
+        ));
+        block.push('\n');
+        block.push_str(&Self::render_frame_block(&frames, 4));
+        eprintln!("{block}\n");
+    }
+
+    /// Emit the aggregate "N repetitive deprecation warnings omitted" footer at
+    /// the end of the compile, if the per-id cap dropped any warnings.
+    fn emit_deprecation_footer(&self) {
+        if self.deprecations_omitted == 0 {
+            return;
+        }
+        eprintln!(
+            "WARNING: {} repetitive deprecation warnings omitted.\nRun in verbose mode to see all warnings.\n",
+            self.deprecations_omitted
+        );
     }
 
     /// Enter a user callable (mixin/function) for diagnostics: record a stack
@@ -3010,11 +3079,14 @@ impl<'a> Evaluator<'a> {
                     let text = self.eval_template(tpl)?;
                     sink.push_at_rule(OutNode::Raw(format!("@import {text};")));
                 }
-                ImportArg::Sass(path) => {
+                ImportArg::Sass { path, pos, length } => {
                     if is_css_import(path) {
                         sink.push_at_rule(OutNode::Raw(format!("@import \"{path}\";")));
                         continue;
                     }
+                    // Every Sass `@import` of a non-CSS file fires the `[import]`
+                    // deprecation, pointing at the quoted URL token.
+                    self.emit_deprecation(&crate::deprecation::Deprecation::import(), *pos, *length);
                     // Run the caller's importer outside the arena scope so any
                     // state it caches (paths, sources) outlives this compile's
                     // arena reset; see the matching note in `load_module`.
@@ -3321,7 +3393,9 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
-            Expr::Div { lhs, rhs, slash, pos } => {
+            Expr::Div {
+                lhs, rhs, slash, pos, ..
+            } => {
                 let l = self.eval_expr(lhs)?;
                 let r = self.eval_expr(rhs)?;
                 eval_div(l, r, *slash, *pos)

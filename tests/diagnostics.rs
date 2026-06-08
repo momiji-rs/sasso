@@ -35,6 +35,8 @@ const MATCHING: &[&str] = &[
     "compile-undefined-variable-stack",
     "compile-tab-expansion",
     "compile-gutter-alignment",
+    // Deprecations (registry sub-step): the fully-static `@import` warning.
+    "deprecation-import",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {

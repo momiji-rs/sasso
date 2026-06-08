@@ -1215,8 +1215,10 @@ impl Parser {
         // Quoted-string form.
         match self.sc.peek() {
             Some('"') | Some('\'') => {
+                let url_pos = self.sc.position();
                 let mark = self.sc.mark();
                 let pieces = self.parse_quoted_string()?;
+                let url_len = self.sc.byte_len_from(mark);
                 let raw_url = self.sc.slice_from(mark);
                 self.skip_ws_trivia();
                 let modifiers = self.parse_import_modifiers()?;
@@ -1232,7 +1234,11 @@ impl Parser {
                             }
                         }
                     }
-                    Ok(ImportArg::Sass(path))
+                    Ok(ImportArg::Sass {
+                        path,
+                        pos: url_pos,
+                        length: url_len,
+                    })
                 } else {
                     let mut tpl = vec![TplPiece::Lit(raw_url)];
                     if !modifiers.is_empty() {

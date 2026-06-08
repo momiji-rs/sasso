@@ -186,8 +186,10 @@ pub(crate) enum ForwardMember {
 
 /// One entry in an `@import` statement.
 pub(crate) enum ImportArg {
-    /// A Sass import: the (unquoted) path of a partial to resolve and inline.
-    Sass(String),
+    /// A Sass import: the (unquoted) path of a partial to resolve and inline,
+    /// plus the 1-based position and byte length of the quoted URL token (for
+    /// the `[import]` deprecation snippet).
+    Sass { path: String, pos: Pos, length: usize },
     /// A plain CSS `@import`: emitted verbatim as `@import <text>;`. Stored as
     /// a template so `#{…}` interpolation in the URL/modifiers resolves at
     /// eval time. The text is everything between `@import ` and the `;`.
