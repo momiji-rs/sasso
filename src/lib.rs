@@ -46,6 +46,7 @@ mod scanner;
 mod selector;
 mod value;
 
+pub use arena::ScopedAlloc;
 pub use error::Error;
 
 use std::path::{Path, PathBuf};
@@ -158,7 +159,50 @@ impl<'a> Options<'a> {
 ///
 /// Returns [`Error`] on a parse or evaluation failure (with a 1-based
 /// source position when known).
+///
+/// # Allocator scope
+///
+/// When the binary installs [`ScopedAlloc`] as its `#[global_allocator]`, this
+/// function brackets the whole compile in a bump-arena scope: every allocation
+/// `compile_inner` makes is a pointer bump from a per-thread arena that is freed
+/// wholesale when the scope ends. The returned `Result` is allocated *in* the
+/// arena, so it is deep-cloned out to the system allocator *before* the arena is
+/// reset — the value handed back to the caller never points into the arena. When
+/// no `ScopedAlloc` is installed the scope primitives are inert (depth tracking
+/// only) and every allocation goes to the system allocator as usual, so this
+/// wrapper is correct (just with a redundant clone) under any global allocator.
 pub fn compile(source: &str, options: &Options<'_>) -> Result<String, Error> {
+    // Enter the arena scope. The RAII guard's `Drop` leaves + resets the arena
+    // on the *panic* path; the success path below finishes manually and forgets
+    // the guard, so there is no double-leave.
+    let guard = arena::Scope::enter();
+    // All allocations here bump from the arena (when ScopedAlloc is installed).
+    let result = compile_inner(source, options);
+    // Leave the scope WITHOUT resetting yet: depth drops to 0, so the arena is
+    // now inactive and subsequent allocations route to the system allocator —
+    // but the arena memory is still intact and `result` may point into it.
+    let outermost = arena::leave_no_reset();
+    // Deep-clone the result to the system allocator while the scope is inactive.
+    // `Error` derives `Clone`, so both the `Ok(String)` and `Err(message)` cases
+    // are copied out byte-for-byte to system-owned memory.
+    let owned = result.clone();
+    // Drop the arena-resident original (in-arena `dealloc` is a no-op) before
+    // the region it lives in is reclaimed.
+    drop(result);
+    // Only the outermost scope owns the arena's lifetime; reset frees it all.
+    if outermost {
+        arena::reset();
+    }
+    // We finished the scope manually; suppress the guard's `Drop` to avoid a
+    // second leave/reset.
+    std::mem::forget(guard);
+    owned
+}
+
+/// The actual compile pipeline. Runs inside the arena scope established by
+/// [`compile`]; all of its allocations may be arena-resident, so its result is
+/// copied out by the wrapper before the arena is reset.
+fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
     let sheet = match options.syntax {
         Syntax::Scss => parser::parse(source)?,
         Syntax::Sass => sass_parser::parse(source)?,
