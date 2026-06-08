@@ -2232,9 +2232,6 @@ enum ChannelCategory {
     LabB,
     Whiteness,
     Blackness,
-    X,
-    Y,
-    Z,
 }
 
 fn channel_category(space: ColorSpace, idx: usize) -> Option<ChannelCategory> {
@@ -2272,9 +2269,11 @@ fn channel_category(space: ColorSpace, idx: usize) -> Option<ChannelCategory> {
         (Hwb, 2) => Blackness,
         (Lab, 1) | (Oklab, 1) => LabA,
         (Lab, 2) | (Oklab, 2) => LabB,
-        (XyzD65, 0) | (XyzD50, 0) => X,
-        (XyzD65, 1) | (XyzD50, 1) => Y,
-        (XyzD65, 2) | (XyzD50, 2) => Z,
+        // CSS Color 4 groups the xyz channels with the analogous rgb channels
+        // for missing-component carry (Reds: r/x, Greens: g/y, Blues: b/z).
+        (XyzD65, 0) | (XyzD50, 0) => Red,
+        (XyzD65, 1) | (XyzD50, 1) => Green,
+        (XyzD65, 2) | (XyzD50, 2) => Blue,
         _ => return None,
     })
 }
@@ -2836,9 +2835,22 @@ fn fn_same(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
     let c2 = as_color(require(&params, pos_args, named, 1, "same", pos)?, pos)?;
     let m1 = legacy_to_modern(&c1);
     let m2 = legacy_to_modern(&c2);
+    // color.same compares the *realized* colors: a missing channel counts as 0
+    // and is NOT carried through the conversion (the spec converts none -> 0
+    // before the xyz conversion). Fill none with 0 so convert_modern yields
+    // plain numbers rather than carrying missing components into xyz.
+    let fill0 = |m: &ModernColor| ModernColor {
+        space: m.space,
+        channels: [
+            Some(z(m.channels[0])),
+            Some(z(m.channels[1])),
+            Some(z(m.channels[2])),
+        ],
+        alpha: m.alpha,
+    };
     // Compare in xyz-d65 (a canonical space) with alpha.
-    let x1 = convert_modern(&m1, ColorSpace::XyzD65);
-    let x2 = convert_modern(&m2, ColorSpace::XyzD65);
+    let x1 = convert_modern(&fill0(&m1), ColorSpace::XyzD65);
+    let x2 = convert_modern(&fill0(&m2), ColorSpace::XyzD65);
     let close = |a: f64, b: f64| (a - b).abs() < 1e-7;
     let same = close(z(x1.channels[0]), z(x2.channels[0]))
         && close(z(x1.channels[1]), z(x2.channels[1]))

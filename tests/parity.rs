@@ -3736,3 +3736,25 @@ fn parity_color_convert_achromatic_to_hsl_hwb() {
     assert_parity("@use \"sass:color\";\na {b: color.channel(hsl(300, 0%, 50%), \"hue\")}\n");
     assert_parity("a {b: hsl(300, 0%, 50%)}\n");
 }
+
+#[test]
+fn parity_color_convert_missing_channel_carry() {
+    // CSS Color 4 carries a missing component into the analogous channel of the
+    // target space; the xyz channels are analogous to rgb (Reds: r/x, Greens:
+    // g/y, Blues: b/z), so a missing rgb channel survives a round-trip to xyz.
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(color(a98-rgb none 0.5 0.5), xyz)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(color(srgb 0.5 0.5 none), xyz)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(color(xyz none 0.2 0.3), a98-rgb)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(color(xyz 0.1 0.2 none), display-p3)}\n");
+    // a/b are not analogous to xyz/rgb; Lightness carries across lab/oklab.
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(lab(50% none 30), xyz)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(lab(none 20 30), oklab)}\n");
+    // color.same converts none -> 0 (NO carry): two colors that realize
+    // differently are not the same even if both carry a missing component.
+    assert_parity(
+        "@use \"sass:color\";\na {b: color.same(color(rec2020 0.5 none 0.2), color(xyz 0.174805932224126 none 0.058901333881161))}\n",
+    );
+    assert_parity(
+        "@use \"sass:color\";\na {b: color.same(color(display-p3 0.1 0.3 none), color(display-p3 0.1 0.3 0))}\n",
+    );
+}
