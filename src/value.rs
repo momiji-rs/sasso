@@ -1545,6 +1545,15 @@ impl ModernColor {
 
     /// Serialize the classic `hsl(h, s%, l%)` / `hsla(…)` comma form.
     fn hsl_comma_css(&self, h: f64, s: f64, l: f64, a: f64, opaque: bool, compressed: bool) -> String {
+        // dart-sass normalizes a negative HSL saturation — which arises when an
+        // out-of-range hwb color converts to hsl — by flipping the hue 180° and
+        // taking the saturation's magnitude. A non-negative saturation (every
+        // normal color) is untouched.
+        let (h, s) = if s < 0.0 {
+            ((h + 180.0).rem_euclid(360.0), -s)
+        } else {
+            (h, s)
+        };
         let hh = fmt_num(h, compressed);
         let ss = fmt_num(s, compressed);
         let ll = fmt_num(l, compressed);

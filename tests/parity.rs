@@ -3642,3 +3642,15 @@ fn parity_list_separator_and_bracket_preservation() {
     assert_parity("@use \"sass:list\";\na {b: list.join((1), (2 3 4))}\n");
     assert_parity("@use \"sass:list\";\na {b: list.append((1), 2)}\n");
 }
+
+#[test]
+fn parity_color_hwb_out_of_range_negative_saturation() {
+    // An out-of-range hwb color converts to hsl with a NEGATIVE raw saturation;
+    // dart-sass normalizes it by flipping the hue 180 degrees and taking |sat|
+    // (e.g. hwb(20deg 200% -125%) -> hsl(200, 11.11%, 212.5%), not hsl(20, -11.11%, …)).
+    assert_parity("a { b: hwb(20deg 200% -125%); }\n");
+    assert_parity("@use \"sass:color\";\na { b: color.to-space(hwb(20deg 200% -125%), hsl); }\n");
+    // Normal hwb / hsl (non-negative saturation) must be unaffected.
+    assert_parity("a { b: hwb(20deg 30% 40%); }\n");
+    assert_parity("a { b: hsl(20, 50%, 50%); }\n");
+}
