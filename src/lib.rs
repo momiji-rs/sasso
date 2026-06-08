@@ -36,6 +36,7 @@ mod arena;
 
 mod ast;
 mod builtins;
+mod diag;
 mod emit;
 mod error;
 mod eval;
