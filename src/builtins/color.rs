@@ -2170,8 +2170,18 @@ fn hsl_to_rgb255(hsl: [f64; 3]) -> [f64; 3] {
 
 /// rgb [0..255] -> hsl [hue-deg, sat-%, light-%].
 fn rgb255_to_hsl(rgb: [f64; 3]) -> [f64; 3] {
-    let c = Color::rgb(rgb[0], rgb[1], rgb[2], 1.0);
-    let (h, s, l) = c.to_hsl();
+    let max = rgb[0].max(rgb[1]).max(rgb[2]);
+    let min = rgb[0].min(rgb[1]).min(rgb[2]);
+    // A color-space conversion (via an XYZ round-trip) can leave a truly
+    // achromatic color with channels that differ only by floating-point error.
+    // `to_hsl` would read that as a tiny non-zero chroma — yielding a spurious
+    // hue, plus an unstable saturation near l=0/1 where its denominator
+    // collapses. dart-sass's exact gray round-trip gives hue 0 / saturation 0,
+    // so collapse a negligible chroma to a canonical achromatic hsl.
+    if max - min < 1e-6 {
+        return [0.0, 0.0, (max + min) / 2.0 / 255.0 * 100.0];
+    }
+    let (h, s, l) = Color::rgb(rgb[0], rgb[1], rgb[2], 1.0).to_hsl();
     [h, s * 100.0, l * 100.0]
 }
 
@@ -2192,9 +2202,18 @@ fn hwb_to_rgb255(hwb: [f64; 3]) -> [f64; 3] {
 
 /// rgb [0..255] -> hwb [hue-deg, white-%, black-%].
 fn rgb255_to_hwb(rgb: [f64; 3]) -> [f64; 3] {
-    let (h, _s, _l) = Color::rgb(rgb[0], rgb[1], rgb[2], 1.0).to_hsl();
-    let w = rgb[0].min(rgb[1]).min(rgb[2]) / 255.0 * 100.0;
-    let bl = (1.0 - rgb[0].max(rgb[1]).max(rgb[2]) / 255.0) * 100.0;
+    let min = rgb[0].min(rgb[1]).min(rgb[2]);
+    let max = rgb[0].max(rgb[1]).max(rgb[2]);
+    // An achromatic conversion result has a powerless hue; a round-trip can
+    // leave channels floating-point-unequal, so collapse a negligible chroma to
+    // dart-sass's canonical hue 0 rather than reading a spurious hue.
+    let h = if max - min < 1e-6 {
+        0.0
+    } else {
+        Color::rgb(rgb[0], rgb[1], rgb[2], 1.0).to_hsl().0
+    };
+    let w = min / 255.0 * 100.0;
+    let bl = (1.0 - max / 255.0) * 100.0;
     [h, w, bl]
 }
 

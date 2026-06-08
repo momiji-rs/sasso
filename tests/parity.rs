@@ -3717,3 +3717,22 @@ fn parity_color_module_hwb_comma_and_validation() {
         }
     }
 }
+
+#[test]
+fn parity_color_convert_achromatic_to_hsl_hwb() {
+    // Converting a truly achromatic color (gray/white from a wide-gamut space)
+    // to hsl/hwb must yield dart-sass's canonical hue 0 / saturation 0 — the
+    // XYZ round-trip leaves floating-point chroma residue that would otherwise
+    // read as a spurious hue (180/300deg) and, near l=0/1, an unstable
+    // saturation. A truly chromatic (or explicitly-built achromatic) color is
+    // unaffected.
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(color(a98-rgb 1 1 1), hsl)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(color(a98-rgb 0.5 0.5 0.5), hsl)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(color(a98-rgb 0.5 0.5 0.5), hwb)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(color(prophoto-rgb 0.5 0.5 0.5), hsl)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(color(rec2020 0.3 0.3 0.3), hwb)}\n");
+    // Chromatic conversions and explicitly-built achromatic hsl keep their hue.
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(color(a98-rgb 0.8 0.2 0.4), hsl)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.channel(hsl(300, 0%, 50%), \"hue\")}\n");
+    assert_parity("a {b: hsl(300, 0%, 50%)}\n");
+}
