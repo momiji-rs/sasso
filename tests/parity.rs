@@ -4272,3 +4272,39 @@ fn parity_sass_import_context_errors() {
     // A plain-CSS `@import` in a control directive is fine.
     assert_parity("@if true {\n  @import url(x);\n}\n");
 }
+
+#[test]
+fn parity_callable_not_valid_css_value() {
+    // A first-class function/mixin reference cannot appear in `+`/`-`/`/`
+    // arithmetic ("<inspect> isn't a valid CSS value."); `*` still raises the
+    // "Undefined operation" message and `==` still compares.
+    if !enabled() {
+        return;
+    }
+    let err_cases = [
+        "@use \"sass:meta\";\n@mixin a() {}\n@mixin b() {}\nx {y: meta.get-mixin(a) + meta.get-mixin(b)}\n",
+        "@use \"sass:meta\";\n@mixin a() {}\n@mixin b() {}\nx {y: meta.get-mixin(a) - meta.get-mixin(b)}\n",
+        "@use \"sass:meta\";\n@mixin a() {}\n@mixin b() {}\nx {y: meta.get-mixin(a) / meta.get-mixin(b)}\n",
+        "@use \"sass:meta\";\n@function a() {@return 1}\nx {y: meta.get-function(\"a\") + 1}\n",
+        "@use \"sass:meta\";\n@mixin a() {}\n@mixin b() {}\nx {y: meta.get-mixin(a) * meta.get-mixin(b)}\n",
+    ];
+    for scss in err_cases {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping callable-CSS-value parity case: dart-sass unavailable"),
+        }
+    }
+    // Equality comparison of mixins is still valid.
+    assert_module_parity(&[(
+        "input.scss",
+        "@use \"sass:meta\";\n@mixin a() {}\nx {y: meta.get-mixin(a) == meta.get-mixin(a)}\n",
+    )]);
+}

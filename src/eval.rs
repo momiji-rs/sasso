@@ -5546,6 +5546,9 @@ fn calc_incompatible(a: &Number, b: &Number, pos: Pos) -> Error {
 /// numbers, produce a slash-separated value that serializes as `a/b` but
 /// behaves numerically as the quotient; otherwise perform real division.
 pub(crate) fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Value, Error> {
+    if let Some(e) = callable_value_error(&l, &r, pos) {
+        return Err(e);
+    }
     // The parser only sets `slash` when both operands are numeric literals
     // (or themselves slash divisions), so they are always numbers here. A
     // slash-separated value is kept only when the two units are compatible
@@ -5691,6 +5694,9 @@ fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     if color_arith_undefined(&l, &r) {
         return Err(undefined_op(&l, "+", &r, pos));
     }
+    if let Some(e) = callable_value_error(&l, &r, pos) {
+        return Err(e);
+    }
     // A calculation can only be `+`-concatenated with a string; against any
     // other operand (number, color, bool, list, another calculation) dart-sass
     // raises "Undefined operation" rather than string-concatenating.
@@ -5734,6 +5740,9 @@ fn binary_sub(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     // order) is "Undefined operation", not a string join.
     if color_arith_undefined(&l, &r) {
         return Err(undefined_op(&l, "-", &r, pos));
+    }
+    if let Some(e) = callable_value_error(&l, &r, pos) {
+        return Err(e);
     }
     if matches!(&l, Value::Calc(_)) || matches!(&r, Value::Calc(_)) {
         return Err(undefined_op(&l, "-", &r, pos));
@@ -5942,6 +5951,23 @@ fn decl_error(scope: DeclScope, kind: &str) -> Option<String> {
 fn color_arith_undefined(l: &Value, r: &Value) -> bool {
     let numeric = |v: &Value| matches!(v, Value::Color(_) | Value::Number(_));
     (matches!(l, Value::Color(_)) && numeric(r)) || (matches!(r, Value::Color(_)) && numeric(l))
+}
+
+/// A first-class function or mixin reference is not a valid CSS value, so it
+/// cannot appear in arithmetic or a slash: dart-sass errors "<inspect> isn't a
+/// valid CSS value." for the first such operand (left before right).
+fn callable_value_error(l: &Value, r: &Value, pos: Pos) -> Option<Error> {
+    for v in [l, r] {
+        let inspect = match v {
+            Value::Function(f) => Some(f.inspect()),
+            Value::Mixin(m) => Some(m.inspect()),
+            _ => None,
+        };
+        if let Some(s) = inspect {
+            return Some(Error::at(format!("{s} isn't a valid CSS value."), pos));
+        }
+    }
+    None
 }
 
 fn undefined_op(l: &Value, sym: &str, r: &Value, pos: Pos) -> Error {
