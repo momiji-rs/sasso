@@ -63,8 +63,9 @@ matching current dart-sass (1.100) byte-for-byte on the implemented subset.
 ### Performance
 
 Profiling showed the compiler is allocation- and hashing-bound; a series of
-hot-path cuts followed, with no behavior change (cumulative **~1.29×** faster on
-the large benchmark and **~1.14×** on the handwritten one, in-process):
+hot-path cuts followed, with no behavior change (cumulative **~2× faster** on the
+large benchmark vs. the original, lifting the lead over `grass` to ~1.9–2.4× and
+over dart-sass to ~16–25×):
 
 - Selector helpers `split_commas`/`tokenize_complex` return borrowed `&str`
   slices, and `copy_name`/`normalize_selector` avoid their intermediate
@@ -73,6 +74,15 @@ the large benchmark and **~1.14×** on the handwritten one, in-process):
 - The compiler's internal `String`-keyed maps (variable scope, function/mixin
   tables, module maps) use a small inline FxHash hasher instead of std's
   DoS-resistant-but-slow SipHash. (Still zero runtime dependencies.)
+- A **scoped bump-arena allocator** (`ScopedAlloc`): within each `compile()` a
+  per-thread arena turns every allocation into a pointer bump and frees them
+  wholesale (reset) at the end — a further ~1.5×. It is installed as the CLI's
+  `#[global_allocator]`; library/wasm embedders can opt in the same way (it
+  forwards to the system allocator outside a compile, so it's safe to install
+  unconditionally). This is the library's one audited `unsafe` module —
+  verified by unit tests, Miri (no UB), AddressSanitizer, and the full sass-spec
+  suite run through it (11,445 cases, zero crashes, byte-identical output); the
+  rest of the crate is `deny(unsafe_code)`. Still zero runtime dependencies.
 
 ### Tooling
 
