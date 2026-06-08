@@ -21,6 +21,15 @@ use std::time::Instant;
 
 use sasso::{compile, FsImporter, Options, OutputStyle, Syntax};
 
+// Install the scoped bump-arena allocator (perf #5). Inside each `compile`
+// scope every allocation is a pointer bump from a per-thread arena that is
+// freed wholesale when the scope ends; outside a scope (startup, arg parsing,
+// I/O) requests forward to the system allocator. `compile` copies its result
+// out to the system allocator before resetting the arena, so values that
+// escape a compile never point into it.
+#[global_allocator]
+static GLOBAL: sasso::ScopedAlloc = sasso::ScopedAlloc;
+
 const USAGE: &str = "\
 sasso — a pure-Rust SCSS to CSS compiler
 
