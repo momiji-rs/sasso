@@ -4532,9 +4532,19 @@ impl<'a> Evaluator<'a> {
         let found = scopes
             .iter()
             .any(|s| s.keys().any(|k| normalize_arg_name(k) == key));
-        // A variable exposed unprefixed via `@use … as *` (or forwarded into one).
-        let star = !is_private_member(&name) && self.star_user_modules.iter().any(|m| m.var(&name).is_some());
-        Ok(Value::Bool(found || star))
+        if found {
+            return Ok(Value::Bool(true));
+        }
+        // A variable exposed unprefixed via `@use … as *` (or forwarded into
+        // one). Exposure from more than one star module is ambiguous.
+        let count = self.star_member_count(&name, MemberKind::Variable);
+        if count > 1 {
+            return Err(Error::at(
+                "This variable is available from multiple global modules.",
+                pos,
+            ));
+        }
+        Ok(Value::Bool(count >= 1))
     }
 
     /// `meta.mixin-exists($name)`: whether a mixin of that name is defined.
@@ -4555,9 +4565,17 @@ impl<'a> Evaluator<'a> {
         }
         let key = normalize_arg_name(&name);
         let local = self.mixins.keys().any(|k| normalize_arg_name(k) == key);
-        let star =
-            !is_private_member(&name) && self.star_user_modules.iter().any(|m| m.mixin(&name).is_some());
-        Ok(Value::Bool(local || star))
+        if local {
+            return Ok(Value::Bool(true));
+        }
+        let count = self.star_member_count(&name, MemberKind::Mixin);
+        if count > 1 {
+            return Err(Error::at(
+                "This mixin is available from multiple global modules.",
+                pos,
+            ));
+        }
+        Ok(Value::Bool(count >= 1))
     }
 
     /// `meta.function-exists($name)`: whether a user `@function` or a built-in
@@ -4579,11 +4597,36 @@ impl<'a> Evaluator<'a> {
         }
         let key = normalize_arg_name(&name);
         let user = self.functions.keys().any(|k| normalize_arg_name(k) == key);
+        if user {
+            return Ok(Value::Bool(true));
+        }
         // A function exposed unprefixed via `@use … as *` (or forwarded into a
-        // module that is itself `@use`d as `*`).
-        let star =
-            !is_private_member(&name) && self.star_user_modules.iter().any(|m| m.function(&name).is_some());
-        Ok(Value::Bool(user || star || crate::builtins::is_builtin(&name)))
+        // module that is itself `@use`d as `*`). Exposure from more than one
+        // star module is ambiguous.
+        let count = self.star_member_count(&name, MemberKind::Function);
+        if count > 1 {
+            return Err(Error::at(
+                "This function is available from multiple global modules.",
+                pos,
+            ));
+        }
+        Ok(Value::Bool(count >= 1 || crate::builtins::is_builtin(&name)))
+    }
+
+    /// Count how many `@use … as *` modules expose `name` as the given member
+    /// kind; more than one means an unqualified reference is ambiguous.
+    fn star_member_count(&self, name: &str, kind: MemberKind) -> usize {
+        if is_private_member(name) {
+            return 0;
+        }
+        self.star_user_modules
+            .iter()
+            .filter(|m| match kind {
+                MemberKind::Variable => m.var(name).is_some(),
+                MemberKind::Mixin => m.mixin(name).is_some(),
+                MemberKind::Function => m.function(name).is_some(),
+            })
+            .count()
     }
 
     /// `meta.content-exists()`: whether the enclosing mixin was passed a

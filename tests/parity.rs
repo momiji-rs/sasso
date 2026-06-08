@@ -4308,3 +4308,61 @@ fn parity_callable_not_valid_css_value() {
         "@use \"sass:meta\";\n@mixin a() {}\nx {y: meta.get-mixin(a) == meta.get-mixin(a)}\n",
     )]);
 }
+
+#[test]
+fn parity_meta_exists_global_module_conflict() {
+    // A name exposed unprefixed by more than one `@use … as *` module is
+    // ambiguous: the existence predicates error (byte-verified against
+    // dart-sass via the spec ratchet) rather than returning true.
+    let other = "$member: 1;\n@function member() {@return 1}\n@mixin member() {}\n";
+    let cases = [
+        (
+            "meta.variable-exists(member)",
+            "This variable is available from multiple global modules.",
+        ),
+        (
+            "meta.global-variable-exists(member)",
+            "This variable is available from multiple global modules.",
+        ),
+        (
+            "meta.mixin-exists(member)",
+            "This mixin is available from multiple global modules.",
+        ),
+        (
+            "meta.function-exists(member)",
+            "This function is available from multiple global modules.",
+        ),
+    ];
+    for (predicate, expected) in cases {
+        let dir = std::env::temp_dir().join(format!(
+            "sasso-conflict-{}-{}",
+            std::process::id(),
+            predicate.len()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::write(dir.join("_other1.scss"), other).unwrap();
+        std::fs::write(dir.join("_other2.scss"), other).unwrap();
+        let main = format!(
+            "@use \"sass:meta\";\n@use \"other1\" as *;\n@use \"other2\" as *;\na {{b: {predicate}}}\n"
+        );
+        let importer = FsImporter::new(vec![dir.clone()]);
+        let err = compile(&main, &Options::default().with_importer(&importer))
+            .err()
+            .map(|e| e.to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = err.unwrap_or_else(|| panic!("expected an ambiguity error for {predicate}"));
+        assert!(
+            err.trim_start_matches("Error: ").starts_with(expected),
+            "for {predicate}: got {err}"
+        );
+    }
+    // A single star module is unambiguous and resolves to true.
+    assert_module_parity(&[
+        (
+            "input.scss",
+            "@use \"sass:meta\";\n@use \"other1\" as *;\na {b: meta.function-exists(member)}\n",
+        ),
+        ("_other1.scss", other),
+    ]);
+}
