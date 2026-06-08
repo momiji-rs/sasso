@@ -5686,6 +5686,11 @@ fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
         let (av, bv, unit) = coerce_pair(a, b, pos)?;
         return Ok(Value::Number(Number { value: av + bv, unit }));
     }
+    // dart-sass removed color arithmetic: `color + color`/`color + number`
+    // (either order) is "Undefined operation", not string concatenation.
+    if color_arith_undefined(&l, &r) {
+        return Err(undefined_op(&l, "+", &r, pos));
+    }
     // A calculation can only be `+`-concatenated with a string; against any
     // other operand (number, color, bool, list, another calculation) dart-sass
     // raises "Undefined operation" rather than string-concatenating.
@@ -5724,6 +5729,11 @@ fn binary_sub(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     if let (Value::Number(a), Value::Number(b)) = (&l, &r) {
         let (av, bv, unit) = coerce_pair(a, b, pos)?;
         return Ok(Value::Number(Number { value: av - bv, unit }));
+    }
+    // Removed color arithmetic: `color - color`/`color - number` (either
+    // order) is "Undefined operation", not a string join.
+    if color_arith_undefined(&l, &r) {
+        return Err(undefined_op(&l, "-", &r, pos));
     }
     if matches!(&l, Value::Calc(_)) || matches!(&r, Value::Calc(_)) {
         return Err(undefined_op(&l, "-", &r, pos));
@@ -5825,6 +5835,15 @@ fn concat_str(v: &Value) -> String {
         Value::Str(s) => s.text.clone(),
         other => other.to_css(false),
     }
+}
+
+/// Whether a `+`/`-` operation is the removed color arithmetic that dart-sass
+/// rejects with "Undefined operation": a color combined with another color or a
+/// number. A color with a string (or other type) still string-concatenates via
+/// the default `Value.plus`/`Value.minus`.
+fn color_arith_undefined(l: &Value, r: &Value) -> bool {
+    let numeric = |v: &Value| matches!(v, Value::Color(_) | Value::Number(_));
+    (matches!(l, Value::Color(_)) && numeric(r)) || (matches!(r, Value::Color(_)) && numeric(l))
 }
 
 fn undefined_op(l: &Value, sym: &str, r: &Value, pos: Pos) -> Error {

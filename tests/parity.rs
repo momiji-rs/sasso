@@ -4093,3 +4093,40 @@ fn parity_content_using_errors() {
         }
     }
 }
+
+#[test]
+fn parity_color_arithmetic_removed() {
+    // dart-sass removed color arithmetic: `+`/`-` combining a color with
+    // another color or a number is "Undefined operation" (a color with a
+    // string still string-concatenates).
+    if !enabled() {
+        return;
+    }
+    let err_cases = [
+        "$v: #abc + #123;\na {b: $v}\n",
+        "$v: #abc + 1;\na {b: $v}\n",
+        "$v: 1 + #abc;\na {b: $v}\n",
+        "$v: #abc - #123;\na {b: $v}\n",
+        "$v: red - blue;\na {b: $v}\n",
+        "$v: 1 - red;\na {b: $v}\n",
+        "$v: rgb(1 2 3) + 1;\na {b: $v}\n",
+    ];
+    for scss in err_cases {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping color-arithmetic parity case: dart-sass unavailable"),
+        }
+    }
+    // A color combined with a string still concatenates (no error).
+    assert_parity("a {b: \"x\" + red}\n");
+    assert_parity("a {b: foo + red}\n");
+    assert_parity("a {b: red + foo}\n");
+}
