@@ -522,6 +522,15 @@ pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension]) -
     for complex in original {
         originals.insert(complex.render());
     }
+    // Extenders are source selectors too (dart-sass's `_originals` is store-wide),
+    // so a source extender is protected from being trimmed away by a broader
+    // generated one — e.g. a transitive `:is(a, b)` must not trim the original
+    // `:is(a)` that produced it.
+    for ext in extensions {
+        for complex in &ext.extenders {
+            originals.insert(complex.render());
+        }
+    }
 
     let result = extend_to_fixpoint(original, extensions);
 
@@ -701,7 +710,7 @@ fn complex_is_superselector_trailing(complex1: &[TComp], complex2: &[TComp]) -> 
             let Some(last2) = complex2.last() else {
                 return false;
             };
-            return compound_is_superselector(&component1.compound, &last2.compound);
+            return compound_is_superselector(&component1.compound, &last2.compound, parents);
         }
 
         // Find the first index `end` in complex2 whose compound is a subselector
@@ -712,7 +721,7 @@ fn complex_is_superselector_trailing(complex1: &[TComp], complex2: &[TComp]) -> 
             if component2.combinators.len() > 1 {
                 return false;
             }
-            if compound_is_superselector(&component1.compound, &component2.compound) {
+            if compound_is_superselector(&component1.compound, &component2.compound, &[]) {
                 break;
             }
             end += 1;
@@ -787,12 +796,71 @@ fn is_supercombinator(c1: Option<Combinator>, c2: Option<Combinator>) -> bool {
         || (c1 == Some(Combinator::FollowingSibling) && c2 == Some(Combinator::NextSibling))
 }
 
+/// Parse a selector pseudo `:name(<selectors>)` of the `:is`/`:matches`/`:any`/
+/// `:where`/`:-*-any`/`:has`/`:host`/`:host-context` family into its normalized
+/// name and argument selector list. `None` for any other (or non-selector) pseudo.
+fn parse_selector_pseudo(text: &str) -> Option<(String, Vec<Complex>)> {
+    let open = text.find('(')?;
+    if !text.ends_with(')') {
+        return None;
+    }
+    let name = text[..open].trim_start_matches(':').to_ascii_lowercase();
+    let known = matches!(
+        name.as_str(),
+        "is" | "where" | "matches" | "any" | "has" | "host" | "host-context"
+    ) || name.ends_with("-any");
+    if !known {
+        return None;
+    }
+    let list = parse_list(&text[open + 1..text.len() - 1])?;
+    Some((name, list))
+}
+
+/// dart-sass `_selectorPseudoIsSuperselector`. A selector pseudo on the super
+/// side matches if `compound2` carries a same-name selector pseudo whose
+/// argument our list supersedes, OR (for the `:is`/`:matches`/`:any`/`:where`/
+/// `:-*-any` family) one of our argument complexes is a superselector of
+/// `parents` followed by `compound2`. The relational `:has`/`:host`/
+/// `:host-context` use only the same-name rule.
+fn selector_pseudo_is_super(name: &str, branches: &[Complex], b: &Compound, parents: &[TComp]) -> bool {
+    for s in &b.simples {
+        if let Simple::Pseudo(t) = s {
+            if let Some((n2, b_branches)) = parse_selector_pseudo(t) {
+                // Our list must supersede EVERY branch of `b`'s same-name pseudo:
+                // `:is(c)` is NOT a superselector of `:is(c, d)` (it can't match
+                // the `d` branch), but `:is(c, d)` IS of `:is(c)`.
+                if n2 == name
+                    && !b_branches.is_empty()
+                    && b_branches
+                        .iter()
+                        .all(|s2| list_is_superselector(branches, std::slice::from_ref(s2)))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    let matchish = matches!(name, "is" | "where" | "matches" | "any") || name.ends_with("-any");
+    if !matchish {
+        return false;
+    }
+    branches.iter().any(|branch| {
+        let mut target: Vec<TComp> = parents.to_vec();
+        target.push(TComp {
+            compound: b.clone(),
+            combinators: Vec::new(),
+        });
+        complex_is_superselector_trailing(&to_trailing(&branch.components), &target)
+    })
+}
+
 /// Whether compound `a` is a superselector of compound `b` (dart-sass
 /// `compoundIsSuperselector`). A pseudo-element effectively changes the target
 /// of a compound rather than narrowing it, so if either compound has a
 /// pseudo-element they must both have the *same* one (with matching simples on
-/// each side of it).
-fn compound_is_superselector(a: &Compound, b: &Compound) -> bool {
+/// each side of it). `parents` are the components of `b`'s complex that precede
+/// its final compound, used by the `:is`-family selector-pseudo rule.
+fn compound_is_superselector(a: &Compound, b: &Compound, parents: &[TComp]) -> bool {
     match (find_pseudo_element(a), find_pseudo_element(b)) {
         (Some((pe1, i1)), Some((pe2, i2))) => {
             pe1 == pe2
@@ -801,10 +869,16 @@ fn compound_is_superselector(a: &Compound, b: &Compound) -> bool {
         }
         // Exactly one side has a pseudo-element: never a superselector.
         (Some(_), None) | (None, Some(_)) => false,
-        (None, None) => a
-            .simples
-            .iter()
-            .all(|s1| b.simples.iter().any(|s2| simple_is_superselector(s1, s2))),
+        (None, None) => a.simples.iter().all(|s1| {
+            // A selector pseudo (`:is(...)` etc.) follows the dart-sass pseudo
+            // rule; every other simple must match some simple of `b`.
+            if let Simple::Pseudo(text) = s1 {
+                if let Some((name, branches)) = parse_selector_pseudo(text) {
+                    return selector_pseudo_is_super(&name, &branches, b, parents);
+                }
+            }
+            b.simples.iter().any(|s2| simple_is_superselector(s1, s2))
+        }),
     }
 }
 
@@ -820,6 +894,7 @@ fn compound_components_is_superselector(a: &[Simple], b: &[Simple]) -> bool {
     compound_is_superselector(
         &Compound { simples: a.to_vec() },
         &Compound { simples: b.to_vec() },
+        &[],
     )
 }
 
@@ -1234,9 +1309,9 @@ fn merge_trailing_combinators(
             (Some(Combinator::FollowingSibling), Some(Combinator::FollowingSibling)) => {
                 let component1 = components1.pop_back()?;
                 let component2 = components2.pop_back()?;
-                if compound_is_superselector(&component1.compound, &component2.compound) {
+                if compound_is_superselector(&component1.compound, &component2.compound, &[]) {
                     result.push_front(vec![vec![component2]]);
-                } else if compound_is_superselector(&component2.compound, &component1.compound) {
+                } else if compound_is_superselector(&component2.compound, &component1.compound, &[]) {
                     result.push_front(vec![vec![component1]]);
                 } else {
                     let mut choices = vec![
@@ -1268,7 +1343,7 @@ fn merge_trailing_combinators(
                 } else {
                     components1.pop_back()?
                 };
-                if compound_is_superselector(&following.compound, &next.compound) {
+                if compound_is_superselector(&following.compound, &next.compound, &[]) {
                     result.push_front(vec![vec![next]]);
                 } else {
                     let mut choices = vec![vec![following.clone(), next.clone()]];
@@ -1311,7 +1386,7 @@ fn merge_trailing_combinators(
                         .map(|d| {
                             components1
                                 .back()
-                                .map(|c| compound_is_superselector(&d.compound, &c.compound))
+                                .map(|c| compound_is_superselector(&d.compound, &c.compound, &[]))
                                 .unwrap_or(false)
                         })
                         .unwrap_or(false)
@@ -1328,7 +1403,7 @@ fn merge_trailing_combinators(
                         .map(|d| {
                             components2
                                 .back()
-                                .map(|c| compound_is_superselector(&d.compound, &c.compound))
+                                .map(|c| compound_is_superselector(&d.compound, &c.compound, &[]))
                                 .unwrap_or(false)
                         })
                         .unwrap_or(false)
@@ -2541,7 +2616,7 @@ fn extend_component_compound(
     // every extension simultaneously).
     let matching: Vec<&Compound> = targets
         .iter()
-        .filter(|t| compound_is_superselector(t, &comp.compound))
+        .filter(|t| compound_is_superselector(t, &comp.compound, &[]))
         .collect();
     if matching.is_empty() {
         return vec![original];

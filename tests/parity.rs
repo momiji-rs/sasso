@@ -3849,3 +3849,30 @@ fn parity_meta_load_css() {
         ),
     ]);
 }
+
+#[test]
+fn parity_selector_pseudo_is_superselector() {
+    // :is/:matches/:where/:any and :has/:host/:host-context consider their
+    // selector argument. :is(...) is a superselector when every branch of a
+    // same-name pseudo is covered, or (matches family) one branch supersedes the
+    // parents+target compound. :is(c) is NOT a superselector of :is(c, d).
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.is-superselector(\":is(c d, e f, g h)\", \"c d.i, e j f\")}\n",
+    );
+    assert_parity("@use \"sass:selector\";\na {b: selector.is-superselector(\":is(c e)\", \"c d e\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.is-superselector(\":is(c)\", \":is(c, d)\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.is-superselector(\":is(c, d)\", \":is(c)\")}\n");
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.is-superselector(\":has(c d, e f, g h)\", \":has(c d.i, e j f)\")}\n",
+    );
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.is-superselector(\":host(c d, e f, g h)\", \":host(c d.i, e j f)\")}\n",
+    );
+}
+
+#[test]
+fn parity_extend_source_extender_not_trimmed() {
+    // A source extender (`:is(midstream)`) is never trimmed away by a broader
+    // generated selector (the transitive `:is(midstream, downstream)`).
+    assert_parity(":is(midstream) {@extend upstream}\ndownstream {@extend midstream}\nupstream {a: b}\n");
+}
