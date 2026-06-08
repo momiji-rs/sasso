@@ -158,14 +158,14 @@ fn resolve_index(
 }
 
 /// Parse a `$separator` argument into a concrete `ListSep`, or `None` for the
-/// keyword `auto`. dart-sass also accepts `slash`, which this list model
-/// cannot represent; it is rejected with the standard message.
+/// keyword `auto`. Accepts `space`/`comma`/`slash`.
 fn parse_separator(v: &Value, pos: Pos) -> Result<Option<ListSep>, Error> {
     if let Value::Str(SassStr { text, .. }) = v {
         match text.as_str() {
             "auto" => return Ok(None),
             "comma" => return Ok(Some(ListSep::Comma)),
             "space" => return Ok(Some(ListSep::Space)),
+            "slash" => return Ok(Some(ListSep::Slash)),
             _ => {}
         }
     }
@@ -225,9 +225,9 @@ fn fn_set_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
 /// undecided.
 fn settled_sep(v: &Value) -> Option<ListSep> {
     match v {
-        // A comma list is always settled (the comma is an explicit choice),
-        // even when empty or single-element.
-        Value::List(l) if l.sep == ListSep::Comma => Some(ListSep::Comma),
+        // A comma or slash list is always settled (the separator is an explicit
+        // choice), even when empty or single-element.
+        Value::List(l) if matches!(l.sep, ListSep::Comma | ListSep::Slash) => Some(l.sep),
         // A space list is only settled once it holds 2+ elements; a single
         // element (or empty) space list has an *undecided* separator, so it
         // defers to the other operand in `join`/`append`.

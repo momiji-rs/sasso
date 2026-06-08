@@ -3959,3 +3959,11 @@ fn parity_meta_accepts_content() {
         "@use \"sass:meta\";\n@mixin a {@content}\n@mixin b {x: y}\nz {\n  c: meta.accepts-content(meta.get-mixin(\"a\"));\n  d: meta.accepts-content(meta.get-mixin(\"b\"));\n  e: meta.accepts-content(meta.get-mixin(\"apply\", \"meta\"));\n}\n",
     );
 }
+
+#[test]
+fn parity_list_join_append_slash_separator() {
+    // `$separator: slash` now builds a slash-separated list (ListSep::Slash).
+    assert_parity("@use \"sass:list\";\na {b: list.join(1 2, 3 4, $separator: slash)}\n");
+    assert_parity("@use \"sass:list\";\na {b: list.append((1, 2), 3, $separator: slash)}\n");
+    assert_parity("@use \"sass:list\";\na {b: list.separator(list.join((), 1, slash))}\n");
+}
