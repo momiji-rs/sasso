@@ -3925,3 +3925,28 @@ fn parity_meta_module_members() {
         ),
     ]);
 }
+
+#[test]
+fn parity_meta_get_function_module() {
+    // get-function with a `$module` namespace resolves from that module.
+    assert_module_parity(&[
+        ("_other.scss", "@function f() {@return ff}\n"),
+        (
+            "input.scss",
+            "@use \"sass:meta\";\n@use \"other\" as o;\na {b: meta.call(meta.get-function(\"f\", $module: \"o\"))}\n",
+        ),
+    ]);
+    // The bare form captures a function exposed via `@use … as *`.
+    assert_module_parity(&[
+        ("_other.scss", "@function f() {@return ff}\n"),
+        (
+            "input.scss",
+            "@use \"sass:meta\";\n@use \"other\" as *;\na {b: meta.call(meta.get-function(\"f\"))}\n",
+        ),
+    ]);
+    // A built-in module member (math.round) via the namespace.
+    assert_module_parity(&[(
+        "input.scss",
+        "@use \"sass:meta\";\n@use \"sass:math\" as m;\na {b: meta.call(meta.get-function(\"round\", $module: \"m\"), 0.6)}\n",
+    )]);
+}

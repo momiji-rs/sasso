@@ -3883,12 +3883,18 @@ impl<'a> Evaluator<'a> {
             None => return Err(Error::at("Missing argument $name.", pos)),
         };
         let css = matches!(arg(1), Some(v) if v.is_truthy());
-        // A `$module` argument requires the user-module system this build lacks.
-        if matches!(arg(2), Some(v) if !matches!(v, Value::Null)) {
-            return Err(Error::at(
-                "$module: modules are not supported for get-function in this build.",
-                pos,
-            ));
+        // A `$module` namespace resolves the function from that `@use`d module.
+        if let Some(module_v) = arg(2) {
+            match module_v {
+                Value::Null => {}
+                Value::Str(s) => return self.get_function_from_module(&name, &s.text, pos),
+                other => {
+                    return Err(Error::at(
+                        format!("$module: {} is not a string.", other.to_css(false)),
+                        pos,
+                    ))
+                }
+            }
         }
         if css {
             return Ok(Value::Function(SassFunction {
@@ -3905,6 +3911,18 @@ impl<'a> Evaluator<'a> {
                 css: false,
                 user: Some(Rc::clone(f) as Rc<dyn std::any::Any>),
             }));
+        }
+        // A function exposed unprefixed via `@use … as *` (or forwarded into one).
+        if !is_private_member(&name) {
+            for m in &self.star_user_modules {
+                if let Some(f) = m.function(&name) {
+                    return Ok(Value::Function(SassFunction {
+                        name,
+                        css: false,
+                        user: Some(Rc::clone(&f) as Rc<dyn std::any::Any>),
+                    }));
+                }
+            }
         }
         if crate::builtins::is_builtin(&name) {
             return Ok(Value::Function(SassFunction {
@@ -4008,6 +4026,42 @@ impl<'a> Evaluator<'a> {
     /// Resolve a `$module`-qualified mixin reference for `meta.get-mixin`. The
     /// namespace must name a currently-`@use`d module; a built-in module's
     /// mixins (`meta.load-css`, `meta.apply`) resolve by name.
+    /// `meta.get-function($name, $module: ns)`: capture a function reference from
+    /// the module bound to `ns` — a user `@function` by identity, or a built-in
+    /// member by name.
+    fn get_function_from_module(&self, name: &str, module_name: &str, pos: Pos) -> Result<Value, Error> {
+        if let Some(module) = self.used_user_modules.get(module_name) {
+            if is_private_member(name) {
+                return Err(Error::at(
+                    "Private members can't be accessed from outside their modules.".to_string(),
+                    pos,
+                ));
+            }
+            if let Some(f) = module.function(name) {
+                return Ok(Value::Function(SassFunction {
+                    name: name.to_string(),
+                    css: false,
+                    user: Some(Rc::clone(&f) as Rc<dyn std::any::Any>),
+                }));
+            }
+            return Err(Error::at(format!("Function not found: {name}"), pos));
+        }
+        if let Some(builtin) = self.used_modules.get(module_name) {
+            if crate::builtins::module_has_member(builtin, name) {
+                return Ok(Value::Function(SassFunction {
+                    name: name.to_string(),
+                    css: false,
+                    user: None,
+                }));
+            }
+            return Err(Error::at(format!("Function not found: {name}"), pos));
+        }
+        Err(Error::at(
+            format!("There is no module with the namespace \"{module_name}\"."),
+            pos,
+        ))
+    }
+
     fn get_mixin_from_module(&self, name: &str, module_name: &str, pos: Pos) -> Result<Value, Error> {
         if let Some(module) = self.used_user_modules.get(module_name) {
             if is_private_member(name) {

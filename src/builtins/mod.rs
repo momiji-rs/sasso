@@ -315,7 +315,7 @@ fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
 /// Whether `module` exposes `member` as a callable function (used by the
 /// evaluator to resolve unprefixed `@use … as *` members).
 pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
-    if module == "math" && matches!(member, "div" | "clamp" | "min" | "max") {
+    if module == "math" && matches!(member, "div" | "clamp" | "min" | "max" | "round") {
         return true;
     }
     if module == "map" && matches!(member, "set" | "deep-merge" | "deep-remove") {
