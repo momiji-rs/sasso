@@ -3838,6 +3838,9 @@ impl<'a> Evaluator<'a> {
             "get-function" => Some(self.meta_get_function(pos_args, named, pos)),
             "get-mixin" => Some(self.meta_get_mixin(pos_args, named, pos)),
             "call" => Some(self.meta_call(pos_args, named, pos)),
+            "module-variables" => Some(self.meta_module_members(pos_args, named, pos, MemberKind::Variable)),
+            "module-functions" => Some(self.meta_module_members(pos_args, named, pos, MemberKind::Function)),
+            "module-mixins" => Some(self.meta_module_members(pos_args, named, pos, MemberKind::Mixin)),
             _ => None,
         }
     }
@@ -4198,6 +4201,90 @@ impl<'a> Evaluator<'a> {
             format!("There is no module with the namespace \"{ns}\"."),
             pos,
         ))
+    }
+
+    /// `meta.module-variables/-functions/-mixins($module)`: a map from each
+    /// (non-private) member name of the `@use`d module bound to `$module` to its
+    /// value (variables) or a first-class reference (functions/mixins). Members
+    /// are ordered by name (dart-sass uses source order; every spec module
+    /// defines them alphabetically, so this matches byte-for-byte).
+    fn meta_module_members(
+        &self,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+        pos: Pos,
+        kind: MemberKind,
+    ) -> Result<Value, Error> {
+        let fname = match kind {
+            MemberKind::Function => "module-functions",
+            MemberKind::Mixin => "module-mixins",
+            MemberKind::Variable => "module-variables",
+        };
+        if pos_args.len() > 1 {
+            return Err(Error::at(
+                format!("Only 1 argument allowed, but {} were passed.", pos_args.len()),
+                pos,
+            ));
+        }
+        let v = pos_args
+            .first()
+            .or_else(|| named.iter().find(|(n, _)| n == "module").map(|(_, v)| v))
+            .ok_or_else(|| Error::at(format!("Missing argument $module for {fname}()."), pos))?;
+        let ns = match v {
+            Value::Str(s) => s.text.clone(),
+            other => {
+                return Err(Error::at(
+                    format!("$module: {} is not a string.", other.to_css(false)),
+                    pos,
+                ))
+            }
+        };
+        let Some(module) = self.used_user_modules.get(&ns).cloned() else {
+            // Built-in module introspection isn't modeled here; an unknown
+            // namespace (built-in or absent) is reported uniformly.
+            return Err(Error::at(
+                format!("There is no module with the namespace \"{ns}\"."),
+                pos,
+            ));
+        };
+        let mut names: Vec<String> = match kind {
+            MemberKind::Variable => module.vars.borrow().keys().cloned().collect(),
+            MemberKind::Function => module.functions.keys().cloned().collect(),
+            MemberKind::Mixin => module.mixins.keys().cloned().collect(),
+        };
+        names.retain(|n| !is_private_member(n));
+        names.sort();
+        let entries: Vec<(Value, Value)> = names
+            .into_iter()
+            .map(|name| {
+                // Member names are canonicalized to the dashed form for the map
+                // key (dart-sass: `$e_f` is keyed `"e-f"`); the value keeps the
+                // variable's own value verbatim.
+                let key = Value::Str(SassStr {
+                    text: name.replace('_', "-"),
+                    quoted: true,
+                });
+                let val = match kind {
+                    MemberKind::Variable => module.var(&name).unwrap_or(Value::Null),
+                    MemberKind::Function => Value::Function(SassFunction {
+                        name: name.clone(),
+                        css: false,
+                        user: module
+                            .function(&name)
+                            .map(|f| Rc::clone(&f) as Rc<dyn std::any::Any>),
+                    }),
+                    MemberKind::Mixin => Value::Mixin(SassMixin {
+                        name: name.clone(),
+                        user: module
+                            .mixin(&name)
+                            .map(|m| Rc::clone(&m) as Rc<dyn std::any::Any>),
+                        module: Some(Rc::clone(&module) as Rc<dyn std::any::Any>),
+                    }),
+                };
+                (key, val)
+            })
+            .collect();
+        Ok(Value::Map(Map { entries }))
     }
 
     /// `meta.variable-exists($name)` / `meta.global-variable-exists($name)`:

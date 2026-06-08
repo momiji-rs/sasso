@@ -3901,3 +3901,27 @@ fn parity_meta_exists_module_and_star() {
         "@use \"sass:meta\";\n@use \"sass:color\" as c;\na {r: meta.function-exists(\"red\", \"c\")}\n",
     )]);
 }
+
+#[test]
+fn parity_meta_module_members() {
+    // module-variables maps non-private members → value (private `-priv` omitted).
+    assert_module_parity(&[
+        ("_other.scss", "$d: d value;\n$e: e value;\n$-priv: hidden;\n"),
+        (
+            "input.scss",
+            "@use \"sass:meta\";\n@use \"other\";\na {b: meta.inspect(meta.module-variables(\"other\"))}\n",
+        ),
+    ]);
+    // module-functions references are callable; an underscore key canonicalizes
+    // to a dash.
+    assert_module_parity(&[
+        (
+            "_other.scss",
+            "@function c-d() {@return cd}\n@function e_f() {@return ef}\n",
+        ),
+        (
+            "input.scss",
+            "@use \"sass:meta\";\n@use \"other\";\n$m: meta.module-functions(\"other\");\na {x: meta.call(map-get($m, \"c-d\")); y: meta.call(map-get($m, \"e-f\"))}\n",
+        ),
+    ]);
+}
