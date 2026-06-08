@@ -94,6 +94,11 @@ class Case:
     input_text: str
     expected_css: Optional[str]     # None if this is an error spec
     expects_error: bool
+    # Expected STDERR text for the --check-stderr metric, independent of the
+    # CSS verdict. Populated from a warning/warning-<impl>/error/error-<impl>
+    # expectation file when one exists; None when the case has none.
+    expected_stderr: Optional[str] = None
+    stderr_kind: Optional[str] = None  # "warning" | "error" (which file kind)
     extra_files: dict = field(default_factory=dict)  # other .scss/.css siblings
     options: dict = field(default_factory=dict)      # merged options.yml
     precision: Optional[int] = None
@@ -110,6 +115,12 @@ class Result:
     skip_tag: Optional[str] = None
     reason: Optional[str] = None
     input_name: str = "input.scss"
+    # --check-stderr metric (additive; only set when the flag is on AND the
+    # case has a warning/error expectation file). None => not measured.
+    #   stderr_status: "MATCH" | "MISMATCH"
+    #   stderr_kind:   "warning" | "error"
+    stderr_status: Optional[str] = None
+    stderr_kind: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -257,6 +268,45 @@ def pick_expectation(files: dict, dirpath: str, impl: str):
     return None, None  # neither -> not a runnable case
 
 
+def pick_stderr_expectation(files: dict, dirpath: str, impl: str):
+    """Return (expected_stderr_text, kind) for the diagnostics metric, or
+    (None, None) if this case has no warning/error expectation file.
+
+    This is INDEPENDENT of pick_expectation (which only yields a bool
+    expects_error for the CSS verdict). dart-sass's own runner stores the
+    expected stderr in one of four files; impl-specific overrides win:
+
+        error-<impl>   >  error      (kind="error")
+        warning-<impl> >  warning    (kind="warning")
+
+    A case can legitimately carry BOTH a warning file (deprecations printed on
+    a successful compile) and an error file (only one of which dart-sass would
+    actually emit per run); error wins for the purpose of "what's on stderr"
+    only when the case errors, but the chosen-expectation precedence here
+    mirrors how sass-spec attaches the *expected* stderr: the error spec's
+    stderr is the error file; a pure-warning spec's stderr is the warning file.
+    We therefore prefer error-* when present (an error case never also emits
+    its warning file's body alone), else warning-*.
+    """
+    def get(name):
+        key = f"{dirpath}/{name}" if dirpath else name
+        return files.get(key)
+
+    err = get(f"error-{impl}")
+    if err is None:
+        err = get("error")
+    if err is not None:
+        return err, "error"
+
+    warn = get(f"warning-{impl}")
+    if warn is None:
+        warn = get("warning")
+    if warn is not None:
+        return warn, "warning"
+
+    return None, None
+
+
 def collect_case_dirs(files: dict):
     """Return sorted list of directories (by '/' prefix) that contain an
     input file. '' denotes the archive root."""
@@ -314,6 +364,8 @@ def cases_from_files(files: dict, archive_id: str):
         if expected_css is None and not expects_error:
             continue  # no expectation -> not a runnable conformance case
 
+        expected_stderr, stderr_kind = pick_stderr_expectation(files, d, IMPL)
+
         opts = options_for_dir(files, d)
 
         # Import partials for THIS case: every file under d/ that isn't claimed
@@ -347,6 +399,8 @@ def cases_from_files(files: dict, archive_id: str):
             input_text=files[input_path],
             expected_css=expected_css,
             expects_error=expects_error,
+            expected_stderr=expected_stderr,
+            stderr_kind=stderr_kind,
             extra_files=extra,
             options=opts,
             precision=opts.get("precision"),
@@ -396,6 +450,7 @@ def iter_all_cases(suite: Path, suite_root: Path):
         expected_css, expects_error = pick_expectation(files, "", IMPL)
         if expected_css is None and not expects_error:
             continue
+        expected_stderr, stderr_kind = pick_stderr_expectation(files, "", IMPL)
         rel = d.relative_to(suite_root).as_posix()
         extra = {
             k: v for k, v in files.items()
@@ -409,6 +464,8 @@ def iter_all_cases(suite: Path, suite_root: Path):
             input_text=files[inp.name],
             expected_css=expected_css,
             expects_error=expects_error,
+            expected_stderr=expected_stderr,
+            stderr_kind=stderr_kind,
             extra_files=extra,
             options=merged_opts,
             precision=merged_opts.get("precision"),
@@ -442,6 +499,44 @@ def normalize_css(css: str) -> str:
     lines = [ln.rstrip() for ln in css.split("\n")]
     # drop blank lines (sass-spec ignores them when comparing)
     lines = [ln for ln in lines if ln != ""]
+    return "\n".join(lines).strip()
+
+
+def normalize_stderr(text: str, input_basename: str, abs_input_path: str) -> str:
+    """Normalize stderr the way dart-sass's OWN spec runner does before
+    comparing diagnostics — and ONLY that, so the metric is faithful.
+
+    sass-spec's runner runs the compiler with the input written at a path it
+    controls, then rewrites that absolute path back to the relative
+    placeholder ('input.scss' / 'input.sass') that the checked-in expectation
+    files use, and compares ignoring trailing whitespace / line-ending /
+    trailing-blank differences. We replicate exactly that:
+
+      * the absolute temp input path  ->  the bare placeholder basename
+        (both the full path and, defensively, its containing dir prefix),
+      * CRLF/CR -> LF,
+      * a possible UTF-8 BOM stripped,
+      * trailing whitespace stripped from every line,
+      * trailing blank lines / surrounding blank space stripped.
+
+    We do NOT touch glyphs, gutter widths, caret columns, message wording or
+    the deprecation [id] tags — those ARE the diagnostics under test and must
+    match byte-for-byte (post-path-normalization) to count.
+    """
+    if text is None:
+        return ""
+    if text.startswith("﻿"):
+        text = text[1:]
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Map the absolute path the compiler actually saw back to the placeholder
+    # the expectation files use. Replace the full path first (longest match),
+    # then the containing directory prefix so 'dir/input.scss' -> 'input.scss'.
+    if abs_input_path:
+        text = text.replace(abs_input_path, input_basename)
+        parent = os.path.dirname(abs_input_path)
+        if parent:
+            text = text.replace(parent + os.sep, "")
+    lines = [ln.rstrip() for ln in text.split("\n")]
     return "\n".join(lines).strip()
 
 
@@ -481,11 +576,23 @@ def decide_skip(case: Case, enabled_tags: set, impl: str):
 # Compilation
 # --------------------------------------------------------------------------- #
 
-def compile_case(case: Case, sass_bin: str, style: str):
-    """Compile a case. Returns (stdout, returncode). We write the input (and
-    any extra sibling files, needed for @import) to a temp dir and pass the
-    input path positionally. stdout is captured; stderr is discarded (warnings
-    /deprecations live there and we capture stdout only)."""
+def compile_case(case: Case, sass_bin: str, style: str,
+                 capture_stderr: bool = False, extra_args=None):
+    """Compile a case. Returns (stdout, returncode, stderr, abs_input_path).
+
+    We write the input (and any extra sibling files, needed for @import) to a
+    temp dir and pass the input path positionally. stdout is always captured.
+
+    stderr is DISCARDED by default (capture_stderr=False) — this preserves the
+    historical behavior exactly, so the default CSS verdict is byte-identical
+    to before. When capture_stderr=True (the --check-stderr metric) we capture
+    stderr too, and return the absolute input path so the caller can normalize
+    that path back to the spec's 'input.scss' placeholder.
+
+    extra_args: extra CLI flags appended ONLY when supplied (used by
+    --check-stderr to pass e.g. --no-unicode, the flag sass-spec generated its
+    ASCII-glyph expectation files with). Left empty by default so the default
+    CSS run is unchanged."""
     with tempfile.TemporaryDirectory(prefix="sass-spec-") as td:
         tdp = Path(td)
         in_path = tdp / case.input_name
@@ -514,6 +621,8 @@ def compile_case(case: Case, sass_bin: str, style: str):
         cmd = [sass_bin]
         # style flag (dart-sass accepts --style=...; sasso should too)
         cmd.append(f"--style={style}")
+        for a in (extra_args or []):
+            cmd.append(a)
         for lp in load_paths:
             cmd += ["-I", str(lp)]
         if case.precision is not None:
@@ -522,44 +631,78 @@ def compile_case(case: Case, sass_bin: str, style: str):
             pass
         cmd.append(str(in_path))
 
+        abs_input = str(in_path)
         try:
             proc = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=(subprocess.PIPE if capture_stderr
+                        else subprocess.DEVNULL),
                 timeout=60,
             )
-            return proc.stdout.decode("utf-8", errors="replace"), proc.returncode
+            out = proc.stdout.decode("utf-8", errors="replace")
+            err = (proc.stderr.decode("utf-8", errors="replace")
+                   if capture_stderr and proc.stderr is not None else "")
+            return out, proc.returncode, err, abs_input
         except subprocess.TimeoutExpired:
-            return "", 124
+            return "", 124, "", abs_input
         except FileNotFoundError:
             print(f"ERROR: SASS_BIN not found: {sass_bin}", file=sys.stderr)
             sys.exit(2)
 
 
-def evaluate(case: Case, sass_bin: str, style: str) -> Result:
-    stdout, rc = compile_case(case, sass_bin, style)
+def evaluate(case: Case, sass_bin: str, style: str,
+             check_stderr: bool = False, stderr_args=None) -> Result:
+    # The CSS-verdict run is ALWAYS flag-clean (no stderr_args), so the
+    # PASS/FAIL/ERROR_EXPECTED classification — and therefore the baseline
+    # ratchet — is byte-identical whether or not --check-stderr is on. We only
+    # capture stderr here when no extra stderr_args are requested (the common
+    # case), to avoid a second subprocess. When stderr_args ARE requested
+    # (e.g. --no-unicode), we run a SEPARATE measurement compile below so the
+    # extra flags can never perturb the CSS verdict.
+    want_inline_stderr = check_stderr and not stderr_args
+    stdout, rc, stderr_out, abs_input = compile_case(
+        case, sass_bin, style, capture_stderr=want_inline_stderr,
+        extra_args=None)
     errored = rc != 0
 
+    # ---- CSS verdict (UNCHANGED — this drives the baseline ratchet) -------- #
     if case.expects_error:
         if errored:
-            return Result(case.name, "ERROR_EXPECTED", input_name=case.input_name)
-        return Result(case.name, "FAIL",
-                      reason="expected an error but compiled successfully",
-                      input_name=case.input_name)
+            res = Result(case.name, "ERROR_EXPECTED", input_name=case.input_name)
+        else:
+            res = Result(case.name, "FAIL",
+                         reason="expected an error but compiled successfully",
+                         input_name=case.input_name)
+    elif errored:
+        res = Result(case.name, "FAIL",
+                     reason=f"compiler errored (rc={rc}) on a success spec",
+                     input_name=case.input_name)
+    else:
+        got = normalize_css(stdout)
+        want = normalize_css(case.expected_css)
+        if got == want:
+            res = Result(case.name, "PASS", input_name=case.input_name)
+        else:
+            res = Result(case.name, "FAIL", reason="output mismatch",
+                         input_name=case.input_name)
 
-    # success spec
-    if errored:
-        return Result(case.name, "FAIL",
-                      reason=f"compiler errored (rc={rc}) on a success spec",
-                      input_name=case.input_name)
+    # ---- stderr-conformance metric (ADDITIVE — never affects status) ------- #
+    if check_stderr and case.expected_stderr is not None:
+        if want_inline_stderr:
+            measured_err, measured_abs = stderr_out, abs_input
+        else:
+            # separate, flag-carrying compile purely for the stderr metric
+            _, _, measured_err, measured_abs = compile_case(
+                case, sass_bin, style, capture_stderr=True,
+                extra_args=stderr_args)
+        got_err = normalize_stderr(measured_err, case.input_name, measured_abs)
+        want_err = normalize_stderr(case.expected_stderr, case.input_name,
+                                    measured_abs)
+        res.stderr_kind = case.stderr_kind
+        res.stderr_status = "MATCH" if got_err == want_err else "MISMATCH"
 
-    got = normalize_css(stdout)
-    want = normalize_css(case.expected_css)
-    if got == want:
-        return Result(case.name, "PASS", input_name=case.input_name)
-    return Result(case.name, "FAIL", reason="output mismatch",
-                  input_name=case.input_name)
+    return res
 
 
 # --------------------------------------------------------------------------- #
@@ -594,6 +737,24 @@ def main():
                     help="path for results.json")
     ap.add_argument("--quiet", action="store_true",
                     help="don't print per-FAIL diagnostics")
+    ap.add_argument("--check-stderr", action="store_true",
+                    help="ADDITIVE diagnostics metric: for cases that ship a "
+                         "warning/warning-<impl>/error/error-<impl> expectation "
+                         "file, also compare the compiler's STDERR to it (path "
+                         "normalized to the spec placeholder + trailing-ws), and "
+                         "report a separate stderr-conformance count. Does NOT "
+                         "change the PASS/FAIL/ERROR_EXPECTED verdict or the "
+                         "process exit status.")
+    ap.add_argument("--stderr-arg", action="append", default=[],
+                    metavar="FLAG",
+                    help="extra CLI flag passed to the compiler ONLY for the "
+                         "--check-stderr measurement run (repeatable). The "
+                         "checked-in sass-spec expectation files use the ASCII "
+                         "glyph set, i.e. they were generated with dart-sass "
+                         "--no-unicode; pass --stderr-arg=--no-unicode for a "
+                         "compiler that supports it to compare faithfully. "
+                         "Carried on a SEPARATE compile so it never affects the "
+                         "CSS verdict.")
     args = ap.parse_args()
 
     IMPL = args.impl
@@ -656,7 +817,9 @@ def main():
             continue
 
         attempted += 1
-        res = evaluate(case, sass_bin, args.style)
+        res = evaluate(case, sass_bin, args.style,
+                       check_stderr=args.check_stderr,
+                       stderr_args=args.stderr_arg)
         results.append(res)
         if res.status == "FAIL" and not args.quiet:
             print(f"FAIL  {res.name}\n        ({res.reason})")
@@ -671,6 +834,28 @@ def main():
     n_pass = counts["PASS"] + counts["ERROR_EXPECTED"]
     pass_pct_attempted = (100.0 * n_pass / n_attempted) if n_attempted else 0.0
     pass_pct_total = (100.0 * n_pass / total) if total else 0.0
+
+    # ---- additive stderr-conformance tally (only when --check-stderr) ------ #
+    stderr_summary = None
+    if args.check_stderr:
+        measured = [r for r in results if r.stderr_status is not None]
+        s_match = sum(1 for r in measured if r.stderr_status == "MATCH")
+        s_total = len(measured)
+        by_kind: dict = {}
+        for r in measured:
+            k = r.stderr_kind or "unknown"
+            slot = by_kind.setdefault(k, {"total": 0, "match": 0})
+            slot["total"] += 1
+            if r.stderr_status == "MATCH":
+                slot["match"] += 1
+        stderr_summary = {
+            "cases_with_expectation": s_total,
+            "stderr_match": s_match,
+            "stderr_mismatch": s_total - s_match,
+            "stderr_match_pct": round(100.0 * s_match / s_total, 2)
+            if s_total else 0.0,
+            "by_kind": by_kind,
+        }
 
     # write results.json
     out = {
@@ -694,6 +879,8 @@ def main():
         },
         "cases": [asdict(r) for r in results],
     }
+    if stderr_summary is not None:
+        out["stderr_summary"] = stderr_summary
     Path(args.out).write_text(json.dumps(out, indent=2), encoding="utf-8")
 
     # summary
@@ -711,6 +898,19 @@ def main():
     print(f"PASS% of attempted : {pass_pct_attempted:6.2f}%   "
           f"({n_pass}/{n_attempted})")
     print(f"PASS% of total     : {pass_pct_total:6.2f}%   ({n_pass}/{total})")
+    if stderr_summary is not None:
+        s = stderr_summary
+        print("-" * 70)
+        print("STDERR-conformance metric (additive; does not affect verdict)")
+        print(f"  cases w/ warning|error expectation : "
+              f"{s['cases_with_expectation']}")
+        print(f"  stderr byte-match                  : {s['stderr_match']}")
+        print(f"  stderr mismatch                    : {s['stderr_mismatch']}")
+        print(f"  stderr match%                      : "
+              f"{s['stderr_match_pct']:.2f}%")
+        for kind in sorted(s["by_kind"]):
+            slot = s["by_kind"][kind]
+            print(f"    {kind:8s} {slot['match']}/{slot['total']}")
     print(f"results -> {args.out}")
 
     # exit non-zero if any real failures (useful for CI / ratchet)
