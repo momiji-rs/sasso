@@ -4457,3 +4457,34 @@ fn parity_loud_comment_interpolation() {
         }
     }
 }
+
+#[test]
+fn parity_operator_without_whitespace() {
+    // dart-sass: `+`/`-` is a binary operator unless it has whitespace before
+    // but not after (then it is a unary sign starting a new space-list term).
+    assert_parity("a {b: 1+1}\n");
+    assert_parity("a {b: 1+ 1}\n");
+    assert_parity("a {b: 5-2}\n");
+    assert_parity("a {b: 5- 2}\n");
+    assert_parity("a {b: 10px+5px}\n");
+    assert_parity("a {b: 1-a}\n");
+    assert_parity("a {b: (1)-2}\n");
+    // Space-before-not-after stays a list of signed terms.
+    assert_parity("a {b: 1 -2}\n");
+    assert_parity("a {b: 5 -2 3}\n");
+    // Identifiers keep their hyphens (the `-` never reaches the operator parser).
+    assert_parity("a {b: a-b}\n");
+    assert_parity("a {b: foo-bar}\n");
+    assert_parity("a {b: a-1}\n");
+    assert_parity("a {b: red-1}\n");
+    // Unicode ranges: a `?`-wildcard followed by `-name` splits, by `-digit`
+    // subtracts.
+    assert_parity("a {b: U+A?-BCDE}\n");
+    assert_parity("a {b: U+A?-1234}\n");
+    assert_parity("a {b: U+0-7F}\n");
+    // calc() still requires whitespace around `+`/`-`.
+    if enabled() {
+        assert!(compile("a {b: calc(1+1)}\n", &Options::default()).is_err());
+        assert!(dart_sass("a {b: calc(1+1)}\n").is_none());
+    }
+}

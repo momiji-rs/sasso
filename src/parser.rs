@@ -3639,6 +3639,12 @@ impl Parser {
     fn additive(&mut self) -> Result<Expr, Error> {
         let mut lhs = self.multiplicative()?;
         loop {
+            // A `?`-wildcard unicode-range token is terminal: a directly
+            // following `-name` begins a fresh space-list element (handled by
+            // `space_list`), not a subtraction, so don't consume the operator.
+            if self.pending_unicode_split {
+                break;
+            }
             let mark = self.sc.mark();
             let had_ws = self.skip_ws_inline();
             let op = match self.sc.peek() {
@@ -3654,7 +3660,17 @@ impl Parser {
                     let ws_after = matches!(self.sc.peek_at(1), Some(c) if c.is_whitespace())
                         || (self.sc.peek_at(1) == Some('/')
                             && matches!(self.sc.peek_at(2), Some('*') | Some('/')));
-                    if had_ws && ws_after {
+                    // dart-sass: `+`/`-` is a binary operator unless it has
+                    // whitespace before but NOT after — then it is a unary sign
+                    // beginning a new space-separated list term (`1 -2` is the
+                    // list `1 -2`, while `1-2`, `1- 2` and `1 - 2` all subtract).
+                    // Inside a calculation it must be surrounded on both sides.
+                    let binary = if self.calc_depth > 0 {
+                        had_ws && ws_after
+                    } else {
+                        !had_ws || ws_after
+                    };
+                    if binary {
                         let pos = self.sc.position();
                         self.sc.bump();
                         self.skip_ws_inline();
