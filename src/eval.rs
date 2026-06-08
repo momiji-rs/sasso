@@ -1567,7 +1567,15 @@ impl<'a> Evaluator<'a> {
         sink: &mut Sink<'_>,
     ) -> Result<(Rc<Module>, Vec<String>), Error> {
         let importer = self.options.importer;
-        let (key, src, syntax) = match importer.and_then(|imp| imp.resolve_module_with_syntax(url)) {
+        // The caller's importer runs OUTSIDE the arena scope: anything it
+        // allocates (e.g. a cache of paths it owns) must survive past this
+        // compile's arena reset, so route its allocations to the system
+        // allocator. The returned `String`s are then deep-copied into the arena
+        // below by the parse/eval pipeline.
+        let saved = crate::arena::pause();
+        let resolved = importer.and_then(|imp| imp.resolve_module_with_syntax(url));
+        crate::arena::resume(saved);
+        let (key, src, syntax) = match resolved {
             Some(triple) => triple,
             None => {
                 return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
@@ -2739,7 +2747,13 @@ impl<'a> Evaluator<'a> {
                         sink.push_at_rule(OutNode::Raw(format!("@import \"{path}\";")));
                         continue;
                     }
-                    match importer.and_then(|imp| imp.resolve_with_syntax(path)) {
+                    // Run the caller's importer outside the arena scope so any
+                    // state it caches (paths, sources) outlives this compile's
+                    // arena reset; see the matching note in `load_module`.
+                    let saved = crate::arena::pause();
+                    let resolved = importer.and_then(|imp| imp.resolve_with_syntax(path));
+                    crate::arena::resume(saved);
+                    match resolved {
                         Some((src, syntax)) => {
                             if self.loading.iter().any(|p| p == path) {
                                 return Err(Error::unpositioned("This file is already being loaded."));

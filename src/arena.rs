@@ -231,8 +231,7 @@ impl Arena {
     }
 
     fn alloc(&self, layout: Layout) -> Option<*mut u8> {
-        let (aligned, next) =
-            bump_compute(self.cursor.get(), layout.align(), layout.size(), self.end)?;
+        let (aligned, next) = bump_compute(self.cursor.get(), layout.align(), layout.size(), self.end)?;
         self.cursor.set(next);
         // SAFETY: in-bounds offset (see bump_compute).
         Some(unsafe { self.base.add(aligned - self.base as usize) })
@@ -384,7 +383,10 @@ mod tests {
                 b != 0 && (p as usize) >= b && (p as usize) < tl.end.get()
             })
         };
-        assert!(in_arena(p1) && in_arena(p2), "in-scope allocs come from the arena");
+        assert!(
+            in_arena(p1) && in_arena(p2),
+            "in-scope allocs come from the arena"
+        );
         assert!(p2 as usize >= p1 as usize + 128, "no overlap");
         assert_eq!(p1 as usize % 16, 0);
         // dealloc of an in-arena pointer is a no-op (doesn't free / crash).

@@ -296,3 +296,88 @@ fn incompatible_units_error() {
     let err = compile(".a { width: 1px + 1em; }", &Options::default()).unwrap_err();
     assert!(err.message.contains("incompatible units"));
 }
+
+// --- scoped-arena escape safety (perf #5) ----------------------------------
+//
+// `compile` brackets its work in a bump-arena scope (when `ScopedAlloc` is the
+// global allocator) and resets the arena on return. A caller's `Importer` runs
+// inside that scope, so if it stashed the passed `&str` path or otherwise kept
+// allocations made during the call, those would dangle after the reset. The
+// evaluator therefore `pause()`s the arena around each importer callback so the
+// importer's own allocations go to the system allocator and survive the compile.
+//
+// This integration test exercises that boundary: a caching importer copies every
+// requested path into a `RefCell<Vec<String>>` *it owns* (a `path.to_string()`
+// — an allocation made during the importer callback). After `compile` returns we
+// assert those cached strings are still readable and correct. Under `ScopedAlloc`
+// this proves they were NOT arena-allocated (an arena allocation would have been
+// reclaimed by the post-compile reset); under the default allocator it is still a
+// useful correctness regression guard for the pause/resume wiring.
+
+use std::cell::RefCell;
+
+/// An importer that caches every path it is asked to resolve, owning the cached
+/// `String`s itself. Serves both `@import` and `@use`/`@forward`.
+struct CachingImporter {
+    files: HashMap<String, String>,
+    /// Paths requested, copied into importer-owned storage during the callback.
+    requested: RefCell<Vec<String>>,
+}
+
+impl Importer for CachingImporter {
+    fn resolve(&self, path: &str) -> Option<String> {
+        // Record the request in importer-owned state. This allocation happens
+        // *inside* the importer callback; the pause/resume boundary must keep it
+        // on the system allocator so it outlives the compile's arena reset.
+        self.requested.borrow_mut().push(path.to_string());
+        self.files.get(path).cloned()
+    }
+
+    fn resolve_module(&self, path: &str) -> Option<(String, String)> {
+        self.requested.borrow_mut().push(path.to_string());
+        self.files.get(path).map(|src| (path.to_string(), src.clone()))
+    }
+}
+
+#[test]
+fn importer_cached_strings_survive_compile_reset() {
+    let mut files = HashMap::new();
+    files.insert(
+        "partial".to_string(),
+        "$pad: 8px;\nbody { padding: $pad; }".to_string(),
+    );
+    files.insert("mod".to_string(), "$gap: 4px;".to_string());
+    let importer = CachingImporter {
+        files,
+        requested: RefCell::new(Vec::new()),
+    };
+
+    // Drive both importer entry points: `@use` -> resolve_module_with_syntax,
+    // `@import` -> resolve_with_syntax.
+    let out = compile(
+        "@use \"mod\";\n@import \"partial\";\n.a { margin: mod.$gap; }",
+        &Options::default().with_importer(&importer),
+    )
+    .expect("compile should succeed");
+
+    assert_eq!(out, "body {\n  padding: 8px;\n}\n\n.a {\n  margin: 4px;\n}\n");
+
+    // After the compile returns (and, under ScopedAlloc, the arena has been
+    // reset) the importer-owned cache must still be intact and correct. If the
+    // `path.to_string()` allocations had landed in the arena, this would read
+    // freed/reused memory.
+    let requested = importer.requested.borrow();
+    assert!(
+        requested.iter().any(|p| p == "mod"),
+        "expected `mod` to have been requested; got {requested:?}"
+    );
+    assert!(
+        requested.iter().any(|p| p == "partial"),
+        "expected `partial` to have been requested; got {requested:?}"
+    );
+    // Every cached string is still valid UTF-8 with its original content.
+    for p in requested.iter() {
+        assert!(!p.is_empty());
+        assert!(p == "mod" || p == "partial", "unexpected cached path {p:?}");
+    }
+}
