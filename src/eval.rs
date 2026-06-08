@@ -269,6 +269,15 @@ impl Sink<'_> {
 pub(crate) struct EvalOptions<'a> {
     pub style: OutputStyle,
     pub importer: Option<&'a dyn Importer>,
+    /// The entrypoint's source text, for rendering byte-exact diagnostic
+    /// snippets. Empty when the embedder does not supply it (diagnostics then
+    /// fall back to the legacy one-liner).
+    pub source: &'a str,
+    /// The entrypoint's file path/URL as it should appear in diagnostics
+    /// (e.g. `input.scss`).
+    pub url: &'a str,
+    /// The glyph set for snippet/gutter decoration (ASCII under `--no-unicode`).
+    pub glyphs: crate::diag::GlyphSet,
 }
 
 pub(crate) struct Evaluator<'a> {
@@ -337,6 +346,36 @@ pub(crate) struct Evaluator<'a> {
     /// Config keys actually consumed by a `!default` declaration in the module
     /// currently being evaluated (used to reject unused configuration).
     consumed_config: Vec<String>,
+    /// The name of the member whose body is currently executing, as it appears
+    /// in a diagnostic stack frame: `root stylesheet` at the entrypoint, or
+    /// `<name>()` inside a user mixin/function. dart-sass `_member`.
+    member: String,
+    /// The diagnostic call stack: one entry per active user callable/import,
+    /// recording the call site and the *caller's* member name. dart-sass
+    /// `_stack`. Used to render byte-exact stack traces under errors/warnings.
+    call_stack: Vec<DiagFrame>,
+    /// The file path/URL the statements currently being evaluated came from
+    /// (the entrypoint URL, or an imported/used partial's path).
+    current_url: String,
+    /// The source text of [`Self::current_url`], for rendering snippets that
+    /// point into the currently-executing file.
+    current_source: Rc<str>,
+    /// Sources of every file seen so far, keyed by URL, so a stack trace can
+    /// render a snippet that points into a file other than the current one.
+    file_sources: Rc<RefCell<HashMap<String, Rc<str>>>>,
+}
+
+/// One frame of the diagnostic call stack: the call site (file + 1-based
+/// position) and the name of the member that contained that call.
+#[derive(Clone)]
+struct DiagFrame {
+    url: String,
+    pos: Pos,
+    /// The member name to print for this frame (`root stylesheet` or `name()`).
+    member: String,
+    /// Byte length of the call-site span, to size the snippet caret when this
+    /// frame is the primary (innermost) one — used by `@error`.
+    length: usize,
 }
 
 /// An evaluated user module: its public members plus the bindings it itself
@@ -358,6 +397,9 @@ struct Module {
     /// Built-in `sass:*` modules re-exported via `@forward`. A `ns.member` that
     /// misses every captured member is retried against these.
     forwarded_builtins: Vec<ForwardedBuiltin>,
+    /// The path/URL of this module's file, for diagnostic snippets pointing
+    /// into the module (empty when diagnostics are disabled / unknown).
+    diag_url: String,
 }
 
 impl Module {
@@ -483,7 +525,16 @@ struct PendingExtend {
 
 impl<'a> Evaluator<'a> {
     pub(crate) fn new(options: EvalOptions<'a>) -> Self {
+        let url = options.url.to_string();
+        let source: Rc<str> = Rc::from(options.source);
+        let file_sources: HashMap<String, Rc<str>> =
+            [(url.clone(), Rc::clone(&source))].into_iter().collect();
         Evaluator {
+            member: "root stylesheet".to_string(),
+            call_stack: Vec::new(),
+            current_url: url,
+            current_source: source,
+            file_sources: Rc::new(RefCell::new(file_sources)),
             scopes: vec![HashMap::default()],
             // The global scope is treated as semi-global so a top-level control
             // flow scope (its child) becomes semi-global too.
@@ -513,11 +564,204 @@ impl<'a> Evaluator<'a> {
     pub(crate) fn eval_sheet(&mut self, sheet: &Stylesheet, out: &mut Vec<OutNode>) -> Result<(), Error> {
         {
             let mut sink = Sink::Top(out);
-            self.exec(&sheet.stmts, &[], &mut sink)?;
+            let r = self.exec(&sheet.stmts, &[], &mut sink);
+            // At the outermost boundary, finalize any error into a rendered
+            // diagnostic block (header + snippet + frames) if we have a span.
+            if let Err(e) = r {
+                return Err(self.finalize_error(e));
+            }
         }
         self.apply_extends(out)?;
         hoist_css_imports(out);
         Ok(())
+    }
+
+    // ---- diagnostic rendering -------------------------------------------
+
+    /// Whether the entrypoint supplied source text (so snippets can render).
+    fn diag_enabled(&self) -> bool {
+        !self.options.source.is_empty()
+    }
+
+    /// Build the diagnostic stack-frame list (innermost first) for a primary
+    /// span located at `pos` in `self.current_url`, executed by `self.member`.
+    /// This is `[(current file, pos, member)]` followed by the recorded call
+    /// stack, outermost last — exactly dart-sass's `_stackTrace`.
+    fn frames_for(&self, pos: Pos) -> Vec<DiagFrame> {
+        let mut frames = Vec::with_capacity(self.call_stack.len() + 1);
+        frames.push(DiagFrame {
+            url: self.current_url.clone(),
+            pos,
+            member: self.member.clone(),
+            length: 0,
+        });
+        frames.extend(self.call_stack.iter().rev().cloned());
+        frames
+    }
+
+    /// Render the stack-frame list into the column-aligned block dart-sass
+    /// appends under a snippet/warning. `indent` is 2 (errors) or 4
+    /// (warnings/deprecations).
+    fn render_frame_block(frames: &[DiagFrame], indent: usize) -> String {
+        // Column-align: pad each `<url> <line>:<col>` field to the longest.
+        let fields: Vec<String> = frames
+            .iter()
+            .map(|f| format!("{} {}:{}", f.url, f.pos.line, f.pos.col))
+            .collect();
+        let width = fields.iter().map(String::len).max().unwrap_or(0);
+        let pad: String = " ".repeat(indent);
+        let mut out = String::new();
+        for (i, (field, frame)) in fields.iter().zip(frames).enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push_str(field);
+            for _ in 0..width.saturating_sub(field.len()) {
+                out.push(' ');
+            }
+            out.push_str("  ");
+            out.push_str(&frame.member);
+        }
+        out
+    }
+
+    /// Look up the source text for `url`, defaulting to the current file's.
+    fn source_for(&self, url: &str) -> Rc<str> {
+        if url == self.current_url {
+            return Rc::clone(&self.current_source);
+        }
+        self.file_sources
+            .borrow()
+            .get(url)
+            .map(Rc::clone)
+            .unwrap_or_else(|| Rc::clone(&self.current_source))
+    }
+
+    /// Convert an `Error` into a fully-rendered diagnostic block (header +
+    /// snippet + 2-space frame trace), if diagnostics are enabled and the error
+    /// carries a position. Idempotent: an already-rendered error is returned
+    /// unchanged.
+    fn finalize_error(&self, mut e: Error) -> Error {
+        if e.rendered.is_some() || !self.diag_enabled() || !e.has_position() {
+            return e;
+        }
+        let frames = self.frames_for(Pos {
+            line: e.line,
+            col: e.col,
+        });
+        e.rendered = Some(self.render_error_with_frames(&e, &frames));
+        e
+    }
+
+    /// Render `Error: <msg>` + the snippet pointing at the innermost frame +
+    /// the 2-space-indented frame trace.
+    fn render_error_with_frames(&self, e: &Error, frames: &[DiagFrame]) -> String {
+        let primary = &frames[0];
+        let source = self.source_for(&primary.url);
+        // Prefer the primary frame's own span length (set for `@error`'s call
+        // site); otherwise the error's recorded length.
+        let length = if primary.length > 0 {
+            primary.length
+        } else {
+            e.length
+        };
+        let span = crate::diag::Span {
+            line: primary.pos.line,
+            col: primary.pos.col,
+            length,
+        };
+        let mut out = format!("Error: {}\n", e.message);
+        out.push_str(&crate::diag::render_snippet(
+            &source,
+            span,
+            &[],
+            self.options.glyphs,
+        ));
+        out.push('\n');
+        out.push_str(&Self::render_frame_block(frames, 2));
+        out
+    }
+
+    /// Enter a user callable (mixin/function) for diagnostics: record a stack
+    /// frame at `call_pos` (caret length `call_len`) attributed to the *current*
+    /// member, then make `new_member` the current member. Returns the previous
+    /// member name, to be restored by [`Self::leave_call`].
+    fn enter_call(&mut self, call_pos: Pos, call_len: usize, new_member: &str) -> String {
+        self.call_stack.push(DiagFrame {
+            url: self.current_url.clone(),
+            pos: call_pos,
+            member: self.member.clone(),
+            length: call_len,
+        });
+        std::mem::replace(&mut self.member, new_member.to_string())
+    }
+
+    /// Leave a user callable: pop its diagnostic frame and restore `member`.
+    fn leave_call(&mut self, saved_member: String) {
+        self.call_stack.pop();
+        self.member = saved_member;
+    }
+
+    /// Execute a `@warn`: emit `WARNING: <message>` + the 4-space-indented stack
+    /// trace + a trailing blank line to stderr. The message is the string value
+    /// unquoted; exit code is unaffected.
+    fn emit_warn(&mut self, value: &Expr, pos: Pos) -> Result<(), Error> {
+        let v = self.eval_expr(value)?;
+        let msg = v.to_message();
+        if self.diag_enabled() {
+            let frames = self.frames_for(pos);
+            eprintln!("WARNING: {}\n{}\n", msg, Self::render_frame_block(&frames, 4));
+        } else {
+            eprintln!("WARNING: {msg}");
+        }
+        Ok(())
+    }
+
+    /// Execute a `@debug`: emit `<path>:<line> DEBUG: <value>` to stderr (the
+    /// value serialized as in CSS, a string unquoted). No snippet, no frames.
+    fn emit_debug(&mut self, value: &Expr, pos: Pos) -> Result<(), Error> {
+        let v = self.eval_expr(value)?;
+        let msg = v.to_message();
+        if self.diag_enabled() {
+            eprintln!("{}:{} DEBUG: {}", self.current_url, pos.line, msg);
+        } else {
+            eprintln!("DEBUG: {msg}");
+        }
+        Ok(())
+    }
+
+    /// Build the error for an `@error`: its message is the serialized argument
+    /// (a string keeps its quotes). The snippet points at the innermost active
+    /// call site (so an `@error` inside a mixin highlights the `@include`), or
+    /// at the `@error` statement itself when there is no enclosing call. dart's
+    /// "unspanned exception attaches at the boundary" rule.
+    fn build_error(&mut self, value: &Expr, pos: Pos, length: usize) -> Error {
+        let msg = match self.eval_expr(value) {
+            Ok(v) => v.to_error_message(),
+            Err(e) => return e,
+        };
+        if !self.diag_enabled() {
+            return Error::unpositioned(msg);
+        }
+        // The @error throws unspanned; the nearest enclosing call boundary
+        // attaches its span. With an active call stack, the snippet points at
+        // the innermost call site and the trace is the callers only (the
+        // @error's own frame is dropped). At the root, the @error span is used.
+        let frames: Vec<DiagFrame> = if self.call_stack.is_empty() {
+            vec![DiagFrame {
+                url: self.current_url.clone(),
+                pos,
+                member: self.member.clone(),
+                length,
+            }]
+        } else {
+            self.call_stack.iter().rev().cloned().collect()
+        };
+        let mut e = Error::at(msg, frames[0].pos);
+        e.length = frames[0].length;
+        e.rendered = Some(self.render_error_with_frames(&e, &frames));
+        e
     }
 
     /// Register an `@extend` directive: validate the (interpolation-resolved)
@@ -1009,9 +1253,17 @@ impl<'a> Evaluator<'a> {
         Ok(frame)
     }
 
-    /// Call a user-defined `@function`, returning its `@return` value.
-    fn call_function(&mut self, func: &Rc<Callable>, args: &[CallArg]) -> Result<Value, Error> {
+    /// Call a user-defined `@function`, returning its `@return` value. `call`,
+    /// when present, is the (name-start position, byte length) of the call
+    /// expression, recorded as a diagnostic stack frame around the body.
+    fn call_function(
+        &mut self,
+        func: &Rc<Callable>,
+        args: &[CallArg],
+        call: Option<(Pos, usize)>,
+    ) -> Result<Value, Error> {
         let frame = self.bind_args(&func.params, args, &func.name)?;
+        let saved = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.name)));
         self.push_scope_frame(frame);
         // A function body is not a mixin body: `meta.content-exists()` called
         // from a function (even one invoked by a mixin) is an error.
@@ -1019,6 +1271,9 @@ impl<'a> Evaluator<'a> {
         let result = self.run_fn_body(&func.body);
         self.in_mixin.pop();
         self.pop_scope();
+        if let Some(saved) = saved {
+            self.leave_call(saved);
+        }
         match result? {
             // A bare slash-division returned from a function collapses to
             // its number (dart-sass `withoutSlash`); slashes nested in a
@@ -1135,17 +1390,10 @@ impl<'a> Evaluator<'a> {
                         return Ok(Some(v));
                     }
                 }
-                Stmt::Warn(e) => {
-                    let v = self.eval_expr(e)?;
-                    eprintln!("WARNING: {}", v.to_interp());
-                }
-                Stmt::Debug(e) => {
-                    let v = self.eval_expr(e)?;
-                    eprintln!("DEBUG: {}", v.to_interp());
-                }
-                Stmt::Error(e) => {
-                    let v = self.eval_expr(e)?;
-                    return Err(Error::unpositioned(v.to_interp()));
+                Stmt::Warn { value, pos } => self.emit_warn(value, *pos)?,
+                Stmt::Debug { value, pos } => self.emit_debug(value, *pos)?,
+                Stmt::Error { value, pos, length } => {
+                    return Err(self.build_error(value, *pos, *length));
                 }
                 _ => {
                     return Err(Error::unpositioned(
@@ -1169,6 +1417,8 @@ impl<'a> Evaluator<'a> {
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
+        // NOTE: the diagnostic call frame for this `@include` is pushed by the
+        // caller (the `Stmt::Include` arm) so it wraps every resolution path.
         // The built-in `@include meta.apply($mixin, $args...)` invokes a
         // first-class mixin reference. It is bound to the `sass:meta` module's
         // namespace, so resolve it before the generic module path.
@@ -1267,11 +1517,13 @@ impl<'a> Evaluator<'a> {
             }
         });
         let saved = self.enter_module(module);
+        let saved_file = self.enter_module_file(module);
         self.push_scope_frame(frame);
         self.content_stack.push(content_block);
         let result = self.exec(&mixin.body, parents, sink);
         self.content_stack.pop();
         self.pop_scope();
+        self.leave_module_file(saved_file);
         self.leave_module(saved);
         result
     }
@@ -1611,7 +1863,15 @@ impl<'a> Evaluator<'a> {
             ));
         }
         let sheet = parse_with_syntax(&src, syntax)?;
-        let (module, consumed) = self.eval_module(&key, &sheet, config, pos, sink)?;
+        // Register the module's source under a diagnostic display URL so a
+        // snippet/frame that points into this file renders against its text.
+        let diag_url = self.module_diag_url(url, &key);
+        if self.diag_enabled() {
+            self.file_sources
+                .borrow_mut()
+                .insert(diag_url.clone(), Rc::from(src.as_str()));
+        }
+        let (module, consumed) = self.eval_module(&key, &diag_url, &sheet, config, pos, sink)?;
         let module = Rc::new(module);
         self.module_cache.borrow_mut().insert(key, Rc::clone(&module));
         Ok((module, consumed))
@@ -1623,12 +1883,17 @@ impl<'a> Evaluator<'a> {
     fn eval_module(
         &mut self,
         key: &str,
+        diag_url: &str,
         sheet: &Stylesheet,
         config: HashMap<String, (Value, bool)>,
         pos: Pos,
         sink: &mut Sink<'_>,
     ) -> Result<(Module, Vec<String>), Error> {
         // Save and reset the per-module environment, then restore on the way out.
+        // The module's body runs against its own source file for diagnostics.
+        let module_source = self.source_for(diag_url);
+        let saved_url = std::mem::replace(&mut self.current_url, diag_url.to_string());
+        let saved_source = std::mem::replace(&mut self.current_source, module_source);
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::default()]);
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, vec![true]);
         let saved_funcs = std::mem::take(&mut self.functions);
@@ -1676,6 +1941,8 @@ impl<'a> Evaluator<'a> {
         self.pending_config = saved_config;
         self.consumed_config = saved_consumed;
         self.current_selector = saved_selector;
+        self.current_url = saved_url;
+        self.current_source = saved_source;
 
         result?;
         let _ = pos;
@@ -1701,6 +1968,7 @@ impl<'a> Evaluator<'a> {
                 used_builtin_modules,
                 star_builtin_modules,
                 forwarded_builtins: forwarded.builtins,
+                diag_url: diag_url.to_string(),
             },
             consumed,
         ))
@@ -2070,8 +2338,15 @@ impl<'a> Evaluator<'a> {
                     args,
                     content,
                     module,
+                    pos,
+                    length,
                 } => {
-                    self.exec_include(name, args, content.clone(), module.as_deref(), parents, sink)?;
+                    // Push a diagnostic call frame so an error/warning raised in
+                    // the mixin body unwinds through this `@include` call site.
+                    let saved = self.enter_call(*pos, *length, &mixin_frame_name(name, module));
+                    let r = self.exec_include(name, args, content.clone(), module.as_deref(), parents, sink);
+                    self.leave_call(saved);
+                    r?;
                 }
                 Stmt::Use {
                     url,
@@ -2121,17 +2396,10 @@ impl<'a> Evaluator<'a> {
                     optional,
                     pos,
                 } => self.register_extend(selector, *optional, *pos, parents)?,
-                Stmt::Warn(e) => {
-                    let v = self.eval_expr(e)?;
-                    eprintln!("WARNING: {}", v.to_interp());
-                }
-                Stmt::Debug(e) => {
-                    let v = self.eval_expr(e)?;
-                    eprintln!("DEBUG: {}", v.to_interp());
-                }
-                Stmt::Error(e) => {
-                    let v = self.eval_expr(e)?;
-                    return Err(Error::unpositioned(v.to_interp()));
+                Stmt::Warn { value, pos } => self.emit_warn(value, *pos)?,
+                Stmt::Debug { value, pos } => self.emit_debug(value, *pos)?,
+                Stmt::Error { value, pos, length } => {
+                    return Err(self.build_error(value, *pos, *length));
                 }
             }
         }
@@ -2869,6 +3137,16 @@ impl<'a> Evaluator<'a> {
     }
 
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, Error> {
+        // Finalize any positioned error into a rendered diagnostic block here,
+        // where `current_url`/`current_source`/`call_stack` still describe the
+        // file and call context the error was raised in (cross-file safe).
+        match self.eval_expr_inner(expr) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.finalize_error(e)),
+        }
+    }
+
+    fn eval_expr_inner(&mut self, expr: &Expr) -> Result<Value, Error> {
         match expr {
             Expr::Number(v, unit) => Ok(Value::Number(Number {
                 value: *v,
@@ -2881,7 +3159,7 @@ impl<'a> Evaluator<'a> {
             // Reading a variable drops a bare slash-division's spelling
             // (dart-sass `withoutSlash`): `$x: 1/2; a {b: $x}` is `0.5`.
             // Slashes nested inside a stored list are preserved.
-            Expr::Var(name) => match self.lookup(name) {
+            Expr::Var { name, pos } => match self.lookup(name) {
                 Some(v) => Ok(v.clone().without_slash()),
                 None => {
                     // A user module variable exposed unprefixed via `@use … as *`.
@@ -2894,8 +3172,9 @@ impl<'a> Evaluator<'a> {
                             .collect()
                     };
                     if star_hits.len() > 1 {
-                        return Err(Error::unpositioned(
+                        return Err(Error::at(
                             "This variable is available from multiple global modules.",
+                            *pos,
                         ));
                     }
                     if let Some(v) = star_hits.into_iter().next() {
@@ -2904,11 +3183,12 @@ impl<'a> Evaluator<'a> {
                     // A built-in module variable exposed unprefixed via
                     // `@use "sass:…" as *` (e.g. `$pi` from `sass:math`).
                     for m in &self.star_modules {
-                        if let Ok(v) = crate::builtins::module_var(m, name, Pos { line: 1, col: 1 }) {
+                        if let Ok(v) = crate::builtins::module_var(m, name, *pos) {
                             return Ok(v);
                         }
                     }
-                    Err(Error::unpositioned(format!("Undefined variable ${name}.")))
+                    // The caret covers `$name` (the `$` plus the identifier).
+                    Err(Error::at("Undefined variable.", *pos).with_length(1 + name.len()))
                 }
             },
             Expr::NsVar { module, name } => self.eval_module_var(module, name, Pos { line: 1, col: 1 }),
@@ -3090,12 +3370,13 @@ impl<'a> Evaluator<'a> {
                 name,
                 args,
                 pos,
+                length,
                 module,
             } => {
                 // A namespaced call `ns.fn(...)` resolves only against the used
                 // built-in module bound to `ns`.
                 if let Some(ns) = module {
-                    return self.eval_module_call(ns, name, args, *pos);
+                    return self.eval_module_call(ns, name, args, *pos, *length);
                 }
                 // Inside a `@supports` declaration, a CSS math function
                 // (`min`/`max`/`clamp`/…) is kept unsimplified: its arguments
@@ -3115,7 +3396,7 @@ impl<'a> Evaluator<'a> {
                 }
                 // User-defined @function takes precedence over builtins.
                 if let Some(func) = self.functions.get(name).cloned() {
-                    return self.call_function(&func, args);
+                    return self.call_function(&func, args, Some((*pos, *length)));
                 }
                 // A user module function exposed unprefixed via `@use … as *`.
                 if !self.star_user_modules.is_empty() && !is_private_member(name) {
@@ -3131,7 +3412,7 @@ impl<'a> Evaluator<'a> {
                         ));
                     }
                     if let Some((m, f)) = hits.into_iter().next() {
-                        return self.call_user_module_function(&m, &f, args);
+                        return self.call_user_module_function(&m, &f, args, Some((*pos, *length)));
                     }
                 }
                 // The pure CSS-calculation functions are parsed as
@@ -3292,6 +3573,7 @@ impl<'a> Evaluator<'a> {
         member: &str,
         args: &[CallArg],
         pos: Pos,
+        length: usize,
     ) -> Result<Value, Error> {
         // A user module bound to this namespace.
         if let Some(module) = self.used_user_modules.get(ns).cloned() {
@@ -3302,7 +3584,7 @@ impl<'a> Evaluator<'a> {
                 ));
             }
             if let Some(func) = module.function(member) {
-                return self.call_user_module_function(&module, &func, args);
+                return self.call_user_module_function(&module, &func, args, Some((pos, length)));
             }
             // Fall back to a built-in re-exported by this module via @forward.
             if let Some(v) = self.try_forwarded_builtin_call(&module, member, args, pos)? {
@@ -3779,19 +4061,59 @@ impl<'a> Evaluator<'a> {
         module: &Rc<Module>,
         func: &Rc<Callable>,
         args: &[CallArg],
+        call: Option<(Pos, usize)>,
     ) -> Result<Value, Error> {
         let frame = self.bind_args(&func.params, args, &func.name)?;
+        let saved_member = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.name)));
         let saved = self.enter_module(module);
+        let saved_file = self.enter_module_file(module);
         self.push_scope_frame(frame);
         let result = self.run_fn_body(&func.body);
         self.pop_scope();
+        self.leave_module_file(saved_file);
         self.leave_module(saved);
+        if let Some(saved_member) = saved_member {
+            self.leave_call(saved_member);
+        }
         match result? {
             Some(v) => Ok(v.without_slash()),
             None => Err(Error::unpositioned(format!(
                 "Function {}() did not @return a value.",
                 func.name
             ))),
+        }
+    }
+
+    /// Swap in `module`'s source file for diagnostics during a cross-module
+    /// member invocation. Returns the previous `(url, source)` to restore.
+    fn enter_module_file(&mut self, module: &Rc<Module>) -> Option<(String, Rc<str>)> {
+        if module.diag_url.is_empty() {
+            return None;
+        }
+        let source = self.source_for(&module.diag_url);
+        Some((
+            std::mem::replace(&mut self.current_url, module.diag_url.clone()),
+            std::mem::replace(&mut self.current_source, source),
+        ))
+    }
+
+    /// Restore the file swapped out by [`Self::enter_module_file`].
+    fn leave_module_file(&mut self, saved: Option<(String, Rc<str>)>) {
+        if let Some((url, source)) = saved {
+            self.current_url = url;
+            self.current_source = source;
+        }
+    }
+
+    /// The diagnostic display URL for a `@use`/`@import`ed module: the basename
+    /// of the resolved key (dart-sass shows e.g. `_libchain.scss`), falling back
+    /// to the `@use` url spelling when the key has no useful tail.
+    fn module_diag_url(&self, url: &str, key: &str) -> String {
+        let base = key.rsplit(['/', '\\']).next().unwrap_or(key);
+        if base.is_empty() {
+            url.to_string()
+        } else {
+            base.to_string()
         }
     }
 
@@ -5141,6 +5463,12 @@ fn for_indices(start: i64, end: i64, inclusive: bool) -> Vec<i64> {
         }
     }
     out
+}
+
+/// The diagnostic stack-frame name for an `@include`: dart-sass prints the bare
+/// mixin name with empty parens (`name()`), without the `ns.` namespace.
+fn mixin_frame_name(name: &str, _module: &Option<String>) -> String {
+    format!("{name}()")
 }
 
 /// Whether a mixin body contains a reachable `@content`. dart-sass scans the

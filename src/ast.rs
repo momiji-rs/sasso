@@ -90,6 +90,12 @@ pub(crate) enum Stmt {
         args: Vec<CallArg>,
         content: Option<Rc<Vec<Stmt>>>,
         module: Option<String>,
+        /// 1-based position of the `@include` keyword (the `@`), used as the
+        /// call-site span for diagnostic stack frames.
+        pos: Pos,
+        /// Byte length of the include span (`@include name(args)`, excluding the
+        /// trailing `;` or content block), used to size the diagnostic caret.
+        length: usize,
     },
     /// `@content;` — runs the `@include`'s content block.
     Content,
@@ -146,12 +152,17 @@ pub(crate) enum Stmt {
         optional: bool,
         pos: Pos,
     },
-    /// `@warn <expr>;` — writes to stderr, emits no CSS.
-    Warn(Expr),
-    /// `@debug <expr>;` — writes to stderr, emits no CSS.
-    Debug(Expr),
-    /// `@error <expr>;` — aborts compilation with the message.
-    Error(Expr),
+    /// `@warn <expr>;` — writes to stderr, emits no CSS. `pos` is the 1-based
+    /// position of the `@warn` keyword (the innermost stack frame).
+    Warn { value: Expr, pos: Pos },
+    /// `@debug <expr>;` — writes to stderr, emits no CSS. `pos` is the 1-based
+    /// position of the `@debug` keyword (only its line is reported).
+    Debug { value: Expr, pos: Pos },
+    /// `@error <expr>;` — aborts compilation with the message. `pos` is the
+    /// 1-based position of the `@error` keyword and `length` the byte length of
+    /// the `@error <expr>` span (used as the snippet span only at the document
+    /// root; inside a call the innermost call site is used instead).
+    Error { value: Expr, pos: Pos, length: usize },
 }
 
 /// One `$name: value [!default]` entry in a `@use`/`@forward` `with (...)`
@@ -295,7 +306,7 @@ pub(crate) enum Expr {
     /// `null`.
     Null,
     /// `$name` variable reference.
-    Var(String),
+    Var { name: String, pos: Pos },
     /// `ns.$name` — a module variable reference (e.g. `math.$pi`). Resolved by
     /// the evaluator against the used module bound to `module`.
     NsVar { module: String, name: String },
@@ -331,7 +342,11 @@ pub(crate) enum Expr {
     Func {
         name: String,
         args: Vec<CallArg>,
+        /// 1-based position of the function-name start (the call's primary span
+        /// origin for diagnostics — `rgb(…)` points at `rgb`).
         pos: Pos,
+        /// Byte length of the whole call `name(args)`, for the diagnostic caret.
+        length: usize,
         module: Option<String>,
     },
     /// A space- or comma-separated list. `bracketed` marks `[a b]`/`[a, b]`

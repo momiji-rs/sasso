@@ -116,7 +116,6 @@ pub trait Importer {
 }
 
 /// Compilation options.
-#[derive(Default)]
 pub struct Options<'a> {
     /// Output style.
     pub style: OutputStyle,
@@ -124,6 +123,26 @@ pub struct Options<'a> {
     pub syntax: Syntax,
     /// Importer used to resolve `@import`; `None` disables file imports.
     pub importer: Option<&'a dyn Importer>,
+    /// The input's path/URL as it should appear in diagnostics (e.g.
+    /// `input.scss`). `None` disables byte-exact diagnostic snippets (errors
+    /// then render as the legacy `Error: <msg> (line:col)` one-liner).
+    pub url: Option<&'a str>,
+    /// Whether to draw diagnostic snippets with Unicode box-drawing glyphs
+    /// (`true`, the default) or the ASCII fallback (`false`, dart's
+    /// `--no-unicode`).
+    pub unicode: bool,
+}
+
+impl Default for Options<'_> {
+    fn default() -> Self {
+        Options {
+            style: OutputStyle::default(),
+            syntax: Syntax::default(),
+            importer: None,
+            url: None,
+            unicode: true,
+        }
+    }
 }
 
 impl<'a> Options<'a> {
@@ -150,6 +169,20 @@ impl<'a> Options<'a> {
     #[must_use]
     pub fn with_importer(mut self, importer: &'a dyn Importer) -> Self {
         self.importer = Some(importer);
+        self
+    }
+
+    /// Builder: set the diagnostic display URL (enables byte-exact snippets).
+    #[must_use]
+    pub fn with_url(mut self, url: &'a str) -> Self {
+        self.url = Some(url);
+        self
+    }
+
+    /// Builder: select the diagnostic glyph set (`false` = ASCII / `--no-unicode`).
+    #[must_use]
+    pub fn with_unicode(mut self, unicode: bool) -> Self {
+        self.unicode = unicode;
         self
     }
 }
@@ -204,13 +237,53 @@ pub fn compile(source: &str, options: &Options<'_>) -> Result<String, Error> {
 /// [`compile`]; all of its allocations may be arena-resident, so its result is
 /// copied out by the wrapper before the arena is reset.
 fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
+    let glyphs_for = || {
+        if options.unicode {
+            diag::GlyphSet::Unicode
+        } else {
+            diag::GlyphSet::Ascii
+        }
+    };
     let sheet = match options.syntax {
-        Syntax::Scss => parser::parse(source)?,
-        Syntax::Sass => sass_parser::parse(source)?,
+        Syntax::Scss => parser::parse(source),
+        Syntax::Sass => sass_parser::parse(source),
+    };
+    // A parse error never reached the evaluator, so render its snippet here
+    // (single `root stylesheet` frame) when a diagnostic URL is configured.
+    let sheet = match sheet {
+        Ok(s) => s,
+        Err(mut e) => {
+            if let Some(url) = options.url {
+                if e.rendered.is_none() && e.has_position() {
+                    let span = diag::Span {
+                        line: e.line,
+                        col: e.col,
+                        length: e.length,
+                    };
+                    e.rendered = Some(diag::render_error(&e.message, source, url, span, glyphs_for()));
+                }
+            }
+            return Err(e);
+        }
+    };
+    // Diagnostics are enabled only when the caller supplies a display URL; then
+    // the evaluator renders byte-exact `Error:`/`WARNING:` blocks against the
+    // source. Without a URL it falls back to the legacy one-liner.
+    let (diag_source, diag_url) = match options.url {
+        Some(url) => (source, url),
+        None => ("", ""),
+    };
+    let glyphs = if options.unicode {
+        diag::GlyphSet::Unicode
+    } else {
+        diag::GlyphSet::Ascii
     };
     let mut ev = eval::Evaluator::new(eval::EvalOptions {
         style: options.style,
         importer: options.importer,
+        source: diag_source,
+        url: diag_url,
+        glyphs,
     });
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;

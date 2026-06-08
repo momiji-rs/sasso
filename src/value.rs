@@ -604,6 +604,24 @@ impl Value {
         }
     }
 
+    /// The message text for `@warn` / `@debug`: a top-level string is shown
+    /// **unquoted**, every other value (including strings nested in a list) is
+    /// shown with the dart-sass `inspect()` serialization (`"a" "b"`, `a b c`,
+    /// `(k: v)`). Matches dart-sass's `value.toString()`.
+    pub(crate) fn to_message(&self) -> String {
+        match self {
+            Value::Str(s) => s.text.clone(),
+            other => crate::builtins::inspect_value(other),
+        }
+    }
+
+    /// The message text for `@error`: the dart-sass `inspect()` serialization
+    /// of the argument, additionally wrapping an unbracketed multi-element list
+    /// in parentheses (`(a b c)`, `(a, b)`). A string keeps its quotes.
+    pub(crate) fn to_error_message(&self) -> String {
+        crate::builtins::inspect_element(self, ListSep::Space)
+    }
+
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             Value::Number(_) => "number",

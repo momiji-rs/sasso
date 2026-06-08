@@ -22,6 +22,10 @@ use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{Color, Number, SassStr, Value};
 
+// dart-sass `inspect()` serialization, reused by `@error` (the inspected
+// argument keeps quotes; an unbracketed multi-element list is parenthesized).
+pub(crate) use meta::{inspect_element, inspect_value};
+
 /// Dispatch a function call by name across the builtin families.
 pub(crate) fn call(
     name: &str,

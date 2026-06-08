@@ -258,7 +258,7 @@ fn fn_inspect(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
 /// wrapped in `[...]`; an unbracketed empty list is `()` and a single-element
 /// comma list keeps its trailing comma `(x,)`. Maps render `(k: v, …)` with
 /// nested keys/values inspected recursively.
-fn inspect_value(v: &Value) -> String {
+pub(crate) fn inspect_value(v: &Value) -> String {
     match v {
         Value::Null => "null".to_string(),
         Value::Str(s) => {
@@ -332,7 +332,7 @@ fn inspect_value(v: &Value) -> String {
 /// multi-element unbracketed list needs them. A bracketed list carries its own
 /// `[...]`, and empty / single-element comma lists carry their own parens via
 /// [`inspect_value`].
-fn inspect_element(v: &Value, parent_sep: ListSep) -> String {
+pub(crate) fn inspect_element(v: &Value, parent_sep: ListSep) -> String {
     if let Value::List(l) = v {
         if l.items.len() >= 2 && !l.bracketed {
             let needs_parens = match parent_sep {

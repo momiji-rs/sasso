@@ -42,6 +42,7 @@ OPTIONS:
     -I, --load-path <dir>               add an @import search path (repeatable)
         --stdin                         read SCSS from standard input
         --indented                      parse the indented .sass syntax
+        --no-unicode                    ASCII-only diagnostics (no box glyphs)
         --loop <N>                      recompile in-process N times (throughput)
     -q, --quiet                         suppress CSS on stdout (timing only)
         --version                       print version and exit
@@ -60,6 +61,8 @@ struct Cli {
     quiet: bool,
     /// Recompile the input in-process this many times and report throughput.
     loop_n: Option<u32>,
+    /// Render diagnostics with the ASCII glyph set (dart-sass `--no-unicode`).
+    no_unicode: bool,
 }
 
 fn main() -> ExitCode {
@@ -97,6 +100,7 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
         indented: false,
         quiet: false,
         loop_n: None,
+        no_unicode: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -106,6 +110,7 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
             "--version" => return Ok(Action::Version),
             "--stdin" => cli.use_stdin = true,
             "--indented" => cli.indented = true,
+            "--no-unicode" => cli.no_unicode = true,
             "-q" | "--quiet" => cli.quiet = true,
             "--loop" => {
                 i += 1;
@@ -164,11 +169,13 @@ fn run(mut cli: Cli) -> ExitCode {
     // command line is a unit, with its syntax inferred from the extension
     // (`.sass` -> indented) unless `--indented` forces it. Multiple file inputs
     // are compiled in one process so per-invocation startup is shared.
-    let mut units: Vec<(String, Syntax)> = Vec::new();
+    // Each unit is (source, syntax, diagnostic-url). The URL is the path as it
+    // should appear in stderr diagnostics (`-` for stdin, matching dart-sass).
+    let mut units: Vec<(String, Syntax, String)> = Vec::new();
     if cli.use_stdin {
         let syntax = if cli.indented { Syntax::Sass } else { Syntax::Scss };
         match read_stdin() {
-            Ok(s) => units.push((s, syntax)),
+            Ok(s) => units.push((s, syntax, "-".to_string())),
             Err(e) => {
                 eprintln!("error: failed to read stdin: {e}");
                 return ExitCode::FAILURE;
@@ -199,7 +206,7 @@ fn run(mut cli: Cli) -> ExitCode {
                 Syntax::Scss
             };
             match std::fs::read_to_string(path) {
-                Ok(s) => units.push((s, syntax)),
+                Ok(s) => units.push((s, syntax, path.to_string_lossy().into_owned())),
                 Err(e) => {
                     eprintln!("error: cannot read {}: {e}", path.display());
                     return ExitCode::FAILURE;
@@ -213,33 +220,44 @@ fn run(mut cli: Cli) -> ExitCode {
     }
     let importer = FsImporter::new(cli.load_paths);
     let style = cli.style;
-    let opts_for = |syntax| {
+    let unicode = !cli.no_unicode;
+    // Build the per-unit options. Declared as a helper fn (not a closure) so the
+    // returned `Options` can borrow `url`/`importer` for the caller's lifetime.
+    fn opts_for<'a>(
+        style: OutputStyle,
+        importer: &'a FsImporter,
+        unicode: bool,
+        syntax: Syntax,
+        url: &'a str,
+    ) -> Options<'a> {
         Options::default()
             .with_style(style)
             .with_syntax(syntax)
-            .with_importer(&importer)
-    };
+            .with_importer(importer)
+            .with_url(url)
+            .with_unicode(unicode)
+    }
 
     // Throughput mode: recompile the whole input set in-process N times, timing
     // only the compile calls (sources are read once), and report ms/compile +
     // compiles/sec to stderr. The CSS is still emitted once unless `--quiet`.
     if let Some(n) = cli.loop_n {
         // Warm + correctness pass (also catches compile errors before timing).
-        for (source, syntax) in &units {
-            if let Err(e) = compile(source, &opts_for(*syntax)) {
+        for (source, syntax, url) in &units {
+            if let Err(e) = compile(source, &opts_for(style, &importer, unicode, *syntax, url)) {
                 eprintln!("{e}");
-                return ExitCode::FAILURE;
+                return ExitCode::from(65);
             }
         }
         let mut last = String::new();
         let start = Instant::now();
         for _ in 0..n {
-            for (source, syntax) in &units {
-                match compile(source, &opts_for(*syntax)) {
+            for (source, syntax, url) in &units {
+                match compile(source, &opts_for(style, &importer, unicode, *syntax, url)) {
                     Ok(css) => last = css,
                     Err(e) => {
                         eprintln!("{e}");
-                        return ExitCode::FAILURE;
+                        return ExitCode::from(65);
                     }
                 }
             }
@@ -256,12 +274,12 @@ fn run(mut cli: Cli) -> ExitCode {
 
     // One-shot: compile each input unit and stream the CSS to stdout in order.
     let mut out = String::new();
-    for (source, syntax) in &units {
-        match compile(source, &opts_for(*syntax)) {
+    for (source, syntax, url) in &units {
+        match compile(source, &opts_for(style, &importer, unicode, *syntax, url)) {
             Ok(css) => out.push_str(&css),
             Err(e) => {
                 eprintln!("{e}");
-                return ExitCode::FAILURE;
+                return ExitCode::from(65);
             }
         }
     }

@@ -14,7 +14,7 @@ use crate::ast::{
     SupportsValue, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
-use crate::scanner::{Pos, Scanner};
+use crate::scanner::{Mark, Pos, Scanner};
 use crate::value::{named_color, Color, ListSep};
 
 enum NextKind {
@@ -891,6 +891,9 @@ impl Parser {
 
     fn parse_at_rule(&mut self) -> Result<Stmt, Error> {
         let pos = self.sc.position();
+        // Mark at the `@` so span-carrying at-rules (`@error`, `@include`) can
+        // measure their byte length for the diagnostic caret.
+        let start_mark = self.sc.mark();
         self.sc.bump(); // '@'
         let name = self.read_ident_name()?;
         match name.as_str() {
@@ -912,15 +915,15 @@ impl Parser {
             "function" => self.parse_callable_def(true),
             "mixin" => self.parse_callable_def(false),
             "return" => self.parse_return(),
-            "include" => self.parse_include(),
+            "include" => self.parse_include(pos, start_mark),
             "content" => {
                 self.skip_ws_inline();
                 self.sc.eat(';');
                 Ok(Stmt::Content)
             }
-            "warn" => self.parse_message(MessageKind::Warn),
-            "debug" => self.parse_message(MessageKind::Debug),
-            "error" => self.parse_message(MessageKind::Error),
+            "warn" => self.parse_message(MessageKind::Warn, pos, start_mark),
+            "debug" => self.parse_message(MessageKind::Debug, pos, start_mark),
+            "error" => self.parse_message(MessageKind::Error, pos, start_mark),
             "at-root" => self.parse_at_root(),
             "media" => self.parse_media(),
             "keyframes" | "-webkit-keyframes" | "-moz-keyframes" | "-o-keyframes" | "-ms-keyframes" => {
@@ -1358,15 +1361,18 @@ impl Parser {
     }
 
     /// Parse `@warn`/`@debug`/`@error <expr>;`.
-    fn parse_message(&mut self, kind: MessageKind) -> Result<Stmt, Error> {
+    fn parse_message(&mut self, kind: MessageKind, pos: Pos, start_mark: Mark) -> Result<Stmt, Error> {
         self.skip_ws_inline();
         let value = self.parse_value()?;
+        // Byte length of the `@error <expr>` span (from the `@` through the end
+        // of the value, before the trailing `;`), for the diagnostic caret.
+        let length = self.sc.byte_len_from(start_mark);
         self.skip_ws_inline();
         self.sc.eat(';');
         Ok(match kind {
-            MessageKind::Warn => Stmt::Warn(value),
-            MessageKind::Debug => Stmt::Debug(value),
-            MessageKind::Error => Stmt::Error(value),
+            MessageKind::Warn => Stmt::Warn { value, pos },
+            MessageKind::Debug => Stmt::Debug { value, pos },
+            MessageKind::Error => Stmt::Error { value, pos, length },
         })
     }
 
@@ -2876,7 +2882,7 @@ impl Parser {
     }
 
     /// Parse `@include name[(args)] [{ content }];`.
-    fn parse_include(&mut self) -> Result<Stmt, Error> {
+    fn parse_include(&mut self, pos: Pos, start_mark: Mark) -> Result<Stmt, Error> {
         self.skip_ws_inline();
         let mut name = self.read_ident_name()?;
         // `@include ns.mixin(...)` — a namespaced mixin reference.
@@ -2900,6 +2906,9 @@ impl Parser {
         } else {
             Vec::new()
         };
+        // Byte length of `@include name(args)` (through the closing `)` or the
+        // end of the name), excluding the content block / trailing `;`.
+        let length = self.sc.byte_len_from(start_mark);
         self.skip_ws_inline();
         let content = if self.sc.peek() == Some('{') {
             Some(Rc::new(self.parse_braced_body()?))
@@ -2912,6 +2921,8 @@ impl Parser {
             args,
             content,
             module,
+            pos,
+            length,
         })
     }
 
@@ -3734,9 +3745,10 @@ impl Parser {
             Some(c) if c.is_ascii_digit() => self.parse_number(),
             Some('.') if matches!(self.sc.peek_at(1), Some(d) if d.is_ascii_digit()) => self.parse_number(),
             Some('$') => {
+                let pos = self.sc.position();
                 self.sc.bump();
                 let name = self.read_ident_name()?;
-                Ok(Expr::Var(name))
+                Ok(Expr::Var { name, pos })
             }
             Some('#') if self.sc.peek_at(1) == Some('{') => {
                 self.sc.bump();
@@ -4152,6 +4164,10 @@ impl Parser {
     }
 
     fn parse_ident_or_call(&mut self) -> Result<Expr, Error> {
+        // Position/mark of the identifier (function name) start, for diagnostic
+        // spans that must point at the name (e.g. `rgb(1, 2)` highlights `rgb`).
+        let name_pos = self.sc.position();
+        let name_mark = self.sc.mark();
         let pieces = self.parse_ident_template()?;
         if pieces.len() == 1 {
             if let Some(TplPiece::Lit(name)) = pieces.first() {
@@ -4162,12 +4178,12 @@ impl Parser {
                 // is directly followed by an identifier start or `$`; otherwise
                 // it is left for ordinary parsing.
                 if self.sc.peek() == Some('.') {
-                    if let Some(expr) = self.try_parse_namespaced(&name)? {
+                    if let Some(expr) = self.try_parse_namespaced(&name, name_pos, name_mark)? {
                         return Ok(expr);
                     }
                 }
                 if self.sc.peek() == Some('(') {
-                    return self.parse_call(name);
+                    return self.parse_call(name, name_pos, name_mark);
                 }
                 // IE `progid:` special function: `[-vendor-]progid:Name(...)`.
                 // The identifier `progid` (or a vendor-prefixed `-x-progid`) is
@@ -4195,7 +4211,12 @@ impl Parser {
     /// identifier `ns` has been consumed and the next character is `.`.
     /// Returns `Some(Expr)` for `ns.fn(...)` or `ns.$var`, or `None` (without
     /// consuming the `.`) when the dot does not begin a namespaced member.
-    fn try_parse_namespaced(&mut self, ns: &str) -> Result<Option<Expr>, Error> {
+    fn try_parse_namespaced(
+        &mut self,
+        ns: &str,
+        name_pos: Pos,
+        name_mark: Mark,
+    ) -> Result<Option<Expr>, Error> {
         let mark = self.sc.mark();
         self.sc.bump(); // '.'
         match self.sc.peek() {
@@ -4227,13 +4248,13 @@ impl Parser {
                             member_pos,
                         ));
                     }
-                    let pos = self.sc.position();
                     self.sc.bump(); // '('
                     let args = self.parse_args_after_paren()?;
                     Ok(Some(Expr::Func {
                         name: member,
                         args,
-                        pos,
+                        pos: name_pos,
+                        length: self.sc.byte_len_from(name_mark),
                         module: Some(ns.to_string()),
                     }))
                 } else {
@@ -4303,8 +4324,7 @@ impl Parser {
         Ok(pieces)
     }
 
-    fn parse_call(&mut self, name: String) -> Result<Expr, Error> {
-        let pos = self.sc.position();
+    fn parse_call(&mut self, name: String, name_pos: Pos, name_mark: Mark) -> Result<Expr, Error> {
         self.sc.bump(); // '('
                         // `calc()` interior is parsed as a real arithmetic
                         // expression and simplified at evaluation time. The
@@ -4349,7 +4369,8 @@ impl Parser {
             return Ok(Expr::Func {
                 name,
                 args,
-                pos,
+                pos: name_pos,
+                length: self.sc.byte_len_from(name_mark),
                 module: None,
             });
         }
@@ -4369,7 +4390,8 @@ impl Parser {
                 return Ok(Expr::Func {
                     name,
                     args,
-                    pos,
+                    pos: name_pos,
+                    length: self.sc.byte_len_from(name_mark),
                     module: None,
                 });
             }
@@ -4398,7 +4420,8 @@ impl Parser {
         Ok(Expr::Func {
             name,
             args,
-            pos,
+            pos: name_pos,
+            length: self.sc.byte_len_from(name_mark),
             module: None,
         })
     }

@@ -50,7 +50,6 @@
 // integration step that attaches it to `crate::Error`. Until then the non-test
 // `cargo build` sees the items as unused, so we silence `dead_code` here; the
 // integration step that calls these functions removes this allow.
-#![allow(dead_code)]
 
 /// The glyph set used to draw the gutter and span decorations.
 ///
@@ -518,6 +517,10 @@ fn render_multi_line(
 /// Convenience: render a full diagnostic (`Error:` header + snippet) for the
 /// common single-frame `root stylesheet` case. Returns the complete block with
 /// no trailing newline, exactly as dart-sass would write it to stderr.
+///
+/// The evaluator renders its own header + column-aligned frame trace for
+/// runtime/`@error` diagnostics (multi-frame stacks); this single-frame
+/// convenience renders parse errors (always a lone `root stylesheet` frame).
 #[must_use]
 pub fn render_error(message: &str, source: &str, url: &str, span: Span, glyphs: GlyphSet) -> String {
     let frame = Frame {

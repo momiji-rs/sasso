@@ -58,6 +58,15 @@ impl Scanner {
         }
     }
 
+    /// The number of source **bytes** (UTF-8) consumed since `m` was taken.
+    /// Used to size a diagnostic span's caret underline (dart-sass measures
+    /// span lengths in bytes).
+    pub(crate) fn byte_len_from(&self, m: Mark) -> usize {
+        let start = m.pos.min(self.chars.len());
+        let end = self.pos.min(self.chars.len());
+        self.chars[start..end].iter().map(|c| c.len_utf8()).sum()
+    }
+
     pub(crate) fn reset(&mut self, m: Mark) {
         self.pos = m.pos;
         self.line = m.line;
