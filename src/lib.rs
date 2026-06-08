@@ -28,6 +28,12 @@
 //! sharing the evaluator and emitter. The north-star target is 100% of the
 //! official `sass-spec` suite, tracked by the harness in `spec/`.
 
+// The library's `unsafe` is confined to one audited module — `arena`, the
+// scoped bump allocator (perf #5), verified by unit tests + Miri. Every other
+// module is `deny(unsafe_code)` (see Cargo.toml `[lints]`); `arena` is the only
+// `#[allow]`. The wasm wrapper (`/wasm`, a separate crate) has its own FFI unsafe.
+mod arena;
+
 mod ast;
 mod builtins;
 mod emit;

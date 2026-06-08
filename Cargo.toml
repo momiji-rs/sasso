@@ -43,10 +43,13 @@ codegen-units = 1
 inherits = "release"
 lto = "thin"
 
-# Modern lint posture, expressed in-manifest so every target (lib, bin,
-# tests, examples) inherits it and CI/clippy stay consistent.
+# Modern lint posture, expressed in-manifest so every target (lib, bin, tests,
+# examples) inherits it and CI/clippy stay consistent. `unsafe_code` is `deny`
+# (not `forbid`) so the single audited `arena` module — the scoped bump
+# allocator (perf #5), verified by unit tests + Miri — can `#[allow]` it; every
+# other module stays unsafe-free.
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 missing_docs = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
 
