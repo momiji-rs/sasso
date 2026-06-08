@@ -4373,8 +4373,22 @@ impl Parser {
                         // `1px`); a vendor-prefixed `-webkit-calc(…)` does not
                         // match and stays a verbatim special function.
         if name.eq_ignore_ascii_case("calc") {
-            self.calc_depth += 1;
             self.skip_ws_inline();
+            if self.sc.peek() == Some(')') {
+                // An empty `calc()` is NOT a calculation (calc needs one
+                // argument) nor a verbatim special function; it's a regular
+                // function call, so a user `@function calc()` can be invoked
+                // (dart-sass).
+                let args = self.parse_args_after_paren()?;
+                return Ok(Expr::Func {
+                    name,
+                    args,
+                    pos: name_pos,
+                    length: self.sc.byte_len_from(name_mark),
+                    module: None,
+                });
+            }
+            self.calc_depth += 1;
             let inner = self.parse_value();
             self.calc_depth -= 1;
             let inner = inner?;

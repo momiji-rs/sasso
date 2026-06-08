@@ -3659,6 +3659,13 @@ impl<'a> Evaluator<'a> {
                         return self.call_user_module_function(&m, &f, args, Some((*pos, *length)));
                     }
                 }
+                // A bare `calc()` reaches here as a plain call (the parser only
+                // treats `calc(<arg>)` as a calculation), so a user
+                // `@function calc()` could have handled it above. With no user
+                // override it is the CSS `calc()`, which requires an argument.
+                if name.eq_ignore_ascii_case("calc") && args.is_empty() {
+                    return Err(Error::at("Missing argument.", *pos));
+                }
                 // The pure CSS-calculation functions are parsed as
                 // calculations, which cannot take a `...` rest argument.
                 if is_calc_function(name) && args.iter().any(|a| a.splat) {

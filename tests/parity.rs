@@ -4023,3 +4023,17 @@ fn parity_reserved_function_names() {
     assert_parity("@function -a-url() {@return 1}\na {b: -a-url()}\n");
     assert_parity("@function ELEMENT() {@return 1}\na {b: ELEMENT()}\n");
 }
+
+#[test]
+fn parity_user_function_calc_override() {
+    // An empty `calc()` is a regular call, so a user `@function calc()` runs.
+    assert_parity("@function calc() {@return 1}\na {b: calc()}\n");
+    assert_parity("@function calc($x) {@return $x}\na {b: calc(2)}\n");
+    assert_parity("a {b: calc(1px + 2px)}\n");
+    // A bare `calc()` with no user override errors (CSS calc needs an argument).
+    if enabled() {
+        let scss = "a {b: calc()}\n";
+        assert!(compile(scss, &Options::default()).is_err());
+        assert!(dart_sass(scss).is_none());
+    }
+}
