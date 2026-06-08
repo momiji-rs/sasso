@@ -3808,3 +3808,15 @@ fn parity_color_hwb_achromatic_serialization() {
     assert_parity("a {b: hwb(90 0% 0%)}\n");
     assert_parity("a {b: hwb(120 30% 20%)}\n");
 }
+
+#[test]
+fn parity_selector_unify_id_conflict() {
+    // Two distinct ids cannot share a compound: selector.unify yields null
+    // rather than an impossible `#a#b`. A same id (or an id alongside non-id
+    // simples) still unifies.
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\"#a\", \"#b\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\"#s1-1 > .s1-2\", \"#s2-1 > .s2-2\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\"#a.x\", \"#a.y\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\"#a\", \".d\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\".c\", \".d\")}\n");
+}

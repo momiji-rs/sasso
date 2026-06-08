@@ -2122,6 +2122,17 @@ fn simple_unify(this: &Simple, compound: &[Simple]) -> Option<Vec<Simple>> {
         }
         // Class / id / attribute / placeholder: insert before the first pseudo.
         _ => {
+            // Two distinct ids can never share a compound: an id won't unify
+            // into a compound that already holds a different id (dart-sass
+            // IDSelector.unify), so the whole unification fails.
+            if let Simple::Id(id) = this {
+                if compound
+                    .iter()
+                    .any(|s| matches!(s, Simple::Id(other) if other != id))
+                {
+                    return None;
+                }
+            }
             if compound.len() == 1 && matches!(compound[0], Simple::Universal { .. }) {
                 // `other.unify([this])` where other is the universal.
                 return simple_unify(&compound[0], std::slice::from_ref(this));
