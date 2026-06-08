@@ -3967,3 +3967,13 @@ fn parity_list_join_append_slash_separator() {
     assert_parity("@use \"sass:list\";\na {b: list.append((1, 2), 3, $separator: slash)}\n");
     assert_parity("@use \"sass:list\";\na {b: list.separator(list.join((), 1, slash))}\n");
 }
+
+#[test]
+fn parity_for_loop_unit() {
+    // The @for loop variable inherits the FROM bound's unit; the TO bound is
+    // converted to match (a unitless side defers).
+    assert_parity("a {\n  @for $i from 1px through 5px {b: $i}\n}\n");
+    assert_parity("a {\n  @for $i from 5mm through 1cm {b: $i}\n}\n");
+    assert_parity("a {\n  @for $i from 1px through 5 {b: $i}\n}\n");
+    assert_parity("a {\n  @for $i from 1 through 5px {b: $i}\n}\n");
+}

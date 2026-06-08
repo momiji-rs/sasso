@@ -1149,14 +1149,61 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn eval_index(&mut self, e: &Expr) -> Result<i64, Error> {
+    /// Evaluate a `@for` bound to a [`Number`], preserving its unit (the loop
+    /// variable inherits the `from` bound's unit).
+    fn eval_for_number(&mut self, e: &Expr) -> Result<Number, Error> {
         match self.eval_expr(e)? {
-            Value::Number(n) => Ok(n.value.round() as i64),
+            Value::Number(n) => Ok(n),
             other => Err(Error::unpositioned(format!(
                 "{} is not a number.",
                 other.type_name()
             ))),
         }
+    }
+
+    /// Resolve a `@for`'s bounds: the integer start, the integer end (the TO
+    /// bound converted to the FROM bound's unit), and the loop variable's unit
+    /// (taken from FROM). Errors on incompatible units or a non-integer bound,
+    /// matching dart-sass.
+    fn for_bounds(&mut self, from: &Expr, to: &Expr) -> Result<(i64, i64, String), Error> {
+        let start = self.eval_for_number(from)?;
+        let end = self.eval_for_number(to)?;
+        // The loop variable takes FROM's unit; TO is converted to match. A
+        // unitless side defers (no conversion); two incompatible real units err.
+        let end_value = if start.unit.is_empty() || end.unit.is_empty() {
+            end.value
+        } else {
+            match crate::value::convert_factor(&end.unit, &start.unit) {
+                Some(f) => end.value * f,
+                None => {
+                    return Err(Error::unpositioned(format!(
+                        "Expected {} to have unit {}.",
+                        Value::Number(end.clone()).to_css(false),
+                        start.unit,
+                    )))
+                }
+            }
+        };
+        // Both bounds must be integers (dart-sass: "<n> is not an int.").
+        let to_int = |v: f64, n: Number| -> Result<i64, Error> {
+            if (v - v.round()).abs() < 1e-11 {
+                Ok(v.round() as i64)
+            } else {
+                Err(Error::unpositioned(format!(
+                    "{} is not an int.",
+                    Value::Number(n).to_css(false)
+                )))
+            }
+        };
+        let start_i = to_int(start.value, start.clone())?;
+        let end_i = to_int(
+            end_value,
+            Number {
+                value: end_value,
+                unit: start.unit.clone(),
+            },
+        )?;
+        Ok((start_i, end_i, start.unit))
     }
 
     /// The values `@each` iterates: a list yields its items, `null` yields
@@ -1400,16 +1447,15 @@ impl<'a> Evaluator<'a> {
                     inclusive,
                     body,
                 } => {
-                    let start = self.eval_index(from)?;
-                    let end = self.eval_index(to)?;
+                    let (start_i, end_i, unit) = self.for_bounds(from, to)?;
                     self.push_scope(true);
                     let mut result = Ok(None);
-                    for i in for_indices(start, end, *inclusive) {
+                    for i in for_indices(start_i, end_i, *inclusive) {
                         self.set_local(
                             var,
                             Value::Number(Number {
                                 value: i as f64,
-                                unit: String::new(),
+                                unit: unit.clone(),
                             }),
                         );
                         result = self.run_fn_body(body);
@@ -2447,19 +2493,18 @@ impl<'a> Evaluator<'a> {
                     inclusive,
                     body,
                 } => {
-                    let start = self.eval_index(from)?;
-                    let end = self.eval_index(to)?;
+                    let (start_i, end_i, unit) = self.for_bounds(from, to)?;
                     // The loop body runs in its own semi-global scope: the loop
                     // variable and any fresh assignments live there and vanish
                     // when the loop ends (dart-sass `visitForRule`).
                     self.push_scope(true);
                     let mut result = Ok(());
-                    for i in for_indices(start, end, *inclusive) {
+                    for i in for_indices(start_i, end_i, *inclusive) {
                         self.set_local(
                             var,
                             Value::Number(Number {
                                 value: i as f64,
-                                unit: String::new(),
+                                unit: unit.clone(),
                             }),
                         );
                         result = self.exec(body, parents, sink);
