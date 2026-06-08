@@ -630,6 +630,33 @@ def compile_case(case: Case, sass_bin: str, style: str,
         if case.suite_root is not None:
             load_paths.append(case.suite_root)
 
+        # A case may import a PHYSICAL sibling partial of its .hrx via a relative
+        # path (e.g. `@use '../test-hue'`, where `_test-hue.scss` lives next to
+        # the archive in the real suite, not inside it). Mirror those siblings
+        # into the tmp tree and run the archive's own copy of the input so the
+        # relative path resolves against the mirrored layout rather than escaping
+        # the temp dir. Only done for `../`-importing cases, so the flat layout
+        # (and every currently-passing case) is otherwise untouched.
+        input_to_run = in_path
+        if (
+            case.archive_files
+            and case.archive_id
+            and case.suite_root is not None
+            and "../" in case.input_text
+        ):
+            nested_input = base / case.input_name
+            real_dir = case.suite_root / Path(case.archive_id).parent
+            if nested_input.exists() and real_dir.is_dir():
+                for f in real_dir.iterdir():
+                    if f.is_file() and f.suffix in (".scss", ".sass", ".css"):
+                        dst = base.parent / f.name
+                        if not dst.exists():
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            dst.write_text(
+                                f.read_text(encoding="utf-8"), encoding="utf-8"
+                            )
+                input_to_run = nested_input
+
         cmd = [sass_bin]
         # style flag (dart-sass accepts --style=...; sasso should too)
         cmd.append(f"--style={style}")
@@ -641,9 +668,9 @@ def compile_case(case: Case, sass_bin: str, style: str,
             # dart-sass ignores --precision (fixed at 10); sasso may use it.
             # Pass it only if the bin is not our dart wrapper to avoid noise.
             pass
-        cmd.append(str(in_path))
+        cmd.append(str(input_to_run))
 
-        abs_input = str(in_path)
+        abs_input = str(input_to_run)
         try:
             proc = subprocess.run(
                 cmd,
