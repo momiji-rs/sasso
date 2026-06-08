@@ -1335,27 +1335,46 @@ impl ModernColor {
         matches!(self.alpha, Some(a) if (a - 1.0).abs() < f64::EPSILON)
     }
 
-    /// Serialize a single channel, rendering a missing channel as `none`.
+    /// Serialize a single channel, rendering a missing channel as `none`. A
+    /// non-finite value (from a degenerate `calc()`, e.g. a lab a/b channel)
+    /// serializes as a `calc()` constant like dart-sass (`calc(infinity)`).
     fn chan(&self, i: usize, compressed: bool) -> String {
         match self.channels[i] {
             None => "none".to_string(),
+            Some(v) if !v.is_finite() => Number {
+                value: v,
+                unit: String::new(),
+            }
+            .to_css(compressed),
             Some(v) => fmt_num(v, compressed),
         }
     }
 
     /// Serialize a channel as a percentage of `denom` (e.g. lab lightness over
-    /// 100, oklab lightness over 1). Missing → `none`.
+    /// 100, oklab lightness over 1). Missing → `none`; non-finite → a `%`-unit
+    /// `calc()` constant (`calc(infinity * 1%)`).
     fn chan_pct(&self, i: usize, denom: f64, compressed: bool) -> String {
         match self.channels[i] {
             None => "none".to_string(),
+            Some(v) if !v.is_finite() => Number {
+                value: v,
+                unit: "%".to_string(),
+            }
+            .to_css(compressed),
             Some(v) => format!("{}%", fmt_num(v / denom * 100.0, compressed)),
         }
     }
 
-    /// Serialize a hue channel with the `deg` suffix. Missing → `none`.
+    /// Serialize a hue channel with the `deg` suffix. Missing → `none`;
+    /// non-finite → a `deg`-unit `calc()` constant (`calc(NaN * 1deg)`).
     fn chan_hue(&self, i: usize, compressed: bool) -> String {
         match self.channels[i] {
             None => "none".to_string(),
+            Some(v) if !v.is_finite() => Number {
+                value: v,
+                unit: "deg".to_string(),
+            }
+            .to_css(compressed),
             Some(v) => format!("{}deg", fmt_num(v, compressed)),
         }
     }

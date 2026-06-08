@@ -3758,3 +3758,23 @@ fn parity_color_convert_missing_channel_carry() {
         "@use \"sass:color\";\na {b: color.same(color(display-p3 0.1 0.3 none), color(display-p3 0.1 0.3 0))}\n",
     );
 }
+
+#[test]
+fn parity_color_lab_degenerate_calc_channels() {
+    // A degenerate calc() channel (calc(NaN)/calc(±infinity)) makes a real
+    // lab-family COLOR (not a verbatim string): meta.type-of is `color`, the
+    // serialization keeps the calc() spelling, a degenerate lightness clamps
+    // (NaN→0 / +inf→max), chroma floors at 0, and a/b/hue keep calc().
+    assert_parity("a {b: lab(1% calc(NaN) -3)}\n");
+    assert_parity("a {b: lab(1% calc(infinity) -3)}\n");
+    assert_parity("a {b: lab(1% calc(-infinity) -3)}\n");
+    assert_parity("a {b: lch(50% calc(NaN) 30)}\n");
+    assert_parity("a {b: lch(50% calc(infinity) 30)}\n");
+    assert_parity("a {b: lch(50% 20 calc(NaN))}\n");
+    assert_parity("a {b: lab(calc(NaN) 2 3)}\n");
+    assert_parity("a {b: lab(calc(infinity) 2 3)}\n");
+    assert_parity("a {b: oklab(50% calc(infinity) 0.1)}\n");
+    assert_parity("a {b: oklch(0.5 calc(NaN) 30)}\n");
+    assert_parity("@use \"sass:meta\";\na {b: meta.type-of(lab(1% calc(NaN) -3))}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.space(lch(50% calc(infinity) 30))}\n");
+}

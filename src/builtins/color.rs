@@ -1191,12 +1191,6 @@ fn fn_lab_family(
         "oklab" => (ColorSpace::Oklab, 1.0, 1.0),
         _ => (ColorSpace::Oklch, 1.0, 1.0),
     };
-    // A degenerate `calc()` in a non-lightness channel is preserved verbatim
-    // (dart-sass keeps the `calc(...)` text); only the clamped lightness and
-    // alpha are folded.
-    if comps[1..].iter().any(is_degenerate_calc) {
-        return Ok(lab_degenerate(name, &comps, alpha.as_ref(), l_base, l_max, pos));
-    }
     let is_polar = matches!(name, "lch" | "oklch");
     // Percentage references per CSS Color 4: lab a/b 100% = 125, oklab a/b
     // 100% = 0.4, lch chroma 100% = 150, oklch chroma 100% = 0.4.
@@ -1206,7 +1200,10 @@ fn fn_lab_family(
         "oklab" => (0.4, 0.0),
         _ => (0.0, 0.4), // oklch
     };
-    let l = modern_channel(&comps[0], l_base).map(|v| v.clamp(0.0, l_max));
+    // A degenerate lightness clamps like dart-sass (NaN -> 0, +infinity -> max,
+    // -infinity -> 0); a/b/chroma/hue instead keep their non-finite value, which
+    // serializes as `calc(...)` (chroma is additionally floored at 0).
+    let l = modern_channel(&comps[0], l_base).map(|v| if v.is_nan() { 0.0 } else { v.clamp(0.0, l_max) });
     let c1;
     let c2;
     if is_polar {
@@ -3054,53 +3051,6 @@ fn legacy_none_color(channels: &Channels, space: ColorSpace, _pos: Pos) -> Resul
         alpha: modern_alpha(channels.alpha.as_ref()),
     };
     Ok(Some(Value::Color(make_modern(mc))))
-}
-
-/// Serialize a lab-family call (`lab`/`lch`/`oklab`/`oklch`) that has a
-/// degenerate `calc()` in a non-lightness channel: lightness folds and is
-/// rendered as a percentage, the alpha folds, and the chroma/a/b/hue channels
-/// keep their authored spelling (e.g. `calc(infinity)`).
-fn lab_degenerate(
-    name: &str,
-    comps: &[Value],
-    alpha: Option<&Value>,
-    l_base: f64,
-    l_max: f64,
-    pos: Pos,
-) -> Value {
-    let l = modern_channel(&comps[0], l_base)
-        .map(|v| v.clamp(0.0, l_max))
-        .unwrap_or(0.0);
-    let l_pct = fmt_num(l / l_base * 100.0, false);
-    // The chroma channel of lch/oklch is floored at 0: a degenerate calc whose
-    // floored value differs (`-infinity`/`NaN` → 0) folds to that number;
-    // `+infinity` is unchanged so its `calc(...)` text is kept.
-    let is_polar = matches!(name, "lch" | "oklch");
-    let degenerate_chroma = if is_polar {
-        match &comps[1] {
-            Value::Calc(node) => degenerate_const(node),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let c1 = match degenerate_chroma {
-        Some(raw) if raw.is_nan() || raw.max(0.0) != raw => fmt_num(raw.max(0.0), false),
-        _ => comps[1].to_css(false),
-    };
-    let c2 = comps[2].to_css(false);
-    let a = match alpha {
-        Some(v) if is_none_keyword(v) => 1.0,
-        Some(v) => alpha_value(v, pos).unwrap_or(1.0),
-        None => 1.0,
-    };
-    let body = format!("{l_pct}% {c1} {c2}");
-    let text = if (a - 1.0).abs() < f64::EPSILON {
-        format!("{name}({body})")
-    } else {
-        format!("{name}({body} / {})", fmt_num(a, false))
-    };
-    Value::Str(crate::value::SassStr { text, quoted: false })
 }
 
 /// CSS Color 4 `color.mix($c1, $c2, $weight, $method)` interpolation in
