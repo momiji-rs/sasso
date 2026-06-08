@@ -523,6 +523,26 @@ fn split_channels(channels: &Value) -> SplitChannels {
     let Value::List(l) = channels else {
         return no_split(vec![channels.clone()]);
     };
+    if l.sep == ListSep::Slash {
+        // The `<channels> / <alpha>` form (the caller rejects any element count
+        // other than two): the first element is the channels (a space list),
+        // the second is the alpha.
+        if l.items.len() == 2 {
+            // Only an unbracketed space list expands into channels; a bracketed
+            // first element stays a single value so the caller rejects it
+            // ("Expected an unbracketed list"), matching dart-sass.
+            let comps = match &l.items[0] {
+                Value::List(inner) if inner.sep == ListSep::Space && !inner.bracketed => inner.items.clone(),
+                other => vec![other.clone()],
+            };
+            return SplitChannels {
+                comps,
+                alpha: Some(l.items[1].clone()),
+                alpha_split: true,
+            };
+        }
+        return no_split(l.items.clone());
+    }
     if l.sep != ListSep::Space {
         return no_split(l.items.clone());
     }
@@ -988,6 +1008,17 @@ fn fn_lab_family(
         if l.items.is_empty() {
             return Err(Error::at(
                 "$channels: Color component list may not be empty.".to_string(),
+                pos,
+            ));
+        }
+        // A slash-separated channels list is the `<channels> / <alpha>` form, so
+        // dart-sass allows exactly two slash elements (e.g. via `list.slash`).
+        if l.sep == ListSep::Slash && l.items.len() != 2 {
+            return Err(Error::at(
+                format!(
+                    "$channels: Only 2 slash-separated elements allowed, but {} were passed.",
+                    l.items.len()
+                ),
                 pos,
             ));
         }

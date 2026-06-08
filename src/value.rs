@@ -439,6 +439,8 @@ pub(crate) enum ListSep {
     Space,
     /// Comma-separated (`1px, 2px`).
     Comma,
+    /// Slash-separated (`1px / 2px`), produced by `list.slash()`.
+    Slash,
 }
 
 /// An sRGB color. Channels are `0..=255` and may be fractional; alpha is
@@ -942,6 +944,8 @@ impl List {
             (ListSep::Space, _) => " ",
             (ListSep::Comma, true) => ",",
             (ListSep::Comma, false) => ", ",
+            (ListSep::Slash, true) => "/",
+            (ListSep::Slash, false) => " / ",
         };
         let inner = self
             .items
@@ -961,6 +965,7 @@ impl List {
         let sep = match self.sep {
             ListSep::Space => " ",
             ListSep::Comma => ", ",
+            ListSep::Slash => " / ",
         };
         let inner = self
             .items

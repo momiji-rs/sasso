@@ -364,6 +364,12 @@ pub(crate) fn call_module(
             return r;
         }
     }
+    // `sass:list` members without a global alias (`slash`).
+    if module == "list" {
+        if let Some(r) = list::call_module_member(member, pos_args, named, pos) {
+            return r;
+        }
+    }
     match module_member_to_global(module, member) {
         Some(global) => call(global, pos_args, named, pos),
         None => Err(Error::at("Undefined function.".to_string(), pos)),

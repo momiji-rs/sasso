@@ -272,6 +272,7 @@ pub(crate) fn inspect_value(v: &Value) -> String {
             let sep_str = match l.sep {
                 ListSep::Comma => ", ",
                 ListSep::Space => " ",
+                ListSep::Slash => " / ",
             };
             let body = match l.items.len() {
                 0 => {
@@ -338,6 +339,7 @@ pub(crate) fn inspect_element(v: &Value, parent_sep: ListSep) -> String {
             let needs_parens = match parent_sep {
                 ListSep::Comma => l.sep == ListSep::Comma,
                 ListSep::Space => true,
+                ListSep::Slash => l.sep == ListSep::Comma || l.sep == ListSep::Slash,
             };
             if needs_parens {
                 return format!("({})", inspect_value(v));

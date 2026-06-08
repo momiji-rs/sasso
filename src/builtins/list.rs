@@ -32,6 +32,40 @@ pub(super) fn try_call(
     })
 }
 
+/// Dispatch a `sass:list` member that has no global alias (`slash`). Returns
+/// `None` for any other member so the caller can report it as undefined.
+pub(super) fn call_module_member(
+    member: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Option<Result<Value, Error>> {
+    Some(match member {
+        "slash" => fn_slash(pos_args, named, pos),
+        _ => return None,
+    })
+}
+
+/// `list.slash($elements...)`: a slash-separated list of the arguments
+/// (e.g. `list.slash(1, 2, 3)` → `1 / 2 / 3`). dart-sass requires at least two
+/// elements.
+fn fn_slash(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    if !named.is_empty() {
+        return Err(Error::at(
+            "No arguments named ($".to_string() + &named[0].0 + ").",
+            pos,
+        ));
+    }
+    if pos_args.len() < 2 {
+        return Err(Error::at("At least two elements are required.".to_string(), pos));
+    }
+    Ok(Value::List(List {
+        items: pos_args.to_vec(),
+        sep: ListSep::Slash,
+        bracketed: false,
+    }))
+}
+
 /// Borrow a value as a list of elements and its separator. A list yields its
 /// own items and separator; a map yields its entries as `key value` space
 /// lists (comma-separated); any other value (including `null`) is a
@@ -339,6 +373,7 @@ fn fn_list_separator(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     let text = match sep {
         ListSep::Comma => "comma",
         ListSep::Space => "space",
+        ListSep::Slash => "slash",
     };
     Ok(Value::Str(SassStr {
         text: text.to_string(),

@@ -101,6 +101,8 @@ fn value_to_selector_string(v: &Value, pname: &str, pos: Pos) -> Result<String, 
                     Some(parts.join(", "))
                 }
                 ListSep::Space => space_or_string(v),
+                // A slash-separated list is not a valid selector.
+                ListSep::Slash => None,
             },
             _ => None,
         }

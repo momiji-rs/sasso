@@ -3654,3 +3654,18 @@ fn parity_color_hwb_out_of_range_negative_saturation() {
     assert_parity("a { b: hwb(20deg 30% 40%); }\n");
     assert_parity("a { b: hsl(20, 50%, 50%); }\n");
 }
+
+#[test]
+fn parity_list_slash_and_slash_color_channels() {
+    // list.slash builds a slash-separated list (1 / 2 / 3), with the inspect
+    // parenthesization rules (a comma sub-list gets parens, a space one doesn't).
+    assert_parity("@use \"sass:list\";\na { b: list.slash(1, 2, 3); }\n");
+    assert_parity("@use \"sass:list\";\na { b: list.slash(1 2, 3 4); }\n");
+    assert_parity(
+        "@use \"sass:list\";\n@use \"sass:meta\";\na { b: meta.inspect(list.slash((1, 2), 3)); }\n",
+    );
+    // A slash list as color channels is the `<channels> / <alpha>` form: exactly
+    // two elements, the first an unbracketed space list.
+    assert_parity("@use \"sass:list\";\na { b: lab(list.slash(1% 2 3, 0.5)); }\n");
+    assert_parity("@use \"sass:list\";\na { b: rgb(list.slash(1 2 3, 0.5)); }\n");
+}
