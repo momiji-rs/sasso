@@ -3,7 +3,7 @@
 //! `red`/`green`/`blue`/`alpha`.
 
 use super::color_ext::{computed, named_repr};
-use super::{arg, as_color, channel, num, require};
+use super::{arg, as_color, channel, max_positional, num, require};
 use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{fmt_num, CalcNode, Color, List, ListSep, Number, Value};
@@ -1649,7 +1649,17 @@ fn fn_adjust_lightness(
 
 fn fn_percentage(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["number"];
-    let n = num(require(&params, pos_args, named, 0, "percentage", pos)?, pos)?;
+    max_positional(pos_args, params.len(), pos)?;
+    let arg = require(&params, pos_args, named, 0, "percentage", pos)?;
+    if let Value::Number(num) = arg {
+        if !num.unit.is_empty() {
+            return Err(Error::at(
+                format!("$number: Expected {} to have no units.", num.to_css(false)),
+                pos,
+            ));
+        }
+    }
+    let n = num(arg, pos)?;
     Ok(Value::Number(Number {
         value: n * 100.0,
         unit: "%".to_string(),
@@ -1658,6 +1668,7 @@ fn fn_percentage(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
 
 fn fn_channel(name: &str, pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
+    max_positional(pos_args, params.len(), pos)?;
     let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
     // The legacy red/green/blue getters only support legacy colors.
     if c.modern.as_ref().is_some_and(|m| !m.space.is_legacy()) {
@@ -2576,6 +2587,7 @@ pub(super) fn space_arg(v: &Value, pos: Pos) -> Result<ColorSpace, Error> {
 
 fn fn_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
+    max_positional(pos_args, params.len(), pos)?;
     let c = as_color(require(&params, pos_args, named, 0, "space", pos)?, pos)?;
     Ok(Value::Str(crate::value::SassStr {
         text: color_space_of(&c).name().to_string(),
@@ -2585,6 +2597,7 @@ fn fn_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
 
 fn fn_is_legacy(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
+    max_positional(pos_args, params.len(), pos)?;
     let c = as_color(require(&params, pos_args, named, 0, "is-legacy", pos)?, pos)?;
     Ok(Value::Bool(color_space_of(&c).is_legacy()))
 }
@@ -2716,6 +2729,7 @@ fn channel_number(space: ColorSpace, idx: usize, raw: f64) -> Number {
 
 fn fn_is_missing(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "channel"];
+    max_positional(pos_args, params.len(), pos)?;
     let c = as_color(require(&params, pos_args, named, 0, "is-missing", pos)?, pos)?;
     let chan = channel_name_arg(require(&params, pos_args, named, 1, "is-missing", pos)?, pos)?;
     let mc = legacy_to_modern(&c);
@@ -2724,7 +2738,15 @@ fn fn_is_missing(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
     } else {
         match channel_index_in(mc.space, &chan) {
             Some(idx) => mc.channels[idx].is_none(),
-            None => false,
+            None => {
+                return Err(Error::at(
+                    format!(
+                        "$channel: Color {} doesn't have a channel named \"{chan}\".",
+                        c.to_css(false)
+                    ),
+                    pos,
+                ));
+            }
         }
     };
     Ok(Value::Bool(missing))
@@ -2832,6 +2854,7 @@ fn null_powerless(mc: &ModernColor, space: ColorSpace) -> ModernColor {
 
 fn fn_same(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color1", "color2"];
+    max_positional(pos_args, params.len(), pos)?;
     let c1 = as_color(require(&params, pos_args, named, 0, "same", pos)?, pos)?;
     let c2 = as_color(require(&params, pos_args, named, 1, "same", pos)?, pos)?;
     let m1 = legacy_to_modern(&c1);
@@ -2862,6 +2885,7 @@ fn fn_same(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
 
 fn fn_to_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "space", "method"];
+    max_positional(pos_args, params.len(), pos)?;
     let c = as_color(require(&params, pos_args, named, 0, "to-gamut", pos)?, pos)?;
     let mc = legacy_to_modern(&c);
     let space = match arg(&params, pos_args, named, 1) {

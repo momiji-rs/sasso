@@ -414,7 +414,16 @@ fn fn_invert(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option<
     Some((|| {
         let c = as_color(color, pos)?;
         let weight = match arg(&params, pos_args, named, 1) {
-            Some(v) => num(v, pos)?,
+            Some(v) => {
+                let n = num(v, pos)?;
+                if !(0.0..=100.0).contains(&n) {
+                    return Err(Error::at(
+                        format!("$weight: Expected {} to be within 0% and 100%.", v.to_css(false)),
+                        pos,
+                    ));
+                }
+                n
+            }
             None => 100.0,
         };
         let w = (weight / 100.0).clamp(0.0, 1.0);

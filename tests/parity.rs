@@ -4148,3 +4148,49 @@ fn parity_plus_quotes_from_right_string() {
     assert_parity("a {b: 1 + foo}\n");
     assert_parity("a {b: red + foo}\n");
 }
+
+#[test]
+fn parity_builtin_argument_validation() {
+    // Fixed-arity builtins reject extra positional args, and several value
+    // constraints match dart-sass exactly.
+    if !enabled() {
+        return;
+    }
+    let err_cases = [
+        "@use \"sass:color\";\na {b: color.red(red, 2)}\n",
+        "@use \"sass:color\";\na {b: color.green(red, 2)}\n",
+        "@use \"sass:color\";\na {b: color.blue(red, 2)}\n",
+        "@use \"sass:color\";\na {b: color.space(red, srgb)}\n",
+        "@use \"sass:color\";\na {b: color.is-legacy(red, 1)}\n",
+        "@use \"sass:color\";\na {b: color.same(red, blue, green)}\n",
+        "@use \"sass:color\";\na {b: color.is-missing(black, \"red\", 1)}\n",
+        "@use \"sass:color\";\na {b: color.to-gamut(red, srgb, local-minde, x)}\n",
+        "@use \"sass:math\";\na {b: math.percentage(1, 2)}\n",
+        "@use \"sass:math\";\na {b: math.percentage(1%)}\n",
+        "@use \"sass:color\";\na {b: color.is-missing(black, \"RED\")}\n",
+        "@use \"sass:color\";\na {b: color.is-missing(black, \"hue\")}\n",
+        "@use \"sass:color\";\na {b: color.invert(red, 100.001%)}\n",
+        "@use \"sass:color\";\na {b: color.invert(red, -0.001%)}\n",
+    ];
+    for scss in err_cases {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping builtin-validation parity case: dart-sass unavailable"),
+        }
+    }
+    // Valid calls still succeed.
+    assert_module_parity(&[("input.scss", "@use \"sass:color\";\na {b: color.red(red)}\n")]);
+    assert_module_parity(&[("input.scss", "@use \"sass:math\";\na {b: math.percentage(0.5)}\n")]);
+    assert_module_parity(&[(
+        "input.scss",
+        "@use \"sass:color\";\na {b: color.invert(red, 50%)}\n",
+    )]);
+}

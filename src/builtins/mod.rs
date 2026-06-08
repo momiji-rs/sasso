@@ -115,6 +115,23 @@ pub(super) fn require<'v>(
     })
 }
 
+/// Reject more positional arguments than `max`, matching dart-sass's
+/// "Only N arguments allowed, but M were passed." A named argument naming an
+/// excess parameter is handled separately by `require`, so only the positional
+/// overflow is checked here.
+pub(super) fn max_positional(pos_args: &[Value], max: usize, pos: Pos) -> Result<(), Error> {
+    let n = pos_args.len();
+    if n > max {
+        let noun = if max == 1 { "argument" } else { "arguments" };
+        let verb = if n == 1 { "was" } else { "were" };
+        return Err(Error::at(
+            format!("Only {max} {noun} allowed, but {n} {verb} passed."),
+            pos,
+        ));
+    }
+    Ok(())
+}
+
 /// Extract an `f64` from a number value (ignoring its unit).
 pub(super) fn num(v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
