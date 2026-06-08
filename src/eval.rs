@@ -3841,8 +3841,40 @@ impl<'a> Evaluator<'a> {
             "module-variables" => Some(self.meta_module_members(pos_args, named, pos, MemberKind::Variable)),
             "module-functions" => Some(self.meta_module_members(pos_args, named, pos, MemberKind::Function)),
             "module-mixins" => Some(self.meta_module_members(pos_args, named, pos, MemberKind::Mixin)),
+            "accepts-content" => Some(self.meta_accepts_content(pos_args, named, pos)),
             _ => None,
         }
+    }
+
+    /// `meta.accepts-content($mixin)`: whether the mixin reference's body uses a
+    /// `@content` block. The only built-in mixin that does is `meta.apply`.
+    fn meta_accepts_content(
+        &self,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+        pos: Pos,
+    ) -> Result<Value, Error> {
+        let v = pos_args
+            .first()
+            .or_else(|| named.iter().find(|(n, _)| n == "mixin").map(|(_, v)| v))
+            .ok_or_else(|| Error::at("Missing argument $mixin.".to_string(), pos))?;
+        let mixin = match v {
+            Value::Mixin(m) => m,
+            other => {
+                return Err(Error::at(
+                    format!("$mixin: {} is not a mixin reference.", other.to_css(false)),
+                    pos,
+                ))
+            }
+        };
+        let accepts = match &mixin.user {
+            Some(any) => Rc::clone(any)
+                .downcast::<Callable>()
+                .map(|c| body_uses_content(&c.body))
+                .unwrap_or(false),
+            None => mixin.name == "apply",
+        };
+        Ok(Value::Bool(accepts))
     }
 
     /// `meta.get-function($name, $css: false, $module: null)`: capture a

@@ -3950,3 +3950,12 @@ fn parity_meta_get_function_module() {
         "@use \"sass:meta\";\n@use \"sass:math\" as m;\na {b: meta.call(meta.get-function(\"round\", $module: \"m\"), 0.6)}\n",
     )]);
 }
+
+#[test]
+fn parity_meta_accepts_content() {
+    // accepts-content reflects whether the mixin body uses @content; the only
+    // built-in mixin that does is meta.apply.
+    assert_parity(
+        "@use \"sass:meta\";\n@mixin a {@content}\n@mixin b {x: y}\nz {\n  c: meta.accepts-content(meta.get-mixin(\"a\"));\n  d: meta.accepts-content(meta.get-mixin(\"b\"));\n  e: meta.accepts-content(meta.get-mixin(\"apply\", \"meta\"));\n}\n",
+    );
+}
