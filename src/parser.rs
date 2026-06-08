@@ -440,6 +440,35 @@ fn expr_is_quoted_string(expr: &Expr) -> bool {
     matches!(expr, Expr::QuotedString(_))
 }
 
+/// Strip a `-foo-` vendor prefix (a `-`, ASCII letters, then `-`). `--x`,
+/// `-moz_x` (underscore), and an unprefixed name are returned unchanged.
+fn unvendor(name: &str) -> &str {
+    let bytes = name.as_bytes();
+    if bytes.first() != Some(&b'-') || bytes.get(1) == Some(&b'-') {
+        return name;
+    }
+    for (i, &c) in bytes.iter().enumerate().skip(1) {
+        if c == b'-' {
+            return &name[i + 1..];
+        }
+        if !c.is_ascii_alphabetic() {
+            return name;
+        }
+    }
+    name
+}
+
+/// Whether `name` is reserved and may not be a user `@function` name (dart-sass
+/// "Invalid function name."). The SassScript operators and the raw-content CSS
+/// functions `url`/`expression` match exactly (so `-a-and`, `AND`, `-a-url` are
+/// allowed); `element` matches after stripping a vendor prefix; `type` matches
+/// case-insensitively.
+fn is_reserved_function_name(name: &str) -> bool {
+    matches!(name, "and" | "or" | "not" | "url" | "expression")
+        || unvendor(name) == "element"
+        || name.eq_ignore_ascii_case("type")
+}
+
 /// Whether a property-name template begins, *literally*, with `--` (a custom
 /// property). A name whose first piece is `#{…}` interpolation is not literal,
 /// so `#{--b}` namespaces normally while a written `--b` is a custom property.
@@ -2518,7 +2547,13 @@ impl Parser {
     /// Parse a `@function name(params) { … }` or `@mixin name(params) { … }`.
     fn parse_callable_def(&mut self, is_function: bool) -> Result<Stmt, Error> {
         self.skip_ws_inline();
+        let name_pos = self.sc.position();
         let name = self.read_ident_name()?;
+        // A user `@function` may not reuse a name the parser treats as a
+        // SassScript operator or a special plain-CSS function (dart-sass).
+        if is_function && is_reserved_function_name(&name) {
+            return Err(Error::at("Invalid function name.", name_pos));
+        }
         let params = self.parse_param_list()?;
         let body = self.parse_braced_body()?;
         let callable = Rc::new(Callable { name, params, body });

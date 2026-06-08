@@ -3990,3 +3990,36 @@ fn parity_color_equality_space_and_none() {
     assert_parity("a {b: gray == hsl(none 0% 50.196078431373%)}\n");
     assert_parity("a {b: rgb(none 0 0) == rgb(0 0 0)}\n");
 }
+
+#[test]
+fn parity_reserved_function_names() {
+    // A user @function may not reuse a reserved operator/special-function name.
+    if enabled() {
+        for name in [
+            "and",
+            "or",
+            "not",
+            "url",
+            "expression",
+            "element",
+            "-a-element",
+            "type",
+            "TYPE",
+        ] {
+            let scss = format!("@function {name}() {{@return 1}}\na {{b: 1}}\n");
+            assert!(
+                compile(&scss, &Options::default()).is_err(),
+                "expected error for @function {name}"
+            );
+            assert!(
+                dart_sass(&scss).is_none(),
+                "dart-sass unexpectedly accepted @function {name}"
+            );
+        }
+    }
+    // Vendor-prefixed / differently-cased / non-reserved names stay valid.
+    assert_parity("@function -a-and() {@return 1}\na {b: -a-and()}\n");
+    assert_parity("@function AND() {@return 1}\na {b: AND()}\n");
+    assert_parity("@function -a-url() {@return 1}\na {b: -a-url()}\n");
+    assert_parity("@function ELEMENT() {@return 1}\na {b: ELEMENT()}\n");
+}

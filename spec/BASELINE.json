@@ -3,7 +3,7 @@
   "dart_sass": "1.100.0",
   "attempted": 13896,
   "pass": 10136,
-  "error_expected": 2320,
-  "passing": 12456,
+  "error_expected": 2335,
+  "passing": 12471,
   "note": "passing = pass (byte-exact CSS) + error_expected (error specs correctly rejected). Every feature that raises the count bumps this file in the same commit; CI (spec/check_baseline.py) fails if the count regresses below it."
 }
