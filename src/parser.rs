@@ -3389,17 +3389,42 @@ impl Parser {
                     pieces.push(TplPiece::Interp(e));
                 }
                 '"' | '\'' => {
+                    // The quote characters are literal prelude text, but `#{…}`
+                    // inside the string is still interpolation (dart-sass resolves
+                    // `"foo#{x}baz"` in an at-rule prelude to `"foo<x>baz"`).
                     lit.push(c);
                     self.sc.bump();
                     while let Some(ch) = self.sc.peek() {
-                        lit.push(ch);
-                        self.sc.bump();
                         if ch == '\\' {
+                            lit.push(ch);
+                            self.sc.bump();
                             if let Some(n) = self.sc.bump() {
                                 lit.push(n);
                             }
                             continue;
                         }
+                        if ch == '#' && self.sc.peek_at(1) == Some('{') {
+                            if self.plain_css {
+                                return Err(Error::at(
+                                    "Interpolation isn't allowed in plain CSS.",
+                                    self.sc.position(),
+                                ));
+                            }
+                            if !lit.is_empty() {
+                                pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                            }
+                            self.sc.bump();
+                            self.sc.bump();
+                            let e = self.parse_value()?;
+                            self.skip_ws_inline();
+                            if !self.sc.eat('}') {
+                                return Err(Error::at("expected \"}\"", self.sc.position()));
+                            }
+                            pieces.push(TplPiece::Interp(e));
+                            continue;
+                        }
+                        lit.push(ch);
+                        self.sc.bump();
                         if ch == c {
                             break;
                         }

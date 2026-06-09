@@ -112,6 +112,20 @@ fn parity_at_rule_page_and_unknown() {
 }
 
 #[test]
+fn parity_at_rule_prelude_interpolation() {
+    // `#{…}` inside an unknown at-rule prelude is resolved everywhere, including
+    // inside a quoted string (the quotes stay literal); an escaped `\#{` and a
+    // bare `#` are left alone.
+    assert_parity(
+        "$d: \"x.com\";\n@foo url(https://#{$d}/), \"foo#{'ba' + 'r'}baz\", foo#{'ba' + 'r'}baz {\n  .a { b: c }\n}\n",
+    );
+    assert_parity("@foo \"plain\", \"has # hash\", \"esc \\#{no}\", url(\"a#b\") { x { y: z } }\n");
+    // The same template path backs selectors, so `#{…}` inside a quoted
+    // attribute value resolves too.
+    assert_parity("$z: zzz;\na[data-foo=\"#{$z}\"] { color: red; }\n");
+}
+
+#[test]
 fn parity_large_numbers() {
     // Huge literals print as plain decimals, scientific notation expands,
     // and fractions round to ten places exactly like dart-sass.
