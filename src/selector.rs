@@ -2316,6 +2316,15 @@ pub(crate) fn list_is_superselector(sup: &[Complex], sub: &[Complex]) -> bool {
 /// (dart-sass `unifyComplex` for the two-selector case). The parents are woven
 /// with full combinator support via the trailing-combinator weave.
 pub(crate) fn unify_complex(c1: &Complex, c2: &Complex) -> Option<Vec<Complex>> {
+    // dart-sass tracks a complex selector's leading combinator (e.g. `> .c`)
+    // separately from its components. It is preserved in the unified result;
+    // two *different* leading combinators can't unify (`> .c` and `+ .d`).
+    let lc1 = c1.components.first().and_then(|c| c.combinator);
+    let lc2 = c2.components.first().and_then(|c| c.combinator);
+    let leading = match (lc1, lc2) {
+        (Some(a), Some(b)) if a != b => return None,
+        (a, b) => a.or(b),
+    };
     let t1 = to_trailing(&c1.components);
     let t2 = to_trailing(&c2.components);
     let (last1, parents1) = t1.split_last()?;
@@ -2331,9 +2340,13 @@ pub(crate) fn unify_complex(c1: &Complex, c2: &Complex) -> Option<Vec<Complex>> 
     let mut seen = HashSet::new();
     for mut woven in weave_parents_trailing(parents1, parents2) {
         woven.push(base.clone());
-        let complex = Complex {
-            components: from_trailing(&woven),
-        };
+        let mut components = from_trailing(&woven);
+        // Re-attach the preserved leading combinator to the very first
+        // component (dart-sass's `leadingCombinators`).
+        if let (Some(comb), Some(first)) = (leading, components.first_mut()) {
+            first.combinator = Some(comb);
+        }
+        let complex = Complex { components };
         if seen.insert(complex.render()) {
             out.push(complex);
         }

@@ -4532,3 +4532,15 @@ fn parity_modify_color_named_first_arg() {
     assert_parity("@use \"sass:color\";\na {b: color.change($color: red, $hue: 120)}\n");
     assert_parity("@use \"sass:color\";\na {b: color.scale(color(display-p3 0.2 0.5 0.7), $red: 12%)}\n");
 }
+
+#[test]
+fn parity_selector_unify_leading_combinator() {
+    // selector.unify preserves a leading combinator (dart-sass's
+    // `leadingCombinators`); two different leading combinators can't unify.
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\"> .c\", \".d\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\".c\", \"~ .d\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\"+ .c\", \"+ .d\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\"> .c .d\", \".e\")}\n");
+    // No leading combinator: unchanged.
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\".a .b\", \".c .d\")}\n");
+}
