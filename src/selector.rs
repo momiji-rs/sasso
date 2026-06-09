@@ -2531,6 +2531,14 @@ fn simple_unify(this: &Simple, compound: &[Simple]) -> Option<Vec<Simple>> {
             if compound.contains(this) {
                 return Some(compound.to_vec());
             }
+            // A selector-list pseudo (`:is`/`:where`) folding into an all-host
+            // compound goes BEFORE the host (`:is(.d):host(.c)`); dart-sass
+            // orders `:host`/`:host-context` after the first such wrapper.
+            if is_selector_list_pseudo(this) && !compound.is_empty() && compound.iter().all(is_host_pseudo) {
+                let mut out = vec![this.clone()];
+                out.extend_from_slice(compound);
+                return Some(out);
+            }
             let this_is_element = is_pseudo_element(this);
             let mut out = Vec::new();
             let mut added = false;
@@ -2671,17 +2679,21 @@ fn is_host_pseudo(s: &Simple) -> bool {
     matches!(pseudo_base(s).as_deref(), Some("host" | "host-context"))
 }
 
+/// Whether `s` is a selector-list pseudo (`:is`/`:where`/`:matches`/`:any`/
+/// `:-*-any`) that wraps a selector list.
+fn is_selector_list_pseudo(s: &Simple) -> bool {
+    matches!(
+        pseudo_base(s).as_deref(),
+        Some("is" | "where" | "matches" | "any" | "-moz-any" | "-webkit-any")
+    )
+}
+
 /// Whether a simple selector may share a compound with a `:host` /
 /// `:host-context` pseudo: only other host pseudos, the selector-list pseudos
 /// (`:is`/`:where`/`:matches`/`:any`/`:-*-any`), or pseudo-elements — never a
 /// type/class/id/universal/attribute or an ordinary pseudo-class.
 fn host_compatible(s: &Simple) -> bool {
-    is_host_pseudo(s)
-        || is_pseudo_element(s)
-        || matches!(
-            pseudo_base(s).as_deref(),
-            Some("is" | "where" | "matches" | "any" | "-moz-any" | "-webkit-any")
-        )
+    is_host_pseudo(s) || is_pseudo_element(s) || is_selector_list_pseudo(s)
 }
 
 /// Whether unifying `base` and `extra` would put a `:host`/`:host-context`

@@ -4726,3 +4726,14 @@ fn parity_selector_unify_legacy_pseudo_element() {
     assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\"a:after\", \"a::after\"))}\n");
     assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\"::before\", \"::after\"))}\n");
 }
+
+#[test]
+fn parity_selector_unify_host_is_order() {
+    // Unifying a `:host`/`:host-context` with selector-list pseudos orders the
+    // host after the first wrapper: `:host(.c)` + `:is(.d)` → `:is(.d):host(.c)`,
+    // and `:host` + `:is(.c):is(.d)` → `:is(.c):host:is(.d)`.
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\":host(.c)\", \":is(.d)\"))}\n");
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\":host\", \":is(.c):is(.d)\"))}\n");
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\":host\", \":is(.c)\"))}\n");
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\":host-context(.c)\", \":is(.d)\"))}\n");
+}
