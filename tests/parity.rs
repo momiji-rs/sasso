@@ -4196,6 +4196,30 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_stray_else_errors() {
+    // A `@else` / `@else if` that is not part of an `@if` chain is rejected
+    // ("This at-rule is not allowed here."). A valid chain still compiles.
+    if !enabled() {
+        return;
+    }
+    for scss in ["@else {a {b: c}}\n", "@else if true {a {b: c}}\n"] {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping stray-else parity case: dart-sass unavailable"),
+        }
+    }
+    assert_parity("@if false {a {b: c}} @else {d {e: f}}\n");
+}
+
+#[test]
 fn parity_declaration_context_errors() {
     // `@function`/`@mixin` declarations are rejected in control directives,
     // function bodies, and mixin bodies (a compile-time restriction).

@@ -914,6 +914,9 @@ impl Parser {
         match name.as_str() {
             "import" => self.parse_import(pos),
             "if" => self.parse_if(),
+            // A stray `@else` (one not consumed as part of an `@if` chain by
+            // `parse_if`) is never valid on its own.
+            "else" => Err(Error::at("This at-rule is not allowed here.", pos)),
             "for" => self.parse_for(),
             "each" => self.parse_each(),
             "while" => self.parse_while(),
