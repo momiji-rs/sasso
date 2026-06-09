@@ -4502,3 +4502,21 @@ fn parity_adjust_hsl_saturation_clamp() {
     // change does not clamp.
     assert_parity("@use \"sass:color\";\na {b: color.change(hsl(120, 50%, 50%), $saturation: -100%)}\n");
 }
+
+#[test]
+fn parity_legacy_modify_gamut_serialization() {
+    // A legacy color modified without $space serializes in the original format
+    // when the result is in the sRGB gamut (rgb/hex/named), but in the working
+    // space (keeping canonical channels) when it falls out of gamut — so an
+    // hsl-channel adjustment doesn't round-trip through rgb into a flipped
+    // negative-saturation form.
+    assert_parity("@use \"sass:color\";\na {b: color.adjust(red, $lightness: 100%)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.adjust(red, $lightness: 200%)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.change(red, $lightness: 150%)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.adjust(plum, $lightness: -200%)}\n");
+    // In-gamut results keep the rgb/named form.
+    assert_parity("@use \"sass:color\";\na {b: color.change(red, $hue: 120)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.adjust(red, $green: 10)}\n");
+    // A constructed hsl color keeps its hsl format when modified in gamut.
+    assert_parity("@use \"sass:color\";\na {b: color.adjust(hsl(120, 100%, 50%), $lightness: 0%)}\n");
+}

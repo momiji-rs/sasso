@@ -3297,7 +3297,7 @@ pub(super) fn modify_in_space(
     op: ModifyOp,
     pos: Pos,
 ) -> Result<Value, Error> {
-    modify_in_space_opt(c, space, chans, op, false, pos)
+    modify_in_space_full(c, space, chans, op, false, true, pos)
 }
 
 /// As [`modify_in_space`], but with control over whether a *powerless* channel
@@ -3312,8 +3312,27 @@ pub(super) fn modify_in_space_opt(
     powerless_check: bool,
     pos: Pos,
 ) -> Result<Value, Error> {
+    modify_in_space_full(c, space, chans, op, powerless_check, false, pos)
+}
+
+/// The shared `change`/`adjust`/`scale` core. `legacy_format` selects how the
+/// result is serialized: the legacy-keyword path (no `$space`) keeps the
+/// original color's format when the result lands in the sRGB gamut, but falls
+/// back to the working space (keeping its canonical channels) when it doesn't —
+/// so e.g. `adjust(red, $lightness: 100%)` stays `hsl(0, 100%, 150%)` instead of
+/// the negative-saturation rgb round-trip. The explicit-`$space`/non-legacy path
+/// always converts back to the color's original space.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn modify_in_space_full(
+    c: &Color,
+    space: ColorSpace,
+    chans: &[(String, &Value)],
+    op: ModifyOp,
+    powerless_check: bool,
+    legacy_format: bool,
+    pos: Pos,
+) -> Result<Value, Error> {
     let orig = legacy_to_modern(c);
-    let dest = orig.space;
     let mut work = convert_modern(&orig, space);
     // `adjust`/`scale` combine each amount with the channel's current value, so
     // a missing (`none`) channel is unsupported (dart-sass errors rather than
@@ -3386,6 +3405,13 @@ pub(super) fn modify_in_space_opt(
             }
         }
     }
+    // The legacy-keyword path keeps the original format when the result is in
+    // the sRGB gamut, otherwise serializes in the (legacy) working space.
+    let dest = if legacy_format && !in_gamut(&work, ColorSpace::Rgb) {
+        space
+    } else {
+        orig.space
+    };
     let back = convert_modern(&work, dest);
     Ok(Value::Color(make_modern_in(back, dest)))
 }
