@@ -100,6 +100,24 @@ fn normalize_nth(text: &str) -> Option<String> {
     })
 }
 
+/// If `text` is a `:nth-child`/`:nth-last-child` with an `of <selector>` tail,
+/// return `(name, anb, selector)` — the pseudo name (with colon), the canonical
+/// An+B, and the `of` selector list. The selectors compare by `(name, anb)` so
+/// a nested same-An+B nth pseudo can be merged and a different one dropped.
+fn nth_of_parts(text: &str) -> Option<(&str, &str, &str)> {
+    let open = text.find('(')?;
+    if !text.ends_with(')') {
+        return None;
+    }
+    let name = &text[..open];
+    if name != ":nth-child" && name != ":nth-last-child" {
+        return None;
+    }
+    let arg = &text[open + 1..text.len() - 1];
+    let pos = find_of_keyword(&arg.to_ascii_lowercase())?;
+    Some((name, arg[..pos].trim(), arg[pos + 2..].trim()))
+}
+
 /// The byte index of a whitespace-bounded `of` keyword in an already-lowercased
 /// `:nth-child` argument (the boundary between the An+B and the `of <selector>`
 /// tail), or `None` if there is no `of` clause.
@@ -1814,11 +1832,19 @@ fn extend_pseudo_compound_target(
     extenders: &[Complex],
     replace: bool,
 ) -> Option<Vec<Simple>> {
-    let parts = parse_pseudo_parts(text)?;
-    if !is_selector_pseudo(&parts.name) {
+    if PSEUDO_DEPTH.with(|d| d.get()) >= MAX_PSEUDO_DEPTH {
         return None;
     }
-    if PSEUDO_DEPTH.with(|d| d.get()) >= MAX_PSEUDO_DEPTH {
+    // `:nth-child(An+B of <selector>)` extends only its `of` selector.
+    if let Some((name, anb, sel)) = nth_of_parts(text) {
+        let original = parse_list(sel)?;
+        PSEUDO_DEPTH.with(|d| d.set(d.get() + 1));
+        let extended = extend_compound_target(&original, targets, extenders, replace);
+        PSEUDO_DEPTH.with(|d| d.set(d.get() - 1));
+        return finish_nth_of(name, anb, &original, extended);
+    }
+    let parts = parse_pseudo_parts(text)?;
+    if !is_selector_pseudo(&parts.name) {
         return None;
     }
     let original = parse_list(&parts.arg)?;
@@ -1826,6 +1852,65 @@ fn extend_pseudo_compound_target(
     let extended = extend_compound_target(&original, targets, extenders, replace);
     PSEUDO_DEPTH.with(|d| d.set(d.get() - 1));
     finish_extend_pseudo(&parts, &original, extended)
+}
+
+/// Re-wrap an extended `:nth-child(An+B of …)` selector list, or `None` when the
+/// `of` selector was unchanged. A nested same-`(name, An+B)` nth pseudo produced
+/// by the extension is unwrapped to its own `of` selectors (dart-sass merges
+/// them); a different-`(name, An+B)` one is dropped (it can't be combined).
+fn finish_nth_of(name: &str, anb: &str, original: &[Complex], extended: Vec<Complex>) -> Option<Vec<Simple>> {
+    let mut flattened: Vec<Complex> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut push = |c: Complex, flattened: &mut Vec<Complex>| {
+        if seen.insert(c.render()) {
+            flattened.push(c);
+        }
+    };
+    for c in extended {
+        match single_pseudo(&c).and_then(|t| nth_of_parts(t)) {
+            Some((n, a, inner_sel)) if n == name && a == anb => {
+                // Merge a nested same-`(name, An+B)` nth pseudo's own `of`
+                // selectors (deduping so a self-referential extension settles).
+                if let Some(list) = parse_list(inner_sel) {
+                    for inner in list {
+                        push(inner, &mut flattened);
+                    }
+                }
+            }
+            // A nested nth pseudo with a different name or An+B can't merge.
+            Some(_) => {}
+            None => push(c, &mut flattened),
+        }
+    }
+    if flattened.len() == original.len()
+        && flattened
+            .iter()
+            .zip(original.iter())
+            .all(|(a, b)| a.render() == b.render())
+    {
+        return None;
+    }
+    let inner = flattened
+        .iter()
+        .map(|c| c.render())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if inner.is_empty() {
+        return None;
+    }
+    Some(vec![Simple::Pseudo(format!("{name}({anb} of {inner})"))])
+}
+
+/// The verbatim pseudo text when `complex` is a single component holding a
+/// single pseudo simple (`:nth-child(…)`), else `None`.
+fn single_pseudo(complex: &Complex) -> Option<&str> {
+    let [comp] = complex.components.as_slice() else {
+        return None;
+    };
+    let [Simple::Pseudo(text)] = comp.compound.simples.as_slice() else {
+        return None;
+    };
+    Some(text)
 }
 
 /// Selector-pseudo extension of every pseudo in `compound` in the

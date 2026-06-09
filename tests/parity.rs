@@ -4620,3 +4620,25 @@ fn parity_selector_nth_child_anb() {
     );
     assert_parity("@use \"sass:selector\";\na {b: selector.unify(\":nth-of-type(3n - 2)\", \"a\")}\n");
 }
+
+#[test]
+fn parity_selector_extend_nth_of() {
+    // `:nth-child(An+B of <selector>)` extends only its `of` selector; a nested
+    // same-An+B nth pseudo in the extender merges (deduped), a different-An+B
+    // one is dropped.
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.extend(\":nth-child(2n+1 of .c)\", \".c\", \".d\")}\n",
+    );
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.extend(\":nth-child(2n+1 of .c)\", \".c\", \".d, .e\")}\n",
+    );
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.extend(\":nth-child(2n+1 of .c)\", \".c\", \":nth-child(2n+1 of .d, .e)\")}\n",
+    );
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.extend(\":nth-child(2n+1 of .c)\", \".c\", \":nth-child(2n+2 of .d, .e)\")}\n",
+    );
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.replace(\":nth-last-child(2n+1 of .c)\", \".c\", \".d\")}\n",
+    );
+}
