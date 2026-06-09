@@ -2536,8 +2536,13 @@ fn simple_unify(this: &Simple, compound: &[Simple]) -> Option<Vec<Simple>> {
             let mut added = false;
             for s in compound {
                 if !added && is_pseudo_element(s) {
-                    // Only one pseudo-element allowed per compound.
                     if this_is_element {
+                        // The same pseudo-element (e.g. legacy `:after` ≡
+                        // `::after`) already present is kept as-is; two
+                        // *different* pseudo-elements can't share a compound.
+                        if pseudo_elements_equal(this, s) {
+                            return Some(compound.to_vec());
+                        }
                         return None;
                     }
                     out.push(this.clone());
@@ -2647,6 +2652,18 @@ fn pseudo_base(s: &Simple) -> Option<String> {
     };
     let name = text.trim_start_matches(':');
     Some(name.split(['(', ' ']).next().unwrap_or(name).to_ascii_lowercase())
+}
+
+/// Whether two pseudo-elements are the same selector, treating a legacy
+/// single-colon form as equal to its double-colon form (`:after` ≡ `::after`).
+fn pseudo_elements_equal(a: &Simple, b: &Simple) -> bool {
+    match (a, b) {
+        (Simple::Pseudo(ta), Simple::Pseudo(tb)) => {
+            let norm = |t: &str| format!("::{}", t.trim_start_matches(':'));
+            norm(ta) == norm(tb)
+        }
+        _ => false,
+    }
 }
 
 /// Whether `s` is a `:host` / `:host-context` pseudo.

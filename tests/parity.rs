@@ -4715,3 +4715,14 @@ fn parity_selector_trailing_combinators() {
     // A bogus trailing-combinator @extend extender is a no-op.
     assert_parity("a {b: c}\nd + {@extend a}\n");
 }
+
+#[test]
+fn parity_selector_unify_legacy_pseudo_element() {
+    // A legacy single-colon pseudo-element unifies with its double-colon form
+    // (`:after` ≡ `::after`), keeping the base's spelling; two different
+    // pseudo-elements still can't share a compound.
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\":after\", \"::after\"))}\n");
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\"::after\", \":after\"))}\n");
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\"a:after\", \"a::after\"))}\n");
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\"::before\", \"::after\"))}\n");
+}
