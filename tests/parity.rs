@@ -4561,3 +4561,33 @@ fn parity_selector_empty_namespace() {
     // As actual style-rule selectors.
     assert_parity("|c {x: y}\n|* {x: y}\n*|c {x: y}\n");
 }
+
+#[test]
+fn parity_selector_unify_host() {
+    // A `:host`/`:host-context` pseudo can't unify into a compound with an
+    // incompatible simple (class/type/universal/ordinary pseudo-class) → null;
+    // it may coexist with selector-list pseudos (`:is`/`:where`).
+    if !enabled() {
+        return;
+    }
+    let null_cases = [
+        ("\":host(.c)\"", "\".d\""),
+        ("\".c\"", "\":host(.d)\""),
+        ("\":host\"", "\".c\""),
+        ("\":host\"", "\":hover\""),
+        ("\":host\"", "\"*\""),
+        ("\"*\"", "\":host\""),
+        ("\":host\"", "\":host.c\""),
+        ("\":host-context(.c)\"", "\".d\""),
+    ];
+    for (a, b) in null_cases {
+        let scss = format!(
+            "@use \"sass:selector\";\n@use \"sass:meta\";\na {{b: meta.inspect(selector.unify({a}, {b}))}}\n"
+        );
+        let ours = compile(&scss, &Options::default()).ok();
+        match dart_sass(&scss) {
+            Some(theirs) => assert_eq!(ours.as_deref(), Some(theirs.as_str()), "\nunify({a}, {b})"),
+            None => eprintln!("skipping :host unify case: dart-sass unavailable"),
+        }
+    }
+}

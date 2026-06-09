@@ -2122,6 +2122,12 @@ fn render_components(seq: &[ComplexComponent]) -> String {
 /// simple in via `simple_unify`, keeping pseudo-classes after a pseudo-element
 /// in `pseudo_result` to preserve their relative order.
 fn unify_compounds(base: &[Simple], extra: &[Simple]) -> Option<Vec<Simple>> {
+    // A `:host`/`:host-context` pseudo can't share its compound with an
+    // incompatible simple (a class, type, universal, ordinary pseudo-class, …),
+    // so such a pair can't unify (dart-sass).
+    if host_unify_invalid(base, extra) {
+        return None;
+    }
     let mut result: Vec<Simple> = base.to_vec();
     let mut pseudo_result: Vec<Simple> = Vec::new();
     let mut pseudo_element_found = false;
@@ -2295,6 +2301,42 @@ fn namespace_and_name(s: &Simple) -> Option<(Option<String>, Option<String>)> {
 
 /// Whether a pseudo selector is a pseudo-element (`::name` or a legacy
 /// single-colon pseudo-element).
+/// The lowercased base name of a pseudo selector (`:host(.c)` → `"host"`), or
+/// `None` for a non-pseudo simple.
+fn pseudo_base(s: &Simple) -> Option<String> {
+    let Simple::Pseudo(text) = s else {
+        return None;
+    };
+    let name = text.trim_start_matches(':');
+    Some(name.split(['(', ' ']).next().unwrap_or(name).to_ascii_lowercase())
+}
+
+/// Whether `s` is a `:host` / `:host-context` pseudo.
+fn is_host_pseudo(s: &Simple) -> bool {
+    matches!(pseudo_base(s).as_deref(), Some("host" | "host-context"))
+}
+
+/// Whether a simple selector may share a compound with a `:host` /
+/// `:host-context` pseudo: only other host pseudos, the selector-list pseudos
+/// (`:is`/`:where`/`:matches`/`:any`/`:-*-any`), or pseudo-elements — never a
+/// type/class/id/universal/attribute or an ordinary pseudo-class.
+fn host_compatible(s: &Simple) -> bool {
+    is_host_pseudo(s)
+        || is_pseudo_element(s)
+        || matches!(
+            pseudo_base(s).as_deref(),
+            Some("is" | "where" | "matches" | "any" | "-moz-any" | "-webkit-any")
+        )
+}
+
+/// Whether unifying `base` and `extra` would put a `:host`/`:host-context`
+/// pseudo in a compound with a simple it can't combine with (checked across
+/// both inputs, before a universal selector is dropped).
+fn host_unify_invalid(base: &[Simple], extra: &[Simple]) -> bool {
+    let all = || base.iter().chain(extra);
+    all().any(is_host_pseudo) && all().any(|s| !host_compatible(s))
+}
+
 fn is_pseudo_element(s: &Simple) -> bool {
     let Simple::Pseudo(text) = s else {
         return false;
