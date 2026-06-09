@@ -635,6 +635,7 @@ pub(crate) struct ExtendResult {
 /// dart-sass order). Placeholder-only complex selectors are dropped from the
 /// output.
 pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension]) -> ExtendResult {
+    reset_extend_budget();
     // The set of "original" rendered selectors — the unextended input. Original
     // selectors are never trimmed (dart-sass keeps them so the rule still
     // matches what it always matched).
@@ -1889,14 +1890,13 @@ fn extend_to_fixpoint(list: &[Complex], extensions: &[Extension]) -> Vec<Complex
     let mut seen: HashSet<String> = HashSet::new();
     // Worklist of selectors still to extend (originals first).
     let mut queue: std::collections::VecDeque<Complex> = list.iter().cloned().collect();
-    let mut iterations = 0usize;
     while let Some(complex) = queue.pop_front() {
-        iterations += 1;
-        if iterations > 100_000 || result.len() > 100_000 {
+        if !consume_extend_work() || result.len() > 100_000 {
             break;
         }
         for c in extend_complex(&complex, extensions) {
             let rendered = c.render();
+            let len = rendered.len();
             if seen.insert(rendered) {
                 // Re-extend a freshly-produced selector only when it carries a
                 // selector-bearing pseudo: that's the sole case where a second
@@ -1906,7 +1906,9 @@ fn extend_to_fixpoint(list: &[Complex], extensions: &[Extension]) -> Vec<Complex
                 // are already resolved transitively in a single pass by
                 // `collect_extenders`, so re-feeding them would only risk
                 // re-deriving cyclic self-extends without producing anything new.
-                if complex_has_selector_pseudo(&c) {
+                // An over-long selector (a self-referential blowup) is emitted
+                // but not re-fed.
+                if complex_has_selector_pseudo(&c) && len <= EXTEND_REFEED_MAX_LEN {
                     queue.push_back(c.clone());
                 }
                 result.push(c);
@@ -1934,6 +1936,44 @@ fn extend_to_fixpoint(list: &[Complex], extensions: &[Extension]) -> Vec<Complex
 const MAX_PSEUDO_DEPTH: usize = 8;
 thread_local! {
     static PSEUDO_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+// Global work budget for one top-level extend operation, shared by every
+// recursion level (pseudo arguments re-enter the fixpoint via `extend_pseudo*`).
+// The per-level iteration caps alone don't bound the COMBINED work: a
+// self-referential extension (`:not(.c) {@extend .c}`, issue 2055/2399) makes
+// each of the 8 pseudo levels run its own near-full fixpoint over selectors
+// whose rendered length doubles every generation — astronomically slow even
+// though technically finite. Legitimate stylesheets use a few hundred units at
+// most, so exhaustion only truncates pathological self-referential output.
+const EXTEND_WORK_BUDGET: usize = 20_000;
+/// A produced selector longer than this is still emitted but not re-fed for
+/// further extension (real transitive outputs stay around ~2 KB; unbounded
+/// re-feeding doubles the length every generation).
+const EXTEND_REFEED_MAX_LEN: usize = 8_192;
+thread_local! {
+    static EXTEND_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(EXTEND_WORK_BUDGET) };
+}
+
+/// Refill the work budget when entering extension at the top level (recursive
+/// pseudo-argument entries run under `PSEUDO_DEPTH > 0` and share the budget).
+fn reset_extend_budget() {
+    if PSEUDO_DEPTH.with(|d| d.get()) == 0 {
+        EXTEND_WORK.with(|w| w.set(EXTEND_WORK_BUDGET));
+    }
+}
+
+/// Consume one unit of extension work; `false` once the budget is exhausted
+/// (callers stop draining their worklist, keeping the results produced so far).
+fn consume_extend_work() -> bool {
+    EXTEND_WORK.with(|w| {
+        let left = w.get();
+        if left == 0 {
+            return false;
+        }
+        w.set(left - 1);
+        true
+    })
 }
 
 fn extend_pseudo(text: &str, extensions: &[Extension]) -> Option<Vec<Simple>> {
@@ -2949,6 +2989,7 @@ pub(crate) fn extend_compound_target(
     extenders: &[Complex],
     replace: bool,
 ) -> Vec<Complex> {
+    reset_extend_budget();
     // Originals are never trimmed away (dart-sass keeps the input selectors so a
     // rule still matches what it always matched). In replace mode the matched
     // originals are dropped before this point, so the set is the surviving ones.
@@ -2971,10 +3012,8 @@ pub(crate) fn extend_compound_target(
         let mut queue: std::collections::VecDeque<Complex> = std::collections::VecDeque::new();
         queue.push_back(complex.clone());
         let mut local_seen: HashSet<String> = HashSet::new();
-        let mut iterations = 0usize;
         while let Some(cur) = queue.pop_front() {
-            iterations += 1;
-            if iterations > 100_000 || result.len() > 100_000 {
+            if !consume_extend_work() || result.len() > 100_000 {
                 break;
             }
             let cur_rendered = cur.render();
@@ -2995,6 +3034,7 @@ pub(crate) fn extend_compound_target(
                 if !is_self_only
                     && rendered != cur_rendered
                     && !redundant
+                    && rendered.len() <= EXTEND_REFEED_MAX_LEN
                     && local_seen.insert(rendered.clone())
                 {
                     queue.push_back(c.clone());
