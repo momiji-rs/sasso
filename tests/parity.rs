@@ -4642,3 +4642,22 @@ fn parity_selector_extend_nth_of() {
         "@use \"sass:selector\";\na {b: selector.replace(\":nth-last-child(2n+1 of .c)\", \".c\", \".d\")}\n",
     );
 }
+
+#[test]
+fn parity_selector_vendor_prefixed_pseudos() {
+    // A vendor prefix on a selector pseudo (`:-pfx-is`, `:-ms-matches`) is
+    // stripped (dart-sass `unvendor`) for the selector-pseudo family check, so
+    // unify/extend/is-superselector treat it as its base pseudo — but the full
+    // (prefixed) name must match to merge a nested one.
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.is-superselector(\":-pfx-is(c d, e f, g h)\", \"c d\")}\n",
+    );
+    assert_parity("@use \"sass:selector\";\na {b: selector.extend(\":-ms-matches(.c)\", \".c\", \".d\")}\n");
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.extend(\":-ms-matches(.c)\", \".c\", \":-ms-matches(.d, .e)\")}\n",
+    );
+    // Different vendor prefix does not merge.
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.extend(\":-ms-matches(.c)\", \".c\", \":-moz-matches(.d, .e)\")}\n",
+    );
+}

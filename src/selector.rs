@@ -700,8 +700,8 @@ fn simplify_one_pseudo(text: &str) -> PseudoResult {
     let head = &text[..open]; // e.g. `:not`
     let arg = &text[open + 1..text.len() - 1];
     let name = head.trim_start_matches(':').to_ascii_lowercase();
-    let is_matchish = matches!(name.as_str(), "is" | "where" | "matches" | "any") || name.ends_with("-any");
-    let is_not = name == "not";
+    let is_matchish = matches!(unvendor(&name), "is" | "where" | "matches" | "any") || name.ends_with("-any");
+    let is_not = unvendor(&name) == "not";
     if !is_matchish && !is_not {
         return PseudoResult::Keep(text.to_string());
     }
@@ -891,7 +891,7 @@ fn parse_selector_pseudo(text: &str) -> Option<(String, Vec<Complex>)> {
     }
     let name = text[..open].trim_start_matches(':').to_ascii_lowercase();
     let known = matches!(
-        name.as_str(),
+        unvendor(&name),
         "is" | "where" | "matches" | "any" | "has" | "host" | "host-context"
     ) || name.ends_with("-any");
     if !known {
@@ -925,7 +925,7 @@ fn selector_pseudo_is_super(name: &str, branches: &[Complex], b: &Compound, pare
             }
         }
     }
-    let matchish = matches!(name, "is" | "where" | "matches" | "any") || name.ends_with("-any");
+    let matchish = matches!(unvendor(name), "is" | "where" | "matches" | "any") || name.ends_with("-any");
     if !matchish {
         return false;
     }
@@ -1734,9 +1734,25 @@ fn complex_has_selector_pseudo(complex: &Complex) -> bool {
 /// Whether a pseudo name takes a selector list we should extend.
 fn is_selector_pseudo(name: &str) -> bool {
     matches!(
-        name,
+        unvendor(name),
         "not" | "is" | "matches" | "where" | "any" | "current" | "has" | "host" | "host-context"
     ) || name.ends_with("-any")
+}
+
+/// Strip a CSS vendor prefix (`-pfx-is` → `is`), matching dart-sass `unvendor`,
+/// so a vendor-prefixed selector pseudo is recognized. A `--custom` name or a
+/// bare `-name` (no closing prefix dash) is returned unchanged.
+fn unvendor(name: &str) -> &str {
+    let bytes = name.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'-' || bytes[1] == b'-' {
+        return name;
+    }
+    for i in 2..bytes.len() {
+        if bytes[i] == b'-' {
+            return &name[i + 1..];
+        }
+    }
+    name
 }
 
 /// dart-sass `_extendList`: recursively extend a list of complex selectors,
@@ -2039,17 +2055,19 @@ fn single_pseudo_inner(complex: &Complex, outer_name: &str) -> PseudoUnwrap {
     let Some(inner_list) = parse_list(&inner.arg) else {
         return PseudoUnwrap::Keep;
     };
-    match outer_name {
+    match unvendor(outer_name) {
         "not" => {
             // `:not(:is(...))` etc. unwraps; other nested pseudos can't be
             // expanded (each layer adds semantics) so the selector is dropped.
-            if matches!(inner.name.as_str(), "is" | "matches" | "where") {
+            if matches!(unvendor(&inner.name), "is" | "matches" | "where") {
                 PseudoUnwrap::Replace(inner_list)
             } else {
                 PseudoUnwrap::Drop
             }
         }
         "is" | "matches" | "where" | "any" | "current" | "nth-child" | "nth-last-child" => {
+            // The names must match *including* any vendor prefix to merge
+            // (`:-ms-matches` and `:-moz-matches` don't combine).
             if inner.name == outer_name {
                 PseudoUnwrap::Replace(inner_list)
             } else {
