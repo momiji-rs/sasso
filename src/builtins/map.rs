@@ -92,6 +92,7 @@ fn comma_list(items: Vec<Value>) -> Value {
         items,
         sep: ListSep::Comma,
         bracketed: false,
+        keywords: None,
     })
 }
 
@@ -485,6 +486,7 @@ fn fn_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         items: vec![k, v],
         sep: ListSep::Space,
         bracketed: false,
+        keywords: None,
     }))
 }
 
@@ -577,6 +579,7 @@ mod tests {
             items: Vec::new(),
             sep: ListSep::Space,
             bracketed: false,
+            keywords: None,
         });
         assert_eq!(call("map-keys", std::slice::from_ref(&empty)).to_css(false), "");
         assert!(matches!(call("map-get", &[empty, s("a")]), Value::Null));

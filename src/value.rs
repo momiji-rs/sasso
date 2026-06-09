@@ -383,6 +383,23 @@ pub(crate) struct List {
     /// lists serialize wrapped in `[`...`]` and report `true` from
     /// `list.is-bracketed`.
     pub bracketed: bool,
+    /// `Some` when this list is an *argument list* (`$args...`): it carries the
+    /// caller's leftover keyword arguments (name -> value), which `meta.keywords`
+    /// reads and a `$args...` splat forwards as named arguments. `None` for an
+    /// ordinary list. The positional arguments are the list's `items`.
+    pub keywords: Option<Vec<(Value, Value)>>,
+}
+
+impl List {
+    /// An ordinary (non-argument) list.
+    pub(crate) fn new(items: Vec<Value>, sep: ListSep, bracketed: bool) -> Self {
+        List {
+            items,
+            sep,
+            bracketed,
+            keywords: None,
+        }
+    }
 }
 
 /// A map value: an ordered list of key/value entries. Insertion order is
@@ -662,6 +679,8 @@ impl Value {
             Value::Number(_) => "number",
             Value::Color(_) => "color",
             Value::Str(_) => "string",
+            // An argument list (`$args...`) reports as `arglist`, not `list`.
+            Value::List(l) if l.keywords.is_some() => "arglist",
             Value::List(_) => "list",
             Value::Map(_) => "map",
             Value::Bool(_) => "bool",

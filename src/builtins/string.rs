@@ -369,6 +369,7 @@ fn fn_split(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
         items,
         sep: ListSep::Comma,
         bracketed: true,
+        keywords: None,
     }))
 }
 

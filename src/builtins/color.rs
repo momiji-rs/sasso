@@ -1016,12 +1016,14 @@ fn fn_color_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resu
         items: ch.comps,
         sep: ListSep::Space,
         bracketed: false,
+        keywords: None,
     });
     let channels = match ch.alpha {
         Some(a) => Value::List(List {
             items: vec![space, a],
             sep: ListSep::Slash,
             bracketed: false,
+            keywords: None,
         }),
         None => space,
     };

@@ -157,6 +157,7 @@ fn selectors_to_value(complexes: &[Complex]) -> Value {
         items,
         sep: ListSep::Comma,
         bracketed: false,
+        keywords: None,
     })
 }
 
@@ -173,6 +174,7 @@ fn complex_to_value(c: &Complex) -> Value {
         items,
         sep: ListSep::Space,
         bracketed: false,
+        keywords: None,
     })
 }
 
@@ -619,6 +621,7 @@ fn fn_simple_selectors(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
         items,
         sep: ListSep::Comma,
         bracketed: false,
+        keywords: None,
     }))
 }
 

@@ -335,13 +335,18 @@ pub(crate) fn inspect_value(v: &Value) -> String {
 /// [`inspect_value`].
 pub(crate) fn inspect_element(v: &Value, parent_sep: ListSep) -> String {
     if let Value::List(l) = v {
-        if l.items.len() >= 2 && !l.bracketed {
+        // A 2+-element list, or a single-element comma list (`(1,)`, whose own
+        // serialization already carries parens), is wrapped again when nested in
+        // a list/map that would otherwise swallow its separator.
+        let single_comma = l.items.len() == 1 && l.sep == ListSep::Comma;
+        let candidate = !l.bracketed && (l.items.len() >= 2 || single_comma);
+        if candidate {
             let needs_parens = match parent_sep {
                 ListSep::Comma => l.sep == ListSep::Comma,
-                // An undecided parent has at most one element, so it never
-                // actually nests a 2+-element child; treat it like a space
-                // parent for completeness.
-                ListSep::Space | ListSep::Undecided => true,
+                // A single-element comma list already disambiguates itself in a
+                // space context (`(1,) 2`), so it is NOT re-wrapped there; a
+                // 2+-element list still is. (Undecided behaves like space.)
+                ListSep::Space | ListSep::Undecided => !single_comma,
                 ListSep::Slash => l.sep == ListSep::Comma || l.sep == ListSep::Slash,
             };
             if needs_parens {
@@ -383,11 +388,7 @@ mod tests {
     }
 
     fn list(items: Vec<Value>, sep: ListSep) -> Value {
-        Value::List(List {
-            items,
-            sep,
-            bracketed: false,
-        })
+        Value::List(List::new(items, sep, false))
     }
 
     fn call(name: &str, args: &[Value]) -> Value {

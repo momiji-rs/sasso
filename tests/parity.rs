@@ -4196,6 +4196,30 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_argument_list_keywords() {
+    // A `$args...` rest parameter captures positional args (a comma list) plus
+    // keyword args; `meta.keywords` returns the keyword map, `type-of` reports
+    // `arglist`, and a `$args...` splat forwards both positional and keyword
+    // arguments. Underscore arg names normalize to hyphens in the keyword map.
+    assert_parity(
+        "@use \"sass:meta\";\n@function f($args...) {@return meta.inspect((positional: $args, named: meta.keywords($args)))}\na {b: f(1, $x: 2, $y_z: 3); c: f(1, 2)}\n",
+    );
+    assert_parity(
+        "@use \"sass:meta\";\n@function t($args...) {@return meta.type-of($args)}\na {b: t(1, 2)}\n",
+    );
+    assert_parity(
+        "@use \"sass:meta\";\n@mixin fwd($args...) {@include inner($args...)}\n@mixin inner($a, $b: 0, $c: 0) {x: $a $b $c}\na {@include fwd(9, $c: 7)}\n",
+    );
+    // `meta.keywords` rejects a non-argument-list value.
+    let scss = "@use \"sass:meta\";\na {b: meta.keywords((a: 1))}\n";
+    let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+    assert!(
+        ours.is_some_and(|m| m.contains("is not an argument list.")),
+        "expected meta.keywords on a map to error"
+    );
+}
+
+#[test]
 fn parity_selector_digit_start_errors() {
     // An id/class whose name starts with a digit (`#2b`, `.3c`) is rejected;
     // valid names — and keyframe-style `50%` stops — still compile.

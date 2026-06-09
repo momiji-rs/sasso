@@ -1234,6 +1234,7 @@ impl<'a> Evaluator<'a> {
                         items: vec![k, v],
                         sep: ListSep::Space,
                         bracketed: false,
+                        keywords: None,
                     })
                 })
                 .collect()),
@@ -1307,7 +1308,18 @@ impl<'a> Evaluator<'a> {
                             push_named(&mut keyword, key, val)?;
                         }
                     }
-                    Value::List(l) => splat_pos.extend(l.items),
+                    Value::List(l) => {
+                        splat_pos.extend(l.items);
+                        // An argument-list splat (`$args...`) also forwards its
+                        // captured keyword arguments as named arguments.
+                        if let Some(kw) = l.keywords {
+                            for (k, val) in kw {
+                                if let Value::Str(s) = k {
+                                    push_named(&mut keyword, s.text, val)?;
+                                }
+                            }
+                        }
+                    }
                     Value::Null => {}
                     other => splat_pos.push(other),
                 }
@@ -1379,12 +1391,30 @@ impl<'a> Evaluator<'a> {
         }
         if let Some(rest) = &params.rest {
             let remaining: Vec<Value> = pos_iter.collect();
+            // Any keyword args left after binding the declared params become the
+            // arglist's keywords, in caller order and keyed by their
+            // hyphen-normalized name (what `meta.keywords` reports).
+            let kw: Vec<(Value, Value)> = keyword_order
+                .iter()
+                .filter_map(|(norm, _)| {
+                    keyword.remove(norm).map(|v| {
+                        (
+                            Value::Str(SassStr {
+                                text: norm.clone(),
+                                quoted: false,
+                            }),
+                            v,
+                        )
+                    })
+                })
+                .collect();
             frame.insert(
                 rest.clone(),
                 Value::List(List {
                     items: remaining,
                     sep: ListSep::Comma,
                     bracketed: false,
+                    keywords: Some(kw),
                 }),
             );
         } else if pos_iter.next().is_some() {
@@ -3470,6 +3500,7 @@ impl<'a> Evaluator<'a> {
                         items: compounds,
                         sep: ListSep::Space,
                         bracketed: false,
+                        keywords: None,
                     }),
                 }
             })
@@ -3478,6 +3509,7 @@ impl<'a> Evaluator<'a> {
             items,
             sep: ListSep::Comma,
             bracketed: false,
+            keywords: None,
         })
     }
 
@@ -3586,6 +3618,7 @@ impl<'a> Evaluator<'a> {
                     items: vals,
                     sep: *sep,
                     bracketed: *bracketed,
+                    keywords: None,
                 }))
             }
             Expr::Map(entries) => {
@@ -3997,7 +4030,27 @@ impl<'a> Evaluator<'a> {
             "module-functions" => Some(self.meta_module_members(pos_args, named, pos, MemberKind::Function)),
             "module-mixins" => Some(self.meta_module_members(pos_args, named, pos, MemberKind::Mixin)),
             "accepts-content" => Some(self.meta_accepts_content(pos_args, named, pos)),
+            "keywords" => Some(Self::meta_keywords(pos_args, named, pos)),
             _ => None,
+        }
+    }
+
+    /// `meta.keywords($args)`: the keyword arguments captured by a `$args...`
+    /// rest parameter, as a map from each name (hyphen-normalized, unquoted) to
+    /// its value. The argument must be an argument list, not an ordinary value.
+    fn meta_keywords(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+        let v = pos_args
+            .first()
+            .or_else(|| named.iter().find(|(n, _)| n == "args").map(|(_, v)| v))
+            .ok_or_else(|| Error::at("Missing argument $args.".to_string(), pos))?;
+        match v {
+            Value::List(l) if l.keywords.is_some() => Ok(Value::Map(Map {
+                entries: l.keywords.clone().unwrap_or_default(),
+            })),
+            other => Err(Error::at(
+                format!("$args: {} is not an argument list.", other.to_css(false)),
+                pos,
+            )),
         }
     }
 

@@ -63,6 +63,7 @@ fn fn_slash(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
         items: pos_args.to_vec(),
         sep: ListSep::Slash,
         bracketed: false,
+        keywords: None,
     }))
 }
 
@@ -82,6 +83,7 @@ fn as_items(v: &Value) -> (Vec<Value>, ListSep) {
                         items: vec![k.clone(), val.clone()],
                         sep: ListSep::Space,
                         bracketed: false,
+                        keywords: None,
                     })
                 })
                 .collect();
@@ -209,11 +211,7 @@ fn fn_set_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
     }
     // `set-nth` preserves the source list's bracketing (dart-sass).
     let bracketed = matches!(list, Value::List(l) if l.bracketed);
-    Ok(Value::List(List {
-        items,
-        sep,
-        bracketed,
-    }))
+    Ok(Value::List(List::new(items, sep, bracketed)))
 }
 
 /// The "settled" separator of a value, or `None` when undecided. A non-empty
@@ -269,11 +267,7 @@ fn fn_join(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
 
     let mut items = items1;
     items.extend(items2);
-    Ok(Value::List(List {
-        items,
-        sep,
-        bracketed,
-    }))
+    Ok(Value::List(List::new(items, sep, bracketed)))
 }
 
 /// The dart-sass "Only N argument(s) allowed, but M were passed." error.
@@ -341,11 +335,7 @@ fn fn_append(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<
     let bracketed = matches!(list, Value::List(l) if l.bracketed);
 
     items.push(val);
-    Ok(Value::List(List {
-        items,
-        sep,
-        bracketed,
-    }))
+    Ok(Value::List(List::new(items, sep, bracketed)))
 }
 
 /// `index($list, $value)`: the 1-based position of the first element equal to
@@ -410,12 +400,14 @@ fn fn_zip(pos_args: &[Value], named: &[(String, Value)]) -> Result<Value, Error>
             items: row,
             sep: ListSep::Space,
             bracketed: false,
+            keywords: None,
         }));
     }
     Ok(Value::List(List {
         items: out,
         sep: ListSep::Comma,
         bracketed: false,
+        keywords: None,
     }))
 }
 
@@ -453,6 +445,7 @@ mod tests {
             items,
             sep,
             bracketed: false,
+            keywords: None,
         })
     }
 
@@ -615,6 +608,7 @@ mod tests {
             items: vec![s("a"), s("b")],
             sep: ListSep::Space,
             bracketed: true,
+            keywords: None,
         });
         assert!(matches!(call("is-bracketed", &[bracketed]), Value::Bool(true)));
         assert!(matches!(
