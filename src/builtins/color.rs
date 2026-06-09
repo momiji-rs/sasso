@@ -2336,6 +2336,32 @@ pub(crate) fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColo
     }
 }
 
+/// [`convert_modern`] for a conversion that produces a user-facing RESULT
+/// color: a LEGACY result zero-fills its propagated missing channels and a
+/// missing alpha (dart-sass `toSpace`'s default `legacyMissing: true`), so
+/// `to-space(lab-with-missing, hsl)` and the result leg of `scale`/`adjust`/
+/// `change`/`mix`/`to-gamut` with a legacy space emit the plain comma form
+/// (`color.scale(hsl(none 50% 50%), $space: hwb)` -> `hsl(0, 50%, 50%)`).
+/// INTERMEDIATE conversions (a `$method`/`$space` working leg feeding further
+/// computation, e.g. `complement`'s hue rotation or `mix`'s interpolation
+/// inputs) keep using raw [`convert_modern`] so missing-ness survives the
+/// round trip. Same-space conversion stays the identity in both.
+fn convert_modern_filled(mc: &ModernColor, target: ColorSpace) -> ModernColor {
+    let out = convert_modern(mc, target);
+    if mc.space == target || !target.is_legacy() {
+        return out;
+    }
+    ModernColor {
+        space: target,
+        channels: [
+            Some(out.channels[0].unwrap_or(0.0)),
+            Some(out.channels[1].unwrap_or(0.0)),
+            Some(out.channels[2].unwrap_or(0.0)),
+        ],
+        alpha: Some(out.alpha.unwrap_or(0.0)),
+    }
+}
+
 /// Direct (no XYZ round-trip) conversion for same-primary spaces, returning the
 /// three target channels, or `None` if the pair needs the general path.
 fn direct_convert(from: ColorSpace, to: ColorSpace, c: [f64; 3]) -> Option<[f64; 3]> {
@@ -2656,7 +2682,7 @@ pub(super) fn make_modern_in(mc: ModernColor, _space: ColorSpace) -> Color {
 /// chroma/saturation is zero (powerless), matching dart-sass's missing-channel
 /// behavior is not applied here — only the plain numeric conversion.
 fn convert_to_space(mc: &ModernColor, space: ColorSpace) -> ModernColor {
-    convert_modern(mc, space)
+    convert_modern_filled(mc, space)
 }
 
 fn fn_color_channel(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
@@ -2939,8 +2965,8 @@ fn fn_to_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
     } else {
         gamut_map(&mc, space)
     };
-    // Re-express in the original space.
-    let back = convert_modern(&mapped, mc.space);
+    // Re-express in the original space (a legacy result fills missing).
+    let back = convert_modern_filled(&mapped, mc.space);
     Ok(Value::Color(make_modern_in(back, mc.space)))
 }
 
@@ -3146,9 +3172,10 @@ fn interpolate_mix(c1: &Color, c2: &Color, weight: f64, space: ColorSpace, hue_m
         alpha,
     };
     // The result is expressed in c1's original space (CSS Color 4 / dart-sass):
-    // a legacy c1 yields a legacy result, a modern c1 keeps its own space.
+    // a legacy c1 yields a legacy result (missing channels filled), a modern c1
+    // keeps its own space.
     let dest = legacy_to_modern(c1).space;
-    let back = convert_modern(&mc, dest);
+    let back = convert_modern_filled(&mc, dest);
     make_modern_in(back, dest)
 }
 
@@ -3418,7 +3445,8 @@ pub(super) fn modify_in_space_full(
     } else {
         orig.space
     };
-    let back = convert_modern(&work, dest);
+    // Result leg: a legacy destination fills missing channels.
+    let back = convert_modern_filled(&work, dest);
     Ok(Value::Color(make_modern_in(back, dest)))
 }
 

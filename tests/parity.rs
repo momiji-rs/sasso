@@ -5107,6 +5107,18 @@ fn parity_out_of_range_lightness_color_mix() {
 }
 
 #[test]
+fn parity_legacy_conversion_fills_missing() {
+    // Converting a color to a LEGACY space (to-space, or the round-trip inside
+    // scale/adjust/to-gamut with $space) zero-fills missing channels and a
+    // missing alpha, yielding the plain comma form — while authored and
+    // `color.change`d missing channels keep the modern `none` form (same-space
+    // conversion is the identity).
+    assert_parity(
+        "@use \"sass:color\";\na {\n  conv: color.to-space(hsl(none 50% 50%), hwb);\n  same: color.to-space(hsl(none 50% 50%), hsl);\n  scaled: color.scale(hsl(none 50% 50%), $space: hwb);\n  modern: color.to-space(color.change(oklch(50% 0.1 10deg), $lightness: none), hsl);\n  alpha: color.to-space(color.change(oklch(50% 0.1 10deg / none), $lightness: none), hsl);\n  authored: hsl(none 50% 50%);\n  changed: color.change(hsl(10deg, 50%, 50%), $saturation: none);\n}\n",
+    );
+}
+
+#[test]
 fn parity_pseudo_argument_whitespace() {
     // dart-sass trims whitespace immediately inside a pseudo's argument parens.
     // Leading whitespace is always dropped; trailing whitespace is dropped for a
