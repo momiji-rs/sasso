@@ -1387,39 +1387,63 @@ impl Parser {
             && cs[3] == '('
     }
 
-    /// Capture a `url(...)` argument verbatim (parens may nest; quoted
-    /// strings inside are passed through). Interpolation is not expanded here
-    /// (none of the spec URLs use it); the run is emitted as a single literal.
+    /// Capture a `url(...)` argument (parens may nest). The `url(` wrapper and
+    /// the URL text are literal, but `#{…}` interpolation — at the top level or
+    /// inside a quoted string — is expanded (dart-sass resolves
+    /// `@import url("#{$p}://…")`). A URL with no interpolation yields a single
+    /// literal piece, byte-identical to the verbatim source.
     fn parse_import_url_func(&mut self) -> Result<Vec<TplPiece>, Error> {
-        let mark = self.sc.mark();
-        self.sc.bump(); // u
-        self.sc.bump(); // r
-        self.sc.bump(); // l
-        self.sc.bump(); // (
+        let mut pieces: Vec<TplPiece> = Vec::new();
+        let mut lit = String::new();
+        for _ in 0..4 {
+            if let Some(c) = self.sc.bump() {
+                lit.push(c); // `url(`
+            }
+        }
         let mut depth = 1i32;
         while let Some(c) = self.sc.peek() {
-            if self.plain_css && c == '#' && self.sc.peek_at(1) == Some('{') {
-                return Err(Error::at(
-                    "Interpolation isn't allowed in plain CSS.",
-                    self.sc.position(),
-                ));
+            if c == '#' && self.sc.peek_at(1) == Some('{') {
+                if self.plain_css {
+                    return Err(Error::at(
+                        "Interpolation isn't allowed in plain CSS.",
+                        self.sc.position(),
+                    ));
+                }
+                if !lit.is_empty() {
+                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                }
+                pieces.push(TplPiece::Interp(self.read_interp()?));
+                continue;
             }
             match c {
                 '"' | '\'' => {
                     let q = c;
+                    lit.push(c);
                     self.sc.bump();
                     while let Some(ch) = self.sc.peek() {
-                        if self.plain_css && ch == '#' && self.sc.peek_at(1) == Some('{') {
-                            return Err(Error::at(
-                                "Interpolation isn't allowed in plain CSS.",
-                                self.sc.position(),
-                            ));
-                        }
-                        self.sc.bump();
                         if ch == '\\' {
+                            lit.push(ch);
                             self.sc.bump();
+                            if let Some(n) = self.sc.bump() {
+                                lit.push(n);
+                            }
                             continue;
                         }
+                        if ch == '#' && self.sc.peek_at(1) == Some('{') {
+                            if self.plain_css {
+                                return Err(Error::at(
+                                    "Interpolation isn't allowed in plain CSS.",
+                                    self.sc.position(),
+                                ));
+                            }
+                            if !lit.is_empty() {
+                                pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                            }
+                            pieces.push(TplPiece::Interp(self.read_interp()?));
+                            continue;
+                        }
+                        lit.push(ch);
+                        self.sc.bump();
                         if ch == q {
                             break;
                         }
@@ -1427,16 +1451,19 @@ impl Parser {
                 }
                 '(' => {
                     depth += 1;
+                    lit.push(c);
                     self.sc.bump();
                 }
                 ')' => {
                     depth -= 1;
+                    lit.push(c);
                     self.sc.bump();
                     if depth == 0 {
                         break;
                     }
                 }
                 _ => {
+                    lit.push(c);
                     self.sc.bump();
                 }
             }
@@ -1444,7 +1471,10 @@ impl Parser {
         if depth != 0 {
             return Err(Error::at("expected \")\"", self.sc.position()));
         }
-        Ok(vec![TplPiece::Lit(self.sc.slice_from(mark))])
+        if !lit.is_empty() {
+            pieces.push(TplPiece::Lit(lit));
+        }
+        Ok(pieces)
     }
 
     /// Parse the optional `supports(...)` and media-query-list modifiers that
@@ -3319,6 +3349,19 @@ impl Parser {
             ));
         }
         Ok(())
+    }
+
+    /// Consume a `#{ … }` interpolation and return its expression. The caller
+    /// must have verified the cursor is at `#` with `{` next.
+    fn read_interp(&mut self) -> Result<Expr, Error> {
+        self.sc.bump(); // '#'
+        self.sc.bump(); // '{'
+        let e = self.parse_value()?;
+        self.skip_ws_inline();
+        if !self.sc.eat('}') {
+            return Err(Error::at("expected \"}\"", self.sc.position()));
+        }
+        Ok(e)
     }
 
     fn parse_template_mode(&mut self, stops: &[char], comments: CommentMode) -> Result<Vec<TplPiece>, Error> {

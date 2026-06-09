@@ -684,6 +684,9 @@ fn parity_plain_css_import_passthrough() {
     assert_parity("@import \"a.css\" b /**/;\n");
     // Interpolation inside a CSS-import modifier is resolved.
     assert_parity("@import \"b\" c#{\"a\"}d;\n");
+    // `#{…}` inside a `url("…")` import string is resolved (the bare quoted
+    // `@import "…"` form keeps interpolation literal, so it is not tested here).
+    assert_parity("$p: http;\n$f: Sans;\n@import url(\"#{$p}://x.com/c?family=#{$f}\");\n");
 }
 
 /// A trivial in-memory [`Importer`] for offline `@import` inlining tests.
