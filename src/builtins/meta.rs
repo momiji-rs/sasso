@@ -385,13 +385,7 @@ pub(crate) fn inspect_value(v: &Value) -> String {
             let inner = m
                 .entries
                 .iter()
-                .map(|(k, val)| {
-                    format!(
-                        "{}: {}",
-                        inspect_element(k, ListSep::Comma),
-                        inspect_element(val, ListSep::Comma)
-                    )
-                })
+                .map(|(k, val)| format!("{}: {}", inspect_map_element(k), inspect_map_element(val)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("({inner})")
@@ -407,6 +401,20 @@ pub(crate) fn inspect_value(v: &Value) -> String {
 /// multi-element unbracketed list needs them. A bracketed list carries its own
 /// `[...]`, and empty / single-element comma lists carry their own parens via
 /// [`inspect_value`].
+/// Serialize a map key or value, matching dart-sass's `_writeMapElement`: an
+/// unbracketed comma-separated list is wrapped in parens regardless of length,
+/// so an empty arglist becomes `(())`. `inspect_element` only wraps lists of
+/// length >= 1, so the empty-comma case is handled here; everything else
+/// defers to it (a comma parent, since map entries sit in a comma context).
+fn inspect_map_element(v: &Value) -> String {
+    if let Value::List(l) = v {
+        if l.items.is_empty() && l.sep == ListSep::Comma && !l.bracketed {
+            return format!("({})", inspect_value(v));
+        }
+    }
+    inspect_element(v, ListSep::Comma)
+}
+
 pub(crate) fn inspect_element(v: &Value, parent_sep: ListSep) -> String {
     if let Value::List(l) = v {
         // A 2+-element list, or a single-element comma list (`(1,)`, whose own

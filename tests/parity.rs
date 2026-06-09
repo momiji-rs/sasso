@@ -3142,6 +3142,12 @@ fn parity_string_split_and_inspect_brackets() {
     assert_parity(
         "@use \"sass:list\";\n@use \"sass:meta\";\na {\n  c: meta.inspect((1,));\n  s: meta.inspect(list.append((), 1, slash));\n  sp: meta.inspect(list.append((), 1, space));\n  m: meta.inspect(list.join((1,), (2,), slash));\n}\n",
     );
+    // A map key/value that is an unbracketed comma list is parenthesized for any
+    // length: an empty comma list (e.g. an empty arglist) becomes `(())`, while
+    // an empty undecided list `()` stays bare.
+    assert_parity(
+        "@use \"sass:list\";\n@use \"sass:meta\";\n@function args($a...) { @return $a; }\na {\n  ea: meta.inspect((p: args()));\n  el: meta.inspect((p: ()));\n  ec: meta.inspect((p: list.join((), (), comma)));\n}\n",
+    );
 }
 
 #[test]
