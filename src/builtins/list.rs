@@ -311,12 +311,13 @@ fn validate_args(
     Ok(())
 }
 
-/// `join`'s `auto` rule: list1's settled separator, else list2's. When neither
-/// is settled (e.g. `join((), ())`) the result stays undecided.
+/// `join`'s `auto` rule: list1's settled separator, else list2's, else space.
+/// `join` always yields a *decided* separator (dart-sass), so even
+/// `join((), ())` is space-separated, not undecided.
 fn join_auto_separator(list1: &Value, list2: &Value) -> ListSep {
     settled_sep(list1)
         .or_else(|| settled_sep(list2))
-        .unwrap_or(ListSep::Undecided)
+        .unwrap_or(ListSep::Space)
 }
 
 /// `append($list, $val, $separator: auto)`: the list with `$val` appended.
