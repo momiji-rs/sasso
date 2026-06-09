@@ -4196,6 +4196,22 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_calc_functions_are_calculations() {
+    // An unreduced `min`/`max`/`clamp`/`hypot` is a calculation value:
+    // `type-of` is `calculation`, `calc-name`/`calc-args` inspect it, a nested
+    // calculation stays a calculation, and `calc(min(…))` drops its wrapper.
+    // A reducible call still folds to a number.
+    assert_parity("a {b: min(1px, 2vw); c: max(1%, 2px); d: clamp(1%, 2px, 3px)}\n");
+    assert_parity("a {b: min(1px, 2px)}\n");
+    assert_parity("a {b: calc(min(1%, 2px))}\n");
+    assert_parity(
+        "@use \"sass:meta\";\na {b: meta.type-of(clamp(1%, 2px, 3px)); c: meta.calc-name(min(1%, 2px))}\n",
+    );
+    assert_parity("@use \"sass:list\";\n@use \"sass:meta\";\na {b: meta.inspect(meta.calc-args(clamp(1%, 2px, 3px)))}\n");
+    assert_parity("@use \"sass:list\";\n@use \"sass:meta\";\na {b: meta.type-of(list.nth(meta.calc-args(min(max(1%, 1px), 2px)), 1))}\n");
+}
+
+#[test]
 fn parity_calc_name_and_args() {
     // `meta.calc-name` returns the calculation function name (`"calc"`);
     // `meta.calc-args` returns its arguments, where an operation/var becomes an

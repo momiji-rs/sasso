@@ -59,15 +59,20 @@ pub(super) fn try_call(
 }
 
 /// `meta.calc-name($calc)`: the calculation's function name as a quoted string
-/// (currently always `"calc"`, since `min`/`max`/`clamp` are preserved as
-/// strings rather than calculations).
+/// (`"calc"`, `"min"`, `"clamp"`, …).
 fn fn_calc_name(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let v = super::require(&["calc"], pos_args, named, 0, "calc-name", pos)?;
     match v {
-        Value::Calc(_) => Ok(Value::Str(SassStr {
-            text: "calc".to_string(),
-            quoted: true,
-        })),
+        Value::Calc(node) => {
+            let name = match node {
+                CalcNode::Func { name, .. } => name.as_str(),
+                _ => "calc",
+            };
+            Ok(Value::Str(SassStr {
+                text: name.to_string(),
+                quoted: true,
+            }))
+        }
         other => Err(Error::at(
             format!("$calc: {} is not a calculation.", other.to_css(false)),
             pos,
@@ -82,6 +87,13 @@ fn fn_calc_name(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resu
 fn fn_calc_args(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let v = super::require(&["calc"], pos_args, named, 0, "calc-args", pos)?;
     match v {
+        // A function calculation (`min`/`clamp`/…) exposes its own arguments; a
+        // bare `calc()` has a single argument, its expression.
+        Value::Calc(CalcNode::Func { args, .. }) => Ok(Value::List(List::new(
+            args.iter().map(calc_node_to_value).collect(),
+            ListSep::Comma,
+            false,
+        ))),
         Value::Calc(node) => Ok(Value::List(List::new(
             vec![calc_node_to_value(node)],
             ListSep::Comma,
@@ -95,8 +107,8 @@ fn fn_calc_args(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resu
 }
 
 /// Convert one calculation argument node to the Sass value `meta.calc-args`
-/// returns for it: a number stays a number; an operation or any opaque operand
-/// becomes an unquoted string of its serialization.
+/// returns for it: a number stays a number; a nested function calculation stays
+/// a calculation; an operation or any opaque operand becomes an unquoted string.
 fn calc_node_to_value(node: &CalcNode) -> Value {
     match node {
         CalcNode::Number(n) => Value::Number(n.clone()),
@@ -104,6 +116,7 @@ fn calc_node_to_value(node: &CalcNode) -> Value {
             text: s.clone(),
             quoted: false,
         }),
+        CalcNode::Func { .. } => Value::Calc(node.clone()),
         CalcNode::Op { .. } => Value::Str(SassStr {
             text: node.to_calc_css(false),
             quoted: false,

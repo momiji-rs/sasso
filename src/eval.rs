@@ -5568,6 +5568,8 @@ fn calc_node_carries_unit(node: &CalcNode) -> bool {
             right,
         } => calc_node_carries_unit(left) || calc_node_carries_unit(right),
         CalcNode::Op { .. } => false,
+        // A nested calculation function has no single determinable unit here.
+        CalcNode::Func { .. } => false,
     }
 }
 
@@ -6230,6 +6232,9 @@ fn calc_node_has_opaque(node: &CalcNode) -> bool {
         CalcNode::Number(_) => false,
         CalcNode::Str(_) => true,
         CalcNode::Op { left, right, .. } => calc_node_has_opaque(left) || calc_node_has_opaque(right),
+        // A nested calculation function is already preserved, so a calc holding
+        // it cannot reduce to a single number.
+        CalcNode::Func { .. } => true,
     }
 }
 

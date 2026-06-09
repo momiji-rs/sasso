@@ -17,7 +17,7 @@
 
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{convert_factor, Number, SassStr, Value};
+use crate::value::{convert_factor, CalcNode, Number, SassStr, Value};
 
 pub(super) fn try_call(
     name: &str,
@@ -1130,12 +1130,24 @@ fn incompatible(a: &Number, b: &Number, pos: Pos) -> Error {
 
 /// Build the preserved CSS form `name(arg, arg, ...)` over evaluated
 /// arguments, matching dart-sass's serialization (comma + space separated).
+/// An unreduced CSS math function (`min`/`max`/`clamp`/`hypot`/…) becomes a
+/// calculation value, so `meta.type-of` reports `calculation` and
+/// `meta.calc-name`/`meta.calc-args` can inspect it. Each argument keeps its
+/// kind: a number stays a number node, a nested calculation is inlined, and any
+/// other operand is its verbatim serialization.
 fn preserved_call(name: &str, args: &[Value]) -> Value {
-    let parts: Vec<String> = args.iter().map(|v| v.to_css(false)).collect();
-    Value::Str(SassStr {
-        text: format!("{name}({})", parts.join(", ")),
-        quoted: false,
+    Value::Calc(CalcNode::Func {
+        name: name.to_string(),
+        args: args.iter().map(value_to_calc_node).collect(),
     })
+}
+
+fn value_to_calc_node(v: &Value) -> CalcNode {
+    match v {
+        Value::Number(n) => CalcNode::Number(n.clone()),
+        Value::Calc(node) => node.clone(),
+        other => CalcNode::Str(other.to_css(false)),
+    }
 }
 
 #[cfg(test)]

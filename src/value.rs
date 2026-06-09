@@ -155,6 +155,10 @@ pub(crate) enum CalcNode {
         left: Box<CalcNode>,
         right: Box<CalcNode>,
     },
+    /// A calculation function call that could not be reduced to a number
+    /// (`min`/`max`/`clamp`/`hypot`/…). The `Value::Calc` holding this serializes
+    /// as `name(arg, …)` (no `calc()` wrapper).
+    Func { name: String, args: Vec<CalcNode> },
 }
 
 /// A `calc()` binary operator.
@@ -217,6 +221,21 @@ impl CalcNode {
                 }
                 format!("{l}{sep}{r}")
             }
+            CalcNode::Func { name, args } => {
+                let parts: Vec<String> = args.iter().map(|a| a.to_calc_css(compressed)).collect();
+                let sep = if compressed { "," } else { ", " };
+                format!("{name}({})", parts.join(sep))
+            }
+        }
+    }
+
+    /// Serialize as the top-level `Value::Calc` holding this node would: a
+    /// calculation-function node renders bare as `name(args)`, while any other
+    /// node is wrapped in `calc(...)`.
+    pub(crate) fn to_calc_value_css(&self, compressed: bool) -> String {
+        match self {
+            CalcNode::Func { .. } => self.to_calc_css(compressed),
+            _ => format!("calc({})", self.to_calc_css(compressed)),
         }
     }
 
@@ -634,7 +653,7 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Null => String::new(),
             Value::Slash(_, repr) => repr.clone(),
-            Value::Calc(node) => format!("calc({})", node.to_calc_css(compressed)),
+            Value::Calc(node) => node.to_calc_value_css(compressed),
             // Not a valid CSS value; rendered for the "isn't a valid CSS value"
             // error and for `inspect`.
             Value::Function(func) => func.inspect(),
@@ -651,7 +670,7 @@ impl Value {
             Value::List(l) => l.to_interp(),
             Value::Map(m) => m.to_map_css(false),
             Value::Slash(_, repr) => repr.clone(),
-            Value::Calc(node) => format!("calc({})", node.to_calc_css(false)),
+            Value::Calc(node) => node.to_calc_value_css(false),
             other => other.to_css(false),
         }
     }
