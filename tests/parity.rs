@@ -4196,6 +4196,16 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_comment_newline_normalization() {
+    // CR, FF, and CRLF inside a loud comment are all normalized to LF.
+    assert_parity("/* foo\r * bar */\n");
+    assert_parity("/* foo\u{c} * bar */\n");
+    assert_parity("/* foo\r\n * bar */\n");
+    // A plain LF comment is unchanged.
+    assert_parity("/* a\n b\n c */\nx {y: z}\n");
+}
+
+#[test]
 fn parity_empty_value_declaration_dropped() {
     // A regular declaration whose value serializes to nothing (an empty
     // unquoted string, an all-`null` list) is dropped like a `null` value; a

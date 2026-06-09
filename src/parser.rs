@@ -1939,6 +1939,15 @@ impl Parser {
                     }
                     pieces.push(TplPiece::Interp(e));
                 }
+                // CSS treats CR, FF, and CRLF as newlines inside a comment;
+                // dart-sass normalizes them all to LF in the comment contents.
+                Some(c @ ('\r' | '\u{c}')) => {
+                    self.sc.bump();
+                    if c == '\r' && self.sc.peek() == Some('\n') {
+                        self.sc.bump();
+                    }
+                    lit.push('\n');
+                }
                 Some(c) => {
                     lit.push(c);
                     self.sc.bump();
