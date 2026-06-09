@@ -3261,12 +3261,13 @@ fn parity_plain_css_module() {
             "a {\n  b {c: d}\n  &.e {f: g}\n  h: rgb(10, 20, 30);\n}\ni, j {k {l: m}}\n",
         ),
     ]);
-    // A plain CSS file never inlines `@import`; every form is emitted verbatim.
+    // A plain CSS file never inlines `@import`; every form is emitted verbatim,
+    // including an `@import` nested inside a rule.
     assert_module_parity(&[
         ("input.scss", "@use \"plain\";\n"),
         (
             "plain.css",
-            "@import \"whatever\";\n@import url(whatever);\n@import url(\"whatever\");\na {b: c}\n",
+            "@import \"whatever\";\n@import url(whatever);\n@import url(\"whatever\");\na {b: c}\nd {\n  @import \"foo\";\n}\n",
         ),
     ]);
 }

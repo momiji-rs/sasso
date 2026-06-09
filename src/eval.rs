@@ -2339,6 +2339,20 @@ impl<'a> Evaluator<'a> {
                     let text = self.eval_template(c)?;
                     items.push(OutItem::Comment(text));
                 }
+                // A nested `@import` inside a plain-CSS rule is preserved
+                // verbatim, like a top-level one (see `exec_css`).
+                Stmt::Import(args) => {
+                    for arg in args {
+                        let prelude = match arg {
+                            ImportArg::Css(tpl) => self.eval_template(tpl)?,
+                            ImportArg::Sass { path, .. } => format!("\"{path}\""),
+                        };
+                        items.push(OutItem::ChildlessAtRule {
+                            name: "import".to_string(),
+                            prelude,
+                        });
+                    }
+                }
                 _ => {}
             }
         }
