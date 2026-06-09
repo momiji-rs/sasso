@@ -100,7 +100,9 @@ fn value_to_selector_string(v: &Value, pname: &str, pos: Pos) -> Result<String, 
                     }
                     Some(parts.join(", "))
                 }
-                ListSep::Space => space_or_string(v),
+                // An undecided list here is single-element, so treat it like a
+                // space-separated one.
+                ListSep::Space | ListSep::Undecided => space_or_string(v),
                 // A slash-separated list is not a valid selector.
                 ListSep::Slash => None,
             },

@@ -441,6 +441,12 @@ pub(crate) enum ListSep {
     Comma,
     /// Slash-separated (`1px / 2px`), produced by `list.slash()`.
     Slash,
+    /// Not yet decided: an empty or single-element list that has no explicit
+    /// separator. It serializes like a space list but defers to the other
+    /// operand's separator in `list.join`/`list.append`, and `list.separator`
+    /// reports it as `space`. Only ever held by a list with fewer than two
+    /// elements (two elements force a real separator).
+    Undecided,
 }
 
 /// An sRGB color. Channels are `0..=255` and may be fractional; alpha is
@@ -975,7 +981,9 @@ pub(crate) fn calc_units_incompatible(a: &str, b: &str) -> bool {
 impl List {
     fn to_css(&self, compressed: bool) -> String {
         let sep = match (self.sep, compressed) {
-            (ListSep::Space, _) => " ",
+            // An undecided list has at most one element, so its separator
+            // string is never actually used; serialize it like a space list.
+            (ListSep::Space | ListSep::Undecided, _) => " ",
             (ListSep::Comma, true) => ",",
             (ListSep::Comma, false) => ", ",
             (ListSep::Slash, true) => "/",
@@ -997,7 +1005,7 @@ impl List {
 
     fn to_interp(&self) -> String {
         let sep = match self.sep {
-            ListSep::Space => " ",
+            ListSep::Space | ListSep::Undecided => " ",
             ListSep::Comma => ", ",
             ListSep::Slash => " / ",
         };

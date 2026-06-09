@@ -4196,6 +4196,26 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_list_undecided_separator() {
+    // An empty or single-element list with no explicit separator is
+    // "undecided": it defers to the other operand in join/append, while an
+    // explicit `$separator` (or `with-separator`) makes it stick even when the
+    // result is empty or single-element. A single-element bracketed `[1]` is
+    // also undecided.
+    assert_parity("@use \"sass:list\";\na {b: list.join([1], (2,))}\n");
+    assert_parity("@use \"sass:list\";\na {b: list.join([1], (2, 3, 4))}\n");
+    assert_parity("@use \"sass:list\";\na {b: list.separator(list.join((), (), comma))}\n");
+    assert_parity("@use \"sass:list\";\na {b: list.append((), 1, $separator: comma)}\n");
+    assert_parity("@use \"sass:list\";\na {b: list.separator(list.join((), (), $separator: space))}\n");
+    assert_parity("@use \"sass:list\";\na {b: list.separator([1])}\n");
+    assert_parity("@use \"sass:meta\";\na {b: meta.inspect(())}\n");
+    assert_parity("@use \"sass:meta\";\na {b: meta.inspect([])}\n");
+    // A deliberately space-separated empty list keeps its separator through a
+    // join with a comma list as the first operand's settled choice.
+    assert_parity("@use \"sass:list\";\na {b: list.join(list.join((), (), space), (1, 2))}\n");
+}
+
+#[test]
 fn parity_empty_list_declaration_errors() {
     // An empty unbracketed list (`()`, directly or via a variable/builtin)
     // cannot be a declaration value; a bracketed `[]` and any non-empty list

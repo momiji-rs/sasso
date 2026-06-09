@@ -3891,7 +3891,7 @@ impl Parser {
                     self.sc.bump();
                     return Ok(Expr::List {
                         items: Vec::new(),
-                        sep: ListSep::Space,
+                        sep: ListSep::Undecided,
                         bracketed: false,
                     });
                 }
@@ -4123,7 +4123,7 @@ impl Parser {
             self.sc.bump();
             return Ok(Expr::List {
                 items: Vec::new(),
-                sep: ListSep::Space,
+                sep: ListSep::Undecided,
                 bracketed: true,
             });
         }
@@ -4147,9 +4147,11 @@ impl Parser {
                 sep,
                 bracketed: true,
             }),
+            // A single-element bracketed list (`[1]`, `[[c]]`) has no decided
+            // separator yet, so it stays undecided like a bare value would.
             other => Ok(Expr::List {
                 items: vec![other],
-                sep: ListSep::Space,
+                sep: ListSep::Undecided,
                 bracketed: true,
             }),
         }

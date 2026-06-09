@@ -271,7 +271,7 @@ pub(crate) fn inspect_value(v: &Value) -> String {
         Value::List(l) => {
             let sep_str = match l.sep {
                 ListSep::Comma => ", ",
-                ListSep::Space => " ",
+                ListSep::Space | ListSep::Undecided => " ",
                 ListSep::Slash => " / ",
             };
             let body = match l.items.len() {
@@ -338,7 +338,10 @@ pub(crate) fn inspect_element(v: &Value, parent_sep: ListSep) -> String {
         if l.items.len() >= 2 && !l.bracketed {
             let needs_parens = match parent_sep {
                 ListSep::Comma => l.sep == ListSep::Comma,
-                ListSep::Space => true,
+                // An undecided parent has at most one element, so it never
+                // actually nests a 2+-element child; treat it like a space
+                // parent for completeness.
+                ListSep::Space | ListSep::Undecided => true,
                 ListSep::Slash => l.sep == ListSep::Comma || l.sep == ListSep::Slash,
             };
             if needs_parens {

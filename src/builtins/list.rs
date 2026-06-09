@@ -225,15 +225,13 @@ fn fn_set_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
 /// undecided.
 fn settled_sep(v: &Value) -> Option<ListSep> {
     match v {
-        // A comma or slash list is always settled (the separator is an explicit
-        // choice), even when empty or single-element.
-        Value::List(l) if matches!(l.sep, ListSep::Comma | ListSep::Slash) => Some(l.sep),
-        // A space list is only settled once it holds 2+ elements; a single
-        // element (or empty) space list has an *undecided* separator, so it
-        // defers to the other operand in `join`/`append`.
-        Value::List(l) if l.items.len() >= 2 => Some(l.sep),
+        // A list with a real (non-undecided) separator is settled, even when
+        // empty or single-element — the separator is an explicit choice that
+        // `list.join`/`list.append` must honour.
+        Value::List(l) if l.sep != ListSep::Undecided => Some(l.sep),
         // A non-empty map behaves as a comma-separated list of its entries.
         Value::Map(m) if !m.entries.is_empty() => Some(ListSep::Comma),
+        // An undecided list, or a bare value, has no settled separator.
         _ => None,
     }
 }
@@ -313,11 +311,12 @@ fn validate_args(
     Ok(())
 }
 
-/// `join`'s `auto` rule: list1's settled separator, else list2's, else space.
+/// `join`'s `auto` rule: list1's settled separator, else list2's. When neither
+/// is settled (e.g. `join((), ())`) the result stays undecided.
 fn join_auto_separator(list1: &Value, list2: &Value) -> ListSep {
     settled_sep(list1)
         .or_else(|| settled_sep(list2))
-        .unwrap_or(ListSep::Space)
+        .unwrap_or(ListSep::Undecided)
 }
 
 /// `append($list, $val, $separator: auto)`: the list with `$val` appended.
@@ -372,7 +371,7 @@ fn fn_list_separator(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     let sep = settled_sep(v).unwrap_or(ListSep::Space);
     let text = match sep {
         ListSep::Comma => "comma",
-        ListSep::Space => "space",
+        ListSep::Space | ListSep::Undecided => "space",
         ListSep::Slash => "slash",
     };
     Ok(Value::Str(SassStr {
