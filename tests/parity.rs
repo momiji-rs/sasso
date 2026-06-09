@@ -4661,3 +4661,20 @@ fn parity_selector_vendor_prefixed_pseudos() {
         "@use \"sass:selector\";\na {b: selector.extend(\":-ms-matches(.c)\", \".c\", \":-moz-matches(.d, .e)\")}\n",
     );
 }
+
+#[test]
+fn parity_selector_is_superselector_not() {
+    // dart-sass `:not(S1)` superselector rule (contravariant): `:not(c.d)` is a
+    // superselector of `e` (a different type can never match `c.d`), and a
+    // same-name `:not` whose argument supersedes each complex covers it.
+    assert_parity("@use \"sass:selector\";\na {b: selector.is-superselector(\":not(c.d)\", \"e\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.is-superselector(\":not(#c.d)\", \"#e\")}\n");
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.is-superselector(\":not(c d.i, e j f)\", \":not(c d, e f, g h)\")}\n",
+    );
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.is-superselector(\":not(c d.i):not(e j f)\", \":not(c d, e f, g h)\")}\n",
+    );
+    // Not a superselector when the type can still match.
+    assert_parity("@use \"sass:selector\";\na {b: selector.is-superselector(\":not(c.d)\", \"c\")}\n");
+}

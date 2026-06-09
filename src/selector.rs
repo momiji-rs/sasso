@@ -939,6 +939,62 @@ fn selector_pseudo_is_super(name: &str, branches: &[Complex], b: &Compound, pare
     })
 }
 
+/// Parse a `:not(...)` (or vendor-prefixed `:-pfx-not(...)`) selector pseudo
+/// into its (full) name and argument list.
+fn parse_not_pseudo(text: &str) -> Option<(String, Vec<Complex>)> {
+    let open = text.find('(')?;
+    if !text.ends_with(')') {
+        return None;
+    }
+    let name = text[..open].trim_start_matches(':').to_ascii_lowercase();
+    if unvendor(&name) != "not" {
+        return None;
+    }
+    let list = parse_list(&text[open + 1..text.len() - 1])?;
+    Some((name, list))
+}
+
+/// dart-sass `:not(S1)` superselector rule (contravariant): `:not(S1)` is a
+/// superselector of compound `b` iff every complex in `S1` is *excluded* by
+/// some simple of `b` — a type/id with a different name (so `b` can never match
+/// that complex), or a same-(full-)name `:not(S2)` whose `S2` supersedes the
+/// complex.
+fn not_pseudo_is_super(name: &str, branches: &[Complex], b: &Compound) -> bool {
+    branches.iter().all(|complex1| {
+        b.simples
+            .iter()
+            .any(|simple2| not_excludes(complex1, simple2, name))
+    })
+}
+
+fn not_excludes(complex1: &Complex, simple2: &Simple, not_name: &str) -> bool {
+    let last = complex1.components.last();
+    let last_simples = || last.map(|c| c.compound.simples.as_slice()).unwrap_or(&[]);
+    match simple2 {
+        Simple::Type(t2) => {
+            let n2 = type_local_name(t2);
+            last_simples()
+                .iter()
+                .any(|s| matches!(s, Simple::Type(t1) if type_local_name(t1) != n2))
+        }
+        Simple::Id(id2) => last_simples()
+            .iter()
+            .any(|s| matches!(s, Simple::Id(id1) if id1 != id2)),
+        Simple::Pseudo(t2) => match parse_not_pseudo(t2) {
+            Some((n2, s2_branches)) => {
+                n2 == not_name && list_is_superselector(&s2_branches, std::slice::from_ref(complex1))
+            }
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// The local (namespace-stripped) name of a type selector string.
+fn type_local_name(t: &str) -> &str {
+    t.rsplit('|').next().unwrap_or(t)
+}
+
 /// Whether compound `a` is a superselector of compound `b` (dart-sass
 /// `compoundIsSuperselector`). A pseudo-element effectively changes the target
 /// of a compound rather than narrowing it, so if either compound has a
@@ -960,6 +1016,10 @@ fn compound_is_superselector(a: &Compound, b: &Compound, parents: &[TComp]) -> b
             if let Simple::Pseudo(text) = s1 {
                 if let Some((name, branches)) = parse_selector_pseudo(text) {
                     return selector_pseudo_is_super(&name, &branches, b, parents);
+                }
+                // `:not(S1)` uses its own contravariant superselector rule.
+                if let Some((name, branches)) = parse_not_pseudo(text) {
+                    return not_pseudo_is_super(&name, &branches, b);
                 }
             }
             b.simples.iter().any(|s2| simple_is_superselector(s1, s2))
