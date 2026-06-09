@@ -4591,3 +4591,19 @@ fn parity_selector_unify_host() {
         }
     }
 }
+
+#[test]
+fn parity_selector_extend_into_pseudos() {
+    // selector.extend / selector.replace recurse into selector-list pseudo
+    // arguments (`:is`/`:where`/`:matches`/`:not`), and a self-referential
+    // extender converges (no unbounded growth).
+    assert_parity("@use \"sass:selector\";\na {b: selector.extend(\".x\", \".x\", \".x .y\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.extend(\":is(.c)\", \".c\", \".d\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.extend(\":is(.c)\", \".c\", \".d, .e\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.extend(\":where(.x)\", \".x\", \".x .y\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.extend(\":matches(.c)\", \".c\", \".d\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.extend(\":not(.c)\", \".c\", \".d\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.extend(\":not(.c.d)\", \".c\", \".e\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.extend(\":is(.c) .e\", \".c\", \".d\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.replace(\":is(.c)\", \".c\", \".d\")}\n");
+}

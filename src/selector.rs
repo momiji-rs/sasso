@@ -1745,6 +1745,69 @@ fn extend_pseudo(text: &str, extensions: &[Extension]) -> Option<Vec<Simple>> {
     PSEUDO_DEPTH.with(|d| d.set(d.get() + 1));
     let extended = extend_list(&original, extensions);
     PSEUDO_DEPTH.with(|d| d.set(d.get() - 1));
+    finish_extend_pseudo(&parts, &original, extended)
+}
+
+/// The `selector.extend`/`selector.replace` compound-target counterpart of
+/// [`extend_pseudo`]: recursively extend a selector-pseudo's argument list in
+/// the compound-target model so `extend(":is(.c)", ".c", ".d")` -> `:is(.c,
+/// .d)`.
+fn extend_pseudo_compound_target(
+    text: &str,
+    targets: &[Compound],
+    extenders: &[Complex],
+    replace: bool,
+) -> Option<Vec<Simple>> {
+    let parts = parse_pseudo_parts(text)?;
+    if !is_selector_pseudo(&parts.name) {
+        return None;
+    }
+    if PSEUDO_DEPTH.with(|d| d.get()) >= MAX_PSEUDO_DEPTH {
+        return None;
+    }
+    let original = parse_list(&parts.arg)?;
+    PSEUDO_DEPTH.with(|d| d.set(d.get() + 1));
+    let extended = extend_compound_target(&original, targets, extenders, replace);
+    PSEUDO_DEPTH.with(|d| d.set(d.get() - 1));
+    finish_extend_pseudo(&parts, &original, extended)
+}
+
+/// Selector-pseudo extension of every pseudo in `compound` in the
+/// compound-target model (the `selector.extend`/`replace` counterpart of
+/// [`expand_pseudos_in_compound`]).
+fn expand_pseudos_compound_target(
+    compound: &Compound,
+    targets: &[Compound],
+    extenders: &[Complex],
+    replace: bool,
+) -> Compound {
+    let mut simples: Vec<Simple> = Vec::new();
+    for s in &compound.simples {
+        match s {
+            Simple::Pseudo(text) => {
+                let replacement = extend_pseudo_compound_target(text, targets, extenders, replace)
+                    .unwrap_or_else(|| vec![s.clone()]);
+                for r in replacement {
+                    if !simples.contains(&r) {
+                        simples.push(r);
+                    }
+                }
+            }
+            other => simples.push(other.clone()),
+        }
+    }
+    Compound { simples }
+}
+
+/// Shared post-processing for [`extend_pseudo`] and
+/// [`extend_pseudo_compound_target`]: given the original and extended argument
+/// lists, build the replacement simple selector(s) (the `:not` split, nested
+/// pseudo unwrap, and matchish-pseudo re-wrap).
+fn finish_extend_pseudo(
+    parts: &PseudoParts,
+    original: &[Complex],
+    extended: Vec<Complex>,
+) -> Option<Vec<Simple>> {
     // Nothing changed.
     if extended.len() == original.len()
         && extended
@@ -2596,7 +2659,17 @@ pub(crate) fn extend_compound_target(
                 && extended.first().map(Complex::render).as_deref() == Some(cur_rendered.as_str());
             for c in extended {
                 let rendered = c.render();
-                if !is_self_only && rendered != cur_rendered && local_seen.insert(rendered.clone()) {
+                // A selector already covered by a previously-produced one is
+                // redundant; it is trimmed from the output and, crucially, must
+                // not be re-fed — a self-referential extender (`.x` -> `.x .y`)
+                // would otherwise grow `.x .y .y …` without bound. dart-sass
+                // trims during its fixpoint. Checked before `c` joins `result`.
+                let redundant = result.iter().any(|r| complex_is_superselector(r, &c));
+                if !is_self_only
+                    && rendered != cur_rendered
+                    && !redundant
+                    && local_seen.insert(rendered.clone())
+                {
                     queue.push_back(c.clone());
                 }
                 if seen.insert(rendered) {
@@ -2673,6 +2746,20 @@ fn extend_component_compound(
     extenders: &[Complex],
     replace: bool,
 ) -> Vec<Complex> {
+    // First extend any selector-pseudo arguments (`:is(...)`, `:not(...)`, …)
+    // in place, producing an "effective" compound that the per-compound
+    // extension below then runs against.
+    let effective = expand_pseudos_compound_target(&comp.compound, targets, extenders, replace);
+    let owned;
+    let comp = if effective.simples == comp.compound.simples {
+        comp
+    } else {
+        owned = ComplexComponent {
+            combinator: comp.combinator,
+            compound: effective,
+        };
+        &owned
+    };
     // The original component (as a one-component complex).
     let original = Complex {
         components: vec![comp.clone()],
