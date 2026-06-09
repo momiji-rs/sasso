@@ -4678,3 +4678,16 @@ fn parity_selector_is_superselector_not() {
     // Not a superselector when the type can still match.
     assert_parity("@use \"sass:selector\";\na {b: selector.is-superselector(\":not(c.d)\", \"c\")}\n");
 }
+
+#[test]
+fn parity_selector_combinator_runs() {
+    // A "bogus" combinator run — a leading run (`~ ~ c`) or a run between
+    // compounds (`c > > d`) — is preserved through parse/nest/append, and two
+    // different leading runs can't unify.
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.nest(\"c > > d\", \"e\"))}\n");
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.nest(\"~ ~ c\", \"d\"))}\n");
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.nest(\"c\", \"+ > d\"))}\n");
+    assert_parity(
+        "@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\"+ ~ > .c\", \"+ > ~ ~ .d\"))}\n",
+    );
+}

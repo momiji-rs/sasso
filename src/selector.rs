@@ -241,38 +241,35 @@ fn parse_complex(s: &str) -> Option<Complex> {
     let chars: Vec<char> = s.chars().collect();
     let mut components = Vec::new();
     let mut i = 0;
-    let mut pending_combinator: Option<Combinator> = None;
+    // The run of combinators seen since the last compound. dart-sass preserves a
+    // run of more than one (`c > > d`) and a leading run (`~ ~ c`).
+    let mut pending: Vec<Combinator> = Vec::new();
     loop {
         skip_ws(&chars, &mut i);
         if i >= chars.len() {
             break;
         }
-        // A combinator (only valid between compounds).
-        match chars[i] {
-            '>' => {
-                pending_combinator = Some(Combinator::Child);
-                i += 1;
-                continue;
-            }
-            '+' => {
-                pending_combinator = Some(Combinator::NextSibling);
-                i += 1;
-                continue;
-            }
-            '~' => {
-                pending_combinator = Some(Combinator::FollowingSibling);
-                i += 1;
-                continue;
-            }
-            _ => {}
+        // A combinator (a run of them is collected, not just the last).
+        let combinator = match chars[i] {
+            '>' => Some(Combinator::Child),
+            '+' => Some(Combinator::NextSibling),
+            '~' => Some(Combinator::FollowingSibling),
+            _ => None,
+        };
+        if let Some(c) = combinator {
+            pending.push(c);
+            i += 1;
+            continue;
         }
         let compound = parse_compound(&chars, &mut i)?;
         components.push(ComplexComponent {
-            combinators: pending_combinator.take().into_iter().collect(),
+            combinators: std::mem::take(&mut pending),
             compound,
         });
     }
-    if components.is_empty() || pending_combinator.is_some() {
+    // A trailing combinator run (`c >`, `c + >`) is handled in a later stage; for
+    // now reject it. An empty complex is unparseable.
+    if components.is_empty() || !pending.is_empty() {
         return None;
     }
     Some(Complex { components })
@@ -2677,14 +2674,26 @@ pub(crate) fn list_is_superselector(sup: &[Complex], sub: &[Complex]) -> bool {
 /// (dart-sass `unifyComplex` for the two-selector case). The parents are woven
 /// with full combinator support via the trailing-combinator weave.
 pub(crate) fn unify_complex(c1: &Complex, c2: &Complex) -> Option<Vec<Complex>> {
-    // dart-sass tracks a complex selector's leading combinator (e.g. `> .c`)
-    // separately from its components. It is preserved in the unified result;
-    // two *different* leading combinators can't unify (`> .c` and `+ .d`).
-    let lc1 = c1.components.first().and_then(|c| c.combinator());
-    let lc2 = c2.components.first().and_then(|c| c.combinator());
-    let leading = match (lc1, lc2) {
-        (Some(a), Some(b)) if a != b => return None,
-        (a, b) => a.or(b),
+    // dart-sass tracks a complex selector's leading combinator *run* (e.g.
+    // `> .c`, `~ ~ .c`) separately from its components. It is preserved in the
+    // unified result; two *different* non-empty leading runs can't unify.
+    let lc1 = c1
+        .components
+        .first()
+        .map(|c| c.combinators.as_slice())
+        .unwrap_or(&[]);
+    let lc2 = c2
+        .components
+        .first()
+        .map(|c| c.combinators.as_slice())
+        .unwrap_or(&[]);
+    if !lc1.is_empty() && !lc2.is_empty() && lc1 != lc2 {
+        return None;
+    }
+    let leading: Vec<Combinator> = if lc1.is_empty() {
+        lc2.to_vec()
+    } else {
+        lc1.to_vec()
     };
     let t1 = to_trailing(&c1.components);
     let t2 = to_trailing(&c2.components);
@@ -2702,10 +2711,12 @@ pub(crate) fn unify_complex(c1: &Complex, c2: &Complex) -> Option<Vec<Complex>> 
     for mut woven in weave_parents_trailing(parents1, parents2) {
         woven.push(base.clone());
         let mut components = from_trailing(&woven);
-        // Re-attach the preserved leading combinator to the very first
-        // component (dart-sass's `leadingCombinators`).
-        if let (Some(comb), Some(first)) = (leading, components.first_mut()) {
-            first.set_combinator(Some(comb));
+        // Re-attach the preserved leading combinator run to the first component
+        // (dart-sass's `leadingCombinators`).
+        if !leading.is_empty() {
+            if let Some(first) = components.first_mut() {
+                first.combinators = leading.clone();
+            }
         }
         let complex = Complex { components };
         if seen.insert(complex.render()) {
@@ -2829,7 +2840,7 @@ pub(crate) fn unify_lists(list1: &[Complex], list2: &[Complex]) -> Option<Vec<Co
 pub(crate) fn complex_to_list_parts(c: &Complex) -> Vec<String> {
     let mut parts = Vec::new();
     for comp in &c.components {
-        if let Some(comb) = comp.combinator() {
+        for comb in &comp.combinators {
             parts.push(comb.as_str().to_string());
         }
         parts.push(comp.compound.render());
