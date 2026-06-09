@@ -4488,3 +4488,17 @@ fn parity_operator_without_whitespace() {
         assert!(dart_sass("a {b: calc(1+1)}\n").is_none());
     }
 }
+
+#[test]
+fn parity_adjust_hsl_saturation_clamp() {
+    // `color.adjust` clamps an hsl saturation at its lower bound (0) but not the
+    // upper, so over-desaturating yields grey rather than a hue-flip. `change`
+    // sets the raw value (no clamp) and the serializer flips negative saturation.
+    assert_parity("@use \"sass:color\";\na {b: color.adjust(plum, $saturation: -100%)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.adjust(plum, $saturation: -200%)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.adjust(plum, $saturation: -48%)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.adjust(red, $saturation: 50%)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.scale(plum, $saturation: -100%)}\n");
+    // change does not clamp.
+    assert_parity("@use \"sass:color\";\na {b: color.change(hsl(120, 50%, 50%), $saturation: -100%)}\n");
+}

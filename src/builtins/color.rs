@@ -3581,6 +3581,10 @@ fn clamp_adjust_channel(space: ColorSpace, idx: usize, v: f64) -> f64 {
         (Lab, "lightness") | (Lch, "lightness") => v.clamp(0.0, 100.0),
         (Oklab, "lightness") | (Oklch, "lightness") => v.clamp(0.0, 1.0),
         (Lch, "chroma") | (Oklch, "chroma") => v.max(0.0),
+        // hsl saturation can exceed 100% but not go negative; dart-sass clamps
+        // the lower bound only (so `adjust($c, $saturation: -100%)` desaturates
+        // to grey rather than flipping the hue).
+        (Hsl, "saturation") => v.max(0.0),
         _ => v,
     }
 }
