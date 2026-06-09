@@ -211,10 +211,7 @@ impl CalcNode {
                     if let CalcNode::Number(n) = right.as_ref() {
                         if n.value.is_finite() && n.value.is_sign_negative() && n.value != 0.0 {
                             let flipped = if *op == CalcOp::Add { "-" } else { "+" };
-                            let pos = Number {
-                                value: -n.value,
-                                unit: n.unit.clone(),
-                            };
+                            let pos = Number::with_unit(-n.value, n.unit().to_string());
                             return format!("{l} {flipped} {}", pos.to_css(compressed));
                         }
                     }
@@ -247,7 +244,7 @@ impl CalcNode {
         // child rather than a bare leaf number.
         let child_op = match operand {
             CalcNode::Op { op, .. } => Some(*op),
-            CalcNode::Number(n) if !n.value.is_finite() && !n.unit.is_empty() => Some(CalcOp::Mul),
+            CalcNode::Number(n) if !n.value.is_finite() && !n.is_unitless() => Some(CalcOp::Mul),
             _ => None,
         };
         if let Some(child_op) = child_op {
@@ -279,19 +276,129 @@ fn calc_number_css(n: &Number, compressed: bool) -> String {
     } else {
         "-infinity"
     };
-    if n.unit.is_empty() {
+    if n.is_unitless() {
         constant.to_string()
     } else {
         let star = if compressed { "*" } else { " * " };
-        format!("{constant}{star}1{}", n.unit)
+        format!("{constant}{star}1{}", n.unit())
     }
 }
 
-/// A number and its unit (`unit` is empty for unitless numbers).
+/// A number with its units (dart-sass `SassNumber`: a list of numerator units
+/// and a list of denominator units). The representation keeps the two
+/// overwhelmingly common cases — unitless and a single numerator unit —
+/// allocation-identical to a plain `String` field; multi-unit numbers
+/// (`px*px`, `px/s`) box their unit lists.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Number {
     pub value: f64,
-    pub unit: String,
+    units: Units,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Units {
+    None,
+    Single(String),
+    // Constructed by multi-unit arithmetic (stage 2 of the refactor); the
+    // representation lands first so the migration is reviewable on its own.
+    #[allow(dead_code)]
+    Complex(Box<ComplexUnits>),
+}
+
+/// The unit lists of a multi-unit number. Invariant (kept by
+/// [`Number::with_units`]): not representable as `None`/`Single` — there is a
+/// denominator unit, or more than one numerator unit.
+#[derive(Debug, Clone, PartialEq)]
+struct ComplexUnits {
+    numer: Vec<String>,
+    denom: Vec<String>,
+}
+
+impl Number {
+    pub(crate) fn unitless(value: f64) -> Number {
+        Number {
+            value,
+            units: Units::None,
+        }
+    }
+
+    /// A number with zero or one numerator unit (`""` means unitless).
+    pub(crate) fn with_unit(value: f64, unit: impl Into<String>) -> Number {
+        let unit = unit.into();
+        Number {
+            value,
+            units: if unit.is_empty() {
+                Units::None
+            } else {
+                Units::Single(unit)
+            },
+        }
+    }
+
+    /// A number with full numerator/denominator unit lists, normalized to the
+    /// compact representation when possible. No unit cancellation happens
+    /// here — callers cancel before constructing (dart-sass keeps whatever
+    /// lists arithmetic produces).
+    #[allow(dead_code)] // used by stage 2 (multi-unit semantics)
+    pub(crate) fn with_units(value: f64, mut numer: Vec<String>, denom: Vec<String>) -> Number {
+        let units = if denom.is_empty() && numer.len() <= 1 {
+            match numer.pop() {
+                None => Units::None,
+                Some(u) => Units::Single(u),
+            }
+        } else {
+            Units::Complex(Box::new(ComplexUnits { numer, denom }))
+        };
+        Number { value, units }
+    }
+
+    /// A new number carrying this number's units (the common "derive a result
+    /// from an operand" pattern; preserves multi-unit lists).
+    #[allow(dead_code)] // used by stage 2 (multi-unit semantics)
+    pub(crate) fn copy_units(&self, value: f64) -> Number {
+        Number {
+            value,
+            units: self.units.clone(),
+        }
+    }
+
+    pub(crate) fn is_unitless(&self) -> bool {
+        matches!(self.units, Units::None)
+    }
+
+    /// The single unit for the common path: `""` when unitless, the unit of a
+    /// single-numerator number, or the FIRST numerator unit of a multi-unit
+    /// number (callers that can meet multi-unit numbers must check
+    /// [`Number::has_complex_units`] first).
+    pub(crate) fn unit(&self) -> &str {
+        match &self.units {
+            Units::None => "",
+            Units::Single(u) => u,
+            Units::Complex(c) => c.numer.first().map(String::as_str).unwrap_or(""),
+        }
+    }
+
+    #[allow(dead_code)] // used by stage 2 (multi-unit semantics)
+    pub(crate) fn has_complex_units(&self) -> bool {
+        matches!(self.units, Units::Complex(_))
+    }
+
+    #[allow(dead_code)] // used by stage 2 (multi-unit semantics)
+    pub(crate) fn numer_units(&self) -> &[String] {
+        match &self.units {
+            Units::None => &[],
+            Units::Single(u) => std::slice::from_ref(u),
+            Units::Complex(c) => &c.numer,
+        }
+    }
+
+    #[allow(dead_code)] // used by stage 2 (multi-unit semantics)
+    pub(crate) fn denom_units(&self) -> &[String] {
+        match &self.units {
+            Units::None | Units::Single(_) => &[],
+            Units::Complex(c) => &c.denom,
+        }
+    }
 }
 
 /// A string value; `quoted` controls whether it serializes with quotes.
@@ -829,21 +936,21 @@ fn color_sass_eq(a: &Color, b: &Color) -> bool {
 /// incompatible units, are never equal. Value comparisons are fuzzy
 /// ([`fuzzy_eq`]).
 fn numbers_eq(a: &Number, b: &Number) -> bool {
-    if a.unit == b.unit {
+    if a.unit() == b.unit() {
         return fuzzy_eq(a.value, b.value);
     }
     // A unitless number is only equal to another unitless number; a differing
     // unit (handled above) is the only remaining same-emptiness case.
-    if a.unit.is_empty() || b.unit.is_empty() {
+    if a.is_unitless() || b.is_unitless() {
         return false;
     }
     // Conversion is keyed on canonical lowercase units, matching dart-sass's
     // unit table; an authored uppercase unit (`IN`) is treated as unknown and
     // never converts.
-    if a.unit.bytes().any(|c| c.is_ascii_uppercase()) || b.unit.bytes().any(|c| c.is_ascii_uppercase()) {
+    if a.unit().bytes().any(|c| c.is_ascii_uppercase()) || b.unit().bytes().any(|c| c.is_ascii_uppercase()) {
         return false;
     }
-    match convert_factor(&b.unit, &a.unit) {
+    match convert_factor(b.unit(), a.unit()) {
         Some(factor) => fuzzy_eq(a.value, b.value * factor),
         None => false,
     }
@@ -857,7 +964,7 @@ impl Number {
         if !self.value.is_finite() {
             return format!("calc({})", calc_number_css(self, compressed));
         }
-        format!("{}{}", fmt_num(self.value, compressed), self.unit)
+        format!("{}{}", fmt_num(self.value, compressed), self.unit())
     }
 }
 
@@ -1448,11 +1555,7 @@ impl ModernColor {
     fn chan(&self, i: usize, compressed: bool) -> String {
         match self.channels[i] {
             None => "none".to_string(),
-            Some(v) if !v.is_finite() => Number {
-                value: v,
-                unit: String::new(),
-            }
-            .to_css(compressed),
+            Some(v) if !v.is_finite() => Number::unitless(v).to_css(compressed),
             Some(v) => fmt_num(v, compressed),
         }
     }
@@ -1463,11 +1566,7 @@ impl ModernColor {
     fn chan_pct(&self, i: usize, denom: f64, compressed: bool) -> String {
         match self.channels[i] {
             None => "none".to_string(),
-            Some(v) if !v.is_finite() => Number {
-                value: v,
-                unit: "%".to_string(),
-            }
-            .to_css(compressed),
+            Some(v) if !v.is_finite() => Number::with_unit(v, "%".to_string()).to_css(compressed),
             Some(v) => format!("{}%", fmt_num(v / denom * 100.0, compressed)),
         }
     }
@@ -1477,11 +1576,7 @@ impl ModernColor {
     fn chan_hue(&self, i: usize, compressed: bool) -> String {
         match self.channels[i] {
             None => "none".to_string(),
-            Some(v) if !v.is_finite() => Number {
-                value: v,
-                unit: "deg".to_string(),
-            }
-            .to_css(compressed),
+            Some(v) if !v.is_finite() => Number::with_unit(v, "deg".to_string()).to_css(compressed),
             Some(v) => format!("{}deg", fmt_num(v, compressed)),
         }
     }
@@ -2049,10 +2144,7 @@ mod tests {
     }
 
     fn num(value: f64, unit: &str) -> CalcNode {
-        CalcNode::Number(Number {
-            value,
-            unit: unit.to_string(),
-        })
+        CalcNode::Number(Number::with_unit(value, unit.to_string()))
     }
 
     #[test]
@@ -2206,10 +2298,7 @@ mod tests {
     }
 
     fn numval(value: f64, unit: &str) -> Value {
-        Value::Number(Number {
-            value,
-            unit: unit.to_string(),
-        })
+        Value::Number(Number::with_unit(value, unit.to_string()))
     }
 
     #[test]

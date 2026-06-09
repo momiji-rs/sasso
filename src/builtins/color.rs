@@ -172,10 +172,7 @@ fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
 /// A whole number as a unitless [`Number`] (for re-serializing a color's
 /// channels in a special-value passthrough call).
 fn int_num(v: f64) -> Number {
-    Number {
-        value: v.round(),
-        unit: String::new(),
-    }
+    Number::unitless(v.round())
 }
 
 /// Read an alpha argument: a `%` is divided by 100, a unitless number is used
@@ -189,9 +186,9 @@ fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
     }
     match v {
         Value::Number(num) => {
-            let raw = if num.unit == "%" {
+            let raw = if num.unit() == "%" {
                 num.value / 100.0
-            } else if num.unit.is_empty() {
+            } else if num.is_unitless() {
                 num.value
             } else {
                 return Err(Error::at(
@@ -474,7 +471,7 @@ impl Channels {
     /// gains an explicit `deg` (`hsl(180 none 50%)` → `hsl(180deg none 50%)`).
     fn none_verbatim(&self, name: &str, is_hsl: bool) -> Value {
         let hue = match &self.comps[0] {
-            Value::Number(n) if is_hsl && n.unit.is_empty() => {
+            Value::Number(n) if is_hsl && n.is_unitless() => {
                 format!("{}deg", fmt_num(n.value, false))
             }
             other => other.to_css(false),
@@ -645,7 +642,7 @@ fn degenerate_calc_str(s: &str) -> Option<String> {
 
 /// Whether `n` re-serializes to exactly `s` (so the whole token was numeric).
 fn fmt_token_matches(n: &Number, s: &str) -> bool {
-    format!("{}{}", fmt_num(n.value, false), n.unit) == s
+    format!("{}{}", fmt_num(n.value, false), n.unit()) == s
 }
 
 /// Parse a CSS number token that may carry a unit (`"3"`, `"0.5"`, `"50%"`)
@@ -659,10 +656,7 @@ fn parse_number_token(s: &str) -> Option<Number> {
         .unwrap_or(s.len());
     let (num_part, unit) = s.split_at(split);
     let value = num_part.parse::<f64>().ok()?;
-    Some(Number {
-        value,
-        unit: unit.to_string(),
-    })
+    Some(Number::with_unit(value, unit.to_string()))
 }
 
 pub(super) fn rgb_repr(r: f64, g: f64, b: f64, a: f64) -> String {
@@ -751,7 +745,7 @@ fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
 /// are taken as degrees.
 fn hsl_hue(v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
-        Value::Number(num) => Ok(match num.unit.as_str() {
+        Value::Number(num) => Ok(match num.unit() {
             "rad" => num.value.to_degrees(),
             "grad" => num.value * 360.0 / 400.0,
             "turn" => num.value * 360.0,
@@ -947,7 +941,7 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     // channel before the value is read. The hue may be unitless or an angle.
     for (i, cname) in [(1usize, "whiteness"), (2usize, "blackness")] {
         if let Value::Number(num) = &comps[i] {
-            if num.unit != "%" {
+            if num.unit() != "%" {
                 return Err(Error::at(
                     format!(
                         "${cname}: Expected {} to have unit \"%\".",
@@ -1148,8 +1142,7 @@ fn fn_lab_family(
         match comp {
             Value::Number(num) => {
                 if is_hue(i) {
-                    let ok =
-                        num.unit.is_empty() || matches!(num.unit.as_str(), "deg" | "grad" | "rad" | "turn");
+                    let ok = num.is_unitless() || matches!(num.unit(), "deg" | "grad" | "rad" | "turn");
                     if !ok {
                         return Err(Error::at(
                             format!(
@@ -1159,7 +1152,7 @@ fn fn_lab_family(
                             pos,
                         ));
                     }
-                } else if !num.unit.is_empty() && num.unit != "%" {
+                } else if !num.is_unitless() && num.unit() != "%" {
                     return Err(Error::at(
                         format!(
                             "${}: Expected {} to have unit \"%\" or no units.",
@@ -1350,7 +1343,7 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
         }
         match comp {
             Value::Number(num) => {
-                if !num.unit.is_empty() && num.unit != "%" {
+                if !num.is_unitless() && num.unit() != "%" {
                     return Err(Error::at(
                         format!(
                             "${name}: Expected {} to have unit \"%\" or no units.",
@@ -1659,7 +1652,7 @@ fn fn_percentage(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
     max_positional(pos_args, params.len(), pos)?;
     let arg = require(&params, pos_args, named, 0, "percentage", pos)?;
     if let Value::Number(num) = arg {
-        if !num.unit.is_empty() {
+        if !num.is_unitless() {
             return Err(Error::at(
                 format!("$number: Expected {} to have no units.", num.to_css(false)),
                 pos,
@@ -1667,10 +1660,7 @@ fn fn_percentage(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
         }
     }
     let n = num(arg, pos)?;
-    Ok(Value::Number(Number {
-        value: n * 100.0,
-        unit: "%".to_string(),
-    }))
+    Ok(Value::Number(Number::with_unit(n * 100.0, "%".to_string())))
 }
 
 fn fn_channel(name: &str, pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
@@ -1693,10 +1683,7 @@ fn fn_channel(name: &str, pos_args: &[Value], named: &[(String, Value)], pos: Po
         "blue" => c.b,
         _ => 0.0,
     };
-    Ok(Value::Number(Number {
-        value: v.round(),
-        unit: String::new(),
-    }))
+    Ok(Value::Number(Number::unitless(v.round())))
 }
 
 /// Whether `text` is a Microsoft `alpha()` filter argument: ASCII letters,
@@ -1770,10 +1757,7 @@ fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
             pos,
         ));
     }
-    Ok(Value::Number(Number {
-        value: c.a,
-        unit: String::new(),
-    }))
+    Ok(Value::Number(Number::unitless(c.a)))
 }
 
 // =====================================================================
@@ -2496,7 +2480,7 @@ pub(super) fn modern_channel(v: &Value, pct_base: f64) -> Option<f64> {
     }
     match v {
         Value::Number(num) => {
-            if num.unit == "%" {
+            if num.unit() == "%" {
                 Some(num.value / 100.0 * pct_base)
             } else {
                 Some(num.value)
@@ -2518,7 +2502,7 @@ pub(super) fn modern_hue(v: &Value) -> Option<f64> {
         }
     }
     match v {
-        Value::Number(num) => Some(match num.unit.as_str() {
+        Value::Number(num) => Some(match num.unit() {
             "rad" => num.value.to_degrees(),
             "grad" => num.value * 360.0 / 400.0,
             "turn" => num.value * 360.0,
@@ -2542,7 +2526,7 @@ pub(super) fn modern_alpha(v: Option<&Value>) -> Option<f64> {
             }
             match a {
                 Value::Number(num) => {
-                    let val = if num.unit == "%" {
+                    let val = if num.unit() == "%" {
                         num.value / 100.0
                     } else {
                         num.value
@@ -2721,10 +2705,7 @@ fn fn_color_channel(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> 
     };
     if chan == "alpha" {
         let a = mc.alpha.unwrap_or(0.0);
-        return Ok(Value::Number(Number {
-            value: a,
-            unit: String::new(),
-        }));
+        return Ok(Value::Number(Number::unitless(a)));
     }
     let target = convert_modern(&mc, space);
     let idx = channel_index_in(space, &chan).ok_or_else(|| {
@@ -2755,18 +2736,9 @@ fn channel_number(space: ColorSpace, idx: usize, raw: f64) -> Number {
     use ColorSpace::*;
     let names = space.channel_names();
     let cname = names[idx];
-    let pct = |v: f64| Number {
-        value: v,
-        unit: "%".to_string(),
-    };
-    let deg = |v: f64| Number {
-        value: v,
-        unit: "deg".to_string(),
-    };
-    let plain = |v: f64| Number {
-        value: v,
-        unit: String::new(),
-    };
+    let pct = |v: f64| Number::with_unit(v, "%".to_string());
+    let deg = |v: f64| Number::with_unit(v, "deg".to_string());
+    let plain = |v: f64| Number::unitless(v);
     match (space, cname) {
         (Hsl, "saturation") | (Hsl, "lightness") => pct(raw),
         (Hwb, "whiteness") | (Hwb, "blackness") => pct(raw),
@@ -3514,19 +3486,19 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
             // the error message carry that unit (e.g. `0px and 1px`).
             match v {
                 Value::Number(n) => {
-                    let max_disp = if n.unit == "%" { 100.0 } else { 1.0 };
+                    let max_disp = if n.unit() == "%" { 100.0 } else { 1.0 };
                     if n.value < 0.0 || n.value > max_disp {
-                        let (b0, b1) = if n.unit == "%" {
+                        let (b0, b1) = if n.unit() == "%" {
                             ("0%".to_string(), "100%".to_string())
                         } else {
-                            (format!("0{}", n.unit), format!("1{}", n.unit))
+                            (format!("0{}", n.unit()), format!("1{}", n.unit()))
                         };
                         return Err(Error::at(
                             format!("$alpha: Expected {} to be within {b0} and {b1}.", n.to_css(false)),
                             pos,
                         ));
                     }
-                    Some(if n.unit == "%" { n.value / 100.0 } else { n.value })
+                    Some(if n.unit() == "%" { n.value / 100.0 } else { n.value })
                 }
                 Value::Slash(n, _) => Some(n.value),
                 other => {
@@ -3563,7 +3535,7 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
 /// Read a `scale-color` percentage factor in `[-1, 1]`.
 fn scale_pct(v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
-        Value::Number(n) if n.unit == "%" => {
+        Value::Number(n) if n.unit() == "%" => {
             if n.value < -100.0 || n.value > 100.0 {
                 return Err(Error::at(
                     format!("Expected {} to be within -100% and 100%.", n.to_css(false)),
@@ -3612,7 +3584,7 @@ fn validate_modify_unit(space: ColorSpace, idx: usize, name: &str, v: &Value, po
         if space.is_legacy() {
             return Ok(());
         }
-        let ok = num.unit.is_empty() || matches!(num.unit.as_str(), "deg" | "grad" | "rad" | "turn");
+        let ok = num.is_unitless() || matches!(num.unit(), "deg" | "grad" | "rad" | "turn");
         if !ok {
             return Err(Error::at(
                 format!(
@@ -3628,13 +3600,13 @@ fn validate_modify_unit(space: ColorSpace, idx: usize, name: &str, v: &Value, po
     } else if space == ColorSpace::Hwb {
         // Legacy hwb `whiteness`/`blackness` strictly require `%` (note: the
         // error message has no "or no units" — unitless is also rejected).
-        if num.unit != "%" {
+        if num.unit() != "%" {
             return Err(Error::at(
                 format!("${name}: Expected {} to have unit \"%\".", num.to_css(false)),
                 pos,
             ));
         }
-    } else if !num.unit.is_empty() && num.unit != "%" {
+    } else if !num.is_unitless() && num.unit() != "%" {
         return Err(Error::at(
             format!(
                 "${name}: Expected {} to have unit \"%\" or no units.",

@@ -102,10 +102,7 @@ fn list_len(v: &Value) -> usize {
 }
 
 fn unitless(value: f64) -> Value {
-    Value::Number(Number {
-        value,
-        unit: String::new(),
-    })
+    Value::Number(Number::unitless(value))
 }
 
 /// Resolve a 1-based (possibly negative) Sass index against a list of `len`
@@ -420,17 +417,11 @@ mod tests {
     }
 
     fn n(value: f64) -> Value {
-        Value::Number(Number {
-            value,
-            unit: String::new(),
-        })
+        Value::Number(Number::unitless(value))
     }
 
     fn num_unit(value: f64, unit: &str) -> Value {
-        Value::Number(Number {
-            value,
-            unit: unit.to_string(),
-        })
+        Value::Number(Number::with_unit(value, unit.to_string()))
     }
 
     fn s(text: &str) -> Value {

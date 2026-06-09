@@ -115,8 +115,9 @@ fn require_index(
     let v = super::require(params, pos_args, named, i, fname, pos)?;
     let pname = params.get(i).copied().unwrap_or("");
     match v {
-        Value::Number(Number { value, unit }) => {
-            if !unit.is_empty() {
+        Value::Number(n) => {
+            let value = n.value;
+            if !n.is_unitless() {
                 return Err(Error::at(
                     format!("${pname}: Expected {} to have no units.", v.to_css(false)),
                     pos,
@@ -126,10 +127,7 @@ fn require_index(
             // tolerance, but a genuine fraction like `0.5` is an error).
             if (value - value.round()).abs() > 1e-11 {
                 return Err(Error::at(
-                    format!(
-                        "${pname}: {} is not an int.",
-                        crate::value::fmt_num(*value, false)
-                    ),
+                    format!("${pname}: {} is not an int.", crate::value::fmt_num(value, false)),
                     pos,
                 ));
             }
@@ -180,10 +178,7 @@ fn fn_change_case(
 /// `str-length($string)`: unitless character count.
 fn fn_str_length(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let (text, _) = require_string(&["string"], pos_args, named, 0, "str-length", pos)?;
-    Ok(Value::Number(Number {
-        value: text.chars().count() as f64,
-        unit: String::new(),
-    }))
+    Ok(Value::Number(Number::unitless(text.chars().count() as f64)))
 }
 
 /// `str-index($string, $substring)`: 1-based char index of the first
@@ -194,10 +189,9 @@ fn fn_str_index(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resu
     let (sub, _) = require_string(&params, pos_args, named, 1, "str-index", pos)?;
     match text.find(sub) {
         // `find` gives a byte offset; convert to a 1-based char index.
-        Some(byte) => Ok(Value::Number(Number {
-            value: (text[..byte].chars().count() + 1) as f64,
-            unit: String::new(),
-        })),
+        Some(byte) => Ok(Value::Number(Number::unitless(
+            (text[..byte].chars().count() + 1) as f64,
+        ))),
         None => Ok(Value::Null),
     }
 }
@@ -331,7 +325,7 @@ fn fn_split(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
     let limit = match super::arg(&params, pos_args, named, 2) {
         None | Some(Value::Null) => None,
         Some(Value::Number(num)) => {
-            if !num.unit.is_empty() || (num.value - num.value.round()).abs() > 1e-11 {
+            if !num.is_unitless() || (num.value - num.value.round()).abs() > 1e-11 {
                 return Err(Error::at(
                     format!(
                         "$limit: {} is not an int.",
@@ -425,10 +419,7 @@ mod tests {
     }
 
     fn n(value: f64) -> Value {
-        Value::Number(Number {
-            value,
-            unit: String::new(),
-        })
+        Value::Number(Number::unitless(value))
     }
 
     fn call(name: &str, args: &[Value]) -> Value {
@@ -531,10 +522,7 @@ mod tests {
     #[test]
     fn rejects_unknown_names_and_units() {
         assert!(try_call("frobnicate", &[s("x", true)], &[], pos()).is_none());
-        let unit_idx = Value::Number(Number {
-            value: 2.0,
-            unit: "px".to_string(),
-        });
+        let unit_idx = Value::Number(Number::with_unit(2.0, "px".to_string()));
         let err = try_call("str-slice", &[s("abc", true), unit_idx], &[], pos());
         assert!(err.expect("owned").is_err());
     }

@@ -153,7 +153,7 @@ fn fn_type_of(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
 fn fn_unit(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let v = super::require(&["number"], pos_args, named, 0, "unit", pos)?;
     match v {
-        Value::Number(n) => Ok(quoted(n.unit.clone())),
+        Value::Number(n) => Ok(quoted(n.unit().to_string())),
         other => Err(Error::at(
             format!("$number: {} is not a number.", other.to_css(false)),
             pos,
@@ -166,7 +166,7 @@ fn fn_unit(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
 fn fn_unitless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let v = super::require(&["number"], pos_args, named, 0, "unitless", pos)?;
     match v {
-        Value::Number(n) => Ok(Value::Bool(n.unit.is_empty())),
+        Value::Number(n) => Ok(Value::Bool(n.is_unitless())),
         other => Err(Error::at(
             format!("$number: {} is not a number.", other.to_css(false)),
             pos,
@@ -204,7 +204,7 @@ fn fn_comparable(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
     let b = super::require(&params, pos_args, named, 1, "comparable", pos)?;
     let unit_of = |v: &Value, which: &str| -> Result<String, Error> {
         match v {
-            Value::Number(n) => Ok(n.unit.clone()),
+            Value::Number(n) => Ok(n.unit().to_string()),
             other => Err(Error::at(
                 format!("${which}: {} is not a number.", other.to_css(false)),
                 pos,
@@ -449,10 +449,7 @@ mod tests {
     }
 
     fn n(value: f64, unit: &str) -> Value {
-        Value::Number(Number {
-            value,
-            unit: unit.to_string(),
-        })
+        Value::Number(Number::with_unit(value, unit.to_string()))
     }
 
     fn sq(text: &str) -> Value {

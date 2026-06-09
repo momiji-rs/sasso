@@ -78,10 +78,7 @@ fn as_map(v: &Value, fname: &str, pos: Pos) -> Result<Vec<(Value, Value)>, Error
 }
 
 fn unitless(value: f64) -> Value {
-    Value::Number(Number {
-        value,
-        unit: String::new(),
-    })
+    Value::Number(Number::unitless(value))
 }
 
 /// A comma list of the given items. dart-sass `map-keys`/`map-values` always

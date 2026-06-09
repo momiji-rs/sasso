@@ -305,7 +305,7 @@ fn fn_adjust_hue(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
 /// treated as degrees, matching dart-sass's lenient legacy behavior.
 fn angle_degrees(v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
-        Value::Number(n) => Ok(match n.unit.as_str() {
+        Value::Number(n) => Ok(match n.unit() {
             "rad" => n.value.to_degrees(),
             "grad" => n.value * 360.0 / 400.0,
             "turn" => n.value * 360.0,
@@ -351,10 +351,7 @@ fn fn_complement(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
     }
     // complement = adjust the hue by +180deg in the space. An explicit `$space`
     // enables the powerless-channel missing check.
-    let deg = Value::Number(Number {
-        value: 180.0,
-        unit: "deg".to_string(),
-    });
+    let deg = Value::Number(Number::with_unit(180.0, "deg".to_string()));
     modify_in_space_opt(
         &c,
         space,
@@ -625,10 +622,10 @@ fn fn_hsl_getter(
             _ => None,
         };
         if let Some((i, unit)) = idx {
-            return Ok(Value::Number(Number {
-                value: m.channels[i].unwrap_or(0.0),
-                unit: unit.to_string(),
-            }));
+            return Ok(Value::Number(Number::with_unit(
+                m.channels[i].unwrap_or(0.0),
+                unit.to_string(),
+            )));
         }
     }
     let (h, s, l) = c.to_hsl();
@@ -640,10 +637,7 @@ fn fn_hsl_getter(
         // blackness
         _ => ((1.0 - c.r.max(c.g).max(c.b) / 255.0) * 100.0, "%"),
     };
-    Ok(Value::Number(Number {
-        value,
-        unit: unit.to_string(),
-    }))
+    Ok(Value::Number(Number::with_unit(value, unit.to_string())))
 }
 
 /// `opacity($color)` returns the alpha; `opacity($number)` (CSS filter
@@ -662,10 +656,7 @@ fn fn_opacity(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option
     }
     Some((|| {
         let c = as_color(color, pos)?;
-        Ok(Value::Number(Number {
-            value: c.a,
-            unit: String::new(),
-        }))
+        Ok(Value::Number(Number::unitless(c.a)))
     })())
 }
 
@@ -958,7 +949,7 @@ fn scale_toward(current: f64, factor: f64, max: f64) -> f64 {
 fn scale_factor(name: &str, v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
         Value::Number(n) => {
-            if n.unit != "%" {
+            if n.unit() != "%" {
                 return Err(Error::at(
                     format!("${name}: Expected {} to have unit \"%\".", n.to_css(false)),
                     pos,
@@ -1005,10 +996,7 @@ mod tests {
     }
 
     fn n(v: f64, unit: &str) -> Value {
-        Value::Number(Number {
-            value: v,
-            unit: unit.to_string(),
-        })
+        Value::Number(Number::with_unit(v, unit.to_string()))
     }
 
     fn css(name: &str, args: &[Value]) -> String {

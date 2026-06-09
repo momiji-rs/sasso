@@ -1206,16 +1206,16 @@ impl<'a> Evaluator<'a> {
         let end = self.eval_for_number(to)?;
         // The loop variable takes FROM's unit; TO is converted to match. A
         // unitless side defers (no conversion); two incompatible real units err.
-        let end_value = if start.unit.is_empty() || end.unit.is_empty() {
+        let end_value = if start.is_unitless() || end.is_unitless() {
             end.value
         } else {
-            match crate::value::convert_factor(&end.unit, &start.unit) {
+            match crate::value::convert_factor(end.unit(), start.unit()) {
                 Some(f) => end.value * f,
                 None => {
                     return Err(Error::unpositioned(format!(
                         "Expected {} to have unit {}.",
                         Value::Number(end.clone()).to_css(false),
-                        start.unit,
+                        start.unit(),
                     )))
                 }
             }
@@ -1232,14 +1232,8 @@ impl<'a> Evaluator<'a> {
             }
         };
         let start_i = to_int(start.value, start.clone())?;
-        let end_i = to_int(
-            end_value,
-            Number {
-                value: end_value,
-                unit: start.unit.clone(),
-            },
-        )?;
-        Ok((start_i, end_i, start.unit))
+        let end_i = to_int(end_value, Number::with_unit(end_value, start.unit().to_string()))?;
+        Ok((start_i, end_i, start.unit().to_string()))
     }
 
     /// The values `@each` iterates: a list yields its items, `null` yields
@@ -1544,13 +1538,7 @@ impl<'a> Evaluator<'a> {
                     self.push_scope(true);
                     let mut result = Ok(None);
                     for i in for_indices(start_i, end_i, *inclusive) {
-                        self.set_local(
-                            var,
-                            Value::Number(Number {
-                                value: i as f64,
-                                unit: unit.clone(),
-                            }),
-                        );
+                        self.set_local(var, Value::Number(Number::with_unit(i as f64, unit.clone())));
                         result = self.run_fn_body(body);
                         if matches!(result, Ok(None)) {
                             continue;
@@ -2762,13 +2750,7 @@ impl<'a> Evaluator<'a> {
                     self.push_scope(true);
                     let mut result = Ok(());
                     for i in for_indices(start_i, end_i, *inclusive) {
-                        self.set_local(
-                            var,
-                            Value::Number(Number {
-                                value: i as f64,
-                                unit: unit.clone(),
-                            }),
-                        );
+                        self.set_local(var, Value::Number(Number::with_unit(i as f64, unit.clone())));
                         result = self.exec(body, parents, sink);
                         if result.is_err() {
                             break;
@@ -3720,10 +3702,7 @@ impl<'a> Evaluator<'a> {
 
     fn eval_expr_inner(&mut self, expr: &Expr) -> Result<Value, Error> {
         match expr {
-            Expr::Number(v, unit) => Ok(Value::Number(Number {
-                value: *v,
-                unit: unit.clone(),
-            })),
+            Expr::Number(v, unit) => Ok(Value::Number(Number::with_unit(*v, unit.clone()))),
             Expr::Color(c) => Ok(Value::Color(c.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),
@@ -3838,10 +3817,7 @@ impl<'a> Evaluator<'a> {
                     // could not reduce to a number has no negation operator, so
                     // dart-sass rejects it ("Undefined operation \"-calc(…)\".").
                     UnOp::Neg => match v {
-                        Value::Number(n) => Ok(Value::Number(Number {
-                            value: -n.value,
-                            unit: n.unit,
-                        })),
+                        Value::Number(n) => Ok(Value::Number(Number::with_unit(-n.value, n.unit()))),
                         Value::Calc(_) => Err(Error::unpositioned(format!(
                             "Undefined operation \"-{}\".",
                             v.to_css(false)
@@ -3919,7 +3895,7 @@ impl<'a> Evaluator<'a> {
                     // constant spelling (`infinity`/`-infinity`/`NaN`). This is
                     // also the form the color builtins inspect for degenerate
                     // `calc()` channels (`rgb(calc(infinity), …)`).
-                    CalcNode::Number(n) if n.unit.is_empty() => {
+                    CalcNode::Number(n) if n.is_unitless() => {
                         let spelling = if n.value.is_nan() {
                             "NaN"
                         } else if n.value > 0.0 {
@@ -5407,16 +5383,10 @@ impl<'a> Evaluator<'a> {
             } => {
                 let node = self.eval_calc(operand)?;
                 match node {
-                    CalcNode::Number(n) => Ok(CalcNode::Number(Number {
-                        value: -n.value,
-                        unit: n.unit,
-                    })),
+                    CalcNode::Number(n) => Ok(CalcNode::Number(Number::with_unit(-n.value, n.unit()))),
                     other => Ok(CalcNode::Op {
                         op: CalcOp::Mul,
-                        left: Box::new(CalcNode::Number(Number {
-                            value: -1.0,
-                            unit: String::new(),
-                        })),
+                        left: Box::new(CalcNode::Number(Number::unitless(-1.0))),
                         right: Box::new(other),
                     }),
                 }
@@ -5484,10 +5454,7 @@ impl<'a> Evaluator<'a> {
                 if let Value::Str(s) = &v {
                     if !s.quoted {
                         if let Some(value) = calc_constant(&s.text) {
-                            return Ok(CalcNode::Number(Number {
-                                value,
-                                unit: String::new(),
-                            }));
+                            return Ok(CalcNode::Number(Number::unitless(value)));
                         }
                     }
                 }
@@ -5755,7 +5722,7 @@ fn calc_complex_unit_operand(node: &CalcNode) -> Option<&CalcNode> {
 /// a unit, so it does not count toward a compound/inverse unit.
 fn calc_node_carries_unit(node: &CalcNode) -> bool {
     match node {
-        CalcNode::Number(n) => !n.unit.is_empty(),
+        CalcNode::Number(n) => !n.is_unitless(),
         CalcNode::Str(_) => false,
         CalcNode::Op {
             op: CalcOp::Mul | CalcOp::Div,
@@ -5788,64 +5755,52 @@ fn fold_numbers(op: CalcOp, a: &Number, b: &Number, pos: Pos) -> Result<Option<N
         CalcOp::Add | CalcOp::Sub => {
             let apply = |x: f64, y: f64| if op == CalcOp::Add { x + y } else { x - y };
             // Equal units (incl. `%`, relative units, both unitless) fold.
-            if a.unit.eq_ignore_ascii_case(&b.unit) {
-                return Ok(Some(Number {
-                    value: apply(a.value, b.value),
-                    unit: a.unit.clone(),
-                }));
+            if a.unit().eq_ignore_ascii_case(b.unit()) {
+                return Ok(Some(Number::with_unit(
+                    apply(a.value, b.value),
+                    a.unit().to_string(),
+                )));
             }
             // A unitless operand mixed with a real unit is an error in calc.
-            if a.unit.is_empty() || b.unit.is_empty() {
+            if a.is_unitless() || b.is_unitless() {
                 return Err(calc_incompatible(a, b, pos));
             }
             // Two distinct real units: convert when in the same convertible
             // group; error when both are known but cross-dimension; otherwise
             // preserve (a relative/unknown unit is involved).
-            if let Some(factor) = crate::value::convert_factor(&b.unit, &a.unit) {
-                Ok(Some(Number {
-                    value: apply(a.value, b.value * factor),
-                    unit: a.unit.clone(),
-                }))
-            } else if crate::value::calc_units_incompatible(&a.unit, &b.unit) {
+            if let Some(factor) = crate::value::convert_factor(b.unit(), a.unit()) {
+                Ok(Some(Number::with_unit(
+                    apply(a.value, b.value * factor),
+                    a.unit().to_string(),
+                )))
+            } else if crate::value::calc_units_incompatible(a.unit(), b.unit()) {
                 Err(calc_incompatible(a, b, pos))
             } else {
                 Ok(None)
             }
         }
         CalcOp::Mul => {
-            let unit = if a.unit.is_empty() {
-                b.unit.clone()
-            } else if b.unit.is_empty() {
-                a.unit.clone()
+            let unit = if a.is_unitless() {
+                b.unit().to_string()
+            } else if b.is_unitless() {
+                a.unit().to_string()
             } else {
                 // Compound units (`px * s`) are out of scope; preserve.
                 return Ok(None);
             };
-            Ok(Some(Number {
-                value: a.value * b.value,
-                unit,
-            }))
+            Ok(Some(Number::with_unit(a.value * b.value, unit)))
         }
         CalcOp::Div => {
-            if b.unit.is_empty() {
-                return Ok(Some(Number {
-                    value: a.value / b.value,
-                    unit: a.unit.clone(),
-                }));
+            if b.is_unitless() {
+                return Ok(Some(Number::with_unit(a.value / b.value, a.unit().to_string())));
             }
-            if a.unit.eq_ignore_ascii_case(&b.unit) {
-                return Ok(Some(Number {
-                    value: a.value / b.value,
-                    unit: String::new(),
-                }));
+            if a.unit().eq_ignore_ascii_case(b.unit()) {
+                return Ok(Some(Number::unitless(a.value / b.value)));
             }
             // Convertible units cancel to a unitless quotient; anything else
             // (inverse or compound units) is out of scope and preserved.
-            match crate::value::convert_factor(&b.unit, &a.unit) {
-                Some(factor) => Ok(Some(Number {
-                    value: a.value / (b.value * factor),
-                    unit: String::new(),
-                })),
+            match crate::value::convert_factor(b.unit(), a.unit()) {
+                Some(factor) => Ok(Some(Number::unitless(a.value / (b.value * factor)))),
                 None => Ok(None),
             }
         }
@@ -5878,26 +5833,20 @@ pub(crate) fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Valu
     if let (true, Value::Number(a), Value::Number(b)) =
         (slash, l.clone().without_slash(), r.clone().without_slash())
     {
-        let units_compatible = a.unit == b.unit || a.unit.is_empty() || b.unit.is_empty();
+        let units_compatible = a.unit() == b.unit() || a.is_unitless() || b.is_unitless();
         if units_compatible {
             let repr = format!("{}/{}", slash_repr(&l), slash_repr(&r));
             // The carried numeric quotient is only used if the slash is later
             // forced into arithmetic: matching units cancel (`px/px` ->
             // unitless), otherwise the lone unit is kept.
-            let unit = if !a.unit.is_empty() && a.unit == b.unit {
+            let unit = if !a.is_unitless() && a.unit() == b.unit() {
                 String::new()
-            } else if a.unit.is_empty() {
-                b.unit.clone()
+            } else if a.is_unitless() {
+                b.unit().to_string()
             } else {
-                a.unit.clone()
+                a.unit().to_string()
             };
-            return Ok(Value::Slash(
-                Number {
-                    value: a.value / b.value,
-                    unit,
-                },
-                repr,
-            ));
+            return Ok(Value::Slash(Number::with_unit(a.value / b.value, unit), repr));
         }
     }
     match (l.clone().without_slash(), r.clone().without_slash()) {
@@ -5926,31 +5875,31 @@ pub(crate) fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Valu
 /// kept as the bare divisor unit, matching prior behaviour. Cross-dimension
 /// real units error.
 fn divide_numbers(a: &Number, b: &Number, pos: Pos) -> Result<Value, Error> {
-    let (value, unit) = if b.unit.is_empty() {
-        (a.value / b.value, a.unit.clone())
-    } else if a.unit.is_empty() {
+    let (value, unit) = if b.is_unitless() {
+        (a.value / b.value, a.unit().to_string())
+    } else if a.is_unitless() {
         // Inverse units are out of scope; preserve the prior result shape.
-        (a.value / b.value, b.unit.clone())
-    } else if a.unit.eq_ignore_ascii_case(&b.unit) {
+        (a.value / b.value, b.unit().to_string())
+    } else if a.unit().eq_ignore_ascii_case(b.unit()) {
         (a.value / b.value, String::new())
     } else {
-        match crate::value::convert_factor(&b.unit, &a.unit) {
+        match crate::value::convert_factor(b.unit(), a.unit()) {
             Some(factor) => (a.value / (b.value * factor), String::new()),
             None => {
                 return Err(Error::at(
                     format!(
                         "{}{} and {}{} have incompatible units.",
                         crate::value::fmt_num(a.value, false),
-                        a.unit,
+                        a.unit(),
                         crate::value::fmt_num(b.value, false),
-                        b.unit
+                        b.unit()
                     ),
                     pos,
                 ))
             }
         }
     };
-    Ok(Value::Number(Number { value, unit }))
+    Ok(Value::Number(Number::with_unit(value, unit)))
 }
 
 /// The slash-spelling text of an operand: a slash value keeps its chained
@@ -6006,7 +5955,7 @@ fn num_compare(
 fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     if let (Value::Number(a), Value::Number(b)) = (&l, &r) {
         let (av, bv, unit) = coerce_pair(a, b, pos)?;
-        return Ok(Value::Number(Number { value: av + bv, unit }));
+        return Ok(Value::Number(Number::with_unit(av + bv, unit)));
     }
     // dart-sass removed color arithmetic: `color + color`/`color + number`
     // (either order) is "Undefined operation", not string concatenation.
@@ -6053,7 +6002,7 @@ fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
 fn binary_sub(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     if let (Value::Number(a), Value::Number(b)) = (&l, &r) {
         let (av, bv, unit) = coerce_pair(a, b, pos)?;
-        return Ok(Value::Number(Number { value: av - bv, unit }));
+        return Ok(Value::Number(Number::with_unit(av - bv, unit)));
     }
     // Removed color arithmetic: `color - color`/`color - number` (either
     // order) is "Undefined operation", not a string join.
@@ -6079,23 +6028,21 @@ fn binary_sub(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
 fn binary_mul(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     match (l, r) {
         (Value::Number(a), Value::Number(b)) => {
-            let unit = if a.unit.is_empty() {
-                b.unit
-            } else if b.unit.is_empty() {
-                a.unit
+            let unit = if a.is_unitless() {
+                b.unit()
+            } else if b.is_unitless() {
+                a.unit()
             } else {
                 return Err(Error::at(
                     format!(
                         "Multiplication of two units ({} * {}) is not supported.",
-                        a.unit, b.unit
+                        a.unit(),
+                        b.unit()
                     ),
                     pos,
                 ));
             };
-            Ok(Value::Number(Number {
-                value: a.value * b.value,
-                unit,
-            }))
+            Ok(Value::Number(Number::with_unit(a.value * b.value, unit)))
         }
         (l, r) => Err(undefined_op(&l, "*", &r, pos)),
     }
@@ -6115,10 +6062,7 @@ fn num_binop(l: Value, r: Value, pos: Pos, sym: &str, f: impl Fn(f64, f64) -> f6
     match (l, r) {
         (Value::Number(a), Value::Number(b)) => {
             let (av, bv, unit) = coerce_pair(&a, &b, pos)?;
-            Ok(Value::Number(Number {
-                value: f(av, bv),
-                unit,
-            }))
+            Ok(Value::Number(Number::with_unit(f(av, bv), unit)))
         }
         (l, r) => Err(undefined_op(&l, sym, &r, pos)),
     }
@@ -6136,22 +6080,22 @@ fn num_binop(l: Value, r: Value, pos: Pos, sym: &str, f: impl Fn(f64, f64) -> f6
 fn coerce_pair(a: &Number, b: &Number, pos: Pos) -> Result<(f64, f64, String), Error> {
     // Equal units (case-insensitively) or a unitless operand never need a
     // numeric conversion.
-    if a.unit.eq_ignore_ascii_case(&b.unit) || b.unit.is_empty() {
-        return Ok((a.value, b.value, a.unit.clone()));
+    if a.unit().eq_ignore_ascii_case(b.unit()) || b.is_unitless() {
+        return Ok((a.value, b.value, a.unit().to_string()));
     }
-    if a.unit.is_empty() {
-        return Ok((a.value, b.value, b.unit.clone()));
+    if a.is_unitless() {
+        return Ok((a.value, b.value, b.unit().to_string()));
     }
     // Two distinct real units: convert the right into the left's unit.
-    match crate::value::convert_factor(&b.unit, &a.unit) {
-        Some(factor) => Ok((a.value, b.value * factor, a.unit.clone())),
+    match crate::value::convert_factor(b.unit(), a.unit()) {
+        Some(factor) => Ok((a.value, b.value * factor, a.unit().to_string())),
         None => Err(Error::at(
             format!(
                 "{}{} and {}{} have incompatible units.",
                 crate::value::fmt_num(a.value, false),
-                a.unit,
+                a.unit(),
                 crate::value::fmt_num(b.value, false),
-                b.unit
+                b.unit()
             ),
             pos,
         )),

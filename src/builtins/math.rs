@@ -139,10 +139,7 @@ fn round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
     // which reports the arity/name error.
     if pos_args.is_empty() && named.len() == 1 && named[0].0 == "number" {
         let n = as_num(&named[0].1, pos)?;
-        return Ok(num_value(Number {
-            value: n.value.round(),
-            unit: n.unit,
-        }));
+        return Ok(num_value(Number::with_unit(n.value.round(), n.unit())));
     }
     let args = all_args(pos_args, named);
     match args.len() {
@@ -151,10 +148,7 @@ fn round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
             // One-argument form: nearest, unit preserved. An unsimplifiable
             // argument (a `var()`, interpolation, …) preserves the call.
             match round_operand(&args[0], pos)? {
-                Some(n) => Ok(num_value(Number {
-                    value: n.value.round(),
-                    unit: n.unit,
-                })),
+                Some(n) => Ok(num_value(Number::with_unit(n.value.round(), n.unit()))),
                 None => Ok(preserved_round(&args)),
             }
         }
@@ -265,13 +259,8 @@ fn round_with_step(
     explicit: bool,
     pos: Pos,
 ) -> Result<Value, Error> {
-    let unit = number.unit.clone();
-    let with_unit = |value: f64| {
-        num_value(Number {
-            value,
-            unit: unit.clone(),
-        })
-    };
+    let unit = number.unit().to_string();
+    let with_unit = |value: f64| num_value(Number::with_unit(value, unit.clone()));
     // Coerce the step into the number's unit; an incompatible pair preserves
     // the call (a real/unitless or known cross-dimension mix errors, matching
     // the two-argument unit rules).
@@ -364,20 +353,20 @@ enum StepCoercion {
 /// combine; a relative/unknown unit pair preserves the call; a real-vs-unitless
 /// or known cross-dimension mix is an error (matching dart-sass).
 fn coerce_step(step: &Number, number: &Number, pos: Pos) -> StepCoercion {
-    if step.unit.eq_ignore_ascii_case(&number.unit) {
+    if step.unit().eq_ignore_ascii_case(number.unit()) {
         return StepCoercion::Value(step.value);
     }
-    if step.unit.is_empty() && number.unit.is_empty() {
+    if step.is_unitless() && number.is_unitless() {
         return StepCoercion::Value(step.value);
     }
     // A unitless operand mixed with a real unit is incompatible.
-    if step.unit.is_empty() != number.unit.is_empty() {
+    if step.is_unitless() != number.is_unitless() {
         return StepCoercion::Error(incompatible(number, step, pos));
     }
-    if let Some(factor) = convert_factor(&step.unit, &number.unit) {
+    if let Some(factor) = convert_factor(step.unit(), number.unit()) {
         return StepCoercion::Value(step.value * factor);
     }
-    if crate::value::calc_units_incompatible(&number.unit, &step.unit) {
+    if crate::value::calc_units_incompatible(number.unit(), step.unit()) {
         return StepCoercion::Error(incompatible(number, step, pos));
     }
     StepCoercion::Preserve
@@ -429,10 +418,7 @@ fn unary(
 ) -> Result<Value, Error> {
     check_max_args(pos_args, named, 1, pos)?;
     let n = require_num(&["number"], pos_args, named, 0, fname, pos)?;
-    Ok(num_value(Number {
-        value: op(n.value),
-        unit: n.unit.clone(),
-    }))
+    Ok(num_value(Number::with_unit(op(n.value), n.unit().to_string())))
 }
 
 /// `sign(x)`: -1, 0, or 1, preserving the operand's unit. `sign(0)` is `0`
@@ -449,8 +435,12 @@ fn sign(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value
     } else {
         0.0
     };
-    let unit = if s == 0.0 { String::new() } else { n.unit.clone() };
-    Ok(num_value(Number { value: s, unit }))
+    let unit = if s == 0.0 {
+        String::new()
+    } else {
+        n.unit().to_string()
+    };
+    Ok(num_value(Number::with_unit(s, unit)))
 }
 
 /// `pow(base, exp)`: both operands must be unitless; result is unitless.
@@ -524,10 +514,7 @@ fn hypot(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
             StepCoercion::Error(e) => return Err(e),
         }
     }
-    Ok(num_value(Number {
-        value: sum.sqrt(),
-        unit: first.unit.clone(),
-    }))
+    Ok(num_value(Number::with_unit(sum.sqrt(), first.unit().to_string())))
 }
 
 /// `sin`/`cos`/`tan`: accept an angle (`deg`/`grad`/`rad`/`turn`) or a
@@ -586,7 +573,7 @@ fn atan2(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
 /// (`atan2`, `hypot`) preserve their call when any operand is a percentage,
 /// since the result would be context-dependent.
 fn is_percent(n: &Number) -> bool {
-    n.unit == "%"
+    n.unit() == "%"
 }
 
 /// `rem(a, b)` (truncated, sign of dividend) or `mod(a, b)` (floored, sign
@@ -617,10 +604,7 @@ fn remainder(
     } else {
         a.value - bv * (a.value / bv).floor()
     };
-    Ok(num_value(Number {
-        value,
-        unit: a.unit.clone(),
-    }))
+    Ok(num_value(Number::with_unit(value, a.unit().to_string())))
 }
 
 /// `min`/`max`: reduce all-numeric, compatible-unit arguments to the
@@ -675,10 +659,10 @@ fn clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
     };
     // A known cross-dimension pair (against `min`) is an error, matching
     // dart-sass; an unconvertible relative/unknown unit preserves the call.
-    if crate::value::calc_units_incompatible(&lo.unit, &val.unit) {
+    if crate::value::calc_units_incompatible(lo.unit(), val.unit()) {
         return Err(incompatible(lo, val, pos));
     }
-    if crate::value::calc_units_incompatible(&lo.unit, &hi.unit) {
+    if crate::value::calc_units_incompatible(lo.unit(), hi.unit()) {
         return Err(incompatible(lo, hi, pos));
     }
     // Coerce `value` and `hi` into `lo`'s unit; preserve if any pair is not
@@ -716,10 +700,7 @@ pub(super) fn module_round(pos_args: &[Value], named: &[(String, Value)], pos: P
     }
     let v = super::require(&["number"], pos_args, named, 0, "round", pos)?;
     let n = as_num(v, pos)?;
-    Ok(num_value(Number {
-        value: n.value.round(),
-        unit: n.unit,
-    }))
+    Ok(num_value(Number::with_unit(n.value.round(), n.unit())))
 }
 
 /// `math.min(...)` / `math.max(...)`: the numeric (not CSS-calc) reductions.
@@ -825,7 +806,7 @@ fn coerce_for_clamp(
     n_label: &str,
     pos: Pos,
 ) -> Result<f64, Error> {
-    let unitless_mix = base.unit.is_empty() != n.unit.is_empty();
+    let unitless_mix = base.is_unitless() != n.is_unitless();
     if unitless_mix {
         return Err(Error::at(
             format!(
@@ -960,7 +941,7 @@ fn reduce_min_max(args: &[Value], is_min: bool, pos: Pos) -> Result<Option<Numbe
         };
         let mut folded = false;
         for c in &mut clusters {
-            if crate::value::calc_units_incompatible(&c.unit, &n.unit) {
+            if crate::value::calc_units_incompatible(c.unit(), n.unit()) {
                 return Err(incompatible(c, &n, pos));
             }
             if let Some(nv) = try_coerce(&n, c) {
@@ -987,17 +968,17 @@ fn reduce_min_max(args: &[Value], is_min: bool, pos: Pos) -> Result<Option<Numbe
 /// `None` if their units are incompatible. A unitless operand keeps its
 /// value and adopts the comparison silently.
 fn try_coerce(n: &Number, target: &Number) -> Option<f64> {
-    if n.unit.eq_ignore_ascii_case(&target.unit) || n.unit.is_empty() || target.unit.is_empty() {
+    if n.unit().eq_ignore_ascii_case(target.unit()) || n.is_unitless() || target.is_unitless() {
         return Some(n.value);
     }
-    convert_factor(&n.unit, &target.unit).map(|f| n.value * f)
+    convert_factor(n.unit(), target.unit()).map(|f| n.value * f)
 }
 
 /// Convert an angle number to radians, accepting `deg`/`grad`/`rad`/`turn`
 /// or a unitless value (already radians). Errors on any other unit.
 fn angle_to_radians(n: &Number, pos: Pos) -> Result<f64, Error> {
     use std::f64::consts::PI;
-    let deg = match n.unit.to_ascii_lowercase().as_str() {
+    let deg = match n.unit().to_ascii_lowercase().as_str() {
         // unitless and radians are already in radians.
         "" | "rad" => return Ok(n.value),
         "deg" => n.value,
@@ -1047,10 +1028,7 @@ fn const_number(text: &str) -> Option<Number> {
         "e" => std::f64::consts::E,
         _ => return None,
     };
-    Some(Number {
-        value,
-        unit: String::new(),
-    })
+    Some(Number::unitless(value))
 }
 
 /// Convert a value to a `Number`, also accepting the bare calc constants
@@ -1097,7 +1075,7 @@ fn num_value(n: Number) -> Value {
 
 /// Ensure a number is unitless, erroring with dart-sass's wording.
 fn no_unit(n: &Number, pos: Pos) -> Result<(), Error> {
-    if n.unit.is_empty() {
+    if n.is_unitless() {
         Ok(())
     } else {
         Err(Error::at(
@@ -1108,17 +1086,11 @@ fn no_unit(n: &Number, pos: Pos) -> Result<(), Error> {
 }
 
 fn unitless(value: f64) -> Value {
-    num_value(Number {
-        value,
-        unit: String::new(),
-    })
+    num_value(Number::unitless(value))
 }
 
 fn degrees(value: f64) -> Value {
-    num_value(Number {
-        value,
-        unit: "deg".to_string(),
-    })
+    num_value(Number::with_unit(value, "deg".to_string()))
 }
 
 fn incompatible(a: &Number, b: &Number, pos: Pos) -> Error {
@@ -1160,10 +1132,7 @@ mod tests {
     }
 
     fn n(value: f64, unit: &str) -> Value {
-        Value::Number(Number {
-            value,
-            unit: unit.to_string(),
-        })
+        Value::Number(Number::with_unit(value, unit.to_string()))
     }
 
     fn call(name: &str, args: &[Value]) -> Value {

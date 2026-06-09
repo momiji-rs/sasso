@@ -176,7 +176,7 @@ pub(super) fn require_legacy_color(c: &Color, fname: &str, pos: Pos) -> Result<(
 pub(super) fn channel(v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
         Value::Number(n) => {
-            if n.unit == "%" {
+            if n.unit() == "%" {
                 Ok((n.value / 100.0 * 255.0).clamp(0.0, 255.0))
             } else {
                 Ok(n.value.clamp(0.0, 255.0))
@@ -445,12 +445,7 @@ pub(crate) fn call_module(
 /// Resolve a built-in module variable (`math.$pi`, etc.). dart-sass exposes
 /// these only on `sass:math`; an unknown member is "Undefined variable.".
 pub(crate) fn module_var(module: &str, name: &str, pos: Pos) -> Result<Value, Error> {
-    let number = |value: f64| {
-        Ok(Value::Number(Number {
-            value,
-            unit: String::new(),
-        }))
-    };
+    let number = |value: f64| Ok(Value::Number(Number::unitless(value)));
     if module == "math" {
         return match name {
             "pi" => number(std::f64::consts::PI),
