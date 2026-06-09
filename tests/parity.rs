@@ -51,6 +51,21 @@ fn assert_parity(scss: &str) {
     }
 }
 
+/// Assert both sasso and dart-sass REJECT `scss` (error-spec parity).
+fn assert_error_parity(scss: &str) {
+    if !enabled() {
+        return;
+    }
+    assert!(
+        compile(scss, &Options::default()).is_err(),
+        "\nexpected our compile to fail:\n--- scss ---\n{scss}\n"
+    );
+    assert!(
+        dart_sass(scss).is_none(),
+        "\nexpected dart-sass to fail too:\n--- scss ---\n{scss}\n"
+    );
+}
+
 #[test]
 fn parity_variables_nesting() {
     assert_parity("$c: #336699;\n.a {\n  color: $c;\n  .b { color: lighten($c, 10%); }\n  &:hover { color: mix($c, white, 50%); }\n}\n");
@@ -687,6 +702,28 @@ fn parity_plain_css_import_passthrough() {
     // `#{…}` inside a `url("…")` import string is resolved (the bare quoted
     // `@import "…"` form keeps interpolation literal, so it is not tested here).
     assert_parity("$p: http;\n$f: Sans;\n@import url(\"#{$p}://x.com/c?family=#{$f}\");\n");
+}
+
+#[test]
+fn parity_import_modifier_grammar() {
+    // The structural `@import` modifier grammar (dart `tryImportModifiers`):
+    // a `supports(<query>)` re-serializes canonically — `supports( a: b)` ->
+    // `supports(a: b)`, a paren'd declaration unwraps (`supports((a: b))` ->
+    // `supports(a: b)`), conditions/negations/functions keep one paren pair,
+    // custom-property values stay verbatim; media queries canonicalize
+    // (`and(c: d)` -> `and (c: d)`); unknown identifier/function runs pass
+    // through space-joined.
+    assert_parity(
+        "@import \"a.css\" supports( a: b);\n@import \"a.css\" supports((a: b));\n@import \"a.css\" supports((a: b) and (c: d));\n@import \"a.css\" supports(not (a: b));\n@import \"a.css\" supports(a(b));\n@import \"a.css\" supports(calc(1));\n@import \"a.css\" supports(--a: b);\n@import \"a.css\" supports(--a: ,);\n",
+    );
+    assert_parity(
+        "@import \"a\" b and(c: d), e;\n@import \"a\" supports(b: c) (d: e);\n@import \"a\" b c d(e) supports(f: g) h i j(k) l m (n: o), (p: q);\n@import \"b\" c(d), \"e.css\";\n",
+    );
+    // Wrong-order modifiers are rejected ("expected ';'." / identifier).
+    assert_error_parity("@import \"a\" (b: c) supports(d: e);\n");
+    assert_error_parity("@import \"a\" b, supports(c: d);\n");
+    assert_error_parity("@import \"a\" b, \"c\";\n");
+    assert_error_parity("@import url(\"a.css\") supports(--a:);\n");
 }
 
 /// A trivial in-memory [`Importer`] for offline `@import` inlining tests.

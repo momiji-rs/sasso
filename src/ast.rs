@@ -195,10 +195,36 @@ pub(crate) enum ImportArg {
     /// plus the 1-based position and byte length of the quoted URL token (for
     /// the `[import]` deprecation snippet).
     Sass { path: String, pos: Pos, length: usize },
-    /// A plain CSS `@import`: emitted verbatim as `@import <text>;`. Stored as
-    /// a template so `#{…}` interpolation in the URL/modifiers resolves at
-    /// eval time. The text is everything between `@import ` and the `;`.
-    Css(Vec<TplPiece>),
+    /// A plain CSS `@import`: emitted as `@import <url> <modifiers>;`. The URL
+    /// is a template (only `#{…}` interpolation resolves); the modifiers are
+    /// parsed structurally so `supports(...)` and media queries re-serialize
+    /// canonically (dart-sass `tryImportModifiers`).
+    Css {
+        url: Vec<TplPiece>,
+        modifiers: Vec<ImportModifier>,
+    },
+}
+
+/// One parsed `@import` modifier (dart-sass `tryImportModifiers`).
+pub(crate) enum ImportModifier {
+    /// A run of bare identifiers and unknown functions (`b`, `c(d)`), joined
+    /// by single spaces; captured as a template (only `#{…}` resolves).
+    Raw(Vec<TplPiece>),
+    /// `supports(<query>)`. `declaration` is true for a bare `supports(a: b)`
+    /// query, whose `Declaration` serialization already carries its own parens
+    /// (`supports((a: b))` also unwraps to this); every other condition gets
+    /// wrapped in one explicit pair.
+    Supports {
+        condition: SupportsCondition,
+        declaration: bool,
+    },
+    /// The trailing media query list (always the final modifier).
+    /// `comma_before` distinguishes `b, (c: d)` (a list continued after a
+    /// bare-identifier query) from `b (c: d)` (a space-joined list start).
+    Media {
+        list: MediaQueryList,
+        comma_before: bool,
+    },
 }
 
 /// One arm of an `@if` chain. `cond == None` is the trailing `@else`.

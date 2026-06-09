@@ -18,8 +18,9 @@ use crate::fxhash::FxHashMap as HashMap;
 
 use crate::ast::{
     BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, CustomDecl, Declaration, Expr,
-    IfClause, IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery, MediaQueryList, ParamList,
-    PropertySet, Rule, Stmt, Stylesheet, SupportsCondition, SupportsValue, TplPiece, UnOp, VarDecl,
+    IfClause, IfCond, ImportArg, ImportModifier, MediaFeature, MediaInParens, MediaQuery, MediaQueryList,
+    ParamList, PropertySet, Rule, Stmt, Stylesheet, SupportsCondition, SupportsValue, TplPiece, UnOp,
+    VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -2273,7 +2274,7 @@ impl<'a> Evaluator<'a> {
                 Stmt::Import(args) => {
                     for arg in args {
                         let text = match arg {
-                            ImportArg::Css(tpl) => self.eval_template(tpl)?,
+                            ImportArg::Css { url, modifiers } => self.serialize_css_import(url, modifiers)?,
                             ImportArg::Sass { path, .. } => format!("\"{path}\""),
                         };
                         sink.push_at_rule(OutNode::Raw(format!("@import {text};")));
@@ -2344,7 +2345,7 @@ impl<'a> Evaluator<'a> {
                 Stmt::Import(args) => {
                     for arg in args {
                         let prelude = match arg {
-                            ImportArg::Css(tpl) => self.eval_template(tpl)?,
+                            ImportArg::Css { url, modifiers } => self.serialize_css_import(url, modifiers)?,
                             ImportArg::Sass { path, .. } => format!("\"{path}\""),
                         };
                         items.push(OutItem::ChildlessAtRule {
@@ -3322,6 +3323,45 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// Serialize a plain-CSS `@import` argument: the URL template followed by
+    /// its canonical modifiers. Raw identifier/function runs join with single
+    /// spaces; a `supports(<query>)` re-serializes its parsed condition (a
+    /// declaration's own parens double as the call parens); the terminal media
+    /// query list joins with `, ` when it continued a bare-identifier query.
+    fn serialize_css_import(
+        &mut self,
+        url: &[TplPiece],
+        modifiers: &[ImportModifier],
+    ) -> Result<String, Error> {
+        let mut out = self.eval_template(url)?;
+        for m in modifiers {
+            match m {
+                ImportModifier::Raw(tpl) => {
+                    out.push(' ');
+                    out.push_str(&self.eval_template(tpl)?);
+                }
+                ImportModifier::Supports {
+                    condition,
+                    declaration,
+                } => {
+                    out.push(' ');
+                    let inner = self.serialize_supports_condition(condition)?;
+                    if *declaration {
+                        out.push_str(&format!("supports{inner}"));
+                    } else {
+                        out.push_str(&format!("supports({inner})"));
+                    }
+                }
+                ImportModifier::Media { list, comma_before } => {
+                    out.push_str(if *comma_before { ", " } else { " " });
+                    let queries = self.resolve_media_queries(list)?;
+                    out.push_str(&serialize_media_queries(&queries));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// dart-sass `_parenthesize`: wrap a sub-condition in parentheses when it is
     /// a negation, or an operation whose operator differs from the surrounding
     /// one (or there is no surrounding operator).
@@ -3533,8 +3573,8 @@ impl<'a> Evaluator<'a> {
         let importer = self.options.importer;
         for arg in args {
             match arg {
-                ImportArg::Css(tpl) => {
-                    let text = self.eval_template(tpl)?;
+                ImportArg::Css { url, modifiers } => {
+                    let text = self.serialize_css_import(url, modifiers)?;
                     sink.push_at_rule(OutNode::Raw(format!("@import {text};")));
                 }
                 ImportArg::Sass { path, pos, length } => {

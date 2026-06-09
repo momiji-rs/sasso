@@ -9,9 +9,9 @@ use std::rc::Rc;
 
 use crate::ast::{
     BinOp, CallArg, Callable, ConfigEntry, Conjunction, CssCustomItem, CssCustomValue, CustomDecl,
-    Declaration, Expr, ForwardMember, IfBranch, IfClause, IfCond, ImportArg, MediaFeature, MediaInParens,
-    MediaQuery, MediaQueryList, Param, ParamList, PropertySet, Rule, Stmt, Stylesheet, SupportsCondition,
-    SupportsValue, TplPiece, UnOp, VarDecl,
+    Declaration, Expr, ForwardMember, IfBranch, IfClause, IfCond, ImportArg, ImportModifier, MediaFeature,
+    MediaInParens, MediaQuery, MediaQueryList, Param, ParamList, PropertySet, Rule, Stmt, Stylesheet,
+    SupportsCondition, SupportsValue, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::{Mark, Pos, Scanner};
@@ -405,53 +405,14 @@ fn import_url_is_css(pieces: &[TplPiece]) -> bool {
 }
 
 /// Drop trailing whitespace-only literal pieces and trim the last literal.
-fn trim_trailing_ws(mut pieces: Vec<TplPiece>) -> Vec<TplPiece> {
+/// Append a single literal character to a template, merging into a trailing
+/// `Lit` piece when possible.
+fn push_lit(pieces: &mut Vec<TplPiece>, c: char) {
     if let Some(TplPiece::Lit(s)) = pieces.last_mut() {
-        *s = strip_trailing_trivia(s);
+        s.push(c);
+    } else {
+        pieces.push(TplPiece::Lit(c.to_string()));
     }
-    while let Some(TplPiece::Lit(s)) = pieces.last() {
-        if s.is_empty() {
-            pieces.pop();
-        } else {
-            break;
-        }
-    }
-    pieces
-}
-
-/// Strip trailing whitespace and a single trailing `/* */` or `//…` comment
-/// from `s` (an `@import` modifier run). A comment in the *middle* of the run
-/// (e.g. inside `b(/**/ c)`) is preserved because it is not at the very end.
-fn strip_trailing_trivia(s: &str) -> String {
-    let mut out = s.trim_end().to_string();
-    loop {
-        if out.ends_with("*/") {
-            if let Some(start) = out.rfind("/*") {
-                out.truncate(start);
-                out = out.trim_end().to_string();
-                continue;
-            }
-        }
-        // A line comment runs to end-of-text once captured (no newline left).
-        if let Some(start) = find_trailing_line_comment(&out) {
-            out.truncate(start);
-            out = out.trim_end().to_string();
-            continue;
-        }
-        break;
-    }
-    out
-}
-
-/// If the final line of `s` begins (after optional whitespace) a `//` line
-/// comment, return the byte index where the comment's whitespace run starts.
-fn find_trailing_line_comment(s: &str) -> Option<usize> {
-    let last_line_start = s.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let line = &s[last_line_start..];
-    // Find `//` that is not inside a string; the modifier run never contains a
-    // bare `//` except as a comment, so a simple search suffices.
-    let idx = line.find("//")?;
-    Some(last_line_start + idx)
 }
 
 /// Whether `expr` is eligible to keep the deprecated `/` slash spelling.
@@ -1086,6 +1047,13 @@ impl Parser {
             break;
         }
         self.skip_ws_trivia();
+        // After the last argument only `;`, `}`, or EOF may follow; anything
+        // else (e.g. a supports()/identifier after a media query list, the
+        // `wrong_order` cases) is a syntax error like dart-sass.
+        match self.sc.peek() {
+            None | Some(';') | Some('}') => {}
+            _ => return Err(Error::at("expected \";\".", self.sc.position())),
+        }
         self.sc.eat(';');
         Ok(Stmt::Import(args))
     }
@@ -1326,14 +1294,10 @@ impl Parser {
     fn parse_import_arg(&mut self, pos: Pos) -> Result<ImportArg, Error> {
         // `url(...)` form — always a plain CSS import.
         if self.peek_is_url_func() {
-            let mut tpl = self.parse_import_url_func()?;
+            let url = self.parse_import_url_func()?;
             self.skip_ws_trivia();
             let modifiers = self.parse_import_modifiers()?;
-            if !modifiers.is_empty() {
-                tpl.push(TplPiece::Lit(" ".to_string()));
-                tpl.extend(modifiers);
-            }
-            return Ok(ImportArg::Css(tpl));
+            return Ok(ImportArg::Css { url, modifiers });
         }
         // Quoted-string form.
         match self.sc.peek() {
@@ -1363,12 +1327,10 @@ impl Parser {
                         length: url_len,
                     })
                 } else {
-                    let mut tpl = vec![TplPiece::Lit(raw_url)];
-                    if !modifiers.is_empty() {
-                        tpl.push(TplPiece::Lit(" ".to_string()));
-                        tpl.extend(modifiers);
-                    }
-                    Ok(ImportArg::Css(tpl))
+                    Ok(ImportArg::Css {
+                        url: vec![TplPiece::Lit(raw_url)],
+                        modifiers,
+                    })
                 }
             }
             _ => Err(Error::at("expected a string after @import", self.sc.position())),
@@ -1477,58 +1439,156 @@ impl Parser {
         Ok(pieces)
     }
 
-    /// Parse the optional `supports(...)` and media-query-list modifiers that
-    /// follow an `@import` URL, captured verbatim. Returns empty when there
-    /// are none (the next char is `,`, `;`, `}`, or EOF).
-    ///
-    /// A media query *list* consumes following top-level commas as part of the
-    /// same import. dart-sass enters list mode only when the first modifier
-    /// token is a media query (a bare identifier media type, or a parenthesised
-    /// `(feature)` group) — not a `supports(...)` or a `name(...)` URL-modifier
-    /// function, after which a top-level comma starts a fresh import argument.
-    fn parse_import_modifiers(&mut self) -> Result<Vec<TplPiece>, Error> {
-        match self.sc.peek() {
-            None | Some(',') | Some(';') | Some('}') => return Ok(Vec::new()),
-            _ => {}
-        }
-        let media_list_mode = self.import_modifier_starts_media_list();
-        let mut pieces = self.parse_template(&[',', ';', '}'])?;
-        if media_list_mode {
-            while self.sc.peek() == Some(',') {
-                self.sc.bump();
-                pieces.push(TplPiece::Lit(", ".to_string()));
-                self.skip_ws_inline();
-                let more = self.parse_template(&[',', ';', '}'])?;
-                pieces.extend(more);
+    /// Parse the optional modifiers that follow an `@import` URL, mirroring
+    /// dart-sass `tryImportModifiers`: a run of bare identifiers and unknown
+    /// functions (kept near-verbatim), at most interleaved `supports(<query>)`
+    /// clauses (parsed structurally so they re-serialize canonically), then —
+    /// terminally — a media query list, entered either at a `(`-feature or at
+    /// a comma following a bare identifier (a media type). After the media
+    /// list the modifiers END: a following `supports(...)`/identifier is a
+    /// syntax error surfaced by `parse_import`'s `;` check.
+    fn parse_import_modifiers(&mut self) -> Result<Vec<ImportModifier>, Error> {
+        let mut mods: Vec<ImportModifier> = Vec::new();
+        // The current run of identifiers/unknown-functions, space-joined.
+        let mut raw: Vec<TplPiece> = Vec::new();
+        let flush = |raw: &mut Vec<TplPiece>, mods: &mut Vec<ImportModifier>| {
+            if !raw.is_empty() {
+                mods.push(ImportModifier::Raw(std::mem::take(raw)));
+            }
+        };
+        let space = |raw: &mut Vec<TplPiece>| {
+            if !raw.is_empty() {
+                if let Some(TplPiece::Lit(s)) = raw.last_mut() {
+                    s.push(' ');
+                } else {
+                    raw.push(TplPiece::Lit(" ".to_string()));
+                }
+            }
+        };
+        loop {
+            self.skip_ws_trivia();
+            if self.looking_at_interpolated_identifier() {
+                let identifier = self.parse_interpolated_identifier()?;
+                let name = tpl_plain(&identifier).map(|s| s.to_ascii_lowercase());
+                if name.as_deref() != Some("and") && self.sc.peek() == Some('(') {
+                    if name.as_deref() == Some("supports") {
+                        self.sc.bump(); // '('
+                        flush(&mut raw, &mut mods);
+                        let (condition, declaration) = self.parse_import_supports_query()?;
+                        if !self.sc.eat(')') {
+                            return Err(Error::at("expected \")\"", self.sc.position()));
+                        }
+                        mods.push(ImportModifier::Supports {
+                            condition,
+                            declaration,
+                        });
+                    } else {
+                        // Unknown function: `name(<declaration-value>)` verbatim.
+                        self.sc.bump(); // '('
+                        space(&mut raw);
+                        raw.extend(identifier);
+                        push_lit(&mut raw, '(');
+                        let args = self.parse_supports_decl_value(true, true, true)?;
+                        raw.extend(args);
+                        if !self.sc.eat(')') {
+                            return Err(Error::at("expected \")\"", self.sc.position()));
+                        }
+                        push_lit(&mut raw, ')');
+                    }
+                    continue;
+                }
+                // A bare identifier (or `and`).
+                space(&mut raw);
+                raw.extend(identifier);
+                self.skip_ws_trivia();
+                if self.sc.peek() == Some(',') {
+                    // The identifier was a media type; the comma continues its
+                    // media query LIST (only media queries may follow).
+                    self.sc.bump();
+                    flush(&mut raw, &mut mods);
+                    let list = self.parse_media_query_list()?;
+                    mods.push(ImportModifier::Media {
+                        list,
+                        comma_before: true,
+                    });
+                    return Ok(mods);
+                }
+                continue;
+            } else if self.sc.peek() == Some('(') {
+                // A media feature begins the terminal media query list.
+                flush(&mut raw, &mut mods);
+                let list = self.parse_media_query_list()?;
+                mods.push(ImportModifier::Media {
+                    list,
+                    comma_before: false,
+                });
+                return Ok(mods);
+            } else {
+                flush(&mut raw, &mut mods);
+                return Ok(mods);
             }
         }
-        Ok(trim_trailing_ws(pieces))
     }
 
-    /// Whether the modifier at the cursor begins a media query list (so that a
-    /// following top-level comma continues the same `@import`). True for a bare
-    /// identifier not immediately followed by `(` (a media type) and for a `(`
-    /// (a media feature); false for `supports(...)` and `name(...)`.
-    fn import_modifier_starts_media_list(&self) -> bool {
-        match self.sc.peek() {
-            Some('(') => true,
-            Some(c) if is_ident_char(c) && !c.is_ascii_digit() => {
-                // Read the identifier and check what follows.
-                let cs = self.sc.rest();
-                let mut i = 0;
-                while i < cs.len() && is_ident_char(cs[i]) {
-                    i += 1;
-                }
-                let ident: String = cs[..i].iter().collect();
-                if ident.eq_ignore_ascii_case("supports") {
-                    return false;
-                }
-                // A function call (`name(`) is a URL modifier, not a media
-                // type; a bare identifier is a media type.
-                cs.get(i) != Some(&'(')
-            }
-            _ => false,
+    /// dart-sass `_importSupportsQuery`: the content of an `@import ...
+    /// supports(...)` modifier. Returns the condition and whether it was a bare
+    /// declaration (`supports(a: b)`), whose serialization carries its own
+    /// parens.
+    fn parse_import_supports_query(&mut self) -> Result<(SupportsCondition, bool), Error> {
+        self.skip_ws_trivia();
+        if self.scan_keyword_ci("not") {
+            self.skip_ws_trivia();
+            let inner = self.parse_supports_condition_in_parens()?;
+            return Ok((SupportsCondition::Negation(Box::new(inner)), false));
         }
+        if self.sc.peek() == Some('(') {
+            let condition = self.parse_supports_condition()?;
+            let declaration = matches!(condition, SupportsCondition::Declaration { .. });
+            return Ok((condition, declaration));
+        }
+        // `name(<args>)` function form (e.g. `supports(calc(1))`).
+        if self.looking_at_interpolated_identifier() {
+            let mark = self.sc.mark();
+            let identifier = self.parse_interpolated_identifier()?;
+            if self.sc.eat('(') {
+                let arguments = self.parse_supports_decl_value(true, true, true)?;
+                if !self.sc.eat(')') {
+                    return Err(Error::at("expected \")\"", self.sc.position()));
+                }
+                return Ok((
+                    SupportsCondition::Function {
+                        name: identifier,
+                        arguments,
+                    },
+                    false,
+                ));
+            }
+            self.sc.reset(mark);
+        }
+        // Bare declaration: `<name>: <value>`.
+        let name = self.parse_supports_decl_name()?;
+        self.skip_ws_trivia();
+        if !self.sc.eat(':') {
+            return Err(Error::at("expected \":\".", self.sc.position()));
+        }
+        let custom = expr_is_custom_property(&name);
+        let value = if custom {
+            let raw = self.parse_supports_decl_value(false, false, true)?;
+            SupportsValue::Raw(raw)
+        } else {
+            self.skip_ws_trivia();
+            let v = self.parse_value()?;
+            self.skip_ws_trivia();
+            SupportsValue::Expr(v)
+        };
+        Ok((
+            SupportsCondition::Declaration {
+                name,
+                value: Box::new(value),
+                custom,
+            },
+            true,
+        ))
     }
 
     /// Parse `@warn`/`@debug`/`@error <expr>;`.
