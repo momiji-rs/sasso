@@ -3120,6 +3120,11 @@ fn parity_string_split_and_inspect_brackets() {
     assert_parity(
         "@use \"sass:meta\";\na {\n  a: meta.inspect([1, 2, 3]);\n  b: meta.inspect([]);\n  c: meta.inspect([[1, 2] [3, 4]]);\n  d: meta.inspect(((1, 2): 3, (4, 5): 6));\n  e: meta.inspect((1: 2 3, 4: 5 6));\n}\n",
     );
+    // A single-element list keeps its separator's trailing token: `(1,)` for a
+    // comma list and `(1/)` for a slash list; a space list is just `1`.
+    assert_parity(
+        "@use \"sass:list\";\n@use \"sass:meta\";\na {\n  c: meta.inspect((1,));\n  s: meta.inspect(list.append((), 1, slash));\n  sp: meta.inspect(list.append((), 1, space));\n  m: meta.inspect(list.join((1,), (2,), slash));\n}\n",
+    );
 }
 
 #[test]

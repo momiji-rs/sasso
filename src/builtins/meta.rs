@@ -354,6 +354,11 @@ pub(crate) fn inspect_value(v: &Value) -> String {
                 1 if l.sep == ListSep::Comma => {
                     format!("{},", inspect_element(&l.items[0], l.sep))
                 }
+                1 if l.sep == ListSep::Slash => {
+                    // A single-element slash list keeps a trailing `/` (no spaces),
+                    // mirroring the comma list's trailing `,`.
+                    format!("{}/", inspect_element(&l.items[0], l.sep))
+                }
                 _ => l
                     .items
                     .iter()
@@ -363,8 +368,9 @@ pub(crate) fn inspect_value(v: &Value) -> String {
             };
             if l.bracketed {
                 format!("[{body}]")
-            } else if l.items.len() == 1 && l.sep == ListSep::Comma {
-                // The unbracketed single-element comma list needs its own parens.
+            } else if l.items.len() == 1 && matches!(l.sep, ListSep::Comma | ListSep::Slash) {
+                // An unbracketed single-element comma/slash list needs its own
+                // parens: `(1,)` / `(1/)`.
                 format!("({body})")
             } else {
                 body
