@@ -229,7 +229,18 @@ fn parse_compound(chars: &[char], i: &mut usize) -> Option<Compound> {
                     simples.push(Simple::Universal { ns: None });
                 }
             }
-            _ if is_ident_start(c) || c == '\\' || c == '|' => {
+            '|' => {
+                // A leading `|` is the *empty* namespace: `|c`, `|*`.
+                *i += 1;
+                match read_type_after_ns(chars, i)? {
+                    Simple::Universal { .. } => simples.push(Simple::Universal {
+                        ns: Some(String::new()),
+                    }),
+                    Simple::Type(t) => simples.push(Simple::Type(format!("|{t}"))),
+                    other => simples.push(other),
+                }
+            }
+            _ if is_ident_start(c) || c == '\\' => {
                 let (name, is_ns) = read_type_or_ns(chars, i)?;
                 if is_ns {
                     let after = read_type_after_ns(chars, i)?;

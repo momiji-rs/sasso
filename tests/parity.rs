@@ -4544,3 +4544,20 @@ fn parity_selector_unify_leading_combinator() {
     // No leading combinator: unchanged.
     assert_parity("@use \"sass:selector\";\na {b: selector.unify(\".a .b\", \".c .d\")}\n");
 }
+
+#[test]
+fn parity_selector_empty_namespace() {
+    // The selector-string parser accepts the empty namespace (`|c`, `|*`),
+    // which feeds the namespace-aware unify/extend/superselector logic.
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\"|c\", \"|c\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\"*|c\", \"|c\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\"*|c\", \"|*\")}\n");
+    assert_parity(
+        "@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\"c\", \"|c\"))}\n",
+    );
+    assert_parity(
+        "@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\"|c\", \"|d\"))}\n",
+    );
+    // As actual style-rule selectors.
+    assert_parity("|c {x: y}\n|* {x: y}\n*|c {x: y}\n");
+}
