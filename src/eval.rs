@@ -2267,6 +2267,18 @@ impl<'a> Evaluator<'a> {
                     let text = self.eval_template(c)?;
                     sink.push_at_rule(OutNode::Comment(text));
                 }
+                // A plain CSS file never inlines an `@import`; every entry is
+                // emitted verbatim (`@import "x";` / `@import url(x);`), matching
+                // dart-sass loading a `.css` stylesheet.
+                Stmt::Import(args) => {
+                    for arg in args {
+                        let text = match arg {
+                            ImportArg::Css(tpl) => self.eval_template(tpl)?,
+                            ImportArg::Sass { path, .. } => format!("\"{path}\""),
+                        };
+                        sink.push_at_rule(OutNode::Raw(format!("@import {text};")));
+                    }
+                }
                 _ => {}
             }
         }
