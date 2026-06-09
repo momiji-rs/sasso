@@ -169,6 +169,12 @@ impl Sink<'_> {
     }
 
     fn push_comment(&mut self, text: String) {
+        // dart-sass strips a `/*# sourceMappingURL=… */` / `/*# sourceURL=… */`
+        // loud comment (it generates its own); the `# ` space is required, so
+        // `/*#sourceMappingURL…*/`, `/*! … */`, and other names are kept.
+        if text.starts_with("# sourceMappingURL=") || text.starts_with("# sourceURL=") {
+            return;
+        }
         match self {
             Sink::Top(out) => {
                 let out = &mut **out;

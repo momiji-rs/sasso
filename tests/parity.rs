@@ -4737,3 +4737,30 @@ fn parity_selector_unify_host_is_order() {
     assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\":host\", \":is(.c)\"))}\n");
     assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\":host-context(.c)\", \":is(.d)\"))}\n");
 }
+
+#[test]
+fn parity_strip_sourcemap_comment() {
+    // dart-sass strips a `/*# sourceMappingURL=… */` / `/*# sourceURL=… */`
+    // loud comment; the `# ` space is required, so a no-space or `/*!` form and
+    // other names are kept. (dart leaves a trailing blank line where the
+    // stripped comment was — spec-normalized away — so compare trim-trailing.)
+    if !enabled() {
+        return;
+    }
+    for scss in [
+        "a {b: c}\n/*# sourceMappingURL=x */\n",
+        "a {b: c}\n/*# sourceURL=x */\n",
+        "a {b: c}\n/* normal */\n",
+        "a {b: c}\n/*#sourceMappingURL=x*/\n",
+        "a {b: c}\n/*! sourceMappingURL=x */\n",
+    ] {
+        let ours = compile(scss, &Options::default()).expect("compile failed");
+        if let Some(theirs) = dart_sass(scss) {
+            assert_eq!(
+                ours.trim_end(),
+                theirs.trim_end(),
+                "\n--- scss ---\n{scss}\n"
+            );
+        }
+    }
+}
