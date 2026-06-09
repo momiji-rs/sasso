@@ -154,12 +154,38 @@ impl Compound {
     }
 }
 
-/// One component of a complex selector: a compound preceded by an optional
-/// combinator that joins it to the previous component.
+/// One component of a complex selector: a compound preceded by the (usually
+/// empty or single) run of combinators that joins it to the previous component.
+/// A run of more than one combinator (`c > > d`) or a leading run (`~ ~ c`) is a
+/// "bogus" but parseable selector dart-sass preserves.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct ComplexComponent {
-    pub combinator: Option<Combinator>,
+    pub combinators: Vec<Combinator>,
     pub compound: Compound,
+}
+
+impl ComplexComponent {
+    /// A component with a single leading combinator (the common case).
+    fn with_combinator(combinator: Option<Combinator>, compound: Compound) -> Self {
+        ComplexComponent {
+            combinators: combinator.into_iter().collect(),
+            compound,
+        }
+    }
+
+    /// The leading combinator when there is exactly one (the common case);
+    /// `None` for a descendant join or a multi-combinator run.
+    pub(crate) fn combinator(&self) -> Option<Combinator> {
+        match self.combinators.as_slice() {
+            [c] => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// Replace the leading combinator run with a single combinator (or clear it).
+    fn set_combinator(&mut self, c: Option<Combinator>) {
+        self.combinators = c.into_iter().collect();
+    }
 }
 
 /// A complex selector: a sequence of compound selectors joined by descendant
@@ -176,7 +202,7 @@ impl Complex {
             if i > 0 {
                 out.push(' ');
             }
-            if let Some(c) = comp.combinator {
+            for c in &comp.combinators {
                 out.push_str(c.as_str());
                 out.push(' ');
             }
@@ -242,7 +268,7 @@ fn parse_complex(s: &str) -> Option<Complex> {
         }
         let compound = parse_compound(&chars, &mut i)?;
         components.push(ComplexComponent {
-            combinator: pending_combinator.take(),
+            combinators: pending_combinator.take().into_iter().collect(),
             compound,
         });
     }
@@ -577,7 +603,7 @@ pub(crate) fn classify_target(s: &str) -> TargetClass {
     let Some(complex) = parse_complex(s) else {
         return TargetClass::Invalid;
     };
-    if complex.components.len() != 1 || complex.components[0].combinator.is_some() {
+    if complex.components.len() != 1 || complex.components[0].combinator().is_some() {
         return TargetClass::Complex;
     }
     let simples = &complex.components[0].compound.simples;
@@ -670,7 +696,7 @@ fn simplify_pseudo_placeholders(complex: &Complex) -> Option<Complex> {
             simples.push(Simple::Universal { ns: None });
         }
         components.push(ComplexComponent {
-            combinator: comp.combinator,
+            combinators: comp.combinators.clone(),
             compound: Compound { simples },
         });
     }
@@ -1227,7 +1253,7 @@ fn weave(path: &[Complex]) -> Vec<Complex> {
         .map(|tcomps| {
             let mut components = from_trailing(&tcomps);
             if let (Some(comb), Some(first)) = (leading, components.first_mut()) {
-                first.combinator = Some(comb);
+                first.set_combinator(Some(comb));
             }
             Complex { components }
         })
@@ -1238,7 +1264,7 @@ fn weave(path: &[Complex]) -> Vec<Complex> {
 /// the public model this represents how the complex attaches to whatever
 /// precedes it.
 fn leading_combinator(complex: &Complex) -> Option<Combinator> {
-    complex.components.first().and_then(|c| c.combinator)
+    complex.components.first().and_then(|c| c.combinator())
 }
 
 /// A complex-selector component in the *trailing-combinator* representation
@@ -1263,7 +1289,7 @@ fn to_trailing(comps: &[ComplexComponent]) -> Vec<TComp> {
         })
         .collect();
     for i in 1..comps.len() {
-        if let Some(comb) = comps[i].combinator {
+        if let Some(comb) = comps[i].combinator() {
             out[i - 1].combinators.push(comb);
         }
     }
@@ -1279,14 +1305,14 @@ fn from_trailing(tcomps: &[TComp]) -> Vec<ComplexComponent> {
     let mut out: Vec<ComplexComponent> = tcomps
         .iter()
         .map(|t| ComplexComponent {
-            combinator: None,
+            combinators: Vec::new(),
             compound: t.compound.clone(),
         })
         .collect();
     for i in 0..tcomps.len() {
         if let Some(comb) = tcomps[i].combinators.last() {
             if i + 1 < out.len() {
-                out[i + 1].combinator = Some(*comb);
+                out[i + 1].set_combinator(Some(*comb));
             }
         }
     }
@@ -1736,7 +1762,7 @@ fn complex_is_parent_superselector(complex1: &[TComp], complex2: &[TComp]) -> bo
         return false;
     }
     let base = ComplexComponent {
-        combinator: None,
+        combinators: Vec::new(),
         compound: Compound {
             simples: vec![Simple::Placeholder("<temp>".to_string())],
         },
@@ -2177,7 +2203,7 @@ fn extend_component(comp: &ComplexComponent, extensions: &[Extension]) -> Vec<Ve
     // per-simple extension below.
     let effective = expand_pseudos_in_compound(&comp.compound, extensions);
     let comp = ComplexComponent {
-        combinator: comp.combinator,
+        combinators: comp.combinators.clone(),
         compound: effective,
     };
     let comp = &comp;
@@ -2324,7 +2350,7 @@ fn expand_compound_extender(
             if let Some(unified) = unify_compounds(&remaining, &inner_compound.simples) {
                 out.push(Complex {
                     components: vec![ComplexComponent {
-                        combinator: None,
+                        combinators: Vec::new(),
                         compound: Compound { simples: unified },
                     }],
                 });
@@ -2362,7 +2388,7 @@ fn build_extended_compound(
     if !base.is_empty() {
         to_unify.push(Complex {
             components: vec![ComplexComponent {
-                combinator: None,
+                combinators: Vec::new(),
                 compound: Compound {
                     simples: base.clone(),
                 },
@@ -2384,7 +2410,7 @@ fn build_extended_compound(
         .filter_map(|complex| {
             let mut components = complex.components;
             let first = components.first_mut()?;
-            first.combinator = comp.combinator;
+            first.combinators = comp.combinators.clone();
             Some(components)
         })
         .collect()
@@ -2654,8 +2680,8 @@ pub(crate) fn unify_complex(c1: &Complex, c2: &Complex) -> Option<Vec<Complex>> 
     // dart-sass tracks a complex selector's leading combinator (e.g. `> .c`)
     // separately from its components. It is preserved in the unified result;
     // two *different* leading combinators can't unify (`> .c` and `+ .d`).
-    let lc1 = c1.components.first().and_then(|c| c.combinator);
-    let lc2 = c2.components.first().and_then(|c| c.combinator);
+    let lc1 = c1.components.first().and_then(|c| c.combinator());
+    let lc2 = c2.components.first().and_then(|c| c.combinator());
     let leading = match (lc1, lc2) {
         (Some(a), Some(b)) if a != b => return None,
         (a, b) => a.or(b),
@@ -2679,7 +2705,7 @@ pub(crate) fn unify_complex(c1: &Complex, c2: &Complex) -> Option<Vec<Complex>> 
         // Re-attach the preserved leading combinator to the very first
         // component (dart-sass's `leadingCombinators`).
         if let (Some(comb), Some(first)) = (leading, components.first_mut()) {
-            first.combinator = Some(comb);
+            first.set_combinator(Some(comb));
         }
         let complex = Complex { components };
         if seen.insert(complex.render()) {
@@ -2803,7 +2829,7 @@ pub(crate) fn unify_lists(list1: &[Complex], list2: &[Complex]) -> Option<Vec<Co
 pub(crate) fn complex_to_list_parts(c: &Complex) -> Vec<String> {
     let mut parts = Vec::new();
     for comp in &c.components {
-        if let Some(comb) = comp.combinator {
+        if let Some(comb) = comp.combinator() {
             parts.push(comb.as_str().to_string());
         }
         parts.push(comp.compound.render());
@@ -2974,7 +3000,7 @@ fn extend_component_compound(
         comp
     } else {
         owned = ComplexComponent {
-            combinator: comp.combinator,
+            combinators: comp.combinators.clone(),
             compound: effective,
         };
         &owned
@@ -3021,21 +3047,18 @@ fn extend_component_compound(
             let mut components: Vec<ComplexComponent> = Vec::new();
             let lead = &ext.components[..ext.components.len() - 1];
             for (k, l) in lead.iter().enumerate() {
-                let combinator = if k == 0 { comp.combinator } else { l.combinator };
-                components.push(ComplexComponent {
-                    combinator,
-                    compound: l.compound.clone(),
-                });
+                let combinator = if k == 0 { comp.combinator() } else { l.combinator() };
+                components.push(ComplexComponent::with_combinator(combinator, l.compound.clone()));
             }
             let trail_combinator = if lead.is_empty() {
-                comp.combinator
+                comp.combinator()
             } else {
-                last.combinator
+                last.combinator()
             };
-            components.push(ComplexComponent {
-                combinator: trail_combinator,
-                compound: Compound { simples: unified },
-            });
+            components.push(ComplexComponent::with_combinator(
+                trail_combinator,
+                Compound { simples: unified },
+            ));
             let candidate = Complex { components };
             let key = candidate.render();
             if seen.insert(key) {

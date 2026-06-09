@@ -473,7 +473,7 @@ fn append_lists(prefix: &[Complex], suffix: &[Complex], pos: Pos) -> Result<Vec<
                     first.compound.simples.first(),
                     Some(crate::selector::Simple::Type(t)) if t.contains('|')
                 );
-                if first.combinator.is_some() || leading_blocks_append {
+                if first.combinator().is_some() || leading_blocks_append {
                     return Err(Error::at(format!("Can't append {s_str} to {p_one}."), pos));
                 }
             }
@@ -539,7 +539,7 @@ fn extend_or_replace(
 fn compound_targets(list: &[Complex], pos: Pos) -> Result<Vec<crate::selector::Compound>, Error> {
     let mut out = Vec::with_capacity(list.len());
     for complex in list {
-        if complex.components.len() == 1 && complex.components[0].combinator.is_none() {
+        if complex.components.len() == 1 && complex.components[0].combinator().is_none() {
             out.push(complex.components[0].compound.clone());
         } else {
             return Err(Error::at(
