@@ -2029,7 +2029,9 @@ fn to_xyz_d65(space: ColorSpace, c: [f64; 3]) -> [f64; 3] {
         }
         ColorSpace::XyzD65 => c,
         ColorSpace::XyzD50 => mat3(D50_TO_D65, c),
-        ColorSpace::Hsl => to_xyz_d65(ColorSpace::Rgb, hsl_to_rgb255(c)),
+        // hsl routes through srgb in [0..1] (no 255 round-trip) with dart's
+        // exact CSS Color 4 formula, so extreme values match bit-for-bit.
+        ColorSpace::Hsl => to_xyz_d65(ColorSpace::Srgb, hsl_to_srgb01(c)),
         ColorSpace::Hwb => to_xyz_d65(ColorSpace::Rgb, hwb_to_rgb255(c)),
         ColorSpace::Lab => mat3(D50_TO_D65, lab_to_xyz(c)),
         ColorSpace::Lch => to_xyz_d65(ColorSpace::Lab, lch_to_lab(c)),
@@ -2182,9 +2184,27 @@ fn oklab_to_xyz(oklab: [f64; 3]) -> [f64; 3] {
 // ---- hsl / hwb (legacy, channels in canonical units) ----------------
 
 /// hsl [hue-deg, sat-%, light-%] -> rgb [0..255, 0..255, 0..255].
+/// hsl [hue-deg, sat-%, light-%] -> srgb [0..1], using dart-sass's exact CSS
+/// Color 4 algorithm (`HslColorSpace.convert`): `f(n) = l - a*max(-1,
+/// min(k-3, 9-k, 1))` with `k = (n + hue/30) % 12` and `a = s*min(l, 1-l)`.
+/// The operation order matters bit-for-bit for extreme channel values (the
+/// `out_of_range/far` spec cases), where the algebraically-equal C/X/m form
+/// diverges in the last digits.
+fn hsl_to_srgb01(hsl: [f64; 3]) -> [f64; 3] {
+    let scaled_hue = (hsl[0] / 30.0).rem_euclid(12.0);
+    let saturation = hsl[1] / 100.0;
+    let lightness = hsl[2] / 100.0;
+    let a = saturation * lightness.min(1.0 - lightness);
+    let f = |n: f64| {
+        let k = (n + scaled_hue) % 12.0;
+        lightness - a * (-1.0_f64).max((k - 3.0).min(9.0 - k).min(1.0))
+    };
+    [f(0.0), f(8.0), f(4.0)]
+}
+
 fn hsl_to_rgb255(hsl: [f64; 3]) -> [f64; 3] {
-    let c = Color::from_hsl(hsl[0], hsl[1] / 100.0, hsl[2] / 100.0, 1.0);
-    [c.r, c.g, c.b]
+    let s = hsl_to_srgb01(hsl);
+    [s[0] * 255.0, s[1] * 255.0, s[2] * 255.0]
 }
 
 /// rgb [0..255] -> hsl [hue-deg, sat-%, light-%].
@@ -2374,10 +2394,7 @@ fn direct_convert(from: ColorSpace, to: ColorSpace, c: [f64; 3]) -> Option<[f64;
         (Rgb, Hwb) => rgb255_to_hwb(c),
         (Hwb, Rgb) => hwb_to_rgb255(c),
         (Srgb, Hsl) => rgb255_to_hsl([c[0] * 255.0, c[1] * 255.0, c[2] * 255.0]),
-        (Hsl, Srgb) => {
-            let r = hsl_to_rgb255(c);
-            [r[0] / 255.0, r[1] / 255.0, r[2] / 255.0]
-        }
+        (Hsl, Srgb) => hsl_to_srgb01(c),
         (Srgb, Hwb) => rgb255_to_hwb([c[0] * 255.0, c[1] * 255.0, c[2] * 255.0]),
         (Hwb, Srgb) => {
             let r = hwb_to_rgb255(c);
