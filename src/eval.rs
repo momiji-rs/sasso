@@ -43,6 +43,10 @@ type EvaledArgs = (Vec<Value>, Vec<(String, Value)>);
 pub(crate) enum OutNode {
     Rule {
         selectors: Vec<String>,
+        /// Per-complex "line break before" flags from the source selector list
+        /// (`a,\nb` keeps the newline). Empty means none (all comma-joined with
+        /// a space); otherwise parallel to `selectors`.
+        linebreaks: Vec<bool>,
         items: Vec<OutItem>,
     },
     Comment(String),
@@ -142,6 +146,8 @@ enum Sink<'a> {
         /// node when the accumulated `items` must be flushed (i.e. when a nested
         /// rule or at-rule interrupts the parent's own declarations).
         selectors: &'a [String],
+        /// Per-complex source line-break flags (parallel to `selectors`).
+        linebreaks: &'a [bool],
         items: &'a mut Vec<OutItem>,
         nested: &'a mut Vec<OutNode>,
     },
@@ -216,7 +222,11 @@ impl Sink<'_> {
                 }),
                 // A plain-CSS nested rule reaching an at-root sink becomes a
                 // top-level rule carrying its items.
-                OutItem::NestedRule { selectors, items } => body.push(OutNode::Rule { selectors, items }),
+                OutItem::NestedRule { selectors, items } => body.push(OutNode::Rule {
+                    selectors,
+                    linebreaks: Vec::new(),
+                    items,
+                }),
             },
             Sink::Top(_) => {}
         }
@@ -231,6 +241,7 @@ impl Sink<'_> {
     fn flush_rule_block(&mut self) {
         if let Sink::Rule {
             selectors,
+            linebreaks,
             items,
             nested,
         } = self
@@ -243,6 +254,7 @@ impl Sink<'_> {
                 } else {
                     nested.push(OutNode::Rule {
                         selectors: selectors.to_vec(),
+                        linebreaks: linebreaks.to_vec(),
                         items: std::mem::take(*items),
                     });
                 }
@@ -2245,7 +2257,11 @@ impl<'a> Evaluator<'a> {
                 Stmt::Rule(r) => {
                     let selectors = self.css_selectors(&r.selector, true)?;
                     let items = self.css_body(&r.body)?;
-                    sink.push_at_rule(OutNode::Rule { selectors, items });
+                    sink.push_at_rule(OutNode::Rule {
+                        selectors,
+                        linebreaks: Vec::new(),
+                        items,
+                    });
                 }
                 Stmt::Comment(c) => {
                     let text = self.eval_template(c)?;
@@ -2886,11 +2902,21 @@ impl<'a> Evaluator<'a> {
         // for nested rules (`a >` + `b` -> `a > b`). A nested rule that inherits
         // a genuinely bogus combinator (double, or leading/trailing in a pseudo)
         // is dropped in turn.
-        let emit_selectors: Vec<String> = current
-            .iter()
-            .filter(|s| !complex_selector_block_is_bogus(s))
-            .cloned()
-            .collect();
+        // Per-complex source line-breaks (`a,\nb`). `current` is `parents ×
+        // parts` (or just `parts` at the root), so complex `i` came from part
+        // `i % parts.len()`; carry that part's "newline before" flag, filtered
+        // in step with the dropped bogus selectors.
+        let part_lbs = comma_linebreaks(&sel_str, !parents.is_empty());
+        let n = part_lbs.len().max(1);
+        let mut emit_selectors: Vec<String> = Vec::new();
+        let mut emit_linebreaks: Vec<bool> = Vec::new();
+        for (i, s) in current.iter().enumerate() {
+            if complex_selector_block_is_bogus(s) {
+                continue;
+            }
+            emit_selectors.push(s.clone());
+            emit_linebreaks.push(part_lbs.get(i % n).copied().unwrap_or(false));
+        }
         self.push_scope(false);
         let prev_selector = self.current_selector.replace(current.clone());
         let mut items: Vec<OutItem> = Vec::new();
@@ -2898,6 +2924,7 @@ impl<'a> Evaluator<'a> {
         let result = {
             let mut child = Sink::Rule {
                 selectors: &emit_selectors,
+                linebreaks: &emit_linebreaks,
                 items: &mut items,
                 nested: &mut nested,
             };
@@ -3006,6 +3033,7 @@ impl<'a> Evaluator<'a> {
             let res = {
                 let mut child = Sink::Rule {
                     selectors: parents,
+                    linebreaks: &[],
                     items: &mut items,
                     nested: &mut nested,
                 };
@@ -6880,10 +6908,20 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extens
     let mut i = 0;
     while i < nodes.len() {
         let drop = match &mut nodes[i] {
-            OutNode::Rule { selectors, .. } => {
+            OutNode::Rule {
+                selectors,
+                linebreaks,
+                ..
+            } => {
                 let new_sel = extend_selector_list(selectors, extensions);
                 match new_sel {
                     Some(s) => {
+                        // Source line-break flags are positional; if @extend
+                        // changed the complex count they no longer line up, so
+                        // fall back to plain `, ` joining.
+                        if s.len() != selectors.len() {
+                            linebreaks.clear();
+                        }
                         *selectors = s;
                         false
                     }
@@ -7045,6 +7083,58 @@ fn extend_selector_list(
         return None;
     }
     Some(result.selectors)
+}
+
+/// For each non-empty top-level comma part of a selector list, whether the
+/// emitted complex selector should begin on its own line — parallel to the
+/// parts `resolve_selectors` keeps.
+///
+/// dart-sass carries a per-complex `lineBreak` flag set when a newline precedes
+/// the part in source (`a,\nb`). During parent resolution that flag survives for
+/// an *implicit*-parent part (`parent.lineBreak || child.lineBreak`), but a part
+/// that *references* the parent with `&` takes the parent complex's flag instead
+/// and drops its own. We don't track parent line-breaks, so for a `&`-part in a
+/// nested rule we conservatively report `false` (correct whenever the governing
+/// parent is the first/unbroken one, and never emits a break dart-sass wouldn't).
+fn comma_linebreaks(sel: &str, nested: bool) -> Vec<bool> {
+    split_commas(sel)
+        .iter()
+        .enumerate()
+        .filter(|(_, seg)| !seg.trim().is_empty())
+        .map(|(i, seg)| {
+            let newline_before = i > 0 && seg.chars().take_while(|c| c.is_whitespace()).any(|c| c == '\n');
+            newline_before && !(nested && part_has_parent_ref(seg))
+        })
+        .collect()
+}
+
+/// Whether a selector comma-part contains a top-level parent reference `&`
+/// (not inside `[…]` or a quoted string). Interpolation has already been
+/// resolved into `sel` by the time this runs, so a `&` here is a real parent
+/// reference.
+fn part_has_parent_ref(part: &str) -> bool {
+    let mut bracket = 0i32;
+    let mut quote: Option<char> = None;
+    let mut chars = part.chars();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' {
+                    chars.next();
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '[' => bracket += 1,
+                ']' => bracket = (bracket - 1).max(0),
+                '&' if bracket == 0 => return true,
+                _ => {}
+            },
+        }
+    }
+    false
 }
 
 fn resolve_selectors(sel: &str, parents: &[String]) -> Vec<String> {

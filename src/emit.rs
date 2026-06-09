@@ -33,9 +33,26 @@ fn emit_expanded(nodes: &[OutNode]) -> String {
 fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize) {
     let indent = "  ".repeat(depth);
     match node {
-        OutNode::Rule { selectors, items } => {
+        OutNode::Rule {
+            selectors,
+            linebreaks,
+            items,
+        } => {
             out.push_str(&indent);
-            out.push_str(&selectors.join(", "));
+            // A complex selector flagged with a source line break starts on its
+            // own line (aligned to the rule's indent); others are `, `-joined.
+            for (i, sel) in selectors.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                    if linebreaks.get(i).copied().unwrap_or(false) {
+                        out.push('\n');
+                        out.push_str(&indent);
+                    } else {
+                        out.push(' ');
+                    }
+                }
+                out.push_str(sel);
+            }
             out.push_str(" {\n");
             for item in items {
                 emit_item_expanded(out, item, depth + 1);
@@ -210,7 +227,11 @@ fn compressed_nested_rule(selectors: &[String], items: &[OutItem]) -> String {
 
 fn emit_node_compressed(out: &mut String, node: &OutNode) {
     match node {
-        OutNode::Rule { selectors, items } => {
+        OutNode::Rule {
+            selectors,
+            linebreaks: _,
+            items,
+        } => {
             let decls: Vec<String> = items
                 .iter()
                 .filter_map(|it| match it {

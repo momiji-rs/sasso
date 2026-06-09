@@ -5038,3 +5038,18 @@ fn parity_strip_sourcemap_comment() {
         }
     }
 }
+
+#[test]
+fn parity_selector_list_newlines() {
+    // dart-sass preserves a source newline before a comma-separated complex
+    // selector (`a,\nb` stays on two lines), but a part that references the
+    // parent with `&` takes the parent's line-break, not its own — so
+    // `&.x,\n&.y` under a single parent collapses back to one line.
+    assert_parity("a,\nb {\n  x: y;\n}\n");
+    assert_parity(".a {\n  b,\n  c {\n    x: y;\n  }\n}\n");
+    assert_parity("a {\n  &.div,\n  &.span {\n    display: block;\n  }\n}\n");
+    assert_parity(".a {\n  &,\n  .b {\n    x: y;\n  }\n}\n");
+    assert_parity("a,\nb, {\n  x: y;\n}\n");
+    // @extend through a `&,\n&` selector list still collapses to one line.
+    assert_parity("%h {\n  &:hover,\n  &:focus {\n    o: 1;\n  }\n}\n.l {\n  @extend %h;\n}\n");
+}
