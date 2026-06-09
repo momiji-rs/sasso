@@ -3817,7 +3817,7 @@ impl<'a> Evaluator<'a> {
                     // could not reduce to a number has no negation operator, so
                     // dart-sass rejects it ("Undefined operation \"-calc(…)\".").
                     UnOp::Neg => match v {
-                        Value::Number(n) => Ok(Value::Number(Number::with_unit(-n.value, n.unit()))),
+                        Value::Number(n) => Ok(Value::Number(n.copy_units(-n.value))),
                         Value::Calc(_) => Err(Error::unpositioned(format!(
                             "Undefined operation \"-{}\".",
                             v.to_css(false)
@@ -5293,7 +5293,7 @@ impl<'a> Evaluator<'a> {
             nodes.push(node);
         }
         // Every argument is a plain number: let the builtin clamp them (and run
-        // its incompatible-unit checks).
+        // its incompatible-unit and complex-unit checks).
         if nodes.iter().all(|n| matches!(n, CalcNode::Number(_))) {
             let values: Vec<Value> = nodes
                 .into_iter()
@@ -5383,7 +5383,7 @@ impl<'a> Evaluator<'a> {
             } => {
                 let node = self.eval_calc(operand)?;
                 match node {
-                    CalcNode::Number(n) => Ok(CalcNode::Number(Number::with_unit(-n.value, n.unit()))),
+                    CalcNode::Number(n) => Ok(CalcNode::Number(n.copy_units(-n.value))),
                     other => Ok(CalcNode::Op {
                         op: CalcOp::Mul,
                         left: Box::new(CalcNode::Number(Number::unitless(-1.0))),
@@ -5747,19 +5747,35 @@ fn calc_node_carries_unit(node: &CalcNode) -> bool {
 /// where at least one is relative/unknown (`1px + 1vw`, `100% - 10px`) or
 /// that share a class but are not convertible (`1khz + 1hz`) are preserved.
 ///
-/// `*`/`/` fold when one operand is unitless (or, for `/`, the units cancel
-/// after conversion); compound results (`6px * 1s`) are out of scope and
-/// preserved.
+/// `*`/`/` always fold, with dart-sass unit cancellation: a compound result
+/// (`6px * 1s` -> `6px*s`) is a single multi-unit number whose calc
+/// serialization spells the units back out as operands.
 fn fold_numbers(op: CalcOp, a: &Number, b: &Number, pos: Pos) -> Result<Option<Number>, Error> {
     match op {
         CalcOp::Add | CalcOp::Sub => {
             let apply = |x: f64, y: f64| if op == CalcOp::Add { x + y } else { x - y };
+            // A multi-unit operand folds against convertible unit lists;
+            // anything else is dart-sass's "isn't compatible with CSS
+            // calculations." rejection (quoting the first complex operand).
+            if a.has_complex_units() || b.has_complex_units() {
+                if let Some(factor) = crate::value::unit_lists_factor(
+                    (b.numer_units(), b.denom_units()),
+                    (a.numer_units(), a.denom_units()),
+                ) {
+                    return Ok(Some(a.copy_units(apply(a.value, b.value * factor))));
+                }
+                let complex = if a.has_complex_units() { a } else { b };
+                return Err(Error::at(
+                    format!(
+                        "Number {} isn't compatible with CSS calculations.",
+                        complex.to_css(false)
+                    ),
+                    pos,
+                ));
+            }
             // Equal units (incl. `%`, relative units, both unitless) fold.
             if a.unit().eq_ignore_ascii_case(b.unit()) {
-                return Ok(Some(Number::with_unit(
-                    apply(a.value, b.value),
-                    a.unit().to_string(),
-                )));
+                return Ok(Some(a.copy_units(apply(a.value, b.value))));
             }
             // A unitless operand mixed with a real unit is an error in calc.
             if a.is_unitless() || b.is_unitless() {
@@ -5769,41 +5785,15 @@ fn fold_numbers(op: CalcOp, a: &Number, b: &Number, pos: Pos) -> Result<Option<N
             // group; error when both are known but cross-dimension; otherwise
             // preserve (a relative/unknown unit is involved).
             if let Some(factor) = crate::value::convert_factor(b.unit(), a.unit()) {
-                Ok(Some(Number::with_unit(
-                    apply(a.value, b.value * factor),
-                    a.unit().to_string(),
-                )))
+                Ok(Some(a.copy_units(apply(a.value, b.value * factor))))
             } else if crate::value::calc_units_incompatible(a.unit(), b.unit()) {
                 Err(calc_incompatible(a, b, pos))
             } else {
                 Ok(None)
             }
         }
-        CalcOp::Mul => {
-            let unit = if a.is_unitless() {
-                b.unit().to_string()
-            } else if b.is_unitless() {
-                a.unit().to_string()
-            } else {
-                // Compound units (`px * s`) are out of scope; preserve.
-                return Ok(None);
-            };
-            Ok(Some(Number::with_unit(a.value * b.value, unit)))
-        }
-        CalcOp::Div => {
-            if b.is_unitless() {
-                return Ok(Some(Number::with_unit(a.value / b.value, a.unit().to_string())));
-            }
-            if a.unit().eq_ignore_ascii_case(b.unit()) {
-                return Ok(Some(Number::unitless(a.value / b.value)));
-            }
-            // Convertible units cancel to a unitless quotient; anything else
-            // (inverse or compound units) is out of scope and preserved.
-            match crate::value::convert_factor(b.unit(), a.unit()) {
-                Some(factor) => Ok(Some(Number::unitless(a.value / (b.value * factor)))),
-                None => Ok(None),
-            }
-        }
+        CalcOp::Mul => Ok(Some(a.mul(b))),
+        CalcOp::Div => Ok(Some(a.div(b))),
     }
 }
 
@@ -5824,30 +5814,16 @@ pub(crate) fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Valu
         return Err(e);
     }
     // The parser only sets `slash` when both operands are numeric literals
-    // (or themselves slash divisions), so they are always numbers here. A
-    // slash-separated value is kept only when the two units are compatible
-    // (equal, or at most one carries a unit), which covers every slash form
-    // dart-sass preserves in practice (`1/2`, `16px/1.5`, `10px/2px`,
-    // `0.3/0.4px`); a genuinely incompatible pair (`3deg/0.4px`) instead
-    // performs real division so its incompatible-units error still fires.
+    // (or themselves slash divisions), so they are always numbers here. The
+    // slash-separated value keeps the authored `a/b` spelling; the carried
+    // numeric quotient — used if the slash is later forced into arithmetic —
+    // is the real division with full unit cancellation (`1/1px` carries
+    // `1px^-1`, so `math.unit(1/1px)` reports `"px^-1"`).
     if let (true, Value::Number(a), Value::Number(b)) =
         (slash, l.clone().without_slash(), r.clone().without_slash())
     {
-        let units_compatible = a.unit() == b.unit() || a.is_unitless() || b.is_unitless();
-        if units_compatible {
-            let repr = format!("{}/{}", slash_repr(&l), slash_repr(&r));
-            // The carried numeric quotient is only used if the slash is later
-            // forced into arithmetic: matching units cancel (`px/px` ->
-            // unitless), otherwise the lone unit is kept.
-            let unit = if !a.is_unitless() && a.unit() == b.unit() {
-                String::new()
-            } else if a.is_unitless() {
-                b.unit().to_string()
-            } else {
-                a.unit().to_string()
-            };
-            return Ok(Value::Slash(Number::with_unit(a.value / b.value, unit), repr));
-        }
+        let repr = format!("{}/{}", slash_repr(&l), slash_repr(&r));
+        return Ok(Value::Slash(a.div(&b), repr));
     }
     match (l.clone().without_slash(), r.clone().without_slash()) {
         (Value::Number(a), Value::Number(b)) => divide_numbers(&a, &b, pos),
@@ -5868,38 +5844,12 @@ pub(crate) fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Valu
     }
 }
 
-/// Real division of two numbers with dart-sass unit semantics: two units in
-/// the same dimension cancel (the divisor is converted into the dividend's
-/// unit first), a unitless divisor keeps the dividend's unit, and a unitless
-/// dividend over a real divisor yields the (unrepresentable) inverse unit —
-/// kept as the bare divisor unit, matching prior behaviour. Cross-dimension
-/// real units error.
-fn divide_numbers(a: &Number, b: &Number, pos: Pos) -> Result<Value, Error> {
-    let (value, unit) = if b.is_unitless() {
-        (a.value / b.value, a.unit().to_string())
-    } else if a.is_unitless() {
-        // Inverse units are out of scope; preserve the prior result shape.
-        (a.value / b.value, b.unit().to_string())
-    } else if a.unit().eq_ignore_ascii_case(b.unit()) {
-        (a.value / b.value, String::new())
-    } else {
-        match crate::value::convert_factor(b.unit(), a.unit()) {
-            Some(factor) => (a.value / (b.value * factor), String::new()),
-            None => {
-                return Err(Error::at(
-                    format!(
-                        "{}{} and {}{} have incompatible units.",
-                        crate::value::fmt_num(a.value, false),
-                        a.unit(),
-                        crate::value::fmt_num(b.value, false),
-                        b.unit()
-                    ),
-                    pos,
-                ))
-            }
-        }
-    };
-    Ok(Value::Number(Number::with_unit(value, unit)))
+/// Real division of two numbers with dart-sass unit semantics: division never
+/// errors on units — convertible units cancel (scaling the value), and
+/// whatever remains becomes the quotient's numerator/denominator lists
+/// (`math.div(1, 1px)` -> `1px^-1`, `math.div(1px, 1s)` -> `1px/s`).
+fn divide_numbers(a: &Number, b: &Number, _pos: Pos) -> Result<Value, Error> {
+    Ok(Value::Number(a.div(b)))
 }
 
 /// The slash-spelling text of an operand: a slash value keeps its chained
@@ -5954,8 +5904,8 @@ fn num_compare(
 
 fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     if let (Value::Number(a), Value::Number(b)) = (&l, &r) {
-        let (av, bv, unit) = coerce_pair(a, b, pos)?;
-        return Ok(Value::Number(Number::with_unit(av + bv, unit)));
+        let (av, bv, proto) = coerce_pair(a, b, pos)?;
+        return Ok(Value::Number(proto.copy_units(av + bv)));
     }
     // dart-sass removed color arithmetic: `color + color`/`color + number`
     // (either order) is "Undefined operation", not string concatenation.
@@ -6001,8 +5951,8 @@ fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
 /// and a map cannot serialize as a CSS value.
 fn binary_sub(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     if let (Value::Number(a), Value::Number(b)) = (&l, &r) {
-        let (av, bv, unit) = coerce_pair(a, b, pos)?;
-        return Ok(Value::Number(Number::with_unit(av - bv, unit)));
+        let (av, bv, proto) = coerce_pair(a, b, pos)?;
+        return Ok(Value::Number(proto.copy_units(av - bv)));
     }
     // Removed color arithmetic: `color - color`/`color - number` (either
     // order) is "Undefined operation", not a string join.
@@ -6027,23 +5977,10 @@ fn binary_sub(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
 
 fn binary_mul(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     match (l, r) {
-        (Value::Number(a), Value::Number(b)) => {
-            let unit = if a.is_unitless() {
-                b.unit()
-            } else if b.is_unitless() {
-                a.unit()
-            } else {
-                return Err(Error::at(
-                    format!(
-                        "Multiplication of two units ({} * {}) is not supported.",
-                        a.unit(),
-                        b.unit()
-                    ),
-                    pos,
-                ));
-            };
-            Ok(Value::Number(Number::with_unit(a.value * b.value, unit)))
-        }
+        // Units multiply per dart-sass: convertible numerator/denominator
+        // pairs cancel, the rest concatenate (`1px * 1em` -> `1px*em`,
+        // serialized as `calc(1px * 1em)`).
+        (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a.mul(&b))),
         (l, r) => Err(undefined_op(&l, "*", &r, pos)),
     }
 }
@@ -6061,44 +5998,62 @@ fn sass_modulo(a: f64, b: f64) -> f64 {
 fn num_binop(l: Value, r: Value, pos: Pos, sym: &str, f: impl Fn(f64, f64) -> f64) -> Result<Value, Error> {
     match (l, r) {
         (Value::Number(a), Value::Number(b)) => {
-            let (av, bv, unit) = coerce_pair(&a, &b, pos)?;
-            Ok(Value::Number(Number::with_unit(f(av, bv), unit)))
+            let (av, bv, proto) = coerce_pair(&a, &b, pos)?;
+            Ok(Value::Number(proto.copy_units(f(av, bv))))
         }
         (l, r) => Err(undefined_op(&l, sym, &r, pos)),
     }
 }
 
-/// Coerce two numbers onto a common unit for `+`, `-`, `%`, `/`, and
-/// comparison. The result keeps the LEFT operand's unit; the right operand
-/// is converted into it (`1in + 1cm` → both in inches, result `in`). When
-/// exactly one operand is unitless the other's unit is adopted with no
-/// rescaling (`5 + 1px` → `6px`). Incompatible real units error, matching
-/// dart-sass's `<a> and <b> have incompatible units.`
+/// Coerce two numbers onto common units for `+`, `-`, `%`, and comparison.
+/// The result keeps the LEFT operand's units; the right operand is converted
+/// into them (`1in + 1cm` → both in inches, result `in`). When exactly one
+/// operand is unitless the other's units are adopted with no rescaling
+/// (`5 + 1px` → `6px`). Incompatible units error, matching dart-sass's
+/// `<a> and <b> have incompatible units.` (a multi-unit operand prints in its
+/// calc form there).
 ///
-/// Returns `(left_value, right_value, result_unit)` with both values
-/// expressed in `result_unit`.
-fn coerce_pair(a: &Number, b: &Number, pos: Pos) -> Result<(f64, f64, String), Error> {
+/// Returns `(left_value, right_value, prototype)` with both values expressed
+/// in the prototype's units (build the result via `prototype.copy_units(..)`).
+fn coerce_pair(a: &Number, b: &Number, pos: Pos) -> Result<(f64, f64, Number), Error> {
+    let incompatible = || {
+        Err(Error::at(
+            format!(
+                "{} and {} have incompatible units.",
+                a.to_css(false),
+                b.to_css(false)
+            ),
+            pos,
+        ))
+    };
+    // A multi-unit operand coerces via full unit-list matching.
+    if a.has_complex_units() || b.has_complex_units() {
+        if b.is_unitless() {
+            return Ok((a.value, b.value, a.clone()));
+        }
+        if a.is_unitless() {
+            return Ok((a.value, b.value, b.clone()));
+        }
+        return match crate::value::unit_lists_factor(
+            (b.numer_units(), b.denom_units()),
+            (a.numer_units(), a.denom_units()),
+        ) {
+            Some(factor) => Ok((a.value, b.value * factor, a.clone())),
+            None => incompatible(),
+        };
+    }
     // Equal units (case-insensitively) or a unitless operand never need a
     // numeric conversion.
     if a.unit().eq_ignore_ascii_case(b.unit()) || b.is_unitless() {
-        return Ok((a.value, b.value, a.unit().to_string()));
+        return Ok((a.value, b.value, a.clone()));
     }
     if a.is_unitless() {
-        return Ok((a.value, b.value, b.unit().to_string()));
+        return Ok((a.value, b.value, b.clone()));
     }
     // Two distinct real units: convert the right into the left's unit.
     match crate::value::convert_factor(b.unit(), a.unit()) {
-        Some(factor) => Ok((a.value, b.value * factor, a.unit().to_string())),
-        None => Err(Error::at(
-            format!(
-                "{}{} and {}{} have incompatible units.",
-                crate::value::fmt_num(a.value, false),
-                a.unit(),
-                crate::value::fmt_num(b.value, false),
-                b.unit()
-            ),
-            pos,
-        )),
+        Some(factor) => Ok((a.value, b.value * factor, a.clone())),
+        None => incompatible(),
     }
 }
 

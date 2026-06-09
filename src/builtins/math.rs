@@ -139,7 +139,7 @@ fn round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
     // which reports the arity/name error.
     if pos_args.is_empty() && named.len() == 1 && named[0].0 == "number" {
         let n = as_num(&named[0].1, pos)?;
-        return Ok(num_value(Number::with_unit(n.value.round(), n.unit())));
+        return Ok(num_value(n.copy_units(n.value.round())));
     }
     let args = all_args(pos_args, named);
     match args.len() {
@@ -148,7 +148,7 @@ fn round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
             // One-argument form: nearest, unit preserved. An unsimplifiable
             // argument (a `var()`, interpolation, …) preserves the call.
             match round_operand(&args[0], pos)? {
-                Some(n) => Ok(num_value(Number::with_unit(n.value.round(), n.unit()))),
+                Some(n) => Ok(num_value(n.copy_units(n.value.round()))),
                 None => Ok(preserved_round(&args)),
             }
         }
@@ -349,10 +349,54 @@ enum StepCoercion {
     Error(Error),
 }
 
+/// dart-sass `_verifyCompatibleNumbers`: a number with complex units cannot
+/// ride into a preserved (unsimplified) CSS calculation — it is rejected with
+/// its calc-form spelling ("Number calc(2px * 1px) isn't compatible with CSS
+/// calculations.").
+fn verify_no_complex_units(numbers: &[&Number], pos: Pos) -> Result<(), Error> {
+    for n in numbers {
+        if n.has_complex_units() {
+            return Err(Error::at(
+                format!(
+                    "Number {} isn't compatible with CSS calculations.",
+                    n.to_css(false)
+                ),
+                pos,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// [`verify_no_complex_units`] over a `Value` slice (only numbers checked).
+fn verify_no_complex_args(args: &[Value], pos: Pos) -> Result<(), Error> {
+    for v in args {
+        if let Value::Number(n) = v {
+            verify_no_complex_units(&[n], pos)?;
+        }
+    }
+    Ok(())
+}
+
 /// Coerce `step` into `number`'s unit for `round()`. Equal/convertible units
 /// combine; a relative/unknown unit pair preserves the call; a real-vs-unitless
-/// or known cross-dimension mix is an error (matching dart-sass).
+/// or known cross-dimension mix is an error (matching dart-sass). A multi-unit
+/// operand combines only with convertible unit lists; otherwise it is the
+/// "isn't compatible with CSS calculations." rejection.
 fn coerce_step(step: &Number, number: &Number, pos: Pos) -> StepCoercion {
+    if step.has_complex_units() || number.has_complex_units() {
+        return match crate::value::unit_lists_factor(
+            (step.numer_units(), step.denom_units()),
+            (number.numer_units(), number.denom_units()),
+        ) {
+            Some(factor) => StepCoercion::Value(step.value * factor),
+            None => match verify_no_complex_units(&[number, step], pos) {
+                Err(e) => StepCoercion::Error(e),
+                // Unreachable: one operand is known complex.
+                Ok(()) => StepCoercion::Preserve,
+            },
+        };
+    }
     if step.unit().eq_ignore_ascii_case(number.unit()) {
         return StepCoercion::Value(step.value);
     }
@@ -418,7 +462,7 @@ fn unary(
 ) -> Result<Value, Error> {
     check_max_args(pos_args, named, 1, pos)?;
     let n = require_num(&["number"], pos_args, named, 0, fname, pos)?;
-    Ok(num_value(Number::with_unit(op(n.value), n.unit().to_string())))
+    Ok(num_value(n.copy_units(op(n.value))))
 }
 
 /// `sign(x)`: -1, 0, or 1, preserving the operand's unit. `sign(0)` is `0`
@@ -497,6 +541,9 @@ fn hypot(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
         Some(n) => n.clone(),
         None => return Err(Error::at("At least one argument must be passed.", pos)),
     };
+    // A complex-unit operand is rejected even alone (`hypot(-7px / 4em)` ->
+    // "Number calc(-1.75px / 1em) isn't compatible with CSS calculations.").
+    verify_no_complex_units(&nums.iter().collect::<Vec<_>>(), pos)?;
     // A `%` operand makes the result context-dependent, so dart-sass preserves
     // the call rather than folding (`hypot(1%, 2%)`, `hypot(1%, 2px)`).
     if nums.iter().any(is_percent) {
@@ -514,7 +561,7 @@ fn hypot(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
             StepCoercion::Error(e) => return Err(e),
         }
     }
-    Ok(num_value(Number::with_unit(sum.sqrt(), first.unit().to_string())))
+    Ok(num_value(first.copy_units(sum.sqrt())))
 }
 
 /// `sin`/`cos`/`tan`: accept an angle (`deg`/`grad`/`rad`/`turn`) or a
@@ -556,6 +603,8 @@ fn atan2(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
     let params = &["y", "x"];
     let y = require_num(params, pos_args, named, 0, "atan2", pos)?;
     let x = require_num(params, pos_args, named, 1, "atan2", pos)?;
+    // A complex-unit operand is rejected before the `%` preserve below.
+    verify_no_complex_units(&[&y, &x], pos)?;
     // A `%` operand would produce a context-dependent result, so dart-sass
     // preserves the call rather than folding (`atan2(1%, 2%)`).
     if is_percent(&y) || is_percent(&x) {
@@ -604,7 +653,7 @@ fn remainder(
     } else {
         a.value - bv * (a.value / bv).floor()
     };
-    Ok(num_value(Number::with_unit(value, a.unit().to_string())))
+    Ok(num_value(a.copy_units(value)))
 }
 
 /// `min`/`max`: reduce all-numeric, compatible-unit arguments to the
@@ -627,7 +676,10 @@ fn min_max(
     }
     match reduce_min_max(&args, is_min, pos)? {
         Some(n) => Ok(num_value(n)),
-        None => Ok(preserved_call(fname, &args)),
+        None => {
+            verify_no_complex_args(&args, pos)?;
+            Ok(preserved_call(fname, &args))
+        }
     }
 }
 
@@ -655,8 +707,41 @@ fn clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
     }
     let (lo, val, hi) = match (&args[0], &args[1], &args[2]) {
         (Value::Number(a), Value::Number(b), Value::Number(c)) => (a, b, c),
-        _ => return Ok(preserved_call("clamp", &args)),
+        _ => {
+            verify_no_complex_args(&args, pos)?;
+            return Ok(preserved_call("clamp", &args));
+        }
     };
+    // Multi-unit arguments must be mutually convertible (dart
+    // `isComparableTo`): the values compare in `min`'s units and the winning
+    // argument is returned as-is (`clamp(1px*1px, 2px*2px, 3px*3px)` ->
+    // `calc(4px * 1px)`); a non-convertible complex operand is rejected.
+    if lo.has_complex_units() || val.has_complex_units() || hi.has_complex_units() {
+        let coerce = |n: &Number| {
+            crate::value::unit_lists_factor(
+                (n.numer_units(), n.denom_units()),
+                (lo.numer_units(), lo.denom_units()),
+            )
+            .map(|f| n.value * f)
+        };
+        return match (coerce(val), coerce(hi)) {
+            (Some(val_v), Some(hi_v)) => {
+                let winner = if val_v < lo.value {
+                    lo
+                } else if val_v > hi_v {
+                    hi
+                } else {
+                    val
+                };
+                Ok(num_value(winner.clone()))
+            }
+            _ => {
+                verify_no_complex_units(&[lo, val, hi], pos)?;
+                // Unreachable: one operand is known complex.
+                Ok(preserved_call("clamp", &args))
+            }
+        };
+    }
     // A known cross-dimension pair (against `min`) is an error, matching
     // dart-sass; an unconvertible relative/unknown unit preserves the call.
     if crate::value::calc_units_incompatible(lo.unit(), val.unit()) {
@@ -700,7 +785,7 @@ pub(super) fn module_round(pos_args: &[Value], named: &[(String, Value)], pos: P
     }
     let v = super::require(&["number"], pos_args, named, 0, "round", pos)?;
     let n = as_num(v, pos)?;
-    Ok(num_value(Number::with_unit(n.value.round(), n.unit())))
+    Ok(num_value(n.copy_units(n.value.round())))
 }
 
 /// `math.min(...)` / `math.max(...)`: the numeric (not CSS-calc) reductions.
@@ -941,7 +1026,10 @@ fn reduce_min_max(args: &[Value], is_min: bool, pos: Pos) -> Result<Option<Numbe
         };
         let mut folded = false;
         for c in &mut clusters {
-            if crate::value::calc_units_incompatible(c.unit(), n.unit()) {
+            if !c.has_complex_units()
+                && !n.has_complex_units()
+                && crate::value::calc_units_incompatible(c.unit(), n.unit())
+            {
                 return Err(incompatible(c, &n, pos));
             }
             if let Some(nv) = try_coerce(&n, c) {
@@ -968,6 +1056,13 @@ fn reduce_min_max(args: &[Value], is_min: bool, pos: Pos) -> Result<Option<Numbe
 /// `None` if their units are incompatible. A unitless operand keeps its
 /// value and adopts the comparison silently.
 fn try_coerce(n: &Number, target: &Number) -> Option<f64> {
+    if n.has_complex_units() || target.has_complex_units() {
+        return crate::value::unit_lists_factor(
+            (n.numer_units(), n.denom_units()),
+            (target.numer_units(), target.denom_units()),
+        )
+        .map(|f| n.value * f);
+    }
     if n.unit().eq_ignore_ascii_case(target.unit()) || n.is_unitless() || target.is_unitless() {
         return Some(n.value);
     }

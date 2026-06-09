@@ -211,7 +211,7 @@ impl CalcNode {
                     if let CalcNode::Number(n) = right.as_ref() {
                         if n.value.is_finite() && n.value.is_sign_negative() && n.value != 0.0 {
                             let flipped = if *op == CalcOp::Add { "-" } else { "+" };
-                            let pos = Number::with_unit(-n.value, n.unit().to_string());
+                            let pos = n.copy_units(-n.value);
                             return format!("{l} {flipped} {}", pos.to_css(compressed));
                         }
                     }
@@ -260,28 +260,46 @@ impl CalcNode {
     }
 }
 
-/// Render a number inside a `calc()` interior. Finite numbers use their
-/// ordinary CSS form; non-finite numbers use dart-sass's canonical lowercase
-/// constants — `infinity` / `-infinity` / `NaN` when unitless, and
-/// `infinity * 1px` / `NaN * 1px` (the operand spelled out) when they carry a
-/// unit.
+/// Render a number inside a `calc()` interior. Finite single-unit numbers use
+/// their ordinary CSS form. Non-finite numbers use dart-sass's canonical
+/// lowercase constants — `infinity` / `-infinity` / `NaN`, with units spelled
+/// out as operands (`infinity * 1px`). Multi-unit numbers spell every unit as
+/// an operand: a finite value attaches to the first numerator
+/// (`1000px * 1rad / 1Hz`), a numerator-less one stays bare (`1 / 1px`).
 fn calc_number_css(n: &Number, compressed: bool) -> String {
-    if n.value.is_finite() {
+    if n.value.is_finite() && !n.has_complex_units() {
         return n.to_css(compressed);
     }
-    let constant = if n.value.is_nan() {
-        "NaN"
-    } else if n.value > 0.0 {
-        "infinity"
+    let star = if compressed { "*" } else { " * " };
+    let slash = if compressed { "/" } else { " / " };
+    let mut out;
+    let mut numer = n.numer_units().iter();
+    if n.value.is_finite() {
+        // A finite value rides on the first numerator unit when there is one.
+        out = match numer.next() {
+            Some(u) => format!("{}{u}", fmt_num(n.value, compressed)),
+            None => fmt_num(n.value, compressed),
+        };
     } else {
-        "-infinity"
-    };
-    if n.is_unitless() {
-        constant.to_string()
-    } else {
-        let star = if compressed { "*" } else { " * " };
-        format!("{constant}{star}1{}", n.unit())
+        out = if n.value.is_nan() {
+            "NaN".to_string()
+        } else if n.value > 0.0 {
+            "infinity".to_string()
+        } else {
+            "-infinity".to_string()
+        };
     }
+    for u in numer {
+        out.push_str(star);
+        out.push('1');
+        out.push_str(u);
+    }
+    for u in n.denom_units() {
+        out.push_str(slash);
+        out.push('1');
+        out.push_str(u);
+    }
+    out
 }
 
 /// A number with its units (dart-sass `SassNumber`: a list of numerator units
@@ -299,9 +317,6 @@ pub(crate) struct Number {
 enum Units {
     None,
     Single(String),
-    // Constructed by multi-unit arithmetic (stage 2 of the refactor); the
-    // representation lands first so the migration is reviewable on its own.
-    #[allow(dead_code)]
     Complex(Box<ComplexUnits>),
 }
 
@@ -339,7 +354,6 @@ impl Number {
     /// compact representation when possible. No unit cancellation happens
     /// here — callers cancel before constructing (dart-sass keeps whatever
     /// lists arithmetic produces).
-    #[allow(dead_code)] // used by stage 2 (multi-unit semantics)
     pub(crate) fn with_units(value: f64, mut numer: Vec<String>, denom: Vec<String>) -> Number {
         let units = if denom.is_empty() && numer.len() <= 1 {
             match numer.pop() {
@@ -354,7 +368,6 @@ impl Number {
 
     /// A new number carrying this number's units (the common "derive a result
     /// from an operand" pattern; preserves multi-unit lists).
-    #[allow(dead_code)] // used by stage 2 (multi-unit semantics)
     pub(crate) fn copy_units(&self, value: f64) -> Number {
         Number {
             value,
@@ -378,12 +391,10 @@ impl Number {
         }
     }
 
-    #[allow(dead_code)] // used by stage 2 (multi-unit semantics)
     pub(crate) fn has_complex_units(&self) -> bool {
         matches!(self.units, Units::Complex(_))
     }
 
-    #[allow(dead_code)] // used by stage 2 (multi-unit semantics)
     pub(crate) fn numer_units(&self) -> &[String] {
         match &self.units {
             Units::None => &[],
@@ -392,7 +403,6 @@ impl Number {
         }
     }
 
-    #[allow(dead_code)] // used by stage 2 (multi-unit semantics)
     pub(crate) fn denom_units(&self) -> &[String] {
         match &self.units {
             Units::None | Units::Single(_) => &[],
@@ -958,14 +968,143 @@ fn numbers_eq(a: &Number, b: &Number) -> bool {
 
 impl Number {
     pub(crate) fn to_css(&self, compressed: bool) -> String {
-        // A bare non-finite number serializes as a `calc()` constant, matching
+        // A non-finite number serializes as a `calc()` constant, matching
         // dart-sass: a unitless `infinity`/`-infinity`/`NaN` prints as
         // `calc(infinity)` etc., and a unit-bearing one as `calc(infinity * 1px)`.
-        if !self.value.is_finite() {
+        // A multi-unit number likewise has no plain CSS form and serializes as
+        // a calc with its units spelled out (`calc(1px * 1em)`, `calc(1 / 1px)`)
+        // — dart-sass uses this form everywhere, including `meta.inspect`,
+        // interpolation, and error messages.
+        if !self.value.is_finite() || self.has_complex_units() {
             return format!("calc({})", calc_number_css(self, compressed));
         }
         format!("{}{}", fmt_num(self.value, compressed), self.unit())
     }
+
+    /// dart-sass `unitString`: the human-readable unit list — `px`, `px*em`,
+    /// `px/em`, `px*em/(rad*s)`, `px^-1`, `(px*em)^-1`, or `""` for unitless.
+    /// Used by `math.unit()`.
+    pub(crate) fn unit_string(&self) -> String {
+        let numer = self.numer_units();
+        let denom = self.denom_units();
+        match (numer.is_empty(), denom.is_empty()) {
+            (_, true) => numer.join("*"),
+            (true, false) => {
+                if denom.len() == 1 {
+                    format!("{}^-1", denom[0])
+                } else {
+                    format!("({})^-1", denom.join("*"))
+                }
+            }
+            (false, false) => {
+                if denom.len() == 1 {
+                    format!("{}/{}", numer.join("*"), denom[0])
+                } else {
+                    format!("{}/({})", numer.join("*"), denom.join("*"))
+                }
+            }
+        }
+    }
+
+    /// Multiply by `other` with dart-sass `multiplyUnits` cancellation: each
+    /// numerator cancels the first convertible denominator on the other side
+    /// (scaling the value by the conversion), leftovers concatenate.
+    pub(crate) fn mul(&self, other: &Number) -> Number {
+        multiply_units(
+            self.value * other.value,
+            self.numer_units().to_vec(),
+            self.denom_units().to_vec(),
+            other.numer_units().to_vec(),
+            other.denom_units().to_vec(),
+        )
+    }
+
+    /// Divide by `other` (multiplication with `other`'s units inverted).
+    pub(crate) fn div(&self, other: &Number) -> Number {
+        multiply_units(
+            self.value / other.value,
+            self.numer_units().to_vec(),
+            self.denom_units().to_vec(),
+            other.denom_units().to_vec(),
+            other.numer_units().to_vec(),
+        )
+    }
+}
+
+/// The conversion factor used when a numerator unit cancels a denominator
+/// unit: equal names (case-insensitively) cancel exactly (covering unknown
+/// units like `foo/foo`), and units in the same dimension convert.
+fn cancel_factor(numerator: &str, denominator: &str) -> Option<f64> {
+    if numerator.eq_ignore_ascii_case(denominator) {
+        return Some(1.0);
+    }
+    convert_factor(numerator, denominator)
+}
+
+/// The factor converting a value with `from` unit lists into `to` unit lists,
+/// or `None` when they are incompatible. Each `from` numerator must match a
+/// distinct convertible `to` numerator (any order), and likewise for the
+/// denominators (a denominator's factor divides). Mirrors dart-sass's
+/// `coerce`/`convertValue` for multi-unit numbers.
+pub(crate) fn unit_lists_factor(from: (&[String], &[String]), to: (&[String], &[String])) -> Option<f64> {
+    fn match_lists(from: &[String], to: &[String]) -> Option<f64> {
+        if from.len() != to.len() {
+            return None;
+        }
+        let mut factor = 1.0;
+        let mut remaining: Vec<&String> = to.iter().collect();
+        for f in from {
+            let i = remaining.iter().position(|t| cancel_factor(f, t).is_some())?;
+            if let Some(fac) = cancel_factor(f, remaining[i]) {
+                factor *= fac;
+            }
+            remaining.remove(i);
+        }
+        Some(factor)
+    }
+    let numer = match_lists(from.0, to.0)?;
+    let denom = match_lists(from.1, to.1)?;
+    Some(numer / denom)
+}
+
+/// dart-sass `multiplyUnits`: combine two numbers' unit lists, cancelling
+/// each numerator against the first convertible denominator of the OTHER
+/// operand (the value picks up the conversion factor — `1s` cancelling a
+/// `/ms` denominator scales by 1000), and concatenating what remains.
+fn multiply_units(
+    mut value: f64,
+    numer1: Vec<String>,
+    denom1: Vec<String>,
+    numer2: Vec<String>,
+    denom2: Vec<String>,
+) -> Number {
+    let mut numer = Vec::new();
+    let mut denom2 = denom2;
+    for n in numer1 {
+        match denom2.iter().position(|d| cancel_factor(&n, d).is_some()) {
+            Some(i) => {
+                if let Some(factor) = cancel_factor(&n, &denom2[i]) {
+                    value *= factor;
+                }
+                denom2.remove(i);
+            }
+            None => numer.push(n),
+        }
+    }
+    let mut denom1 = denom1;
+    for n in numer2 {
+        match denom1.iter().position(|d| cancel_factor(&n, d).is_some()) {
+            Some(i) => {
+                if let Some(factor) = cancel_factor(&n, &denom1[i]) {
+                    value *= factor;
+                }
+                denom1.remove(i);
+            }
+            None => numer.push(n),
+        }
+    }
+    denom1.extend(denom2);
+    Number::with_units(value, numer, denom1)
 }
 
 /// A CSS dimension group whose units can be converted into one another.

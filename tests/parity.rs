@@ -5129,6 +5129,29 @@ fn parity_selector_list_newlines() {
 }
 
 #[test]
+fn parity_multi_unit_numbers() {
+    // Multi-unit numbers (dart-sass SassNumber numerator/denominator lists):
+    // multiplication/division cancel convertible units (scaling the value) and
+    // keep the rest; the result serializes in calc form everywhere
+    // (`calc(1px * 1em)`, `calc(1 / 1px)`), `math.unit()` reports the
+    // unitString (`px*em`, `px^-1`, `px*em/(rad*s)`), and a slash value
+    // carries the true quotient for forced arithmetic.
+    assert_parity(
+        "@use \"sass:math\";\n@use \"sass:meta\";\na {\n  m1: 1px * 1em;\n  d1: math.div(1px, 1s);\n  d2: math.div(1, 1px);\n  u1: math.unit(1px * 1em * 1rad);\n  u3: math.unit(math.div(math.div(1px, 1em), math.div(1rad, 1s)));\n  u5: math.unit(math.div(1px, 1em));\n  c1: meta.inspect(math.div(1px, 1s));\n  abs: math.abs(math.div(-1px, 1s));\n  i1: math.div(1, 0px);\n  i2: math.div(1px * 1em, 0);\n  i3: math.div(1px, 0em);\n  cancel: math.div(math.div(1px, 1s), math.div(1px, 1s));\n}\n",
+    );
+    // Inside calc: products/quotients fold into one multi-unit number, with
+    // unit conversion on cancellation (`* 1s` against a `/ms` denominator
+    // scales by 1000); convertible-complex sums fold, incompatible ones error.
+    assert_parity(
+        "@use \"sass:math\";\n$number: math.div(1px * 1rad, 1ms * 1Hz);\na {\n  c1: calc($number / (1px / 1ms));\n  c2: calc($number / 1px);\n  c3: calc($number * 1ms);\n  c5: calc($number * 1s);\n  c6: calc(1 / (1 / 1px / 1rad));\n  c7: calc(1 / (1px * 1rad));\n  m: calc(2px * 3px) / 4px;\n  inv: calc(infinity / 1px);\n}\n",
+    );
+    // clamp/min with EQUAL complex units computes (`calc(4px * 1px)`).
+    assert_parity("a {b: clamp(1px*1px, 2px*2px, 3px*3px)}\n");
+    assert_error_parity("a {b: (1px * 1em) + 1px}\n");
+    assert_error_parity("a {b: calc(min(1px*1px, 2em*2em))}\n");
+}
+
+#[test]
 fn parity_out_of_range_lightness_color_mix() {
     // A lab/lch/oklab/oklch lightness outside [0, 100%] can't round-trip
     // through the space's own syntax (the CSS parser clamps it), so it

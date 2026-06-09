@@ -153,7 +153,7 @@ fn fn_type_of(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
 fn fn_unit(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let v = super::require(&["number"], pos_args, named, 0, "unit", pos)?;
     match v {
-        Value::Number(n) => Ok(quoted(n.unit().to_string())),
+        Value::Number(n) => Ok(quoted(n.unit_string())),
         other => Err(Error::at(
             format!("$number: {} is not a number.", other.to_css(false)),
             pos,
