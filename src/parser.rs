@@ -4731,6 +4731,11 @@ impl Parser {
         let mut pieces: Vec<TplPiece> = Vec::new();
         let mut lit = String::from("url(");
         let mut depth = 1i32;
+        // dart-sass skips leading whitespace (without comments, so `/* */`
+        // stays literal) right after the opening paren before reading the URL.
+        while matches!(self.sc.peek(), Some(' ' | '\t' | '\n' | '\r' | '\x0c')) {
+            self.sc.bump();
+        }
         loop {
             match self.sc.peek() {
                 None => return Ok(None),
@@ -4809,6 +4814,17 @@ impl Parser {
                     self.sc.bump();
                     if depth == 0 {
                         break;
+                    }
+                }
+                // Collapse a run of whitespace to a single space, matching
+                // dart-sass: consume the whole run, then emit one space only
+                // if the contents continue (no space directly before `)`).
+                Some(' ' | '\t' | '\n' | '\r' | '\x0c') => {
+                    while matches!(self.sc.peek(), Some(' ' | '\t' | '\n' | '\r' | '\x0c')) {
+                        self.sc.bump();
+                    }
+                    if self.sc.peek() != Some(')') {
+                        lit.push(' ');
                     }
                 }
                 Some(c) => {

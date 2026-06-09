@@ -4739,6 +4739,21 @@ fn parity_selector_unify_host_is_order() {
 }
 
 #[test]
+fn parity_url_whitespace_normalization() {
+    // dart-sass normalizes whitespace inside a plain `url(...)`: leading and
+    // trailing whitespace is trimmed and each internal run collapses to a
+    // single space (matching `_tryUrlContents`). Interpolation and a literal
+    // `/* */` (not whitespace) are preserved verbatim.
+    assert_parity("a {b: url(  c)}\n");
+    assert_parity("a {b: url(c  )}\n");
+    assert_parity("a {b: url( a  b )}\n");
+    assert_parity("a {b: url(   )}\n");
+    assert_parity("a {b: url(  #{1 + 1}  x  )}\n");
+    assert_parity("a {b: url(a/**/b)}\n");
+    assert_parity("a {b: url(  \"x y\"  )}\n");
+}
+
+#[test]
 fn parity_strip_sourcemap_comment() {
     // dart-sass strips a `/*# sourceMappingURL=… */` / `/*# sourceURL=… */`
     // loud comment; the `# ` space is required, so a no-space or `/*!` form and
@@ -4756,11 +4771,7 @@ fn parity_strip_sourcemap_comment() {
     ] {
         let ours = compile(scss, &Options::default()).expect("compile failed");
         if let Some(theirs) = dart_sass(scss) {
-            assert_eq!(
-                ours.trim_end(),
-                theirs.trim_end(),
-                "\n--- scss ---\n{scss}\n"
-            );
+            assert_eq!(ours.trim_end(), theirs.trim_end(), "\n--- scss ---\n{scss}\n");
         }
     }
 }
