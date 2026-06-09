@@ -4196,6 +4196,18 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_color_space_name_case_insensitive() {
+    // Color-space names are ASCII case-insensitive in `color()` and `$space`
+    // arguments; the canonical lower-case form is serialized.
+    assert_parity("a {b: color(sRGB 0.1 0.2 0.3)}\n");
+    assert_parity("a {b: color(Display-P3 0.1 0.2 0.3)}\n");
+    assert_parity("a {b: color(XYZ 0.1 0.2 0.3)}\n");
+    assert_parity("a {b: color(Display-P3-Linear 1 2 3)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.to-space(red, DISPLAY-p3)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.invert(lch(20% 80 50deg), $space: DISPLAY-p3)}\n");
+}
+
+#[test]
 fn parity_list_undecided_separator() {
     // An empty or single-element list with no explicit separator is
     // "undecided": it defers to the other operand in join/append, while an

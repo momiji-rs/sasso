@@ -1314,6 +1314,10 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
             ));
         }
     };
+    // Color-space names are ASCII case-insensitive: match and serialize against
+    // the lower-cased form, but keep the original spelling for the "Unknown
+    // color space" diagnostic (dart-sass shows `color(BOGUS …)` verbatim there).
+    let space_lower = space_name.to_ascii_lowercase();
     let channels = &items[1..];
     // A relative-color call (`color(from … )`) or any special/`none` channel
     // is preserved verbatim. A *degenerate* `calc()` (`calc(NaN)`/`infinity`)
@@ -1326,7 +1330,7 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
     if is_relative || has_special {
         return Ok(verbatim_call("color", &desc));
     }
-    if !is_known_color_space(&space_name) {
+    if !is_known_color_space(&space_lower) {
         return Err(Error::at(
             format!("$description: Unknown color space \"{space_name}\"."),
             pos,
@@ -1371,7 +1375,7 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
         return Err(Error::at(
             format!(
                 "$description: The {} color space has 3 channels but {} has {}.",
-                space_name,
+                space_lower,
                 color_desc_css(&desc),
                 channels.len()
             ),
@@ -1385,7 +1389,7 @@ fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
     }
     // `display-p3-linear` is accepted but not a real CSS Color 4 space in
     // dart-sass; it is preserved verbatim.
-    let space = match predefined_space(&space_name) {
+    let space = match predefined_space(&space_lower) {
         Some(s) => s,
         None => return Ok(verbatim_call("color", &desc)),
     };

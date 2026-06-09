@@ -516,7 +516,10 @@ impl ColorSpace {
     }
 
     pub(crate) fn from_name(s: &str) -> Option<ColorSpace> {
-        Some(match s {
+        // Color-space names are ASCII case-insensitive (`sRGB`, `Display-P3`,
+        // `XYZ` all resolve); callers keep the original spelling for errors and
+        // serialization always uses the canonical lower-case `name()`.
+        Some(match s.to_ascii_lowercase().as_str() {
             "rgb" => ColorSpace::Rgb,
             "hsl" => ColorSpace::Hsl,
             "hwb" => ColorSpace::Hwb,
