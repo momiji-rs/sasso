@@ -30,6 +30,7 @@ use crate::{Importer, OutputStyle, Syntax};
 fn parse_with_syntax(src: &str, syntax: Syntax) -> Result<crate::ast::Stylesheet, Error> {
     match syntax {
         Syntax::Scss => crate::parser::parse(src),
+        Syntax::Css => crate::parser::parse_plain_css(src),
         Syntax::Sass => crate::sass_parser::parse(src),
     }
 }
@@ -111,6 +112,12 @@ pub(crate) enum OutItem {
     ChildlessAtRule {
         name: String,
         prelude: String,
+    },
+    /// A style rule nested directly inside another, kept verbatim instead of
+    /// flattened. Only produced in plain-CSS mode (a loaded `.css` file).
+    NestedRule {
+        selectors: Vec<String>,
+        items: Vec<OutItem>,
     },
 }
 
@@ -207,6 +214,9 @@ impl Sink<'_> {
                     body: Vec::new(),
                     has_block: false,
                 }),
+                // A plain-CSS nested rule reaching an at-root sink becomes a
+                // top-level rule carrying its items.
+                OutItem::NestedRule { selectors, items } => body.push(OutNode::Rule { selectors, items }),
             },
             Sink::Top(_) => {}
         }
@@ -2218,15 +2228,99 @@ impl<'a> Evaluator<'a> {
                 .borrow_mut()
                 .insert(diag_url.clone(), Rc::from(src.as_str()));
         }
-        let (module, consumed) = self.eval_module(&key, &diag_url, &sheet, config, pos, sink)?;
+        let is_css = matches!(syntax, Syntax::Css);
+        let (module, consumed) = self.eval_module(&key, &diag_url, &sheet, config, pos, sink, is_css)?;
         let module = Rc::new(module);
         self.module_cache.borrow_mut().insert(key, Rc::clone(&module));
         Ok((module, consumed))
     }
 
+    /// Emit a plain-CSS (`.css`) module's statements, preserving nesting (no
+    /// Sass flattening), keeping `&` parent references literal, and resolving
+    /// only `#{…}` interpolation. The parser has already rejected Sass-only
+    /// constructs, so the remaining statements are plain CSS.
+    fn exec_css(&mut self, stmts: &[Stmt], sink: &mut Sink<'_>) -> Result<(), Error> {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Rule(r) => {
+                    let selectors = self.css_selectors(&r.selector, true)?;
+                    let items = self.css_body(&r.body)?;
+                    sink.push_at_rule(OutNode::Rule { selectors, items });
+                }
+                Stmt::Comment(c) => {
+                    let text = self.eval_template(c)?;
+                    sink.push_at_rule(OutNode::Comment(text));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve a plain-CSS selector to its comma-separated parts, keeping `&`
+    /// and combinators verbatim (no parent resolution), and rejecting the
+    /// Sass-only selector forms that plain CSS forbids.
+    fn css_selectors(&mut self, sel: &[crate::ast::TplPiece], top_level: bool) -> Result<Vec<String>, Error> {
+        let s = self.eval_template(sel)?;
+        let parts: Vec<String> = split_commas(&s)
+            .into_iter()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        for p in &parts {
+            validate_plain_css_selector(p, top_level)?;
+        }
+        Ok(parts)
+    }
+
+    /// Build a plain-CSS rule body: declarations and nested style rules, with
+    /// nesting preserved (`OutItem::NestedRule`).
+    fn css_body(&mut self, stmts: &[Stmt]) -> Result<Vec<OutItem>, Error> {
+        let mut items = Vec::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Decl(d) => {
+                    let prop = self.eval_template(&d.property)?.trim().to_string();
+                    let value = self.eval_expr(&d.value)?.to_css(false);
+                    items.push(OutItem::Decl {
+                        prop,
+                        value,
+                        important: d.important,
+                        custom: false,
+                    });
+                }
+                Stmt::CustomDecl(d) => {
+                    let prop = self.eval_template(&d.property)?.trim().to_string();
+                    let value = self.eval_template(&d.value)?;
+                    items.push(OutItem::Decl {
+                        prop,
+                        value,
+                        important: false,
+                        custom: true,
+                    });
+                }
+                Stmt::Rule(r) => {
+                    let selectors = self.css_selectors(&r.selector, false)?;
+                    let inner = self.css_body(&r.body)?;
+                    items.push(OutItem::NestedRule {
+                        selectors,
+                        items: inner,
+                    });
+                }
+                Stmt::Comment(c) => {
+                    let text = self.eval_template(c)?;
+                    items.push(OutItem::Comment(text));
+                }
+                _ => {}
+            }
+        }
+        Ok(items)
+    }
+
     /// Evaluate a parsed module sheet in an isolated environment. The module's
     /// top-level CSS is emitted into `sink`; its members are captured into a
     /// [`Module`]. `config` overrides its `!default` variables.
+    #[allow(clippy::too_many_arguments)]
     fn eval_module(
         &mut self,
         key: &str,
@@ -2235,6 +2329,7 @@ impl<'a> Evaluator<'a> {
         config: HashMap<String, (Value, bool)>,
         pos: Pos,
         sink: &mut Sink<'_>,
+        css: bool,
     ) -> Result<(Module, Vec<String>), Error> {
         // Save and reset the per-module environment, then restore on the way out.
         // The module's body runs against its own source file for diagnostics.
@@ -2255,7 +2350,13 @@ impl<'a> Evaluator<'a> {
         let saved_selector = self.current_selector.take();
         self.loading.push(key.to_string());
 
-        let result = self.exec(&sheet.stmts, &[], sink);
+        // A plain-CSS module preserves its nesting (no Sass flattening, `&` kept
+        // literal); a Sass module runs the normal evaluator.
+        let result = if css {
+            self.exec_css(&sheet.stmts, sink)
+        } else {
+            self.exec(&sheet.stmts, &[], sink)
+        };
 
         self.loading.pop();
         // Capture this module's evaluated members before restoring the caller's
@@ -6375,6 +6476,61 @@ fn stmt_uses_content(stmt: &Stmt) -> bool {
 ///
 /// Quoted strings (with `\` escapes) and the contents of nested `[…]`/`(…)`
 /// groups are skipped so combinators/`&`/`%` inside them are not misread.
+/// Reject the selector forms plain CSS forbids in one comma-part: a placeholder
+/// (`%x`), a parent reference with a suffix (`&x`), a top-level leading
+/// combinator (`> a`), and a trailing combinator (`a >`). The text is the
+/// already-resolved selector (no interpolation left).
+fn validate_plain_css_selector(part: &str, top_level: bool) -> Result<(), Error> {
+    let trimmed = part.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    // A leading combinator is allowed when *nested* (it joins onto the parent),
+    // but not at the top level.
+    if top_level && matches!(chars.first(), Some('>' | '+' | '~')) {
+        return Err(Error::unpositioned(
+            "Top-level leading combinators aren't allowed in plain CSS.",
+        ));
+    }
+    // A trailing combinator never has a selector to bind to.
+    if matches!(chars.last(), Some('>' | '+' | '~')) {
+        return Err(Error::unpositioned("expected selector."));
+    }
+    let mut i = 0;
+    // True at the start of each compound (start, or after a combinator/space).
+    let mut at_compound_start = true;
+    let mut depth = 0i32; // inside `[...]`/`(...)`
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' => {
+                i += 2;
+                at_compound_start = false;
+                continue;
+            }
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth -= 1,
+            _ if depth > 0 => {}
+            ' ' | '\t' | '\n' | '\r' | '>' | '+' | '~' => at_compound_start = true,
+            '%' if at_compound_start => {
+                return Err(Error::unpositioned(
+                    "Placeholder selectors aren't allowed in plain CSS.",
+                ));
+            }
+            '&' => {
+                let next = chars.get(i + 1).copied();
+                if matches!(next, Some(n) if n.is_ascii_alphanumeric() || n == '-' || n == '_' || n == '\\') {
+                    return Err(Error::unpositioned(
+                        "Parent selectors can't have suffixes in plain CSS.",
+                    ));
+                }
+                at_compound_start = false;
+            }
+            _ => at_compound_start = false,
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
     for part in split_commas(sel) {
         let chars: Vec<char> = part.chars().collect();

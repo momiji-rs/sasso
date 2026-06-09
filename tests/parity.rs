@@ -3221,6 +3221,21 @@ fn assert_module_parity(files: &[(&str, &str)]) {
 }
 
 #[test]
+fn parity_plain_css_module() {
+    // A `.css` file loaded via `@use` is parsed in plain-CSS mode: nesting is
+    // preserved (not flattened), `&` stays literal, and declaration values are
+    // emitted verbatim (no SassScript). Sass functions like `rgb`/`grayscale`
+    // are kept as CSS, not evaluated.
+    assert_module_parity(&[
+        ("input.scss", "@use \"plain\";\n"),
+        (
+            "plain.css",
+            "a {\n  b {c: d}\n  &.e {f: g}\n  h: rgb(10, 20, 30);\n}\ni, j {k {l: m}}\n",
+        ),
+    ]);
+}
+
+#[test]
 fn parity_use_user_module() {
     // `@use "file"` loads a user partial once, emits its CSS, and exposes its
     // variables, functions, and mixins under the default namespace.

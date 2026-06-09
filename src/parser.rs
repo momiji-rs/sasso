@@ -167,16 +167,32 @@ struct Parser {
     /// `@use`/`@forward` then errors ("@use rules must be written before any
     /// other rules.").
     seen_non_module_stmt: bool,
+    /// Plain-CSS mode (a `.css` file loaded via `@use`/`@forward`). SassScript
+    /// and Sass-only statements are rejected: this is the analogue of dart-sass's
+    /// `CssParser`. Nesting is still parsed (CSS nesting is preserved in output);
+    /// the difference is that Sass features become errors.
+    plain_css: bool,
 }
 
-/// Parse a complete stylesheet.
+/// Parse a complete stylesheet (SCSS).
 pub(crate) fn parse(src: &str) -> Result<Stylesheet, Error> {
+    parse_inner(src, false)
+}
+
+/// Parse a plain-CSS stylesheet (a loaded `.css` file): the same brace/semicolon
+/// grammar, but Sass features are rejected.
+pub(crate) fn parse_plain_css(src: &str) -> Result<Stylesheet, Error> {
+    parse_inner(src, true)
+}
+
+fn parse_inner(src: &str, plain_css: bool) -> Result<Stylesheet, Error> {
     let mut p = Parser {
         sc: Scanner::new(src),
         calc_depth: 0,
         pending_unicode_split: false,
         block_depth: 0,
         seen_non_module_stmt: false,
+        plain_css,
     };
     let stmts = p.parse_statements(true)?;
     Ok(Stylesheet { stmts })
@@ -184,6 +200,35 @@ pub(crate) fn parse(src: &str) -> Result<Stylesheet, Error> {
 
 fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+/// Whether `name` is a global Sass function with no plain-CSS meaning, so a
+/// `.css` file calling it is an error (the CSS color/math functions — `rgb`,
+/// `hsl`, `grayscale`, `saturate`, `min`, `calc`, … — are deliberately absent,
+/// since plain CSS preserves those verbatim).
+fn is_sass_only_function(name: &str) -> bool {
+    matches!(
+        name,
+        // list
+        "index" | "nth" | "set-nth" | "join" | "append" | "zip" | "list-separator"
+            | "is-bracketed" | "length"
+            // map
+            | "map-get" | "map-merge" | "map-remove" | "map-keys" | "map-values" | "map-has-key"
+            // meta
+            | "type-of" | "unit" | "unitless" | "comparable" | "inspect" | "keywords"
+            | "feature-exists" | "variable-exists" | "global-variable-exists" | "function-exists"
+            | "mixin-exists" | "content-exists" | "get-function" | "call" | "get-mixin"
+            // string
+            | "str-length" | "str-insert" | "str-index" | "str-slice" | "to-upper-case"
+            | "to-lower-case" | "unique-id"
+            // color (Sass-only adjusters / getters, not CSS functions)
+            | "mix" | "adjust-hue" | "lighten" | "darken" | "desaturate" | "opacify"
+            | "transparentize" | "fade-in" | "fade-out" | "scale-color" | "adjust-color"
+            | "change-color" | "ie-hex-str"
+            // selector
+            | "selector-nest" | "selector-append" | "selector-replace" | "selector-unify"
+            | "is-superselector" | "simple-selectors" | "selector-parse" | "selector-extend"
+    )
 }
 
 /// Whether a module member name is private (dart-sass: begins with `-` or
@@ -565,6 +610,12 @@ impl Parser {
                     self.sc.bump();
                 }
                 Some('/') if self.sc.peek_at(1) == Some('/') => {
+                    if self.plain_css {
+                        return Err(Error::at(
+                            "Silent comments aren't allowed in plain CSS.",
+                            self.sc.position(),
+                        ));
+                    }
                     while let Some(c) = self.sc.peek() {
                         if c == '\n' {
                             break;
@@ -823,6 +874,12 @@ impl Parser {
     /// consuming an optional trailing `;` so a following sibling parses cleanly
     /// (`b: { c: { d: e }; f: g }`).
     fn parse_property_set_body(&mut self) -> Result<Vec<Stmt>, Error> {
+        if self.plain_css {
+            return Err(Error::at(
+                "Nested declarations aren't allowed in plain CSS.",
+                self.sc.position(),
+            ));
+        }
         self.sc.bump(); // '{'
         self.block_depth += 1;
         let body = self.parse_statements(false);
@@ -841,6 +898,9 @@ impl Parser {
 
     fn parse_var_decl(&mut self) -> Result<Stmt, Error> {
         let pos = self.sc.position();
+        if self.plain_css {
+            return Err(Error::at("Sass variables aren't allowed in plain CSS.", pos));
+        }
         // An optional `ns.` prefix: `ns.$name: value` assigns to a module
         // variable. `peek_namespaced_var_decl` guarantees the shape.
         let mut namespace = None;
@@ -911,6 +971,38 @@ impl Parser {
         let start_mark = self.sc.mark();
         self.sc.bump(); // '@'
         let name = self.read_ident_name()?;
+        // In plain CSS the Sass control/definition at-rules are rejected; only
+        // genuine CSS at-rules (`@media`, `@supports`, `@font-face`,
+        // `@keyframes`, `@import`, `@charset`, `@page`, and unknown vendor
+        // at-rules emitted verbatim) are allowed.
+        if self.plain_css {
+            // `@function --x`/`@mixin --x` are plain-CSS custom callables (the
+            // `--` prefix), which CSS allows; a bare `@function`/`@mixin` is the
+            // Sass definition and is rejected like the other control at-rules.
+            let sass_callable =
+                matches!(name.as_str(), "function" | "mixin") && !self.peek_callable_name_is_custom();
+            if sass_callable
+                || matches!(
+                    name.as_str(),
+                    "if" | "else"
+                        | "each"
+                        | "for"
+                        | "while"
+                        | "include"
+                        | "content"
+                        | "return"
+                        | "warn"
+                        | "debug"
+                        | "error"
+                        | "extend"
+                        | "at-root"
+                        | "use"
+                        | "forward"
+                )
+            {
+                return Err(Error::at("This at-rule isn't allowed in plain CSS.", pos));
+            }
+        }
         match name.as_str() {
             "import" => self.parse_import(pos),
             "if" => self.parse_if(),
@@ -982,7 +1074,13 @@ impl Parser {
             let arg = self.parse_import_arg(pos)?;
             args.push(arg);
             self.skip_ws_trivia();
-            if self.sc.eat(',') {
+            if self.sc.peek() == Some(',') {
+                // Plain CSS `@import` takes a single URL — a comma-separated
+                // list is a Sass-only feature.
+                if self.plain_css {
+                    return Err(Error::at("expected \";\".", self.sc.position()));
+                }
+                self.sc.bump();
                 continue;
             }
             break;
@@ -1300,11 +1398,23 @@ impl Parser {
         self.sc.bump(); // (
         let mut depth = 1i32;
         while let Some(c) = self.sc.peek() {
+            if self.plain_css && c == '#' && self.sc.peek_at(1) == Some('{') {
+                return Err(Error::at(
+                    "Interpolation isn't allowed in plain CSS.",
+                    self.sc.position(),
+                ));
+            }
             match c {
                 '"' | '\'' => {
                     let q = c;
                     self.sc.bump();
                     while let Some(ch) = self.sc.peek() {
+                        if self.plain_css && ch == '#' && self.sc.peek_at(1) == Some('{') {
+                            return Err(Error::at(
+                                "Interpolation isn't allowed in plain CSS.",
+                                self.sc.position(),
+                            ));
+                        }
                         self.sc.bump();
                         if ch == '\\' {
                             self.sc.bump();
@@ -2031,6 +2141,7 @@ impl Parser {
                     }
                 }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    self.reject_plain_css_interp()?;
                     self.sc.bump();
                     self.sc.bump();
                     let e = self.parse_value()?;
@@ -2788,6 +2899,7 @@ impl Parser {
                 Some(';') if depth == 0 => break,
                 Some('}') if depth == 0 => break,
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    self.reject_plain_css_interp()?;
                     if !lit.is_empty() {
                         pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
                     }
@@ -3198,6 +3310,17 @@ impl Parser {
         }
     }
 
+    /// In plain-CSS mode, a `#{…}` interpolation is rejected at its `#`.
+    fn reject_plain_css_interp(&self) -> Result<(), Error> {
+        if self.plain_css {
+            return Err(Error::at(
+                "Interpolation isn't allowed in plain CSS.",
+                self.sc.position(),
+            ));
+        }
+        Ok(())
+    }
+
     fn parse_template_mode(&mut self, stops: &[char], comments: CommentMode) -> Result<Vec<TplPiece>, Error> {
         let mut pieces = Vec::new();
         let mut lit = String::new();
@@ -3247,6 +3370,12 @@ impl Parser {
             }
             match c {
                 '#' if self.sc.peek_at(1) == Some('{') => {
+                    if self.plain_css {
+                        return Err(Error::at(
+                            "Interpolation isn't allowed in plain CSS.",
+                            self.sc.position(),
+                        ));
+                    }
                     if !lit.is_empty() {
                         pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
                     }
@@ -3510,7 +3639,8 @@ impl Parser {
 
     fn or_expr(&mut self) -> Result<Expr, Error> {
         let mut lhs = self.and_expr()?;
-        while self.try_keyword("or") {
+        // In plain CSS `or`/`and`/`not` are ordinary identifiers, not operators.
+        while !self.plain_css && self.try_keyword("or") {
             self.skip_ws_inline();
             let pos = self.sc.position();
             let rhs = self.and_expr()?;
@@ -3526,7 +3656,7 @@ impl Parser {
 
     fn and_expr(&mut self) -> Result<Expr, Error> {
         let mut lhs = self.not_expr()?;
-        while self.try_keyword("and") {
+        while !self.plain_css && self.try_keyword("and") {
             self.skip_ws_inline();
             let pos = self.sc.position();
             let rhs = self.not_expr()?;
@@ -3541,7 +3671,7 @@ impl Parser {
     }
 
     fn not_expr(&mut self) -> Result<Expr, Error> {
-        if self.try_keyword("not") {
+        if !self.plain_css && self.try_keyword("not") {
             self.skip_ws_inline();
             let operand = self.not_expr()?;
             return Ok(Expr::Unary {
@@ -3569,6 +3699,12 @@ impl Parser {
                 self.sc.reset(mark);
                 break;
             };
+            if self.plain_css {
+                return Err(Error::at(
+                    "Operators aren't allowed in plain CSS.",
+                    self.sc.position(),
+                ));
+            }
             let pos = self.sc.position();
             self.skip_ws_inline();
             let rhs = self.relational()?;
@@ -3611,6 +3747,12 @@ impl Parser {
                     break;
                 }
             };
+            if self.plain_css {
+                return Err(Error::at(
+                    "Operators aren't allowed in plain CSS.",
+                    self.sc.position(),
+                ));
+            }
             let pos = self.sc.position();
             self.skip_ws_inline();
             let rhs = self.additive()?;
@@ -3683,6 +3825,14 @@ impl Parser {
                         !had_ws || ws_after
                     };
                     if binary {
+                        // Outside a calculation, `+`/`-` is a Sass operator,
+                        // which plain CSS forbids (inside calc it is real math).
+                        if self.plain_css && self.calc_depth == 0 {
+                            return Err(Error::at(
+                                "Operators aren't allowed in plain CSS.",
+                                self.sc.position(),
+                            ));
+                        }
                         let pos = self.sc.position();
                         self.sc.bump();
                         self.skip_ws_inline();
@@ -3747,6 +3897,13 @@ impl Parser {
             }
             match op {
                 Some(op) => {
+                    // `*`/`%` are Sass operators (real math inside calc only).
+                    if self.plain_css && self.calc_depth == 0 {
+                        return Err(Error::at(
+                            "Operators aren't allowed in plain CSS.",
+                            self.sc.position(),
+                        ));
+                    }
                     let pos = self.sc.position();
                     self.sc.bump();
                     self.skip_ws_inline();
@@ -3871,11 +4028,20 @@ impl Parser {
             Some('.') if matches!(self.sc.peek_at(1), Some(d) if d.is_ascii_digit()) => self.parse_number(),
             Some('$') => {
                 let pos = self.sc.position();
+                if self.plain_css {
+                    return Err(Error::at("Sass variables aren't allowed in plain CSS.", pos));
+                }
                 self.sc.bump();
                 let name = self.read_ident_name()?;
                 Ok(Expr::Var { name, pos })
             }
             Some('#') if self.sc.peek_at(1) == Some('{') => {
+                if self.plain_css {
+                    return Err(Error::at(
+                        "Interpolation isn't allowed in plain CSS.",
+                        self.sc.position(),
+                    ));
+                }
                 self.sc.bump();
                 self.sc.bump();
                 // Whitespace (including newlines) is permitted around the
@@ -3894,6 +4060,14 @@ impl Parser {
                 Ok(Expr::QuotedString(pieces))
             }
             Some('(') => {
+                // A grouping paren is a Sass construct, but parens INSIDE a
+                // calculation are legitimate CSS (`calc(2 * (1px + 1%))`).
+                if self.plain_css && self.calc_depth == 0 {
+                    return Err(Error::at(
+                        "Parentheses aren't allowed in plain CSS.",
+                        self.sc.position(),
+                    ));
+                }
                 self.sc.bump();
                 self.skip_ws_inline();
                 if self.sc.peek() == Some(')') {
@@ -3921,6 +4095,12 @@ impl Parser {
             }
             Some('[') => self.parse_bracketed_list(),
             Some('&') => {
+                if self.plain_css {
+                    return Err(Error::at(
+                        "The parent selector isn't allowed in plain CSS.",
+                        self.sc.position(),
+                    ));
+                }
                 self.sc.bump();
                 Ok(Expr::Parent)
             }
@@ -4253,6 +4433,7 @@ impl Parser {
                     break;
                 }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    self.reject_plain_css_interp()?;
                     if !lit.is_empty() {
                         pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
                     }
@@ -4417,6 +4598,7 @@ impl Parser {
         loop {
             match self.sc.peek() {
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    self.reject_plain_css_interp()?;
                     if !lit.is_empty() {
                         pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
                     }
@@ -4458,6 +4640,11 @@ impl Parser {
     }
 
     fn parse_call(&mut self, name: String, name_pos: Pos, name_mark: Mark) -> Result<Expr, Error> {
+        // A plain-CSS function call is preserved verbatim, but a Sass-only global
+        // function (one with no plain-CSS meaning, e.g. `index`) is rejected.
+        if self.plain_css && is_sass_only_function(&name) {
+            return Err(Error::at("This function isn't allowed in plain CSS.", name_pos));
+        }
         self.sc.bump(); // '('
                         // `calc()` interior is parsed as a real arithmetic
                         // expression and simplified at evaluation time. The
@@ -4762,6 +4949,7 @@ impl Parser {
                 // A top-level `$variable` is SassScript, not a plain URL.
                 Some('$') => return Ok(None),
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    self.reject_plain_css_interp()?;
                     if !lit.is_empty() {
                         pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
                     }
@@ -5026,6 +5214,12 @@ impl Parser {
                 Ok(Some(IfCond::Paren(Box::new(inner))))
             }
             _ if self.peek_keyword_paren_ci("sass") => {
+                if self.plain_css {
+                    return Err(Error::at(
+                        "sass() conditions aren't allowed in plain CSS",
+                        self.sc.position(),
+                    ));
+                }
                 for _ in 0.."sass".chars().count() {
                     self.sc.bump();
                 }
@@ -5118,6 +5312,7 @@ impl Parser {
     fn read_if_raw_token(&mut self, pieces: &mut Vec<TplPiece>) -> Result<bool, Error> {
         match self.sc.peek() {
             Some('#') if self.sc.peek_at(1) == Some('{') => {
+                self.reject_plain_css_interp()?;
                 self.sc.bump();
                 self.sc.bump();
                 let e = self.parse_value()?;
@@ -5387,6 +5582,12 @@ impl Parser {
                 self.skip_ws_inline();
                 let mut name_opt = None;
                 if self.sc.peek() == Some('$') {
+                    if self.plain_css {
+                        return Err(Error::at(
+                            "Sass variables aren't allowed in plain CSS.",
+                            self.sc.position(),
+                        ));
+                    }
                     let mark = self.sc.mark();
                     self.sc.bump();
                     let argname = self.read_ident_name()?;
@@ -5408,6 +5609,9 @@ impl Parser {
                     && self.sc.peek_at(1) == Some('.')
                     && self.sc.peek_at(2) == Some('.');
                 if splat {
+                    if self.plain_css {
+                        return Err(Error::at("expected \")\".", self.sc.position()));
+                    }
                     self.sc.bump();
                     self.sc.bump();
                     self.sc.bump();

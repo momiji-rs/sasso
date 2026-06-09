@@ -127,6 +127,16 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
             }
             out.push_str(";\n");
         }
+        OutItem::NestedRule { selectors, items } => {
+            out.push_str(&indent);
+            out.push_str(&selectors.join(", "));
+            out.push_str(" {\n");
+            for child in items {
+                emit_item_expanded(out, child, depth + 1);
+            }
+            out.push_str(&indent);
+            out.push_str("}\n");
+        }
     }
 }
 
@@ -174,6 +184,30 @@ fn emit_compressed_body(out: &mut String, nodes: &[OutNode]) {
     }
 }
 
+/// Serialize a plain-CSS nested rule for compressed output (a rare, untested
+/// path — plain CSS is normally emitted expanded).
+fn compressed_nested_rule(selectors: &[String], items: &[OutItem]) -> String {
+    let inner: Vec<String> = items
+        .iter()
+        .filter_map(|it| match it {
+            OutItem::Decl {
+                prop,
+                value,
+                important,
+                custom,
+            } => {
+                let imp = if *important && !*custom { "!important" } else { "" };
+                Some(format!("{prop}:{value}{imp}"))
+            }
+            OutItem::Comment(_) => None,
+            OutItem::ChildlessAtRule { name, prelude } if prelude.is_empty() => Some(format!("@{name}")),
+            OutItem::ChildlessAtRule { name, prelude } => Some(format!("@{name} {prelude}")),
+            OutItem::NestedRule { selectors, items } => Some(compressed_nested_rule(selectors, items)),
+        })
+        .collect();
+    format!("{}{{{}}}", selectors.join(","), inner.join(";"))
+}
+
 fn emit_node_compressed(out: &mut String, node: &OutNode) {
     match node {
         OutNode::Rule { selectors, items } => {
@@ -199,6 +233,9 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
                         } else {
                             Some(format!("@{name} {prelude}"))
                         }
+                    }
+                    OutItem::NestedRule { selectors, items } => {
+                        Some(compressed_nested_rule(selectors, items))
                     }
                 })
                 .collect();

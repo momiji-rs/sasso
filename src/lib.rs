@@ -76,6 +76,10 @@ pub enum Syntax {
     /// The indented `.sass` syntax: blocks come from indentation, statements
     /// end at a newline.
     Sass,
+    /// Plain CSS (a `.css` file loaded via `@use`/`@forward`): the brace/semicolon
+    /// grammar, but Sass features are rejected, nesting is preserved verbatim,
+    /// and values are emitted without SassScript evaluation.
+    Css,
 }
 
 /// Resolves `@import` arguments to SCSS source.
@@ -247,6 +251,7 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
     };
     let sheet = match options.syntax {
         Syntax::Scss => parser::parse(source),
+        Syntax::Css => parser::parse_plain_css(source),
         Syntax::Sass => sass_parser::parse(source),
     };
     // A parse error never reached the evaluator, so render its snippet here
@@ -369,20 +374,49 @@ impl Importer for FsImporter {
                 Resolution::NotFound => {}
             }
         }
+        // A plain `.css` file is a valid `@use`/`@forward` target (loaded in
+        // plain-CSS mode), tried only after the Sass candidates so an adjacent
+        // `.scss`/`.sass` still wins.
+        for base in &self.load_paths {
+            if let Some(p) = resolve_css_in_base(base, path) {
+                if let Ok(src) = std::fs::read_to_string(&p) {
+                    let key = std::fs::canonicalize(&p)
+                        .map(|c| c.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| p.to_string_lossy().into_owned());
+                    return Some((key, src, Syntax::Css));
+                }
+            }
+        }
         None
     }
+}
+
+/// Resolve `path` to a plain `.css` file under `base`: `name.css` or the
+/// partial `_name.css`. Returns the first existing candidate.
+fn resolve_css_in_base(base: &Path, path: &str) -> Option<PathBuf> {
+    let p = Path::new(path);
+    let dir = match p.parent() {
+        Some(par) if !par.as_os_str().is_empty() => base.join(par),
+        _ => base.to_path_buf(),
+    };
+    let file = p.file_name().and_then(|s| s.to_str()).unwrap_or(path);
+    let stem = file.strip_suffix(".css").unwrap_or(file);
+    for name in [format!("{stem}.css"), format!("_{stem}.css")] {
+        let cand = dir.join(&name);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
 }
 
 /// The syntax a resolved file should be parsed with, from its extension: a
 /// `.sass` file is the indented syntax, anything else (`.scss`) is SCSS.
 fn syntax_for_path(p: &Path) -> Syntax {
-    if p.extension()
-        .map(|e| e.eq_ignore_ascii_case("sass"))
-        .unwrap_or(false)
-    {
-        Syntax::Sass
-    } else {
-        Syntax::Scss
+    match p.extension().and_then(|e| e.to_str()) {
+        Some(e) if e.eq_ignore_ascii_case("sass") => Syntax::Sass,
+        Some(e) if e.eq_ignore_ascii_case("css") => Syntax::Css,
+        _ => Syntax::Scss,
     }
 }
 
