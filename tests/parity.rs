@@ -4196,6 +4196,17 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_empty_value_declaration_dropped() {
+    // A regular declaration whose value serializes to nothing (an empty
+    // unquoted string, an all-`null` list) is dropped like a `null` value; a
+    // quoted `""` or a space `" "` still emits.
+    assert_parity("@use \"sass:string\";\na {c: 1; b: string.unquote(\"\"); d: 2}\n");
+    assert_parity("a {c: 1; b: (null, null); d: 2}\n");
+    assert_parity("a {b: \"\"}\n");
+    assert_parity("a {b: \" \"}\n");
+}
+
+#[test]
 fn parity_color_space_name_case_insensitive() {
     // Color-space names are ASCII case-insensitive in `color()` and `$space`
     // arguments; the canonical lower-case form is serialized.

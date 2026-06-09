@@ -3259,6 +3259,11 @@ impl<'a> Evaluator<'a> {
             }
         }
         let vstr = value.to_css(self.compressed());
+        // A value that serializes to nothing (an empty unquoted string, an
+        // all-`null` list) drops the whole declaration, like a `null` value.
+        if vstr.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(OutItem::Decl {
             prop,
             value: vstr,
