@@ -4196,6 +4196,26 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_calc_name_and_args() {
+    // `meta.calc-name` returns the calculation function name (`"calc"`);
+    // `meta.calc-args` returns its arguments, where an operation/var becomes an
+    // unquoted string and a number stays a number.
+    assert_parity("@use \"sass:meta\";\na {b: meta.calc-name(calc(var(--c)))}\n");
+    assert_parity("@use \"sass:meta\";\na {b: meta.inspect(meta.calc-args(calc(1% + 1px)))}\n");
+    assert_parity(
+        "@use \"sass:list\";\n@use \"sass:meta\";\na {b: list.nth(meta.calc-args(calc(var(--c))), 1)}\n",
+    );
+    assert_parity("@use \"sass:list\";\n@use \"sass:meta\";\na {b: meta.type-of(list.nth(meta.calc-args(calc(1% + 1px)), 1))}\n");
+    // A non-calculation argument is rejected.
+    let scss = "@use \"sass:meta\";\na {b: meta.calc-args(1)}\n";
+    let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+    assert!(
+        ours.is_some_and(|m| m.contains("is not a calculation.")),
+        "expected calc-args on a number to error"
+    );
+}
+
+#[test]
 fn parity_argument_list_keywords() {
     // A `$args...` rest parameter captures positional args (a comma list) plus
     // keyword args; `meta.keywords` returns the keyword map, `type-of` reports

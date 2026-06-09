@@ -10,7 +10,7 @@
 
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{ListSep, SassStr, Value};
+use crate::value::{CalcNode, List, ListSep, SassStr, Value};
 
 pub(super) fn try_call(
     name: &str,
@@ -26,7 +26,7 @@ pub(super) fn try_call(
     }
     // Fixed-arity members reject extra positional arguments before running.
     let max = match name {
-        "type-of" | "unit" | "unitless" | "inspect" | "feature-exists" => Some(1),
+        "type-of" | "unit" | "unitless" | "inspect" | "feature-exists" | "calc-name" | "calc-args" => Some(1),
         "comparable" => Some(2),
         _ => None,
     };
@@ -52,8 +52,63 @@ pub(super) fn try_call(
         "inspect" => fn_inspect(pos_args, named, pos),
         "feature-exists" => fn_feature_exists(pos_args, named, pos),
         "function-exists" => fn_function_exists(pos_args, named, pos),
+        "calc-name" => fn_calc_name(pos_args, named, pos),
+        "calc-args" => fn_calc_args(pos_args, named, pos),
         _ => return None,
     })
+}
+
+/// `meta.calc-name($calc)`: the calculation's function name as a quoted string
+/// (currently always `"calc"`, since `min`/`max`/`clamp` are preserved as
+/// strings rather than calculations).
+fn fn_calc_name(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let v = super::require(&["calc"], pos_args, named, 0, "calc-name", pos)?;
+    match v {
+        Value::Calc(_) => Ok(Value::Str(SassStr {
+            text: "calc".to_string(),
+            quoted: true,
+        })),
+        other => Err(Error::at(
+            format!("$calc: {} is not a calculation.", other.to_css(false)),
+            pos,
+        )),
+    }
+}
+
+/// `meta.calc-args($calc)`: the calculation's arguments as a comma-separated
+/// list. A `calc()` holds a single argument (its expression): a bare number
+/// stays a number, a nested operation becomes an unquoted string, and any other
+/// operand (a `var()`/interpolation result) is its unquoted string.
+fn fn_calc_args(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    let v = super::require(&["calc"], pos_args, named, 0, "calc-args", pos)?;
+    match v {
+        Value::Calc(node) => Ok(Value::List(List::new(
+            vec![calc_node_to_value(node)],
+            ListSep::Comma,
+            false,
+        ))),
+        other => Err(Error::at(
+            format!("$calc: {} is not a calculation.", other.to_css(false)),
+            pos,
+        )),
+    }
+}
+
+/// Convert one calculation argument node to the Sass value `meta.calc-args`
+/// returns for it: a number stays a number; an operation or any opaque operand
+/// becomes an unquoted string of its serialization.
+fn calc_node_to_value(node: &CalcNode) -> Value {
+    match node {
+        CalcNode::Number(n) => Value::Number(n.clone()),
+        CalcNode::Str(s) => Value::Str(SassStr {
+            text: s.clone(),
+            quoted: false,
+        }),
+        CalcNode::Op { .. } => Value::Str(SassStr {
+            text: node.to_calc_css(false),
+            quoted: false,
+        }),
+    }
 }
 
 /// An unquoted string value.

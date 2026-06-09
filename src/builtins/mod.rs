@@ -336,6 +336,8 @@ fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
             "type-of" => Some("type-of"),
             "inspect" => Some("inspect"),
             "feature-exists" => Some("feature-exists"),
+            "calc-name" => Some("calc-name"),
+            "calc-args" => Some("calc-args"),
             // `keywords`, `call`, `get-function`, the `*-exists`/`get-mixin`/
             // `apply`/`module-*` members need evaluator context or first-class
             // functions not available in this value-only dispatch — left
