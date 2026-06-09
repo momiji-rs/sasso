@@ -4196,6 +4196,19 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_selector_nest_parent_in_pseudo() {
+    // `selector.nest` substitutes a `&` inside a selector-list pseudo
+    // (`:is`/`:where`/`:not`) with the parent, instead of nesting it as a
+    // descendant; a complex with no `&` anywhere still nests as a descendant.
+    assert_parity("@use \"sass:selector\";\na {b: selector.nest(\"c\", \":is(&)\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.nest(\"c d\", \":is(&)\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.nest(\"c\", \":not(&)\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.nest(\"c\", \":where(& .e)\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.nest(\"c\", \"&:is(&)\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.nest(\"c\", \":is(&), x\")}\n");
+}
+
+#[test]
 fn parity_private_use_char_escaping() {
     // Private-use characters are serialized as `\<hex>` escapes in both quoted
     // and unquoted strings (planes 15/16 too); a non-character or CJK-compat

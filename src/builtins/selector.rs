@@ -204,8 +204,9 @@ fn resolve_parents(child: &str, parents: &[Complex], fname: &str, pos: Pos) -> R
     for parent in parents {
         let parent_one = parent.render();
         for cc in &child_complexes {
-            let resolved = if has_top_parent(cc) {
-                // Substitute this single parent complex for each top-level `&`.
+            let resolved = if has_parent_ref(cc) {
+                // Substitute this single parent complex for each `&`, including
+                // one inside a selector-list pseudo (`:is(&)` -> `:is(c)`).
                 substitute_parent(cc, &parent_one)
             } else {
                 // Descendant nesting: parent then child.
@@ -288,8 +289,12 @@ fn validate_parent_placement(s: &str) -> Result<(), Error> {
 
 /// Whether a complex-selector string has a top-level `&` (outside brackets,
 /// parens, and quotes), i.e. a parent reference this resolver substitutes.
-fn has_top_parent(s: &str) -> bool {
-    let mut paren = 0i32;
+/// Whether `s` contains a `&` parent reference. dart-sass substitutes a `&`
+/// wherever it appears in selector position, including inside a selector-list
+/// pseudo (`:is(&)`, `:not(&)`), so any paren depth counts; a `&` inside a
+/// quoted string, an escape, or an attribute value (`[x=&]`) is literal and
+/// does not.
+fn has_parent_ref(s: &str) -> bool {
     let mut bracket = 0i32;
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -308,11 +313,9 @@ fn has_top_parent(s: &str) -> bool {
                     }
                 }
             }
-            '(' => paren += 1,
-            ')' => paren -= 1,
             '[' => bracket += 1,
             ']' => bracket -= 1,
-            '&' if paren == 0 && bracket == 0 => return true,
+            '&' if bracket == 0 => return true,
             _ => {}
         }
     }
