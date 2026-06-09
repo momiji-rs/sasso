@@ -66,6 +66,59 @@ impl Simple {
     }
 }
 
+/// Normalize a `:nth-child(…)` / `:nth-last-child(…)` pseudo's An+B argument
+/// (`2n + 1` → `2n+1`, `2N + 1` → `2n+1`, `3n - 2` → `3n-2`), preserving an
+/// `of <selector>` tail. Only the lowercase `nth-child`/`nth-last-child`
+/// pseudos are normalized (dart-sass keeps any other pseudo — including an
+/// uppercased name or `:nth-of-type` — verbatim). Returns `None` when the text
+/// is not such a pseudo, leaving it unchanged.
+fn normalize_nth(text: &str) -> Option<String> {
+    let open = text.find('(')?;
+    if !text.ends_with(')') {
+        return None;
+    }
+    let name = &text[..open];
+    if name != ":nth-child" && name != ":nth-last-child" {
+        return None;
+    }
+    let arg = &text[open + 1..text.len() - 1];
+    // Split off an `of <selector>` tail at a whitespace-bounded `of` keyword.
+    let lower = arg.to_ascii_lowercase();
+    let (anb, of_sel) = match find_of_keyword(&lower) {
+        Some(pos) => (&arg[..pos], Some(arg[pos + 2..].trim())),
+        None => (arg, None),
+    };
+    // The An+B canonical form has no internal whitespace and a lowercase `n`.
+    let anb_norm: String = anb.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    if anb_norm.is_empty() {
+        return None;
+    }
+    let anb_norm = anb_norm.to_ascii_lowercase();
+    Some(match of_sel {
+        Some(sel) => format!("{name}({anb_norm} of {sel})"),
+        None => format!("{name}({anb_norm})"),
+    })
+}
+
+/// The byte index of a whitespace-bounded `of` keyword in an already-lowercased
+/// `:nth-child` argument (the boundary between the An+B and the `of <selector>`
+/// tail), or `None` if there is no `of` clause.
+fn find_of_keyword(lower: &str) -> Option<usize> {
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find("of") {
+        let pos = i + rel;
+        let before_ws = pos == 0 || bytes[pos - 1].is_ascii_whitespace();
+        let after = pos + 2;
+        let after_ws = after < bytes.len() && bytes[after].is_ascii_whitespace();
+        if before_ws && after_ws {
+            return Some(pos);
+        }
+        i = pos + 2;
+    }
+    None
+}
+
 /// A compound selector: a non-empty run of simple selectors with no
 /// combinator between them, e.g. `.foo.bar:hover`.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -209,6 +262,9 @@ fn parse_compound(chars: &[char], i: &mut usize) -> Option<Compound> {
             }
             ':' => {
                 let text = read_pseudo(chars, i)?;
+                // Canonicalize a `:nth-child`/`:nth-last-child` An+B argument so
+                // comparisons and output match dart-sass (`2n + 1` → `2n+1`).
+                let text = normalize_nth(&text).unwrap_or(text);
                 simples.push(Simple::Pseudo(text));
             }
             '*' => {

@@ -4607,3 +4607,16 @@ fn parity_selector_extend_into_pseudos() {
     assert_parity("@use \"sass:selector\";\na {b: selector.extend(\":is(.c) .e\", \".c\", \".d\")}\n");
     assert_parity("@use \"sass:selector\";\na {b: selector.replace(\":is(.c)\", \".c\", \".d\")}\n");
 }
+
+#[test]
+fn parity_selector_nth_child_anb() {
+    // `:nth-child`/`:nth-last-child` An+B arguments are canonicalized
+    // (`2n + 1` → `2n+1`, `2N + 1` → `2n+1`); other nth pseudos and uppercased
+    // names stay verbatim.
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\":nth-child(2n + 1)\", \"a\")}\n");
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\":nth-last-child(3n - 2)\", \"a\")}\n");
+    assert_parity(
+        "@use \"sass:selector\";\na {b: selector.is-superselector(\":nth-child(2n+1)\", \":nth-child(2n + 1)\")}\n",
+    );
+    assert_parity("@use \"sass:selector\";\na {b: selector.unify(\":nth-of-type(3n - 2)\", \"a\")}\n");
+}
