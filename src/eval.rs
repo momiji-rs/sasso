@@ -6383,6 +6383,20 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
                     }
                     at_compound_start = false;
                 }
+                // A `#`/`.` (id/class) must be followed by an identifier name
+                // start; `#2b` / `.3c` are "Expected identifier." (a `-`, `_`,
+                // letter, escape, or non-ASCII char is fine). A `.` right after a
+                // digit is a decimal point (a keyframe stop like `50.5%`), not a
+                // class, so it is skipped. A bare digit *type* selector (`1a`) is
+                // also left alone: `50%` keyframe stops reach this same validator.
+                '#' | '.' if !(c == '.' && i > 0 && chars[i - 1].is_ascii_digit()) => {
+                    let next = chars.get(i + 1).copied();
+                    let starts_ident = matches!(next, Some(n) if n.is_ascii_alphabetic() || n == '-' || n == '_' || n == '\\' || (n as u32) >= 0x80);
+                    if !starts_ident {
+                        return Err(Error::unpositioned("Expected identifier."));
+                    }
+                    at_compound_start = false;
+                }
                 // A reference combinator (`/foo/`) used to be valid CSS but is
                 // no longer supported; dart-sass now rejects any top-level `/`
                 // in a selector with "expected selector.". (A `/` inside an

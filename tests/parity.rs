@@ -4196,6 +4196,35 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_selector_digit_start_errors() {
+    // An id/class whose name starts with a digit (`#2b`, `.3c`) is rejected;
+    // valid names — and keyframe-style `50%` stops — still compile.
+    if enabled() {
+        for scss in [
+            "#2b {x: y}\n",
+            "#2 {x: y}\n",
+            ".3c {x: y}\n",
+            ".3 {x: y}\n",
+            "#4 {x: y}\n",
+        ] {
+            let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+            match dart_sass_error(scss) {
+                Some(theirs) => {
+                    let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                    let msg = ours.trim_start_matches("Error: ");
+                    assert!(
+                        msg.starts_with(&theirs),
+                        "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                    );
+                }
+                None => eprintln!("skipping selector-digit parity case: dart-sass unavailable"),
+            }
+        }
+    }
+    assert_parity("#a2 {x: y}\n.-baz {x: y}\n.foo2 {x: y}\n");
+}
+
+#[test]
 fn parity_selector_nest_parent_in_pseudo() {
     // `selector.nest` substitutes a `&` inside a selector-list pseudo
     // (`:is`/`:where`/`:not`) with the parent, instead of nesting it as a
