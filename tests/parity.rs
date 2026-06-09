@@ -4196,6 +4196,37 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_empty_list_declaration_errors() {
+    // An empty unbracketed list (`()`, directly or via a variable/builtin)
+    // cannot be a declaration value; a bracketed `[]` and any non-empty list
+    // are fine.
+    if !enabled() {
+        return;
+    }
+    for scss in [
+        "a {b: ()}\n",
+        "a {b: (())}\n",
+        "$x: ();\na {b: $x}\n",
+        "@use \"sass:list\";\na {b: list.join((), ())}\n",
+    ] {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping empty-list parity case: dart-sass unavailable"),
+        }
+    }
+    // A bracketed empty list is a valid CSS value.
+    assert_parity("a {b: []}\n");
+}
+
+#[test]
 fn parity_raw_newline_in_string_errors() {
     // A literal newline inside a quoted string is an error; a `\` line
     // continuation or a `\a` escape is the valid way to span lines.

@@ -3250,6 +3250,14 @@ impl<'a> Evaluator<'a> {
                 d.pos,
             ));
         }
+        // An empty unbracketed list (`()`, or e.g. `list.join((), ())`) cannot
+        // serialize as a CSS value; a bracketed `[]` is fine, as is any list
+        // with at least one element.
+        if let Value::List(l) = &value {
+            if l.items.is_empty() && !l.bracketed {
+                return Err(Error::at("() isn't a valid CSS value.", d.pos));
+            }
+        }
         let vstr = value.to_css(self.compressed());
         Ok(Some(OutItem::Decl {
             prop,
