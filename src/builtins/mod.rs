@@ -26,6 +26,10 @@ use crate::value::{Color, Number, SassStr, Value};
 // argument keeps quotes; an unbracketed multi-element list is parenthesized).
 pub(crate) use meta::{inspect_element, inspect_value};
 
+// Color-space conversion, needed by `ModernColor::to_css` for the
+// out-of-range `color-mix(in …, color(xyz …) 100%, black)` fallback.
+pub(crate) use color::convert_modern;
+
 /// Dispatch a function call by name across the builtin families.
 pub(crate) fn call(
     name: &str,

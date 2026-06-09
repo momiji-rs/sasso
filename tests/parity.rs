@@ -5092,6 +5092,21 @@ fn parity_selector_list_newlines() {
 }
 
 #[test]
+fn parity_out_of_range_lightness_color_mix() {
+    // A lab/lch/oklab/oklch lightness outside [0, 100%] can't round-trip
+    // through the space's own syntax (the CSS parser clamps it), so it
+    // serializes as `color-mix(in <space>, color(xyz <unclamped>) 100%, black)`.
+    // Boundary values (exactly 0/100) and missing lightness stay in the
+    // own-space form; alpha rides inside the xyz color.
+    assert_parity(
+        "@use \"sass:color\";\na {\n  b: color.change(lab(50% 1 1), $lightness: -1%);\n  c: color.change(lab(50% 1 1), $lightness: 101%);\n  d: color.change(lch(50% 10 10deg), $lightness: -1%);\n  e: color.change(oklab(50% 0.1 0.1), $lightness: 101%);\n  f: color.change(oklch(50% 0.1 10deg), $lightness: -1%);\n  g: color.change(lab(50% 1 1 / 0.5), $lightness: -1%);\n}\n",
+    );
+    assert_parity(
+        "@use \"sass:color\";\na {\n  zero: color.change(lab(50% 1 1), $lightness: 0%);\n  hundred: color.change(lab(50% 1 1), $lightness: 100%);\n  missing: lab(none 1 1);\n  okboundary: color.change(oklch(50% 0.1 10deg), $lightness: 100%);\n}\n",
+    );
+}
+
+#[test]
 fn parity_pseudo_argument_whitespace() {
     // dart-sass trims whitespace immediately inside a pseudo's argument parens.
     // Leading whitespace is always dropped; trailing whitespace is dropped for a

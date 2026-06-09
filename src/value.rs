@@ -1501,6 +1501,29 @@ impl ModernColor {
         if self.space.is_legacy() && !self.has_missing() {
             return self.legacy_css(compressed);
         }
+        // A lab/lch/oklab/oklch lightness outside [0, 100%] cannot round-trip
+        // through the space's own function syntax (the CSS parser clamps it),
+        // so dart-sass serializes the exact value via a `color-mix()` whose
+        // first color is the unclamped xyz-d65 conversion. Only when no
+        // channel is missing (a missing channel uses a different fallback,
+        // relative color syntax, not exercised by the spec suite and left
+        // as-is here). NaN lightness also fails the range check.
+        if matches!(self.space, Lab | Lch | Oklab | Oklch) {
+            if let (Some(l), Some(_), Some(_)) = (self.channels[0], self.channels[1], self.channels[2]) {
+                let max = if matches!(self.space, Lab | Lch) {
+                    100.0
+                } else {
+                    1.0
+                };
+                // dart fuzzy compare (epsilon 1e-11): in range iff above 0 and
+                // below max, or fuzzy-EQUAL to a bound. NaN fails everything.
+                let fuzzy_eq = |a: f64, b: f64| (a - b).abs() < 1e-11;
+                let in_range = (l > 0.0 || fuzzy_eq(l, 0.0)) && (l < max || fuzzy_eq(l, max));
+                if !in_range {
+                    return self.out_of_range_css(compressed);
+                }
+            }
+        }
         match self.space {
             Rgb | Hsl | Hwb => {
                 // Legacy space with a missing channel: modern space-separated
@@ -1579,6 +1602,35 @@ impl ModernColor {
                     format!("color({space}{sp}{body}{sp}/{sp}{})", self.alpha_str(compressed))
                 }
             }
+        }
+    }
+
+    /// Serialize an out-of-range lab/lch/oklab/oklch color as
+    /// `color-mix(in <space>, color(xyz <x> <y> <z>[ / <alpha>]) 100%, black)`
+    /// (dart-sass's fallback for a lightness the own-space syntax would clamp).
+    /// Compressed form per dart: no space after commas or before `100%`, and
+    /// the irrelevant base color is the shorter `red`:
+    /// `color-mix(in lab,color(xyz x y z[/a])100%,red)`. A `none` alpha
+    /// converts to `0` in this form.
+    fn out_of_range_css(&self, compressed: bool) -> String {
+        let xyz = crate::builtins::convert_modern(self, ColorSpace::XyzD65);
+        let x = xyz.chan(0, compressed);
+        let y = xyz.chan(1, compressed);
+        let z = xyz.chan(2, compressed);
+        let alpha = self.alpha.unwrap_or(0.0);
+        let opaque = self.alpha.is_some() && (alpha - 1.0).abs() < f64::EPSILON;
+        let inner = if opaque {
+            format!("color(xyz {x} {y} {z})")
+        } else if compressed {
+            format!("color(xyz {x} {y} {z}/{})", fmt_num(alpha, true))
+        } else {
+            format!("color(xyz {x} {y} {z} / {})", fmt_num(alpha, false))
+        };
+        let space = self.space.name();
+        if compressed {
+            format!("color-mix(in {space},{inner}100%,red)")
+        } else {
+            format!("color-mix(in {space}, {inner} 100%, black)")
         }
     }
 

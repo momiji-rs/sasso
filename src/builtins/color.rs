@@ -2299,7 +2299,7 @@ fn channel_category(space: ColorSpace, idx: usize) -> Option<ChannelCategory> {
 
 /// Convert a [`ModernColor`] to a new space, preserving alpha and carrying
 /// over missing channels into analogous channels of the target (CSS Color 4).
-pub(super) fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColor {
+pub(crate) fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColor {
     if mc.space == target {
         return mc.clone();
     }
