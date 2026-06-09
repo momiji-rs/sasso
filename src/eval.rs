@@ -7640,13 +7640,28 @@ fn canonicalize_ident(raw: &str) -> String {
 fn copy_pseudo(chars: &[char], i: &mut usize, out: &mut String) {
     out.push(chars[*i]); // first ':'
     *i += 1;
-    if *i < chars.len() && chars[*i] == ':' {
+    let is_element = *i < chars.len() && chars[*i] == ':';
+    if is_element {
         out.push(':');
         *i += 1;
     }
+    let name_start = *i;
     copy_name(chars, i, out);
+    let name: String = chars[name_start..*i].iter().collect();
     if *i < chars.len() && chars[*i] == '(' {
-        let mut depth = 0i32;
+        out.push('(');
+        *i += 1;
+        // dart-sass trims the whitespace immediately inside a pseudo's argument
+        // parens (interior runs are already collapsed to a single space by
+        // `normalize_selector`). Leading whitespace is always dropped; trailing
+        // whitespace is dropped for a pseudo-CLASS or a selector-argument
+        // pseudo-element (`::slotted`), but KEPT for a text-argument
+        // pseudo-element such as `::part(foo )` / `::highlight(h )`.
+        let trim_trailing = !is_element || is_selector_pseudo_element(&name);
+        while *i < chars.len() && chars[*i] == ' ' {
+            *i += 1;
+        }
+        let mut depth = 1i32;
         while *i < chars.len() {
             let c = chars[*i];
             match c {
@@ -7660,16 +7675,41 @@ fn copy_pseudo(chars: &[char], i: &mut usize, out: &mut String) {
                     continue;
                 }
                 '(' => depth += 1,
-                ')' => depth -= 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if trim_trailing {
+                            while out.ends_with(' ') {
+                                out.pop();
+                            }
+                        }
+                        out.push(')');
+                        *i += 1;
+                        break;
+                    }
+                }
                 _ => {}
             }
             out.push(c);
             *i += 1;
-            if depth == 0 {
-                break;
-            }
         }
     }
+}
+
+/// Whether a `::name` pseudo-element takes a selector argument (so dart-sass
+/// parses and re-serializes it, trimming the argument on both sides). Other
+/// pseudo-elements (`::part`, `::highlight`) carry a raw text argument and keep
+/// its trailing whitespace. Compared case-insensitively, ignoring a vendor
+/// prefix, matching dart-sass's `_selectorPseudoElements`.
+fn is_selector_pseudo_element(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let unvendored = lower
+        .strip_prefix('-')
+        .map_or(lower.as_str(), |rest| match rest.find('-') {
+            Some(idx) => &rest[idx + 1..],
+            None => lower.as_str(),
+        });
+    matches!(unvendored, "slotted" | "cue" | "cue-region")
 }
 
 /// Copy a type/element selector, including an optional `ns|`/`*|`/`|` namespace

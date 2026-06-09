@@ -5061,3 +5061,25 @@ fn parity_selector_list_newlines() {
     // @extend through a `&,\n&` selector list still collapses to one line.
     assert_parity("%h {\n  &:hover,\n  &:focus {\n    o: 1;\n  }\n}\n.l {\n  @extend %h;\n}\n");
 }
+
+#[test]
+fn parity_pseudo_argument_whitespace() {
+    // dart-sass trims whitespace immediately inside a pseudo's argument parens.
+    // Leading whitespace is always dropped; trailing whitespace is dropped for a
+    // pseudo-CLASS or a selector-argument pseudo-element (`::slotted`), but KEPT
+    // for a text-argument pseudo-element (`::part`, `::highlight`).
+    for sel in [
+        ":nth-of-type( 2n - 1 )",
+        ":nth-of-type(2n-  1)",
+        ":nth-of-type(2n  -1)",
+        ":not( .a )",
+        ":lang(  en  )",
+        ":has(  > .a  )",
+        "::slotted(  .x  )",
+        "::part( foo )",
+        "::part(foo )",
+        "::highlight( h )",
+    ] {
+        assert_parity(&format!("{sel} {{ color: red; }}\n"));
+    }
+}
