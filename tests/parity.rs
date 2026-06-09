@@ -4196,6 +4196,18 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_private_use_char_escaping() {
+    // Private-use characters are serialized as `\<hex>` escapes in both quoted
+    // and unquoted strings (planes 15/16 too); a non-character or CJK-compat
+    // char stays raw. Control/DEL are escaped only inside a quoted string.
+    assert_parity("@use \"sass:string\";\na {b: string.split(\"\\E000\", \"\")}\n");
+    assert_parity("a {b: \"\\E000\"; c: \"\\F0000\"; d: \"\\10FFFD\"}\n");
+    assert_parity("a {b: \"\\FDD0\"; c: \"\\F900\"}\n");
+    assert_parity("@use \"sass:string\";\na {b: string.unquote(\"x\\E000 y\")}\n");
+    assert_parity("a {b: \"x\\7f y\"; c: \"x\\19 y\"}\n");
+}
+
+#[test]
 fn parity_comment_newline_normalization() {
     // CR, FF, and CRLF inside a loud comment are all normalized to LF.
     assert_parity("/* foo\r * bar */\n");

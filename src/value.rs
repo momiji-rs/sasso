@@ -282,11 +282,19 @@ pub(crate) struct SassStr {
     pub quoted: bool,
 }
 
+/// A private-use code point per dart-sass `isPrivateUseCharacter`: the BMP
+/// private-use area plus the whole of planes 15 and 16 (so `\e000`, `\f0000`,
+/// `\10fffd` escape, while a non-character like `\fdd0` or `\f900` stays raw).
+pub(crate) fn is_private_use(cp: u32) -> bool {
+    (0xE000..=0xF8FF).contains(&cp) || (0xF0000..=0x10FFFF).contains(&cp)
+}
+
 /// Serialize a string as a quoted CSS string, matching dart-sass's
 /// `_visitQuotedString`. The text holds decoded code points; this re-escapes
-/// only what it must: the chosen quote character, backslashes, and control
-/// characters (everything `0x00..=0x1F` except tab, plus `0x7F`). Double quotes
-/// are preferred; a string that contains `"` but no `'` is wrapped in `'`.
+/// only what it must: the chosen quote character, backslashes, control
+/// characters (everything `0x00..=0x1F` except tab, plus `0x7F`), and
+/// private-use characters. Double quotes are preferred; a string that contains
+/// `"` but no `'` is wrapped in `'`.
 pub(crate) fn serialize_quoted(text: &str) -> String {
     let has_double = text.contains('"');
     let has_single = text.contains('\'');
@@ -300,10 +308,10 @@ pub(crate) fn serialize_quoted(text: &str) -> String {
         if c == quote || c == '\\' {
             out.push('\\');
             out.push(c);
-        } else if (cp <= 0x1F && c != '\t') || cp == 0x7F {
-            // Control character: `\<hex>` with a trailing space only when the
-            // next character would otherwise extend the escape (a hex digit,
-            // space, or tab).
+        } else if (cp <= 0x1F && c != '\t') || cp == 0x7F || is_private_use(cp) {
+            // A control character, DEL, or a private-use character: `\<hex>`
+            // with a trailing space only when the next character would otherwise
+            // extend the escape (a hex digit, space, or tab).
             out.push('\\');
             out.push_str(&format!("{cp:x}"));
             let needs_space = chars
@@ -323,14 +331,30 @@ pub(crate) fn serialize_quoted(text: &str) -> String {
 /// Serialize an unquoted string for CSS / interpolation output (dart-sass
 /// `_visitUnquotedString`): a newline becomes a space, and a space directly
 /// after a newline is dropped so `"\a "`-style line breaks collapse to a single
-/// space; every other code point is written verbatim.
+/// space; a private-use character is escaped as `\<hex>` (control characters,
+/// unlike in a quoted string, are written verbatim here); every other code
+/// point is written verbatim.
 pub(crate) fn serialize_unquoted(text: &str) -> String {
-    if !text.contains('\n') {
+    let chars: Vec<char> = text.chars().collect();
+    if !chars.iter().any(|&c| c == '\n' || is_private_use(c as u32)) {
         return text.to_string();
     }
     let mut out = String::with_capacity(text.len());
     let mut after_newline = false;
-    for c in text.chars() {
+    for (i, &c) in chars.iter().enumerate() {
+        let cp = c as u32;
+        if is_private_use(cp) {
+            out.push('\\');
+            out.push_str(&format!("{cp:x}"));
+            let needs_space = chars
+                .get(i + 1)
+                .is_some_and(|n| n.is_ascii_hexdigit() || *n == ' ' || *n == '\t');
+            if needs_space {
+                out.push(' ');
+            }
+            after_newline = false;
+            continue;
+        }
         match c {
             '\n' => {
                 out.push(' ');
