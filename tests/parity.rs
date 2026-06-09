@@ -4196,6 +4196,32 @@ fn parity_builtin_argument_validation() {
 }
 
 #[test]
+fn parity_raw_newline_in_string_errors() {
+    // A literal newline inside a quoted string is an error; a `\` line
+    // continuation or a `\a` escape is the valid way to span lines.
+    if !enabled() {
+        return;
+    }
+    for scss in ["a {b: \"x\ny\"}\n", "a {b: \"x\ry\"}\n"] {
+        let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
+        match dart_sass_error(scss) {
+            Some(theirs) => {
+                let ours = ours.unwrap_or_else(|| panic!("expected our compile to error:\n{scss}"));
+                let msg = ours.trim_start_matches("Error: ");
+                assert!(
+                    msg.starts_with(&theirs),
+                    "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
+                );
+            }
+            None => eprintln!("skipping raw-newline parity case: dart-sass unavailable"),
+        }
+    }
+    // A `\` line continuation and a `\a` escape stay valid.
+    assert_parity("a {b: \"x\\\ny\"}\n");
+    assert_parity("a {b: \"x\\a y\"}\n");
+}
+
+#[test]
 fn parity_stray_else_errors() {
     // A `@else` / `@else if` that is not part of an `@if` chain is rejected
     // ("This at-rule is not allowed here."). A valid chain still compiles.

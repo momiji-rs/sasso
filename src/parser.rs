@@ -4267,6 +4267,12 @@ impl Parser {
                         lit.push(if c == '\0' { '\u{FFFD}' } else { c });
                     }
                 }
+                // A literal newline cannot appear inside a quoted string; it must
+                // be written as a `\` line continuation or a `\a` escape. dart-sass
+                // reports the unterminated string with `Expected "<quote>".`.
+                Some('\n' | '\r' | '\x0c') => {
+                    return Err(Error::at(format!("Expected {q}."), self.sc.position()));
+                }
                 Some(c) => {
                     lit.push(c);
                     self.sc.bump();
