@@ -4691,3 +4691,27 @@ fn parity_selector_combinator_runs() {
         "@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.unify(\"+ ~ > .c\", \"+ > ~ ~ .d\"))}\n",
     );
 }
+
+#[test]
+fn parity_selector_trailing_combinators() {
+    // Trailing combinator runs (`c >`, `d + >`) and combinator-only selectors
+    // (`>`) round-trip through nest; append rejects them, and a bogus
+    // trailing-combinator @extend extender is dropped.
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.nest(\"c\", \"d + >\"))}\n");
+    assert_parity("@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.nest(\"c\", \">\", \"d\"))}\n");
+    assert_parity(
+        "@use \"sass:selector\";\n@use \"sass:meta\";\na {b: meta.inspect(selector.nest(\"c ~\", \"d\"))}\n",
+    );
+    if enabled() {
+        // append rejects a combinator-only / trailing-combinator selector.
+        for scss in [
+            "@use \"sass:selector\";\na {b: selector.append(\".c\", \">\", \".d\")}\n",
+            "@use \"sass:selector\";\na {b: selector.append(\".c ~\", \".d\")}\n",
+        ] {
+            assert!(compile(scss, &Options::default()).is_err());
+            assert!(dart_sass(scss).is_none());
+        }
+    }
+    // A bogus trailing-combinator @extend extender is a no-op.
+    assert_parity("a {b: c}\nd + {@extend a}\n");
+}

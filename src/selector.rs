@@ -189,10 +189,13 @@ impl ComplexComponent {
 }
 
 /// A complex selector: a sequence of compound selectors joined by descendant
-/// (whitespace) or explicit combinators, e.g. `.a > .b .c`.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// (whitespace) or explicit combinators, e.g. `.a > .b .c`. `trailing` holds a
+/// "bogus" trailing combinator run (`c >`, `c + >`) — or, when `components` is
+/// empty, a combinator-only selector (`>`) — that dart-sass preserves.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub(crate) struct Complex {
     pub components: Vec<ComplexComponent>,
+    pub trailing: Vec<Combinator>,
 }
 
 impl Complex {
@@ -207,6 +210,12 @@ impl Complex {
                 out.push(' ');
             }
             out.push_str(&comp.compound.render());
+        }
+        for (j, c) in self.trailing.iter().enumerate() {
+            if j > 0 || !self.components.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(c.as_str());
         }
         out
     }
@@ -267,12 +276,15 @@ fn parse_complex(s: &str) -> Option<Complex> {
             compound,
         });
     }
-    // A trailing combinator run (`c >`, `c + >`) is handled in a later stage; for
-    // now reject it. An empty complex is unparseable.
-    if components.is_empty() || !pending.is_empty() {
+    // A trailing combinator run (`c >`, `c + >`) or a combinator-only selector
+    // (`>`) is preserved in `trailing`. A truly empty complex is unparseable.
+    if components.is_empty() && pending.is_empty() {
         return None;
     }
-    Some(Complex { components })
+    Some(Complex {
+        components,
+        trailing: pending,
+    })
 }
 
 /// Parse one compound selector starting at `*i`, advancing `*i` past it.
@@ -697,7 +709,10 @@ fn simplify_pseudo_placeholders(complex: &Complex) -> Option<Complex> {
             compound: Compound { simples },
         });
     }
-    Some(Complex { components })
+    Some(Complex {
+        components,
+        trailing: Vec::new(),
+    })
 }
 
 enum PseudoResult {
@@ -1152,6 +1167,7 @@ fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
             opts.iter()
                 .map(|seq| Complex {
                     components: seq.clone(),
+                    trailing: Vec::new(),
                 })
                 .collect()
         })
@@ -1252,7 +1268,10 @@ fn weave(path: &[Complex]) -> Vec<Complex> {
             if let (Some(comb), Some(first)) = (leading, components.first_mut()) {
                 first.set_combinator(Some(comb));
             }
-            Complex { components }
+            Complex {
+                components,
+                trailing: Vec::new(),
+            }
         })
         .collect()
 }
@@ -1739,9 +1758,11 @@ fn lcs_select_groups(group1: &[TComp], group2: &[TComp]) -> Option<Vec<TComp>> {
     // unification yields a single complex selector.
     let c1 = Complex {
         components: from_trailing(group1),
+        trailing: Vec::new(),
     };
     let c2 = Complex {
         components: from_trailing(group2),
+        trailing: Vec::new(),
     };
     let unified = unify_complex(&c1, &c2)?;
     if unified.len() == 1 {
@@ -1768,7 +1789,16 @@ fn complex_is_parent_superselector(complex1: &[TComp], complex2: &[TComp]) -> bo
     c1.push(base.clone());
     let mut c2 = from_trailing(complex2);
     c2.push(base);
-    complex_is_superselector(&Complex { components: c1 }, &Complex { components: c2 })
+    complex_is_superselector(
+        &Complex {
+            components: c1,
+            trailing: Vec::new(),
+        },
+        &Complex {
+            components: c2,
+            trailing: Vec::new(),
+        },
+    )
 }
 
 /// Compute the replacement options for one component. The first option is the
@@ -2350,6 +2380,7 @@ fn expand_compound_extender(
                         combinators: Vec::new(),
                         compound: Compound { simples: unified },
                     }],
+                    trailing: Vec::new(),
                 });
             }
         }
@@ -2390,6 +2421,7 @@ fn build_extended_compound(
                     simples: base.clone(),
                 },
             }],
+            trailing: Vec::new(),
         });
     }
     for ext in &extenders {
@@ -2417,6 +2449,7 @@ fn build_extended_compound(
 fn render_components(seq: &[ComplexComponent]) -> String {
     Complex {
         components: seq.to_vec(),
+        trailing: Vec::new(),
     }
     .render()
 }
@@ -2718,7 +2751,10 @@ pub(crate) fn unify_complex(c1: &Complex, c2: &Complex) -> Option<Vec<Complex>> 
                 first.combinators = leading.clone();
             }
         }
-        let complex = Complex { components };
+        let complex = Complex {
+            components,
+            trailing: Vec::new(),
+        };
         if seen.insert(complex.render()) {
             out.push(complex);
         }
@@ -2783,6 +2819,7 @@ fn unify_complex_multi(complexes: &[Complex]) -> Option<Vec<Complex>> {
     let path: Vec<Complex> = if without_bases.is_empty() {
         vec![Complex {
             components: from_trailing(&[base_tcomp]),
+            trailing: Vec::new(),
         }]
     } else {
         let mut path = Vec::new();
@@ -2793,10 +2830,12 @@ fn unify_complex_multi(complexes: &[Complex]) -> Option<Vec<Complex>> {
                 concatenated.push(base_tcomp.clone());
                 path.push(Complex {
                     components: from_trailing(&concatenated),
+                    trailing: Vec::new(),
                 });
             } else {
                 path.push(Complex {
                     components: from_trailing(parents),
+                    trailing: Vec::new(),
                 });
             }
         }
@@ -2844,6 +2883,9 @@ pub(crate) fn complex_to_list_parts(c: &Complex) -> Vec<String> {
             parts.push(comb.as_str().to_string());
         }
         parts.push(comp.compound.render());
+    }
+    for comb in &c.trailing {
+        parts.push(comb.as_str().to_string());
     }
     parts
 }
@@ -3019,6 +3061,7 @@ fn extend_component_compound(
     // The original component (as a one-component complex).
     let original = Complex {
         components: vec![comp.clone()],
+        trailing: Vec::new(),
     };
     // Targets whose compound is a subselector of this component's compound: each
     // matching target contributes its own woven extensions (dart-sass applies
@@ -3070,7 +3113,10 @@ fn extend_component_compound(
                 trail_combinator,
                 Compound { simples: unified },
             ));
-            let candidate = Complex { components };
+            let candidate = Complex {
+                components,
+                trailing: Vec::new(),
+            };
             let key = candidate.render();
             if seen.insert(key) {
                 options.push(candidate);
@@ -3083,6 +3129,7 @@ fn extend_component_compound(
         // component intact).
         options.push(Complex {
             components: vec![comp.clone()],
+            trailing: Vec::new(),
         });
     }
     options

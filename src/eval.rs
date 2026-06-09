@@ -910,7 +910,11 @@ impl<'a> Evaluator<'a> {
             let mut extenders = Vec::new();
             for ext in &pe.extenders {
                 if let Some(c) = crate::selector::parse_complex_one(ext) {
-                    extenders.push(c);
+                    // A bogus extender with a trailing combinator (`d +`) can't
+                    // extend anything — dart-sass drops it (with a deprecation).
+                    if c.trailing.is_empty() {
+                        extenders.push(c);
+                    }
                 }
             }
             extensions.push(crate::selector::Extension {

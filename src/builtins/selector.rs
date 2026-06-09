@@ -458,6 +458,16 @@ fn fn_append(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<
 fn append_lists(prefix: &[Complex], suffix: &[Complex], pos: Pos) -> Result<Vec<Complex>, Error> {
     let mut out: Vec<Complex> = Vec::new();
     for p in prefix {
+        // A parent with a trailing combinator (`.c ~`) can't be appended onto.
+        if !p.trailing.is_empty() {
+            return Err(Error::at(
+                format!(
+                    "Selector \"{}\" can't be used as a parent in a compound selector.",
+                    p.render()
+                ),
+                pos,
+            ));
+        }
         let p_one = p.render();
         for s in suffix {
             // The first component of the suffix must have no combinator, and its
@@ -465,6 +475,10 @@ fn append_lists(prefix: &[Complex], suffix: &[Complex], pos: Pos) -> Result<Vec<
             // selector (those can't suffix another compound), matching dart-sass
             // `_prependParent`.
             let s_str = s.render();
+            // A combinator-only suffix (`>`) has no compound to append.
+            if s.components.is_empty() {
+                return Err(Error::at(format!("Can't append {s_str} to {p_one}."), pos));
+            }
             if let Some(first) = s.components.first() {
                 let leading_blocks_append = matches!(
                     first.compound.simples.first(),
