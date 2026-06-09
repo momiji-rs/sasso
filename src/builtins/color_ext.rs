@@ -35,9 +35,10 @@ fn modify_with_space(
         },
         None => c.modern.as_ref().map(|m| m.space).unwrap_or(ColorSpace::Rgb),
     };
+    // `$color` (when passed by name) and `$space` are not channels.
     let chans: Vec<(String, &Value)> = named
         .iter()
-        .filter(|(n, _)| n != "space")
+        .filter(|(n, _)| n != "space" && n != "color")
         .map(|(n, v)| (n.clone(), v))
         .collect();
     // An explicit `$space` enables the powerless-channel missing check.

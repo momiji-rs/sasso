@@ -4520,3 +4520,15 @@ fn parity_legacy_modify_gamut_serialization() {
     // A constructed hsl color keeps its hsl format when modified in gamut.
     assert_parity("@use \"sass:color\";\na {b: color.adjust(hsl(120, 100%, 50%), $lightness: 0%)}\n");
 }
+
+#[test]
+fn parity_modify_color_named_first_arg() {
+    // `$color` passed by name (e.g. with a non-legacy color and an explicit
+    // working space) must not be treated as a channel.
+    assert_parity(
+        "@use \"sass:color\";\na {b: color.scale($color: color(a98-rgb 0.2 0.5 0.7), $red: 12%, $green: 24%, $blue: 48%)}\n",
+    );
+    assert_parity("@use \"sass:color\";\na {b: color.adjust($color: red, $red: 10)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.change($color: red, $hue: 120)}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.scale(color(display-p3 0.2 0.5 0.7), $red: 12%)}\n");
+}
