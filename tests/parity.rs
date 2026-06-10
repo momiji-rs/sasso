@@ -5199,3 +5199,50 @@ fn parity_pseudo_argument_whitespace() {
         assert_parity(&format!("{sel} {{ color: red; }}\n"));
     }
 }
+
+#[test]
+fn weave_combinator_runs_match_dart() {
+    // dart-sass's `_weaveParents` family: combinator runs (leading, trailing,
+    // multi) survive `selector.extend`/`selector.unify` losslessly, merge by
+    // dart's `_mergeLeadingCombinators`/`_mergeTrailingCombinators` rules, and
+    // bogus (multi-run) results are dropped as useless.
+    let go = |args: &str| {
+        ours(&format!(
+            "@use \"sass:selector\";\na {{b: selector.extend({args})}}\n"
+        ))
+    };
+    // Leading combinator on the extender is preserved.
+    assert_eq!(go("\".c\", \".c\", \"+ .d\""), "a {\n  b: .c, + .d;\n}\n");
+    // Two different leading combinators can't merge: extension fails.
+    assert_eq!(go("\"~ .c\", \".c\", \"+ .d\""), "a {\n  b: ~ .c;\n}\n");
+    // A trailing run on the selector is preserved on the extension.
+    assert_eq!(go("\".c +\", \".c\", \".d\""), "a {\n  b: .c +, .d +;\n}\n");
+    // The extender's trailing combinator becomes the join combinator.
+    assert_eq!(
+        go("\".c .d\", \".c\", \".e >\""),
+        "a {\n  b: .c .d, .e > .d;\n}\n"
+    );
+    // Conflicting trailing combinators can't merge.
+    assert_eq!(go("\".c ~\", \".c\", \".d >\""), "a {\n  b: .c ~;\n}\n");
+    // A multi-combinator run anywhere makes the extension useless.
+    assert_eq!(go("\".c ~ ~ .d\", \".c\", \".e\""), "a {\n  b: .c ~ ~ .d;\n}\n");
+    assert_eq!(go("\".c\", \".c\", \".d ~ + .e\""), "a {\n  b: .c;\n}\n");
+    assert_eq!(go("\"> + .c\", \".c\", \".d\""), "a {\n  b: > + .c;\n}\n");
+    // A combinator-only extender replaces the compound wholesale.
+    assert_eq!(go("\".c\", \".c\", \">\""), "a {\n  b: .c, >;\n}\n");
+    assert_eq!(go("\".c .d\", \".c\", \"~\""), "a {\n  b: .c .d, ~ .d;\n}\n");
+    // `selector.unify` rejects any multi-combinator run (dart `isUseless`).
+    assert_eq!(
+        ours("@use \"sass:selector\";\na {b: selector.unify(\".c + ~ > .d\", \".e + ~ > .f\")}\n"),
+        ""
+    );
+    // `is-superselector` is false either way for a bogus trailing run.
+    assert_eq!(
+        ours(concat!(
+            "@use \"sass:meta\";\n@use \"sass:selector\";\n",
+            "a {b: meta.inspect(selector.is-superselector(\".c\", \".c >\"))}\n",
+            "c {d: meta.inspect(selector.is-superselector(\".c >\", \".c\"))}\n"
+        )),
+        "a {\n  b: false;\n}\n\nc {\n  d: false;\n}\n"
+    );
+}
