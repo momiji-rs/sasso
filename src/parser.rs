@@ -199,7 +199,9 @@ fn parse_inner(src: &str, plain_css: bool) -> Result<Stylesheet, Error> {
 }
 
 fn is_ident_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+    // dart `isName`: any non-ASCII code point is a valid identifier char
+    // (`$vär`, `föö` need no escaping).
+    c.is_ascii_alphanumeric() || c == '-' || c == '_' || (c as u32) >= 0x80
 }
 
 /// Reject generic/unknown at-rules in a context that forbids them (function

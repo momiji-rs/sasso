@@ -6660,3 +6660,17 @@ fn color_oklch_to_oklab_round_trips_lms() {
         "a {\n  b: oklab(50% 0.1 0.1);\n}\n"
     );
 }
+
+#[test]
+fn unicode_identifiers() {
+    // Any non-ASCII code point is a valid identifier char (dart `isName`):
+    // variables, property values, and selectors carry them unescaped.
+    assert_eq!(
+        ours("$v\u{e4}r: foo;\nblat {a: $v\u{e4}r}\n"),
+        "blat {\n  a: foo;\n}\n"
+    );
+    assert_eq!(
+        ours("@charset \"UTF-8\";\nfoo {\n  bar: f\u{f6}\u{f6} b\u{e2}r; }\n"),
+        "@charset \"UTF-8\";\nfoo {\n  bar: f\u{f6}\u{f6} b\u{e2}r;\n}\n"
+    );
+}

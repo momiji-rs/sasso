@@ -49,9 +49,10 @@ struct Transpiler {
     in_css_callable: bool,
 }
 
-/// Whether `c` may appear in an identifier (mirrors the SCSS parser).
+/// Whether `c` may appear in an identifier (mirrors the SCSS parser; any
+/// non-ASCII code point is a valid identifier char like dart `isName`).
 fn is_ident_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+    c.is_ascii_alphanumeric() || c == '-' || c == '_' || (c as u32) >= 0x80
 }
 
 impl Transpiler {
