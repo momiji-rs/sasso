@@ -2580,6 +2580,7 @@ impl<'a> Evaluator<'a> {
         let mut out = Vec::new();
         let mut visited = std::collections::HashSet::new();
         self.walk_subtree(key, &mut visited, &mut out);
+        trim_leading_blanks(&mut out);
         out
     }
 
@@ -2653,6 +2654,7 @@ impl<'a> Evaluator<'a> {
                 .push((copy_key.clone(), key.to_string()));
             let mut out = Vec::new();
             self.walk_subtree(key, &mut visited, &mut out);
+            trim_leading_blanks(&mut out);
             self.import_clone = Some((k, visited));
             (copy_key, out)
         } else {
@@ -7860,6 +7862,14 @@ fn splice_nodes(sink: &mut Sink<'_>, nodes: Vec<OutNode>) {
     }
 }
 
+/// Drop leading blank separators (an unwrapped module-scope boundary can
+/// leave one at the head of a cloned subtree).
+fn trim_leading_blanks(nodes: &mut Vec<OutNode>) {
+    while matches!(nodes.first(), Some(OutNode::Blank)) {
+        nodes.remove(0);
+    }
+}
+
 /// Sentinel marking the end of a completed top-level style rule's output
 /// group (dart-sass `isGroupEnd`): the next group gets a blank line even when
 /// the group ended in a bubbled at-rule. Consumed by the next `push_group`;
@@ -7870,28 +7880,35 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     if group.is_empty() {
         return;
     }
-    // A completed style rule always separates from the next group.
-    let prev_group_end = matches!(out.last(), Some(OutNode::Raw(s)) if s == STYLE_GROUP_END);
-    if prev_group_end {
+    // The last EFFECTIVE node before this group: module-scope wrappers are
+    // judged by their last non-blank child (a module's captured CSS may end
+    // in a style-group-end sentinel from its own evaluation).
+    fn last_effective(n: &OutNode) -> &OutNode {
+        if let OutNode::ModuleScope { nodes, .. } = n {
+            if let Some(l) = nodes.iter().rev().find(|x| !matches!(x, OutNode::Blank)) {
+                return last_effective(l);
+            }
+        }
+        n
+    }
+    // A completed style rule always separates from the next group (dart
+    // isGroupEnd); a top-level sentinel is consumed here, one inside a
+    // wrapper just informs the decision (the emitters skip it).
+    let top_marker = matches!(out.last(), Some(OutNode::Raw(s)) if s == STYLE_GROUP_END);
+    if top_marker {
         out.pop();
     }
+    let last_eff = out.last().map(last_effective);
+    let prev_group_end = top_marker || matches!(last_eff, Some(OutNode::Raw(s)) if s == STYLE_GROUP_END);
     // dart-sass never prefixes a blank line after an at-rule, a passed-through
     // CSS `@import` (a `Raw` at-rule), or a loud comment: the next group packs
     // tight against them. A blank line is only inserted after a style rule (or
-    // top-level declaration) that already emitted CSS. A module-scope wrapper
-    // is judged by its last effective node.
-    fn packs_tight(n: &OutNode) -> bool {
-        match n {
-            OutNode::AtRule { .. } | OutNode::Raw(_) | OutNode::Comment(_) => true,
-            OutNode::ModuleScope { nodes, .. } => nodes
-                .iter()
-                .rev()
-                .find(|n| !matches!(n, OutNode::Blank))
-                .is_some_and(packs_tight),
-            _ => false,
-        }
-    }
-    let prev_packs_tight = out.last().is_some_and(packs_tight);
+    // top-level declaration) that already emitted CSS.
+    let prev_packs_tight = match last_eff {
+        Some(OutNode::AtRule { .. } | OutNode::Comment(_)) => true,
+        Some(OutNode::Raw(s)) => s != STYLE_GROUP_END,
+        _ => false,
+    };
     if !out.is_empty() && (prev_group_end || !prev_packs_tight) {
         out.push(OutNode::Blank);
     }
