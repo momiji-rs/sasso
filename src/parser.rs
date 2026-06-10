@@ -3812,11 +3812,11 @@ impl Parser {
     }
 
     fn and_expr(&mut self) -> Result<Expr, Error> {
-        let mut lhs = self.not_expr()?;
+        let mut lhs = self.equality()?;
         while !self.plain_css && self.try_keyword("and") {
             self.skip_ws_inline();
             let pos = self.sc.position();
-            let rhs = self.not_expr()?;
+            let rhs = self.equality()?;
             lhs = Expr::Binary {
                 op: BinOp::And,
                 lhs: Box::new(lhs),
@@ -3825,18 +3825,6 @@ impl Parser {
             };
         }
         Ok(lhs)
-    }
-
-    fn not_expr(&mut self) -> Result<Expr, Error> {
-        if !self.plain_css && self.try_keyword("not") {
-            self.skip_ws_inline();
-            let operand = self.not_expr()?;
-            return Ok(Expr::Unary {
-                op: UnOp::Not,
-                operand: Box::new(operand),
-            });
-        }
-        self.equality()
     }
 
     fn equality(&mut self) -> Result<Expr, Error> {
@@ -4109,6 +4097,18 @@ impl Parser {
     }
 
     fn unary(&mut self) -> Result<Expr, Error> {
+        // `not` is a unary operator over a single expression (dart-sass
+        // `identifierLike` → `UnaryOperation(not, singleExpression())`), so it
+        // binds tighter than every binary operator: `not 1 + 2` is
+        // `(not 1) + 2` and `not $a == $b` is `(not $a) == $b`.
+        if !self.plain_css && self.try_keyword("not") {
+            self.skip_ws_inline();
+            let operand = self.unary()?;
+            return Ok(Expr::Unary {
+                op: UnOp::Not,
+                operand: Box::new(operand),
+            });
+        }
         // Inside a calculation a unary `+`/`-` is only legal as the sign of a
         // numeric literal written tight against the digit (`-1px`, `+3`,
         // `2 * +3`). Any other unary form — separated by whitespace (`- 1px`),
@@ -4251,6 +4251,21 @@ impl Parser {
                 Ok(Expr::Interp(Box::new(e)))
             }
             Some('#') => self.parse_hex(),
+            // A leading `/` begins a slash-separated value with an empty left
+            // operand (`font: / 2` → `/2`, `(1, / 2)` → `1, /2`), matching
+            // dart-sass.
+            Some('/') if !self.plain_css && self.calc_depth == 0 => {
+                let pos = self.sc.position();
+                self.sc.bump();
+                self.skip_ws_inline();
+                let rhs = self.multiplicative()?;
+                Ok(Expr::Div {
+                    lhs: Box::new(Expr::Ident(vec![TplPiece::Lit(String::new())])),
+                    rhs: Box::new(rhs),
+                    slash: true,
+                    pos,
+                })
+            }
             Some('"') | Some('\'') => {
                 let pieces = self.parse_quoted_string()?;
                 Ok(Expr::QuotedString(pieces))

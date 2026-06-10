@@ -5536,3 +5536,19 @@ fn interp_adjacency_and_unit_dash() {
     assert_eq!(ours("a {b: 10em-1}\n"), "a {\n  b: 9em;\n}\n");
     assert_eq!(ours("a {b: #AAA/#{itpl}}\n"), "a {\n  b: #AAA/itpl;\n}\n");
 }
+
+#[test]
+fn not_precedence_and_leading_slash() {
+    // dart-sass: `not` is a unary operator over a single expression, binding
+    // tighter than every binary operator; a leading `/` begins a slash value
+    // with an empty left operand.
+    assert_eq!(ours("a {b: not 1 + 2}\n"), "a {\n  b: false2;\n}\n");
+    assert_eq!(ours("a {b: 1 + not 2}\n"), "a {\n  b: 1false;\n}\n");
+    assert_eq!(
+        ours("$a: false;\n$b: false;\na {b: not $a == $b}\n"),
+        "a {\n  b: false;\n}\n"
+    );
+    assert_eq!(ours("a {b: not (1 == 1)}\n"), "a {\n  b: false;\n}\n");
+    assert_eq!(ours("a {b: (1, / 2)}\n"), "a {\n  b: 1, /2;\n}\n");
+    assert_eq!(ours("a {b: / 2}\n"), "a {\n  b: /2;\n}\n");
+}
