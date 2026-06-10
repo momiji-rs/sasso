@@ -6054,3 +6054,45 @@ fn forwarded_members_bind_their_defining_module() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn nested_import_forward_members_and_override() {
+    let dir = std::env::temp_dir().join("sasso_parity_itf");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |n: &str, b: &str| std::fs::write(dir.join(n), b).unwrap();
+    w(
+        "_upstream.scss",
+        "@mixin b() {c: d}\n$v: old;\n@function get-v() {@return $v}\n",
+    );
+    w("_midstream.scss", "@forward \"upstream\";\n");
+    w("_up1.scss", "$b: 1;\n");
+    w("_up2.scss", "$b: 2;\n");
+    w("_mid1.scss", "@forward \"up1\";\n");
+    w("_mid2.scss", "@forward \"up2\";\n");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    // A nested `@import`'s forwarded mixins/functions are callable inside
+    // the rule (and a local assignment writes the forwarded variable)...
+    assert_eq!(
+        compile(
+            "a {\n  @import \"midstream\";\n  @include b;\n  $v: new;\n  e: get-v();\n}\n",
+            &opts
+        )
+        .unwrap(),
+        "a {\n  c: d;\n  e: new;\n}\n"
+    );
+    // ...but they are NOT visible outside the rule.
+    assert!(compile("a {@import \"midstream\"}\nb {@include b}\n", &opts).is_err());
+    // A same-named variable forwarded from a DIFFERENT module overrides the
+    // previous import's binding (sass/dart-sass#888).
+    assert_eq!(
+        compile(
+            "@import \"mid1\";\nf {a: $b}\n@import \"mid2\";\ns {a: $b}\n",
+            &opts
+        )
+        .unwrap(),
+        "f {\n  a: 1;\n}\n\ns {\n  a: 2;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

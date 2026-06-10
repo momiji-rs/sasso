@@ -444,12 +444,19 @@ pub(crate) struct Evaluator<'a> {
     /// (via `@use`/`@forward`/`meta.load-css`). An extension whose origin can
     /// reach a module along these edges may rewrite that module's CSS.
     module_deps: RefCell<HashMap<String, std::collections::HashSet<String>>>,
-    /// Global variables that were written by an `@import`ed `@forward` merge.
-    /// In dart-sass such a variable stays bound to its module: re-importing
-    /// the same forwards must not clobber an intervening assignment
-    /// (`@import "f"; $a: changed; @import "f"` keeps `changed`), while a
-    /// user-defined global IS overwritten by the first merge.
-    forwarded_globals: std::collections::HashSet<String>,
+    /// Global variables that were written by an `@import`ed `@forward` merge,
+    /// with the source module each came from (by pointer). In dart-sass such
+    /// a variable stays bound to its module: re-importing the SAME forwards
+    /// must not clobber an intervening assignment (`@import "f"; $a: changed;
+    /// @import "f"` keeps `changed`), while a user-defined global IS
+    /// overwritten by the first merge — and a forward of the same name from a
+    /// DIFFERENT module overrides the previous binding (sass/dart-sass#888).
+    forwarded_globals: HashMap<String, usize>,
+    /// Function/mixin bindings injected by a *nested* `@import`'s forward
+    /// merge, undone when the enclosing scope pops (dart scopes them
+    /// lexically; this build's callable maps are global). Each entry records
+    /// (scope depth at insertion, name, previous binding, is_mixin).
+    callable_undo: Vec<(usize, String, Option<Rc<Callable>>, bool)>,
     /// Built-in modules made available via `@use "sass:<mod>"`, keyed by the
     /// in-scope namespace (default = the part after `sass:`, or the `as ns`
     /// override). The value is the canonical built-in module name (e.g.
@@ -771,7 +778,8 @@ impl<'a> Evaluator<'a> {
             in_supports_declaration: false,
             in_plain_css: false,
             config_is_implicit: false,
-            forwarded_globals: std::collections::HashSet::new(),
+            forwarded_globals: HashMap::default(),
+            callable_undo: Vec::new(),
             current_module: String::new(),
             module_deps: RefCell::new(HashMap::default()),
             used_modules: HashMap::default(),
@@ -1223,6 +1231,24 @@ impl<'a> Evaluator<'a> {
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.scope_semi_global.pop();
+        // Undo any nested-import callable bindings scoped to the popped frame.
+        let depth_after = self.scopes.len();
+        while matches!(self.callable_undo.last(), Some((d, ..)) if *d > depth_after) {
+            let (_, name, prev, is_mixin) = self.callable_undo.pop().unwrap();
+            let map = if is_mixin {
+                &mut self.mixins
+            } else {
+                &mut self.functions
+            };
+            match prev {
+                Some(c) => {
+                    map.insert(name, c);
+                }
+                None => {
+                    map.remove(&name);
+                }
+            }
+        }
     }
 
     /// Assign a non-global variable (dart-sass `Environment.setVariable`). The
@@ -4361,23 +4387,45 @@ impl<'a> Evaluator<'a> {
                                         // value afterwards) — but a global a
                                         // previous forward-merge created stays
                                         // bound to its module, so re-importing
-                                        // must not clobber an intervening
-                                        // assignment.
-                                        if self.forwarded_globals.contains(&k) {
-                                            g.entry(k).or_insert(val);
-                                        } else {
-                                            self.forwarded_globals.insert(k.clone());
-                                            g.insert(k, val);
+                                        // the SAME module must not clobber an
+                                        // intervening assignment, while a
+                                        // forward from a DIFFERENT module
+                                        // overrides it (sass/dart-sass#888).
+                                        let src_ptr =
+                                            imported_fwd.var_src.get(&k).map(|p| *p as usize).unwrap_or(0);
+                                        match self.forwarded_globals.get(&k) {
+                                            Some(prev) if *prev == src_ptr => {
+                                                g.entry(k).or_insert(val);
+                                            }
+                                            _ => {
+                                                self.forwarded_globals.insert(k.clone(), src_ptr);
+                                                g.insert(k, val);
+                                            }
                                         }
                                     }
                                 }
-                            } else if let Some(s) = self.scopes.last_mut() {
+                            } else {
                                 // A nested `@import`'s forwarded variables join
                                 // the enclosing rule's scope (so a following
                                 // nested import's implicit configuration sees
-                                // them); functions/mixins stay module-local.
-                                for (k, val) in imported_fwd.vars {
-                                    s.insert(k, val);
+                                // them, and a local assignment updates them);
+                                // its forwarded functions/mixins become
+                                // callable too (this build's callables are
+                                // global, so they outlive the rule — dart
+                                // scopes them lexically).
+                                if let Some(s) = self.scopes.last_mut() {
+                                    for (k, val) in imported_fwd.vars {
+                                        s.insert(k, val);
+                                    }
+                                }
+                                let depth = self.scopes.len();
+                                for (k, f) in imported_fwd.functions {
+                                    let prev = self.functions.insert(k.clone(), f);
+                                    self.callable_undo.push((depth, k, prev, false));
+                                }
+                                for (k, m) in imported_fwd.mixins {
+                                    let prev = self.mixins.insert(k.clone(), m);
+                                    self.callable_undo.push((depth, k, prev, true));
                                 }
                             }
                         }
