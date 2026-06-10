@@ -5246,3 +5246,34 @@ fn weave_combinator_runs_match_dart() {
         "a {\n  b: false;\n}\n\nc {\n  d: false;\n}\n"
     );
 }
+
+#[test]
+fn selector_arg_pseudo_superselector_rules() {
+    // dart-sass `_selectorPseudoIsSuperselector` for `:nth-child(An+B of S)` /
+    // `:nth-last-child` (same name + An+B, `of` lists compared as selectors),
+    // the `::slotted` argument rule, and `SimpleSelector.isSuperselector`'s
+    // subselector-pseudos rule (`c` covers `:nth-child(n+1 of c)`).
+    let go = |s1: &str, s2: &str| {
+        ours(&format!(
+            "@use \"sass:selector\";\na {{b: selector.is-superselector(\"{s1}\", \"{s2}\")}}\n"
+        ))
+    };
+    let yes = "a {\n  b: true;\n}\n";
+    let no = "a {\n  b: false;\n}\n";
+    assert_eq!(go(":nth-child(2n of c, d)", ":nth-child(2n of c)"), yes);
+    assert_eq!(go(":nth-child(2n of c, d)", "e:nth-child(2n of c)"), yes);
+    assert_eq!(go(":nth-child(2n of c)", ":nth-child(3n of c)"), no);
+    assert_eq!(go(":nth-last-child(2n of c, d)", ":nth-last-child(2n of c)"), yes);
+    assert_eq!(
+        go(
+            ":-pfx-nth-child(n+1 of c d, e f)",
+            ":-pfx-nth-child(n+1 of c d.i)"
+        ),
+        yes
+    );
+    assert_eq!(go("::slotted(c, d)", "::slotted(c)"), yes);
+    assert_eq!(go("e::slotted(c, d)", "e::slotted(c)"), yes);
+    assert_eq!(go("::-pfx-slotted(c d, e f)", "::-pfx-slotted(c d.i)"), yes);
+    assert_eq!(go("c", ":nth-child(n+1 of c)"), yes);
+    assert_eq!(go("c", ":nth-child(n+1 of d)"), no);
+}

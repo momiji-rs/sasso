@@ -1037,7 +1037,7 @@ fn type_local_name(t: &str) -> &str {
 fn compound_is_superselector(a: &Compound, b: &Compound, parents: &[TComp]) -> bool {
     match (find_pseudo_element(a), find_pseudo_element(b)) {
         (Some((pe1, i1)), Some((pe2, i2))) => {
-            pe1 == pe2
+            pseudo_element_is_superselector(pe1, pe2)
                 && compound_components_is_superselector(&a.simples[..i1], &b.simples[..i2])
                 && compound_components_is_superselector(&a.simples[i1 + 1..], &b.simples[i2 + 1..])
         }
@@ -1054,10 +1054,95 @@ fn compound_is_superselector(a: &Compound, b: &Compound, parents: &[TComp]) -> b
                 if let Some((name, branches)) = parse_not_pseudo(text) {
                     return not_pseudo_is_super(&name, &branches, b);
                 }
+                // `:nth-child(An+B of S1)`/`:nth-last-child(...)` (possibly
+                // vendor-prefixed) match a same-named pseudo in `b` with the
+                // same An+B whose `of` list is a subselector (dart-sass
+                // `_selectorPseudoIsSuperselector`).
+                if let Some((head, anb, of_sel)) = nth_selector_parts(text) {
+                    return nth_pseudo_is_super(head, anb, of_sel, b);
+                }
             }
             b.simples.iter().any(|s2| simple_is_superselector(s1, s2))
         }),
     }
+}
+
+/// Whether pseudo-element `pe1` is a superselector of pseudo-element `pe2`
+/// (dart-sass `PseudoSelector.isSuperselector`): they are equal, or both are a
+/// same-named `::slotted(...)` whose selector arguments compare as lists.
+fn pseudo_element_is_superselector(pe1: &Simple, pe2: &Simple) -> bool {
+    if pe1 == pe2 {
+        return true;
+    }
+    let (Simple::Pseudo(t1), Simple::Pseudo(t2)) = (pe1, pe2) else {
+        return false;
+    };
+    let (Some(p1), Some(p2)) = (parse_pseudo_parts(t1), parse_pseudo_parts(t2)) else {
+        return false;
+    };
+    if unvendor(&p1.name) != "slotted" || p1.head != p2.head {
+        return false;
+    }
+    match (parse_list(&p1.arg), parse_list(&p2.arg)) {
+        (Some(l1), Some(l2)) => list_is_superselector(&l1, &l2),
+        _ => false,
+    }
+}
+
+/// Parse a (possibly vendor-prefixed) `:nth-child`/`:nth-last-child` pseudo
+/// with an `of <selector>` clause into `(head, anb, of_selector)`, where `head`
+/// is the verbatim name including the colon.
+fn nth_selector_parts(text: &str) -> Option<(&str, &str, &str)> {
+    let open = text.find('(')?;
+    if !text.ends_with(')') || text.starts_with("::") {
+        return None;
+    }
+    let head = &text[..open];
+    let name = head.trim_start_matches(':').to_ascii_lowercase();
+    if !matches!(unvendor(&name), "nth-child" | "nth-last-child") {
+        return None;
+    }
+    let arg = &text[open + 1..text.len() - 1];
+    let pos = find_of_keyword(&arg.to_ascii_lowercase())?;
+    Some((head, arg[..pos].trim(), arg[pos + 2..].trim()))
+}
+
+/// The selector branches of a subselector-pseudo *class* (dart-sass
+/// `SimpleSelector._subselectorPseudos`): the argument list of
+/// `:is`/`:matches`/`:any`/`:where`, or the `of` list of
+/// `:nth-child`/`:nth-last-child`. Vendor prefixes are allowed.
+fn subselector_pseudo_branches(text: &str) -> Option<Vec<Complex>> {
+    if let Some((_, _, of_sel)) = nth_selector_parts(text) {
+        return parse_list(of_sel);
+    }
+    let parts = parse_pseudo_parts(text)?;
+    if parts.head.starts_with("::") {
+        return None;
+    }
+    if !matches!(unvendor(&parts.name), "is" | "matches" | "any" | "where") {
+        return None;
+    }
+    parse_list(&parts.arg)
+}
+
+/// dart-sass `_selectorPseudoIsSuperselector` for `nth-child`/`nth-last-child`:
+/// some simple of `b` is a same-named pseudo with an identical An+B argument
+/// whose `of` selector list is a subselector of `pseudo1`'s.
+fn nth_pseudo_is_super(head1: &str, anb1: &str, of1: &str, b: &Compound) -> bool {
+    let Some(list1) = parse_list(of1) else {
+        return false;
+    };
+    b.simples.iter().any(|s2| {
+        let Simple::Pseudo(t2) = s2 else {
+            return false;
+        };
+        let Some((head2, anb2, of2)) = nth_selector_parts(t2) else {
+            return false;
+        };
+        head2 == head1
+            && anb2 == anb1
+            && parse_list(of2).is_some_and(|list2| list_is_superselector(&list1, &list2))
+    })
 }
 
 /// Like [`compound_is_superselector`] over raw simple-selector slices, treating
@@ -1090,6 +1175,22 @@ fn find_pseudo_element(compound: &Compound) -> Option<(&Simple, usize)> {
 fn simple_is_superselector(a: &Simple, b: &Simple) -> bool {
     if a == b {
         return true;
+    }
+    // dart-sass `SimpleSelector.isSuperselector`: any simple is a superselector
+    // of a subselector-pseudo (`:is`/`:matches`/`:any`/`:where` or
+    // `:nth-child(... of S)`/`:nth-last-child(... of S)`) when every branch's
+    // final compound contains a subselector of it.
+    if let Simple::Pseudo(text) = b {
+        if let Some(branches) = subselector_pseudo_branches(text) {
+            return branches.iter().all(|complex| {
+                to_dart(complex).comps.last().is_some_and(|last| {
+                    last.compound
+                        .simples
+                        .iter()
+                        .any(|s| simple_is_superselector(a, s))
+                })
+            });
+        }
     }
     match a {
         // `*` (no namespace) matches everything.
