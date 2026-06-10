@@ -553,13 +553,21 @@ fn split_top(s: &str, sep: char) -> Vec<String> {
 /// `target` (a single simple selector) is matched. `target` is `None` when the
 /// extend target couldn't be parsed as a single simple selector (it then never
 /// matches, but still records "not found" for the !optional check).
+#[derive(Clone)]
 pub(crate) struct Extension {
     pub target: Option<Simple>,
     /// The extending selector list (the rule body containing `@extend`).
     pub extenders: Vec<Complex>,
     pub optional: bool,
     /// Whether this extension's target was ever found in the stylesheet.
-    pub matched: std::cell::Cell<bool>,
+    /// Shared so scoped clones report back to the original.
+    pub matched: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The module keys this extension's origin can see (its own key plus its
+    /// transitive upstreams). A chained extension (an extender that is itself
+    /// extended) only links when the outer extension can see the inner one's
+    /// origin (dart-sass per-module stores).
+    pub origin: String,
+    pub origin_closure: std::rc::Rc<std::collections::HashSet<String>>,
 }
 
 /// Parse a single complex selector (one comma-free selector). Returns `None`
@@ -2523,6 +2531,19 @@ fn extend_component(comp: &TComp, extensions: &[Extension]) -> Option<Vec<DCompl
 /// extender that is itself a target of another extension is expanded into its
 /// own extenders too. `stack` guards against extension cycles.
 fn collect_extenders(target: &Simple, extensions: &[Extension], stack: &mut Vec<Simple>) -> Vec<Complex> {
+    collect_extenders_vis(target, extensions, stack, None)
+}
+
+/// Like [`collect_extenders`], but when `outer` is the origin of the
+/// extension whose extender is being chained, only extensions that can SEE
+/// that origin participate (dart-sass: `lft {@extend right-e}` doesn't link
+/// through a sibling module's extension, but a downstream module's does).
+fn collect_extenders_vis(
+    target: &Simple,
+    extensions: &[Extension],
+    stack: &mut Vec<Simple>,
+    outer: Option<&str>,
+) -> Vec<Complex> {
     if stack.contains(target) {
         return Vec::new();
     }
@@ -2533,6 +2554,11 @@ fn collect_extenders(target: &Simple, extensions: &[Extension], stack: &mut Vec<
         if t != target {
             continue;
         }
+        if let Some(outer_origin) = outer {
+            if !ext.origin_closure.contains(outer_origin) {
+                continue;
+            }
+        }
         ext.matched.set(true);
         for extender in &ext.extenders {
             // The direct extender selector itself.
@@ -2542,7 +2568,7 @@ fn collect_extenders(target: &Simple, extensions: &[Extension], stack: &mut Vec<
             if extender.components.len() == 1 && extender.components[0].compound.simples.len() == 1 {
                 let inner = &extender.components[0].compound.simples[0];
                 stack.push(target.clone());
-                let deeper = collect_extenders(inner, extensions, stack);
+                let deeper = collect_extenders_vis(inner, extensions, stack, Some(&ext.origin));
                 stack.pop();
                 out.extend(deeper);
             } else if extender.components.len() == 1 {

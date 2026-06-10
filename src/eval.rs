@@ -65,6 +65,14 @@ pub(crate) enum OutNode {
         body: Vec<OutNode>,
         has_block: bool,
     },
+    /// A module's spliced CSS, tagged with its canonical key so the extend
+    /// pass can scope extensions (dart-sass: an `@extend` affects the module's
+    /// own CSS and its transitive upstreams, never siblings or downstream).
+    /// Emits transparently as its contents.
+    ModuleScope {
+        key: String,
+        nodes: Vec<OutNode>,
+    },
     /// A bare declaration emitted directly inside an at-rule body (e.g.
     /// `@font-face { font-family: x; }`).
     AtDecl {
@@ -423,6 +431,13 @@ pub(crate) struct Evaluator<'a> {
     /// already-loaded module is then reused silently instead of erroring with
     /// "can't be configured using with".
     config_is_implicit: bool,
+    /// The canonical key of the module currently being evaluated (empty for
+    /// the root stylesheet) — stamped onto each registered `@extend`.
+    current_module: String,
+    /// Module dependency edges: user key -> the canonical keys it loads
+    /// (via `@use`/`@forward`/`meta.load-css`). An extension whose origin can
+    /// reach a module along these edges may rewrite that module's CSS.
+    module_deps: RefCell<HashMap<String, std::collections::HashSet<String>>>,
     /// Global variables that were written by an `@import`ed `@forward` merge.
     /// In dart-sass such a variable stays bound to its module: re-importing
     /// the same forwards must not clobber an intervening assignment
@@ -646,6 +661,9 @@ struct PendingExtend {
     optional: bool,
     /// Whether this `@extend` was registered inside a `@media` context.
     in_media: bool,
+    /// The canonical key of the module this `@extend` was written in
+    /// (empty for the root stylesheet).
+    origin: String,
     pos: Pos,
 }
 
@@ -682,6 +700,8 @@ impl<'a> Evaluator<'a> {
             in_plain_css: false,
             config_is_implicit: false,
             forwarded_globals: std::collections::HashSet::new(),
+            current_module: String::new(),
+            module_deps: RefCell::new(HashMap::default()),
             used_modules: HashMap::default(),
             star_modules: Vec::new(),
             used_user_modules: HashMap::default(),
@@ -982,6 +1002,7 @@ impl<'a> Evaluator<'a> {
             match crate::selector::classify_target(t) {
                 crate::selector::TargetClass::Simple(simple) => {
                     self.extends.push(PendingExtend {
+                        origin: self.current_module.clone(),
                         target: simple,
                         target_str: t.to_string(),
                         extenders: extenders.clone(),
@@ -1013,6 +1034,30 @@ impl<'a> Evaluator<'a> {
     /// according to the collected `@extend` directives, drop placeholder-only
     /// rules, and error on an unmatched non-`!optional` extend.
     fn apply_extends(&mut self, out: &mut Vec<OutNode>) -> Result<(), Error> {
+        // Per-origin upstream closures over the recorded load edges (the
+        // module keys each origin can see, including itself).
+        let deps = self.module_deps.borrow();
+        let mut closure_cache: HashMap<String, std::rc::Rc<std::collections::HashSet<String>>> =
+            HashMap::default();
+        for pe in &self.extends {
+            if closure_cache.contains_key(&pe.origin) {
+                continue;
+            }
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            seen.insert(pe.origin.clone());
+            let mut stack = vec![pe.origin.clone()];
+            while let Some(k) = stack.pop() {
+                if let Some(nexts) = deps.get(&k) {
+                    for n in nexts {
+                        if seen.insert(n.clone()) {
+                            stack.push(n.clone());
+                        }
+                    }
+                }
+            }
+            closure_cache.insert(pe.origin.clone(), std::rc::Rc::new(seen));
+        }
+        drop(deps);
         let mut extensions: Vec<crate::selector::Extension> = Vec::new();
         for pe in &self.extends {
             let mut extenders = Vec::new();
@@ -1029,7 +1074,9 @@ impl<'a> Evaluator<'a> {
                 target: Some(pe.target.clone()),
                 extenders,
                 optional: pe.optional,
-                matched: std::cell::Cell::new(false),
+                matched: std::rc::Rc::new(std::cell::Cell::new(false)),
+                origin: pe.origin.clone(),
+                origin_closure: std::rc::Rc::clone(&closure_cache[&pe.origin]),
             });
         }
 
@@ -1046,7 +1093,14 @@ impl<'a> Evaluator<'a> {
             }
         }
 
-        rewrite_nodes(out, &extensions);
+        // Per-module visibility: an extension's origin can rewrite a module's
+        // CSS when that module is (transitively) loaded by the origin.
+        let origins: Vec<String> = self.extends.iter().map(|pe| pe.origin.clone()).collect();
+        let closures: HashMap<String, std::collections::HashSet<String>> = closure_cache
+            .iter()
+            .map(|(k, v)| (k.clone(), (**v).clone()))
+            .collect();
+        rewrite_nodes_scoped(out, "", &extensions, &origins, &closures);
 
         // Report the first unmatched non-optional extend.
         for (pe, ext) in self.extends.iter().zip(extensions.iter()) {
@@ -2288,7 +2342,18 @@ impl<'a> Evaluator<'a> {
                 // (dart `Configuration.implicit`) — and re-emits its CSS at
                 // this import site (dart clones the module's CSS per import).
                 if self.config_is_implicit {
-                    splice_nodes(sink, reparent_nodes(existing.css.clone(), parents));
+                    self.module_deps
+                        .borrow_mut()
+                        .entry(self.current_module.clone())
+                        .or_default()
+                        .insert(key.clone());
+                    splice_nodes(
+                        sink,
+                        vec![OutNode::ModuleScope {
+                            key: key.clone(),
+                            nodes: reparent_nodes(existing.css.clone(), parents),
+                        }],
+                    );
                     return Ok((existing, consumed));
                 }
                 return Err(Error::at(
@@ -2300,8 +2365,19 @@ impl<'a> Evaluator<'a> {
             // configured variables); the caller's own/forwarded handling decides
             // whether the leftover configuration is an error. `meta.load-css`
             // still re-emits the cached CSS at the call site.
+            self.module_deps
+                .borrow_mut()
+                .entry(self.current_module.clone())
+                .or_default()
+                .insert(key.clone());
             if force_reemit {
-                splice_nodes(sink, reparent_nodes(existing.css.clone(), parents));
+                splice_nodes(
+                    sink,
+                    vec![OutNode::ModuleScope {
+                        key: key.clone(),
+                        nodes: reparent_nodes(existing.css.clone(), parents),
+                    }],
+                );
             }
             return Ok((existing, Vec::new()));
         }
@@ -2322,6 +2398,11 @@ impl<'a> Evaluator<'a> {
                 .insert(diag_url.clone(), Rc::from(src.as_str()));
         }
         let is_css = matches!(syntax, Syntax::Css);
+        self.module_deps
+            .borrow_mut()
+            .entry(self.current_module.clone())
+            .or_default()
+            .insert(key.clone());
         // Evaluate into a buffer so the emitted CSS can be captured on the
         // module (for per-import re-emission) before splicing into the
         // caller's sink.
@@ -2331,7 +2412,13 @@ impl<'a> Evaluator<'a> {
             self.eval_module(&key, &diag_url, &sheet, config, pos, &mut buf_sink, is_css)?
         };
         module.css = css_buf.clone();
-        splice_nodes(sink, reparent_nodes(css_buf, parents));
+        splice_nodes(
+            sink,
+            vec![OutNode::ModuleScope {
+                key: key.clone(),
+                nodes: reparent_nodes(css_buf, parents),
+            }],
+        );
         let module = Rc::new(module);
         self.module_cache.borrow_mut().insert(key, Rc::clone(&module));
         Ok((module, consumed))
@@ -2788,6 +2875,7 @@ impl<'a> Evaluator<'a> {
         let saved_config = std::mem::replace(&mut self.pending_config, config);
         let saved_consumed = std::mem::take(&mut self.consumed_config);
         let saved_selector = self.current_selector.take();
+        let saved_module = std::mem::replace(&mut self.current_module, key.to_string());
         self.loading.push(key.to_string());
 
         // A `$var: ... !global` anywhere in the module — even in a branch that
@@ -2843,6 +2931,7 @@ impl<'a> Evaluator<'a> {
         self.pending_config = saved_config;
         self.consumed_config = saved_consumed;
         self.current_selector = saved_selector;
+        self.current_module = saved_module;
         self.current_url = saved_url;
         self.current_source = saved_source;
 
@@ -6943,40 +7032,68 @@ fn is_css_import(arg: &str) -> bool {
 /// `Raw` top-level nodes and are unaffected. A no-op when there is at most one
 /// import or no rules precede any import.
 fn hoist_css_imports(out: &mut Vec<OutNode>) {
-    let is_import = |n: &OutNode| matches!(n, OutNode::Raw(s) if s.starts_with("@import"));
+    fn is_import(n: &OutNode) -> bool {
+        matches!(n, OutNode::Raw(s) if s.starts_with("@import"))
+    }
     // Hoisting only kicks in when a CSS `@import` follows a *style-producing*
     // node (a rule/at-rule/declaration). Imports interleaved only with comments
     // and blanks keep their source order (dart-sass preserves comment context).
-    let produces_css = |n: &OutNode| !matches!(n, OutNode::Blank | OutNode::Comment(_)) && !is_import(n);
-    let mut seen_css = false;
-    let mut needs_hoist = false;
-    for n in out.iter() {
-        if is_import(n) {
-            if seen_css {
-                needs_hoist = true;
-                break;
+    // ModuleScope wrappers are transparent for both detection and extraction.
+    fn scan(nodes: &[OutNode], seen_css: &mut bool) -> bool {
+        for n in nodes {
+            match n {
+                OutNode::ModuleScope { nodes, .. } => {
+                    if scan(nodes, seen_css) {
+                        return true;
+                    }
+                }
+                n if is_import(n) => {
+                    if *seen_css {
+                        return true;
+                    }
+                }
+                OutNode::Blank | OutNode::Comment(_) => {}
+                _ => *seen_css = true,
             }
-        } else if produces_css(n) {
-            seen_css = true;
         }
+        false
     }
-    if !needs_hoist {
+    let mut seen_css = false;
+    if !scan(out, &mut seen_css) {
         return;
     }
-    let original = std::mem::take(out);
-    let mut imports = Vec::new();
-    let mut rest = Vec::new();
-    for node in original {
-        match node {
-            n if is_import(&n) => imports.push(n),
-            OutNode::Blank => {}
-            other => rest.push(other),
+    fn extract(nodes: &mut Vec<OutNode>, imports: &mut Vec<OutNode>) {
+        let mut i = 0;
+        while i < nodes.len() {
+            if is_import(&nodes[i]) {
+                imports.push(nodes.remove(i));
+                // Drop a now-dangling separator after the removed import.
+                if i < nodes.len() && matches!(nodes[i], OutNode::Blank) {
+                    nodes.remove(i);
+                }
+                continue;
+            }
+            if let OutNode::ModuleScope { nodes: inner, .. } = &mut nodes[i] {
+                extract(inner, imports);
+            }
+            i += 1;
         }
     }
-    // Imports first (tight, no blank between them), then a blank, then the rest.
+    let mut imports = Vec::new();
+    let original = std::mem::take(out);
+    let mut rest = Vec::new();
+    for node in original {
+        rest.push(node);
+    }
+    extract(&mut rest, &mut imports);
+    // Imports first (tight, no blank between them), then a blank, then the rest
+    // (dropping top-level blanks and regrouping).
     out.extend(imports);
     for node in rest {
-        push_group(out, vec![node]);
+        match node {
+            OutNode::Blank => {}
+            other => push_group(out, vec![other]),
+        }
     }
 }
 
@@ -7612,10 +7729,72 @@ fn root_rule_contains_target(nodes: &[OutNode], target: &crate::selector::Simple
 /// the collected extensions and dropping rules whose every complex selector
 /// still contains a placeholder. Recurses into at-rule bodies (e.g. `@media`),
 /// but NOT into `@keyframes` (whose "selectors" are keyframe stops like `50%`).
+/// Scoped extend pass: rewrite `nodes` belonging to module `scope` with the
+/// extensions visible there (the module's own plus those of every module that
+/// (transitively) loads it — dart-sass per-module ExtensionStores), recursing
+/// into [`OutNode::ModuleScope`] wrappers with their own scope.
+fn rewrite_nodes_scoped(
+    nodes: &mut Vec<OutNode>,
+    scope: &str,
+    all: &[crate::selector::Extension],
+    origins: &[String],
+    closures: &HashMap<String, std::collections::HashSet<String>>,
+) {
+    // The extensions whose origin can reach `scope` along load edges. A
+    // private placeholder target (`%-name`/`%_name`) is module-private:
+    // only extensions written in the same module may match it.
+    let visible: Vec<crate::selector::Extension> = all
+        .iter()
+        .zip(origins.iter())
+        .filter(|(e, o)| {
+            let reachable =
+                o.as_str() == scope || closures.get(o.as_str()).is_some_and(|c| c.contains(scope));
+            let private_ok = match &e.target {
+                Some(crate::selector::Simple::Placeholder(n)) if n.starts_with('-') || n.starts_with('_') => {
+                    o.as_str() == scope
+                }
+                _ => true,
+            };
+            reachable && private_ok
+        })
+        .map(|(e, _)| e.clone())
+        .collect();
+    rewrite_with_scopes(nodes, &visible, all, origins, closures);
+}
+
+/// The walk shared by [`rewrite_nodes_scoped`]: rules use the current scope's
+/// `visible` extensions; a nested [`OutNode::ModuleScope`] re-enters with its
+/// own scope.
+fn rewrite_with_scopes(
+    nodes: &mut Vec<OutNode>,
+    visible: &[crate::selector::Extension],
+    all: &[crate::selector::Extension],
+    origins: &[String],
+    closures: &HashMap<String, std::collections::HashSet<String>>,
+) {
+    for node in nodes.iter_mut() {
+        match node {
+            OutNode::ModuleScope { key, nodes } => {
+                let key = key.clone();
+                rewrite_nodes_scoped(nodes, &key, all, origins, closures);
+            }
+            OutNode::AtRule { name, body, .. } if !is_keyframes_name(name) => {
+                rewrite_with_scopes(body, visible, all, origins, closures);
+            }
+            _ => {}
+        }
+    }
+    rewrite_nodes(nodes, visible);
+}
+
 fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extension]) {
     let mut i = 0;
     while i < nodes.len() {
         let drop = match &mut nodes[i] {
+            // Already rewritten (with its own scope) by rewrite_with_scopes;
+            // drop the wrapper when nothing visible remains inside (so its
+            // group separator doesn't leave a stray blank line).
+            OutNode::ModuleScope { nodes, .. } => nodes.iter().all(|n| matches!(n, OutNode::Blank)),
             OutNode::Rule {
                 selectors,
                 linebreaks,
@@ -7643,12 +7822,11 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extens
                 has_block,
                 ..
             } => {
-                if !is_keyframes_name(name) {
-                    rewrite_nodes(body, extensions);
-                }
-                // A conditional group rule (`@media`/`@supports`) whose body is
-                // emptied by placeholder removal produces no CSS, so drop it
-                // (dart-sass omits empty `@media`/`@supports`).
+                // Body rules were already rewritten by rewrite_with_scopes
+                // (which knows the per-module scopes); only the empty-group
+                // drop remains here. A conditional group rule
+                // (`@media`/`@supports`) whose body is emptied by placeholder
+                // removal produces no CSS, so drop it.
                 *has_block && body.is_empty() && (name == "media" || name == "supports")
             }
             _ => false,

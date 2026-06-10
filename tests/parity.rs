@@ -5666,3 +5666,60 @@ fn nest_parent_list_and_cartesian() {
     )
     .is_err());
 }
+
+#[test]
+fn module_scoped_extend() {
+    // dart-sass per-module ExtensionStores: an @extend affects the module's
+    // own CSS and its transitive upstreams — never siblings or downstream —
+    // and a chained extension only links when the outer extension's origin is
+    // visible to the inner one. Private placeholders are module-private.
+    let dir = std::env::temp_dir().join(format!("sasso_scoped_ext_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+
+    // Siblings don't see each other.
+    std::fs::write(
+        dir.join("_left.scss"),
+        "left-e {in: left}\nlx {@extend right-e !optional}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("_right.scss"),
+        "right-e {in: right}\nrx {@extend left-e !optional}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile("@use \"left\";\n@use \"right\";\n", &opts).expect("sibling"),
+        "left-e {\n  in: left;\n}\n\nright-e {\n  in: right;\n}\n"
+    );
+    // Upstream extends work; downstream don't.
+    std::fs::write(dir.join("_up.scss"), "up-style {a: b}\n").unwrap();
+    assert_eq!(
+        compile("@use \"up\";\nme {@extend up-style}\n", &opts).expect("upstream"),
+        "up-style, me {\n  a: b;\n}\n"
+    );
+    // Diamond: both sides extend shared, but don't chain through each other.
+    std::fs::write(dir.join("_shared.scss"), "in-shared {x: y}\n").unwrap();
+    std::fs::write(
+        dir.join("_dl.scss"),
+        "@use \"shared\";\nleft-e2 {@extend in-shared}\nl2 {@extend right-e2 !optional}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("_dr.scss"),
+        "@use \"shared\";\nright-e2 {@extend in-shared}\nr2 {@extend left-e2 !optional}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile("@use \"dl\";\n@use \"dr\";\n", &opts).expect("diamond"),
+        "in-shared, right-e2, left-e2 {\n  x: y;\n}\n"
+    );
+    // A private placeholder can't be extended from another module.
+    std::fs::write(dir.join("_po.scss"), "%-priv {x: y}\nin-other {@extend %-priv}\n").unwrap();
+    assert_eq!(
+        compile("@use \"po\";\nme {@extend %-priv !optional}\n", &opts).expect("private"),
+        "in-other {\n  x: y;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -33,6 +33,12 @@ fn emit_expanded(nodes: &[OutNode]) -> String {
 fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize) {
     let indent = "  ".repeat(depth);
     match node {
+        // A module-scope wrapper is transparent: emit its contents in place.
+        OutNode::ModuleScope { nodes, .. } => {
+            for n in nodes {
+                emit_node_expanded(out, n, depth);
+            }
+        }
         OutNode::Rule {
             selectors,
             linebreaks,
@@ -257,6 +263,11 @@ fn compressed_nested_at_rule(name: &str, prelude: &str, items: &[OutItem]) -> St
 
 fn emit_node_compressed(out: &mut String, node: &OutNode) {
     match node {
+        OutNode::ModuleScope { nodes, .. } => {
+            for n in nodes {
+                emit_node_compressed(out, n);
+            }
+        }
         OutNode::Rule {
             selectors,
             linebreaks: _,
