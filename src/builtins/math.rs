@@ -465,26 +465,25 @@ fn unary(
     Ok(num_value(n.copy_units(op(n.value))))
 }
 
-/// `sign(x)`: -1, 0, or 1, preserving the operand's unit. `sign(0)` is `0`
-/// (not `0px`); dart-sass keeps the unit on non-zero results.
+/// `sign(x)`: -1, 0, or 1, with the operand's full units (also for zero) —
+/// dart-sass `SassNumber(value.sign).coerceToMatch(arg)`. `±0`/NaN pass
+/// through as themselves (`1 / sign(-0.0)` is `-infinity`); a `%` operand
+/// can't simplify (its sign could flip after resolution against the unknown
+/// reference value), so the call is preserved.
 fn sign(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     check_max_args(pos_args, named, 1, pos)?;
     let n = require_num(&["number"], pos_args, named, 0, "sign", pos)?;
-    let s = if n.value.is_nan() {
-        f64::NAN
-    } else if n.value > 0.0 {
+    if n.numer_units().iter().any(|u| u == "%") {
+        return Ok(preserved_call("sign", &all_args(pos_args, named)));
+    }
+    let s = if n.value > 0.0 {
         1.0
     } else if n.value < 0.0 {
         -1.0
     } else {
-        0.0
+        n.value
     };
-    let unit = if s == 0.0 {
-        String::new()
-    } else {
-        n.unit().to_string()
-    };
-    Ok(num_value(Number::with_unit(s, unit)))
+    Ok(num_value(n.copy_units(s)))
 }
 
 /// `pow(base, exp)`: both operands must be unitless; result is unitless.
@@ -1387,10 +1386,13 @@ mod tests {
     }
 
     #[test]
-    fn sign_keeps_unit_except_zero() {
+    fn sign_keeps_units() {
         assert_eq!(call("sign", &[n(-5.0, "px")]).to_css(false), "-1px");
-        assert_eq!(call("sign", &[n(0.0, "px")]).to_css(false), "0");
+        // Zero keeps the operand's unit too (dart `coerceToMatch`).
+        assert_eq!(call("sign", &[n(0.0, "px")]).to_css(false), "0px");
         assert_eq!(call("sign", &[n(3.0, "")]).to_css(false), "1");
+        // A `%` operand preserves the call.
+        assert_eq!(call("sign", &[n(7.0, "%")]).to_css(false), "sign(7%)");
     }
 
     #[test]

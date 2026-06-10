@@ -4503,15 +4503,44 @@ impl<'a> Evaluator<'a> {
                             _ => false,
                         };
                         if !nodes.iter().enumerate().all(|(i, n)| simplified(i, n)) {
-                            let parts: Vec<String> =
-                                nodes.iter().map(|n| n.to_calc_css(self.compressed())).collect();
-                            return Ok(Value::Str(SassStr {
-                                text: format!("round({})", parts.join(", ")),
-                                quoted: false,
+                            // A preserved round is a first-class Calculation
+                            // (`meta.calc-name`/`calc-args` see it).
+                            return Ok(Value::Calc(CalcNode::Func {
+                                name: "round".to_string(),
+                                args: nodes,
                             }));
                         }
                         // Fall through to the normal builtin path below.
                     }
+                }
+                // `min`/`max` are likewise CSS calculations: their arguments
+                // fold as calc expressions, and any unsimplifiable operand
+                // (`1px + var(--c)`) preserves the call with the folded
+                // subtrees spelled as calc (`max(5px, 1px + var(--c))`). When
+                // every argument folds to a number the builtin computes as
+                // before, and SassScript-only operators (`7 % 3`) keep the
+                // whole call on the legacy path.
+                if (name.eq_ignore_ascii_case("min") || name.eq_ignore_ascii_case("max"))
+                    && !self.functions.contains_key(name)
+                    && !args.is_empty()
+                    && !args.iter().any(|a| a.splat || a.name.is_some())
+                    && !args.iter().any(|a| expr_has_non_calc_op(&a.value))
+                {
+                    if let Ok(nodes) = args
+                        .iter()
+                        .map(|a| self.eval_calc(&a.value))
+                        .collect::<Result<Vec<CalcNode>, Error>>()
+                    {
+                        if !nodes.iter().all(|n| matches!(n, CalcNode::Number(_))) {
+                            // A preserved min/max is a first-class Calculation
+                            // (`meta.calc-name`/`calc-args` see it).
+                            return Ok(Value::Calc(CalcNode::Func {
+                                name: name.to_ascii_lowercase(),
+                                args: nodes,
+                            }));
+                        }
+                    }
+                    // Fall through to the normal builtin path below.
                 }
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.

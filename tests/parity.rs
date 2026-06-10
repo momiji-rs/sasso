@@ -5456,3 +5456,27 @@ fn round_calculation_semantics() {
     assert_eq!(ours("a {b: round(2.5)}\n"), "a {\n  b: 3;\n}\n");
     assert!(compile("a {b: round(7 % 3, 1)}\n", &Options::default()).is_err());
 }
+
+#[test]
+fn sign_and_minmax_calculation_semantics() {
+    // `sign()` keeps the operand's full units (also for zero), `±0` passes
+    // through (`1 / sign(-0.0)` is `-infinity`), and a `%` operand preserves
+    // the call. `min`/`max` arguments fold as calc expressions and preserve
+    // the call with folded subtrees when an operand doesn't simplify.
+    assert_eq!(ours("a {b: sign(0px)}\n"), "a {\n  b: 0px;\n}\n");
+    assert_eq!(ours("a {b: sign(7%)}\n"), "a {\n  b: sign(7%);\n}\n");
+    assert_eq!(ours("a {b: sign(-7px / 4em) * 1em}\n"), "a {\n  b: -1px;\n}\n");
+    assert_eq!(
+        ours("@use \"sass:math\";\na {b: math.div(1, sign(-0.0))}\n"),
+        "a {\n  b: calc(-infinity);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: min(1px + 2px - var(--c), 5px)}\n"),
+        "a {\n  b: min(3px - var(--c), 5px);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: max(5px, 1px + var(--c))}\n"),
+        "a {\n  b: max(5px, 1px + var(--c));\n}\n"
+    );
+    assert_eq!(ours("a {b: min(3px + 4px, 10px)}\n"), "a {\n  b: 7px;\n}\n");
+}
