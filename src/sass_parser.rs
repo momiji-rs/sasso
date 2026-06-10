@@ -208,6 +208,13 @@ impl Transpiler {
         // deeper-indented lines after the prelude completes are its body.
         self.extend_directive_prelude(&mut logical, indent)?;
 
+        // The indented syntax allows *unquoted* `@import` URLs (`@import foo,
+        // sub/bar`, `@import other.css`); quote each bare URL token for the
+        // SCSS grammar (which requires quoted strings or `url(…)`).
+        if directive_name(&logical).as_deref() == Some("import") {
+            logical = quote_import_urls(&logical);
+        }
+
         // The statement keyword decides whether a `;` or a `{ … }` block is
         // appropriate, and handles custom props.
         self.emit_statement(&logical, child_indent, indent, line_no)
@@ -365,8 +372,14 @@ impl Transpiler {
         // later, so a trailing comma there is also not consumed here.
         let comma_continues =
             !logical.starts_with('@') && !logical.starts_with('$') && find_decl_colon(&logical).is_none();
+        // A *declaration value* mid-expression continues on a trailing binary
+        // operator (`b: 3 %` + `2` is the modulo `3 % 2`).
+        let op_continues =
+            !logical.starts_with('@') && !logical.starts_with('$') && find_decl_colon(&logical).is_some();
         loop {
-            if continuation_pending(&logical, comma_continues) {
+            if continuation_pending(&logical, comma_continues)
+                || (op_continues && ends_with_value_operator(&logical))
+            {
                 // Need a following line to continue. Continuations join the
                 // *immediate next physical line* (dart-sass does not skip blanks
                 // here).
@@ -914,6 +927,129 @@ fn continuation_pending(s: &str, comma_continues: bool) -> bool {
         return true;
     }
     comma_continues && t.ends_with(',')
+}
+
+/// Quote the bare URL tokens of an indented-syntax `@import` for the SCSS
+/// grammar: in each top-level comma part, an unquoted first token that is not
+/// a `url(…)` call and contains no interpolation gets double quotes
+/// (`@import foo, sub/bar` -> `@import "foo", "sub/bar"`); any following
+/// modifier text is kept verbatim.
+fn quote_import_urls(logical: &str) -> String {
+    let Some(rest) = logical.trim_start().strip_prefix("@import") else {
+        return logical.to_string();
+    };
+    let mut out = String::from("@import ");
+    let mut first = true;
+    for part in split_top_level_commas(rest.trim()) {
+        if !first {
+            out.push_str(", ");
+        }
+        first = false;
+        let part = part.trim();
+        let token_end = part.find(char::is_whitespace).unwrap_or(part.len());
+        let (token, modifiers) = part.split_at(token_end);
+        let bare = !token.is_empty()
+            && !token.starts_with('"')
+            && !token.starts_with('\'')
+            && !token.contains("#{")
+            && !token.to_ascii_lowercase().starts_with("url(");
+        if bare {
+            out.push('"');
+            out.push_str(token);
+            out.push('"');
+        } else {
+            out.push_str(token);
+        }
+        out.push_str(modifiers);
+    }
+    out
+}
+
+/// Split on top-level commas (outside brackets and quoted strings).
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let cs: Vec<char> = s.chars().collect();
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        match c {
+            '"' | '\'' => {
+                cur.push(c);
+                i += 1;
+                while i < cs.len() {
+                    cur.push(cs[i]);
+                    if cs[i] == '\\' && i + 1 < cs.len() {
+                        i += 1;
+                        cur.push(cs[i]);
+                    } else if cs[i] == c {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            '(' | '[' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' | ']' => {
+                depth -= 1;
+                cur.push(c);
+            }
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(c),
+        }
+        i += 1;
+    }
+    parts.push(cur);
+    parts
+}
+
+/// Whether a declaration value ends mid-expression with a binary operator
+/// awaiting its right operand on the next line (`3 %`, `3 +`, `true and`,
+/// `3 /`, `c -`). A `-` directly attached to an identifier character is part
+/// of the identifier (`c-` does not continue); `=` only continues as part of
+/// a comparison (`==`, `<=`, `>=`, `!=`).
+fn ends_with_value_operator(s: &str) -> bool {
+    let t = trim_trailing_loud_comments(s);
+    if t.ends_with("==") || t.ends_with("<=") || t.ends_with(">=") || t.ends_with("!=") {
+        return true;
+    }
+    if let Some(rest) = t.strip_suffix('-') {
+        let prev = rest.chars().next_back();
+        return !matches!(prev, Some(p) if is_ident_char(p));
+    }
+    if let Some(rest) = t.strip_suffix('%') {
+        // `3%` is a percent unit (complete); only a detached `%` is the
+        // modulo operator awaiting its right operand.
+        let prev = rest.chars().next_back();
+        return matches!(prev, Some(p) if p.is_whitespace());
+    }
+    if let Some(c) = t.chars().next_back() {
+        if matches!(c, '+' | '*' | '/' | '<' | '>') {
+            return true;
+        }
+    }
+    // Trailing keyword operator (whole word, case-insensitive).
+    let last_word: String = t
+        .chars()
+        .rev()
+        .take_while(|c| is_ident_char(*c))
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if last_word.len() < t.trim_end().len() {
+        // Must be preceded by whitespace/boundary to be the operator word.
+        let before = &t[..t.len() - last_word.len()];
+        if !before.ends_with(char::is_whitespace) {
+            return false;
+        }
+    }
+    matches!(last_word.to_ascii_lowercase().as_str(), "and" | "or" | "not")
 }
 
 /// Strip any run of complete trailing `/* … */` comments (and the whitespace

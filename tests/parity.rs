@@ -5920,3 +5920,16 @@ fn sass_statement_escape_and_nested_linebreaks() {
     );
     assert_parity("a,\nb {\n  c, d {x: y}\n}\n");
 }
+
+#[test]
+fn sass_value_operator_continuation_and_unquoted_imports() {
+    // A declaration value continues on a trailing binary operator.
+    assert_eq!(ours_sass("a\n  b: 3 %\n  2\n"), "a {\n  b: 1;\n}\n");
+    assert_eq!(ours_sass("a\n  b: 3 +\n  2\n"), "a {\n  b: 5;\n}\n");
+    assert_eq!(ours_sass("a\n  b: true and\n  false\n"), "a {\n  b: false;\n}\n");
+    // `3%` is a complete percent unit and `c-` ends an identifier — no join.
+    assert_eq!(ours_sass("a\n  b: 3%\n"), "a {\n  b: 3%;\n}\n");
+    // An unquoted indented-syntax `@import` URL is quoted for the SCSS
+    // grammar; a `.css` one stays a plain-CSS import.
+    assert_eq!(ours_sass("@import other.css\n"), "@import \"other.css\";\n");
+}
