@@ -2790,6 +2790,20 @@ impl<'a> Evaluator<'a> {
         let saved_selector = self.current_selector.take();
         self.loading.push(key.to_string());
 
+        // A `$var: ... !global` anywhere in the module — even in a branch that
+        // never evaluates — creates a variable slot defaulting to null, so the
+        // module always exposes the same members regardless of how it's
+        // evaluated (dart-sass).
+        if !css {
+            let mut slots: Vec<String> = Vec::new();
+            collect_global_var_decls(&sheet.stmts, &mut slots);
+            if let Some(g) = self.scopes.first_mut() {
+                for name in slots {
+                    g.entry(name).or_insert(Value::Null);
+                }
+            }
+        }
+
         // A plain-CSS module preserves its nesting (no Sass flattening, `&` kept
         // literal); a Sass module runs the normal evaluator.
         let result = if css {
@@ -4017,6 +4031,19 @@ impl<'a> Evaluator<'a> {
                             let saved_star = std::mem::take(&mut self.star_modules);
                             let saved_used_user = std::mem::take(&mut self.used_user_modules);
                             let saved_star_user = std::mem::take(&mut self.star_user_modules);
+                            // Nested `$var: ... !global` declarations in the
+                            // imported sheet register null slots in the
+                            // importing module too (dart-sass: members are
+                            // statically visible).
+                            {
+                                let mut slots: Vec<String> = Vec::new();
+                                collect_global_var_decls(&sheet.stmts, &mut slots);
+                                if let Some(g) = self.scopes.first_mut() {
+                                    for name in slots {
+                                        g.entry(name).or_insert(Value::Null);
+                                    }
+                                }
+                            }
                             // The imported file's own `@forward`s expose members
                             // as if defined in the importer; collect them
                             // separately, then merge into the current scope.
@@ -6132,6 +6159,34 @@ fn expr_contains_calc_substitution(e: &Expr) -> bool {
         Expr::Calc { inner } => expr_contains_calc_substitution(inner),
         Expr::List { items, .. } => items.iter().any(expr_contains_calc_substitution),
         _ => false,
+    }
+}
+
+/// Collect the names of every `$var: ... !global` declaration nested inside
+/// block statements (rules, conditionals, loops, mixins are NOT entered —
+/// dart-sass registers slots for statically visible nested globals in rules
+/// and control flow). Top-level declarations register themselves on
+/// evaluation.
+fn collect_global_var_decls(stmts: &[Stmt], out: &mut Vec<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::VarDecl(v) if v.is_global && v.namespace.is_none() => out.push(v.name.clone()),
+            Stmt::Rule(r) => collect_global_var_decls(&r.body, out),
+            Stmt::If(branches) => {
+                for b in branches {
+                    collect_global_var_decls(&b.body, out);
+                }
+            }
+            Stmt::For { body, .. }
+            | Stmt::Each { body, .. }
+            | Stmt::While { body, .. }
+            | Stmt::Media { body, .. }
+            | Stmt::Supports { body, .. }
+            | Stmt::AtRoot { body, .. }
+            | Stmt::Keyframes { body, .. } => collect_global_var_decls(body, out),
+            Stmt::AtRule { body: Some(b), .. } => collect_global_var_decls(b, out),
+            _ => {}
+        }
     }
 }
 

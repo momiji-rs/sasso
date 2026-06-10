@@ -5614,3 +5614,28 @@ fn load_css_reemits_cached_module() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn nested_global_decl_registers_module_slot() {
+    // A `$var: ... !global` nested in a never-evaluated branch still creates
+    // a module variable slot defaulting to null (dart-sass: a module exposes
+    // the same members regardless of how it's evaluated).
+    let dir = std::env::temp_dir().join(format!("sasso_global_slot_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    std::fs::write(
+        dir.join("_other.scss"),
+        "x {\n  @if false {\n    $member: value !global;\n  }\n}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile(
+            "@use \"sass:meta\";\n@use \"other\";\na {b: meta.inspect(other.$member)}\n",
+            &opts
+        )
+        .expect("nested global slot"),
+        "a {\n  b: null;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
