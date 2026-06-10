@@ -493,6 +493,11 @@ pub(crate) struct Evaluator<'a> {
     /// style rules in dart-sass, so nested at-rules do not bubble out of them
     /// and frame selectors get keyframe normalization (`E` -> `e`).
     in_keyframes: bool,
+    /// dart `_atRootExcludingStyleRule`: inside `@at-root` (before the first
+    /// nested style rule) the implicit parent join is disabled — `&` still
+    /// resolves against the enclosing rule, but a plain selector stays at the
+    /// root instead of nesting under it.
+    at_root_excluding_style_rule: bool,
     /// Global variables that were written by an `@import`ed `@forward` merge,
     /// with the source module each came from (by pointer). In dart-sass such
     /// a variable stays bound to its module: re-importing the SAME forwards
@@ -852,6 +857,7 @@ impl<'a> Evaluator<'a> {
             load_css_copies: RefCell::new(Vec::new()),
             copy_counter: std::cell::Cell::new(0),
             in_keyframes: false,
+            at_root_excluding_style_rule: false,
             import_clone: None,
             current_file_dir: None,
             media_hoist: Vec::new(),
@@ -1140,7 +1146,9 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
         parents: &[String],
     ) -> Result<(), Error> {
-        if parents.is_empty() {
+        // dart checks `_styleRule` (null inside `@at-root` before any nested
+        // rule), not `_styleRuleIgnoringAtRoot` (which still feeds `&`).
+        if parents.is_empty() || self.at_root_excluding_style_rule {
             return Err(Error::at("@extend may only be used within style rules.", pos));
         }
         let extenders = self.current_selector.clone().unwrap_or_else(|| parents.to_vec());
@@ -3916,7 +3924,7 @@ impl<'a> Evaluator<'a> {
                     self.eval_supports(condition, body, parents, sink)?;
                 }
                 Stmt::AtRoot { query, body } => {
-                    self.eval_at_root(query.as_deref(), body, sink)?;
+                    self.eval_at_root(query.as_deref(), body, parents, sink)?;
                 }
                 Stmt::Keyframes { name, prelude, body } => {
                     self.eval_keyframes(name, prelude, body, sink)?;
@@ -3956,7 +3964,7 @@ impl<'a> Evaluator<'a> {
                 .filter(|p| !p.is_empty())
                 .collect()
         } else {
-            resolve_selectors(&sel_str, parents)
+            resolve_selectors_opt(&sel_str, parents, !self.at_root_excluding_style_rule)
         };
         // Drop "bogus combinator" complex selectors from the emitted block;
         // dart-sass omits them from the generated CSS. A top-level TRAILING
@@ -4005,6 +4013,9 @@ impl<'a> Evaluator<'a> {
         self.push_scope(false);
         let prev_selector = self.current_selector.replace(current.clone());
         let prev_linebreaks = std::mem::replace(&mut self.current_linebreaks, full_lbs);
+        // Entering a style rule re-enables the implicit parent join for
+        // anything nested below it (dart resets _atRootExcludingStyleRule).
+        let prev_at_root = std::mem::replace(&mut self.at_root_excluding_style_rule, false);
         let mut items: Vec<OutItem> = Vec::new();
         let mut nested: Vec<OutNode> = Vec::new();
         let result = {
@@ -4024,6 +4035,7 @@ impl<'a> Evaluator<'a> {
         };
         self.current_selector = prev_selector;
         self.current_linebreaks = prev_linebreaks;
+        self.at_root_excluding_style_rule = prev_at_root;
         self.pop_scope();
         result?;
         sink.emit_style_rule(nested);
@@ -4057,8 +4069,14 @@ impl<'a> Evaluator<'a> {
         // selector into its body — `a { @font-face { d: e } }` emits a bare
         // `@font-face { d: e }`. Every other at-rule (including `@page`,
         // `@-moz-font-face`, and unknown directives) wraps its body in the
-        // enclosing selector.
-        let body_parents: &[String] = if name == "font-face" { &[] } else { parents };
+        // enclosing selector — UNLESS we're directly inside `@at-root`,
+        // where there is no style rule to wrap with (dart's _styleRule is
+        // null even though `&` still resolves).
+        let body_parents: &[String] = if name == "font-face" || self.at_root_excluding_style_rule {
+            &[]
+        } else {
+            parents
+        };
         let out_body = self.eval_at_body(stmts, body_parents)?;
         sink.push_at_rule(OutNode::AtRule {
             name: name.to_string(),
@@ -4557,24 +4575,40 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
-    /// Evaluate `@at-root`: run the body with the parent-selector context reset
-    /// to the document root, then hoist its output. The optional query is
-    /// accepted but not yet honoured (the common no-query case is supported).
+    /// Evaluate `@at-root`: hoist the body's output to the document root. The
+    /// parent-selector context is KEPT — dart resolves `&` against the
+    /// enclosing rule but disables the implicit parent join
+    /// (`implicitParent: !_atRootExcludingStyleRule`), so `@at-root & {…}`
+    /// re-emits the parent at the root while `@at-root .x {…}` stays `.x`.
+    /// The optional query is accepted but not yet honoured (the common
+    /// no-query case is supported).
     fn eval_at_root(
         &mut self,
         _query: Option<&[TplPiece]>,
         body: &[Stmt],
+        parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         self.push_scope(false);
+        let saved = self.at_root_excluding_style_rule;
+        self.at_root_excluding_style_rule = true;
         let mut out: Vec<OutNode> = Vec::new();
         let res = {
             let mut child = Sink::AtRoot(&mut out);
-            self.exec(body, &[], &mut child)
+            self.exec(body, parents, &mut child)
         };
+        self.at_root_excluding_style_rule = saved;
         self.pop_scope();
         res?;
+        // Hoisted root-level nodes separate with a blank line only after a
+        // completed style rule (dart's isGroupEnd: `#inc {…}` → blank →
+        // `@supports`, but `@supports {…}` → `@foo` packs tight).
+        let mut prev_was_rule = false;
         for node in out {
+            if prev_was_rule {
+                sink.push_at_rule(OutNode::Blank);
+            }
+            prev_was_rule = matches!(node, OutNode::Rule { .. });
             sink.push_at_rule(node);
         }
         Ok(())
@@ -8924,6 +8958,13 @@ fn part_has_parent_ref(part: &str) -> bool {
 }
 
 fn resolve_selectors(sel: &str, parents: &[String]) -> Vec<String> {
+    resolve_selectors_opt(sel, parents, true)
+}
+
+/// As [`resolve_selectors`], with dart's `implicitParent` switch: inside
+/// `@at-root` (before the first nested style rule) a part WITHOUT `&` stays
+/// at the root instead of joining the parent, while `&` still substitutes.
+fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -> Vec<String> {
     let parts: Vec<String> = split_commas(sel)
         .into_iter()
         .map(|p| p.trim().to_string())
@@ -8937,6 +8978,18 @@ fn resolve_selectors(sel: &str, parents: &[String]) -> Vec<String> {
         // such as `&foo` is rejected earlier by `validate_selector`.)
         for part in &parts {
             result.push(normalize_selector(part));
+        }
+    } else if !implicit_parent {
+        // dart resolves per complex: a part with `&` expands across the
+        // parents; a part without stays at the root exactly once.
+        for part in &parts {
+            if part.contains('&') {
+                for parent in parents {
+                    result.push(normalize_selector(&part.replace('&', parent)));
+                }
+            } else {
+                result.push(normalize_selector(part));
+            }
         }
     } else {
         for parent in parents {

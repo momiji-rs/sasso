@@ -6709,3 +6709,28 @@ fn selector_escape_terminating_space() {
         "@media screen\\9  {\n  x {\n    y: z;\n  }\n}\n"
     );
 }
+
+#[test]
+fn at_root_parent_ref() {
+    // `&` inside @at-root resolves against the enclosing rule (dart
+    // _styleRuleIgnoringAtRoot) while plain selectors stay at the root
+    // (implicitParent: false), and deeper nesting re-enables the join.
+    assert_eq!(
+        ours(".foo {\n  @at-root & {\n    a: b;\n  }\n}\n"),
+        ".foo {\n  a: b;\n}\n"
+    );
+    assert_eq!(
+        ours("foo {\n  @at-root {\n    & { color: blue; }\n    &--modifier { color: red; }\n  }\n}\n"),
+        "foo {\n  color: blue;\n}\n\nfoo--modifier {\n  color: red;\n}\n"
+    );
+    assert_eq!(
+        ours("test {\n  @at-root {\n    & {\n      foo { bar: baz; }\n    }\n  }\n}\n"),
+        "test foo {\n  bar: baz;\n}\n"
+    );
+    // @extend directly inside @at-root is outside any style rule.
+    assert!(compile(
+        ".a { x: y }\n.b { @at-root { @extend .a } }\n",
+        &Options::default()
+    )
+    .is_err());
+}
