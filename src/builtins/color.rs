@@ -1784,462 +1784,6 @@ fn z(v: Option<f64>) -> f64 {
     v.unwrap_or(0.0)
 }
 
-/// Matrix * vector (3x3 * 3).
-fn mat3(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
-    [
-        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
-        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
-        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
-    ]
-}
-
-// ---- sRGB transfer functions ----------------------------------------
-
-fn srgb_to_linear(c: f64) -> f64 {
-    let sign = c.signum();
-    let abs = c.abs();
-    if abs <= 0.04045 {
-        c / 12.92
-    } else {
-        sign * ((abs + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn linear_to_srgb(c: f64) -> f64 {
-    let sign = c.signum();
-    let abs = c.abs();
-    if abs <= 0.0031308 {
-        c * 12.92
-    } else {
-        sign * (1.055 * abs.powf(1.0 / 2.4) - 0.055)
-    }
-}
-
-// ---- rec2020 transfer functions -------------------------------------
-
-fn rec2020_to_linear(c: f64) -> f64 {
-    const ALPHA: f64 = 1.09929682680944;
-    const BETA: f64 = 0.018053968510807;
-    let sign = c.signum();
-    let abs = c.abs();
-    if abs < BETA * 4.5 {
-        c / 4.5
-    } else {
-        sign * ((abs + ALPHA - 1.0) / ALPHA).powf(1.0 / 0.45)
-    }
-}
-
-fn linear_to_rec2020(c: f64) -> f64 {
-    const ALPHA: f64 = 1.09929682680944;
-    const BETA: f64 = 0.018053968510807;
-    let sign = c.signum();
-    let abs = c.abs();
-    if abs < BETA {
-        c * 4.5
-    } else {
-        sign * (ALPHA * abs.powf(0.45) - (ALPHA - 1.0))
-    }
-}
-
-// ---- a98-rgb transfer functions -------------------------------------
-
-fn a98_to_linear(c: f64) -> f64 {
-    c.signum() * c.abs().powf(563.0 / 256.0)
-}
-
-fn linear_to_a98(c: f64) -> f64 {
-    c.signum() * c.abs().powf(256.0 / 563.0)
-}
-
-// ---- prophoto-rgb transfer functions --------------------------------
-
-fn prophoto_to_linear(c: f64) -> f64 {
-    const ET2: f64 = 16.0 / 512.0;
-    let sign = c.signum();
-    let abs = c.abs();
-    if abs <= ET2 {
-        c / 16.0
-    } else {
-        sign * abs.powf(1.8)
-    }
-}
-
-fn linear_to_prophoto(c: f64) -> f64 {
-    const ET: f64 = 1.0 / 512.0;
-    let sign = c.signum();
-    let abs = c.abs();
-    if abs >= ET {
-        sign * abs.powf(1.0 / 1.8)
-    } else {
-        c * 16.0
-    }
-}
-
-// ---- linear-light RGB <-> XYZ (D65) matrices ------------------------
-
-// All matrices are byte-for-byte the values dart-sass uses in
-// `lib/src/value/color/conversions.dart`, so conversions round-trip exactly.
-const SRGB_TO_XYZ: [[f64; 3]; 3] = [
-    [0.4123907992659595, 0.35758433938387796, 0.1804807884018343],
-    [0.21263900587151036, 0.7151686787677559, 0.07219231536073371],
-    [0.01933081871559185, 0.11919477979462598, 0.9505321522496606],
-];
-const XYZ_TO_SRGB: [[f64; 3]; 3] = [
-    [3.2409699419045213, -1.5373831775700935, -0.4986107602930033],
-    [-0.9692436362808798, 1.8759675015077206, 0.04155505740717561],
-    [0.0556300796969936, -0.20397695888897657, 1.0569715142428786],
-];
-
-const P3_TO_XYZ: [[f64; 3]; 3] = [
-    [0.48657094864821626, 0.26566769316909294, 0.1982172852343625],
-    [0.22897456406974884, 0.6917385218365062, 0.079286914093745],
-    [0.0, 0.04511338185890257, 1.0439443689009757],
-];
-const XYZ_TO_P3: [[f64; 3]; 3] = [
-    [2.4934969119414245, -0.9313836179191236, -0.40271078445071684],
-    [-0.8294889695615749, 1.7626640603183468, 0.02362468584194359],
-    [0.03584583024378433, -0.0761723892680417, 0.9568845240076873],
-];
-
-const A98_TO_XYZ: [[f64; 3]; 3] = [
-    [0.5766690429101308, 0.18555823790654627, 0.18822864623499472],
-    [0.29734497525053616, 0.627363566255466, 0.07529145849399789],
-    [0.02703136138641237, 0.07068885253582714, 0.9913375368376389],
-];
-const XYZ_TO_A98: [[f64; 3]; 3] = [
-    [2.041587903810746, -0.5650069742788596, -0.3447313507783295],
-    [-0.9692436362808798, 1.8759675015077206, 0.04155505740717561],
-    [0.01344428063203102, -0.11836239223101823, 1.0151749943912054],
-];
-
-const PROPHOTO_TO_XYZ_D50: [[f64; 3]; 3] = [
-    [0.7977666449006423, 0.13518129740053308, 0.0313477341283922],
-    [0.2880748288194013, 0.711835234241873, 0.00008993693872564],
-    [0.0, 0.0, 0.8251046025104602],
-];
-const XYZ_D50_TO_PROPHOTO: [[f64; 3]; 3] = [
-    [1.3457868816471583, -0.25557208737979464, -0.05110186497554526],
-    [-0.5446307051249019, 1.5082477428451468, 0.02052744743642139],
-    [0.0, 0.0, 1.2119675456389452],
-];
-
-const REC2020_TO_XYZ: [[f64; 3]; 3] = [
-    [0.6369580483012913, 0.14461690358620838, 0.16888097516417205],
-    [0.26270021201126703, 0.677998071518871, 0.05930171646986194],
-    [0.0, 0.0280726930490875, 1.0609850577107909],
-];
-const XYZ_TO_REC2020: [[f64; 3]; 3] = [
-    [1.7166511879712676, -0.3556707837763924, -0.2533662813736598],
-    [-0.666684351832489, 1.616481236634939, 0.01576854581391113],
-    [0.01763985744531091, -0.04277061325780865, 0.942103121235474],
-];
-
-// Bradford chromatic adaptation D65<->D50.
-const D65_TO_D50: [[f64; 3]; 3] = [
-    [1.0479297925449966, 0.02294687060160952, -0.05019226628920519],
-    [0.02962780877005567, 0.99043442675388, -0.01707379906341879],
-    [-0.00924304064620452, 0.01505519149029816, 0.751874281428137],
-];
-const D50_TO_D65: [[f64; 3]; 3] = [
-    [0.9554734214880752, -0.02309845494876452, 0.06325924320057065],
-    [-0.02836970933386358, 1.0099953980813041, 0.0210414411919173],
-    [0.01231401486448199, -0.02050764929889898, 1.330365926242124],
-];
-
-// oklab matrices.
-const XYZ_TO_LMS: [[f64; 3]; 3] = [
-    [0.819022437996703, 0.36190626005289034, -0.12887378152098788],
-    [0.03298365393238846, 0.9292868615863433, 0.03614466635064235],
-    [0.0481771893596242, 0.2642395317527308, 0.6335478284694308],
-];
-const LMS_TO_OKLAB: [[f64; 3]; 3] = [
-    [0.210454268309314, 0.7936177747023054, -0.0040720430116193],
-    [1.9779985324311684, -2.42859224204858, 0.450593709617411],
-    [0.0259040424655478, 0.7827717124575296, -0.8086757549230774],
-];
-const LMS_TO_XYZ: [[f64; 3]; 3] = [
-    [1.2268798758459243, -0.5578149944602171, 0.2813910456659646],
-    [-0.04057574521480084, 1.1122868032803173, -0.07171105806551635],
-    [-0.07637293667466007, -0.42149333240224324, 1.5869240198367818],
-];
-const OKLAB_TO_LMS: [[f64; 3]; 3] = [
-    [1.0, 0.3963377773761749, 0.2158037573099136],
-    [0.9999999999999998, -0.10556134581565854, -0.06385417282581334],
-    [0.9999999999999999, -0.0894841775298118, -1.2914855480194094],
-];
-
-// ---- per-space <-> XYZ D65 conversions ------------------------------
-
-/// Convert a color's three (missing-as-0) channels in `space` to XYZ D65.
-fn to_xyz_d65(space: ColorSpace, c: [f64; 3]) -> [f64; 3] {
-    match space {
-        ColorSpace::Rgb => {
-            let lin = [
-                srgb_to_linear(c[0] / 255.0),
-                srgb_to_linear(c[1] / 255.0),
-                srgb_to_linear(c[2] / 255.0),
-            ];
-            mat3(SRGB_TO_XYZ, lin)
-        }
-        ColorSpace::Srgb => {
-            let lin = [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])];
-            mat3(SRGB_TO_XYZ, lin)
-        }
-        ColorSpace::SrgbLinear => mat3(SRGB_TO_XYZ, c),
-        ColorSpace::DisplayP3 => {
-            let lin = [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])];
-            mat3(P3_TO_XYZ, lin)
-        }
-        ColorSpace::DisplayP3Linear => mat3(P3_TO_XYZ, c),
-        ColorSpace::A98Rgb => {
-            let lin = [a98_to_linear(c[0]), a98_to_linear(c[1]), a98_to_linear(c[2])];
-            mat3(A98_TO_XYZ, lin)
-        }
-        ColorSpace::ProphotoRgb => {
-            let lin = [
-                prophoto_to_linear(c[0]),
-                prophoto_to_linear(c[1]),
-                prophoto_to_linear(c[2]),
-            ];
-            mat3(D50_TO_D65, mat3(PROPHOTO_TO_XYZ_D50, lin))
-        }
-        ColorSpace::Rec2020 => {
-            let lin = [
-                rec2020_to_linear(c[0]),
-                rec2020_to_linear(c[1]),
-                rec2020_to_linear(c[2]),
-            ];
-            mat3(REC2020_TO_XYZ, lin)
-        }
-        ColorSpace::XyzD65 => c,
-        ColorSpace::XyzD50 => mat3(D50_TO_D65, c),
-        // hsl routes through srgb in [0..1] (no 255 round-trip) with dart's
-        // exact CSS Color 4 formula, so extreme values match bit-for-bit.
-        ColorSpace::Hsl => to_xyz_d65(ColorSpace::Srgb, hsl_to_srgb01(c)),
-        ColorSpace::Hwb => to_xyz_d65(ColorSpace::Rgb, hwb_to_rgb255(c)),
-        ColorSpace::Lab => mat3(D50_TO_D65, lab_to_xyz(c)),
-        ColorSpace::Lch => to_xyz_d65(ColorSpace::Lab, lch_to_lab(c)),
-        ColorSpace::Oklab => oklab_to_xyz(c),
-        ColorSpace::Oklch => oklab_to_xyz(lch_to_lab(c)),
-    }
-}
-
-/// Convert XYZ D65 to a color's three channels in `space`.
-fn from_xyz_d65(space: ColorSpace, xyz: [f64; 3]) -> [f64; 3] {
-    match space {
-        ColorSpace::Rgb => {
-            let lin = mat3(XYZ_TO_SRGB, xyz);
-            [
-                linear_to_srgb(lin[0]) * 255.0,
-                linear_to_srgb(lin[1]) * 255.0,
-                linear_to_srgb(lin[2]) * 255.0,
-            ]
-        }
-        ColorSpace::Srgb => {
-            let lin = mat3(XYZ_TO_SRGB, xyz);
-            [
-                linear_to_srgb(lin[0]),
-                linear_to_srgb(lin[1]),
-                linear_to_srgb(lin[2]),
-            ]
-        }
-        ColorSpace::SrgbLinear => mat3(XYZ_TO_SRGB, xyz),
-        ColorSpace::DisplayP3 => {
-            let lin = mat3(XYZ_TO_P3, xyz);
-            [
-                linear_to_srgb(lin[0]),
-                linear_to_srgb(lin[1]),
-                linear_to_srgb(lin[2]),
-            ]
-        }
-        ColorSpace::DisplayP3Linear => mat3(XYZ_TO_P3, xyz),
-        ColorSpace::A98Rgb => {
-            let lin = mat3(XYZ_TO_A98, xyz);
-            [
-                linear_to_a98(lin[0]),
-                linear_to_a98(lin[1]),
-                linear_to_a98(lin[2]),
-            ]
-        }
-        ColorSpace::ProphotoRgb => {
-            let lin = mat3(XYZ_D50_TO_PROPHOTO, mat3(D65_TO_D50, xyz));
-            [
-                linear_to_prophoto(lin[0]),
-                linear_to_prophoto(lin[1]),
-                linear_to_prophoto(lin[2]),
-            ]
-        }
-        ColorSpace::Rec2020 => {
-            let lin = mat3(XYZ_TO_REC2020, xyz);
-            [
-                linear_to_rec2020(lin[0]),
-                linear_to_rec2020(lin[1]),
-                linear_to_rec2020(lin[2]),
-            ]
-        }
-        ColorSpace::XyzD65 => xyz,
-        ColorSpace::XyzD50 => mat3(D65_TO_D50, xyz),
-        ColorSpace::Hsl => rgb255_to_hsl(from_xyz_d65(ColorSpace::Rgb, xyz)),
-        ColorSpace::Hwb => rgb255_to_hwb(from_xyz_d65(ColorSpace::Rgb, xyz)),
-        ColorSpace::Lab => xyz_to_lab(mat3(D65_TO_D50, xyz)),
-        ColorSpace::Lch => lab_to_lch(xyz_to_lab(mat3(D65_TO_D50, xyz))),
-        ColorSpace::Oklab => xyz_to_oklab(xyz),
-        ColorSpace::Oklch => lab_to_lch(xyz_to_oklab(xyz)),
-    }
-}
-
-// ---- lab / lch (D50) ------------------------------------------------
-
-const D50: [f64; 3] = [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
-
-fn lab_to_xyz(lab: [f64; 3]) -> [f64; 3] {
-    const KAPPA: f64 = 24389.0 / 27.0;
-    const EPSILON: f64 = 216.0 / 24389.0;
-    let fy = (lab[0] + 16.0) / 116.0;
-    let fx = lab[1] / 500.0 + fy;
-    let fz = fy - lab[2] / 200.0;
-    let x = if fx.powi(3) > EPSILON {
-        fx.powi(3)
-    } else {
-        (116.0 * fx - 16.0) / KAPPA
-    };
-    let y = if lab[0] > KAPPA * EPSILON {
-        ((lab[0] + 16.0) / 116.0).powi(3)
-    } else {
-        lab[0] / KAPPA
-    };
-    let zz = if fz.powi(3) > EPSILON {
-        fz.powi(3)
-    } else {
-        (116.0 * fz - 16.0) / KAPPA
-    };
-    [x * D50[0], y * D50[1], zz * D50[2]]
-}
-
-fn xyz_to_lab(xyz: [f64; 3]) -> [f64; 3] {
-    const KAPPA: f64 = 24389.0 / 27.0;
-    const EPSILON: f64 = 216.0 / 24389.0;
-    let xr = xyz[0] / D50[0];
-    let yr = xyz[1] / D50[1];
-    let zr = xyz[2] / D50[2];
-    let f = |t: f64| {
-        if t > EPSILON {
-            t.cbrt()
-        } else {
-            (KAPPA * t + 16.0) / 116.0
-        }
-    };
-    let fx = f(xr);
-    let fy = f(yr);
-    let fz = f(zr);
-    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
-}
-
-/// lch -> lab (lightness, chroma, hue-deg) -> (lightness, a, b).
-fn lch_to_lab(lch: [f64; 3]) -> [f64; 3] {
-    let h = lch[2].to_radians();
-    [lch[0], lch[1] * h.cos(), lch[1] * h.sin()]
-}
-
-/// lab -> lch.
-fn lab_to_lch(lab: [f64; 3]) -> [f64; 3] {
-    let c = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
-    let mut h = lab[2].atan2(lab[1]).to_degrees();
-    if h < 0.0 {
-        h += 360.0;
-    }
-    [lab[0], c, h]
-}
-
-// ---- oklab / oklch --------------------------------------------------
-
-fn xyz_to_oklab(xyz: [f64; 3]) -> [f64; 3] {
-    let lms = mat3(XYZ_TO_LMS, xyz);
-    let lms_ = [lms[0].cbrt(), lms[1].cbrt(), lms[2].cbrt()];
-    mat3(LMS_TO_OKLAB, lms_)
-}
-
-fn oklab_to_xyz(oklab: [f64; 3]) -> [f64; 3] {
-    let lms_ = mat3(OKLAB_TO_LMS, oklab);
-    let lms = [lms_[0].powi(3), lms_[1].powi(3), lms_[2].powi(3)];
-    mat3(LMS_TO_XYZ, lms)
-}
-
-// ---- hsl / hwb (legacy, channels in canonical units) ----------------
-
-/// hsl [hue-deg, sat-%, light-%] -> rgb [0..255, 0..255, 0..255].
-/// hsl [hue-deg, sat-%, light-%] -> srgb [0..1], using dart-sass's exact CSS
-/// Color 4 algorithm (`HslColorSpace.convert`): `f(n) = l - a*max(-1,
-/// min(k-3, 9-k, 1))` with `k = (n + hue/30) % 12` and `a = s*min(l, 1-l)`.
-/// The operation order matters bit-for-bit for extreme channel values (the
-/// `out_of_range/far` spec cases), where the algebraically-equal C/X/m form
-/// diverges in the last digits.
-fn hsl_to_srgb01(hsl: [f64; 3]) -> [f64; 3] {
-    let scaled_hue = (hsl[0] / 30.0).rem_euclid(12.0);
-    let saturation = hsl[1] / 100.0;
-    let lightness = hsl[2] / 100.0;
-    let a = saturation * lightness.min(1.0 - lightness);
-    let f = |n: f64| {
-        let k = (n + scaled_hue) % 12.0;
-        lightness - a * (-1.0_f64).max((k - 3.0).min(9.0 - k).min(1.0))
-    };
-    [f(0.0), f(8.0), f(4.0)]
-}
-
-fn hsl_to_rgb255(hsl: [f64; 3]) -> [f64; 3] {
-    let s = hsl_to_srgb01(hsl);
-    [s[0] * 255.0, s[1] * 255.0, s[2] * 255.0]
-}
-
-/// rgb [0..255] -> hsl [hue-deg, sat-%, light-%].
-fn rgb255_to_hsl(rgb: [f64; 3]) -> [f64; 3] {
-    let max = rgb[0].max(rgb[1]).max(rgb[2]);
-    let min = rgb[0].min(rgb[1]).min(rgb[2]);
-    // A color-space conversion (via an XYZ round-trip) can leave a truly
-    // achromatic color with channels that differ only by floating-point error.
-    // `to_hsl` would read that as a tiny non-zero chroma — yielding a spurious
-    // hue, plus an unstable saturation near l=0/1 where its denominator
-    // collapses. dart-sass's exact gray round-trip gives hue 0 / saturation 0,
-    // so collapse a negligible chroma to a canonical achromatic hsl.
-    if max - min < 1e-6 {
-        return [0.0, 0.0, (max + min) / 2.0 / 255.0 * 100.0];
-    }
-    let (h, s, l) = Color::rgb(rgb[0], rgb[1], rgb[2], 1.0).to_hsl();
-    [h, s * 100.0, l * 100.0]
-}
-
-/// hwb [hue-deg, white-%, black-%] -> rgb [0..255].
-fn hwb_to_rgb255(hwb: [f64; 3]) -> [f64; 3] {
-    let h = hwb[0];
-    let mut w = hwb[1] / 100.0;
-    let mut bl = hwb[2] / 100.0;
-    if w + bl > 1.0 {
-        let sum = w + bl;
-        w /= sum;
-        bl /= sum;
-    }
-    let base = Color::from_hsl(h, 1.0, 0.5, 1.0);
-    let mix = |v: f64| ((v / 255.0) * (1.0 - w - bl) + w) * 255.0;
-    [mix(base.r), mix(base.g), mix(base.b)]
-}
-
-/// rgb [0..255] -> hwb [hue-deg, white-%, black-%].
-fn rgb255_to_hwb(rgb: [f64; 3]) -> [f64; 3] {
-    let min = rgb[0].min(rgb[1]).min(rgb[2]);
-    let max = rgb[0].max(rgb[1]).max(rgb[2]);
-    // An achromatic conversion result has a powerless hue; a round-trip can
-    // leave channels floating-point-unequal, so collapse a negligible chroma to
-    // dart-sass's canonical hue 0 rather than reading a spurious hue.
-    let h = if max - min < 1e-6 {
-        0.0
-    } else {
-        Color::rgb(rgb[0], rgb[1], rgb[2], 1.0).to_hsl().0
-    };
-    let w = min / 255.0 * 100.0;
-    let bl = (1.0 - max / 255.0) * 100.0;
-    [h, w, bl]
-}
-
 /// The CSS Color 4 "analogous component" category of a channel, used to carry
 /// a missing channel through a color-space conversion. `None` for channels that
 /// are never analogous to a differently-named channel.
@@ -2308,15 +1852,10 @@ pub(crate) fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColo
         return mc.clone();
     }
     let src = [z(mc.channels[0]), z(mc.channels[1]), z(mc.channels[2])];
-    // Same-primary conversions avoid an XYZ round-trip (which would introduce
-    // tiny floating-point error): rgb (0..255) and srgb (0..1) differ only by a
-    // 255 scale, and hsl/hwb share rgb's primaries.
-    let out = if let Some(direct) = direct_convert(mc.space, target, src) {
-        direct
-    } else {
-        let xyz = to_xyz_d65(mc.space, src);
-        from_xyz_d65(target, xyz)
-    };
+    // dart-sass's exact conversion graph: one precomputed matrix between
+    // linear spaces, glibc-rounded `pow`, and dart's formula shapes — see
+    // `builtins::colorspace`.
+    let out = super::colorspace::convert(mc.space, target, src);
     // For each output channel, become missing if the analogous source channel
     // was missing.
     let missing_in_src = |cat: ChannelCategory| {
@@ -2327,11 +1866,22 @@ pub(crate) fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColo
         _ => Some(out[i]),
     };
     let mut channels = [mk(0), mk(1), mk(2)];
-    // An lch/oklch hue that is powerless in the result (zero chroma) becomes a
-    // missing channel, matching dart-sass's conversion behavior. (hsl keeps a
-    // numeric hue at zero saturation.)
+    // A hue that is powerless in the result becomes a missing channel,
+    // matching dart-sass's conversion behavior: lch/oklch at zero chroma, hsl
+    // at fuzzy-zero saturation, and hwb when whiteness+blackness covers
+    // everything. (The legacy result fill then turns a missing hsl/hwb hue
+    // into 0.)
     if matches!(target, ColorSpace::Lch | ColorSpace::Oklch) && out[1].abs() < 1e-10 {
         channels[2] = None;
+    }
+    if target == ColorSpace::Hsl && out[1].abs() < 1e-11 {
+        channels[0] = None;
+    }
+    if target == ColorSpace::Hwb {
+        let sum = out[1] + out[2];
+        if sum > 100.0 || (sum - 100.0).abs() < 1e-11 {
+            channels[0] = None;
+        }
     }
     ModernColor {
         space: target,
@@ -2364,30 +1914,6 @@ fn convert_modern_filled(mc: &ModernColor, target: ColorSpace) -> ModernColor {
         ],
         alpha: Some(out.alpha.unwrap_or(0.0)),
     }
-}
-
-/// Direct (no XYZ round-trip) conversion for same-primary spaces, returning the
-/// three target channels, or `None` if the pair needs the general path.
-fn direct_convert(from: ColorSpace, to: ColorSpace, c: [f64; 3]) -> Option<[f64; 3]> {
-    use ColorSpace::*;
-    Some(match (from, to) {
-        (Rgb, Srgb) => [c[0] / 255.0, c[1] / 255.0, c[2] / 255.0],
-        (Srgb, Rgb) => [c[0] * 255.0, c[1] * 255.0, c[2] * 255.0],
-        (Rgb, Hsl) => rgb255_to_hsl(c),
-        (Hsl, Rgb) => hsl_to_rgb255(c),
-        (Rgb, Hwb) => rgb255_to_hwb(c),
-        (Hwb, Rgb) => hwb_to_rgb255(c),
-        (Srgb, Hsl) => rgb255_to_hsl([c[0] * 255.0, c[1] * 255.0, c[2] * 255.0]),
-        (Hsl, Srgb) => hsl_to_srgb01(c),
-        (Srgb, Hwb) => rgb255_to_hwb([c[0] * 255.0, c[1] * 255.0, c[2] * 255.0]),
-        (Hwb, Srgb) => {
-            let r = hwb_to_rgb255(c);
-            [r[0] / 255.0, r[1] / 255.0, r[2] / 255.0]
-        }
-        (Hsl, Hwb) => rgb255_to_hwb(hsl_to_rgb255(c)),
-        (Hwb, Hsl) => rgb255_to_hsl(hwb_to_rgb255(c)),
-        _ => return None,
-    })
 }
 
 /// Build a [`ModernColor`] from a legacy [`Color`] (its current space is
@@ -3356,6 +2882,24 @@ pub(super) fn modify_in_space_full(
 ) -> Result<Value, Error> {
     let orig = legacy_to_modern(c);
     let mut work = convert_modern(&orig, space);
+    // A missing channel INTRODUCED by the conversion (a powerless hue from an
+    // achromatic source, e.g. `black` -> hsl) is filled with 0 so modifying it
+    // works (dart's working-space conversion fills legacy missing channels);
+    // an AUTHORED missing channel (analogous to a source `none`) stays
+    // missing, so `adjust` still errors on it and `change` still sets it.
+    {
+        let missing_in_src = |cat: ChannelCategory| {
+            (0..3).any(|i| orig.channels[i].is_none() && channel_category(orig.space, i) == Some(cat))
+        };
+        for i in 0..3 {
+            if work.channels[i].is_none() {
+                let authored = channel_category(space, i).is_some_and(&missing_in_src);
+                if !authored {
+                    work.channels[i] = Some(0.0);
+                }
+            }
+        }
+    }
     // `adjust`/`scale` combine each amount with the channel's current value, so
     // a missing (`none`) channel is unsupported (dart-sass errors rather than
     // guessing). `change` *sets* the channel, so a missing channel is fine. The
@@ -3702,7 +3246,9 @@ pub(super) fn invert_in_space(
         channels,
         alpha: src.alpha,
     };
-    let back = convert_modern(&mc, dest);
+    // Result leg: a legacy destination fills missing channels (incl. a hue
+    // the working-space round trip made powerless).
+    let back = convert_modern_filled(&mc, dest);
     Ok(make_modern_in(back, dest))
 }
 

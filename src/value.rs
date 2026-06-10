@@ -1902,11 +1902,10 @@ impl ModernColor {
                 // serialized via hsl(), matching dart-sass.
                 let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
                 if !(in_gamut(r) && in_gamut(g) && in_gamut(b)) {
-                    let c = Color::rgb(r, g, b, 1.0);
-                    let (h, s, l) = c.to_hsl();
-                    let hh = fmt_num(h, compressed);
-                    let ss = fmt_num(s * 100.0, compressed);
-                    let ll = fmt_num(l * 100.0, compressed);
+                    let hsl = crate::builtins::srgb_to_hsl([r / 255.0, g / 255.0, b / 255.0]);
+                    let hh = fmt_num(hsl[0], compressed);
+                    let ss = fmt_num(hsl[1], compressed);
+                    let ll = fmt_num(hsl[2], compressed);
                     let comma = if compressed { "," } else { ", " };
                     return if opaque {
                         format!("hsl({hh}{comma}{ss}%{comma}{ll}%)")
@@ -1985,27 +1984,24 @@ impl ModernColor {
         }
     }
 
-    /// The sRGB-byte triple and the (hue, sat%, light%) for an hwb color.
+    /// The sRGB-byte triple and the (hue, sat%, light%) for an hwb color,
+    /// via the engine's exact dart conversions. A fuzzy-zero saturation makes
+    /// the hue powerless; the legacy fill renders it as 0.
     fn hwb_rgb_and_hsl(&self) -> ([f64; 3], f64, f64, f64) {
-        let h = self.channels[0].unwrap_or(0.0);
-        let mut w = self.channels[1].unwrap_or(0.0) / 100.0;
-        let mut bl = self.channels[2].unwrap_or(0.0) / 100.0;
-        if w + bl > 1.0 {
-            let sum = w + bl;
-            w /= sum;
-            bl /= sum;
-        }
-        let base = Color::from_hsl(h, 1.0, 0.5, 1.0);
-        let mix = |v: f64| ((v / 255.0) * (1.0 - w - bl) + w) * 255.0;
-        let c = Color::rgb(mix(base.r), mix(base.g), mix(base.b), 1.0);
-        let (mut hh, ss, ll) = c.to_hsl();
-        // An achromatic result (the chroma collapses when whiteness+blackness
-        // fills the gamut) has a powerless hue; dart-sass canonicalizes it to 0
-        // rather than the floating-point residue of the hwb->rgb round-trip.
-        if c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b) < 1e-6 {
-            hh = 0.0;
-        }
-        ([c.r, c.g, c.b], hh, ss * 100.0, ll * 100.0)
+        let hwb = [
+            self.channels[0].unwrap_or(0.0),
+            self.channels[1].unwrap_or(0.0),
+            self.channels[2].unwrap_or(0.0),
+        ];
+        let rgb01 = crate::builtins::hwb_to_srgb(hwb);
+        let hsl = crate::builtins::srgb_to_hsl(rgb01);
+        let hue = if hsl[1].abs() < 1e-11 { 0.0 } else { hsl[0] };
+        (
+            [rgb01[0] * 255.0, rgb01[1] * 255.0, rgb01[2] * 255.0],
+            hue,
+            hsl[1],
+            hsl[2],
+        )
     }
 
     /// The (hue, saturation%, lightness%) triple for legacy hsl/hwb

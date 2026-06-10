@@ -11,6 +11,7 @@
 
 mod color;
 mod color_ext;
+mod colorspace;
 mod list;
 mod map;
 mod math;
@@ -29,6 +30,10 @@ pub(crate) use meta::{inspect_element, inspect_value};
 // Color-space conversion, needed by `ModernColor::to_css` for the
 // out-of-range `color-mix(in …, color(xyz …) 100%, black)` fallback.
 pub(crate) use color::convert_modern;
+
+// The engine's srgb -> hsl (dart's exact formula), used by the legacy
+// out-of-gamut rgb serialization in `value.rs`.
+pub(crate) use colorspace::{hwb_to_srgb, srgb_to_hsl};
 
 /// Dispatch a function call by name across the builtin families.
 pub(crate) fn call(

@@ -41,6 +41,7 @@ mod diag;
 mod emit;
 mod error;
 mod eval;
+mod fdlibm;
 mod fxhash;
 mod parser;
 mod sass_parser;
