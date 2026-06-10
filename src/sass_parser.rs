@@ -54,7 +54,7 @@ impl Transpiler {
     fn new(src: &str) -> Self {
         // Normalise line endings the way dart-sass does (it treats CR, CRLF and
         // form-feed as newlines for line-splitting purposes).
-        let normalized = src.replace("\r\n", "\n").replace('\r', "\n");
+        let normalized = src.replace("\r\n", "\n").replace(['\r', '\u{c}'], "\n");
         let mut lines = Vec::new();
         for (i, physical) in normalized.split('\n').enumerate() {
             let mut indent = 0usize;
@@ -217,7 +217,17 @@ impl Transpiler {
     fn parse_loud_comment(&mut self, indent: usize) -> Result<(), Error> {
         let start = self.idx;
         let line_no = self.lines[start].line;
-        let content = self.lines[start].content.trim_start().to_string();
+        let mut content = self.lines[start].content.trim_start().to_string();
+        // An open `#{` interpolation spans lines as expression whitespace, not
+        // comment-line structure: join continuation lines verbatim until it
+        // closes (`/* #{a` + `+ b} */` is one comment containing `#{a\n+ b}`).
+        let mut first_line_end = start + 1;
+        while interp_open_anywhere(&content) && first_line_end < self.lines.len() {
+            content.push('\n');
+            content.push_str(&self.lines[first_line_end].indent_str);
+            content.push_str(&self.lines[first_line_end].content);
+            first_line_end += 1;
+        }
         // Does the comment terminate on the same line?
         if let Some(end) = content.find("*/") {
             // Anything after the close (besides whitespace / another comment) is
@@ -234,7 +244,7 @@ impl Transpiler {
             }
             self.out.push_str(&content[..end + 2]);
             self.out.push('\n');
-            self.idx = start + 1;
+            self.idx = first_line_end;
             // A deeper-indented block after a closed comment is an error.
             if let Some(i) = self.next_nonblank(self.idx) {
                 if self.lines[i].indent > indent {
@@ -249,37 +259,54 @@ impl Transpiler {
             }
             return Ok(());
         }
-        // Unterminated on this line: gather the deeper-indented block as comment
-        // body. dart-sass reindents a multi-line loud comment so the first
-        // content line follows `/* ` and each subsequent line is prefixed with
-        // ` * ` (aligning the `*` under the opening `/*`).
-        let mut content_lines: Vec<String> = Vec::new();
+        // Unterminated on this line: gather the deeper-indented block as
+        // comment body. dart-sass reindents a multi-line loud comment so the
+        // first content line follows `/*` and each subsequent line keeps its
+        // *source column*, with ` *` written across columns 0-1 (so content
+        // never starts before column 3). Blank lines inside the block are
+        // preserved as a bare ` *`; trailing blanks after the block are not.
+        // Each entry is `(source_column, text)`; a blank line has no entry
+        // text — modelled as None.
+        let mut content_lines: Vec<Option<(usize, String)>> = Vec::new();
         // Line 0 content after the `/*` marker (drop it if only whitespace).
         let first = content.trim_start_matches("/*");
         if !first.trim().is_empty() {
-            content_lines.push(first.trim_start().to_string());
+            content_lines.push(Some((3, first.trim_start().to_string())));
         }
-        self.idx = start + 1;
+        self.idx = first_line_end;
         let mut closed = false;
-        while let Some(i) = self.next_nonblank(self.idx) {
-            if self.lines[i].indent <= indent {
+        let mut pending_blanks = 0usize;
+        while self.idx < self.lines.len() {
+            let l = &self.lines[self.idx];
+            if l.content.trim().is_empty() {
+                pending_blanks += 1;
+                self.idx += 1;
+                continue;
+            }
+            if l.indent <= indent {
                 break;
             }
-            let body = self.lines[i].content.trim_start().to_string();
-            self.idx = i + 1;
-            content_lines.push(body.clone());
+            // Flush blanks only between block lines (a blank run *inside* the
+            // comment renders as ` *` lines).
+            for _ in 0..pending_blanks {
+                content_lines.push(None);
+            }
+            pending_blanks = 0;
+            let body = l.content.trim_end().to_string();
+            content_lines.push(Some((l.indent, body.clone())));
+            self.idx += 1;
             if body.contains("*/") {
                 closed = true;
                 break;
             }
         }
         if content_lines.is_empty() {
-            content_lines.push(String::new());
+            content_lines.push(Some((3, String::new())));
         }
         if !closed {
             // dart-sass auto-closes an unterminated loud comment at the end of
             // its block, appending ` */` to the last line.
-            if let Some(last) = content_lines.last_mut() {
+            if let Some(Some((_, last))) = content_lines.last_mut() {
                 if last.is_empty() {
                     *last = "*/".to_string();
                 } else {
@@ -288,12 +315,23 @@ impl Transpiler {
             }
         }
         for (i, line) in content_lines.iter().enumerate() {
-            if i == 0 {
-                self.out.push_str("/* ");
-            } else {
-                self.out.push_str(" * ");
+            match line {
+                Some((col, text)) => {
+                    // `/*`/` *` occupy columns 0-1; pad so the text keeps its
+                    // source column (minimum column 3).
+                    let pad = col.max(&3) - 2;
+                    if i == 0 {
+                        self.out.push_str("/*");
+                    } else {
+                        self.out.push_str(" *");
+                    }
+                    for _ in 0..pad {
+                        self.out.push(' ');
+                    }
+                    self.out.push_str(text);
+                }
+                None => self.out.push_str(" *"),
             }
-            self.out.push_str(line);
             self.out.push('\n');
         }
         Ok(())
@@ -390,9 +428,10 @@ impl Transpiler {
                 logical.push(' ');
             }
             logical.push_str(&piece);
-            // Pull in any bracket / comma continuations of this new line too
-            // (a directive prelude permits trailing-comma continuation).
-            while continuation_pending(logical, true) {
+            // Pull in any bracket continuations of this new line too (a
+            // trailing comma only continues a `@use`/`@forward` member list).
+            let comma_continues = matches!(directive_name(logical).as_deref(), Some("use" | "forward"));
+            while continuation_pending(logical, comma_continues) {
                 let Some(j) = self.next_nonblank(self.idx) else {
                     break;
                 };
@@ -648,7 +687,12 @@ fn forbids_indented_child(logical: &str) -> Option<String> {
 /// line, demands a following operand (so the prelude continues).
 fn ends_with_pending_operator(t: &str) -> bool {
     let t = t.trim_end();
-    if t.ends_with(',') || t.ends_with('\\') {
+    // A trailing comma does NOT continue a directive prelude or variable
+    // declaration in the indented syntax (`@each $a in b,` iterates the
+    // single-element list `(b,)`; `$a: 1,` + indented line is "Nothing may
+    // be indented beneath a variable declaration."). Only selector lists
+    // continue on a comma, handled in `assemble_logical_line`.
+    if t.ends_with('\\') {
         return true;
     }
     // Trailing binary/relational/arithmetic operators.
@@ -745,6 +789,9 @@ fn prelude_incomplete(logical: &str) -> bool {
         "return" | "warn" | "debug" | "error" | "extend" => prelude.is_empty(),
         // `@include` needs a name.
         "include" => prelude.is_empty(),
+        // `@use`/`@forward` member lists (`show a,`) continue on a comma —
+        // their preludes treat newlines as whitespace throughout.
+        "use" | "forward" if prelude.ends_with(',') => true,
         // `@use`/`@forward`/`@import` need a URL.
         "use" | "forward" | "import" => prelude.is_empty(),
         _ => false,
@@ -837,6 +884,13 @@ fn continuation_pending(s: &str, comma_continues: bool) -> bool {
     if t.ends_with('\\') {
         return true;
     }
+    // A trailing `!` awaits its `important` keyword on the next line
+    // (`b: c!` + `important` joins; dart errors `Expected "important".`
+    // when the next line is something else, which the joined SCSS parse
+    // reproduces).
+    if t.ends_with('!') {
+        return true;
+    }
     comma_continues && t.ends_with(',')
 }
 
@@ -927,6 +981,40 @@ struct ScanState {
 
 /// Scan `s` once, tracking strings, `//`/`/* */` comments and `#{…}`
 /// interpolation, to report its closing state.
+/// Whether `s` ends inside an open `#{` interpolation, scanning *inside*
+/// loud-comment text too (unlike [`scan_state`], which skips comment bodies):
+/// a `#{` opens interpolation even within `/* … */`.
+fn interp_open_anywhere(s: &str) -> bool {
+    let cs: Vec<char> = s.chars().collect();
+    let mut interp = 0i32;
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            // Quoted strings only have meaning inside interpolation here.
+            '"' | '\'' if interp > 0 => {
+                let q = cs[i];
+                i += 1;
+                while i < cs.len() && cs[i] != q {
+                    if cs[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            '#' if cs.get(i + 1) == Some(&'{') => {
+                interp += 1;
+                i += 2;
+                continue;
+            }
+            '{' if interp > 0 => interp += 1,
+            '}' if interp > 0 => interp -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    interp > 0
+}
+
 fn scan_state(s: &str) -> ScanState {
     let cs: Vec<char> = s.chars().collect();
     let mut depth = 0i32;

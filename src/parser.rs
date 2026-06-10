@@ -811,15 +811,16 @@ impl Parser {
         let mut important = false;
         self.skip_ws_inline();
         if self.sc.peek() == Some('!') {
-            let mark = self.sc.mark();
             self.sc.bump();
             self.skip_ws_inline();
+            let flag_pos = self.sc.position();
             let flag = self.read_ident_name().unwrap_or_default();
-            if flag.eq_ignore_ascii_case("important") {
-                important = true;
-            } else {
-                self.sc.reset(mark);
+            // After a declaration value, `!` admits only the `important`
+            // flag; anything else is dart-sass's hard error (no backtrack).
+            if !flag.eq_ignore_ascii_case("important") {
+                return Err(Error::at("Expected \"important\".", flag_pos));
             }
+            important = true;
         }
         // Value-plus-block nested property set: `prop: value [!important] { … }`.
         // Only a value separated from the colon by whitespace (or comment)

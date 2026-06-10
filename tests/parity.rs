@@ -5839,3 +5839,32 @@ fn sass_bare_plus_selector_and_using_block() {
     // block (SCSS `@include a() using ();` is 'expected "{".').
     assert_eq!(ours_sass("@mixin a\n  @content\n@include a() using\n  ()\n"), "");
 }
+
+#[test]
+fn sass_comment_blocks_and_continuation_rules() {
+    // Multi-line loud comments keep each line's source column behind ` *`,
+    // preserve interior blank lines, and treat `\f` as a line separator.
+    assert_eq!(ours_sass("/*\n  Multi\n  line\n"), "/* Multi\n * line */\n");
+    assert_eq!(
+        ours_sass("/* Handles\n         weird\n   indentation\n"),
+        "/* Handles\n *       weird\n * indentation */\n"
+    );
+    assert_eq!(ours_sass("/* Keeps\n\n   empty\n"), "/* Keeps\n *\n * empty */\n");
+    assert_eq!(ours_sass("/*\n  foo\u{c}  bar\n"), "/* foo\n * bar */\n");
+    // An open interpolation joins continuation lines as expression text.
+    assert_eq!(ours_sass("/* #{a \n  + b} */\n"), "/* ab */\n");
+    // A trailing comma does NOT continue a directive prelude (`@each $a in b,`
+    // iterates `(b,)`; the deeper lines are its body) — but a `@use`/`@forward`
+    // member list does continue.
+    assert_eq!(
+        ours_sass("@each $a in b,\n c\n  .#{$a}\n    d: $a\n"),
+        "c .b {\n  d: b;\n}\n"
+    );
+    // `!` awaits `important` on the next line; anything else is dart's
+    // hard `Expected "important".` (also in SCSS: no silent backtrack).
+    assert_eq!(
+        ours_sass("a\n  b: c!\n    important\n"),
+        "a {\n  b: c !important;\n}\n"
+    );
+    assert!(compile("a {b: c !ie;}", &Options::default()).is_err());
+}
