@@ -6186,3 +6186,22 @@ fn keyframes_nested_at_rules_and_selector_normalization() {
     assert_parity("@keyframes a {\n  13E+1% {c: d}\n}\n");
     assert_parity("@keyframes a {\n  from {c: d}\n  50.5% {e: f}\n}\n");
 }
+
+#[test]
+fn nested_media_merge_bubbles_in_source_order() {
+    // A mergeable nested @media bubbles out of its enclosing media rule,
+    // slicing the outer rule's own children into segments around it at the
+    // source position (dart-sass#453).
+    assert_eq!(
+        ours("@media screen {\n  a {b: c}\n  @media (color) {x {y: z}}\n}\n"),
+        "@media screen {\n  a {\n    b: c;\n  }\n}\n@media screen and (color) {\n  x {\n    y: z;\n  }\n}\n"
+    );
+    assert_eq!(
+        ours("@media (r: after) {\n  @media (a: b) {x {y: z}}\n  a {b: c}\n}\n"),
+        "@media (r: after) and (a: b) {\n  x {\n    y: z;\n  }\n}\n@media (r: after) {\n  a {\n    b: c;\n  }\n}\n"
+    );
+    assert_parity("@media screen {\n  a {b: c}\n  @media (color) {x {y: z}}\n}\n");
+    assert_parity("@media (r: after) {\n  @media (a: b) {x {y: z}}\n  a {b: c}\n}\n");
+    // An unmergeable nested @media stays nested.
+    assert_parity("@media not screen {\n  a {b: c}\n  @media (color) {x {y: z}}\n}\n");
+}

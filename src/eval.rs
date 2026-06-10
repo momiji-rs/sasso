@@ -453,6 +453,10 @@ pub(crate) struct Evaluator<'a> {
     load_css_copies: RefCell<Vec<(String, String)>>,
     /// Monotonic counter for unique load-css copy keys.
     copy_counter: std::cell::Cell<usize>,
+    /// Queue of merged nested `@media` nodes bubbling out of an enclosing
+    /// media rule, taken in order at the `\u{0}MEDIA_HOIST\u{0}` markers the
+    /// inner rule leaves in the outer body.
+    media_hoist: Vec<OutNode>,
     /// Whether evaluation is inside a `@keyframes` body: frame blocks are not
     /// style rules in dart-sass, so nested at-rules do not bubble out of them
     /// and frame selectors get keyframe normalization (`E` -> `e`).
@@ -799,6 +803,7 @@ impl<'a> Evaluator<'a> {
             load_css_copies: RefCell::new(Vec::new()),
             copy_counter: std::cell::Cell::new(0),
             in_keyframes: false,
+            media_hoist: Vec::new(),
             used_modules: HashMap::default(),
             star_modules: Vec::new(),
             used_user_modules: HashMap::default(),
@@ -4009,22 +4014,58 @@ impl<'a> Evaluator<'a> {
         let node_queries = if bubble_out { &child_queries } else { &queries };
         let prelude = serialize_media_queries(node_queries);
 
+        let enclosing = !self.media_queries.is_empty();
         let saved = std::mem::replace(&mut self.media_queries, child_queries);
+        let saved_hoist = std::mem::take(&mut self.media_hoist);
         let out_body = self.eval_at_body(body, parents);
         self.media_queries = saved;
+        let mut hoisted = std::mem::replace(&mut self.media_hoist, saved_hoist);
         let out_body = out_body?;
 
-        // An empty body produces no output.
-        if out_body.is_empty() {
+        // Split the body at the hoist markers nested mergeable media rules
+        // left behind: each marker interleaves the bubbled rule at its source
+        // position, slicing this rule's own children into segments around it
+        // (dart-sass#453 keeps source order).
+        let mut result: Vec<OutNode> = Vec::new();
+        let mut segment: Vec<OutNode> = Vec::new();
+        let mut hoist_iter = hoisted.drain(..);
+        let flush = |segment: &mut Vec<OutNode>, result: &mut Vec<OutNode>, prelude: &str| {
+            if !segment.is_empty() {
+                result.push(OutNode::AtRule {
+                    name: "media".to_string(),
+                    prelude: prelude.to_string(),
+                    body: std::mem::take(segment),
+                    has_block: true,
+                });
+            }
+        };
+        for n in out_body {
+            if matches!(&n, OutNode::Raw(s) if s == MEDIA_HOIST_MARKER) {
+                flush(&mut segment, &mut result, &prelude);
+                if let Some(h) = hoist_iter.next() {
+                    result.push(h);
+                }
+            } else {
+                segment.push(n);
+            }
+        }
+        drop(hoist_iter);
+        flush(&mut segment, &mut result, &prelude);
+        if result.is_empty() {
             return Ok(());
         }
 
-        sink.push_at_rule(OutNode::AtRule {
-            name: "media".to_string(),
-            prelude,
-            body: out_body,
-            has_block: true,
-        });
+        // A mergeable rule nested in another media bubbles the whole batch
+        // out through the enclosing rule (leaving a marker at this source
+        // position); otherwise emit in place.
+        if bubble_out && enclosing {
+            sink.push_at_rule(OutNode::Raw(MEDIA_HOIST_MARKER.to_string()));
+            self.media_hoist.extend(result);
+        } else {
+            for n in result {
+                sink.push_at_rule(n);
+            }
+        }
         Ok(())
     }
 
@@ -7771,6 +7812,10 @@ fn stmt_uses_content(stmt: &Stmt) -> bool {
 /// (`%x`), a parent reference with a suffix (`&x`), a top-level leading
 /// combinator (`> a`), and a trailing combinator (`a >`). The text is the
 /// already-resolved selector (no interpolation left).
+/// Sentinel left in an enclosing `@media` body where a merged nested media
+/// rule bubbled out; the outer rule splits its own children around it.
+const MEDIA_HOIST_MARKER: &str = "\u{0}MEDIA_HOIST\u{0}";
+
 /// Normalize a keyframe selector: a percentage stop's scientific-notation
 /// marker is lowercased (`130E-1%` -> `130e-1%`); everything else (including
 /// the digits and `from`/`to`) is left verbatim.
