@@ -5480,3 +5480,25 @@ fn sign_and_minmax_calculation_semantics() {
     );
     assert_eq!(ours("a {b: min(3px + 4px, 10px)}\n"), "a {\n  b: 7px;\n}\n");
 }
+
+#[test]
+fn calc_space_splice_and_minmax_compatibility() {
+    // A space-separated calc run splices a string-valued variable verbatim
+    // (`calc(1 $c)` with `$c: unquote("+ 2")` → `calc(1 + 2)`, unfolded);
+    // a number-valued variable still has no operator.
+    assert_eq!(
+        ours(concat!(
+            "@use \"sass:string\";\n$c: string.unquote(\"+ 2\");\n",
+            "a {b: calc(1 $c)}\nc {d: calc($c 3)}\n"
+        )),
+        "a {\n  b: calc(1 + 2);\n}\n\nc {\n  d: calc(+ 2 3);\n}\n"
+    );
+    assert!(compile("$n: 2;\na {b: calc(1 $n)}\n", &Options::default()).is_err());
+    // min/max fold sequentially with unitless comparable to anything; the
+    // preserve path rejects a unitless operand paired with any unit.
+    assert_eq!(ours("a {b: min(1c, 2)}\n"), "a {\n  b: 1c;\n}\n");
+    assert_eq!(ours("a {b: max(2d, 3, 1c)}\n"), "a {\n  b: 3;\n}\n");
+    assert_eq!(ours("a {b: min(1c, 2px)}\n"), "a {\n  b: min(1c, 2px);\n}\n");
+    assert!(compile("a {b: min(3, 1c, 2d)}\n", &Options::default()).is_err());
+    assert!(compile("a {b: min(1px, 2em, 3)}\n", &Options::default()).is_err());
+}

@@ -1017,38 +1017,64 @@ fn normalize_const(v: Value) -> Value {
 /// "potentially incompatible" error case is left preserved rather than
 /// errored — a strict subset of dart's behaviour that never folds wrongly.)
 fn reduce_min_max(args: &[Value], is_min: bool, pos: Pos) -> Result<Option<Number>, Error> {
-    let mut clusters: Vec<Number> = Vec::new();
+    // dart-sass `SassCalculation.min`/`max`: a sequential fold where a
+    // unitless operand is comparable to anything (the legacy rule, so
+    // `min(1c, 2)` computes `1c`); the first incomparable pair stops the
+    // simplification.
+    let mut best: Option<Number> = None;
+    let mut simplified = true;
     for v in args {
         let n = match v {
             Value::Number(n) => n.clone(),
-            _ => return Ok(None),
-        };
-        let mut folded = false;
-        for c in &mut clusters {
-            if !c.has_complex_units()
-                && !n.has_complex_units()
-                && crate::value::calc_units_incompatible(c.unit(), n.unit())
-            {
-                return Err(incompatible(c, &n, pos));
-            }
-            if let Some(nv) = try_coerce(&n, c) {
-                // Pick the winner, keeping its own authored unit.
-                let pick_n = if is_min { nv < c.value } else { nv > c.value };
-                if pick_n {
-                    *c = n.clone();
-                }
-                folded = true;
+            _ => {
+                simplified = false;
                 break;
             }
-        }
-        if !folded {
-            clusters.push(n);
+        };
+        match &mut best {
+            None => best = Some(n),
+            Some(b) => match try_coerce(&n, b) {
+                Some(nv) => {
+                    // Pick the winner, keeping its own authored unit.
+                    let pick_n = if is_min { nv < b.value } else { nv > b.value };
+                    if pick_n {
+                        *b = n;
+                    }
+                }
+                None => {
+                    simplified = false;
+                    break;
+                }
+            },
         }
     }
-    match clusters.len() {
-        1 => Ok(Some(clusters.remove(0))),
-        _ => Ok(None),
+    if simplified {
+        return Ok(best);
     }
+    // Preserve path: every number pair must be at least *potentially*
+    // compatible (dart `_verifyCompatibleNumbers`) — a unitless operand can
+    // never combine with a unit in a real calculation, and two known units
+    // must share a dimension; an unknown unit is potentially anything.
+    let nums: Vec<&Number> = args
+        .iter()
+        .filter_map(|v| match v {
+            Value::Number(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    for i in 0..nums.len() {
+        for j in i + 1..nums.len() {
+            let (a, b) = (nums[i], nums[j]);
+            if a.has_complex_units() || b.has_complex_units() {
+                continue; // rejected separately by verify_no_complex_args
+            }
+            let (ua, ub) = (a.unit(), b.unit());
+            if a.is_unitless() != b.is_unitless() || crate::value::calc_units_incompatible(ua, ub) {
+                return Err(incompatible(a, b, pos));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Convert `n` into `target`'s unit, returning the converted scalar, or

@@ -5927,22 +5927,39 @@ impl<'a> Evaluator<'a> {
             }
             // A space-separated list written directly in the calc interior is
             // an "unparsed" run: it is only valid when it contains a `var()`/
-            // `env()` substitution or an interpolation, which dart-sass splices
-            // verbatim (`calc(var(--c) 1)`, `calc(#{"1 +"} 2)` -> `calc(1 +
-            // 2)`). A space-list of ordinary operands (`calc(1 2)`,
-            // `calc(c 1 2)`, `calc($c $d)`) has no operator between adjacent
-            // terms, which dart-sass rejects with "Missing math operator.".
+            // `env()` substitution, an interpolation, or a variable holding an
+            // unquoted string — all of which dart-sass splices verbatim
+            // (`calc(var(--c) 1)`, `calc(#{"1 +"} 2)` -> `calc(1 + 2)`,
+            // `calc(1 $c)` with `$c: unquote("+ 2")` -> `calc(1 + 2)`). A
+            // space-list of ordinary operands (`calc(1 2)`, `calc(c 1 2)`) or
+            // of number-valued variables (`calc(1 $n)`) has no operator
+            // between adjacent terms: "Missing math operator.".
             Expr::List {
                 items,
                 sep: ListSep::Space,
                 bracketed: false,
             } => {
-                if !items.iter().any(expr_has_substitution) {
+                let has_subst = items.iter().any(expr_has_substitution);
+                if !has_subst
+                    && !items
+                        .iter()
+                        .any(|e| matches!(e, Expr::Var { .. } | Expr::NsVar { .. }))
+                {
                     return Err(Error::unpositioned("Missing math operator."));
                 }
                 let mut parts = Vec::with_capacity(items.len());
+                let mut any_str = false;
                 for it in items {
-                    parts.push(self.eval_calc(it)?.to_calc_css(false));
+                    let node = self.eval_calc(it)?;
+                    if matches!(node, CalcNode::Str(_)) {
+                        any_str = true;
+                    }
+                    parts.push(node.to_calc_css(false));
+                }
+                // Variables alone only justify the splice when at least one
+                // resolved to raw text.
+                if !has_subst && !any_str {
+                    return Err(Error::unpositioned("Missing math operator."));
                 }
                 Ok(CalcNode::Str(parts.join(" ")))
             }
