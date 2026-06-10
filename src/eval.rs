@@ -457,6 +457,13 @@ pub(crate) struct Evaluator<'a> {
     /// media rule, taken in order at the `\u{0}MEDIA_HOIST\u{0}` markers the
     /// inner rule leaves in the outer body.
     media_hoist: Vec<OutNode>,
+    /// Set while module loads run inside a module-loading `@import`: dart
+    /// clones the whole import subtree's CSS at the import site (the same
+    /// `_combineCss(clone: true)` as meta.load-css). All loads in the chain
+    /// share ONE copy scope key and ONE visited set (a diamond emits its
+    /// shared upstream once per import, not once per use edge), and record no
+    /// main-tree edge.
+    import_clone: Option<(String, std::collections::HashSet<String>)>,
     /// Whether evaluation is inside a `@keyframes` body: frame blocks are not
     /// style rules in dart-sass, so nested at-rules do not bubble out of them
     /// and frame selectors get keyframe normalization (`E` -> `e`).
@@ -574,6 +581,10 @@ struct Module {
     /// The path/URL of this module's file, for diagnostic snippets pointing
     /// into the module (empty when diagnostics are disabled / unknown).
     diag_url: String,
+    /// Whether this module's CSS has been emitted into the MAIN tree (an
+    /// ordinary `@use`/`@forward` load). A module first loaded inside an
+    /// `@import`/load-css clone has not — the next plain load emits it.
+    emitted_main: std::cell::Cell<bool>,
     /// The module's emitted CSS, captured at first evaluation so an
     /// `@import`-reached module can re-emit it at each import site (dart
     /// clones the module's CSS tree per import).
@@ -803,6 +814,7 @@ impl<'a> Evaluator<'a> {
             load_css_copies: RefCell::new(Vec::new()),
             copy_counter: std::cell::Cell::new(0),
             in_keyframes: false,
+            import_clone: None,
             media_hoist: Vec::new(),
             used_modules: HashMap::default(),
             star_modules: Vec::new(),
@@ -1214,6 +1226,14 @@ impl<'a> Evaluator<'a> {
                 origin_closure: std::rc::Rc::clone(&closure_cache[&pe.origin]),
             });
         }
+        // dart keeps one extension store per module and concatenates them
+        // upstream-first, each store's own extensions in reverse source order.
+        // Our single-pass rewrite prepends each processed extender, so process
+        // DOWNSTREAM origins first: a downstream module's closure is a strict
+        // superset of its upstreams', so a stable sort by descending closure
+        // size puts downstream stores first while keeping same-module source
+        // order (which the prepending then reverses, as dart does).
+        extensions.sort_by_key(|e| std::cmp::Reverse(closure_cache.get(&e.origin).map_or(0, |c| c.len())));
 
         // An `@extend` registered inside `@media` may not extend a selector
         // outside any media context (dart-sass "You may not @extend selectors
@@ -1230,7 +1250,8 @@ impl<'a> Evaluator<'a> {
 
         // Per-module visibility: an extension's origin can rewrite a module's
         // CSS when that module is (transitively) loaded by the origin.
-        let origins: Vec<String> = self.extends.iter().map(|pe| pe.origin.clone()).collect();
+        // Parallel to the (sorted) extensions list.
+        let origins: Vec<String> = extensions.iter().map(|e| e.origin.clone()).collect();
         let closures: HashMap<String, std::collections::HashSet<String>> = closure_cache
             .iter()
             .map(|(k, v)| (k.clone(), (**v).clone()))
@@ -2489,37 +2510,43 @@ impl<'a> Evaluator<'a> {
     /// `meta.load-css`, which re-emits the whole subtree at the call site
     /// (dart `_combineCss` with `clone: true`).
     fn subtree_css(&self, key: &str) -> Vec<OutNode> {
-        fn walk(
-            ev: &Evaluator<'_>,
-            key: &str,
-            visited: &mut std::collections::HashSet<String>,
-            out: &mut Vec<OutNode>,
-        ) {
-            if !visited.insert(key.to_string()) {
-                return;
-            }
-            let deps = ev.module_dep_order.borrow().get(key).cloned().unwrap_or_default();
-            for d in deps {
-                walk(ev, &d, visited, out);
-            }
-            if let Some(m) = ev.module_cache.borrow().get(key) {
-                for n in &m.css {
-                    // An embedded dependency's scope wrapper is covered by the
-                    // dependency walk above — but a nested load-css COPY is a
-                    // materialized clone (it has no load edge) and stays.
-                    if let OutNode::ModuleScope { key: k, .. } = n {
-                        if !k.contains("#copy") {
-                            continue;
-                        }
-                    }
-                    out.push(n.clone());
-                }
-            }
-        }
         let mut out = Vec::new();
         let mut visited = std::collections::HashSet::new();
-        walk(self, key, &mut visited, &mut out);
+        self.walk_subtree(key, &mut visited, &mut out);
         out
+    }
+
+    fn walk_subtree(
+        &self,
+        key: &str,
+        visited: &mut std::collections::HashSet<String>,
+        out: &mut Vec<OutNode>,
+    ) {
+        if !visited.insert(key.to_string()) {
+            return;
+        }
+        let deps = self
+            .module_dep_order
+            .borrow()
+            .get(key)
+            .cloned()
+            .unwrap_or_default();
+        for d in deps {
+            self.walk_subtree(&d, visited, out);
+        }
+        if let Some(m) = self.module_cache.borrow().get(key) {
+            for n in &m.css {
+                // An embedded dependency's scope wrapper is covered by the
+                // dependency walk above; a materialized clone (no load edge)
+                // stays.
+                if let OutNode::ModuleScope { key: k, .. } = n {
+                    if !k.contains("#copy") && !k.contains("#import") {
+                        continue;
+                    }
+                }
+                out.push(n.clone());
+            }
+        }
     }
 
     /// Register a unique `meta.load-css` copy scope for `key` at the current
@@ -2541,6 +2568,32 @@ impl<'a> Evaluator<'a> {
         copy_key
     }
 
+    /// The copy scope and subtree CSS for one forced re-emit. Inside a
+    /// module-loading `@import`, all loads share the import's single copy key
+    /// and visited set (a diamond's shared upstream emits once per import);
+    /// a `meta.load-css` call gets its own key and a fresh walk.
+    fn clone_module_css(&mut self, key: &str) -> (String, Vec<OutNode>) {
+        let state = self.import_clone.take();
+        if let Some((k, mut visited)) = state {
+            let copy_key = k.clone();
+            self.module_deps
+                .borrow_mut()
+                .entry(self.current_module.clone())
+                .or_default()
+                .insert(copy_key.clone());
+            self.load_css_copies
+                .borrow_mut()
+                .push((copy_key.clone(), key.to_string()));
+            let mut out = Vec::new();
+            self.walk_subtree(key, &mut visited, &mut out);
+            self.import_clone = Some((k, visited));
+            (copy_key, out)
+        } else {
+            let copy_key = self.register_load_css_copy(key);
+            (copy_key, self.subtree_css(key))
+        }
+    }
+
     fn load_module(
         &mut self,
         url: &str,
@@ -2550,6 +2603,8 @@ impl<'a> Evaluator<'a> {
         force_reemit: bool,
         sink: &mut Sink<'_>,
     ) -> Result<(Rc<Module>, Vec<String>), Error> {
+        // Inside a module-loading `@import`, every load re-emits as a clone.
+        let force_reemit = force_reemit || self.import_clone.is_some();
         let importer = self.options.importer;
         // The caller's importer runs OUTSIDE the arena scope: anything it
         // allocates (e.g. a cache of paths it owns) must survive past this
@@ -2570,7 +2625,8 @@ impl<'a> Evaluator<'a> {
         // configuration targets no variable the module actually defines (a
         // module with no configurable variables may be loaded with or without
         // config). The keys it *does* define count as consumed for the caller.
-        if let Some(existing) = self.module_cache.borrow().get(&key).cloned() {
+        let cached = self.module_cache.borrow().get(&key).cloned();
+        if let Some(existing) = cached {
             let consumed: Vec<String> = config
                 .keys()
                 .filter(|k| existing.var(k).is_some())
@@ -2634,12 +2690,23 @@ impl<'a> Evaluator<'a> {
                 // extensions apply to it (caller -> copy edge), the subtree's
                 // own extensions apply to the clone, and other loaders'
                 // extensions do not (dart `_combineCss` with `clone: true`).
-                let copy_key = self.register_load_css_copy(&key);
+                let (copy_key, nodes) = self.clone_module_css(&key);
                 splice_nodes(
                     sink,
                     vec![OutNode::ModuleScope {
                         key: copy_key,
-                        nodes: reparent_nodes(self.subtree_css(&key), parents),
+                        nodes: reparent_nodes(nodes, parents),
+                    }],
+                );
+            } else if !existing.emitted_main.get() {
+                // First loaded inside an import/load-css clone: this plain
+                // load is the module's first appearance in the MAIN tree.
+                existing.emitted_main.set(true);
+                splice_nodes(
+                    sink,
+                    vec![OutNode::ModuleScope {
+                        key: key.clone(),
+                        nodes: reparent_nodes(existing.css.clone(), parents),
                     }],
                 );
             }
@@ -2694,15 +2761,16 @@ impl<'a> Evaluator<'a> {
         // an ordinary `@use`/`@forward` load wraps its own CSS in its module
         // scope.
         if force_reemit {
-            let copy_key = self.register_load_css_copy(&key);
+            let (copy_key, nodes) = self.clone_module_css(&key);
             splice_nodes(
                 sink,
                 vec![OutNode::ModuleScope {
                     key: copy_key,
-                    nodes: reparent_nodes(self.subtree_css(&key), parents),
+                    nodes: reparent_nodes(nodes, parents),
                 }],
             );
         } else {
+            module.emitted_main.set(true);
             splice_nodes(
                 sink,
                 vec![OutNode::ModuleScope {
@@ -3281,6 +3349,7 @@ impl<'a> Evaluator<'a> {
                 fn_origins,
                 mixin_origins,
                 diag_url: diag_url.to_string(),
+                emitted_main: std::cell::Cell::new(false),
                 css: Vec::new(),
             },
             consumed,
@@ -4606,7 +4675,16 @@ impl<'a> Evaluator<'a> {
                             } else {
                                 None
                             };
+                            let saved_clone = if loads_modules {
+                                let n = self.copy_counter.get() + 1;
+                                self.copy_counter.set(n);
+                                self.import_clone
+                                    .replace((format!("#import{n}"), std::collections::HashSet::new()))
+                            } else {
+                                self.import_clone.take()
+                            };
                             let result = self.exec(&sheet.stmts, parents, sink);
+                            self.import_clone = saved_clone;
                             if let Some((p, c, i)) = saved_pending_consumed {
                                 self.pending_config = p;
                                 self.consumed_config = c;

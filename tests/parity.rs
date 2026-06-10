@@ -6226,3 +6226,41 @@ fn media_interpolation_reparses_resolved_text() {
     assert!(compile("@media #{\"(a)\"} or (b) {x {y: z}}\n", &Options::default()).is_err());
     assert_parity("@media bar#{12} {x {y: z}}\n");
 }
+
+#[test]
+fn import_subtree_clones_and_extension_store_order() {
+    let dir = std::env::temp_dir().join("sasso_parity_impclone");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |n: &str, b: &str| std::fs::write(dir.join(n), b).unwrap();
+    w("_shared.scss", "shared {x: y}\n");
+    w("_used.scss", "@use \"shared\";\nin-used {@extend shared}\n");
+    w(
+        "_imported.scss",
+        "@use \"shared\";\nin-imported {@extend shared}\n",
+    );
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    // A module-loading @import clones the whole import subtree at the import
+    // site: the used extend applies to the original, the imported extend to
+    // both (it is downstream of the used module). Upstream extension stores
+    // come first; same-store extenders show in reverse source order.
+    assert_eq!(
+        compile("@use \"used\";\n@import \"imported\";\n", &opts).unwrap(),
+        "shared, in-used, in-imported {\n  x: y;\n}\n\nshared, in-imported {\n  x: y;\n}\n"
+    );
+    // A module first loaded inside an import clone still emits its main-tree
+    // copy at the next plain @use.
+    w("_importer.scss", "@import \"imported\";\n");
+    assert_eq!(
+        compile("@use \"importer\";\n@use \"used\";\n", &opts).unwrap(),
+        "shared, in-imported {\n  x: y;\n}\n\nshared, in-used {\n  x: y;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    // Same-module extenders alone keep dart's reverse source order.
+    assert_eq!(
+        ours("s {x: y}\nfirst {@extend s}\nsecond {@extend s}\n"),
+        "s, second, first {\n  x: y;\n}\n"
+    );
+    assert_parity("s {x: y}\nfirst {@extend s}\nsecond {@extend s}\n");
+}
