@@ -478,8 +478,21 @@ fn fn_grayscale(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Opti
         if !is_legacy {
             return Ok(Value::Color(super::color::grayscale_modern(&c)));
         }
-        let (h, _s, l) = c.to_hsl();
-        Ok(Value::Color(from_hsl(h, 0.0, l, c.a)))
+        // Legacy grayscale is `change($saturation: 0)` in HSL: a same-space
+        // hsl input keeps its hue and missing channels; an rgb/hwb input
+        // round-trips through hsl and back to its own space (whose legacy
+        // serialization then renders the now-powerless hue as 0).
+        let zero = Value::Number(crate::value::Number::with_unit(0.0, "%"));
+        let chans: Vec<(String, &Value)> = vec![("saturation".to_string(), &zero)];
+        super::color::modify_in_space_full(
+            &c,
+            ColorSpace::Hsl,
+            &chans,
+            super::color::ModifyOp::Change,
+            false,
+            false,
+            pos,
+        )
     })())
 }
 
@@ -912,6 +925,22 @@ fn fn_scale_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
         Space::Hsl => ColorSpace::Hsl,
         Space::Hwb => ColorSpace::Hwb,
     };
+    // A color with missing channels keeps them when only the alpha (or
+    // nothing) is scaled — the byte-tuple decomposition below would collapse
+    // `rgb(none none none)` to black (dart preserves the missing channels).
+    {
+        let mc = super::color::legacy_to_modern(&c);
+        if mc.channels.iter().any(Option::is_none) && chans.iter().all(|(n, _)| *n == "alpha") {
+            let mut out = mc;
+            for (_, v) in &chans {
+                let factor = scale_factor("alpha", v, pos)?;
+                let a = out.alpha.unwrap_or(1.0);
+                out.alpha = Some(scale_toward(a, factor, 1.0));
+            }
+            let space = out.space;
+            return Ok(Value::Color(super::color::make_modern_in(out, space)));
+        }
+    }
     let mut tuple = decompose(&c, space);
     let mut alpha = c.a;
     for (n, v) in chans {

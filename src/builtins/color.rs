@@ -2981,7 +2981,7 @@ pub(super) fn modify_in_space_full(
     // works (dart's working-space conversion fills legacy missing channels);
     // an AUTHORED missing channel (analogous to a source `none`) stays
     // missing, so `adjust` still errors on it and `change` still sets it.
-    {
+    if orig.space != space {
         let missing_in_src = |cat: ChannelCategory| {
             (0..3).any(|i| orig.channels[i].is_none() && channel_category(orig.space, i) == Some(cat))
         };
@@ -3312,6 +3312,13 @@ pub(super) fn invert_in_space(
         }
     }
     let inverted = invert_channels(space, &src);
+    // A full-weight invert IS the inverted color (no mixing) — mixing would
+    // resurrect a missing channel from the original via the interpolation
+    // missing-takes-other rule.
+    if (weight - 1.0).abs() < 1e-11 {
+        let back = convert_modern_filled(&inverted, dest);
+        return Ok(make_modern_in(back, dest));
+    }
     // Mix the inverted color toward the original by `1 - weight` (per channel).
     let mix = |a: Option<f64>, b: Option<f64>, hue: bool| -> Option<f64> {
         match (a, b) {
