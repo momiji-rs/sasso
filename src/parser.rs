@@ -3765,9 +3765,13 @@ impl Parser {
             // A lone `=` (not `==`) ends the space-list so an enclosing
             // argument list can apply the single-`=` Microsoft-filter operator
             // (`foo(a = b)`); `==` stays the equality operator, parsed above.
+            // A `:` likewise ends it — a map key may be separated from its
+            // colon by whitespace (`(b \n : c)`), which the paren handler
+            // then resolves as a map.
             if (!had_ws && !adjacent_string && !adjacent_interp)
                 || self.at_value_terminator()
                 || (self.sc.peek() == Some('=') && self.sc.peek_at(1) != Some('='))
+                || (self.sc.peek() == Some(':') && self.sc.peek_at(1) != Some(':'))
             {
                 self.sc.reset(mark);
                 break;

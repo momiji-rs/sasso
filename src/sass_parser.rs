@@ -480,6 +480,48 @@ impl Transpiler {
         // know whether a child block follows. We emit the prelude, then either a
         // block or — when no child block follows — the empty form appropriate to
         // the statement kind (an empty `{}` for block constructs, `;` otherwise).
+        // A declaration WITH a value whose child block contains a line that
+        // is not itself a `prop: value` declaration is dart-sass's
+        // "expected \":\"." error (nested properties only) — e.g.
+        // `b: c,` followed by a deeper-indented bare `d`.
+        let is_decl_with_value = !logical.starts_with('@')
+            && !logical.starts_with('$')
+            && !logical.starts_with("--")
+            && find_decl_colon(logical).is_some_and(|c| {
+                let after = &logical[c + 1..];
+                after.starts_with(char::is_whitespace) && !after.trim().is_empty()
+            });
+        if is_decl_with_value {
+            if let Some(i) = self.next_nonblank(self.idx) {
+                if self.lines[i].indent > indent {
+                    let child_indent = self.lines[i].indent;
+                    let mut j = i;
+                    while j < self.lines.len() {
+                        let l = &self.lines[j];
+                        if l.content.trim().is_empty() {
+                            j += 1;
+                            continue;
+                        }
+                        if l.indent < child_indent {
+                            break;
+                        }
+                        if l.indent == child_indent {
+                            let t = l.content.trim_start();
+                            if !t.starts_with("//") && !t.starts_with("/*") && find_decl_colon(t).is_none() {
+                                return Err(Error::at(
+                                    "expected \":\".".to_string(),
+                                    Pos {
+                                        line: l.line,
+                                        col: l.content.trim_end().chars().count() + 1,
+                                    },
+                                ));
+                            }
+                        }
+                        j += 1;
+                    }
+                }
+            }
+        }
         self.out.push_str(logical);
         if !self.parse_child_into_braces(indent)? {
             let form = if explicit_semicolon {

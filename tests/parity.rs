@@ -5749,3 +5749,25 @@ fn midstream_pseudo_extender_replaced_across_modules() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn sass_whitespace_map_keys_and_decl_children() {
+    // A map key may be separated from its colon by whitespace: the space list
+    // ends at `:` so the paren handler still sees a key/value pair.
+    assert_eq!(
+        ours("$a: (b\n  : c, d: e);\nx {y: map-get($a, b)}\n"),
+        "x {\n  y: c;\n}\n"
+    );
+    assert_sass_parity("$a: (b\n  : c, d: e)\nx\n  y: map-get($a, b)\n");
+    // A declaration WITH a value whose child block contains a bare
+    // non-declaration line is dart's `expected ":".` error.
+    let err = compile(
+        "a\n  b: c,\n     d\n",
+        &Options::default().with_syntax(sasso::Syntax::Sass),
+    )
+    .expect_err("bare child line under a valued declaration must error");
+    assert!(
+        err.to_string().contains("expected \":\"."),
+        "unexpected error: {err}"
+    );
+}
