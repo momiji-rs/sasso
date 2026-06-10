@@ -5771,3 +5771,52 @@ fn sass_whitespace_map_keys_and_decl_children() {
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn selector_paren_validation_and_import_supports_collapse() {
+    // A top-level `(` in a selector is only valid as a pseudo argument list;
+    // a stray `)` is its own error (dart-sass "expected selector." /
+    // `Unexpected ")".`).
+    for bad in [
+        "a(b) {x: y}",
+        "a (b) {x: y}",
+        "(b) {x: y}",
+        "*(b) {x: y}",
+        "a[u](b) {x: y}",
+        "a#{\"(b)\"} {x: y}",
+        "a:nth-child (2n) {x: y}",
+        "a) {x: y}",
+    ] {
+        assert!(compile(bad, &Options::default()).is_err(), "should reject: {bad}");
+    }
+    for good in [
+        ":not(b) {x: y}",
+        "a:hover(b) {x: y}",
+        ":#{\"not\"}(b) {x: y}",
+        ":has(> a) {x: y}",
+        "::part(x) {a: b}",
+        ":-webkit-any(a) {x: y}",
+    ] {
+        assert!(
+            compile(good, &Options::default()).is_ok(),
+            "should accept: {good}"
+        );
+        assert_parity(good);
+    }
+    // An `@import` supports(...) condition is an expression part of the
+    // modifiers interpolation: its serialized text gets the unquoted-string
+    // newline collapse. A Raw function modifier is verbatim text — preserved.
+    assert_eq!(
+        ours("@import \"a.css\" supports(a(\n  b));\n"),
+        "@import \"a.css\" supports(a( b));\n"
+    );
+    assert_eq!(
+        ours("@import \"a.css\" supports(a(b\n  ));\n"),
+        "@import \"a.css\" supports(a(b ));\n"
+    );
+    assert_eq!(
+        ours("@import \"a.css\" foo(b\n  c);\n"),
+        "@import \"a.css\" foo(b\n  c);\n"
+    );
+    assert_parity("@import \"a.css\" supports(a(b\n\n  c));\n");
+}

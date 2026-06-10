@@ -3850,7 +3850,12 @@ impl<'a> Evaluator<'a> {
                     declaration,
                 } => {
                     out.push(' ');
-                    let inner = self.serialize_supports_condition(condition)?;
+                    // The condition is an *expression* part of the modifiers
+                    // interpolation in dart-sass (a `SupportsExpression` whose
+                    // value is an unquoted string), so its serialized text gets
+                    // the unquoted-string newline collapse — unlike a Raw
+                    // modifier, which is verbatim buffer text.
+                    let inner = unquoted_string_css(&self.serialize_supports_condition(condition)?);
                     if *declaration {
                         out.push_str(&format!("supports{inner}"));
                     } else {
@@ -7384,6 +7389,22 @@ fn validate_plain_css_selector(part: &str, top_level: bool) -> Result<(), Error>
     Ok(())
 }
 
+/// Whether the `(` at `chars[open]` directly follows a pseudo-class/element
+/// name: a non-empty run of identifier characters whose preceding character is
+/// a `:` (`:not(`, `::-webkit-any(`).
+fn paren_follows_pseudo(chars: &[char], open: usize) -> bool {
+    let mut j = open;
+    while j > 0 {
+        let p = chars[j - 1];
+        if p.is_ascii_alphanumeric() || p == '-' || p == '_' || (p as u32) >= 0x80 {
+            j -= 1;
+        } else {
+            break;
+        }
+    }
+    j < open && j > 0 && chars[j - 1] == ':'
+}
+
 fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
     for part in split_commas(sel) {
         let chars: Vec<char> = part.chars().collect();
@@ -7412,6 +7433,22 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
                     i = end + 1;
                     at_compound_start = false;
                     continue;
+                }
+                // A top-level `(` is only valid as a pseudo-class/element
+                // argument list (`:not(…)`, `::part(…)`): the run of identifier
+                // characters directly before it must follow a `:`. Anywhere
+                // else — compound start, after a plain identifier, after `]` —
+                // dart-sass reports "expected selector." (`a(b)`, `a (b)`).
+                '(' if depth == 0 => {
+                    if !paren_follows_pseudo(&chars, i) {
+                        return Err(Error::unpositioned("expected selector."));
+                    }
+                    depth += 1;
+                    at_compound_start = false;
+                }
+                // A stray top-level closer never matches an open bracket.
+                ')' if depth == 0 => {
+                    return Err(Error::unpositioned("Unexpected \")\"."));
                 }
                 '[' | '(' => {
                     depth += 1;
