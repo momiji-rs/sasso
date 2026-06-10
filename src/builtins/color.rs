@@ -179,10 +179,8 @@ fn int_num(v: f64) -> Number {
 /// directly, and the result is clamped to `[0, 1]`. NaN clamps to 0. Any
 /// other unit is an error (`Expected … to have unit "%" or no units.`).
 fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
-    if let Value::Calc(node) = v {
-        if let Some(c) = degenerate_const(node) {
-            return Ok(clamp_alpha(c));
-        }
+    if let Some(c) = degenerate_value(v) {
+        return Ok(clamp_alpha(c));
     }
     match v {
         Value::Number(num) => {
@@ -225,15 +223,11 @@ fn rgb_channel(v: &Value, pos: Pos) -> Result<f64, Error> {
     if let Value::Slash(num, _) = v {
         return Ok(clamp_finite(num.value, 0.0, 255.0));
     }
-    if let Value::Calc(node) = v {
-        if let Some(c) = degenerate_const(node) {
-            return Ok(clamp_finite(c, 0.0, 255.0));
-        }
-    }
-    if let Value::Number(num) = v {
-        if num.value.is_nan() {
+    if let Some(c) = degenerate_value(v) {
+        if c.is_nan() {
             return Ok(0.0);
         }
+        return Ok(clamp_finite(c, 0.0, 255.0));
     }
     channel(v, pos)
 }
@@ -549,7 +543,8 @@ fn split_channels(channels: &Value) -> SplitChannels {
     // unit, e.g. `50%/0.4`).
     if let Some(Value::Slash(_, repr)) = items.last() {
         if let Some((lhs, rhs)) = repr.split_once('/') {
-            if let (Some(last), Some(alpha)) = (parse_number_token(lhs), parse_number_token(rhs)) {
+            let token = |s: &str| parse_number_token(s).or_else(|| parse_degenerate_token(s));
+            if let (Some(last), Some(alpha)) = (token(lhs), token(rhs)) {
                 items.pop();
                 items.push(Value::Number(last));
                 return SplitChannels {
@@ -647,6 +642,25 @@ fn fmt_token_matches(n: &Number, s: &str) -> bool {
 
 /// Parse a CSS number token that may carry a unit (`"3"`, `"0.5"`, `"50%"`)
 /// into a [`Number`]. Returns `None` for anything not of that shape.
+/// Parse the textual spelling of a degenerate calc back into its number:
+/// `calc(NaN)`, `calc(infinity)`, `calc(-infinity)`, and the unit-bearing
+/// `calc(<const> * 1<unit>)` forms a slash repr may carry.
+fn parse_degenerate_token(s: &str) -> Option<Number> {
+    let t = s.trim();
+    let inner = t.strip_prefix("calc(")?.strip_suffix(')')?.trim();
+    let (const_part, unit) = match inner.split_once('*') {
+        Some((c, u)) => (c.trim(), u.trim().strip_prefix('1')?.to_string()),
+        None => (inner, String::new()),
+    };
+    let value = match const_part.to_ascii_lowercase().as_str() {
+        "nan" => f64::NAN,
+        "infinity" => f64::INFINITY,
+        "-infinity" => f64::NEG_INFINITY,
+        _ => return None,
+    };
+    Some(Number::with_unit(value, unit))
+}
+
 fn parse_number_token(s: &str) -> Option<Number> {
     let s = s.trim();
     let split = s
@@ -762,7 +776,37 @@ fn hsl_hue(v: &Value, pos: Pos) -> Result<f64, Error> {
 /// Whether a value is a `calc()` that folds to a degenerate constant
 /// (`infinity`, `-infinity`, `NaN`).
 fn is_degenerate_calc(v: &Value) -> bool {
-    matches!(v, Value::Calc(node) if degenerate_const(node).is_some())
+    degenerate_value(v).is_some()
+}
+
+/// The non-finite value of a degenerate channel: a non-finite number (the
+/// usual form, since a fully-folded `calc()` unwraps to a number), or a
+/// residual `calc()` constant.
+fn degenerate_value(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) if !n.value.is_finite() => Some(n.value),
+        Value::Calc(node) => match node {
+            CalcNode::Number(n) if !n.value.is_finite() => Some(n.value),
+            _ => degenerate_const(node),
+        },
+        _ => None,
+    }
+}
+
+/// Fold a degenerate `calc()` channel (`calc(NaN)`, `calc(infinity * 1%)`)
+/// to its plain number, keeping the unit; any other value passes through.
+fn fold_degenerate(v: &Value) -> Value {
+    if let Value::Calc(node) = v {
+        if let Some(c) = degenerate_const(node) {
+            return Value::Number(Number::unitless(c));
+        }
+        if let CalcNode::Number(n) = node {
+            if !n.value.is_finite() {
+                return Value::Number(n.clone());
+            }
+        }
+    }
+    v.clone()
 }
 
 /// Serialize an `hsl()`/`hsla()` call that carries a degenerate `calc()`
@@ -807,8 +851,8 @@ fn hsl_degenerate_hue(v: &Value, pos: Pos) -> Result<String, Error> {
 /// non-positive/`NaN` result to `0%`, otherwise both emit `calc(X * 1%)`. A
 /// plain number keeps its literal `%` spelling (saturation floored at 0).
 fn hsl_degenerate_pct(v: &Value, is_saturation: bool, pos: Pos) -> Result<String, Error> {
-    if let Value::Calc(node) = v {
-        if let Some(c) = degenerate_const(node) {
+    if let Some(c) = degenerate_value(v) {
+        {
             if is_saturation && (c.is_nan() || c <= 0.0) {
                 return Ok("0%".to_string());
             }
@@ -881,15 +925,18 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     let is_relative = comps
         .first()
         .is_some_and(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.eq_ignore_ascii_case("from")));
-    let comps_func = comps.iter().any(is_special);
-    // A degenerate `calc()` alpha (`calc(NaN)`/`calc(±infinity)`) folds to a
-    // clamped number rather than being preserved verbatim (dart-sass).
+    // A degenerate `calc()` channel or alpha (`calc(NaN)`, `calc(infinity *
+    // 1%)`) folds to its number — dart constructs the color and lets the
+    // hwb -> hsl legacy serialization propagate the non-finite values —
+    // rather than preserving the call verbatim.
+    let comps_func = comps.iter().any(|v| is_special(v) && !is_degenerate_calc(v));
     let alpha_func = alpha
         .as_ref()
         .is_some_and(|v| is_special(v) && !is_degenerate_calc(v));
     if is_relative || comps_func || alpha_func {
         return Ok(verbatim_call("hwb", &channels));
     }
+    let comps: Vec<Value> = comps.iter().map(fold_degenerate).collect();
     // A non-number channel (a non-`from` keyword such as `c`, or a quoted
     // string) is reported before the channel-count check, matching dart-sass.
     for (i, comp) in comps.iter().enumerate() {
@@ -2045,10 +2092,8 @@ pub(super) fn modern_alpha(v: Option<&Value>) -> Option<f64> {
         None => Some(1.0),
         Some(a) if is_none_keyword(a) => None,
         Some(a) => {
-            if let Value::Calc(node) = a {
-                if let Some(c) = degenerate_const(node) {
-                    return Some(if c.is_nan() { 0.0 } else { c.clamp(0.0, 1.0) });
-                }
+            if let Some(c) = degenerate_value(a) {
+                return Some(if c.is_nan() { 0.0 } else { c.clamp(0.0, 1.0) });
             }
             match a {
                 Value::Number(num) => {

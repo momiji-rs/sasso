@@ -199,6 +199,25 @@ fn lin_of(space: ColorSpace) -> LinTransfer {
 
 // ---- hsl / hwb (dart `HslColorSpace.convert` / `HwbColorSpace.convert`) --
 
+/// JS `Math.max` (NaN-propagating, unlike Rust's `f64::max` which ignores
+/// NaN) — the comparisons in the conversion code must see dart's values.
+fn js_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+/// JS `Math.min` (NaN-propagating).
+fn js_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.min(b)
+    }
+}
+
 /// dart `hueToRgb(m1, m2, hue)` — the CSS2 algorithm.
 fn hue_to_rgb(m1: f64, m2: f64, mut hue: f64) -> f64 {
     if hue < 0.0 {
@@ -260,8 +279,8 @@ pub(crate) fn hwb_to_srgb(hwb: [f64; 3]) -> [f64; 3] {
 /// out-of-gamut channels produce).
 pub(crate) fn srgb_to_hsl(rgb: [f64; 3]) -> [f64; 3] {
     let (red, green, blue) = (rgb[0], rgb[1], rgb[2]);
-    let max = red.max(green).max(blue);
-    let min = red.min(green).min(blue);
+    let max = js_max(js_max(red, green), blue);
+    let min = js_min(js_min(red, green), blue);
     let delta = max - min;
     let mut hue = if max == min {
         0.0
@@ -288,8 +307,8 @@ pub(crate) fn srgb_to_hsl(rgb: [f64; 3]) -> [f64; 3] {
 /// srgb [0..1] -> hwb [hue-deg, white-%, black-%].
 pub(super) fn srgb_to_hwb(rgb: [f64; 3]) -> [f64; 3] {
     let (red, green, blue) = (rgb[0], rgb[1], rgb[2]);
-    let max = red.max(green).max(blue);
-    let min = red.min(green).min(blue);
+    let max = js_max(js_max(red, green), blue);
+    let min = js_min(js_min(red, green), blue);
     let delta = max - min;
     let hue = if max == min {
         0.0

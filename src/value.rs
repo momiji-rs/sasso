@@ -1972,15 +1972,29 @@ impl ModernColor {
         } else {
             (h, s)
         };
-        let hh = fmt_num(h, compressed);
-        let ss = fmt_num(s, compressed);
-        let ll = fmt_num(l, compressed);
+        // A non-finite channel (an hwb color with a degenerate calc() channel
+        // propagates NaN through the hsl conversion) serializes in its calc
+        // form: `calc(NaN)` for the hue, `calc(NaN * 1%)` for percentages.
+        let hh = if h.is_finite() {
+            fmt_num(h, compressed)
+        } else {
+            Number::unitless(h).to_css(compressed)
+        };
+        let pct = |v: f64| {
+            if v.is_finite() {
+                format!("{}%", fmt_num(v, compressed))
+            } else {
+                Number::with_unit(v, "%").to_css(compressed)
+            }
+        };
+        let ss = pct(s);
+        let ll = pct(l);
         let comma = if compressed { "," } else { ", " };
         if opaque {
-            format!("hsl({hh}{comma}{ss}%{comma}{ll}%)")
+            format!("hsl({hh}{comma}{ss}{comma}{ll})")
         } else {
             let aa = fmt_num(a, compressed);
-            format!("hsla({hh}{comma}{ss}%{comma}{ll}%{comma}{aa})")
+            format!("hsla({hh}{comma}{ss}{comma}{ll}{comma}{aa})")
         }
     }
 

@@ -3890,21 +3890,12 @@ impl<'a> Evaluator<'a> {
                 // calculation so it serializes as `calc(infinity)` etc., and
                 // anything still containing an operation stays a calculation.
                 match node {
-                    CalcNode::Number(n) if n.value.is_finite() => Ok(Value::Number(n)),
-                    // A bare unitless non-finite result canonicalizes to its
-                    // constant spelling (`infinity`/`-infinity`/`NaN`). This is
-                    // also the form the color builtins inspect for degenerate
-                    // `calc()` channels (`rgb(calc(infinity), …)`).
-                    CalcNode::Number(n) if n.is_unitless() => {
-                        let spelling = if n.value.is_nan() {
-                            "NaN"
-                        } else if n.value > 0.0 {
-                            "infinity"
-                        } else {
-                            "-infinity"
-                        };
-                        Ok(Value::Calc(CalcNode::Str(spelling.to_string())))
-                    }
+                    // A calculation that reduces to a single number unwraps to
+                    // it — including a non-finite result (dart-sass:
+                    // `meta.type-of(calc(NaN)) == number`); the Number's own
+                    // serialization restores the `calc(NaN)`/`calc(infinity *
+                    // 1px)` spelling.
+                    CalcNode::Number(n) => Ok(Value::Number(n)),
                     // `calc()` wrapping a single already-complete calculation
                     // (`calc(min(1%, 2px))`, `calc(clamp(…))`, etc.) is
                     // redundant: dart-sass drops the outer `calc()` and emits
