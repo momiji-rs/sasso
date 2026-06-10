@@ -6205,3 +6205,24 @@ fn nested_media_merge_bubbles_in_source_order() {
     // An unmergeable nested @media stays nested.
     assert_parity("@media not screen {\n  a {b: c}\n  @media (color) {x {y: z}}\n}\n");
 }
+
+#[test]
+fn media_interpolation_reparses_resolved_text() {
+    // Interpolation may span query boundaries: the RESOLVED prelude text is
+    // re-parsed (dart CssMediaQuery.parseList).
+    assert_eq!(
+        ours("@media scr#{\"een, pri\"}nt a#{\"nd (max-width: 300px)\"} {x {y: z}}\n"),
+        "@media screen, print and (max-width: 300px) {\n  x {\n    y: z;\n  }\n}\n"
+    );
+    // A parenthesised condition survives verbatim through the re-parse
+    // (no `and` normalization inside raw parens).
+    assert_eq!(
+        ours("@media (#{\"(a) AnD (b)\"}) {x {y: z}}\n"),
+        "@media ((a) AnD (b)) {\n  x {\n    y: z;\n  }\n}\n"
+    );
+    // A modifier keeps its original case, and `or` after interpolation is
+    // still a parse error (the stylesheet grammar stays strict).
+    assert_parity("@media ONLY screen {x {y: z}}\n");
+    assert!(compile("@media #{\"(a)\"} or (b) {x {y: z}}\n", &Options::default()).is_err());
+    assert_parity("@media bar#{12} {x {y: z}}\n");
+}

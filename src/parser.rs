@@ -2471,8 +2471,10 @@ impl Parser {
             (None, ident1)
         } else {
             self.skip_media_ws();
-            // `@media only screen [and …]` — ident1 is the modifier.
-            let modifier = media_ident_plain(&ident1).map(|s| s.to_ascii_lowercase());
+            // `@media only screen [and …]` — ident1 is the modifier (kept as
+            // a template verbatim: it may contain interpolation, and dart
+            // preserves its original case).
+            let modifier = Some(ident1);
             if !self.try_media_keyword("and") {
                 return Ok(MediaQuery::Type {
                     modifier,

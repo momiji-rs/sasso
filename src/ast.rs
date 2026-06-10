@@ -505,7 +505,7 @@ pub(crate) enum MediaQuery {
     /// `[modifier]? <type> [and <cond>]*`. The modifier (`not`/`only`,
     /// already lowercased) and type may contain interpolation.
     Type {
-        modifier: Option<String>,
+        modifier: Option<Vec<TplPiece>>,
         mtype: Vec<TplPiece>,
         conditions: Vec<MediaInParens>,
     },

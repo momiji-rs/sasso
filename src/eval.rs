@@ -4076,6 +4076,14 @@ impl<'a> Evaluator<'a> {
         for q in &list.queries {
             out.push(self.resolve_media_query(q)?);
         }
+        // dart-sass re-parses the RESOLVED prelude text (CssMediaQuery
+        // .parseList), so interpolation may span query boundaries
+        // (`scr#{"een, pri"}nt` splits into two queries). Only a prelude that
+        // actually contained interpolation needs the round-trip.
+        if list.queries.iter().any(media_query_has_interp) {
+            let text = serialize_media_queries(&out);
+            return css_media_parse_list(&text);
+        }
         Ok(out)
     }
 
@@ -4087,9 +4095,13 @@ impl<'a> Evaluator<'a> {
                 conditions,
             } => {
                 let mtype = self.eval_template(mtype)?;
+                let modifier = match modifier {
+                    Some(t) => Some(self.eval_template(t)?),
+                    None => None,
+                };
                 let conditions = self.resolve_conditions(conditions)?;
                 Ok(ResolvedQuery {
-                    modifier: modifier.clone(),
+                    modifier,
                     mtype: Some(mtype),
                     conditions,
                     conjunction_and: true,
@@ -9246,6 +9258,188 @@ impl ResolvedQuery {
 }
 
 /// Serialize a comma list of media queries.
+/// Whether a parsed media query contains `#{}` interpolation anywhere.
+fn media_query_has_interp(q: &MediaQuery) -> bool {
+    fn tpl(t: &[TplPiece]) -> bool {
+        t.iter().any(|p| matches!(p, TplPiece::Interp(_)))
+    }
+    fn expr(e: &Expr) -> bool {
+        match e {
+            Expr::Interp(_) => true,
+            Expr::Ident(t) | Expr::QuotedString(t) => tpl(t),
+            Expr::Paren(inner) | Expr::Unary { operand: inner, .. } => expr(inner),
+            Expr::Binary { lhs, rhs, .. } | Expr::Div { lhs, rhs, .. } => expr(lhs) || expr(rhs),
+            Expr::List { items, .. } => items.iter().any(expr),
+            _ => false,
+        }
+    }
+    fn in_parens(c: &MediaInParens) -> bool {
+        match c {
+            MediaInParens::Feature(f) => match &**f {
+                MediaFeature::Decl { name, value } => expr(name) || value.as_ref().is_some_and(expr),
+                MediaFeature::Range {
+                    first, second, rest, ..
+                } => expr(first) || expr(second) || rest.as_ref().is_some_and(|(_, e)| expr(e)),
+            },
+            MediaInParens::Not(inner) => in_parens(inner),
+            MediaInParens::Group { conditions, .. } => conditions.iter().any(in_parens),
+            MediaInParens::Interp(_) => true,
+        }
+    }
+    match q {
+        MediaQuery::Type {
+            mtype, conditions, ..
+        } => tpl(mtype) || conditions.iter().any(in_parens),
+        MediaQuery::Condition { conditions, .. } => conditions.iter().any(in_parens),
+    }
+}
+
+/// Parse a RESOLVED (interpolation-free) media query list the way dart-sass's
+/// `CssMediaQuery.parseList` does: identifiers and `and`/`or` keywords are
+/// structural, while each parenthesised condition is kept as raw balanced
+/// text (`((a) AnD (b))` survives verbatim).
+fn css_media_parse_list(text: &str) -> Result<Vec<ResolvedQuery>, Error> {
+    let mut out = Vec::new();
+    for part in split_top_level_media_commas(text) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        out.push(css_media_parse_one(part)?);
+    }
+    Ok(out)
+}
+
+fn split_top_level_media_commas(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    for c in s.chars() {
+        match c {
+            '(' | '[' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' | ']' => {
+                depth -= 1;
+                cur.push(c);
+            }
+            ',' if depth == 0 => parts.push(std::mem::take(&mut cur)),
+            _ => cur.push(c),
+        }
+    }
+    parts.push(cur);
+    parts
+}
+
+fn css_media_parse_one(t: &str) -> Result<ResolvedQuery, Error> {
+    let chars: Vec<char> = t.chars().collect();
+    let mut i = 0usize;
+    let skip_ws = |i: &mut usize| {
+        while *i < chars.len() && chars[*i].is_whitespace() {
+            *i += 1;
+        }
+    };
+    // A raw balanced `(...)` condition, kept verbatim.
+    let take_paren = |i: &mut usize| -> Result<String, Error> {
+        let start = *i;
+        let mut depth = 0i32;
+        while *i < chars.len() {
+            match chars[*i] {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        *i += 1;
+                        return Ok(chars[start..*i].iter().collect());
+                    }
+                }
+                _ => {}
+            }
+            *i += 1;
+        }
+        Err(Error::unpositioned("expected \")\"."))
+    };
+    let take_ident = |i: &mut usize| -> String {
+        let start = *i;
+        while *i < chars.len() && !chars[*i].is_whitespace() && chars[*i] != '(' {
+            *i += 1;
+        }
+        chars[start..*i].iter().collect()
+    };
+    skip_ws(&mut i);
+    // Condition-only form: `(c) [and|or (c)]*` (possibly `not (c)`).
+    if i < chars.len() && chars[i] == '(' {
+        let mut conditions = vec![take_paren(&mut i)?];
+        let mut conjunction_and = true;
+        loop {
+            skip_ws(&mut i);
+            if i >= chars.len() {
+                break;
+            }
+            let word = take_ident(&mut i);
+            skip_ws(&mut i);
+            match word.to_ascii_lowercase().as_str() {
+                "and" => conditions.push(take_paren(&mut i)?),
+                "or" => {
+                    conjunction_and = false;
+                    conditions.push(take_paren(&mut i)?);
+                }
+                _ => return Err(Error::unpositioned("expected \"and\" or \"or\".")),
+            }
+        }
+        return Ok(ResolvedQuery {
+            modifier: None,
+            mtype: None,
+            conditions,
+            conjunction_and,
+        });
+    }
+    let id1 = take_ident(&mut i);
+    skip_ws(&mut i);
+    if id1.eq_ignore_ascii_case("not") && i < chars.len() && chars[i] == '(' {
+        let cond = take_paren(&mut i)?;
+        return Ok(ResolvedQuery {
+            modifier: None,
+            mtype: None,
+            conditions: vec![format!("not {cond}")],
+            conjunction_and: true,
+        });
+    }
+    // `[modifier] type [and (c)]*` — a second identifier that isn't `and`
+    // makes the first the modifier.
+    let mut modifier = None;
+    let mut mtype = id1;
+    if i < chars.len() && chars[i] != '(' {
+        let save = i;
+        let id2 = take_ident(&mut i);
+        if !id2.is_empty() && !id2.eq_ignore_ascii_case("and") {
+            modifier = Some(std::mem::replace(&mut mtype, id2));
+        } else {
+            i = save;
+        }
+    }
+    let mut conditions = Vec::new();
+    loop {
+        skip_ws(&mut i);
+        if i >= chars.len() {
+            break;
+        }
+        let word = take_ident(&mut i);
+        if !word.eq_ignore_ascii_case("and") {
+            return Err(Error::unpositioned("expected \"and\"."));
+        }
+        skip_ws(&mut i);
+        conditions.push(take_paren(&mut i)?);
+    }
+    Ok(ResolvedQuery {
+        modifier,
+        mtype: Some(mtype),
+        conditions,
+        conjunction_and: true,
+    })
+}
+
 fn serialize_media_queries(queries: &[ResolvedQuery]) -> String {
     queries
         .iter()
