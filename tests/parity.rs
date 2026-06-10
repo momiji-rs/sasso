@@ -5868,3 +5868,34 @@ fn sass_comment_blocks_and_continuation_rules() {
     );
     assert!(compile("a {b: c !ie;}", &Options::default()).is_err());
 }
+
+#[test]
+fn sass_custom_props_spread_and_inline_comments() {
+    // Only an open bracket or interpolation continues a custom-property
+    // value; any other indented child is dart's error.
+    assert!(compile(
+        ".x\n  --foo: bar\n    baz: qux\n",
+        &Options::default().with_syntax(sasso::Syntax::Sass)
+    )
+    .is_err());
+    assert_eq!(
+        ours_sass("a\n  --b: (c\n    d)\n"),
+        "a {\n  --b: (c\n    d);\n}\n"
+    );
+    // Whitespace (and newlines) may separate a splat value from its `...`.
+    assert_eq!(
+        ours("@function a($b, $c) {@return null}\n$d: e, f;\n$g: a($d\n  ...);\nx {y: $g}\n"),
+        ""
+    );
+    // A trailing loud comment is invisible to selector-comma continuation
+    // and tolerated (dropped) after an explicit `;`.
+    assert_eq!(ours_sass("a, /* c */\nb\n  x: y\n"), "a,\nb {\n  x: y;\n}\n");
+    assert_eq!(
+        ours_sass("a\n  b: c; /* f */\n  d: e;\n"),
+        "a {\n  b: c;\n  d: e;\n}\n"
+    );
+    // A selector list whose FIRST comma part is empty is "expected selector."
+    // (later empty parts are tolerated).
+    assert!(compile(",b {x: y}", &Options::default()).is_err());
+    assert_parity("a, ,b {x: y}\n");
+}

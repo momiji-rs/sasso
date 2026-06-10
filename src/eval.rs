@@ -7406,6 +7406,12 @@ fn paren_follows_pseudo(chars: &[char], open: usize) -> bool {
 }
 
 fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
+    // A selector list whose FIRST comma part is empty is dart-sass's
+    // "expected selector." (`,b`); later empty parts (`a,,b`, trailing `a,`)
+    // are tolerated and skipped.
+    if sel.trim_start().starts_with(',') {
+        return Err(Error::unpositioned("expected selector."));
+    }
     for part in split_commas(sel) {
         let chars: Vec<char> = part.chars().collect();
         let mut i = 0;

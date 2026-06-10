@@ -480,7 +480,9 @@ impl Transpiler {
         // (`@a b;`) is then a leaf statement.
         let mut explicit_semicolon = false;
         if let Some(semi) = find_top_level_semicolon(logical) {
-            let after = logical[semi + 1..].trim();
+            // A trailing loud comment after the `;` is tolerated and dropped
+            // (`b: c; /* f */`); anything else is two statements on a line.
+            let after = trim_trailing_loud_comments(logical[semi + 1..].trim());
             if !after.is_empty() {
                 let col = logical[..semi].chars().count();
                 return Err(Error::at(
@@ -598,21 +600,26 @@ impl Transpiler {
         }
         self.idx = start + 1;
         let mut value = raw[colon + 1..].trim_start().to_string();
-        // A child block continues the custom-property value verbatim, preserving
-        // each line's original source indentation.
+        // Only an *open* bracket (`(`/`[`/`{`) or `#{` interpolation continues
+        // the value onto following lines (verbatim, preserving each line's
+        // source indentation); otherwise nothing may be indented beneath a
+        // custom property (dart-sass error).
+        while custom_value_open(&value) && self.idx < self.lines.len() {
+            let l = &self.lines[self.idx];
+            value.push('\n');
+            value.push_str(&l.indent_str);
+            value.push_str(&l.content);
+            self.idx += 1;
+        }
         if let Some(i) = self.next_nonblank(self.idx) {
-            let child_indent = self.lines[i].indent;
-            if child_indent > indent {
-                self.idx = i;
-                while let Some(j) = self.next_nonblank(self.idx) {
-                    if self.lines[j].indent <= indent {
-                        break;
-                    }
-                    value.push('\n');
-                    value.push_str(&self.lines[j].indent_str);
-                    value.push_str(&self.lines[j].content);
-                    self.idx = j + 1;
-                }
+            if self.lines[i].indent > indent {
+                return Err(Error::at(
+                    "Nothing may be indented beneath a custom property.".to_string(),
+                    Pos {
+                        line: self.lines[i].line,
+                        col: self.lines[i].indent + 1,
+                    },
+                ));
             }
         }
         self.out.push_str(name);
@@ -880,7 +887,9 @@ fn continuation_pending(s: &str, comma_continues: bool) -> bool {
     if st.bracket_depth > 0 || st.in_interp || st.in_loud_comment {
         return true;
     }
-    let t = s.trim_end();
+    // Trailing complete loud comments are invisible to continuation
+    // detection (`a, /* c */` still continues the selector list).
+    let t = trim_trailing_loud_comments(s);
     if t.ends_with('\\') {
         return true;
     }
@@ -892,6 +901,24 @@ fn continuation_pending(s: &str, comma_continues: bool) -> bool {
         return true;
     }
     comma_continues && t.ends_with(',')
+}
+
+/// Strip any run of complete trailing `/* … */` comments (and the whitespace
+/// before them) from `s`.
+fn trim_trailing_loud_comments(s: &str) -> &str {
+    let mut t = s.trim_end();
+    while t.ends_with("*/") {
+        let Some(open) = t.rfind("/*") else {
+            break;
+        };
+        // Only a comment that closes at the very end qualifies (the `*/` we
+        // saw must belong to this `/*`).
+        if !t[open..].ends_with("*/") || t[open + 2..t.len() - 2].contains("/*") {
+            break;
+        }
+        t = t[..open].trim_end();
+    }
+    t
 }
 
 /// Strip a trailing `//` silent comment from a single line, respecting quoted
@@ -981,6 +1008,34 @@ struct ScanState {
 
 /// Scan `s` once, tracking strings, `//`/`/* */` comments and `#{…}`
 /// interpolation, to report its closing state.
+/// Whether a custom-property value ends with an open `(`/`[`/`{` bracket or
+/// `#{` interpolation (so the next line continues it verbatim). Quoted
+/// strings are skipped; a custom value's braces count as brackets.
+fn custom_value_open(s: &str) -> bool {
+    let cs: Vec<char> = s.chars().collect();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            '"' | '\'' => {
+                let q = cs[i];
+                i += 1;
+                while i < cs.len() && cs[i] != q {
+                    if cs[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    depth > 0
+}
+
 /// Whether `s` ends inside an open `#{` interpolation, scanning *inside*
 /// loud-comment text too (unlike [`scan_state`], which skips comment bodies):
 /// a `#{` opens interpolation even within `/* … */`.

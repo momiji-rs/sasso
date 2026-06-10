@@ -3769,10 +3769,15 @@ impl Parser {
             // A `:` likewise ends it — a map key may be separated from its
             // colon by whitespace (`(b \n : c)`), which the paren handler
             // then resolves as a map.
+            // A `...` splat ends the list too — the value may be separated
+            // from its `...` by whitespace (`a($d ...)`, `a($d\n  ...)`).
             if (!had_ws && !adjacent_string && !adjacent_interp)
                 || self.at_value_terminator()
                 || (self.sc.peek() == Some('=') && self.sc.peek_at(1) != Some('='))
                 || (self.sc.peek() == Some(':') && self.sc.peek_at(1) != Some(':'))
+                || (self.sc.peek() == Some('.')
+                    && self.sc.peek_at(1) == Some('.')
+                    && self.sc.peek_at(2) == Some('.'))
             {
                 self.sc.reset(mark);
                 break;
@@ -5837,7 +5842,9 @@ impl Parser {
                 let value = self.arg_value()?;
                 // A trailing `...` marks a splat argument: a list spreads into
                 // positional args and a map into keyword args. A named arg may
-                // not be a splat.
+                // not be a splat. Whitespace (including newlines) may separate
+                // the value from its `...` (`a($d\n  ...)`).
+                self.skip_ws_inline();
                 let splat = name_opt.is_none()
                     && self.sc.peek() == Some('.')
                     && self.sc.peek_at(1) == Some('.')
