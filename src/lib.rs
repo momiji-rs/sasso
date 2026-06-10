@@ -375,40 +375,8 @@ impl Importer for FsImporter {
                 Resolution::NotFound => {}
             }
         }
-        // A plain `.css` file is a valid `@use`/`@forward` target (loaded in
-        // plain-CSS mode), tried only after the Sass candidates so an adjacent
-        // `.scss`/`.sass` still wins.
-        for base in &self.load_paths {
-            if let Some(p) = resolve_css_in_base(base, path) {
-                if let Ok(src) = std::fs::read_to_string(&p) {
-                    let key = std::fs::canonicalize(&p)
-                        .map(|c| c.to_string_lossy().into_owned())
-                        .unwrap_or_else(|_| p.to_string_lossy().into_owned());
-                    return Some((key, src, Syntax::Css));
-                }
-            }
-        }
         None
     }
-}
-
-/// Resolve `path` to a plain `.css` file under `base`: `name.css` or the
-/// partial `_name.css`. Returns the first existing candidate.
-fn resolve_css_in_base(base: &Path, path: &str) -> Option<PathBuf> {
-    let p = Path::new(path);
-    let dir = match p.parent() {
-        Some(par) if !par.as_os_str().is_empty() => base.join(par),
-        _ => base.to_path_buf(),
-    };
-    let file = p.file_name().and_then(|s| s.to_str()).unwrap_or(path);
-    let stem = file.strip_suffix(".css").unwrap_or(file);
-    for name in [format!("{stem}.css"), format!("_{stem}.css")] {
-        let cand = dir.join(&name);
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    None
 }
 
 /// The syntax a resolved file should be parsed with, from its extension: a
@@ -463,8 +431,18 @@ fn resolve_in_base(base: &Path, path: &str, allow_import_only: bool) -> Resoluti
     };
     let file = p.file_name().and_then(|s| s.to_str()).unwrap_or(path);
 
+    // Explicit `.css` extension: only the plain-CSS candidate is considered.
+    // (An `@import "x.css"` never reaches here — it's a passthrough upstream —
+    // but `@use "x.css"` does.)
+    if let Some(stem) = file.strip_suffix(".css") {
+        return match tier_exact(&dir, stem, &["css"], false) {
+            Tier::One(p) => Resolution::Found(p),
+            Tier::Many => Resolution::Ambiguous,
+            Tier::None => Resolution::NotFound,
+        };
+    }
+
     // Explicit `.scss`/`.sass` extension: only that extension is considered.
-    // (`.css` is handled upstream as a plain CSS import and never reaches here.)
     let explicit_ext = [".scss", ".sass"].into_iter().find(|ext| file.ends_with(ext));
 
     if let Some(ext) = explicit_ext {
@@ -499,6 +477,15 @@ fn resolve_in_base(base: &Path, path: &str, allow_import_only: bool) -> Resoluti
             Tier::Many => return Resolution::Ambiguous,
             Tier::None => {}
         }
+    }
+
+    // A plain `.css` file (loaded in plain-CSS mode): after the Sass
+    // candidates, but BEFORE index files (dart-sass `_tryPathWithExtensions`
+    // tries `$path.css` before `_tryPathAsDirectory`).
+    match tier_exact(&dir, file, &["css"], false) {
+        Tier::One(p) => return Resolution::Found(p),
+        Tier::Many => return Resolution::Ambiguous,
+        Tier::None => {}
     }
 
     // Index files live in a subdirectory named after the import path.

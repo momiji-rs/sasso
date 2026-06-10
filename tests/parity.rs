@@ -5372,3 +5372,40 @@ fn colon_property_hack_scss() {
     // A pseudo-selector block is still a nested rule, not a declaration.
     assert_eq!(ours("b {:hover {c: d}}\n"), "b :hover {\n  c: d;\n}\n");
 }
+
+#[test]
+fn import_plain_css_file() {
+    // `@import "x"` resolves a plain `.css` file after the Sass candidates but
+    // before index files, loads it in plain-CSS mode, and nests its outermost
+    // rules under an enclosing Sass rule (inner nesting stays native).
+    let dir = std::env::temp_dir().join(format!("sasso_import_css_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("both")).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+
+    std::fs::write(dir.join("plain.css"), "a { b {c: d}}\n").unwrap();
+    assert_eq!(
+        compile("@import \"plain\";\n", &opts).expect("import css"),
+        "a {\n  b {\n    c: d;\n  }\n}\n"
+    );
+    assert_eq!(
+        compile("x {@import \"plain\";}\n", &opts).expect("nested import css"),
+        "x a {\n  b {\n    c: d;\n  }\n}\n"
+    );
+
+    // css beats index.
+    std::fs::write(dir.join("both.css"), "css {x: y}\n").unwrap();
+    std::fs::write(dir.join("both").join("index.scss"), "idx {x: y}\n").unwrap();
+    assert_eq!(
+        compile("@import \"both\";\n", &opts).expect("css before index"),
+        "css {\n  x: y;\n}\n"
+    );
+
+    // An adjacent .scss still wins over .css.
+    std::fs::write(dir.join("plain.scss"), "scss {x: y}\n").unwrap();
+    assert_eq!(
+        compile("@import \"plain\";\n", &opts).expect("scss wins"),
+        "scss {\n  x: y;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

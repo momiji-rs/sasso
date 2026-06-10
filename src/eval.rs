@@ -2300,18 +2300,37 @@ impl<'a> Evaluator<'a> {
     /// Sass flattening), keeping `&` parent references literal, and resolving
     /// only `#{…}` interpolation. The parser has already rejected Sass-only
     /// constructs, so the remaining statements are plain CSS.
-    fn exec_css(&mut self, stmts: &[Stmt], sink: &mut Sink<'_>) -> Result<(), Error> {
+    fn exec_css(&mut self, stmts: &[Stmt], parents: &[String], sink: &mut Sink<'_>) -> Result<(), Error> {
         let saved = std::mem::replace(&mut self.in_plain_css, true);
-        let result = self.exec_css_inner(stmts, sink);
+        let result = self.exec_css_inner(stmts, parents, sink);
         self.in_plain_css = saved;
         result
     }
 
-    fn exec_css_inner(&mut self, stmts: &[Stmt], sink: &mut Sink<'_>) -> Result<(), Error> {
+    fn exec_css_inner(
+        &mut self,
+        stmts: &[Stmt],
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
         for stmt in stmts {
             match stmt {
                 Stmt::Rule(r) => {
-                    let selectors = self.css_selectors(&r.selector, true)?;
+                    // When the plain-CSS sheet is imported inside a style rule,
+                    // its outermost rules nest under the Sass parent (descendant
+                    // join); inner nesting stays native (dart-sass `nestWithin`
+                    // with `preserveParentSelectors`). The sheet's own top level
+                    // always rejects leading combinators — also when merged
+                    // under a Sass parent (dart checks in the merge branch).
+                    let own = self.css_selectors(&r.selector, true)?;
+                    let selectors: Vec<String> = if parents.is_empty() {
+                        own
+                    } else {
+                        parents
+                            .iter()
+                            .flat_map(|p| own.iter().map(move |s| format!("{p} {s}")))
+                            .collect()
+                    };
                     let (items, bubbled) = self.css_rule_children(&r.body, &selectors)?;
                     // A childless rule is invisible (dart-sass skips it when
                     // serializing) — e.g. when its whole body bubbled out.
@@ -2733,7 +2752,7 @@ impl<'a> Evaluator<'a> {
         // A plain-CSS module preserves its nesting (no Sass flattening, `&` kept
         // literal); a Sass module runs the normal evaluator.
         let result = if css {
-            self.exec_css(&sheet.stmts, sink)
+            self.exec_css(&sheet.stmts, &[], sink)
         } else {
             self.exec(&sheet.stmts, &[], sink)
         };
@@ -3928,6 +3947,15 @@ impl<'a> Evaluator<'a> {
                                 return Err(Error::unpositioned("This file is already being loaded."));
                             }
                             let sheet = parse_with_syntax(&src, syntax)?;
+                            // A plain-CSS file imports as plain CSS: nesting
+                            // preserved, no Sass evaluation (same as `@use`).
+                            if matches!(syntax, Syntax::Css) {
+                                self.loading.push(path.clone());
+                                let result = self.exec_css(&sheet.stmts, parents, sink);
+                                self.loading.pop();
+                                result?;
+                                continue;
+                            }
                             self.loading.push(path.clone());
                             // `@import` inlines the file's variables/functions/
                             // mixins into the current scope, but its module
