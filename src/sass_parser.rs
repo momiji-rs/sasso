@@ -175,6 +175,19 @@ impl Transpiler {
         //     continuations) ---------------------------------------------
         let (mut logical, child_indent) = self.assemble_logical_line(indent)?;
 
+        // A leading `\` escapes the statement into a *style rule* and is
+        // consumed (the legacy `\:hover` form, distinguishing a pseudo-class
+        // selector from the old `:prop val` declaration syntax; SCSS keeps
+        // the backslash, the indented syntax drops it).
+        if logical.starts_with('\\') {
+            logical.remove(0);
+            self.out.push_str(&logical);
+            if !self.parse_child_into_braces(indent)? {
+                self.out.push_str(" {}\n");
+            }
+            return Ok(());
+        }
+
         // Rewrite the indented-syntax mixin shorthands to their `@mixin`/
         // `@include` equivalents *before* prelude continuation. `=name` defines
         // a mixin, and a bare `=` continues onto the next line like the

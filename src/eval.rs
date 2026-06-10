@@ -410,6 +410,10 @@ pub(crate) struct Evaluator<'a> {
     /// `&` in value position. `None` at the document root (where `&` is `null`).
     /// Each element is one resolved complex selector (space-joined).
     current_selector: Option<Vec<String>>,
+    /// Source line-break flags parallel to `current_selector` (whether each
+    /// resolved complex selector started on a fresh source line). A nested
+    /// rule's complex inherits its parent's flag OR its own part's flag.
+    current_linebreaks: Vec<bool>,
     /// Collected `@extend` directives, applied in a post-eval extension pass.
     extends: Vec<PendingExtend>,
     /// The current nested-property-set name prefix (e.g. `font` then `font-x`).
@@ -694,6 +698,7 @@ impl<'a> Evaluator<'a> {
             in_mixin: Vec::new(),
             media_queries: Vec::new(),
             current_selector: None,
+            current_linebreaks: Vec::new(),
             extends: Vec::new(),
             decl_prefix: None,
             in_supports_declaration: false,
@@ -3440,6 +3445,20 @@ impl<'a> Evaluator<'a> {
         // in step with the dropped bogus selectors.
         let part_lbs = comma_linebreaks(&sel_str, !parents.is_empty());
         let n = part_lbs.len().max(1);
+        // A nested complex came from parent `i / n` (`current` is parent-major
+        // `parents × parts`); it starts a fresh line when its own part did OR
+        // its parent did.
+        let parent_lbs: &[bool] = if self.current_linebreaks.len() == parents.len() {
+            &self.current_linebreaks
+        } else {
+            &[]
+        };
+        let full_lbs: Vec<bool> = (0..current.len())
+            .map(|i| {
+                part_lbs.get(i % n).copied().unwrap_or(false)
+                    || parent_lbs.get(i / n).copied().unwrap_or(false)
+            })
+            .collect();
         let mut emit_selectors: Vec<String> = Vec::new();
         let mut emit_linebreaks: Vec<bool> = Vec::new();
         for (i, s) in current.iter().enumerate() {
@@ -3447,10 +3466,11 @@ impl<'a> Evaluator<'a> {
                 continue;
             }
             emit_selectors.push(s.clone());
-            emit_linebreaks.push(part_lbs.get(i % n).copied().unwrap_or(false));
+            emit_linebreaks.push(full_lbs.get(i).copied().unwrap_or(false));
         }
         self.push_scope(false);
         let prev_selector = self.current_selector.replace(current.clone());
+        let prev_linebreaks = std::mem::replace(&mut self.current_linebreaks, full_lbs);
         let mut items: Vec<OutItem> = Vec::new();
         let mut nested: Vec<OutNode> = Vec::new();
         let result = {
@@ -3469,6 +3489,7 @@ impl<'a> Evaluator<'a> {
             r
         };
         self.current_selector = prev_selector;
+        self.current_linebreaks = prev_linebreaks;
         self.pop_scope();
         result?;
         sink.emit_style_rule(nested);

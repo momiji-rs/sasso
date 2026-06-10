@@ -5899,3 +5899,24 @@ fn sass_custom_props_spread_and_inline_comments() {
     assert!(compile(",b {x: y}", &Options::default()).is_err());
     assert_parity("a, ,b {x: y}\n");
 }
+
+#[test]
+fn sass_statement_escape_and_nested_linebreaks() {
+    // A leading `\` escapes the statement into a style rule and is consumed
+    // (the legacy `\:hover` disambiguation; SCSS keeps the backslash).
+    assert_eq!(
+        ours_sass("\\:hover TD\n  color: red\n"),
+        ":hover TD {\n  color: red;\n}\n"
+    );
+    assert_eq!(
+        ours_sass("\\:color red\n  foo: bar\n"),
+        ":color red {\n  foo: bar;\n}\n"
+    );
+    // A nested complex selector starts a fresh output line when its own
+    // comma part did OR its parent did.
+    assert_eq!(
+        ours("a,\nb {\n  c, d {x: y}\n}\n"),
+        "a c, a d,\nb c,\nb d {\n  x: y;\n}\n"
+    );
+    assert_parity("a,\nb {\n  c, d {x: y}\n}\n");
+}
