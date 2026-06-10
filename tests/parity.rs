@@ -6096,3 +6096,38 @@ fn nested_import_forward_members_and_override() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn load_css_copies_belong_to_their_caller() {
+    let dir = std::env::temp_dir().join("sasso_parity_lcx");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |n: &str, b: &str| std::fs::write(dir.join(n), b).unwrap();
+    w("_other.scss", "a {b: c}\n");
+    w(
+        "_left.scss",
+        "@use \"sass:meta\";\n@include meta.load-css(\"other\");\nleft {@extend a}\n",
+    );
+    w(
+        "_right.scss",
+        "@use \"sass:meta\";\n@include meta.load-css(\"other\");\nright {@extend a}\n",
+    );
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    // Each load-css copy is spliced into ITS caller's tree: only that
+    // caller's extensions apply to it.
+    assert_eq!(
+        compile("@use \"left\";\n@use \"right\";\n", &opts).unwrap(),
+        "a, left {\n  b: c;\n}\n\na, right {\n  b: c;\n}\n"
+    );
+    // A built-in module loads as a no-op (no CSS, no error).
+    assert_eq!(
+        compile(
+            "@use \"sass:meta\";\n@include meta.load-css(\"sass:color\");\n",
+            &opts
+        )
+        .unwrap(),
+        ""
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

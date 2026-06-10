@@ -2119,6 +2119,19 @@ impl<'a> Evaluator<'a> {
                 ))
             }
         }
+        // A built-in `sass:*` module emits no CSS (and can't be configured).
+        if let Some(m) = url.strip_prefix("sass:") {
+            if crate::builtins::is_module(m) {
+                if !config.is_empty() {
+                    return Err(Error::at(
+                        format!("Built-in module sass:{m} can't be configured."),
+                        pos,
+                    ));
+                }
+                return Ok(());
+            }
+            return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
+        }
         let conf_keys: Vec<String> = config.keys().cloned().collect();
         // Evaluate the module into a fresh TOP-LEVEL buffer so its body runs in
         // its own top-level context — a module top-level declaration errors no
@@ -2487,13 +2500,11 @@ impl<'a> Evaluator<'a> {
                 .or_default()
                 .insert(key.clone());
             if force_reemit {
-                splice_nodes(
-                    sink,
-                    vec![OutNode::ModuleScope {
-                        key: key.clone(),
-                        nodes: reparent_nodes(existing.css.clone(), parents),
-                    }],
-                );
+                // A `meta.load-css` copy is spliced into the CALLER's tree
+                // (dart clones the module's CSS there), so the caller's own
+                // extensions apply to it and other loaders' do not — no
+                // module-scope wrapper.
+                splice_nodes(sink, reparent_nodes(existing.css.clone(), parents));
             }
             return Ok((existing, Vec::new()));
         }
@@ -2528,13 +2539,20 @@ impl<'a> Evaluator<'a> {
             self.eval_module(&key, &diag_url, &sheet, config, pos, &mut buf_sink, is_css)?
         };
         module.css = css_buf.clone();
-        splice_nodes(
-            sink,
-            vec![OutNode::ModuleScope {
-                key: key.clone(),
-                nodes: reparent_nodes(css_buf, parents),
-            }],
-        );
+        // A first load through `meta.load-css` (force_reemit) splices the CSS
+        // bare into the CALLER's tree (the caller's extensions apply to it);
+        // an ordinary `@use`/`@forward` load wraps it in its module scope.
+        if force_reemit {
+            splice_nodes(sink, reparent_nodes(css_buf, parents));
+        } else {
+            splice_nodes(
+                sink,
+                vec![OutNode::ModuleScope {
+                    key: key.clone(),
+                    nodes: reparent_nodes(css_buf, parents),
+                }],
+            );
+        }
         let module = Rc::new(module);
         self.module_cache.borrow_mut().insert(key, Rc::clone(&module));
         Ok((module, consumed))
