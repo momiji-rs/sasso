@@ -464,6 +464,10 @@ pub(crate) struct Evaluator<'a> {
     /// shared upstream once per import, not once per use edge), and record no
     /// main-tree edge.
     import_clone: Option<(String, std::collections::HashSet<String>)>,
+    /// The directory of the file currently being evaluated, used to resolve
+    /// relative `@use`/`@forward`/`@import` URLs against the containing file
+    /// first (dart-sass resolution order).
+    current_file_dir: Option<String>,
     /// Whether evaluation is inside a `@keyframes` body: frame blocks are not
     /// style rules in dart-sass, so nested at-rules do not bubble out of them
     /// and frame selectors get keyframe normalization (`E` -> `e`).
@@ -505,6 +509,13 @@ pub(crate) struct Evaluator<'a> {
     /// currently being evaluated, consumed by its `!default` declarations.
     /// Maps variable name -> (value, is_default_override).
     pending_config: HashMap<String, (Value, bool)>,
+    /// The opaque identity of the ORIGINAL explicit configuration the pending
+    /// config derives from (0 = none/implicit). dart-sass allows re-loading
+    /// an already-loaded module with a configuration that shares the same
+    /// original (a `with (...)` distributed through several forwards).
+    pending_config_id: usize,
+    /// Counter for fresh explicit-configuration identities.
+    config_id_counter: std::cell::Cell<usize>,
     /// Config keys actually consumed by a `!default` declaration in the module
     /// currently being evaluated (used to reject unused configuration).
     consumed_config: Vec<String>,
@@ -581,6 +592,12 @@ struct Module {
     /// The path/URL of this module's file, for diagnostic snippets pointing
     /// into the module (empty when diagnostics are disabled / unknown).
     diag_url: String,
+    /// The identity of the original explicit configuration this module was
+    /// first evaluated with (0 = none/implicit).
+    config_origin: std::cell::Cell<usize>,
+    /// The directory of the module's resolved file (for relative URL
+    /// resolution while the module's own code runs); empty when unknown.
+    file_dir: String,
     /// Whether this module's CSS has been emitted into the MAIN tree (an
     /// ordinary `@use`/`@forward` load). A module first loaded inside an
     /// `@import`/load-css clone has not — the next plain load emits it.
@@ -815,6 +832,7 @@ impl<'a> Evaluator<'a> {
             copy_counter: std::cell::Cell::new(0),
             in_keyframes: false,
             import_clone: None,
+            current_file_dir: None,
             media_hoist: Vec::new(),
             used_modules: HashMap::default(),
             star_modules: Vec::new(),
@@ -823,6 +841,8 @@ impl<'a> Evaluator<'a> {
             module_cache: Rc::new(RefCell::new(HashMap::default())),
             forwarded: Forwarded::default(),
             pending_config: HashMap::default(),
+            pending_config_id: 0,
+            config_id_counter: std::cell::Cell::new(0),
             consumed_config: Vec::new(),
         }
     }
@@ -2216,7 +2236,13 @@ impl<'a> Evaluator<'a> {
         let mut buf: Vec<OutNode> = Vec::new();
         let consumed = {
             let mut module_sink = Sink::Top(&mut buf);
-            let (_module, consumed) = self.load_module(&url, config, pos, parents, true, &mut module_sink)?;
+            let config_id = if config.is_empty() {
+                0
+            } else {
+                self.fresh_config_id()
+            };
+            let (_module, consumed) =
+                self.load_module(&url, config, config_id, pos, parents, true, &mut module_sink)?;
             consumed
         };
         if conf_keys.iter().any(|k| !consumed.contains(k)) {
@@ -2424,7 +2450,12 @@ impl<'a> Evaluator<'a> {
         // A user stylesheet module.
         let conf = self.eval_config(config)?;
         let conf_keys: Vec<String> = conf.keys().cloned().collect();
-        let (module, consumed) = self.load_module(url, conf, pos, &[], false, sink)?;
+        let config_id = if conf.is_empty() {
+            0
+        } else {
+            self.fresh_config_id()
+        };
+        let (module, consumed) = self.load_module(url, conf, config_id, pos, &[], false, sink)?;
         // Any configured variable the module did not consume via a `!default`
         // declaration is an error.
         if conf_keys.iter().any(|k| !consumed.contains(k)) {
@@ -2509,6 +2540,13 @@ impl<'a> Evaluator<'a> {
     /// each module once), un-wrapping embedded module-scope nodes — used for
     /// `meta.load-css`, which re-emits the whole subtree at the call site
     /// (dart `_combineCss` with `clone: true`).
+    /// A fresh explicit-configuration identity.
+    fn fresh_config_id(&self) -> usize {
+        let n = self.config_id_counter.get() + 1;
+        self.config_id_counter.set(n);
+        n
+    }
+
     fn subtree_css(&self, key: &str) -> Vec<OutNode> {
         let mut out = Vec::new();
         let mut visited = std::collections::HashSet::new();
@@ -2594,10 +2632,12 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn load_module(
         &mut self,
         url: &str,
         config: HashMap<String, (Value, bool)>,
+        config_id: usize,
         pos: Pos,
         parents: &[String],
         force_reemit: bool,
@@ -2612,7 +2652,8 @@ impl<'a> Evaluator<'a> {
         // allocator. The returned `String`s are then deep-copied into the arena
         // below by the parse/eval pipeline.
         let saved = crate::arena::pause();
-        let resolved = importer.and_then(|imp| imp.resolve_module_with_syntax(url));
+        let base = self.current_file_dir.clone();
+        let resolved = importer.and_then(|imp| imp.resolve_module_with_syntax_in(url, base.as_deref()));
         crate::arena::resume(saved);
         let (key, src, syntax) = match resolved {
             Some(triple) => triple,
@@ -2658,6 +2699,13 @@ impl<'a> Evaluator<'a> {
                             nodes: reparent_nodes(existing.css.clone(), parents),
                         }],
                     );
+                    return Ok((existing, consumed));
+                }
+                // A configuration distributed through several forwards keeps
+                // its ORIGINAL identity: re-reaching an already-loaded module
+                // with the same original silently reuses it (dart-sass
+                // sameOriginal).
+                if config_id != 0 && existing.config_origin.get() == config_id {
                     return Ok((existing, consumed));
                 }
                 return Err(Error::at(
@@ -2749,7 +2797,16 @@ impl<'a> Evaluator<'a> {
         let mut css_buf: Vec<OutNode> = Vec::new();
         let (mut module, consumed) = {
             let mut buf_sink = Sink::Top(&mut css_buf);
-            self.eval_module(&key, &diag_url, &sheet, config, pos, &mut buf_sink, is_css)?
+            self.eval_module(
+                &key,
+                &diag_url,
+                &sheet,
+                config,
+                config_id,
+                pos,
+                &mut buf_sink,
+                is_css,
+            )?
         };
         module.css = css_buf.clone();
         let module = Rc::new(module);
@@ -3212,6 +3269,7 @@ impl<'a> Evaluator<'a> {
         diag_url: &str,
         sheet: &Stylesheet,
         config: HashMap<String, (Value, bool)>,
+        config_id: usize,
         pos: Pos,
         sink: &mut Sink<'_>,
         css: bool,
@@ -3219,6 +3277,9 @@ impl<'a> Evaluator<'a> {
         // Save and reset the per-module environment, then restore on the way out.
         // The module's body runs against its own source file for diagnostics.
         let module_source = self.source_for(diag_url);
+        // Relative URLs inside the module resolve against ITS directory.
+        let module_dir = dirname_of(key);
+        let saved_dir = std::mem::replace(&mut self.current_file_dir, module_dir);
         let saved_url = std::mem::replace(&mut self.current_url, diag_url.to_string());
         let saved_source = std::mem::replace(&mut self.current_source, module_source);
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::default()]);
@@ -3231,6 +3292,7 @@ impl<'a> Evaluator<'a> {
         let saved_star_user = std::mem::take(&mut self.star_user_modules);
         let saved_fwd = std::mem::take(&mut self.forwarded);
         let saved_config = std::mem::replace(&mut self.pending_config, config);
+        let saved_config_id = std::mem::replace(&mut self.pending_config_id, config_id);
         let saved_consumed = std::mem::take(&mut self.consumed_config);
         let saved_selector = self.current_selector.take();
         let saved_module = std::mem::replace(&mut self.current_module, key.to_string());
@@ -3287,9 +3349,11 @@ impl<'a> Evaluator<'a> {
         self.star_user_modules = saved_star_user;
         self.forwarded = saved_fwd;
         self.pending_config = saved_config;
+        self.pending_config_id = saved_config_id;
         self.consumed_config = saved_consumed;
         self.current_selector = saved_selector;
         self.current_module = saved_module;
+        self.current_file_dir = saved_dir;
         self.current_url = saved_url;
         self.current_source = saved_source;
 
@@ -3349,6 +3413,8 @@ impl<'a> Evaluator<'a> {
                 fn_origins,
                 mixin_origins,
                 diag_url: diag_url.to_string(),
+                config_origin: std::cell::Cell::new(self.pending_config_id),
+                file_dir: dirname_of(key).unwrap_or_default(),
                 emitted_main: std::cell::Cell::new(false),
                 css: Vec::new(),
             },
@@ -3463,7 +3529,14 @@ impl<'a> Evaluator<'a> {
         if !forward_conf.is_empty() {
             self.config_is_implicit = false;
         }
-        let load_result = self.load_module(url, combined, pos, parents, false, sink);
+        // A pure passthrough keeps the original configuration identity; a
+        // forward with its own `with (...)` starts a new one.
+        let combined_id = if forward_conf.is_empty() {
+            self.pending_config_id
+        } else {
+            self.fresh_config_id()
+        };
+        let load_result = self.load_module(url, combined, combined_id, pos, parents, false, sink);
         self.config_is_implicit = saved_implicit;
         let (module, consumed) = load_result?;
 
@@ -3538,29 +3611,34 @@ impl<'a> Evaluator<'a> {
         for (name, val) in &module_vars {
             let key = format!("{pfx}{name}");
             if !is_private_member(name) && visible_var(&key) {
+                // The member's true home: follow the module's own origin
+                // entry (a re-forward stays bound to the defining module).
+                let origin = module
+                    .var_origin(name)
+                    .unwrap_or_else(|| (Rc::clone(&module), name.clone()));
+                // Conflict identity is that home module, so two forwards that
+                // both re-export the SAME upstream member don't collide
+                // (distributed configuration trees).
+                let member_src: *const Module = Rc::as_ptr(&origin.0);
                 if let Some(prev) = self.forwarded.var_src.get(&key) {
-                    if *prev != src {
+                    if *prev != member_src {
                         return Err(Error::at(
                             format!("Two forwarded modules both define a variable named ${key}."),
                             pos,
                         ));
                     }
                 }
-                // The member's true home: follow the module's own origin
-                // entry (a re-forward stays bound to the defining module).
-                let origin = module
-                    .var_origin(name)
-                    .unwrap_or_else(|| (Rc::clone(&module), name.clone()));
                 self.forwarded.vars.insert(key.clone(), val.clone());
                 self.forwarded.var_origins.insert(key.clone(), origin);
-                self.forwarded.var_src.insert(key, src);
+                self.forwarded.var_src.insert(key, member_src);
             }
         }
         for (name, f) in &module.functions {
             let key = format!("{pfx}{name}");
             if !is_private_member(name) && visible_name(&key) {
+                let f_src: *const Module = module.fn_origin(name).map(|m| Rc::as_ptr(&m)).unwrap_or(src);
                 if let Some(prev) = self.forwarded.fn_src.get(&key) {
-                    if *prev != src {
+                    if *prev != f_src {
                         return Err(Error::at(
                             format!("Two forwarded modules both define a function named {key}."),
                             pos,
@@ -3570,14 +3648,15 @@ impl<'a> Evaluator<'a> {
                 let origin = module.fn_origin(name).unwrap_or_else(|| Rc::clone(&module));
                 self.forwarded.functions.insert(key.clone(), Rc::clone(f));
                 self.forwarded.fn_origins.insert(key.clone(), origin);
-                self.forwarded.fn_src.insert(key, src);
+                self.forwarded.fn_src.insert(key, f_src);
             }
         }
         for (name, m) in &module.mixins {
             let key = format!("{pfx}{name}");
             if !is_private_member(name) && visible_name(&key) {
+                let m_src: *const Module = module.mixin_origin(name).map(|m| Rc::as_ptr(&m)).unwrap_or(src);
                 if let Some(prev) = self.forwarded.mixin_src.get(&key) {
-                    if *prev != src {
+                    if *prev != m_src {
                         return Err(Error::at(
                             format!("Two forwarded modules both define a mixin named {key}."),
                             pos,
@@ -3587,7 +3666,7 @@ impl<'a> Evaluator<'a> {
                 let origin = module.mixin_origin(name).unwrap_or_else(|| Rc::clone(&module));
                 self.forwarded.mixins.insert(key.clone(), Rc::clone(m));
                 self.forwarded.mixin_origins.insert(key.clone(), origin);
-                self.forwarded.mixin_src.insert(key, src);
+                self.forwarded.mixin_src.insert(key, m_src);
             }
         }
         Ok(())
@@ -4603,10 +4682,12 @@ impl<'a> Evaluator<'a> {
                     // state it caches (paths, sources) outlives this compile's
                     // arena reset; see the matching note in `load_module`.
                     let saved = crate::arena::pause();
-                    let resolved = importer.and_then(|imp| imp.resolve_with_syntax(path));
+                    let base = self.current_file_dir.clone();
+                    let resolved =
+                        importer.and_then(|imp| imp.resolve_import_with_path(path, base.as_deref()));
                     crate::arena::resume(saved);
                     match resolved {
-                        Some((src, syntax)) => {
+                        Some((resolved_key, src, syntax)) => {
                             if self.loading.iter().any(|p| p == path) {
                                 return Err(Error::unpositioned("This file is already being loaded."));
                             }
@@ -4671,9 +4752,17 @@ impl<'a> Evaluator<'a> {
                                     std::mem::replace(&mut self.pending_config, implicit_config),
                                     std::mem::take(&mut self.consumed_config),
                                     std::mem::replace(&mut self.config_is_implicit, true),
+                                    std::mem::replace(&mut self.pending_config_id, 0),
                                 ))
                             } else {
                                 None
+                            };
+                            // Relative URLs inside the imported sheet resolve
+                            // against ITS directory.
+                            let saved_dir = if resolved_key.is_empty() {
+                                self.current_file_dir.clone()
+                            } else {
+                                std::mem::replace(&mut self.current_file_dir, dirname_of(&resolved_key))
                             };
                             let saved_clone = if loads_modules {
                                 let n = self.copy_counter.get() + 1;
@@ -4684,11 +4773,13 @@ impl<'a> Evaluator<'a> {
                                 self.import_clone.take()
                             };
                             let result = self.exec(&sheet.stmts, parents, sink);
+                            self.current_file_dir = saved_dir;
                             self.import_clone = saved_clone;
-                            if let Some((p, c, i)) = saved_pending_consumed {
+                            if let Some((p, c, i, id)) = saved_pending_consumed {
                                 self.pending_config = p;
                                 self.consumed_config = c;
                                 self.config_is_implicit = i;
+                                self.pending_config_id = id;
                             }
                             let imported_fwd = std::mem::replace(&mut self.forwarded, saved_fwd);
                             self.used_modules = saved_used;
@@ -6229,22 +6320,29 @@ impl<'a> Evaluator<'a> {
 
     /// Swap in `module`'s source file for diagnostics during a cross-module
     /// member invocation. Returns the previous `(url, source)` to restore.
-    fn enter_module_file(&mut self, module: &Rc<Module>) -> Option<(String, Rc<str>)> {
+    fn enter_module_file(&mut self, module: &Rc<Module>) -> Option<(String, Rc<str>, Option<String>)> {
         if module.diag_url.is_empty() {
             return None;
         }
         let source = self.source_for(&module.diag_url);
+        let dir = if module.file_dir.is_empty() {
+            None
+        } else {
+            Some(module.file_dir.clone())
+        };
         Some((
             std::mem::replace(&mut self.current_url, module.diag_url.clone()),
             std::mem::replace(&mut self.current_source, source),
+            std::mem::replace(&mut self.current_file_dir, dir),
         ))
     }
 
     /// Restore the file swapped out by [`Self::enter_module_file`].
-    fn leave_module_file(&mut self, saved: Option<(String, Rc<str>)>) {
-        if let Some((url, source)) = saved {
+    fn leave_module_file(&mut self, saved: Option<(String, Rc<str>, Option<String>)>) {
+        if let Some((url, source, dir)) = saved {
             self.current_url = url;
             self.current_source = source;
+            self.current_file_dir = dir;
         }
     }
 
@@ -7902,6 +8000,15 @@ fn stmt_uses_content(stmt: &Stmt) -> bool {
 /// (`%x`), a parent reference with a suffix (`&x`), a top-level leading
 /// combinator (`> a`), and a trailing combinator (`a >`). The text is the
 /// already-resolved selector (no interpolation left).
+/// The parent directory of a resolved file key, for relative URL resolution
+/// (`None` when the key has no directory component or is not a path).
+fn dirname_of(key: &str) -> Option<String> {
+    let p = std::path::Path::new(key);
+    p.parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|d| d.to_string_lossy().into_owned())
+}
+
 /// Sentinel left in an enclosing `@media` body where a merged nested media
 /// rule bubbled out; the outer rule splits its own children around it.
 const MEDIA_HOIST_MARKER: &str = "\u{0}MEDIA_HOIST\u{0}";

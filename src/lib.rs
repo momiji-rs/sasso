@@ -119,6 +119,30 @@ pub trait Importer {
         self.resolve_module(path)
             .map(|(key, src)| (key, src, Syntax::Scss))
     }
+
+    /// Like [`Importer::resolve_module_with_syntax`], but tries `base_dir`
+    /// (the directory of the file containing the rule) before the importer's
+    /// own search paths — dart-sass resolves relative URLs against the
+    /// containing file first. The default ignores the base.
+    fn resolve_module_with_syntax_in(
+        &self,
+        path: &str,
+        _base_dir: Option<&str>,
+    ) -> Option<(String, String, Syntax)> {
+        self.resolve_module_with_syntax(path)
+    }
+
+    /// Like [`Importer::resolve_with_syntax`] for `@import`, but reports the
+    /// resolved file's canonical path (empty when unknown) and tries
+    /// `base_dir` first. The default ignores the base and reports no path.
+    fn resolve_import_with_path(
+        &self,
+        path: &str,
+        _base_dir: Option<&str>,
+    ) -> Option<(String, String, Syntax)> {
+        self.resolve_with_syntax(path)
+            .map(|(src, syntax)| (String::new(), src, syntax))
+    }
 }
 
 /// Compilation options.
@@ -357,14 +381,56 @@ impl Importer for FsImporter {
     }
 
     fn resolve_module_with_syntax(&self, path: &str) -> Option<(String, String, Syntax)> {
-        for base in &self.load_paths {
+        self.resolve_module_with_syntax_in(path, None)
+    }
+
+    fn resolve_module_with_syntax_in(
+        &self,
+        path: &str,
+        base_dir: Option<&str>,
+    ) -> Option<(String, String, Syntax)> {
+        // dart-sass resolves a relative URL against the containing file's
+        // directory first, then the configured load paths.
+        let bases = base_dir
+            .map(|b| vec![PathBuf::from(b)])
+            .unwrap_or_default()
+            .into_iter()
+            .chain(self.load_paths.iter().cloned());
+        for base in bases {
             // `@use`/`@forward` never consider `.import` files (those are an
             // `@import`-only escape hatch).
-            match resolve_in_base(base, path, false) {
+            match resolve_in_base(&base, path, false) {
                 Resolution::Found(p) => {
                     if let Ok(src) = std::fs::read_to_string(&p) {
                         // The canonical key is the resolved absolute path so the
                         // same file loaded via different URLs is cached once.
+                        let key = std::fs::canonicalize(&p)
+                            .map(|c| c.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| p.to_string_lossy().into_owned());
+                        return Some((key, src, syntax_for_path(&p)));
+                    }
+                }
+                Resolution::Ambiguous => return None,
+                Resolution::NotFound => {}
+            }
+        }
+        None
+    }
+
+    fn resolve_import_with_path(
+        &self,
+        path: &str,
+        base_dir: Option<&str>,
+    ) -> Option<(String, String, Syntax)> {
+        let bases = base_dir
+            .map(|b| vec![PathBuf::from(b)])
+            .unwrap_or_default()
+            .into_iter()
+            .chain(self.load_paths.iter().cloned());
+        for base in bases {
+            match resolve_in_base(&base, path, true) {
+                Resolution::Found(p) => {
+                    if let Ok(src) = std::fs::read_to_string(&p) {
                         let key = std::fs::canonicalize(&p)
                             .map(|c| c.to_string_lossy().into_owned())
                             .unwrap_or_else(|_| p.to_string_lossy().into_owned());

@@ -6264,3 +6264,48 @@ fn import_subtree_clones_and_extension_store_order() {
     );
     assert_parity("s {x: y}\nfirst {@extend s}\nsecond {@extend s}\n");
 }
+
+#[test]
+fn relative_resolution_and_distributed_config() {
+    let dir = std::env::temp_dir().join("sasso_parity_relres");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("module/a")).unwrap();
+    std::fs::create_dir_all(dir.join("subdir")).unwrap();
+    let w = |n: &str, b: &str| std::fs::write(dir.join(n), b).unwrap();
+    // Relative URLs resolve against the containing FILE's directory.
+    w("module/_index.scss", "@forward './a/a1';\n@forward './a/a2';\n");
+    w("module/a/_variables.scss", "$a: default !default;\n");
+    w(
+        "module/a/a1.scss",
+        "@forward './variables';\n@use './variables' as *;\n.a1 {content: #{$a}}\n",
+    );
+    w(
+        "module/a/a2.scss",
+        "@forward './variables';\n@use './variables' as *;\n.a2 {content: #{$a}}\n",
+    );
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    // A `with (...)` distributed through several forwards keeps one original
+    // identity: re-reaching the shared upstream is not "already loaded", and
+    // two forwards of the SAME member don't conflict.
+    assert_eq!(
+        compile("@use 'module' with ($a: 'a');\n", &opts).unwrap(),
+        ".a1 {\n  content: a;\n}\n\n.a2 {\n  content: a;\n}\n"
+    );
+    // meta.load-css resolves relative to the DEFINING file of the mixin.
+    w("_upstream.scss", "a {b: in main}\n");
+    w("subdir/_upstream.scss", "a {b: in subdir}\n");
+    w(
+        "subdir/_midstream.scss",
+        "@use 'sass:meta';\n@mixin load-css($m) {@include meta.load-css($m)}\n",
+    );
+    assert_eq!(
+        compile(
+            "@use 'subdir/midstream';\n@include midstream.load-css('upstream');\n",
+            &opts
+        )
+        .unwrap(),
+        "a {\n  b: in subdir;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
