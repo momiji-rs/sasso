@@ -454,12 +454,12 @@ pub(super) fn convert(src: ColorSpace, dest: ColorSpace, ch: [f64; 3]) -> [f64; 
         }
         ColorSpace::Oklab => from_oklab_source(ch, dest),
         ColorSpace::Oklch => {
-            let oklab = lch_to_lab(ch);
-            if dest == ColorSpace::Oklab {
-                oklab
-            } else {
-                from_oklab_source(oklab, dest)
-            }
+            // dart's `OklabColorSpace.convert` has NO same-space case, so an
+            // oklch source bound for oklab still round-trips through LMS
+            // (cube then cube root) — `oklch(10% 999999 0deg)` comes back as
+            // `oklab(9.9999999976% 999998.9999999992 0)`. Only a direct
+            // oklab→oklab conversion short-circuits (at the toSpace level).
+            from_oklab_source(lch_to_lab(ch), dest)
         }
         _ => convert_linear(src, ch, dest),
     }
@@ -490,18 +490,14 @@ fn from_lab_source(lab: [f64; 3], dest: ColorSpace) -> [f64; 3] {
     }
 }
 
-/// dart `OklabColorSpace.convert`, default arm: oklab -> LMS -> onward.
+/// dart `OklabColorSpace.convert`: an oklch destination goes through
+/// `labToLch`; EVERYTHING else — including oklab itself — falls to the
+/// default LMS arm (dart has no same-space case here, so an oklab
+/// destination cubes into LMS and cube-roots straight back).
 fn from_oklab_source(oklab: [f64; 3], dest: ColorSpace) -> [f64; 3] {
     match dest {
-        ColorSpace::Oklab => oklab,
         ColorSpace::Oklch => lab_to_lch(oklab),
-        _ => {
-            let lms = oklab_to_lms(oklab);
-            match dest {
-                ColorSpace::Oklab | ColorSpace::Oklch => unreachable!(),
-                _ => convert_linear_from_lms(lms, dest),
-            }
-        }
+        _ => convert_linear_from_lms(oklab_to_lms(oklab), dest),
     }
 }
 

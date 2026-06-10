@@ -6625,3 +6625,35 @@ fn color_dart_vm_math_semantics() {
         "a {\n  b: -392156470588235.4%;\n}\n"
     );
 }
+
+#[test]
+fn number_format_dart_tostring_semantics() {
+    // dart rounds the SHORTEST decimal spelling at the string level (11th
+    // digit, half-up): 2154.15598416745's true value is …44978 (below the
+    // half), but its shortest spelling ends in `5`, so dart rounds UP.
+    assert_eq!(ours("a {b: 2154.15598416745}\n"), "a {\n  b: 2154.1559841675;\n}\n");
+    // ECMA toString tie-break: 657390374199289.25 has two equidistant
+    // shortest spellings; dart picks the EVEN final digit (…289.2).
+    assert_eq!(
+        ours("a {b: (657390374199289 + 0.25)}\n"),
+        "a {\n  b: 657390374199289.2;\n}\n"
+    );
+    // Half-up at the 10-digit boundary still applies.
+    assert_eq!(ours("a {b: 0.00000000015}\n"), "a {\n  b: 0.0000000002;\n}\n");
+    assert_eq!(ours("a {b: 1e-11}\n"), "a {\n  b: 0;\n}\n");
+}
+
+#[test]
+fn color_oklch_to_oklab_round_trips_lms() {
+    // dart's OklabColorSpace.convert has no same-space case: an oklch source
+    // bound for oklab cubes into LMS and cube-roots straight back.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.to-space(oklch(10% 999999 0deg), oklab)}\n"),
+        "a {\n  b: oklab(9.9999999976% 999998.9999999992 0);\n}\n"
+    );
+    // A direct oklab→oklab conversion short-circuits at the toSpace level.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.to-space(oklab(50% 0.1 0.1), oklab)}\n"),
+        "a {\n  b: oklab(50% 0.1 0.1);\n}\n"
+    );
+}

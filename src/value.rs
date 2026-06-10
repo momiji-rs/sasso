@@ -2109,21 +2109,13 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
             format!("{n}")
         }
     } else {
-        // Round to 10 decimal places the way dart-sass does: scale by 1e10,
-        // round half away from zero (`f64::round`), then re-emit the shortest
-        // decimal that round-trips. `{n:.10}` rounds half to even, which
-        // disagrees with dart-sass on exact halfway digits (e.g. `1.5e-10`
-        // must become `0.0000000002`, not `0.0000000001`). Any value with a
-        // non-zero fractional part has magnitude below `2^53`, so `n * 1e10`
-        // (< ~9e25) never overflows; the `is_finite` guard is defensive.
-        let factor = 1e10_f64;
-        let scaled = n * factor;
-        let rounded = if scaled.is_finite() {
-            scaled.round() / factor
-        } else {
-            format!("{n:.10}").parse().unwrap_or(n)
-        };
-        format!("{rounded}")
+        // dart `_writeNumber`: serialize the SHORTEST round-trip decimal
+        // (`double.toString()` + exponent removal), then round it AT THE
+        // STRING LEVEL to 10 decimal places, looking only at the 11th digit
+        // (half-up). This follows the shortest spelling, not the true value:
+        // `2154.15598416745` (true value …44978) still rounds UP to
+        // `…1675` because its shortest form ends in a literal `5`.
+        round_decimal_string(ecma_shortest(n))
     };
     if s == "-0" {
         s = "0".to_string();
@@ -2134,6 +2126,121 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
         } else if let Some(rest) = s.strip_prefix("-0.") {
             s = format!("-.{rest}");
         }
+    }
+    s
+}
+
+/// dart `double.toString()` (ECMA-262 Number::toString): the shortest
+/// decimal that round-trips, breaking a tie between two equidistant
+/// spellings by choosing the EVEN final digit. Rust's `{}` is also shortest
+/// but ties differently (`657390374199289.25` prints `…289.3`, dart prints
+/// `…289.2`), so re-round to the same significant-digit count through
+/// `{:e}`'s half-to-even rounding and expand the exponent form.
+fn ecma_shortest(n: f64) -> String {
+    let rust = format!("{n}");
+    // Count significant digits (skipping sign, dot, and leading zeros).
+    let sig = rust
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .skip_while(|&c| c == '0')
+        .count();
+    if sig == 0 {
+        return rust;
+    }
+    let sci = format!("{:.*e}", sig - 1, n);
+    if sci.parse::<f64>() != Ok(n) {
+        return rust;
+    }
+    let expanded = expand_exponent(&sci);
+    if expanded.parse::<f64>() == Ok(n) {
+        expanded
+    } else {
+        rust
+    }
+}
+
+/// Expand `D.DDDDeK` scientific notation into a plain decimal string (dart
+/// `_removeExponent`).
+fn expand_exponent(sci: &str) -> String {
+    let Some(epos) = sci.find('e') else {
+        return sci.to_string();
+    };
+    let exp: i32 = sci[epos + 1..].parse().unwrap_or(0);
+    let mantissa = &sci[..epos];
+    let neg = mantissa.starts_with('-');
+    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
+    let sign = if neg { "-" } else { "" };
+    // One digit sits before the dot in `{:e}` form, so the decimal point in
+    // the digit string belongs after position `exp + 1`.
+    let point = exp + 1;
+    if point <= 0 {
+        let zeros = "0".repeat((-point) as usize);
+        format!("{sign}0.{zeros}{digits}")
+    } else if (point as usize) >= digits.len() {
+        let zeros = "0".repeat(point as usize - digits.len());
+        format!("{sign}{digits}{zeros}")
+    } else {
+        format!(
+            "{sign}{}.{}",
+            &digits[..point as usize],
+            &digits[point as usize..]
+        )
+    }
+}
+
+/// dart `_writeRounded`: round a plain decimal string to 10 fractional
+/// digits by inspecting ONLY the 11th digit (>= '5' carries up), then trim
+/// trailing fractional zeros. Ten or fewer fractional digits pass verbatim.
+fn round_decimal_string(text: String) -> String {
+    let Some(dot) = text.find('.') else {
+        return text;
+    };
+    if text.len() - dot - 1 <= 10 {
+        return trim_fraction(text);
+    }
+    let mut bytes: Vec<u8> = text.into_bytes();
+    let round_up = bytes[dot + 11] >= b'5';
+    bytes.truncate(dot + 11);
+    if round_up {
+        let mut i = bytes.len() - 1;
+        loop {
+            match bytes[i] {
+                b'.' => i -= 1,
+                b'9' => {
+                    bytes[i] = b'0';
+                    if i == 0 {
+                        bytes.insert(0, b'1');
+                        break;
+                    }
+                    i -= 1;
+                }
+                b'-' => {
+                    bytes.insert(i + 1, b'1');
+                    break;
+                }
+                _ => {
+                    bytes[i] += 1;
+                    break;
+                }
+            }
+        }
+    }
+    trim_fraction(String::from_utf8(bytes).expect("ascii decimal"))
+}
+
+/// Trim trailing fractional zeros (and a then-trailing dot); `-0` and
+/// all-zero results collapse to `0` at the caller.
+fn trim_fraction(mut s: String) -> String {
+    if s.contains('.') {
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+    }
+    if s == "-0" || s == "0" {
+        return "0".to_string();
     }
     s
 }
