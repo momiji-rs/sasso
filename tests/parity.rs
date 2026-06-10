@@ -6017,3 +6017,40 @@ fn space_list_atom_adjacency() {
     // Operators still bind tighter than adjacency.
     assert_eq!(ours("a {b: 1+2}\n"), "a {\n  b: 3;\n}\n");
 }
+
+#[test]
+fn forwarded_members_bind_their_defining_module() {
+    let dir = std::env::temp_dir().join("sasso_parity_fwd_origin");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("_upstream.scss"),
+        "$a: old value;\n@function get-a() {@return $a}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("_midstream.scss"), "@forward \"upstream\" as d-*;\n").unwrap();
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    // A prefixed forwarded variable assignment writes through to the
+    // defining module, and the forwarded function executes there.
+    assert_eq!(
+        compile(
+            "@use \"midstream\";\nmidstream.$d-a: new value;\nb {c: midstream.d-get-a()}\n",
+            &opts
+        )
+        .unwrap(),
+        "b {\n  c: new value;\n}\n"
+    );
+    // A module's own same-named variable shadows the forwarded one for
+    // READS, but a namespaced assignment still writes the forwarded module.
+    std::fs::write(
+        dir.join("_shadow.scss"),
+        "@forward \"upstream\";\n$a: shadow value;\n@function get-shadow-a() {@return $a}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile("@use \"shadow\";\nshadow.$a: new value;\nb {c: shadow.$a; s: shadow.get-shadow-a(); u: shadow.get-a()}\n", &opts).unwrap(),
+        "b {\n  c: shadow value;\n  s: shadow value;\n  u: new value;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

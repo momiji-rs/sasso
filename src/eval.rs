@@ -537,6 +537,16 @@ struct Module {
     /// Built-in `sass:*` modules re-exported via `@forward`. A `ns.member` that
     /// misses every captured member is retried against these.
     forwarded_builtins: Vec<ForwardedBuiltin>,
+    /// For members re-exported via `@forward`, the module they actually live
+    /// in (the variable entry also carries the ORIGINAL name): reads, writes
+    /// and calls route there so the defining module's environment is live.
+    var_origins: HashMap<String, (Rc<Module>, String)>,
+    /// Like `var_origins`, but kept even when the module's own same-named
+    /// variable SHADOWS the forwarded one: dart reads the own variable but a
+    /// namespaced *assignment* still writes through to the forwarded module.
+    var_write_origins: HashMap<String, (Rc<Module>, String)>,
+    fn_origins: HashMap<String, Rc<Module>>,
+    mixin_origins: HashMap<String, Rc<Module>>,
     /// The path/URL of this module's file, for diagnostic snippets pointing
     /// into the module (empty when diagnostics are disabled / unknown).
     diag_url: String,
@@ -552,6 +562,10 @@ impl Module {
     /// every key. Private members (leading `-`/`_`) are the caller's
     /// responsibility to exclude.
     fn var(&self, name: &str) -> Option<Value> {
+        // A forwarded member reads live from its defining module.
+        if let Some((m, oname)) = self.var_origin(name) {
+            return m.var(&oname);
+        }
         let vars = self.vars.borrow();
         if let Some(v) = vars.get(name) {
             return Some(v.clone());
@@ -560,6 +574,51 @@ impl Module {
         vars.iter()
             .find(|(k, _)| normalize_var_name(k) == norm)
             .map(|(_, v)| v.clone())
+    }
+    /// The defining module (and original variable name) of a forwarded
+    /// variable, dash/underscore-insensitively.
+    fn var_origin(&self, name: &str) -> Option<(Rc<Module>, String)> {
+        if let Some((m, o)) = self.var_origins.get(name) {
+            return Some((Rc::clone(m), o.clone()));
+        }
+        let norm = normalize_var_name(name);
+        self.var_origins
+            .iter()
+            .find(|(k, _)| normalize_var_name(k) == norm)
+            .map(|(_, (m, o))| (Rc::clone(m), o.clone()))
+    }
+    /// The write-through target of a forwarded variable (kept even when
+    /// shadowed by the module's own same-named variable).
+    fn var_write_origin(&self, name: &str) -> Option<(Rc<Module>, String)> {
+        if let Some((m, o)) = self.var_write_origins.get(name) {
+            return Some((Rc::clone(m), o.clone()));
+        }
+        let norm = normalize_var_name(name);
+        self.var_write_origins
+            .iter()
+            .find(|(k, _)| normalize_var_name(k) == norm)
+            .map(|(_, (m, o))| (Rc::clone(m), o.clone()))
+    }
+    /// The defining module of a forwarded function/mixin.
+    fn fn_origin(&self, name: &str) -> Option<Rc<Module>> {
+        if let Some(m) = self.fn_origins.get(name) {
+            return Some(Rc::clone(m));
+        }
+        let norm = normalize_var_name(name);
+        self.fn_origins
+            .iter()
+            .find(|(k, _)| normalize_var_name(k) == norm)
+            .map(|(_, m)| Rc::clone(m))
+    }
+    fn mixin_origin(&self, name: &str) -> Option<Rc<Module>> {
+        if let Some(m) = self.mixin_origins.get(name) {
+            return Some(Rc::clone(m));
+        }
+        let norm = normalize_var_name(name);
+        self.mixin_origins
+            .iter()
+            .find(|(k, _)| normalize_var_name(k) == norm)
+            .map(|(_, m)| Rc::clone(m))
     }
     fn function(&self, name: &str) -> Option<Rc<Callable>> {
         if let Some(f) = self.functions.get(name) {
@@ -621,6 +680,12 @@ struct Forwarded {
     vars: HashMap<String, Value>,
     functions: HashMap<String, Rc<Callable>>,
     mixins: HashMap<String, Rc<Callable>>,
+    /// The module each re-exported member actually lives in (with the
+    /// member's ORIGINAL name for variables), so calls/assignments through
+    /// the forward run against the defining module's environment.
+    var_origins: HashMap<String, (Rc<Module>, String)>,
+    fn_origins: HashMap<String, Rc<Module>>,
+    mixin_origins: HashMap<String, Rc<Module>>,
     /// Built-in `sass:*` modules re-exported via `@forward "sass:x"`.
     builtins: Vec<ForwardedBuiltin>,
     /// For each re-exported member name, the source module it came from (by
@@ -1298,19 +1363,25 @@ impl<'a> Evaluator<'a> {
                 )));
             }
         };
-        let exists = module.var(&v.name).is_some();
+        // A forwarded variable writes through to its defining module (under
+        // its ORIGINAL name), so the module's own functions see the new value.
+        let (target, name) = match module.var_write_origin(&v.name) {
+            Some((m, o)) => (m, o),
+            None => (Rc::clone(&module), v.name.clone()),
+        };
+        let exists = target.var(&name).is_some();
         if !exists {
             return Err(Error::unpositioned("Undefined variable."));
         }
         if v.is_default {
-            if let Some(existing) = module.var(&v.name) {
+            if let Some(existing) = target.var(&name) {
                 if !matches!(existing, Value::Null) {
                     return Ok(());
                 }
             }
         }
         let val = self.eval_expr(&v.value)?.without_slash();
-        module.vars.borrow_mut().insert(v.name.clone(), val);
+        target.vars.borrow_mut().insert(name, val);
         Ok(())
     }
 
@@ -1797,7 +1868,9 @@ impl<'a> Evaluator<'a> {
                 let mixin = target
                     .mixin(name)
                     .ok_or_else(|| Error::unpositioned("Undefined mixin."))?;
-                return self.run_module_mixin(&target, &mixin, args, content, content_params, parents, sink);
+                // A forwarded mixin runs in its DEFINING module's environment.
+                let exec = target.mixin_origin(name).unwrap_or(target);
+                return self.run_module_mixin(&exec, &mixin, args, content, content_params, parents, sink);
             }
             if !self.used_modules.contains_key(ns) {
                 return Err(Error::unpositioned(format!(
@@ -2956,14 +3029,41 @@ impl<'a> Evaluator<'a> {
         let _ = pos;
 
         // Merge `@forward`ed members (lower precedence than the module's own).
+        // A member the module did NOT shadow keeps its origin binding, so
+        // reads/writes/calls route to the defining module.
+        let mut var_origins: HashMap<String, (Rc<Module>, String)> = HashMap::default();
+        let mut fn_origins: HashMap<String, Rc<Module>> = HashMap::default();
+        let mut mixin_origins: HashMap<String, Rc<Module>> = HashMap::default();
+        // Assignments write through to the forwarded module even when the
+        // module's own same-named variable shadows it for reads.
+        let var_write_origins: HashMap<String, (Rc<Module>, String)> = forwarded
+            .var_origins
+            .iter()
+            .map(|(k, (m, o))| (k.clone(), (Rc::clone(m), o.clone())))
+            .collect();
         for (k, v) in forwarded.vars {
-            vars.entry(k).or_insert(v);
+            if let std::collections::hash_map::Entry::Vacant(e) = vars.entry(k.clone()) {
+                e.insert(v);
+                if let Some(o) = forwarded.var_origins.get(&k) {
+                    var_origins.insert(k, (Rc::clone(&o.0), o.1.clone()));
+                }
+            }
         }
         for (k, v) in forwarded.functions {
-            functions.entry(k).or_insert(v);
+            if let std::collections::hash_map::Entry::Vacant(e) = functions.entry(k.clone()) {
+                e.insert(v);
+                if let Some(o) = forwarded.fn_origins.get(&k) {
+                    fn_origins.insert(k, Rc::clone(o));
+                }
+            }
         }
         for (k, v) in forwarded.mixins {
-            mixins.entry(k).or_insert(v);
+            if let std::collections::hash_map::Entry::Vacant(e) = mixins.entry(k.clone()) {
+                e.insert(v);
+                if let Some(o) = forwarded.mixin_origins.get(&k) {
+                    mixin_origins.insert(k, Rc::clone(o));
+                }
+            }
         }
 
         Ok((
@@ -2976,6 +3076,10 @@ impl<'a> Evaluator<'a> {
                 used_builtin_modules,
                 star_builtin_modules,
                 forwarded_builtins: forwarded.builtins,
+                var_origins,
+                var_write_origins,
+                fn_origins,
+                mixin_origins,
                 diag_url: diag_url.to_string(),
                 css: Vec::new(),
             },
@@ -3173,7 +3277,13 @@ impl<'a> Evaluator<'a> {
                         ));
                     }
                 }
+                // The member's true home: follow the module's own origin
+                // entry (a re-forward stays bound to the defining module).
+                let origin = module
+                    .var_origin(name)
+                    .unwrap_or_else(|| (Rc::clone(&module), name.clone()));
                 self.forwarded.vars.insert(key.clone(), val.clone());
+                self.forwarded.var_origins.insert(key.clone(), origin);
                 self.forwarded.var_src.insert(key, src);
             }
         }
@@ -3188,7 +3298,9 @@ impl<'a> Evaluator<'a> {
                         ));
                     }
                 }
+                let origin = module.fn_origin(name).unwrap_or_else(|| Rc::clone(&module));
                 self.forwarded.functions.insert(key.clone(), Rc::clone(f));
+                self.forwarded.fn_origins.insert(key.clone(), origin);
                 self.forwarded.fn_src.insert(key, src);
             }
         }
@@ -3203,7 +3315,9 @@ impl<'a> Evaluator<'a> {
                         ));
                     }
                 }
+                let origin = module.mixin_origin(name).unwrap_or_else(|| Rc::clone(&module));
                 self.forwarded.mixins.insert(key.clone(), Rc::clone(m));
+                self.forwarded.mixin_origins.insert(key.clone(), origin);
                 self.forwarded.mixin_src.insert(key, src);
             }
         }
@@ -4906,7 +5020,10 @@ impl<'a> Evaluator<'a> {
                 ));
             }
             if let Some(func) = module.function(member) {
-                return self.call_user_module_function(&module, &func, args, Some((pos, length)));
+                // A forwarded function executes in its DEFINING module's
+                // environment (its body closes over that module's globals).
+                let exec = module.fn_origin(member).unwrap_or(module);
+                return self.call_user_module_function(&exec, &func, args, Some((pos, length)));
             }
             // Fall back to a built-in re-exported by this module via @forward.
             if let Some(v) = self.try_forwarded_builtin_call(&module, member, args, pos)? {
