@@ -5277,3 +5277,27 @@ fn selector_arg_pseudo_superselector_rules() {
     assert_eq!(go("c", ":nth-child(n+1 of c)"), yes);
     assert_eq!(go("c", ":nth-child(n+1 of d)"), no);
 }
+
+#[test]
+fn slotted_and_current_pseudo_arg_extend() {
+    // dart-sass `_extendPseudo` runs for every selector-bearing pseudo,
+    // including the pseudo-element `::slotted`; a nested same-name `:current`
+    // is unwrapped and merged, and re-extension settles (deduped argument).
+    let go = |args: &str| {
+        ours(&format!(
+            "@use \"sass:selector\";\na {{b: selector.extend({args})}}\n"
+        ))
+    };
+    assert_eq!(
+        go("\"::slotted(.c)\", \".c\", \".d\""),
+        "a {\n  b: ::slotted(.c, .d);\n}\n"
+    );
+    assert_eq!(
+        go("\"::slotted(.c)\", \".c\", \"::slotted(.d)\""),
+        "a {\n  b: ::slotted(.c, ::slotted(.d));\n}\n"
+    );
+    assert_eq!(
+        go("\":current(.c)\", \".c\", \":current(.d, .e)\""),
+        "a {\n  b: :current(.c, .d, .e);\n}\n"
+    );
+}

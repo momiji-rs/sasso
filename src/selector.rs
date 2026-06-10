@@ -2003,11 +2003,12 @@ fn complex_has_selector_pseudo(complex: &Complex) -> bool {
     })
 }
 
-/// Whether a pseudo name takes a selector list we should extend.
+/// Whether a pseudo name takes a selector list we should extend. `slotted` is
+/// the selector-bearing pseudo-*element* (dart-sass `_selectorPseudoElements`).
 fn is_selector_pseudo(name: &str) -> bool {
     matches!(
         unvendor(name),
-        "not" | "is" | "matches" | "where" | "any" | "current" | "has" | "host" | "host-context"
+        "not" | "is" | "matches" | "where" | "any" | "current" | "has" | "host" | "host-context" | "slotted"
     ) || name.ends_with("-any")
 }
 
@@ -2329,12 +2330,28 @@ fn finish_extend_pseudo(
     if complexes.is_empty() {
         return None;
     }
-    let inner = complexes
+    // Dedup the rewritten argument list so a second extension pass (our
+    // worklist re-feed; dart-sass extends in a single simultaneous pass)
+    // settles instead of appending the same selectors again.
+    let mut seen: HashSet<String> = HashSet::new();
+    let rendered: Vec<String> = complexes
         .iter()
         .map(|c| c.render())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(vec![Simple::Pseudo(format!("{}({})", parts.head, inner))])
+        .filter(|r| seen.insert(r.clone()))
+        .collect();
+    if rendered.len() == original.len()
+        && rendered
+            .iter()
+            .zip(original.iter())
+            .all(|(a, b)| *a == b.render())
+    {
+        return None;
+    }
+    Some(vec![Simple::Pseudo(format!(
+        "{}({})",
+        parts.head,
+        rendered.join(", ")
+    ))])
 }
 
 enum PseudoUnwrap {
