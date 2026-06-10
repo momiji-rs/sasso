@@ -6005,3 +6005,15 @@ fn css_custom_callable_result_rules_and_string_line_continuation() {
         "a {\n  b: \"line1       line2\";\n}\n"
     );
 }
+
+#[test]
+fn space_list_atom_adjacency() {
+    // dart-sass's space list doesn't require whitespace between atoms:
+    // a touching atom start begins a new term.
+    assert_eq!(ours("a {b: (x)y}\n"), "a {\n  b: x y;\n}\n");
+    assert_eq!(ours("a {b: 5px(3)}\n"), "a {\n  b: 5px 3;\n}\n");
+    assert_eq!(ours("a {b: x(y)z}\n"), "a {\n  b: x(y) z;\n}\n");
+    assert_parity("a {b: (x)y; c: 5px(3); d: x(y)z}\n");
+    // Operators still bind tighter than adjacency.
+    assert_eq!(ours("a {b: 1+2}\n"), "a {\n  b: 3;\n}\n");
+}

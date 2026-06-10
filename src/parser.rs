@@ -3795,6 +3795,13 @@ impl Parser {
             let adjacent_string = !had_ws
                 && self.at_value_atom_start()
                 && (prev_was_string || matches!(self.sc.peek(), Some('"') | Some('\'')));
+            // dart-sass's space list doesn't require whitespace between atoms
+            // at all (`_spaceListOrValue` loops while `lookingAtExpression`):
+            // `(x)y` is `x y`, `5px(3)` is `5px 3`. A touching atom start
+            // begins a new term. (Operators were already consumed by
+            // `or_expr`, and an ident followed by `(` was consumed as a
+            // call, so what reaches here is a genuine new atom.)
+            let adjacent_atom = !had_ws && self.at_value_atom_start();
             // An interpolation directly after a complete atom begins a new
             // term with an implicit separator (`1#{0}` is the list `1 0`), as
             // does a `-#{…}` interpolated identifier (`10-#{10}` → `10 -10`);
@@ -3814,7 +3821,7 @@ impl Parser {
             // then resolves as a map.
             // A `...` splat ends the list too — the value may be separated
             // from its `...` by whitespace (`a($d ...)`, `a($d\n  ...)`).
-            if (!had_ws && !adjacent_string && !adjacent_interp)
+            if (!had_ws && !adjacent_string && !adjacent_interp && !adjacent_atom)
                 || self.at_value_terminator()
                 || (self.sc.peek() == Some('=') && self.sc.peek_at(1) != Some('='))
                 || (self.sc.peek() == Some(':') && self.sc.peek_at(1) != Some(':'))
