@@ -381,6 +381,13 @@ fn ours_sass(sass: &str) -> String {
     compile(sass, &Options::default().with_syntax(sasso::Syntax::Sass)).expect("our indented compile failed")
 }
 
+/// Compile `scss` and return the error message (panicking on success).
+fn ours_err(scss: &str) -> String {
+    compile(scss, &Options::default())
+        .expect_err("compile unexpectedly succeeded")
+        .to_string()
+}
+
 #[test]
 fn rgb_hsl_special_value_passthrough() {
     // A special channel argument (var/env/calc) preserves the call,
@@ -5932,4 +5939,24 @@ fn sass_value_operator_continuation_and_unquoted_imports() {
     // An unquoted indented-syntax `@import` URL is quoted for the SCSS
     // grammar; a `.css` one stays a plain-CSS import.
     assert_eq!(ours_sass("@import other.css\n"), "@import \"other.css\";\n");
+}
+
+#[test]
+fn interpolated_function_name_is_plain_css_call() {
+    // An interpolated identifier directly followed by `(` is a plain-CSS
+    // call: the name resolves, the args evaluate, and the call serializes
+    // verbatim — never dispatched to a built-in or user function.
+    assert_eq!(
+        ours(".x {a: qu#{o}te(arg); b: foo#{1 + 1}bar(2 + 2); c: #{foo}(arg)}\n"),
+        ".x {\n  a: quote(arg);\n  b: foo2bar(4);\n  c: foo(arg);\n}\n"
+    );
+    assert_parity(".x {a: qu#{o}te(arg); b: #{1 + 1}foo(arg)}\n");
+    // Splats expand; keyword arguments are rejected.
+    assert_eq!(
+        ours("$l: 1, 2, 3;\n.x {a: f#{o}o($l...)}\n"),
+        ".x {\n  a: foo(1, 2, 3);\n}\n"
+    );
+    assert!(
+        ours_err(".x {a: f#{o}o($b: 1)}\n").contains("Plain CSS functions don't support keyword arguments.")
+    );
 }

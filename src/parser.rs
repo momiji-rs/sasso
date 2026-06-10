@@ -4236,6 +4236,7 @@ impl Parser {
                         self.sc.position(),
                     ));
                 }
+                let interp_pos = self.sc.position();
                 self.sc.bump();
                 self.sc.bump();
                 // Whitespace (including newlines) is permitted around the
@@ -4256,7 +4257,29 @@ impl Parser {
                 {
                     let mut pieces = vec![TplPiece::Interp(e)];
                     pieces.extend(self.parse_ident_template()?);
+                    // `(` directly after makes this a dynamic plain-CSS call
+                    // (`#{1 + 1}foo(arg)` -> `2foo(arg)`).
+                    if self.sc.peek() == Some('(') {
+                        self.sc.bump();
+                        let args = self.parse_args_after_paren()?;
+                        return Ok(Expr::InterpFunc {
+                            name: pieces,
+                            args,
+                            pos: interp_pos,
+                        });
+                    }
                     return Ok(Expr::Ident(pieces));
+                }
+                // A directly-following `(` makes the interpolation a dynamic
+                // plain-CSS function name (`#{foo}(arg)` -> `foo(arg)`).
+                if self.sc.peek() == Some('(') {
+                    self.sc.bump();
+                    let args = self.parse_args_after_paren()?;
+                    return Ok(Expr::InterpFunc {
+                        name: vec![TplPiece::Interp(e)],
+                        args,
+                        pos: interp_pos,
+                    });
                 }
                 Ok(Expr::Interp(Box::new(e)))
             }
@@ -4756,6 +4779,21 @@ impl Parser {
                     return Ok(Expr::Color(color));
                 }
             }
+        }
+        // An interpolated identifier directly followed by `(` is a plain-CSS
+        // call with a dynamic name (`qu#{o}te(arg)` serializes as `quote(arg)`
+        // — never dispatched to a real function).
+        if self.sc.peek() == Some('(')
+            && pieces.iter().any(|p| matches!(p, TplPiece::Interp(_)))
+            && !self.plain_css
+        {
+            self.sc.bump();
+            let args = self.parse_args_after_paren()?;
+            return Ok(Expr::InterpFunc {
+                name: pieces,
+                args,
+                pos: name_pos,
+            });
         }
         Ok(Expr::Ident(pieces))
     }

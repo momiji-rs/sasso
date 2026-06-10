@@ -382,6 +382,15 @@ pub(crate) enum Expr {
         length: usize,
         module: Option<String>,
     },
+    /// A function call whose name contains interpolation (`qu#{o}te(arg)`).
+    /// dart-sass treats these as *plain CSS* calls: the name resolves at
+    /// eval time, the arguments are evaluated, and the call serializes
+    /// verbatim — never dispatched to a built-in or user function.
+    InterpFunc {
+        name: Vec<TplPiece>,
+        args: Vec<CallArg>,
+        pos: Pos,
+    },
     /// A space- or comma-separated list. `bracketed` marks `[a b]`/`[a, b]`
     /// literals, which serialize wrapped in square brackets.
     List {

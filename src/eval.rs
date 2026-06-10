@@ -4536,6 +4536,28 @@ impl<'a> Evaluator<'a> {
                     other => Ok(Value::Calc(other)),
                 }
             }
+            // An interpolated-name call is a *plain CSS* function (dart-sass
+            // `PlainCssCallable`): the resolved name is never dispatched to a
+            // built-in or user function; the arguments evaluate and the call
+            // serializes verbatim. Keyword arguments are rejected.
+            Expr::InterpFunc { name, args, pos } => {
+                let fname = self.eval_template(name)?;
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(Error::at(
+                        "Plain CSS functions don't support keyword arguments.",
+                        *pos,
+                    ));
+                }
+                let mut parts: Vec<String> = Vec::with_capacity(args.len());
+                for a in args {
+                    let v = self.eval_expr(&a.value)?;
+                    parts.push(v.to_css(self.compressed()));
+                }
+                Ok(Value::Str(SassStr {
+                    text: format!("{fname}({})", parts.join(", ")),
+                    quoted: false,
+                }))
+            }
             Expr::Func {
                 name,
                 args,
