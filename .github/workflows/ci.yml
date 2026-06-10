@@ -66,3 +66,26 @@ jobs:
         run: cargo build --release
       - name: pass-rate ratchet (must not regress below spec/BASELINE.json)
         run: python3 spec/check_baseline.py
+      - name: failure summary by bucket (informational)
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+          from collections import Counter
+          path = os.path.join('spec', 'results.json')
+          if not os.path.exists(path):
+              print('no results.json'); raise SystemExit(0)
+          cases = json.load(open(path))['cases']
+          fails = [c['name'] for c in cases if c['status'] == 'FAIL']
+          print(f"FAIL total: {len(fails)}")
+          buckets = Counter('/'.join(n.replace(':', '/').split('/')[:3]) for n in fails)
+          for k, v in buckets.most_common(30):
+              print(f"{v:5} {k}")
+          PYEOF
+      - name: upload results.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sass-spec-results-linux
+          path: spec/results.json
+          if-no-files-found: ignore
