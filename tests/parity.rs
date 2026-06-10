@@ -6131,3 +6131,40 @@ fn load_css_copies_belong_to_their_caller() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn load_css_subtree_clone_and_blank_gating() {
+    let dir = std::env::temp_dir().join("sasso_parity_scm");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |n: &str, b: &str| std::fs::write(dir.join(n), b).unwrap();
+    w("_upstream.scss", "@c;\n");
+    w("_midstream.scss", "@use 'upstream';\n");
+    w("_target.scss", "@use \"midstream\";\n\n.target {a: b}\n");
+    w(
+        "extender.scss",
+        "@use 'target';\n\n.extender {\n  @extend .target;\n}\n",
+    );
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    // load-css re-emits the module's whole subtree as a clone carrying that
+    // subtree's extensions; the main tree's copy stays untouched
+    // (sass/sass#3322).
+    assert_eq!(
+        compile(
+            "@use 'sass:meta';\n@use 'target';\n\n@include meta.load-css('extender');\n",
+            &opts
+        )
+        .unwrap(),
+        "@c;\n.target {\n  a: b;\n}\n\n@c;\n.target, .extender {\n  a: b;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    // A blank line only follows a completed style rule (dart isGroupEnd):
+    // consecutive @media blocks and at-rule-then-rule join tightly.
+    assert_eq!(
+        ours("@media a {x {p: q}}\n\n@media b {y {p: q}}\n"),
+        "@media a {\n  x {\n    p: q;\n  }\n}\n@media b {\n  y {\n    p: q;\n  }\n}\n"
+    );
+    assert_parity("a {x: y}\n\n@c;\n");
+    assert_parity("@media a {x {p: q}}\n\n@media b {y {p: q}}\n");
+}

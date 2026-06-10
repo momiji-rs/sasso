@@ -22,21 +22,32 @@ pub(crate) fn emit(nodes: &[OutNode], style: OutputStyle) -> String {
 
 fn emit_expanded(nodes: &[OutNode]) -> String {
     let mut out = String::new();
+    let mut prev = Prev::None;
     for node in nodes {
-        emit_node_expanded(&mut out, node, 0);
+        emit_node_expanded(&mut out, node, 0, &mut prev);
     }
     out
 }
 
+/// What the previously-emitted sibling was, for blank-line gating: dart-sass
+/// only emits a blank line after a completed *style rule* (`isGroupEnd`), so
+/// a Blank whose previous sibling is anything else is dropped.
+#[derive(Clone, Copy, PartialEq)]
+enum Prev {
+    None,
+    Rule,
+    Other,
+}
+
 /// Render one node at the given nesting `depth` (0 = document root). Each
 /// extra level adds two spaces of indentation.
-fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize) {
+fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut Prev) {
     let indent = "  ".repeat(depth);
     match node {
         // A module-scope wrapper is transparent: emit its contents in place.
         OutNode::ModuleScope { nodes, .. } => {
             for n in nodes {
-                emit_node_expanded(out, n, depth);
+                emit_node_expanded(out, n, depth, prev);
             }
         }
         OutNode::Rule {
@@ -65,19 +76,27 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize) {
             }
             out.push_str(&indent);
             out.push_str("}\n");
+            *prev = Prev::Rule;
         }
         OutNode::Comment(text) => {
             out.push_str(&indent);
             out.push_str("/*");
             out.push_str(text);
             out.push_str("*/\n");
+            *prev = Prev::Other;
         }
         OutNode::Raw(s) => {
             out.push_str(&indent);
             out.push_str(s);
             out.push('\n');
+            *prev = Prev::Other;
         }
-        OutNode::Blank => out.push('\n'),
+        OutNode::Blank => {
+            if *prev == Prev::Rule {
+                out.push('\n');
+            }
+            *prev = Prev::Other;
+        }
         OutNode::AtDecl {
             prop,
             value,
@@ -88,6 +107,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize) {
             out.push_str(prop);
             emit_decl_value_expanded(out, value, *important, *custom, depth);
             out.push_str(";\n");
+            *prev = Prev::Other;
         }
         OutNode::AtRule {
             name,
@@ -102,6 +122,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize) {
                 out.push(' ');
                 out.push_str(prelude);
             }
+            *prev = Prev::Other;
             if !has_block {
                 out.push_str(";\n");
                 return;
@@ -111,8 +132,9 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize) {
                 return;
             }
             out.push_str(" {\n");
+            let mut inner = Prev::None;
             for child in body {
-                emit_node_expanded(out, child, depth + 1);
+                emit_node_expanded(out, child, depth + 1, &mut inner);
             }
             out.push_str(&indent);
             out.push_str("}\n");

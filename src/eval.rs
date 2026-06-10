@@ -444,6 +444,15 @@ pub(crate) struct Evaluator<'a> {
     /// (via `@use`/`@forward`/`meta.load-css`). An extension whose origin can
     /// reach a module along these edges may rewrite that module's CSS.
     module_deps: RefCell<HashMap<String, std::collections::HashSet<String>>>,
+    /// The same load edges in *load order* (for `meta.load-css` subtree
+    /// re-emission, which walks dependencies upstream-first).
+    module_dep_order: RefCell<HashMap<String, Vec<String>>>,
+    /// `meta.load-css` copy scopes: (copy key, base module key). An origin
+    /// inside the base's subtree also sees the copy (its extensions apply to
+    /// the clone), in addition to the caller-edge reachability.
+    load_css_copies: RefCell<Vec<(String, String)>>,
+    /// Monotonic counter for unique load-css copy keys.
+    copy_counter: std::cell::Cell<usize>,
     /// Global variables that were written by an `@import`ed `@forward` merge,
     /// with the source module each came from (by pointer). In dart-sass such
     /// a variable stays bound to its module: re-importing the SAME forwards
@@ -782,6 +791,9 @@ impl<'a> Evaluator<'a> {
             callable_undo: Vec::new(),
             current_module: String::new(),
             module_deps: RefCell::new(HashMap::default()),
+            module_dep_order: RefCell::new(HashMap::default()),
+            load_css_copies: RefCell::new(Vec::new()),
+            copy_counter: std::cell::Cell::new(0),
             used_modules: HashMap::default(),
             star_modules: Vec::new(),
             used_user_modules: HashMap::default(),
@@ -1117,15 +1129,10 @@ impl<'a> Evaluator<'a> {
         // Per-origin upstream closures over the recorded load edges (the
         // module keys each origin can see, including itself).
         let deps = self.module_deps.borrow();
-        let mut closure_cache: HashMap<String, std::rc::Rc<std::collections::HashSet<String>>> =
-            HashMap::default();
-        for pe in &self.extends {
-            if closure_cache.contains_key(&pe.origin) {
-                continue;
-            }
+        let bfs = |start: &str| {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            seen.insert(pe.origin.clone());
-            let mut stack = vec![pe.origin.clone()];
+            seen.insert(start.to_string());
+            let mut stack = vec![start.to_string()];
             while let Some(k) = stack.pop() {
                 if let Some(nexts) = deps.get(&k) {
                     for n in nexts {
@@ -1135,9 +1142,47 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
-            closure_cache.insert(pe.origin.clone(), std::rc::Rc::new(seen));
+            seen
+        };
+        let mut raw_cache: HashMap<String, std::collections::HashSet<String>> = HashMap::default();
+        for pe in &self.extends {
+            if raw_cache.contains_key(&pe.origin) {
+                continue;
+            }
+            let seen = bfs(&pe.origin);
+            raw_cache.insert(pe.origin.clone(), seen);
         }
+        // A `meta.load-css` copy is also visible to any origin inside the
+        // copied module's subtree: the clone carries that subtree's own
+        // extensions (dart bakes them into the cloned CSS).
+        let copies = self.load_css_copies.borrow();
+        for (copy_key, base) in copies.iter() {
+            let base_reach = bfs(base);
+            for (origin, set) in raw_cache.iter_mut() {
+                if base_reach.contains(origin) {
+                    set.insert(copy_key.clone());
+                }
+            }
+        }
+        // An origin NOT reachable from the root tree (it was only ever
+        // pulled in through `meta.load-css`) exists solely inside the
+        // clones: its extensions apply to copy scopes only, never to the
+        // main tree's module scopes (dart: such a module's extension store
+        // never joins the root `_combineCss`).
+        if !copies.is_empty() {
+            let main_reach = bfs("");
+            for (origin, set) in raw_cache.iter_mut() {
+                if !origin.is_empty() && !main_reach.contains(origin) {
+                    set.retain(|s| copies.iter().any(|(ck, _)| ck == s));
+                }
+            }
+        }
+        drop(copies);
         drop(deps);
+        let closure_cache: HashMap<String, std::rc::Rc<std::collections::HashSet<String>>> = raw_cache
+            .into_iter()
+            .map(|(k, v)| (k, std::rc::Rc::new(v)))
+            .collect();
         let mut extensions: Vec<crate::selector::Extension> = Vec::new();
         for pe in &self.extends {
             let mut extenders = Vec::new();
@@ -2429,6 +2474,63 @@ impl<'a> Evaluator<'a> {
     /// emit its CSS into `sink`, and return the shared module instance plus the
     /// list of config keys the module consumed (for `@forward ... with`
     /// pass-through).
+    /// Collect a module's full subtree CSS (dependencies upstream-first,
+    /// each module once), un-wrapping embedded module-scope nodes — used for
+    /// `meta.load-css`, which re-emits the whole subtree at the call site
+    /// (dart `_combineCss` with `clone: true`).
+    fn subtree_css(&self, key: &str) -> Vec<OutNode> {
+        fn walk(
+            ev: &Evaluator<'_>,
+            key: &str,
+            visited: &mut std::collections::HashSet<String>,
+            out: &mut Vec<OutNode>,
+        ) {
+            if !visited.insert(key.to_string()) {
+                return;
+            }
+            let deps = ev.module_dep_order.borrow().get(key).cloned().unwrap_or_default();
+            for d in deps {
+                walk(ev, &d, visited, out);
+            }
+            if let Some(m) = ev.module_cache.borrow().get(key) {
+                for n in &m.css {
+                    // An embedded dependency's scope wrapper is covered by the
+                    // dependency walk above — but a nested load-css COPY is a
+                    // materialized clone (it has no load edge) and stays.
+                    if let OutNode::ModuleScope { key: k, .. } = n {
+                        if !k.contains("#copy") {
+                            continue;
+                        }
+                    }
+                    out.push(n.clone());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        walk(self, key, &mut visited, &mut out);
+        out
+    }
+
+    /// Register a unique `meta.load-css` copy scope for `key` at the current
+    /// call site: the caller gains a load edge to the copy (its extensions
+    /// apply to it), and origins inside the base's subtree are linked during
+    /// `apply_extends`.
+    fn register_load_css_copy(&self, key: &str) -> String {
+        let n = self.copy_counter.get() + 1;
+        self.copy_counter.set(n);
+        let copy_key = format!("{key}#copy{n}");
+        self.module_deps
+            .borrow_mut()
+            .entry(self.current_module.clone())
+            .or_default()
+            .insert(copy_key.clone());
+        self.load_css_copies
+            .borrow_mut()
+            .push((copy_key.clone(), key.to_string()));
+        copy_key
+    }
+
     fn load_module(
         &mut self,
         url: &str,
@@ -2476,6 +2578,13 @@ impl<'a> Evaluator<'a> {
                         .entry(self.current_module.clone())
                         .or_default()
                         .insert(key.clone());
+                    {
+                        let mut ord = self.module_dep_order.borrow_mut();
+                        let v = ord.entry(self.current_module.clone()).or_default();
+                        if !v.contains(&key) {
+                            v.push(key.clone());
+                        }
+                    }
                     splice_nodes(
                         sink,
                         vec![OutNode::ModuleScope {
@@ -2493,18 +2602,36 @@ impl<'a> Evaluator<'a> {
             // The cached module consumed nothing (it defines none of the
             // configured variables); the caller's own/forwarded handling decides
             // whether the leftover configuration is an error. `meta.load-css`
-            // still re-emits the cached CSS at the call site.
-            self.module_deps
-                .borrow_mut()
-                .entry(self.current_module.clone())
-                .or_default()
-                .insert(key.clone());
+            // still re-emits the cached CSS at the call site — WITHOUT a load
+            // edge to the base module (the caller only gains the copy edge, so
+            // a module pulled in solely through load-css never joins the main
+            // tree's extension reachability).
+            if !force_reemit {
+                self.module_deps
+                    .borrow_mut()
+                    .entry(self.current_module.clone())
+                    .or_default()
+                    .insert(key.clone());
+                let mut ord = self.module_dep_order.borrow_mut();
+                let v = ord.entry(self.current_module.clone()).or_default();
+                if !v.contains(&key) {
+                    v.push(key.clone());
+                }
+            }
             if force_reemit {
-                // A `meta.load-css` copy is spliced into the CALLER's tree
-                // (dart clones the module's CSS there), so the caller's own
-                // extensions apply to it and other loaders' do not — no
-                // module-scope wrapper.
-                splice_nodes(sink, reparent_nodes(existing.css.clone(), parents));
+                // A `meta.load-css` copy re-emits the module's whole SUBTREE
+                // at the call site under a unique copy scope: the caller's
+                // extensions apply to it (caller -> copy edge), the subtree's
+                // own extensions apply to the clone, and other loaders'
+                // extensions do not (dart `_combineCss` with `clone: true`).
+                let copy_key = self.register_load_css_copy(&key);
+                splice_nodes(
+                    sink,
+                    vec![OutNode::ModuleScope {
+                        key: copy_key,
+                        nodes: reparent_nodes(self.subtree_css(&key), parents),
+                    }],
+                );
             }
             return Ok((existing, Vec::new()));
         }
@@ -2525,11 +2652,20 @@ impl<'a> Evaluator<'a> {
                 .insert(diag_url.clone(), Rc::from(src.as_str()));
         }
         let is_css = matches!(syntax, Syntax::Css);
-        self.module_deps
-            .borrow_mut()
-            .entry(self.current_module.clone())
-            .or_default()
-            .insert(key.clone());
+        // A `meta.load-css` first load also records only the copy edge (see
+        // the cache-hit branch above).
+        if !force_reemit {
+            self.module_deps
+                .borrow_mut()
+                .entry(self.current_module.clone())
+                .or_default()
+                .insert(key.clone());
+            let mut ord = self.module_dep_order.borrow_mut();
+            let v = ord.entry(self.current_module.clone()).or_default();
+            if !v.contains(&key) {
+                v.push(key.clone());
+            }
+        }
         // Evaluate into a buffer so the emitted CSS can be captured on the
         // module (for per-import re-emission) before splicing into the
         // caller's sink.
@@ -2539,11 +2675,23 @@ impl<'a> Evaluator<'a> {
             self.eval_module(&key, &diag_url, &sheet, config, pos, &mut buf_sink, is_css)?
         };
         module.css = css_buf.clone();
-        // A first load through `meta.load-css` (force_reemit) splices the CSS
-        // bare into the CALLER's tree (the caller's extensions apply to it);
-        // an ordinary `@use`/`@forward` load wraps it in its module scope.
+        let module = Rc::new(module);
+        self.module_cache
+            .borrow_mut()
+            .insert(key.clone(), Rc::clone(&module));
+        // A first load through `meta.load-css` (force_reemit) splices the
+        // module's whole subtree under a unique copy scope at the call site;
+        // an ordinary `@use`/`@forward` load wraps its own CSS in its module
+        // scope.
         if force_reemit {
-            splice_nodes(sink, reparent_nodes(css_buf, parents));
+            let copy_key = self.register_load_css_copy(&key);
+            splice_nodes(
+                sink,
+                vec![OutNode::ModuleScope {
+                    key: copy_key,
+                    nodes: reparent_nodes(self.subtree_css(&key), parents),
+                }],
+            );
         } else {
             splice_nodes(
                 sink,
@@ -2553,8 +2701,6 @@ impl<'a> Evaluator<'a> {
                 }],
             );
         }
-        let module = Rc::new(module);
-        self.module_cache.borrow_mut().insert(key, Rc::clone(&module));
         Ok((module, consumed))
     }
 
