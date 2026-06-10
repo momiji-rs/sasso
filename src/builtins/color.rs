@@ -2322,23 +2322,70 @@ fn fn_is_in_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
 /// check their own channels; the legacy hsl/hwb spaces share the sRGB gamut
 /// (their rgb representation must fit `[0,255]`); the unbounded perceptual/xyz
 /// spaces are always in gamut.
-fn in_gamut(mc: &ModernColor, space: ColorSpace) -> bool {
+/// Per-channel gamut bounds of a BOUNDED space's own channels (dart's
+/// `LinearChannel` min/max); `None` entry = an unbounded (polar hue) channel,
+/// outer `None` = an unbounded space (always in gamut).
+fn channel_bounds(space: ColorSpace) -> Option<[Option<(f64, f64)>; 3]> {
     use ColorSpace::*;
-    let bound = |conv: &ModernColor, lo: f64, hi: f64| {
-        conv.channels
-            .iter()
-            .all(|c| matches!(c, Some(v) if *v >= lo - 1e-7 && *v <= hi + 1e-7) || c.is_none())
-    };
-    match space {
-        Rgb => bound(&convert_modern(mc, space), 0.0, 255.0),
+    Some(match space {
+        Rgb => [Some((0.0, 255.0)); 3],
         Srgb | SrgbLinear | DisplayP3 | DisplayP3Linear | A98Rgb | ProphotoRgb | Rec2020 => {
-            bound(&convert_modern(mc, space), 0.0, 1.0)
+            [Some((0.0, 1.0)); 3]
         }
-        // hsl/hwb share sRGB's gamut.
-        Hsl | Hwb => bound(&convert_modern(mc, Rgb), 0.0, 255.0),
-        // The unbounded perceptual/xyz spaces are always in gamut.
-        _ => true,
+        Hsl | Hwb => [None, Some((0.0, 100.0)), Some((0.0, 100.0))],
+        _ => return None,
+    })
+}
+
+/// dart `SassColor.isInGamut`: a bounded space checks each channel (missing
+/// reads as 0) against its own bounds with fuzzy (1e-11) edges; unbounded
+/// spaces and polar hue channels are always in gamut.
+fn is_in_gamut(mc: &ModernColor) -> bool {
+    let Some(bounds) = channel_bounds(mc.space) else {
+        return true;
+    };
+    let fuzzy_eq = |a: f64, b: f64| (a - b).abs() < 1e-11;
+    for (bound, channel) in bounds.iter().zip(&mc.channels) {
+        if let Some((min, max)) = bound {
+            let v = channel.unwrap_or(0.0);
+            let ok = (v < *max || fuzzy_eq(v, *max)) && (v > *min || fuzzy_eq(v, *min));
+            if !ok {
+                return false;
+            }
+        }
     }
+    true
+}
+
+/// dart `ClipGamutMap`: clamp each bounded channel in the color's OWN space
+/// (NaN collapses to the minimum, a missing channel stays missing, polar hue
+/// channels pass through).
+fn clip_in_own_space(mc: &ModernColor) -> ModernColor {
+    let Some(bounds) = channel_bounds(mc.space) else {
+        return mc.clone();
+    };
+    let clamp1 = |v: Option<f64>, b: Option<(f64, f64)>| match (v, b) {
+        (Some(v), Some((min, max))) => Some(if v.is_nan() { min } else { v.clamp(min, max) }),
+        _ => v,
+    };
+    ModernColor {
+        space: mc.space,
+        channels: [
+            clamp1(mc.channels[0], bounds[0]),
+            clamp1(mc.channels[1], bounds[1]),
+            clamp1(mc.channels[2], bounds[2]),
+        ],
+        alpha: mc.alpha,
+    }
+}
+
+/// In-gamut check after converting into `space` (the public `is-in-gamut`
+/// shape, also used by the legacy-format serialization probe).
+fn in_gamut(mc: &ModernColor, space: ColorSpace) -> bool {
+    if mc.space == space {
+        return is_in_gamut(mc);
+    }
+    is_in_gamut(&convert_modern(mc, space))
 }
 
 fn fn_is_powerless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
@@ -2472,13 +2519,16 @@ fn fn_to_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
             ))
         }
     };
-    if in_gamut(&mc, space) {
+    // dart converts into the working space first (filling legacy missing
+    // channels), checks the gamut there, and maps in that space.
+    let work = convert_modern_filled(&mc, space);
+    if is_in_gamut(&work) {
         return Ok(Value::Color(c));
     }
     let mapped = if clip {
-        clamp_in_space(&mc, space)
+        clip_in_own_space(&work)
     } else {
-        gamut_map(&mc, space)
+        gamut_map(&work)
     };
     // Re-express in the original space (a legacy result fills missing).
     let back = convert_modern_filled(&mapped, mc.space);
@@ -2489,99 +2539,98 @@ fn fn_to_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
 /// search, clipping in the target space, until the clipped color is within a
 /// just-noticeable difference (deltaEOK). Ported from the CSS Color 4 spec /
 /// dart-sass.
-fn gamut_map(mc: &ModernColor, space: ColorSpace) -> ModernColor {
-    const JND: f64 = 0.02;
-    const EPS: f64 = 0.0001;
-    let oklch = convert_modern(mc, ColorSpace::Oklch);
-    let l = z(oklch.channels[0]);
-    if l >= 1.0 {
-        return clamp_in_space(&white_in(space), space);
+/// dart `LocalMindeGamutMap.map`: `color` is already in the target space.
+fn gamut_map(color: &ModernColor) -> ModernColor {
+    let fuzzy_eq = |a: f64, b: f64| (a - b).abs() < 1e-11;
+    let origin_oklch = convert_modern(color, ColorSpace::Oklch);
+    let lightness = origin_oklch.channels[0];
+    let hue = origin_oklch.channels[2];
+    let alpha = color.alpha;
+    let l = lightness.unwrap_or(0.0);
+    if l > 1.0 || fuzzy_eq(l, 1.0) {
+        // A legacy color maps to white via rgb(255,255,255); a modern bounded
+        // space takes its channels literally at their maxima (1,1,1).
+        return if color.space.is_legacy() {
+            convert_modern(
+                &ModernColor {
+                    space: ColorSpace::Rgb,
+                    channels: [Some(255.0); 3],
+                    alpha,
+                },
+                color.space,
+            )
+        } else {
+            ModernColor {
+                space: color.space,
+                channels: [Some(1.0); 3],
+                alpha,
+            }
+        };
     }
-    if l <= 0.0 {
-        return clamp_in_space(&black_in(space), space);
+    if l < 0.0 || fuzzy_eq(l, 0.0) {
+        return convert_modern(
+            &ModernColor {
+                space: ColorSpace::Rgb,
+                channels: [Some(0.0); 3],
+                alpha,
+            },
+            color.space,
+        );
     }
-    let h = z(oklch.channels[2]);
-    let make = |c: f64| ModernColor {
-        space: ColorSpace::Oklch,
-        channels: [Some(l), Some(c), Some(h)],
-        alpha: oklch.alpha,
+    let mut clipped = if is_in_gamut(color) {
+        color.clone()
+    } else {
+        clip_in_own_space(color)
     };
-    let mut current = oklch.clone();
-    let mut clipped = clamp_in_space(&current, space);
-    if delta_eok(&clipped, &current) < JND {
-        return convert_modern(&clipped, space);
+    if delta_eok(&clipped, color) < 0.02 {
+        return clipped;
     }
+    let mut max = origin_oklch.channels[1].unwrap_or(0.0);
     let mut min = 0.0;
-    let mut max = z(oklch.channels[1]);
     let mut min_in_gamut = true;
-    while max - min > EPS {
+    while max - min > 0.0001 {
         let chroma = (min + max) / 2.0;
-        current = make(chroma);
-        if min_in_gamut && in_gamut(&current, space) {
+        let current = convert_modern(
+            &ModernColor {
+                space: ColorSpace::Oklch,
+                channels: [lightness, Some(chroma), hue],
+                alpha,
+            },
+            color.space,
+        );
+        if min_in_gamut && is_in_gamut(&current) {
             min = chroma;
             continue;
         }
-        clipped = clamp_in_space(&current, space);
+        clipped = if is_in_gamut(&current) {
+            current.clone()
+        } else {
+            clip_in_own_space(&current)
+        };
         let e = delta_eok(&clipped, &current);
-        if e < JND {
-            if JND - e < EPS {
-                return convert_modern(&clipped, space);
+        if e < 0.02 {
+            if 0.02 - e < 0.0001 {
+                return clipped;
             }
-            min_in_gamut = false;
             min = chroma;
+            min_in_gamut = false;
         } else {
             max = chroma;
         }
     }
-    convert_modern(&clipped, space)
+    clipped
 }
 
-fn white_in(space: ColorSpace) -> ModernColor {
-    let mc = ModernColor {
-        space: ColorSpace::Oklch,
-        channels: [Some(1.0), Some(0.0), Some(0.0)],
-        alpha: Some(1.0),
-    };
-    convert_modern(&mc, space)
-}
-
-fn black_in(space: ColorSpace) -> ModernColor {
-    let mc = ModernColor {
-        space: ColorSpace::Oklch,
-        channels: [Some(0.0), Some(0.0), Some(0.0)],
-        alpha: Some(1.0),
-    };
-    convert_modern(&mc, space)
-}
-
-/// Clamp each channel of a color (already convertible) into `space`'s bounds.
-fn clamp_in_space(mc: &ModernColor, space: ColorSpace) -> ModernColor {
-    use ColorSpace::*;
-    let conv = convert_modern(mc, space);
-    let (lo, hi) = match space {
-        Rgb => (0.0, 255.0),
-        Srgb | SrgbLinear | DisplayP3 | DisplayP3Linear | A98Rgb | ProphotoRgb | Rec2020 => (0.0, 1.0),
-        _ => return conv,
-    };
-    ModernColor {
-        space,
-        channels: [
-            conv.channels[0].map(|v| v.clamp(lo, hi)),
-            conv.channels[1].map(|v| v.clamp(lo, hi)),
-            conv.channels[2].map(|v| v.clamp(lo, hi)),
-        ],
-        alpha: conv.alpha,
-    }
-}
-
-/// The deltaEOK (Euclidean distance in oklab) between two colors.
+/// The deltaEOK (Euclidean distance in oklab) between two colors — through
+/// `Math.pow(d, 2)` like dart, not `d*d`.
 fn delta_eok(a: &ModernColor, b: &ModernColor) -> f64 {
+    use crate::fdlibm::pow;
     let a = convert_modern(a, ColorSpace::Oklab);
     let b = convert_modern(b, ColorSpace::Oklab);
     let dl = z(a.channels[0]) - z(b.channels[0]);
     let da = z(a.channels[1]) - z(b.channels[1]);
     let db = z(a.channels[2]) - z(b.channels[2]);
-    (dl * dl + da * da + db * db).sqrt()
+    (pow(dl, 2.0) + pow(da, 2.0) + pow(db, 2.0)).sqrt()
 }
 
 /// Build a modern legacy color (rgb/hsl) from a [`Channels`] set when it
