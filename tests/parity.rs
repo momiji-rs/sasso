@@ -5301,3 +5301,41 @@ fn slotted_and_current_pseudo_arg_extend() {
         "a {\n  b: :current(.c, .d, .e);\n}\n"
     );
 }
+
+#[test]
+fn plain_css_at_rules() {
+    // Plain-CSS (.css) at-rules: top-level pass-through with canonical media
+    // serialization, first-level bubbling around a copy of the parent rule,
+    // and native (in-place) nesting below that (dart `_hasCssNesting`).
+    let dir = std::env::temp_dir().join(format!("sasso_plain_atrule_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    let go = |css: &str| {
+        std::fs::write(dir.join("plain.css"), css).expect("write plain.css");
+        compile("@use \"plain\";\n", &opts).expect("plain css compile")
+    };
+    // Canonical media-logic serialization (mixed case normalized).
+    assert_eq!(
+        go("@media (a) AnD (b) {x {y: z}}\n"),
+        "@media (a) and (b) {\n  x {\n    y: z;\n  }\n}\n"
+    );
+    assert_eq!(
+        go("@media a and not (b) {x {y: z}}\n"),
+        "@media a and not (b) {\n  x {\n    y: z;\n  }\n}\n"
+    );
+    // First-level @media bubbles out around a copy of the parent rule.
+    assert_eq!(
+        go("a {@media b {c: d}}\n"),
+        "@media b {\n  a {\n    c: d;\n  }\n}\n"
+    );
+    // Below the first nesting level it stays in place (native CSS nesting).
+    assert_eq!(
+        go("a { b {@media c {d: e}}}\n"),
+        "a {\n  b {\n    @media c {\n      d: e;\n    }\n  }\n}\n"
+    );
+    // Childless rules are invisible, recursively.
+    assert_eq!(go("a {}\n"), "");
+    assert_eq!(go("a { b {} c: d}\n"), "a {\n  c: d;\n}\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
