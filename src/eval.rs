@@ -4457,6 +4457,62 @@ impl<'a> Evaluator<'a> {
                         quoted: false,
                     }));
                 }
+                // `round()` is likewise the CSS round() calculation: each
+                // argument evaluates as a calculation (so `1.4px + var(--c)`
+                // keeps its `+` with the numeric subtree folded, and
+                // `1px + 4px` folds to `5px`). If every argument simplifies
+                // (numbers, plus a leading strategy keyword), the normal
+                // builtin computes the result; otherwise the call is
+                // preserved. Calc-incompatible SassScript (`7 % 3`) falls back
+                // to the legacy one-argument `math.round` (arity errors and
+                // all).
+                if name.eq_ignore_ascii_case("round")
+                    && !self.functions.contains_key(name)
+                    && (1..=3).contains(&args.len())
+                    && !args.iter().any(|a| a.splat || a.name.is_some())
+                {
+                    // A SassScript-only operator (`7 % 3`) makes the call a
+                    // plain function, and the only plain `round` is the legacy
+                    // one-argument `math.round` — multi-argument forms are an
+                    // arity error (dart-sass).
+                    if args.iter().any(|a| expr_has_non_calc_op(&a.value)) {
+                        if args.len() > 1 {
+                            return Err(Error::at(
+                                format!("Only 1 argument allowed, but {} were passed.", args.len()),
+                                *pos,
+                            ));
+                        }
+                        // A single argument falls through to the legacy builtin.
+                    } else if let Ok(nodes) =
+                        args.iter()
+                            .map(|a| self.eval_calc(&a.value))
+                            .collect::<Result<Vec<CalcNode>, Error>>()
+                    {
+                        let simplified = |i: usize, n: &CalcNode| match n {
+                            CalcNode::Number(_) => true,
+                            // A leading strategy keyword participates as a
+                            // keyword, not an operand.
+                            CalcNode::Str(s) => {
+                                i == 0
+                                    && nodes.len() >= 2
+                                    && matches!(
+                                        s.to_ascii_lowercase().as_str(),
+                                        "nearest" | "up" | "down" | "to-zero"
+                                    )
+                            }
+                            _ => false,
+                        };
+                        if !nodes.iter().enumerate().all(|(i, n)| simplified(i, n)) {
+                            let parts: Vec<String> =
+                                nodes.iter().map(|n| n.to_calc_css(self.compressed())).collect();
+                            return Ok(Value::Str(SassStr {
+                                text: format!("round({})", parts.join(", ")),
+                                quoted: false,
+                            }));
+                        }
+                        // Fall through to the normal builtin path below.
+                    }
+                }
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.
                 let (mut pos_args, mut named) = self.eval_call_args(args)?;
@@ -5952,6 +6008,37 @@ fn expr_contains_calc_substitution(e: &Expr) -> bool {
         Expr::Paren(inner) => expr_contains_calc_substitution(inner),
         Expr::Calc { inner } => expr_contains_calc_substitution(inner),
         Expr::List { items, .. } => items.iter().any(expr_contains_calc_substitution),
+        _ => false,
+    }
+}
+
+/// Whether an expression contains a SassScript-only operator (`%`, a
+/// comparison, boolean logic) that can never appear in a CSS calculation.
+/// dart-sass's parser then treats the whole call as a plain function rather
+/// than a calculation (`round(7 % 3, 1)` is the legacy one-argument
+/// `math.round` — an arity error).
+fn expr_has_non_calc_op(e: &Expr) -> bool {
+    match e {
+        Expr::Binary { op, lhs, rhs, .. } => {
+            matches!(
+                op,
+                BinOp::Mod
+                    | BinOp::Eq
+                    | BinOp::Neq
+                    | BinOp::Lt
+                    | BinOp::Gt
+                    | BinOp::Le
+                    | BinOp::Ge
+                    | BinOp::And
+                    | BinOp::Or
+                    | BinOp::SingleEq
+            ) || expr_has_non_calc_op(lhs)
+                || expr_has_non_calc_op(rhs)
+        }
+        Expr::Div { lhs, rhs, .. } => expr_has_non_calc_op(lhs) || expr_has_non_calc_op(rhs),
+        Expr::Unary { operand, .. } => expr_has_non_calc_op(operand),
+        Expr::Paren(inner) => expr_has_non_calc_op(inner),
+        Expr::List { items, .. } => items.iter().any(expr_has_non_calc_op),
         _ => false,
     }
 }

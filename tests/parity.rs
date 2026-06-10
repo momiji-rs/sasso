@@ -5432,3 +5432,27 @@ fn import_implicit_configuration() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn round_calculation_semantics() {
+    // CSS `round()` is a calculation: arguments fold as calc expressions
+    // (`1px + 4px` -> `5px`), unsimplifiable operands preserve the call with
+    // the folded subtrees, a leading strategy keyword participates as a
+    // keyword, and a SassScript-only operator falls back to the legacy
+    // one-argument math.round (arity error for more).
+    assert_eq!(
+        ours("a {b: round(3.4px + 10%, 1px + 4px)}\n"),
+        "a {\n  b: round(3.4px + 10%, 5px);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: round(1.4px + var(--a))}\n"),
+        "a {\n  b: round(1.4px + var(--a));\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: round(1px + 0%, 1px + 0%)}\n"),
+        "a {\n  b: round(1px + 0%, 1px + 0%);\n}\n"
+    );
+    assert_eq!(ours("a {b: round(#{\"up\"}, 3px, 9px)}\n"), "a {\n  b: 9px;\n}\n");
+    assert_eq!(ours("a {b: round(2.5)}\n"), "a {\n  b: 3;\n}\n");
+    assert!(compile("a {b: round(7 % 3, 1)}\n", &Options::default()).is_err());
+}
