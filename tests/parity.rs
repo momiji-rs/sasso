@@ -376,6 +376,11 @@ fn ours(scss: &str) -> String {
     compile(scss, &Options::default()).expect("our compile failed")
 }
 
+/// Compile indented-syntax `sass` and return our CSS (panicking on error).
+fn ours_sass(sass: &str) -> String {
+    compile(sass, &Options::default().with_syntax(sasso::Syntax::Sass)).expect("our indented compile failed")
+}
+
 #[test]
 fn rgb_hsl_special_value_passthrough() {
     // A special channel argument (var/env/calc) preserves the call,
@@ -5819,4 +5824,18 @@ fn selector_paren_validation_and_import_supports_collapse() {
         "@import \"a.css\" foo(b\n  c);\n"
     );
     assert_parity("@import \"a.css\" supports(a(b\n\n  c));\n");
+}
+
+#[test]
+fn sass_bare_plus_selector_and_using_block() {
+    // A bare `+` line is the next-sibling combinator selector (like `+ a`),
+    // NOT the include shorthand — only `+name` includes a mixin.
+    assert_sass_parity("d\n  +\n    a\n      x: y\n");
+    assert_eq!(ours_sass("@mixin a\n  b: c\nd\n  +\n    a\n"), "");
+    assert_eq!(ours_sass("@mixin a\n  b: c\nd\n  +a\n"), "d {\n  b: c;\n}\n");
+    // `=` alone still continues onto the next line as `@mixin`.
+    assert_eq!(ours_sass("=\n  a\n\nd\n  @include a\n"), "");
+    // An `@include … using (…)` with no child block takes an EMPTY content
+    // block (SCSS `@include a() using ();` is 'expected "{".').
+    assert_eq!(ours_sass("@mixin a\n  @content\n@include a() using\n  ()\n"), "");
 }

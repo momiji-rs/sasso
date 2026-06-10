@@ -176,15 +176,14 @@ impl Transpiler {
         let (mut logical, child_indent) = self.assemble_logical_line(indent)?;
 
         // Rewrite the indented-syntax mixin shorthands to their `@mixin`/
-        // `@include` equivalents *before* prelude continuation, so a shorthand
-        // whose name spills onto the next line (`=` / `+` alone) continues like
-        // the directive it stands for. `=name` defines a mixin; `+name` (no
-        // space before the name) includes one (a `+ a` with a space is the next-
-        // sibling combinator selector, left untouched).
+        // `@include` equivalents *before* prelude continuation. `=name` defines
+        // a mixin, and a bare `=` continues onto the next line like the
+        // directive it stands for; `+name` (no space before the name) includes
+        // one, but a bare `+` is the next-sibling combinator *selector* (like
+        // `+ a` with a space), since `+` has a selector meaning `=` lacks.
         if let Some(rest) = logical.strip_prefix('=') {
             logical = format!("@mixin {}", rest.trim_start());
-        } else if logical == "+"
-            || matches!(logical.strip_prefix('+'), Some(r) if r.starts_with(|c: char| is_ident_char(c) || c == '#' || c == '\\'))
+        } else if matches!(logical.strip_prefix('+'), Some(r) if r.starts_with(|c: char| is_ident_char(c) || c == '#' || c == '\\'))
         {
             let rest = logical[1..].trim_start();
             logical = format!("@include {rest}");
@@ -785,7 +784,11 @@ fn empty_form(logical: &str) -> EmptyForm {
             | "at-root" | "keyframes" | "-webkit-keyframes" | "-moz-keyframes" | "-o-keyframes"
             | "-ms-keyframes" => EmptyForm::Braces,
             // Leaf directives. `@include` without a child content block ends at
-            // the newline (a child block, if present, is its content).
+            // the newline (a child block, if present, is its content) — unless
+            // it carries a `using (…)` clause, which always takes a content
+            // block (empty here), since SCSS `@include a() using ();` is
+            // 'expected "{".'.
+            "include" if has_top_level_using(t) => EmptyForm::Braces,
             "include" | "return" | "import" | "use" | "forward" | "extend" | "content" | "warn" | "debug"
             | "error" | "charset" => EmptyForm::Semicolon,
             // Unknown / generic at-rules (`@font-face`, `@page`, `@namespace`,
@@ -1044,6 +1047,42 @@ fn find_decl_colon(logical: &str) -> Option<usize> {
 /// brackets, `#{…}` interpolation and `/* */` comments), or `None`. A single
 /// trailing `;` ends a statement; a `;` with further content is "multiple
 /// statements on one line", which the indented syntax forbids.
+/// Whether an `@include` logical line carries a top-level `using` keyword
+/// (outside brackets and strings) — i.e. a content-block parameter clause.
+fn has_top_level_using(logical: &str) -> bool {
+    let cs: Vec<char> = logical.chars().collect();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            '"' | '\'' => {
+                let q = cs[i];
+                i += 1;
+                while i < cs.len() && cs[i] != q {
+                    if cs[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            'u' | 'U' if depth == 0 => {
+                let prev_ident = i > 0 && is_ident_char(cs[i - 1]);
+                let word: String = cs[i..].iter().take_while(|c| is_ident_char(**c)).collect();
+                if !prev_ident && word.eq_ignore_ascii_case("using") {
+                    return true;
+                }
+                i += word.len().max(1);
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 fn find_top_level_semicolon(logical: &str) -> Option<usize> {
     let cs: Vec<char> = logical.chars().collect();
     let mut paren = 0i32;
