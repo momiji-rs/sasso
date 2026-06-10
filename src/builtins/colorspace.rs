@@ -12,7 +12,7 @@
 // suggestions to use std consts would be no-ops but obscure the provenance.
 #![allow(clippy::approx_constant, clippy::excessive_precision)]
 
-use crate::fdlibm::pow;
+use crate::musl_math::pow;
 use crate::value::ColorSpace;
 
 #[allow(clippy::unreadable_literal)]

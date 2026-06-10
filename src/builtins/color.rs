@@ -2624,7 +2624,7 @@ fn gamut_map(color: &ModernColor) -> ModernColor {
 /// The deltaEOK (Euclidean distance in oklab) between two colors — through
 /// `Math.pow(d, 2)` like dart, not `d*d`.
 fn delta_eok(a: &ModernColor, b: &ModernColor) -> f64 {
-    use crate::fdlibm::pow;
+    use crate::musl_math::pow;
     let a = convert_modern(a, ColorSpace::Oklab);
     let b = convert_modern(b, ColorSpace::Oklab);
     let dl = z(a.channels[0]) - z(b.channels[0]);
