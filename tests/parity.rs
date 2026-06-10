@@ -5339,3 +5339,36 @@ fn plain_css_at_rules() {
     assert_eq!(go("a { b {} c: d}\n"), "a {\n  c: d;\n}\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn plain_css_value_semantics() {
+    // In a plain-CSS module no function is invoked: calls re-serialize with
+    // their arguments (dart-sass `plainCss`), keywords are plain identifiers,
+    // and CSS calculations still simplify.
+    let dir = std::env::temp_dir().join(format!("sasso_plain_value_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    let go = |css: &str| {
+        std::fs::write(dir.join("plain.css"), css).expect("write plain.css");
+        compile("@use \"plain\";\n", &opts).expect("plain css compile")
+    };
+    assert_eq!(go("a {b: alpha(0.1)}\n"), "a {\n  b: alpha(0.1);\n}\n");
+    assert_eq!(go("a {b: rgb(255 0 0)}\n"), "a {\n  b: rgb(255 0 0);\n}\n");
+    assert_eq!(go("a {b: RGB(1,2,3)}\n"), "a {\n  b: RGB(1, 2, 3);\n}\n");
+    assert_eq!(go("a {b: min(1px, 2px)}\n"), "a {\n  b: 1px;\n}\n");
+    assert_eq!(go("a {x: null}\n"), "a {\n  x: null;\n}\n");
+    assert_eq!(go("a {b: true}\n"), "a {\n  b: true;\n}\n");
+    // The `:x: y` IE property hack parses as a declaration.
+    assert_eq!(go(".hacks {*x: y; :x: y}\n"), ".hacks {\n  *x: y;\n  :x: y;\n}\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn colon_property_hack_scss() {
+    // The leading-`:` property hack also parses in SCSS (dart-sass reads one
+    // leading punctuation character before the property identifier).
+    assert_eq!(ours("a {:x: y}\n"), "a {\n  :x: y;\n}\n");
+    // A pseudo-selector block is still a nested rule, not a declaration.
+    assert_eq!(ours("b {:hover {c: d}}\n"), "b :hover {\n  c: d;\n}\n");
+}

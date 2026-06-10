@@ -411,6 +411,11 @@ pub(crate) struct Evaluator<'a> {
     /// `calc(1 + 2)` literal in `@supports (a: calc(1 + 2))`), matching
     /// dart-sass `_inSupportsDeclaration`.
     in_supports_declaration: bool,
+    /// True while evaluating a plain-CSS (`.css`) module's statements: no
+    /// function — user-defined or built-in — is invoked there (dart-sass
+    /// `plainCss`); calls re-serialize verbatim. CSS calculations still
+    /// simplify.
+    in_plain_css: bool,
     /// Built-in modules made available via `@use "sass:<mod>"`, keyed by the
     /// in-scope namespace (default = the part after `sass:`, or the `as ns`
     /// override). The value is the canonical built-in module name (e.g.
@@ -657,6 +662,7 @@ impl<'a> Evaluator<'a> {
             extends: Vec::new(),
             decl_prefix: None,
             in_supports_declaration: false,
+            in_plain_css: false,
             used_modules: HashMap::default(),
             star_modules: Vec::new(),
             used_user_modules: HashMap::default(),
@@ -2295,6 +2301,13 @@ impl<'a> Evaluator<'a> {
     /// only `#{…}` interpolation. The parser has already rejected Sass-only
     /// constructs, so the remaining statements are plain CSS.
     fn exec_css(&mut self, stmts: &[Stmt], sink: &mut Sink<'_>) -> Result<(), Error> {
+        let saved = std::mem::replace(&mut self.in_plain_css, true);
+        let result = self.exec_css_inner(stmts, sink);
+        self.in_plain_css = saved;
+        result
+    }
+
+    fn exec_css_inner(&mut self, stmts: &[Stmt], sink: &mut Sink<'_>) -> Result<(), Error> {
         for stmt in stmts {
             match stmt {
                 Stmt::Rule(r) => {
@@ -2383,6 +2396,11 @@ impl<'a> Evaluator<'a> {
                         body: out_body,
                         has_block: true,
                     });
+                }
+                // A plain-CSS custom `@function --x` is emitted verbatim, same
+                // as in an SCSS sheet.
+                Stmt::CssCustomAtRule { name, prelude, body } => {
+                    self.eval_css_custom_at_rule(name, prelude, body, sink)?;
                 }
                 _ => {}
             }
@@ -4250,6 +4268,24 @@ impl<'a> Evaluator<'a> {
                 // built-in module bound to `ns`.
                 if let Some(ns) = module {
                     return self.eval_module_call(ns, name, args, *pos, *length);
+                }
+                // In a plain-CSS module no function is invoked (dart-sass
+                // `plainCss` looks none up): the call re-serializes verbatim
+                // with its arguments evaluated. CSS calculations (min/max/…)
+                // still simplify through their normal paths below.
+                if self.in_plain_css
+                    && !is_supports_calc_function(name)
+                    && !name.eq_ignore_ascii_case("calc")
+                    && !args.iter().any(|a| a.splat || a.name.is_some())
+                {
+                    let mut parts: Vec<String> = Vec::with_capacity(args.len());
+                    for a in args {
+                        parts.push(self.eval_expr(&a.value)?.to_css(self.compressed()));
+                    }
+                    return Ok(Value::Str(SassStr {
+                        text: format!("{name}({})", parts.join(", ")),
+                        quoted: false,
+                    }));
                 }
                 // Inside a `@supports` declaration, a CSS math function
                 // (`min`/`max`/`clamp`/…) is kept unsimplified: its arguments

@@ -619,7 +619,9 @@ impl Parser {
                     }
                     any = true;
                 }
-                Some('/') if self.sc.peek_at(1) == Some('/') => {
+                // In plain CSS `//` is not a comment: each `/` is a value token
+                // (`1///bar` round-trips), so it must not be skipped.
+                Some('/') if self.sc.peek_at(1) == Some('/') && !self.plain_css => {
                     while let Some(c) = self.sc.peek() {
                         if c == '\n' {
                             break;
@@ -764,7 +766,23 @@ impl Parser {
 
     fn parse_declaration(&mut self) -> Result<Stmt, Error> {
         let pos = self.sc.position();
-        let property = self.parse_template_mode(&[':'], CommentMode::Strip)?;
+        // An IE property hack may start with a single punctuation character;
+        // `*x`/`.x`/`#x` fall out of template parsing naturally, but a leading
+        // `:` (`:x: y`) must be consumed up front so the property name doesn't
+        // terminate at it (dart-sass `_declarationOrBuffer` reads one leading
+        // `:`/`*`/`.`/`#` before the identifier).
+        let colon_hack = self.sc.peek() == Some(':')
+            && matches!(self.sc.peek_at(1), Some(c) if c.is_alphanumeric() || c == '-' || c == '_' || c == '\\');
+        if colon_hack {
+            self.sc.bump();
+        }
+        let mut property = self.parse_template_mode(&[':'], CommentMode::Strip)?;
+        if colon_hack {
+            match property.first_mut() {
+                Some(TplPiece::Lit(lit)) => lit.insert(0, ':'),
+                _ => property.insert(0, TplPiece::Lit(":".to_string())),
+            }
+        }
         if !self.sc.eat(':') {
             return Err(Error::at("expected \":\" in declaration", self.sc.position()));
         }
@@ -4635,11 +4653,15 @@ impl Parser {
                 if self.sc.peek() == Some(':') && is_progid_name(&name) {
                     return self.parse_progid(&name);
                 }
-                match name.as_str() {
-                    "true" => return Ok(Expr::Bool(true)),
-                    "false" => return Ok(Expr::Bool(false)),
-                    "null" => return Ok(Expr::Null),
-                    _ => {}
+                // In plain CSS `true`/`false`/`null` have no special meaning;
+                // they stay plain identifiers (dart-sass `CssParser`).
+                if !self.plain_css {
+                    match name.as_str() {
+                        "true" => return Ok(Expr::Bool(true)),
+                        "false" => return Ok(Expr::Bool(false)),
+                        "null" => return Ok(Expr::Null),
+                        _ => {}
+                    }
                 }
                 if let Some(color) = named_color(&name) {
                     return Ok(Expr::Color(color));
