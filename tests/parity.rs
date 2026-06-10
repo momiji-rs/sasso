@@ -6693,3 +6693,19 @@ fn identifier_escape_decoding() {
         "a {\n  b: foo-;\n  c: \\-foo;\n}\n"
     );
 }
+
+#[test]
+fn selector_escape_terminating_space() {
+    // A hex escape's terminating space is part of the token: `\02e foo` is
+    // the single type selector `\.foo` (extendable), and a trailing
+    // `selector\9 ` keeps its space in the emitted selector.
+    assert_eq!(
+        ours(".foo {a: b}\n\\.foo {c: d}\n.bar {@extend \\02e foo}\n"),
+        ".foo {\n  a: b;\n}\n\n\\.foo, .bar {\n  c: d;\n}\n"
+    );
+    assert_eq!(ours("selector\\9 { x: y; }\n"), "selector\\9  {\n  x: y;\n}\n");
+    assert_eq!(
+        ours("@media screen\\9 { x {y: z} }\n"),
+        "@media screen\\9  {\n  x {\n    y: z;\n  }\n}\n"
+    );
+}

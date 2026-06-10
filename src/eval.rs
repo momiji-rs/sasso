@@ -8986,14 +8986,46 @@ fn split_commas(s: &str) -> Vec<&str> {
 /// preceding simple with a descendant combinator (`[a] b`), matching
 /// dart-sass's `[adjacent-compounds]` normalization.
 fn normalize_selector(s: &str) -> String {
-    // Collapse runs of whitespace to single spaces (and trim) without the
-    // intermediate Vec<&str> that `split_whitespace().collect().join()` builds.
+    // Collapse runs of whitespace to single spaces (and trim) — but a hex
+    // escape's single terminating whitespace is PART of the token
+    // (`selector\9 ` keeps its trailing space; dart emits `selector\9  {`).
+    let cs: Vec<char> = s.chars().collect();
     let mut collapsed = String::with_capacity(s.len());
-    for word in s.split_whitespace() {
-        if !collapsed.is_empty() {
-            collapsed.push(' ');
+    let mut prev_space = true; // trims leading whitespace
+    let mut ci = 0;
+    while ci < cs.len() {
+        let c = cs[ci];
+        if c == '\\' && ci + 1 < cs.len() && cs[ci + 1].is_ascii_hexdigit() {
+            collapsed.push('\\');
+            ci += 1;
+            let mut digits = 0;
+            while digits < 6 && ci < cs.len() && cs[ci].is_ascii_hexdigit() {
+                collapsed.push(cs[ci]);
+                ci += 1;
+                digits += 1;
+            }
+            if ci < cs.len() && cs[ci].is_whitespace() {
+                collapsed.push(' ');
+                ci += 1;
+            }
+            prev_space = false;
+            continue;
         }
-        collapsed.push_str(word);
+        if c.is_whitespace() {
+            if !prev_space {
+                collapsed.push(' ');
+            }
+            prev_space = true;
+            ci += 1;
+            continue;
+        }
+        collapsed.push(c);
+        prev_space = false;
+        ci += 1;
+    }
+    // Trim a PLAIN trailing space (one belonging to an escape stays).
+    if prev_space && collapsed.ends_with(' ') {
+        collapsed.pop();
     }
     let chars: Vec<char> = collapsed.chars().collect();
     let mut out = String::new();
@@ -9086,7 +9118,29 @@ fn normalize_selector(s: &str) -> String {
             }
         }
     }
-    out.trim().to_string()
+    let t = out.trim();
+    // dart keeps a hex escape's terminating space (`selector\9 ` emits with
+    // its trailing space intact); only plain trailing whitespace trims.
+    let start = out.len() - out.trim_start().len();
+    let end = start + t.len();
+    if out[end..].starts_with(' ') && ends_with_hex_escape(t) {
+        out[start..=end].to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// Whether `t` ends in a `\<hex>{1,6}` escape whose terminating space must
+/// survive trimming.
+fn ends_with_hex_escape(t: &str) -> bool {
+    let b = t.as_bytes();
+    let mut i = b.len();
+    let mut digits = 0;
+    while i > 0 && (b[i - 1] as char).is_ascii_hexdigit() && digits < 6 {
+        i -= 1;
+        digits += 1;
+    }
+    digits > 0 && i > 0 && b[i - 1] == b'\\'
 }
 
 /// One token of a complex selector split at the top level (paren/bracket depth
@@ -9338,83 +9392,10 @@ fn copy_name(chars: &[char], i: &mut usize, out: &mut String) {
     // intermediate String allocation.
     if has_escape {
         let raw: String = chars[start..*i].iter().collect();
-        out.push_str(&canonicalize_ident(&raw));
+        out.push_str(&crate::selector::canonicalize_ident(&raw));
     } else {
         out.extend(chars[start..*i].iter());
     }
-}
-
-/// Decode a CSS identifier's `\` escapes to their literal characters, then
-/// re-serialize it in dart-sass's canonical escape form (its `_writeIdentifier`).
-/// A plain ASCII identifier with no escapes round-trips unchanged.
-fn canonicalize_ident(raw: &str) -> String {
-    if !raw.contains('\\') {
-        return raw.to_string();
-    }
-    // ---- decode ----
-    let chars: Vec<char> = raw.chars().collect();
-    let mut decoded: Vec<char> = Vec::with_capacity(chars.len());
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '\\' {
-            i += 1;
-            if i >= chars.len() {
-                // A trailing lone backslash decodes to U+FFFD per CSS.
-                decoded.push('\u{FFFD}');
-                break;
-            }
-            if chars[i].is_ascii_hexdigit() {
-                let mut hex = String::new();
-                let mut digits = 0;
-                while digits < 6 && i < chars.len() && chars[i].is_ascii_hexdigit() {
-                    hex.push(chars[i]);
-                    i += 1;
-                    digits += 1;
-                }
-                // One optional trailing whitespace terminates the escape.
-                if i < chars.len() && chars[i].is_whitespace() {
-                    i += 1;
-                }
-                let cp = u32::from_str_radix(&hex, 16).unwrap_or(0);
-                // U+0000 and out-of-range/surrogate code points map to U+FFFD.
-                let ch = if cp == 0 {
-                    '\u{FFFD}'
-                } else {
-                    char::from_u32(cp).unwrap_or('\u{FFFD}')
-                };
-                decoded.push(ch);
-            } else {
-                decoded.push(chars[i]);
-                i += 1;
-            }
-        } else {
-            decoded.push(chars[i]);
-            i += 1;
-        }
-    }
-    // ---- re-serialize (dart-sass `_writeIdentifier`) ----
-    let mut out = String::new();
-    let first_is_hyphen = decoded.first() == Some(&'-');
-    for (idx, &c) in decoded.iter().enumerate() {
-        let cu = c as u32;
-        let needs_hex = cu < 0x20
-            || cu == 0x7F
-            || (idx == 0 && c.is_ascii_digit())
-            || (idx == 1 && c.is_ascii_digit() && first_is_hyphen);
-        if needs_hex {
-            out.push('\\');
-            out.push_str(&format!("{cu:x}"));
-            // dart-sass always terminates a numeric escape with a single space
-            // so it can never be misread as continuing into the next character.
-            out.push(' ');
-        } else if c == '_' || c == '-' || c.is_ascii_alphanumeric() || cu >= 0x80 {
-            out.push(c);
-        } else {
-            out.push('\\');
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// Copy a pseudo-class/element selector (`:name` / `::name` plus any balanced

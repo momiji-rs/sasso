@@ -2823,6 +2823,14 @@ impl Parser {
                     lit.push(c);
                     self.sc.bump();
                 }
+                // A media type/modifier may carry identifier escapes
+                // (`@media screen\9`); decode and re-serialize canonically
+                // (`screen\9 ` keeps the escape's terminating space).
+                Some('\\') => {
+                    let at_start = lit.is_empty() && pieces.is_empty();
+                    let c = self.read_escape_char()?;
+                    push_ident_escape(&mut lit, c, at_start);
+                }
                 _ => break,
             }
         }

@@ -385,15 +385,104 @@ fn read_type_after_ns(chars: &[char], i: &mut usize) -> Option<Simple> {
     Some(Simple::Type(t))
 }
 
+/// Decode a CSS identifier's `\` escapes to their literal characters, then
+/// re-serialize it in dart-sass's canonical escape form (its `_writeIdentifier`).
+/// A plain ASCII identifier with no escapes round-trips unchanged.
+pub(crate) fn canonicalize_ident(raw: &str) -> String {
+    if !raw.contains('\\') {
+        return raw.to_string();
+    }
+    // ---- decode ----
+    let chars: Vec<char> = raw.chars().collect();
+    let mut decoded: Vec<char> = Vec::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            i += 1;
+            if i >= chars.len() {
+                // A trailing lone backslash decodes to U+FFFD per CSS.
+                decoded.push('\u{FFFD}');
+                break;
+            }
+            if chars[i].is_ascii_hexdigit() {
+                let mut hex = String::new();
+                let mut digits = 0;
+                while digits < 6 && i < chars.len() && chars[i].is_ascii_hexdigit() {
+                    hex.push(chars[i]);
+                    i += 1;
+                    digits += 1;
+                }
+                // One optional trailing whitespace terminates the escape.
+                if i < chars.len() && chars[i].is_whitespace() {
+                    i += 1;
+                }
+                let cp = u32::from_str_radix(&hex, 16).unwrap_or(0);
+                // U+0000 and out-of-range/surrogate code points map to U+FFFD.
+                let ch = if cp == 0 {
+                    '\u{FFFD}'
+                } else {
+                    char::from_u32(cp).unwrap_or('\u{FFFD}')
+                };
+                decoded.push(ch);
+            } else {
+                decoded.push(chars[i]);
+                i += 1;
+            }
+        } else {
+            decoded.push(chars[i]);
+            i += 1;
+        }
+    }
+    // ---- re-serialize (dart-sass `_writeIdentifier`) ----
+    let mut out = String::new();
+    let first_is_hyphen = decoded.first() == Some(&'-');
+    for (idx, &c) in decoded.iter().enumerate() {
+        let cu = c as u32;
+        let needs_hex = cu < 0x20
+            || cu == 0x7F
+            || (idx == 0 && c.is_ascii_digit())
+            || (idx == 1 && c.is_ascii_digit() && first_is_hyphen);
+        if needs_hex {
+            out.push('\\');
+            out.push_str(&format!("{cu:x}"));
+            // dart-sass always terminates a numeric escape with a single space
+            // so it can never be misread as continuing into the next character.
+            out.push(' ');
+        } else if c == '_' || c == '-' || c.is_ascii_alphanumeric() || cu >= 0x80 {
+            out.push(c);
+        } else {
+            out.push('\\');
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn read_ident(chars: &[char], i: &mut usize) -> Option<String> {
     let start = *i;
     let mut s = String::new();
+    let mut saw_escape = false;
     while *i < chars.len() {
         let c = chars[*i];
         if c == '\\' {
+            // A hex escape consumes up to six digits PLUS one optional
+            // trailing whitespace — `\02e foo` is the single identifier
+            // `\.foo`, not two compounds.
+            saw_escape = true;
             s.push(c);
             *i += 1;
-            if *i < chars.len() {
+            if *i < chars.len() && chars[*i].is_ascii_hexdigit() {
+                let mut digits = 0;
+                while digits < 6 && *i < chars.len() && chars[*i].is_ascii_hexdigit() {
+                    s.push(chars[*i]);
+                    *i += 1;
+                    digits += 1;
+                }
+                if *i < chars.len() && chars[*i].is_whitespace() {
+                    s.push(chars[*i]);
+                    *i += 1;
+                }
+            } else if *i < chars.len() {
                 s.push(chars[*i]);
                 *i += 1;
             }
@@ -408,6 +497,11 @@ fn read_ident(chars: &[char], i: &mut usize) -> Option<String> {
     }
     if *i == start {
         return None;
+    }
+    // Canonicalize the escape spelling so `\2E foo`, `\02e foo`, and `\.foo`
+    // all compare (and extend-match) equal.
+    if saw_escape {
+        s = canonicalize_ident(&s);
     }
     Some(s)
 }
