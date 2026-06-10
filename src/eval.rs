@@ -41,6 +41,7 @@ fn parse_with_syntax(src: &str, syntax: Syntax) -> Result<crate::ast::Stylesheet
 type EvaledArgs = (Vec<Value>, Vec<(String, Value)>);
 
 /// A flattened output node.
+#[derive(Clone)]
 pub(crate) enum OutNode {
     Rule {
         selectors: Vec<String>,
@@ -101,6 +102,7 @@ enum MergeResult {
 }
 
 /// An item inside a rule block.
+#[derive(Clone)]
 pub(crate) enum OutItem {
     Decl {
         prop: String,
@@ -416,6 +418,17 @@ pub(crate) struct Evaluator<'a> {
     /// `plainCss`); calls re-serialize verbatim. CSS calculations still
     /// simplify.
     in_plain_css: bool,
+    /// True while the pending configuration is the *implicit* one built from
+    /// an `@import`'s visible variables (dart `Configuration.implicit`): an
+    /// already-loaded module is then reused silently instead of erroring with
+    /// "can't be configured using with".
+    config_is_implicit: bool,
+    /// Global variables that were written by an `@import`ed `@forward` merge.
+    /// In dart-sass such a variable stays bound to its module: re-importing
+    /// the same forwards must not clobber an intervening assignment
+    /// (`@import "f"; $a: changed; @import "f"` keeps `changed`), while a
+    /// user-defined global IS overwritten by the first merge.
+    forwarded_globals: std::collections::HashSet<String>,
     /// Built-in modules made available via `@use "sass:<mod>"`, keyed by the
     /// in-scope namespace (default = the part after `sass:`, or the `as ns`
     /// override). The value is the canonical built-in module name (e.g.
@@ -506,6 +519,10 @@ struct Module {
     /// The path/URL of this module's file, for diagnostic snippets pointing
     /// into the module (empty when diagnostics are disabled / unknown).
     diag_url: String,
+    /// The module's emitted CSS, captured at first evaluation so an
+    /// `@import`-reached module can re-emit it at each import site (dart
+    /// clones the module's CSS tree per import).
+    css: Vec<OutNode>,
 }
 
 impl Module {
@@ -663,6 +680,8 @@ impl<'a> Evaluator<'a> {
             decl_prefix: None,
             in_supports_declaration: false,
             in_plain_css: false,
+            config_is_implicit: false,
+            forwarded_globals: std::collections::HashSet::new(),
             used_modules: HashMap::default(),
             star_modules: Vec::new(),
             used_user_modules: HashMap::default(),
@@ -1942,7 +1961,7 @@ impl<'a> Evaluator<'a> {
         let mut buf: Vec<OutNode> = Vec::new();
         let consumed = {
             let mut module_sink = Sink::Top(&mut buf);
-            let (_module, consumed) = self.load_module(&url, config, pos, &mut module_sink)?;
+            let (_module, consumed) = self.load_module(&url, config, pos, &[], &mut module_sink)?;
             consumed
         };
         if conf_keys.iter().any(|k| !consumed.contains(k)) {
@@ -2148,7 +2167,7 @@ impl<'a> Evaluator<'a> {
         // A user stylesheet module.
         let conf = self.eval_config(config)?;
         let conf_keys: Vec<String> = conf.keys().cloned().collect();
-        let (module, consumed) = self.load_module(url, conf, pos, sink)?;
+        let (module, consumed) = self.load_module(url, conf, pos, &[], sink)?;
         // Any configured variable the module did not consume via a `!default`
         // declaration is an error.
         if conf_keys.iter().any(|k| !consumed.contains(k)) {
@@ -2234,6 +2253,7 @@ impl<'a> Evaluator<'a> {
         url: &str,
         config: HashMap<String, (Value, bool)>,
         pos: Pos,
+        parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(Rc<Module>, Vec<String>), Error> {
         let importer = self.options.importer;
@@ -2263,6 +2283,17 @@ impl<'a> Evaluator<'a> {
                 .cloned()
                 .collect();
             if !consumed.is_empty() {
+                // An *implicit* configuration (an `@import`'s visible
+                // variables) silently reuses the already-evaluated module —
+                // `$a: changed; @import "fwd"` keeps the first load's values
+                // (dart `Configuration.implicit`) — and re-emits its CSS at
+                // this import site (dart clones the module's CSS per import).
+                if self.config_is_implicit {
+                    for node in reparent_nodes(existing.css.clone(), parents) {
+                        sink.push_at_rule(node);
+                    }
+                    return Ok((existing, consumed));
+                }
                 return Err(Error::at(
                     "This module was already loaded, so it can't be configured using \"with\".".to_string(),
                     pos,
@@ -2290,7 +2321,18 @@ impl<'a> Evaluator<'a> {
                 .insert(diag_url.clone(), Rc::from(src.as_str()));
         }
         let is_css = matches!(syntax, Syntax::Css);
-        let (module, consumed) = self.eval_module(&key, &diag_url, &sheet, config, pos, sink, is_css)?;
+        // Evaluate into a buffer so the emitted CSS can be captured on the
+        // module (for per-import re-emission) before splicing into the
+        // caller's sink.
+        let mut css_buf: Vec<OutNode> = Vec::new();
+        let (mut module, consumed) = {
+            let mut buf_sink = Sink::Top(&mut css_buf);
+            self.eval_module(&key, &diag_url, &sheet, config, pos, &mut buf_sink, is_css)?
+        };
+        module.css = css_buf.clone();
+        for node in reparent_nodes(css_buf, parents) {
+            sink.push_at_rule(node);
+        }
         let module = Rc::new(module);
         self.module_cache.borrow_mut().insert(key, Rc::clone(&module));
         Ok((module, consumed))
@@ -2816,6 +2858,7 @@ impl<'a> Evaluator<'a> {
                 star_builtin_modules,
                 forwarded_builtins: forwarded.builtins,
                 diag_url: diag_url.to_string(),
+                css: Vec::new(),
             },
             consumed,
         ))
@@ -2834,6 +2877,7 @@ impl<'a> Evaluator<'a> {
         hide: &Option<Vec<crate::ast::ForwardMember>>,
         config: &[crate::ast::ConfigEntry],
         pos: Pos,
+        parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         // `@forward "sass:<mod>"` re-exports a built-in module. Built-ins can't
@@ -2920,7 +2964,16 @@ impl<'a> Evaluator<'a> {
             }
         }
 
-        let (module, consumed) = self.load_module(url, combined, pos, sink)?;
+        // A forward with its own `with (...)` entries makes the configuration
+        // explicit (already-loaded then errors); pure passthrough keeps the
+        // caller's implicit/explicit status.
+        let saved_implicit = self.config_is_implicit;
+        if !forward_conf.is_empty() {
+            self.config_is_implicit = false;
+        }
+        let load_result = self.load_module(url, combined, pos, parents, sink);
+        self.config_is_implicit = saved_implicit;
+        let (module, consumed) = load_result?;
 
         // A non-passthrough forward entry the module never consumed configured a
         // variable that isn't `!default` in the forwarded module.
@@ -3215,7 +3268,7 @@ impl<'a> Evaluator<'a> {
                     hide,
                     config,
                     pos,
-                } => self.exec_forward(url, prefix.as_deref(), show, hide, config, *pos, sink)?,
+                } => self.exec_forward(url, prefix.as_deref(), show, hide, config, *pos, parents, sink)?,
                 Stmt::Content(content_args) => {
                     // The content block runs in the caller's context, so it is no
                     // longer "directly in a mixin" (dart-sass): a
@@ -3993,14 +4046,16 @@ impl<'a> Evaluator<'a> {
                                 Some((
                                     std::mem::replace(&mut self.pending_config, implicit_config),
                                     std::mem::take(&mut self.consumed_config),
+                                    std::mem::replace(&mut self.config_is_implicit, true),
                                 ))
                             } else {
                                 None
                             };
                             let result = self.exec(&sheet.stmts, parents, sink);
-                            if let Some((p, c)) = saved_pending_consumed {
+                            if let Some((p, c, i)) = saved_pending_consumed {
                                 self.pending_config = p;
                                 self.consumed_config = c;
+                                self.config_is_implicit = i;
                             }
                             let imported_fwd = std::mem::replace(&mut self.forwarded, saved_fwd);
                             self.used_modules = saved_used;
@@ -4023,8 +4078,31 @@ impl<'a> Evaluator<'a> {
                                 }
                                 if let Some(g) = self.scopes.first_mut() {
                                     for (k, val) in imported_fwd.vars {
-                                        g.entry(k).or_insert(val);
+                                        // The forwarded module's assignments
+                                        // behave as if written at the import:
+                                        // they overwrite an existing
+                                        // user-defined global (`$a: shadowed;
+                                        // @import "fwd"` sees the forwarded
+                                        // value afterwards) — but a global a
+                                        // previous forward-merge created stays
+                                        // bound to its module, so re-importing
+                                        // must not clobber an intervening
+                                        // assignment.
+                                        if self.forwarded_globals.contains(&k) {
+                                            g.entry(k).or_insert(val);
+                                        } else {
+                                            self.forwarded_globals.insert(k.clone());
+                                            g.insert(k, val);
+                                        }
                                     }
+                                }
+                            } else if let Some(s) = self.scopes.last_mut() {
+                                // A nested `@import`'s forwarded variables join
+                                // the enclosing rule's scope (so a following
+                                // nested import's implicit configuration sees
+                                // them); functions/mixins stay module-local.
+                                for (k, val) in imported_fwd.vars {
+                                    s.insert(k, val);
                                 }
                             }
                         }
@@ -6056,6 +6134,45 @@ fn expr_contains_calc_substitution(e: &Expr) -> bool {
         Expr::List { items, .. } => items.iter().any(expr_contains_calc_substitution),
         _ => false,
     }
+}
+
+/// Nest module CSS under the style rule enclosing an `@import` (descendant
+/// join on every top-level rule, recursing into at-rule bodies). dart-sass
+/// clones the module's CSS into the current parent; a top-level import
+/// (`parents` empty) passes through unchanged.
+fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
+    if parents.is_empty() {
+        return nodes;
+    }
+    nodes
+        .into_iter()
+        .map(|n| match n {
+            OutNode::Rule {
+                selectors,
+                linebreaks: _,
+                items,
+            } => OutNode::Rule {
+                selectors: parents
+                    .iter()
+                    .flat_map(|p| selectors.iter().map(move |s| format!("{p} {s}")))
+                    .collect(),
+                linebreaks: Vec::new(),
+                items,
+            },
+            OutNode::AtRule {
+                name,
+                prelude,
+                body,
+                has_block,
+            } => OutNode::AtRule {
+                name,
+                prelude,
+                body: reparent_nodes(body, parents),
+                has_block,
+            },
+            other => other,
+        })
+        .collect()
 }
 
 /// Whether an expression contains a SassScript-only operator (`%`, a

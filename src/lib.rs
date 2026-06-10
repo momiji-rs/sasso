@@ -532,45 +532,17 @@ fn tier_with_extensions(dir: &Path, stem: &str, import_only: bool) -> Tier {
 
 /// Collect existing candidate files for `stem` under `dir` across `exts`, in
 /// non-partial and partial forms, optionally inserting the `.import` suffix
-/// (import-only files). Import-only candidates we cannot compile (their body is
-/// only `@forward`/`@use`) are skipped. Returns how many matched.
+/// (import-only files). Returns how many matched.
 fn tier_exact(dir: &Path, stem: &str, exts: &[&str], import_only: bool) -> Tier {
     let mut found = Vec::new();
     let suffix = if import_only { ".import" } else { "" };
     for ext in exts {
         for name in [format!("_{stem}{suffix}.{ext}"), format!("{stem}{suffix}.{ext}")] {
             let cand = dir.join(&name);
-            if !cand.is_file() {
-                continue;
+            if cand.is_file() {
+                found.push(cand);
             }
-            if import_only && !import_only_is_usable(&cand) {
-                continue;
-            }
-            found.push(cand);
         }
     }
     Tier::from(found)
-}
-
-/// Whether an import-only file is something this build can actually inline.
-///
-/// Real `.import.scss` files re-export another module with `@forward`/`@use`,
-/// which this build has no support for. Such files are reported as unusable so
-/// that resolution falls back to the corresponding normal file. A file with
-/// any other meaningful content (e.g. plain rules) is considered usable.
-fn import_only_is_usable(path: &Path) -> bool {
-    let Ok(src) = std::fs::read_to_string(path) else {
-        // Unreadable: let the normal resolution path report "not found".
-        return false;
-    };
-    for line in src.lines() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with("//") || t.starts_with("/*") {
-            continue;
-        }
-        return !(t.starts_with("@forward") || t.starts_with("@use"));
-    }
-    // Empty (only comments/blank lines) — nothing to inline, treat as usable
-    // (an empty import-only file is valid and contributes no output).
-    true
 }

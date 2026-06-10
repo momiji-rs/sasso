@@ -5552,3 +5552,44 @@ fn not_precedence_and_leading_slash() {
     assert_eq!(ours("a {b: (1, / 2)}\n"), "a {\n  b: 1, /2;\n}\n");
     assert_eq!(ours("a {b: / 2}\n"), "a {\n  b: /2;\n}\n");
 }
+
+#[test]
+fn import_forward_module_semantics() {
+    // dart-sass @import-of-@forward: the module evaluates once (implicit
+    // configuration doesn't re-configure it), its CSS re-emits at every
+    // import site, forwarded assignments overwrite user globals but a
+    // forwarded global keeps an intervening assignment, and a rule-scoped
+    // import nests the module's CSS under the enclosing rule.
+    let dir = std::env::temp_dir().join(format!("sasso_imp_fwd_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    std::fs::write(dir.join("_other.scss"), "$a: original !default;\nb {c: $a}\n").unwrap();
+    std::fs::write(dir.join("_other.import.scss"), "@forward \"other\";\n").unwrap();
+
+    // Module CSS re-emits per import; second implicit config is ignored.
+    assert_eq!(
+        compile(
+            "$a: configured;\n@import \"other\";\n$a: changed;\n@import \"other\";\n",
+            &opts
+        )
+        .expect("import twice"),
+        "b {\n  c: configured;\n}\n\nb {\n  c: configured;\n}\n"
+    );
+    // An intervening assignment to a forwarded global survives a re-import.
+    assert_eq!(
+        compile(
+            "@import \"other\";\n$a: changed;\n@import \"other\";\nd {e: $a}\n",
+            &opts
+        )
+        .expect("still changes"),
+        "b {\n  c: original;\n}\n\nb {\n  c: original;\n}\n\nd {\n  e: changed;\n}\n"
+    );
+    // A rule-scoped import nests the module CSS under the rule.
+    std::fs::write(dir.join("_mid.scss"), "@forward \"other\";\n").unwrap();
+    assert_eq!(
+        compile("a {\n  $a: configured;\n  @import \"mid\";\n}\n", &opts).expect("nested"),
+        "a b {\n  c: configured;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
