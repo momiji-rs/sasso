@@ -5723,3 +5723,29 @@ fn module_scoped_extend() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn midstream_pseudo_extender_replaced_across_modules() {
+    // An extender added to an UPSTREAM module's CSS is not one of that
+    // store's originals, so an in-place pseudo rewrite replaces it; in the
+    // same file both forms survive (dart-sass _originals are store-wide).
+    let dir = std::env::temp_dir().join(format!("sasso_midstream_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    std::fs::write(dir.join("_up.scss"), "in-upstream {a: b}\n").unwrap();
+    assert_eq!(
+        compile(
+            "@use \"up\";\n:is(in-midstream) {@extend in-upstream}\n\nin-input {\n  @extend in-midstream;\n  y: z;\n}\n",
+            &opts
+        )
+        .expect("midstream"),
+        "in-upstream, :is(in-midstream, in-input) {\n  a: b;\n}\n\nin-input {\n  y: z;\n}\n"
+    );
+    // Same-file: both the added extender and its rewrite survive.
+    assert_eq!(
+        ours(":is(midstream) {@extend upstream}\n\ndownstream {@extend midstream}\n\nupstream {a: b}\n"),
+        "upstream, :is(midstream), :is(midstream, downstream) {\n  a: b;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -7759,7 +7759,7 @@ fn rewrite_nodes_scoped(
         })
         .map(|(e, _)| e.clone())
         .collect();
-    rewrite_with_scopes(nodes, &visible, all, origins, closures);
+    rewrite_with_scopes(nodes, &visible, scope, all, origins, closures);
 }
 
 /// The walk shared by [`rewrite_nodes_scoped`]: rules use the current scope's
@@ -7768,6 +7768,7 @@ fn rewrite_nodes_scoped(
 fn rewrite_with_scopes(
     nodes: &mut Vec<OutNode>,
     visible: &[crate::selector::Extension],
+    scope: &str,
     all: &[crate::selector::Extension],
     origins: &[String],
     closures: &HashMap<String, std::collections::HashSet<String>>,
@@ -7779,15 +7780,15 @@ fn rewrite_with_scopes(
                 rewrite_nodes_scoped(nodes, &key, all, origins, closures);
             }
             OutNode::AtRule { name, body, .. } if !is_keyframes_name(name) => {
-                rewrite_with_scopes(body, visible, all, origins, closures);
+                rewrite_with_scopes(body, visible, scope, all, origins, closures);
             }
             _ => {}
         }
     }
-    rewrite_nodes(nodes, visible);
+    rewrite_nodes(nodes, visible, scope);
 }
 
-fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extension]) {
+fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extension], scope: &str) {
     let mut i = 0;
     while i < nodes.len() {
         let drop = match &mut nodes[i] {
@@ -7800,7 +7801,7 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extens
                 linebreaks,
                 ..
             } => {
-                let new_sel = extend_selector_list(selectors, extensions);
+                let new_sel = extend_selector_list(selectors, extensions, scope);
                 match new_sel {
                     Some(s) => {
                         // Source line-break flags are positional; if @extend
@@ -7951,6 +7952,7 @@ fn is_valid_namespace(s: &str) -> bool {
 fn extend_selector_list(
     selectors: &[String],
     extensions: &[crate::selector::Extension],
+    scope: &str,
 ) -> Option<Vec<String>> {
     let has_placeholder = selectors.iter().any(|s| s.contains('%'));
     // Fast path: no extensions and no placeholder → the selector is untouched.
@@ -7964,7 +7966,7 @@ fn extend_selector_list(
         // Unparseable selector: never lose it; leave untouched.
         return Some(selectors.to_vec());
     };
-    let result = crate::selector::extend_selectors(&parsed, extensions);
+    let result = crate::selector::extend_selectors(&parsed, extensions, scope);
     if result.all_placeholders {
         return None;
     }

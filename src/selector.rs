@@ -629,7 +629,7 @@ pub(crate) struct ExtendResult {
 /// extended selector list (original selectors first, then generated ones, in
 /// dart-sass order). Placeholder-only complex selectors are dropped from the
 /// output.
-pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension]) -> ExtendResult {
+pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension], scope: &str) -> ExtendResult {
     reset_extend_budget();
     // The set of "original" rendered selectors — the unextended input. Original
     // selectors are never trimmed (dart-sass keeps them so the rule still
@@ -638,11 +638,18 @@ pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension]) -
     for complex in original {
         originals.insert(complex.render());
     }
-    // Extenders are source selectors too (dart-sass's `_originals` is store-wide),
-    // so a source extender is protected from being trimmed away by a broader
-    // generated one — e.g. a transitive `:is(a, b)` must not trim the original
-    // `:is(a)` that produced it.
+    // Extenders are source selectors too (dart-sass's `_originals` is
+    // store-wide), so a source extender is protected from being trimmed away
+    // by a broader generated one — e.g. a transitive `:is(a, b)` must not
+    // trim the original `:is(a)` that produced it. But only within the
+    // extender's OWN module: an extender added to an upstream module's CSS is
+    // not one of that store's originals, so an in-place pseudo rewrite there
+    // REPLACES it (`:is(in-midstream)` becomes `:is(in-midstream, in-input)`
+    // in the used module, while the same-file case keeps both).
     for ext in extensions {
+        if ext.origin != scope {
+            continue;
+        }
         for complex in &ext.extenders {
             originals.insert(complex.render());
         }
