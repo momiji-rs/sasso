@@ -1970,9 +1970,7 @@ impl<'a> Evaluator<'a> {
                 pos,
             ));
         }
-        for node in buf {
-            sink.push_at_rule(node);
-        }
+        splice_nodes(sink, buf);
         Ok(())
     }
 
@@ -2290,9 +2288,7 @@ impl<'a> Evaluator<'a> {
                 // (dart `Configuration.implicit`) — and re-emits its CSS at
                 // this import site (dart clones the module's CSS per import).
                 if self.config_is_implicit {
-                    for node in reparent_nodes(existing.css.clone(), parents) {
-                        sink.push_at_rule(node);
-                    }
+                    splice_nodes(sink, reparent_nodes(existing.css.clone(), parents));
                     return Ok((existing, consumed));
                 }
                 return Err(Error::at(
@@ -2305,9 +2301,7 @@ impl<'a> Evaluator<'a> {
             // whether the leftover configuration is an error. `meta.load-css`
             // still re-emits the cached CSS at the call site.
             if force_reemit {
-                for node in reparent_nodes(existing.css.clone(), parents) {
-                    sink.push_at_rule(node);
-                }
+                splice_nodes(sink, reparent_nodes(existing.css.clone(), parents));
             }
             return Ok((existing, Vec::new()));
         }
@@ -2337,9 +2331,7 @@ impl<'a> Evaluator<'a> {
             self.eval_module(&key, &diag_url, &sheet, config, pos, &mut buf_sink, is_css)?
         };
         module.css = css_buf.clone();
-        for node in reparent_nodes(css_buf, parents) {
-            sink.push_at_rule(node);
-        }
+        splice_nodes(sink, reparent_nodes(css_buf, parents));
         let module = Rc::new(module);
         self.module_cache.borrow_mut().insert(key, Rc::clone(&module));
         Ok((module, consumed))
@@ -6930,6 +6922,23 @@ fn hoist_css_imports(out: &mut Vec<OutNode>) {
     out.extend(imports);
     for node in rest {
         push_group(out, vec![node]);
+    }
+}
+
+/// Splice an already-grouped node sequence (a module's captured CSS) into a
+/// sink. Into a top-level sink the whole sequence is ONE group — its internal
+/// `Blank` separators are preserved and exactly one separator is added before
+/// it — instead of per-node `push_group` calls that would double the blanks.
+fn splice_nodes(sink: &mut Sink<'_>, nodes: Vec<OutNode>) {
+    match sink {
+        Sink::Top(out) => push_group(out, nodes),
+        _ => {
+            for n in nodes {
+                if !matches!(n, OutNode::Blank) {
+                    sink.push_at_rule(n);
+                }
+            }
+        }
     }
 }
 

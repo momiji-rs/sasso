@@ -158,19 +158,21 @@ pub(crate) fn pow(x: f64, y: f64) -> f64 {
     let topy = top12(y);
     if topx.wrapping_sub(1) >= 0x7ff - 1 || (topy & 0x7ff).wrapping_sub(0x3be) >= 0x43e - 0x3be {
         if zeroinfnan(iy) {
-            if 2 * iy == 0 {
+            if iy.wrapping_mul(2) == 0 {
                 return 1.0;
             }
             if ix == 1.0f64.to_bits() {
                 return 1.0;
             }
-            if 2 * ix > 2 * f64::INFINITY.to_bits() || 2 * iy > 2 * f64::INFINITY.to_bits() {
+            if ix.wrapping_mul(2) > f64::INFINITY.to_bits().wrapping_mul(2)
+                || iy.wrapping_mul(2) > f64::INFINITY.to_bits().wrapping_mul(2)
+            {
                 return x + y;
             }
-            if 2 * ix == 2 * 1.0f64.to_bits() {
+            if ix.wrapping_mul(2) == 1.0f64.to_bits().wrapping_mul(2) {
                 return 1.0;
             }
-            if (2 * ix < 2 * 1.0f64.to_bits()) == ((iy >> 63) == 0) {
+            if (ix.wrapping_mul(2) < 1.0f64.to_bits().wrapping_mul(2)) == ((iy >> 63) == 0) {
                 return 0.0;
             }
             return y * y;
