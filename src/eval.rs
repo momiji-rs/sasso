@@ -319,11 +319,19 @@ impl Sink<'_> {
                 if selectors.is_empty() {
                     items.clear();
                 } else {
-                    nested.push(OutNode::Rule {
+                    let rule = OutNode::Rule {
                         selectors: selectors.to_vec(),
                         linebreaks: linebreaks.to_vec(),
                         items: std::mem::take(*items),
-                    });
+                    };
+                    // The rule's block precedes any media-hoist markers that
+                    // accumulated while it was open (the bubbled rules leave
+                    // the style rule entirely and follow it in the output).
+                    let insert_at = nested
+                        .iter()
+                        .position(|n| matches!(n, OutNode::Raw(s) if s == MEDIA_HOIST_MARKER))
+                        .unwrap_or(nested.len());
+                    nested.insert(insert_at, rule);
                 }
             }
         }
@@ -336,6 +344,13 @@ impl Sink<'_> {
             Sink::Top(out) => {
                 let out = &mut **out;
                 push_group(out, output);
+                // A completed top-level style rule marks its LAST produced
+                // node (which may be a bubbled at-rule) as a group end: the
+                // next group gets a blank line even after an at-rule
+                // (dart-sass isGroupEnd, set only by visitStyleRule).
+                if !out.is_empty() {
+                    out.push(OutNode::Raw(STYLE_GROUP_END.to_string()));
+                }
             }
             Sink::Rule { .. } => {
                 // Split the enclosing rule's own block around this nested rule.
@@ -359,7 +374,13 @@ impl Sink<'_> {
                 push_group(out, vec![node]);
             }
             Sink::Rule { .. } => {
-                self.flush_rule_block();
+                // A media-hoist marker only matters to an OUTER media rule's
+                // segmenting: the bubbled rule leaves this style rule
+                // entirely, so the rule's own block is NOT split around it.
+                let is_hoist_marker = matches!(&node, OutNode::Raw(s) if s == MEDIA_HOIST_MARKER);
+                if !is_hoist_marker {
+                    self.flush_rule_block();
+                }
                 if let Sink::Rule { nested, .. } = self {
                     nested.push(node);
                 }
@@ -456,7 +477,7 @@ pub(crate) struct Evaluator<'a> {
     /// Queue of merged nested `@media` nodes bubbling out of an enclosing
     /// media rule, taken in order at the `\u{0}MEDIA_HOIST\u{0}` markers the
     /// inner rule leaves in the outer body.
-    media_hoist: Vec<OutNode>,
+    media_hoist: Vec<Vec<OutNode>>,
     /// Set while module loads run inside a module-loading `@import`: dart
     /// clones the whole import subtree's CSS at the import site (the same
     /// `_combineCss(clone: true)` as meta.load-css). All loads in the chain
@@ -2371,7 +2392,14 @@ impl<'a> Evaluator<'a> {
         if let Some(frame) = frame {
             self.push_scope_frame(frame);
         }
+        // The block runs in its DEFINITION environment's content context: a
+        // `@content` inside it forwards to the block one level up, not to
+        // itself (a recursive mixin chaining `@content` must terminate).
+        let running = self.content_stack.pop();
         let result = self.exec(&stmts, parents, sink);
+        if let Some(top) = running {
+            self.content_stack.push(top);
+        }
         if pushed {
             self.pop_scope();
         }
@@ -4191,8 +4219,8 @@ impl<'a> Evaluator<'a> {
         for n in out_body {
             if matches!(&n, OutNode::Raw(s) if s == MEDIA_HOIST_MARKER) {
                 flush(&mut segment, &mut result, &prelude);
-                if let Some(h) = hoist_iter.next() {
-                    result.push(h);
+                if let Some(batch) = hoist_iter.next() {
+                    result.extend(batch);
                 }
             } else {
                 segment.push(n);
@@ -4209,7 +4237,7 @@ impl<'a> Evaluator<'a> {
         // position); otherwise emit in place.
         if bubble_out && enclosing {
             sink.push_at_rule(OutNode::Raw(MEDIA_HOIST_MARKER.to_string()));
-            self.media_hoist.extend(result);
+            self.media_hoist.push(result);
         } else {
             for n in result {
                 sink.push_at_rule(n);
@@ -7820,19 +7848,39 @@ fn splice_nodes(sink: &mut Sink<'_>, nodes: Vec<OutNode>) {
     }
 }
 
+/// Sentinel marking the end of a completed top-level style rule's output
+/// group (dart-sass `isGroupEnd`): the next group gets a blank line even when
+/// the group ended in a bubbled at-rule. Consumed by the next `push_group`;
+/// any survivor is skipped by the emitters.
+const STYLE_GROUP_END: &str = "\u{0}STYLE_GROUP_END\u{0}";
+
 fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     if group.is_empty() {
         return;
     }
+    // A completed style rule always separates from the next group.
+    let prev_group_end = matches!(out.last(), Some(OutNode::Raw(s)) if s == STYLE_GROUP_END);
+    if prev_group_end {
+        out.pop();
+    }
     // dart-sass never prefixes a blank line after an at-rule, a passed-through
     // CSS `@import` (a `Raw` at-rule), or a loud comment: the next group packs
     // tight against them. A blank line is only inserted after a style rule (or
-    // top-level declaration) that already emitted CSS.
-    let prev_packs_tight = matches!(
-        out.last(),
-        Some(OutNode::AtRule { .. } | OutNode::Raw(_) | OutNode::Comment(_))
-    );
-    if !out.is_empty() && !prev_packs_tight {
+    // top-level declaration) that already emitted CSS. A module-scope wrapper
+    // is judged by its last effective node.
+    fn packs_tight(n: &OutNode) -> bool {
+        match n {
+            OutNode::AtRule { .. } | OutNode::Raw(_) | OutNode::Comment(_) => true,
+            OutNode::ModuleScope { nodes, .. } => nodes
+                .iter()
+                .rev()
+                .find(|n| !matches!(n, OutNode::Blank))
+                .is_some_and(packs_tight),
+            _ => false,
+        }
+    }
+    let prev_packs_tight = out.last().is_some_and(packs_tight);
+    if !out.is_empty() && (prev_group_end || !prev_packs_tight) {
         out.push(OutNode::Blank);
     }
     out.append(&mut group);

@@ -86,15 +86,17 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             *prev = Prev::Other;
         }
         OutNode::Raw(s) => {
+            // Internal sentinels (style-group-end) never reach the output.
+            if s.starts_with('\u{0}') {
+                return;
+            }
             out.push_str(&indent);
             out.push_str(s);
             out.push('\n');
             *prev = Prev::Other;
         }
         OutNode::Blank => {
-            if *prev == Prev::Rule {
-                out.push('\n');
-            }
+            out.push('\n');
             *prev = Prev::Other;
         }
         OutNode::AtDecl {
@@ -337,7 +339,11 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
         // Loud comments are dropped in compressed output (the slice does
         // not yet special-case `/*!` important comments).
         OutNode::Comment(_) => {}
-        OutNode::Raw(s) => out.push_str(s),
+        OutNode::Raw(s) => {
+            if !s.starts_with('\u{0}') {
+                out.push_str(s)
+            }
+        }
         OutNode::Blank => {}
         OutNode::AtDecl {
             prop,

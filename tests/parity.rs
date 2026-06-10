@@ -6377,3 +6377,25 @@ fn meta_builtin_module_introspection() {
         "@use \"sass:meta\";\na {v: meta.inspect([1,]); w: meta.inspect([1, 2]); x: meta.inspect([])}\n",
     );
 }
+
+#[test]
+fn deep_media_chains_and_content_forwarding() {
+    // A three-level mergeable media chain re-bubbles every batch (the
+    // hoist queue is per-marker batches).
+    assert_parity("@media all {\n  .bar {a: b}\n  @media (min-width: 1px) {\n    .baz {a: b}\n    @media (max-width: 2em) {.foo {a: b}}\n  }\n}\n");
+    // A bubbling media does NOT split the enclosing rule's own block: the
+    // declarations around it stay together and the merged rule follows.
+    assert_eq!(
+        ours("@media only screen {\n  .foo {\n    a: b;\n    @media (min-width: 1px) {c: d}\n    e: f;\n  }\n}\n"),
+        "@media only screen {\n  .foo {\n    a: b;\n    e: f;\n  }\n}\n@media only screen and (min-width: 1px) {\n  .foo {\n    c: d;\n  }\n}\n"
+    );
+    // A completed top-level style rule separates from the next group even
+    // when its output ended in a bubbled at-rule.
+    assert_parity(".foo {\n  @media all {a: b}\n}\n.bar {c: d}\n");
+    // A recursive mixin that forwards @content terminates: the block runs
+    // with the content context of its DEFINITION site.
+    assert_eq!(
+        ours("@mixin m($l...) {\n  @if length($l) == 0 {@content;}\n  @else {@include m() {@content;}}\n}\na {@include m(x) {content: bar}}\n"),
+        "a {\n  content: bar;\n}\n"
+    );
+}
