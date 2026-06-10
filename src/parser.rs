@@ -3774,15 +3774,60 @@ impl Parser {
 
     fn read_ident_name(&mut self) -> Result<String, Error> {
         let mut s = String::new();
-        while matches!(self.sc.peek(), Some(c) if is_ident_char(c)) {
-            if let Some(c) = self.sc.bump() {
-                s.push(c);
+        loop {
+            match self.sc.peek() {
+                Some(c) if is_ident_char(c) => {
+                    self.sc.bump();
+                    s.push(c);
+                }
+                // dart decodes identifier escapes at the lexer level —
+                // `@w\61rn` IS `@warn` and `f\6Fo-bar` defines `foo-bar` —
+                // so the stored name is the decoded spelling.
+                Some('\\') => s.push(self.read_escape_char()?),
+                _ => break,
             }
         }
         if s.is_empty() {
             return Err(Error::at("expected an identifier", self.sc.position()));
         }
         Ok(s)
+    }
+
+    /// Decode a `\` escape inside an identifier (dart `escapeCharacter`):
+    /// 1-6 hex digits (plus one optional trailing whitespace) become the
+    /// code point — zero, surrogates, and out-of-range collapse to U+FFFD —
+    /// and any other character is taken literally.
+    fn read_escape_char(&mut self) -> Result<char, Error> {
+        self.sc.bump(); // the backslash
+        let first = match self.sc.peek() {
+            None | Some('\n') | Some('\r') => {
+                return Err(Error::at("Expected escape sequence.", self.sc.position()))
+            }
+            Some(c) => c,
+        };
+        if first.is_ascii_hexdigit() {
+            let mut value: u32 = 0;
+            for _ in 0..6 {
+                match self.sc.peek() {
+                    Some(c) if c.is_ascii_hexdigit() => {
+                        value = (value << 4) + c.to_digit(16).unwrap();
+                        self.sc.bump();
+                    }
+                    _ => break,
+                }
+            }
+            // One optional whitespace terminator (dart `scanCharIf`).
+            if matches!(self.sc.peek(), Some(' ' | '\t' | '\n' | '\r' | '\u{c}')) {
+                self.sc.bump();
+            }
+            if value == 0 || (0xD800..=0xDFFF).contains(&value) || value > 0x10FFFF {
+                return Ok('\u{FFFD}');
+            }
+            Ok(char::from_u32(value).unwrap_or('\u{FFFD}'))
+        } else {
+            self.sc.bump();
+            Ok(first)
+        }
     }
 
     // ---- value expressions -------------------------------------------
@@ -4383,7 +4428,7 @@ impl Parser {
                     || self.sc.peek() == Some('\\')
                 {
                     let mut pieces = vec![TplPiece::Interp(e)];
-                    pieces.extend(self.parse_ident_template()?);
+                    pieces.extend(self.parse_ident_template_from(1)?);
                     // `(` directly after makes this a dynamic plain-CSS call
                     // (`#{1 + 1}foo(arg)` -> `2foo(arg)`).
                     if self.sc.peek() == Some('(') {
@@ -4480,7 +4525,10 @@ impl Parser {
             // dart-sass. `u + 1` (with whitespace) is ordinary concatenation
             // and falls through to the identifier branch below.
             Some('u') | Some('U') if self.sc.peek_at(1) == Some('+') => self.parse_unicode_range(),
-            Some(c) if c.is_ascii_alphabetic() || c == '-' || c == '_' => self.parse_ident_or_call(),
+            // Any non-ASCII code point starts an identifier (dart isNameStart).
+            Some(c) if c.is_ascii_alphabetic() || c == '-' || c == '_' || (c as u32) >= 0x80 => {
+                self.parse_ident_or_call()
+            }
             // A value beginning with a CSS escape (`\41`, `\9`, …) is an
             // identifier; let `parse_ident_or_call` consume the escape run.
             Some('\\') => self.parse_ident_or_call(),
@@ -5027,13 +5075,20 @@ impl Parser {
     }
 
     fn parse_ident_template(&mut self) -> Result<Vec<TplPiece>, Error> {
+        self.parse_ident_template_from(0)
+    }
+
+    /// As [`parse_ident_template`], with `emitted` pre-seeded — the
+    /// continuation of `#{foo}\-` is MID-identifier, so its escapes use the
+    /// name-char rule, not the name-START rule.
+    fn parse_ident_template_from(&mut self, start_emitted: usize) -> Result<Vec<TplPiece>, Error> {
         let mut pieces = Vec::new();
         let mut lit = String::new();
         // `emitted` counts code points written to the identifier so far (across
         // both literal and interpolation pieces) so the leading-digit / first
         // -char escaping rules can be applied. `first_hyphen` records whether
         // the identifier begins with `-` (a digit right after it is escaped).
-        let mut emitted = 0usize;
+        let mut emitted = start_emitted;
         let mut first_hyphen = false;
         loop {
             match self.sc.peek() {

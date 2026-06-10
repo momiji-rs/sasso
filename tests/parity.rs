@@ -6674,3 +6674,22 @@ fn unicode_identifiers() {
         "@charset \"UTF-8\";\nfoo {\n  bar: f\u{f6}\u{f6} b\u{e2}r;\n}\n"
     );
 }
+
+#[test]
+fn identifier_escape_decoding() {
+    // Identifier escapes decode at the lexer level: `@w\61rn` IS `@warn`,
+    // `@\69 f` is `@if`, and escaped function names normalize for dispatch.
+    assert_eq!(
+        ours("@function f\\6Fo-bar() {@return 1}\na {b: foo-b\\61r()}\n"),
+        "a {\n  b: 1;\n}\n"
+    );
+    assert_eq!(ours("@\\69 f true {a {b: c}}\n"), "a {\n  b: c;\n}\n");
+    // `@w\61rn` runs as @warn: output is just the rule.
+    assert_eq!(ours("@w\\61rn warning;\na {b: c}\n"), "a {\n  b: c;\n}\n");
+    // A mid-identifier escape after an interpolation uses the name-CHAR
+    // rule (`#{foo}\-` is `foo-`), while a leading `\-` keeps its escape.
+    assert_eq!(
+        ours("a {b: #{foo}\\-; c: \\-#{foo}}\n"),
+        "a {\n  b: foo-;\n  c: \\-foo;\n}\n"
+    );
+}
