@@ -3969,7 +3969,39 @@ impl<'a> Evaluator<'a> {
                             // as if defined in the importer; collect them
                             // separately, then merge into the current scope.
                             let saved_fwd = std::mem::take(&mut self.forwarded);
+                            // dart-sass: when the imported file loads
+                            // user-defined modules (it has top-level
+                            // `@use`/`@forward`), its `@forward`s see every
+                            // variable visible at the import — all scope
+                            // levels, inner shadowing outer — as an implicit
+                            // configuration (`toImplicitConfiguration`); a
+                            // file without module loads keeps the current
+                            // configuration (an enclosing `with (...)` still
+                            // flows into its `!default`s). Unconsumed implicit
+                            // entries are never an error.
+                            let loads_modules = sheet
+                                .stmts
+                                .iter()
+                                .any(|s| matches!(s, Stmt::Use { .. } | Stmt::Forward { .. }));
+                            let saved_pending_consumed = if loads_modules {
+                                let mut implicit_config: HashMap<String, (Value, bool)> = HashMap::default();
+                                for scope in &self.scopes {
+                                    for (k, v) in scope {
+                                        implicit_config.insert(normalize_var_name(k), (v.clone(), false));
+                                    }
+                                }
+                                Some((
+                                    std::mem::replace(&mut self.pending_config, implicit_config),
+                                    std::mem::take(&mut self.consumed_config),
+                                ))
+                            } else {
+                                None
+                            };
                             let result = self.exec(&sheet.stmts, parents, sink);
+                            if let Some((p, c)) = saved_pending_consumed {
+                                self.pending_config = p;
+                                self.consumed_config = c;
+                            }
                             let imported_fwd = std::mem::replace(&mut self.forwarded, saved_fwd);
                             self.used_modules = saved_used;
                             self.star_modules = saved_star;

@@ -5409,3 +5409,26 @@ fn import_plain_css_file() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn import_implicit_configuration() {
+    // dart-sass: an `@import`ed file's `@forward`s see every variable visible
+    // at the import as an implicit configuration for `!default` variables.
+    let dir = std::env::temp_dir().join(format!("sasso_import_cfg_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    std::fs::write(dir.join("_midstream.scss"), "@forward \"upstream\";\n").unwrap();
+    std::fs::write(dir.join("_upstream.scss"), "$a: original !default;\nb {c: $a}\n").unwrap();
+    assert_eq!(
+        compile("$a: configured;\n@import \"midstream\";\n", &opts).expect("import cfg"),
+        "b {\n  c: configured;\n}\n"
+    );
+    // Without a matching variable the default applies; the unconsumed
+    // implicit entry is not an error.
+    assert_eq!(
+        compile("$other: x;\n@import \"midstream\";\n", &opts).expect("unrelated"),
+        "b {\n  c: original;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
