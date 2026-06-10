@@ -6,9 +6,7 @@
 //! [`Color::from_hsl`] and left with `repr = None`, so they serialize via
 //! the normal `rgb()`/`rgba()`/hex rule, matching dart-sass.
 
-use super::color::{
-    missing_channel_err, missing_legacy_channel, modify_in_space, modify_in_space_opt, space_arg, ModifyOp,
-};
+use super::color::{modify_in_space, modify_in_space_opt, space_arg, ModifyOp};
 use super::{arg, as_color, clamp01, num, require, require_legacy_color};
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -73,8 +71,11 @@ pub(super) fn named_repr(r: f64, g: f64, b: f64, a: f64) -> Option<String> {
         return None;
     }
     let int = |v: f64| {
-        if (v - v.round()).abs() < 1e-9 && (0.0..=255.0).contains(&v) {
-            Some(v.round() as u16)
+        let r = v.round();
+        // Range-check the ROUNDED value: a converted channel may sit a few
+        // ulps past 255 and still round to a named color (dart fuzzyRound).
+        if (v - r).abs() < 1e-9 && (0.0..=255.0).contains(&r) {
+            Some(r as u16)
         } else {
             None
         }
@@ -781,71 +782,6 @@ fn resolve_channels<'v>(
     Ok((space, chans))
 }
 
-/// Decompose a color into the channel tuple for `space` (each in dart-sass's
-/// natural unit: rgb 0–255, hsl/hwb percentages 0–100, hue degrees).
-fn decompose(c: &Color, space: Space) -> [f64; 3] {
-    match space {
-        Space::Rgb => [c.r, c.g, c.b],
-        Space::Hsl => {
-            let (h, s, l) = c.to_hsl();
-            [h, s * 100.0, l * 100.0]
-        }
-        Space::Hwb => {
-            let (h, _s, _l) = c.to_hsl();
-            let w = c.r.min(c.g).min(c.b) / 255.0 * 100.0;
-            let b = (1.0 - c.r.max(c.g).max(c.b) / 255.0) * 100.0;
-            [h, w, b]
-        }
-    }
-}
-
-/// Rebuild a color from a channel tuple in `space` plus alpha.
-fn recompose(space: Space, ch: [f64; 3], a: f64) -> Color {
-    match space {
-        Space::Rgb => computed(ch[0], ch[1], ch[2], a),
-        Space::Hsl => from_hsl(
-            ch[0],
-            (ch[1] / 100.0).clamp(0.0, 1.0),
-            (ch[2] / 100.0).clamp(0.0, 1.0),
-            a,
-        ),
-        Space::Hwb => from_hwb(ch[0], ch[1], ch[2], a),
-    }
-}
-
-/// HWB → sRGB, per the CSS Color 4 algorithm. Whiteness/blackness are
-/// percentages (0–100); they are normalized when their sum exceeds 100.
-fn from_hwb(h: f64, w_pct: f64, b_pct: f64, a: f64) -> Color {
-    let mut w = (w_pct / 100.0).clamp(0.0, 1.0);
-    let mut b = (b_pct / 100.0).clamp(0.0, 1.0);
-    if w + b > 1.0 {
-        let sum = w + b;
-        w /= sum;
-        b /= sum;
-    }
-    // Start from the pure hue, then scale by (1 - w - b) and add w.
-    let base = Color::from_hsl(h, 1.0, 0.5, a);
-    let mix = |v: f64| ((v / 255.0) * (1.0 - w - b) + w) * 255.0;
-    computed(mix(base.r), mix(base.g), mix(base.b), a)
-}
-
-/// The index of a channel within its space's tuple, and whether it is the
-/// hue channel.
-fn channel_index(space: Space, name: &str) -> Option<usize> {
-    Some(match (space, name) {
-        (Space::Rgb, "red") => 0,
-        (Space::Rgb, "green") => 1,
-        (Space::Rgb, "blue") => 2,
-        (Space::Hsl, "hue") => 0,
-        (Space::Hsl, "saturation") => 1,
-        (Space::Hsl, "lightness") => 2,
-        (Space::Hwb, "hue") => 0,
-        (Space::Hwb, "whiteness") => 1,
-        (Space::Hwb, "blackness") => 2,
-        _ => return None,
-    })
-}
-
 /// `adjust-color($color, channels…)` — add each amount to the matching
 /// channel (rgb values 0–255, hsl/hwb percentages, hue degrees, alpha 0–1),
 /// then clamp.
@@ -941,26 +877,11 @@ fn fn_scale_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
             return Ok(Value::Color(super::color::make_modern_in(out, space)));
         }
     }
-    let mut tuple = decompose(&c, space);
-    let mut alpha = c.a;
-    for (n, v) in chans {
-        if n == "hue" {
-            return Err(Error::at(format!("${n}: Channel isn't scalable."), pos));
-        }
-        // `scale` combines with the channel's current value, so a missing
-        // (`none`) channel is unsupported (dart-sass errors).
-        if let Some(color) = missing_legacy_channel(&c, cspace, n) {
-            return Err(missing_channel_err(n, &color, pos));
-        }
-        let factor = scale_factor(n, v, pos)?;
-        if n == "alpha" {
-            alpha = scale_toward(alpha, factor, 1.0);
-        } else if let Some(i) = channel_index(space, n) {
-            let max = channel_max(space, i);
-            tuple[i] = scale_toward(tuple[i], factor, max);
-        }
-    }
-    Ok(Value::Color(recompose(space, tuple, alpha)))
+    // Run the modern scale path (like adjust/change above): it operates on
+    // the color's OWN stored channels — so an hwb color keeps its space and
+    // its raw (un-normalized) whiteness/blackness, matching dart.
+    let chan_args: Vec<(String, &Value)> = chans.iter().map(|(n, v)| (n.to_string(), *v)).collect();
+    modify_in_space(&c, cspace, &chan_args, super::color::ModifyOp::Scale, pos)
 }
 
 /// Scale `current` by `factor` (`-1..=1`) toward `max` (when positive) or `0`
@@ -999,14 +920,6 @@ fn scale_factor(name: &str, v: &Value, pos: Pos) -> Result<f64, Error> {
             format!("${name}: {} is not a number.", other.to_css(false)),
             pos,
         )),
-    }
-}
-
-/// The maximum value a channel can reach when scaling.
-fn channel_max(space: Space, i: usize) -> f64 {
-    match (space, i) {
-        (Space::Rgb, _) => 255.0,
-        _ => 100.0,
     }
 }
 

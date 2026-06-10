@@ -6448,3 +6448,141 @@ fn attribute_and_pseudo_arg_canonicalization() {
     );
     assert_parity(":not([a = b]) {x: y}\n:is( .a , .b ) {x: y}\n");
 }
+
+#[test]
+fn color_named_serialization_rounding() {
+    // A converted channel a few ulps past 255 still rounds to a named color
+    // (dart fuzzyRound): oklch/oklab/lch/lab → rgb white.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.to-space(color.to-space(white, oklch), rgb)}\n"),
+        "a {\n  b: white;\n}\n"
+    );
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.to-space(color.to-space(white, lab), rgb)}\n"),
+        "a {\n  b: white;\n}\n"
+    );
+}
+
+#[test]
+fn color_same_family_powerless_ab() {
+    // dart's lch → lab conversion marks a/b powerless when the lightness is
+    // missing or fuzzy-zero (LabColorSpace.convert dest=lab); oklab has NO
+    // such rule — `oklch(none ...)` keeps its computed a/b.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.to-space(lch(none 20% 30deg), lab)}\n"),
+        "a {\n  b: lab(none none none);\n}\n"
+    );
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.to-space(lch(0% 20% 30deg), lab)}\n"),
+        "a {\n  b: lab(0% none none);\n}\n"
+    );
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.to-space(oklch(none 20% 30deg), oklab)}\n"),
+        "a {\n  b: oklab(none 0.0692820323 0.04);\n}\n"
+    );
+}
+
+#[test]
+fn color_to_gamut_round_trips() {
+    // dart's to-gamut ALWAYS round-trips toSpace(space) → map → back, even
+    // in gamut: the back leg legacy-fills missing channels and the polar
+    // round trip marks a powerless hue `none`.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.to-gamut(rgb(none none none), $space: display-p3, $method: clip)}\n"),
+        "a {\n  b: black;\n}\n"
+    );
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.to-gamut(hsl(none 50% 50%), $space: hwb, $method: clip)}\n"),
+        "a {\n  b: hsl(0, 50%, 50%);\n}\n"
+    );
+    assert_eq!(
+        ours(
+            "@use \"sass:color\";\na {b: color.to-gamut(oklch(10% 0% 0deg), $space: srgb, $method: clip)}\n"
+        ),
+        "a {\n  b: oklch(10% 0 none);\n}\n"
+    );
+    // An unbounded target space returns the color untouched.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.to-gamut(red, $space: lab, $method: clip)}\n"),
+        "a {\n  b: red;\n}\n"
+    );
+}
+
+#[test]
+fn hwb_construction_normalization() {
+    // dart normalizes whiteness + blackness > 100 at CONSTRUCTION; every
+    // read path (legacy getters, channel, inspect) sees normalized storage.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.blackness(hwb(0 70% 70%))}\n"),
+        "a {\n  b: 50%;\n}\n"
+    );
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.whiteness(hwb(0 70% 50%))}\n"),
+        "a {\n  b: 58.3333333333%;\n}\n"
+    );
+    // The none-hue path normalizes too.
+    assert_eq!(
+        ours("@use \"sass:meta\";\na {b: meta.inspect(hwb(none 70% 70%))}\n"),
+        "a {\n  b: hwb(none 50% 50%);\n}\n"
+    );
+    // `change` re-normalizes; `adjust`/`scale` results stay raw.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:meta\";\na {b: meta.inspect(color.change(hwb(0 30% 30%), $whiteness: 90%))}\n"),
+        "a {\n  b: hwb(0 75% 25%);\n}\n"
+    );
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:meta\";\na {b: meta.inspect(color.adjust(hwb(0 30% 30%), $whiteness: 60%))}\n"),
+        "a {\n  b: hwb(0 90% 30%);\n}\n"
+    );
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.channel(color.adjust(hwb(0 30% 30%), $whiteness: 60%), \"whiteness\")}\n"),
+        "a {\n  b: 90%;\n}\n"
+    );
+    // The legacy scale keyword path keeps the hwb space and raw channels.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:meta\";\na {b: meta.inspect(color.scale(hwb(0 30% 30%), $whiteness: 90%))}\n"),
+        "a {\n  b: hwb(0 93% 30%);\n}\n"
+    );
+}
+
+#[test]
+fn color_inspect_forms() {
+    // inspect keeps hwb's own form (hue without `deg`, `/ alpha` tail) and
+    // prints an out-of-gamut rgb without the hsl reroute; CSS output of the
+    // same colors still uses the legacy route.
+    assert_eq!(
+        ours("@use \"sass:meta\";\na {b: meta.inspect(hwb(120 0% 0%))}\n"),
+        "a {\n  b: hwb(120 0% 0%);\n}\n"
+    );
+    assert_eq!(
+        ours("@use \"sass:meta\";\na {b: meta.inspect(hwb(0 30% 40% / 0.5))}\n"),
+        "a {\n  b: hwb(0 30% 40% / 0.5);\n}\n"
+    );
+    assert_eq!(
+        ours(
+            "@use \"sass:color\";\n@use \"sass:meta\";\na {b: meta.inspect(color.change(red, $red: 300))}\n"
+        ),
+        "a {\n  b: rgb(300, 0, 0);\n}\n"
+    );
+    assert_parity("a {b: hwb(120 0% 0%)}\n");
+    assert_parity("a {b: hwb(0 70% 70%)}\n");
+}
+
+#[test]
+fn color_scale_past_bound_stays() {
+    // dart `_scaleChannel`: a channel already past the targeted bound stays
+    // put — scaling can't pull it back into range.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.scale(color(srgb 1.2 0.5 0.7), $red: 10%)}\n"),
+        "a {\n  b: color(srgb 1.2 0.5 0.7);\n}\n"
+    );
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.scale(color(srgb -0.5 0.5 0.7), $red: -10%)}\n"),
+        "a {\n  b: color(srgb -0.5 0.5 0.7);\n}\n"
+    );
+    // Still inside the bound: the normal lerp applies.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.scale(color(srgb 1.2 0.5 0.7), $red: -10%)}\n"),
+        "a {\n  b: color(srgb 1.08 0.5 0.7);\n}\n"
+    );
+}

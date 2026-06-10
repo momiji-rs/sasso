@@ -390,7 +390,14 @@ pub(crate) fn inspect_value(v: &Value) -> String {
                 .join(", ");
             format!("({inner})")
         }
-        // Numbers, colors, and booleans inspect exactly as they serialize.
+        // A color inspects in dart's `inspect: true` serializer mode: hwb
+        // keeps its own `hwb(...)` form, and out-of-gamut rgb skips the hsl
+        // reroute (see `ModernColor::inspect_css`).
+        Value::Color(c) => match &c.modern {
+            Some(m) => m.inspect_css(),
+            None => c.to_css(false),
+        },
+        // Numbers and booleans inspect exactly as they serialize.
         other => other.to_css(false),
     }
 }

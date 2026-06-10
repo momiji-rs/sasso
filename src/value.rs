@@ -1517,8 +1517,11 @@ impl Color {
 /// triple (dart-sass canonical names). `None` if the triple has no name.
 pub(crate) fn rgb_name(r: f64, g: f64, b: f64) -> Option<&'static str> {
     let int = |v: f64| {
-        if (v - v.round()).abs() < 1e-9 && (0.0..=255.0).contains(&v) {
-            Some(v.round() as u16)
+        let r = v.round();
+        // Range-check the ROUNDED value: a converted channel may sit a few
+        // ulps past 255 and still round to a named color (dart fuzzyRound).
+        if (v - r).abs() < 1e-9 && (0.0..=255.0).contains(&r) {
+            Some(r as u16)
         } else {
             None
         }
@@ -1837,6 +1840,47 @@ impl ModernColor {
                 }
             }
         }
+    }
+
+    /// The `meta.inspect`/`@debug` serialization (dart `_writeLegacyColor`
+    /// with `inspect: true`): an hwb color with no missing channels prints
+    /// its own `hwb(H W% B%[ / A])` form (hue without `deg`), and an
+    /// out-of-gamut legacy rgb skips the hsl reroute, falling to the plain
+    /// `rgb(...)` comma form (named/hex only apply in-gamut). Everything
+    /// else serializes exactly like CSS output.
+    pub(crate) fn inspect_css(&self) -> String {
+        if self.space.is_legacy() && !self.has_missing() {
+            let a = self.alpha.unwrap_or(0.0);
+            let opaque = (a - 1.0).abs() < 1e-11;
+            match self.space {
+                ColorSpace::Hwb => {
+                    let h = fmt_num(self.channels[0].unwrap_or(0.0), false);
+                    let w = fmt_num(self.channels[1].unwrap_or(0.0), false);
+                    let b = fmt_num(self.channels[2].unwrap_or(0.0), false);
+                    return if opaque {
+                        format!("hwb({h} {w}% {b}%)")
+                    } else {
+                        format!("hwb({h} {w}% {b}% / {})", fmt_num(a, false))
+                    };
+                }
+                ColorSpace::Rgb => {
+                    let in_gamut =
+                        |i: usize| (-1e-9..=255.0 + 1e-9).contains(&self.channels[i].unwrap_or(0.0));
+                    if !(in_gamut(0) && in_gamut(1) && in_gamut(2)) {
+                        let r = fmt_num(self.channels[0].unwrap_or(0.0), false);
+                        let g = fmt_num(self.channels[1].unwrap_or(0.0), false);
+                        let b = fmt_num(self.channels[2].unwrap_or(0.0), false);
+                        return if opaque {
+                            format!("rgb({r}, {g}, {b})")
+                        } else {
+                            format!("rgba({r}, {g}, {b}, {})", fmt_num(a, false))
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.to_css(false)
     }
 
     /// Serialize an out-of-range lab/lch/oklab/oklch color as

@@ -975,8 +975,18 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         } else {
             modern_hue(&comps[0])
         };
-        let w = modern_channel(&comps[1], 100.0);
-        let bl = modern_channel(&comps[2], 100.0);
+        let mut w = modern_channel(&comps[1], 100.0);
+        let mut bl = modern_channel(&comps[2], 100.0);
+        // dart normalizes at CONSTRUCTION (`_colorFromChannels`): when both
+        // whiteness and blackness are present and sum past 100, both scale
+        // back to a 100 total. Reads then see the normalized storage.
+        if let (Some(wv), Some(bv)) = (w, bl) {
+            if wv + bv > 100.0 {
+                let t = wv + bv;
+                w = Some(wv / t * 100.0);
+                bl = Some(bv / t * 100.0);
+            }
+        }
         let mc = ModernColor {
             space: ColorSpace::Hwb,
             channels: [h, w, bl],
@@ -1000,18 +1010,24 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
         }
     }
     let h = hsl_hue(&comps[0], pos)?;
-    let w_pct = num(&comps[1], pos)?;
-    let b_pct = num(&comps[2], pos)?;
+    let mut w_pct = num(&comps[1], pos)?;
+    let mut b_pct = num(&comps[2], pos)?;
     let a = match &alpha {
         Some(v) => alpha_value(v, pos)?,
         None => 1.0,
     };
+    // dart normalizes at CONSTRUCTION (`_colorFromChannels`): a whiteness +
+    // blackness sum past 100 scales both back to a 100 total, and every read
+    // path (channel getters, inspect) sees the normalized storage. `change`
+    // re-normalizes; `adjust`/`scale` results stay raw.
+    if w_pct + b_pct > 100.0 {
+        let t = w_pct + b_pct;
+        w_pct = w_pct / t * 100.0;
+        b_pct = b_pct / t * 100.0;
+    }
     let mut out = hwb_to_color(h, w_pct, b_pct, a);
     // Carry the modern Hwb tag (so `color.space`/`color.channel` work);
-    // serialization uses the classic hsl comma form via `legacy_css`. Raw
-    // whiteness/blackness are stored verbatim so serialization keeps its exact
-    // sRGB round-trip; the out-of-gamut normalization (scaling a >100% sum back
-    // to 100%) is applied on the introspection read path instead.
+    // serialization uses the classic hsl comma form via `legacy_css`.
     let h_norm = h.rem_euclid(360.0);
     out.modern = Some(ModernColor {
         space: ColorSpace::Hwb,
@@ -1921,6 +1937,16 @@ pub(crate) fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColo
     if matches!(target, ColorSpace::Lch | ColorSpace::Oklch) && out[1].abs() < 1e-10 {
         channels[2] = None;
     }
+    // dart's lch → lab conversion marks a/b POWERLESS when the lightness is
+    // missing or fuzzy-zero (LabColorSpace.convert dest=lab: `powerlessAB =
+    // lightness == null || fuzzyEquals(lightness, 0)`). Oklab has NO such
+    // rule (`oklch(none 20% 30deg)` keeps its computed a/b), and a same-space
+    // conversion is an identity shortcut that never reaches here.
+    let lch_to_lab = mc.space == ColorSpace::Lch && target == ColorSpace::Lab;
+    if lch_to_lab && (channels[0].is_none() || out[0].abs() < 1e-11) {
+        channels[1] = None;
+        channels[2] = None;
+    }
     if target == ColorSpace::Hsl && out[1].abs() < 1e-11 {
         channels[0] = None;
     }
@@ -2285,18 +2311,10 @@ fn fn_color_channel(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> 
             pos,
         )
     })?;
+    // dart reads the stored channel verbatim: hwb normalization happens at
+    // CONSTRUCTION (and on `change`), so an `adjust`/`scale` result whose
+    // whiteness + blackness exceed 100 reads its raw values here.
     let raw = target.channels[idx].unwrap_or(0.0);
-    // dart-sass reports the gamut-normalized whiteness/blackness: when their
-    // sum exceeds 100%, both are scaled to sum to 100%. Storage keeps the raw
-    // inputs (for an exact serialization round-trip), so normalize on read.
-    let raw = if space == ColorSpace::Hwb && (idx == 1 || idx == 2) {
-        match (target.channels[1], target.channels[2]) {
-            (Some(w), Some(bl)) if w + bl > 100.0 => raw / (w + bl) * 100.0,
-            _ => raw,
-        }
-    } else {
-        raw
-    };
     Ok(Value::Number(channel_number(space, idx, raw)))
 }
 
@@ -2564,18 +2582,22 @@ fn fn_to_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
             ))
         }
     };
-    // dart converts into the working space first (filling legacy missing
-    // channels), checks the gamut there, and maps in that space.
-    let work = convert_modern_filled(&mc, space);
-    if is_in_gamut(&work) {
+    // dart returns the color untouched when the target space is unbounded.
+    if channel_bounds(space).is_none() {
         return Ok(Value::Color(c));
     }
-    let mapped = if clip {
+    // dart ALWAYS round-trips: `toSpace(space)` (keeping missing channels) →
+    // map only when out of gamut → `toSpace(color.space, legacyMissing:
+    // false)` (zero-fills legacy missing on the way back). Even an in-gamut
+    // color picks up the round-trip conversion (powerless-hue → none etc).
+    let work = convert_modern(&mc, space);
+    let mapped = if is_in_gamut(&work) {
+        work
+    } else if clip {
         clip_in_own_space(&work)
     } else {
         gamut_map(&work)
     };
-    // Re-express in the original space (a legacy result fills missing).
     let back = convert_modern_filled(&mapped, mc.space);
     Ok(Value::Color(make_modern_in(back, mc.space)))
 }
@@ -3065,6 +3087,17 @@ pub(super) fn modify_in_space_full(
             }
         }
     }
+    // `change` rebuilds through the hwb constructor in dart, which normalizes
+    // a whiteness + blackness sum past 100; `adjust`/`scale` keep raw values.
+    if matches!(op, ModifyOp::Change) && space == ColorSpace::Hwb {
+        if let (Some(wv), Some(bv)) = (work.channels[1], work.channels[2]) {
+            if wv + bv > 100.0 {
+                let t = wv + bv;
+                work.channels[1] = Some(wv / t * 100.0);
+                work.channels[2] = Some(bv / t * 100.0);
+            }
+        }
+    }
     // The legacy-keyword path keeps the original format when the result is in
     // the sRGB gamut, otherwise serializes in the (legacy) working space.
     let dest = if legacy_format && !in_gamut(&work, ColorSpace::Rgb) {
@@ -3090,25 +3123,6 @@ pub(super) fn missing_channel_err(name: &str, color: &Value, pos: Pos) -> Error 
         ),
         pos,
     )
-}
-
-/// For the legacy `scale-color`/`adjust-color` keyword path: if the channel
-/// `name` (or `alpha`) of `c` is missing (`none`) in the legacy `space`, return
-/// the source color (serialized in that space) for a missing-channel error.
-pub(super) fn missing_legacy_channel(c: &Color, space: ColorSpace, name: &str) -> Option<Value> {
-    let work = convert_modern(&legacy_to_modern(c), space);
-    // The legacy keyword path only rejects a *literally* missing (`none`)
-    // channel, not a powerless one.
-    let missing = if name == "alpha" {
-        work.alpha.is_none()
-    } else {
-        channel_index_in(space, name).is_some_and(|idx| work.channels[idx].is_none())
-    };
-    if missing {
-        Some(Value::Color(make_modern(work)))
-    } else {
-        None
-    }
 }
 
 /// Apply a change/adjust/scale to the alpha channel. Returns `None` for a
@@ -3194,10 +3208,19 @@ fn scale_pct(v: &Value, pos: Pos) -> Result<f64, Error> {
 }
 
 /// Scale `current` by `factor` (`-1..=1`) toward `bounds.1` (positive) or
-/// `bounds.0` (negative).
+/// `bounds.0` (negative). dart `_scaleChannel`: a channel already past the
+/// targeted bound stays put (scaling can't pull it back into range).
 fn scale_to(current: f64, factor: f64, bounds: (f64, f64)) -> f64 {
-    if factor > 0.0 {
-        current + (bounds.1 - current) * factor
+    if factor == 0.0 {
+        current
+    } else if factor > 0.0 {
+        if current >= bounds.1 {
+            current
+        } else {
+            current + (bounds.1 - current) * factor
+        }
+    } else if current <= bounds.0 {
+        current
     } else {
         current + (current - bounds.0) * factor
     }
