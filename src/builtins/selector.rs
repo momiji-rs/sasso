@@ -180,52 +180,149 @@ fn complex_to_value(c: &Complex) -> Value {
 
 // ---- `&` parent resolution (for nest / append) ------------------------
 
-/// Render a parsed selector list back to its `, `-joined string form.
-fn render_list(complexes: &[Complex]) -> String {
-    complexes
-        .iter()
-        .map(Complex::render)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// Resolve the child selector string `child` against the parent selector list
 /// `parents`, returning the resolved selector list (dart-sass
 /// `SelectorList.resolveParentSelectors` over each parent). A child complex that
 /// contains a top-level `&` substitutes the parent in place (parent-major
 /// order); one without `&` is nested as a descendant of each parent.
-fn resolve_parents(child: &str, parents: &[Complex], fname: &str, pos: Pos) -> Result<Vec<Complex>, Error> {
-    let parent_str = render_list(parents);
+fn resolve_parents_str(child: &str, parents: &[String], fname: &str, pos: Pos) -> Result<Vec<String>, Error> {
+    let parent_str = parents.join(", ");
+    let parent_strs: Vec<String> = parents.to_vec();
     let child_complexes = split_top_commas(child);
     // dart-sass parses each nested selector with parent references allowed, so a
     // `&` that is not at the start of a compound selector is rejected up front.
     for cc in &child_complexes {
         validate_parent_placement(cc)?;
     }
-    let mut out: Vec<Complex> = Vec::new();
-    for parent in parents {
-        let parent_one = parent.render();
-        for cc in &child_complexes {
-            let resolved = if has_parent_ref(cc) {
-                // Substitute this single parent complex for each `&`, including
-                // one inside a selector-list pseudo (`:is(&)` -> `:is(c)`).
-                substitute_parent(cc, &parent_one)
-            } else {
-                // Descendant nesting: parent then child.
-                format!("{parent_one} {}", cc.trim())
-            };
-            let parsed = selector::parse_list(&resolved).ok_or_else(|| {
-                Error::at(format!("Invalid selector produced by {fname}(): {resolved}"), pos)
-            })?;
-            out.extend(parsed);
+    // Per-child expansions: a top-level `&` expands as a cartesian product
+    // over the parent complexes (each occurrence picks independently, the
+    // last varying fastest); a `&` inside a selector pseudo receives the
+    // WHOLE parent list (`:is(&)` -> `:is(c, d)`); a child without `&` nests
+    // under every parent. The groups are then flattened column-major
+    // (dart-sass `flattenVertically`).
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    for cc in &child_complexes {
+        if has_parent_ref(cc) {
+            groups.push(expand_parent_refs(cc, &parent_strs, &parent_str));
+        } else {
+            groups.push(parent_strs.iter().map(|p| format!("{p} {}", cc.trim())).collect());
         }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for resolved in flatten_vertically(groups) {
+        // Validate by parsing — except when the result still carries a
+        // literal `&` (a parent that was itself `&`), which stays raw.
+        if has_parent_ref(&resolved) {
+            out.push(resolved);
+            continue;
+        }
+        let parsed = selector::parse_list(&resolved)
+            .ok_or_else(|| Error::at(format!("Invalid selector produced by {fname}(): {resolved}"), pos))?;
+        out.extend(parsed.iter().map(Complex::render));
     }
     if out.is_empty() {
         // No `&` and no parents shouldn't happen (parents is non-empty), but
         // guard against an empty result.
-        return parse_selector_text(&parent_str, "selectors", pos);
+        return Ok(parse_selector_text(&parent_str, "selectors", pos)?
+            .iter()
+            .map(Complex::render)
+            .collect());
     }
     Ok(out)
+}
+
+/// Serialize complex-selector strings into a selector value: a comma list of
+/// space lists (each string split on top-level whitespace), all unquoted.
+/// Handles strings a parsed [`Complex`] can't represent (a literal `&`).
+fn selector_strings_to_value(complexes: &[String]) -> Value {
+    let items: Vec<Value> = complexes
+        .iter()
+        .map(|c| {
+            let parts = split_top_ws(c);
+            Value::List(List {
+                items: parts
+                    .into_iter()
+                    .map(|text| Value::Str(SassStr { text, quoted: false }))
+                    .collect(),
+                sep: ListSep::Space,
+                bracketed: false,
+                keywords: None,
+            })
+        })
+        .collect();
+    Value::List(List {
+        items,
+        sep: ListSep::Comma,
+        bracketed: false,
+        keywords: None,
+    })
+}
+
+/// Split a complex-selector string on top-level whitespace (outside quotes,
+/// parens, and brackets).
+fn split_top_ws(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                cur.push(c);
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            }
+            '"' | '\'' => {
+                cur.push(c);
+                let q = c;
+                for n in chars.by_ref() {
+                    cur.push(n);
+                    if n == q {
+                        break;
+                    }
+                }
+            }
+            '(' | '[' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' | ']' => {
+                depth -= 1;
+                cur.push(c);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// dart-sass `flattenVertically`: flatten a list of groups column-major —
+/// the first element of every group, then the second, … (`[[a,b],[c,d]]` →
+/// `[a,c,b,d]`).
+fn flatten_vertically(groups: Vec<Vec<String>>) -> Vec<String> {
+    if groups.len() == 1 {
+        return groups.into_iter().next().unwrap_or_default();
+    }
+    let mut queues: Vec<std::collections::VecDeque<String>> = groups.into_iter().map(|g| g.into()).collect();
+    let mut out = Vec::new();
+    while !queues.is_empty() {
+        queues.retain_mut(|q| {
+            if let Some(v) = q.pop_front() {
+                out.push(v);
+            }
+            !q.is_empty()
+        });
+    }
+    out
 }
 
 /// Validate that every top-level `&` in a child complex selector appears at the
@@ -327,32 +424,58 @@ fn has_parent_ref(s: &str) -> bool {
 /// Replace every unescaped, unquoted top-level `&` in `s` with `parent`. The
 /// text directly following a `&` joins onto the parent's last compound by string
 /// adjacency (e.g. `&.y` with parent `.a .b` becomes `.a .b.y`).
-fn substitute_parent(s: &str, parent: &str) -> String {
-    let mut out = String::with_capacity(s.len() + parent.len());
+fn expand_parent_refs(s: &str, parents: &[String], parent_list: &str) -> Vec<String> {
+    let mut variants: Vec<String> = vec![String::new()];
     let mut chars = s.chars().peekable();
+    let mut paren = 0i32;
+    let push_all = |variants: &mut Vec<String>, text: &str| {
+        for v in variants.iter_mut() {
+            v.push_str(text);
+        }
+    };
     while let Some(c) = chars.next() {
         match c {
             '\\' => {
-                out.push(c);
+                let mut t = String::from(c);
                 if let Some(n) = chars.next() {
-                    out.push(n);
+                    t.push(n);
                 }
+                push_all(&mut variants, &t);
             }
             '"' | '\'' => {
-                out.push(c);
+                let mut t = String::from(c);
                 let q = c;
                 for n in chars.by_ref() {
-                    out.push(n);
+                    t.push(n);
                     if n == q {
                         break;
                     }
                 }
+                push_all(&mut variants, &t);
             }
-            '&' => out.push_str(parent),
-            _ => out.push(c),
+            '(' => {
+                paren += 1;
+                push_all(&mut variants, "(");
+            }
+            ')' => {
+                paren -= 1;
+                push_all(&mut variants, ")");
+            }
+            // Inside a selector pseudo the parent reference receives the
+            // whole parent LIST (`:is(&)` -> `:is(c, d)`).
+            '&' if paren > 0 => push_all(&mut variants, parent_list),
+            // A top-level `&` expands as a cartesian product: each occurrence
+            // picks a parent complex independently, the last varying fastest.
+            '&' => {
+                variants = variants
+                    .iter()
+                    .flat_map(|v| parents.iter().map(move |p| format!("{v}{p}")))
+                    .collect();
+            }
+            _ => push_all(&mut variants, &c.to_string()),
         }
     }
-    out
+    variants
 }
 
 /// Split a selector-list string on top-level commas (depth-aware), trimming.
@@ -419,13 +542,43 @@ fn fn_nest(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
             pos,
         ));
     }
-    // The first selector is the base (it may not contain `&`).
-    let mut acc = parse_arg_selector(&all[0], pos)?;
+    // The first selector is the base; it MAY contain `&`, which stays
+    // literal (dart-sass parses it with parent references allowed):
+    // `nest("&")` is `&`, `nest("&", ".x")` is `& .x`.
+    let first = value_to_selector_string(&all[0], "selectors", pos)?;
+    let mut acc: Vec<String> = if has_parent_ref(&first) {
+        let parts = split_top_commas(&first);
+        for cc in &parts {
+            validate_parent_placement(cc)?;
+            // A top-level `&` may not carry a suffix (`&c`) — dart-sass
+            // rejects it when parsing the first argument.
+            let chars: Vec<char> = cc.chars().collect();
+            for (i, ch) in chars.iter().enumerate() {
+                if *ch == '&' {
+                    if let Some(n) = chars.get(i + 1) {
+                        if n.is_alphanumeric() || *n == '-' || *n == '_' || *n == '\\' {
+                            return Err(Error::at(
+                                "A top-level selector may not contain a parent selector with a suffix."
+                                    .to_string(),
+                                pos,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        parts.iter().map(|p| p.trim().to_string()).collect()
+    } else {
+        parse_arg_selector(&all[0], pos)?
+            .iter()
+            .map(Complex::render)
+            .collect()
+    };
     for v in &all[1..] {
         let child = value_to_selector_string(v, "selectors", pos)?;
-        acc = resolve_parents(&child, &acc, "selector-nest", pos)?;
+        acc = resolve_parents_str(&child, &acc, "selector-nest", pos)?;
     }
-    Ok(selectors_to_value(&acc))
+    Ok(selector_strings_to_value(&acc))
 }
 
 /// Parse a single selector value argument into a complex-selector list.

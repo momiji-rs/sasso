@@ -5639,3 +5639,30 @@ fn nested_global_decl_registers_module_slot() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn nest_parent_list_and_cartesian() {
+    // dart-sass `resolveParentSelectors` semantics in selector.nest: a `&`
+    // inside a selector pseudo receives the WHOLE parent list, multiple
+    // top-level `&`s expand as a cartesian product (last varying fastest),
+    // and a lone `&` first argument stays literal.
+    let go = |args: &str| {
+        ours(&format!(
+            "@use \"sass:selector\";\na {{b: selector.nest({args})}}\n"
+        ))
+    };
+    assert_eq!(go("\"c, d\", \":is(&)\""), "a {\n  b: :is(c, d);\n}\n");
+    assert_eq!(
+        go("\"c, d\", \"&.e &.f\""),
+        "a {\n  b: c.e c.f, c.e d.f, d.e c.f, d.e d.f;\n}\n"
+    );
+    assert_eq!(go("\"&\""), "a {\n  b: &;\n}\n");
+    assert_eq!(go("\"&\", \".x\""), "a {\n  b: & .x;\n}\n");
+    assert_eq!(go("\"&.suffix\""), "a {\n  b: &.suffix;\n}\n");
+    assert_eq!(go("\"c, d\", \"e, f\""), "a {\n  b: c e, c f, d e, d f;\n}\n");
+    assert!(compile(
+        "@use \"sass:selector\";\na {b: selector.nest(\"&c\")}\n",
+        &Options::default()
+    )
+    .is_err());
+}
