@@ -298,13 +298,17 @@ fn parse_compound(chars: &[char], i: &mut usize) -> Option<Compound> {
             }
             '[' => {
                 let text = read_bracketed(chars, i)?;
-                simples.push(Simple::Attribute(text));
+                simples.push(Simple::Attribute(normalize_attribute(&text)));
             }
             ':' => {
                 let text = read_pseudo(chars, i)?;
                 // Canonicalize a `:nth-child`/`:nth-last-child` An+B argument so
                 // comparisons and output match dart-sass (`2n + 1` → `2n+1`).
                 let text = normalize_nth(&text).unwrap_or(text);
+                // Re-serialize a selector-argument pseudo canonically (its
+                // attributes/inner pseudos normalize recursively, so
+                // `:not([a = b])` and `:not([a=b])` compare equal).
+                let text = normalize_pseudo_arg(&text).unwrap_or(text);
                 simples.push(Simple::Pseudo(text));
             }
             '*' => {
@@ -406,6 +410,112 @@ fn read_ident(chars: &[char], i: &mut usize) -> Option<String> {
         return None;
     }
     Some(s)
+}
+
+/// Canonicalize an attribute selector the way dart-sass serializes one:
+/// whitespace around the operator is dropped (`[a = b]` -> `[a=b]`), and a
+/// quoted value that is a plain identifier loses its quotes
+/// (`[a="b"]` -> `[a=b]`). Anything that doesn't fit the simple
+/// `[name op value modifier?]` grammar is returned verbatim.
+pub(crate) fn normalize_attribute(text: &str) -> String {
+    let inner = match text.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+        Some(i) => i.trim(),
+        None => return text.to_string(),
+    };
+    let cs: Vec<char> = inner.chars().collect();
+    let mut i = 0usize;
+    let is_name_char =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '\\') || (c as u32) >= 0x80;
+    // Optional namespace + name. A `|` is part of the name unless followed
+    // by `=` (the `|=` operator).
+    let name_start = i;
+    while i < cs.len() {
+        let c = cs[i];
+        if is_name_char(c) || c == '*' || (c == '|' && cs.get(i + 1) != Some(&'=')) {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if i == name_start {
+        return text.to_string();
+    }
+    let name: String = cs[name_start..i].iter().collect();
+    let mut j = i;
+    while j < cs.len() && cs[j].is_whitespace() {
+        j += 1;
+    }
+    if j >= cs.len() {
+        return format!("[{name}]");
+    }
+    // Operator: `=` or one of `~|^$*` followed by `=`.
+    let op: String = if cs[j] == '=' {
+        j += 1;
+        "=".to_string()
+    } else if matches!(cs[j], '~' | '|' | '^' | '$' | '*') && cs.get(j + 1) == Some(&'=') {
+        let o = format!("{}=", cs[j]);
+        j += 2;
+        o
+    } else {
+        return text.to_string();
+    };
+    while j < cs.len() && cs[j].is_whitespace() {
+        j += 1;
+    }
+    // Value: quoted or an identifier run.
+    #[allow(clippy::needless_late_init)]
+    let value: String;
+    if j < cs.len() && (cs[j] == '"' || cs[j] == '\'') {
+        let q = cs[j];
+        j += 1;
+        let vstart = j;
+        while j < cs.len() && cs[j] != q {
+            if cs[j] == '\\' {
+                j += 1;
+            }
+            j += 1;
+        }
+        if j >= cs.len() {
+            return text.to_string();
+        }
+        let raw: String = cs[vstart..j].iter().collect();
+        j += 1; // closing quote
+                // A plain-identifier value loses its quotes (dart-sass).
+        let is_ident = !raw.is_empty()
+            && raw
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || (c as u32) >= 0x80)
+            && raw
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_') || (c as u32) >= 0x80);
+        value = if is_ident { raw } else { format!("\"{raw}\"") };
+    } else {
+        let vstart = j;
+        while j < cs.len() && !cs[j].is_whitespace() && cs[j] != ']' {
+            if cs[j] == '\\' {
+                j += 1;
+            }
+            j += 1;
+        }
+        if j == vstart {
+            return text.to_string();
+        }
+        value = cs[vstart..j].iter().collect();
+    }
+    while j < cs.len() && cs[j].is_whitespace() {
+        j += 1;
+    }
+    // Optional single-letter modifier (`i`/`s`).
+    if j < cs.len() {
+        let m: String = cs[j..].iter().collect();
+        let m = m.trim();
+        if m.len() == 1 && m.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            return format!("[{name}{op}{value} {m}]");
+        }
+        return text.to_string();
+    }
+    format!("[{name}{op}{value}]")
 }
 
 /// Read a `[...]` attribute selector verbatim, returning the full text.
@@ -927,6 +1037,28 @@ fn is_supercombinator(c1: Option<Combinator>, c2: Option<Combinator>) -> bool {
 /// Parse a selector pseudo `:name(<selectors>)` of the `:is`/`:matches`/`:any`/
 /// `:where`/`:-*-any`/`:has`/`:host`/`:host-context` family into its normalized
 /// name and argument selector list. `None` for any other (or non-selector) pseudo.
+/// Canonicalize the selector argument of a `:not`/`:is`/`:where`/`:matches`/
+/// `:any`/`:has` pseudo by re-parsing and re-rendering it (recursively
+/// normalizing nested attributes and pseudos). `None` leaves it verbatim.
+pub(crate) fn normalize_pseudo_arg(text: &str) -> Option<String> {
+    let open = text.find('(')?;
+    if !text.ends_with(')') {
+        return None;
+    }
+    let head = &text[..open];
+    let name_l = head.trim_start_matches(':').to_ascii_lowercase();
+    let known = matches!(
+        unvendor(&name_l),
+        "not" | "is" | "where" | "matches" | "any" | "has"
+    ) || name_l.ends_with("-any");
+    if !known {
+        return None;
+    }
+    let list = parse_list(&text[open + 1..text.len() - 1])?;
+    let inner = list.iter().map(|c| c.render()).collect::<Vec<_>>().join(", ");
+    Some(format!("{head}({inner})"))
+}
+
 fn parse_selector_pseudo(text: &str) -> Option<(String, Vec<Complex>)> {
     let open = text.find('(')?;
     if !text.ends_with(')') {

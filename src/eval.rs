@@ -9005,11 +9005,13 @@ fn normalize_selector(s: &str) -> String {
         match c {
             '[' => {
                 let end = matching_bracket(&chars, i);
-                let inner: String = chars[i + 1..end.min(chars.len())].iter().collect();
-                out.push('[');
-                out.push_str(&normalize_attribute_text(&inner));
                 if end < chars.len() {
-                    out.push(']');
+                    let whole: String = chars[i..=end].iter().collect();
+                    out.push_str(&crate::selector::normalize_attribute(&whole));
+                } else {
+                    let inner: String = chars[i + 1..].iter().collect();
+                    out.push('[');
+                    out.push_str(&normalize_attribute_text(&inner));
                 }
                 i = end + 1;
                 mid_compound = true;
@@ -9024,9 +9026,15 @@ fn normalize_selector(s: &str) -> String {
                 continue;
             }
             ':' => {
-                // A pseudo-class/element (with any `(...)` argument), copied
-                // verbatim. Its interior is not subject to compound separation.
+                // A pseudo-class/element (with any `(...)` argument). A
+                // selector-argument pseudo re-serializes canonically.
+                let start = out.len();
                 copy_pseudo(&chars, &mut i, &mut out);
+                let text = out[start..].to_string();
+                if let Some(canon) = crate::selector::normalize_pseudo_arg(&text) {
+                    out.truncate(start);
+                    out.push_str(&canon);
+                }
                 mid_compound = true;
                 continue;
             }

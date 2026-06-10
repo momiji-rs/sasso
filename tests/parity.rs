@@ -6429,3 +6429,22 @@ fn interpolated_at_rule_names_and_forbidden_contexts() {
         assert!(err.contains("This at-rule is not allowed here."), "{bad}: {err}");
     }
 }
+
+#[test]
+fn attribute_and_pseudo_arg_canonicalization() {
+    // Attribute selectors canonicalize: operator whitespace drops and a
+    // plain-identifier quoted value loses its quotes — so an interpolated
+    // extend target matches its rule.
+    assert_eq!(
+        ours("[baz^=\"blip12px\"] {a: b}\n.bar {@extend [baz^=\"blip#{12px}\"]}\n"),
+        "[baz^=blip12px], .bar {\n  a: b;\n}\n"
+    );
+    assert_parity("a[b=\"c\"] {x: y}\na[d = e] {x: y}\na[f=\"g h\"] {x: y}\n");
+    // A selector-argument pseudo re-serializes canonically, so equal-modulo-
+    // whitespace `:not()` arguments unify into one.
+    assert_eq!(
+        ours("%-a :not([a=b]).baz {a: b}\n:not([a = b]) {@extend .baz} -a {@extend %-a}\n"),
+        "-a :not([a=b]) {\n  a: b;\n}\n"
+    );
+    assert_parity(":not([a = b]) {x: y}\n:is( .a , .b ) {x: y}\n");
+}
