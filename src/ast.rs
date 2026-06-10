@@ -113,6 +113,15 @@ pub(crate) enum Stmt {
         prelude: Vec<TplPiece>,
         body: Option<Vec<Stmt>>,
     },
+    /// A generic at-rule whose NAME contains interpolation
+    /// (`@#{"media"} … {}`): always treated as unknown — no Sass parse-time
+    /// behavior — except `@keyframes`, whose frame handling happens at eval
+    /// time once the name resolves.
+    InterpAtRule {
+        name: Vec<TplPiece>,
+        prelude: Vec<TplPiece>,
+        body: Option<Vec<Stmt>>,
+    },
     /// A plain-CSS custom `@function`/`@mixin` whose name begins with `--`.
     /// dart-sass does not treat these as Sass definitions: the whole construct
     /// is emitted verbatim as a generic at-rule. `name` is the keyword exactly

@@ -202,6 +202,28 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+/// Reject generic/unknown at-rules in a context that forbids them (function
+/// bodies, nested property sets), recursing into control-flow bodies.
+fn reject_at_rules_in(stmts: &[Stmt]) -> Result<(), Error> {
+    for s in stmts {
+        match s {
+            Stmt::AtRule { .. } | Stmt::InterpAtRule { .. } => {
+                return Err(Error::unpositioned("This at-rule is not allowed here."));
+            }
+            Stmt::If(branches) => {
+                for b in branches {
+                    reject_at_rules_in(&b.body)?;
+                }
+            }
+            Stmt::For { body, .. } | Stmt::Each { body, .. } | Stmt::While { body, .. } => {
+                reject_at_rules_in(body)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Whether `name` is a global Sass function with no plain-CSS meaning, so a
 /// `.css` file calling it is an error (the CSS color/math functions — `rgb`,
 /// `hsl`, `grayscale`, `saturate`, `min`, `calc`, … — are deliberately absent,
@@ -865,6 +887,8 @@ impl Parser {
         let body = self.parse_statements(false);
         self.block_depth -= 1;
         let body = body?;
+        // Unknown at-rules aren't allowed in a nested property set.
+        reject_at_rules_in(&body)?;
         if !self.sc.eat('}') {
             return Err(Error::at("expected \"}\".", self.sc.position()));
         }
@@ -950,7 +974,15 @@ impl Parser {
         // measure their byte length for the diagnostic caret.
         let start_mark = self.sc.mark();
         self.sc.bump(); // '@'
+                        // An interpolated NAME makes this a generic (unknown) at-rule with no
+                        // Sass parse-time behavior (`@#{"media"} …`).
+        if self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{') {
+            return self.parse_interp_at_rule(Vec::new());
+        }
         let name = self.read_ident_name()?;
+        if self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{') {
+            return self.parse_interp_at_rule(vec![TplPiece::Lit(name)]);
+        }
         // In plain CSS the Sass control/definition at-rules are rejected; only
         // genuine CSS at-rules (`@media`, `@supports`, `@font-face`,
         // `@keyframes`, `@import`, `@charset`, `@page`, and unknown vendor
@@ -2338,6 +2370,42 @@ impl Parser {
     /// either a `{ … }` body or a terminating `;` (or an immediate `}` closing
     /// the enclosing block, as in `@page … {@g}`). Covers `@font-face`,
     /// `@page`, `@charset`, vendor `@foo`, and unknown directives.
+    /// Parse the rest of an at-rule whose name contains interpolation:
+    /// finish the name template, then a generic prelude and optional body.
+    fn parse_interp_at_rule(&mut self, mut name: Vec<TplPiece>) -> Result<Stmt, Error> {
+        loop {
+            if self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{') {
+                self.sc.bump();
+                self.sc.bump();
+                self.skip_ws_inline();
+                let e = self.parse_value()?;
+                self.skip_ws_inline();
+                if !self.sc.eat('}') {
+                    return Err(Error::at("expected \"}\"", self.sc.position()));
+                }
+                name.push(TplPiece::Interp(e));
+                continue;
+            }
+            match self.sc.peek() {
+                Some(c) if is_ident_char(c) => {
+                    let lit = self.read_ident_name()?;
+                    name.push(TplPiece::Lit(lit));
+                }
+                _ => break,
+            }
+        }
+        self.skip_ws_inline();
+        let prelude = trim_prelude(self.parse_template_mode(&['{', ';', '}'], CommentMode::UnknownPrelude)?);
+        self.skip_ws_inline();
+        let body = if self.sc.peek() == Some('{') {
+            Some(self.parse_braced_body()?)
+        } else {
+            self.sc.eat(';');
+            None
+        };
+        Ok(Stmt::InterpAtRule { name, prelude, body })
+    }
+
     fn parse_generic_at_rule(&mut self, name: String) -> Result<Stmt, Error> {
         self.skip_ws_inline();
         // dart-sass parses `@-moz-document` (only the exact lowercase spelling)
@@ -2823,6 +2891,11 @@ impl Parser {
         }
         let params = self.parse_param_list()?;
         let body = self.parse_braced_body()?;
+        // Unknown at-rules aren't allowed in a function body (parse-time in
+        // dart-sass: "This at-rule is not allowed here.").
+        if is_function {
+            reject_at_rules_in(&body)?;
+        }
         let callable = Rc::new(Callable { name, params, body });
         Ok(if is_function {
             Stmt::FunctionDef(callable)

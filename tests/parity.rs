@@ -6399,3 +6399,33 @@ fn deep_media_chains_and_content_forwarding() {
         "a {\n  content: bar;\n}\n"
     );
 }
+
+#[test]
+fn interpolated_at_rule_names_and_forbidden_contexts() {
+    // An at-rule with an interpolated NAME is always generic (no Sass
+    // parse-time behavior) — except @keyframes, resolved at eval time.
+    assert_parity("@#{\"plain\"} value;\n@#{\"block\"} {x: y}\n");
+    assert_eq!(
+        ours("@#{\"media\"} ($var: value) {\n  .x {y: z}\n}\n"),
+        "@media ($var: value) {\n  .x {\n    y: z;\n  }\n}\n"
+    );
+    assert_eq!(
+        ours("@#{\"keyframes\"} name {\n  10% {x: y}\n}\n"),
+        "@keyframes name {\n  10% {\n    x: y;\n  }\n}\n"
+    );
+    assert_eq!(
+        ours("@#{\"error\"} not really an error;\n"),
+        "@error not really an error;\n"
+    );
+    // Unknown at-rules (interpolated or not) are parse errors in function
+    // bodies and nested property sets.
+    for bad in [
+        "@function f() {@asdf; @return null;}",
+        ".x {y: {@asdf;}}",
+        "@function f() {@#{\"asdf\"}; @return null;}",
+        ".x {y: {@#{\"asdf\"};}}",
+    ] {
+        let err = ours_err(bad);
+        assert!(err.contains("This at-rule is not allowed here."), "{bad}: {err}");
+    }
+}

@@ -3892,6 +3892,18 @@ impl<'a> Evaluator<'a> {
                 Stmt::AtRule { name, prelude, body } => {
                     self.eval_at_rule(name, prelude, body.as_deref(), parents, sink)?;
                 }
+                Stmt::InterpAtRule { name, prelude, body } => {
+                    // The name resolves at eval time; `@keyframes` is the one
+                    // rule whose special handling happens here (frame stops).
+                    let resolved = self.eval_template(name)?;
+                    if is_keyframes_name(&resolved) && body.is_some() {
+                        if let Some(b) = body {
+                            self.eval_keyframes(&resolved, prelude, b, sink)?;
+                        }
+                    } else {
+                        self.eval_at_rule(&resolved, prelude, body.as_deref(), parents, sink)?;
+                    }
+                }
                 Stmt::CssCustomAtRule { name, prelude, body } => {
                     self.eval_css_custom_at_rule(name, prelude, body, sink)?;
                 }
