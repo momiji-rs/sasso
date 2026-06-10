@@ -490,6 +490,10 @@ enum Resolution {
 /// since this build has no module system; resolution then falls through to the
 /// normal file, matching the output we can actually produce.
 fn resolve_in_base(base: &Path, path: &str, allow_import_only: bool) -> Resolution {
+    // dart-sass normalizes the URL lexically before touching the filesystem,
+    // so `foo/bar/../baz` resolves even when `foo/bar` doesn't exist.
+    let normalized = lexical_normalize(path);
+    let path = normalized.as_str();
     let p = Path::new(path);
     let dir = match p.parent() {
         Some(par) if !par.as_os_str().is_empty() => base.join(par),
@@ -570,6 +574,33 @@ fn resolve_in_base(base: &Path, path: &str, allow_import_only: bool) -> Resoluti
     }
 
     Resolution::NotFound
+}
+
+/// Lexically remove `.` and `..` segments from a URL path (no filesystem
+/// access; leading `..` segments that would escape are kept).
+fn lexical_normalize(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if matches!(out.last(), Some(&s) if s != "..") {
+                    out.pop();
+                } else {
+                    out.push("..");
+                }
+            }
+            s => out.push(s),
+        }
+    }
+    let mut s = out.join("/");
+    if path.starts_with('/') {
+        s.insert(0, '/');
+    }
+    if s.is_empty() {
+        s.push('.');
+    }
+    s
 }
 
 /// One precedence tier's matches.

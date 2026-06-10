@@ -6309,3 +6309,39 @@ fn relative_resolution_and_distributed_config() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn use_url_dotdot_and_nested_global_writethrough() {
+    let dir = std::env::temp_dir().join("sasso_parity_dotdot");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("foo/baz/qux")).unwrap();
+    let w = |n: &str, b: &str| std::fs::write(dir.join(n), b).unwrap();
+    w("foo/baz/qux/other.scss", "$variable: value;\n");
+    w(
+        "other.scss",
+        "$member: value;\n@function get-member() {@return $member}\n",
+    );
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    // `..` segments normalize lexically (foo/bar need not exist); the
+    // namespace is the URL basename.
+    assert_eq!(
+        compile(
+            "@use \"foo/bar/../baz/qux/other\";\na {b: other.$variable}\n",
+            &opts
+        )
+        .unwrap(),
+        "a {\n  b: value;\n}\n"
+    );
+    // A nested un-namespaced `!global` assignment writes through to the one
+    // `as *` module that defines the variable.
+    assert_eq!(
+        compile(
+            "@use \"other\" as *;\na {\n  $member: new value !global;\n  b: get-member();\n}\n",
+            &opts
+        )
+        .unwrap(),
+        "a {\n  b: new value;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

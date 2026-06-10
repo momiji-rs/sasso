@@ -1429,10 +1429,11 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
-        // A top-level assignment to a name not in scope but exposed by exactly
-        // one `@use … as *` module updates that module's variable (so the
-        // module's own functions/mixins observe the change).
-        if self.scopes.len() == 1 && !is_private_member(&v.name) {
+        // A top-level (or nested `!global`) assignment to a name not in the
+        // global scope but exposed by exactly one `@use … as *` module updates
+        // that module's variable (so the module's own functions/mixins observe
+        // the change).
+        if (self.scopes.len() == 1 || v.is_global) && !is_private_member(&v.name) {
             if let Some(g) = self.scopes.first() {
                 if !g.contains_key(&v.name) {
                     let targets: Vec<Rc<Module>> = self
