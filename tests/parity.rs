@@ -6345,3 +6345,35 @@ fn use_url_dotdot_and_nested_global_writethrough() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn meta_builtin_module_introspection() {
+    // sass:meta's own members are enumerable; variables are none.
+    assert_eq!(
+        ours("@use \"sass:map\";\n@use \"sass:meta\";\n$m: meta.module-mixins(\"meta\");\na {x: map.has-key($m, \"load-css\"); t: meta.type-of($m)}\n"),
+        "a {\n  x: true;\n  t: map;\n}\n"
+    );
+    assert_eq!(
+        ours("@use \"sass:meta\";\na {b: meta.inspect(meta.module-variables(\"meta\"))}\n"),
+        "a {\n  b: ();\n}\n"
+    );
+    // A captured builtin meta function dispatches through the evaluator
+    // (variable-exists needs scopes).
+    assert_eq!(
+        ours("@use \"sass:map\";\n@use \"sass:meta\";\n$functions: meta.module-functions(\"meta\");\na {x: meta.call(map.get($functions, \"variable-exists\"), \"functions\")}\n"),
+        "a {\n  x: true;\n}\n"
+    );
+    // get-function with a builtin $module; its inspect form.
+    assert_eq!(
+        ours("@use \"sass:meta\";\na {v: meta.inspect(meta.get-function(\"get-function\", $module: \"meta\"))}\n"),
+        "a {\n  v: get-function(\"get-function\");\n}\n"
+    );
+    // A bracketed single-element trailing-comma list keeps its separator.
+    assert_eq!(
+        ours("@use \"sass:meta\";\na {v: meta.inspect([1,])}\n"),
+        "a {\n  v: [1,];\n}\n"
+    );
+    assert_parity(
+        "@use \"sass:meta\";\na {v: meta.inspect([1,]); w: meta.inspect([1, 2]); x: meta.inspect([])}\n",
+    );
+}

@@ -5941,7 +5941,12 @@ impl<'a> Evaluator<'a> {
                 quoted: false,
             }));
         }
-        // A built-in reference: dispatch through the builtin library.
+        // A built-in reference. The `sass:meta` introspection functions need
+        // the evaluator's scopes/definitions; everything else dispatches
+        // through the value-only builtin library.
+        if let Some(r) = self.try_meta_eval_call(&f.name, &pos_args, &named, pos) {
+            return r;
+        }
         crate::builtins::call(&f.name, &pos_args, &named, pos)
     }
 
@@ -6062,8 +6067,41 @@ impl<'a> Evaluator<'a> {
             }
         };
         let Some(module) = self.used_user_modules.get(&ns).cloned() else {
-            // Built-in module introspection isn't modeled here; an unknown
-            // namespace (built-in or absent) is reported uniformly.
+            // A built-in module: `sass:meta` is modeled member-by-member
+            // (the suite probes it); other built-ins have no variables and
+            // their callables are dispatched, not enumerated, so report the
+            // names we know.
+            if let Some(builtin) = self.used_modules.get(&ns) {
+                let names: Vec<&str> = match (builtin.as_str(), kind) {
+                    ("meta", MemberKind::Function) => crate::builtins::META_FUNCTION_NAMES.to_vec(),
+                    ("meta", MemberKind::Mixin) => crate::builtins::META_MIXIN_NAMES.to_vec(),
+                    _ => Vec::new(),
+                };
+                let entries: Vec<(Value, Value)> = names
+                    .into_iter()
+                    .map(|name| {
+                        let key = Value::Str(SassStr {
+                            text: name.to_string(),
+                            quoted: true,
+                        });
+                        let val = match kind {
+                            MemberKind::Function => Value::Function(SassFunction {
+                                name: name.to_string(),
+                                css: false,
+                                user: None,
+                            }),
+                            MemberKind::Mixin => Value::Mixin(SassMixin {
+                                name: name.to_string(),
+                                user: None,
+                                module: None,
+                            }),
+                            MemberKind::Variable => Value::Null,
+                        };
+                        (key, val)
+                    })
+                    .collect();
+                return Ok(Value::Map(Map { entries }));
+            }
             return Err(Error::at(
                 format!("There is no module with the namespace \"{ns}\"."),
                 pos,

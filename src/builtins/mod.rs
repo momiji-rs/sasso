@@ -359,7 +359,36 @@ fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
 
 /// Whether `module` exposes `member` as a callable function (used by the
 /// evaluator to resolve unprefixed `@use … as *` members).
+/// The `sass:meta` module's function members (dart-sass 1.100), for
+/// `meta.module-functions("meta")` and `$module`-qualified lookups.
+pub(crate) const META_FUNCTION_NAMES: &[&str] = &[
+    "accepts-content",
+    "calc-args",
+    "calc-name",
+    "call",
+    "content-exists",
+    "feature-exists",
+    "function-exists",
+    "get-function",
+    "get-mixin",
+    "global-variable-exists",
+    "inspect",
+    "keywords",
+    "mixin-exists",
+    "module-functions",
+    "module-mixins",
+    "module-variables",
+    "type-of",
+    "variable-exists",
+];
+
+/// The `sass:meta` module's mixin members.
+pub(crate) const META_MIXIN_NAMES: &[&str] = &["apply", "load-css"];
+
 pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
+    if module == "meta" && META_FUNCTION_NAMES.contains(&member) {
+        return true;
+    }
     if module == "math" && matches!(member, "div" | "clamp" | "min" | "max" | "round") {
         return true;
     }

@@ -4529,6 +4529,39 @@ impl Parser {
     /// parsed at the space-list level, stopping before the closing `)`. Used
     /// when the leading element of a parenthesised group turned out not to be
     /// a map key. With no following commas this is just `first`.
+    /// Like [`finish_paren_list`], but the list ends at `]`.
+    fn finish_bracket_list(&mut self, first: Expr) -> Result<Expr, Error> {
+        let mut rest = Vec::new();
+        let mut trailing = false;
+        loop {
+            let mark = self.sc.mark();
+            self.skip_ws_inline();
+            if self.sc.peek() == Some(',') {
+                self.sc.bump();
+                self.skip_ws_inline();
+                if self.sc.peek() == Some(']') {
+                    trailing = true;
+                    break;
+                }
+                rest.push(self.space_list()?);
+            } else {
+                self.sc.reset(mark);
+                break;
+            }
+        }
+        if rest.is_empty() && !trailing {
+            return Ok(first);
+        }
+        let mut items = Vec::with_capacity(rest.len() + 1);
+        items.push(first);
+        items.extend(rest);
+        Ok(Expr::List {
+            items,
+            sep: ListSep::Comma,
+            bracketed: false,
+        })
+    }
+
     fn finish_paren_list(&mut self, first: Expr) -> Result<Expr, Error> {
         let mut rest = Vec::new();
         let mut trailing = false;
@@ -4612,7 +4645,10 @@ impl Parser {
                 bracketed: true,
             });
         }
-        let inner = self.parse_value()?;
+        // Parse like a paren group so a trailing comma marks a one-element
+        // COMMA list (`[1,]` keeps its separator, like `(1,)`).
+        let first = self.space_list()?;
+        let inner = self.finish_bracket_list(first)?;
         self.skip_ws_inline();
         if !self.sc.eat(']') {
             return Err(Error::at("expected \"]\"", self.sc.position()));
