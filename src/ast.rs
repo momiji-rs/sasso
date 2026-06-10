@@ -285,6 +285,9 @@ pub(crate) enum CssCustomValue {
     Raw(Vec<TplPiece>),
     /// SassScript value (interpolated property): evaluated normally.
     Script(Expr),
+    /// A nested property set on an interpolated property (`#{re}sult: {b: c}`):
+    /// each `(suffix, value)` child emits as `property-suffix: value`.
+    Set(Vec<(Vec<TplPiece>, Expr)>),
 }
 
 pub(crate) struct Declaration {

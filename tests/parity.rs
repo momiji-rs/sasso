@@ -5975,3 +5975,33 @@ fn splat_list_separator_survives_into_arglist() {
     );
     assert_parity("@mixin m($x, $zs...) {z: $zs}\na {@include m(a, c d e...)}\n");
 }
+
+#[test]
+fn css_custom_callable_result_rules_and_string_line_continuation() {
+    // In a plain-CSS custom callable body, an interpolated property follows
+    // the nested-property rules (`#{re}sult: {b: c}` -> `result-b: c`)...
+    assert_eq!(
+        ours("@function --a() {#{re}sult: {b: c}}\n"),
+        "@function --a() {\n  result-b: c;\n}\n"
+    );
+    // ...while a literal `result` keeps a braced value verbatim, and in the
+    // indented syntax may not have an indented child block.
+    assert_eq!(
+        ours("@function --a() {result: {b: c}}\n"),
+        "@function --a() {\n  result: {b: c};\n}\n"
+    );
+    let err = compile(
+        "@function --a()\n  result:\n    b: c\n",
+        &Options::default().with_syntax(sasso::Syntax::Sass),
+    )
+    .expect_err("indented child beneath result must error");
+    assert!(err
+        .to_string()
+        .contains("Nothing may be indented beneath a @function result."));
+    // A `\`+newline inside an open quoted string is a CSS line continuation:
+    // it vanishes and the next line's indentation stays part of the string.
+    assert_eq!(
+        ours_sass("a \n  b: 'line1 \\\n      line2'\n"),
+        "a {\n  b: \"line1       line2\";\n}\n"
+    );
+}

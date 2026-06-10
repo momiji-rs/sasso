@@ -43,6 +43,10 @@ struct Transpiler {
     idx: usize,
     /// The assembled SCSS output.
     out: String,
+    /// Whether the current block is the body of a plain-CSS custom
+    /// `@function --x()`/`@mixin --x()` (where a literal `result` declaration
+    /// may not have an indented child block).
+    in_css_callable: bool,
 }
 
 /// Whether `c` may appear in an identifier (mirrors the SCSS parser).
@@ -81,6 +85,7 @@ impl Transpiler {
             lines,
             idx: 0,
             out: String::new(),
+            in_css_callable: false,
         }
     }
 
@@ -391,7 +396,7 @@ impl Transpiler {
                 let st = scan_state(&logical);
                 // Inside an open interpolation or loud comment, the next line's
                 // text is captured verbatim (a `//` there is not a comment).
-                let verbatim = st.in_interp || st.in_loud_comment;
+                let verbatim = st.in_interp || st.in_loud_comment || st.in_string;
                 if next_content.trim().is_empty() {
                     if st.bracket_depth > 0 || verbatim {
                         // A blank line inside brackets/interp/comment joins as a
@@ -408,11 +413,19 @@ impl Transpiler {
                     strip_silent_comment(&next_content)
                 };
                 // Backslash continuation: drop the trailing backslash and join
-                // with a single space (the line "wraps").
+                // with a single space (the line "wraps"). Inside an open
+                // quoted string the `\`+newline is a CSS line continuation:
+                // it vanishes entirely and the next line's indentation
+                // characters stay part of the string.
                 if logical.ends_with('\\') {
                     logical.pop();
-                    logical.push(' ');
-                    logical.push_str(joined.trim_start());
+                    if st.in_string {
+                        logical.push_str(&next_indent_str);
+                        logical.push_str(&joined);
+                    } else {
+                        logical.push(' ');
+                        logical.push_str(joined.trim_start());
+                    }
                 } else {
                     // Bracket / trailing-comma / interp / comment continuation:
                     // preserve the newline and the line's original indentation so
@@ -588,8 +601,43 @@ impl Transpiler {
                 }
             }
         }
+        // Inside a plain-CSS custom callable body, a literal `result`
+        // declaration may not have an indented child block (an interpolated
+        // `#{result}:` follows the ordinary nested-property rules instead).
+        if self.in_css_callable && !logical.contains("#{") {
+            if let Some(colon) = find_decl_colon(logical) {
+                if logical[..colon].trim().eq_ignore_ascii_case("result") {
+                    if let Some(i) = self.next_nonblank(self.idx) {
+                        if self.lines[i].indent > indent {
+                            return Err(Error::at(
+                                "Nothing may be indented beneath a @function result.".to_string(),
+                                Pos {
+                                    line: self.lines[i].line,
+                                    col: self.lines[i].indent + 1,
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         self.out.push_str(logical);
-        if !self.parse_child_into_braces(indent)? {
+        // A `@function --x()`/`@mixin --x()` body is a plain-CSS custom
+        // callable; flag it for the `result` child check above.
+        let css_callable = matches!(directive_name(logical).as_deref(), Some("function" | "mixin"))
+            && logical
+                .trim_start()
+                .trim_start_matches('@')
+                .trim_start_matches(|c: char| is_ident_char(c))
+                .trim_start()
+                .starts_with("--");
+        let saved_callable = self.in_css_callable;
+        if css_callable {
+            self.in_css_callable = true;
+        }
+        let had_block = self.parse_child_into_braces(indent)?;
+        self.in_css_callable = saved_callable;
+        if !had_block {
             let form = if explicit_semicolon {
                 EmptyForm::Semicolon
             } else {
@@ -1153,6 +1201,8 @@ struct ScanState {
     bracket_depth: i32,
     in_interp: bool,
     in_loud_comment: bool,
+    /// The line ends inside an unterminated quoted string.
+    in_string: bool,
 }
 
 /// Scan `s` once, tracking strings, `//`/`/* */` comments and `#{…}`
@@ -1237,6 +1287,15 @@ fn scan_state(s: &str) -> ScanState {
                     }
                     i += 1;
                 }
+                if i >= cs.len() {
+                    // Unterminated quoted string at end of line.
+                    return ScanState {
+                        bracket_depth: depth,
+                        in_interp: interp_depth > 0,
+                        in_loud_comment: false,
+                        in_string: true,
+                    };
+                }
             }
             '/' if cs.get(i + 1) == Some(&'/') => break,
             '/' if cs.get(i + 1) == Some(&'*') => {
@@ -1250,6 +1309,7 @@ fn scan_state(s: &str) -> ScanState {
                         bracket_depth: depth,
                         in_interp: interp_depth > 0,
                         in_loud_comment: true,
+                        in_string: false,
                     };
                 }
                 i += 2;
@@ -1272,6 +1332,7 @@ fn scan_state(s: &str) -> ScanState {
         bracket_depth: depth,
         in_interp: interp_depth > 0,
         in_loud_comment: false,
+        in_string: false,
     }
 }
 

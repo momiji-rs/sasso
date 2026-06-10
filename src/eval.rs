@@ -3562,17 +3562,25 @@ impl<'a> Evaluator<'a> {
         let mut out_body: Vec<OutNode> = Vec::new();
         for item in body {
             let prop = self.eval_template(&item.property)?;
-            let line = match &item.value {
+            match &item.value {
                 CssCustomValue::Raw(tpl) => {
                     let raw = self.eval_template(tpl)?;
-                    format!("{prop}:{raw};")
+                    out_body.push(OutNode::Raw(format!("{prop}:{raw};")));
                 }
                 CssCustomValue::Script(expr) => {
                     let value = self.eval_expr(expr)?.to_css(self.compressed());
-                    format!("{prop}: {value};")
+                    out_body.push(OutNode::Raw(format!("{prop}: {value};")));
                 }
-            };
-            out_body.push(OutNode::Raw(line));
+                // A nested property set on an interpolated property: each
+                // child emits as `property-suffix: value`.
+                CssCustomValue::Set(children) => {
+                    for (suffix, expr) in children {
+                        let sfx = self.eval_template(suffix)?;
+                        let value = self.eval_expr(expr)?.to_css(self.compressed());
+                        out_body.push(OutNode::Raw(format!("{prop}-{sfx}: {value};")));
+                    }
+                }
+            }
         }
         sink.push_at_rule(OutNode::AtRule {
             name: name.to_string(),

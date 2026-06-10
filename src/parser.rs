@@ -2889,17 +2889,60 @@ impl Parser {
                 return Err(Error::at("expected \":\".", self.sc.position()));
             }
             let has_interp = property.iter().any(|p| matches!(p, TplPiece::Interp(_)));
-            let value = if has_interp {
+            if has_interp {
                 self.skip_ws_inline();
+                // An interpolated property name follows the ordinary nested-
+                // property rules: a value-less `{ … }` block expands each
+                // child as `property-child` (`#{re}sult: {b: c}` emits
+                // `result-b: c`) — unlike a literal `result`, whose value is
+                // captured verbatim (braces and all).
+                if self.sc.peek() == Some('{') {
+                    self.sc.bump();
+                    let mut children: Vec<(Vec<TplPiece>, Expr)> = Vec::new();
+                    loop {
+                        self.skip_ws_inline();
+                        match self.sc.peek() {
+                            None => return Err(Error::at("expected \"}\".", self.sc.position())),
+                            Some('}') => {
+                                self.sc.bump();
+                                break;
+                            }
+                            Some(';') => {
+                                self.sc.bump();
+                                continue;
+                            }
+                            _ => {}
+                        }
+                        let child = trim_prelude(self.parse_template(&[':', '{', ';', '}'])?);
+                        if !self.sc.eat(':') {
+                            return Err(Error::at("expected \":\".", self.sc.position()));
+                        }
+                        self.skip_ws_inline();
+                        let expr = self.parse_value()?;
+                        self.skip_ws_inline();
+                        self.sc.eat(';');
+                        children.push((child, expr));
+                    }
+                    items.push(CssCustomItem {
+                        property,
+                        value: CssCustomValue::Set(children),
+                    });
+                    continue;
+                }
                 let expr = self.parse_value()?;
                 self.skip_ws_inline();
                 self.sc.eat(';');
-                CssCustomValue::Script(expr)
+                items.push(CssCustomItem {
+                    property,
+                    value: CssCustomValue::Script(expr),
+                });
             } else {
                 let raw = self.parse_css_custom_value()?;
-                CssCustomValue::Raw(raw)
-            };
-            items.push(CssCustomItem { property, value });
+                items.push(CssCustomItem {
+                    property,
+                    value: CssCustomValue::Raw(raw),
+                });
+            }
         }
         Ok(items)
     }
