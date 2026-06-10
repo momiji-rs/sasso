@@ -37,8 +37,10 @@ fn parse_with_syntax(src: &str, syntax: Syntax) -> Result<crate::ast::Stylesheet
 }
 
 /// A call's evaluated arguments, split into positional values and named
-/// `(name, value)` keyword pairs (after splat expansion).
-type EvaledArgs = (Vec<Value>, Vec<(String, Value)>);
+/// `(name, value)` keyword pairs (after splat expansion), plus the rest-
+/// argument list separator (a splatted list's separator survives into the
+/// callee's arglist; comma otherwise).
+type EvaledArgs = (Vec<Value>, Vec<(String, Value)>, ListSep);
 
 /// A flattened output node.
 #[derive(Clone)]
@@ -1434,6 +1436,9 @@ impl<'a> Evaluator<'a> {
         let mut splat_pos = Vec::new();
         let mut keyword: Vec<(String, Value)> = Vec::new();
         let mut seen_named = false;
+        // A splatted list's separator survives into the callee's rest arglist
+        // (`foo(c d e...)` binds `$zs` as a SPACE-separated arglist).
+        let mut rest_sep = ListSep::Comma;
         let push_named = |keyword: &mut Vec<(String, Value)>, name: String, v: Value| -> Result<(), Error> {
             let norm = normalize_arg_name(&name);
             if keyword.iter().any(|(n, _)| normalize_arg_name(n) == norm) {
@@ -1464,6 +1469,9 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                     Value::List(l) => {
+                        if !matches!(l.sep, ListSep::Undecided) {
+                            rest_sep = l.sep;
+                        }
                         splat_pos.extend(l.items);
                         // An argument-list splat (`$args...`) also forwards its
                         // captured keyword arguments as named arguments.
@@ -1497,7 +1505,7 @@ impl<'a> Evaluator<'a> {
             }
         }
         explicit_pos.extend(splat_pos);
-        Ok((explicit_pos, keyword))
+        Ok((explicit_pos, keyword, rest_sep))
     }
 
     fn bind_args(
@@ -1518,7 +1526,7 @@ impl<'a> Evaluator<'a> {
         evaled: EvaledArgs,
         name: &str,
     ) -> Result<HashMap<String, Value>, Error> {
-        let (positional, keyword_vec) = evaled;
+        let (positional, keyword_vec, rest_sep) = evaled;
         let mut keyword: HashMap<String, Value> = HashMap::default();
         // Track the order and source spelling of keyword names so an
         // "unknown parameter" error can list them as the caller wrote them.
@@ -1567,7 +1575,7 @@ impl<'a> Evaluator<'a> {
                 rest.clone(),
                 Value::List(List {
                     items: remaining,
-                    sep: ListSep::Comma,
+                    sep: rest_sep,
                     bracketed: false,
                     keywords: Some(kw),
                 }),
@@ -1896,7 +1904,7 @@ impl<'a> Evaluator<'a> {
         // Evaluate apply's own arguments (expanding any `...` splat). The first
         // positional (or named `$mixin`) is the mixin reference; the remainder
         // are forwarded to the mixin.
-        let (mut pos_args, mut named) = self.eval_call_args(args)?;
+        let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
         for v in &mut pos_args {
             *v = std::mem::replace(v, Value::Null).without_slash();
         }
@@ -1951,7 +1959,7 @@ impl<'a> Evaluator<'a> {
                 pos,
             ));
         }
-        let (pos_args, named) = self.eval_call_args(args)?;
+        let (pos_args, named, _) = self.eval_call_args(args)?;
         let mut iter = pos_args.into_iter();
         let mut url_val = iter.next();
         let mut with_val = iter.next();
@@ -2064,7 +2072,11 @@ impl<'a> Evaluator<'a> {
         if content.is_some() && !body_uses_content(&callable.body) {
             return Err(Error::unpositioned("Mixin doesn't accept a content block."));
         }
-        let frame = self.bind_evaled(&callable.params, (pos_args, named), &callable.name)?;
+        let frame = self.bind_evaled(
+            &callable.params,
+            (pos_args, named, ListSep::Comma),
+            &callable.name,
+        )?;
         // A mixin captured from another module runs in that module's environment;
         // its `@content` block runs back at the call site.
         if let Some(module_any) = &mixin.module {
@@ -4785,7 +4797,7 @@ impl<'a> Evaluator<'a> {
                 }
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.
-                let (mut pos_args, mut named) = self.eval_call_args(args)?;
+                let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
                 // The global (deprecated) aliases of the `sass:meta` existence
                 // predicates resolve against the evaluator state, not the
                 // value-only builtin layer. A user-defined function of the same
@@ -4904,7 +4916,7 @@ impl<'a> Evaluator<'a> {
                 ));
             }
         };
-        let (mut pos_args, mut named) = self.eval_call_args(args)?;
+        let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
         for v in &mut pos_args {
             *v = std::mem::replace(v, Value::Null).without_slash();
         }
@@ -5302,7 +5314,11 @@ impl<'a> Evaluator<'a> {
         // `Rc` so the borrow on `f` is released before running the body).
         if let Some(any) = &f.user {
             if let Ok(callable) = Rc::clone(any).downcast::<Callable>() {
-                let frame = self.bind_evaled(&callable.params, (pos_args, named), &callable.name)?;
+                let frame = self.bind_evaled(
+                    &callable.params,
+                    (pos_args, named, ListSep::Comma),
+                    &callable.name,
+                )?;
                 self.push_scope_frame(frame);
                 self.in_mixin.push(false);
                 let result = self.run_fn_body(&callable.body);
@@ -5660,7 +5676,7 @@ impl<'a> Evaluator<'a> {
                 None => member,
             };
             if fb.visible(bare) && crate::builtins::module_has_member(&fb.module, bare) {
-                let (mut pos_args, mut named) = self.eval_call_args(args)?;
+                let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
                 for v in &mut pos_args {
                     *v = std::mem::replace(v, Value::Null).without_slash();
                 }

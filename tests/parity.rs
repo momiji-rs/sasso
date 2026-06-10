@@ -5960,3 +5960,18 @@ fn interpolated_function_name_is_plain_css_call() {
         ours_err(".x {a: f#{o}o($b: 1)}\n").contains("Plain CSS functions don't support keyword arguments.")
     );
 }
+
+#[test]
+fn splat_list_separator_survives_into_arglist() {
+    // A splatted list's separator survives into the callee's rest arglist:
+    // `foo(c d e...)` binds the rest param as a SPACE-separated arglist.
+    assert_eq!(
+        ours("@mixin m($x, $zs...) {z: $zs}\na {@include m(a, c d e...)}\n"),
+        "a {\n  z: c d e;\n}\n"
+    );
+    assert_eq!(
+        ours("@mixin m($x, $zs...) {z: $zs}\na {@include m(a, (c, d, e)...)}\n"),
+        "a {\n  z: c, d, e;\n}\n"
+    );
+    assert_parity("@mixin m($x, $zs...) {z: $zs}\na {@include m(a, c d e...)}\n");
+}
