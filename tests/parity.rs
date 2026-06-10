@@ -6168,3 +6168,21 @@ fn load_css_subtree_clone_and_blank_gating() {
     assert_parity("a {x: y}\n\n@c;\n");
     assert_parity("@media a {x {p: q}}\n\n@media b {y {p: q}}\n");
 }
+
+#[test]
+fn keyframes_nested_at_rules_and_selector_normalization() {
+    // A keyframe block is not a style rule: a nested at-rule stays inside
+    // the frame instead of bubbling out.
+    assert_eq!(
+        ours("@keyframes a {\n  to {@media screen {b: c}}\n}\n"),
+        "@keyframes a {\n  to {\n    @media screen {\n      b: c;\n    }\n  }\n}\n"
+    );
+    // A percentage stop's scientific-notation marker lowercases; the digits
+    // stay verbatim, and `+` is not a combinator here.
+    assert_eq!(
+        ours("@keyframes a {\n  130E-1% {c: d}\n}\n"),
+        "@keyframes a {\n  130e-1% {\n    c: d;\n  }\n}\n"
+    );
+    assert_parity("@keyframes a {\n  13E+1% {c: d}\n}\n");
+    assert_parity("@keyframes a {\n  from {c: d}\n  50.5% {e: f}\n}\n");
+}

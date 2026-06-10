@@ -453,6 +453,10 @@ pub(crate) struct Evaluator<'a> {
     load_css_copies: RefCell<Vec<(String, String)>>,
     /// Monotonic counter for unique load-css copy keys.
     copy_counter: std::cell::Cell<usize>,
+    /// Whether evaluation is inside a `@keyframes` body: frame blocks are not
+    /// style rules in dart-sass, so nested at-rules do not bubble out of them
+    /// and frame selectors get keyframe normalization (`E` -> `e`).
+    in_keyframes: bool,
     /// Global variables that were written by an `@import`ed `@forward` merge,
     /// with the source module each came from (by pointer). In dart-sass such
     /// a variable stays bound to its module: re-importing the SAME forwards
@@ -794,6 +798,7 @@ impl<'a> Evaluator<'a> {
             module_dep_order: RefCell::new(HashMap::default()),
             load_css_copies: RefCell::new(Vec::new()),
             copy_counter: std::cell::Cell::new(0),
+            in_keyframes: false,
             used_modules: HashMap::default(),
             star_modules: Vec::new(),
             used_user_modules: HashMap::default(),
@@ -3746,7 +3751,17 @@ impl<'a> Evaluator<'a> {
             return Err(Error::unpositioned("expected selector."));
         }
         validate_selector(&sel_str, !parents.is_empty())?;
-        let current = resolve_selectors(&sel_str, parents);
+        // A keyframe selector list is stops (`from`, `to`, `13E+1%`), not CSS
+        // selectors: no combinator normalization or parent resolution.
+        let current = if self.in_keyframes {
+            split_commas(&sel_str)
+                .into_iter()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        } else {
+            resolve_selectors(&sel_str, parents)
+        };
         // Drop "bogus combinator" complex selectors from the emitted block;
         // dart-sass omits them from the generated CSS. A top-level TRAILING
         // combinator (`a >`) is bogus as a leaf (its own declaration block is
@@ -3781,7 +3796,14 @@ impl<'a> Evaluator<'a> {
             if complex_selector_block_is_bogus(s) {
                 continue;
             }
-            emit_selectors.push(s.clone());
+            // A keyframe selector's percentage normalizes its exponent marker
+            // to lowercase (`130E-1%` -> `130e-1%`), digits untouched.
+            let s = if self.in_keyframes {
+                normalize_keyframe_selector(s)
+            } else {
+                s.clone()
+            };
+            emit_selectors.push(s);
             emit_linebreaks.push(full_lbs.get(i).copied().unwrap_or(false));
         }
         self.push_scope(false);
@@ -3954,6 +3976,19 @@ impl<'a> Evaluator<'a> {
         }
 
         let queries = self.resolve_media_queries(query)?;
+
+        // Inside a keyframe block an at-rule nests verbatim: the frame is not
+        // a style rule in dart-sass, so there is no bubbling/wrapping.
+        if self.in_keyframes && sink.is_rule() {
+            let prelude = serialize_media_queries(&queries);
+            let out_body = self.eval_at_body(body, &[])?;
+            sink.push_item(OutItem::NestedAtRule {
+                name: "media".to_string(),
+                prelude,
+                items: at_body_to_items(out_body),
+            });
+            return Ok(());
+        }
 
         // Merge with the enclosing media context (dart-sass `_mergeMediaQueries`).
         let merged = if self.media_queries.is_empty() {
@@ -4266,11 +4301,13 @@ impl<'a> Evaluator<'a> {
             }
         }
         let prelude = self.eval_template(prelude)?;
-        let out_body = self.eval_at_body(body, &[])?;
+        let saved_kf = std::mem::replace(&mut self.in_keyframes, true);
+        let out_body = self.eval_at_body(body, &[]);
+        self.in_keyframes = saved_kf;
         sink.push_at_rule(OutNode::AtRule {
             name: name.to_string(),
             prelude,
-            body: out_body,
+            body: out_body?,
             has_block: true,
         });
         Ok(())
@@ -7734,6 +7771,70 @@ fn stmt_uses_content(stmt: &Stmt) -> bool {
 /// (`%x`), a parent reference with a suffix (`&x`), a top-level leading
 /// combinator (`> a`), and a trailing combinator (`a >`). The text is the
 /// already-resolved selector (no interpolation left).
+/// Normalize a keyframe selector: a percentage stop's scientific-notation
+/// marker is lowercased (`130E-1%` -> `130e-1%`); everything else (including
+/// the digits and `from`/`to`) is left verbatim.
+fn normalize_keyframe_selector(s: &str) -> String {
+    if !s.contains('E') {
+        return s.to_string();
+    }
+    let t = s.trim();
+    let is_pct = t.ends_with('%')
+        && t[..t.len() - 1]
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | 'e' | 'E'));
+    if is_pct {
+        s.replace('E', "e")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Convert an at-rule-body node list (as produced by `eval_at_body` with no
+/// parents) into rule items, for at-rules nested verbatim inside keyframe
+/// blocks.
+fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
+    let mut items = Vec::new();
+    for n in nodes {
+        match n {
+            OutNode::AtDecl {
+                prop,
+                value,
+                important,
+                custom,
+            } => items.push(OutItem::Decl {
+                prop,
+                value,
+                important,
+                custom,
+            }),
+            OutNode::Comment(t) => items.push(OutItem::Comment(t)),
+            OutNode::Rule {
+                selectors, items: ri, ..
+            } => items.push(OutItem::NestedRule { selectors, items: ri }),
+            OutNode::AtRule {
+                name,
+                prelude,
+                body,
+                has_block,
+            } => {
+                if has_block {
+                    items.push(OutItem::NestedAtRule {
+                        name,
+                        prelude,
+                        items: at_body_to_items(body),
+                    });
+                } else {
+                    items.push(OutItem::ChildlessAtRule { name, prelude });
+                }
+            }
+            OutNode::ModuleScope { nodes, .. } => items.extend(at_body_to_items(nodes)),
+            OutNode::Raw(_) | OutNode::Blank => {}
+        }
+    }
+    items
+}
+
 fn validate_plain_css_selector(part: &str, top_level: bool) -> Result<(), Error> {
     let trimmed = part.trim();
     let chars: Vec<char> = trimmed.chars().collect();
