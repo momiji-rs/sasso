@@ -2019,31 +2019,39 @@ fn make_modern(mc: ModernColor) -> Color {
     c
 }
 
-/// Normalize a polar color's stored channels: lch/oklch negate-chroma folds to
-/// positive chroma with a 180-degree hue shift, and the hue is reduced to
-/// `[0, 360)`. Other spaces are returned unchanged.
+/// dart `SassColor._normalizeHue`: `(hue % 360 + 360 + (invert ? 180 : 0))
+/// % 360`. The EXACT fmod sequence matters bit-for-bit — adding 360 and
+/// reducing again perturbs the last ulp vs a single euclidean remainder, and
+/// sass-spec expectations carry that perturbation.
+fn normalize_hue(hue: f64, invert: bool) -> f64 {
+    let shift = if invert { 180.0 } else { 0.0 };
+    (hue % 360.0 + 360.0 + shift) % 360.0
+}
+
+/// Normalize a polar color's stored channels exactly like dart's
+/// `SassColor.forSpaceInternal`: hsl and lch/oklch take the ABSOLUTE
+/// saturation/chroma, inverting the hue by 180° when it was negative beyond
+/// fuzz; every legacy/polar hue reduces through [`normalize_hue`]'s fmod
+/// sequence. Other spaces are returned unchanged.
 fn normalize_polar(mut mc: ModernColor) -> ModernColor {
-    if matches!(mc.space, ColorSpace::Lch | ColorSpace::Oklch) {
-        if let Some(c) = mc.channels[1] {
-            if c < 0.0 {
-                mc.channels[1] = Some(-c);
-                if let Some(h) = mc.channels[2] {
-                    mc.channels[2] = Some(h + 180.0);
-                }
-            }
+    let fuzzy_zero = |v: f64| v.abs() < 1e-11;
+    let (hue_idx, mag_idx) = match mc.space {
+        ColorSpace::Hsl => (0, Some(1)),
+        ColorSpace::Hwb => (0, None),
+        ColorSpace::Lch | ColorSpace::Oklch => (2, Some(1)),
+        _ => return mc,
+    };
+    let mut invert = false;
+    if let Some(i) = mag_idx {
+        if let Some(c) = mc.channels[i] {
+            invert = c < 0.0 && !fuzzy_zero(c);
+            mc.channels[i] = Some(c.abs());
         }
     }
-    let hue_idx = match mc.space {
-        ColorSpace::Hsl | ColorSpace::Hwb => Some(0),
-        ColorSpace::Lch | ColorSpace::Oklch => Some(2),
-        _ => None,
-    };
-    if let Some(i) = hue_idx {
-        if let Some(h) = mc.channels[i] {
-            if h.is_finite() {
-                mc.channels[i] = Some(h.rem_euclid(360.0));
-            }
-        }
+    if let Some(h) = mc.channels[hue_idx] {
+        // No finite guard: dart's fmod sends an infinite hue to NaN, and the
+        // spec expects `calc(NaN * 1deg)` for `lch(1% 2 calc(infinity))`.
+        mc.channels[hue_idx] = Some(normalize_hue(h, invert));
     }
     mc
 }
@@ -2325,14 +2333,17 @@ fn channel_number(space: ColorSpace, idx: usize, raw: f64) -> Number {
     use ColorSpace::*;
     let names = space.channel_names();
     let cname = names[idx];
-    let pct = |v: f64| Number::with_unit(v, "%".to_string());
+    // dart's channel() builds a `%` number via `value * 100 / channel.max` —
+    // the round trip perturbs the last ulp on far-range values, and the spec
+    // expectations carry it (a max of 100 is NOT a no-op in floating point).
+    let pct = |v: f64, max: f64| Number::with_unit(v * 100.0 / max, "%".to_string());
     let deg = |v: f64| Number::with_unit(v, "deg".to_string());
     let plain = |v: f64| Number::unitless(v);
     match (space, cname) {
-        (Hsl, "saturation") | (Hsl, "lightness") => pct(raw),
-        (Hwb, "whiteness") | (Hwb, "blackness") => pct(raw),
-        (Lab, "lightness") | (Lch, "lightness") => pct(raw),
-        (Oklab, "lightness") | (Oklch, "lightness") => pct(raw * 100.0),
+        (Hsl, "saturation") | (Hsl, "lightness") => pct(raw, 100.0),
+        (Hwb, "whiteness") | (Hwb, "blackness") => pct(raw, 100.0),
+        (Lab, "lightness") | (Lch, "lightness") => pct(raw, 100.0),
+        (Oklab, "lightness") | (Oklch, "lightness") => pct(raw, 1.0),
         (_, "hue") => deg(raw),
         _ => plain(raw),
     }
@@ -2688,16 +2699,16 @@ fn gamut_map(color: &ModernColor) -> ModernColor {
     clipped
 }
 
-/// The deltaEOK (Euclidean distance in oklab) between two colors — through
-/// `Math.pow(d, 2)` like dart, not `d*d`.
+/// The deltaEOK (Euclidean distance in oklab) between two colors. dart's
+/// `math.pow(d, 2)` is the VM's `d*d` square intrinsic (identical bits to a
+/// correctly-rounded pow for squares).
 fn delta_eok(a: &ModernColor, b: &ModernColor) -> f64 {
-    use crate::musl_math::pow;
     let a = convert_modern(a, ColorSpace::Oklab);
     let b = convert_modern(b, ColorSpace::Oklab);
     let dl = z(a.channels[0]) - z(b.channels[0]);
     let da = z(a.channels[1]) - z(b.channels[1]);
     let db = z(a.channels[2]) - z(b.channels[2]);
-    (pow(dl, 2.0) + pow(da, 2.0) + pow(db, 2.0)).sqrt()
+    (dl * dl + da * da + db * db).sqrt()
 }
 
 /// Build a modern legacy color (rgb/hsl) from a [`Channels`] set when it

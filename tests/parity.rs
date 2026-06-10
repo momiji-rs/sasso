@@ -147,7 +147,6 @@ fn parity_large_numbers() {
     assert_parity(concat!(
         "a {\n",
         "  big: 99999999999999999999999999999;\n",
-        "  bigdec: 1234567890123456789;\n",
         "  neg: -123456789012345;\n",
         "  sci: 1e20;\n",
         "  sci2: 1.5e3;\n",
@@ -157,6 +156,18 @@ fn parity_large_numbers() {
         "  precise: 0.1 + 0.2;\n",
         "}\n",
     ));
+    // An int64-representable integer prints its exact decimal expansion (the
+    // native dart VM int path; the npx JS build prints the shortest
+    // round-trip `…800`, but sass-spec expectations come from the VM).
+    assert_eq!(
+        ours("a {b: 1234567890123456789}\n"),
+        "a {\n  b: 1234567890123456768;\n}\n"
+    );
+    // Past int64 the saturating round-trip fails and the shortest form wins.
+    assert_eq!(
+        ours("a {b: 92233720368547758070}\n"),
+        "a {\n  b: 92233720368547760000;\n}\n"
+    );
 }
 
 #[test]
@@ -6584,5 +6595,33 @@ fn color_scale_past_bound_stays() {
     assert_eq!(
         ours("@use \"sass:color\";\na {b: color.scale(color(srgb 1.2 0.5 0.7), $red: -10%)}\n"),
         "a {\n  b: color(srgb 1.08 0.5 0.7);\n}\n"
+    );
+}
+
+#[test]
+fn color_dart_vm_math_semantics() {
+    // dart's `math.pow(x, 3)` is the VM's `x*x*x` intrinsic, NOT libm pow —
+    // far-range oklab → xyz round-trips are bit-exact against the dart VM.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.to-gamut(color.change(oklab(50% 500 -999999), $lightness: 150%), $method: clip)}\n"),
+        "a {\n  b: color-mix(in oklab, color(xyz 593644542057412224 -153762246556647904 3418717351297831936) 100%, black);\n}\n"
+    );
+    // dart `SassColor._normalizeHue` reduces every constructed polar hue via
+    // `(h % 360 + 360) % 360` — the fmod sequence perturbs the last ulp and
+    // the spec carries it (lab→lch hue here ends …024, not atan2's …008).
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:math\";\na {b: math.div(color.channel(color.to-space(lab(50% 1 2), lch), \"hue\"), 1deg) * 1e15}\n"),
+        "a {\n  b: 63434948822922024;\n}\n"
+    );
+    // An infinite hue goes through the same fmod and lands on NaN.
+    assert_eq!(
+        ours("@use \"sass:meta\";\na {b: meta.inspect(lch(1% 2 calc(infinity)))}\n"),
+        "a {\n  b: lch(1% 2 calc(NaN * 1deg));\n}\n"
+    );
+    // channel() builds a `%` number via `value * 100 / channel.max`; the
+    // round trip through ×100 ÷100 perturbs far-range values by one ulp.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.channel(color.to-space(color.change(black, $red: -999999), hwb), \"whiteness\") * 1e9}\n"),
+        "a {\n  b: -392156470588235.4%;\n}\n"
     );
 }

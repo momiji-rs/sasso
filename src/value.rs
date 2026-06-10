@@ -2095,12 +2095,19 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
             "-Infinity".to_string()
         };
     }
-    // Integers (including huge literals well beyond `2^53`) print via the
-    // shortest round-tripping form, which never overflows into exponential
-    // notation and matches dart-sass. Multiplying by `1e10` to round would
-    // corrupt large magnitudes, so it is reserved for fractional values.
+    // Integers print the way the dart VM does: `fuzzyAsInt` converts the
+    // double to a NATIVE int64 (saturating, exactly like Rust's `as i64`)
+    // and prints its exact decimal expansion — `593644542057412224`, not the
+    // shortest-roundtrip `…200`. A magnitude past int64 fails the round-trip
+    // check (saturation changes the value) and falls back to the shortest
+    // form, which never overflows into exponential notation.
     let mut s = if n.fract() == 0.0 {
-        format!("{n}")
+        let i = n as i64;
+        if i as f64 == n {
+            format!("{i}")
+        } else {
+            format!("{n}")
+        }
     } else {
         // Round to 10 decimal places the way dart-sass does: scale by 1e10,
         // round half away from zero (`f64::round`), then re-emit the shortest
@@ -2306,8 +2313,13 @@ mod tests {
         assert_eq!(fmt_num(123456789012345.0, false), "123456789012345");
         assert_eq!(fmt_num(-123456789012345.0, false), "-123456789012345");
         assert_eq!(fmt_num(1e20, false), "100000000000000000000");
-        // Beyond 2^53 the shortest round-tripping form matches dart-sass.
-        assert_eq!(fmt_num(1234567890123456789.0, false), "1234567890123456800");
+        // Within int64, the exact decimal expansion (dart VM int printing).
+        assert_eq!(fmt_num(1234567890123456789.0, false), "1234567890123456768");
+        assert_eq!(fmt_num(593644542057412224.0, false), "593644542057412224");
+        // 2^63 saturates to int64 max and still round-trips (dart VM).
+        assert_eq!(fmt_num(9223372036854775808.0, false), "9223372036854775807");
+        // Beyond int64 the shortest round-tripping form matches dart-sass.
+        assert_eq!(fmt_num(92233720368547758070.0, false), "92233720368547760000");
         assert_eq!(
             fmt_num(99999999999999999999999999999.0, false),
             "100000000000000000000000000000"

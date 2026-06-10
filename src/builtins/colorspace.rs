@@ -324,6 +324,20 @@ pub(super) fn srgb_to_hwb(rgb: [f64; 3]) -> [f64; 3] {
 
 // ---- lab / lch (dart `LabColorSpace` / `XyzD50ColorSpace`) ---------------
 
+/// dart's `math.pow(x, 3)` compiles to `x*x*x` on the VM (small-integer
+/// exponents are intrinsics, NOT the libm pow) — using the real pow here
+/// drifts a ulp from the dart-VM oracle on far-range inputs.
+#[inline]
+fn cube(t: f64) -> f64 {
+    t * t * t
+}
+
+/// dart's `math.pow(x, 2)` intrinsic (see [`cube`]).
+#[inline]
+fn square(t: f64) -> f64 {
+    t * t
+}
+
 const LAB_EPSILON: f64 = 0.008856451679035631; // 216/24389
 const LAB_KAPPA: f64 = 903.2962962962963; // 24389/27
 const D50_X: f64 = 0.9642956764295677;
@@ -331,7 +345,7 @@ const D50_Z: f64 = 0.8251046025104602;
 
 /// dart `LabColorSpace._convertFToXorZ`.
 fn lab_f_to_x_or_z(component: f64) -> f64 {
-    let cubed = pow(component, 3.0);
+    let cubed = cube(component);
     if cubed > LAB_EPSILON {
         cubed
     } else {
@@ -344,7 +358,7 @@ fn lab_to_xyz_d50(lab: [f64; 3]) -> [f64; 3] {
     let f1 = (lab[0] + 16.0) / 116.0;
     let x = lab_f_to_x_or_z(lab[1] / 500.0 + f1) * D50_X;
     let y = if lab[0] > 8.0 {
-        pow(f1, 3.0)
+        cube(f1)
     } else {
         lab[0] / LAB_KAPPA
     };
@@ -379,9 +393,9 @@ pub(super) fn lch_to_lab(lch: [f64; 3]) -> [f64; 3] {
 }
 
 /// lab-style [L, a, b] -> lch-style [L, chroma, hue-deg] (dart `labToLch`:
-/// `pow(a, 2)` — through the SAME pow — and a `+360` negative-hue fold).
+/// `pow(a, 2)` — the VM's square intrinsic — and a `+360` negative-hue fold).
 pub(super) fn lab_to_lch(lab: [f64; 3]) -> [f64; 3] {
-    let chroma = (pow(lab[1], 2.0) + pow(lab[2], 2.0)).sqrt();
+    let chroma = (square(lab[1]) + square(lab[2])).sqrt();
     let mut hue = lab[2].atan2(lab[1]) * 180.0 / PI;
     if hue < 0.0 {
         hue += 360.0;
@@ -392,13 +406,13 @@ pub(super) fn lab_to_lch(lab: [f64; 3]) -> [f64; 3] {
 // ---- oklab / oklch (dart `OklabColorSpace` / `LmsColorSpace`) ------------
 
 /// oklab [L, a, b] -> LMS (dart `OklabColorSpace.convert`: matrix rows cubed
-/// through `pow(x, 3)`).
+/// through `pow(x, 3)` — the VM's `x*x*x` intrinsic).
 fn oklab_to_lms(oklab: [f64; 3]) -> [f64; 3] {
     let m = &OKLAB_TO_LMS;
     [
-        pow(m[0] * oklab[0] + m[1] * oklab[1] + m[2] * oklab[2], 3.0),
-        pow(m[3] * oklab[0] + m[4] * oklab[1] + m[5] * oklab[2], 3.0),
-        pow(m[6] * oklab[0] + m[7] * oklab[1] + m[8] * oklab[2], 3.0),
+        cube(m[0] * oklab[0] + m[1] * oklab[1] + m[2] * oklab[2]),
+        cube(m[3] * oklab[0] + m[4] * oklab[1] + m[5] * oklab[2]),
+        cube(m[6] * oklab[0] + m[7] * oklab[1] + m[8] * oklab[2]),
     ]
 }
 
