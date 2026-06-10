@@ -6631,7 +6631,10 @@ fn number_format_dart_tostring_semantics() {
     // dart rounds the SHORTEST decimal spelling at the string level (11th
     // digit, half-up): 2154.15598416745's true value is …44978 (below the
     // half), but its shortest spelling ends in `5`, so dart rounds UP.
-    assert_eq!(ours("a {b: 2154.15598416745}\n"), "a {\n  b: 2154.1559841675;\n}\n");
+    assert_eq!(
+        ours("a {b: 2154.15598416745}\n"),
+        "a {\n  b: 2154.1559841675;\n}\n"
+    );
     // ECMA toString tie-break: 657390374199289.25 has two equidistant
     // shortest spellings; dart picks the EVEN final digit (…289.2).
     assert_eq!(
