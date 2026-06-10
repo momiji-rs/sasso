@@ -1883,7 +1883,7 @@ impl<'a> Evaluator<'a> {
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
         pos: Pos,
-        _parents: &[String],
+        parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         if content.is_some() {
@@ -1961,7 +1961,7 @@ impl<'a> Evaluator<'a> {
         let mut buf: Vec<OutNode> = Vec::new();
         let consumed = {
             let mut module_sink = Sink::Top(&mut buf);
-            let (_module, consumed) = self.load_module(&url, config, pos, &[], &mut module_sink)?;
+            let (_module, consumed) = self.load_module(&url, config, pos, parents, true, &mut module_sink)?;
             consumed
         };
         if conf_keys.iter().any(|k| !consumed.contains(k)) {
@@ -2167,7 +2167,7 @@ impl<'a> Evaluator<'a> {
         // A user stylesheet module.
         let conf = self.eval_config(config)?;
         let conf_keys: Vec<String> = conf.keys().cloned().collect();
-        let (module, consumed) = self.load_module(url, conf, pos, &[], sink)?;
+        let (module, consumed) = self.load_module(url, conf, pos, &[], false, sink)?;
         // Any configured variable the module did not consume via a `!default`
         // declaration is an error.
         if conf_keys.iter().any(|k| !consumed.contains(k)) {
@@ -2254,6 +2254,7 @@ impl<'a> Evaluator<'a> {
         config: HashMap<String, (Value, bool)>,
         pos: Pos,
         parents: &[String],
+        force_reemit: bool,
         sink: &mut Sink<'_>,
     ) -> Result<(Rc<Module>, Vec<String>), Error> {
         let importer = self.options.importer;
@@ -2301,7 +2302,13 @@ impl<'a> Evaluator<'a> {
             }
             // The cached module consumed nothing (it defines none of the
             // configured variables); the caller's own/forwarded handling decides
-            // whether the leftover configuration is an error.
+            // whether the leftover configuration is an error. `meta.load-css`
+            // still re-emits the cached CSS at the call site.
+            if force_reemit {
+                for node in reparent_nodes(existing.css.clone(), parents) {
+                    sink.push_at_rule(node);
+                }
+            }
             return Ok((existing, Vec::new()));
         }
         // Guard against a load cycle.
@@ -2971,7 +2978,7 @@ impl<'a> Evaluator<'a> {
         if !forward_conf.is_empty() {
             self.config_is_implicit = false;
         }
-        let load_result = self.load_module(url, combined, pos, parents, sink);
+        let load_result = self.load_module(url, combined, pos, parents, false, sink);
         self.config_is_implicit = saved_implicit;
         let (module, consumed) = load_result?;
 

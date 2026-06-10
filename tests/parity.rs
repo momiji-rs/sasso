@@ -5593,3 +5593,24 @@ fn import_forward_module_semantics() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn load_css_reemits_cached_module() {
+    // `meta.load-css` re-emits a cached module's CSS at every call site,
+    // nested under the enclosing rule; an explicit second `$with` still
+    // errors ("already loaded").
+    let dir = std::env::temp_dir().join(format!("sasso_load_css_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    std::fs::write(dir.join("_m.scss"), "b {c: d}\n").unwrap();
+    assert_eq!(
+        compile(
+            "@use \"sass:meta\";\n@include meta.load-css(\"m\");\nx {@include meta.load-css(\"m\");}\n",
+            &opts
+        )
+        .expect("load twice"),
+        "b {\n  c: d;\n}\n\nx b {\n  c: d;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
