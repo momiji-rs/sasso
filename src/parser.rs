@@ -3960,15 +3960,29 @@ impl Parser {
                     let ws_after = matches!(self.sc.peek_at(1), Some(c) if c.is_whitespace())
                         || (self.sc.peek_at(1) == Some('/')
                             && matches!(self.sc.peek_at(2), Some('*') | Some('/')));
-                    // dart-sass: `+`/`-` is a binary operator unless it has
-                    // whitespace before but NOT after — then it is a unary sign
-                    // beginning a new space-separated list term (`1 -2` is the
-                    // list `1 -2`, while `1-2`, `1- 2` and `1 - 2` all subtract).
-                    // Inside a calculation it must be surrounded on both sides.
+                    // dart-sass: `+`/`-` in operator position is binary unless
+                    // it has whitespace before but NOT after AND begins a new
+                    // space-list term. A `+` here is ALWAYS binary (`c +d` is
+                    // `c + d`, the strict-unary deprecation case); a `-` starts
+                    // a new term only when it begins a number (`1 -2`) or an
+                    // identifier (`c -d`, `-#{…}`) — otherwise (`c -$d`,
+                    // `10 -(2)`, `c -"x"`) it is binary too. Inside a
+                    // calculation it must be surrounded on both sides.
                     let binary = if self.calc_depth > 0 {
                         had_ws && ws_after
+                    } else if !had_ws || ws_after {
+                        true
                     } else {
-                        !had_ws || ws_after
+                        match op {
+                            BinOp::Add => true,
+                            _ => {
+                                let n1 = self.sc.peek_at(1);
+                                let starts_term = matches!(n1, Some(c) if c.is_ascii_digit() || c == '.' || c == '-' || c == '_' || c.is_alphabetic())
+                                    || (n1 == Some('#') && self.sc.peek_at(2) == Some('{'))
+                                    || n1 == Some('\\');
+                                !starts_term
+                            }
+                        }
                     };
                     if binary {
                         // Outside a calculation, `+`/`-` is a Sass operator,

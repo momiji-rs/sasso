@@ -5502,3 +5502,18 @@ fn calc_space_splice_and_minmax_compatibility() {
     assert!(compile("a {b: min(3, 1c, 2d)}\n", &Options::default()).is_err());
     assert!(compile("a {b: min(1px, 2em, 3)}\n", &Options::default()).is_err());
 }
+
+#[test]
+fn strict_unary_plus_minus() {
+    // dart-sass strict-unary: in operator position with whitespace before but
+    // not after, `+` is ALWAYS binary (`c +d` is `c + d`); `-` starts a new
+    // space-list term only before a number or identifier.
+    assert_eq!(ours("a {b: c +d}\n"), "a {\n  b: cd;\n}\n");
+    assert_eq!(ours("a {b: 1 +2}\n"), "a {\n  b: 3;\n}\n");
+    assert_eq!(ours("a {b: 10 +5px}\n"), "a {\n  b: 15px;\n}\n");
+    assert_eq!(ours("a {b: c -d}\n"), "a {\n  b: c -d;\n}\n");
+    assert_eq!(ours("a {b: 1 -2}\n"), "a {\n  b: 1 -2;\n}\n");
+    assert_eq!(ours("$d: 5;\na {b: c -$d}\n"), "a {\n  b: c-5;\n}\n");
+    assert_eq!(ours("a {b: 10 -(2)}\n"), "a {\n  b: 8;\n}\n");
+    assert_eq!(ours("a {b: c -\"x\"}\n"), "a {\n  b: c-\"x\";\n}\n");
+}
