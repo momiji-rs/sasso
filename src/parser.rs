@@ -3751,10 +3751,21 @@ impl Parser {
             let adjacent_string = !had_ws
                 && self.at_value_atom_start()
                 && (prev_was_string || matches!(self.sc.peek(), Some('"') | Some('\'')));
+            // An interpolation directly after a complete atom begins a new
+            // term with an implicit separator (`1#{0}` is the list `1 0`), as
+            // does a `-#{…}` interpolated identifier (`10-#{10}` → `10 -10`);
+            // an interpolation that continues an identifier was already
+            // consumed by the identifier template, so a `#{` seen here is a
+            // fresh atom.
+            let adjacent_interp = !had_ws
+                && ((self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{'))
+                    || (self.sc.peek() == Some('-')
+                        && self.sc.peek_at(1) == Some('#')
+                        && self.sc.peek_at(2) == Some('{')));
             // A lone `=` (not `==`) ends the space-list so an enclosing
             // argument list can apply the single-`=` Microsoft-filter operator
             // (`foo(a = b)`); `==` stays the equality operator, parsed above.
-            if (!had_ws && !adjacent_string)
+            if (!had_ws && !adjacent_string && !adjacent_interp)
                 || self.at_value_terminator()
                 || (self.sc.peek() == Some('=') && self.sc.peek_at(1) != Some('='))
             {
@@ -3952,6 +3963,19 @@ impl Parser {
                 Some('-') => Some(BinOp::Sub),
                 _ => None,
             };
+            // A `-` directly followed by `#{` begins an interpolated
+            // identifier (`10-#{10}` is the list `10 -10`), never a
+            // subtraction — regardless of surrounding whitespace. After a
+            // quoted string a `-` that begins an identifier (`"q"-l`) likewise
+            // starts a new term (dart-sass can't continue a string token).
+            if matches!(op, Some(BinOp::Sub)) {
+                let interp_next = self.sc.peek_at(1) == Some('#') && self.sc.peek_at(2) == Some('{');
+                let ident_next = matches!(self.sc.peek_at(1), Some(c) if c.is_alphabetic() || c == '_' || c == '-' || c == '\\');
+                if interp_next || (expr_is_quoted_string(&lhs) && ident_next) {
+                    self.sc.reset(mark);
+                    break;
+                }
+            }
             match op {
                 Some(op) => {
                     // Whitespace OR a comment (`/* */`, `//`) immediately
@@ -4211,6 +4235,18 @@ impl Parser {
                 self.skip_ws_inline();
                 if !self.sc.eat('}') {
                     return Err(Error::at("expected \"}\"", self.sc.position()));
+                }
+                // A directly-following identifier character (or another
+                // interpolation) continues the same interpolated identifier:
+                // `#{1}0` is the single token `10`, `#{1}px` is `1px` (a
+                // string), matching dart-sass `identifierLike`.
+                if matches!(self.sc.peek(), Some(c) if is_ident_char(c))
+                    || (self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{'))
+                    || self.sc.peek() == Some('\\')
+                {
+                    let mut pieces = vec![TplPiece::Interp(e)];
+                    pieces.extend(self.parse_ident_template()?);
+                    return Ok(Expr::Ident(pieces));
                 }
                 Ok(Expr::Interp(Box::new(e)))
             }
@@ -4554,9 +4590,23 @@ impl Parser {
             self.sc.bump();
             unit.push('%');
         } else {
-            while matches!(self.sc.peek(), Some(c) if c.is_ascii_alphabetic()) {
-                if let Some(c) = self.sc.bump() {
-                    unit.push(c);
+            loop {
+                match self.sc.peek() {
+                    Some(c) if c.is_ascii_alphabetic() => {
+                        self.sc.bump();
+                        unit.push(c);
+                    }
+                    // dart `identifier(unit: true)`: a `-` joins the unit
+                    // unless a digit or dot follows (so `10px-10px` still
+                    // subtracts but `10px- 10px` is the unit `px-`).
+                    Some('-') if !unit.is_empty() => match self.sc.peek_at(1) {
+                        Some(c) if c.is_ascii_digit() || c == '.' => break,
+                        _ => {
+                            self.sc.bump();
+                            unit.push('-');
+                        }
+                    },
+                    _ => break,
                 }
             }
         }

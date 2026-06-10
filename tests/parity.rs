@@ -5517,3 +5517,22 @@ fn strict_unary_plus_minus() {
     assert_eq!(ours("a {b: 10 -(2)}\n"), "a {\n  b: 8;\n}\n");
     assert_eq!(ours("a {b: c -\"x\"}\n"), "a {\n  b: c-\"x\";\n}\n");
 }
+
+#[test]
+fn interp_adjacency_and_unit_dash() {
+    // Interpolation adjacency (dart `identifierLike` + implicit list
+    // separators): `1#{0}` is the list `1 0`, `#{1}0` the single token `10`,
+    // `10-#{10}` the list `10 -10`; a quoted string followed by `-ident`
+    // starts a new term; a number's unit eats a trailing `-` unless a digit
+    // follows; a color divided by a string slash-joins.
+    assert_eq!(ours("a {b: 1#{0}}\n"), "a {\n  b: 1 0;\n}\n");
+    assert_eq!(ours("a {b: #{1}0}\n"), "a {\n  b: 10;\n}\n");
+    assert_eq!(ours("a {b: #{1}px}\n"), "a {\n  b: 1px;\n}\n");
+    assert_eq!(ours("a {b: 10-#{10}}\n"), "a {\n  b: 10 -10;\n}\n");
+    assert_eq!(ours("a {b: \"q\"-l}\n"), "a {\n  b: \"q\" -l;\n}\n");
+    assert_eq!(ours("a {b: \"q\" - l}\n"), "a {\n  b: \"q\"-l;\n}\n");
+    assert_eq!(ours("a {b: 10px- 10px}\n"), "a {\n  b: 10px- 10px;\n}\n");
+    assert_eq!(ours("a {b: 10px-10px}\n"), "a {\n  b: 0px;\n}\n");
+    assert_eq!(ours("a {b: 10em-1}\n"), "a {\n  b: 9em;\n}\n");
+    assert_eq!(ours("a {b: #AAA/#{itpl}}\n"), "a {\n  b: #AAA/itpl;\n}\n");
+}

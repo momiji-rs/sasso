@@ -6378,9 +6378,13 @@ pub(crate) fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Valu
     }
     match (l.clone().without_slash(), r.clone().without_slash()) {
         (Value::Number(a), Value::Number(b)) => divide_numbers(&a, &b, pos),
-        // dart-sass: `SassColor.dividedBy` throws "Undefined operation"; a
-        // color on the *left* of `/` is the one error case here.
-        (lv @ Value::Color(_), rv) => Err(undefined_op(&lv, "/", &rv, pos)),
+        // dart-sass: `SassColor.dividedBy` throws "Undefined operation" when
+        // the right side is a number or another color; any other right side
+        // (a string, `var()`, …) falls back to the slash join below
+        // (`#AAA/#{itpl}` → `#AAA/itpl`).
+        (lv @ Value::Color(_), rv @ (Value::Number(_) | Value::Color(_))) => {
+            Err(undefined_op(&lv, "/", &rv, pos))
+        }
         // Every other left/right pair (a calculation, `var()`, unquoted
         // string, list, `true`/`null`, or a number divided by a non-number)
         // forms a slash-separated unquoted string `left/right`, mirroring
