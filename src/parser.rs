@@ -46,6 +46,13 @@ enum CommentMode {
     /// before the prelude template starts. Applied only at the top level;
     /// nested content is kept verbatim.
     UnknownPrelude,
+    /// A declaration's property name: like `Strip`, except that ONE loud
+    /// comment directly glued to the name (no whitespace between) joins it
+    /// verbatim — dart `_declarationOrBuffer` appends `rawText(loudComment)`
+    /// to the name buffer when `/*` immediately follows the identifier
+    /// (issue_1422: `foo/*c*/: bar` keeps the comment, `foo /*c*/ : bar`
+    /// drops it).
+    DeclName,
 }
 
 enum MessageKind {
@@ -867,7 +874,7 @@ impl Parser {
         if colon_hack {
             self.sc.bump();
         }
-        let mut property = self.parse_template_mode(&[':'], CommentMode::Strip)?;
+        let mut property = self.parse_template_mode(&[':'], CommentMode::DeclName)?;
         if colon_hack {
             match property.first_mut() {
                 Some(TplPiece::Lit(lit)) => lit.insert(0, ':'),
@@ -3752,6 +3759,9 @@ impl Parser {
         let mut lit = String::new();
         let mut paren = 0i32;
         let mut bracket = 0i32;
+        // Whether a glued loud comment already joined a DeclName template
+        // (dart appends at most ONE `rawText(loudComment)` to the name).
+        let mut glued = false;
         while let Some(c) = self.sc.peek() {
             if paren == 0 && bracket == 0 && stops.contains(&c) {
                 break;
@@ -3760,7 +3770,7 @@ impl Parser {
             if c == '/' && comments != CommentMode::Keep {
                 let top = paren == 0 && bracket == 0;
                 let strip_here = match comments {
-                    CommentMode::Strip => true,
+                    CommentMode::Strip | CommentMode::DeclName => true,
                     CommentMode::StripTopLevel | CommentMode::UnknownPrelude => top,
                     CommentMode::Keep => false,
                 };
@@ -3768,11 +3778,19 @@ impl Parser {
                     match self.sc.peek_at(1) {
                         Some('*') => {
                             // A loud comment is kept verbatim for unknown
-                            // preludes (dart-sass preserves it); otherwise it
-                            // collapses to whitespace.
-                            if comments == CommentMode::UnknownPrelude {
+                            // preludes (dart-sass preserves it) and when glued
+                            // directly to a declaration name (issue_1422);
+                            // otherwise it collapses to whitespace.
+                            let glue_to_name = comments == CommentMode::DeclName
+                                && !glued
+                                && lit
+                                    .chars()
+                                    .last()
+                                    .map_or(!pieces.is_empty(), |p| !p.is_whitespace());
+                            if comments == CommentMode::UnknownPrelude || glue_to_name {
                                 let text = self.consume_loud_comment();
                                 lit.push_str(&text);
+                                glued = true;
                             } else {
                                 let _ = self.consume_loud_comment();
                                 lit.push(' ');

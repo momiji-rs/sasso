@@ -7338,3 +7338,19 @@ fn interp_string_newlines_raw_at_top_level_collapse_inside_lists() {
         "a {\n  b: \"q x y\";\n  c: \"x y, x y\";\n}\n"
     );
 }
+
+#[test]
+fn loud_comment_glued_to_property_name_joins_it() {
+    // dart _declarationOrBuffer appends ONE rawText(loudComment) to the name
+    // when `/*` directly follows the identifier (issue_1422); a whitespace-
+    // separated comment is mid-trivia and drops.
+    assert_eq!(ours(".a { foo/*c*/: bar; }\n"), ".a {\n  foo/*c*/: bar;\n}\n");
+    assert_eq!(ours(".a { foo /*c*/ : bar; }\n"), ".a {\n  foo: bar;\n}\n");
+    // Only the first glued comment joins; later ones are trivia.
+    assert_eq!(
+        ours(".a { foo/*a*/ /*b*/: bar; }\n"),
+        ".a {\n  foo/*a*/: bar;\n}\n"
+    );
+    // An interpolated name glues the same way.
+    assert_eq!(ours(".a { #{f}oo/*c*/: bar; }\n"), ".a {\n  foo/*c*/: bar;\n}\n");
+}
