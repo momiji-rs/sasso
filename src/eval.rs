@@ -9571,6 +9571,10 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
 /// within their part. Each part is a contiguous substring of `s`, so callers
 /// that need an owned `String` call `.to_string()` themselves.
 fn split_commas(s: &str) -> Vec<&str> {
+    // No comma anywhere means one segment, whatever the nesting structure.
+    if !s.as_bytes().contains(&b',') {
+        return vec![s];
+    }
     let mut out = Vec::new();
     let mut paren = 0i32;
     let mut bracket = 0i32;
@@ -9599,6 +9603,45 @@ fn split_commas(s: &str) -> Vec<&str> {
 /// preceding simple with a descendant combinator (`[a] b`), matching
 /// dart-sass's `[adjacent-compounds]` normalization.
 fn normalize_selector(s: &str) -> String {
+    // Fast path: already-canonical selectors skip the two char-vector
+    // materializations below. Equivalence was proven by a check build that
+    // asserted fast == slow on every call across the full sass-spec suite.
+    if is_canonical_plain(s) {
+        return s.to_string();
+    }
+    normalize_selector_slow(s)
+}
+
+/// Whether `s` is already in canonical form without running the normalizer:
+/// only plain compound characters (ASCII letters/digits, `_-.#%`) separated
+/// by single descendant spaces, with no leading/trailing space. Every rewrite
+/// `normalize_selector` performs — whitespace collapse, hex-escape handling,
+/// attribute/pseudo/combinator canonicalization — is triggered by a character
+/// outside this set.
+fn is_canonical_plain(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.is_empty() || b[0] == b' ' || b[b.len() - 1] == b' ' {
+        return false;
+    }
+    let mut prev_space = false;
+    for &c in b {
+        match c {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'#' | b'%' => {
+                prev_space = false;
+            }
+            b' ' => {
+                if prev_space {
+                    return false;
+                }
+                prev_space = true;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn normalize_selector_slow(s: &str) -> String {
     // Collapse runs of whitespace to single spaces (and trim) — but a hex
     // escape's single terminating whitespace is PART of the token
     // (`selector\9 ` keeps its trailing space; dart emits `selector\9  {`).
@@ -9828,6 +9871,12 @@ fn tokenize_complex(s: &str) -> Vec<SelToken<'_>> {
 /// here (it is kept, or handled separately by the nesting rules). The check
 /// recurses into selector pseudo arguments (`:is()`, `:not()`, …).
 fn complex_selector_is_bogus(s: &str, in_pseudo: bool, allow_leading: bool) -> bool {
+    // Bogus-ness needs a combinator (`>`/`+`/`~`) or a selector-pseudo
+    // argument (which needs a `(`); a selector containing none of those
+    // bytes cannot be bogus, so skip the tokenization entirely.
+    if !has_bogus_trigger(s) {
+        return false;
+    }
     let tokens = tokenize_complex(s);
     if tokens.is_empty() {
         return false;
@@ -9870,11 +9919,23 @@ fn complex_selector_is_bogus(s: &str, in_pseudo: bool, allow_leading: bool) -> b
 /// (`a >`): a trailing combinator is valid only for nesting, so the leaf block
 /// it would head is omitted while the selector still serves as a parent.
 fn complex_selector_block_is_bogus(s: &str) -> bool {
+    if !has_bogus_trigger(s) {
+        return false;
+    }
     if complex_selector_is_bogus(s, false, false) {
         return true;
     }
     let tokens = tokenize_complex(s);
     matches!(tokens.last(), Some(SelToken::Combinator))
+}
+
+/// Whether `s` contains any byte that could make a complex selector bogus: a
+/// combinator, or the `(` of a selector-pseudo argument to recurse into.
+/// Escaped spellings (`\>`) still contain the trigger byte, so anything
+/// suspicious takes the full tokenizing path.
+fn has_bogus_trigger(s: &str) -> bool {
+    s.bytes()
+        .any(|c| matches!(c, b'>' | b'+' | b'~' | b'('))
 }
 
 /// Whether `name` (a pseudo-class/element name, case-insensitive, without the
