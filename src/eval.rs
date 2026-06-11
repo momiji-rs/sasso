@@ -5471,7 +5471,19 @@ impl<'a> Evaluator<'a> {
             match arg {
                 ImportArg::Css { url, modifiers } => {
                     let text = self.serialize_css_import(url, modifiers)?;
-                    sink.push_at_rule(OutNode::Raw(format!("@import {text};")));
+                    // Inside a style rule the plain-CSS @import stays in the
+                    // rule's block (dart keeps it nested:
+                    // `foo { @import url(...); }`); at the top level it is a
+                    // Raw node subject to import hoisting.
+                    if matches!(sink, Sink::Rule { .. }) {
+                        sink.push_item(OutItem::ChildlessAtRule {
+                            name: "import".to_string(),
+                            prelude: text,
+                            lines: SrcLines::default(),
+                        });
+                    } else {
+                        sink.push_at_rule(OutNode::Raw(format!("@import {text};")));
+                    }
                 }
                 ImportArg::Sass { path, pos, length } => {
                     if is_css_import(path) {
