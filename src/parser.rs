@@ -5111,7 +5111,13 @@ impl Parser {
         } else {
             loop {
                 match self.sc.peek() {
-                    Some(c) if c.is_ascii_alphabetic() => {
+                    Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                        self.sc.bump();
+                        unit.push(c);
+                    }
+                    // An identifier BODY may contain digits (`1a2b3c` is the
+                    // single unit `a2b3c`), just not start with one.
+                    Some(c) if c.is_ascii_digit() && !unit.is_empty() => {
                         self.sc.bump();
                         unit.push(c);
                     }
@@ -5125,6 +5131,21 @@ impl Parser {
                             unit.push('-');
                         }
                     },
+                    // A unit may START with `-` only when an identifier
+                    // follows (`1-em` is 1 with unit `-em`; `1--em` is the
+                    // list `1 --em`, `1- 2` subtracts).
+                    Some('-') if unit.is_empty() => match self.sc.peek_at(1) {
+                        Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                            self.sc.bump();
+                            unit.push('-');
+                        }
+                        _ => break,
+                    },
+                    // A CSS escape is part of the unit, decoded like any
+                    // identifier (`1\65 m` is the unit `em`).
+                    Some('\\') => {
+                        unit.push(self.read_escape_char()?);
+                    }
                     _ => break,
                 }
             }

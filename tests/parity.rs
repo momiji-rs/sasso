@@ -7186,6 +7186,18 @@ fn pseudo_parent_ref_takes_whole_parent_list() {
 }
 
 #[test]
+fn unit_identifier_grammar() {
+    // dart `identifier(unit: true)`: a unit body may contain digits
+    // (`1a2b3c`), underscores, escapes (`1\65 m` is `em`), and may START
+    // with `-` when an identifier follows (`1-em` minus `2-em` is `-1-em`)
+    // — while `1--em` stays the list `1 --em` and `1- 2` subtracts.
+    assert_eq!(
+        ours("@use \"sass:meta\";\na { v: meta.type-of(1a2b3c); w: (1-em-2-em); x: (1\\65 _em); y: (1--em); z: (1- 2); }\n"),
+        "a {\n  v: number;\n  w: -1-em;\n  x: 1e_em;\n  y: 1 --em;\n  z: -1;\n}\n"
+    );
+}
+
+#[test]
 fn content_block_runs_in_child_scope() {
     // A content block is a user-defined callable: a `$var:` first declared
     // inside it stays local to the block, so a global-only variable is NOT
