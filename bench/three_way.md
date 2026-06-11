@@ -1,111 +1,131 @@
 # sasso vs dart-sass vs grass — benchmark report
 
-Three SCSS compilers, same corpus, same machine. Headline: **sasso is the
-fastest engine on every axis measured** — it beats dart-sass by ~16–25×
-end-to-end (and ~24× on pure compute), and leads `grass` (the incumbent Rust
-compiler) by **~1.9–2.4×** after the allocation/hashing work plus a scoped
-bump-arena allocator (see the repo CHANGELOG).
+SCSS compilers, same corpus, same machine. Headline: **sasso is the fastest
+engine on every axis measured** — ~2.1× faster than `grass` (the incumbent
+Rust compiler) on pure compile throughput, ~6× faster than dart-sass's
+fastest form (the native-VM compiler daemon that `sass-embedded` runs), and
+~24× faster end-to-end than the dart-sass JS CLI that `npx sass` executes.
 
 > Reproduce: `cd bench && RUNS=12 WARMUP=3 LOOP_N=200 bash scripts/run_bench.sh`
-> (then transcribe the numbers here). Correctness is verified separately — see
-> [Correctness](#correctness).
+> (then transcribe the numbers here). For low-noise A/B comparisons of two
+> sasso builds, prefer instructions retired (`/usr/bin/time -l`) plus
+> interleaved min-of-N wall — CPU contention steals cycles, not instructions.
+> Correctness is verified separately — see [Correctness](#correctness).
 
 ## Environment
 
 | | |
 | --- | --- |
 | Machine | Apple M2 Max, 12 cores |
-| OS | macOS 26.3.1 (arm64) |
-| Tool | `hyperfine`, 12 timed runs, 3 warmups |
-| sasso | 0.1.0 (this repo, `--release`, with perf #1/#3 + the scoped bump arena) |
-| dart-sass | 1.100.0 (dart2js 3.12.0) — cached binary **and** via `npx sass` |
+| OS | macOS 26.3.0 (arm64) |
+| Tool | `hyperfine` (`-N` where startup matters), ≥10 timed runs, warmups |
+| sasso | 0.1.0 @ master `ec7f955` (fmt/linebreaks/arena-registry/mul-div perf round) |
+| dart-sass | 1.100.0 — JS CLI (dart2js, what `npx sass` runs), native-VM CLI, `sass-embedded` 1.100.0, and the `sass` JS library in-process |
 | grass | 0.13.4 (`grass_runner`, `--release`, same `lto`/`codegen-units` as sasso) |
 
 ## Results
 
-### 1. Startup cost (compile a 1-rule file ≈ pure process startup)
+### 1. Startup cost (compile a 1-rule file; `/usr/bin/true` = the OS floor)
 
-| Engine | Time | vs sasso |
+| Engine | Time | Above floor |
 | --- | --- | --- |
-| **sasso** | **1.5 ms** | 1× |
-| grass | 1.5 ms | ~tie |
-| dart-sass (bin) | 138 ms | **~90× slower** |
-| npx sass | 522 ms | **~340× slower** |
+| `/usr/bin/true` | 1.1 ms | — |
+| **sasso** | **1.8 ms** | **0.7 ms** |
+| grass | 1.7 ms | 0.6 ms (~tie) |
+| dart-sass (native VM) | 22.4 ms | 21.3 ms |
+| dart-sass (JS bin) | 146 ms | 145 ms |
+| npx sass | ~1 s | — |
+
+sasso's own startup cost is ~0.7 ms over the bare process floor — not worth
+chasing; batch mode or the library/wasm builds remove it entirely.
 
 ### 2. Cold single-file (one large file, ~25k lines of CSS out, end-to-end)
 
 | Engine | Time | vs sasso |
 | --- | --- | --- |
-| **sasso** | **14.2 ms** | 1× |
-| grass | 26.9 ms | **1.89× slower** |
-| dart-sass (bin) | 356 ms | **25× slower** |
-| npx sass | 1.05 s | **73× slower** |
+| **sasso** | **15.4 ms** | 1× |
+| grass | 27.3 ms | **1.8× slower** |
+| dart-sass (native VM) | 84.5 ms | **5.5× slower** |
+| dart-sass (JS bin) | 365 ms | **24× slower** |
 
 ### 3. Amortized batch (40 medium files, **one** invocation — startup shared)
 
 | Engine | Total | Per file | vs sasso |
 | --- | --- | --- | --- |
-| **sasso** | **58.9 ms** | **1.47 ms** | 1× |
-| grass | 135 ms | 3.39 ms | **2.30× slower** |
-| dart-sass (bin) | 934 ms | 23.4 ms | **15.9× slower** |
+| **sasso** | **65.2 ms** | **1.63 ms** | 1× |
+| grass | 138 ms | 3.46 ms | **2.1× slower** |
+| dart-sass (JS bin) | 960 ms | 24.0 ms | **14.7× slower** |
 
-### 4. Pure compile throughput (in-process loop, **startup removed**)
+### 4. Pure compile throughput (in-process / daemon, startup removed)
 
-| Source | sasso | grass | sasso advantage |
-| --- | --- | --- | --- |
-| large file (×200) | **9.0 ms/compile** (110/s) | 21.4 ms/compile (47/s) | **2.36× faster** |
-| handwritten (×1000) | **0.196 ms/compile** (5106/s) | 0.408 ms/compile (2450/s) | **2.08× faster** |
+| Engine | large (ms/compile) | handwritten (ms/compile) |
+| --- | --- | --- |
+| **sasso** (`--loop`) | **9.8–10.4** | **0.27** |
+| grass (`--loop`) | 21.9 (2.1–2.2×) | 0.40 (1.5×) |
+| sass-embedded `initCompiler()` (native VM daemon) | 63.8 (6.1×) | 3.49 (13×) |
+| `sass` JS library in-process | 97.1 (9.3×) | 2.83 (10×) |
+| sass-embedded default `compile()` | 101.8 (9.7×) | 39.6 (147×) |
 
-dart-sass has no in-process loop mode, but its pure compute derives from
-cold-large (356 ms) − startup (138 ms) ≈ **~218 ms**, vs sasso's **9.0 ms** —
-i.e. **sasso is ~24× faster than dart-sass on pure compute**.
+Two findings worth knowing about the dart-sass forms:
+
+- `sass-embedded`'s default `compile()` **spawns a fresh compiler process per
+  call** (~38 ms fixed); the daemon numbers require its explicit
+  `initCompiler()` API.
+- The embedded protocol costs ~1–3 ms of IPC per compile, so on small files
+  the pure-JS `sass` library beats the native-VM daemon; the native VM only
+  wins on large files.
+
+### 5. sasso as wasm (Node, in-process)
+
+| Build | large (ms/compile) | Size |
+| --- | --- | --- |
+| npm `-Oz` (shipped) | 38.3 | 778 KB / 319 KB gzip |
+| speed (`opt-level=3` + `wasm-opt -O3`) | 21.1 | 1.43 MB / 525 KB gzip |
+
+The wasm tax vs native sasso is ~2× (and the wasm build runs without the
+bump arena). Even so, the speed build **ties native grass** and beats every
+dart-sass form available to a Node toolchain by 3–4.6×.
 
 ## What changed since the last report
 
-The previous report (perf #1/#3 only) had sasso at 18.9 ms cold / 14.0 ms pure
-and ~1.5× over grass. A **scoped bump-arena allocator** pushed it further:
+The 99%-conformance push (13,297 → 13,774 passing) had regressed pure
+compile from ~9.0 to ~13.4 ms. A perf round recovered it (−27%):
 
-| | system alloc | **scoped arena** |
-| --- | --- | --- |
-| cold large | 18.9 ms | **14.2 ms** |
-| pure compile (large) | 14.0 ms | **9.0 ms** (~1.5×) |
-| vs grass (pure) | 1.55× | **2.36×** |
-| vs dart-sass (cold) | 19× | **25×** |
+| Fix | Effect |
+| --- | --- |
+| fmt: skip the ECMA re-round for tie-free number spellings | −17% wall |
+| emit: skip selector line-break bookkeeping when no breaks exist | −2% |
+| arena: dealloc classifies via a global region registry, not TLS | −2.8% |
+| value: fast-path unitless `mul`/`div` (no unit-list Vecs) | −0.8% |
 
-Within each `compile()` a per-thread arena turns every allocation into a pointer
-bump; the whole arena is reset (freed) when the compile ends. Because reset
-reuses the *same* region every compile, it has excellent cache locality — it
-beats both a never-freeing one-shot bump and `mimalloc` in measurement, while
-staying zero-dependency (hand-written) and not leaking across compiles.
+Method notes that paid off: bisect by **instructions retired** (load-immune,
+reproducible to ~0.1%); an Acquire-ordered registry variant measured **+7%
+wall on M2 Max** (ldar stalls) — write-once slots make all-Relaxed sound.
 
 ### Safety of the arena
 
-The arena is the library's one audited `unsafe` module (the rest is
-`deny(unsafe_code)`). It was verified by:
-
-- **Miri** — no UB (out-of-bounds, misalignment, provenance, use-after-free).
-- **AddressSanitizer** — the full unit + integration + parity suites, clean.
-- **Full sass-spec under the live arena** — all 11,445 passing cases run through
-  the allocator with **zero crashes** and **byte-identical** output (delta +0).
-- **Concurrency** — 8 threads × 2,000 = 16,000 concurrent compiles, each
-  byte-identical (per-thread arenas don't interfere).
-- **Memory-stable** — 1,500 repeated compiles hold RSS flat (reset works; no
-  growth), so a long-running library embedder won't leak.
+The arena remains the library's one audited `unsafe` module (the rest is
+`deny(unsafe_code)`), verified by Miri (standalone twin), AddressSanitizer,
+the full sass-spec suite under the live allocator (byte-identical, zero
+crashes), and `tests/arena_threads.rs` (8 threads × 200 concurrent compiles,
+byte-identical results against the shared region registry).
 
 ## Takeaways
 
-- **vs dart-sass**: ~16–25× faster end-to-end, ~24× on pure compute, ~90× on
-  startup — and ~73× vs the `npx sass` path most pipelines use.
-- **vs grass** (the strong incumbent Rust compiler): now ~1.9× cold / ~2.3×
-  batch / ~2.4× pure-throughput, while targeting *current* dart-sass semantics
-  (CSS Color 4, modern color serialization) that grass (pinned to dart-sass
-  1.54.3) predates.
+- **vs grass** (same-Rust incumbent): ~2.1× on pure throughput and batch,
+  ~1.8× cold — while targeting *current* dart-sass semantics (CSS Color 4,
+  modern serialization) that grass (pinned to dart-sass 1.54.3) predates.
+- **vs dart-sass**: ~6× against its fastest deployable form (native-VM
+  daemon, large files); 10–24× against the forms most pipelines actually run
+  (JS library, JS CLI, per-call embedded).
+- **As wasm**, sasso is the fastest SCSS compiler available inside a JS
+  runtime, by ~3× over `sass-embedded`.
 
 ## Correctness
 
 On both corpus files, sasso is **byte-identical to dart-sass 1.100.0** after
-whitespace + color-serialization canonicalization (and, as above, on the full
-sass-spec suite):
+whitespace + color-serialization canonicalization (and on the full sass-spec
+suite: 13,774 passing, 99.06% of attempted):
 
 ```bash
 cd bench
@@ -117,15 +137,15 @@ for f in corpus/handwritten/main.scss corpus/generated/large.scss; do
 done
 ```
 
-The broader oracle is the official sass-spec suite — see the repo-root
-[Conformance](../README.md#conformance) section (~82%).
-
 ## Caveats
 
 - One machine (Apple M2 Max), one corpus. Absolute numbers are hardware- and
   corpus-dependent; the **ratios** are the durable signal.
 - The corpus exercises the implemented feature subset, not the full sass-spec
   surface.
-- dart-sass's per-invocation startup is fixed cost; on a single huge file the
-  end-to-end ratio shrinks toward the pure-compute ratio, and on many small
-  files it grows.
+- dart-sass per-invocation startup is fixed cost; on one huge file the
+  end-to-end ratio shrinks toward the pure-compute ratio, on many small files
+  it grows.
+- The handwritten corpus triggers `@import` deprecation warnings; sasso and
+  dart-sass both render them (suppressed via logger in the dart loops),
+  grass does not.
