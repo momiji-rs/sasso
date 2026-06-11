@@ -225,6 +225,16 @@ enum Sink<'a> {
         lines: SrcLines,
         items: &'a mut Vec<OutItem>,
         nested: &'a mut Vec<OutNode>,
+        /// The at-rule nesting depth of this rule's body (`at_rule_ctx.len()`
+        /// at construction): an `@at-root` hoist marker whose batch escapes
+        /// this body (target < depth) is transparent to block anchoring, while
+        /// one grafting INTO this body (target == depth) is a solid sibling.
+        at_depth: usize,
+        /// Index in `nested` of the most recently flushed block fragment, so a
+        /// later fragment can JOIN it when only escaping hoist markers landed
+        /// in between (dart adds both declaration runs to the same style-rule
+        /// copy because the escaped batches aren't siblings inside this node).
+        flushed: &'a mut Option<usize>,
     },
     /// The body of a top-level at-rule (no enclosing selector): bare
     /// declarations land here directly as [`OutNode::AtDecl`], interleaved
@@ -377,6 +387,8 @@ impl Sink<'_> {
             lines,
             items,
             nested,
+            at_depth,
+            flushed,
         } = self
         {
             if !items.is_empty() {
@@ -385,20 +397,34 @@ impl Sink<'_> {
                 if selectors.is_empty() {
                     items.clear();
                 } else {
+                    // The rule's block precedes any hoist markers that
+                    // accumulated while it was open (the bubbled rules leave
+                    // the style rule entirely and follow it in the output);
+                    // an `@at-root` graft INTO this body (target == depth) is
+                    // a real sibling, so the block stays after it.
+                    let insert_at = nested
+                        .iter()
+                        .position(|n| is_escaping_marker(n, *at_depth))
+                        .unwrap_or(nested.len());
+                    // Both declaration runs target the same style-rule copy
+                    // when only escaped batches landed between them (dart's
+                    // entry copy has no following sibling inside this node).
+                    if insert_at > 0 && **flushed == Some(insert_at - 1) {
+                        if let Some(OutNode::Rule { items: prev, .. }) = nested.get_mut(insert_at - 1) {
+                            prev.append(*items);
+                            return;
+                        }
+                        // (a non-Rule at that index can't happen: `flushed`
+                        // only ever records a flushed block fragment)
+                    }
                     let rule = OutNode::Rule {
                         selectors: selectors.to_vec(),
                         linebreaks: linebreaks.to_vec(),
                         items: std::mem::take(*items),
                         lines: *lines,
                     };
-                    // The rule's block precedes any media-hoist markers that
-                    // accumulated while it was open (the bubbled rules leave
-                    // the style rule entirely and follow it in the output).
-                    let insert_at = nested
-                        .iter()
-                        .position(|n| matches!(n, OutNode::Raw(s) if s == MEDIA_HOIST_MARKER))
-                        .unwrap_or(nested.len());
                     nested.insert(insert_at, rule);
+                    **flushed = Some(insert_at);
                 }
             }
         }
@@ -441,12 +467,16 @@ impl Sink<'_> {
                 push_group(out, vec![node]);
             }
             Sink::Rule { .. } => {
-                // A media-hoist (or at-root-hoist) marker only matters to an
-                // OUTER at-rule's segmenting: the bubbled batch leaves this
-                // style rule entirely, so its own block is NOT split around it.
-                let is_hoist_marker = matches!(&node, OutNode::Raw(s)
-                    if s == MEDIA_HOIST_MARKER || s == AT_ROOT_HOIST_MARKER);
-                if !is_hoist_marker {
+                // A hoist marker whose batch ESCAPES this body only matters to
+                // an OUTER at-rule's segmenting: the batch leaves this style
+                // rule entirely, so its own block is NOT split around it. An
+                // `@at-root` graft INTO this body is a real sibling and splits
+                // the block like any other bubbled child.
+                let depth = match self {
+                    Sink::Rule { at_depth, .. } => *at_depth,
+                    _ => 0,
+                };
+                if !is_escaping_marker(&node, depth) {
                     self.flush_rule_block();
                 }
                 if let Sink::Rule { nested, .. } = self {
@@ -554,9 +584,9 @@ pub(crate) struct Evaluator<'a> {
     /// inner rule leaves in the outer body.
     media_hoist: Vec<Vec<OutNode>>,
     /// Batches hoisted by `@at-root` queries, taken in order at the
-    /// `AT_ROOT_HOIST_MARKER`s; each batch is already re-wrapped in its kept
-    /// (non-excluded) at-rule layers and travels outward to the root.
-    at_root_hoist: std::collections::VecDeque<Vec<OutNode>>,
+    /// `AT_ROOT_HOIST_MARKER`s; each batch is already re-wrapped in the kept
+    /// at-rule layers BELOW its graft target and travels outward to it.
+    at_root_hoist: std::collections::VecDeque<AtRootBatch>,
     /// The enclosing at-rule layers (outermost first), so `@at-root` queries
     /// can re-wrap their body in the layers the query keeps.
     at_rule_ctx: Vec<AtCtx>,
@@ -4538,6 +4568,8 @@ impl<'a> Evaluator<'a> {
         });
         let mut items: Vec<OutItem> = Vec::new();
         let mut nested: Vec<OutNode> = Vec::new();
+        let mut flushed: Option<usize> = None;
+        let at_depth = self.at_rule_ctx.len();
         let result = {
             let mut child = Sink::Rule {
                 selectors: &emit_selectors,
@@ -4545,6 +4577,8 @@ impl<'a> Evaluator<'a> {
                 lines: rule_lines,
                 items: &mut items,
                 nested: &mut nested,
+                at_depth,
+                flushed: &mut flushed,
             };
             let r = self.exec(&rule.body, &current, &mut child);
             // Flush any declarations/loud comments that follow the last nested
@@ -4667,6 +4701,8 @@ impl<'a> Evaluator<'a> {
         } else {
             let mut items: Vec<OutItem> = Vec::new();
             let mut nested: Vec<OutNode> = Vec::new();
+            let mut flushed: Option<usize> = None;
+            let at_depth = self.at_rule_ctx.len();
             let res = {
                 let mut child = Sink::Rule {
                     selectors: parents,
@@ -4676,6 +4712,8 @@ impl<'a> Evaluator<'a> {
                     lines: SrcLines::default(),
                     items: &mut items,
                     nested: &mut nested,
+                    at_depth,
+                    flushed: &mut flushed,
                 };
                 let r = self.exec(stmts, parents, &mut child);
                 if r.is_ok() {
@@ -4754,7 +4792,7 @@ impl<'a> Evaluator<'a> {
         let enclosing = !self.media_queries.is_empty();
         let saved = std::mem::replace(&mut self.media_queries, child_queries);
         let saved_hoist = std::mem::take(&mut self.media_hoist);
-        let outermost_at_rule = self.at_rule_ctx.is_empty();
+        let own_depth = self.at_rule_ctx.len();
         self.at_rule_ctx.push(AtCtx::Media {
             prelude: prelude.clone(),
         });
@@ -4783,22 +4821,43 @@ impl<'a> Evaluator<'a> {
             }
         };
         for n in out_body {
+            let at_root_target = match &n {
+                OutNode::Raw(s) => at_root_marker_target(s),
+                _ => None,
+            };
             if matches!(&n, OutNode::Raw(s) if s == MEDIA_HOIST_MARKER) {
                 flush(&mut segment, &mut result, &prelude);
                 if let Some(batch) = hoist_iter.next() {
                     result.extend(batch);
                 }
-            } else if matches!(&n, OutNode::Raw(s) if s == AT_ROOT_HOIST_MARKER) {
-                // An @at-root batch escaping this media: split around it. The
-                // outermost at-rule layer places the batch here (just after
-                // its own segment); inner layers pass the marker outward.
-                flush(&mut segment, &mut result, &prelude);
-                if outermost_at_rule {
-                    if let Some(batch) = self.at_root_hoist.pop_front() {
-                        result.extend(batch);
-                        result.push(OutNode::Raw(AT_ROOT_PACK_TIGHT.to_string()));
+            } else if let Some(t) = at_root_target {
+                if t == own_depth + 1 {
+                    // The batch grafts INTO this rule's own body (dart adds
+                    // it to the existing node at its current end): it joins
+                    // the current segment in place, splitting nothing.
+                    if let Some(b) = self.at_root_hoist.pop_front() {
+                        debug_assert_eq!(b.target, t);
+                        segment.extend(b.nodes);
+                    }
+                } else if own_depth == 0 {
+                    // A root-bound batch: split around it, placing it just
+                    // after this rule's current segment at the root.
+                    flush(&mut segment, &mut result, &prelude);
+                    if let Some(b) = self.at_root_hoist.pop_front() {
+                        debug_assert_eq!(b.target, t);
+                        result.extend(b.nodes);
+                        result.push(OutNode::Raw(
+                            if b.group_end {
+                                STYLE_GROUP_END
+                            } else {
+                                AT_ROOT_PACK_TIGHT
+                            }
+                            .to_string(),
+                        ));
                     }
                 } else {
+                    // Bound further out: split and pass the marker outward.
+                    flush(&mut segment, &mut result, &prelude);
                     result.push(n);
                 }
             } else {
@@ -4954,7 +5013,7 @@ impl<'a> Evaluator<'a> {
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         let prelude = self.serialize_supports_condition(condition)?;
-        let outermost_at_rule = self.at_rule_ctx.is_empty();
+        let own_depth = self.at_rule_ctx.len();
         self.at_rule_ctx.push(AtCtx::Supports {
             prelude: prelude.clone(),
         });
@@ -4980,14 +5039,32 @@ impl<'a> Evaluator<'a> {
             }
         };
         for n in out_body {
-            if matches!(&n, OutNode::Raw(s) if s == AT_ROOT_HOIST_MARKER) {
-                flush(&mut segment, &mut result);
-                if outermost_at_rule {
-                    if let Some(batch) = self.at_root_hoist.pop_front() {
-                        result.extend(batch);
-                        result.push(OutNode::Raw(AT_ROOT_PACK_TIGHT.to_string()));
+            let at_root_target = match &n {
+                OutNode::Raw(s) => at_root_marker_target(s),
+                _ => None,
+            };
+            if let Some(t) = at_root_target {
+                if t == own_depth + 1 {
+                    // Grafts INTO this rule's own body: joins the current
+                    // segment in place (dart appends to the existing node).
+                    if let Some(b) = self.at_root_hoist.pop_front() {
+                        segment.extend(b.nodes);
+                    }
+                } else if own_depth == 0 {
+                    flush(&mut segment, &mut result);
+                    if let Some(b) = self.at_root_hoist.pop_front() {
+                        result.extend(b.nodes);
+                        result.push(OutNode::Raw(
+                            if b.group_end {
+                                STYLE_GROUP_END
+                            } else {
+                                AT_ROOT_PACK_TIGHT
+                            }
+                            .to_string(),
+                        ));
                     }
                 } else {
+                    flush(&mut segment, &mut result);
                     result.push(n);
                 }
             } else {
@@ -5149,7 +5226,7 @@ impl<'a> Evaluator<'a> {
         }
         let prelude = self.eval_template(prelude)?;
         let saved_kf = std::mem::replace(&mut self.in_keyframes, true);
-        let outermost_at_rule = self.at_rule_ctx.is_empty();
+        let own_depth = self.at_rule_ctx.len();
         self.at_rule_ctx.push(AtCtx::Keyframes {
             name: name.to_string(),
             prelude: prelude.clone(),
@@ -5163,11 +5240,26 @@ impl<'a> Evaluator<'a> {
         let mut shell: Vec<OutNode> = Vec::new();
         let mut after: Vec<OutNode> = Vec::new();
         for n in out_body {
-            if matches!(&n, OutNode::Raw(s) if s == AT_ROOT_HOIST_MARKER) {
-                if outermost_at_rule {
-                    if let Some(batch) = self.at_root_hoist.pop_front() {
-                        after.extend(batch);
-                        after.push(OutNode::Raw(AT_ROOT_PACK_TIGHT.to_string()));
+            let at_root_target = match &n {
+                OutNode::Raw(s) => at_root_marker_target(s),
+                _ => None,
+            };
+            if let Some(t) = at_root_target {
+                if t == own_depth + 1 {
+                    if let Some(b) = self.at_root_hoist.pop_front() {
+                        shell.extend(b.nodes);
+                    }
+                } else if own_depth == 0 {
+                    if let Some(b) = self.at_root_hoist.pop_front() {
+                        after.extend(b.nodes);
+                        after.push(OutNode::Raw(
+                            if b.group_end {
+                                STYLE_GROUP_END
+                            } else {
+                                AT_ROOT_PACK_TIGHT
+                            }
+                            .to_string(),
+                        ));
                     }
                 } else {
                     after.push(n);
@@ -5208,15 +5300,18 @@ impl<'a> Evaluator<'a> {
             None => None,
         };
         let q = AtRootQuery::parse(query_text.as_deref());
-        // Which enclosing at-rule layers the query keeps (re-wrapped around
-        // the hoisted body) vs excludes (escaped). dart `AtRootQuery.excludes`.
-        let kept: Vec<AtCtx> = self
+        // Which enclosing at-rule layers the query keeps vs excludes (dart
+        // `AtRootQuery.excludes`). The topmost excluded layer is the graft
+        // target (dart `_trimIncluded`): kept layers ABOVE it stay in place
+        // (the batch re-enters inside the innermost of them), kept layers
+        // BELOW it are copied around the hoisted body.
+        let excluded: Vec<bool> = self
             .at_rule_ctx
             .iter()
-            .filter(|c| !q.excludes_name(c.query_name()))
-            .cloned()
+            .map(|c| q.excludes_name(c.query_name()))
             .collect();
-        let any_excluded_layer = kept.len() != self.at_rule_ctx.len();
+        let first_excluded = excluded.iter().position(|&e| e);
+        let any_excluded_layer = first_excluded.is_some();
         // `(with: all)`-style queries that exclude nothing run in place.
         if !any_excluded_layer && !q.excludes_style_rules() {
             return self.exec(body, parents, sink);
@@ -5321,16 +5416,23 @@ impl<'a> Evaluator<'a> {
         if spaced.is_empty() {
             return Ok(());
         }
-        if any_excluded_layer {
-            // Escape the enclosing at-rules: re-wrap the body in the KEPT
-            // layers (innermost-last) and leave a marker; each enclosing
-            // layer splits around it and passes it outward to the root.
+        if let Some(te) = first_excluded {
+            // Escape the excluded at-rules: re-wrap the body in the kept
+            // layers BELOW the graft target (innermost-last) and leave a
+            // marker; each enclosing layer below the target splits around it
+            // and passes it outward until the target layer consumes it.
             let mut batch = spaced;
-            for layer in kept.iter().rev() {
-                batch = vec![layer.wrap(batch)];
+            for (i, layer) in self.at_rule_ctx.iter().enumerate().rev() {
+                if i > te && !excluded[i] {
+                    batch = vec![layer.wrap(batch)];
+                }
             }
-            self.at_root_hoist.push_back(batch);
-            sink.push_at_rule(OutNode::Raw(AT_ROOT_HOIST_MARKER.to_string()));
+            self.at_root_hoist.push_back(AtRootBatch {
+                target: te,
+                group_end: parents.is_empty(),
+                nodes: batch,
+            });
+            sink.push_at_rule(OutNode::Raw(format!("{AT_ROOT_HOIST_MARKER}{te}")));
         } else {
             // No layer escaped: the body stays inside the enclosing at-rules
             // (only the style-rule join was disabled), so emit in place.
@@ -8877,9 +8979,12 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     if group.is_empty() {
         return;
     }
-    // A pack-tight sentinel attaches to the previous group verbatim — no
-    // separator logic now, and the NEXT group packs tight against it.
-    if group.len() == 1 && matches!(&group[0], OutNode::Raw(s) if s == AT_ROOT_PACK_TIGHT) {
+    // A pack-tight or group-end sentinel attaches to the previous group
+    // verbatim — no separator logic now; the NEXT group packs tight against
+    // a pack-tight sentinel and blank-separates after a group-end one.
+    if group.len() == 1
+        && matches!(&group[0], OutNode::Raw(s) if s == AT_ROOT_PACK_TIGHT || s == STYLE_GROUP_END)
+    {
         out.append(&mut group);
         return;
     }
@@ -9132,15 +9237,46 @@ fn dirname_of(key: &str) -> Option<String> {
 /// rule bubbled out; the outer rule splits its own children around it.
 const MEDIA_HOIST_MARKER: &str = "\u{0}MEDIA_HOIST\u{0}";
 
-/// Sentinel left where an `@at-root` hoisted a (fully re-wrapped) batch out
-/// of the enclosing at-rules; each enclosing media/supports/keyframes layer
-/// splits around it and passes it outward until the outermost layer places
-/// the batch after itself at the root.
+/// Sentinel left where an `@at-root` hoisted a batch out of one or more
+/// enclosing at-rules, suffixed with the batch's graft target (the index of
+/// the topmost EXCLUDED at-rule layer — dart `_trimIncluded`). Each enclosing
+/// layer below the target splits around the marker and passes it outward; the
+/// layer whose body sits at the target depth consumes it — target 0 means the
+/// batch re-enters at the document root, between the outermost layer's
+/// segments, while a deeper target grafts INTO that layer's own body.
 const AT_ROOT_HOIST_MARKER: &str = "\u{0}AT_ROOT_HOIST\u{0}";
 
 /// Trailing sentinel after a placed at-root batch: the next top-level group
 /// packs tight against it (no blank line), and the emitters skip it.
 const AT_ROOT_PACK_TIGHT: &str = "\u{0}ATR_TIGHT\u{0}";
+
+/// An `@at-root` batch awaiting its graft point (paired with a hoist marker).
+struct AtRootBatch {
+    /// Index of the topmost excluded at-rule layer = the depth the batch
+    /// re-enters the tree at (0 = document root).
+    target: usize,
+    /// Whether the `@at-root` ran with no enclosing style rule: dart then
+    /// marks the batch's last node as a group end (the next root-level node
+    /// gets a blank line) instead of packing tight.
+    group_end: bool,
+    nodes: Vec<OutNode>,
+}
+
+/// Parse an `@at-root` hoist marker's encoded graft target.
+fn at_root_marker_target(s: &str) -> Option<usize> {
+    s.strip_prefix(AT_ROOT_HOIST_MARKER).and_then(|t| t.parse().ok())
+}
+
+/// Whether `n` is a hoist marker whose batch escapes a body at `depth`:
+/// media hoists always escape; an at-root batch escapes when its graft
+/// target lies outside this body. Escaping markers are transparent to
+/// block anchoring (the batch is not a sibling inside this node).
+fn is_escaping_marker(n: &OutNode, depth: usize) -> bool {
+    match n {
+        OutNode::Raw(s) => s == MEDIA_HOIST_MARKER || at_root_marker_target(s).is_some_and(|t| t < depth),
+        _ => false,
+    }
+}
 
 /// One enclosing at-rule layer recorded for `@at-root` queries: the data
 /// needed to re-wrap a hoisted body in that layer (dart's "included" copies).
@@ -9404,13 +9540,12 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
                 },
                 _ if quote.is_some() => {}
                 '(' | '[' => stack.push(c),
-                ')' => {
-                    if stack.pop() == Some('[') {
+                ')' | ']' => {
+                    let open = stack.pop();
+                    if c == ')' && open == Some('[') {
                         return Err(Error::unpositioned("expected \"]\"."));
                     }
-                }
-                ']' => {
-                    if stack.pop() == Some('(') {
+                    if c == ']' && open == Some('(') {
                         return Err(Error::unpositioned("expected \")\"."));
                     }
                 }

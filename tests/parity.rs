@@ -7223,3 +7223,35 @@ fn trailing_comments_join_previous_line() {
         "a {\n  b: c;\n  /* own line */\n}\n"
     );
 }
+
+#[test]
+fn at_root_batches_graft_at_their_target_layer() {
+    // dart visitAtRootRule + _trimIncluded: an `@at-root (without: media)`
+    // batch re-enters the tree at the topmost EXCLUDED layer. Escaping the
+    // outermost at-rule appends the batch at the root AFTER the in-progress
+    // @media node (issue_1890) — never before it.
+    assert_eq!(
+        ours(".w {\n  @media (min-width: 480px) {\n    display: block;\n    @at-root (without: media) {\n      .box { display: inline-block; }\n    }\n  }\n}\n"),
+        "@media (min-width: 480px) {\n  .w {\n    display: block;\n  }\n}\n.w .box {\n  display: inline-block;\n}\n"
+    );
+    // Declarations before AND after the at-root join ONE style-rule copy in
+    // the original media (dart's entry copy has no following sibling inside
+    // the media node); a post-marker RULE splits into a media copy instead.
+    assert_eq!(
+        ours(".w {\n  @media m {\n    a: 1;\n    @at-root (without: media) { .b { v: 1; } }\n    .pm { c: 3; }\n    d: 4;\n  }\n}\n"),
+        "@media m {\n  .w {\n    a: 1;\n    d: 4;\n  }\n}\n.w .b {\n  v: 1;\n}\n@media m {\n  .w .pm {\n    c: 3;\n  }\n}\n"
+    );
+    // A kept layer ABOVE the excluded one is the graft root: the batch lands
+    // INSIDE the existing @supports node at its current end, and a later
+    // declaration copy follows it there.
+    assert_eq!(
+        ours(".w {\n  @supports (display: flex) {\n    @media m {\n      a: 1;\n      @at-root (without: media) { .box { b: 2; } }\n    }\n    c: 9;\n  }\n}\n"),
+        "@supports (display: flex) {\n  @media m {\n    .w {\n      a: 1;\n    }\n  }\n  .w .box {\n    b: 2;\n  }\n  .w {\n    c: 9;\n  }\n}\n"
+    );
+    // With no enclosing style rule dart marks the batch's last node as a
+    // group end: the next root node gets a blank line.
+    assert_eq!(
+        ours("@media a {\n  .x { p: 1; }\n  @at-root (without: media) { .b { v: 1; } }\n  .z { r: 3; }\n}\n"),
+        "@media a {\n  .x {\n    p: 1;\n  }\n}\n.b {\n  v: 1;\n}\n\n@media a {\n  .z {\n    r: 3;\n  }\n}\n"
+    );
+}
