@@ -5960,6 +5960,7 @@ impl<'a> Evaluator<'a> {
                         | "content-exists"
                         | "get-function"
                         | "call"
+                        | "keywords"
                 ) {
                     for v in &mut pos_args {
                         *v = std::mem::replace(v, Value::Null).without_slash();
