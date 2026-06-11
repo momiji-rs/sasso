@@ -1289,6 +1289,19 @@ pub(crate) fn calc_units_incompatible(a: &str, b: &str) -> bool {
     }
 }
 
+/// dart `Value.isBlank`: `null`, an EMPTY unquoted string, or a list whose
+/// every element is blank. Blank elements vanish from list serialization
+/// (`foo #{""}` emits `foo`, separator included).
+fn value_is_blank(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Str(s) => !s.quoted && s.text.is_empty(),
+        // A BRACKETED list is never blank (`[[]]` and `foo []` survive).
+        Value::List(l) => !l.bracketed && l.items.iter().all(value_is_blank),
+        _ => false,
+    }
+}
+
 impl List {
     fn to_css(&self, compressed: bool) -> String {
         let sep = match (self.sep, compressed) {
@@ -1303,7 +1316,7 @@ impl List {
         let inner = self
             .items
             .iter()
-            .filter(|v| !matches!(v, Value::Null))
+            .filter(|v| !value_is_blank(v))
             .map(|v| v.to_css(compressed))
             .collect::<Vec<_>>()
             .join(sep);
@@ -1323,7 +1336,7 @@ impl List {
         let inner = self
             .items
             .iter()
-            .filter(|v| !matches!(v, Value::Null))
+            .filter(|v| !value_is_blank(v))
             .map(|v| v.to_interp())
             .collect::<Vec<_>>()
             .join(sep);

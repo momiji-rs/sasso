@@ -4420,10 +4420,13 @@ impl<'a> Evaluator<'a> {
     fn serialize_media_feature(&mut self, f: &MediaFeature) -> Result<String, Error> {
         match f {
             MediaFeature::Decl { name, value } => {
-                let n = self.eval_expr(name)?.to_css(self.compressed());
+                // Media-feature names and values serialize in interpolation
+                // context: a quoted string unquotes (`("min-width:#{$w}")`
+                // emits `(min-width:20px)`), numbers are unchanged.
+                let n = self.eval_expr(name)?.to_interp();
                 match value {
                     Some(v) => {
-                        let val = self.eval_expr(v)?.to_css(self.compressed());
+                        let val = self.eval_expr(v)?.to_interp();
                         Ok(format!("{n}: {val}"))
                     }
                     None => Ok(n),

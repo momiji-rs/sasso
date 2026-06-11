@@ -6910,3 +6910,24 @@ fn progid_string_interpolation() {
         ".foo {\n  filter: progid:DXImageTransform.Microsoft.AlphaImageLoader(src=\"foo\", sizingMethod='scale');\n}\n"
     );
 }
+
+#[test]
+fn blank_list_elements_vanish() {
+    // dart Value.isBlank: an empty unquoted string disappears from list
+    // serialization, separator included; whitespace-only stays.
+    assert_eq!(ours("a { a: foo #{\"\"}; }\n"), "a {\n  a: foo;\n}\n");
+    assert_eq!(ours("b { b: foo #{\" \"}; }\n"), "b {\n  b: foo  ;\n}\n");
+}
+
+#[test]
+fn media_feature_strings_unquote() {
+    // Media-feature names/values serialize in interpolation context.
+    assert_eq!(
+        ours("@media screen and (\"min-width:#{20px}\") { a { b: c } }\n"),
+        "@media screen and (min-width:20px) {\n  a {\n    b: c;\n  }\n}\n"
+    );
+    assert_eq!(
+        ours("$s: \"20px\";\n@media (min-width: $s) { a { b: c } }\n"),
+        "@media (min-width: 20px) {\n  a {\n    b: c;\n  }\n}\n"
+    );
+}
