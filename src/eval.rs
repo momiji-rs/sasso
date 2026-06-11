@@ -8718,10 +8718,20 @@ fn hoist_css_imports(out: &mut Vec<OutNode>) {
         rest.push(node);
     }
     extract(&mut rest, &mut imports);
-    // Imports first (tight, no blank between them), then a blank, then the rest
-    // (dropping top-level blanks and regrouping).
+    // dart inserts out-of-order imports after the document's LEADING
+    // comments (indexAfterImports skips comments and imports), so a `/*!`
+    // banner stays first. Then the imports (tight, no blank between them),
+    // then the rest (dropping top-level blanks and regrouping).
+    let mut iter = rest.into_iter().peekable();
+    while matches!(iter.peek(), Some(OutNode::Comment(..)) | Some(OutNode::Blank)) {
+        match iter.next() {
+            Some(OutNode::Blank) => {}
+            Some(c) => push_group(out, vec![c]),
+            None => unreachable!(),
+        }
+    }
     out.extend(imports);
-    for node in rest {
+    for node in iter {
         match node {
             OutNode::Blank => {}
             other => push_group(out, vec![other]),

@@ -439,6 +439,15 @@ pub(crate) fn call_module(
     named: &[(String, Value)],
     pos: Pos,
 ) -> Result<Value, Error> {
+    // Member names are dash/underscore-interchangeable like every Sass
+    // identifier (`string.unique_id()` is `string.unique-id()`).
+    let normalized;
+    let member = if member.contains('_') {
+        normalized = member.replace('_', "-");
+        normalized.as_str()
+    } else {
+        member
+    };
     // `math.div(a, b)` is true (always-divide) division, unit-aware.
     if module == "math" && member == "div" {
         return math::module_div(pos_args, named, pos);
