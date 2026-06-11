@@ -9362,6 +9362,40 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
     if sel.trim_start().starts_with(',') {
         return Err(Error::unpositioned("expected selector."));
     }
+    // Parens and brackets must nest properly: `a:b([c)]` is dart's
+    // `expected "]".` (a `)` closing while a `[` is still open).
+    {
+        let mut stack: Vec<char> = Vec::new();
+        let mut quote: Option<char> = None;
+        let mut prev_escape = false;
+        for c in sel.chars() {
+            if prev_escape {
+                prev_escape = false;
+                continue;
+            }
+            match c {
+                '\\' => prev_escape = true,
+                q @ ('"' | '\'') => match quote {
+                    Some(open) if open == q => quote = None,
+                    Some(_) => {}
+                    None => quote = Some(q),
+                },
+                _ if quote.is_some() => {}
+                '(' | '[' => stack.push(c),
+                ')' => {
+                    if stack.pop() == Some('[') {
+                        return Err(Error::unpositioned("expected \"]\"."));
+                    }
+                }
+                ']' => {
+                    if stack.pop() == Some('(') {
+                        return Err(Error::unpositioned("expected \")\"."));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     // The `:nth-*` pseudos require an An+B argument: `:nth-child()` is
     // dart's selector-parse error `Expected "n".` (issue_2175).
     {
