@@ -1020,7 +1020,7 @@ fn trim(
         // may not trim `.test-case:active` whose source weighs 2000.
         let max_spec = source_spec_for(c1);
         let covers = |c2: &Complex| complex_specificity(c2) >= max_spec && complex_is_superselector(c2, c1);
-        if result.iter().any(|c2| covers(c2)) || selectors[..i].iter().any(|c2| covers(c2)) {
+        if result.iter().any(&covers) || selectors[..i].iter().any(&covers) {
             continue;
         }
         result.insert(0, c1.clone());
