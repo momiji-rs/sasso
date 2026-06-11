@@ -6826,3 +6826,19 @@ fn selector_linebreaks_with_stray_commas() {
         "z a,\nz b {\n  display: block;\n}\n"
     );
 }
+
+#[test]
+fn modulo_infinite_modulus() {
+    // dart moduloLikeSass: an infinite DIVISOR returns the dividend when
+    // signs agree and NaN otherwise; an infinite dividend is always NaN.
+    assert_eq!(ours("a {b: 1px % calc(infinity * 1px)}\n"), "a {\n  b: 1px;\n}\n");
+    assert_eq!(
+        ours("a {b: -1px % calc(-infinity * 1px)}\n"),
+        "a {\n  b: -1px;\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: 1px % calc(-infinity * 1px)}\n"),
+        "a {\n  b: calc(NaN * 1px);\n}\n"
+    );
+    assert_eq!(ours("a {b: calc(infinity) % 3}\n"), "a {\n  b: calc(NaN);\n}\n");
+}

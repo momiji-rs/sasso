@@ -7786,10 +7786,23 @@ fn binary_mul(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     }
 }
 
-/// Sass modulo: a floored modulo whose result takes the divisor's sign
-/// (matching dart-sass). `1.2 % -4.7 == -3.5`, `-1.2 % 4.7 == 3.5`.
-/// Division by zero yields NaN.
+/// Sass modulo (dart `moduloLikeSass`): a floored modulo whose result takes
+/// the divisor's sign. `1.2 % -4.7 == -3.5`, `-1.2 % 4.7 == 3.5`. An
+/// infinite dividend (or a zero divisor) yields NaN; an infinite DIVISOR
+/// returns the dividend when their signs agree (`1px % infinity*1px == 1px`,
+/// signed zeros included) and NaN otherwise.
 fn sass_modulo(a: f64, b: f64) -> f64 {
+    if a.is_infinite() {
+        return f64::NAN;
+    }
+    if b.is_infinite() {
+        // dart compares signIncludingZero, so `-0.0 % -infinity` is `-0.0`.
+        return if a.is_sign_negative() == b.is_sign_negative() {
+            a
+        } else {
+            f64::NAN
+        };
+    }
     if b == 0.0 {
         return f64::NAN;
     }
