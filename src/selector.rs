@@ -3632,3 +3632,19 @@ fn extend_component_compound(
     }
     Some(options)
 }
+
+/// Whether any compound in `s` contains `target` as one of its simple
+/// selectors (used to satisfy `@extend` target lookup against rules whose
+/// bogus combinators omitted them from the CSS).
+pub(crate) fn selector_contains_simple(s: &str, target: &Simple) -> bool {
+    for part in split_top(s, ',') {
+        if let Some(complex) = parse_complex(part.trim()) {
+            for comp in &complex.components {
+                if comp.compound.simples.iter().any(|x| x == target) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}

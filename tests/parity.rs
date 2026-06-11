@@ -6759,3 +6759,14 @@ fn at_root_queries() {
         "@media screen {\n  .x {\n    y: z;\n  }\n}\n"
     );
 }
+
+#[test]
+fn extend_target_in_omitted_bogus_rule() {
+    // A bogus-combinator rule (`.a > + x`) is omitted from the CSS but
+    // still satisfies @extend target matching (dart keeps it in the extend
+    // graph); the extension result is bogus too, so the output is empty.
+    assert_eq!(ours(".a > + x {a: b}\n.b y {@extend x}\n"), "");
+    assert_eq!(ours(".a ~ > + .b > x {a: b}\n.c > + .d > y {@extend x}\n"), "");
+    // A genuinely missing target still errors.
+    assert!(compile(".a x {a: b}\n.b {@extend z}\n", &Options::default()).is_err());
+}

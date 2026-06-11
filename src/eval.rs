@@ -486,6 +486,9 @@ pub(crate) struct Evaluator<'a> {
     /// The enclosing at-rule layers (outermost first), so `@at-root` queries
     /// can re-wrap their body in the layers the query keeps.
     at_rule_ctx: Vec<AtCtx>,
+    /// Bogus-combinator selectors omitted from the CSS (`.a > + x`): they
+    /// still satisfy `@extend` target matching like dart's extend graph.
+    bogus_selectors: Vec<String>,
     /// Set while module loads run inside a module-loading `@import`: dart
     /// clones the whole import subtree's CSS at the import site (the same
     /// `_combineCss(clone: true)` as meta.load-css). All loads in the chain
@@ -871,6 +874,7 @@ impl<'a> Evaluator<'a> {
             media_hoist: Vec::new(),
             at_root_hoist: std::collections::VecDeque::new(),
             at_rule_ctx: Vec::new(),
+            bogus_selectors: Vec::new(),
             used_modules: HashMap::default(),
             star_modules: Vec::new(),
             used_user_modules: HashMap::default(),
@@ -1317,9 +1321,17 @@ impl<'a> Evaluator<'a> {
             .collect();
         rewrite_nodes_scoped(out, "", &extensions, &origins, &closures);
 
-        // Report the first unmatched non-optional extend.
+        // Report the first unmatched non-optional extend. A target that only
+        // appears in an omitted bogus-combinator rule still counts as found
+        // (dart extends it; the result is bogus too and is omitted).
         for (pe, ext) in self.extends.iter().zip(extensions.iter()) {
-            if !ext.optional && !ext.matched.get() {
+            if !ext.optional
+                && !ext.matched.get()
+                && !self
+                    .bogus_selectors
+                    .iter()
+                    .any(|s| crate::selector::selector_contains_simple(s, &pe.target))
+            {
                 return Err(Error::at(
                     format!(
                         "The target selector was not found.\nUse \"@extend {} !optional\" to avoid this error.",
@@ -4008,6 +4020,10 @@ impl<'a> Evaluator<'a> {
         let mut emit_linebreaks: Vec<bool> = Vec::new();
         for (i, s) in current.iter().enumerate() {
             if complex_selector_block_is_bogus(s) {
+                // The omitted selector still participates in @extend target
+                // matching (dart keeps the rule in the extend graph and only
+                // omits it from the emitted CSS).
+                self.bogus_selectors.push(s.clone());
                 continue;
             }
             // A keyframe selector's percentage normalizes its exponent marker
