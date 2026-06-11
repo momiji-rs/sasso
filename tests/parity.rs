@@ -7370,3 +7370,18 @@ fn escaped_callable_names_decode_to_one_key() {
         "a {\n  b: 1;\n  c: 1;\n}\n"
     );
 }
+
+#[test]
+fn has_pseudo_drops_placeholder_arguments_like_dart() {
+    // dart's serializer drops invisible (placeholder) complexes from every
+    // pseudo's argument list: after `@extend %not`, `div:has(%not)` renders
+    // `div:has(.not)` — the placeholder never reaches the output
+    // (issue_1797); a `:has` whose whole argument stays invisible can never
+    // match and its rule drops.
+    assert_eq!(
+        ours(
+            "%not { c: red; }\n.not { @extend %not; }\ndiv:has(%not) { x: y; }\nspan:has(%never) { z: w; }\n"
+        ),
+        ".not {\n  c: red;\n}\n\ndiv:has(.not) {\n  x: y;\n}\n"
+    );
+}

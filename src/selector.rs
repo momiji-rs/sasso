@@ -963,7 +963,12 @@ fn simplify_one_pseudo(text: &str) -> PseudoResult {
     let head = &text[..open]; // e.g. `:not`
     let arg = &text[open + 1..text.len() - 1];
     let name = head.trim_start_matches(':').to_ascii_lowercase();
-    let is_matchish = matches!(unvendor(&name), "is" | "where" | "matches" | "any") || name.ends_with("-any");
+    // `:has()` joins the matches-any set: dart's serializer drops invisible
+    // (placeholder) complexes from EVERY pseudo's argument list, and a
+    // fully-invisible argument makes the pseudo — and its compound — never
+    // match (issue_1797 `div:has(%not)` extends to `div:has(.not)`).
+    let is_matchish =
+        matches!(unvendor(&name), "is" | "where" | "matches" | "any" | "has") || name.ends_with("-any");
     let is_not = unvendor(&name) == "not";
     if !is_matchish && !is_not {
         return PseudoResult::Keep(text.to_string());
