@@ -27,6 +27,10 @@ use crate::scanner::Pos;
 use crate::value::{CalcNode, CalcOp, List, ListSep, Map, Number, SassFunction, SassMixin, SassStr, Value};
 use crate::{Importer, OutputStyle, Syntax};
 
+/// One cached `@import` resolution: (resolved canonical key, syntax, parsed
+/// sheet), shared across repeated imports within a single compile.
+type CachedImport = std::rc::Rc<(String, Syntax, crate::ast::Stylesheet)>;
+
 /// Parse imported/`@use`d source with the front-end matching its file syntax.
 fn parse_with_syntax(src: &str, syntax: Syntax) -> Result<crate::ast::Stylesheet, Error> {
     match syntax {
@@ -448,6 +452,9 @@ pub(crate) struct Evaluator<'a> {
     /// load cycle (dart-sass "This file is already being loaded."); a path that
     /// has finished loading may be imported again (`@import` re-evaluates).
     loading: Vec<String>,
+    /// Per-compile `@import` cache (dart-sass ImportCache analogue): keyed by
+    /// (url, importing dir), holding (resolved key, syntax, parsed sheet).
+    import_cache: HashMap<(String, Option<String>), CachedImport>,
     /// User function/mixin scope chains, parallel to `scopes` (dart's
     /// `Environment._functions`/`_mixins`): a definition always lands in the
     /// innermost frame, so a nested `@function`/`@mixin` shadows an outer one
@@ -881,6 +888,7 @@ impl<'a> Evaluator<'a> {
             scope_semi_global: vec![true],
             options,
             loading: Vec::new(),
+            import_cache: HashMap::default(),
             functions: vec![new_fn_scope()],
             mixins: vec![new_fn_scope()],
             content_stack: Vec::new(),
@@ -5229,20 +5237,48 @@ impl<'a> Evaluator<'a> {
                     // Every Sass `@import` of a non-CSS file fires the `[import]`
                     // deprecation, pointing at the quoted URL token.
                     self.emit_deprecation(&crate::deprecation::Deprecation::import(), *pos, *length);
-                    // Run the caller's importer outside the arena scope so any
-                    // state it caches (paths, sources) outlives this compile's
-                    // arena reset; see the matching note in `load_module`.
-                    let saved = crate::arena::pause();
                     let base = self.current_file_dir.clone();
-                    let resolved =
-                        importer.and_then(|imp| imp.resolve_import_with_path(path, base.as_deref()));
-                    crate::arena::resume(saved);
-                    match resolved {
-                        Some((resolved_key, src, syntax)) => {
+                    // Per-compile import cache (dart-sass ImportCache): the
+                    // same URL imported from the same base directory shares
+                    // one resolution + parse; the body still EXECUTES per
+                    // import (Sass semantics). Misses and parse errors are
+                    // not cached — they re-error identically.
+                    let cache_key = (path.clone(), base.clone());
+                    let entry = match self.import_cache.get(&cache_key) {
+                        Some(e) => {
                             if self.loading.iter().any(|p| p == path) {
                                 return Err(Error::unpositioned("This file is already being loaded."));
                             }
-                            let sheet = parse_with_syntax(&src, syntax)?;
+                            Some(e.clone())
+                        }
+                        None => {
+                            // Run the caller's importer outside the arena scope
+                            // so any state it caches (paths, sources) outlives
+                            // this compile's arena reset; see the matching note
+                            // in `load_module`.
+                            let saved = crate::arena::pause();
+                            let resolved =
+                                importer.and_then(|imp| imp.resolve_import_with_path(path, base.as_deref()));
+                            crate::arena::resume(saved);
+                            match resolved {
+                                Some((resolved_key, src, syntax)) => {
+                                    if self.loading.iter().any(|p| p == path) {
+                                        return Err(Error::unpositioned(
+                                            "This file is already being loaded.",
+                                        ));
+                                    }
+                                    let sheet = parse_with_syntax(&src, syntax)?;
+                                    let e = std::rc::Rc::new((resolved_key, syntax, sheet));
+                                    self.import_cache.insert(cache_key, e.clone());
+                                    Some(e)
+                                }
+                                None => None,
+                            }
+                        }
+                    };
+                    match entry {
+                        Some(entry) => {
+                            let (resolved_key, syntax, sheet) = (&entry.0, entry.1, &entry.2);
                             // A plain-CSS file imports as plain CSS: nesting
                             // preserved, no Sass evaluation (same as `@use`).
                             if matches!(syntax, Syntax::Css) {
@@ -5314,7 +5350,7 @@ impl<'a> Evaluator<'a> {
                             let saved_dir = if resolved_key.is_empty() {
                                 self.current_file_dir.clone()
                             } else {
-                                std::mem::replace(&mut self.current_file_dir, dirname_of(&resolved_key))
+                                std::mem::replace(&mut self.current_file_dir, dirname_of(resolved_key))
                             };
                             let saved_clone = if loads_modules {
                                 let n = self.copy_counter.get() + 1;
