@@ -7517,3 +7517,19 @@ fn at_in_selector_is_expected_selector_with_dual_span() {
     assert!(msg.contains("expected selector."), "{msg}");
     assert!(msg.contains("1:10"), "{msg}");
 }
+
+#[test]
+fn user_calc_function_overrides_calculation() {
+    // dart resolves user functions before calculation semantics: a
+    // user-defined calc() shadows the CSS calculation, receiving the
+    // argument as an ordinarily-evaluated expression; vendor-prefixed
+    // -x-calc( stays a parse-time special function (issue_1706).
+    assert_eq!(
+        ours("@function calc($e) { @return custom; }\n@function -foo-calc($e) { @return custom; }\n.t {\n  a: calc(1px * 1%);\n  b: -foo-calc(2px * 2%);\n}\n"),
+        ".t {\n  a: custom;\n  b: -foo-calc(2px * 2%);\n}\n"
+    );
+    assert_eq!(
+        ours("@function calc($e) { @return $e; }\na { b: calc(2px * 3); }\n"),
+        "a {\n  b: 6px;\n}\n"
+    );
+}

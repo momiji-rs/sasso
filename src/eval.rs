@@ -6265,6 +6265,24 @@ impl<'a> Evaluator<'a> {
                 eval_div(l, r, *slash, *pos)
             }
             Expr::Calc { inner, .. } => {
+                // dart resolves user functions BEFORE calculation semantics: a
+                // user-defined `@function calc(...)` shadows the CSS
+                // calculation (issue_1706), receiving the argument evaluated
+                // as an ordinary expression. Vendor-prefixed `-x-calc(` stays
+                // a parse-time special function and can't be overridden.
+                if !self.in_plain_css {
+                    if let Some(callable) = self.lookup_function("calc") {
+                        let arg = self.eval_expr(inner)?.without_slash();
+                        let f = crate::value::SassFunction {
+                            name: "calc".to_string(),
+                            css: false,
+                            user: Some(callable as Rc<dyn std::any::Any>),
+                        };
+                        return self
+                            .invoke_function_ref(&f, vec![arg], Vec::new(), Pos { line: 0, col: 0 })
+                            .map(Value::without_slash);
+                    }
+                }
                 let node = self.eval_calc(inner)?;
                 // Inside a `@supports` declaration the calculation is kept
                 // unsimplified: the `calc()` wrapper is always preserved (even
