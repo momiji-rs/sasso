@@ -7535,7 +7535,24 @@ impl<'a> Evaluator<'a> {
             IfCond::Sass(expr) => Ok(CondEval::Bool(self.eval_expr(expr)?.is_truthy())),
             IfCond::Raw { pieces, .. } => {
                 let text = self.eval_template(pieces)?;
-                Ok(CondEval::Css(RCond::Css(text)))
+                // dart re-serializes the raw token run with collapsed
+                // whitespace and no space inside empty parens
+                // (`css(\n)` is `css()`).
+                let mut collapsed = String::with_capacity(text.len());
+                let mut prev_ws = false;
+                for c in text.chars() {
+                    if c.is_whitespace() {
+                        prev_ws = true;
+                        continue;
+                    }
+                    if prev_ws && !collapsed.is_empty() && c != ')' {
+                        collapsed.push(' ');
+                    }
+                    prev_ws = false;
+                    collapsed.push(c);
+                }
+                let collapsed = collapsed.replace("( ", "(");
+                Ok(CondEval::Css(RCond::Css(collapsed)))
             }
             IfCond::Not(inner) => match self.eval_if_cond(inner)? {
                 CondEval::Bool(b) => Ok(CondEval::Bool(!b)),
