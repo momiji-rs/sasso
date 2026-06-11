@@ -68,7 +68,7 @@ pub(crate) fn call(
     if let Some(r) = selector::try_call(name, pos_args, named, pos) {
         return r;
     }
-    Ok(plain_css_function(name, pos_args, named))
+    plain_css_function(name, pos_args, named, pos)
 }
 
 /// Whether `name` is a real Sass builtin function (as opposed to an unknown
@@ -200,15 +200,41 @@ pub(super) fn clamp01(v: f64) -> f64 {
 }
 
 /// Preserve an unknown function call verbatim as an unquoted CSS string.
-fn plain_css_function(name: &str, pos_args: &[Value], named: &[(String, Value)]) -> Value {
-    let mut parts: Vec<String> = pos_args.iter().map(|v| v.to_css(false)).collect();
-    for (n, v) in named {
-        parts.push(format!("${n}: {}", v.to_css(false)));
+/// Plain CSS has no keyword arguments, and a value with no CSS
+/// representation (an empty unbracketed list, a map) is rejected — while
+/// `null` serializes to nothing and a bracketed empty list stays `[]`
+/// (dart-sass).
+fn plain_css_function(
+    name: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Result<Value, Error> {
+    if !named.is_empty() {
+        return Err(Error::at(
+            "Plain CSS functions don't support keyword arguments.",
+            pos,
+        ));
     }
-    Value::Str(SassStr {
+    let mut parts: Vec<String> = Vec::with_capacity(pos_args.len());
+    for v in pos_args {
+        match v {
+            Value::List(l) if l.items.is_empty() && !l.bracketed => {
+                return Err(Error::at("() isn't a valid CSS value.", pos));
+            }
+            Value::Map(_) => {
+                return Err(Error::at(
+                    format!("{} isn't a valid CSS value.", v.to_css(false)),
+                    pos,
+                ));
+            }
+            _ => parts.push(v.to_css(false)),
+        }
+    }
+    Ok(Value::Str(SassStr {
         text: format!("{name}({})", parts.join(", ")),
         quoted: false,
-    })
+    }))
 }
 
 // ---- built-in module system (`@use "sass:<mod>"`) ----------------------

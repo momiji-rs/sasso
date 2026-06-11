@@ -677,8 +677,38 @@ fn min_max(
         Some(n) => Ok(num_value(n)),
         None => {
             verify_no_complex_args(&args, pos)?;
+            // The BUILTIN min/max (reached via a splat or meta.call — the
+            // direct spelling parses as a CSS calculation upstream) requires
+            // numbers: dart's math.min asserts every argument
+            // ("blah is not a number."). Only calc-style substitutions
+            // (var()/calc strings) keep the call preserved.
+            if let Some(bad) = args
+                .iter()
+                .find(|v| !matches!(v, Value::Number(_)) && !value_is_calc_substitution(v))
+            {
+                return Err(Error::at(format!("{} is not a number.", bad.to_css(false)), pos));
+            }
             Ok(preserved_call(fname, &args))
         }
+    }
+}
+
+/// Whether a non-number min/max argument is a calc-style substitution that
+/// keeps the call preserved (a `var()`/`calc()`/`env()` string or a nested
+/// calculation) rather than a plain value dart's builtin rejects.
+fn value_is_calc_substitution(v: &Value) -> bool {
+    match v {
+        Value::Calc(_) => true,
+        Value::Str(s) => {
+            let t = s.text.trim_start().to_ascii_lowercase();
+            t.starts_with("var(")
+                || t.starts_with("calc(")
+                || t.starts_with("env(")
+                || t.starts_with("min(")
+                || t.starts_with("max(")
+                || t.starts_with("clamp(")
+        }
+        _ => false,
     }
 }
 

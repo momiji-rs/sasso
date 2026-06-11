@@ -4406,7 +4406,7 @@ impl<'a> Evaluator<'a> {
                 .filter(|p| !p.is_empty())
                 .collect()
         } else {
-            resolve_selectors_opt(&sel_str, parents, !self.at_root_excluding_style_rule)
+            resolve_selectors_opt(&sel_str, parents, !self.at_root_excluding_style_rule)?
         };
         // Drop "bogus combinator" complex selectors from the emitted block;
         // dart-sass omits them from the generated CSS. A top-level TRAILING
@@ -9928,12 +9928,35 @@ fn part_has_parent_ref(part: &str) -> bool {
 /// Resolve a selector against its parents with dart's `implicitParent` switch: inside
 /// `@at-root` (before the first nested style rule) a part WITHOUT `&` stays
 /// at the root instead of joining the parent, while `&` still substitutes.
-fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -> Vec<String> {
+fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -> Result<Vec<String>, Error> {
     let parts: Vec<String> = split_commas(sel)
         .into_iter()
         .map(|p| trim_selector_part(p).to_string())
         .filter(|p| !p.is_empty())
         .collect();
+    // dart: a parent that ends in a combinator can't substitute into a `&`
+    // that is part of a compound (`.a > { &.b {} }` errors; `& .b` is fine).
+    let check_compound_parent = |part: &str, parent: &str| -> Result<(), Error> {
+        let trimmed = parent.trim_end();
+        if !matches!(trimmed.chars().last(), Some('>' | '+' | '~')) {
+            return Ok(());
+        }
+        let chars: Vec<char> = part.chars().collect();
+        for (i, &c) in chars.iter().enumerate() {
+            if c == '&' {
+                if let Some(&next) = chars.get(i + 1) {
+                    if next.is_alphanumeric()
+                        || matches!(next, '.' | '#' | ':' | '[' | '%' | '\\' | '-' | '_')
+                    {
+                        return Err(Error::unpositioned(format!(
+                            "Selector \"{trimmed}\" can't be used as a parent in a compound selector."
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    };
     let mut result = Vec::new();
     if parents.is_empty() {
         // At the document root (no enclosing style rule) a parent selector `&`
@@ -9949,6 +9972,7 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
         for part in &parts {
             if part.contains('&') {
                 for parent in parents {
+                    check_compound_parent(part, parent)?;
                     result.push(normalize_selector(&part.replace('&', parent)));
                 }
             } else {
@@ -9959,6 +9983,7 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
         for parent in parents {
             for part in &parts {
                 let combined = if part.contains('&') {
+                    check_compound_parent(part, parent)?;
                     part.replace('&', parent)
                 } else {
                     format!("{parent} {part}")
@@ -9967,7 +9992,7 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
             }
         }
     }
-    result
+    Ok(result)
 }
 
 /// Split `s` on top-level commas (paren/bracket depth 0), returning borrowed

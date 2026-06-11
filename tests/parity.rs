@@ -7109,6 +7109,29 @@ fn escaped_literal_space_survives_selector_normalization() {
 }
 
 #[test]
+fn plain_css_function_arg_validation() {
+    // dart: an unknown function is plain CSS — no keyword arguments, and an
+    // empty unbracketed list / a map has no CSS representation; `null`
+    // serializes to nothing and `[]` stays.
+    assert!(compile("foo { color: missing($a: b); }", &Options::default()).is_err());
+    assert!(compile("foo { foo: foo(()); }", &Options::default()).is_err());
+    assert!(compile("foo { foo: foo((a: b)); }", &Options::default()).is_err());
+    assert_eq!(
+        ours("x { v: foo(null); w: foo([]); }\n"),
+        "x {\n  v: foo();\n  w: foo([]);\n}\n"
+    );
+    // The BUILTIN min/max (via splat / meta.call) requires numbers.
+    assert!(compile(
+        "@use \"sass:meta\";\n$foo: 1 2 3 blah 4;\nfoo { bar: meta.call(min, $foo...); }",
+        &Options::default()
+    )
+    .is_err());
+    // A parent ending in a combinator can't substitute into a compound `&`.
+    assert!(compile(".a > { &.b { x: y; } }", &Options::default()).is_err());
+    assert_eq!(ours(".a > { & .b { x: y; } }\n"), ".a > .b {\n  x: y;\n}\n");
+}
+
+#[test]
 fn content_block_runs_in_child_scope() {
     // A content block is a user-defined callable: a `$var:` first declared
     // inside it stays local to the block, so a global-only variable is NOT
