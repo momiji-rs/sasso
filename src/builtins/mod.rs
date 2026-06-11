@@ -251,7 +251,7 @@ pub(crate) fn is_module(module: &str) -> bool {
 /// implements it, or `None` when the member is not a function this build can
 /// dispatch to a global implementation. The global implementations are reused
 /// verbatim — module members are just renamed views of them.
-fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
+pub(crate) fn module_member_to_global(module: &str, member: &str) -> Option<&'static str> {
     // Names returned as `Some` must be real global builtins (so the dispatcher
     // finds them). Members handled specially (e.g. `math.div`) or unsupported
     // (color-space math, first-class functions) are deliberately absent.

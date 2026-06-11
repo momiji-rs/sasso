@@ -6691,8 +6691,14 @@ impl<'a> Evaluator<'a> {
         }
         if let Some(builtin) = self.used_modules.get(module_name) {
             if crate::builtins::module_has_member(builtin, name) {
+                // The captured reference dispatches through the GLOBAL alias
+                // (`color.scale` is the global `scale-color`), so a later
+                // meta.call resolves the right builtin (issue_2818).
+                let global = crate::builtins::module_member_to_global(builtin, name)
+                    .unwrap_or(name)
+                    .to_string();
                 return Ok(Value::Function(SassFunction {
-                    name: name.to_string(),
+                    name: global,
                     css: false,
                     user: None,
                 }));
