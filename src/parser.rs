@@ -4492,10 +4492,12 @@ impl Parser {
                 _ => None,
             };
             // `/` is the deprecated slash operator (handled specially), but
-            // never treat `*/` or a `/` opening a comment as an operator.
+            // never treat `*/` or a `/` opening a comment as an operator —
+            // except in plain CSS, where `//` is two slash separators
+            // (`1///bar` keeps all three).
             if op.is_none()
                 && self.sc.peek() == Some('/')
-                && self.sc.peek_at(1) != Some('/')
+                && (self.sc.peek_at(1) != Some('/') || self.plain_css)
                 && self.sc.peek_at(1) != Some('*')
             {
                 let pos = self.sc.position();
@@ -4731,8 +4733,8 @@ impl Parser {
             Some('#') => self.parse_hex(),
             // A leading `/` begins a slash-separated value with an empty left
             // operand (`font: / 2` → `/2`, `(1, / 2)` → `1, /2`), matching
-            // dart-sass.
-            Some('/') if !self.plain_css && self.calc_depth == 0 => {
+            // dart-sass — in plain CSS too (`1/ / /bar` is `1///bar`).
+            Some('/') if self.calc_depth == 0 => {
                 let pos = self.sc.position();
                 self.sc.bump();
                 self.skip_ws_inline();
