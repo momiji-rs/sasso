@@ -5722,7 +5722,9 @@ impl<'a> Evaluator<'a> {
         let items: Vec<Value> = selectors
             .iter()
             .map(|complex| {
-                let mut compounds: Vec<Value> = complex
+                // Every complex selector is a SPACE LIST of compounds (dart:
+                // `meta.type-of(list.nth(&, 1))` is `list` even for `.foo`).
+                let compounds: Vec<Value> = complex
                     .split_whitespace()
                     .map(|c| {
                         Value::Str(SassStr {
@@ -5731,15 +5733,12 @@ impl<'a> Evaluator<'a> {
                         })
                     })
                     .collect();
-                match compounds.len() {
-                    1 => compounds.remove(0),
-                    _ => Value::List(List {
-                        items: compounds,
-                        sep: ListSep::Space,
-                        bracketed: false,
-                        keywords: None,
-                    }),
-                }
+                Value::List(List {
+                    items: compounds,
+                    sep: ListSep::Space,
+                    bracketed: false,
+                    keywords: None,
+                })
             })
             .collect();
         Value::List(List {
