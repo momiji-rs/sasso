@@ -2147,6 +2147,31 @@ fn ecma_shortest(n: f64) -> String {
     if sig == 0 {
         return rust;
     }
+    if !rust.contains('e') && n.abs() >= f64::MIN_POSITIVE {
+        // A tie between two equidistant shortest spellings requires the
+        // spacing of sig-digit decimals (relative, at least 10^-sig) to fit
+        // inside the value's one-ulp round-trip window (relative at most
+        // 2^-52 for normal doubles), which forces sig >= 16. At 15 or fewer
+        // significant digits the shortest round-trip spelling is unique, so
+        // Rust's `{}` already IS ECMA toString — skip the re-round and its
+        // two parses. Subnormals (wider relative ulps) and exponent-form
+        // spellings take the slow path.
+        if sig <= 15 {
+            return rust;
+        }
+        // A tie can only flip the FINAL digit of the spelling: the two
+        // candidates are same-length decimals one apart in the last place,
+        // and a carry would end the higher one in `0` — a trailing zero
+        // means a shorter spelling round-trips, contradicting shortest-form.
+        // The caller rounds at the 10th fractional digit reading only the
+        // 11th, so a final digit deeper than the 11th fractional place never
+        // reaches the output and the tie-break is moot.
+        if let Some(dot) = rust.find('.') {
+            if rust.len() - dot - 1 > 11 {
+                return rust;
+            }
+        }
+    }
     let sci = format!("{:.*e}", sig - 1, n);
     if sci.parse::<f64>() != Ok(n) {
         return rust;
