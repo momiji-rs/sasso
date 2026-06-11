@@ -9931,7 +9931,7 @@ fn part_has_parent_ref(part: &str) -> bool {
 fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -> Vec<String> {
     let parts: Vec<String> = split_commas(sel)
         .into_iter()
-        .map(|p| p.trim().to_string())
+        .map(|p| trim_selector_part(p).to_string())
         .filter(|p| !p.is_empty())
         .collect();
     let mut result = Vec::new();
@@ -10071,6 +10071,15 @@ fn normalize_selector_slow(s: &str) -> String {
             prev_space = false;
             continue;
         }
+        // A literal escape: the next character — even whitespace (`sp\ `) —
+        // is part of the token, never a separator to collapse or trim.
+        if c == '\\' && ci + 1 < cs.len() {
+            collapsed.push('\\');
+            collapsed.push(cs[ci + 1]);
+            ci += 2;
+            prev_space = false;
+            continue;
+        }
         if c.is_whitespace() {
             if !prev_space {
                 collapsed.push(' ');
@@ -10184,11 +10193,12 @@ fn normalize_selector_slow(s: &str) -> String {
         }
     }
     let t = out.trim();
-    // dart keeps a hex escape's terminating space (`selector\9 ` emits with
-    // its trailing space intact); only plain trailing whitespace trims.
+    // dart keeps an escape's trailing space: a hex escape's terminator
+    // (`selector\9 `) and an escaped literal space (`sp\ `) both survive;
+    // only plain trailing whitespace trims.
     let start = out.len() - out.trim_start().len();
     let end = start + t.len();
-    if out[end..].starts_with(' ') && ends_with_hex_escape(t) {
+    if out[end..].starts_with(' ') && (ends_with_hex_escape(t) || ends_with_escaping_backslash(t)) {
         out[start..=end].to_string()
     } else {
         t.to_string()
@@ -10206,6 +10216,30 @@ fn ends_with_hex_escape(t: &str) -> bool {
         digits += 1;
     }
     digits > 0 && i > 0 && b[i - 1] == b'\\'
+}
+
+/// Whether `t` ends in an ODD run of backslashes, so the character after it
+/// (an escaped literal space, `sp\ `) is part of the identifier.
+fn ends_with_escaping_backslash(t: &str) -> bool {
+    let b = t.as_bytes();
+    let mut n = 0;
+    while n < b.len() && b[b.len() - 1 - n] == b'\\' {
+        n += 1;
+    }
+    n % 2 == 1
+}
+
+/// Trim a selector part's surrounding whitespace, keeping the one character
+/// that belongs to a trailing escape — a hex escape's terminator (`\9 `) or
+/// an escaped literal space (`sp\ `).
+fn trim_selector_part(p: &str) -> &str {
+    let t0 = p.trim_start();
+    let t = t0.trim_end();
+    if t.len() < t0.len() && (ends_with_hex_escape(t) || ends_with_escaping_backslash(t)) {
+        &t0[..t.len() + 1]
+    } else {
+        t
+    }
 }
 
 /// One token of a complex selector split at the top level (paren/bracket depth
@@ -10250,7 +10284,7 @@ fn tokenize_complex(s: &str) -> Vec<SelToken<'_>> {
             '[' => bracket += 1,
             ']' => bracket -= 1,
             '>' | '+' | '~' if paren == 0 && bracket == 0 => {
-                let t = s[start..idx].trim();
+                let t = trim_selector_part(&s[start..idx]);
                 if !t.is_empty() {
                     tokens.push(SelToken::Compound(t));
                 }
@@ -10260,7 +10294,7 @@ fn tokenize_complex(s: &str) -> Vec<SelToken<'_>> {
             _ => {}
         }
     }
-    let t = s[start..].trim();
+    let t = trim_selector_part(&s[start..]);
     if !t.is_empty() {
         tokens.push(SelToken::Compound(t));
     }

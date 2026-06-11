@@ -7090,6 +7090,25 @@ fn important_is_a_value_term() {
 }
 
 #[test]
+fn escaped_literal_space_survives_selector_normalization() {
+    // `sp\ ` (an escaped literal space) is part of the identifier: the
+    // whitespace collapse/trim in selector normalization must not eat it —
+    // at the end of a comma part, before a descendant space, or trailing.
+    assert_eq!(
+        ours("sp\\ , x {\n  color: red;\n}\n"),
+        "sp\\ , x {\n  color: red;\n}\n"
+    );
+    assert_eq!(
+        ours("div sp\\  p {\n  color: red;\n}\n"),
+        "div sp\\  p {\n  color: red;\n}\n"
+    );
+    assert_eq!(
+        ours("div sp\\  {\n  color: red;\n}\n"),
+        "div sp\\  {\n  color: red;\n}\n"
+    );
+}
+
+#[test]
 fn content_block_runs_in_child_scope() {
     // A content block is a user-defined callable: a `$var:` first declared
     // inside it stays local to the block, so a global-only variable is NOT
