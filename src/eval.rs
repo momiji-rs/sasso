@@ -9028,9 +9028,49 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
 /// The integer indices a `@for` iterates: ascending or descending, with the
 /// end included (`through`) or excluded (`to`).
 /// Normalize a Sass argument/parameter name: hyphens and underscores are
-/// interchangeable, so `$b-c` and `$b_c` refer to the same parameter.
+/// interchangeable, so `$b-c` and `$b_c` refer to the same parameter. A name
+/// containing CSS escapes is decoded first, so the raw definition spelling
+/// `foo\func` and a call site's canonical `foo\f unc` agree (issue_553) —
+/// dart decodes escapes into the identifier text at parse time.
 fn normalize_arg_name(name: &str) -> String {
+    if name.contains('\\') {
+        return decode_ident_escapes(name).replace('_', "-");
+    }
     name.replace('_', "-")
+}
+
+/// Decode CSS escapes (`\66 ` / `\func` / `\\`) to their code points: up to
+/// six hex digits terminated by one optional whitespace, or a literal next
+/// character. NUL decodes to U+FFFD like CSS.
+fn decode_ident_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let mut hex = String::new();
+        while hex.len() < 6 && it.peek().is_some_and(|h| h.is_ascii_hexdigit()) {
+            hex.push(it.next().unwrap());
+        }
+        if hex.is_empty() {
+            match it.next() {
+                Some(l) => out.push(l),
+                None => out.push('\\'),
+            }
+        } else {
+            let cp = u32::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
+            out.push(match char::from_u32(cp) {
+                Some('\0') | None => '\u{FFFD}',
+                Some(ch) => ch,
+            });
+            if matches!(it.peek(), Some(' ' | '\t' | '\n')) {
+                it.next();
+            }
+        }
+    }
+    out
 }
 
 /// Whether `name` is a global CSS-calculation function that dart-sass parses

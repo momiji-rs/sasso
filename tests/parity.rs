@@ -7354,3 +7354,19 @@ fn loud_comment_glued_to_property_name_joins_it() {
     // An interpolated name glues the same way.
     assert_eq!(ours(".a { #{f}oo/*c*/: bar; }\n"), ".a {\n  foo/*c*/: bar;\n}\n");
 }
+
+#[test]
+fn escaped_callable_names_decode_to_one_key() {
+    // dart decodes CSS escapes into identifier text at parse time, so the
+    // raw definition `foo\func` and the call site's canonical `foo\f unc`
+    // (and dash/underscore variants) name the same callable (issue_553).
+    assert_eq!(
+        ours("$foo\\bar: 1;\n@function foo\\func() { @return 1; }\n@mixin foo\\mixin() { m: 1; }\n.t {\n  v: $foo\\bar;\n  f: foo\\func();\n  @include foo\\mixin();\n}\n"),
+        ".t {\n  v: 1;\n  f: 1;\n  m: 1;\n}\n"
+    );
+    // Equivalent escape spellings reach the same definition.
+    assert_eq!(
+        ours("@function f\\6fo() { @return 1; }\na { b: f\\6f o(); c: foo(); }\n"),
+        "a {\n  b: 1;\n  c: 1;\n}\n"
+    );
+}
