@@ -978,7 +978,12 @@ impl Number {
         if !self.value.is_finite() || self.has_complex_units() {
             return format!("calc({})", calc_number_css(self, compressed));
         }
-        format!("{}{}", fmt_num(self.value, compressed), self.unit())
+        // Append the unit onto fmt_num's own String — a `format!` here would
+        // re-run the formatting machinery and allocate a second time on the
+        // hottest serialization path in the compiler.
+        let mut s = fmt_num(self.value, compressed);
+        s.push_str(self.unit());
+        s
     }
 
     /// dart-sass `unitString`: the human-readable unit list — `px`, `px*em`,
@@ -2136,7 +2141,7 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
     let mut s = if n.fract() == 0.0 {
         let i = n as i64;
         if i as f64 == n {
-            format!("{i}")
+            fmt_i64(i)
         } else {
             format!("{n}")
         }
@@ -2162,6 +2167,32 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
     s
 }
 
+/// `i64` → decimal `String` without the `core::fmt` machinery. Numbers are
+/// the hottest serialization path (every dimension in every declaration), and
+/// `format!("{i}")` spends most of its time in `Formatter` dispatch, not in
+/// digit generation. Output is byte-identical to `i64`'s `Display`.
+fn fmt_i64(v: i64) -> String {
+    // Longest spelling: "-9223372036854775808" = 20 bytes.
+    let mut buf = [0u8; 20];
+    let neg = v < 0;
+    let mut u = v.unsigned_abs();
+    let mut at = buf.len();
+    loop {
+        at -= 1;
+        buf[at] = b'0' + (u % 10) as u8;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    if neg {
+        at -= 1;
+        buf[at] = b'-';
+    }
+    // The buffer holds only ASCII digits and '-'.
+    std::str::from_utf8(&buf[at..]).expect("ascii").to_string()
+}
+
 /// dart `double.toString()` (ECMA-262 Number::toString): the shortest
 /// decimal that round-trips, breaking a tie between two equidistant
 /// spellings by choosing the EVEN final digit. Rust's `{}` is also shortest
@@ -2169,7 +2200,14 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
 /// `…289.2`), so re-round to the same significant-digit count through
 /// `{:e}`'s half-to-even rounding and expand the exponent form.
 fn ecma_shortest(n: f64) -> String {
-    let rust = format!("{n}");
+    // Pre-size for the longest shortest-roundtrip spelling (~24 bytes):
+    // `format!` would start at zero capacity and reallocate 2-3 times while
+    // grisu streams digits in.
+    let mut rust = String::with_capacity(24);
+    {
+        use std::fmt::Write;
+        let _ = write!(rust, "{n}");
+    }
     // Count significant digits (skipping sign, dot, and leading zeros).
     let sig = rust
         .chars()
