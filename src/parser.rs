@@ -781,6 +781,12 @@ impl Parser {
                     }
                     continue;
                 }
+                // A CSS escape: the next character (`something\:`) is part of
+                // the identifier, never a declaration colon.
+                '\\' => {
+                    i += 2;
+                    continue;
+                }
                 '(' => paren += 1,
                 ')' => paren -= 1,
                 '[' => bracket += 1,
@@ -3579,7 +3585,20 @@ impl Parser {
                 break;
             }
             self.sc.bump(); // '@'
-            if self.read_ident_name().unwrap_or_default() != "else" {
+                            // `@elseif` is a deprecated spelling of `@else if` (dart still
+                            // accepts it with an [elseif] deprecation warning).
+            let kw = self.read_ident_name().unwrap_or_default();
+            if kw == "elseif" {
+                self.skip_ws_inline();
+                let cond = self.parse_value()?;
+                let body = self.parse_braced_body()?;
+                branches.push(IfBranch {
+                    cond: Some(cond),
+                    body,
+                });
+                continue;
+            }
+            if kw != "else" {
                 self.sc.reset(mark);
                 break;
             }

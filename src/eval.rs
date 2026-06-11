@@ -5194,6 +5194,17 @@ impl<'a> Evaluator<'a> {
         self.pop_scope();
         res?;
 
+        // A declaration inside `@at-root` that no style rule wraps lands at
+        // the document root, which dart rejects ("Declarations may only be
+        // used within style rules." — issue_1585's `@at-root { @content }`).
+        if (q.excludes_style_rules() || parents.is_empty())
+            && out.iter().any(|n| matches!(n, OutNode::AtDecl { .. }))
+        {
+            return Err(Error::unpositioned(
+                "Declarations may only be used within style rules.",
+            ));
+        }
+
         // When the query KEEPS style rules, bare declarations re-wrap in the
         // enclosing selectors (dart's included CssStyleRule copy):
         // `a { @at-root (without: media) { b: c } }` emits `a { b: c }`.
@@ -9252,6 +9263,26 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
     // are tolerated and skipped.
     if sel.trim_start().starts_with(',') {
         return Err(Error::unpositioned("expected selector."));
+    }
+    // The `:nth-*` pseudos require an An+B argument: `:nth-child()` is
+    // dart's selector-parse error `Expected "n".` (issue_2175).
+    {
+        let lower = sel.to_ascii_lowercase();
+        for pat in [
+            ":nth-child(",
+            ":nth-last-child(",
+            ":nth-of-type(",
+            ":nth-last-of-type(",
+        ] {
+            let mut from = 0;
+            while let Some(p) = lower[from..].find(pat) {
+                let start = from + p + pat.len();
+                if lower[start..].trim_start().starts_with(')') {
+                    return Err(Error::unpositioned("Expected \"n\"."));
+                }
+                from = start;
+            }
+        }
     }
     for part in split_commas(sel) {
         let chars: Vec<char> = part.chars().collect();

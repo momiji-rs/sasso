@@ -7132,6 +7132,28 @@ fn plain_css_function_arg_validation() {
 }
 
 #[test]
+fn misc_error_validation_batch() {
+    // `@elseif` is a deprecated spelling of `@else if`.
+    assert_eq!(
+        ours("$x: 3px;\n@if $x == 2px { a { v: 1; } }\n@elseif $x == 3px { b { v: 2; } }\n"),
+        "b {\n  v: 2;\n}\n"
+    );
+    // A declaration inside `@at-root` that no style rule wraps is an error.
+    assert!(compile(
+        "@mixin bar() { @at-root { @content; } }\n.test { @include bar() { color: yellow; } }",
+        &Options::default()
+    )
+    .is_err());
+    // `something\:` is a selector (the escape is never a declaration colon).
+    assert_eq!(
+        ours("something\\:{ padding: 2px; }\n"),
+        "something\\: {\n  padding: 2px;\n}\n"
+    );
+    // `:nth-child()` requires an An+B argument.
+    assert!(compile("a:nth-child() { color: red; }", &Options::default()).is_err());
+}
+
+#[test]
 fn content_block_runs_in_child_scope() {
     // A content block is a user-defined callable: a `$var:` first declared
     // inside it stays local to the block, so a global-only variable is NOT
