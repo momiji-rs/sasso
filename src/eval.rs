@@ -10030,6 +10030,60 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
         }
         Ok(())
     };
+    // A `&` that sits only inside pseudo arguments takes the WHOLE parent
+    // list in place (dart: `:not(&-c)` under `.a, .b` is `:not(.a-c, .b-c)`,
+    // ONE complex — no cartesian expansion). A part with any top-level `&`
+    // (or a pseudo-`&` glued to a non-suffix simple) uses the normal path.
+    let substitute_pseudo_refs = |part: &str| -> Option<String> {
+        if !part.contains('&') {
+            return None;
+        }
+        let chars: Vec<char> = part.chars().collect();
+        let mut depth = 0i32;
+        let mut out = String::new();
+        let mut i = 0;
+        let mut replaced = false;
+        while i < chars.len() {
+            let c = chars[i];
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                '&' => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    // Collect an identifier suffix (`&-c`); any other glued
+                    // simple (`&.x`, `&:h`) bails to the normal path.
+                    let mut suffix = String::new();
+                    let mut j = i + 1;
+                    while j < chars.len() && (chars[j].is_alphanumeric() || matches!(chars[j], '-' | '_')) {
+                        suffix.push(chars[j]);
+                        j += 1;
+                    }
+                    if matches!(chars.get(j), Some('.' | '#' | ':' | '[' | '%' | '\\' | '&')) {
+                        return None;
+                    }
+                    let expansion = parents
+                        .iter()
+                        .map(|p| format!("{p}{suffix}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    out.push_str(&expansion);
+                    replaced = true;
+                    i = j;
+                    continue;
+                }
+                _ => {}
+            }
+            out.push(c);
+            i += 1;
+        }
+        if replaced {
+            Some(out)
+        } else {
+            None
+        }
+    };
     let mut result = Vec::new();
     if parents.is_empty() {
         // At the document root (no enclosing style rule) a parent selector `&`
@@ -10043,7 +10097,9 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
         // dart resolves per complex: a part with `&` expands across the
         // parents; a part without stays at the root exactly once.
         for part in &parts {
-            if part.contains('&') {
+            if let Some(s) = substitute_pseudo_refs(part) {
+                result.push(normalize_selector(&s));
+            } else if part.contains('&') {
                 for parent in parents {
                     check_compound_parent(part, parent)?;
                     result.push(normalize_selector(&part.replace('&', parent)));
@@ -10053,8 +10109,16 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
             }
         }
     } else {
-        for parent in parents {
+        for (pi, parent) in parents.iter().enumerate() {
             for part in &parts {
+                // A pseudo-only `&` part resolves ONCE (whole parent list in
+                // place), emitted at its position in the first parent round.
+                if let Some(s) = substitute_pseudo_refs(part) {
+                    if pi == 0 {
+                        result.push(normalize_selector(&s));
+                    }
+                    continue;
+                }
                 let combined = if part.contains('&') {
                     check_compound_parent(part, parent)?;
                     part.replace('&', parent)

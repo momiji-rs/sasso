@@ -7165,6 +7165,27 @@ fn extend_products_inherit_extender_linebreaks() {
 }
 
 #[test]
+fn pseudo_parent_ref_takes_whole_parent_list() {
+    // A `&` only inside a pseudo argument takes the WHOLE parent list in
+    // place — ONE complex, no cartesian expansion — with an optional ident
+    // suffix (libsass#2630).
+    assert_eq!(
+        ours(".a, .b {\n  :not(&-c) {d: e}\n}\n"),
+        ":not(.a-c, .b-c) {\n  d: e;\n}\n"
+    );
+    assert_eq!(
+        ours(".a, .b {\n  :not(&) {d: e}\n}\n"),
+        ":not(.a, .b) {\n  d: e;\n}\n"
+    );
+    // Mixed parts keep dart's order: the pseudo part resolves once, at its
+    // position in the FIRST parent round.
+    assert_eq!(
+        ours(".a, .b {\n  x:hover &, :is(&) {d: e}\n}\n"),
+        "x:hover .a, :is(.a, .b), x:hover .b {\n  d: e;\n}\n"
+    );
+}
+
+#[test]
 fn content_block_runs_in_child_scope() {
     // A content block is a user-defined callable: a `$var:` first declared
     // inside it stays local to the block, so a global-only variable is NOT
