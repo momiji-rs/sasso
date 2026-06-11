@@ -6241,7 +6241,8 @@ impl<'a> Evaluator<'a> {
                                 *v = std::mem::replace(v, Value::Null).without_slash();
                                 let _ = n;
                             }
-                            return crate::builtins::call_module(&m, name, &pos_args, &named, *pos);
+                            return crate::builtins::call_module(&m, name, &pos_args, &named, *pos)
+                                .map(Value::without_slash);
                         }
                     }
                 }
@@ -6256,7 +6257,10 @@ impl<'a> Evaluator<'a> {
                         *v = std::mem::replace(v, Value::Null).without_slash();
                     }
                 }
-                crate::builtins::call(name, &pos_args, &named, *pos)
+                // A function call's RESULT is slash-free too (dart applies
+                // `withoutSlash()` to every call result): `list.nth(3 1/2 4,
+                // 2)` returns 0.5, not the slash form.
+                crate::builtins::call(name, &pos_args, &named, *pos).map(Value::without_slash)
             }
         }
     }
@@ -6315,7 +6319,8 @@ impl<'a> Evaluator<'a> {
                 return r;
             }
         }
-        crate::builtins::call_module(&module, member, &pos_args, &named, pos)
+        // Call results are slash-free (dart `withoutSlash()` on every call).
+        crate::builtins::call_module(&module, member, &pos_args, &named, pos).map(Value::without_slash)
     }
 
     /// Handle a `sass:meta` member that depends on the evaluator's state
@@ -6746,7 +6751,7 @@ impl<'a> Evaluator<'a> {
         if let Some(r) = self.try_meta_eval_call(&f.name, &pos_args, &named, pos) {
             return r;
         }
-        crate::builtins::call(&f.name, &pos_args, &named, pos)
+        crate::builtins::call(&f.name, &pos_args, &named, pos).map(Value::without_slash)
     }
 
     /// Read the single string `$name` argument of an existence predicate,
@@ -7117,9 +7122,9 @@ impl<'a> Evaluator<'a> {
                 for (_, v) in &mut named {
                     *v = std::mem::replace(v, Value::Null).without_slash();
                 }
-                return Ok(Some(crate::builtins::call_module(
-                    &fb.module, bare, &pos_args, &named, pos,
-                )?));
+                return Ok(Some(
+                    crate::builtins::call_module(&fb.module, bare, &pos_args, &named, pos)?.without_slash(),
+                ));
             }
         }
         Ok(None)
@@ -7276,30 +7281,105 @@ impl<'a> Evaluator<'a> {
     /// The lazy `if($condition, $if-true, $if-false)` function: evaluates
     /// the condition, then only the selected branch.
     fn eval_if_function(&mut self, args: &[CallArg], pos: Pos) -> Result<Value, Error> {
-        let mut by_pos: Vec<&Expr> = Vec::new();
-        let mut cond = None;
-        let mut t_val = None;
-        let mut f_val = None;
-        for a in args {
-            match a.name.as_deref() {
-                Some("condition") => cond = Some(&a.value),
-                Some("if-true") => t_val = Some(&a.value),
-                Some("if-false") => f_val = Some(&a.value),
-                Some(other) => {
-                    return Err(Error::at(format!("if() has no argument named ${other}."), pos));
-                }
-                None => by_pos.push(&a.value),
+        // An argument is lazy (an unevaluated branch expression) unless it
+        // came from a `...` splat: dart's macro-argument handling evaluates
+        // the splat eagerly and reconstitutes its elements (and an argument
+        // list's keywords) as already-evaluated arguments.
+        enum IfArg<'a> {
+            Lazy(&'a Expr),
+            Eager(Value),
+        }
+        fn slot_index(name: &str) -> Option<usize> {
+            match name {
+                "condition" => Some(0),
+                "if-true" => Some(1),
+                "if-false" => Some(2),
+                _ => None,
             }
         }
-        let cond = cond.or_else(|| by_pos.first().copied());
-        let t_val = t_val.or_else(|| by_pos.get(1).copied());
-        let f_val = f_val.or_else(|| by_pos.get(2).copied());
+        let mut by_pos: Vec<IfArg<'_>> = Vec::new();
+        // $condition / $if-true / $if-false by name.
+        let mut named: [Option<IfArg<'_>>; 3] = [None, None, None];
+        for a in args {
+            if a.splat {
+                match self.eval_expr(&a.value)? {
+                    Value::List(l) => {
+                        if let Some(kw) = &l.keywords {
+                            for (k, v) in kw {
+                                if let Value::Str(s) = k {
+                                    match slot_index(&s.text) {
+                                        Some(i) => named[i] = Some(IfArg::Eager(v.clone())),
+                                        None => {
+                                            return Err(Error::at(
+                                                format!("if() has no argument named ${}.", s.text),
+                                                pos,
+                                            ))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        for item in l.items {
+                            by_pos.push(IfArg::Eager(item));
+                        }
+                    }
+                    Value::Map(m) => {
+                        for (k, v) in m.entries {
+                            let name = match k {
+                                Value::Str(s) => s.text,
+                                other => {
+                                    return Err(Error::at(
+                                        format!(
+                                            "Variable keyword argument map must have string keys.\n{} is not a string.",
+                                            other.to_css(false)
+                                        ),
+                                        pos,
+                                    ))
+                                }
+                            };
+                            match slot_index(&name) {
+                                Some(i) => named[i] = Some(IfArg::Eager(v)),
+                                None => {
+                                    return Err(Error::at(
+                                        format!("if() has no argument named ${name}."),
+                                        pos,
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                    other => by_pos.push(IfArg::Eager(other)),
+                }
+                continue;
+            }
+            match a.name.as_deref() {
+                Some(name) => match slot_index(name) {
+                    Some(i) => named[i] = Some(IfArg::Lazy(&a.value)),
+                    None => {
+                        return Err(Error::at(format!("if() has no argument named ${name}."), pos));
+                    }
+                },
+                None => by_pos.push(IfArg::Lazy(&a.value)),
+            }
+        }
+        let [cond, t_val, f_val] = named;
+        let mut pos_iter = by_pos.into_iter();
+        let cond = cond.or_else(|| pos_iter.next());
+        let t_val = t_val.or_else(|| pos_iter.next());
+        let f_val = f_val.or_else(|| pos_iter.next());
         match (cond, t_val, f_val) {
             (Some(c), Some(t), Some(f)) => {
+                let truthy = match c {
+                    IfArg::Lazy(e) => self.eval_expr(e)?.is_truthy(),
+                    IfArg::Eager(v) => v.is_truthy(),
+                };
                 // if() is a function boundary: a bare slash-division branch
                 // collapses to its number (dart-sass `withoutSlash`).
-                let branch = if self.eval_expr(c)?.is_truthy() { t } else { f };
-                Ok(self.eval_expr(branch)?.without_slash())
+                let branch = if truthy { t } else { f };
+                match branch {
+                    IfArg::Lazy(e) => Ok(self.eval_expr(e)?.without_slash()),
+                    IfArg::Eager(v) => Ok(v.without_slash()),
+                }
             }
             _ => Err(Error::at(
                 "if() requires arguments $condition, $if-true, $if-false.",

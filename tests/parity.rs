@@ -7066,6 +7066,18 @@ fn url_whitespace_falls_back_to_function_call() {
 }
 
 #[test]
+fn call_results_are_slash_free_and_if_supports_splat() {
+    // dart applies withoutSlash() to every call result: extracting a
+    // slash-division value through a built-in resolves it.
+    assert_eq!(
+        ours("@use \"sass:list\";\na {b: list.nth(3 1/2 4, 2)}\n"),
+        "a {\n  b: 0.5;\n}\n"
+    );
+    // if() accepts splat arguments (macro args evaluate the splat eagerly).
+    assert_eq!(ours("c {d: if(true, 1/2 null...)}\n"), "c {\n  d: 0.5;\n}\n");
+}
+
+#[test]
 fn content_block_runs_in_child_scope() {
     // A content block is a user-defined callable: a `$var:` first declared
     // inside it stays local to the block, so a global-only variable is NOT
