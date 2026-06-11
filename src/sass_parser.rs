@@ -697,6 +697,10 @@ impl Transpiler {
                 ));
             }
         }
+        // Keep the original indentation in the transpiled line: the name's
+        // source column caps the re-indentation strip of a multi-line value
+        // (dart _writeReindentedValue), so it must survive the SCSS re-parse.
+        self.out.push_str(&self.lines[start].indent_str);
         self.out.push_str(name);
         self.out.push_str(": ");
         self.out.push_str(value.trim_end());

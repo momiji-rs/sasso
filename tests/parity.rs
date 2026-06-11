@@ -7271,3 +7271,40 @@ fn interpolation_skips_leading_whitespace_and_comments() {
     assert_eq!(ours("a#{ \" b\"} { c: d; }\n"), "a b {\n  c: d;\n}\n");
     assert_eq!(ours("a { b: c#{ 1 + 2}; }\n"), "a {\n  b: c3;\n}\n");
 }
+
+#[test]
+fn custom_property_values_reindent_like_dart() {
+    // dart _writeReindentedValue: a multi-line custom value strips
+    // min(name column, least continuation indent) from each continuation
+    // line and prefixes the current output indentation; deeper relative
+    // indentation survives, blank-with-whitespace lines stay.
+    assert_eq!(
+        ours("a {\n         --deep: {\n           foo: bar;\n         };\n}\n"),
+        "a {\n  --deep: {\n    foo: bar;\n  };\n}\n"
+    );
+    // A continuation line ABOVE the base re-anchors the strip at its own
+    // indent: `--below: \n    foo\n bar` strips 1 (min of col 2 and 1).
+    assert_eq!(
+        ours("a {\n  --below:\n    foo\n bar\n   baz;\n}\n"),
+        "a {\n  --below:\n     foo\n  bar\n    baz;\n}\n"
+    );
+    // Hard tabs count as single characters in the strip.
+    assert_eq!(
+        ours("a {\n\t--tabs: {\n\t\tfoo: bar;\n\t};\n}\n"),
+        "a {\n  --tabs: {\n  \tfoo: bar;\n  };\n}\n"
+    );
+    // .sass keeps the original name column through transpilation.
+    assert_eq!(
+        ours_sass("a\n  --b: (c\n    d)\n"),
+        "a {\n  --b: (c\n    d);\n}\n"
+    );
+    // Compressed output folds each newline + following whitespace run to a
+    // single space instead (dart _writeFoldedValue).
+    use sasso::OutputStyle;
+    let compressed = compile(
+        "a {\n  --x: {\n    foo: bar;\n  };\n}\n",
+        &Options::default().with_style(OutputStyle::Compressed),
+    )
+    .expect("compile failed");
+    assert_eq!(compressed, "a{--x: { foo: bar; }}");
+}

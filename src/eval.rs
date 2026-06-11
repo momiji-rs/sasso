@@ -5518,7 +5518,9 @@ impl<'a> Evaluator<'a> {
                 file: 0,
                 start: d.pos.line as u32,
                 end: d.end_line,
-                col: 0,
+                // The name's 0-based source column caps the re-indentation
+                // strip for a multi-line value (dart _writeReindentedValue).
+                col: d.pos.col.saturating_sub(1) as u32,
             }),
         }))
     }

@@ -178,7 +178,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
         } => {
             out.push_str(indent);
             out.push_str(prop);
-            emit_decl_value_expanded(out, value, *important, *custom, depth);
+            emit_decl_value_expanded(out, value, *important, *custom, lines.col as usize, indent);
             out.push_str(";\n");
             *prev = *lines;
         }
@@ -239,7 +239,7 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize, prev: &mut
         } => {
             out.push_str(indent);
             out.push_str(prop);
-            emit_decl_value_expanded(out, value, *important, *custom, depth);
+            emit_decl_value_expanded(out, value, *important, *custom, lines.col as usize, indent);
             out.push_str(";\n");
             *prev = *lines;
         }
@@ -303,16 +303,139 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize, prev: &mut
 /// custom property emits its value verbatim right after the colon (its leading
 /// whitespace is part of `value`, dart-sass adds no space) and never appends an
 /// `!important` flag; a normal declaration uses the canonical `: ` separator.
-fn emit_decl_value_expanded(out: &mut String, value: &str, important: bool, custom: bool, _depth: usize) {
+/// A multi-line custom value is re-indented (dart `_writeReindentedValue`):
+/// `name_col` is the declaration name's 0-based source column and `indent`
+/// the current output indentation.
+fn emit_decl_value_expanded(
+    out: &mut String,
+    value: &str,
+    important: bool,
+    custom: bool,
+    name_col: usize,
+    indent: &str,
+) {
     if custom {
         out.push(':');
-        out.push_str(value);
+        match minimum_indentation(value) {
+            MinIndent::SingleLine => out.push_str(value),
+            MinIndent::Trailing => {
+                out.push_str(trim_ascii_right_exclude_escape(value));
+                out.push(' ');
+            }
+            MinIndent::Min(m) => write_with_indent(out, value, m.min(name_col), indent),
+        }
         return;
     }
     out.push_str(": ");
     out.push_str(value);
     if important {
         out.push_str(" !important");
+    }
+}
+
+/// dart `_minimumIndentation`: the minimum indentation of `text`'s
+/// continuation lines, skipping blank lines.
+enum MinIndent {
+    /// `text` has no newline — emit verbatim.
+    SingleLine,
+    /// Every continuation line is blank (dart's `-1`) — trim right + space.
+    Trailing,
+    /// The least indented non-blank continuation line starts at this column.
+    Min(usize),
+}
+
+fn minimum_indentation(text: &str) -> MinIndent {
+    let bytes = text.as_bytes();
+    let mut i = match text.find('\n') {
+        None => return MinIndent::SingleLine,
+        Some(p) => p + 1,
+    };
+    if i >= bytes.len() {
+        return MinIndent::Trailing;
+    }
+    let mut min: Option<usize> = None;
+    while i < bytes.len() {
+        let start = i;
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break; // a trailing all-whitespace line is not counted
+        }
+        if bytes[i] == b'\n' {
+            i += 1; // blank line: not counted
+            continue;
+        }
+        let col = i - start;
+        min = Some(min.map_or(col, |m| m.min(col)));
+        while i < bytes.len() && bytes[i] != b'\n' {
+            i += 1;
+        }
+        i += 1;
+    }
+    match min {
+        None => MinIndent::Trailing,
+        Some(m) => MinIndent::Min(m),
+    }
+}
+
+/// dart `trimAsciiRight(value, excludeEscape: true)`: strip trailing ASCII
+/// whitespace, but keep one character after a terminating backslash so an
+/// escaped trailing space survives.
+fn trim_ascii_right_exclude_escape(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && matches!(bytes[end - 1], b' ' | b'\t' | b'\n' | b'\r' | b'\x0c') {
+        end -= 1;
+    }
+    if end != 0 && end != bytes.len() && bytes[end - 1] == b'\\' {
+        end += 1;
+    }
+    &s[..end]
+}
+
+/// dart `_writeWithIndent`: write the first line verbatim, then each
+/// continuation line stripped of `min_indent` characters and prefixed with
+/// the current output indentation. Blank lines stay blank; a trailing
+/// all-whitespace line folds to a single space.
+fn write_with_indent(out: &mut String, text: &str, min_indent: usize, indent: &str) {
+    let first_end = text.find('\n').unwrap_or(text.len());
+    out.push_str(&text[..first_end]);
+    if first_end == text.len() {
+        return;
+    }
+    let mut i = first_end + 1;
+    loop {
+        let mut line_start = i;
+        let mut newlines = 1usize;
+        // Scan the whitespace run, counting blank lines; `i` settles on the
+        // first non-whitespace character (the run's indentation is ASCII, so
+        // byte stepping stays on char boundaries).
+        loop {
+            if i >= text.len() {
+                out.push(' ');
+                return;
+            }
+            match text.as_bytes()[i] {
+                b' ' | b'\t' => i += 1,
+                b'\n' => {
+                    i += 1;
+                    line_start = i;
+                    newlines += 1;
+                }
+                _ => break,
+            }
+        }
+        for _ in 0..newlines {
+            out.push('\n');
+        }
+        out.push_str(indent);
+        let line_end = text[i..].find('\n').map(|p| i + p).unwrap_or(text.len());
+        out.push_str(&text[line_start + min_indent..line_end]);
+        if line_end == text.len() {
+            return;
+        }
+        i = line_end + 1;
     }
 }
 
@@ -357,6 +480,7 @@ fn compressed_nested_rule(selectors: &[String], items: &[OutItem]) -> String {
                 ..
             } => {
                 let imp = if *important && !*custom { "!important" } else { "" };
+                let value = fold_value_compressed(value, *custom);
                 Some(format!("{prop}:{value}{imp}"))
             }
             OutItem::Comment(..) => None,
@@ -369,6 +493,28 @@ fn compressed_nested_rule(selectors: &[String], items: &[OutItem]) -> String {
         })
         .collect();
     format!("{}{{{}}}", selectors.join(","), inner.join(";"))
+}
+
+/// dart `_writeFoldedValue` (compressed custom properties): each newline
+/// becomes a single space and the whitespace run following it is dropped.
+/// Non-custom values pass through untouched.
+fn fold_value_compressed<'v>(value: &'v str, custom: bool) -> std::borrow::Cow<'v, str> {
+    if !custom || !value.contains('\n') {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\n' {
+            out.push(c);
+            continue;
+        }
+        out.push(' ');
+        while matches!(chars.peek(), Some(' ' | '\t' | '\n' | '\r' | '\x0c')) {
+            chars.next();
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// Serialize a plain-CSS nested at-rule for compressed output (rare path; see
@@ -410,6 +556,7 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
                         // leading whitespace is part of `value`) and never gains
                         // an `!important` flag.
                         let imp = if *important && !*custom { "!important" } else { "" };
+                        let value = fold_value_compressed(value, *custom);
                         Some(format!("{prop}:{value}{imp}"))
                     }
                     OutItem::Comment(..) => None,
@@ -455,7 +602,7 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
             let imp = if *important && !*custom { "!important" } else { "" };
             out.push_str(prop);
             out.push(':');
-            out.push_str(value);
+            out.push_str(&fold_value_compressed(value, *custom));
             out.push_str(imp);
         }
         OutNode::AtRule {
