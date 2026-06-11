@@ -7533,3 +7533,19 @@ fn user_calc_function_overrides_calculation() {
         "a {\n  b: 6px;\n}\n"
     );
 }
+
+#[test]
+fn media_feature_is_a_full_boolean_expression() {
+    // dart parses a media feature's value with _expressionUntilComparison —
+    // a full SassScript expression stopping only at range comparisons. So
+    // `(screen and (color))` is ONE boolean expression whose `and` returns
+    // its second operand (issue_485), while range syntax still parses.
+    assert_eq!(
+        ours("@media (not (screen and (color))) { a {b: c} }\n"),
+        "@media not (color) {\n  a {\n    b: c;\n  }\n}\n"
+    );
+    assert_eq!(
+        ours("@media (width > 0) { a {b: c} }\n"),
+        "@media (width > 0) {\n  a {\n    b: c;\n  }\n}\n"
+    );
+}

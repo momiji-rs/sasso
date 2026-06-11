@@ -2963,7 +2963,56 @@ impl Parser {
         if matches!(self.sc.peek(), Some('=')) {
             return Err(Error::at("Expected expression.", self.sc.position()));
         }
-        self.additive()
+        // dart `_expressionUntilComparison`: a full SassScript expression
+        // stopping at `<`, `>`, or a single `=` — `(screen and (color))`
+        // evaluates as ONE boolean expression (issue_485: `and` returns its
+        // second operand, so the feature renders `(color)`), while range
+        // syntax `(width > 0)` still leaves the comparison to the media
+        // grammar (the additive operand never consumes those).
+        let mut lhs = self.media_and_chain()?;
+        loop {
+            let mark = self.sc.mark();
+            self.skip_ws_inline();
+            if !self.plain_css && self.try_keyword("or") {
+                self.skip_ws_inline();
+                let pos = self.sc.position();
+                let rhs = self.media_and_chain()?;
+                lhs = Expr::Binary {
+                    op: BinOp::Or,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    pos,
+                };
+            } else {
+                self.sc.reset(mark);
+                break;
+            }
+        }
+        Ok(lhs)
+    }
+
+    /// The `and` level of [`Self::media_expression`], over additive operands.
+    fn media_and_chain(&mut self) -> Result<Expr, Error> {
+        let mut lhs = self.additive()?;
+        loop {
+            let mark = self.sc.mark();
+            self.skip_ws_inline();
+            if !self.plain_css && self.try_keyword("and") {
+                self.skip_ws_inline();
+                let pos = self.sc.position();
+                let rhs = self.additive()?;
+                lhs = Expr::Binary {
+                    op: BinOp::And,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    pos,
+                };
+            } else {
+                self.sc.reset(mark);
+                break;
+            }
+        }
+        Ok(lhs)
     }
 
     /// Parse an identifier/template that may include interpolation, used for a
