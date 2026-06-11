@@ -1548,6 +1548,11 @@ impl Parser {
                             }
                             continue;
                         }
+                        // A raw newline terminates the string with dart's
+                        // `Expected ".` (issue_1096 CRLF url strings).
+                        if ch == '\n' || ch == '\r' {
+                            return Err(Error::at(format!("Expected {q}."), self.sc.position()));
+                        }
                         if ch == '#' && self.sc.peek_at(1) == Some('{') {
                             if self.plain_css {
                                 return Err(Error::at(
