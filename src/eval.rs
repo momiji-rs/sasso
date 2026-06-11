@@ -913,6 +913,7 @@ struct PendingExtend {
 impl<'a> Evaluator<'a> {
     pub(crate) fn new(options: EvalOptions<'a>) -> Self {
         let url = options.url.to_string();
+        let entry_dir = dirname_of(options.url).unwrap_or_default();
         let source: Rc<str> = Rc::from(options.source);
         let file_sources: HashMap<String, Rc<str>> =
             [(url.clone(), Rc::clone(&source))].into_iter().collect();
@@ -954,7 +955,10 @@ impl<'a> Evaluator<'a> {
             in_keyframes: false,
             at_root_excluding_style_rule: false,
             import_clone: None,
-            current_file_dir: None,
+            // The entry file's containing directory (possibly "" = the
+            // CWD-relative root): relative imports resolve against it first,
+            // like dart — NOT via an implicit load path.
+            current_file_dir: Some(entry_dir),
             media_hoist: Vec::new(),
             at_root_hoist: std::collections::VecDeque::new(),
             at_rule_ctx: Vec::new(),

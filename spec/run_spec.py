@@ -642,6 +642,10 @@ def compile_case(case: Case, sass_bin: str, style: str,
         # the way dart-sass's runner sees them. The flat layout above keeps
         # sibling/relative imports byte-identical, so currently-passing cases are
         # unaffected.
+        # NOTE: the per-case tmp dir (tdp) is deliberately NOT a load path:
+        # relative imports resolve against the containing file's directory
+        # (the compiler's current_file_dir), exactly like dart — a file in a
+        # subdirectory must not see the entry's siblings (parent_relative).
         load_paths = []
         if case.archive_files:
             base = tdp / case.archive_id if case.archive_id else tdp
@@ -650,7 +654,7 @@ def compile_case(case: Case, sass_bin: str, style: str,
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 if not fp.exists():
                     fp.write_text(content, encoding="utf-8")
-            load_paths = [tdp] + ([base] if case.archive_id else [])
+            load_paths = [base] if case.archive_id else []
 
         # The real suite root is the LOWEST-priority load path: shared partials
         # outside the case archive (e.g. core_functions/color/_utils.scss) resolve

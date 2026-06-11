@@ -173,7 +173,7 @@ fn parse_style(s: &str) -> Result<OutputStyle, String> {
     }
 }
 
-fn run(mut cli: Cli) -> ExitCode {
+fn run(cli: Cli) -> ExitCode {
     // Gather the input units to compile, each paired with its syntax. `--stdin`
     // is a single unit (SCSS unless `--indented`); otherwise every path on the
     // command line is a unit, with its syntax inferred from the extension
@@ -202,14 +202,10 @@ fn run(mut cli: Cli) -> ExitCode {
             return ExitCode::FAILURE;
         }
         for path in &cli.inputs {
-            // Make each input file's directory an implicit load path so sibling
-            // partials resolve, like dart-sass.
-            if let Some(parent) = path.parent() {
-                let parent = parent.to_path_buf();
-                if !parent.as_os_str().is_empty() && !cli.load_paths.contains(&parent) {
-                    cli.load_paths.push(parent);
-                }
-            }
+            // Relative imports resolve against the CONTAINING file's
+            // directory (the evaluator's current_file_dir), like dart — the
+            // input's directory is deliberately NOT an implicit load path
+            // (a file in a subdirectory must not see the entry's siblings).
             let ext_is_sass = path
                 .extension()
                 .map(|e| e.eq_ignore_ascii_case("sass"))
@@ -233,9 +229,6 @@ fn run(mut cli: Cli) -> ExitCode {
         }
     }
 
-    if cli.load_paths.is_empty() {
-        cli.load_paths.push(PathBuf::from("."));
-    }
     let importer = FsImporter::new(cli.load_paths);
     let style = cli.style;
     let unicode = !cli.no_unicode;
