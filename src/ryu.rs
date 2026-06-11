@@ -258,29 +258,39 @@ pub(crate) fn format64(f: f64, out: &mut String) {
             break;
         }
     }
-    let digits = &buf[at..];
+    // Validate the ASCII digit run ONCE; the branches below slice this `&str`
+    // (str slicing is byte-indexed, so no further UTF-8 checks) instead of
+    // re-validating each fragment.
+    let digits = std::str::from_utf8(&buf[at..]).expect("ascii digits");
     let len = digits.len() as i32;
     // The decimal point sits after `point` digits: digits * 10^exponent.
     let point = len + v.exponent;
     if v.exponent >= 0 {
         // All digits before the point, then exponent zeros: 123000…
-        out.push_str(std::str::from_utf8(digits).expect("ascii digits"));
-        for _ in 0..v.exponent {
-            out.push('0');
-        }
+        out.reserve(digits.len() + v.exponent as usize);
+        out.push_str(digits);
+        push_zeros(out, v.exponent as usize);
     } else if point > 0 {
         // Point inside the digit run: 12.3…
-        out.push_str(std::str::from_utf8(&digits[..point as usize]).expect("ascii digits"));
+        let point = point as usize;
+        out.reserve(digits.len() + 1);
+        out.push_str(&digits[..point]);
         out.push('.');
-        out.push_str(std::str::from_utf8(&digits[point as usize..]).expect("ascii digits"));
+        out.push_str(&digits[point..]);
     } else {
         // 0.00…digits
+        let zeros = (-point) as usize;
+        out.reserve(2 + zeros + digits.len());
         out.push_str("0.");
-        for _ in 0..-point {
-            out.push('0');
-        }
-        out.push_str(std::str::from_utf8(digits).expect("ascii digits"));
+        push_zeros(out, zeros);
+        out.push_str(digits);
     }
+}
+
+/// Append `n` ASCII '0' bytes (a single extend, not a per-char push loop).
+#[inline]
+fn push_zeros(out: &mut String, n: usize) {
+    out.extend(std::iter::repeat('0').take(n));
 }
 
 #[cfg(test)]
