@@ -518,6 +518,8 @@ pub(crate) struct Evaluator<'a> {
     /// Per-compile `@import` cache (dart-sass ImportCache analogue): keyed by
     /// (url, importing dir), holding (resolved key, syntax, parsed sheet).
     import_cache: HashMap<(String, Option<String>), CachedImport>,
+    /// One-entry memo for [`Self::stamp`]: the current file's interned id.
+    last_stamp: (String, u32),
     /// User function/mixin scope chains, parallel to `scopes` (dart's
     /// `Environment._functions`/`_mixins`): a definition always lands in the
     /// innermost frame, so a nested `@function`/`@mixin` shadows an outer one
@@ -964,6 +966,7 @@ impl<'a> Evaluator<'a> {
             options,
             loading: Vec::new(),
             import_cache: HashMap::default(),
+            last_stamp: (String::new(), 0),
             functions: vec![new_fn_scope()],
             mixins: vec![new_fn_scope()],
             content_stack: Vec::new(),
@@ -1014,8 +1017,16 @@ impl<'a> Evaluator<'a> {
         if lines == SrcLines::default() {
             return lines;
         }
+        // One-entry memo: stamp runs for every source-line-carrying node and
+        // the current file changes rarely, so a string compare beats the
+        // clone + hash insert on virtually every call.
+        if self.last_stamp.1 != 0 && self.last_stamp.0 == self.current_url {
+            lines.file = self.last_stamp.1;
+            return lines;
+        }
         let next = self.file_ids.len() as u32 + 1;
         let id = *self.file_ids.entry(self.current_url.clone()).or_insert(next);
+        self.last_stamp = (self.current_url.clone(), id);
         lines.file = id;
         lines
     }
@@ -9845,7 +9856,11 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
         return Err(Error::unpositioned("expected selector."));
     }
     // Parens and brackets must nest properly: `a:b([c)]` is dart's
-    // `expected "]".` (a `)` closing while a `[` is still open).
+    // `expected "]".` (a `)` closing while a `[` is still open). A selector
+    // without any bracket/quote/escape byte cannot mis-nest — skip the scan.
+    if sel
+        .bytes()
+        .any(|c| matches!(c, b'(' | b'[' | b')' | b']' | b'"' | b'\'' | b'\\'))
     {
         let mut stack: Vec<char> = Vec::new();
         let mut quote: Option<char> = None;
@@ -9878,8 +9893,16 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
         }
     }
     // The `:nth-*` pseudos require an An+B argument: `:nth-child()` is
-    // dart's selector-parse error `Expected "n".` (issue_2175).
-    {
+    // dart's selector-parse error `Expected "n".` (issue_2175). Gated on a
+    // zero-alloc case-insensitive ":nth-" byte scan — the lowercase copy and
+    // four substring searches below cost real allocations per selector.
+    if sel.as_bytes().windows(5).any(|w| {
+        w[0] == b':'
+            && (w[1] | 0x20) == b'n'
+            && (w[2] | 0x20) == b't'
+            && (w[3] | 0x20) == b'h'
+            && w[4] == b'-'
+    }) {
         let lower = sel.to_ascii_lowercase();
         for pat in [
             ":nth-child(",
