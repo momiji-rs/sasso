@@ -6842,3 +6842,25 @@ fn modulo_infinite_modulus() {
     );
     assert_eq!(ours("a {b: calc(infinity) % 3}\n"), "a {\n  b: calc(NaN);\n}\n");
 }
+
+#[test]
+fn loud_comment_continuation_indent() {
+    // Continuation lines of a loud comment gain the CURRENT output
+    // indentation on top of their own source indentation.
+    assert_eq!(
+        ours(".foo {\n    /* Foo\n Bar\nBaz */\n  a: b; }\n"),
+        ".foo {\n  /* Foo\n   Bar\n  Baz */\n  a: b;\n}\n"
+    );
+}
+
+#[test]
+fn id_tokens_when_not_hex_colors() {
+    // `#` + identifier that isn't a valid color is an ID token (nav-up).
+    assert_eq!(
+        ours("a {b: #ab; c: #abcde; d: #abcg}\n"),
+        "a {\n  b: #ab;\n  c: #abcde;\n  d: #abcg;\n}\n"
+    );
+    // Valid hex colors still parse as colors (color arithmetic errors).
+    assert!(compile("a {b: #abc + 1}\n", &Options::default()).is_err());
+    assert_eq!(ours("a {b: #abc}\n"), "a {\n  b: #abc;\n}\n");
+}

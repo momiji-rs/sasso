@@ -204,6 +204,47 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_' || (c as u32) >= 0x80
 }
 
+/// dart `_minimumIndentation` + `_writeWithIndent`: a loud comment's
+/// continuation lines drop `min(<their minimum indentation>, <the comment's
+/// own start column>)` leading spaces at PARSE time; the emitter then adds
+/// the current output indentation back. Only applied to interpolation-free
+/// comments (the common case).
+fn strip_comment_indent(pieces: &mut [TplPiece], start_col: usize) {
+    if pieces.len() != 1 {
+        return;
+    }
+    let TplPiece::Lit(text) = &mut pieces[0] else {
+        return;
+    };
+    if !text.contains('\n') {
+        return;
+    }
+    let mut min_indent: Option<usize> = None;
+    for line in text.split('\n').skip(1) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ind = line.len() - line.trim_start_matches(' ').len();
+        min_indent = Some(min_indent.map_or(ind, |m| m.min(ind)));
+    }
+    let Some(min_indent) = min_indent else { return };
+    let strip = min_indent.min(start_col);
+    if strip == 0 {
+        return;
+    }
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+            let avail = line.len() - line.trim_start_matches(' ').len();
+            out.push_str(&line[strip.min(avail)..]);
+        } else {
+            out.push_str(line);
+        }
+    }
+    *text = out;
+}
+
 /// Reject generic/unknown at-rules in a context that forbids them (function
 /// bodies, nested property sets), recursing into control-flow bodies.
 fn reject_at_rules_in(stmts: &[Stmt]) -> Result<(), Error> {
@@ -609,9 +650,12 @@ impl Parser {
                     }
                 }
                 Some('/') if self.sc.peek_at(1) == Some('*') => {
+                    let col0 = self.sc.position().col - 1;
                     self.sc.bump();
                     self.sc.bump();
-                    out.push(Stmt::Comment(self.parse_loud_comment_body()?));
+                    let mut pieces = self.parse_loud_comment_body()?;
+                    strip_comment_indent(&mut pieces, col0);
+                    out.push(Stmt::Comment(pieces));
                 }
                 _ => break,
             }
@@ -4905,10 +4949,30 @@ impl Parser {
                 hex.push(c);
             }
         }
-        match Color::from_hex(&hex) {
-            Some(c) => Ok(Expr::Color(c)),
-            None => Err(Error::at(format!("invalid hex color #{hex}"), pos)),
+        // A `#` token that isn't a valid color is an ID token (CSS `nav-up`
+        // and friends accept IDs): keep consuming the identifier and emit
+        // the literal (`#ab`, `#abcde`, `#abcg`).
+        let continues = matches!(self.sc.peek(), Some(c) if is_ident_char(c) || c == '\\');
+        if !continues {
+            if let Some(c) = Color::from_hex(&hex) {
+                return Ok(Expr::Color(c));
+            }
         }
+        let mut ident = hex;
+        loop {
+            match self.sc.peek() {
+                Some(c) if is_ident_char(c) => {
+                    self.sc.bump();
+                    ident.push(c);
+                }
+                Some('\\') => ident.push(self.read_escape_char()?),
+                _ => break,
+            }
+        }
+        if ident.is_empty() {
+            return Err(Error::at("Expected identifier.", pos));
+        }
+        Ok(Expr::Ident(vec![TplPiece::Lit(format!("#{ident}"))]))
     }
 
     fn parse_quoted_string(&mut self) -> Result<Vec<TplPiece>, Error> {

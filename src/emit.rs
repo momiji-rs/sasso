@@ -81,7 +81,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
         OutNode::Comment(text) => {
             out.push_str(&indent);
             out.push_str("/*");
-            out.push_str(text);
+            push_comment_text(out, text, &indent);
             out.push_str("*/\n");
             *prev = Prev::Other;
         }
@@ -161,7 +161,7 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
         OutItem::Comment(text) => {
             out.push_str(&indent);
             out.push_str("/*");
-            out.push_str(text);
+            push_comment_text(out, text, &indent);
             out.push_str("*/\n");
         }
         OutItem::ChildlessAtRule { name, prelude } => {
@@ -382,5 +382,22 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
             emit_compressed_body(out, body);
             out.push('}');
         }
+    }
+}
+
+/// Write a loud comment's text with dart's continuation-line handling: every
+/// line after the first gains the CURRENT output indentation on top of its
+/// own source indentation.
+fn push_comment_text(out: &mut String, text: &str, indent: &str) {
+    let mut first = true;
+    for line in text.split('\n') {
+        if !first {
+            out.push('\n');
+            if !line.is_empty() {
+                out.push_str(indent);
+            }
+        }
+        out.push_str(line);
+        first = false;
     }
 }
