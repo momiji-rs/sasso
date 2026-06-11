@@ -872,12 +872,22 @@ pub(crate) fn extend_selectors(
         }
     }
 
-    let result = extend_to_fixpoint_breaks(original, original_breaks, extensions);
+    let (result, changed) = extend_to_fixpoint_breaks(original, original_breaks, extensions);
 
     // Remove selectors that are subselectors of another (redundant), keeping
-    // originals (dart-sass `_trim` with extender source specificities).
-    let source_spec = source_specificity_map(extensions);
-    let result = trim_breaks(result, &originals, &source_spec);
+    // originals (dart-sass `_trim` with extender source specificities). When
+    // NOTHING changed, dart returns the original list untouched — no trim,
+    // duplicate selectors preserved (issue_2291's reparsed `A, B, C-foo...`).
+    let result = if changed {
+        let source_spec = source_specificity_map(extensions);
+        trim_breaks(result, &originals, &source_spec)
+    } else {
+        original
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.clone(), original_breaks.get(i).copied().unwrap_or(false)))
+            .collect()
+    };
 
     // Simplify placeholders inside `:is()/:where()/:not()`-style pseudo
     // arguments, dropping selectors whose pseudo can never match.
@@ -2370,9 +2380,18 @@ fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
     for complex in list {
         originals.insert(complex.render());
     }
-    let result = extend_to_fixpoint(list, extensions);
+    let (result, changed) = extend_to_fixpoint_breaks(list, &[], extensions);
+    // dart `_extendList`: when no complex was changed the ORIGINAL list is
+    // returned untouched — no trim, duplicates preserved.
+    if !changed {
+        return list.to_vec();
+    }
     let source_spec = source_specificity_map(extensions);
-    trim(result, &originals, &source_spec)
+    trim(
+        result.into_iter().map(|(c, _)| c).collect(),
+        &originals,
+        &source_spec,
+    )
 }
 
 /// Run the extension to a fixpoint: extend each selector, then feed every
@@ -2380,20 +2399,15 @@ fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
 /// This realizes dart-sass's extension-graph behavior where an extender produced
 /// by one `@extend` can itself be extended by another (transitively, including
 /// targets buried in pseudo arguments). Bounded to guarantee termination.
-fn extend_to_fixpoint(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
-    extend_to_fixpoint_breaks(list, &[], extensions)
-        .into_iter()
-        .map(|(c, _)| c)
-        .collect()
-}
-
-/// Like [`extend_to_fixpoint`], threading per-selector line-break flags: each
-/// product carries its input's flag OR any contributing extender's.
+/// Threads per-selector line-break flags (each product carries its input's
+/// flag OR any contributing extender's) and reports whether ANY input complex
+/// was changed by an extension — dart `_extendList` returns the original list
+/// untouched when nothing changed.
 fn extend_to_fixpoint_breaks(
     list: &[Complex],
     list_breaks: &[bool],
     extensions: &[Extension],
-) -> Vec<(Complex, bool)> {
+) -> (Vec<(Complex, bool)>, bool) {
     // Extender flags by rendered form, for the per-option lookup.
     let mut ext_breaks: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
     for ext in extensions {
@@ -2405,17 +2419,23 @@ fn extend_to_fixpoint_breaks(
     }
     let mut result: Vec<(Complex, bool)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    // Worklist of selectors still to extend (originals first).
-    let mut queue: std::collections::VecDeque<(Complex, bool)> = list
+    let mut changed = false;
+    // Worklist of selectors still to extend (originals first; the flag marks
+    // an ORIGINAL input, whose unchanged round-trip doesn't count as a change).
+    let mut queue: std::collections::VecDeque<(Complex, bool, bool)> = list
         .iter()
         .enumerate()
-        .map(|(i, c)| (c.clone(), list_breaks.get(i).copied().unwrap_or(false)))
+        .map(|(i, c)| (c.clone(), list_breaks.get(i).copied().unwrap_or(false), true))
         .collect();
-    while let Some((complex, in_break)) = queue.pop_front() {
+    while let Some((complex, in_break, is_input)) = queue.pop_front() {
         if !consume_extend_work() || result.len() > 100_000 {
             break;
         }
-        for (c, flag) in extend_complex_breaks(&complex, in_break, extensions, &ext_breaks) {
+        let products = extend_complex_breaks(&complex, in_break, extensions, &ext_breaks);
+        if is_input && !(products.len() == 1 && products[0].0.render() == complex.render()) {
+            changed = true;
+        }
+        for (c, flag) in products {
             let rendered = c.render();
             let len = rendered.len();
             if seen.insert(rendered) {
@@ -2431,13 +2451,13 @@ fn extend_to_fixpoint_breaks(
                 // anything new. An over-long selector (a self-referential
                 // blowup) is emitted but not re-fed.
                 if complex_has_selector_pseudo(&c) && len <= EXTEND_REFEED_MAX_LEN {
-                    queue.push_back((c.clone(), flag));
+                    queue.push_back((c.clone(), flag, false));
                 }
                 result.push((c, flag));
             }
         }
     }
-    result
+    (result, changed)
 }
 
 /// dart-sass `_extendPseudo`: extend the selector argument of a selector-bearing

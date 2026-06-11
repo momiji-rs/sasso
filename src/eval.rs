@@ -10286,6 +10286,47 @@ fn part_has_parent_ref(part: &str) -> bool {
     false
 }
 
+/// Replace top-level `&` parent references with `parent`. A `&` inside `[…]`
+/// or a quoted string is literal text (issue_2291 `[str="&"]` keeps its
+/// ampersand); one inside pseudo parentheses is still a real reference.
+fn replace_parent_refs(part: &str, parent: &str) -> String {
+    let mut out = String::with_capacity(part.len() + parent.len());
+    let mut bracket = 0i32;
+    let mut quote: Option<char> = None;
+    let mut chars = part.chars();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                out.push(c);
+                if c == '\\' {
+                    if let Some(n) = chars.next() {
+                        out.push(n);
+                    }
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => {
+                    quote = Some(c);
+                    out.push(c);
+                }
+                '[' => {
+                    bracket += 1;
+                    out.push(c);
+                }
+                ']' => {
+                    bracket = (bracket - 1).max(0);
+                    out.push(c);
+                }
+                '&' if bracket == 0 => out.push_str(parent),
+                _ => out.push(c),
+            },
+        }
+    }
+    out
+}
+
 /// Resolve a selector against its parents with dart's `implicitParent` switch: inside
 /// `@at-root` (before the first nested style rule) a part WITHOUT `&` stays
 /// at the root instead of joining the parent, while `&` still substitutes.
@@ -10379,8 +10420,17 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
     let split_parent_refs = |part: &str| -> Option<Vec<String>> {
         let mut segments = vec![String::new()];
         let mut depth = 0i32;
+        let mut quote: Option<char> = None;
         for c in part.chars() {
+            if let Some(q) = quote {
+                segments.last_mut().unwrap().push(c);
+                if c == q {
+                    quote = None;
+                }
+                continue;
+            }
             match c {
+                '"' | '\'' => quote = Some(c),
                 '(' | '[' => depth += 1,
                 ')' | ']' => depth -= 1,
                 '&' if depth == 0 => {
@@ -10444,10 +10494,10 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
                     check_compound_parent(part, parent)?;
                 }
                 expand_cartesian(&segments, &mut result);
-            } else if part.contains('&') {
+            } else if part_has_parent_ref(part) {
                 for parent in parents {
                     check_compound_parent(part, parent)?;
-                    result.push(normalize_selector(&part.replace('&', parent)));
+                    result.push(normalize_selector(&replace_parent_refs(part, parent)));
                 }
             } else {
                 result.push(normalize_selector(part));
@@ -10475,9 +10525,9 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
                     }
                     continue;
                 }
-                let combined = if part.contains('&') {
+                let combined = if part_has_parent_ref(part) {
                     check_compound_parent(part, parent)?;
-                    part.replace('&', parent)
+                    replace_parent_refs(part, parent)
                 } else {
                     format!("{parent} {part}")
                 };

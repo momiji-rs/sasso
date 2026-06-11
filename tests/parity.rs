@@ -7385,3 +7385,21 @@ fn has_pseudo_drops_placeholder_arguments_like_dart() {
         ".not {\n  c: red;\n}\n\ndiv:has(.not) {\n  x: y;\n}\n"
     );
 }
+
+#[test]
+fn ampersand_in_attribute_strings_is_literal_and_unchanged_lists_skip_trim() {
+    // A `&` inside an attribute's quoted string is literal text, NOT a parent
+    // reference — the selector still gets the implicit parent join
+    // (issue_2291 `bar[baz="#{&}"][str="&"]` under `foo`).
+    assert_eq!(
+        ours("foo {\n  bar[baz=\"#{&}\"][str=\"&\"] {\n    a: q;\n  }\n}\n"),
+        "foo bar[baz=foo][str=\"&\"] {\n  a: q;\n}\n"
+    );
+    // When no selector in a rule is changed by any extension, dart returns
+    // the list untouched: duplicates from a reparsed interpolation survive
+    // even while @extend is active elsewhere.
+    assert_eq!(
+        ours("%p { x: y; }\n.q { @extend %p; }\nA, B {\n  #{&}-z {\n    c: d;\n  }\n}\n"),
+        ".q {\n  x: y;\n}\n\nA A, A B-z, B A, B B-z {\n  c: d;\n}\n"
+    );
+}
