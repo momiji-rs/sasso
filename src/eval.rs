@@ -9235,15 +9235,31 @@ fn extend_selector_list(
 /// nested rule we conservatively report `false` (correct whenever the governing
 /// parent is the first/unbroken one, and never emits a break dart-sass wouldn't).
 fn comma_linebreaks(sel: &str, nested: bool) -> Vec<bool> {
-    split_commas(sel)
-        .iter()
-        .enumerate()
-        .filter(|(_, seg)| !seg.trim().is_empty())
-        .map(|(i, seg)| {
-            let newline_before = i > 0 && seg.chars().take_while(|c| c.is_whitespace()).any(|c| c == '\n');
-            newline_before && !(nested && part_has_parent_ref(seg))
-        })
-        .collect()
+    // An EMPTY comma part (a stray trailing/doubled comma) is dropped, but a
+    // newline inside it still belongs to the next real part:
+    // `#foo #bar,,\n,#baz #boom,` keeps `#baz #boom` on its own line.
+    let mut out = Vec::new();
+    let mut pending_nl = false;
+    let segs = split_commas(sel);
+    for (i, seg) in segs.iter().enumerate() {
+        if seg.trim().is_empty() {
+            pending_nl = pending_nl || (i > 0 && seg.contains('\n'));
+            continue;
+        }
+        // dart marks a complex as line-broken when ANY newline sits between
+        // it and the previous one — including BEFORE the comma (`a\n, b`).
+        let leading_nl = seg.chars().take_while(|c| c.is_whitespace()).any(|c| c == '\n');
+        let prev_trailing_nl = i > 0
+            && segs[i - 1]
+                .chars()
+                .rev()
+                .take_while(|c| c.is_whitespace())
+                .any(|c| c == '\n');
+        let newline_before = i > 0 && (leading_nl || prev_trailing_nl);
+        out.push((newline_before || pending_nl) && !(nested && part_has_parent_ref(seg)));
+        pending_nl = false;
+    }
+    out
 }
 
 /// Whether a selector comma-part contains a top-level parent reference `&`

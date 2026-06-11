@@ -4225,6 +4225,19 @@ impl Parser {
         Ok(lhs)
     }
 
+    /// Whether the `%` at the cursor is followed (after whitespace) by
+    /// something that can start an operand — otherwise it's a lone `%` token.
+    fn percent_has_rhs(&self) -> bool {
+        let mut i = 1;
+        while matches!(self.sc.peek_at(i), Some(c) if c.is_whitespace()) {
+            i += 1;
+        }
+        !matches!(
+            self.sc.peek_at(i),
+            None | Some('}') | Some(')') | Some(']') | Some(';') | Some(',') | Some('!')
+        )
+    }
+
     fn multiplicative(&mut self) -> Result<Expr, Error> {
         let mut lhs = self.unary()?;
         loop {
@@ -4232,7 +4245,10 @@ impl Parser {
             self.skip_ws_inline();
             let op = match self.sc.peek() {
                 Some('*') => Some(BinOp::Mul),
-                Some('%') => Some(BinOp::Mod),
+                // `%` is modulo only when an operand follows; a trailing `%`
+                // (`a {b: c %}`, `f(g %)`) is a lone unquoted-string token
+                // handled by the space-list/primary layer (dart-sass).
+                Some('%') if self.percent_has_rhs() => Some(BinOp::Mod),
                 _ => None,
             };
             // `/` is the deprecated slash operator (handled specially), but

@@ -6802,3 +6802,27 @@ fn extend_transitive_multi_component_extender() {
         );
     }
 }
+
+#[test]
+fn lone_percent_after_operand() {
+    // `%` is modulo only when an operand follows; a trailing `%` is a lone
+    // unquoted-string token (dart-sass css/percent).
+    assert_eq!(ours("a {b: c %}\n"), "a {\n  b: c %;\n}\n");
+    assert_eq!(ours("d {e: f(g %)}\n"), "d {\n  e: f(g %);\n}\n");
+    // Real modulo still works.
+    assert_eq!(ours("a {b: 7 % 3}\n"), "a {\n  b: 1;\n}\n");
+}
+
+#[test]
+fn selector_linebreaks_with_stray_commas() {
+    // A newline inside an empty comma part (stray commas) or BEFORE the
+    // comma still marks the next complex as line-broken.
+    assert_eq!(
+        ours("#foo #bar,,\n,#baz #boom, {a: b}\n"),
+        "#foo #bar,\n#baz #boom {\n  a: b;\n}\n"
+    );
+    assert_eq!(
+        ours("a\n, b {\n  z & {\n    display: block;\n  }\n}\n"),
+        "z a,\nz b {\n  display: block;\n}\n"
+    );
+}
