@@ -6891,3 +6891,13 @@ fn nth_child_anb_canonicalizes_in_rules() {
         "li:nth-child(-3n-3) {\n  a: b;\n}\n"
     );
 }
+
+#[test]
+fn duplicate_pseudo_preserved_through_extend() {
+    // `:baz:baz` is valid CSS; extension must not dedup the unchanged
+    // pseudos of the original compound.
+    assert_eq!(
+        ours(".foo:baz:baz {a: b}\n.bar {@extend .foo}\n"),
+        ".foo:baz:baz, .bar:baz:baz {\n  a: b;\n}\n"
+    );
+}

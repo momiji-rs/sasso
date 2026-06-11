@@ -2529,11 +2529,21 @@ fn expand_pseudos_compound_target(
     for s in &compound.simples {
         match s {
             Simple::Pseudo(text) => {
-                let replacement = extend_pseudo_compound_target(text, targets, extenders, replace)
-                    .unwrap_or_else(|| vec![s.clone()]);
-                for r in replacement {
-                    if !simples.contains(&r) {
-                        simples.push(r);
+                // An UNCHANGED pseudo keeps duplicates (`:baz:baz` is valid
+                // CSS). A replacement's products dedup against what's already
+                // pushed AND against the other ORIGINAL simples (which the
+                // unchanged path will keep verbatim later).
+                match extend_pseudo_compound_target(text, targets, extenders, replace) {
+                    None => simples.push(s.clone()),
+                    Some(replacement) => {
+                        for r in replacement {
+                            let dup_of_other_original =
+                                r != *s && compound.simples.iter().any(|o| o != s && *o == r);
+                            if dup_of_other_original || simples.contains(&r) {
+                                continue;
+                            }
+                            simples.push(r);
+                        }
                     }
                 }
             }
@@ -2694,13 +2704,21 @@ fn expand_pseudos_in_compound(compound: &Compound, extensions: &[Extension]) -> 
     for s in &compound.simples {
         match s {
             Simple::Pseudo(text) => {
-                let replacement = match extend_pseudo(text, extensions) {
-                    Some(r) => r,
-                    None => vec![s.clone()],
-                };
-                for r in replacement {
-                    if !simples.contains(&r) {
-                        simples.push(r);
+                // An UNCHANGED pseudo keeps duplicates (`:baz:baz` is valid
+                // CSS). A replacement's products dedup against what's already
+                // pushed AND against the other ORIGINAL simples (which the
+                // unchanged path will keep verbatim later).
+                match extend_pseudo(text, extensions) {
+                    None => simples.push(s.clone()),
+                    Some(replacement) => {
+                        for r in replacement {
+                            let dup_of_other_original =
+                                r != *s && compound.simples.iter().any(|o| o != s && *o == r);
+                            if dup_of_other_original || simples.contains(&r) {
+                                continue;
+                            }
+                            simples.push(r);
+                        }
                     }
                 }
             }
