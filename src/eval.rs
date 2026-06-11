@@ -5604,6 +5604,24 @@ impl<'a> Evaluator<'a> {
                             } else {
                                 self.import_clone.take()
                             };
+                            // dart parses an imported file as a TOP-LEVEL
+                            // stylesheet: a bare declaration there — even
+                            // inside top-level control flow — is its parse
+                            // error `expected "{".`, regardless of the
+                            // @import sitting inside a rule (issue_2295).
+                            fn has_top_decl(stmts: &[Stmt]) -> bool {
+                                stmts.iter().any(|s| match s {
+                                    Stmt::Decl(_) | Stmt::PropertySet(_) | Stmt::CustomDecl(_) => true,
+                                    Stmt::If(branches) => branches.iter().any(|b| has_top_decl(&b.body)),
+                                    Stmt::For { body, .. }
+                                    | Stmt::Each { body, .. }
+                                    | Stmt::While { body, .. } => has_top_decl(body),
+                                    _ => false,
+                                })
+                            }
+                            if has_top_decl(&sheet.stmts) {
+                                return Err(Error::unpositioned("expected \"{\"."));
+                            }
                             let result = self.exec(&sheet.stmts, parents, sink);
                             self.current_file_dir = saved_dir;
                             self.import_clone = saved_clone;
