@@ -7322,3 +7322,19 @@ fn var_empty_second_arg_only_after_first_positional() {
         "a {\n  b: [--c];\n}\n"
     );
 }
+
+#[test]
+fn interp_string_newlines_raw_at_top_level_collapse_inside_lists() {
+    // dart _performInterpolation: a directly interpolated string contributes
+    // its raw text (the outer quoted serializer re-escapes the newline)...
+    assert_eq!(
+        ours("$s: \"x\\a y\";\na { b: \"p#{$s}q\"; }\n"),
+        "a {\n  b: \"px\\ayq\";\n}\n"
+    );
+    // ...while a string inside a composite value serializes quote-less, its
+    // newlines collapsing to single spaces (issue_1786).
+    assert_eq!(
+        ours("$s: \"x\\a y\";\na { b: \"#{q $s}\"; c: \"#{($s, $s)}\"; }\n"),
+        "a {\n  b: \"q x y\";\n  c: \"x y, x y\";\n}\n"
+    );
+}

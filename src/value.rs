@@ -782,6 +782,10 @@ impl Value {
     /// strings lose their quotes.
     pub(crate) fn to_interp(&self) -> String {
         match self {
+            // A directly interpolated string contributes its RAW text (dart
+            // `_performInterpolation` takes `result.text` verbatim); only a
+            // string nested in a composite value goes through the unquoted
+            // serializer (see `List::to_interp`).
             Value::Str(s) => s.text.clone(),
             Value::Null => String::new(),
             Value::List(l) => l.to_interp(),
@@ -1385,7 +1389,14 @@ impl List {
             .items
             .iter()
             .filter(|v| !value_is_blank(v))
-            .map(|v| v.to_interp())
+            // A string INSIDE a composite value serializes through dart's
+            // quote-less serializer (`_visitUnquotedString`): its newlines
+            // collapse to single spaces (issue_1786 `"#{a $str-with-lf}"`),
+            // unlike a directly interpolated string's raw text.
+            .map(|v| match v {
+                Value::Str(s) => serialize_unquoted(&s.text),
+                other => other.to_interp(),
+            })
             .collect::<Vec<_>>()
             .join(sep);
         if self.bracketed {
