@@ -5545,46 +5545,11 @@ impl Parser {
                     }
                     pieces.push(TplPiece::Interp(e));
                 }
-                // A quoted string: copy verbatim but still resolve any `#{...}`
-                // interpolation inside it (matching dart-sass, which evaluates
-                // interpolation within URL string contents).
-                Some(q @ ('"' | '\'')) => {
-                    lit.push(q);
-                    self.sc.bump();
-                    loop {
-                        match self.sc.peek() {
-                            None => break,
-                            Some('#') if self.sc.peek_at(1) == Some('{') => {
-                                if !lit.is_empty() {
-                                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
-                                }
-                                self.sc.bump();
-                                self.sc.bump();
-                                let e = self.parse_value()?;
-                                self.skip_ws_inline();
-                                if !self.sc.eat('}') {
-                                    return Err(Error::at("expected \"}\"", self.sc.position()));
-                                }
-                                pieces.push(TplPiece::Interp(e));
-                            }
-                            Some('\\') => {
-                                if let Some(c) = self.sc.bump() {
-                                    lit.push(c);
-                                }
-                                if let Some(c) = self.sc.bump() {
-                                    lit.push(c);
-                                }
-                            }
-                            Some(ch) => {
-                                lit.push(ch);
-                                self.sc.bump();
-                                if ch == q {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
+                // A quoted string makes this a NORMAL function call, not a
+                // plain-URL token (dart-sass): the string argument then
+                // serializes canonically (double quotes preferred), so
+                // `url('x.png')` emits `url("x.png")`.
+                Some('"' | '\'') => return Ok(None),
                 // A CSS escape in unquoted URL contents is decoded and
                 // re-serialized with the identifier rules (always in body
                 // position, so a leading digit or `-` stays literal). This also

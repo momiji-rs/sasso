@@ -6864,3 +6864,30 @@ fn id_tokens_when_not_hex_colors() {
     assert!(compile("a {b: #abc + 1}\n", &Options::default()).is_err());
     assert_eq!(ours("a {b: #abc}\n"), "a {\n  b: #abc;\n}\n");
 }
+
+#[test]
+fn url_quoted_string_normalizes() {
+    // A quoted url() is a normal function call whose string argument
+    // serializes canonically (double quotes preferred, single kept when the
+    // content has a double quote); unquoted urls stay plain tokens.
+    assert_eq!(ours("a {b: url('x.png')}\n"), "a {\n  b: url(\"x.png\");\n}\n");
+    assert_eq!(
+        ours("e {f: url('it\"s.png')}\n"),
+        "e {\n  f: url('it\"s.png');\n}\n"
+    );
+    assert_eq!(ours("e {f: url(plain.png)}\n"), "e {\n  f: url(plain.png);\n}\n");
+}
+
+#[test]
+fn nth_child_anb_canonicalizes_in_rules() {
+    // The An+B argument drops whitespace in plain rules too (not only
+    // through the extend machinery).
+    assert_eq!(
+        ours("li:nth-child(3n - 3) {a: b}\n"),
+        "li:nth-child(3n-3) {\n  a: b;\n}\n"
+    );
+    assert_eq!(
+        ours("li:nth-child(-3n - 3) {a: b}\n"),
+        "li:nth-child(-3n-3) {\n  a: b;\n}\n"
+    );
+}

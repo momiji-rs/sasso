@@ -66,6 +66,16 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
+    // Touch stdout/stderr once before any compile scope: std lazily heap-
+    // allocates their lock (a boxed pthread_mutex_t on macOS) on first use,
+    // and if that first use happened inside an arena scope (e.g. a deprecation
+    // warning mid-compile) the allocation would be swept by the scope reset,
+    // leaving the static stdio locks dangling for every later print.
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().lock().flush();
+        let _ = std::io::stderr().lock().flush();
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse_args(&args) {
         Ok(Action::Run(cli)) => run(cli),

@@ -9459,7 +9459,12 @@ fn normalize_selector(s: &str) -> String {
                 let start = out.len();
                 copy_pseudo(&chars, &mut i, &mut out);
                 let text = out[start..].to_string();
-                if let Some(canon) = crate::selector::normalize_pseudo_arg(&text) {
+                // An `:nth-child`/`:nth-last-child` An+B argument
+                // canonicalizes (whitespace drops, lowercase `n`); a
+                // selector-argument pseudo re-serializes canonically.
+                let canon = crate::selector::normalize_nth(&text)
+                    .or_else(|| crate::selector::normalize_pseudo_arg(&text));
+                if let Some(canon) = canon {
                     out.truncate(start);
                     out.push_str(&canon);
                 }

@@ -72,7 +72,7 @@ impl Simple {
 /// pseudos are normalized (dart-sass keeps any other pseudo — including an
 /// uppercased name or `:nth-of-type` — verbatim). Returns `None` when the text
 /// is not such a pseudo, leaving it unchanged.
-fn normalize_nth(text: &str) -> Option<String> {
+pub(crate) fn normalize_nth(text: &str) -> Option<String> {
     let open = text.find('(')?;
     if !text.ends_with(')') {
         return None;
