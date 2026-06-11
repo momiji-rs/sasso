@@ -94,12 +94,14 @@ class Case:
     input_text: str
     expected_css: Optional[str]     # None if this is an error spec
     expects_error: bool
+    input_bytes: Optional[bytes] = None  # original bytes when not valid UTF-8
     # Expected STDERR text for the --check-stderr metric, independent of the
     # CSS verdict. Populated from a warning/warning-<impl>/error/error-<impl>
     # expectation file when one exists; None when the case has none.
     expected_stderr: Optional[str] = None
     stderr_kind: Optional[str] = None  # "warning" | "error" (which file kind)
     extra_files: dict = field(default_factory=dict)  # other .scss/.css siblings
+    extra_file_bytes: dict = field(default_factory=dict)  # raw bytes for non-UTF-8 siblings
     options: dict = field(default_factory=dict)      # merged options.yml
     precision: Optional[int] = None
     archive_id: str = ""                             # the case's archive/dir, suite-relative
@@ -432,12 +434,23 @@ def iter_all_cases(suite: Path, suite_root: Path):
     for inp in sorted(list(suite.rglob("input.scss")) + list(suite.rglob("input.sass"))):
         d = inp.parent
         files = {}
+        file_bytes = {}
         for f in d.iterdir():
             if f.is_file():
                 try:
-                    files[f.name] = f.read_text(encoding="utf-8")
-                except (UnicodeDecodeError, OSError):
+                    raw = f.read_bytes()
+                except OSError:
                     files[f.name] = ""
+                    continue
+                file_bytes[f.name] = raw
+                try:
+                    files[f.name] = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    # Keep lossy text only for skip-tag scanning and metadata
+                    # plumbing. compile_case writes the original bytes for the
+                    # input/extra file so invalid-UTF-8 specs reach the compiler
+                    # unchanged instead of silently becoming an empty stylesheet.
+                    files[f.name] = raw.decode("utf-8", errors="replace")
         # physical options.yml in ancestor dirs (recursive). Walk up to suite.
         merged_opts = {}
         chain = []
@@ -463,15 +476,23 @@ def iter_all_cases(suite: Path, suite_root: Path):
             and not (k.startswith("output") or k.startswith("error")
                      or k.startswith("warning") or k == "options.yml")
         }
+        extra_bytes = {
+            k: file_bytes[k] for k in extra
+            if k in file_bytes and files[k].encode("utf-8") != file_bytes[k]
+        }
         yield Case(
             name=rel,
             input_name=inp.name,
             input_text=files[inp.name],
             expected_css=expected_css,
             expects_error=expects_error,
+            input_bytes=file_bytes.get(inp.name)
+            if files[inp.name].encode("utf-8") != file_bytes.get(inp.name, b"")
+            else None,
             expected_stderr=expected_stderr,
             stderr_kind=stderr_kind,
             extra_files=extra,
+            extra_file_bytes=extra_bytes,
             options=merged_opts,
             precision=merged_opts.get("precision"),
             archive_id=rel,
@@ -602,11 +623,18 @@ def compile_case(case: Case, sass_bin: str, style: str,
     with tempfile.TemporaryDirectory(prefix="sass-spec-") as td:
         tdp = Path(td)
         in_path = tdp / case.input_name
-        in_path.write_text(case.input_text, encoding="utf-8")
+        if case.input_bytes is not None:
+            in_path.write_bytes(case.input_bytes)
+        else:
+            in_path.write_text(case.input_text, encoding="utf-8")
         for rel, content in case.extra_files.items():
             fp = tdp / rel
             fp.parent.mkdir(parents=True, exist_ok=True)
-            fp.write_text(content, encoding="utf-8")
+            raw = case.extra_file_bytes.get(rel)
+            if raw is not None:
+                fp.write_bytes(raw)
+            else:
+                fp.write_text(content, encoding="utf-8")
 
         # Also reproduce the whole archive under <tmp>/<archive_id>/ and add it as
         # a load path, so suite-root-relative imports (e.g. shared fixtures like

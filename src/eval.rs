@@ -9395,6 +9395,7 @@ fn split_commas(s: &str) -> Vec<&str> {
 /// selector appearing mid-compound (`[a]b`, `:not(.x)b`) is joined to the
 /// preceding simple with a descendant combinator (`[a] b`), matching
 /// dart-sass's `[adjacent-compounds]` normalization.
+
 fn normalize_selector(s: &str) -> String {
     // Collapse runs of whitespace to single spaces (and trim) — but a hex
     // escape's single terminating whitespace is PART of the token

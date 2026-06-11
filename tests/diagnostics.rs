@@ -92,3 +92,19 @@ fn diagnostics_exit_codes() {
         .code();
     assert_eq!(warn_code, Some(0), "@warn must exit 0");
 }
+
+#[test]
+fn invalid_utf8_input_exits_65() {
+    let bin = env!("CARGO_BIN_EXE_sasso");
+    let dir = std::env::temp_dir().join(format!("sasso_invalid_utf8_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let input = dir.join("input.scss");
+    std::fs::write(&input, b"foo{;\xF6\xFC").expect("write invalid utf8");
+
+    let out = Command::new(bin).arg(&input).output().expect("run");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(65));
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "Error: Invalid UTF-8.\n");
+}

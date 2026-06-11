@@ -6941,3 +6941,13 @@ fn double_minus_starts_a_term() {
         "foo {\n  bar: 1 --em-2--em;\n  baz: 5 --3;\n  qux: 2;\n}\n"
     );
 }
+
+#[test]
+fn at_rule_prelude_whitespace_collapses() {
+    // Whitespace runs in a generic at-rule prelude collapse to single
+    // spaces; quoted strings keep theirs.
+    assert_eq!(
+        ours(".foo {\n  @apply (  --bar  );\n}\n"),
+        ".foo {\n  @apply ( --bar );\n}\n"
+    );
+}

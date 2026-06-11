@@ -3662,6 +3662,24 @@ impl Parser {
                     }
                 }
             }
+            // For unknown at-rule preludes dart collapses a whitespace run
+            // WITHOUT a newline to one space and keeps a run WITH one from
+            // its first newline (`@asdf a  b` → `a b`; `c \n   d` →
+            // `c\n   d`). Comments terminate a run, so `foo //\n  bar`
+            // keeps foo's trailing space AND the newline indent.
+            if comments == CommentMode::UnknownPrelude && c.is_whitespace() {
+                let mut run = String::new();
+                while matches!(self.sc.peek(), Some(w) if w.is_whitespace()) {
+                    if let Some(w) = self.sc.bump() {
+                        run.push(w);
+                    }
+                }
+                match run.find('\n') {
+                    Some(nl) => lit.push_str(&run[nl..]),
+                    None => lit.push(' '),
+                }
+                continue;
+            }
             match c {
                 '#' if self.sc.peek_at(1) == Some('{') => {
                     if self.plain_css {

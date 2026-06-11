@@ -187,6 +187,10 @@ fn run(mut cli: Cli) -> ExitCode {
         match read_stdin() {
             Ok(s) => units.push((s, syntax, "-".to_string())),
             Err(e) => {
+                if is_invalid_utf8(&e) {
+                    eprintln!("Error: Invalid UTF-8.");
+                    return ExitCode::from(65);
+                }
                 eprintln!("error: failed to read stdin: {e}");
                 return ExitCode::FAILURE;
             }
@@ -218,6 +222,10 @@ fn run(mut cli: Cli) -> ExitCode {
             match std::fs::read_to_string(path) {
                 Ok(s) => units.push((s, syntax, path.to_string_lossy().into_owned())),
                 Err(e) => {
+                    if is_invalid_utf8(&e) {
+                        eprintln!("Error: Invalid UTF-8.");
+                        return ExitCode::from(65);
+                    }
                     eprintln!("error: cannot read {}: {e}", path.display());
                     return ExitCode::FAILURE;
                 }
@@ -304,4 +312,8 @@ fn read_stdin() -> std::io::Result<String> {
     let mut s = String::new();
     std::io::stdin().read_to_string(&mut s)?;
     Ok(s)
+}
+
+fn is_invalid_utf8(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::InvalidData
 }
