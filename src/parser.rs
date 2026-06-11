@@ -906,15 +906,17 @@ impl Parser {
         let mut important = false;
         self.skip_ws_inline();
         if self.sc.peek() == Some('!') {
+            // `!important` is consumed by the expression layer as a value
+            // term, so a `!` here is a stray flag (`!default` after a plain
+            // declaration) — dart stops the declaration at the `!` and fails
+            // wanting the terminator.
+            let bang_pos = self.sc.position();
+            if !self.looking_at_important() {
+                return Err(Error::at("expected \";\".", bang_pos));
+            }
             self.sc.bump();
             self.skip_ws_inline();
-            let flag_pos = self.sc.position();
-            let flag = self.read_ident_name().unwrap_or_default();
-            // After a declaration value, `!` admits only the `important`
-            // flag; anything else is dart-sass's hard error (no backtrack).
-            if !flag.eq_ignore_ascii_case("important") {
-                return Err(Error::at("Expected \"important\".", flag_pos));
-            }
+            let _ = self.read_ident_name();
             important = true;
             end_line = self.sc.position().line as u32;
         }
@@ -3998,10 +4000,13 @@ impl Parser {
     }
 
     fn at_value_terminator(&self) -> bool {
-        matches!(
-            self.sc.peek(),
-            None | Some(',') | Some(';') | Some('}') | Some(')') | Some(']') | Some('{') | Some('!')
-        )
+        match self.sc.peek() {
+            None | Some(',') | Some(';') | Some('}') | Some(')') | Some(']') | Some('{') => true,
+            // `!important` is a value term (dart `_importantExpression`); any
+            // other `!` (a `!default`/`!global` flag) ends the value.
+            Some('!') => !self.looking_at_important(),
+            _ => false,
+        }
     }
 
     /// Whether the scanner is positioned at the start of a value atom (the
@@ -4011,6 +4016,7 @@ impl Parser {
     fn at_value_atom_start(&self) -> bool {
         match self.sc.peek() {
             Some('.') => matches!(self.sc.peek_at(1), Some(d) if d.is_ascii_digit()),
+            Some('!') => self.looking_at_important(),
             Some(c) => {
                 c.is_ascii_digit()
                     || matches!(c, '$' | '#' | '"' | '\'' | '(' | '[' | '&' | '+' | '-' | '\\')
@@ -4018,6 +4024,28 @@ impl Parser {
             }
             None => false,
         }
+    }
+
+    /// Whether the cursor sits on `!` followed (after optional whitespace) by
+    /// the identifier `important` (case-insensitively) — dart's
+    /// `_importantExpression` lookahead, so a `!default`/`!global` flag never
+    /// reads as a value term.
+    fn looking_at_important(&self) -> bool {
+        if self.sc.peek() != Some('!') {
+            return false;
+        }
+        let mut i = 1;
+        while matches!(self.sc.peek_at(i), Some(' ' | '\t' | '\n' | '\r' | '\x0c')) {
+            i += 1;
+        }
+        for ch in "important".chars() {
+            match self.sc.peek_at(i) {
+                Some(c) if c.eq_ignore_ascii_case(&ch) => i += 1,
+                _ => return false,
+            }
+        }
+        // The identifier must end here (`!importantx` is not the keyword).
+        !matches!(self.sc.peek_at(i), Some(c) if is_ident_char(c))
     }
 
     fn comma_list(&mut self) -> Result<Expr, Error> {
@@ -4573,6 +4601,15 @@ impl Parser {
         match self.sc.peek() {
             Some(c) if c.is_ascii_digit() => self.parse_number(),
             Some('.') if matches!(self.sc.peek_at(1), Some(d) if d.is_ascii_digit()) => self.parse_number(),
+            // `!important` (any case, whitespace after `!` allowed) is a value
+            // term: the canonical unquoted string `!important` (dart
+            // `_importantExpression`).
+            Some('!') if self.looking_at_important() => {
+                self.sc.bump();
+                self.skip_ws_inline();
+                let _ = self.read_ident_name()?;
+                Ok(Expr::Ident(vec![TplPiece::Lit("!important".to_string())]))
+            }
             Some('$') => {
                 let pos = self.sc.position();
                 if self.plain_css {

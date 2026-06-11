@@ -7078,6 +7078,18 @@ fn call_results_are_slash_free_and_if_supports_splat() {
 }
 
 #[test]
+fn important_is_a_value_term() {
+    // `!important` (any case, space after `!` allowed) is a value term, so it
+    // can appear mid-list and in mixin/function arguments; a stray `!default`
+    // after a declaration value still errors.
+    assert_eq!(
+        ours("@mixin foo($x) { style: $x; }\ndiv {\n  @include foo(0px inset !important);\n  fludge: foo bar ! Important hux;\n}\n"),
+        "div {\n  style: 0px inset !important;\n  fludge: foo bar !important hux;\n}\n"
+    );
+    assert!(compile("x { v: foo !default; }", &Options::default()).is_err());
+}
+
+#[test]
 fn content_block_runs_in_child_scope() {
     // A content block is a user-defined callable: a `$var:` first declared
     // inside it stays local to the block, so a global-only variable is NOT
