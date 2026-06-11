@@ -872,44 +872,29 @@ pub(crate) fn extend_selectors(
         }
     }
 
-    let result = extend_to_fixpoint(original, extensions);
+    let result = extend_to_fixpoint_breaks(original, original_breaks, extensions);
 
     // Remove selectors that are subselectors of another (redundant), keeping
     // originals (dart-sass `_trim` with extender source specificities).
     let source_spec = source_specificity_map(extensions);
-    let result = trim(result, &originals, &source_spec);
+    let result = trim_breaks(result, &originals, &source_spec);
 
     // Simplify placeholders inside `:is()/:where()/:not()`-style pseudo
     // arguments, dropping selectors whose pseudo can never match.
-    let mut simplified: Vec<Complex> = Vec::new();
-    for c in result {
+    let mut simplified: Vec<(Complex, bool)> = Vec::new();
+    for (c, f) in result {
         if let Some(c) = simplify_pseudo_placeholders(&c) {
-            simplified.push(c);
+            simplified.push((c, f));
         }
     }
 
     // Drop complex selectors that still contain a (top-level) placeholder.
-    let kept: Vec<&Complex> = simplified.iter().filter(|c| !c.has_placeholder()).collect();
+    // Each product's line-break flag traveled through the pipeline (dart's
+    // `complex.lineBreak || path.any((c) => c.lineBreak)`).
+    let kept: Vec<&(Complex, bool)> = simplified.iter().filter(|(c, _)| !c.has_placeholder()).collect();
     let all_placeholders = kept.is_empty();
-    let selectors: Vec<String> = kept.iter().map(|c| c.render()).collect();
-    // Line-break flags: look each rendered output up among the inputs (an
-    // original keeps its flag) and the extenders (a wholesale product takes
-    // the extender's source flag); woven products fall back to `false`.
-    let mut break_map: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-    for ext in extensions {
-        for (j, c) in ext.extenders.iter().enumerate() {
-            let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
-            break_map.entry(c.render()).or_insert(flag);
-        }
-    }
-    for (i, complex) in original.iter().enumerate() {
-        let flag = original_breaks.get(i).copied().unwrap_or(false);
-        break_map.insert(complex.render(), flag);
-    }
-    let breaks: Vec<bool> = selectors
-        .iter()
-        .map(|s| break_map.get(s).copied().unwrap_or(false))
-        .collect();
+    let selectors: Vec<String> = kept.iter().map(|(c, _)| c.render()).collect();
+    let breaks: Vec<bool> = kept.iter().map(|(_, f)| *f).collect();
     ExtendResult {
         selectors,
         breaks,
@@ -1008,6 +993,22 @@ fn trim(
     originals: &HashSet<String>,
     source_spec: &std::collections::HashMap<String, u64>,
 ) -> Vec<Complex> {
+    trim_breaks(
+        selectors.into_iter().map(|c| (c, false)).collect(),
+        originals,
+        source_spec,
+    )
+    .into_iter()
+    .map(|(c, _)| c)
+    .collect()
+}
+
+/// Like [`trim`], preserving each selector's line-break flag.
+fn trim_breaks(
+    selectors: Vec<(Complex, bool)>,
+    originals: &HashSet<String>,
+    source_spec: &std::collections::HashMap<String, u64>,
+) -> Vec<(Complex, bool)> {
     // Quadratic; dart-sass bails above 100 to avoid pathological cost.
     if selectors.len() > 100 {
         return selectors;
@@ -1028,23 +1029,23 @@ fn trim(
             .max()
             .unwrap_or(0)
     };
-    let mut result: Vec<Complex> = Vec::new();
+    let mut result: Vec<(Complex, bool)> = Vec::new();
     let mut num_originals = 0usize;
     let n = selectors.len();
     'outer: for i in (0..n).rev() {
-        let c1 = &selectors[i];
+        let (c1, f1) = &selectors[i];
         if originals.contains(&c1.render()) {
             // A duplicate original rotates to the front (dart `rotateSlice`),
             // preserving the EARLIEST source position's precedence.
             for j in 0..num_originals {
-                if result[j].render() == c1.render() {
+                if result[j].0.render() == c1.render() {
                     let c = result.remove(j);
                     result.insert(0, c);
                     continue 'outer;
                 }
             }
             num_originals += 1;
-            result.insert(0, c1.clone());
+            result.insert(0, (c1.clone(), *f1));
             continue;
         }
         // Drop c1 only when a superselector ALSO has at least the max source
@@ -1052,10 +1053,10 @@ fn trim(
         // may not trim `.test-case:active` whose source weighs 2000.
         let max_spec = source_spec_for(c1);
         let covers = |c2: &Complex| complex_specificity(c2) >= max_spec && complex_is_superselector(c2, c1);
-        if result.iter().any(&covers) || selectors[..i].iter().any(&covers) {
+        if result.iter().any(|(c2, _)| covers(c2)) || selectors[..i].iter().any(|(c2, _)| covers(c2)) {
             continue;
         }
-        result.insert(0, c1.clone());
+        result.insert(0, (c1.clone(), *f1));
     }
     result
 }
@@ -1541,26 +1542,45 @@ fn type_namespace(t: &str) -> Option<String> {
 /// option of every component is the original, so the unextended selector comes
 /// out first. (dart-sass `Extender._extendComplex`.)
 fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
+    let empty = std::collections::HashMap::new();
+    extend_complex_breaks(complex, false, extensions, &empty)
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// Like [`extend_complex`], but every product carries its line-break flag:
+/// the input's flag OR any contributing extender's (dart's
+/// `complex.lineBreak || path.any((c) => c.lineBreak)`).
+fn extend_complex_breaks(
+    complex: &Complex,
+    in_break: bool,
+    extensions: &[Extension],
+    ext_breaks: &std::collections::HashMap<String, bool>,
+) -> Vec<(Complex, bool)> {
     let d = to_dart(complex);
     // dart-sass: a complex selector with more than one leading combinator is
     // never extended (the caller keeps the original).
     if d.leading.len() > 1 {
-        return vec![complex.clone()];
+        return vec![(complex.clone(), in_break)];
     }
 
     // For each component, the complex selectors it can expand to (the original
     // first, followed by any extension replacements, transitively resolved).
-    let mut per_component: Vec<Vec<DComplex>> = Vec::new();
+    let mut per_component: Vec<Vec<(DComplex, bool)>> = Vec::new();
     let mut any_extended = false;
     for (i, comp) in d.comps.iter().enumerate() {
-        match extend_component(comp, extensions) {
+        match extend_component(comp, extensions, ext_breaks) {
             // dart-sass folds unextended leading components into a prefix
             // complex carrying the selector's leading run; keeping the run on
             // the first component's sole option is equivalent.
-            None => per_component.push(vec![DComplex {
-                leading: if i == 0 { d.leading.clone() } else { Vec::new() },
-                comps: vec![comp.clone()],
-            }]),
+            None => per_component.push(vec![(
+                DComplex {
+                    leading: if i == 0 { d.leading.clone() } else { Vec::new() },
+                    comps: vec![comp.clone()],
+                },
+                false,
+            )]),
             Some(extended) => {
                 any_extended = true;
                 if i == 0 && !d.leading.is_empty() {
@@ -1570,10 +1590,15 @@ fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
                     per_component.push(
                         extended
                             .into_iter()
-                            .filter(|n| n.leading.is_empty() || n.leading == d.leading)
-                            .map(|n| DComplex {
-                                leading: d.leading.clone(),
-                                comps: n.comps,
+                            .filter(|(n, _)| n.leading.is_empty() || n.leading == d.leading)
+                            .map(|(n, f)| {
+                                (
+                                    DComplex {
+                                        leading: d.leading.clone(),
+                                        comps: n.comps,
+                                    },
+                                    f,
+                                )
                             })
                             .collect(),
                     );
@@ -1584,19 +1609,19 @@ fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
         }
     }
     if !any_extended {
-        return vec![complex.clone()];
+        return vec![(complex.clone(), in_break)];
     }
 
     // Take the Cartesian product across components and `weave` each path into
     // one or more complete complex selectors (dart-sass `paths` + `weave`).
-    let mut combos: Vec<Vec<DComplex>> = vec![Vec::new()];
+    let mut combos: Vec<(Vec<DComplex>, bool)> = vec![(Vec::new(), false)];
     for opts in &per_component {
-        let mut next: Vec<Vec<DComplex>> = Vec::new();
-        for combo in &combos {
-            for opt in opts {
+        let mut next: Vec<(Vec<DComplex>, bool)> = Vec::new();
+        for (combo, cflag) in &combos {
+            for (opt, oflag) in opts {
                 let mut c = combo.clone();
                 c.push(opt.clone());
-                next.push(c);
+                next.push((c, *cflag || *oflag));
             }
         }
         combos = next;
@@ -1607,12 +1632,12 @@ fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
 
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for path in combos {
+    for (path, pflag) in combos {
         for woven in weave(&path) {
             let c = from_dart(&woven);
             let r = c.render();
             if seen.insert(r) {
-                out.push(c);
+                out.push((c, in_break || pflag));
             }
         }
     }
@@ -2351,15 +2376,41 @@ fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
 /// by one `@extend` can itself be extended by another (transitively, including
 /// targets buried in pseudo arguments). Bounded to guarantee termination.
 fn extend_to_fixpoint(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
-    let mut result: Vec<Complex> = Vec::new();
+    extend_to_fixpoint_breaks(list, &[], extensions)
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// Like [`extend_to_fixpoint`], threading per-selector line-break flags: each
+/// product carries its input's flag OR any contributing extender's.
+fn extend_to_fixpoint_breaks(
+    list: &[Complex],
+    list_breaks: &[bool],
+    extensions: &[Extension],
+) -> Vec<(Complex, bool)> {
+    // Extender flags by rendered form, for the per-option lookup.
+    let mut ext_breaks: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    for ext in extensions {
+        for (j, c) in ext.extenders.iter().enumerate() {
+            let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
+            let e = ext_breaks.entry(c.render()).or_insert(false);
+            *e = *e || flag;
+        }
+    }
+    let mut result: Vec<(Complex, bool)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     // Worklist of selectors still to extend (originals first).
-    let mut queue: std::collections::VecDeque<Complex> = list.iter().cloned().collect();
-    while let Some(complex) = queue.pop_front() {
+    let mut queue: std::collections::VecDeque<(Complex, bool)> = list
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.clone(), list_breaks.get(i).copied().unwrap_or(false)))
+        .collect();
+    while let Some((complex, in_break)) = queue.pop_front() {
         if !consume_extend_work() || result.len() > 100_000 {
             break;
         }
-        for c in extend_complex(&complex, extensions) {
+        for (c, flag) in extend_complex_breaks(&complex, in_break, extensions, &ext_breaks) {
             let rendered = c.render();
             let len = rendered.len();
             if seen.insert(rendered) {
@@ -2375,9 +2426,9 @@ fn extend_to_fixpoint(list: &[Complex], extensions: &[Extension]) -> Vec<Complex
                 // anything new. An over-long selector (a self-referential
                 // blowup) is emitted but not re-fed.
                 if complex_has_selector_pseudo(&c) && len <= EXTEND_REFEED_MAX_LEN {
-                    queue.push_back(c.clone());
+                    queue.push_back((c.clone(), flag));
                 }
-                result.push(c);
+                result.push((c, flag));
             }
         }
     }
@@ -2760,7 +2811,11 @@ fn expand_pseudos_in_compound(compound: &Compound, extensions: &[Extension]) -> 
     Compound { simples }
 }
 
-fn extend_component(comp: &TComp, extensions: &[Extension]) -> Option<Vec<DComplex>> {
+fn extend_component(
+    comp: &TComp,
+    extensions: &[Extension],
+    ext_breaks: &std::collections::HashMap<String, bool>,
+) -> Option<Vec<(DComplex, bool)>> {
     // First, extend any selector-pseudo arguments (`:not(...)`, `:is(...)`,
     // etc.) in place, producing an "effective" compound. For `:not()` with a
     // single-complex argument this *adds* simples to the compound (dart-sass
@@ -2780,17 +2835,22 @@ fn extend_component(comp: &TComp, extensions: &[Extension]) -> Option<Vec<DCompl
     let simples = &comp.compound.simples;
     // Per-simple option list: index 0 is "keep self" (None); the rest are
     // (transitively expanded) extender complex selectors targeting this simple.
-    let mut per_simple: Vec<Vec<Option<Complex>>> = Vec::new();
+    let mut per_simple: Vec<Vec<Option<(Complex, bool)>>> = Vec::new();
     let mut any = false;
     for s in simples {
-        let mut opts: Vec<Option<Complex>> = vec![None];
+        let mut opts: Vec<Option<(Complex, bool)>> = vec![None];
         let mut seen: HashSet<String> = HashSet::new();
         for extender in collect_extenders(s, extensions, &mut Vec::new()) {
             let key = extender.render();
-            if seen.insert(key) {
-                opts.push(Some(extender));
-                any = true;
+            if seen.contains(&key) {
+                continue;
             }
+            // The extender's source line-break flag travels with the option
+            // (dart's ComplexSelector.lineBreak).
+            let flag = ext_breaks.get(&key).copied().unwrap_or(false);
+            seen.insert(key);
+            opts.push(Some((extender, flag)));
+            any = true;
         }
         per_simple.push(opts);
     }
@@ -2804,15 +2864,15 @@ fn extend_component(comp: &TComp, extensions: &[Extension]) -> Option<Vec<DCompl
     if !any {
         // No simple has an extender; the component only "changed" if a pseudo
         // argument was rewritten in place.
-        return pseudo_changed.then_some(vec![options_first]);
+        return pseudo_changed.then_some(vec![(options_first, false)]);
     }
-    let mut options: Vec<DComplex> = vec![options_first];
+    let mut options: Vec<(DComplex, bool)> = vec![(options_first, false)];
 
     // Cartesian product of per-simple choices (path outer, option inner) so the
     // first simple's choice varies slowest — matching dart-sass's observed
     // output order for within-compound extension (`.foo.bar` + two extends
     // yields `.foo.bar, .foo.bang, .bar.baz, .baz.bang`).
-    let mut paths: Vec<Vec<&Option<Complex>>> = vec![Vec::new()];
+    let mut paths: Vec<Vec<&Option<(Complex, bool)>>> = vec![Vec::new()];
     for opts in &per_simple {
         let mut next = Vec::new();
         for path in &paths {
@@ -2829,16 +2889,20 @@ fn extend_component(comp: &TComp, extensions: &[Extension]) -> Option<Vec<DCompl
     }
 
     let mut seen: HashSet<String> = HashSet::new();
-    seen.insert(render_dcomplex(&options[0]));
+    seen.insert(render_dcomplex(&options[0].0));
     for path in &paths {
         // Skip the all-self path (the original compound, already option 0).
         if path.iter().all(|o| o.is_none()) {
             continue;
         }
-        for d in build_extended_compound(comp, simples, path) {
+        // The option's flag is the OR of the contributing extenders' flags.
+        let flag = path.iter().any(|o| matches!(o, Some((_, true))));
+        let plain: Vec<Option<Complex>> = path.iter().map(|o| o.as_ref().map(|(c, _)| c.clone())).collect();
+        let refs: Vec<&Option<Complex>> = plain.iter().collect();
+        for d in build_extended_compound(comp, simples, &refs) {
             let key = render_dcomplex(&d);
             if seen.insert(key) {
-                options.push(d);
+                options.push((d, flag));
             }
         }
     }
