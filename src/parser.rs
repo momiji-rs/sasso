@@ -972,6 +972,29 @@ impl Parser {
         let body = body?;
         // Unknown at-rules aren't allowed in a nested property set.
         reject_at_rules_in(&body)?;
+        // dart's `_declarationChild` parses every non-`@` child of a nested
+        // property set as a declaration, so a style rule there is its
+        // `expected ":".` (the selector reads as a property name).
+        fn reject_rules_in(stmts: &[Stmt]) -> Result<(), Error> {
+            for s in stmts {
+                match s {
+                    Stmt::Rule(_) => {
+                        return Err(Error::unpositioned("expected \":\"."));
+                    }
+                    Stmt::If(branches) => {
+                        for b in branches {
+                            reject_rules_in(&b.body)?;
+                        }
+                    }
+                    Stmt::For { body, .. } | Stmt::Each { body, .. } | Stmt::While { body, .. } => {
+                        reject_rules_in(body)?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        reject_rules_in(&body)?;
         if !self.sc.eat('}') {
             return Err(Error::at("expected \"}\".", self.sc.position()));
         }
