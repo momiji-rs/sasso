@@ -1515,13 +1515,16 @@ impl<'a> Evaluator<'a> {
                 origin_closure: std::rc::Rc::clone(&closure_cache[&pe.origin]),
             });
         }
-        // dart keeps one extension store per module and concatenates them
-        // upstream-first, each store's own extensions in reverse source order.
-        // Our single-pass rewrite prepends each processed extender, so process
-        // DOWNSTREAM origins first: a downstream module's closure is a strict
-        // superset of its upstreams', so a stable sort by descending closure
-        // size puts downstream stores first while keeping same-module source
-        // order (which the prepending then reverses, as dart does).
+        // Apply DOWNSTREAM origins first (dart `_combineCss` concatenates module
+        // extension stores upstream-first, so the most-downstream store's
+        // products land LAST in the output). A downstream module's closure is a
+        // strict superset of its upstreams', so a STABLE sort by descending
+        // closure size orders the fold's batches downstream-first while keeping
+        // same-module document order. With the per-selector origin gating and the
+        // fixpoint re-fold, this reproduces dart's cross-module output order —
+        // e.g. a root `@import`ed `@extend` (closure = everything) applies first
+        // so its product trails a `@use`d module's (use/extend/scope:*), while a
+        // transitive upstream chain still settles via the fixpoint.
         extensions.sort_by_key(|e| std::cmp::Reverse(closure_cache.get(&e.origin).map_or(0, |c| c.len())));
 
         // An `@extend` registered inside `@media` may not extend a selector

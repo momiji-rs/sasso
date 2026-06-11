@@ -7587,3 +7587,54 @@ fn selector_replace_promotes_replaced_original() {
         "a {\n  b: .e;\n}\n"
     );
 }
+
+#[test]
+fn extend_registration_order_sequential() {
+    // dart applies each `@extend` in registration order, re-extending the
+    // accumulated selector list — NOT a one-shot cartesian. For case 229 the
+    // nested `c {@extend b}` registers first (rule `a b` becomes `a b, a c`),
+    // then `d {@extend a}` folds over that → `a b, d b, a c, d c`.
+    assert_eq!(
+        ours("a {\n  b {a: b}\n  c {@extend b}\n}\nd {@extend a}\n"),
+        "a b, d b, a c, d c {\n  a: b;\n}\n"
+    );
+    // Cross-branch placeholder redundancy (extend-tests/234).
+    assert_eq!(
+        ours(".e %z {a: b}\n%x .c %y {@extend %z}\n.a, .b {@extend %x}\n.a .d {@extend %y}\n"),
+        ".e .a .c .d, .e .b .c .a .d, .a .e .b .c .d, .a .c .e .d, .b .c .e .a .d {\n  a: b;\n}\n"
+    );
+    // A three-level extend cycle settles to the full closure via the fixpoint
+    // re-fold, each rule keeping its own registration-order head.
+    assert_eq!(
+        ours(".foo {a: b; @extend .bar}\n.bar {c: d; @extend .baz}\n.baz {e: f; @extend .foo}\n"),
+        ".foo, .baz, .bar {\n  a: b;\n}\n\n.bar, .foo, .baz {\n  c: d;\n}\n\n.baz, .bar, .foo {\n  e: f;\n}\n"
+    );
+}
+
+#[test]
+fn extend_selector_pseudo_one_shot() {
+    // A target inside a selector pseudo is extended by REWRITING the compound in
+    // place; dart applies such extensions simultaneously. Two `:not` extends
+    // unify into one compound (compound-unification-in-not)...
+    assert_eq!(
+        ours(".a {@extend .c}\n.b {@extend .d}\n:not(.c):not(.d) {x: y}\n"),
+        ":not(.c):not(.a):not(.d):not(.b) {\n  x: y;\n}\n"
+    );
+    // ...a `:not` chain keeps the pre-merge product (extend-result-of-extend)...
+    assert_eq!(
+        ours(".a {@extend :not(.b)}\n.b {@extend .c}\n:not(.c) {x: y}\n"),
+        ":not(.c):not(.b), .a:not(.c) {\n  x: y;\n}\n"
+    );
+    // ...and re-extending an EXTENDER's `:is()` keeps the pre-extension form
+    // (dart sass/dart-sass#1297).
+    assert_eq!(
+        ours(":is(midstream) {@extend upstream}\ndownstream {@extend midstream}\nupstream {a: b}\n"),
+        "upstream, :is(midstream), :is(midstream, downstream) {\n  a: b;\n}\n"
+    );
+    // But a pseudo whose argument is NOT a target stays on the registration-order
+    // fold so its placeholder order is preserved (extend-tests/086.1).
+    assert_eq!(
+        ours("%a {\n  x:y;\n}\nb:after:not(:first-child) {\n  @extend %a;\n}\nc:s {\n  @extend %a;\n}\nd::e {\n  @extend c;\n}\n"),
+        "c:s, d:s::e, b:after:not(:first-child) {\n  x: y;\n}\n"
+    );
+}
