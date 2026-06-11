@@ -6734,3 +6734,28 @@ fn at_root_parent_ref() {
     )
     .is_err());
 }
+
+#[test]
+fn at_root_queries() {
+    // dart AtRootQuery: `(without: media)` escapes the media layer but
+    // keeps the style rule (bare declarations re-wrap in the enclosing
+    // selector); `(without: all)` escapes everything; quoted names work.
+    assert_eq!(
+        ours("@media print {\n  a {\n    @at-root (without: media) {\n      b: c;\n    }\n  }\n}\n"),
+        "a {\n  b: c;\n}\n"
+    );
+    assert_eq!(
+        ours("@keyframes a {\n  @at-root (without: all) {\n    b {c: d}\n  }\n}\n"),
+        "@keyframes a {}\nb {\n  c: d;\n}\n"
+    );
+    // Kept layers re-wrap around the hoisted body at the root.
+    assert_eq!(
+        ours("@media screen {\n  @supports (color: red) {\n    @at-root (without: media) {\n      .x {y: z}\n    }\n  }\n}\n"),
+        "@supports (color: red) {\n  .x {\n    y: z;\n  }\n}\n"
+    );
+    // `(with: all)` excludes nothing and runs in place.
+    assert_eq!(
+        ours("@media screen {\n  @at-root (with: \"all\") {\n    .x {y: z}\n  }\n}\n"),
+        "@media screen {\n  .x {\n    y: z;\n  }\n}\n"
+    );
+}

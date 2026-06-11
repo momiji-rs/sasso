@@ -374,10 +374,11 @@ impl Sink<'_> {
                 push_group(out, vec![node]);
             }
             Sink::Rule { .. } => {
-                // A media-hoist marker only matters to an OUTER media rule's
-                // segmenting: the bubbled rule leaves this style rule
-                // entirely, so the rule's own block is NOT split around it.
-                let is_hoist_marker = matches!(&node, OutNode::Raw(s) if s == MEDIA_HOIST_MARKER);
+                // A media-hoist (or at-root-hoist) marker only matters to an
+                // OUTER at-rule's segmenting: the bubbled batch leaves this
+                // style rule entirely, so its own block is NOT split around it.
+                let is_hoist_marker = matches!(&node, OutNode::Raw(s)
+                    if s == MEDIA_HOIST_MARKER || s == AT_ROOT_HOIST_MARKER);
                 if !is_hoist_marker {
                     self.flush_rule_block();
                 }
@@ -478,6 +479,13 @@ pub(crate) struct Evaluator<'a> {
     /// media rule, taken in order at the `\u{0}MEDIA_HOIST\u{0}` markers the
     /// inner rule leaves in the outer body.
     media_hoist: Vec<Vec<OutNode>>,
+    /// Batches hoisted by `@at-root` queries, taken in order at the
+    /// `AT_ROOT_HOIST_MARKER`s; each batch is already re-wrapped in its kept
+    /// (non-excluded) at-rule layers and travels outward to the root.
+    at_root_hoist: std::collections::VecDeque<Vec<OutNode>>,
+    /// The enclosing at-rule layers (outermost first), so `@at-root` queries
+    /// can re-wrap their body in the layers the query keeps.
+    at_rule_ctx: Vec<AtCtx>,
     /// Set while module loads run inside a module-loading `@import`: dart
     /// clones the whole import subtree's CSS at the import site (the same
     /// `_combineCss(clone: true)` as meta.load-css). All loads in the chain
@@ -861,6 +869,8 @@ impl<'a> Evaluator<'a> {
             import_clone: None,
             current_file_dir: None,
             media_hoist: Vec::new(),
+            at_root_hoist: std::collections::VecDeque::new(),
+            at_rule_ctx: Vec::new(),
             used_modules: HashMap::default(),
             star_modules: Vec::new(),
             used_user_modules: HashMap::default(),
@@ -4226,7 +4236,12 @@ impl<'a> Evaluator<'a> {
         let enclosing = !self.media_queries.is_empty();
         let saved = std::mem::replace(&mut self.media_queries, child_queries);
         let saved_hoist = std::mem::take(&mut self.media_hoist);
+        let outermost_at_rule = self.at_rule_ctx.is_empty();
+        self.at_rule_ctx.push(AtCtx::Media {
+            prelude: prelude.clone(),
+        });
         let out_body = self.eval_at_body(body, parents);
+        self.at_rule_ctx.pop();
         self.media_queries = saved;
         let mut hoisted = std::mem::replace(&mut self.media_hoist, saved_hoist);
         let out_body = out_body?;
@@ -4253,6 +4268,19 @@ impl<'a> Evaluator<'a> {
                 flush(&mut segment, &mut result, &prelude);
                 if let Some(batch) = hoist_iter.next() {
                     result.extend(batch);
+                }
+            } else if matches!(&n, OutNode::Raw(s) if s == AT_ROOT_HOIST_MARKER) {
+                // An @at-root batch escaping this media: split around it. The
+                // outermost at-rule layer places the batch here (just after
+                // its own segment); inner layers pass the marker outward.
+                flush(&mut segment, &mut result, &prelude);
+                if outermost_at_rule {
+                    if let Some(batch) = self.at_root_hoist.pop_front() {
+                        result.extend(batch);
+                        result.push(OutNode::Raw(AT_ROOT_PACK_TIGHT.to_string()));
+                    }
+                } else {
+                    result.push(n);
                 }
             } else {
                 segment.push(n);
@@ -4404,16 +4432,49 @@ impl<'a> Evaluator<'a> {
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         let prelude = self.serialize_supports_condition(condition)?;
-        let out_body = self.eval_at_body(body, parents)?;
+        let outermost_at_rule = self.at_rule_ctx.is_empty();
+        self.at_rule_ctx.push(AtCtx::Supports {
+            prelude: prelude.clone(),
+        });
+        let out_body = self.eval_at_body(body, parents);
+        self.at_rule_ctx.pop();
+        let out_body = out_body?;
         if out_body.is_empty() {
             return Ok(());
         }
-        sink.push_at_rule(OutNode::AtRule {
-            name: "supports".to_string(),
-            prelude,
-            body: out_body,
-            has_block: true,
-        });
+        // Split around any escaping @at-root batches (markers), wrapping each
+        // segment in its own @supports copy like dart's tree rebuild.
+        let mut result: Vec<OutNode> = Vec::new();
+        let mut segment: Vec<OutNode> = Vec::new();
+        let flush = |segment: &mut Vec<OutNode>, result: &mut Vec<OutNode>| {
+            if !segment.is_empty() {
+                result.push(OutNode::AtRule {
+                    name: "supports".to_string(),
+                    prelude: prelude.clone(),
+                    body: std::mem::take(segment),
+                    has_block: true,
+                });
+            }
+        };
+        for n in out_body {
+            if matches!(&n, OutNode::Raw(s) if s == AT_ROOT_HOIST_MARKER) {
+                flush(&mut segment, &mut result);
+                if outermost_at_rule {
+                    if let Some(batch) = self.at_root_hoist.pop_front() {
+                        result.extend(batch);
+                        result.push(OutNode::Raw(AT_ROOT_PACK_TIGHT.to_string()));
+                    }
+                } else {
+                    result.push(n);
+                }
+            } else {
+                segment.push(n);
+            }
+        }
+        flush(&mut segment, &mut result);
+        for n in result {
+            sink.push_at_rule(n);
+        }
         Ok(())
     }
 
@@ -4564,14 +4625,42 @@ impl<'a> Evaluator<'a> {
         }
         let prelude = self.eval_template(prelude)?;
         let saved_kf = std::mem::replace(&mut self.in_keyframes, true);
+        let outermost_at_rule = self.at_rule_ctx.is_empty();
+        self.at_rule_ctx.push(AtCtx::Keyframes {
+            name: name.to_string(),
+            prelude: prelude.clone(),
+        });
         let out_body = self.eval_at_body(body, &[]);
+        self.at_rule_ctx.pop();
         self.in_keyframes = saved_kf;
+        let out_body = out_body?;
+        // Pull any escaping @at-root batches out (the keyframes shell stays,
+        // even empty: `@keyframes a {}` + the hoisted rules after it).
+        let mut shell: Vec<OutNode> = Vec::new();
+        let mut after: Vec<OutNode> = Vec::new();
+        for n in out_body {
+            if matches!(&n, OutNode::Raw(s) if s == AT_ROOT_HOIST_MARKER) {
+                if outermost_at_rule {
+                    if let Some(batch) = self.at_root_hoist.pop_front() {
+                        after.extend(batch);
+                        after.push(OutNode::Raw(AT_ROOT_PACK_TIGHT.to_string()));
+                    }
+                } else {
+                    after.push(n);
+                }
+            } else {
+                shell.push(n);
+            }
+        }
         sink.push_at_rule(OutNode::AtRule {
             name: name.to_string(),
             prelude,
-            body: out_body?,
+            body: shell,
             has_block: true,
         });
+        for n in after {
+            sink.push_at_rule(n);
+        }
         Ok(())
     }
 
@@ -4584,32 +4673,131 @@ impl<'a> Evaluator<'a> {
     /// no-query case is supported).
     fn eval_at_root(
         &mut self,
-        _query: Option<&[TplPiece]>,
+        query: Option<&[TplPiece]>,
         body: &[Stmt],
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
+        let query_text = match query {
+            Some(tpl) => Some(self.eval_template(tpl)?),
+            None => None,
+        };
+        let q = AtRootQuery::parse(query_text.as_deref());
+        // Which enclosing at-rule layers the query keeps (re-wrapped around
+        // the hoisted body) vs excludes (escaped). dart `AtRootQuery.excludes`.
+        let kept: Vec<AtCtx> = self
+            .at_rule_ctx
+            .iter()
+            .filter(|c| !q.excludes_name(c.query_name()))
+            .cloned()
+            .collect();
+        let any_excluded_layer = kept.len() != self.at_rule_ctx.len();
+        // `(with: all)`-style queries that exclude nothing run in place.
+        if !any_excluded_layer && !q.excludes_style_rules() {
+            return self.exec(body, parents, sink);
+        }
+
         self.push_scope(false);
         let saved = self.at_root_excluding_style_rule;
-        self.at_root_excluding_style_rule = true;
+        self.at_root_excluding_style_rule = q.excludes_style_rules();
+        // An excluded media layer also stops feeding the body's own @media
+        // merging; an excluded keyframes layer drops the keyframe context.
+        let saved_media = if q.excludes_name("media") {
+            Some(std::mem::take(&mut self.media_queries))
+        } else {
+            None
+        };
+        let saved_kf = if q.excludes_name("keyframes") {
+            Some(std::mem::replace(&mut self.in_keyframes, false))
+        } else {
+            None
+        };
         let mut out: Vec<OutNode> = Vec::new();
         let res = {
             let mut child = Sink::AtRoot(&mut out);
             self.exec(body, parents, &mut child)
         };
         self.at_root_excluding_style_rule = saved;
+        if let Some(m) = saved_media {
+            self.media_queries = m;
+        }
+        if let Some(k) = saved_kf {
+            self.in_keyframes = k;
+        }
         self.pop_scope();
         res?;
+
+        // When the query KEEPS style rules, bare declarations re-wrap in the
+        // enclosing selectors (dart's included CssStyleRule copy):
+        // `a { @at-root (without: media) { b: c } }` emits `a { b: c }`.
+        let out = if !q.excludes_style_rules() && !parents.is_empty() {
+            let mut wrapped: Vec<OutNode> = Vec::new();
+            let mut decls: Vec<OutItem> = Vec::new();
+            let flush = |decls: &mut Vec<OutItem>, wrapped: &mut Vec<OutNode>| {
+                if !decls.is_empty() {
+                    wrapped.push(OutNode::Rule {
+                        selectors: parents.to_vec(),
+                        linebreaks: Vec::new(),
+                        items: std::mem::take(decls),
+                    });
+                }
+            };
+            for n in out {
+                match n {
+                    OutNode::AtDecl {
+                        prop,
+                        value,
+                        important,
+                        custom,
+                    } => decls.push(OutItem::Decl {
+                        prop,
+                        value,
+                        important,
+                        custom,
+                    }),
+                    other => {
+                        flush(&mut decls, &mut wrapped);
+                        wrapped.push(other);
+                    }
+                }
+            }
+            flush(&mut decls, &mut wrapped);
+            wrapped
+        } else {
+            out
+        };
+
         // Hoisted root-level nodes separate with a blank line only after a
         // completed style rule (dart's isGroupEnd: `#inc {…}` → blank →
         // `@supports`, but `@supports {…}` → `@foo` packs tight).
+        let mut spaced: Vec<OutNode> = Vec::new();
         let mut prev_was_rule = false;
         for node in out {
             if prev_was_rule {
-                sink.push_at_rule(OutNode::Blank);
+                spaced.push(OutNode::Blank);
             }
             prev_was_rule = matches!(node, OutNode::Rule { .. });
-            sink.push_at_rule(node);
+            spaced.push(node);
+        }
+        if spaced.is_empty() {
+            return Ok(());
+        }
+        if any_excluded_layer {
+            // Escape the enclosing at-rules: re-wrap the body in the KEPT
+            // layers (innermost-last) and leave a marker; each enclosing
+            // layer splits around it and passes it outward to the root.
+            let mut batch = spaced;
+            for layer in kept.iter().rev() {
+                batch = vec![layer.wrap(batch)];
+            }
+            self.at_root_hoist.push_back(batch);
+            sink.push_at_rule(OutNode::Raw(AT_ROOT_HOIST_MARKER.to_string()));
+        } else {
+            // No layer escaped: the body stays inside the enclosing at-rules
+            // (only the style-rule join was disabled), so emit in place.
+            for node in spaced {
+                sink.push_at_rule(node);
+            }
         }
         Ok(())
     }
@@ -7914,6 +8102,12 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     if group.is_empty() {
         return;
     }
+    // A pack-tight sentinel attaches to the previous group verbatim — no
+    // separator logic now, and the NEXT group packs tight against it.
+    if group.len() == 1 && matches!(&group[0], OutNode::Raw(s) if s == AT_ROOT_PACK_TIGHT) {
+        out.append(&mut group);
+        return;
+    }
     // The last EFFECTIVE node before this group: module-scope wrappers are
     // judged by their last non-blank child (a module's captured CSS may end
     // in a style-group-end sentinel from its own evaluation).
@@ -8162,6 +8356,114 @@ fn dirname_of(key: &str) -> Option<String> {
 /// Sentinel left in an enclosing `@media` body where a merged nested media
 /// rule bubbled out; the outer rule splits its own children around it.
 const MEDIA_HOIST_MARKER: &str = "\u{0}MEDIA_HOIST\u{0}";
+
+/// Sentinel left where an `@at-root` hoisted a (fully re-wrapped) batch out
+/// of the enclosing at-rules; each enclosing media/supports/keyframes layer
+/// splits around it and passes it outward until the outermost layer places
+/// the batch after itself at the root.
+const AT_ROOT_HOIST_MARKER: &str = "\u{0}AT_ROOT_HOIST\u{0}";
+
+/// Trailing sentinel after a placed at-root batch: the next top-level group
+/// packs tight against it (no blank line), and the emitters skip it.
+const AT_ROOT_PACK_TIGHT: &str = "\u{0}ATR_TIGHT\u{0}";
+
+/// One enclosing at-rule layer recorded for `@at-root` queries: the data
+/// needed to re-wrap a hoisted body in that layer (dart's "included" copies).
+#[derive(Clone)]
+enum AtCtx {
+    Media { prelude: String },
+    Supports { prelude: String },
+    Keyframes { name: String, prelude: String },
+}
+
+impl AtCtx {
+    /// The query name this layer matches (dart `AtRootQuery.excludes`).
+    fn query_name(&self) -> &'static str {
+        match self {
+            AtCtx::Media { .. } => "media",
+            AtCtx::Supports { .. } => "supports",
+            AtCtx::Keyframes { .. } => "keyframes",
+        }
+    }
+
+    /// Wrap `body` in this layer's at-rule node.
+    fn wrap(&self, body: Vec<OutNode>) -> OutNode {
+        match self {
+            AtCtx::Media { prelude } => OutNode::AtRule {
+                name: "media".to_string(),
+                prelude: prelude.clone(),
+                body,
+                has_block: true,
+            },
+            AtCtx::Supports { prelude } => OutNode::AtRule {
+                name: "supports".to_string(),
+                prelude: prelude.clone(),
+                body,
+                has_block: true,
+            },
+            AtCtx::Keyframes { name, prelude } => OutNode::AtRule {
+                name: name.clone(),
+                prelude: prelude.clone(),
+                body,
+                has_block: true,
+            },
+        }
+    }
+}
+
+/// A parsed `@at-root` query (dart `AtRootQuery`): `(with: …)` keeps only
+/// the named layers, `(without: …)` drops them, `all` matches every layer,
+/// and the default (no query) is `(without: rule)`.
+struct AtRootQuery {
+    include: bool,
+    names: Vec<String>,
+    all: bool,
+    rule: bool,
+}
+
+impl AtRootQuery {
+    fn parse(text: Option<&str>) -> AtRootQuery {
+        let Some(text) = text else {
+            return AtRootQuery {
+                include: false,
+                names: vec!["rule".to_string()],
+                all: false,
+                rule: true,
+            };
+        };
+        let inner = text.trim().trim_start_matches('(').trim_end_matches(')');
+        let (include, list) = match inner.split_once(':') {
+            Some((k, v)) if k.trim().eq_ignore_ascii_case("with") => (true, v),
+            Some((_, v)) => (false, v),
+            None => (false, inner),
+        };
+        let names: Vec<String> = list
+            .split_whitespace()
+            .map(|s| s.trim_matches('"').trim_matches('\'').to_ascii_lowercase())
+            .collect();
+        let all = names.iter().any(|n| n == "all");
+        let rule = names.iter().any(|n| n == "rule");
+        AtRootQuery {
+            include,
+            names,
+            all,
+            rule,
+        }
+    }
+
+    /// Whether the query excludes style rules (dart `excludesStyleRules`).
+    fn excludes_style_rules(&self) -> bool {
+        (self.all || self.rule) != self.include
+    }
+
+    /// Whether the query excludes the layer named `name`.
+    fn excludes_name(&self, name: &str) -> bool {
+        if self.all {
+            return !self.include;
+        }
+        self.names.iter().any(|n| n == name) != self.include
+    }
+}
 
 /// Normalize a keyframe selector: a percentage stop's scientific-notation
 /// marker is lowercased (`130E-1%` -> `130e-1%`); everything else (including
@@ -8957,11 +9259,7 @@ fn part_has_parent_ref(part: &str) -> bool {
     false
 }
 
-fn resolve_selectors(sel: &str, parents: &[String]) -> Vec<String> {
-    resolve_selectors_opt(sel, parents, true)
-}
-
-/// As [`resolve_selectors`], with dart's `implicitParent` switch: inside
+/// Resolve a selector against its parents with dart's `implicitParent` switch: inside
 /// `@at-root` (before the first nested style rule) a part WITHOUT `&` stays
 /// at the root instead of joining the parent, while `&` still substitutes.
 fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -> Vec<String> {
