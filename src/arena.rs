@@ -29,6 +29,77 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// =========================================================================
+// Process-global arena-region registry.
+//
+// `dealloc` only needs to answer "is this pointer inside SOME thread's arena
+// region?" — an in-arena free is a no-op (reclaimed wholesale on scope reset),
+// anything else forwards to System. Arena regions are never freed (they leak
+// at thread exit by design), so the set of regions only grows, and a global
+// table of `[base, end)` ranges can answer that question with two atomic loads
+// per registered region — no thread-local access. This halves the macOS
+// `_tlv_get_addr` dynamic-TLS traffic, which `alloc` (which genuinely needs
+// the per-thread cursor) still pays.
+//
+// Memory ordering: everything is Relaxed, and that is sufficient because the
+// slots are WRITE-ONCE. A false "in arena" needs `base != 0 && p >= base &&
+// p < end` — both loads nonzero — and a nonzero load of a write-once slot is
+// its final value, so the containment is real. A false "not in arena" (a
+// stale 0) could only misroute a pointer that genuinely lives in the
+// unobserved region — but a thread always sees its own claim/publication, and
+// any pointer legitimately handed to another thread rides that channel's
+// happens-before edge, which makes the registry writes visible to relaxed
+// loads too. A thread with no such edge cannot legitimately hold the pointer.
+// (The old per-thread check misclassified cross-thread frees of arena
+// pointers as System allocations — the registry handles them correctly.)
+// =========================================================================
+
+/// Max registered arena regions (one per thread that ever compiles). A thread
+/// past the cap simply runs without an arena.
+const MAX_ARENAS: usize = 128;
+
+/// A `[base, end)` region; the pair sits in one cache line per slot.
+struct Region {
+    base: AtomicUsize,
+    end: AtomicUsize,
+}
+
+#[allow(clippy::declare_interior_mutable_const)] // repeated-element array init (MSRV < 1.79)
+const ZERO_REGION: Region = Region {
+    base: AtomicUsize::new(0),
+    end: AtomicUsize::new(0),
+};
+/// Claim counter: slots `0..REGION_SLOTS` are claimed (possibly unpublished).
+static REGION_SLOTS: AtomicUsize = AtomicUsize::new(0);
+static REGIONS: [Region; MAX_ARENAS] = [ZERO_REGION; MAX_ARENAS];
+
+/// Claim a slot and publish `[base, end)`. Returns `false` when the registry
+/// is full (the caller must then NOT use the region as an arena: `dealloc`
+/// would misroute its pointers to `System`).
+fn register_region(base: usize, end: usize) -> bool {
+    let idx = REGION_SLOTS.fetch_add(1, Ordering::Relaxed);
+    if idx >= MAX_ARENAS {
+        return false;
+    }
+    REGIONS[idx].base.store(base, Ordering::Relaxed);
+    REGIONS[idx].end.store(end, Ordering::Relaxed);
+    true
+}
+
+/// Whether `p` lies inside any registered arena region.
+#[inline]
+fn in_any_arena(p: usize) -> bool {
+    let n = REGION_SLOTS.load(Ordering::Relaxed).min(MAX_ARENAS);
+    for r in &REGIONS[..n] {
+        let base = r.base.load(Ordering::Relaxed);
+        if base != 0 && p >= base && p < r.end.load(Ordering::Relaxed) {
+            return true;
+        }
+    }
+    false
+}
 
 /// Pure bump arithmetic over absolute addresses: align `cur` up to `align`, add
 /// `size`, and check the result fits at or below `end` (exclusive). Returns
@@ -74,6 +145,13 @@ impl ThreadState {
         // SAFETY: non-zero size, 4096 is a valid power-of-two alignment.
         let p = unsafe { System.alloc(layout) };
         if p.is_null() {
+            return false;
+        }
+        if !register_region(p as usize, p as usize + THREAD_ARENA_SIZE) {
+            // Registry full: this region must not serve as an arena (dealloc
+            // wouldn't recognize its pointers). Hand it back and run without.
+            // SAFETY: p came from System.alloc with this same layout.
+            unsafe { System.dealloc(p, layout) };
             return false;
         }
         self.base.set(p);
@@ -128,17 +206,14 @@ unsafe impl GlobalAlloc for ScopedAlloc {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        TL.with(|tl| {
-            let p = ptr as usize;
-            let base = tl.base.get() as usize;
-            let in_arena = base != 0 && p >= base && p < tl.end.get();
-            if !in_arena {
-                // SAFETY: not from the arena, so it came from the system
-                // allocator with this same layout.
-                unsafe { System.dealloc(ptr, layout) };
-            }
-            // in-arena: no-op (reclaimed wholesale on scope reset)
-        });
+        // The global region registry answers "arena or System?" without a
+        // thread-local lookup (see its module section above).
+        if !in_any_arena(ptr as usize) {
+            // SAFETY: not from any arena, so it came from the system
+            // allocator with this same layout.
+            unsafe { System.dealloc(ptr, layout) };
+        }
+        // in-arena: no-op (reclaimed wholesale on scope reset)
     }
 }
 
