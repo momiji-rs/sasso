@@ -42,6 +42,25 @@ fn parse_with_syntax(src: &str, syntax: Syntax) -> Result<crate::ast::Stylesheet
 /// callee's arglist; comma otherwise).
 type EvaledArgs = (Vec<Value>, Vec<(String, Value)>, ListSep);
 
+/// One variable scope. Lexical scoping shares frames between the active
+/// chain and callable closures (dart's Environment maps), so a scope is a
+/// shared, interior-mutable map.
+pub(crate) type Scope = std::rc::Rc<std::cell::RefCell<HashMap<String, Value>>>;
+
+fn new_scope() -> Scope {
+    std::rc::Rc::new(std::cell::RefCell::new(HashMap::default()))
+}
+
+/// A user `@function`/`@mixin` with its LEXICAL environment: the variable
+/// scope chain captured at the definition site (shared frames, dart's
+/// `Environment.closure()`). The body runs against this chain, not the
+/// caller's stack.
+pub(crate) struct UserCallable {
+    pub def: Rc<Callable>,
+    pub env: Vec<Scope>,
+    pub env_semi: Vec<bool>,
+}
+
 /// A flattened output node.
 #[derive(Clone)]
 pub(crate) enum OutNode {
@@ -407,7 +426,7 @@ pub(crate) struct EvalOptions<'a> {
 }
 
 pub(crate) struct Evaluator<'a> {
-    scopes: Vec<HashMap<String, Value>>,
+    scopes: Vec<Scope>,
     /// Whether each scope in `scopes` is "semi-global" (dart-sass): a control
     /// flow scope (`@for`/`@each`/`@while`/`@if`) that lets a fresh assignment
     /// reach the global scope, but only when every enclosing scope up to the
@@ -418,8 +437,8 @@ pub(crate) struct Evaluator<'a> {
     /// load cycle (dart-sass "This file is already being loaded."); a path that
     /// has finished loading may be imported again (`@import` re-evaluates).
     loading: Vec<String>,
-    functions: HashMap<String, Rc<Callable>>,
-    mixins: HashMap<String, Rc<Callable>>,
+    functions: HashMap<String, Rc<UserCallable>>,
+    mixins: HashMap<String, Rc<UserCallable>>,
     /// Stack of `@content` blocks, one per active `@include`.
     content_stack: Vec<Option<ContentBlock>>,
     /// Whether we are *directly* executing a mixin body (dart-sass `_inMixin`).
@@ -521,7 +540,7 @@ pub(crate) struct Evaluator<'a> {
     /// merge, undone when the enclosing scope pops (dart scopes them
     /// lexically; this build's callable maps are global). Each entry records
     /// (scope depth at insertion, name, previous binding, is_mixin).
-    callable_undo: Vec<(usize, String, Option<Rc<Callable>>, bool)>,
+    callable_undo: Vec<(usize, String, Option<Rc<UserCallable>>, bool)>,
     /// Built-in modules made available via `@use "sass:<mod>"`, keyed by the
     /// in-scope namespace (default = the part after `sass:`, or the `as ns`
     /// override). The value is the canonical built-in module name (e.g.
@@ -603,9 +622,9 @@ struct Module {
     /// Top-level variables (the module's global scope). Shared and mutable so an
     /// outside `ns.$var: value` assignment updates the module and its own
     /// functions/mixins observe the new value on their next call.
-    vars: RefCell<HashMap<String, Value>>,
-    functions: HashMap<String, Rc<Callable>>,
-    mixins: HashMap<String, Rc<Callable>>,
+    vars: Scope,
+    functions: HashMap<String, Rc<UserCallable>>,
+    mixins: HashMap<String, Rc<UserCallable>>,
     /// Namespaced user modules this module `@use`d (for transitive `ns.fn()`
     /// calls evaluated inside this module's own functions/mixins).
     used_user_modules: HashMap<String, Rc<Module>>,
@@ -709,7 +728,7 @@ impl Module {
             .find(|(k, _)| normalize_var_name(k) == norm)
             .map(|(_, m)| Rc::clone(m))
     }
-    fn function(&self, name: &str) -> Option<Rc<Callable>> {
+    fn function(&self, name: &str) -> Option<Rc<UserCallable>> {
         if let Some(f) = self.functions.get(name) {
             return Some(Rc::clone(f));
         }
@@ -719,7 +738,7 @@ impl Module {
             .find(|(k, _)| normalize_var_name(k) == norm)
             .map(|(_, f)| Rc::clone(f))
     }
-    fn mixin(&self, name: &str) -> Option<Rc<Callable>> {
+    fn mixin(&self, name: &str) -> Option<Rc<UserCallable>> {
         if let Some(m) = self.mixins.get(name) {
             return Some(Rc::clone(m));
         }
@@ -749,10 +768,10 @@ struct ContentBlock {
 /// the callee module's environment.
 #[derive(Clone)]
 struct SavedModuleEnv {
-    scopes: Vec<HashMap<String, Value>>,
+    scopes: Vec<Scope>,
     scope_semi_global: Vec<bool>,
-    functions: HashMap<String, Rc<Callable>>,
-    mixins: HashMap<String, Rc<Callable>>,
+    functions: HashMap<String, Rc<UserCallable>>,
+    mixins: HashMap<String, Rc<UserCallable>>,
     used_modules: HashMap<String, String>,
     star_modules: Vec<String>,
     used_user_modules: HashMap<String, Rc<Module>>,
@@ -767,8 +786,8 @@ struct SavedModuleEnv {
 #[derive(Default)]
 struct Forwarded {
     vars: HashMap<String, Value>,
-    functions: HashMap<String, Rc<Callable>>,
-    mixins: HashMap<String, Rc<Callable>>,
+    functions: HashMap<String, Rc<UserCallable>>,
+    mixins: HashMap<String, Rc<UserCallable>>,
     /// The module each re-exported member actually lives in (with the
     /// member's ORIGINAL name for variables), so calls/assignments through
     /// the forward run against the defining module's environment.
@@ -842,7 +861,7 @@ impl<'a> Evaluator<'a> {
             deprecations_shown: HashMap::default(),
             deprecations_omitted: 0,
             deprecations_seen: std::collections::HashSet::new(),
-            scopes: vec![HashMap::default()],
+            scopes: vec![new_scope()],
             // The global scope is treated as semi-global so a top-level control
             // flow scope (its child) becomes semi-global too.
             scope_semi_global: vec![true],
@@ -1350,13 +1369,23 @@ impl<'a> Evaluator<'a> {
 
     // ---- scopes ------------------------------------------------------
 
-    fn lookup(&self, name: &str) -> Option<&Value> {
+    fn lookup(&self, name: &str) -> Option<Value> {
         for scope in self.scopes.iter().rev() {
-            if let Some(v) = scope.get(name) {
-                return Some(v);
+            if let Some(v) = scope.borrow().get(name) {
+                return Some(v.clone());
             }
         }
         None
+    }
+
+    /// Capture the current variable-scope chain as a callable's lexical
+    /// closure (dart `Environment.closure()` — shared frames, not snapshots).
+    fn capture_callable(&self, def: &Rc<Callable>) -> Rc<UserCallable> {
+        Rc::new(UserCallable {
+            def: Rc::clone(def),
+            env: self.scopes.clone(),
+            env_semi: self.scope_semi_global.clone(),
+        })
     }
 
     /// Push a new scope. `semi_global` requests semi-global behavior (control
@@ -1364,14 +1393,14 @@ impl<'a> Evaluator<'a> {
     /// already semi-global (dart-sass `Environment.scope`).
     fn push_scope(&mut self, semi_global: bool) {
         let effective = semi_global && self.scope_semi_global.last().copied().unwrap_or(false);
-        self.scopes.push(HashMap::default());
+        self.scopes.push(new_scope());
         self.scope_semi_global.push(effective);
     }
 
     /// Push a pre-populated, non-semi-global scope (a mixin/function argument
     /// frame).
     fn push_scope_frame(&mut self, frame: HashMap<String, Value>) {
-        self.scopes.push(frame);
+        self.scopes.push(std::rc::Rc::new(std::cell::RefCell::new(frame)));
         self.scope_semi_global.push(false);
     }
 
@@ -1406,14 +1435,14 @@ impl<'a> Evaluator<'a> {
     fn assign(&mut self, name: &str, val: Value) {
         if self.scopes.len() == 1 {
             if let Some(g) = self.scopes.first_mut() {
-                g.insert(name.to_string(), val);
+                g.borrow_mut().insert(name.to_string(), val);
             }
             return;
         }
         // Innermost scope index holding the variable (None if undeclared).
         let mut index = None;
         for (i, scope) in self.scopes.iter().enumerate().rev() {
-            if scope.contains_key(name) {
+            if scope.borrow().contains_key(name) {
                 index = Some(i);
                 break;
             }
@@ -1425,7 +1454,7 @@ impl<'a> Evaluator<'a> {
             None => self.scopes.len() - 1,
         };
         if let Some(scope) = self.scopes.get_mut(target) {
-            scope.insert(name.to_string(), val);
+            scope.borrow_mut().insert(name.to_string(), val);
         }
     }
 
@@ -1466,7 +1495,7 @@ impl<'a> Evaluator<'a> {
                 // hasn't already defined the variable.
                 if !(matches!(cfg_val, Value::Null) || cfg_is_default && already_set) {
                     if let Some(g) = self.scopes.first_mut() {
-                        g.insert(v.name.clone(), cfg_val);
+                        g.borrow_mut().insert(v.name.clone(), cfg_val);
                     }
                     return Ok(());
                 }
@@ -1486,7 +1515,7 @@ impl<'a> Evaluator<'a> {
         // the change).
         if (self.scopes.len() == 1 || v.is_global) && !is_private_member(&v.name) {
             if let Some(g) = self.scopes.first() {
-                if !g.contains_key(&v.name) {
+                if !g.borrow().contains_key(&v.name) {
                     let targets: Vec<Rc<Module>> = self
                         .star_user_modules
                         .iter()
@@ -1509,7 +1538,7 @@ impl<'a> Evaluator<'a> {
         }
         if v.is_global {
             if let Some(g) = self.scopes.first_mut() {
-                g.insert(v.name.clone(), val);
+                g.borrow_mut().insert(v.name.clone(), val);
             }
         } else {
             self.assign(&v.name, val);
@@ -1566,7 +1595,7 @@ impl<'a> Evaluator<'a> {
     /// iteration (dart-sass `setLocalVariable`).
     fn set_local(&mut self, name: &str, val: Value) {
         if let Some(sc) = self.scopes.last_mut() {
-            sc.insert(name.to_string(), val);
+            sc.borrow_mut().insert(name.to_string(), val);
         }
     }
 
@@ -1763,6 +1792,96 @@ impl<'a> Evaluator<'a> {
         self.bind_evaled(params, evaled, name)
     }
 
+    /// Bind evaluated arguments into the CURRENT (freshly pushed) scope.
+    /// Parameter defaults evaluate inside the callee environment with the
+    /// already-bound parameters visible (`@mixin m($a, $b: $a)`), matching
+    /// dart's progressive binding.
+    fn bind_evaled_into_scope(
+        &mut self,
+        params: &ParamList,
+        evaled: EvaledArgs,
+        name: &str,
+    ) -> Result<(), Error> {
+        let (positional, keyword_vec, rest_sep) = evaled;
+        let mut keyword: HashMap<String, Value> = HashMap::default();
+        let mut keyword_order: Vec<(String, String)> = Vec::new();
+        for (n, v) in keyword_vec {
+            let norm = normalize_arg_name(&n);
+            if !keyword.contains_key(&norm) {
+                keyword_order.push((norm.clone(), n));
+            }
+            keyword.insert(norm, v);
+        }
+        let mut pos_iter = positional.into_iter();
+        for param in &params.params {
+            let val = if let Some(v) = pos_iter.next() {
+                v
+            } else if let Some(v) = keyword.remove(&normalize_arg_name(&param.name)) {
+                v
+            } else if let Some(def) = &param.default {
+                self.eval_expr(def)?
+            } else {
+                return Err(Error::unpositioned(format!("Missing argument ${}.", param.name)));
+            };
+            if let Some(sc) = self.scopes.last() {
+                sc.borrow_mut().insert(param.name.clone(), val);
+            }
+        }
+        if let Some(rest) = &params.rest {
+            let remaining: Vec<Value> = pos_iter.collect();
+            let kw: Vec<(Value, Value)> = keyword_order
+                .iter()
+                .filter_map(|(norm, _)| {
+                    keyword.remove(norm).map(|v| {
+                        (
+                            Value::Str(SassStr {
+                                text: norm.clone(),
+                                quoted: false,
+                            }),
+                            v,
+                        )
+                    })
+                })
+                .collect();
+            if let Some(sc) = self.scopes.last() {
+                sc.borrow_mut().insert(
+                    rest.clone(),
+                    Value::List(List {
+                        items: remaining,
+                        sep: rest_sep,
+                        bracketed: false,
+                        keywords: Some(kw),
+                    }),
+                );
+            }
+        } else if pos_iter.next().is_some() {
+            return Err(Error::unpositioned(format!(
+                "{name} was passed too many arguments."
+            )));
+        }
+        if params.rest.is_none() && !keyword.is_empty() {
+            let leftover: Vec<&str> = keyword_order
+                .iter()
+                .filter(|(norm, _)| keyword.contains_key(norm))
+                .map(|(_, orig)| orig.as_str())
+                .collect();
+            if let Some((last, init)) = leftover.split_last() {
+                let msg = if init.is_empty() {
+                    format!("No parameter named ${last}.")
+                } else {
+                    let head = init
+                        .iter()
+                        .map(|n| format!("${n}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("No parameters named {head} or ${last}.")
+                };
+                return Err(Error::unpositioned(msg));
+            }
+        }
+        Ok(())
+    }
+
     /// Bind already-evaluated `(positional, keyword)` arguments into a call
     /// frame. Used by `meta.call`, which has only evaluated values to pass on.
     fn bind_evaled(
@@ -1861,19 +1980,32 @@ impl<'a> Evaluator<'a> {
     /// expression, recorded as a diagnostic stack frame around the body.
     fn call_function(
         &mut self,
-        func: &Rc<Callable>,
+        func: &Rc<UserCallable>,
         args: &[CallArg],
         call: Option<(Pos, usize)>,
     ) -> Result<Value, Error> {
-        let frame = self.bind_args(&func.params, args, &func.name)?;
-        let saved = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.name)));
-        self.push_scope_frame(frame);
-        // A function body is not a mixin body: `meta.content-exists()` called
-        // from a function (even one invoked by a mixin) is an error.
-        self.in_mixin.push(false);
-        let result = self.run_fn_body(&func.body);
-        self.in_mixin.pop();
+        // Arguments evaluate in the CALLER's environment; the body (and the
+        // parameter defaults) run against the callable's LEXICAL closure.
+        let evaled = self.eval_call_args(args)?;
+        let saved = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.def.name)));
+        let saved_undo = std::mem::take(&mut self.callable_undo);
+        let saved_scopes = std::mem::replace(&mut self.scopes, func.env.clone());
+        let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());
+        self.push_scope(false);
+        let result = self
+            .bind_evaled_into_scope(&func.def.params, evaled, &func.def.name)
+            .and_then(|()| {
+                // A function body is not a mixin body: `meta.content-exists()`
+                // called from a function (even one invoked by a mixin) errors.
+                self.in_mixin.push(false);
+                let r = self.run_fn_body(&func.def.body);
+                self.in_mixin.pop();
+                r
+            });
         self.pop_scope();
+        self.scopes = saved_scopes;
+        self.scope_semi_global = saved_semi;
+        self.callable_undo = saved_undo;
         if let Some(saved) = saved {
             self.leave_call(saved);
         }
@@ -1884,7 +2016,7 @@ impl<'a> Evaluator<'a> {
             Some(v) => Ok(v.without_slash()),
             None => Err(Error::unpositioned(format!(
                 "Function {}() did not @return a value.",
-                func.name
+                func.def.name
             ))),
         }
     }
@@ -1899,7 +2031,8 @@ impl<'a> Evaluator<'a> {
                 Stmt::Comment(_) => {}
                 Stmt::Return(e) => return Ok(Some(self.eval_expr(e)?)),
                 Stmt::FunctionDef(c) => {
-                    self.functions.insert(c.name.clone(), Rc::clone(c));
+                    let captured = self.capture_callable(c);
+                    self.functions.insert(c.name.clone(), captured);
                 }
                 Stmt::If(branches) => {
                     for branch in branches {
@@ -2056,7 +2189,7 @@ impl<'a> Evaluator<'a> {
         // A bare `@include` may resolve a user module mixin exposed unprefixed
         // via `@use … as *`.
         if !self.mixins.contains_key(name) && !self.star_user_modules.is_empty() && !is_private_member(name) {
-            let hits: Vec<(Rc<Module>, Rc<Callable>)> = self
+            let hits: Vec<(Rc<Module>, Rc<UserCallable>)> = self
                 .star_user_modules
                 .iter()
                 .filter_map(|m| m.mixin(name).map(|mx| (Rc::clone(m), mx)))
@@ -2077,21 +2210,39 @@ impl<'a> Evaluator<'a> {
             .ok_or_else(|| Error::unpositioned(format!("Undefined mixin {name}.")))?;
         // dart-sass: passing a content block to a mixin that never uses
         // `@content` is an error, even when the block is empty.
-        if content.is_some() && !body_uses_content(&mixin.body) {
+        if content.is_some() && !body_uses_content(&mixin.def.body) {
             return Err(Error::unpositioned("Mixin doesn't accept a content block."));
         }
-        let frame = self.bind_args(&mixin.params, args, &mixin.name)?;
-        self.push_scope_frame(frame);
-        self.content_stack.push(content.map(|stmts| ContentBlock {
-            stmts,
-            params: content_params.clone(),
-            caller_env: None,
-        }));
-        self.in_mixin.push(true);
-        let result = self.exec(&mixin.body, parents, sink);
-        self.in_mixin.pop();
-        self.content_stack.pop();
+        // Arguments evaluate in the caller's environment; the body runs in
+        // the mixin's lexical closure. The content block captures the CALL
+        // SITE so `@content` sees the includer's variables.
+        let evaled = self.eval_call_args(args)?;
+        let content_block = content.map(|stmts| {
+            let snapshot = self.snapshot_env();
+            ContentBlock {
+                stmts,
+                params: content_params.clone(),
+                caller_env: Some(Box::new(snapshot)),
+            }
+        });
+        let saved_undo = std::mem::take(&mut self.callable_undo);
+        let saved_scopes = std::mem::replace(&mut self.scopes, mixin.env.clone());
+        let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
+        self.push_scope(false);
+        let result = self
+            .bind_evaled_into_scope(&mixin.def.params, evaled, &mixin.def.name)
+            .and_then(|()| {
+                self.content_stack.push(content_block);
+                self.in_mixin.push(true);
+                let r = self.exec(&mixin.def.body, parents, sink);
+                self.in_mixin.pop();
+                self.content_stack.pop();
+                r
+            });
         self.pop_scope();
+        self.scopes = saved_scopes;
+        self.scope_semi_global = saved_semi;
+        self.callable_undo = saved_undo;
         result
     }
 
@@ -2102,20 +2253,21 @@ impl<'a> Evaluator<'a> {
     fn run_module_mixin(
         &mut self,
         module: &Rc<Module>,
-        mixin: &Rc<Callable>,
+        mixin: &Rc<UserCallable>,
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
-        if content.is_some() && !body_uses_content(&mixin.body) {
+        if content.is_some() && !body_uses_content(&mixin.def.body) {
             return Err(Error::unpositioned("Mixin doesn't accept a content block."));
         }
-        // Bind the arguments at the call site (so they resolve in the caller's
-        // scope), then enter the module's environment for the body. Snapshot the
-        // call-site env so a `@content` block runs there, not in the module.
-        let frame = self.bind_args(&mixin.params, args, &mixin.name)?;
+        // Evaluate the arguments at the call site (so they resolve in the
+        // caller's scope), then enter the module's environment and the
+        // mixin's lexical closure for the body. Snapshot the call-site env
+        // so a `@content` block runs there, not in the module.
+        let evaled = self.eval_call_args(args)?;
         let content_block = content.map(|stmts| {
             let snapshot = self.snapshot_env();
             ContentBlock {
@@ -2126,11 +2278,22 @@ impl<'a> Evaluator<'a> {
         });
         let saved = self.enter_module(module);
         let saved_file = self.enter_module_file(module);
-        self.push_scope_frame(frame);
-        self.content_stack.push(content_block);
-        let result = self.exec(&mixin.body, parents, sink);
-        self.content_stack.pop();
+        let saved_undo = std::mem::take(&mut self.callable_undo);
+        let saved_scopes = std::mem::replace(&mut self.scopes, mixin.env.clone());
+        let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
+        self.push_scope(false);
+        let result = self
+            .bind_evaled_into_scope(&mixin.def.params, evaled, &mixin.def.name)
+            .and_then(|()| {
+                self.content_stack.push(content_block);
+                let r = self.exec(&mixin.def.body, parents, sink);
+                self.content_stack.pop();
+                r
+            });
         self.pop_scope();
+        self.scopes = saved_scopes;
+        self.scope_semi_global = saved_semi;
+        self.callable_undo = saved_undo;
         self.leave_module_file(saved_file);
         self.leave_module(saved);
         result
@@ -2322,7 +2485,7 @@ impl<'a> Evaluator<'a> {
     ) -> Result<(), Error> {
         // A captured user `@mixin`: recover the type-erased `Callable`.
         let callable = match &mixin.user {
-            Some(any) => match Rc::clone(any).downcast::<Callable>() {
+            Some(any) => match Rc::clone(any).downcast::<UserCallable>() {
                 Ok(c) => c,
                 Err(_) => return Err(Error::unpositioned("Undefined mixin.")),
             },
@@ -2335,49 +2498,50 @@ impl<'a> Evaluator<'a> {
                 return Err(Error::unpositioned("Undefined mixin."));
             }
         };
-        if content.is_some() && !body_uses_content(&callable.body) {
+        if content.is_some() && !body_uses_content(&callable.def.body) {
             return Err(Error::unpositioned("Mixin doesn't accept a content block."));
         }
-        let frame = self.bind_evaled(
-            &callable.params,
-            (pos_args, named, ListSep::Comma),
-            &callable.name,
-        )?;
-        // A mixin captured from another module runs in that module's environment;
-        // its `@content` block runs back at the call site.
-        if let Some(module_any) = &mixin.module {
-            if let Ok(module) = Rc::clone(module_any).downcast::<Module>() {
-                let content_block = content.map(|stmts| {
-                    let snapshot = self.snapshot_env();
-                    ContentBlock {
-                        stmts,
-                        params: content_params.clone(),
-                        caller_env: Some(Box::new(snapshot)),
-                    }
-                });
-                let saved = self.enter_module(&module);
-                self.push_scope_frame(frame);
+        let content_block = content.map(|stmts| {
+            let snapshot = self.snapshot_env();
+            ContentBlock {
+                stmts,
+                params: content_params.clone(),
+                caller_env: Some(Box::new(snapshot)),
+            }
+        });
+        // A mixin captured from another module runs in that module's
+        // environment; either way the body runs in its lexical closure and
+        // the `@content` block runs back at the call site.
+        let module = mixin
+            .module
+            .as_ref()
+            .and_then(|m| Rc::clone(m).downcast::<Module>().ok());
+        let saved = module.as_ref().map(|m| self.enter_module(m));
+        let saved_undo = std::mem::take(&mut self.callable_undo);
+        let saved_scopes = std::mem::replace(&mut self.scopes, callable.env.clone());
+        let saved_semi = std::mem::replace(&mut self.scope_semi_global, callable.env_semi.clone());
+        self.push_scope(false);
+        let result = self
+            .bind_evaled_into_scope(
+                &callable.def.params,
+                (pos_args, named, ListSep::Comma),
+                &callable.def.name,
+            )
+            .and_then(|()| {
                 self.content_stack.push(content_block);
                 self.in_mixin.push(true);
-                let result = self.exec(&callable.body, parents, sink);
+                let r = self.exec(&callable.def.body, parents, sink);
                 self.in_mixin.pop();
                 self.content_stack.pop();
-                self.pop_scope();
-                self.leave_module(saved);
-                return result;
-            }
-        }
-        self.push_scope_frame(frame);
-        self.content_stack.push(content.map(|stmts| ContentBlock {
-            stmts,
-            params: content_params.clone(),
-            caller_env: None,
-        }));
-        self.in_mixin.push(true);
-        let result = self.exec(&callable.body, parents, sink);
-        self.in_mixin.pop();
-        self.content_stack.pop();
+                r
+            });
         self.pop_scope();
+        self.scopes = saved_scopes;
+        self.scope_semi_global = saved_semi;
+        self.callable_undo = saved_undo;
+        if let Some(saved) = saved {
+            self.leave_module(saved);
+        }
         result
     }
 
@@ -2528,7 +2692,7 @@ impl<'a> Evaluator<'a> {
             // already defines at the top level is a conflict.
             if let Some(g) = self.scopes.first() {
                 for name in module.vars.borrow().keys() {
-                    if !is_private_member(name) && g.contains_key(name) {
+                    if !is_private_member(name) && g.borrow().contains_key(name) {
                         return Err(Error::at(
                             format!(
                                 "This module and the new module both define a variable named \"${name}\"."
@@ -3343,7 +3507,8 @@ impl<'a> Evaluator<'a> {
         let saved_dir = std::mem::replace(&mut self.current_file_dir, module_dir);
         let saved_url = std::mem::replace(&mut self.current_url, diag_url.to_string());
         let saved_source = std::mem::replace(&mut self.current_source, module_source);
-        let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::default()]);
+        let saved_undo = std::mem::take(&mut self.callable_undo);
+        let saved_scopes = std::mem::replace(&mut self.scopes, vec![new_scope()]);
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, vec![true]);
         let saved_funcs = std::mem::take(&mut self.functions);
         let saved_mixins = std::mem::take(&mut self.mixins);
@@ -3366,7 +3531,8 @@ impl<'a> Evaluator<'a> {
         if !css {
             let mut slots: Vec<String> = Vec::new();
             collect_global_var_decls(&sheet.stmts, &mut slots);
-            if let Some(g) = self.scopes.first_mut() {
+            if let Some(g) = self.scopes.first() {
+                let mut g = g.borrow_mut();
                 for name in slots {
                     g.entry(name).or_insert(Value::Null);
                 }
@@ -3384,10 +3550,10 @@ impl<'a> Evaluator<'a> {
         self.loading.pop();
         // Capture this module's evaluated members before restoring the caller's
         // environment.
-        let mut vars = std::mem::take(&mut self.scopes)
+        let vars_scope = std::mem::take(&mut self.scopes)
             .into_iter()
             .next()
-            .unwrap_or_default();
+            .unwrap_or_else(new_scope);
         let mut functions = std::mem::take(&mut self.functions);
         let mut mixins = std::mem::take(&mut self.mixins);
         let used_user_modules = std::mem::take(&mut self.used_user_modules);
@@ -3402,6 +3568,7 @@ impl<'a> Evaluator<'a> {
         // Restore the caller's environment.
         self.scopes = saved_scopes;
         self.scope_semi_global = saved_semi;
+        self.callable_undo = saved_undo;
         self.functions = saved_funcs;
         self.mixins = saved_mixins;
         self.used_modules = saved_used;
@@ -3434,11 +3601,14 @@ impl<'a> Evaluator<'a> {
             .iter()
             .map(|(k, (m, o))| (k.clone(), (Rc::clone(m), o.clone())))
             .collect();
-        for (k, v) in forwarded.vars {
-            if let std::collections::hash_map::Entry::Vacant(e) = vars.entry(k.clone()) {
-                e.insert(v);
-                if let Some(o) = forwarded.var_origins.get(&k) {
-                    var_origins.insert(k, (Rc::clone(&o.0), o.1.clone()));
+        {
+            let mut vars = vars_scope.borrow_mut();
+            for (k, v) in forwarded.vars {
+                if let std::collections::hash_map::Entry::Vacant(e) = vars.entry(k.clone()) {
+                    e.insert(v);
+                    if let Some(o) = forwarded.var_origins.get(&k) {
+                        var_origins.insert(k, (Rc::clone(&o.0), o.1.clone()));
+                    }
                 }
             }
         }
@@ -3461,7 +3631,7 @@ impl<'a> Evaluator<'a> {
 
         Ok((
             Module {
-                vars: RefCell::new(vars),
+                vars: vars_scope,
                 functions,
                 mixins,
                 used_user_modules,
@@ -3863,10 +4033,12 @@ impl<'a> Evaluator<'a> {
                     result?;
                 }
                 Stmt::FunctionDef(callable) => {
-                    self.functions.insert(callable.name.clone(), Rc::clone(callable));
+                    let captured = self.capture_callable(callable);
+                    self.functions.insert(callable.name.clone(), captured);
                 }
                 Stmt::MixinDef(callable) => {
-                    self.mixins.insert(callable.name.clone(), Rc::clone(callable));
+                    let captured = self.capture_callable(callable);
+                    self.mixins.insert(callable.name.clone(), captured);
                 }
                 Stmt::Return(_) => {
                     return Err(Error::unpositioned("@return is only allowed inside a function."));
@@ -5012,7 +5184,8 @@ impl<'a> Evaluator<'a> {
                             {
                                 let mut slots: Vec<String> = Vec::new();
                                 collect_global_var_decls(&sheet.stmts, &mut slots);
-                                if let Some(g) = self.scopes.first_mut() {
+                                if let Some(g) = self.scopes.first() {
+                                    let mut g = g.borrow_mut();
                                     for name in slots {
                                         g.entry(name).or_insert(Value::Null);
                                     }
@@ -5039,7 +5212,7 @@ impl<'a> Evaluator<'a> {
                             let saved_pending_consumed = if loads_modules {
                                 let mut implicit_config: HashMap<String, (Value, bool)> = HashMap::default();
                                 for scope in &self.scopes {
-                                    for (k, v) in scope {
+                                    for (k, v) in scope.borrow().iter() {
                                         implicit_config.insert(normalize_var_name(k), (v.clone(), false));
                                     }
                                 }
@@ -5090,12 +5263,15 @@ impl<'a> Evaluator<'a> {
                             // members stay scoped to the enclosing rule).
                             if self.scopes.len() == 1 {
                                 for (k, f) in imported_fwd.functions {
-                                    self.functions.insert(k, f);
+                                    let rebound = self.capture_callable(&f.def);
+                                    self.functions.insert(k, rebound);
                                 }
                                 for (k, m) in imported_fwd.mixins {
-                                    self.mixins.insert(k, m);
+                                    let rebound = self.capture_callable(&m.def);
+                                    self.mixins.insert(k, rebound);
                                 }
-                                if let Some(g) = self.scopes.first_mut() {
+                                if let Some(g) = self.scopes.first() {
+                                    let mut g = g.borrow_mut();
                                     for (k, val) in imported_fwd.vars {
                                         // The forwarded module's assignments
                                         // behave as if written at the import:
@@ -5131,18 +5307,25 @@ impl<'a> Evaluator<'a> {
                                 // callable too (this build's callables are
                                 // global, so they outlive the rule — dart
                                 // scopes them lexically).
-                                if let Some(s) = self.scopes.last_mut() {
+                                if let Some(s) = self.scopes.last() {
+                                    let mut s = s.borrow_mut();
                                     for (k, val) in imported_fwd.vars {
                                         s.insert(k, val);
                                     }
                                 }
                                 let depth = self.scopes.len();
+                                // dart's @import is textual inclusion: a
+                                // forwarded callable rebinds to the IMPORT
+                                // SITE's environment (so `$v: new` next to
+                                // the import is what `get-v()` reads).
                                 for (k, f) in imported_fwd.functions {
-                                    let prev = self.functions.insert(k.clone(), f);
+                                    let rebound = self.capture_callable(&f.def);
+                                    let prev = self.functions.insert(k.clone(), rebound);
                                     self.callable_undo.push((depth, k, prev, false));
                                 }
                                 for (k, m) in imported_fwd.mixins {
-                                    let prev = self.mixins.insert(k.clone(), m);
+                                    let rebound = self.capture_callable(&m.def);
+                                    let prev = self.mixins.insert(k.clone(), rebound);
                                     self.callable_undo.push((depth, k, prev, true));
                                 }
                             }
@@ -5510,7 +5693,7 @@ impl<'a> Evaluator<'a> {
                 }
                 // A user module function exposed unprefixed via `@use … as *`.
                 if !self.star_user_modules.is_empty() && !is_private_member(name) {
-                    let hits: Vec<(Rc<Module>, Rc<Callable>)> = self
+                    let hits: Vec<(Rc<Module>, Rc<UserCallable>)> = self
                         .star_user_modules
                         .iter()
                         .filter_map(|m| m.function(name).map(|f| (Rc::clone(m), f)))
@@ -5895,8 +6078,8 @@ impl<'a> Evaluator<'a> {
         };
         let accepts = match &mixin.user {
             Some(any) => Rc::clone(any)
-                .downcast::<Callable>()
-                .map(|c| body_uses_content(&c.body))
+                .downcast::<UserCallable>()
+                .map(|c| body_uses_content(&c.def.body))
                 .unwrap_or(false),
             None => mixin.name == "apply",
         };
@@ -6200,26 +6383,37 @@ impl<'a> Evaluator<'a> {
         named: Vec<(String, Value)>,
         pos: Pos,
     ) -> Result<Value, Error> {
-        // A captured user `@function`: bind the evaluated args and run its body.
-        // The payload is a type-erased `Rc<Callable>`; recover it (cloning the
-        // `Rc` so the borrow on `f` is released before running the body).
+        // A captured user `@function`: bind the evaluated args and run its
+        // body in the callable's lexical closure. The payload is a
+        // type-erased `Rc<UserCallable>` (cloning the `Rc` releases the
+        // borrow on `f` before running the body).
         if let Some(any) = &f.user {
-            if let Ok(callable) = Rc::clone(any).downcast::<Callable>() {
-                let frame = self.bind_evaled(
-                    &callable.params,
-                    (pos_args, named, ListSep::Comma),
-                    &callable.name,
-                )?;
-                self.push_scope_frame(frame);
-                self.in_mixin.push(false);
-                let result = self.run_fn_body(&callable.body);
-                self.in_mixin.pop();
+            if let Ok(callable) = Rc::clone(any).downcast::<UserCallable>() {
+                let saved_undo = std::mem::take(&mut self.callable_undo);
+                let saved_scopes = std::mem::replace(&mut self.scopes, callable.env.clone());
+                let saved_semi = std::mem::replace(&mut self.scope_semi_global, callable.env_semi.clone());
+                self.push_scope(false);
+                let result = self
+                    .bind_evaled_into_scope(
+                        &callable.def.params,
+                        (pos_args, named, ListSep::Comma),
+                        &callable.def.name,
+                    )
+                    .and_then(|()| {
+                        self.in_mixin.push(false);
+                        let r = self.run_fn_body(&callable.def.body);
+                        self.in_mixin.pop();
+                        r
+                    });
                 self.pop_scope();
+                self.scopes = saved_scopes;
+                self.scope_semi_global = saved_semi;
+                self.callable_undo = saved_undo;
                 return match result? {
                     Some(v) => Ok(v.without_slash()),
                     None => Err(Error::unpositioned(format!(
                         "Function {}() did not @return a value.",
-                        callable.name
+                        callable.def.name
                     ))),
                 };
             }
@@ -6467,10 +6661,10 @@ impl<'a> Evaluator<'a> {
             )?));
         }
         let key = normalize_arg_name(&name);
-        let scopes: &[HashMap<String, Value>] = if global { &self.scopes[..1] } else { &self.scopes };
+        let scopes: &[Scope] = if global { &self.scopes[..1] } else { &self.scopes };
         let found = scopes
             .iter()
-            .any(|s| s.keys().any(|k| normalize_arg_name(k) == key));
+            .any(|s| s.borrow().keys().any(|k| normalize_arg_name(k) == key));
         if found {
             return Ok(Value::Bool(true));
         }
@@ -6626,17 +6820,25 @@ impl<'a> Evaluator<'a> {
     fn call_user_module_function(
         &mut self,
         module: &Rc<Module>,
-        func: &Rc<Callable>,
+        func: &Rc<UserCallable>,
         args: &[CallArg],
         call: Option<(Pos, usize)>,
     ) -> Result<Value, Error> {
-        let frame = self.bind_args(&func.params, args, &func.name)?;
-        let saved_member = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.name)));
+        let evaled = self.eval_call_args(args)?;
+        let saved_member = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.def.name)));
         let saved = self.enter_module(module);
         let saved_file = self.enter_module_file(module);
-        self.push_scope_frame(frame);
-        let result = self.run_fn_body(&func.body);
+        let saved_undo = std::mem::take(&mut self.callable_undo);
+        let saved_scopes = std::mem::replace(&mut self.scopes, func.env.clone());
+        let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());
+        self.push_scope(false);
+        let result = self
+            .bind_evaled_into_scope(&func.def.params, evaled, &func.def.name)
+            .and_then(|()| self.run_fn_body(&func.def.body));
         self.pop_scope();
+        self.scopes = saved_scopes;
+        self.scope_semi_global = saved_semi;
+        self.callable_undo = saved_undo;
         self.leave_module_file(saved_file);
         self.leave_module(saved);
         if let Some(saved_member) = saved_member {
@@ -6646,7 +6848,7 @@ impl<'a> Evaluator<'a> {
             Some(v) => Ok(v.without_slash()),
             None => Err(Error::unpositioned(format!(
                 "Function {}() did not @return a value.",
-                func.name
+                func.def.name
             ))),
         }
     }
@@ -6694,7 +6896,10 @@ impl<'a> Evaluator<'a> {
     /// Install `module`'s environment for a cross-module member invocation,
     /// returning the previous environment to restore with [`leave_module`].
     fn enter_module(&mut self, module: &Rc<Module>) -> SavedModuleEnv {
-        let module_scope = module.vars.borrow().clone();
+        // The module's global scope is SHARED (the same Rc its callables
+        // captured), so writes inside the module are immediately visible to
+        // its closures and to later cross-module reads.
+        let module_scope = std::rc::Rc::clone(&module.vars);
         SavedModuleEnv {
             scopes: std::mem::replace(&mut self.scopes, vec![module_scope]),
             scope_semi_global: std::mem::replace(&mut self.scope_semi_global, vec![true]),
@@ -6718,11 +6923,9 @@ impl<'a> Evaluator<'a> {
     /// recorded a module, its (possibly mutated) global scope is written back so
     /// a `!global` assignment inside the module persists.
     fn leave_module(&mut self, saved: SavedModuleEnv) {
-        if let Some(module) = &saved.write_back {
-            if let Some(scope0) = self.scopes.first() {
-                *module.vars.borrow_mut() = scope0.clone();
-            }
-        }
+        // The module scope is shared by Rc; writes already land in
+        // module.vars without an explicit copy-back.
+        let _ = &saved.write_back;
         self.scopes = saved.scopes;
         self.scope_semi_global = saved.scope_semi_global;
         self.functions = saved.functions;

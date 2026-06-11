@@ -6951,3 +6951,32 @@ fn at_rule_prelude_whitespace_collapses() {
         ".foo {\n  @apply ( --bar );\n}\n"
     );
 }
+
+#[test]
+fn lexical_scoping_closures() {
+    // A mixin/function body runs against its DEFINITION environment (dart's
+    // Environment.closure), not the caller's stack: a caller-local variable
+    // is invisible inside the body.
+    assert!(compile(
+        "@mixin m() {\n  a: $x;\n}\nfoo {\n  $x: 1;\n  @include m();\n}\n",
+        &Options::default()
+    )
+    .is_err());
+    // A local assignment inside a function stays local (issue_613): the
+    // caller's $var is untouched by the function's own $var.
+    assert_eq!(
+        ours("$v: 1;\n@function f() { $v: 3; @return 0; }\n.s { $v: 4; $d: f(); c: $v; }\n.o { c: $v; }\n"),
+        ".s {\n  c: 4;\n}\n\n.o {\n  c: 1;\n}\n"
+    );
+    // Parameter defaults see already-bound parameters (progressive binding).
+    assert_eq!(
+        ours("@mixin m($a, $b: $a) { x: $a $b; }\nfoo { @include m(1); }\n"),
+        "foo {\n  x: 1 1;\n}\n"
+    );
+    // A global write inside a mixin lands in the global scope and is visible
+    // through its closure afterwards.
+    assert_eq!(
+        ours("$g: old;\n@mixin set() { $g: new !global; }\nfoo { @include set(); v: $g; }\n"),
+        "foo {\n  v: new;\n}\n"
+    );
+}
