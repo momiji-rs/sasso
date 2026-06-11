@@ -7,6 +7,7 @@
 //! port its `@extend` algorithm (extension, unification, transitive chains,
 //! and placeholder-rule dropping).
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 /// A combinator joining two compound selectors.
@@ -872,21 +873,43 @@ pub(crate) fn extend_selectors(
         }
     }
 
-    let (result, changed) = extend_to_fixpoint_breaks(original, original_breaks, extensions);
-
     // Remove selectors that are subselectors of another (redundant), keeping
     // originals (dart-sass `_trim` with extender source specificities). When
     // NOTHING changed, dart returns the original list untouched — no trim,
     // duplicate selectors preserved (issue_2291's reparsed `A, B, C-foo...`).
-    let result = if changed {
+    let result = if USE_SEQUENTIAL_FOLD {
+        // Faithful dart order: apply the expanded extension sequence one
+        // extension at a time, each step re-extending the accumulated selector
+        // list and trimming (dart's per-`addExtension` `_extendExistingSelectors`
+        // → `_extendList`). Transitivity is precomputed by `expand_extensions`,
+        // so the per-step single-extension application reproduces dart's
+        // registration-order output. `_trim` uses the store-wide source
+        // specificity (dart `_sourceSpecificity` is accumulated across the whole
+        // store, only from the original extenders).
         let source_spec = source_specificity_map(extensions);
-        trim_breaks(result, &originals, &source_spec)
-    } else {
-        original
+        let expanded = expand_extensions(extensions);
+        let mut current: Vec<(Complex, bool)> = original
             .iter()
             .enumerate()
             .map(|(i, c)| (c.clone(), original_breaks.get(i).copied().unwrap_or(false)))
-            .collect()
+            .collect();
+        for ext in &expanded {
+            let (next, _changed) = extend_list_single(&current, ext, &originals, &source_spec);
+            current = next;
+        }
+        current
+    } else {
+        let (result, changed) = extend_to_fixpoint_breaks(original, original_breaks, extensions);
+        if changed {
+            let source_spec = source_specificity_map(extensions);
+            trim_breaks(result, &originals, &source_spec)
+        } else {
+            original
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.clone(), original_breaks.get(i).copied().unwrap_or(false)))
+                .collect()
+        }
     };
 
     // Simplify placeholders inside `:is()/:where()/:not()`-style pseudo
@@ -2392,6 +2415,210 @@ fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
         &originals,
         &source_spec,
     )
+}
+
+/// Whether the sequential single-extension fold (the faithful dart-sass
+/// `ExtensionStore` registration order) drives extension, instead of the legacy
+/// one-shot cartesian over all extensions at once. Introduced OFF so the commit
+/// adding the machinery is a pure runtime no-op; flipped on once the
+/// zero-regression gate proves the scaffold compiles and the fold matches dart.
+const USE_SEQUENTIAL_FOLD: bool = false;
+
+/// Build a single-extender [`Extension`] cloning `src`'s metadata. The `matched`
+/// cell is SHARED (`Rc::clone`) so the `!optional` "not found" check still flips
+/// when this split extension is applied to a selector.
+fn single_extension(src: &Extension, target: Simple, extender: Complex, break_flag: bool) -> Extension {
+    Extension {
+        target: Some(target),
+        extenders: vec![extender],
+        extender_breaks: vec![break_flag],
+        optional: src.optional,
+        matched: std::rc::Rc::clone(&src.matched),
+        origin: src.origin.clone(),
+        origin_closure: std::rc::Rc::clone(&src.origin_closure),
+    }
+}
+
+/// Register a transitively-derived extension (dart `extension.withExtender`):
+/// `complex` becomes a new extender for `old`'s target unless already present
+/// (then only the optional flag merges, mandatory winning). Appends to `output`
+/// and indexes its simples in `by_extender` so later registrations can chain.
+fn register_derived(
+    output: &mut Vec<Extension>,
+    sources: &mut HashMap<String, HashMap<String, usize>>,
+    by_extender: &mut HashMap<String, Vec<usize>>,
+    old: &Extension,
+    old_target: &Simple,
+    old_target_key: &str,
+    complex: Complex,
+) {
+    let key = complex.render();
+    let target_sources = sources.entry(old_target_key.to_string()).or_default();
+    if let Some(&idx) = target_sources.get(&key) {
+        if !old.optional {
+            output[idx].optional = false;
+        }
+        return;
+    }
+    let idx = output.len();
+    target_sources.insert(key, idx);
+    let mut simples = Vec::new();
+    all_simples_of(&complex, &mut simples);
+    // Woven/derived products carry no source line break (dart's lineBreak only
+    // travels with the original extender object); the fold's flag plumbing keeps
+    // an original's own flag separately.
+    output.push(single_extension(old, old_target.clone(), complex, false));
+    for s in simples {
+        by_extender.entry(s.render()).or_default().push(idx);
+    }
+}
+
+/// Faithful port of dart `ExtensionStore.addExtension` + `_extendExistingExtensions`
+/// (extension_store.dart 242-399), linearized for sasso's 2-phase model.
+///
+/// dart registers `@extend`s one at a time in document order; each registration
+/// (a) records the new `target ← extender` extension and (b) re-extends every
+/// already-registered extension whose extender contains `target` by the new one,
+/// registering those transitively-derived extensions too (one pass — deeper
+/// chains settle across the SEQUENCE of registrations, exactly as dart's
+/// successive `addExtension` calls do). The per-rule result is then equivalent
+/// to folding the resulting extension sequence over the rule.
+///
+/// Returns that sequence: the input extensions split to one extender each, in
+/// registration order, with transitively-derived extensions inserted right
+/// after the registration that triggered them (dart's "registered at this
+/// moment"). Transitivity that the legacy `collect_extenders` resolved inline at
+/// lookup time now lives here, so a later fold step sees chained extenders as
+/// siblings — which is what reproduces dart's registration-order output.
+fn expand_extensions(input: &[Extension]) -> Vec<Extension> {
+    let mut output: Vec<Extension> = Vec::new();
+    // dart `_extensions`: target -> (extender -> output index); insertion order
+    // within a target is the `output` order.
+    let mut sources: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    // dart `_extensionsByExtender`: every simple of a registered extender ->
+    // the output extensions whose extender contains it.
+    let mut by_extender: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for ext in input {
+        let Some(target) = ext.target.clone() else {
+            continue;
+        };
+        let target_key = target.render();
+        // dart reads `_extensionsByExtender[target]` at the TOP of addExtension,
+        // BEFORE this @extend's own extenders are registered, so it can never
+        // re-extend itself. Snapshot it now.
+        let existing: Vec<usize> = by_extender.get(&target_key).cloned().unwrap_or_default();
+        // The new single-extender extensions registered by THIS @extend, used to
+        // re-extend the existing ones below (dart `newExtensions`).
+        let mut new_slice: Vec<Extension> = Vec::new();
+        for (j, extender) in ext.extenders.iter().enumerate() {
+            if to_dart(extender).is_useless() {
+                continue;
+            }
+            let ext_key = extender.render();
+            let target_sources = sources.entry(target_key.clone()).or_default();
+            if let Some(&idx) = target_sources.get(&ext_key) {
+                // dart MergedExtension.merge: only the optional flag is
+                // observable in this model — a mandatory extension wins.
+                if !ext.optional {
+                    output[idx].optional = false;
+                }
+                continue;
+            }
+            let idx = output.len();
+            target_sources.insert(ext_key, idx);
+            let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
+            let single = single_extension(ext, target.clone(), extender.clone(), flag);
+            new_slice.push(single.clone());
+            output.push(single);
+            let mut simples = Vec::new();
+            all_simples_of(extender, &mut simples);
+            for s in simples {
+                by_extender.entry(s.render()).or_default().push(idx);
+            }
+        }
+        if new_slice.is_empty() || existing.is_empty() {
+            continue;
+        }
+        // dart `_extendExistingExtensions`: re-extend each existing extender
+        // (one whose extender contained `target`) by the new extension(s). ONE
+        // pass over the snapshot, no inner feedback — multi-level closure comes
+        // from the sequence of @extends.
+        for old_idx in existing {
+            if !consume_extend_work() {
+                break;
+            }
+            let old = output[old_idx].clone();
+            let Some(old_target) = old.target.clone() else {
+                continue;
+            };
+            let old_target_key = old_target.render();
+            let old_extender = old.extenders[0].clone();
+            let old_extender_key = old_extender.render();
+            let extended = extend_complex(&old_extender, &new_slice);
+            // dart: skip the first product when it's the unchanged extender.
+            let mut iter = extended.into_iter().peekable();
+            if iter.peek().map(Complex::render).as_deref() == Some(old_extender_key.as_str()) {
+                iter.next();
+            }
+            for complex in iter {
+                register_derived(
+                    &mut output,
+                    &mut sources,
+                    &mut by_extender,
+                    &old,
+                    &old_target,
+                    &old_target_key,
+                    complex,
+                );
+            }
+        }
+    }
+    output
+}
+
+/// One fold step = dart `_extendList` against a single registered extension:
+/// re-extend every selector in `list` by `ext` (reusing the per-component
+/// cartesian/weave pipeline), then `_trim` with the store-wide `source_spec`.
+/// Returns the new list and whether anything changed; when nothing changed the
+/// ORIGINAL list is returned untouched (no trim, duplicates preserved — dart's
+/// `_extendList` returns its input unchanged, keeping issue_2291 reparses).
+fn extend_list_single(
+    list: &[(Complex, bool)],
+    ext: &Extension,
+    originals: &HashSet<String>,
+    source_spec: &HashMap<String, u64>,
+) -> (Vec<(Complex, bool)>, bool) {
+    let slice = std::slice::from_ref(ext);
+    let mut ext_breaks: HashMap<String, bool> = HashMap::new();
+    for (j, c) in ext.extenders.iter().enumerate() {
+        let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
+        let e = ext_breaks.entry(c.render()).or_insert(false);
+        *e = *e || flag;
+    }
+    let mut out: Vec<(Complex, bool)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut changed = false;
+    for (complex, in_break) in list {
+        let products = if consume_extend_work() && out.len() <= 100_000 {
+            extend_complex_breaks(complex, *in_break, slice, &ext_breaks)
+        } else {
+            vec![(complex.clone(), *in_break)]
+        };
+        if !(products.len() == 1 && products[0].0.render() == complex.render()) {
+            changed = true;
+        }
+        for (c, f) in products {
+            if seen.insert(c.render()) {
+                out.push((c, f));
+            }
+        }
+    }
+    if changed {
+        (trim_breaks(out, originals, source_spec), true)
+    } else {
+        (list.to_vec(), false)
+    }
 }
 
 /// Run the extension to a fixpoint: extend each selector, then feed every
