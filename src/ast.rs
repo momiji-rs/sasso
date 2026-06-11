@@ -158,7 +158,12 @@ pub(crate) enum Stmt {
     /// `@media <media-query-list> { body }`. The query is parsed into a
     /// structured form so SassScript inside feature values is resolved and the
     /// query is re-serialized (and bubbled/merged) exactly like dart-sass.
-    Media { query: MediaQueryList, body: Vec<Stmt> },
+    Media {
+        query: MediaQueryList,
+        body: Vec<Stmt>,
+        /// `{`/`}` source lines for the serializer's trailing-comment rule.
+        lines: SrcLines,
+    },
     /// `@supports <condition> { body }`. The condition is parsed into a
     /// structured form (`SupportsCondition`) so it serializes canonically and
     /// malformed conditions are rejected; the body bubbles like any at-rule.

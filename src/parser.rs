@@ -2581,8 +2581,8 @@ impl Parser {
     /// Malformed queries are rejected, matching dart-sass.
     fn parse_media(&mut self) -> Result<Stmt, Error> {
         let query = self.parse_media_query_list()?;
-        let body = self.parse_braced_body()?;
-        Ok(Stmt::Media { query, body })
+        let (body, lines) = self.parse_braced_body_lines()?;
+        Ok(Stmt::Media { query, body, lines })
     }
 
     /// Skip whitespace and `/* */` / `//` comments (allowed between media

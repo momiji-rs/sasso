@@ -3302,7 +3302,7 @@ impl<'a> Evaluator<'a> {
                         sink.push_at_rule(OutNode::Raw(format!("@import {text};")));
                     }
                 }
-                Stmt::Media { query, body } => {
+                Stmt::Media { query, body, lines } => {
                     let queries = self.resolve_media_queries(query)?;
                     let prelude = serialize_media_queries(&queries);
                     let out_body = self.css_at_body(body)?;
@@ -3447,7 +3447,7 @@ impl<'a> Evaluator<'a> {
                     let lines = self.stamp(*lines);
                     out.push(OutNode::Comment(text, lines));
                 }
-                Stmt::Media { query, body } => {
+                Stmt::Media { query, body, lines } => {
                     let queries = self.resolve_media_queries(query)?;
                     let prelude = serialize_media_queries(&queries);
                     let inner = self.css_at_body(body)?;
@@ -3549,7 +3549,7 @@ impl<'a> Evaluator<'a> {
         };
         for stmt in stmts {
             match stmt {
-                Stmt::Media { query, body } => {
+                Stmt::Media { query, body, lines } => {
                     let queries = self.resolve_media_queries(query)?;
                     let prelude = serialize_media_queries(&queries);
                     let inner = self.css_body(body)?;
@@ -3673,7 +3673,7 @@ impl<'a> Evaluator<'a> {
                     });
                 }
             }
-            Stmt::Media { query, body } => {
+            Stmt::Media { query, body, lines } => {
                 let queries = self.resolve_media_queries(query)?;
                 let prelude = serialize_media_queries(&queries);
                 let inner = self.css_body(body)?;
@@ -4382,8 +4382,9 @@ impl<'a> Evaluator<'a> {
                 Stmt::CssCustomAtRule { name, prelude, body } => {
                     self.eval_css_custom_at_rule(name, prelude, body, sink)?;
                 }
-                Stmt::Media { query, body } => {
-                    self.eval_media(query, body, parents, sink)?;
+                Stmt::Media { query, body, lines } => {
+                    let stamped = self.stamp(*lines);
+                    self.eval_media(query, body, stamped, parents, sink)?;
                 }
                 Stmt::Supports { condition, body } => {
                     self.eval_supports(condition, body, parents, sink)?;
@@ -4690,6 +4691,7 @@ impl<'a> Evaluator<'a> {
         &mut self,
         query: &MediaQueryList,
         body: &[Stmt],
+        lines: SrcLines,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -4766,7 +4768,7 @@ impl<'a> Evaluator<'a> {
                     prelude: prelude.to_string(),
                     body: std::mem::take(segment),
                     has_block: true,
-                    lines: SrcLines::default(),
+                    lines,
                 });
             }
         };
