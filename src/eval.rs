@@ -4000,22 +4000,31 @@ impl<'a> Evaluator<'a> {
         // parts` (or just `parts` at the root), so complex `i` came from part
         // `i % parts.len()`; carry that part's "newline before" flag, filtered
         // in step with the dropped bogus selectors.
-        let part_lbs = comma_linebreaks(&sel_str, !parents.is_empty());
-        let n = part_lbs.len().max(1);
-        // A nested complex came from parent `i / n` (`current` is parent-major
-        // `parents × parts`); it starts a fresh line when its own part did OR
-        // its parent did.
-        let parent_lbs: &[bool] = if self.current_linebreaks.len() == parents.len() {
-            &self.current_linebreaks
+        // Fast path: no newline anywhere in the source list and no inherited
+        // parent breaks means every flag is false — an EMPTY vec, which all
+        // consumers (`.get(i)` fallbacks, the `parents.len()` match below for
+        // nested rules) already read as all-false. Skips the split/scan and
+        // three per-rule allocations on the overwhelmingly common shape.
+        let full_lbs: Vec<bool> = if self.current_linebreaks.is_empty() && !sel_str.contains('\n') {
+            Vec::new()
         } else {
-            &[]
+            let part_lbs = comma_linebreaks(&sel_str, !parents.is_empty());
+            let n = part_lbs.len().max(1);
+            // A nested complex came from parent `i / n` (`current` is
+            // parent-major `parents × parts`); it starts a fresh line when its
+            // own part did OR its parent did.
+            let parent_lbs: &[bool] = if self.current_linebreaks.len() == parents.len() {
+                &self.current_linebreaks
+            } else {
+                &[]
+            };
+            (0..current.len())
+                .map(|i| {
+                    part_lbs.get(i % n).copied().unwrap_or(false)
+                        || parent_lbs.get(i / n).copied().unwrap_or(false)
+                })
+                .collect()
         };
-        let full_lbs: Vec<bool> = (0..current.len())
-            .map(|i| {
-                part_lbs.get(i % n).copied().unwrap_or(false)
-                    || parent_lbs.get(i / n).copied().unwrap_or(false)
-            })
-            .collect();
         let mut emit_selectors: Vec<String> = Vec::new();
         let mut emit_linebreaks: Vec<bool> = Vec::new();
         for (i, s) in current.iter().enumerate() {
@@ -4034,7 +4043,9 @@ impl<'a> Evaluator<'a> {
                 s.clone()
             };
             emit_selectors.push(s);
-            emit_linebreaks.push(full_lbs.get(i).copied().unwrap_or(false));
+            if !full_lbs.is_empty() {
+                emit_linebreaks.push(full_lbs.get(i).copied().unwrap_or(false));
+            }
         }
         self.push_scope(false);
         let prev_selector = self.current_selector.replace(current.clone());
