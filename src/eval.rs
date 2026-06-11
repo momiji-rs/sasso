@@ -518,8 +518,9 @@ pub(crate) struct Evaluator<'a> {
     /// Per-compile `@import` cache (dart-sass ImportCache analogue): keyed by
     /// (url, importing dir), holding (resolved key, syntax, parsed sheet).
     import_cache: HashMap<(String, Option<String>), CachedImport>,
-    /// One-entry memo for [`Self::stamp`]: the current file's interned id.
-    last_stamp: (String, u32),
+    /// The current file's interned diagnostic id for [`Self::stamp`], or 0
+    /// when not yet interned. Every `current_url` assignment resets it.
+    current_url_stamp: u32,
     /// User function/mixin scope chains, parallel to `scopes` (dart's
     /// `Environment._functions`/`_mixins`): a definition always lands in the
     /// innermost frame, so a nested `@function`/`@mixin` shadows an outer one
@@ -966,7 +967,7 @@ impl<'a> Evaluator<'a> {
             options,
             loading: Vec::new(),
             import_cache: HashMap::default(),
-            last_stamp: (String::new(), 0),
+            current_url_stamp: 0,
             functions: vec![new_fn_scope()],
             mixins: vec![new_fn_scope()],
             content_stack: Vec::new(),
@@ -1017,16 +1018,16 @@ impl<'a> Evaluator<'a> {
         if lines == SrcLines::default() {
             return lines;
         }
-        // One-entry memo: stamp runs for every source-line-carrying node and
-        // the current file changes rarely, so a string compare beats the
-        // clone + hash insert on virtually every call.
-        if self.last_stamp.1 != 0 && self.last_stamp.0 == self.current_url {
-            lines.file = self.last_stamp.1;
+        // stamp runs for every source-line-carrying node; the id is interned
+        // once per file entry (every `current_url` assignment resets it), so
+        // the per-node cost is a u32 check.
+        if self.current_url_stamp != 0 {
+            lines.file = self.current_url_stamp;
             return lines;
         }
         let next = self.file_ids.len() as u32 + 1;
         let id = *self.file_ids.entry(self.current_url.clone()).or_insert(next);
-        self.last_stamp = (self.current_url.clone(), id);
+        self.current_url_stamp = id;
         lines.file = id;
         lines
     }
@@ -3923,6 +3924,7 @@ impl<'a> Evaluator<'a> {
         let module_dir = dirname_of(key);
         let saved_dir = std::mem::replace(&mut self.current_file_dir, module_dir);
         let saved_url = std::mem::replace(&mut self.current_url, diag_url.to_string());
+        self.current_url_stamp = 0;
         let saved_source = std::mem::replace(&mut self.current_source, module_source);
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![new_scope()]);
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, vec![true]);
@@ -4006,6 +4008,7 @@ impl<'a> Evaluator<'a> {
         self.current_module = saved_module;
         self.current_file_dir = saved_dir;
         self.current_url = saved_url;
+        self.current_url_stamp = 0;
         self.current_source = saved_source;
 
         result?;
@@ -7578,6 +7581,7 @@ impl<'a> Evaluator<'a> {
         } else {
             Some(module.file_dir.clone())
         };
+        self.current_url_stamp = 0;
         Some((
             std::mem::replace(&mut self.current_url, module.diag_url.clone()),
             std::mem::replace(&mut self.current_source, source),
@@ -7589,6 +7593,7 @@ impl<'a> Evaluator<'a> {
     fn leave_module_file(&mut self, saved: Option<(String, Rc<str>, Option<String>)>) {
         if let Some((url, source, dir)) = saved {
             self.current_url = url;
+            self.current_url_stamp = 0;
             self.current_source = source;
             self.current_file_dir = dir;
         }
