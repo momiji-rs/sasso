@@ -50,7 +50,7 @@ mod scanner;
 mod selector;
 mod value;
 
-pub use arena::ScopedAlloc;
+pub use arena::{set_arena_bytes, ScopedAlloc};
 pub use error::Error;
 
 use std::path::{Path, PathBuf};

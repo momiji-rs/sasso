@@ -10,12 +10,20 @@
     ".": {
       "types": "./sasso.d.ts",
       "import": "./sasso.mjs"
+    },
+    "./speed": {
+      "types": "./sasso.speed.d.ts",
+      "import": "./sasso.speed.mjs"
     }
   },
   "files": [
+    "_loader.mjs",
     "sasso.mjs",
+    "sasso.speed.mjs",
     "sasso.wasm",
+    "sasso.speed.wasm",
     "sasso.d.ts",
+    "sasso.speed.d.ts",
     "README.md",
     "LICENSE-APACHE",
     "LICENSE-MIT"

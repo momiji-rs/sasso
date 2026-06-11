@@ -111,9 +111,81 @@ fn bump_compute(cur: usize, align: usize, size: usize, end: usize) -> Option<(us
     (next <= end).then_some((aligned, next))
 }
 
-/// Per-thread arena size: virtual address space reserved up front. Physical
-/// pages commit lazily on first touch, so an unused reservation costs ~nothing.
-const THREAD_ARENA_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
+// ── Arena reservation size ──────────────────────────────────────────────
+//
+// The region is reserved up front on first use. On a 64-bit host this is
+// virtual — physical pages commit lazily on first touch, so a huge unused
+// reservation costs ~nothing, and the size is a fixed 2 GiB. On wasm32 there
+// is no lazy commit (`memory.grow` zero-fills and commits every page
+// immediately) and the address space is only 4 GiB, so the reservation must
+// be a realistic peak working-set bound: a single large-stylesheet compile
+// peaks around 25 MiB, and the region grows the wasm heap ONCE on the first
+// compile and is then reused (reset, not freed) — a fixed footprint, not
+// per-compile growth. Anything that overflows the region spills to the system
+// allocator with no loss of correctness.
+//
+// The wasm size has two layers of developer control:
+//   • compile-time default — `SASSO_WASM_ARENA_MB` at build time (default 32),
+//   • runtime override — [`set_arena_bytes`] before the first compile (0
+//     disables the arena entirely: every allocation forwards to System).
+// Native ignores both and always uses its 2 GiB virtual reservation.
+
+/// Const decimal parser for the `SASSO_WASM_ARENA_MB` build-time value.
+#[cfg(target_arch = "wasm32")]
+const fn parse_mb(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut n = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        assert!(
+            b >= b'0' && b <= b'9',
+            "SASSO_WASM_ARENA_MB must be decimal digits"
+        );
+        n = n * 10 + (b - b'0') as usize;
+        i += 1;
+    }
+    n
+}
+
+/// Compile-time default arena size (wasm): `SASSO_WASM_ARENA_MB` MiB, else 32.
+#[cfg(target_arch = "wasm32")]
+const WASM_DEFAULT_ARENA_SIZE: usize = match option_env!("SASSO_WASM_ARENA_MB") {
+    Some(s) => parse_mb(s) * 1024 * 1024,
+    None => 32 * 1024 * 1024,
+};
+
+/// Runtime override of the wasm arena size: `0` = unset (use the compile-time
+/// default), `usize::MAX` = explicitly disabled, anything else = that many
+/// bytes. Read only on wasm; native's [`effective_arena_size`] ignores it.
+static ARENA_CONFIG: AtomicUsize = AtomicUsize::new(0);
+
+/// Override the wasm arena reservation size, in **bytes**. Must be called
+/// BEFORE the first `compile()` — the region is reserved on first use and then
+/// fixed, so a later call has no effect. `0` disables the arena entirely
+/// (every allocation forwards to the system allocator: lower memory, slower).
+/// No effect on native targets (they always use the 2 GiB virtual reservation).
+pub fn set_arena_bytes(bytes: usize) {
+    ARENA_CONFIG.store(if bytes == 0 { usize::MAX } else { bytes }, Ordering::Relaxed);
+}
+
+/// The arena size to reserve, resolving the runtime override against the
+/// compile-time default. `0` means "disabled" (the caller forwards to System).
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn effective_arena_size() -> usize {
+    match ARENA_CONFIG.load(Ordering::Relaxed) {
+        0 => WASM_DEFAULT_ARENA_SIZE,
+        usize::MAX => 0,
+        n => n,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn effective_arena_size() -> usize {
+    2 * 1024 * 1024 * 1024 // 2 GiB virtual; the runtime override is wasm-only
+}
 
 /// Per-thread bump state. POD only (no `Drop`) — see the module-level safety
 /// note. The backing region leaks at thread exit (virtual + lazily committed).
@@ -123,6 +195,10 @@ struct ThreadState {
     cursor: Cell<usize>,
     /// Scope nesting depth. `0` = inactive: allocations pass through to System.
     depth: Cell<u32>,
+    /// Set once if [`Self::reserve`] fails (OOM, registry full, or the arena
+    /// is disabled): the alloc path then forwards straight to System without
+    /// retrying the `#[cold]` reservation on every allocation.
+    reserve_failed: Cell<bool>,
 }
 
 impl ThreadState {
@@ -132,14 +208,20 @@ impl ThreadState {
             end: Cell::new(0),
             cursor: Cell::new(0),
             depth: Cell::new(0),
+            reserve_failed: Cell::new(false),
         }
     }
 
     /// Reserve the backing region on first use. Returns `false` on failure (the
-    /// caller then forwards the request to the system allocator).
+    /// caller then forwards the request to the system allocator) — including
+    /// when the arena is disabled (size 0) by the runtime override.
     #[cold]
     fn reserve(&self) -> bool {
-        let Ok(layout) = Layout::from_size_align(THREAD_ARENA_SIZE, 4096) else {
+        let size = effective_arena_size();
+        if size == 0 {
+            return false; // disabled: run on the system allocator
+        }
+        let Ok(layout) = Layout::from_size_align(size, 4096) else {
             return false;
         };
         // SAFETY: non-zero size, 4096 is a valid power-of-two alignment.
@@ -147,7 +229,7 @@ impl ThreadState {
         if p.is_null() {
             return false;
         }
-        if !register_region(p as usize, p as usize + THREAD_ARENA_SIZE) {
+        if !register_region(p as usize, p as usize + size) {
             // Registry full: this region must not serve as an arena (dealloc
             // wouldn't recognize its pointers). Hand it back and run without.
             // SAFETY: p came from System.alloc with this same layout.
@@ -155,7 +237,7 @@ impl ThreadState {
             return false;
         }
         self.base.set(p);
-        self.end.set(p as usize + THREAD_ARENA_SIZE);
+        self.end.set(p as usize + size);
         self.cursor.set(p as usize);
         true
     }
@@ -187,8 +269,17 @@ unsafe impl GlobalAlloc for ScopedAlloc {
                 // SAFETY: forwarding an unchanged layout to the system allocator.
                 return unsafe { System.alloc(layout) };
             }
-            if tl.base.get().is_null() && !tl.reserve() {
-                return unsafe { System.alloc(layout) };
+            if tl.base.get().is_null() {
+                // Reserve once; if it fails (OOM / registry full / disabled),
+                // remember that and forward to System on every later alloc
+                // instead of re-running the cold reservation.
+                if tl.reserve_failed.get() {
+                    return unsafe { System.alloc(layout) };
+                }
+                if !tl.reserve() {
+                    tl.reserve_failed.set(true);
+                    return unsafe { System.alloc(layout) };
+                }
             }
             match bump_compute(tl.cursor.get(), layout.align(), layout.size(), tl.end.get()) {
                 Some((aligned, next)) => {

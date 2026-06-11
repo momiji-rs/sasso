@@ -18,6 +18,27 @@
 
 use std::alloc::{alloc, dealloc, Layout};
 
+// PoC: install sasso's scoped bump arena as the wasm global allocator. Every
+// allocation inside a `compile()` scope becomes a pointer bump from a single
+// pre-grown region that is reset (not freed) when the compile ends; the FFI
+// buffers below (sasso_alloc / the boxed result) are allocated OUTSIDE any
+// scope, so they route to the system allocator and outlive the reset. On
+// wasm32 the region is 128 MiB (see arena.rs) — grown once on the first
+// compile and reused. Outside a scope every request forwards to System, so
+// installing it is safe even though sasso_alloc runs before compile.
+#[global_allocator]
+static GLOBAL: sasso::ScopedAlloc = sasso::ScopedAlloc;
+
+/// Override the bump arena's reservation size, in **bytes**, before the first
+/// `sasso_compile`. `0` disables the arena (every allocation forwards to the
+/// system allocator: lower memory, slower). The region is reserved on the
+/// first compile and then fixed, so this is a no-op once compilation started.
+/// The compile-time default is 32 MiB (or `SASSO_WASM_ARENA_MB` at build time).
+#[no_mangle]
+pub extern "C" fn sasso_set_arena_bytes(bytes: usize) {
+    sasso::set_arena_bytes(bytes);
+}
+
 /// Allocate `len` bytes in linear memory (align 1, for UTF-8 byte buffers).
 ///
 /// Returns null for `len == 0`. Free with [`sasso_free`].

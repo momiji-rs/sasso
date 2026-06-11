@@ -27,6 +27,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: wasm
+          # build.sh builds the size and speed variants in isolated target
+          # dirs (so switching opt-level can't reuse a stale artifact).
+          cache-directories: |
+            wasm/target-size
+            wasm/target-speed
       - name: install binaryen (wasm-opt)
         run: sudo apt-get update && sudo apt-get install -y binaryen
       - uses: actions/setup-node@v6
