@@ -1010,6 +1010,15 @@ impl Number {
     /// numerator cancels the first convertible denominator on the other side
     /// (scaling the value by the conversion), leftovers concatenate.
     pub(crate) fn mul(&self, other: &Number) -> Number {
+        // Fast path: a unitless operand has nothing to cancel or concatenate,
+        // so the result carries the other side's units verbatim — no unit-list
+        // materialization (the general path builds four Vec<String>s).
+        if matches!(other.units, Units::None) {
+            return self.copy_units(self.value * other.value);
+        }
+        if matches!(self.units, Units::None) {
+            return other.copy_units(self.value * other.value);
+        }
         multiply_units(
             self.value * other.value,
             self.numer_units().to_vec(),
@@ -1021,6 +1030,16 @@ impl Number {
 
     /// Divide by `other` (multiplication with `other`'s units inverted).
     pub(crate) fn div(&self, other: &Number) -> Number {
+        // Fast paths mirroring `mul`: a unitless divisor leaves the units
+        // untouched, and same-named single units cancel exactly (`px/px`).
+        if matches!(other.units, Units::None) {
+            return self.copy_units(self.value / other.value);
+        }
+        if let (Units::Single(a), Units::Single(b)) = (&self.units, &other.units) {
+            if a.eq_ignore_ascii_case(b) {
+                return Number::unitless(self.value / other.value);
+            }
+        }
         multiply_units(
             self.value / other.value,
             self.numer_units().to_vec(),
