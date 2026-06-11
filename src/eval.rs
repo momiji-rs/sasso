@@ -2653,9 +2653,12 @@ impl<'a> Evaluator<'a> {
             }
         };
         let restore = caller_env.map(|env| self.install_env(env));
-        let pushed = frame.is_some();
-        if let Some(frame) = frame {
-            self.push_scope_frame(frame);
+        // A content block is a user-defined callable in dart: its body always
+        // runs in a fresh child scope, so a `$var:` first declared inside it
+        // stays local to the block (and a `using` frame binds there).
+        match frame {
+            Some(frame) => self.push_scope_frame(frame),
+            None => self.push_scope(false),
         }
         // The block runs in its DEFINITION environment's content context: a
         // `@content` inside it forwards to the block one level up, not to
@@ -2665,9 +2668,7 @@ impl<'a> Evaluator<'a> {
         if let Some(top) = running {
             self.content_stack.push(top);
         }
-        if pushed {
-            self.pop_scope();
-        }
+        self.pop_scope();
         if let Some(restore) = restore {
             self.leave_module(restore);
         }

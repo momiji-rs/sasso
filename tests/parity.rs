@@ -7007,3 +7007,14 @@ fn lexical_scoping_functions_and_mixins() {
         "div span {\n  w: 3;\n}\ndiv {\n  h: 3;\n}\n"
     );
 }
+
+#[test]
+fn content_block_runs_in_child_scope() {
+    // A content block is a user-defined callable: a `$var:` first declared
+    // inside it stays local to the block, so a global-only variable is NOT
+    // overwritten (get_mixin content:scope/redeclare/vars).
+    assert_eq!(
+        ours("@mixin a { @content; }\n$g: global;\nfoo {\n  $r: rule;\n  @include a { $g: inner; $r: inner; }\n  g: $g;\n  r: $r;\n}\n"),
+        "foo {\n  g: global;\n  r: inner;\n}\n"
+    );
+}
