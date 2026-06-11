@@ -4422,6 +4422,15 @@ impl<'a> Evaluator<'a> {
             return Err(Error::unpositioned("expected selector."));
         }
         validate_selector(&sel_str, !parents.is_empty())?;
+        // A selector starting with a digit is dart's "expected selector."
+        // (`1a {}`, issue_2023) — except keyframe stops (`50%`, `13E2%`).
+        if !self.in_keyframes {
+            for part in split_commas(&sel_str) {
+                if part.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
+                    return Err(Error::unpositioned("expected selector."));
+                }
+            }
+        }
         // A keyframe selector list is stops (`from`, `to`, `13E+1%`), not CSS
         // selectors: no combinator normalization or parent resolution.
         let current = if self.in_keyframes {
