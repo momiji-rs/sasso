@@ -4051,6 +4051,12 @@ impl Parser {
     // ---- value expressions -------------------------------------------
 
     fn parse_value(&mut self) -> Result<Expr, Error> {
+        // dart-sass skips whitespace AND comments before an expression
+        // (`singleInterpolation` runs `whitespace()` first), so `#{ a }` and
+        // `"#{ a /* c */ }"` parse — a comment ends at the first `*/` and is
+        // never itself scanned for interpolation. Established callers skip
+        // before calling, making this a no-op for them.
+        self.skip_ws_inline();
         self.comma_list()
     }
 

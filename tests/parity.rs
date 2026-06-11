@@ -7255,3 +7255,19 @@ fn at_root_batches_graft_at_their_target_layer() {
         "@media a {\n  .x {\n    p: 1;\n  }\n}\n.b {\n  v: 1;\n}\n\n@media a {\n  .z {\n    r: 3;\n  }\n}\n"
     );
 }
+
+#[test]
+fn interpolation_skips_leading_whitespace_and_comments() {
+    // dart `singleInterpolation` runs whitespace() (which also consumes
+    // comments) BEFORE the expression: `#{ a }` parses everywhere, and a
+    // comment inside an interpolation ends at the first `*/` without being
+    // scanned for `#{` or quotes (issue_1798/3).
+    assert_eq!(
+        ours("a { content: \"#{ a /*#{\"}*/ }\"; }\n"),
+        "a {\n  content: \"a\";\n}\n"
+    );
+    assert_eq!(ours("a { b: \"#{ 1 + 2}\"; }\n"), "a {\n  b: \"3\";\n}\n");
+    // Selector templates and identifier templates share the rule.
+    assert_eq!(ours("a#{ \" b\"} { c: d; }\n"), "a b {\n  c: d;\n}\n");
+    assert_eq!(ours("a { b: c#{ 1 + 2}; }\n"), "a {\n  b: c3;\n}\n");
+}
