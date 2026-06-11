@@ -7154,6 +7154,17 @@ fn misc_error_validation_batch() {
 }
 
 #[test]
+fn extend_products_inherit_extender_linebreaks() {
+    // dart's ComplexSelector.lineBreak travels with the selector: when
+    // `@extend` adds the extenders to `.foo`'s rule, each added complex
+    // keeps its OWN source line break (issue_1574/2179).
+    assert_eq!(
+        ours(".foo { bar: baz; }\na,\nb,\nc { @extend .foo; }\n"),
+        ".foo, a,\nb,\nc {\n  bar: baz;\n}\n"
+    );
+}
+
+#[test]
 fn content_block_runs_in_child_scope() {
     // A content block is a user-defined callable: a `$var:` first declared
     // inside it stays local to the block, so a global-only variable is NOT

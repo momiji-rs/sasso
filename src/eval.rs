@@ -894,6 +894,9 @@ struct PendingExtend {
     target_str: String,
     /// The enclosing rule's resolved selector list (the extenders).
     extenders: Vec<String>,
+    /// Source line-break flags parallel to `extenders` (an extend product
+    /// inherits its extender's flag, dart's ComplexSelector.lineBreak).
+    extender_breaks: Vec<bool>,
     optional: bool,
     /// Whether this `@extend` was registered inside a `@media` context.
     in_media: bool,
@@ -1273,6 +1276,7 @@ impl<'a> Evaluator<'a> {
                         target: simple,
                         target_str: t.to_string(),
                         extenders: extenders.clone(),
+                        extender_breaks: self.current_linebreaks.clone(),
                         optional,
                         in_media,
                         pos,
@@ -1361,18 +1365,21 @@ impl<'a> Evaluator<'a> {
         let mut extensions: Vec<crate::selector::Extension> = Vec::new();
         for pe in &self.extends {
             let mut extenders = Vec::new();
-            for ext in &pe.extenders {
+            let mut extender_breaks = Vec::new();
+            for (i, ext) in pe.extenders.iter().enumerate() {
                 if let Some(c) = crate::selector::parse_complex_one(ext) {
                     // A bogus extender with a trailing combinator (`d +`) can't
                     // extend anything — dart-sass drops it (with a deprecation).
                     if c.trailing.is_empty() {
                         extenders.push(c);
+                        extender_breaks.push(pe.extender_breaks.get(i).copied().unwrap_or(false));
                     }
                 }
             }
             extensions.push(crate::selector::Extension {
                 target: Some(pe.target.clone()),
                 extenders,
+                extender_breaks,
                 optional: pe.optional,
                 matched: std::rc::Rc::new(std::cell::Cell::new(false)),
                 origin: pe.origin.clone(),
@@ -9716,15 +9723,13 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extens
                 linebreaks,
                 ..
             } => {
-                let new_sel = extend_selector_list(selectors, extensions, scope);
+                let new_sel = extend_selector_list(selectors, linebreaks, extensions, scope);
                 match new_sel {
-                    Some(s) => {
-                        // Source line-break flags are positional; if @extend
-                        // changed the complex count they no longer line up, so
-                        // fall back to plain `, ` joining.
-                        if s.len() != selectors.len() {
-                            linebreaks.clear();
-                        }
+                    Some((s, b)) => {
+                        // Line-break flags travel with their selectors (dart's
+                        // ComplexSelector.lineBreak): an original keeps its
+                        // flag, an extend product takes its extender's.
+                        *linebreaks = b;
                         *selectors = s;
                         false
                     }
@@ -9866,26 +9871,27 @@ fn is_valid_namespace(s: &str) -> bool {
 /// emits no CSS). Returns `Some(unchanged)` when the selector needs no change.
 fn extend_selector_list(
     selectors: &[String],
+    breaks: &[bool],
     extensions: &[crate::selector::Extension],
     scope: &str,
-) -> Option<Vec<String>> {
+) -> Option<(Vec<String>, Vec<bool>)> {
     let has_placeholder = selectors.iter().any(|s| s.contains('%'));
     // Fast path: no extensions and no placeholder → the selector is untouched.
     // Crucially this leaves selectors we don't model (keyframe stops are handled
     // separately, but also unusual selectors) byte-for-byte intact.
     if extensions.is_empty() && !has_placeholder {
-        return Some(selectors.to_vec());
+        return Some((selectors.to_vec(), breaks.to_vec()));
     }
     let joined = selectors.join(", ");
     let Some(parsed) = crate::selector::parse_list(&joined) else {
         // Unparseable selector: never lose it; leave untouched.
-        return Some(selectors.to_vec());
+        return Some((selectors.to_vec(), breaks.to_vec()));
     };
-    let result = crate::selector::extend_selectors(&parsed, extensions, scope);
+    let result = crate::selector::extend_selectors(&parsed, breaks, extensions, scope);
     if result.all_placeholders {
         return None;
     }
-    Some(result.selectors)
+    Some((result.selectors, result.breaks))
 }
 
 /// For each non-empty top-level comma part of a selector list, whether the

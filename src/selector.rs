@@ -762,6 +762,10 @@ pub(crate) struct Extension {
     pub target: Option<Simple>,
     /// The extending selector list (the rule body containing `@extend`).
     pub extenders: Vec<Complex>,
+    /// Source line-break flags parallel to `extenders`: an extend product
+    /// that IS an extender complex inherits its flag (dart's
+    /// ComplexSelector.lineBreak travels with the selector object).
+    pub extender_breaks: Vec<bool>,
     pub optional: bool,
     /// Whether this extension's target was ever found in the stylesheet.
     /// Shared so scoped clones report back to the original.
@@ -825,6 +829,10 @@ pub(crate) fn classify_target(s: &str) -> TargetClass {
 pub(crate) struct ExtendResult {
     /// The rewritten, comma-separated selector strings.
     pub selectors: Vec<String>,
+    /// Source line-break flags parallel to `selectors`: an original keeps its
+    /// input flag, a product that IS an extender complex takes the extender's
+    /// flag, and woven products fall back to `false`.
+    pub breaks: Vec<bool>,
     /// True if every component still contains a placeholder (rule should drop).
     pub all_placeholders: bool,
 }
@@ -833,7 +841,12 @@ pub(crate) struct ExtendResult {
 /// extended selector list (original selectors first, then generated ones, in
 /// dart-sass order). Placeholder-only complex selectors are dropped from the
 /// output.
-pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension], scope: &str) -> ExtendResult {
+pub(crate) fn extend_selectors(
+    original: &[Complex],
+    original_breaks: &[bool],
+    extensions: &[Extension],
+    scope: &str,
+) -> ExtendResult {
     reset_extend_budget();
     // The set of "original" rendered selectors — the unextended input. Original
     // selectors are never trimmed (dart-sass keeps them so the rule still
@@ -879,8 +892,27 @@ pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension], s
     let kept: Vec<&Complex> = simplified.iter().filter(|c| !c.has_placeholder()).collect();
     let all_placeholders = kept.is_empty();
     let selectors: Vec<String> = kept.iter().map(|c| c.render()).collect();
+    // Line-break flags: look each rendered output up among the inputs (an
+    // original keeps its flag) and the extenders (a wholesale product takes
+    // the extender's source flag); woven products fall back to `false`.
+    let mut break_map: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    for ext in extensions {
+        for (j, c) in ext.extenders.iter().enumerate() {
+            let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
+            break_map.entry(c.render()).or_insert(flag);
+        }
+    }
+    for (i, complex) in original.iter().enumerate() {
+        let flag = original_breaks.get(i).copied().unwrap_or(false);
+        break_map.insert(complex.render(), flag);
+    }
+    let breaks: Vec<bool> = selectors
+        .iter()
+        .map(|s| break_map.get(s).copied().unwrap_or(false))
+        .collect();
     ExtendResult {
         selectors,
+        breaks,
         all_placeholders,
     }
 }
