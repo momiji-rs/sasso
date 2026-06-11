@@ -7055,6 +7055,17 @@ fn hyphens_and_underscores_interchange_in_names() {
 }
 
 #[test]
+fn url_whitespace_falls_back_to_function_call() {
+    // A plain-URL token allows whitespace only directly before `)`: interior
+    // whitespace re-parses the call as a normal function, so SassScript
+    // evaluates (`url(foo + bar)` -> `url(foobar)`).
+    assert_eq!(
+        ours("div { c: url(foo + bar); b: url( foo ); a: url(foo bar); }\n"),
+        "div {\n  c: url(foobar);\n  b: url(foo);\n  a: url(foo bar);\n}\n"
+    );
+}
+
+#[test]
 fn content_block_runs_in_child_scope() {
     // A content block is a user-defined callable: a `$var:` first declared
     // inside it stays local to the block, so a global-only variable is NOT

@@ -5637,15 +5637,16 @@ impl Parser {
                         break;
                     }
                 }
-                // Collapse a run of whitespace to a single space, matching
-                // dart-sass: consume the whole run, then emit one space only
-                // if the contents continue (no space directly before `)`).
+                // dart-sass allows whitespace in a plain-URL token only
+                // directly before the closing `)`. A space followed by more
+                // contents makes this a NORMAL function call instead, so
+                // `url(foo + bar)` evaluates SassScript (-> `url(foobar)`).
                 Some(' ' | '\t' | '\n' | '\r' | '\x0c') => {
                     while matches!(self.sc.peek(), Some(' ' | '\t' | '\n' | '\r' | '\x0c')) {
                         self.sc.bump();
                     }
                     if self.sc.peek() != Some(')') {
-                        lit.push(' ');
+                        return Ok(None);
                     }
                 }
                 Some(c) => {
