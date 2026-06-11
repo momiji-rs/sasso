@@ -10873,7 +10873,39 @@ fn css_media_parse_list(text: &str) -> Result<Vec<ResolvedQuery>, Error> {
         if part.is_empty() {
             continue;
         }
-        out.push(css_media_parse_one(part)?);
+        let mut q = css_media_parse_one(part)?;
+        // dart re-parses `(not (a))` as a negation and serializes it WITHOUT
+        // the outer parentheses (`@media not (a)`).
+        if q.mtype.is_none() && q.modifier.is_none() && q.conditions.len() == 1 {
+            let c = q.conditions[0].clone();
+            if let Some(inner) = c.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+                let t = inner.trim();
+                let balanced = {
+                    let mut d = 0i32;
+                    let mut ok = true;
+                    for ch in t.chars() {
+                        match ch {
+                            '(' => d += 1,
+                            ')' => {
+                                d -= 1;
+                                if d < 0 {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    ok && d == 0
+                };
+                // Only the exact lowercase `not` keyword re-parses as a
+                // negation (dart keeps `(NoT (a))` verbatim).
+                if balanced && (t.starts_with("not ") || t.starts_with("not(")) {
+                    q.conditions[0] = t.to_string();
+                }
+            }
+        }
+        out.push(q);
     }
     Ok(out)
 }
