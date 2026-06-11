@@ -4025,7 +4025,10 @@ impl Parser {
             if matches!(self.sc.peek(), Some(' ' | '\t' | '\n' | '\r' | '\u{c}')) {
                 self.sc.bump();
             }
-            if value == 0 || (0xD800..=0xDFFF).contains(&value) || value > 0x10FFFF {
+            // NUL is KEPT (it re-serializes as `\0 `, dart's consume_escape);
+            // surrogates and out-of-range code points become the replacement
+            // character.
+            if (0xD800..=0xDFFF).contains(&value) || value > 0x10FFFF {
                 return Ok('\u{FFFD}');
             }
             Ok(char::from_u32(value).unwrap_or('\u{FFFD}'))
@@ -5178,7 +5181,13 @@ impl Parser {
                     self.sc.bump();
                     ident.push(c);
                 }
-                Some('\\') => ident.push(self.read_escape_char()?),
+                // Escapes store their canonical spelling (`#f00000\9\0` keeps
+                // `\9 \0 ` — a control character re-serializes as a hex
+                // escape, like dart's identifier canonicalization).
+                Some('\\') => {
+                    let c = self.read_escape_char()?;
+                    push_ident_escape(&mut ident, c, false);
+                }
                 _ => break,
             }
         }

@@ -966,6 +966,26 @@ fn numbers_eq(a: &Number, b: &Number) -> bool {
     }
 }
 
+/// Append a unit with dart's `_writeIdentifier` escaping: a control
+/// character (a decoded `1\9` IE hack) re-serializes as a hex escape with
+/// its terminating space (`1\9 `); ordinary units append verbatim.
+fn push_unit_escaped(out: &mut String, unit: &str) {
+    if unit.chars().all(|c| (c as u32) >= 0x20 && (c as u32) != 0x7F) {
+        out.push_str(unit);
+        return;
+    }
+    for c in unit.chars() {
+        let cu = c as u32;
+        if cu < 0x20 || cu == 0x7F {
+            out.push('\\');
+            out.push_str(&format!("{cu:x}"));
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+}
+
 impl Number {
     pub(crate) fn to_css(&self, compressed: bool) -> String {
         // A non-finite number serializes as a `calc()` constant, matching
@@ -982,7 +1002,7 @@ impl Number {
         // re-run the formatting machinery and allocate a second time on the
         // hottest serialization path in the compiler.
         let mut s = fmt_num(self.value, compressed);
-        s.push_str(self.unit());
+        push_unit_escaped(&mut s, self.unit());
         s
     }
 
