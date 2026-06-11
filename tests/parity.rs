@@ -7308,3 +7308,17 @@ fn custom_property_values_reindent_like_dart() {
     .expect("compile failed");
     assert_eq!(compressed, "a{--x: { foo: bar; }}");
 }
+
+#[test]
+fn var_empty_second_arg_only_after_first_positional() {
+    // dart's allowEmptySecondArg fires only when exactly one POSITIONAL
+    // argument precedes the trailing comma (`positional.length == 1 &&
+    // named.isEmpty`): `var(--c, )` keeps an empty second argument...
+    assert_eq!(ours("a {b: var(--c, )}\n"), "a {\n  b: var(--c, );\n}\n");
+    // ...while a named first argument gets ordinary trailing-comma behavior
+    // and dispatches to a user-defined override with one argument.
+    assert_eq!(
+        ours("@function var($arg) {@return [$arg]}\na {b: var($arg: --c, )}\n"),
+        "a {\n  b: [--c];\n}\n"
+    );
+}

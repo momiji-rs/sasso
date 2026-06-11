@@ -6428,6 +6428,7 @@ impl Parser {
                     self.sc.bump();
                 }
                 let is_first = args.is_empty();
+                let is_named = name_opt.is_some();
                 args.push(CallArg {
                     name: name_opt,
                     value,
@@ -6438,9 +6439,12 @@ impl Parser {
                     self.skip_ws_inline();
                     if self.sc.peek() == Some(')') {
                         // `var(<first>,)`: the trailing comma after exactly the
-                        // first positional (non-splat) argument introduces an
-                        // empty second argument rather than being ignored.
-                        if allow_empty_second_arg && is_first && !splat {
+                        // first POSITIONAL (non-splat, non-named) argument
+                        // introduces an empty second argument rather than being
+                        // ignored (dart: `positional.length == 1 &&
+                        // named.isEmpty`) — `var($arg: --c, )` keeps the
+                        // ordinary trailing-comma behavior.
+                        if allow_empty_second_arg && is_first && !splat && !is_named {
                             args.push(CallArg {
                                 name: None,
                                 value: Expr::Ident(Vec::new()),
