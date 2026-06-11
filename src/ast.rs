@@ -304,6 +304,13 @@ pub(crate) struct VarDecl {
 pub(crate) struct Rule {
     pub selector: Vec<TplPiece>,
     pub body: Vec<Stmt>,
+    /// 1-based position where the selector text starts, for mapping a
+    /// resolved-selector error column back to the source.
+    pub selector_pos: crate::scanner::Pos,
+    /// Expression spans (line, start col, col of `}`) of the selector's
+    /// top-level `#{…}` interpolations, parallel to its `Interp` pieces —
+    /// for the dual-span "error in interpolated output" diagnostic.
+    pub selector_interp_spans: Vec<(u32, u32, u32)>,
     /// 1-based line of the rule's opening `{` (0 when unavailable), for the
     /// serializer's trailing-comment rule.
     pub brace_line: u32,

@@ -309,6 +309,82 @@ fn push_usize(out: &mut String, n: usize) {
 /// the file, and empty sources all degrade gracefully (clamping rather than
 /// panicking), so it satisfies the crate's panic-free discipline.
 #[must_use]
+/// Render dart-sass's dual-span "error in interpolated output" block: the
+/// original line with the interpolation's expression underlined, then the
+/// interpolated output with a marker at the failing column.
+///
+/// ```text
+///   ,--> input.scss
+/// 1 | .test31#{'\@baz'} { content: '3.1'; }
+///   |          ^^^^^^^
+///   '
+///   ,
+/// 1 | .test31@baz
+///   |        = error in interpolated output
+///   '
+/// ```
+#[allow(clippy::too_many_arguments)]
+pub fn render_interp_error_snippet(
+    source: &str,
+    line: usize,
+    col_start: usize,
+    col_end: usize,
+    resolved: &str,
+    resolved_col: usize,
+    url: &str,
+    glyphs: GlyphSet,
+) -> String {
+    let lines = split_lines(source);
+    let src_line = lines.get(line.saturating_sub(1)).copied().unwrap_or("");
+    let width = digit_count(line);
+    let pad = blank_gutter(width);
+    let marker = match glyphs {
+        GlyphSet::Unicode => "\u{2501}",
+        GlyphSet::Ascii => "=",
+    };
+    let arrow = match glyphs {
+        GlyphSet::Unicode => "\u{250c}\u{2500}\u{2500}>",
+        GlyphSet::Ascii => ",-->",
+    };
+    let mut out = String::new();
+    // First box: the original source with the interpolation underlined.
+    out.push_str(&pad);
+    out.push_str(arrow);
+    out.push(' ');
+    out.push_str(url);
+    out.push('\n');
+    out.push_str(&format!("{line:>width$} {} {src_line}\n", glyphs.vertical()));
+    out.push_str(&pad);
+    out.push_str(glyphs.vertical());
+    out.push(' ');
+    for _ in 1..col_start {
+        out.push(' ');
+    }
+    for _ in col_start..col_end {
+        out.push('^');
+    }
+    out.push_str(" \n");
+    out.push_str(&pad);
+    out.push_str(glyphs.bottom());
+    out.push('\n');
+    // Second box: the interpolated output (always line 1 of a virtual file).
+    out.push_str(&pad);
+    out.push_str(glyphs.top());
+    out.push('\n');
+    out.push_str(&format!("{:>width$} {} {resolved}\n", 1, glyphs.vertical()));
+    out.push_str(&pad);
+    out.push_str(glyphs.vertical());
+    out.push(' ');
+    for _ in 1..resolved_col {
+        out.push(' ');
+    }
+    out.push_str(marker);
+    out.push_str(" error in interpolated output\n");
+    out.push_str(&pad);
+    out.push_str(glyphs.bottom());
+    out
+}
+
 pub fn render_snippet(source: &str, span: Span, frames: &[Frame<'_>], glyphs: GlyphSet) -> String {
     let lines = split_lines(source);
 

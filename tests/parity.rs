@@ -7496,3 +7496,24 @@ fn module_import_hoist_keeps_comment_runs_with_their_imports() {
         "/* before use in input */\n/* before use in midstream */\n/* before css in upstream */\n@import \"upstream.css\";\n/* after use in midstream */\n@import \"midstream.css\";\n@import \"input.css\";\na {\n  in: upstream;\n}\n\na {\n  in: midstream;\n}\n\na {\n  in: input;\n}\n"
     );
 }
+
+#[test]
+fn at_in_selector_is_expected_selector_with_dual_span() {
+    // dart: `@` has no legal position in a selector. From literal text the
+    // error points at the source column (shifting across any preceding
+    // interpolations); from interpolated output it renders the dual-span
+    // "error in interpolated output" block (todo_single_escape).
+    let err = compile(".a@b { c: d; }\n", &Options::default()).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("expected selector."), "{msg}");
+    assert!(msg.contains("1:3"), "{msg}");
+    let err = compile("$x: \"y\";\n.a#{$x}@b { c: d; }\n", &Options::default()).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("2:8"), "{msg}");
+    // Without diagnostic source the dual-span block isn't rendered, but the
+    // position is still the interpolation expression's start.
+    let err = compile(".test31#{'\\@baz'} { content: '3.1'; }\n", &Options::default()).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("expected selector."), "{msg}");
+    assert!(msg.contains("1:10"), "{msg}");
+}

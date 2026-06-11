@@ -1116,6 +1116,84 @@ impl<'a> Evaluator<'a> {
         e
     }
 
+    /// Build the "expected selector." error for a `@` in a resolved selector:
+    /// when the offending column falls inside an interpolation's output the
+    /// error renders dart's dual-span "error in interpolated output" block;
+    /// when it maps to literal selector text the source column is recovered
+    /// by shifting across the interpolations before it.
+    fn interp_selector_error(
+        &self,
+        rule: &Rule,
+        sel_str: &str,
+        interp_bounds: &[(usize, usize)],
+        at_idx: usize,
+    ) -> Error {
+        const MSG: &str = "expected selector.";
+        let spans = &rule.selector_interp_spans;
+        let single_line = !sel_str.contains('\n');
+        // Inside an interpolation's output -> dual-span rendering, positioned
+        // at the interpolation expression's start.
+        if spans.len() == interp_bounds.len() {
+            for (k, &(start, len)) in interp_bounds.iter().enumerate() {
+                if at_idx >= start && at_idx < start + len {
+                    let (line, col_start, col_end) = spans[k];
+                    let pos = Pos {
+                        line: line as usize,
+                        col: col_start as usize,
+                    };
+                    let mut e = Error::at(MSG, pos);
+                    if self.diag_enabled() {
+                        let source = self.source_for(&self.current_url.clone());
+                        let frames = self.frames_for(pos);
+                        let mut rendered = format!("Error: {MSG}\n");
+                        rendered.push_str(&crate::diag::render_interp_error_snippet(
+                            &source,
+                            line as usize,
+                            col_start as usize,
+                            col_end as usize,
+                            sel_str,
+                            at_idx + 1,
+                            &frames[0].url,
+                            self.options.glyphs,
+                        ));
+                        rendered.push('\n');
+                        rendered.push_str(&Self::render_frame_block(&frames, 2));
+                        e.rendered = Some(rendered);
+                    }
+                    return e;
+                }
+            }
+        }
+        // Literal text: recover the source column by shifting across the
+        // interpolations that precede the offending index.
+        if single_line
+            && spans.len() == interp_bounds.len()
+            && spans
+                .iter()
+                .all(|&(l, _, _)| l as usize == rule.selector_pos.line)
+        {
+            let mut shift: i64 = 0;
+            for (k, &(start, len)) in interp_bounds.iter().enumerate() {
+                if at_idx >= start + len {
+                    let (_, col_start, col_end) = spans[k];
+                    // The source text `#{ ... }` spans from 2 before the
+                    // expression start through the closing brace.
+                    let src_total = (col_end as i64 + 1) - (col_start as i64 - 2);
+                    shift += src_total - len as i64;
+                }
+            }
+            let col = (rule.selector_pos.col as i64 + at_idx as i64 + shift).max(1) as usize;
+            return Error::at(
+                MSG,
+                Pos {
+                    line: rule.selector_pos.line,
+                    col,
+                },
+            );
+        }
+        Error::at(MSG, rule.selector_pos)
+    }
+
     /// Render `Error: <msg>` + the snippet pointing at the innermost frame +
     /// the 2-space-indented frame trace.
     fn render_error_with_frames(&self, e: &Error, frames: &[DiagFrame]) -> String {
@@ -4503,13 +4581,23 @@ impl<'a> Evaluator<'a> {
     /// body into a fresh rule sink, then hand the produced block and the
     /// rules that bubbled out of it to the enclosing `sink`.
     fn eval_style_rule(&mut self, rule: &Rule, parents: &[String], sink: &mut Sink<'_>) -> Result<(), Error> {
-        let sel_str = self.eval_template(&rule.selector)?;
+        let (sel_str, interp_bounds) = self.eval_template_bounds(&rule.selector)?;
         // A selector that resolves to nothing (e.g. `#{&}` at the document root,
         // where `&` is null) is rejected by dart-sass with "expected selector".
         if sel_str.trim().is_empty() {
             return Err(Error::unpositioned("expected selector."));
         }
         validate_selector(&sel_str, !parents.is_empty())?;
+        // A `@` has no legal position in a CSS selector: dart's selector
+        // parser fails with "expected selector." — pointed at the source when
+        // the offending character maps to literal text, or rendered as the
+        // dual-span "error in interpolated output" diagnostic when it came
+        // from an interpolation (todo_single_escape).
+        if !self.in_keyframes {
+            if let Some(at_idx) = find_unquoted_at(&sel_str) {
+                return Err(self.interp_selector_error(rule, &sel_str, &interp_bounds, at_idx));
+            }
+        }
         // A selector starting with a digit is dart's "expected selector."
         // (`1a {}`, issue_2023) — except keyframe stops (`50%`, `13E2%`).
         if !self.in_keyframes {
@@ -5907,6 +5995,33 @@ impl<'a> Evaluator<'a> {
             }
         }
         Ok(s)
+    }
+
+    /// Like [`Self::eval_template`], additionally returning each `Interp`
+    /// piece's (char start, char length) range in the output — used to decide
+    /// whether a resolved-selector error column falls inside interpolated
+    /// text (the dual-span "error in interpolated output" diagnostic).
+    fn eval_template_bounds(&mut self, pieces: &[TplPiece]) -> Result<(String, Vec<(usize, usize)>), Error> {
+        let mut s = String::new();
+        let mut chars = 0usize;
+        let mut bounds = Vec::new();
+        for piece in pieces {
+            match piece {
+                TplPiece::Lit(t) => {
+                    s.push_str(t);
+                    chars += t.chars().count();
+                }
+                TplPiece::Interp(e) => {
+                    let v = self.eval_expr(e)?;
+                    let out = v.to_interp();
+                    let len = out.chars().count();
+                    bounds.push((chars, len));
+                    s.push_str(&out);
+                    chars += len;
+                }
+            }
+        }
+        Ok((s, bounds))
     }
 
     /// The value of `&` in value position: the current resolved selector list
@@ -10451,6 +10566,33 @@ fn part_has_parent_ref(part: &str) -> bool {
         }
     }
     false
+}
+
+/// The char index of the first `@` outside quoted strings in a resolved
+/// selector, if any — `@` has no legal position in a CSS selector.
+fn find_unquoted_at(sel: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut iter = sel.chars().enumerate();
+    while let Some((i, c)) = iter.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' {
+                    iter.next();
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '\\' => {
+                    iter.next();
+                }
+                '@' => return Some(i),
+                _ => {}
+            },
+        }
+    }
+    None
 }
 
 /// Replace top-level `&` parent references with `parent`. A `&` inside `[…]`

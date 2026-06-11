@@ -169,6 +169,13 @@ struct Parser {
     /// the top level (depth 0); inside any block they are "This at-rule is not
     /// allowed here.".
     block_depth: u32,
+    /// When set, `parse_template_mode` records each top-level `#{…}`
+    /// interpolation's expression span (line, start col, col of `}`) here —
+    /// used by rule selectors for the dual-span "error in interpolated
+    /// output" diagnostic. Nested template parses (inside an interpolation's
+    /// expression) suspend collection.
+    collect_interp_spans: bool,
+    interp_spans: Vec<(u32, u32, u32)>,
     /// Set once a top-level statement that is *not* a variable declaration,
     /// comment, `@charset`, `@use`, or `@forward` has been parsed. A later
     /// `@use`/`@forward` then errors ("@use rules must be written before any
@@ -198,6 +205,8 @@ fn parse_inner(src: &str, plain_css: bool) -> Result<Stylesheet, Error> {
         calc_depth: 0,
         pending_unicode_split: false,
         block_depth: 0,
+        collect_interp_spans: false,
+        interp_spans: Vec::new(),
         seen_non_module_stmt: false,
         plain_css,
     };
@@ -841,7 +850,13 @@ impl Parser {
     }
 
     fn parse_rule(&mut self) -> Result<Stmt, Error> {
-        let selector = self.parse_template_mode(&['{'], CommentMode::Strip)?;
+        let selector_pos = self.sc.position();
+        let saved_spans = std::mem::take(&mut self.interp_spans);
+        let saved_collect = std::mem::replace(&mut self.collect_interp_spans, true);
+        let selector = self.parse_template_mode(&['{'], CommentMode::Strip);
+        self.collect_interp_spans = saved_collect;
+        let selector_interp_spans = std::mem::replace(&mut self.interp_spans, saved_spans);
+        let selector = selector?;
         let brace_line = self.sc.position().line as u32;
         if !self.sc.eat('{') {
             return Err(Error::at("expected \"{\"", self.sc.position()));
@@ -857,6 +872,8 @@ impl Parser {
         Ok(Stmt::Rule(Rule {
             selector,
             body,
+            selector_pos,
+            selector_interp_spans,
             brace_line,
             end_line,
         }))
@@ -2467,6 +2484,7 @@ impl Parser {
             if self.sc.peek() == Some('@') {
                 return Err(Error::at("expected selector.", self.sc.position()));
             }
+            let selector_pos = self.sc.position();
             let selector = self.parse_template(&['{'])?;
             let (body, lines) = self.parse_braced_body_lines()?;
             return Ok(Stmt::AtRoot {
@@ -2474,6 +2492,8 @@ impl Parser {
                 body: vec![Stmt::Rule(Rule {
                     selector,
                     body,
+                    selector_pos,
+                    selector_interp_spans: Vec::new(),
                     brace_line: lines.start,
                     end_line: lines.end,
                 })],
@@ -3843,8 +3863,22 @@ impl Parser {
                     }
                     self.sc.bump();
                     self.sc.bump();
+                    // Record the expression span for a rule selector's
+                    // dual-span diagnostic; nested template parses inside the
+                    // expression suspend collection.
+                    let span_start = self.sc.position();
+                    let collect = std::mem::replace(&mut self.collect_interp_spans, false);
                     let e = self.parse_value()?;
                     self.skip_ws_inline();
+                    self.collect_interp_spans = collect;
+                    if collect {
+                        let end = self.sc.position();
+                        self.interp_spans.push((
+                            span_start.line as u32,
+                            span_start.col as u32,
+                            end.col as u32,
+                        ));
+                    }
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
