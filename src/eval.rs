@@ -10122,11 +10122,63 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
             None
         }
     };
+    // Count a part's TOP-LEVEL `&` references (outside parens/brackets) and
+    // split it into the segments between them. With k >= 2 refs the part
+    // expands to the parents' k-fold cartesian product (`& &` under
+    // `ul, ol` is `ul ul, ul ol, ol ul, ol ol`, issue_1710).
+    let split_parent_refs = |part: &str| -> Option<Vec<String>> {
+        let mut segments = vec![String::new()];
+        let mut depth = 0i32;
+        for c in part.chars() {
+            match c {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                '&' if depth == 0 => {
+                    segments.push(String::new());
+                    continue;
+                }
+                _ => {}
+            }
+            segments.last_mut().unwrap().push(c);
+        }
+        if segments.len() >= 3 {
+            Some(segments)
+        } else {
+            None
+        }
+    };
+    let expand_cartesian = |segments: &[String], result: &mut Vec<String>| {
+        let k = segments.len() - 1;
+        let n = parents.len();
+        let mut idx = vec![0usize; k];
+        loop {
+            let mut s = String::new();
+            for (i, seg) in segments[..k].iter().enumerate() {
+                s.push_str(seg);
+                s.push_str(&parents[idx[i]]);
+            }
+            s.push_str(&segments[k]);
+            result.push(normalize_selector(&s));
+            // Increment with the LAST ref fastest (dart's order).
+            let mut j = k;
+            loop {
+                if j == 0 {
+                    return;
+                }
+                j -= 1;
+                idx[j] += 1;
+                if idx[j] < n {
+                    break;
+                }
+                idx[j] = 0;
+            }
+        }
+    };
     let mut result = Vec::new();
     if parents.is_empty() {
         // At the document root (no enclosing style rule) a parent selector `&`
         // has no parent to substitute, so dart-sass keeps it literal: `& {a: b}`
-        // emits `& {…}` and `&.foo {…}` emits `&.foo {…}`. (A `&`-with-suffix
+        // emits `& {\u{2026}}` and `&.foo {\u{2026}}` emits `&.foo {\u{2026}}`. (A `&`-with-suffix
         // such as `&foo` is rejected earlier by `validate_selector`.)
         for part in &parts {
             result.push(normalize_selector(part));
@@ -10137,6 +10189,11 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
         for part in &parts {
             if let Some(s) = substitute_pseudo_refs(part) {
                 result.push(normalize_selector(&s));
+            } else if let Some(segments) = split_parent_refs(part) {
+                for parent in parents {
+                    check_compound_parent(part, parent)?;
+                }
+                expand_cartesian(&segments, &mut result);
             } else if part.contains('&') {
                 for parent in parents {
                     check_compound_parent(part, parent)?;
@@ -10154,6 +10211,17 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
                 if let Some(s) = substitute_pseudo_refs(part) {
                     if pi == 0 {
                         result.push(normalize_selector(&s));
+                    }
+                    continue;
+                }
+                // A part with k >= 2 top-level refs expands its full
+                // cartesian product once, in the first parent round.
+                if let Some(segments) = split_parent_refs(part) {
+                    if pi == 0 {
+                        for parent in parents {
+                            check_compound_parent(part, parent)?;
+                        }
+                        expand_cartesian(&segments, &mut result);
                     }
                     continue;
                 }
