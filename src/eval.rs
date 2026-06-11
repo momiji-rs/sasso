@@ -6101,7 +6101,9 @@ impl<'a> Evaluator<'a> {
             // (dart-sass `withoutSlash`): `$x: 1/2; a {b: $x}` is `0.5`.
             // Slashes nested inside a stored list are preserved.
             Expr::Var { name, pos } => match self.lookup(name) {
-                Some(v) => Ok(v.clone().without_slash()),
+                // `lookup` already returns an owned clone out of the scope;
+                // `without_slash` consumes it, so a second clone is wasted.
+                Some(v) => Ok(v.without_slash()),
                 None => {
                     // A user module variable exposed unprefixed via `@use … as *`.
                     let star_hits: Vec<Value> = if is_private_member(name) {
@@ -8670,11 +8672,22 @@ pub(crate) fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Valu
     // numeric quotient — used if the slash is later forced into arithmetic —
     // is the real division with full unit cancellation (`1/1px` carries
     // `1px^-1`, so `math.unit(1/1px)` reports `"px^-1"`).
-    if let (true, Value::Number(a), Value::Number(b)) =
-        (slash, l.clone().without_slash(), r.clone().without_slash())
-    {
-        let repr = format!("{}/{}", slash_repr(&l), slash_repr(&r));
-        return Ok(Value::Slash(a.div(&b), repr));
+    // Fast path: plain `number / number` (the overwhelmingly common case) —
+    // no slash carry, no clone. `without_slash` is a no-op on a plain Number,
+    // so this is behavior-identical to the first match arm below.
+    if !slash {
+        if let (Value::Number(a), Value::Number(b)) = (&l, &r) {
+            return divide_numbers(a, b, pos);
+        }
+    }
+    // The clones below are only reached for the slash-carry and non-number
+    // cases; guarding on `slash` keeps the common path from building the
+    // tuple's clones eagerly.
+    if slash {
+        if let (Value::Number(a), Value::Number(b)) = (l.clone().without_slash(), r.clone().without_slash()) {
+            let repr = format!("{}/{}", slash_repr(&l), slash_repr(&r));
+            return Ok(Value::Slash(a.div(&b), repr));
+        }
     }
     match (l.clone().without_slash(), r.clone().without_slash()) {
         (Value::Number(a), Value::Number(b)) => divide_numbers(&a, &b, pos),
