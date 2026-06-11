@@ -4193,7 +4193,11 @@ impl Parser {
             if matches!(op, Some(BinOp::Sub)) {
                 let interp_next = self.sc.peek_at(1) == Some('#') && self.sc.peek_at(2) == Some('{');
                 let ident_next = matches!(self.sc.peek_at(1), Some(c) if c.is_alphabetic() || c == '_' || c == '-' || c == '\\');
-                if interp_next || (expr_is_quoted_string(&lhs) && ident_next) {
+                // `--` always begins an identifier (a CSS custom-ident like
+                // `--em-2--em`), never a subtraction: `1--em` is the space
+                // list `1 --em`.
+                let custom_ident_next = self.sc.peek_at(1) == Some('-');
+                if interp_next || custom_ident_next || (expr_is_quoted_string(&lhs) && ident_next) {
                     self.sc.reset(mark);
                     break;
                 }

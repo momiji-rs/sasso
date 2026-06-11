@@ -6931,3 +6931,13 @@ fn media_feature_strings_unquote() {
         "@media (min-width: 20px) {\n  a {\n    b: c;\n  }\n}\n"
     );
 }
+
+#[test]
+fn double_minus_starts_a_term() {
+    // `--` never subtracts: `1--em` is the space list `1 --em`, and
+    // `5--3` is `5 --3`; single-minus subtraction still works.
+    assert_eq!(
+        ours("foo {bar: 1--em-2--em; baz: 5--3; qux: 5-3}\n"),
+        "foo {\n  bar: 1 --em-2--em;\n  baz: 5 --3;\n  qux: 2;\n}\n"
+    );
+}
