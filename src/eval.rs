@@ -9938,6 +9938,61 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
             }
         }
     }
+    // One byte pre-scan classifies the rest of the validation: most resolved
+    // selectors are plain (idents/classes/combinators/spaces) and need at
+    // most the sigil ident-start check — no char-vector materialization, no
+    // comma split. Every rejection or recursion in the full walk below is
+    // triggered by one of the "slow" bytes, except the `#`/`.` ident-start
+    // rule, which the byte-only light path reproduces exactly (UTF-8
+    // continuation bytes are >= 0x80, so byte lookarounds match char ones).
+    let mut needs_slow = false;
+    let mut has_sigil = false;
+    for &b in sel.as_bytes() {
+        match b {
+            b'\\' | b'"' | b'\'' | b'[' | b'(' | b')' | b']' | b'&' | b'%' | b'/' => needs_slow = true,
+            b'#' | b'.' => has_sigil = true,
+            _ => {}
+        }
+    }
+    // Equivalence of the light/skip paths against the full walk was proven
+    // by a check build asserting identical Results on every call across the
+    // full sass-spec suite.
+    if needs_slow {
+        validate_selector_tail(sel, has_parent)
+    } else if has_sigil {
+        validate_plain_sigils(sel)
+    } else {
+        Ok(())
+    }
+}
+
+/// The `#`/`.` ident-start rule on a selector with no escape, quote,
+/// bracket, paren, `&`, `%`, or `/` byte: every sigil is top-level, and its
+/// next character must start an identifier (a `.` right after a digit is a
+/// keyframe decimal point and is skipped; `#` gets no such exemption).
+fn validate_plain_sigils(sel: &str) -> Result<(), Error> {
+    let b = sel.as_bytes();
+    for i in 0..b.len() {
+        let c = b[i];
+        if c != b'#' && c != b'.' {
+            continue;
+        }
+        if c == b'.' && i > 0 && b[i - 1].is_ascii_digit() {
+            continue;
+        }
+        let starts_ident = match b.get(i + 1) {
+            Some(&n) => n.is_ascii_alphabetic() || n == b'-' || n == b'_' || n >= 0x80,
+            None => false,
+        };
+        if !starts_ident {
+            return Err(Error::unpositioned("Expected identifier."));
+        }
+    }
+    Ok(())
+}
+
+/// The full per-part validation walk (slow path).
+fn validate_selector_tail(sel: &str, has_parent: bool) -> Result<(), Error> {
     for part in split_commas(sel) {
         let chars: Vec<char> = part.chars().collect();
         let mut i = 0;
@@ -10612,6 +10667,11 @@ fn part_has_parent_ref(part: &str) -> bool {
 /// The char index of the first `@` outside quoted strings in a resolved
 /// selector, if any — `@` has no legal position in a CSS selector.
 fn find_unquoted_at(sel: &str) -> Option<usize> {
+    // `@` is ASCII: no `@` byte means no occurrence at all — skip the
+    // quote-tracking walk that otherwise runs for every resolved selector.
+    if !sel.as_bytes().contains(&b'@') {
+        return None;
+    }
     let mut quote: Option<char> = None;
     let mut iter = sel.chars().enumerate();
     while let Some((i, c)) = iter.next() {
