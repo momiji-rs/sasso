@@ -5,6 +5,12 @@
 # the `unsafe` needed for the raw `extern "C"` ABI. No wasm-bindgen — the JS
 # loader (npm/sasso.mjs) marshals UTF-8 through linear memory by hand, keeping
 # the module tiny and dependency-free.
+# Self-contained workspace root: stops cargo's upward manifest walk here, so
+# the crate resolves identically from the main checkout AND from git worktrees
+# nested under .claude/worktrees/ (where the walk would otherwise escape into
+# the outer repo's workspace, whose relative `exclude = ["wasm"]` can't match).
+[workspace]
+
 [package]
 name = "sasso-wasm"
 version = "0.1.0"
