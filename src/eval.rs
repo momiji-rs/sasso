@@ -89,6 +89,16 @@ pub(crate) enum OutNode {
         /// Source lines (`start` = the `{` line, `end` = the `}` line) for the
         /// serializer's trailing-comment rule; default = disabled.
         lines: SrcLines,
+        /// The number of `@extend`s already registered when this rule's selector
+        /// was established (dart-sass `addSelector` timing). When the rule was
+        /// registered AFTER every applicable `@extend` (`extend_base >=`
+        /// visible-extension count), dart extends the fresh selector by the whole
+        /// store at ONCE — `_extendComplex`'s `paths` unification order (last
+        /// choice slowest) — rather than re-extending it incrementally
+        /// (registration-order fold). `usize::MAX` marks a non-evaluated rule
+        /// (plain-CSS import, `@at-root` graft, reparent shell) for which the
+        /// sequential default always applies.
+        extend_base: usize,
     },
     Comment(String, SrcLines),
     /// A verbatim line (e.g. a passed-through CSS `@import`).
@@ -235,6 +245,10 @@ enum Sink<'a> {
         /// in between (dart adds both declaration runs to the same style-rule
         /// copy because the escaped batches aren't siblings inside this node).
         flushed: &'a mut Option<usize>,
+        /// The `@extend` registration count when this rule's selector was
+        /// established (dart `addSelector` timing), carried onto each flushed
+        /// [`OutNode::Rule`]. See [`OutNode::Rule::extend_base`].
+        extend_base: usize,
     },
     /// The body of a top-level at-rule (no enclosing selector): bare
     /// declarations land here directly as [`OutNode::AtDecl`], interleaved
@@ -316,6 +330,7 @@ impl Sink<'_> {
                     linebreaks: Vec::new(),
                     items,
                     lines: SrcLines::default(),
+                    extend_base: usize::MAX,
                 }),
                 // Likewise a plain-CSS nested at-rule becomes a top-level one,
                 // its items wrapped as bare at-rule children.
@@ -344,6 +359,7 @@ impl Sink<'_> {
                                 linebreaks: Vec::new(),
                                 items,
                                 lines: SrcLines::default(),
+                                extend_base: usize::MAX,
                             },
                             OutItem::ChildlessAtRule { name, prelude, lines } => OutNode::AtRule {
                                 name,
@@ -360,6 +376,7 @@ impl Sink<'_> {
                                     linebreaks: Vec::new(),
                                     items,
                                     lines: SrcLines::default(),
+                                    extend_base: usize::MAX,
                                 }],
                                 has_block: true,
                                 lines: SrcLines::default(),
@@ -389,6 +406,7 @@ impl Sink<'_> {
             nested,
             at_depth,
             flushed,
+            extend_base,
         } = self
         {
             if !items.is_empty() {
@@ -422,6 +440,7 @@ impl Sink<'_> {
                         linebreaks: linebreaks.to_vec(),
                         items: std::mem::take(*items),
                         lines: *lines,
+                        extend_base: *extend_base,
                     };
                     nested.insert(insert_at, rule);
                     **flushed = Some(insert_at);
@@ -3405,6 +3424,7 @@ impl<'a> Evaluator<'a> {
                     linebreaks: Vec::new(),
                     items: preserved,
                     lines: SrcLines::default(),
+                    extend_base: usize::MAX,
                 });
             }
         }
@@ -3445,6 +3465,7 @@ impl<'a> Evaluator<'a> {
                                 end: r.end_line,
                                 col: 0,
                             }),
+                            extend_base: usize::MAX,
                         });
                     }
                     for node in bubbled {
@@ -3573,6 +3594,7 @@ impl<'a> Evaluator<'a> {
                                 end: r.end_line,
                                 col: 0,
                             }),
+                            extend_base: usize::MAX,
                         });
                     }
                     out.extend(bubbled);
@@ -3710,6 +3732,7 @@ impl<'a> Evaluator<'a> {
                     linebreaks: Vec::new(),
                     items: inner,
                     lines: SrcLines::default(),
+                    extend_base: usize::MAX,
                 }],
                 has_block: true,
                 lines: SrcLines::default(),
@@ -4718,6 +4741,12 @@ impl<'a> Evaluator<'a> {
         let mut nested: Vec<OutNode> = Vec::new();
         let mut flushed: Option<usize> = None;
         let at_depth = self.at_rule_ctx.len();
+        // dart `addSelector` timing: how many `@extend`s were already registered
+        // when this rule's selector was established (before its body runs and
+        // registers any of its own). A rule registered AFTER all its applicable
+        // `@extend`s is extended one-shot in dart's `paths` order; otherwise the
+        // registration-order fold.
+        let extend_base = self.extends.len();
         let result = {
             let mut child = Sink::Rule {
                 selectors: &emit_selectors,
@@ -4727,6 +4756,7 @@ impl<'a> Evaluator<'a> {
                 nested: &mut nested,
                 at_depth,
                 flushed: &mut flushed,
+                extend_base,
             };
             let r = self.exec(&rule.body, &current, &mut child);
             // Flush any declarations/loud comments that follow the last nested
@@ -4862,6 +4892,7 @@ impl<'a> Evaluator<'a> {
                     nested: &mut nested,
                     at_depth,
                     flushed: &mut flushed,
+                    extend_base: usize::MAX,
                 };
                 let r = self.exec(stmts, parents, &mut child);
                 if r.is_ok() {
@@ -5519,6 +5550,7 @@ impl<'a> Evaluator<'a> {
                         linebreaks: Vec::new(),
                         items: std::mem::take(decls),
                         lines: SrcLines::default(),
+                        extend_base: usize::MAX,
                     });
                 }
             };
@@ -8318,6 +8350,7 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
                 linebreaks: _,
                 items,
                 lines,
+                extend_base,
             } => {
                 if selectors.iter().any(|s| part_has_parent_ref(s)) {
                     preserved.push(OutItem::NestedRule { selectors, items });
@@ -8330,6 +8363,7 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
                         linebreaks: Vec::new(),
                         items,
                         lines,
+                        extend_base,
                     });
                 }
             }
@@ -8356,6 +8390,7 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
             linebreaks: Vec::new(),
             items: preserved,
             lines: SrcLines::default(),
+            extend_base: usize::MAX,
         });
     }
     out.extend(rest);
@@ -10444,9 +10479,10 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extens
             OutNode::Rule {
                 selectors,
                 linebreaks,
+                extend_base,
                 ..
             } => {
-                let new_sel = extend_selector_list(selectors, linebreaks, extensions, scope);
+                let new_sel = extend_selector_list(selectors, linebreaks, extensions, scope, *extend_base);
                 match new_sel {
                     Some((s, b)) => {
                         // Line-break flags travel with their selectors (dart's
@@ -10597,6 +10633,7 @@ fn extend_selector_list(
     breaks: &[bool],
     extensions: &[crate::selector::Extension],
     scope: &str,
+    extend_base: usize,
 ) -> Option<(Vec<String>, Vec<bool>)> {
     let has_placeholder = selectors.iter().any(|s| s.contains('%'));
     // Fast path: no extensions and no placeholder → the selector is untouched.
@@ -10610,7 +10647,7 @@ fn extend_selector_list(
         // Unparseable selector: never lose it; leave untouched.
         return Some((selectors.to_vec(), breaks.to_vec()));
     };
-    let result = crate::selector::extend_selectors(&parsed, breaks, extensions, scope);
+    let result = crate::selector::extend_selectors(&parsed, breaks, extensions, scope, extend_base);
     if result.all_placeholders {
         return None;
     }

@@ -7638,3 +7638,31 @@ fn extend_selector_pseudo_one_shot() {
         "c:s, d:s::e, b:after:not(:first-child) {\n  x: y;\n}\n"
     );
 }
+
+#[test]
+fn extend_one_shot_vs_incremental_order() {
+    // dart `addSelector` extends a rule registered AFTER all its `@extend`s by
+    // the whole store at ONCE, in `_extendComplex`'s `paths` order (the LAST
+    // unification choice varies slowest). The rule `.e.f` here comes after both
+    // extends, so its compound unifies to `.e.f, .a .f.b, .c .e.d, …`
+    // (nested-compound-unification) — NOT the incremental interleaving.
+    assert_eq!(
+        ours(".a .b {@extend .e}\n.c .d {@extend .f}\n.e.f {x: y}\n"),
+        ".e.f, .a .f.b, .c .e.d, .a .c .b.d, .c .a .b.d {\n  x: y;\n}\n"
+    );
+    // A rule registered BEFORE its `@extend`s is extended INCREMENTALLY in
+    // registration order: each `:not` is inserted right after the target, so a
+    // later `@extend` sorts ahead of an earlier one — `:not(.x)` extended by
+    // `.y` then `.z` gives `:not(.x):not(.z):not(.y)` (reverse), the opposite of
+    // the one-shot order.
+    assert_eq!(
+        ours(":not(.x) {a: b}\n.y {@extend .x}\n.z {@extend .x}\n"),
+        ":not(.x):not(.z):not(.y) {\n  a: b;\n}\n"
+    );
+    // The same rule registered AFTER its extends takes the one-shot order
+    // (forward): `:not(.x):not(.y):not(.z)`.
+    assert_eq!(
+        ours(".y {@extend .x}\n.z {@extend .x}\n:not(.x) {a: b}\n"),
+        ":not(.x):not(.y):not(.z) {\n  a: b;\n}\n"
+    );
+}

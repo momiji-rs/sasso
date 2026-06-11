@@ -847,6 +847,7 @@ pub(crate) fn extend_selectors(
     original_breaks: &[bool],
     extensions: &[Extension],
     scope: &str,
+    extend_base: usize,
 ) -> ExtendResult {
     reset_extend_budget();
     // The set of "original" rendered selectors — the unextended input. Original
@@ -879,35 +880,40 @@ pub(crate) fn extend_selectors(
     // duplicate selectors preserved (issue_2291's reparsed `A, B, C-foo...`).
     let source_spec = source_specificity_map(extensions);
     let (batches, registry) = expand_extensions(extensions);
-    // When an extension extends a target that lives INSIDE a selector pseudo's
-    // argument, dart rewrites the enclosing compound in place and applies every
-    // such extension in ONE simultaneous pass. The sequential fold's per-batch
-    // replacement mishandles this: a `:not` merge across two extends leaves an
-    // un-unified intermediate (`:not(c):not(d)` must gain `:not(a)` AND `:not(b)`
-    // at once — compound-unification), a `:not` chain re-extends a pseudo product
-    // and loses it (extend-result-of-extend), and re-extending an EXTENDER's
-    // pseudo drops the pre-extension form (dart#1297 `:is(a)` must survive beside
-    // `:is(a, b)` — extends_after). For a SINGLE-MODULE rule in exactly those
-    // shapes, drive extension with the legacy one-shot worklist over the full
-    // `registry` (transitive closure precomputed, incl. dart#1297 derived
-    // extensions no batch applies). Everything else — including pseudos whose
-    // argument is NOT a target (`:not(:first-child)`, `::slotted(.c.d)` extended
-    // elsewhere) and plain placeholder order (086.1, issue_2468) — stays on the
-    // fold, whose interleaving + per-origin gating reproduce dart's order and
-    // block cross-sibling diamond leaks.
+    // dart `addSelector` ONE-SHOT vs `_extendExistingSelectors` INCREMENTAL.
+    // When a rule's selector was established AFTER every applicable `@extend`
+    // (`extend_base >= extensions.len()`), dart extends it by the whole store at
+    // ONCE — `_extendComplex`'s `paths` unification order (LAST choice slowest)
+    // and the `:not`/`:is` merge applied simultaneously. When it was established
+    // before/among its `@extend`s, dart re-extends it incrementally in
+    // registration order (the opposite cartesian order, and each `:not` inserted
+    // right after the target so later extends sort first). The one-shot path
+    // runs the worklist over the full `registry` (transitive closure incl.
+    // dart#1297 derived extensions) with the `paths`-order cartesian; the
+    // incremental path is the registration-order FOLD (per-origin gating intact).
+    // Gated to single-module: there the closure-size sort is stable so the index
+    // equals registration order; multi-module keeps the fold.
+    let single_module = extensions.iter().all(|e| e.origin == scope);
+    let one_shot = single_module && extend_base != usize::MAX && extend_base >= extensions.len();
+    // A SELF-REFERENTIAL pseudo chain — an extender carries a selector pseudo
+    // whose argument mentions an extension target (`:not(.thing[disabled])`
+    // extending `.thing`, issue_2055) — loops through the pseudo machinery and
+    // needs the worklist's re-feed (the per-batch fold expands a pseudo once and
+    // can't converge the nesting). Route it to the worklist over the full
+    // registry regardless of registration position (no cartesian flip unless it
+    // is also one-shot).
     let targets: HashSet<String> = extensions
         .iter()
         .filter_map(|e| e.target.as_ref().map(Simple::render))
         .collect();
-    let single_module = extensions.iter().all(|e| e.origin == scope);
-    let pseudo_path = single_module
-        && (registry.iter().any(|e| {
+    let pseudo_self_ref = single_module
+        && registry.iter().any(|e| {
             e.extenders
                 .iter()
                 .any(|c| pseudo_arg_has_target(c, &targets, false))
-        }) || original.iter().any(|c| pseudo_arg_has_target(c, &targets, true)));
-    let result = if pseudo_path {
-        let (result, changed) = extend_to_fixpoint_breaks(original, original_breaks, &registry);
+        });
+    let result = if one_shot || pseudo_self_ref {
+        let (result, changed) = extend_to_fixpoint_breaks(original, original_breaks, &registry, one_shot);
         if changed {
             trim_breaks(result, &originals, &source_spec)
         } else {
@@ -1627,7 +1633,7 @@ fn type_namespace(t: &str) -> Option<String> {
 /// out first. (dart-sass `Extender._extendComplex`.)
 fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
     let empty = std::collections::HashMap::new();
-    extend_complex_breaks(complex, false, extensions, &empty)
+    extend_complex_breaks(complex, false, extensions, &empty, false)
         .into_iter()
         .map(|(c, _)| c)
         .collect()
@@ -1641,6 +1647,7 @@ fn extend_complex_breaks(
     in_break: bool,
     extensions: &[Extension],
     ext_breaks: &std::collections::HashMap<String, bool>,
+    one_shot: bool,
 ) -> Vec<(Complex, bool)> {
     let d = to_dart(complex);
     // dart-sass: a complex selector with more than one leading combinator is
@@ -1654,7 +1661,7 @@ fn extend_complex_breaks(
     let mut per_component: Vec<Vec<(DComplex, bool)>> = Vec::new();
     let mut any_extended = false;
     for (i, comp) in d.comps.iter().enumerate() {
-        match extend_component(comp, extensions, ext_breaks) {
+        match extend_component(comp, extensions, ext_breaks, one_shot) {
             // dart-sass folds unextended leading components into a prefix
             // complex carrying the selector's leading run; keeping the run on
             // the first component's sole option is equivalent.
@@ -1697,15 +1704,30 @@ fn extend_complex_breaks(
     }
 
     // Take the Cartesian product across components and `weave` each path into
-    // one or more complete complex selectors (dart-sass `paths` + `weave`).
+    // one or more complete complex selectors (dart-sass `paths` + `weave`). The
+    // iteration order sets which component varies fastest: dart's one-shot
+    // `_extendComplex` uses literal `paths` (the LAST component varies SLOWEST,
+    // its option the outer loop), while the incremental registration-order fold
+    // varies the FIRST component slowest (its product interleaved per step). See
+    // nested-compound-unification: rule-after-extends -> one_shot paths order.
     let mut combos: Vec<(Vec<DComplex>, bool)> = vec![(Vec::new(), false)];
     for opts in &per_component {
         let mut next: Vec<(Vec<DComplex>, bool)> = Vec::new();
-        for (combo, cflag) in &combos {
+        if one_shot {
             for (opt, oflag) in opts {
-                let mut c = combo.clone();
-                c.push(opt.clone());
-                next.push((c, *cflag || *oflag));
+                for (combo, cflag) in &combos {
+                    let mut c = combo.clone();
+                    c.push(opt.clone());
+                    next.push((c, *cflag || *oflag));
+                }
+            }
+        } else {
+            for (combo, cflag) in &combos {
+                for (opt, oflag) in opts {
+                    let mut c = combo.clone();
+                    c.push(opt.clone());
+                    next.push((c, *cflag || *oflag));
+                }
             }
         }
         combos = next;
@@ -2480,7 +2502,7 @@ fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
     for complex in list {
         originals.insert(complex.render());
     }
-    let (result, changed) = extend_to_fixpoint_breaks(list, &[], extensions);
+    let (result, changed) = extend_to_fixpoint_breaks(list, &[], extensions, false);
     // dart `_extendList`: when no complex was changed the ORIGINAL list is
     // returned untouched — no trim, duplicates preserved.
     if !changed {
@@ -2761,7 +2783,7 @@ fn extend_list_batch(
         let self_render = complex.render();
         let visible = batch_closure.contains(c_origin);
         let products = if visible && consume_extend_work() && out.len() <= 100_000 {
-            extend_complex_breaks(complex, *in_break, batch, &ext_breaks)
+            extend_complex_breaks(complex, *in_break, batch, &ext_breaks, false)
         } else {
             vec![(complex.clone(), *in_break)]
         };
@@ -2809,6 +2831,7 @@ fn extend_to_fixpoint_breaks(
     list: &[Complex],
     list_breaks: &[bool],
     extensions: &[Extension],
+    one_shot: bool,
 ) -> (Vec<(Complex, bool)>, bool) {
     // Extender flags by rendered form, for the per-option lookup.
     let mut ext_breaks: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
@@ -2833,7 +2856,7 @@ fn extend_to_fixpoint_breaks(
         if !consume_extend_work() || result.len() > 100_000 {
             break;
         }
-        let products = extend_complex_breaks(&complex, in_break, extensions, &ext_breaks);
+        let products = extend_complex_breaks(&complex, in_break, extensions, &ext_breaks, one_shot);
         if is_input && !(products.len() == 1 && products[0].0.render() == complex.render()) {
             changed = true;
         }
@@ -3242,6 +3265,7 @@ fn extend_component(
     comp: &TComp,
     extensions: &[Extension],
     ext_breaks: &std::collections::HashMap<String, bool>,
+    one_shot: bool,
 ) -> Option<Vec<(DComplex, bool)>> {
     // First, extend any selector-pseudo arguments (`:not(...)`, `:is(...)`,
     // etc.) in place, producing an "effective" compound. For `:not()` with a
@@ -3295,18 +3319,30 @@ fn extend_component(
     }
     let mut options: Vec<(DComplex, bool)> = vec![(options_first, false)];
 
-    // Cartesian product of per-simple choices (path outer, option inner) so the
-    // first simple's choice varies slowest — matching dart-sass's observed
-    // output order for within-compound extension (`.foo.bar` + two extends
-    // yields `.foo.bar, .foo.bang, .bar.baz, .baz.bang`).
+    // Cartesian product of per-simple choices. The incremental (registration-
+    // order) fold varies the FIRST simple slowest (path outer, option inner) —
+    // `.foo.bar` + two extends -> `.foo.bar, .foo.bang, .bar.baz, .baz.bang`.
+    // dart's one-shot `_extendCompound` uses literal `paths(options)`: the LAST
+    // simple varies SLOWEST (option outer, path inner) — the order that unifies
+    // `:not(c):not(d)`/`.e.f` rule-after-extends to match dart.
     let mut paths: Vec<Vec<&Option<(Complex, bool)>>> = vec![Vec::new()];
     for opts in &per_simple {
         let mut next = Vec::new();
-        for path in &paths {
+        if one_shot {
             for opt in opts {
-                let mut p = path.clone();
-                p.push(opt);
-                next.push(p);
+                for path in &paths {
+                    let mut p = path.clone();
+                    p.push(opt);
+                    next.push(p);
+                }
+            }
+        } else {
+            for path in &paths {
+                for opt in opts {
+                    let mut p = path.clone();
+                    p.push(opt);
+                    next.push(p);
+                }
             }
         }
         paths = next;

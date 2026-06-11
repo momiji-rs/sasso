@@ -115,6 +115,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             linebreaks,
             items,
             lines,
+            ..
         } => {
             out.push_str(indent);
             // A complex selector flagged with a source line break starts on its
