@@ -563,6 +563,10 @@ pub(crate) struct Evaluator<'a> {
     /// Bogus-combinator selectors omitted from the CSS (`.a > + x`): they
     /// still satisfy `@extend` target matching like dart's extend graph.
     bogus_selectors: Vec<String>,
+    /// Placeholder-rule selectors seen during eval (module key, selector).
+    /// An empty placeholder rule is pruned from the output tree but still
+    /// counts as an `@extend` target within the modules the extension sees.
+    placeholder_rules: Vec<(String, String)>,
     /// Set while module loads run inside a module-loading `@import`: dart
     /// clones the whole import subtree's CSS at the import site (the same
     /// `_combineCss(clone: true)` as meta.load-css). All loads in the chain
@@ -955,6 +959,7 @@ impl<'a> Evaluator<'a> {
             at_root_hoist: std::collections::VecDeque::new(),
             at_rule_ctx: Vec::new(),
             bogus_selectors: Vec::new(),
+            placeholder_rules: Vec::new(),
             used_modules: HashMap::default(),
             star_modules: Vec::new(),
             used_user_modules: HashMap::default(),
@@ -1422,12 +1427,25 @@ impl<'a> Evaluator<'a> {
         // appears in an omitted bogus-combinator rule still counts as found
         // (dart extends it; the result is bogus too and is omitted).
         for (pe, ext) in self.extends.iter().zip(extensions.iter()) {
+            // A private placeholder (`%-x`/`%_x`) is only visible within its
+            // own module; any other target is visible across the extension's
+            // module closure.
+            let private = matches!(&pe.target,
+                crate::selector::Simple::Placeholder(n) if n.starts_with('-') || n.starts_with('_'));
             if !ext.optional
                 && !ext.matched.get()
                 && !self
                     .bogus_selectors
                     .iter()
                     .any(|s| crate::selector::selector_contains_simple(s, &pe.target))
+                && !self.placeholder_rules.iter().any(|(m, s)| {
+                    let visible = if private {
+                        *m == ext.origin
+                    } else {
+                        ext.origin_closure.contains(m)
+                    };
+                    visible && crate::selector::selector_contains_simple(s, &pe.target)
+                })
             {
                 return Err(Error::at(
                     format!(
@@ -4461,6 +4479,14 @@ impl<'a> Evaluator<'a> {
                 // omits it from the emitted CSS).
                 self.bogus_selectors.push(s.clone());
                 continue;
+            }
+            // A placeholder rule stays an @extend target even when its body
+            // produces nothing (`%bam { bam: null }` is "found", dart keeps
+            // every rule in the extend graph; we prune empty rules from the
+            // output tree, so record the selector with its module scope).
+            if s.contains('%') {
+                self.placeholder_rules
+                    .push((self.current_module.clone(), s.clone()));
             }
             // A keyframe selector's percentage normalizes its exponent marker
             // to lowercase (`130E-1%` -> `130e-1%`), digits untouched.
