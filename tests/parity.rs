@@ -6980,3 +6980,30 @@ fn lexical_scoping_closures() {
         "foo {\n  v: new;\n}\n"
     );
 }
+
+#[test]
+fn lexical_scoping_functions_and_mixins() {
+    // Functions and mixins are lexically scoped too (dart's parallel
+    // _functions/_mixins frames): a nested definition shadows an outer one
+    // only within its block (scss-tests 132/134).
+    assert_eq!(
+        ours("@mixin bar {a: b}\nfoo {\n  @mixin bar {c: d}\n  @include bar;\n}\nbaz {@include bar}\n"),
+        "foo {\n  c: d;\n}\n\nbaz {\n  a: b;\n}\n"
+    );
+    assert_eq!(
+        ours("@function foo() {@return 1}\nfoo {\n  @function foo() {@return 2}\n  a: foo();\n}\nbaz {b: foo()}\n"),
+        "foo {\n  a: 2;\n}\n\nbaz {\n  b: 1;\n}\n"
+    );
+    // A function defined inside a rule is invisible outside it: the outer
+    // call stays a plain CSS function (scss-tests 133).
+    assert_eq!(
+        ours("foo {\n  @function foo() {@return 1}\n  a: foo(); }\nbar {b: foo()}\n"),
+        "foo {\n  a: 1;\n}\n\nbar {\n  b: foo();\n}\n"
+    );
+    // A user function shadowing a built-in reverts to the built-in outside
+    // its block (functions-and-mixins).
+    assert_eq!(
+        ours("div {\n  span {\n    @function length($a, $b) { @return $a + $b; }\n    w: length(1, 2);\n  }\n  h: length(a b c);\n}\n"),
+        "div span {\n  w: 3;\n}\ndiv {\n  h: 3;\n}\n"
+    );
+}

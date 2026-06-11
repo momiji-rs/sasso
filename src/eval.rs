@@ -51,14 +51,25 @@ fn new_scope() -> Scope {
     std::rc::Rc::new(std::cell::RefCell::new(HashMap::default()))
 }
 
-/// A user `@function`/`@mixin` with its LEXICAL environment: the variable
-/// scope chain captured at the definition site (shared frames, dart's
-/// `Environment.closure()`). The body runs against this chain, not the
-/// caller's stack.
+/// One function/mixin scope frame, parallel to the variable chain (dart's
+/// `Environment._functions`/`_mixins` are lists of maps pushed and popped in
+/// lockstep with `_variables`).
+pub(crate) type FnScope = std::rc::Rc<std::cell::RefCell<HashMap<String, Rc<UserCallable>>>>;
+
+fn new_fn_scope() -> FnScope {
+    std::rc::Rc::new(std::cell::RefCell::new(HashMap::default()))
+}
+
+/// A user `@function`/`@mixin` with its LEXICAL environment: the variable and
+/// function/mixin scope chains captured at the definition site (shared
+/// frames, dart's `Environment.closure()`). The body runs against these
+/// chains, not the caller's stack.
 pub(crate) struct UserCallable {
     pub def: Rc<Callable>,
     pub env: Vec<Scope>,
     pub env_semi: Vec<bool>,
+    pub env_fns: Vec<FnScope>,
+    pub env_mixins: Vec<FnScope>,
 }
 
 /// A flattened output node.
@@ -437,8 +448,12 @@ pub(crate) struct Evaluator<'a> {
     /// load cycle (dart-sass "This file is already being loaded."); a path that
     /// has finished loading may be imported again (`@import` re-evaluates).
     loading: Vec<String>,
-    functions: HashMap<String, Rc<UserCallable>>,
-    mixins: HashMap<String, Rc<UserCallable>>,
+    /// User function/mixin scope chains, parallel to `scopes` (dart's
+    /// `Environment._functions`/`_mixins`): a definition always lands in the
+    /// innermost frame, so a nested `@function`/`@mixin` shadows an outer one
+    /// only within its block.
+    functions: Vec<FnScope>,
+    mixins: Vec<FnScope>,
     /// Stack of `@content` blocks, one per active `@include`.
     content_stack: Vec<Option<ContentBlock>>,
     /// Whether we are *directly* executing a mixin body (dart-sass `_inMixin`).
@@ -536,11 +551,6 @@ pub(crate) struct Evaluator<'a> {
     /// overwritten by the first merge — and a forward of the same name from a
     /// DIFFERENT module overrides the previous binding (sass/dart-sass#888).
     forwarded_globals: HashMap<String, usize>,
-    /// Function/mixin bindings injected by a *nested* `@import`'s forward
-    /// merge, undone when the enclosing scope pops (dart scopes them
-    /// lexically; this build's callable maps are global). Each entry records
-    /// (scope depth at insertion, name, previous binding, is_mixin).
-    callable_undo: Vec<(usize, String, Option<Rc<UserCallable>>, bool)>,
     /// Built-in modules made available via `@use "sass:<mod>"`, keyed by the
     /// in-scope namespace (default = the part after `sass:`, or the `as ns`
     /// override). The value is the canonical built-in module name (e.g.
@@ -623,8 +633,11 @@ struct Module {
     /// outside `ns.$var: value` assignment updates the module and its own
     /// functions/mixins observe the new value on their next call.
     vars: Scope,
-    functions: HashMap<String, Rc<UserCallable>>,
-    mixins: HashMap<String, Rc<UserCallable>>,
+    /// Top-level functions/mixins (the module's global frame). Shared by Rc
+    /// with the chains the module's own callables captured, so they resolve
+    /// each other (and forwarded members merged after evaluation).
+    functions: FnScope,
+    mixins: FnScope,
     /// Namespaced user modules this module `@use`d (for transitive `ns.fn()`
     /// calls evaluated inside this module's own functions/mixins).
     used_user_modules: HashMap<String, Rc<Module>>,
@@ -729,21 +742,22 @@ impl Module {
             .map(|(_, m)| Rc::clone(m))
     }
     fn function(&self, name: &str) -> Option<Rc<UserCallable>> {
-        if let Some(f) = self.functions.get(name) {
+        let fns = self.functions.borrow();
+        if let Some(f) = fns.get(name) {
             return Some(Rc::clone(f));
         }
         let norm = normalize_var_name(name);
-        self.functions
-            .iter()
+        fns.iter()
             .find(|(k, _)| normalize_var_name(k) == norm)
             .map(|(_, f)| Rc::clone(f))
     }
     fn mixin(&self, name: &str) -> Option<Rc<UserCallable>> {
-        if let Some(m) = self.mixins.get(name) {
+        let mixins = self.mixins.borrow();
+        if let Some(m) = mixins.get(name) {
             return Some(Rc::clone(m));
         }
         let norm = normalize_var_name(name);
-        self.mixins
+        mixins
             .iter()
             .find(|(k, _)| normalize_var_name(k) == norm)
             .map(|(_, m)| Rc::clone(m))
@@ -770,8 +784,8 @@ struct ContentBlock {
 struct SavedModuleEnv {
     scopes: Vec<Scope>,
     scope_semi_global: Vec<bool>,
-    functions: HashMap<String, Rc<UserCallable>>,
-    mixins: HashMap<String, Rc<UserCallable>>,
+    functions: Vec<FnScope>,
+    mixins: Vec<FnScope>,
     used_modules: HashMap<String, String>,
     star_modules: Vec<String>,
     used_user_modules: HashMap<String, Rc<Module>>,
@@ -867,8 +881,8 @@ impl<'a> Evaluator<'a> {
             scope_semi_global: vec![true],
             options,
             loading: Vec::new(),
-            functions: HashMap::default(),
-            mixins: HashMap::default(),
+            functions: vec![new_fn_scope()],
+            mixins: vec![new_fn_scope()],
             content_stack: Vec::new(),
             in_mixin: Vec::new(),
             media_queries: Vec::new(),
@@ -880,7 +894,6 @@ impl<'a> Evaluator<'a> {
             in_plain_css: false,
             config_is_implicit: false,
             forwarded_globals: HashMap::default(),
-            callable_undo: Vec::new(),
             current_module: String::new(),
             module_deps: RefCell::new(HashMap::default()),
             module_dep_order: RefCell::new(HashMap::default()),
@@ -1378,23 +1391,29 @@ impl<'a> Evaluator<'a> {
         None
     }
 
-    /// Capture the current variable-scope chain as a callable's lexical
-    /// closure (dart `Environment.closure()` — shared frames, not snapshots).
+    /// Capture the current variable and function/mixin scope chains as a
+    /// callable's lexical closure (dart `Environment.closure()` — shared
+    /// frames, not snapshots).
     fn capture_callable(&self, def: &Rc<Callable>) -> Rc<UserCallable> {
         Rc::new(UserCallable {
             def: Rc::clone(def),
             env: self.scopes.clone(),
             env_semi: self.scope_semi_global.clone(),
+            env_fns: self.functions.clone(),
+            env_mixins: self.mixins.clone(),
         })
     }
 
     /// Push a new scope. `semi_global` requests semi-global behavior (control
     /// flow), which only takes effect when the current innermost scope is
-    /// already semi-global (dart-sass `Environment.scope`).
+    /// already semi-global (dart-sass `Environment.scope`). The function and
+    /// mixin chains push in lockstep with the variable chain.
     fn push_scope(&mut self, semi_global: bool) {
         let effective = semi_global && self.scope_semi_global.last().copied().unwrap_or(false);
         self.scopes.push(new_scope());
         self.scope_semi_global.push(effective);
+        self.functions.push(new_fn_scope());
+        self.mixins.push(new_fn_scope());
     }
 
     /// Push a pre-populated, non-semi-global scope (a mixin/function argument
@@ -1402,29 +1421,74 @@ impl<'a> Evaluator<'a> {
     fn push_scope_frame(&mut self, frame: HashMap<String, Value>) {
         self.scopes.push(std::rc::Rc::new(std::cell::RefCell::new(frame)));
         self.scope_semi_global.push(false);
+        self.functions.push(new_fn_scope());
+        self.mixins.push(new_fn_scope());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.scope_semi_global.pop();
-        // Undo any nested-import callable bindings scoped to the popped frame.
-        let depth_after = self.scopes.len();
-        while matches!(self.callable_undo.last(), Some((d, ..)) if *d > depth_after) {
-            let (_, name, prev, is_mixin) = self.callable_undo.pop().unwrap();
-            let map = if is_mixin {
-                &mut self.mixins
-            } else {
-                &mut self.functions
-            };
-            match prev {
-                Some(c) => {
-                    map.insert(name, c);
-                }
-                None => {
-                    map.remove(&name);
-                }
+        self.functions.pop();
+        self.mixins.pop();
+    }
+
+    /// Define a user `@function` in the innermost frame (dart
+    /// `visitFunctionRule`: always `_functions.length - 1`, no semi-global
+    /// special case), so the definition is scoped to the enclosing block.
+    fn define_function(&mut self, name: &str, c: Rc<UserCallable>) {
+        if let Some(frame) = self.functions.last() {
+            frame.borrow_mut().insert(name.to_string(), c);
+        }
+    }
+
+    /// Define a user `@mixin` in the innermost frame (dart `visitMixinRule`).
+    fn define_mixin(&mut self, name: &str, c: Rc<UserCallable>) {
+        if let Some(frame) = self.mixins.last() {
+            frame.borrow_mut().insert(name.to_string(), c);
+        }
+    }
+
+    /// Look up a user `@function` by exact name, innermost frame first.
+    fn lookup_function(&self, name: &str) -> Option<Rc<UserCallable>> {
+        for frame in self.functions.iter().rev() {
+            if let Some(f) = frame.borrow().get(name) {
+                return Some(Rc::clone(f));
             }
         }
+        None
+    }
+
+    /// Look up a user `@mixin` by exact name, innermost frame first.
+    fn lookup_mixin(&self, name: &str) -> Option<Rc<UserCallable>> {
+        for frame in self.mixins.iter().rev() {
+            if let Some(m) = frame.borrow().get(name) {
+                return Some(Rc::clone(m));
+            }
+        }
+        None
+    }
+
+    /// Look up a user `@function` dash/underscore-insensitively (for the
+    /// `meta` introspection functions), innermost frame first.
+    fn lookup_function_norm(&self, key: &str) -> Option<Rc<UserCallable>> {
+        for frame in self.functions.iter().rev() {
+            let frame = frame.borrow();
+            if let Some((_, f)) = frame.iter().find(|(k, _)| normalize_arg_name(k) == key) {
+                return Some(Rc::clone(f));
+            }
+        }
+        None
+    }
+
+    /// Look up a user `@mixin` dash/underscore-insensitively, innermost first.
+    fn lookup_mixin_norm(&self, key: &str) -> Option<Rc<UserCallable>> {
+        for frame in self.mixins.iter().rev() {
+            let frame = frame.borrow();
+            if let Some((_, m)) = frame.iter().find(|(k, _)| normalize_arg_name(k) == key) {
+                return Some(Rc::clone(m));
+            }
+        }
+        None
     }
 
     /// Assign a non-global variable (dart-sass `Environment.setVariable`). The
@@ -1988,9 +2052,10 @@ impl<'a> Evaluator<'a> {
         // parameter defaults) run against the callable's LEXICAL closure.
         let evaled = self.eval_call_args(args)?;
         let saved = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.def.name)));
-        let saved_undo = std::mem::take(&mut self.callable_undo);
         let saved_scopes = std::mem::replace(&mut self.scopes, func.env.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());
+        let saved_fns = std::mem::replace(&mut self.functions, func.env_fns.clone());
+        let saved_mixins = std::mem::replace(&mut self.mixins, func.env_mixins.clone());
         self.push_scope(false);
         let result = self
             .bind_evaled_into_scope(&func.def.params, evaled, &func.def.name)
@@ -2005,7 +2070,8 @@ impl<'a> Evaluator<'a> {
         self.pop_scope();
         self.scopes = saved_scopes;
         self.scope_semi_global = saved_semi;
-        self.callable_undo = saved_undo;
+        self.functions = saved_fns;
+        self.mixins = saved_mixins;
         if let Some(saved) = saved {
             self.leave_call(saved);
         }
@@ -2032,7 +2098,7 @@ impl<'a> Evaluator<'a> {
                 Stmt::Return(e) => return Ok(Some(self.eval_expr(e)?)),
                 Stmt::FunctionDef(c) => {
                     let captured = self.capture_callable(c);
-                    self.functions.insert(c.name.clone(), captured);
+                    self.define_function(&c.name, captured);
                 }
                 Stmt::If(branches) => {
                     for branch in branches {
@@ -2188,7 +2254,8 @@ impl<'a> Evaluator<'a> {
         }
         // A bare `@include` may resolve a user module mixin exposed unprefixed
         // via `@use … as *`.
-        if !self.mixins.contains_key(name) && !self.star_user_modules.is_empty() && !is_private_member(name) {
+        if self.lookup_mixin(name).is_none() && !self.star_user_modules.is_empty() && !is_private_member(name)
+        {
             let hits: Vec<(Rc<Module>, Rc<UserCallable>)> = self
                 .star_user_modules
                 .iter()
@@ -2204,9 +2271,7 @@ impl<'a> Evaluator<'a> {
             }
         }
         let mixin = self
-            .mixins
-            .get(name)
-            .cloned()
+            .lookup_mixin(name)
             .ok_or_else(|| Error::unpositioned(format!("Undefined mixin {name}.")))?;
         // dart-sass: passing a content block to a mixin that never uses
         // `@content` is an error, even when the block is empty.
@@ -2225,9 +2290,10 @@ impl<'a> Evaluator<'a> {
                 caller_env: Some(Box::new(snapshot)),
             }
         });
-        let saved_undo = std::mem::take(&mut self.callable_undo);
         let saved_scopes = std::mem::replace(&mut self.scopes, mixin.env.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
+        let saved_fns = std::mem::replace(&mut self.functions, mixin.env_fns.clone());
+        let saved_mixins = std::mem::replace(&mut self.mixins, mixin.env_mixins.clone());
         self.push_scope(false);
         let result = self
             .bind_evaled_into_scope(&mixin.def.params, evaled, &mixin.def.name)
@@ -2242,7 +2308,8 @@ impl<'a> Evaluator<'a> {
         self.pop_scope();
         self.scopes = saved_scopes;
         self.scope_semi_global = saved_semi;
-        self.callable_undo = saved_undo;
+        self.functions = saved_fns;
+        self.mixins = saved_mixins;
         result
     }
 
@@ -2278,9 +2345,10 @@ impl<'a> Evaluator<'a> {
         });
         let saved = self.enter_module(module);
         let saved_file = self.enter_module_file(module);
-        let saved_undo = std::mem::take(&mut self.callable_undo);
         let saved_scopes = std::mem::replace(&mut self.scopes, mixin.env.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
+        let saved_fns = std::mem::replace(&mut self.functions, mixin.env_fns.clone());
+        let saved_mixins = std::mem::replace(&mut self.mixins, mixin.env_mixins.clone());
         self.push_scope(false);
         let result = self
             .bind_evaled_into_scope(&mixin.def.params, evaled, &mixin.def.name)
@@ -2293,7 +2361,8 @@ impl<'a> Evaluator<'a> {
         self.pop_scope();
         self.scopes = saved_scopes;
         self.scope_semi_global = saved_semi;
-        self.callable_undo = saved_undo;
+        self.functions = saved_fns;
+        self.mixins = saved_mixins;
         self.leave_module_file(saved_file);
         self.leave_module(saved);
         result
@@ -2517,9 +2586,10 @@ impl<'a> Evaluator<'a> {
             .as_ref()
             .and_then(|m| Rc::clone(m).downcast::<Module>().ok());
         let saved = module.as_ref().map(|m| self.enter_module(m));
-        let saved_undo = std::mem::take(&mut self.callable_undo);
         let saved_scopes = std::mem::replace(&mut self.scopes, callable.env.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, callable.env_semi.clone());
+        let saved_fns = std::mem::replace(&mut self.functions, callable.env_fns.clone());
+        let saved_mixins = std::mem::replace(&mut self.mixins, callable.env_mixins.clone());
         self.push_scope(false);
         let result = self
             .bind_evaled_into_scope(
@@ -2538,7 +2608,8 @@ impl<'a> Evaluator<'a> {
         self.pop_scope();
         self.scopes = saved_scopes;
         self.scope_semi_global = saved_semi;
-        self.callable_undo = saved_undo;
+        self.functions = saved_fns;
+        self.mixins = saved_mixins;
         if let Some(saved) = saved {
             self.leave_module(saved);
         }
@@ -3507,11 +3578,10 @@ impl<'a> Evaluator<'a> {
         let saved_dir = std::mem::replace(&mut self.current_file_dir, module_dir);
         let saved_url = std::mem::replace(&mut self.current_url, diag_url.to_string());
         let saved_source = std::mem::replace(&mut self.current_source, module_source);
-        let saved_undo = std::mem::take(&mut self.callable_undo);
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![new_scope()]);
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, vec![true]);
-        let saved_funcs = std::mem::take(&mut self.functions);
-        let saved_mixins = std::mem::take(&mut self.mixins);
+        let saved_funcs = std::mem::replace(&mut self.functions, vec![new_fn_scope()]);
+        let saved_mixins = std::mem::replace(&mut self.mixins, vec![new_fn_scope()]);
         let saved_used = std::mem::take(&mut self.used_modules);
         let saved_star = std::mem::take(&mut self.star_modules);
         let saved_used_user = std::mem::take(&mut self.used_user_modules);
@@ -3554,8 +3624,16 @@ impl<'a> Evaluator<'a> {
             .into_iter()
             .next()
             .unwrap_or_else(new_scope);
-        let mut functions = std::mem::take(&mut self.functions);
-        let mut mixins = std::mem::take(&mut self.mixins);
+        // The module's top-level function/mixin frames, shared by Rc with the
+        // chains the module's own callables captured.
+        let functions = std::mem::take(&mut self.functions)
+            .into_iter()
+            .next()
+            .unwrap_or_else(new_fn_scope);
+        let mixins = std::mem::take(&mut self.mixins)
+            .into_iter()
+            .next()
+            .unwrap_or_else(new_fn_scope);
         let used_user_modules = std::mem::take(&mut self.used_user_modules);
         let star_user_modules = std::mem::take(&mut self.star_user_modules);
         let used_builtin_modules = std::mem::take(&mut self.used_modules);
@@ -3568,7 +3646,6 @@ impl<'a> Evaluator<'a> {
         // Restore the caller's environment.
         self.scopes = saved_scopes;
         self.scope_semi_global = saved_semi;
-        self.callable_undo = saved_undo;
         self.functions = saved_funcs;
         self.mixins = saved_mixins;
         self.used_modules = saved_used;
@@ -3612,19 +3689,25 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
-        for (k, v) in forwarded.functions {
-            if let std::collections::hash_map::Entry::Vacant(e) = functions.entry(k.clone()) {
-                e.insert(v);
-                if let Some(o) = forwarded.fn_origins.get(&k) {
-                    fn_origins.insert(k, Rc::clone(o));
+        {
+            let mut fns = functions.borrow_mut();
+            for (k, v) in forwarded.functions {
+                if let std::collections::hash_map::Entry::Vacant(e) = fns.entry(k.clone()) {
+                    e.insert(v);
+                    if let Some(o) = forwarded.fn_origins.get(&k) {
+                        fn_origins.insert(k, Rc::clone(o));
+                    }
                 }
             }
         }
-        for (k, v) in forwarded.mixins {
-            if let std::collections::hash_map::Entry::Vacant(e) = mixins.entry(k.clone()) {
-                e.insert(v);
-                if let Some(o) = forwarded.mixin_origins.get(&k) {
-                    mixin_origins.insert(k, Rc::clone(o));
+        {
+            let mut mxs = mixins.borrow_mut();
+            for (k, v) in forwarded.mixins {
+                if let std::collections::hash_map::Entry::Vacant(e) = mxs.entry(k.clone()) {
+                    e.insert(v);
+                    if let Some(o) = forwarded.mixin_origins.get(&k) {
+                        mixin_origins.insert(k, Rc::clone(o));
+                    }
                 }
             }
         }
@@ -3864,7 +3947,7 @@ impl<'a> Evaluator<'a> {
                 self.forwarded.var_src.insert(key, member_src);
             }
         }
-        for (name, f) in &module.functions {
+        for (name, f) in module.functions.borrow().iter() {
             let key = format!("{pfx}{name}");
             if !is_private_member(name) && visible_name(&key) {
                 let f_src: *const Module = module.fn_origin(name).map(|m| Rc::as_ptr(&m)).unwrap_or(src);
@@ -3882,7 +3965,7 @@ impl<'a> Evaluator<'a> {
                 self.forwarded.fn_src.insert(key, f_src);
             }
         }
-        for (name, m) in &module.mixins {
+        for (name, m) in module.mixins.borrow().iter() {
             let key = format!("{pfx}{name}");
             if !is_private_member(name) && visible_name(&key) {
                 let m_src: *const Module = module.mixin_origin(name).map(|m| Rc::as_ptr(&m)).unwrap_or(src);
@@ -4034,11 +4117,11 @@ impl<'a> Evaluator<'a> {
                 }
                 Stmt::FunctionDef(callable) => {
                     let captured = self.capture_callable(callable);
-                    self.functions.insert(callable.name.clone(), captured);
+                    self.define_function(&callable.name, captured);
                 }
                 Stmt::MixinDef(callable) => {
                     let captured = self.capture_callable(callable);
-                    self.mixins.insert(callable.name.clone(), captured);
+                    self.define_mixin(&callable.name, captured);
                 }
                 Stmt::Return(_) => {
                     return Err(Error::unpositioned("@return is only allowed inside a function."));
@@ -5257,18 +5340,20 @@ impl<'a> Evaluator<'a> {
                             self.loading.pop();
                             result?;
                             // A `@forward`ed member from the imported file becomes
-                            // an ordinary member of the importing scope. This
-                            // build's functions/mixins are global, so only a
-                            // top-level `@import` exposes them (a nested import's
-                            // members stay scoped to the enclosing rule).
+                            // an ordinary member of the importing scope: dart's
+                            // @import is textual inclusion, so each forwarded
+                            // callable rebinds to the IMPORT SITE's environment
+                            // and lands in the innermost frame (a nested
+                            // import's members stay scoped to the enclosing
+                            // rule and pop with it).
                             if self.scopes.len() == 1 {
                                 for (k, f) in imported_fwd.functions {
                                     let rebound = self.capture_callable(&f.def);
-                                    self.functions.insert(k, rebound);
+                                    self.define_function(&k, rebound);
                                 }
                                 for (k, m) in imported_fwd.mixins {
                                     let rebound = self.capture_callable(&m.def);
-                                    self.mixins.insert(k, rebound);
+                                    self.define_mixin(&k, rebound);
                                 }
                                 if let Some(g) = self.scopes.first() {
                                     let mut g = g.borrow_mut();
@@ -5303,30 +5388,22 @@ impl<'a> Evaluator<'a> {
                                 // the enclosing rule's scope (so a following
                                 // nested import's implicit configuration sees
                                 // them, and a local assignment updates them);
-                                // its forwarded functions/mixins become
-                                // callable too (this build's callables are
-                                // global, so they outlive the rule — dart
-                                // scopes them lexically).
+                                // its forwarded functions/mixins land in the
+                                // innermost frame, scoped to the enclosing
+                                // rule (they pop with it, like dart).
                                 if let Some(s) = self.scopes.last() {
                                     let mut s = s.borrow_mut();
                                     for (k, val) in imported_fwd.vars {
                                         s.insert(k, val);
                                     }
                                 }
-                                let depth = self.scopes.len();
-                                // dart's @import is textual inclusion: a
-                                // forwarded callable rebinds to the IMPORT
-                                // SITE's environment (so `$v: new` next to
-                                // the import is what `get-v()` reads).
                                 for (k, f) in imported_fwd.functions {
                                     let rebound = self.capture_callable(&f.def);
-                                    let prev = self.functions.insert(k.clone(), rebound);
-                                    self.callable_undo.push((depth, k, prev, false));
+                                    self.define_function(&k, rebound);
                                 }
                                 for (k, m) in imported_fwd.mixins {
                                     let rebound = self.capture_callable(&m.def);
-                                    let prev = self.mixins.insert(k.clone(), rebound);
-                                    self.callable_undo.push((depth, k, prev, true));
+                                    self.define_mixin(&k, rebound);
                                 }
                             }
                         }
@@ -5679,7 +5756,7 @@ impl<'a> Evaluator<'a> {
                 // still wins, so this only applies to builtins.
                 if self.in_supports_declaration
                     && is_supports_calc_function(name)
-                    && !self.functions.contains_key(name)
+                    && self.lookup_function(name).is_none()
                 {
                     return self.eval_supports_calc_func(name, args, *pos);
                 }
@@ -5688,7 +5765,7 @@ impl<'a> Evaluator<'a> {
                     return self.eval_if_function(args, *pos);
                 }
                 // User-defined @function takes precedence over builtins.
-                if let Some(func) = self.functions.get(name).cloned() {
+                if let Some(func) = self.lookup_function(name) {
                     return self.call_function(&func, args, Some((*pos, *length)));
                 }
                 // A user module function exposed unprefixed via `@use … as *`.
@@ -5733,7 +5810,7 @@ impl<'a> Evaluator<'a> {
                 // computes the result (and applies its unit checks), so this only
                 // changes the two calc-specific behaviours above.
                 if is_pure_calc_math_function(name)
-                    && !self.functions.contains_key(name)
+                    && self.lookup_function(name).is_none()
                     && !args.iter().any(|a| a.splat || a.name.is_some())
                 {
                     if let Some(v) = self.try_eval_calc_math_call(name, args, *pos)? {
@@ -5743,7 +5820,7 @@ impl<'a> Evaluator<'a> {
                 // `calc-size()` is a two-argument calculation: a sizing keyword
                 // (or `var()`/calculation) plus a calculation, always preserved.
                 if name.eq_ignore_ascii_case("calc-size")
-                    && !self.functions.contains_key(name)
+                    && self.lookup_function(name).is_none()
                     && !args.iter().any(|a| a.splat || a.name.is_some())
                 {
                     return self.eval_calc_size(args, *pos);
@@ -5754,7 +5831,7 @@ impl<'a> Evaluator<'a> {
                 // arithmetic. Other arities (a preserved single argument, or an
                 // arity error) fall through to the builtin.
                 if name.eq_ignore_ascii_case("clamp")
-                    && !self.functions.contains_key(name)
+                    && self.lookup_function(name).is_none()
                     && args.len() == 3
                     && !args.iter().any(|a| a.splat || a.name.is_some())
                 {
@@ -5769,7 +5846,7 @@ impl<'a> Evaluator<'a> {
                 // number, so the deprecated `math.abs` global handles it as
                 // before (`abs(1 + 1px)` -> `2px`, `abs(-3) -> 3`).
                 if name.eq_ignore_ascii_case("abs")
-                    && !self.functions.contains_key(name)
+                    && self.lookup_function(name).is_none()
                     && args.len() == 1
                     && args[0].name.is_none()
                     && !args[0].splat
@@ -5791,7 +5868,7 @@ impl<'a> Evaluator<'a> {
                 // to the legacy one-argument `math.round` (arity errors and
                 // all).
                 if name.eq_ignore_ascii_case("round")
-                    && !self.functions.contains_key(name)
+                    && self.lookup_function(name).is_none()
                     && (1..=3).contains(&args.len())
                     && !args.iter().any(|a| a.splat || a.name.is_some())
                 {
@@ -5845,7 +5922,7 @@ impl<'a> Evaluator<'a> {
                 // before, and SassScript-only operators (`7 % 3`) keep the
                 // whole call on the legacy path.
                 if (name.eq_ignore_ascii_case("min") || name.eq_ignore_ascii_case("max"))
-                    && !self.functions.contains_key(name)
+                    && self.lookup_function(name).is_none()
                     && !args.is_empty()
                     && !args.iter().any(|a| a.splat || a.name.is_some())
                     && !args.iter().any(|a| expr_has_non_calc_op(&a.value))
@@ -6146,11 +6223,11 @@ impl<'a> Evaluator<'a> {
         }
         // A user `@function` of that name (dash/underscore-insensitive) wins.
         let key = normalize_arg_name(&name);
-        if let Some((_, f)) = self.functions.iter().find(|(k, _)| normalize_arg_name(k) == key) {
+        if let Some(f) = self.lookup_function_norm(&key) {
             return Ok(Value::Function(SassFunction {
                 name,
                 css: false,
-                user: Some(Rc::clone(f) as Rc<dyn std::any::Any>),
+                user: Some(f as Rc<dyn std::any::Any>),
             }));
         }
         // A function exposed unprefixed via `@use … as *` (or forwarded into one).
@@ -6229,10 +6306,10 @@ impl<'a> Evaluator<'a> {
         }
         // A user `@mixin` of that name (dash/underscore-insensitive) wins.
         let key = normalize_arg_name(&name);
-        if let Some((_, m)) = self.mixins.iter().find(|(k, _)| normalize_arg_name(k) == key) {
+        if let Some(m) = self.lookup_mixin_norm(&key) {
             return Ok(Value::Mixin(SassMixin {
                 name,
-                user: Some(Rc::clone(m) as Rc<dyn std::any::Any>),
+                user: Some(m as Rc<dyn std::any::Any>),
                 module: None,
             }));
         }
@@ -6361,10 +6438,8 @@ impl<'a> Evaluator<'a> {
                     name: s.text.clone(),
                     css: false,
                     user: self
-                        .functions
-                        .iter()
-                        .find(|(k, _)| normalize_arg_name(k) == normalize_arg_name(&s.text))
-                        .map(|(_, c)| Rc::clone(c) as Rc<dyn std::any::Any>),
+                        .lookup_function_norm(&normalize_arg_name(&s.text))
+                        .map(|c| c as Rc<dyn std::any::Any>),
                 };
                 self.invoke_function_ref(&f, rest_pos, rest_named, pos)
             }
@@ -6389,9 +6464,10 @@ impl<'a> Evaluator<'a> {
         // borrow on `f` before running the body).
         if let Some(any) = &f.user {
             if let Ok(callable) = Rc::clone(any).downcast::<UserCallable>() {
-                let saved_undo = std::mem::take(&mut self.callable_undo);
                 let saved_scopes = std::mem::replace(&mut self.scopes, callable.env.clone());
                 let saved_semi = std::mem::replace(&mut self.scope_semi_global, callable.env_semi.clone());
+                let saved_fns = std::mem::replace(&mut self.functions, callable.env_fns.clone());
+                let saved_mixins = std::mem::replace(&mut self.mixins, callable.env_mixins.clone());
                 self.push_scope(false);
                 let result = self
                     .bind_evaled_into_scope(
@@ -6408,7 +6484,8 @@ impl<'a> Evaluator<'a> {
                 self.pop_scope();
                 self.scopes = saved_scopes;
                 self.scope_semi_global = saved_semi;
-                self.callable_undo = saved_undo;
+                self.functions = saved_fns;
+                self.mixins = saved_mixins;
                 return match result? {
                     Some(v) => Ok(v.without_slash()),
                     None => Err(Error::unpositioned(format!(
@@ -6597,8 +6674,8 @@ impl<'a> Evaluator<'a> {
         };
         let mut names: Vec<String> = match kind {
             MemberKind::Variable => module.vars.borrow().keys().cloned().collect(),
-            MemberKind::Function => module.functions.keys().cloned().collect(),
-            MemberKind::Mixin => module.mixins.keys().cloned().collect(),
+            MemberKind::Function => module.functions.borrow().keys().cloned().collect(),
+            MemberKind::Mixin => module.mixins.borrow().keys().cloned().collect(),
         };
         names.retain(|n| !is_private_member(n));
         names.sort();
@@ -6697,7 +6774,7 @@ impl<'a> Evaluator<'a> {
             )?));
         }
         let key = normalize_arg_name(&name);
-        let local = self.mixins.keys().any(|k| normalize_arg_name(k) == key);
+        let local = self.lookup_mixin_norm(&key).is_some();
         if local {
             return Ok(Value::Bool(true));
         }
@@ -6729,7 +6806,7 @@ impl<'a> Evaluator<'a> {
             )?));
         }
         let key = normalize_arg_name(&name);
-        let user = self.functions.keys().any(|k| normalize_arg_name(k) == key);
+        let user = self.lookup_function_norm(&key).is_some();
         if user {
             return Ok(Value::Bool(true));
         }
@@ -6828,9 +6905,10 @@ impl<'a> Evaluator<'a> {
         let saved_member = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.def.name)));
         let saved = self.enter_module(module);
         let saved_file = self.enter_module_file(module);
-        let saved_undo = std::mem::take(&mut self.callable_undo);
         let saved_scopes = std::mem::replace(&mut self.scopes, func.env.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());
+        let saved_fns = std::mem::replace(&mut self.functions, func.env_fns.clone());
+        let saved_mixins = std::mem::replace(&mut self.mixins, func.env_mixins.clone());
         self.push_scope(false);
         let result = self
             .bind_evaled_into_scope(&func.def.params, evaled, &func.def.name)
@@ -6838,7 +6916,8 @@ impl<'a> Evaluator<'a> {
         self.pop_scope();
         self.scopes = saved_scopes;
         self.scope_semi_global = saved_semi;
-        self.callable_undo = saved_undo;
+        self.functions = saved_fns;
+        self.mixins = saved_mixins;
         self.leave_module_file(saved_file);
         self.leave_module(saved);
         if let Some(saved_member) = saved_member {
@@ -6903,8 +6982,8 @@ impl<'a> Evaluator<'a> {
         SavedModuleEnv {
             scopes: std::mem::replace(&mut self.scopes, vec![module_scope]),
             scope_semi_global: std::mem::replace(&mut self.scope_semi_global, vec![true]),
-            functions: std::mem::replace(&mut self.functions, module.functions.clone()),
-            mixins: std::mem::replace(&mut self.mixins, module.mixins.clone()),
+            functions: std::mem::replace(&mut self.functions, vec![std::rc::Rc::clone(&module.functions)]),
+            mixins: std::mem::replace(&mut self.mixins, vec![std::rc::Rc::clone(&module.mixins)]),
             used_modules: std::mem::replace(&mut self.used_modules, module.used_builtin_modules.clone()),
             star_modules: std::mem::replace(&mut self.star_modules, module.star_builtin_modules.clone()),
             used_user_modules: std::mem::replace(
@@ -9934,8 +10013,7 @@ fn complex_selector_block_is_bogus(s: &str) -> bool {
 /// Escaped spellings (`\>`) still contain the trigger byte, so anything
 /// suspicious takes the full tokenizing path.
 fn has_bogus_trigger(s: &str) -> bool {
-    s.bytes()
-        .any(|c| matches!(c, b'>' | b'+' | b'~' | b'('))
+    s.bytes().any(|c| matches!(c, b'>' | b'+' | b'~' | b'('))
 }
 
 /// Whether `name` (a pseudo-class/element name, case-insensitive, without the
