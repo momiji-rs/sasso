@@ -3277,6 +3277,37 @@ impl<'a> Evaluator<'a> {
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
+        // When the plain-CSS sheet is imported inside a style rule, top-level
+        // rules whose selector contains a parent reference `&` keep native
+        // CSS-nesting semantics: they are emitted VERBATIM as nested children
+        // of one leading parent-selector shell (dart `nestWithin` with
+        // `preserveParentSelectors`), while `&`-less rules get the descendant
+        // join below.
+        if !parents.is_empty() {
+            let mut preserved: Vec<OutItem> = Vec::new();
+            for stmt in stmts {
+                if let Stmt::Rule(r) = stmt {
+                    let own = self.css_selectors(&r.selector, true)?;
+                    if own.iter().any(|s| part_has_parent_ref(s)) {
+                        let inner = self.css_body(&r.body)?;
+                        if !inner.is_empty() {
+                            preserved.push(OutItem::NestedRule {
+                                selectors: own,
+                                items: inner,
+                            });
+                        }
+                    }
+                }
+            }
+            if !preserved.is_empty() {
+                sink.push_at_rule(OutNode::Rule {
+                    selectors: parents.to_vec(),
+                    linebreaks: Vec::new(),
+                    items: preserved,
+                    lines: SrcLines::default(),
+                });
+            }
+        }
         for stmt in stmts {
             match stmt {
                 Stmt::Rule(r) => {
@@ -3287,6 +3318,11 @@ impl<'a> Evaluator<'a> {
                     // always rejects leading combinators — also when merged
                     // under a Sass parent (dart checks in the merge branch).
                     let own = self.css_selectors(&r.selector, true)?;
+                    // A `&`-bearing rule was already emitted in the leading
+                    // parent shell above.
+                    if !parents.is_empty() && own.iter().any(|s| part_has_parent_ref(s)) {
+                        continue;
+                    }
                     let selectors: Vec<String> = if parents.is_empty() {
                         own
                     } else {
@@ -8108,39 +8144,61 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
     if parents.is_empty() {
         return nodes;
     }
-    nodes
-        .into_iter()
-        .map(|n| match n {
+    // A rule whose selector contains a parent reference `&` keeps native
+    // CSS-nesting semantics: it nests VERBATIM inside one leading
+    // parent-selector shell instead of the descendant join (dart `nestWithin`
+    // with `preserveParentSelectors` — through_load_css:top_level_parent).
+    let mut preserved: Vec<OutItem> = Vec::new();
+    let mut rest: Vec<OutNode> = Vec::new();
+    for n in nodes {
+        match n {
             OutNode::Rule {
                 selectors,
                 linebreaks: _,
                 items,
                 lines,
-            } => OutNode::Rule {
-                selectors: parents
-                    .iter()
-                    .flat_map(|p| selectors.iter().map(move |s| format!("{p} {s}")))
-                    .collect(),
-                linebreaks: Vec::new(),
-                items,
-                lines,
-            },
+            } => {
+                if selectors.iter().any(|s| part_has_parent_ref(s)) {
+                    preserved.push(OutItem::NestedRule { selectors, items });
+                } else {
+                    rest.push(OutNode::Rule {
+                        selectors: parents
+                            .iter()
+                            .flat_map(|p| selectors.iter().map(move |s| format!("{p} {s}")))
+                            .collect(),
+                        linebreaks: Vec::new(),
+                        items,
+                        lines,
+                    });
+                }
+            }
             OutNode::AtRule {
                 name,
                 prelude,
                 body,
                 has_block,
                 lines,
-            } => OutNode::AtRule {
+            } => rest.push(OutNode::AtRule {
                 name,
                 prelude,
                 body: reparent_nodes(body, parents),
                 has_block,
                 lines,
-            },
-            other => other,
-        })
-        .collect()
+            }),
+            other => rest.push(other),
+        }
+    }
+    let mut out = Vec::new();
+    if !preserved.is_empty() {
+        out.push(OutNode::Rule {
+            selectors: parents.to_vec(),
+            linebreaks: Vec::new(),
+            items: preserved,
+            lines: SrcLines::default(),
+        });
+    }
+    out.extend(rest);
+    out
 }
 
 /// Whether an expression contains a SassScript-only operator (`%`, a

@@ -7403,3 +7403,39 @@ fn ampersand_in_attribute_strings_is_literal_and_unchanged_lists_skip_trim() {
         ".q {\n  x: y;\n}\n\nA A, A B-z, B A, B B-z {\n  c: d;\n}\n"
     );
 }
+
+#[test]
+fn plain_css_parent_rules_nest_verbatim_under_importing_rule() {
+    // dart `nestWithin` with preserveParentSelectors: a plain-CSS top-level
+    // rule whose selector contains `&` keeps native CSS-nesting semantics —
+    // it nests VERBATIM inside one leading parent shell, while `&`-less
+    // rules get the descendant join (through_import:top_level_parent).
+    let dir = std::env::temp_dir().join("sasso_tip_parity");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("plain.css"), "x {y: z}\n& {b {c: d}}\n").unwrap();
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    let out = compile("a {@import \"plain\"}\n", &opts).expect("compile failed");
+    assert_eq!(
+        out,
+        "a {\n  & {\n    b {\n      c: d;\n    }\n  }\n}\na x {\n  y: z;\n}\n"
+    );
+}
+
+#[test]
+fn load_css_parent_rules_nest_verbatim_too() {
+    // The meta.load-css path reparents the module's CSS into the caller's
+    // rule; an `&`-bearing top-level rule keeps native nesting there as well
+    // (through_load_css:top_level_parent).
+    let dir = std::env::temp_dir().join("sasso_tlc_parity");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("plain.css"), "& {b {c: d}}\n").unwrap();
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    let out = compile(
+        "@use \"sass:meta\";\na {@include meta.load-css(\"plain\")}\n",
+        &opts,
+    )
+    .expect("compile failed");
+    assert_eq!(out, "a {\n  & {\n    b {\n      c: d;\n    }\n  }\n}\n");
+}
