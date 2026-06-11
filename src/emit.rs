@@ -29,6 +29,18 @@ fn emit_expanded(nodes: &[OutNode]) -> String {
     out
 }
 
+/// Indentation for a nesting depth (two spaces per level) without allocating:
+/// `"  ".repeat(depth)` ran once per emitted node/item, which is tens of
+/// thousands of short-lived Strings on a large output. Depths beyond the
+/// precomputed pad (rare) fall back to an owned String.
+fn indent_for(depth: usize) -> std::borrow::Cow<'static, str> {
+    const PAD: &str = "                                                                "; // 32 levels
+    match PAD.get(..depth * 2) {
+        Some(s) => std::borrow::Cow::Borrowed(s),
+        None => std::borrow::Cow::Owned("  ".repeat(depth)),
+    }
+}
+
 /// What the previously-emitted sibling was, for blank-line gating: dart-sass
 /// only emits a blank line after a completed *style rule* (`isGroupEnd`), so
 /// a Blank whose previous sibling is anything else is dropped.
@@ -42,7 +54,8 @@ enum Prev {
 /// Render one node at the given nesting `depth` (0 = document root). Each
 /// extra level adds two spaces of indentation.
 fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut Prev) {
-    let indent = "  ".repeat(depth);
+    let indent = indent_for(depth);
+    let indent = indent.as_ref();
     match node {
         // A module-scope wrapper is transparent: emit its contents in place.
         OutNode::ModuleScope { nodes, .. } => {
@@ -55,7 +68,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             linebreaks,
             items,
         } => {
-            out.push_str(&indent);
+            out.push_str(indent);
             // A complex selector flagged with a source line break starts on its
             // own line (aligned to the rule's indent); others are `, `-joined.
             for (i, sel) in selectors.iter().enumerate() {
@@ -63,7 +76,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
                     out.push(',');
                     if linebreaks.get(i).copied().unwrap_or(false) {
                         out.push('\n');
-                        out.push_str(&indent);
+                        out.push_str(indent);
                     } else {
                         out.push(' ');
                     }
@@ -74,14 +87,14 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             for item in items {
                 emit_item_expanded(out, item, depth + 1);
             }
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push_str("}\n");
             *prev = Prev::Rule;
         }
         OutNode::Comment(text) => {
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push_str("/*");
-            push_comment_text(out, text, &indent);
+            push_comment_text(out, text, indent);
             out.push_str("*/\n");
             *prev = Prev::Other;
         }
@@ -90,7 +103,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             if s.starts_with('\u{0}') {
                 return;
             }
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push_str(s);
             out.push('\n');
             *prev = Prev::Other;
@@ -105,7 +118,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             important,
             custom,
         } => {
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push_str(prop);
             emit_decl_value_expanded(out, value, *important, *custom, depth);
             out.push_str(";\n");
@@ -117,7 +130,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             body,
             has_block,
         } => {
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
@@ -138,14 +151,15 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             for child in body {
                 emit_node_expanded(out, child, depth + 1, &mut inner);
             }
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push_str("}\n");
         }
     }
 }
 
 fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
-    let indent = "  ".repeat(depth);
+    let indent = indent_for(depth);
+    let indent = indent.as_ref();
     match item {
         OutItem::Decl {
             prop,
@@ -153,19 +167,19 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
             important,
             custom,
         } => {
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push_str(prop);
             emit_decl_value_expanded(out, value, *important, *custom, depth);
             out.push_str(";\n");
         }
         OutItem::Comment(text) => {
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push_str("/*");
-            push_comment_text(out, text, &indent);
+            push_comment_text(out, text, indent);
             out.push_str("*/\n");
         }
         OutItem::ChildlessAtRule { name, prelude } => {
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
@@ -175,17 +189,17 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
             out.push_str(";\n");
         }
         OutItem::NestedRule { selectors, items } => {
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push_str(&selectors.join(", "));
             out.push_str(" {\n");
             for child in items {
                 emit_item_expanded(out, child, depth + 1);
             }
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push_str("}\n");
         }
         OutItem::NestedAtRule { name, prelude, items } => {
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
@@ -196,7 +210,7 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
             for child in items {
                 emit_item_expanded(out, child, depth + 1);
             }
-            out.push_str(&indent);
+            out.push_str(indent);
             out.push_str("}\n");
         }
     }
