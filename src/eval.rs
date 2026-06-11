@@ -19,8 +19,8 @@ use crate::fxhash::FxHashMap as HashMap;
 use crate::ast::{
     BinOp, CallArg, Callable, Conjunction, CssCustomItem, CssCustomValue, CustomDecl, Declaration, Expr,
     IfClause, IfCond, ImportArg, ImportModifier, MediaFeature, MediaInParens, MediaQuery, MediaQueryList,
-    ParamList, PropertySet, Rule, Stmt, Stylesheet, SupportsCondition, SupportsValue, TplPiece, UnOp,
-    VarDecl,
+    ParamList, PropertySet, Rule, SrcLines, Stmt, Stylesheet, SupportsCondition, SupportsValue, TplPiece,
+    UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -86,8 +86,11 @@ pub(crate) enum OutNode {
         /// a space); otherwise parallel to `selectors`.
         linebreaks: Vec<bool>,
         items: Vec<OutItem>,
+        /// Source lines (`start` = the `{` line, `end` = the `}` line) for the
+        /// serializer's trailing-comment rule; default = disabled.
+        lines: SrcLines,
     },
-    Comment(String),
+    Comment(String, SrcLines),
     /// A verbatim line (e.g. a passed-through CSS `@import`).
     Raw(String),
     /// A blank-line separator between top-level groups (expanded only).
@@ -100,6 +103,10 @@ pub(crate) enum OutNode {
         prelude: String,
         body: Vec<OutNode>,
         has_block: bool,
+        /// Source lines (`start` = the `{` line or the statement's own line
+        /// for the `;` form, `end` = the `}` line or the same) for the
+        /// serializer's trailing-comment rule; default = disabled.
+        lines: SrcLines,
     },
     /// A module's spliced CSS, tagged with its canonical key so the extend
     /// pass can scope extensions (dart-sass: an `@extend` affects the module's
@@ -118,6 +125,9 @@ pub(crate) enum OutNode {
         /// A custom property (`--x`) whose value is emitted verbatim after the
         /// colon (no inserted space); its leading whitespace is part of `value`.
         custom: bool,
+        /// Source lines (only `file` and `end` are meaningful) for the
+        /// serializer's trailing-comment rule; default = disabled.
+        lines: SrcLines,
     },
 }
 
@@ -155,14 +165,20 @@ pub(crate) enum OutItem {
         /// A custom property (`--x`) whose value is emitted verbatim after the
         /// colon (no inserted space); its leading whitespace is part of `value`.
         custom: bool,
+        /// Source lines (only `file` and `end` are meaningful) for the
+        /// serializer's trailing-comment rule; default = disabled.
+        lines: SrcLines,
     },
-    Comment(String),
+    Comment(String, SrcLines),
     /// A childless at-rule (`@e f;`) that appears directly inside a style rule:
     /// dart-sass keeps it in the parent block (interleaved with declarations),
     /// unlike a block at-rule which bubbles out to the document root.
     ChildlessAtRule {
         name: String,
         prelude: String,
+        /// Source lines (only `file` and `end` are meaningful) for the
+        /// serializer's trailing-comment rule; default = disabled.
+        lines: SrcLines,
     },
     /// A style rule nested directly inside another, kept verbatim instead of
     /// flattened. Only produced in plain-CSS mode (a loaded `.css` file).
@@ -204,6 +220,9 @@ enum Sink<'a> {
         selectors: &'a [String],
         /// Per-complex source line-break flags (parallel to `selectors`).
         linebreaks: &'a [bool],
+        /// The source rule's brace/end lines, stamped onto every flushed block
+        /// fragment (dart keeps the original rule's span on each copy).
+        lines: SrcLines,
         items: &'a mut Vec<OutItem>,
         nested: &'a mut Vec<OutNode>,
     },
@@ -225,19 +244,20 @@ impl Sink<'_> {
     /// Deposit a childless at-rule (`@e f;`). Inside a style rule it joins the
     /// parent's block (interleaved with declarations, in source order); at the
     /// top level or inside an at-rule body it is a bubbled-out `OutNode`.
-    fn push_childless_at_rule(&mut self, name: String, prelude: String) {
+    fn push_childless_at_rule(&mut self, name: String, prelude: String, lines: SrcLines) {
         match self {
-            Sink::Rule { items, .. } => items.push(OutItem::ChildlessAtRule { name, prelude }),
+            Sink::Rule { items, .. } => items.push(OutItem::ChildlessAtRule { name, prelude, lines }),
             _ => self.push_at_rule(OutNode::AtRule {
                 name,
                 prelude,
                 body: Vec::new(),
                 has_block: false,
+                lines,
             }),
         }
     }
 
-    fn push_comment(&mut self, text: String) {
+    fn push_comment(&mut self, text: String, lines: SrcLines) {
         // dart-sass strips a `/*# sourceMappingURL=… */` / `/*# sourceURL=… */`
         // loud comment (it generates its own); the `# ` space is required, so
         // `/*#sourceMappingURL…*/`, `/*! … */`, and other names are kept.
@@ -247,10 +267,10 @@ impl Sink<'_> {
         match self {
             Sink::Top(out) => {
                 let out = &mut **out;
-                push_group(out, vec![OutNode::Comment(text)]);
+                push_group(out, vec![OutNode::Comment(text, lines)]);
             }
-            Sink::Rule { items, .. } => items.push(OutItem::Comment(text)),
-            Sink::AtRoot(body) => body.push(OutNode::Comment(text)),
+            Sink::Rule { items, .. } => items.push(OutItem::Comment(text, lines)),
+            Sink::AtRoot(body) => body.push(OutNode::Comment(text, lines)),
         }
     }
 
@@ -263,18 +283,21 @@ impl Sink<'_> {
                     value,
                     important,
                     custom,
+                    lines,
                 } => body.push(OutNode::AtDecl {
                     prop,
                     value,
                     important,
                     custom,
+                    lines,
                 }),
-                OutItem::Comment(text) => body.push(OutNode::Comment(text)),
-                OutItem::ChildlessAtRule { name, prelude } => body.push(OutNode::AtRule {
+                OutItem::Comment(text, lines) => body.push(OutNode::Comment(text, lines)),
+                OutItem::ChildlessAtRule { name, prelude, lines } => body.push(OutNode::AtRule {
                     name,
                     prelude,
                     body: Vec::new(),
                     has_block: false,
+                    lines,
                 }),
                 // A plain-CSS nested rule reaching an at-root sink becomes a
                 // top-level rule carrying its items.
@@ -282,6 +305,7 @@ impl Sink<'_> {
                     selectors,
                     linebreaks: Vec::new(),
                     items,
+                    lines: SrcLines::default(),
                 }),
                 // Likewise a plain-CSS nested at-rule becomes a top-level one,
                 // its items wrapped as bare at-rule children.
@@ -296,23 +320,27 @@ impl Sink<'_> {
                                 value,
                                 important,
                                 custom,
+                                lines,
                             } => OutNode::AtDecl {
                                 prop,
                                 value,
                                 important,
                                 custom,
+                                lines,
                             },
-                            OutItem::Comment(text) => OutNode::Comment(text),
+                            OutItem::Comment(text, lines) => OutNode::Comment(text, lines),
                             OutItem::NestedRule { selectors, items } => OutNode::Rule {
                                 selectors,
                                 linebreaks: Vec::new(),
                                 items,
+                                lines: SrcLines::default(),
                             },
-                            OutItem::ChildlessAtRule { name, prelude } => OutNode::AtRule {
+                            OutItem::ChildlessAtRule { name, prelude, lines } => OutNode::AtRule {
                                 name,
                                 prelude,
                                 body: Vec::new(),
                                 has_block: false,
+                                lines,
                             },
                             OutItem::NestedAtRule { name, prelude, items } => OutNode::AtRule {
                                 name,
@@ -321,12 +349,15 @@ impl Sink<'_> {
                                     selectors: Vec::new(),
                                     linebreaks: Vec::new(),
                                     items,
+                                    lines: SrcLines::default(),
                                 }],
                                 has_block: true,
+                                lines: SrcLines::default(),
                             },
                         })
                         .collect(),
                     has_block: true,
+                    lines: SrcLines::default(),
                 }),
             },
             Sink::Top(_) => {}
@@ -343,6 +374,7 @@ impl Sink<'_> {
         if let Sink::Rule {
             selectors,
             linebreaks,
+            lines,
             items,
             nested,
         } = self
@@ -357,6 +389,7 @@ impl Sink<'_> {
                         selectors: selectors.to_vec(),
                         linebreaks: linebreaks.to_vec(),
                         items: std::mem::take(*items),
+                        lines: *lines,
                     };
                     // The rule's block precedes any media-hoist markers that
                     // accumulated while it was open (the bubbled rules leave
@@ -618,6 +651,9 @@ pub(crate) struct Evaluator<'a> {
     /// Per-location dedup: a `(id, url, line, col)` already warned about is not
     /// warned about again (dart-sass collapses identical repeated warnings).
     deprecations_seen: std::collections::HashSet<(&'static str, String, usize, usize)>,
+    /// Small interned ids for source URLs, stamped into [`SrcLines`] so the
+    /// serializer's trailing-comment rule can require same-file adjacency.
+    file_ids: HashMap<String, u32>,
 }
 
 /// One frame of the diagnostic call stack: the call site (file + 1-based
@@ -882,6 +918,7 @@ impl<'a> Evaluator<'a> {
             deprecations_shown: HashMap::default(),
             deprecations_omitted: 0,
             deprecations_seen: std::collections::HashSet::new(),
+            file_ids: HashMap::default(),
             scopes: vec![new_scope()],
             // The global scope is treated as semi-global so a top-level control
             // flow scope (its child) becomes semi-global too.
@@ -926,6 +963,19 @@ impl<'a> Evaluator<'a> {
             config_id_counter: std::cell::Cell::new(0),
             consumed_config: Vec::new(),
         }
+    }
+
+    /// Intern the current file's diagnostics URL as a small id for SrcLines.
+    /// Parser-produced lines (`file == 0`) become "this file"; a default
+    /// (all-zero) value stays disabled.
+    fn stamp(&mut self, mut lines: SrcLines) -> SrcLines {
+        if lines == SrcLines::default() {
+            return lines;
+        }
+        let next = self.file_ids.len() as u32 + 1;
+        let id = *self.file_ids.entry(self.current_url.clone()).or_insert(next);
+        lines.file = id;
+        lines
     }
 
     pub(crate) fn eval_sheet(&mut self, sheet: &Stylesheet, out: &mut Vec<OutNode>) -> Result<(), Error> {
@@ -2109,7 +2159,7 @@ impl<'a> Evaluator<'a> {
         for stmt in stmts {
             match stmt {
                 Stmt::VarDecl(v) => self.apply_var(v)?,
-                Stmt::Comment(_) => {}
+                Stmt::Comment(..) => {}
                 Stmt::Return(e) => return Ok(Some(self.eval_expr(e)?)),
                 Stmt::FunctionDef(c) => {
                     let captured = self.capture_callable(c);
@@ -3194,15 +3244,22 @@ impl<'a> Evaluator<'a> {
                             selectors,
                             linebreaks: Vec::new(),
                             items,
+                            lines: self.stamp(SrcLines {
+                                file: 0,
+                                start: r.brace_line,
+                                end: r.end_line,
+                                col: 0,
+                            }),
                         });
                     }
                     for node in bubbled {
                         sink.push_at_rule(node);
                     }
                 }
-                Stmt::Comment(c) => {
+                Stmt::Comment(c, lines) => {
                     let text = self.eval_template(c)?;
-                    sink.push_at_rule(OutNode::Comment(text));
+                    let lines = self.stamp(*lines);
+                    sink.push_at_rule(OutNode::Comment(text, lines));
                 }
                 // A plain CSS file never inlines an `@import`; every entry is
                 // emitted verbatim (`@import "x";` / `@import url(x);`), matching
@@ -3226,6 +3283,7 @@ impl<'a> Evaluator<'a> {
                             prelude,
                             body: out_body,
                             has_block: true,
+                            lines: SrcLines::default(),
                         });
                     }
                 }
@@ -3238,17 +3296,25 @@ impl<'a> Evaluator<'a> {
                             prelude,
                             body: out_body,
                             has_block: true,
+                            lines: SrcLines::default(),
                         });
                     }
                 }
-                Stmt::AtRule { name, prelude, body } => {
+                Stmt::AtRule {
+                    name,
+                    prelude,
+                    body,
+                    lines,
+                } => {
                     let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let lines = self.stamp(*lines);
                     match body {
                         None => sink.push_at_rule(OutNode::AtRule {
                             name: name.clone(),
                             prelude: prelude_s,
                             body: Vec::new(),
                             has_block: false,
+                            lines,
                         }),
                         Some(b) => {
                             let out_body = self.css_at_body(b)?;
@@ -3257,18 +3323,26 @@ impl<'a> Evaluator<'a> {
                                 prelude: prelude_s,
                                 body: out_body,
                                 has_block: true,
+                                lines,
                             });
                         }
                     }
                 }
-                Stmt::Keyframes { name, prelude, body } => {
+                Stmt::Keyframes {
+                    name,
+                    prelude,
+                    body,
+                    lines,
+                } => {
                     let prelude_s = self.eval_template(prelude)?.trim().to_string();
                     let out_body = self.css_at_body(body)?;
+                    let lines = self.stamp(*lines);
                     sink.push_at_rule(OutNode::AtRule {
                         name: name.clone(),
                         prelude: prelude_s,
                         body: out_body,
                         has_block: true,
+                        lines,
                     });
                 }
                 // A plain-CSS custom `@function --x` is emitted verbatim, same
@@ -3297,6 +3371,12 @@ impl<'a> Evaluator<'a> {
                             selectors,
                             linebreaks: Vec::new(),
                             items,
+                            lines: self.stamp(SrcLines {
+                                file: 0,
+                                start: r.brace_line,
+                                end: r.end_line,
+                                col: 0,
+                            }),
                         });
                     }
                     out.extend(bubbled);
@@ -3309,6 +3389,12 @@ impl<'a> Evaluator<'a> {
                         value,
                         important: d.important,
                         custom: false,
+                        lines: self.stamp(SrcLines {
+                            file: 0,
+                            start: d.pos.line as u32,
+                            end: d.end_line,
+                            col: 0,
+                        }),
                     });
                 }
                 Stmt::CustomDecl(d) => {
@@ -3319,11 +3405,18 @@ impl<'a> Evaluator<'a> {
                         value,
                         important: false,
                         custom: true,
+                        lines: self.stamp(SrcLines {
+                            file: 0,
+                            start: d.pos.line as u32,
+                            end: d.end_line,
+                            col: 0,
+                        }),
                     });
                 }
-                Stmt::Comment(c) => {
+                Stmt::Comment(c, lines) => {
                     let text = self.eval_template(c)?;
-                    out.push(OutNode::Comment(text));
+                    let lines = self.stamp(*lines);
+                    out.push(OutNode::Comment(text, lines));
                 }
                 Stmt::Media { query, body } => {
                     let queries = self.resolve_media_queries(query)?;
@@ -3335,6 +3428,7 @@ impl<'a> Evaluator<'a> {
                             prelude,
                             body: inner,
                             has_block: true,
+                            lines: SrcLines::default(),
                         });
                     }
                 }
@@ -3347,17 +3441,25 @@ impl<'a> Evaluator<'a> {
                             prelude,
                             body: inner,
                             has_block: true,
+                            lines: SrcLines::default(),
                         });
                     }
                 }
-                Stmt::AtRule { name, prelude, body } => {
+                Stmt::AtRule {
+                    name,
+                    prelude,
+                    body,
+                    lines,
+                } => {
                     let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let lines = self.stamp(*lines);
                     match body {
                         None => out.push(OutNode::AtRule {
                             name: name.clone(),
                             prelude: prelude_s,
                             body: Vec::new(),
                             has_block: false,
+                            lines,
                         }),
                         Some(b) => {
                             let inner = self.css_at_body(b)?;
@@ -3366,6 +3468,7 @@ impl<'a> Evaluator<'a> {
                                 prelude: prelude_s,
                                 body: inner,
                                 has_block: true,
+                                lines,
                             });
                         }
                     }
@@ -3409,8 +3512,10 @@ impl<'a> Evaluator<'a> {
                     selectors: parent_selectors.to_vec(),
                     linebreaks: Vec::new(),
                     items: inner,
+                    lines: SrcLines::default(),
                 }],
                 has_block: true,
+                lines: SrcLines::default(),
             });
         };
         for stmt in stmts {
@@ -3430,6 +3535,7 @@ impl<'a> Evaluator<'a> {
                     name,
                     prelude,
                     body: Some(b),
+                    ..
                 } => {
                     let prelude_s = self.eval_template(prelude)?.trim().to_string();
                     let inner = self.css_body(b)?;
@@ -3482,6 +3588,12 @@ impl<'a> Evaluator<'a> {
                     value,
                     important: d.important,
                     custom: false,
+                    lines: self.stamp(SrcLines {
+                        file: 0,
+                        start: d.pos.line as u32,
+                        end: d.end_line,
+                        col: 0,
+                    }),
                 });
             }
             Stmt::CustomDecl(d) => {
@@ -3492,6 +3604,12 @@ impl<'a> Evaluator<'a> {
                     value,
                     important: false,
                     custom: true,
+                    lines: self.stamp(SrcLines {
+                        file: 0,
+                        start: d.pos.line as u32,
+                        end: d.end_line,
+                        col: 0,
+                    }),
                 });
             }
             Stmt::Rule(r) => {
@@ -3506,9 +3624,10 @@ impl<'a> Evaluator<'a> {
                     });
                 }
             }
-            Stmt::Comment(c) => {
+            Stmt::Comment(c, lines) => {
                 let text = self.eval_template(c)?;
-                items.push(OutItem::Comment(text));
+                let lines = self.stamp(*lines);
+                items.push(OutItem::Comment(text, lines));
             }
             // A nested `@import` inside a plain-CSS rule is preserved
             // verbatim, like a top-level one (see `exec_css`).
@@ -3521,6 +3640,7 @@ impl<'a> Evaluator<'a> {
                     items.push(OutItem::ChildlessAtRule {
                         name: "import".to_string(),
                         prelude,
+                        lines: SrcLines::default(),
                     });
                 }
             }
@@ -3547,13 +3667,22 @@ impl<'a> Evaluator<'a> {
                     });
                 }
             }
-            Stmt::AtRule { name, prelude, body } => {
+            Stmt::AtRule {
+                name,
+                prelude,
+                body,
+                lines,
+            } => {
                 let prelude_s = self.eval_template(prelude)?.trim().to_string();
                 match body {
-                    None => items.push(OutItem::ChildlessAtRule {
-                        name: name.clone(),
-                        prelude: prelude_s,
-                    }),
+                    None => {
+                        let lines = self.stamp(*lines);
+                        items.push(OutItem::ChildlessAtRule {
+                            name: name.clone(),
+                            prelude: prelude_s,
+                            lines,
+                        });
+                    }
                     Some(b) => {
                         let inner = self.css_body(b)?;
                         if !inner.is_empty() {
@@ -4012,9 +4141,10 @@ impl<'a> Evaluator<'a> {
         for stmt in stmts {
             match stmt {
                 Stmt::VarDecl(v) => self.apply_var(v)?,
-                Stmt::Comment(c) => {
+                Stmt::Comment(c, lines) => {
                     let text = self.eval_template(c)?;
-                    sink.push_comment(text);
+                    let lines = self.stamp(*lines);
+                    sink.push_comment(text, lines);
                 }
                 Stmt::Decl(d) => {
                     if sink.is_top() {
@@ -4192,8 +4322,14 @@ impl<'a> Evaluator<'a> {
                     result?;
                 }
                 Stmt::Import(args) => self.eval_imports(args, parents, sink)?,
-                Stmt::AtRule { name, prelude, body } => {
-                    self.eval_at_rule(name, prelude, body.as_deref(), parents, sink)?;
+                Stmt::AtRule {
+                    name,
+                    prelude,
+                    body,
+                    lines,
+                } => {
+                    let lines = self.stamp(*lines);
+                    self.eval_at_rule(name, prelude, body.as_deref(), lines, parents, sink)?;
                 }
                 Stmt::InterpAtRule { name, prelude, body } => {
                     // The name resolves at eval time; `@keyframes` is the one
@@ -4201,10 +4337,17 @@ impl<'a> Evaluator<'a> {
                     let resolved = self.eval_template(name)?;
                     if is_keyframes_name(&resolved) && body.is_some() {
                         if let Some(b) = body {
-                            self.eval_keyframes(&resolved, prelude, b, sink)?;
+                            self.eval_keyframes(&resolved, prelude, b, SrcLines::default(), sink)?;
                         }
                     } else {
-                        self.eval_at_rule(&resolved, prelude, body.as_deref(), parents, sink)?;
+                        self.eval_at_rule(
+                            &resolved,
+                            prelude,
+                            body.as_deref(),
+                            SrcLines::default(),
+                            parents,
+                            sink,
+                        )?;
                     }
                 }
                 Stmt::CssCustomAtRule { name, prelude, body } => {
@@ -4219,8 +4362,14 @@ impl<'a> Evaluator<'a> {
                 Stmt::AtRoot { query, body } => {
                     self.eval_at_root(query.as_deref(), body, parents, sink)?;
                 }
-                Stmt::Keyframes { name, prelude, body } => {
-                    self.eval_keyframes(name, prelude, body, sink)?;
+                Stmt::Keyframes {
+                    name,
+                    prelude,
+                    body,
+                    lines,
+                } => {
+                    let lines = self.stamp(*lines);
+                    self.eval_keyframes(name, prelude, body, lines, sink)?;
                 }
                 Stmt::Extend {
                     selector,
@@ -4324,12 +4473,19 @@ impl<'a> Evaluator<'a> {
         // Entering a style rule re-enables the implicit parent join for
         // anything nested below it (dart resets _atRootExcludingStyleRule).
         let prev_at_root = std::mem::replace(&mut self.at_root_excluding_style_rule, false);
+        let rule_lines = self.stamp(SrcLines {
+            file: 0,
+            start: rule.brace_line,
+            end: rule.end_line,
+            col: 0,
+        });
         let mut items: Vec<OutItem> = Vec::new();
         let mut nested: Vec<OutNode> = Vec::new();
         let result = {
             let mut child = Sink::Rule {
                 selectors: &emit_selectors,
                 linebreaks: &emit_linebreaks,
+                lines: rule_lines,
                 items: &mut items,
                 nested: &mut nested,
             };
@@ -4359,6 +4515,7 @@ impl<'a> Evaluator<'a> {
         name: &str,
         prelude: &[TplPiece],
         body: Option<&[Stmt]>,
+        lines: SrcLines,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -4369,7 +4526,7 @@ impl<'a> Evaluator<'a> {
             if name == "charset" && !sink.is_rule() {
                 return Ok(());
             }
-            sink.push_childless_at_rule(name.to_string(), prelude);
+            sink.push_childless_at_rule(name.to_string(), prelude, lines);
             return Ok(());
         };
         // `@font-face` (exactly, case-sensitively, unprefixed) holds plain
@@ -4391,6 +4548,7 @@ impl<'a> Evaluator<'a> {
             prelude,
             body: out_body,
             has_block: true,
+            lines,
         });
         Ok(())
     }
@@ -4435,6 +4593,7 @@ impl<'a> Evaluator<'a> {
             prelude,
             body: out_body,
             has_block: true,
+            lines: SrcLines::default(),
         });
         Ok(())
     }
@@ -4455,6 +4614,9 @@ impl<'a> Evaluator<'a> {
                 let mut child = Sink::Rule {
                     selectors: parents,
                     linebreaks: &[],
+                    // No source rule of its own (the wrap re-uses the enclosing
+                    // selectors); the trailing-comment rule stays disabled.
+                    lines: SrcLines::default(),
                     items: &mut items,
                     nested: &mut nested,
                 };
@@ -4558,6 +4720,7 @@ impl<'a> Evaluator<'a> {
                     prelude: prelude.to_string(),
                     body: std::mem::take(segment),
                     has_block: true,
+                    lines: SrcLines::default(),
                 });
             }
         };
@@ -4754,6 +4917,7 @@ impl<'a> Evaluator<'a> {
                     prelude: prelude.clone(),
                     body: std::mem::take(segment),
                     has_block: true,
+                    lines: SrcLines::default(),
                 });
             }
         };
@@ -4909,6 +5073,7 @@ impl<'a> Evaluator<'a> {
         name: &str,
         prelude: &[TplPiece],
         body: &[Stmt],
+        lines: SrcLines,
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         // A style rule nested inside a keyframe block is invalid; each frame
@@ -4958,6 +5123,7 @@ impl<'a> Evaluator<'a> {
             prelude,
             body: shell,
             has_block: true,
+            lines,
         });
         for n in after {
             sink.push_at_rule(n);
@@ -5040,6 +5206,7 @@ impl<'a> Evaluator<'a> {
                         selectors: parents.to_vec(),
                         linebreaks: Vec::new(),
                         items: std::mem::take(decls),
+                        lines: SrcLines::default(),
                     });
                 }
             };
@@ -5050,11 +5217,13 @@ impl<'a> Evaluator<'a> {
                         value,
                         important,
                         custom,
+                        lines,
                     } => decls.push(OutItem::Decl {
                         prop,
                         value,
                         important,
                         custom,
+                        lines,
                     }),
                     other => {
                         flush(&mut decls, &mut wrapped);
@@ -5153,6 +5322,12 @@ impl<'a> Evaluator<'a> {
             value: vstr,
             important: d.important,
             custom: false,
+            lines: self.stamp(SrcLines {
+                file: 0,
+                start: d.pos.line as u32,
+                end: d.end_line,
+                col: 0,
+            }),
         }))
     }
 
@@ -5168,6 +5343,12 @@ impl<'a> Evaluator<'a> {
             value,
             important: false,
             custom: true,
+            lines: self.stamp(SrcLines {
+                file: 0,
+                start: d.pos.line as u32,
+                end: d.end_line,
+                col: 0,
+            }),
         }))
     }
 
@@ -5210,6 +5391,9 @@ impl<'a> Evaluator<'a> {
                     value: vstr,
                     important: ps.important,
                     custom: false,
+                    // No usable end line of its own (the value precedes the
+                    // `{…}` block); the trailing-comment rule stays disabled.
+                    lines: SrcLines::default(),
                 });
             }
         }
@@ -7626,6 +7810,7 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
                 selectors,
                 linebreaks: _,
                 items,
+                lines,
             } => OutNode::Rule {
                 selectors: parents
                     .iter()
@@ -7633,17 +7818,20 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
                     .collect(),
                 linebreaks: Vec::new(),
                 items,
+                lines,
             },
             OutNode::AtRule {
                 name,
                 prelude,
                 body,
                 has_block,
+                lines,
             } => OutNode::AtRule {
                 name,
                 prelude,
                 body: reparent_nodes(body, parents),
                 has_block,
+                lines,
             },
             other => other,
         })
@@ -8398,7 +8586,7 @@ fn hoist_css_imports(out: &mut Vec<OutNode>) {
                         return true;
                     }
                 }
-                OutNode::Blank | OutNode::Comment(_) => {}
+                OutNode::Blank | OutNode::Comment(..) => {}
                 _ => *seen_css = true,
             }
         }
@@ -8509,7 +8697,7 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     // tight against them. A blank line is only inserted after a style rule (or
     // top-level declaration) that already emitted CSS.
     let prev_packs_tight = match last_eff {
-        Some(OutNode::AtRule { .. } | OutNode::Comment(_)) => true,
+        Some(OutNode::AtRule { .. } | OutNode::Comment(..)) => true,
         Some(OutNode::Raw(s)) => s != STYLE_GROUP_END,
         _ => false,
     };
@@ -8770,18 +8958,21 @@ impl AtCtx {
                 prelude: prelude.clone(),
                 body,
                 has_block: true,
+                lines: SrcLines::default(),
             },
             AtCtx::Supports { prelude } => OutNode::AtRule {
                 name: "supports".to_string(),
                 prelude: prelude.clone(),
                 body,
                 has_block: true,
+                lines: SrcLines::default(),
             },
             AtCtx::Keyframes { name, prelude } => OutNode::AtRule {
                 name: name.clone(),
                 prelude: prelude.clone(),
                 body,
                 has_block: true,
+                lines: SrcLines::default(),
             },
         }
     }
@@ -8872,13 +9063,15 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
                 value,
                 important,
                 custom,
+                lines,
             } => items.push(OutItem::Decl {
                 prop,
                 value,
                 important,
                 custom,
+                lines,
             }),
-            OutNode::Comment(t) => items.push(OutItem::Comment(t)),
+            OutNode::Comment(t, lines) => items.push(OutItem::Comment(t, lines)),
             OutNode::Rule {
                 selectors, items: ri, ..
             } => items.push(OutItem::NestedRule { selectors, items: ri }),
@@ -8887,6 +9080,7 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
                 prelude,
                 body,
                 has_block,
+                lines,
             } => {
                 if has_block {
                     items.push(OutItem::NestedAtRule {
@@ -8895,7 +9089,7 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
                         items: at_body_to_items(body),
                     });
                 } else {
-                    items.push(OutItem::ChildlessAtRule { name, prelude });
+                    items.push(OutItem::ChildlessAtRule { name, prelude, lines });
                 }
             }
             OutNode::ModuleScope { nodes, .. } => items.extend(at_body_to_items(nodes)),

@@ -1,5 +1,6 @@
 //! Serialize the flattened output tree to CSS.
 
+use crate::ast::SrcLines;
 use crate::eval::{OutItem, OutNode};
 use crate::OutputStyle;
 
@@ -22,11 +23,61 @@ pub(crate) fn emit(nodes: &[OutNode], style: OutputStyle) -> String {
 
 fn emit_expanded(nodes: &[OutNode]) -> String {
     let mut out = String::new();
-    let mut prev = Prev::None;
+    let mut prev = SrcLines::default();
     for node in nodes {
         emit_node_expanded(&mut out, node, 0, &mut prev);
     }
     out
+}
+
+/// dart `_isTrailingComment` (expanded style only): a comment joins the
+/// previous line when it starts on the line the previous construct ended —
+/// or, for a block's first child, on the parent's opening-brace line — and
+/// both come from the same source file. `prev.end` always holds the
+/// comparison line; a zero file id disables the rule.
+///
+/// A `previous` whose span is IDENTICAL to the comment's is a clone of the
+/// same comment (the same file imported twice): dart's span-containment
+/// branch then walks back for a `{`, finds `searchFrom < 0`, and rejects it.
+fn is_trailing(comment: SrcLines, prev: SrcLines) -> bool {
+    comment.file != 0 && comment.file == prev.file && comment.start == prev.end && comment != prev
+}
+
+/// The previous-sibling seed for a block's children: the first child compares
+/// against the block's opening-brace line (dart walks back to the `{`).
+fn block_start(lines: SrcLines) -> SrcLines {
+    SrcLines {
+        file: lines.file,
+        start: lines.start,
+        end: lines.start,
+        col: 0,
+    }
+}
+
+/// Append a trailing comment to the line already in `out`: drop the pending
+/// newline(s) — at the root a group blank line may sit between — then write
+/// ` /*…*/` with continuation lines at indentation 0 (dart saves and zeroes
+/// `_indentation` for trailing comments).
+fn push_trailing_comment(out: &mut String, text: &str) {
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out.push_str(" /*");
+    push_comment_text(out, text, "");
+    out.push_str("*/\n");
+}
+
+/// Close an expanded block opened with `" {\n"`. When its only child was a
+/// trailing comment the whole block stays on one line (dart: ` }`, e.g.
+/// `@font-face { /**/ }`); otherwise the `}` gets its own indented line.
+fn close_block(out: &mut String, indent: &str, children: usize, last_joined: bool) {
+    if children == 1 && last_joined {
+        out.pop(); // the trailing comment's newline
+        out.push_str(" }\n");
+    } else {
+        out.push_str(indent);
+        out.push_str("}\n");
+    }
 }
 
 /// Indentation for a nesting depth (two spaces per level) without allocating:
@@ -41,32 +92,29 @@ fn indent_for(depth: usize) -> std::borrow::Cow<'static, str> {
     }
 }
 
-/// What the previously-emitted sibling was, for blank-line gating: dart-sass
-/// only emits a blank line after a completed *style rule* (`isGroupEnd`), so
-/// a Blank whose previous sibling is anything else is dropped.
-#[derive(Clone, Copy, PartialEq)]
-enum Prev {
-    None,
-    Rule,
-    Other,
-}
-
 /// Render one node at the given nesting `depth` (0 = document root). Each
-/// extra level adds two spaces of indentation.
-fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut Prev) {
+/// extra level adds two spaces of indentation. `prev` carries the previous
+/// sibling's source lines for the trailing-comment rule (its `end` is the
+/// comparison line); returns whether THIS node was emitted as a trailing
+/// comment joined onto the previous line.
+fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut SrcLines) -> bool {
     let indent = indent_for(depth);
     let indent = indent.as_ref();
     match node {
-        // A module-scope wrapper is transparent: emit its contents in place.
+        // A module-scope wrapper is transparent: emit its contents in place
+        // (the previous-sibling line state flows through the boundary).
         OutNode::ModuleScope { nodes, .. } => {
+            let mut joined = false;
             for n in nodes {
-                emit_node_expanded(out, n, depth, prev);
+                joined = emit_node_expanded(out, n, depth, prev);
             }
+            return joined;
         }
         OutNode::Rule {
             selectors,
             linebreaks,
             items,
+            lines,
         } => {
             out.push_str(indent);
             // A complex selector flagged with a source line break starts on its
@@ -84,51 +132,62 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
                 out.push_str(sel);
             }
             out.push_str(" {\n");
+            let mut inner = block_start(*lines);
+            let mut joined = false;
             for item in items {
-                emit_item_expanded(out, item, depth + 1);
+                joined = emit_item_expanded(out, item, depth + 1, &mut inner);
             }
-            out.push_str(indent);
-            out.push_str("}\n");
-            *prev = Prev::Rule;
+            close_block(out, indent, items.len(), joined);
+            *prev = *lines;
         }
-        OutNode::Comment(text) => {
+        OutNode::Comment(text, lines) => {
+            if is_trailing(*lines, *prev) {
+                push_trailing_comment(out, text);
+                *prev = *lines;
+                return true;
+            }
             out.push_str(indent);
             out.push_str("/*");
             push_comment_text(out, text, indent);
             out.push_str("*/\n");
-            *prev = Prev::Other;
+            *prev = *lines;
         }
         OutNode::Raw(s) => {
-            // Internal sentinels (style-group-end) never reach the output.
+            // Internal sentinels (style-group-end) never reach the output —
+            // and don't disturb the previous-sibling line state.
             if s.starts_with('\u{0}') {
-                return;
+                return false;
             }
             out.push_str(indent);
             out.push_str(s);
             out.push('\n');
-            *prev = Prev::Other;
+            *prev = SrcLines::default();
         }
         OutNode::Blank => {
+            // A synthetic group separator: dart has no such node, so it leaves
+            // the previous-sibling line state alone (a trailing comment after
+            // it joins across, swallowing the blank like dart does).
             out.push('\n');
-            *prev = Prev::Other;
         }
         OutNode::AtDecl {
             prop,
             value,
             important,
             custom,
+            lines,
         } => {
             out.push_str(indent);
             out.push_str(prop);
             emit_decl_value_expanded(out, value, *important, *custom, depth);
             out.push_str(";\n");
-            *prev = Prev::Other;
+            *prev = *lines;
         }
         OutNode::AtRule {
             name,
             prelude,
             body,
             has_block,
+            lines,
         } => {
             out.push_str(indent);
             out.push('@');
@@ -137,27 +196,37 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
                 out.push(' ');
                 out.push_str(prelude);
             }
-            *prev = Prev::Other;
+            *prev = *lines;
             if !has_block {
                 out.push_str(";\n");
-                return;
+                return false;
             }
             if body.is_empty() {
                 out.push_str(" {}\n");
-                return;
+                return false;
             }
             out.push_str(" {\n");
-            let mut inner = Prev::None;
+            let mut inner = block_start(*lines);
+            let mut children = 0usize;
+            let mut joined = false;
             for child in body {
-                emit_node_expanded(out, child, depth + 1, &mut inner);
+                let before = out.len();
+                let j = emit_node_expanded(out, child, depth + 1, &mut inner);
+                // Sentinels emit nothing and don't count as children.
+                if out.len() > before {
+                    children += 1;
+                    joined = j;
+                }
             }
-            out.push_str(indent);
-            out.push_str("}\n");
+            close_block(out, indent, children, joined);
         }
     }
+    false
 }
 
-fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
+/// Render one rule-block item; same `prev`/return contract as
+/// [`emit_node_expanded`].
+fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize, prev: &mut SrcLines) -> bool {
     let indent = indent_for(depth);
     let indent = indent.as_ref();
     match item {
@@ -166,19 +235,27 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
             value,
             important,
             custom,
+            lines,
         } => {
             out.push_str(indent);
             out.push_str(prop);
             emit_decl_value_expanded(out, value, *important, *custom, depth);
             out.push_str(";\n");
+            *prev = *lines;
         }
-        OutItem::Comment(text) => {
+        OutItem::Comment(text, lines) => {
+            if is_trailing(*lines, *prev) {
+                push_trailing_comment(out, text);
+                *prev = *lines;
+                return true;
+            }
             out.push_str(indent);
             out.push_str("/*");
             push_comment_text(out, text, indent);
             out.push_str("*/\n");
+            *prev = *lines;
         }
-        OutItem::ChildlessAtRule { name, prelude } => {
+        OutItem::ChildlessAtRule { name, prelude, lines } => {
             out.push_str(indent);
             out.push('@');
             out.push_str(name);
@@ -187,16 +264,19 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
                 out.push_str(prelude);
             }
             out.push_str(";\n");
+            *prev = *lines;
         }
         OutItem::NestedRule { selectors, items } => {
             out.push_str(indent);
             out.push_str(&selectors.join(", "));
             out.push_str(" {\n");
+            let mut inner = SrcLines::default();
+            let mut joined = false;
             for child in items {
-                emit_item_expanded(out, child, depth + 1);
+                joined = emit_item_expanded(out, child, depth + 1, &mut inner);
             }
-            out.push_str(indent);
-            out.push_str("}\n");
+            close_block(out, indent, items.len(), joined);
+            *prev = SrcLines::default();
         }
         OutItem::NestedAtRule { name, prelude, items } => {
             out.push_str(indent);
@@ -207,13 +287,16 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize) {
                 out.push_str(prelude);
             }
             out.push_str(" {\n");
+            let mut inner = SrcLines::default();
+            let mut joined = false;
             for child in items {
-                emit_item_expanded(out, child, depth + 1);
+                joined = emit_item_expanded(out, child, depth + 1, &mut inner);
             }
-            out.push_str(indent);
-            out.push_str("}\n");
+            close_block(out, indent, items.len(), joined);
+            *prev = SrcLines::default();
         }
     }
+    false
 }
 
 /// Append the `: value [!important]` portion of an expanded declaration. A
@@ -249,7 +332,7 @@ fn emit_compressed_body(out: &mut String, nodes: &[OutNode]) {
     for node in nodes {
         // Comments and blanks produce no compressed output; don't let them
         // reset the separator state.
-        if matches!(node, OutNode::Comment(_) | OutNode::Blank) {
+        if matches!(node, OutNode::Comment(..) | OutNode::Blank) {
             continue;
         }
         if prev_was_decl {
@@ -271,13 +354,14 @@ fn compressed_nested_rule(selectors: &[String], items: &[OutItem]) -> String {
                 value,
                 important,
                 custom,
+                ..
             } => {
                 let imp = if *important && !*custom { "!important" } else { "" };
                 Some(format!("{prop}:{value}{imp}"))
             }
-            OutItem::Comment(_) => None,
-            OutItem::ChildlessAtRule { name, prelude } if prelude.is_empty() => Some(format!("@{name}")),
-            OutItem::ChildlessAtRule { name, prelude } => Some(format!("@{name} {prelude}")),
+            OutItem::Comment(..) => None,
+            OutItem::ChildlessAtRule { name, prelude, .. } if prelude.is_empty() => Some(format!("@{name}")),
+            OutItem::ChildlessAtRule { name, prelude, .. } => Some(format!("@{name} {prelude}")),
             OutItem::NestedRule { selectors, items } => Some(compressed_nested_rule(selectors, items)),
             OutItem::NestedAtRule { name, prelude, items } => {
                 Some(compressed_nested_at_rule(name, prelude, items))
@@ -310,6 +394,7 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
             selectors,
             linebreaks: _,
             items,
+            ..
         } => {
             let decls: Vec<String> = items
                 .iter()
@@ -319,6 +404,7 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
                         value,
                         important,
                         custom,
+                        ..
                     } => {
                         // A custom property emits its value verbatim (its
                         // leading whitespace is part of `value`) and never gains
@@ -326,8 +412,8 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
                         let imp = if *important && !*custom { "!important" } else { "" };
                         Some(format!("{prop}:{value}{imp}"))
                     }
-                    OutItem::Comment(_) => None,
-                    OutItem::ChildlessAtRule { name, prelude } => {
+                    OutItem::Comment(..) => None,
+                    OutItem::ChildlessAtRule { name, prelude, .. } => {
                         if prelude.is_empty() {
                             Some(format!("@{name}"))
                         } else {
@@ -352,7 +438,7 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
         }
         // Loud comments are dropped in compressed output (the slice does
         // not yet special-case `/*!` important comments).
-        OutNode::Comment(_) => {}
+        OutNode::Comment(..) => {}
         OutNode::Raw(s) => {
             if !s.starts_with('\u{0}') {
                 out.push_str(s)
@@ -364,6 +450,7 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
             value,
             important,
             custom,
+            ..
         } => {
             let imp = if *important && !*custom { "!important" } else { "" };
             out.push_str(prop);
@@ -376,6 +463,7 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
             prelude,
             body,
             has_block,
+            ..
         } => {
             out.push('@');
             out.push_str(name);

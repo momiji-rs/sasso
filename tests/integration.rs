@@ -121,8 +121,10 @@ fn default_and_important_flags() {
 
 #[test]
 fn comments_loud_preserved_silent_dropped() {
+    // A loud comment starting on the line the previous declaration ends joins
+    // that line (dart-sass's trailing-comment serializer rule).
     let out = css("// silent\n.a { color: red; /* inline */ }\n/* trailing */");
-    assert_eq!(out, ".a {\n  color: red;\n  /* inline */\n}\n\n/* trailing */\n");
+    assert_eq!(out, ".a {\n  color: red; /* inline */\n}\n\n/* trailing */\n");
 }
 
 #[test]

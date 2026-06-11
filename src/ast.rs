@@ -13,6 +13,23 @@ pub(crate) struct Stylesheet {
     pub stmts: Vec<Stmt>,
 }
 
+/// 1-based source-line metadata for the serializer's trailing-comment rule
+/// (dart `_isTrailingComment`). `file` is an evaluator-interned source id
+/// (0 = unknown, never trailing).
+#[derive(Clone, Copy, Default, PartialEq)]
+pub(crate) struct SrcLines {
+    pub file: u32,
+    /// A comment's `/*` line; a block's opening-brace line.
+    pub start: u32,
+    /// The construct's last line (closing delimiter / end of value).
+    pub end: u32,
+    /// A comment's 1-based `/*` column (0 elsewhere): two comments with the
+    /// same file/lines/column are span-identical CLONES (the same file
+    /// imported twice), which dart's span-containment branch rejects as
+    /// trailing — distinct same-line comments differ in column and still join.
+    pub col: u32,
+}
+
 /// A statement, valid at the top level or inside a rule body.
 pub(crate) enum Stmt {
     /// `$name: value [!default] [!global];`
@@ -57,8 +74,10 @@ pub(crate) enum Stmt {
         pos: Pos,
     },
     /// `/* ... */` loud comment (inner text, without the delimiters). The body
-    /// is a template so `#{…}` interpolation is resolved at eval time.
-    Comment(Vec<TplPiece>),
+    /// is a template so `#{…}` interpolation is resolved at eval time. The
+    /// [`SrcLines`] carry the comment's source lines (parser fills start/end,
+    /// `file` stays 0 until the evaluator stamps it).
+    Comment(Vec<TplPiece>, SrcLines),
     /// `@if`/`@else if`/`@else` — evaluated top to bottom, first match wins.
     If(Vec<IfBranch>),
     /// `@for $i from A through|to B { … }`.
@@ -112,6 +131,9 @@ pub(crate) enum Stmt {
         name: String,
         prelude: Vec<TplPiece>,
         body: Option<Vec<Stmt>>,
+        /// Source lines: `start` = the `{` line (or the rule's own line for the
+        /// `;` form), `end` = the `}` line (or the same line).
+        lines: SrcLines,
     },
     /// A generic at-rule whose NAME contains interpolation
     /// (`@#{"media"} … {}`): always treated as unknown — no Sass parse-time
@@ -157,6 +179,8 @@ pub(crate) enum Stmt {
         name: String,
         prelude: Vec<TplPiece>,
         body: Vec<Stmt>,
+        /// Source lines: `start` = the `{` line, `end` = the `}` line.
+        lines: SrcLines,
     },
     /// `@extend <selector> [!optional];` — registers an extension of the
     /// enclosing rule onto the target selector. The selector is a template
@@ -275,6 +299,11 @@ pub(crate) struct VarDecl {
 pub(crate) struct Rule {
     pub selector: Vec<TplPiece>,
     pub body: Vec<Stmt>,
+    /// 1-based line of the rule's opening `{` (0 when unavailable), for the
+    /// serializer's trailing-comment rule.
+    pub brace_line: u32,
+    /// 1-based line of the rule's closing `}` (0 when unavailable).
+    pub end_line: u32,
 }
 
 /// One top-level item in a plain-CSS custom `@function`/`@mixin` body. The
@@ -304,6 +333,9 @@ pub(crate) struct Declaration {
     pub value: Expr,
     pub important: bool,
     pub pos: Pos,
+    /// 1-based line where the declaration's value ends (0 when unavailable),
+    /// for the serializer's trailing-comment rule.
+    pub end_line: u32,
 }
 
 /// A custom-property declaration (`--name: value`). The name and the value
@@ -313,6 +345,9 @@ pub(crate) struct CustomDecl {
     pub property: Vec<TplPiece>,
     pub value: Vec<TplPiece>,
     pub pos: Pos,
+    /// 1-based line where the declaration's value ends (0 when unavailable),
+    /// for the serializer's trailing-comment rule.
+    pub end_line: u32,
 }
 
 /// A nested property set: a declaration whose value (which may be empty) is

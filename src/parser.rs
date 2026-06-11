@@ -10,8 +10,8 @@ use std::rc::Rc;
 use crate::ast::{
     BinOp, CallArg, Callable, ConfigEntry, Conjunction, CssCustomItem, CssCustomValue, CustomDecl,
     Declaration, Expr, ForwardMember, IfBranch, IfClause, IfCond, ImportArg, ImportModifier, MediaFeature,
-    MediaInParens, MediaQuery, MediaQueryList, Param, ParamList, PropertySet, Rule, Stmt, Stylesheet,
-    SupportsCondition, SupportsValue, TplPiece, UnOp, VarDecl,
+    MediaInParens, MediaQuery, MediaQueryList, Param, ParamList, PropertySet, Rule, SrcLines, Stmt,
+    Stylesheet, SupportsCondition, SupportsValue, TplPiece, UnOp, VarDecl,
 };
 use crate::error::Error;
 use crate::scanner::{Mark, Pos, Scanner};
@@ -307,7 +307,7 @@ fn is_private_member(name: &str) -> bool {
 /// and `@forward`; everything else means a following `@use` is too late.
 fn stmt_allowed_before_use(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::VarDecl(_) | Stmt::Comment(_) | Stmt::Use { .. } | Stmt::Forward { .. } => true,
+        Stmt::VarDecl(_) | Stmt::Comment(..) | Stmt::Use { .. } | Stmt::Forward { .. } => true,
         Stmt::AtRule { name, .. } => name.eq_ignore_ascii_case("charset"),
         _ => false,
     }
@@ -650,12 +650,22 @@ impl Parser {
                     }
                 }
                 Some('/') if self.sc.peek_at(1) == Some('*') => {
-                    let col0 = self.sc.position().col - 1;
+                    let start = self.sc.position();
+                    let col0 = start.col - 1;
                     self.sc.bump();
                     self.sc.bump();
                     let mut pieces = self.parse_loud_comment_body()?;
                     strip_comment_indent(&mut pieces, col0);
-                    out.push(Stmt::Comment(pieces));
+                    let end_line = self.sc.position().line as u32;
+                    out.push(Stmt::Comment(
+                        pieces,
+                        SrcLines {
+                            file: 0,
+                            start: start.line as u32,
+                            end: end_line,
+                            col: start.col as u32,
+                        },
+                    ));
                 }
                 _ => break,
             }
@@ -819,6 +829,7 @@ impl Parser {
 
     fn parse_rule(&mut self) -> Result<Stmt, Error> {
         let selector = self.parse_template_mode(&['{'], CommentMode::Strip)?;
+        let brace_line = self.sc.position().line as u32;
         if !self.sc.eat('{') {
             return Err(Error::at("expected \"{\"", self.sc.position()));
         }
@@ -829,7 +840,13 @@ impl Parser {
         if !self.sc.eat('}') {
             return Err(Error::at("expected \"}\"", self.sc.position()));
         }
-        Ok(Stmt::Rule(Rule { selector, body }))
+        let end_line = self.sc.position().line as u32;
+        Ok(Stmt::Rule(Rule {
+            selector,
+            body,
+            brace_line,
+            end_line,
+        }))
     }
 
     fn parse_declaration(&mut self) -> Result<Stmt, Error> {
@@ -860,8 +877,14 @@ impl Parser {
         // never a nested property set.
         if property_is_literal_custom(&property) {
             let value = self.parse_custom_property_value()?;
+            let end_line = self.sc.position().line as u32;
             self.sc.eat(';');
-            return Ok(Stmt::CustomDecl(CustomDecl { property, value, pos }));
+            return Ok(Stmt::CustomDecl(CustomDecl {
+                property,
+                value,
+                pos,
+                end_line,
+            }));
         }
         let ws_after_colon = self.skip_ws_inline();
         // Bare nested property set: `prop: { … }` / `prop:{ … }` (no value).
@@ -876,6 +899,10 @@ impl Parser {
             }));
         }
         let value = self.parse_value()?;
+        // The line where the declaration's span ends, for the serializer's
+        // trailing-comment rule — captured before whitespace is skipped (an
+        // `!important` flag extends the span).
+        let mut end_line = self.sc.position().line as u32;
         let mut important = false;
         self.skip_ws_inline();
         if self.sc.peek() == Some('!') {
@@ -889,6 +916,7 @@ impl Parser {
                 return Err(Error::at("Expected \"important\".", flag_pos));
             }
             important = true;
+            end_line = self.sc.position().line as u32;
         }
         // Value-plus-block nested property set: `prop: value [!important] { … }`.
         // Only a value separated from the colon by whitespace (or comment)
@@ -915,6 +943,7 @@ impl Parser {
             value,
             important,
             pos,
+            end_line,
         }))
     }
 
@@ -2391,10 +2420,15 @@ impl Parser {
             None
         } else {
             let selector = self.parse_template(&['{'])?;
-            let body = self.parse_braced_body()?;
+            let (body, lines) = self.parse_braced_body_lines()?;
             return Ok(Stmt::AtRoot {
                 query: None,
-                body: vec![Stmt::Rule(Rule { selector, body })],
+                body: vec![Stmt::Rule(Rule {
+                    selector,
+                    body,
+                    brace_line: lines.start,
+                    end_line: lines.end,
+                })],
             });
         };
         let body = self.parse_braced_body()?;
@@ -2408,8 +2442,13 @@ impl Parser {
     fn parse_keyframes(&mut self, name: String) -> Result<Stmt, Error> {
         self.skip_ws_inline();
         let prelude = trim_prelude(self.parse_template(&['{'])?);
-        let body = self.parse_braced_body()?;
-        Ok(Stmt::Keyframes { name, prelude, body })
+        let (body, lines) = self.parse_braced_body_lines()?;
+        Ok(Stmt::Keyframes {
+            name,
+            prelude,
+            body,
+            lines,
+        })
     }
 
     /// Parse a generic/unknown at-rule: `@name <prelude up to { ; or }>` then
@@ -2466,13 +2505,29 @@ impl Parser {
         let prelude = self.parse_template_mode(&['{', ';', '}'], comment_mode)?;
         let prelude = trim_prelude(prelude);
         self.skip_ws_inline();
-        let body = if self.sc.peek() == Some('{') {
-            Some(self.parse_braced_body()?)
+        let (body, lines) = if self.sc.peek() == Some('{') {
+            let (body, lines) = self.parse_braced_body_lines()?;
+            (Some(body), lines)
         } else {
             self.sc.eat(';');
-            None
+            // The `;` form: the statement starts and ends on the `;` line.
+            let line = self.sc.position().line as u32;
+            (
+                None,
+                SrcLines {
+                    file: 0,
+                    start: line,
+                    end: line,
+                    col: 0,
+                },
+            )
         };
-        Ok(Stmt::AtRule { name, prelude, body })
+        Ok(Stmt::AtRule {
+            name,
+            prelude,
+            body,
+            lines,
+        })
     }
 
     // ---- @media -----------------------------------------------------
@@ -3545,7 +3600,14 @@ impl Parser {
 
     /// Parse a `{ … }` statement block.
     fn parse_braced_body(&mut self) -> Result<Vec<Stmt>, Error> {
+        Ok(self.parse_braced_body_lines()?.0)
+    }
+
+    /// Parse a `{ … }` statement block, also reporting the `{`/`}` source
+    /// lines (for the serializer's trailing-comment rule; `file` stays 0).
+    fn parse_braced_body_lines(&mut self) -> Result<(Vec<Stmt>, SrcLines), Error> {
         self.skip_ws_inline();
+        let brace_line = self.sc.position().line as u32;
         if !self.sc.eat('{') {
             return Err(Error::at("expected \"{\"", self.sc.position()));
         }
@@ -3556,7 +3618,13 @@ impl Parser {
         if !self.sc.eat('}') {
             return Err(Error::at("expected \"}\"", self.sc.position()));
         }
-        Ok(body)
+        let lines = SrcLines {
+            file: 0,
+            start: brace_line,
+            end: self.sc.position().line as u32,
+            col: 0,
+        };
+        Ok((body, lines))
     }
 
     /// Parse an interpolated template (selector or property name) up to,

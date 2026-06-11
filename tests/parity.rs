@@ -7075,3 +7075,19 @@ fn content_block_runs_in_child_scope() {
         "foo {\n  g: global;\n  r: inner;\n}\n"
     );
 }
+
+#[test]
+fn trailing_comments_join_previous_line() {
+    // dart's trailing-comment serializer rule: a loud comment starting on the
+    // line the previous construct ended joins that line with a single space.
+    assert_eq!(ours("a {b: {c: d} /**/}\n"), "a {\n  b-c: d; /**/\n}\n");
+    // A block whose ONLY child is a trailing comment stays on one line, with
+    // ` }` on the same line (the comment compares against the `{` line).
+    assert_eq!(ours("a {\n  @font-face {/**/}\n}\n"), "@font-face { /**/ }\n");
+    assert_eq!(ours("a {\n  @keyframes {/**/}\n}\n"), "@keyframes { /**/ }\n");
+    // A comment on its own source line keeps its own indented output line.
+    assert_eq!(
+        ours("a {\n  b: c;\n  /* own line */\n}\n"),
+        "a {\n  b: c;\n  /* own line */\n}\n"
+    );
+}
