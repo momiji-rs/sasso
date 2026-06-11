@@ -2450,6 +2450,11 @@ impl Parser {
         } else if self.sc.peek() == Some('{') {
             None
         } else {
+            // The shorthand prelude is a SELECTOR; an at-rule there is
+            // dart's "expected selector." (issue_238764 `@at-root @bar`).
+            if self.sc.peek() == Some('@') {
+                return Err(Error::at("expected selector.", self.sc.position()));
+            }
             let selector = self.parse_template(&['{'])?;
             let (body, lines) = self.parse_braced_body_lines()?;
             return Ok(Stmt::AtRoot {

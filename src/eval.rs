@@ -10167,7 +10167,7 @@ fn split_commas(s: &str) -> Vec<&str> {
 /// selector appearing mid-compound (`[a]b`, `:not(.x)b`) is joined to the
 /// preceding simple with a descendant combinator (`[a] b`), matching
 /// dart-sass's `[adjacent-compounds]` normalization.
-fn normalize_selector(s: &str) -> String {
+pub(crate) fn normalize_selector(s: &str) -> String {
     // Fast path: already-canonical selectors skip the two char-vector
     // materializations below. Equivalence was proven by a check build that
     // asserted fast == slow on every call across the full sass-spec suite.
