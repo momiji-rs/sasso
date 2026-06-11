@@ -959,7 +959,7 @@ impl Parser {
             self.sc.eat('.');
         }
         self.sc.bump(); // '$'
-        let name = self.read_ident_name()?;
+        let name = self.read_variable_name()?;
         self.skip_ws_inline();
         if !self.sc.eat(':') {
             return Err(Error::at(
@@ -1264,7 +1264,7 @@ impl Parser {
                 return Err(Error::at("expected \"$\".", entry_pos));
             }
             self.sc.bump();
-            let name = self.read_ident_name()?;
+            let name = self.read_variable_name()?;
             self.skip_ws_trivia();
             if !self.sc.eat(':') {
                 return Err(Error::at("expected \":\".", self.sc.position()));
@@ -1311,7 +1311,7 @@ impl Parser {
             self.skip_ws_trivia();
             if self.sc.peek() == Some('$') {
                 self.sc.bump();
-                let name = self.read_ident_name()?;
+                let name = self.read_variable_name()?;
                 members.push(ForwardMember::Var(name));
             } else {
                 let name = self.read_ident_name()?;
@@ -3309,7 +3309,7 @@ impl Parser {
             if !self.sc.eat('$') {
                 return Err(Error::at("expected a parameter", self.sc.position()));
             }
-            let name = self.read_ident_name()?;
+            let name = self.read_variable_name()?;
             self.skip_ws_inline();
             if self.sc.peek() == Some('.')
                 && self.sc.peek_at(1) == Some('.')
@@ -3363,7 +3363,17 @@ impl Parser {
     /// Parse `@include name[(args)] [{ content }];`.
     fn parse_include(&mut self, pos: Pos, start_mark: Mark) -> Result<Stmt, Error> {
         self.skip_ws_inline();
+        let include_name_pos = self.sc.position();
         let mut name = self.read_ident_name()?;
+        // `@include --a` is reserved for plain CSS mixins (dart-sass), even
+        // though `@mixin __a` normalizes to the same name.
+        if name.starts_with("--") {
+            return Err(Error::at(
+                "Sass @mixin names beginning with -- are forbidden for \
+                     forward-compatibility with plain CSS mixins.",
+                include_name_pos,
+            ));
+        }
         // `@include ns.mixin(...)` — a namespaced mixin reference.
         let mut module = None;
         if self.sc.peek() == Some('.') {
@@ -3436,7 +3446,7 @@ impl Parser {
         if !self.sc.eat('$') {
             return Err(Error::at("expected a variable after @for", self.sc.position()));
         }
-        let var = self.read_ident_name()?;
+        let var = self.read_variable_name()?;
         if !self.try_keyword("from") {
             return Err(Error::at("expected \"from\"", self.sc.position()));
         }
@@ -3469,7 +3479,7 @@ impl Parser {
             if !self.sc.eat('$') {
                 return Err(Error::at("expected a variable after @each", self.sc.position()));
             }
-            vars.push(self.read_ident_name()?);
+            vars.push(self.read_variable_name()?);
             self.skip_ws_inline();
             if self.sc.eat(',') {
                 continue;
@@ -3839,6 +3849,19 @@ impl Parser {
                 Ok(Some(c))
             }
             None => Ok(Some('\u{FFFD}')),
+        }
+    }
+
+    /// Read a variable name (after `$`), normalizing `_` to `-` like dart's
+    /// `variableName()` — `$a_b` and `$a-b` are the SAME variable. Function /
+    /// mixin and CSS identifiers keep their spelling (normalization for those
+    /// happens at definition/lookup, so plain-CSS output preserves `_`).
+    fn read_variable_name(&mut self) -> Result<String, Error> {
+        let name = self.read_ident_name()?;
+        if name.contains('_') {
+            Ok(name.replace('_', "-"))
+        } else {
+            Ok(name)
         }
     }
 
@@ -4488,7 +4511,7 @@ impl Parser {
                     return Err(Error::at("Sass variables aren't allowed in plain CSS.", pos));
                 }
                 self.sc.bump();
-                let name = self.read_ident_name()?;
+                let name = self.read_variable_name()?;
                 Ok(Expr::Var { name, pos })
             }
             Some('#') if self.sc.peek_at(1) == Some('{') => {
@@ -5136,7 +5159,7 @@ impl Parser {
             Some('$') => {
                 let var_pos = self.sc.position();
                 self.sc.bump();
-                let name = self.read_ident_name()?;
+                let name = self.read_variable_name()?;
                 if is_private_member(&name) {
                     return Err(Error::at(
                         "Private members can't be accessed from outside their modules.",
@@ -6180,7 +6203,7 @@ impl Parser {
                     }
                     let mark = self.sc.mark();
                     self.sc.bump();
-                    let argname = self.read_ident_name()?;
+                    let argname = self.read_variable_name()?;
                     self.skip_ws_inline();
                     if self.sc.peek() == Some(':') && self.sc.peek_at(1) != Some(':') {
                         self.sc.bump();

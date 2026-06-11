@@ -7027,6 +7027,34 @@ fn unit_conversion_is_case_sensitive_with_frequency() {
 }
 
 #[test]
+fn hyphens_and_underscores_interchange_in_names() {
+    // dart normalizes `_` to `-` in variable names at parse time and in
+    // function/mixin names at definition/lookup, so all four spellings
+    // resolve to the same member (52_interchangeable_hyphens_underscores).
+    assert_eq!(
+        ours("$my-var: 1;\n@mixin my-mix($p) { a: $p; b: $my_var; }\ndiv { @include my_mix(2); }\n"),
+        "div {\n  a: 2;\n  b: 1;\n}\n"
+    );
+    assert_eq!(
+        ours("@function blah_blah() { @return blah; }\ndiv { foo: blah-blah(); }\n"),
+        "div {\n  foo: blah;\n}\n"
+    );
+    // A plain-CSS call keeps its original spelling (no user function).
+    assert_eq!(
+        ours("div { b: some_func(1); }\n"),
+        "div {\n  b: some_func(1);\n}\n"
+    );
+    // `--`-prefixed calls are reserved for plain CSS: `--a()` never matches
+    // `@function __a` (even though both normalize to `--a`), and
+    // `@include --a` is a hard error.
+    assert_eq!(
+        ours("@function __a() {@return 1}\nb {c: --a(); d: __a()}\n"),
+        "b {\n  c: --a();\n  d: 1;\n}\n"
+    );
+    assert!(compile("@mixin __a() {b: c}\nd {@include --a}\n", &Options::default()).is_err());
+}
+
+#[test]
 fn content_block_runs_in_child_scope() {
     // A content block is a user-defined callable: a `$var:` first declared
     // inside it stays local to the block, so a global-only variable is NOT

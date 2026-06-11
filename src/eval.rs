@@ -1443,33 +1443,40 @@ impl<'a> Evaluator<'a> {
     /// Define a user `@function` in the innermost frame (dart
     /// `visitFunctionRule`: always `_functions.length - 1`, no semi-global
     /// special case), so the definition is scoped to the enclosing block.
+    /// Keys are dash-normalized like dart's parse-time `identifier(normalize:
+    /// true)` — `@function a_b` and `@function a-b` define the SAME name (the
+    /// AST keeps the original spelling for plain-CSS fallback and messages).
     fn define_function(&mut self, name: &str, c: Rc<UserCallable>) {
         if let Some(frame) = self.functions.last() {
-            frame.borrow_mut().insert(name.to_string(), c);
+            frame.borrow_mut().insert(normalize_arg_name(name), c);
         }
     }
 
     /// Define a user `@mixin` in the innermost frame (dart `visitMixinRule`).
     fn define_mixin(&mut self, name: &str, c: Rc<UserCallable>) {
         if let Some(frame) = self.mixins.last() {
-            frame.borrow_mut().insert(name.to_string(), c);
+            frame.borrow_mut().insert(normalize_arg_name(name), c);
         }
     }
 
-    /// Look up a user `@function` by exact name, innermost frame first.
+    /// Look up a user `@function` (dash/underscore-insensitively, like dart),
+    /// innermost frame first.
     fn lookup_function(&self, name: &str) -> Option<Rc<UserCallable>> {
+        let key = normalize_arg_name(name);
         for frame in self.functions.iter().rev() {
-            if let Some(f) = frame.borrow().get(name) {
+            if let Some(f) = frame.borrow().get(&key) {
                 return Some(Rc::clone(f));
             }
         }
         None
     }
 
-    /// Look up a user `@mixin` by exact name, innermost frame first.
+    /// Look up a user `@mixin` (dash/underscore-insensitively), innermost
+    /// frame first.
     fn lookup_mixin(&self, name: &str) -> Option<Rc<UserCallable>> {
+        let key = normalize_arg_name(name);
         for frame in self.mixins.iter().rev() {
-            if let Some(m) = frame.borrow().get(name) {
+            if let Some(m) = frame.borrow().get(&key) {
                 return Some(Rc::clone(m));
             }
         }
@@ -5801,9 +5808,14 @@ impl<'a> Evaluator<'a> {
                 if name == "if" {
                     return self.eval_if_function(args, *pos);
                 }
-                // User-defined @function takes precedence over builtins.
-                if let Some(func) = self.lookup_function(name) {
-                    return self.call_function(&func, args, Some((*pos, *length)));
+                // User-defined @function takes precedence over builtins — but
+                // a `--`-prefixed call is always plain CSS (dart reserves it
+                // for custom functions), even though `@function __a`
+                // normalizes to the same `--a` key.
+                if !name.starts_with("--") {
+                    if let Some(func) = self.lookup_function(name) {
+                        return self.call_function(&func, args, Some((*pos, *length)));
+                    }
                 }
                 // A user module function exposed unprefixed via `@use … as *`.
                 if !self.star_user_modules.is_empty() && !is_private_member(name) {
