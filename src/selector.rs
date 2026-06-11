@@ -3612,6 +3612,20 @@ pub(crate) fn extend_compound_target(
         let mut queue: std::collections::VecDeque<Complex> = std::collections::VecDeque::new();
         queue.push_back(complex.clone());
         let mut local_seen: HashSet<String> = HashSet::new();
+        // dart `_extendComplex` promotes the FIRST product of extending an
+        // original input complex to an original itself (extension_store.dart
+        // `if (first && _originals.contains(complex)) _originals.add(output)`).
+        // dart extends every target simultaneously, so that first product is the
+        // FULLY-replaced selector. Our worklist replaces one target per step, so
+        // the fully-replaced selector is the first one that extends to only
+        // itself (`is_self_only` — no target left to replace). In replace mode
+        // that terminal selector is the original that must survive `_trim`, so
+        // `selector.replace((c, d c), c, e)` keeps `d e` (the bare `e` from
+        // input `c` would otherwise trim it) while `replace("c.d", "c, .d", .e)`
+        // still collapses to `.e` (the intermediate `.d.e` is NOT promoted).
+        // Non-replace mode keeps the unchanged input as its first product
+        // (already in `originals`), so the promotion is needed only for replace.
+        let mut promote_first = replace;
         while let Some(cur) = queue.pop_front() {
             if !consume_extend_work() || result.len() > 100_000 {
                 break;
@@ -3625,6 +3639,23 @@ pub(crate) fn extend_compound_target(
                 && extended.first().map(Complex::render).as_deref() == Some(cur_rendered.as_str());
             for c in extended {
                 let rendered = c.render();
+                // Promote the first FULLY-replaced product of this input to an
+                // original (dart `_extendComplex` line 630). A product is fully
+                // replaced once no target remains — i.e. re-extending it yields
+                // only itself. Checked structurally here (not via the re-feed
+                // worklist) because a terminal product can be redundant and thus
+                // never re-fed: in `replace((c, d c), c, e)`, `d e` is covered
+                // by the sibling `e` so it is not re-fed, yet must be promoted so
+                // `_trim` keeps it.
+                if promote_first {
+                    let re = extend_complex_compound(&c, targets, extenders, replace);
+                    let terminal = re.len() == 1
+                        && re.first().map(Complex::render).as_deref() == Some(rendered.as_str());
+                    if terminal {
+                        originals.insert(rendered.clone());
+                        promote_first = false;
+                    }
+                }
                 // A selector already covered by a previously-produced one is
                 // redundant; it is trimmed from the output and, crucially, must
                 // not be re-fed — a self-referential extender (`.x` -> `.x .y`)

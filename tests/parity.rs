@@ -7568,3 +7568,22 @@ fn transitive_multi_simple_extender_chain_folds() {
         ".a .b, .a .a.mod1, .a .a.mod2 {\n  c: d;\n}\n"
     );
 }
+
+#[test]
+fn selector_replace_promotes_replaced_original() {
+    // dart promotes the first FULLY-replaced product of each input complex to
+    // an original, so it survives `_trim` even when a sibling product
+    // superselects it: `replace((c, d c), c, e)` keeps `d e` (the bare `e`
+    // from input `c` would otherwise trim it). (core_functions/selector/
+    // replace:format/input/non_string/selector.)
+    assert_eq!(
+        ours("@use \"sass:selector\";\na {b: selector.replace((c, d c), \"c\", \"e\")}\n"),
+        "a {\n  b: e, d e;\n}\n"
+    );
+    // But an INTERMEDIATE (not fully replaced) product is still trimmed:
+    // multi-target replace collapses `c.d` to `.e`, not `.d.e, .e`.
+    assert_eq!(
+        ours("@use \"sass:selector\";\na {b: selector.replace(\"c.d\", \"c, .d\", \".e\")}\n"),
+        "a {\n  b: .e;\n}\n"
+    );
+}
