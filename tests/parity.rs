@@ -7549,3 +7549,22 @@ fn media_feature_is_a_full_boolean_expression() {
         "@media (width > 0) {\n  a {\n    b: c;\n  }\n}\n"
     );
 }
+
+#[test]
+fn transitive_multi_simple_extender_chain_folds() {
+    // A multi-simple compound extender whose simple is itself extended by a
+    // DISJOINT multi-simple selector folds transitively: `%a` extended by
+    // `c:s`, and `c` extended by `d::e`, yields `d:s::e`
+    // (extend-tests/086.1).
+    assert_eq!(
+        ours("%a {\n  x:y;\n}\nb:after:not(:first-child) {\n  @extend %a;\n}\nc:s {\n  @extend %a;\n}\nd::e {\n  @extend c;\n}\n"),
+        "c:s, d:s::e, b:after:not(:first-child) {\n  x: y;\n}\n"
+    );
+    // A self-overlapping multi-simple extender (`.a` extended by `.a.mod1`) is
+    // NOT folded here — that stays with dart's extension-graph fixpoint
+    // (regression guard for directives/extend/after_target:multiple_recursive).
+    assert_eq!(
+        ours(".a .b {\n  c: d;\n}\n.a.mod1, .a.mod2 {\n  @extend .a, .b;\n}\n"),
+        ".a .b, .a .a.mod1, .a .a.mod2 {\n  c: d;\n}\n"
+    );
+}

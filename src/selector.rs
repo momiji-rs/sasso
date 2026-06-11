@@ -3040,21 +3040,26 @@ fn expand_compound_extender(
     let simples = &compound.simples;
     for (i, simple) in simples.iter().enumerate() {
         for inner_extender in collect_extenders(simple, extensions, stack) {
-            // Only fold in atomic chains: a single-component, single-simple
-            // inner extender (e.g. `%y` -> `a`). Folding in multi-simple
-            // extenders here would re-expand compounds that are themselves
-            // targets (a self-recursive `.a.mod1 {@extend .a}` family) and blow
-            // up combinatorially; dart-sass resolves those through its full
-            // extension graph + trimming, not this localized fold.
+            // Only fold in single-component inner extenders. A multi-component
+            // inner extender (`a c`) needs full weaving, which dart resolves
+            // through its extension graph rather than this localized fold.
             if inner_extender.components.len() != 1 {
                 continue;
             }
             let inner_compound = &inner_extender.components[0].compound;
-            if inner_compound.simples.len() != 1 {
+            // A multi-simple inner extender that contains the simple it is
+            // replacing is self-overlapping (`.a` extended by `.a.mod1`): the
+            // localized fold would re-derive spurious compounds, so leave
+            // those to dart's extension-graph fixpoint. A disjoint multi-simple
+            // inner extender (`c` -> `d::e`) folds cleanly into `c:s` ->
+            // `d:s::e` (extend-tests/086.1).
+            if inner_compound.simples.len() > 1 && inner_compound.simples.contains(simple) {
                 continue;
             }
             // The remaining simples (all but the one being replaced), unified
-            // with the inner extender's single simple.
+            // with the inner extender's compound — which may itself be
+            // multi-simple. The `stack` guard in `collect_extenders` bounds
+            // single-simple self-recursive `.a.mod1 {@extend .a}` chains.
             let remaining: Vec<Simple> = simples
                 .iter()
                 .enumerate()
