@@ -7465,3 +7465,34 @@ fn use_inside_imported_sheet_joins_importing_rule() {
         "outer in-used {\n  parent: (in-used,);\n}\nouter in-imported {\n  parent: (outer in-imported,);\n}\n"
     );
 }
+
+#[test]
+fn module_import_hoist_keeps_comment_runs_with_their_imports() {
+    // dart _combineCss visitModule: each module's leading comment+import run
+    // goes to the imports bucket (per-module _indexAfterImports), comments
+    // before a @use ride ahead of the used module's contribution, and an
+    // out-of-order plain import re-inserts at its module's import-run end.
+    let dir = std::env::temp_dir().join("sasso_order_parity");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("_midstream.scss"),
+        "/* before use in midstream */\n@use \"upstream\";\n/* after use in midstream */\n@import \"midstream.css\";\na {in: midstream}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("_upstream.scss"),
+        "/* before css in upstream */\n@import \"upstream.css\";\na {in: upstream}\n",
+    )
+    .unwrap();
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    let out = compile(
+        "/* before use in input */\n@use \"midstream\";\n@import \"input.css\";\na {in: input}\n",
+        &opts,
+    )
+    .expect("compile failed");
+    assert_eq!(
+        out,
+        "/* before use in input */\n/* before use in midstream */\n/* before css in upstream */\n@import \"upstream.css\";\n/* after use in midstream */\n@import \"midstream.css\";\n@import \"input.css\";\na {\n  in: upstream;\n}\n\na {\n  in: midstream;\n}\n\na {\n  in: input;\n}\n"
+    );
+}

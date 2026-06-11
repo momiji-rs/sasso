@@ -8966,44 +8966,146 @@ fn hoist_css_imports(out: &mut Vec<OutNode>) {
     if !scan(out, &mut seen_css) {
         return;
     }
-    fn extract(nodes: &mut Vec<OutNode>, imports: &mut Vec<OutNode>) {
-        let mut i = 0;
-        while i < nodes.len() {
-            if is_import(&nodes[i]) {
-                imports.push(nodes.remove(i));
-                // Drop a now-dangling separator after the removed import.
-                if i < nodes.len() && matches!(nodes[i], OutNode::Blank) {
-                    nodes.remove(i);
+    // Stage 1 — dart's per-module `_endOfImports`/`_outOfOrderImports`: a
+    // root-level plain-CSS import that appears AFTER other css re-inserts at
+    // the end of the module's leading import run (comments before any css
+    // extend the run; a ModuleScope is transparent but keeps its position).
+    // A load-css / import-clone copy scope is dart's `clone: true` splice:
+    // the cloned CSS joins the SURROUNDING module's own statements with no
+    // module boundary, so its imports take part in the surrounding module's
+    // out-of-order handling and leading-run split.
+    fn is_clone_scope(key: &str) -> bool {
+        key.contains("#copy") || key.contains("#import")
+    }
+    fn normalize_out_of_order(nodes: Vec<OutNode>) -> Vec<OutNode> {
+        let mut queue: std::collections::VecDeque<OutNode> = nodes.into();
+        let mut result: Vec<OutNode> = Vec::new();
+        let mut out_of_order: Vec<OutNode> = Vec::new();
+        let mut frozen = false;
+        let mut insert_at = 0usize;
+        while let Some(n) = queue.pop_front() {
+            match n {
+                OutNode::ModuleScope { key, nodes: inner } if is_clone_scope(&key) => {
+                    for x in inner.into_iter().rev() {
+                        queue.push_front(x);
+                    }
                 }
-                continue;
+                OutNode::ModuleScope { key, nodes: inner } => {
+                    result.push(OutNode::ModuleScope {
+                        key,
+                        nodes: normalize_out_of_order(inner),
+                    });
+                    if !frozen {
+                        insert_at = result.len();
+                    }
+                }
+                n if is_import(&n) => {
+                    if frozen {
+                        out_of_order.push(n);
+                    } else {
+                        result.push(n);
+                        insert_at = result.len();
+                    }
+                }
+                OutNode::Comment(..) | OutNode::Blank => {
+                    result.push(n);
+                    if !frozen {
+                        insert_at = result.len();
+                    }
+                }
+                other => {
+                    frozen = true;
+                    result.push(other);
+                }
             }
-            if let OutNode::ModuleScope { nodes: inner, .. } = &mut nodes[i] {
-                extract(inner, imports);
-            }
-            i += 1;
         }
+        if !out_of_order.is_empty() {
+            result.splice(insert_at..insert_at, out_of_order);
+        }
+        result
     }
+    // Stage 2 — dart `_combineCss`'s visitModule: two buckets. Each module
+    // contributes its leading run (comments + plain-CSS @imports up to the
+    // LAST import — `_indexAfterImports`) to the `imports` bucket and
+    // everything after to the `css` flow. Comments written before a `@use`
+    // (sitting before a ModuleScope here) are that module's
+    // preModuleComments: they go to the imports bucket while the css flow is
+    // still empty, and stay in place afterwards. The css flow keeps its
+    // ModuleScope structure.
+    fn visit(nodes: Vec<OutNode>, imports: &mut Vec<OutNode>, css_seen: &mut bool) -> Vec<OutNode> {
+        let mut rest: Vec<OutNode> = Vec::new();
+        let mut iter = nodes.into_iter().peekable();
+        // Phase 1: pre-module comment runs and embedded upstream modules.
+        let mut pending: Vec<OutNode> = Vec::new();
+        loop {
+            match iter.peek() {
+                Some(OutNode::Comment(..)) | Some(OutNode::Blank) => {
+                    pending.push(iter.next().unwrap());
+                }
+                Some(OutNode::ModuleScope { .. }) => {
+                    let Some(OutNode::ModuleScope { key, nodes: inner }) = iter.next() else {
+                        unreachable!()
+                    };
+                    // preModuleComments: into the imports bucket only while
+                    // no css flowed yet (dart `css.isEmpty ? imports : css`).
+                    if !*css_seen {
+                        imports.extend(pending.drain(..).filter(|n| !matches!(n, OutNode::Blank)));
+                    } else {
+                        rest.append(&mut pending);
+                    }
+                    let inner_rest = visit(inner, imports, css_seen);
+                    if !inner_rest.is_empty() {
+                        *css_seen = true;
+                        // Re-group the module's remaining flow: pulling its
+                        // leading imports out makes previously-separated
+                        // top-level neighbors adjacent, so the blank-line
+                        // separators are recomputed like dart's serializer.
+                        let mut regrouped: Vec<OutNode> = Vec::new();
+                        for n in inner_rest {
+                            match n {
+                                OutNode::Blank => {}
+                                other => push_group(&mut regrouped, vec![other]),
+                            }
+                        }
+                        rest.push(OutNode::ModuleScope {
+                            key,
+                            nodes: regrouped,
+                        });
+                    }
+                }
+                _ => break,
+            }
+        }
+        // Phase 2: the module's own statements — `_indexAfterImports` over
+        // the remaining sequence (pending comments are its leading run).
+        let mut own: Vec<OutNode> = pending;
+        own.extend(iter);
+        let mut last_import: Option<usize> = None;
+        for (i, n) in own.iter().enumerate() {
+            if is_import(n) {
+                last_import = Some(i);
+            } else if !matches!(n, OutNode::Comment(..) | OutNode::Blank) {
+                break;
+            }
+        }
+        if let Some(li) = last_import {
+            let tail = own.split_off(li + 1);
+            imports.extend(own.into_iter().filter(|n| !matches!(n, OutNode::Blank)));
+            own = tail;
+        }
+        if own.iter().any(|n| !matches!(n, OutNode::Blank)) {
+            *css_seen = true;
+        }
+        rest.extend(own);
+        rest
+    }
+    let original = normalize_out_of_order(std::mem::take(out));
     let mut imports = Vec::new();
-    let original = std::mem::take(out);
-    let mut rest = Vec::new();
-    for node in original {
-        rest.push(node);
-    }
-    extract(&mut rest, &mut imports);
-    // dart inserts out-of-order imports after the document's LEADING
-    // comments (indexAfterImports skips comments and imports), so a `/*!`
-    // banner stays first. Then the imports (tight, no blank between them),
-    // then the rest (dropping top-level blanks and regrouping).
-    let mut iter = rest.into_iter().peekable();
-    while matches!(iter.peek(), Some(OutNode::Comment(..)) | Some(OutNode::Blank)) {
-        match iter.next() {
-            Some(OutNode::Blank) => {}
-            Some(c) => push_group(out, vec![c]),
-            None => unreachable!(),
-        }
-    }
+    let mut css_seen = false;
+    let rest = visit(original, &mut imports, &mut css_seen);
     out.extend(imports);
-    for node in iter {
+    // Regroup the css flow, dropping stale top-level blanks.
+    for node in rest {
         match node {
             OutNode::Blank => {}
             other => push_group(out, vec![other]),
