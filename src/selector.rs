@@ -862,8 +862,9 @@ pub(crate) fn extend_selectors(original: &[Complex], extensions: &[Extension], s
     let result = extend_to_fixpoint(original, extensions);
 
     // Remove selectors that are subselectors of another (redundant), keeping
-    // originals (dart-sass `_trim`).
-    let result = trim(result, &originals);
+    // originals (dart-sass `_trim` with extender source specificities).
+    let source_spec = source_specificity_map(extensions);
+    let result = trim(result, &originals, &source_spec);
 
     // Simplify placeholders inside `:is()/:where()/:not()`-style pseudo
     // arguments, dropping selectors whose pseudo can never match.
@@ -970,28 +971,59 @@ fn simplify_one_pseudo(text: &str) -> PseudoResult {
 /// preserving original selectors. Mirrors dart-sass `ExtensionStore._trim`:
 /// iterate last-to-first, dropping a selector when an already-kept (or
 /// later-in-input) selector is its superselector. Originals are always kept.
-fn trim(selectors: Vec<Complex>, originals: &HashSet<String>) -> Vec<Complex> {
+fn trim(
+    selectors: Vec<Complex>,
+    originals: &HashSet<String>,
+    source_spec: &std::collections::HashMap<String, u64>,
+) -> Vec<Complex> {
     // Quadratic; dart-sass bails above 100 to avoid pathological cost.
     if selectors.len() > 100 {
         return selectors;
     }
+    // dart `_sourceSpecificityFor`: a compound's source specificity is the
+    // max recorded for any of its simples (0 when none was an extender).
+    let source_spec_for = |c: &Complex| -> u64 {
+        c.components
+            .iter()
+            .map(|comp| {
+                comp.compound
+                    .simples
+                    .iter()
+                    .map(|s| source_spec.get(&s.render()).copied().unwrap_or(0))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(0)
+    };
     let mut result: Vec<Complex> = Vec::new();
+    let mut num_originals = 0usize;
     let n = selectors.len();
-    for i in (0..n).rev() {
+    'outer: for i in (0..n).rev() {
         let c1 = &selectors[i];
         if originals.contains(&c1.render()) {
-            // Keep originals, avoiding duplicate originals.
-            if !result.iter().any(|c| c.render() == c1.render()) {
-                result.insert(0, c1.clone());
+            // A duplicate original rotates to the front (dart `rotateSlice`),
+            // preserving the EARLIEST source position's precedence.
+            for j in 0..num_originals {
+                if result[j].render() == c1.render() {
+                    let c = result.remove(j);
+                    result.insert(0, c);
+                    continue 'outer;
+                }
             }
+            num_originals += 1;
+            result.insert(0, c1.clone());
             continue;
         }
-        // Drop c1 if any already-kept selector is its superselector.
-        let superseded = result.iter().any(|c2| complex_is_superselector(c2, c1))
-            || selectors[..i].iter().any(|c2| complex_is_superselector(c2, c1));
-        if !superseded {
-            result.insert(0, c1.clone());
+        // Drop c1 only when a superselector ALSO has at least the max source
+        // specificity of c1's extenders (dart `_trim`): `.test-case` (1000)
+        // may not trim `.test-case:active` whose source weighs 2000.
+        let max_spec = source_spec_for(c1);
+        let covers = |c2: &Complex| complex_specificity(c2) >= max_spec && complex_is_superselector(c2, c1);
+        if result.iter().any(|c2| covers(c2)) || selectors[..i].iter().any(|c2| covers(c2)) {
+            continue;
         }
+        result.insert(0, c1.clone());
     }
     result
 }
@@ -2277,7 +2309,8 @@ fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
         originals.insert(complex.render());
     }
     let result = extend_to_fixpoint(list, extensions);
-    trim(result, &originals)
+    let source_spec = source_specificity_map(extensions);
+    trim(result, &originals, &source_spec)
 }
 
 /// Run the extension to a fixpoint: extend each selector, then feed every
@@ -2303,11 +2336,12 @@ fn extend_to_fixpoint(list: &[Complex], extensions: &[Extension]) -> Vec<Complex
                 // pass can reveal *more* extensions (a target buried in a
                 // pseudo argument that became extendable, or an extender pseudo
                 // that is itself a target). Plain class/placeholder/type chains
-                // are already resolved transitively in a single pass by
-                // `collect_extenders`, so re-feeding them would only risk
-                // re-deriving cyclic self-extends without producing anything new.
-                // An over-long selector (a self-referential blowup) is emitted
-                // but not re-fed.
+                // are resolved transitively in a single pass by
+                // `collect_extenders` (including multi-component extenders via
+                // the visible-store re-extension), so re-feeding them would
+                // only risk re-deriving cyclic self-extends without producing
+                // anything new. An over-long selector (a self-referential
+                // blowup) is emitted but not re-fed.
                 if complex_has_selector_pseudo(&c) && len <= EXTEND_REFEED_MAX_LEN {
                     queue.push_back(c.clone());
                 }
@@ -2726,7 +2760,8 @@ fn extend_component(comp: &TComp, extensions: &[Extension]) -> Option<Vec<DCompl
 
     // Cartesian product of per-simple choices (path outer, option inner) so the
     // first simple's choice varies slowest — matching dart-sass's observed
-    // output order for within-compound extension.
+    // output order for within-compound extension (`.foo.bar` + two extends
+    // yields `.foo.bar, .foo.bang, .bar.baz, .baz.bang`).
     let mut paths: Vec<Vec<&Option<Complex>>> = vec![Vec::new()];
     for opts in &per_simple {
         let mut next = Vec::new();
@@ -2817,6 +2852,33 @@ fn collect_extenders_vis(
                     extensions,
                     stack,
                 ));
+                stack.pop();
+            } else {
+                // A multi-component extender (`a c` from a nested
+                // `c {@extend b}`): dart's `_extendExistingExtensions`
+                // re-extends the whole extender complex against the visible
+                // store, so `d {@extend a}` also yields `d c`. Guard against
+                // cycles by excluding extensions targeting anything already
+                // on the chain stack (or this target itself).
+                stack.push(target.clone());
+                let visible: Vec<Extension> = extensions
+                    .iter()
+                    .filter(|e| e.origin_closure.contains(&ext.origin))
+                    .filter(|e| {
+                        e.target
+                            .as_ref()
+                            .is_some_and(|t| t != target && !stack.contains(t))
+                    })
+                    .cloned()
+                    .collect();
+                if !visible.is_empty() {
+                    let own = extender.render();
+                    for expanded in extend_complex(extender, &visible) {
+                        if expanded.render() != own {
+                            out.push(expanded);
+                        }
+                    }
+                }
                 stack.pop();
             }
         }
@@ -3440,8 +3502,11 @@ pub(crate) fn extend_compound_target(
         }
     }
     // Drop selectors made redundant by a superselector elsewhere in the list
-    // (dart-sass `_trim`), keeping originals.
-    trim(result, &originals)
+    // (dart-sass `_trim`), keeping originals. The one-off builtin store never
+    // fills `_sourceSpecificity` (only `@extend`'s addExtension does), so
+    // every max-specificity here is 0 and plain superselector coverage trims.
+    let source_spec = std::collections::HashMap::new();
+    trim(result, &originals, &source_spec)
 }
 
 /// Extend one complex selector against one or more compound targets: compute
@@ -3647,4 +3712,104 @@ pub(crate) fn selector_contains_simple(s: &str, target: &Simple) -> bool {
         }
     }
     false
+}
+
+// ---- specificity (dart SimpleSelector/ComplexSelector.specificity) -----
+
+/// dart `SimpleSelector.specificity`: classes/attributes/placeholders and
+/// plain pseudo-classes weigh 1000, IDs weigh 1000², types 1, universal 0.
+/// `:where()` is 0; selector-argument pseudos (`:is`/`:not`/`:matches`/
+/// `:has`…) take the max of their argument complexes.
+fn simple_specificity(s: &Simple) -> u64 {
+    match s {
+        Simple::Universal { .. } => 0,
+        Simple::Type(t) => {
+            // `ns|*` renders as a Type carrying `*`; the universal part is 0.
+            if t.ends_with('*') {
+                0
+            } else {
+                1
+            }
+        }
+        Simple::Id(_) => 1_000_000,
+        Simple::Class(_) | Simple::Placeholder(_) | Simple::Attribute(_) => 1000,
+        Simple::Pseudo(text) => pseudo_specificity(text),
+    }
+}
+
+fn pseudo_specificity(text: &str) -> u64 {
+    let is_element = text.starts_with("::");
+    let body = text.trim_start_matches(':');
+    let (name, arg) = match body.split_once('(') {
+        Some((n, rest)) => (n.to_ascii_lowercase(), Some(rest.trim_end_matches(')'))),
+        None => (body.to_ascii_lowercase(), None),
+    };
+    let base = unvendor(&name).to_string();
+    if base == "where" {
+        return 0;
+    }
+    if let Some(arg) = arg {
+        let selectorish =
+            matches!(base.as_str(), "is" | "matches" | "any" | "not" | "has") || base.ends_with("-any");
+        if selectorish {
+            if let Some(list) = parse_list(arg) {
+                return list.iter().map(complex_specificity).max().unwrap_or(0);
+            }
+        }
+    }
+    if is_element {
+        1
+    } else {
+        1000
+    }
+}
+
+fn compound_specificity(c: &Compound) -> u64 {
+    c.simples.iter().map(simple_specificity).sum()
+}
+
+/// dart `ComplexSelector.specificity`: the sum of its compounds'.
+pub(crate) fn complex_specificity(c: &Complex) -> u64 {
+    c.components
+        .iter()
+        .map(|comp| compound_specificity(&comp.compound))
+        .sum()
+}
+
+/// All simple selectors in a complex, recursing into selector-argument
+/// pseudos (dart `_simpleSelectors`).
+fn all_simples_of(complex: &Complex, out: &mut Vec<Simple>) {
+    for comp in &complex.components {
+        for s in &comp.compound.simples {
+            out.push(s.clone());
+            if let Simple::Pseudo(text) = s {
+                if let Some(open) = text.find('(') {
+                    if text.ends_with(')') {
+                        if let Some(list) = parse_list(&text[open + 1..text.len() - 1]) {
+                            for inner in &list {
+                                all_simples_of(inner, out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Build dart's `_sourceSpecificity` map: every simple selector of every
+/// extender records (first write wins) its complex's specificity.
+pub(crate) fn source_specificity_map(extensions: &[Extension]) -> std::collections::HashMap<String, u64> {
+    let mut map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for ext in extensions {
+        for complex in &ext.extenders {
+            let spec = complex_specificity(complex);
+            let mut simples = Vec::new();
+            all_simples_of(complex, &mut simples);
+            for s in simples {
+                map.entry(s.render()).or_insert(spec);
+            }
+        }
+    }
+    map
 }

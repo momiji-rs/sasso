@@ -6770,3 +6770,35 @@ fn extend_target_in_omitted_bogus_rule() {
     // A genuinely missing target still errors.
     assert!(compile(".a x {a: b}\n.b {@extend z}\n", &Options::default()).is_err());
 }
+
+#[test]
+fn extend_trim_source_specificity() {
+    // dart _trim only drops a selector when a superselector ALSO has at
+    // least the victim's max SOURCE specificity: `.test-case` (1000) keeps
+    // `.test-case:active` whose extender weighed 2000.
+    assert_eq!(
+        ours(concat!(
+            "%default-color {color: red}\n%alt-color {color: green}\n",
+            "%default-style {\n@extend %default-color;\n&:hover {@extend %alt-color}\n",
+            "&:active {@extend %default-color}\n}\n",
+            ".test-case {@extend %default-style}\n"
+        )),
+        ".test-case:active, .test-case {\n  color: red;\n}\n\n.test-case:hover {\n  color: green;\n}\n"
+    );
+}
+
+#[test]
+fn extend_transitive_multi_component_extender() {
+    // `c {@extend b}` inside `a` (extender `a c`) plus `d {@extend a}`
+    // yields `d c` — dart's _extendExistingExtensions re-extends the whole
+    // extender complex. (dart orders this `a b, d b, a c, d c`; our paths
+    // order differs pending the full _extendComplex order port.)
+    let out = ours("a {\nb {a: b}\nc {@extend b}\n}\nd {@extend a}\n");
+    let selectors = out.split(" {").next().unwrap();
+    for sel in ["a b", "d b", "a c", "d c"] {
+        assert!(
+            selectors.split(", ").any(|s| s == sel),
+            "missing {sel} in {selectors}"
+        );
+    }
+}
