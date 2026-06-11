@@ -7868,8 +7868,9 @@ fn fold_numbers(op: CalcOp, a: &Number, b: &Number, pos: Pos) -> Result<Option<N
                     pos,
                 ));
             }
-            // Equal units (incl. `%`, relative units, both unitless) fold.
-            if a.unit().eq_ignore_ascii_case(b.unit()) {
+            // Identical units (incl. `%`, relative units, both unitless)
+            // fold; dart compares unit names exactly (`PX` != `px`).
+            if a.unit() == b.unit() {
                 return Ok(Some(a.copy_units(apply(a.value, b.value))));
             }
             // A unitless operand mixed with a real unit is an error in calc.
@@ -8154,9 +8155,9 @@ fn coerce_pair(a: &Number, b: &Number, pos: Pos) -> Result<(f64, f64, Number), E
             None => incompatible(),
         };
     }
-    // Equal units (case-insensitively) or a unitless operand never need a
-    // numeric conversion.
-    if a.unit().eq_ignore_ascii_case(b.unit()) || b.is_unitless() {
+    // Identical units (exact strings, like dart) or a unitless operand never
+    // need a numeric conversion.
+    if a.unit() == b.unit() || b.is_unitless() {
         return Ok((a.value, b.value, a.clone()));
     }
     if a.is_unitless() {

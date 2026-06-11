@@ -7009,6 +7009,24 @@ fn lexical_scoping_functions_and_mixins() {
 }
 
 #[test]
+fn unit_conversion_is_case_sensitive_with_frequency() {
+    // dart's conversion table matches unit names exactly: `PX` and `px` are
+    // DIFFERENT units (addition errors), `1in + 1Q` errors while `1in + 1q`
+    // converts, and frequency `Hz`/`kHz` ARE convertible (canonical: Hz).
+    assert!(compile("a { v: 1PX + 1px; }", &Options::default()).is_err());
+    assert!(compile("a { v: 1in + 1Q; }", &Options::default()).is_err());
+    assert_eq!(ours("a { v: 1kHz + 1Hz; }"), "a {\n  v: 1.001kHz;\n}\n");
+    assert_eq!(ours("a { v: 1PX + 2PX; }"), "a {\n  v: 3PX;\n}\n");
+    // calc classification stays case-INSENSITIVE: same-class non-convertible
+    // pairs preserve, while the convertible pair folds.
+    assert_eq!(
+        ours("a { v: calc(1PX + 1px); }"),
+        "a {\n  v: calc(1PX + 1px);\n}\n"
+    );
+    assert_eq!(ours("a { v: calc(1kHz + 1Hz); }"), "a {\n  v: 1.001kHz;\n}\n");
+}
+
+#[test]
 fn content_block_runs_in_child_scope() {
     // A content block is a user-defined callable: a `$var:` first declared
     // inside it stays local to the block, so a global-only variable is NOT

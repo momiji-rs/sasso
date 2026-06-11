@@ -1041,7 +1041,7 @@ impl Number {
             return self.copy_units(self.value / other.value);
         }
         if let (Units::Single(a), Units::Single(b)) = (&self.units, &other.units) {
-            if a.eq_ignore_ascii_case(b) {
+            if a == b {
                 return Number::unitless(self.value / other.value);
             }
         }
@@ -1056,10 +1056,10 @@ impl Number {
 }
 
 /// The conversion factor used when a numerator unit cancels a denominator
-/// unit: equal names (case-insensitively) cancel exactly (covering unknown
-/// units like `foo/foo`), and units in the same dimension convert.
+/// unit: identical names (exact strings, like dart) cancel exactly (covering
+/// unknown units like `foo/foo`), and units in the same dimension convert.
 fn cancel_factor(numerator: &str, denominator: &str) -> Option<f64> {
-    if numerator.eq_ignore_ascii_case(denominator) {
+    if numerator == denominator {
         return Some(1.0);
     }
     convert_factor(numerator, denominator)
@@ -1144,17 +1144,21 @@ pub(crate) enum Dim {
     Length,
     Angle,
     Time,
+    Frequency,
     Resolution,
 }
 
-/// The dimension group a unit belongs to, or `None` for `%`, an unknown
-/// unit, or a unitless number. Unit names compare case-insensitively, as in
-/// dart-sass (`PX` and `px` are the same unit).
+/// The CONVERTIBLE dimension group a unit belongs to, or `None` for `%`, an
+/// unknown unit, or a unitless number. dart-sass's conversion table matches
+/// unit names case-SENSITIVELY (`1in + 1q` converts but `1in + 1Q` errors,
+/// `PX` never converts to `px`), even though calc-class *classification* is
+/// case-insensitive (see `known_calc_class`).
 pub(crate) fn unit_dimension(unit: &str) -> Option<Dim> {
-    match unit.to_ascii_lowercase().as_str() {
+    match unit {
         "px" | "in" | "cm" | "mm" | "q" | "pt" | "pc" => Some(Dim::Length),
         "deg" | "grad" | "rad" | "turn" => Some(Dim::Angle),
         "s" | "ms" => Some(Dim::Time),
+        "Hz" | "kHz" => Some(Dim::Frequency),
         "dpi" | "dpcm" | "dppx" => Some(Dim::Resolution),
         _ => None,
     }
@@ -1165,10 +1169,11 @@ pub(crate) fn unit_dimension(unit: &str) -> Option<Dim> {
 /// unit not in a convertible dimension group.
 ///
 /// Canonical bases (verified against dart-sass):
-/// length → px, angle → deg, time → s, resolution → dpi.
+/// length → px, angle → deg, time → s, frequency → Hz, resolution → dpi.
+/// Lookups are case-sensitive like dart's conversion table.
 fn canonical_factor(unit: &str) -> Option<f64> {
     use std::f64::consts::PI;
-    Some(match unit.to_ascii_lowercase().as_str() {
+    Some(match unit {
         // length (canonical: px)
         "px" => 1.0,
         "in" => 96.0,
@@ -1185,6 +1190,9 @@ fn canonical_factor(unit: &str) -> Option<f64> {
         // time (canonical: s)
         "s" => 1.0,
         "ms" => 1.0 / 1000.0,
+        // frequency (canonical: Hz)
+        "Hz" => 1.0,
+        "kHz" => 1000.0,
         // resolution (canonical: dpi)
         "dpi" => 1.0,
         "dpcm" => 2.54,
@@ -1205,13 +1213,13 @@ pub(crate) fn convert_factor(from: &str, to: &str) -> Option<f64> {
     Some(f / t)
 }
 
-/// Whether two units can be combined in arithmetic. Equal units (case
-/// insensitively, as dart-sass does) are always compatible; otherwise both
-/// must be non-empty and share a dimension group. An empty unit (unitless)
-/// is handled by the caller, not here — this is the strict "two real units"
-/// test, mirroring dart-sass's `isComparableTo`.
+/// Whether two units can be combined in arithmetic. Identical units (exact
+/// strings — dart treats `PX` and `px` as DIFFERENT units) are always
+/// compatible; otherwise both must share a convertible dimension group. An
+/// empty unit (unitless) is handled by the caller, not here — this is the
+/// strict "two real units" test, mirroring dart-sass's `isComparableTo`.
 pub(crate) fn units_compatible(a: &str, b: &str) -> bool {
-    if a.eq_ignore_ascii_case(b) {
+    if a == b {
         return true;
     }
     match (unit_dimension(a), unit_dimension(b)) {
@@ -1277,25 +1285,21 @@ fn is_relative_length(unit: &str) -> bool {
 }
 
 /// The broad class a unit belongs to for `calc()` compatibility decisions.
-/// Unlike [`Dim`] (the *convertible* groups), this includes frequency, whose
-/// `hz`/`khz` dart-sass recognises as absolute units but does not convert
-/// between, and the relative length units, which are known lengths but not
-/// convertible. Returns `None` for `%`, `fr`, and genuinely unknown units,
+/// Unlike [`Dim`] (the *convertible*, case-sensitive groups), classification
+/// is case-INSENSITIVE (`calc(1PX + 1s)` and `calc(1Q + 1s)` error
+/// cross-class even though `PX`/`Q` never convert) and includes the relative
+/// length units. Returns `None` for `%`, `fr`, and genuinely unknown units,
 /// which `calc()` preserves verbatim rather than rejecting.
 fn known_calc_class(unit: &str) -> Option<u8> {
-    if let Some(d) = unit_dimension(unit) {
-        return Some(match d {
-            Dim::Length => 0,
-            Dim::Angle => 1,
-            Dim::Time => 2,
-            Dim::Resolution => 3,
-        });
-    }
     if is_relative_length(unit) {
         return Some(0); // length class (relative, not convertible)
     }
     match unit.to_ascii_lowercase().as_str() {
-        "hz" | "khz" => Some(4), // frequency: known, but not inter-convertible
+        "px" | "in" | "cm" | "mm" | "q" | "pt" | "pc" => Some(0),
+        "deg" | "grad" | "rad" | "turn" => Some(1),
+        "s" | "ms" => Some(2),
+        "dpi" | "dpcm" | "dppx" => Some(3),
+        "hz" | "khz" => Some(4),
         _ => None,
     }
 }
@@ -2657,29 +2661,35 @@ mod tests {
     #[test]
     fn unit_dimensions_group_known_units() {
         assert_eq!(unit_dimension("px"), Some(Dim::Length));
-        assert_eq!(unit_dimension("PT"), Some(Dim::Length));
         assert_eq!(unit_dimension("deg"), Some(Dim::Angle));
         assert_eq!(unit_dimension("ms"), Some(Dim::Time));
+        assert_eq!(unit_dimension("kHz"), Some(Dim::Frequency));
         assert_eq!(unit_dimension("dppx"), Some(Dim::Resolution));
-        // `%`, unknown viewport units, frequency, and unitless have no group.
+        // The conversion table is case-sensitive (dart: `1in + 1Q` errors,
+        // `1in + 1q` converts), so `PT`/`khz` have no group; nor do `%`,
+        // viewport units, or unitless.
+        assert_eq!(unit_dimension("PT"), None);
+        assert_eq!(unit_dimension("khz"), None);
         assert_eq!(unit_dimension("%"), None);
         assert_eq!(unit_dimension("vw"), None);
-        assert_eq!(unit_dimension("khz"), None);
         assert_eq!(unit_dimension(""), None);
     }
 
     #[test]
     fn units_compatible_within_groups_only() {
         assert!(units_compatible("in", "cm"));
-        assert!(units_compatible("px", "PX"));
         assert!(units_compatible("deg", "turn"));
         assert!(units_compatible("s", "ms"));
+        assert!(units_compatible("Hz", "kHz"));
         assert!(units_compatible("dpi", "dppx"));
         // equal units are always compatible, even `%` and unknown units.
         assert!(units_compatible("%", "%"));
-        // cross-group and unknown units are incompatible.
+        assert!(units_compatible("PX", "PX"));
+        // cross-group, unknown, and case-mismatched units are incompatible
+        // (dart: `1px + 1PX` errors).
         assert!(!units_compatible("px", "s"));
         assert!(!units_compatible("px", "vw"));
+        assert!(!units_compatible("px", "PX"));
         assert!(!units_compatible("khz", "hz"));
     }
 

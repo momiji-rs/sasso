@@ -174,49 +174,33 @@ fn fn_unitless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
     }
 }
 
-/// The compatibility group of a unit, or `None` for an unknown unit. Two
-/// units are mutually convertible iff they share a group; otherwise only
-/// an exact textual match (or a unitless operand) counts as comparable.
-/// `Q` has no conversion factor in dart-sass, so it is not part of the
-/// length group.
-fn unit_group(unit: &str) -> Option<u8> {
-    match unit {
-        // length
-        "px" | "cm" | "mm" | "in" | "pt" | "pc" => Some(1),
-        // angle
-        "deg" | "grad" | "rad" | "turn" => Some(2),
-        // time
-        "s" | "ms" => Some(3),
-        // frequency
-        "Hz" | "kHz" => Some(4),
-        // resolution
-        "dpi" | "dpcm" | "dppx" => Some(5),
-        _ => None,
-    }
-}
-
 /// `comparable($number1, $number2)`: `true` when the two numbers' units are
-/// compatible — either operand unitless, identical units, or units in the
-/// same conversion group.
+/// compatible — either operand unitless, or the full unit lists convert.
 fn fn_comparable(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["number1", "number2"];
     let a = super::require(&params, pos_args, named, 0, "comparable", pos)?;
     let b = super::require(&params, pos_args, named, 1, "comparable", pos)?;
-    let unit_of = |v: &Value, which: &str| -> Result<String, Error> {
+    let num_of = |v: &Value, which: &str| -> Result<crate::value::Number, Error> {
         match v {
-            Value::Number(n) => Ok(n.unit().to_string()),
+            Value::Number(n) => Ok(n.clone()),
             other => Err(Error::at(
                 format!("${which}: {} is not a number.", other.to_css(false)),
                 pos,
             )),
         }
     };
-    let ua = unit_of(a, "number1")?;
-    let ub = unit_of(b, "number2")?;
-    let compatible = ua.is_empty()
-        || ub.is_empty()
-        || ua == ub
-        || matches!((unit_group(&ua), unit_group(&ub)), (Some(x), Some(y)) if x == y);
+    let na = num_of(a, "number1")?;
+    let nb = num_of(b, "number2")?;
+    // dart `isComparableTo`: a unitless number is comparable to anything;
+    // otherwise the FULL unit lists must convert (so `1px` vs the true
+    // quotient `1px^-1` of `1/1px` is NOT comparable).
+    let compatible = na.is_unitless()
+        || nb.is_unitless()
+        || crate::value::unit_lists_factor(
+            (na.numer_units(), na.denom_units()),
+            (nb.numer_units(), nb.denom_units()),
+        )
+        .is_some();
     Ok(Value::Bool(compatible))
 }
 
