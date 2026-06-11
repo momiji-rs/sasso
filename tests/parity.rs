@@ -6901,3 +6901,12 @@ fn duplicate_pseudo_preserved_through_extend() {
         ".foo:baz:baz, .bar:baz:baz {\n  a: b;\n}\n"
     );
 }
+
+#[test]
+fn progid_string_interpolation() {
+    // `#{…}` inside a progid argument's quoted string still resolves.
+    assert_eq!(
+        ours(".foo {\n  filter: progid:DXImageTransform.Microsoft.AlphaImageLoader(src=\"#{foo}\", sizingMethod='scale');\n}\n"),
+        ".foo {\n  filter: progid:DXImageTransform.Microsoft.AlphaImageLoader(src=\"foo\", sizingMethod='scale');\n}\n"
+    );
+}
