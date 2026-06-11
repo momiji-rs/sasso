@@ -7439,3 +7439,29 @@ fn load_css_parent_rules_nest_verbatim_too() {
     .expect("compile failed");
     assert_eq!(out, "a {\n  & {\n    b {\n      c: d;\n    }\n  }\n}\n");
 }
+
+#[test]
+fn use_inside_imported_sheet_joins_importing_rule() {
+    // `outer {@import "imported"}` where the imported sheet `@use`s a module:
+    // the module evaluates in a clean context (its `&` is null) but its CSS
+    // joins the importing rule's selector (nested_import_into_use).
+    let dir = std::env::temp_dir().join("sasso_niu_parity");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("_imported.scss"),
+        "@use \"sass:meta\";\n@use \"used\";\n\nin-imported {parent: meta.inspect(&)}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("_used.scss"),
+        "@use \"sass:meta\";\nin-used {parent: meta.inspect(&)}\n",
+    )
+    .unwrap();
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    let out = compile("outer {@import \"imported\"}\n", &opts).expect("compile failed");
+    assert_eq!(
+        out,
+        "outer in-used {\n  parent: (in-used,);\n}\nouter in-imported {\n  parent: (outer in-imported,);\n}\n"
+    );
+}

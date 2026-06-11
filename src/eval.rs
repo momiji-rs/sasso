@@ -2833,6 +2833,7 @@ impl<'a> Evaluator<'a> {
 
     /// Process a `@use "<url>" [as ns|as *] [with (...)];` for a built-in
     /// `sass:*` module or a user stylesheet.
+    #[allow(clippy::too_many_arguments)]
     fn exec_use(
         &mut self,
         url: &str,
@@ -2840,6 +2841,7 @@ impl<'a> Evaluator<'a> {
         star: bool,
         config: &[crate::ast::ConfigEntry],
         pos: Pos,
+        parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         // Built-in `sass:<mod>` modules.
@@ -2874,7 +2876,12 @@ impl<'a> Evaluator<'a> {
         } else {
             self.fresh_config_id()
         };
-        let (module, consumed) = self.load_module(url, conf, config_id, pos, &[], false, sink)?;
+        // `parents` is only non-empty when this `@use` sits at the top of a
+        // sheet imported INSIDE a style rule: the module still evaluates in a
+        // clean context, but its emitted CSS joins the importing rule's
+        // selectors (dart nests the whole import subtree's CSS —
+        // nested_import_into_use).
+        let (module, consumed) = self.load_module(url, conf, config_id, pos, parents, false, sink)?;
         // Any configured variable the module did not consume via a `!default`
         // declaration is an error.
         if conf_keys.iter().any(|k| !consumed.contains(k)) {
@@ -4408,7 +4415,7 @@ impl<'a> Evaluator<'a> {
                     star,
                     config,
                     pos,
-                } => self.exec_use(url, namespace.as_deref(), *star, config, *pos, sink)?,
+                } => self.exec_use(url, namespace.as_deref(), *star, config, *pos, parents, sink)?,
                 Stmt::Forward {
                     url,
                     prefix,
