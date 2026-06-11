@@ -2178,7 +2178,11 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
         if i as f64 == n {
             fmt_i64(i)
         } else {
-            format!("{n}")
+            // Integer-valued but past i64: Ryū prints the shortest form in
+            // plain positional notation, exactly like Display.
+            let mut s = String::with_capacity(24);
+            crate::ryu::format64(n, &mut s);
+            s
         }
     } else {
         // dart `_writeNumber`: serialize the SHORTEST round-trip decimal
@@ -2235,14 +2239,11 @@ fn fmt_i64(v: i64) -> String {
 /// `…289.2`), so re-round to the same significant-digit count through
 /// `{:e}`'s half-to-even rounding and expand the exponent form.
 fn ecma_shortest(n: f64) -> String {
-    // Pre-size for the longest shortest-roundtrip spelling (~24 bytes):
-    // `format!` would start at zero capacity and reallocate 2-3 times while
-    // grisu streams digits in.
+    // The zero-dep Ryū port: byte-identical to `format!("{n}")` (proven by
+    // its differential fuzz) without the core::fmt machinery, writing into
+    // one pre-sized allocation.
     let mut rust = String::with_capacity(24);
-    {
-        use std::fmt::Write;
-        let _ = write!(rust, "{n}");
-    }
+    crate::ryu::format64(n, &mut rust);
     // Count significant digits (skipping sign, dot, and leading zeros).
     let sig = rust
         .chars()

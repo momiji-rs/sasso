@@ -44,6 +44,7 @@ mod eval;
 mod fxhash;
 mod musl_math;
 mod parser;
+mod ryu;
 mod sass_parser;
 mod scanner;
 mod selector;
