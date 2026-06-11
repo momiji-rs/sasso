@@ -3307,12 +3307,13 @@ impl<'a> Evaluator<'a> {
                     let prelude = serialize_media_queries(&queries);
                     let out_body = self.css_at_body(body)?;
                     if !out_body.is_empty() {
+                        let lines = self.stamp(*lines);
                         sink.push_at_rule(OutNode::AtRule {
                             name: "media".to_string(),
                             prelude,
                             body: out_body,
                             has_block: true,
-                            lines: SrcLines::default(),
+                            lines,
                         });
                     }
                 }
@@ -3452,12 +3453,13 @@ impl<'a> Evaluator<'a> {
                     let prelude = serialize_media_queries(&queries);
                     let inner = self.css_at_body(body)?;
                     if !inner.is_empty() {
+                        let lines = self.stamp(*lines);
                         out.push(OutNode::AtRule {
                             name: "media".to_string(),
                             prelude,
                             body: inner,
                             has_block: true,
-                            lines: SrcLines::default(),
+                            lines,
                         });
                     }
                 }
@@ -3549,7 +3551,11 @@ impl<'a> Evaluator<'a> {
         };
         for stmt in stmts {
             match stmt {
-                Stmt::Media { query, body, lines } => {
+                Stmt::Media {
+                    query,
+                    body,
+                    lines: _,
+                } => {
                     let queries = self.resolve_media_queries(query)?;
                     let prelude = serialize_media_queries(&queries);
                     let inner = self.css_body(body)?;
@@ -3673,7 +3679,11 @@ impl<'a> Evaluator<'a> {
                     });
                 }
             }
-            Stmt::Media { query, body, lines } => {
+            Stmt::Media {
+                query,
+                body,
+                lines: _,
+            } => {
                 let queries = self.resolve_media_queries(query)?;
                 let prelude = serialize_media_queries(&queries);
                 let inner = self.css_body(body)?;
