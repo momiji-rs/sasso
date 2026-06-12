@@ -409,6 +409,80 @@ fn rgb_hsl_argument_validation_matches_dart() {
     }
 }
 
+#[test]
+fn static_placement_and_serialization_match_dart() {
+    let err = |src: &str| compile(src, &Options::default()).unwrap_err().message;
+
+    // @content only inside a @mixin declaration (caught even in dead branches).
+    assert_eq!(
+        err("@content;"),
+        "@content is only allowed within mixin declarations."
+    );
+    assert_eq!(
+        err("@if true{@content}"),
+        "@content is only allowed within mixin declarations."
+    );
+    assert!(compile("@mixin m{@content}\na{@include m{x:y}}", &Options::default()).is_ok());
+
+    // @function bodies forbid style rules / declarations / @extend statically.
+    assert_eq!(
+        err("@function f(){ @if false { a { color:red } } @return 1 } x{y:f()}"),
+        "@function rules may not contain style rules."
+    );
+    assert_eq!(
+        err("@function f(){ @if false { color: red } @return 1 } x{y:f()}"),
+        "@function rules may not contain declarations."
+    );
+
+    // @extend must be lexically within a style rule (dead branches caught too).
+    assert_eq!(
+        err("@if false { @extend .foo; }"),
+        "@extend may only be used within style rules."
+    );
+    assert!(compile("a{x:1}b{@extend a}", &Options::default()).is_ok());
+
+    // A map or empty list is not a valid CSS value in any serialization context.
+    assert_eq!(err("a{b: -(a:1)}"), "(a: 1) isn't a valid CSS value.");
+    assert_eq!(err("a{b: #{(a:1)}}"), "(a: 1) isn't a valid CSS value.");
+    assert_eq!(err("a{b: #{()}}"), "() isn't a valid CSS value.");
+    assert_eq!(err("a{b: 1 + ()}"), "() isn't a valid CSS value.");
+    assert_eq!(css("a{b: #{1 2 3}}"), "a {\n  b: 1 2 3;\n}\n"); // a non-empty list is fine
+}
+
+#[test]
+fn selector_pseudo_grammar_matches_dart() {
+    let err = |src: &str| compile(src, &Options::default()).unwrap_err().message;
+
+    // Empty/garbage functional-pseudo and An+B arguments, and bare colon runs.
+    assert_eq!(err("a:not(){x:y}"), "expected selector.");
+    assert_eq!(err("a:nth-child(2n+3 foo){x:y}"), "Expected \"of\".");
+    assert_eq!(err("a:::before{x:y}"), "Expected identifier.");
+    for bad in [
+        "a:nth-child(2n+){x:y}",
+        "a:nth-child(of){x:y}",
+        "a:nth-child(2x){x:y}",
+    ] {
+        assert!(compile(bad, &Options::default()).is_err(), "{bad}");
+    }
+
+    // Valid pseudos / An+B / interpolation / unknown-pseudo args still compile.
+    for ok in [
+        "a:nth-child(2n+1){x:y}",
+        "a:nth-child(odd){x:y}",
+        "a:nth-child(-n+3){x:y}",
+        "a:nth-child(2n of .a){x:y}",
+        "a:not(.a, .b){x:y}",
+        "a:is(h1, h2){x:y}",
+        "a:has(> .x){x:y}",
+        "a::before{x:y}",
+        "a:lang(en){x:y}",
+        "$n: 3;\na:nth-child(#{$n}){x:y}",
+        "a:nth-of-type(){x:y}", // dart accepts this; sasso no longer over-rejects
+    ] {
+        assert!(compile(ok, &Options::default()).is_ok(), "{ok}");
+    }
+}
+
 // --- scoped-arena escape safety (perf #5) ----------------------------------
 //
 // `compile` brackets its work in a bump-arena scope (when `ScopedAlloc` is the
