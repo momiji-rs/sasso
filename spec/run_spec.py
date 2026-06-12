@@ -506,28 +506,24 @@ def iter_all_cases(suite: Path, suite_root: Path):
 # --------------------------------------------------------------------------- #
 
 def normalize_css(css: str) -> str:
-    """Normalize trivial whitespace differences per sass-spec comparison norms.
+    """Normalize CSS output EXACTLY like sass-spec's own `normalizeOutput`
+    (spec/sass-spec/lib/test-case/compare.ts): collapse every run of newlines
+    to a single `\n` (which also drops blank lines *between* content) and
+    normalize input-file paths. The only addition is `rstrip("\n")`, which
+    absorbs the single trailing newline that `parse_hrx` strips from the
+    expected body — making the net comparison identical to upstream's.
 
-    sass-spec compares ignoring:
-      * leading/trailing whitespace of the whole document,
-      * trailing whitespace on each line,
-      * blank lines,
-      * a possible UTF-8 BOM,
-      * \\r\\n vs \\n line endings.
-    It does NOT collapse interior significant whitespace (indentation in
-    expanded output is meaningful), so we keep per-line indentation intact.
+    We deliberately do NOT `lstrip`, do NOT rstrip whitespace per line, and do
+    NOT strip a BOM: those would mask real byte differences (a missing leading
+    blank line, an interior trailing space) that the official comparator
+    catches. Indentation and interior whitespace stay significant.
     """
     if css is None:
         return ""
-    # strip BOM
-    if css.startswith("﻿"):
-        css = css[1:]
     css = css.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [ln.rstrip() for ln in css.split("\n")]
-    # drop blank lines (sass-spec ignores them when comparing)
-    lines = [ln for ln in lines if ln != ""]
-    return "\n".join(lines).strip()
-
+    css = re.sub(r"\n+", "\n", css)
+    css = re.sub(r"[-_/A-Za-z0-9]+(input\.s[ca]ss)", r"\1", css)
+    return css.rstrip("\n")
 
 def normalize_stderr(text: str, input_basename: str, abs_input_path: str) -> str:
     """Normalize stderr the way dart-sass's OWN spec runner does before

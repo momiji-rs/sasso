@@ -318,7 +318,11 @@ impl Transpiler {
                 content_lines.push(None);
             }
             pending_blanks = 0;
-            let body = l.content.trim_end().to_string();
+            // Keep the line's trailing whitespace: dart-sass preserves it inside
+            // a loud comment body (`/* \n  a \n  */` -> `/* a \n * */`, the space
+            // after `a` is retained). Only leading indentation is normalized,
+            // via the source-column padding below.
+            let body = l.content.to_string();
             content_lines.push(Some((l.indent, body.clone())));
             self.idx += 1;
             if body.contains("*/") {
