@@ -2605,6 +2605,28 @@ fn pseudo_arg_has_target_deep(complex: &Complex, targets: &FxHashSet<Simple>) ->
     })
 }
 
+/// Sound over-approximation of "can this batch's extensions possibly change
+/// `complex`?". A `@extend` only rewrites a complex when one of its target
+/// simples appears either DIRECTLY in a compound (matched by `collect_extenders`
+/// via `Simple` equality) OR inside a selector-pseudo's argument at any depth
+/// (rewritten in place by `expand_pseudos_in_compound`/`extend_pseudo`, which
+/// only descend into [`is_selector_pseudo`] arguments). If NONE of `targets`
+/// appears in either position, `extend_complex_breaks` is GUARANTEED to return
+/// the complex unchanged — so the heavy `to_dart` + per-component scan can be
+/// skipped. The match is exactly the union of the two sound sub-checks, so this
+/// only returns `false` when the complex DEFINITELY cannot match (the byte-exact
+/// ratchet and the Phase-1a guard catch any unsoundness immediately).
+fn complex_may_match_targets(complex: &Complex, targets: &FxHashSet<Simple>) -> bool {
+    if targets.is_empty() {
+        return false;
+    }
+    complex
+        .components
+        .iter()
+        .any(|comp| comp.compound.simples.iter().any(|s| targets.contains(s)))
+        || pseudo_arg_has_target_deep(complex, targets)
+}
+
 /// Whether a pseudo name takes a selector list we should extend. `slotted` is
 /// the selector-bearing pseudo-*element* (dart-sass `_selectorPseudoElements`).
 fn is_selector_pseudo(name: &str) -> bool {
@@ -2981,33 +3003,42 @@ fn extend_list_batch(
             *e = *e || flag;
         }
     }
+    // The batch's target simples, computed ONCE. A complex that mentions none of
+    // them (directly or inside a selector-pseudo argument) cannot be changed by
+    // this batch, so the per-complex `render()` + `to_dart`/`extend_complex_breaks`
+    // is skipped entirely — this is the cut to the extend-heavy O(n^2) malloc.
+    let batch_targets: FxHashSet<Simple> = batch.iter().filter_map(|e| e.target.clone()).collect();
     let mut out: Vec<(Complex, bool)> = Vec::new();
-    let mut seen: FxHashSet<String> = FxHashSet::default();
-    // render -> owning origin, to re-attach after the order-/origin-agnostic trim.
-    let mut origin_of: FxHashMap<String, String> = FxHashMap::default();
+    let mut seen: FxHashSet<Complex> = FxHashSet::default();
+    // complex -> owning origin, to re-attach after the order-/origin-agnostic trim.
+    // (Phase-1a proved typed `Complex` keys partition identically to `render()`.)
+    let mut origin_of: FxHashMap<Complex, String> = FxHashMap::default();
     let mut changed = false;
     for (complex, in_break, c_origin) in list {
-        let self_render = complex.render();
         let visible = batch_closure.contains(c_origin);
-        let products = if visible && consume_extend_work() && out.len() <= 100_000 {
+        // Cheap sound pre-filter: a complex containing none of the batch's
+        // targets is GUARANTEED unchanged, so pass it through without `render()`,
+        // `to_dart`, or `extend_complex_breaks`.
+        let can_match = visible && complex_may_match_targets(complex, &batch_targets);
+        let products = if can_match && consume_extend_work() && out.len() <= 100_000 {
             extend_complex_breaks(complex, *in_break, batch, &ext_breaks, false)
         } else {
             vec![(complex.clone(), *in_break)]
         };
-        if visible && !(products.len() == 1 && products[0].0.render() == self_render) {
+        if can_match && !(products.len() == 1 && products[0].0 == *complex) {
             changed = true;
         }
         for (c, f) in products {
-            let r = c.render();
             // The unchanged self-copy keeps its origin; a genuinely new product
-            // takes the batch's origin so further batches gate against it.
-            let o = if r == self_render {
+            // takes the batch's origin so further batches gate against it. The
+            // FIRST product carrying a given selector sets its origin (`or_insert`).
+            let o = if c == *complex {
                 c_origin.clone()
             } else {
                 batch_origin.clone()
             };
-            origin_of.entry(r.clone()).or_insert(o);
-            if seen.insert(r) {
+            origin_of.entry(c.clone()).or_insert(o);
+            if seen.insert(c.clone()) {
                 out.push((c, f));
             }
         }
@@ -3018,8 +3049,7 @@ fn extend_list_batch(
     trim_breaks(out, originals, source_spec)
         .into_iter()
         .map(|(c, f)| {
-            let r = c.render();
-            let o = origin_of.get(&r).cloned().unwrap_or_else(|| batch_origin.clone());
+            let o = origin_of.get(&c).cloned().unwrap_or_else(|| batch_origin.clone());
             (c, f, o)
         })
         .collect()
