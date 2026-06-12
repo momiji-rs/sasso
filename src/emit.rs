@@ -117,6 +117,10 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             lines,
             ..
         } => {
+            // `Parsed` selectors render to their final strings here (byte-
+            // identical to the strings the extend engine used to materialize);
+            // `Raw` selectors borrow directly.
+            let selectors = selectors.to_strings();
             out.push_str(indent);
             // A complex selector flagged with a source line break starts on its
             // own line (aligned to the rule's indent); others are `, `-joined.
@@ -579,7 +583,7 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
             if decls.is_empty() {
                 return;
             }
-            out.push_str(&selectors.join(","));
+            out.push_str(&selectors.to_strings().join(","));
             out.push('{');
             out.push_str(&decls.join(";"));
             out.push('}');

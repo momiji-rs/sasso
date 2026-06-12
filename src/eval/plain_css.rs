@@ -47,7 +47,7 @@ impl<'a> Evaluator<'a> {
             }
             if !preserved.is_empty() {
                 sink.push_at_rule(OutNode::Rule {
-                    selectors: parents.to_vec(),
+                    selectors: RuleSelectors::Raw(parents.to_vec()),
                     linebreaks: Vec::new(),
                     items: preserved,
                     lines: SrcLines::default(),
@@ -83,7 +83,7 @@ impl<'a> Evaluator<'a> {
                     // serializing) — e.g. when its whole body bubbled out.
                     if !items.is_empty() {
                         sink.push_at_rule(OutNode::Rule {
-                            selectors,
+                            selectors: RuleSelectors::Raw(selectors),
                             linebreaks: Vec::new(),
                             items,
                             lines: self.stamp(SrcLines {
@@ -212,7 +212,7 @@ impl<'a> Evaluator<'a> {
                     let (items, bubbled) = self.css_rule_children(&r.body, &selectors)?;
                     if !items.is_empty() {
                         out.push(OutNode::Rule {
-                            selectors,
+                            selectors: RuleSelectors::Raw(selectors),
                             linebreaks: Vec::new(),
                             items,
                             lines: self.stamp(SrcLines {
@@ -355,7 +355,7 @@ impl<'a> Evaluator<'a> {
                 name: name.to_string(),
                 prelude,
                 body: vec![OutNode::Rule {
-                    selectors: parent_selectors.to_vec(),
+                    selectors: RuleSelectors::Raw(parent_selectors.to_vec()),
                     linebreaks: Vec::new(),
                     items: inner,
                     lines: SrcLines::default(),

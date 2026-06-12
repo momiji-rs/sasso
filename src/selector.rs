@@ -212,6 +212,13 @@ impl Complex {
     }
 }
 
+/// Whether a complex selector still contains a placeholder simple (`%foo`).
+/// Lets the extend pass test a `Parsed` rule's placeholder fast-path condition
+/// on the typed model, with no render.
+pub(crate) fn complex_has_placeholder(c: &Complex) -> bool {
+    c.has_placeholder()
+}
+
 // ---- Phase 1a parity proof: render() injectivity over the typed model ----
 
 /// Debug-only guard for the selector campaign's core invariant: typed
@@ -897,8 +904,11 @@ pub(crate) fn classify_target(s: &str) -> TargetClass {
 
 /// The result of running the extend engine on a selector list.
 pub(crate) struct ExtendResult {
-    /// The rewritten, comma-separated selector strings.
-    pub selectors: Vec<String>,
+    /// The rewritten selector list, typed. The caller (`OutNode::Rule`) carries
+    /// these `Complex` values through to emit, which renders them via
+    /// `Complex::render()` — byte-identical to rendering them here (Phase 1d:
+    /// no string round trip between the engine and the serializer).
+    pub selectors: Vec<Complex>,
     /// Source line-break flags parallel to `selectors`: an original keeps its
     /// input flag, a product that IS an extender complex takes the extender's
     /// flag, and woven products fall back to `false`.
@@ -1070,10 +1080,15 @@ pub(crate) fn extend_selectors(
     // Drop complex selectors that still contain a (top-level) placeholder.
     // Each product's line-break flag traveled through the pipeline (dart's
     // `complex.lineBreak || path.any((c) => c.lineBreak)`).
-    let kept: Vec<&(Complex, bool)> = simplified.iter().filter(|(c, _)| !c.has_placeholder()).collect();
-    let all_placeholders = kept.is_empty();
-    let selectors: Vec<String> = kept.iter().map(|(c, _)| c.render()).collect();
-    let breaks: Vec<bool> = kept.iter().map(|(_, f)| *f).collect();
+    let all_placeholders = simplified.iter().all(|(c, _)| c.has_placeholder());
+    let mut selectors: Vec<Complex> = Vec::new();
+    let mut breaks: Vec<bool> = Vec::new();
+    for (c, f) in simplified {
+        if !c.has_placeholder() {
+            selectors.push(c);
+            breaks.push(f);
+        }
+    }
     ExtendResult {
         selectors,
         breaks,

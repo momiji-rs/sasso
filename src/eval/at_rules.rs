@@ -778,7 +778,7 @@ impl<'a> Evaluator<'a> {
             let flush = |decls: &mut Vec<OutItem>, wrapped: &mut Vec<OutNode>| {
                 if !decls.is_empty() {
                     wrapped.push(OutNode::Rule {
-                        selectors: parents.to_vec(),
+                        selectors: RuleSelectors::Raw(parents.to_vec()),
                         linebreaks: Vec::new(),
                         items: std::mem::take(decls),
                         lines: SrcLines::default(),

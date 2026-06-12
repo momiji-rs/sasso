@@ -89,11 +89,51 @@ pub(crate) struct UserCallable {
     pub env_mixins: Vec<FnScope>,
 }
 
+/// A style rule's selector list, carried through the output tree either as the
+/// raw resolved strings (the common case — no `@extend` rewrote it, so it is
+/// never parsed) or as the typed `Complex` list the `@extend` engine produced
+/// (Phase 1d: the engine works on the typed model directly — no `join(", ")` +
+/// `parse_list` round trip — and emit renders it via `Complex::render()`, which
+/// is byte-identical to the strings the engine used to materialize).
+#[derive(Clone)]
+pub(crate) enum RuleSelectors {
+    /// The already-resolved selector strings (`&`/interpolation substituted).
+    /// Untouched by the extend pass — emit writes them verbatim. This is the
+    /// zero-parse fast path: an extend-free stylesheet never leaves this form.
+    Raw(Vec<String>),
+    /// The typed selector list a rewrite produced. Rendered only at emit, via
+    /// the same `Complex::render()` the engine used to materialize its strings.
+    Parsed(Rc<[crate::selector::Complex]>),
+}
+
+impl RuleSelectors {
+    /// The selector list as rendered strings: the `Raw` slice borrowed
+    /// directly, or each `Parsed` `Complex` rendered (byte-identical to the
+    /// strings the extend engine used to produce). Used by emit and by the
+    /// pre-extend passes (reparent, plain-CSS at-body lowering) and the
+    /// cross-media probe.
+    pub(crate) fn to_strings(&self) -> std::borrow::Cow<'_, [String]> {
+        match self {
+            RuleSelectors::Raw(v) => std::borrow::Cow::Borrowed(v),
+            RuleSelectors::Parsed(v) => std::borrow::Cow::Owned(v.iter().map(|c| c.render()).collect()),
+        }
+    }
+
+    /// Consume into rendered strings (owned), for the pre-extend lowering paths
+    /// that move a rule's selectors into an `OutItem`/joined parent shell.
+    fn into_strings(self) -> Vec<String> {
+        match self {
+            RuleSelectors::Raw(v) => v,
+            RuleSelectors::Parsed(v) => v.iter().map(|c| c.render()).collect(),
+        }
+    }
+}
+
 /// A flattened output node.
 #[derive(Clone)]
 pub(crate) enum OutNode {
     Rule {
-        selectors: Vec<String>,
+        selectors: RuleSelectors,
         /// Per-complex "line break before" flags from the source selector list
         /// (`a,\nb` keeps the newline). Empty means none (all comma-joined with
         /// a space); otherwise parallel to `selectors`.
@@ -348,7 +388,7 @@ impl Sink<'_> {
                 // A plain-CSS nested rule reaching an at-root sink becomes a
                 // top-level rule carrying its items.
                 OutItem::NestedRule { selectors, items } => body.push(OutNode::Rule {
-                    selectors,
+                    selectors: RuleSelectors::Raw(selectors),
                     linebreaks: Vec::new(),
                     items,
                     lines: SrcLines::default(),
@@ -377,7 +417,7 @@ impl Sink<'_> {
                             },
                             OutItem::Comment(text, lines) => OutNode::Comment(text, lines),
                             OutItem::NestedRule { selectors, items } => OutNode::Rule {
-                                selectors,
+                                selectors: RuleSelectors::Raw(selectors),
                                 linebreaks: Vec::new(),
                                 items,
                                 lines: SrcLines::default(),
@@ -394,7 +434,7 @@ impl Sink<'_> {
                                 name,
                                 prelude,
                                 body: vec![OutNode::Rule {
-                                    selectors: Vec::new(),
+                                    selectors: RuleSelectors::Raw(Vec::new()),
                                     linebreaks: Vec::new(),
                                     items,
                                     lines: SrcLines::default(),
@@ -458,7 +498,7 @@ impl Sink<'_> {
                         // only ever records a flushed block fragment)
                     }
                     let rule = OutNode::Rule {
-                        selectors: selectors.to_vec(),
+                        selectors: RuleSelectors::Raw(selectors.to_vec()),
                         linebreaks: linebreaks.to_vec(),
                         items: std::mem::take(*items),
                         lines: *lines,
@@ -3302,14 +3342,17 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
                 lines,
                 extend_base,
             } => {
+                let selectors = selectors.into_strings();
                 if selectors.iter().any(|s| part_has_parent_ref(s)) {
                     preserved.push(OutItem::NestedRule { selectors, items });
                 } else {
                     rest.push(OutNode::Rule {
-                        selectors: parents
-                            .iter()
-                            .flat_map(|p| selectors.iter().map(move |s| format!("{p} {s}")))
-                            .collect(),
+                        selectors: RuleSelectors::Raw(
+                            parents
+                                .iter()
+                                .flat_map(|p| selectors.iter().map(move |s| format!("{p} {s}")))
+                                .collect(),
+                        ),
                         linebreaks: Vec::new(),
                         items,
                         lines,
@@ -3336,7 +3379,7 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
     let mut out = Vec::new();
     if !preserved.is_empty() {
         out.push(OutNode::Rule {
-            selectors: parents.to_vec(),
+            selectors: RuleSelectors::Raw(parents.to_vec()),
             linebreaks: Vec::new(),
             items: preserved,
             lines: SrcLines::default(),
@@ -4459,7 +4502,10 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
             OutNode::Comment(t, lines) => items.push(OutItem::Comment(t, lines)),
             OutNode::Rule {
                 selectors, items: ri, ..
-            } => items.push(OutItem::NestedRule { selectors, items: ri }),
+            } => items.push(OutItem::NestedRule {
+                selectors: selectors.into_strings(),
+                items: ri,
+            }),
             OutNode::AtRule {
                 name,
                 prelude,
@@ -5025,7 +5071,7 @@ fn unquote_plain_attribute_value(raw: &str) -> String {
 /// `@extend` that crosses a media-query boundary.
 fn root_rule_contains_target(nodes: &[OutNode], target: &crate::selector::Simple) -> bool {
     nodes.iter().any(|node| match node {
-        OutNode::Rule { selectors, .. } => selectors.iter().any(|s| {
+        OutNode::Rule { selectors, .. } => selectors.to_strings().iter().any(|s| {
             crate::selector::parse_list(s)
                 .map(|cs| crate::selector::list_contains_simple(&cs, target))
                 .unwrap_or(false)
@@ -5257,30 +5303,54 @@ fn is_valid_namespace(s: &str) -> bool {
 /// Compute the extended selector list for a rule. Returns `None` when, after
 /// extension, every complex selector still contains a placeholder (the rule
 /// emits no CSS). Returns `Some(unchanged)` when the selector needs no change.
+///
+/// Phase 1d: the engine works on the typed [`crate::selector::Complex`] model
+/// and the result is carried as [`RuleSelectors::Parsed`] — emit renders it
+/// directly, so there is no `join(", ")` + `parse_list` round trip back to
+/// strings. The fast path (no `@extend` and no placeholder) and the
+/// unparseable fallback keep the rule's original [`RuleSelectors::Raw`] strings
+/// untouched, byte-for-byte.
 fn extend_selector_list(
-    selectors: &[String],
+    selectors: &RuleSelectors,
     breaks: &[bool],
     extensions: &[crate::selector::Extension],
     scope: &str,
     extend_base: usize,
-) -> Option<(Vec<String>, Vec<bool>)> {
-    let has_placeholder = selectors.iter().any(|s| s.contains('%'));
+) -> Option<(RuleSelectors, Vec<bool>)> {
+    let has_placeholder = match selectors {
+        RuleSelectors::Raw(v) => v.iter().any(|s| s.contains('%')),
+        RuleSelectors::Parsed(v) => v.iter().any(crate::selector::complex_has_placeholder),
+    };
     // Fast path: no extensions and no placeholder → the selector is untouched.
     // Crucially this leaves selectors we don't model (keyframe stops are handled
     // separately, but also unusual selectors) byte-for-byte intact.
     if extensions.is_empty() && !has_placeholder {
-        return Some((selectors.to_vec(), breaks.to_vec()));
+        return Some((selectors.clone(), breaks.to_vec()));
     }
-    let joined = selectors.join(", ");
-    let Some(parsed) = crate::selector::parse_list(&joined) else {
-        // Unparseable selector: never lose it; leave untouched.
-        return Some((selectors.to_vec(), breaks.to_vec()));
+    // Parse the rule's selectors into the typed model exactly once. A `Raw`
+    // rule (the only shape an evaluated rule arrives in) is joined and parsed
+    // here; a `Parsed` rule (a re-entered already-rewritten list, not produced
+    // today) is borrowed directly.
+    let parsed_owned;
+    let parsed: &[crate::selector::Complex] = match selectors {
+        RuleSelectors::Raw(v) => {
+            let joined = v.join(", ");
+            match crate::selector::parse_list(&joined) {
+                Some(p) => {
+                    parsed_owned = p;
+                    &parsed_owned
+                }
+                // Unparseable selector: never lose it; leave untouched.
+                None => return Some((selectors.clone(), breaks.to_vec())),
+            }
+        }
+        RuleSelectors::Parsed(v) => v,
     };
-    let result = crate::selector::extend_selectors(&parsed, breaks, extensions, scope, extend_base);
+    let result = crate::selector::extend_selectors(parsed, breaks, extensions, scope, extend_base);
     if result.all_placeholders {
         return None;
     }
-    Some((result.selectors, result.breaks))
+    Some((RuleSelectors::Parsed(result.selectors.into()), result.breaks))
 }
 
 /// For each non-empty top-level comma part of a selector list, whether the
