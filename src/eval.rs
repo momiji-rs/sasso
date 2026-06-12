@@ -286,6 +286,15 @@ impl Sink<'_> {
         // loud comment (it generates its own); the `# ` space is required, so
         // `/*#sourceMappingURL…*/`, `/*! … */`, and other names are kept.
         if text.starts_with("# sourceMappingURL=") || text.starts_with("# sourceURL=") {
+            // The comment emits nothing, but the statement it occupied still
+            // ends a top-level group (dart's serializer writes a blank line
+            // before the following node — and, when the stripped comment leads
+            // the document, a leading blank). Leave a group-end sentinel so the
+            // next top-level group blank-separates; inside a block (or at-root
+            // body) the comment vanishes with no separator, as dart does.
+            if let Sink::Top(out) = self {
+                out.push(OutNode::Raw(STYLE_GROUP_END.to_string()));
+            }
             return;
         }
         match self {
@@ -9386,7 +9395,10 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
         Some(OutNode::Raw(s)) => s != STYLE_GROUP_END,
         _ => false,
     };
-    if !out.is_empty() && (prev_group_end || !prev_packs_tight) {
+    // A consumed group-end sentinel forces the separator even when popping it
+    // emptied `out` (a stripped sourceMappingURL comment leading the document:
+    // dart still writes a leading blank before the first emitted node).
+    if (top_marker || !out.is_empty()) && (prev_group_end || !prev_packs_tight) {
         out.push(OutNode::Blank);
     }
     out.append(&mut group);
