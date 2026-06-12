@@ -21,6 +21,19 @@ fn is_special(v: &Value) -> bool {
     }
 }
 
+/// Whether a value is specifically a `var(...)` reference (an unquoted string
+/// whose first CSS function is `var`, case-insensitively). dart's legacy
+/// two-argument `rgb($color, $alpha)` / `hsl` overloads short-circuit to a
+/// verbatim passthrough only for `var()` — not `env()`, `calc()`, or any other
+/// special — so the color-type check is suppressed exactly when a `var()` is
+/// present.
+fn is_var(v: &Value) -> bool {
+    matches!(v, Value::Str(s) if !s.quoted && {
+        let t = s.text.trim_start();
+        t.len() >= 4 && t[..4].eq_ignore_ascii_case("var(")
+    })
+}
+
 /// Like [`is_special`] but for the legacy `rgb`/`hsl` channels, where a
 /// `calc()` that folds to a degenerate constant (`infinity`, `-infinity`,
 /// `NaN`) is *not* special — dart-sass folds it to that floating point value
@@ -120,25 +133,33 @@ fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     // literal rgb() spelling. When either argument is a special value the
     // call is preserved verbatim instead. The arguments may be passed by name
     // (`rgb($color: red, $alpha: 0.5)`).
-    if n == 2 {
-        let color = pos_args
-            .first()
-            .or_else(|| named.iter().find(|(k, _)| k == "color").map(|(_, v)| v));
-        if let Some(Value::Color(c)) = color {
-            let alpha = pos_args
-                .get(1)
-                .or_else(|| named.iter().find(|(k, _)| k == "alpha").map(|(_, v)| v));
-            if let Some(alpha) = alpha {
-                if is_special_legacy(alpha) {
-                    // rgb(blue, calc(0.4)) → rgb(0, 0, 255, calc(0.4)).
-                    let r = Value::Number(int_num(c.r));
-                    let g = Value::Number(int_num(c.g));
-                    let b = Value::Number(int_num(c.b));
-                    return Ok(special_call("rgb", &[&r, &g, &b, alpha]));
-                }
-                let a = alpha_value(alpha, pos)?;
-                return Ok(Value::Color(computed(c.r, c.g, c.b, a)));
+    if let Some((color, alpha)) = legacy_color_alpha(pos_args, named) {
+        // A special first argument (`var()`) is not a color but the call is
+        // preserved verbatim by the channels passthrough below; everything
+        // else binding to `$color` must be a real color, matching dart's
+        // legacy `rgb($color, $alpha)` overload.
+        if let Value::Color(c) = color {
+            if is_special_legacy(alpha) {
+                // rgb(blue, calc(0.4)) → rgb(0, 0, 255, calc(0.4)).
+                let r = Value::Number(int_num(c.r));
+                let g = Value::Number(int_num(c.g));
+                let b = Value::Number(int_num(c.b));
+                return Ok(special_call("rgb", &[&r, &g, &b, alpha]));
             }
+            let a = alpha_value(alpha, pos)?;
+            return Ok(Value::Color(computed(c.r, c.g, c.b, a)));
+        }
+        // The `$color` must be a real color. dart's legacy `rgb($color,
+        // $alpha)` overload only short-circuits to a verbatim passthrough when
+        // an argument is specifically a `var()` (not `env()`/`calc()`/any other
+        // special), so `rgb(1, var(--foo))` is preserved but `rgb(1, env(--x))`
+        // and `rgb(env(--x), 0.5)` both error. A `var()` here falls through to
+        // the channels passthrough below, which re-serializes the call.
+        if !is_var(color) && !is_var(alpha) {
+            return Err(Error::at(
+                format!("$color: {} is not a color.", color_arg_css(color)),
+                pos,
+            ));
         }
     }
     // Otherwise gather the channel list and an optional alpha.
@@ -174,6 +195,59 @@ fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
 /// channels in a special-value passthrough call).
 fn int_num(v: f64) -> Number {
     Number::unitless(v.round())
+}
+
+/// Bind a two-argument legacy `rgb`/`rgba` call to the `rgb($color, $alpha)`
+/// overload, returning `(color, alpha)` when it cleanly fits and `None`
+/// otherwise (so the caller falls through to the `$channels` path, which
+/// preserves a special-value first argument and reports the channel-shape
+/// errors dart raises for the other overloads).
+///
+/// dart resolves a two-argument call to this overload only when both
+/// parameters bind: positionally (`rgb(c, a)`) or by the exact names
+/// `$color`/`$alpha` (`rgb($color: c, $alpha: a)`, in any order, including a
+/// positional `$color` plus a named `$alpha`). Any other named argument
+/// (`$green`, `$red`, …) or a positional/named collision leaves the overload
+/// unbound — dart then reports `Missing argument $channels.` /
+/// `No parameter named $X.` from the `$channels` overload, which the existing
+/// channel-collection path already produces (an exit-code match).
+fn legacy_color_alpha<'a>(
+    pos_args: &'a [Value],
+    named: &'a [(String, Value)],
+) -> Option<(&'a Value, &'a Value)> {
+    if pos_args.len() + named.len() != 2 {
+        return None;
+    }
+    let by_name = |key: &str| named.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+    // Every named argument must be one of the overload's parameters, and must
+    // not duplicate a parameter already filled positionally.
+    for (k, _) in named {
+        if k != "color" && k != "alpha" {
+            return None;
+        }
+        let filled_positionally =
+            (k == "color" && !pos_args.is_empty()) || (k == "alpha" && pos_args.len() >= 2);
+        if filled_positionally {
+            return None;
+        }
+    }
+    let color = pos_args.first().or_else(|| by_name("color"))?;
+    let alpha = pos_args.get(1).or_else(|| by_name("alpha"))?;
+    Some((color, alpha))
+}
+
+/// Serialize a `$color` argument for the legacy-overload "is not a color"
+/// error, matching dart's inspect form: an unbracketed multi-element list is
+/// parenthesized (`(1 2 3)`, `(1, 2, 3)`); every other value (a bracketed
+/// list, a single-element list, a map, a quoted string, a number) uses its
+/// plain inspect spelling.
+fn color_arg_css(v: &Value) -> String {
+    match v {
+        Value::List(l) if !l.bracketed && l.items.len() >= 2 => {
+            format!("({})", crate::builtins::inspect_value(v))
+        }
+        _ => crate::builtins::inspect_value(v),
+    }
 }
 
 /// Read an alpha argument: a `%` is divided by 100, a unitless number is used
@@ -764,6 +838,18 @@ fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     }
     if let Some(verbatim) = channels.special_passthrough("hsl") {
         return Ok(verbatim);
+    }
+    // hsl/hsla has no two-argument `$color, $alpha` overload (unlike rgb). A
+    // plain two-positional call (`hsl(1, 0.5)`, `hsl(#123, 0.5)`) therefore
+    // binds to the `hsl($hue, $saturation, $lightness, $alpha)` signature with
+    // `$lightness` unfilled, which dart reports as `Missing argument
+    // $lightness.`. A special first argument is preserved verbatim above, so it
+    // does not reach here; the exotic named-argument fallbacks (which dart maps
+    // to the `$channels` overload's `No parameter named …` / `Missing argument
+    // $channels.`) keep their existing channel-shape errors (an exit-code
+    // match).
+    if pos_args.len() == 2 && named.is_empty() {
+        return Err(Error::at("Missing argument $lightness.".to_string(), pos));
     }
     // A degenerate `calc()` channel (`calc(infinity)`, `calc(-infinity)`,
     // `calc(NaN)`) keeps the whole call as a special hsl() spelling, with each
