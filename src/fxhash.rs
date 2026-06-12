@@ -12,7 +12,7 @@
 //! zero-runtime-dependency property, and with no `unsafe` (the crate forbids
 //! it): the byte path uses `copy_from_slice` + `from_le_bytes`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// The FxHash mixing constant (a large odd number; same as rustc-hash).
@@ -20,6 +20,9 @@ const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
 
 /// A `HashMap` using [`FxHasher`] instead of the default SipHash.
 pub(crate) type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
+
+/// A `HashSet` using [`FxHasher`] instead of the default SipHash.
+pub(crate) type FxHashSet<K> = HashSet<K, BuildHasherDefault<FxHasher>>;
 
 /// FxHash: fold each machine word of the input into the running hash with a
 /// rotate-xor-multiply step. Fast for short keys; not collision-resistant

@@ -7,8 +7,7 @@
 //! port its `@extend` algorithm (extension, unification, transitive chains,
 //! and placeholder-rule dropping).
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use crate::fxhash::{FxHashMap, FxHashSet};
 
 /// A combinator joining two compound selectors.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -230,8 +229,8 @@ impl Complex {
 #[cfg(debug_assertions)]
 pub(crate) fn assert_render_injective(c: &Complex) {
     thread_local! {
-        static SEEN: std::cell::RefCell<HashMap<String, Complex>> =
-            std::cell::RefCell::new(HashMap::new());
+        static SEEN: std::cell::RefCell<FxHashMap<String, Complex>> =
+            std::cell::RefCell::new(FxHashMap::default());
     }
     SEEN.with(|seen| {
         let key = c.render();
@@ -254,8 +253,8 @@ pub(crate) fn assert_render_injective(c: &Complex) {
 #[cfg(debug_assertions)]
 pub(crate) fn assert_simple_render_injective(s: &Simple) {
     thread_local! {
-        static SEEN: std::cell::RefCell<HashMap<String, Simple>> =
-            std::cell::RefCell::new(HashMap::new());
+        static SEEN: std::cell::RefCell<FxHashMap<String, Simple>> =
+            std::cell::RefCell::new(FxHashMap::default());
     }
     SEEN.with(|seen| {
         let key = s.render();
@@ -844,6 +843,8 @@ pub(crate) struct Extension {
     /// extended) only links when the outer extension can see the inner one's
     /// origin (dart-sass per-module stores).
     pub origin: String,
+    // Module-origin set, built in eval (`closure_cache`); kept on std `HashSet`
+    // so the FxHash migration stays scoped to this file's selector maps.
     pub origin_closure: std::rc::Rc<std::collections::HashSet<String>>,
 }
 
@@ -921,7 +922,7 @@ pub(crate) fn extend_selectors(
     // The set of "original" rendered selectors — the unextended input. Original
     // selectors are never trimmed (dart-sass keeps them so the rule still
     // matches what it always matched).
-    let mut originals: HashSet<String> = HashSet::new();
+    let mut originals: FxHashSet<String> = FxHashSet::default();
     for complex in original {
         assert_render_injective(complex);
         originals.insert(complex.render());
@@ -971,7 +972,7 @@ pub(crate) fn extend_selectors(
     // can't converge the nesting). Route it to the worklist over the full
     // registry regardless of registration position (no cartesian flip unless it
     // is also one-shot).
-    let targets: HashSet<String> = extensions
+    let targets: FxHashSet<String> = extensions
         .iter()
         .filter_map(|e| e.target.as_ref().map(Simple::render))
         .collect();
@@ -1176,8 +1177,8 @@ fn simplify_one_pseudo(text: &str) -> PseudoResult {
 /// later-in-input) selector is its superselector. Originals are always kept.
 fn trim(
     selectors: Vec<Complex>,
-    originals: &HashSet<String>,
-    source_spec: &std::collections::HashMap<String, u64>,
+    originals: &FxHashSet<String>,
+    source_spec: &FxHashMap<String, u64>,
 ) -> Vec<Complex> {
     trim_breaks(
         selectors.into_iter().map(|c| (c, false)).collect(),
@@ -1192,8 +1193,8 @@ fn trim(
 /// Like [`trim`], preserving each selector's line-break flag.
 fn trim_breaks(
     selectors: Vec<(Complex, bool)>,
-    originals: &HashSet<String>,
-    source_spec: &std::collections::HashMap<String, u64>,
+    originals: &FxHashSet<String>,
+    source_spec: &FxHashMap<String, u64>,
 ) -> Vec<(Complex, bool)> {
     // Quadratic; dart-sass bails above 100 to avoid pathological cost.
     if selectors.len() > 100 {
@@ -1728,7 +1729,7 @@ fn type_namespace(t: &str) -> Option<String> {
 /// option of every component is the original, so the unextended selector comes
 /// out first. (dart-sass `Extender._extendComplex`.)
 fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
-    let empty = std::collections::HashMap::new();
+    let empty = FxHashMap::default();
     extend_complex_breaks(complex, false, extensions, &empty, false)
         .into_iter()
         .map(|(c, _)| c)
@@ -1742,7 +1743,7 @@ fn extend_complex_breaks(
     complex: &Complex,
     in_break: bool,
     extensions: &[Extension],
-    ext_breaks: &std::collections::HashMap<String, bool>,
+    ext_breaks: &FxHashMap<String, bool>,
     one_shot: bool,
 ) -> Vec<(Complex, bool)> {
     let d = to_dart(complex);
@@ -1833,7 +1834,7 @@ fn extend_complex_breaks(
     }
 
     let mut out = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     for (path, pflag) in combos {
         for woven in weave(&path) {
             let c = from_dart(&woven);
@@ -2542,7 +2543,7 @@ fn complex_has_selector_pseudo(complex: &Complex) -> bool {
 /// and applies such extensions simultaneously, which the sequential per-batch
 /// fold mishandles. A pseudo whose argument is NOT a target (`:not(:first-child)`
 /// in 086.1) is ignored, so those stay on the fold.
-fn pseudo_arg_has_target(complex: &Complex, targets: &HashSet<String>, only_not: bool) -> bool {
+fn pseudo_arg_has_target(complex: &Complex, targets: &FxHashSet<String>, only_not: bool) -> bool {
     complex.components.iter().any(|comp| {
         comp.compound.simples.iter().any(|s| {
             let Simple::Pseudo(text) = s else { return false };
@@ -2573,7 +2574,7 @@ fn pseudo_arg_has_target(complex: &Complex, targets: &HashSet<String>, only_not:
 /// pseudo; this recursion is what flags issue_2055's `:has(:not(...))` extender
 /// as self-referential so the `addSelector` pre-extension and the self-inclusive
 /// `_extendExistingExtensions` re-extension apply to it.
-fn pseudo_arg_has_target_deep(complex: &Complex, targets: &HashSet<String>) -> bool {
+fn pseudo_arg_has_target_deep(complex: &Complex, targets: &FxHashSet<String>) -> bool {
     complex.components.iter().any(|comp| {
         comp.compound.simples.iter().any(|s| {
             let Simple::Pseudo(text) = s else { return false };
@@ -2625,7 +2626,7 @@ fn unvendor(name: &str) -> &str {
 /// dart-sass `_extendList`: recursively extend a list of complex selectors,
 /// dedup, and trim redundant superselectors. Used for pseudo arguments.
 fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
-    let mut originals: HashSet<String> = HashSet::new();
+    let mut originals: FxHashSet<String> = FxHashSet::default();
     for complex in list {
         originals.insert(complex.render());
     }
@@ -2671,8 +2672,8 @@ fn single_extension(src: &Extension, target: Simple, extender: Complex, break_fl
 #[allow(clippy::too_many_arguments)]
 fn register_derived(
     registry: &mut Vec<Extension>,
-    sources: &mut HashMap<String, HashMap<String, usize>>,
-    by_extender: &mut HashMap<String, Vec<usize>>,
+    sources: &mut FxHashMap<String, FxHashMap<String, usize>>,
+    by_extender: &mut FxHashMap<String, Vec<usize>>,
     batch: &mut Vec<Extension>,
     batch_target_key: &str,
     old: &Extension,
@@ -2733,8 +2734,8 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
     // batch applies them — e.g. `upstream <- :is(midstream, downstream)` for
     // dart#1297).
     let mut registry: Vec<Extension> = Vec::new();
-    let mut sources: HashMap<String, HashMap<String, usize>> = HashMap::new();
-    let mut by_extender: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut sources: FxHashMap<String, FxHashMap<String, usize>> = FxHashMap::default();
+    let mut by_extender: FxHashMap<String, Vec<usize>> = FxHashMap::default();
     let mut batches: Vec<Vec<Extension>> = Vec::new();
     // Store-wide source specificity (dart `_sourceSpecificity`, from the
     // original extenders) used to TRIM each transitively-derived extender just
@@ -2746,7 +2747,7 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
     let source_spec = source_specificity_map(input);
     // Every `@extend` target, for detecting a self-referential pseudo extender
     // (one whose `:not(...)`/`:has(...)` argument names a target — issue_2055).
-    let all_targets: HashSet<String> = input
+    let all_targets: FxHashSet<String> = input
         .iter()
         .filter_map(|e| e.target.as_ref().map(Simple::render))
         .collect();
@@ -2789,7 +2790,7 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
             .any(|c| pseudo_arg_has_target_deep(c, &all_targets));
         let pre_extended: Vec<(Complex, bool)> = {
             let mut out: Vec<(Complex, bool)> = Vec::new();
-            let mut seen: HashSet<String> = HashSet::new();
+            let mut seen: FxHashSet<String> = FxHashSet::default();
             for (j, extender) in ext.extenders.iter().enumerate() {
                 let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
                 let products = if registry.is_empty() || !self_ref_extender {
@@ -2898,7 +2899,7 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
                 // so a derived extender covered by the original at equal-or-greater
                 // specificity is dropped before registration — the bound that keeps
                 // self-overlapping chains finite.
-                let mut origin_set = HashSet::new();
+                let mut origin_set = FxHashSet::default();
                 origin_set.insert(old_extender_key.clone());
                 let extended = trim(
                     extend_complex(&old_extender, &new_slice),
@@ -2964,8 +2965,8 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
 fn extend_list_batch(
     list: &[(Complex, bool, String)],
     batch: &[Extension],
-    originals: &HashSet<String>,
-    source_spec: &HashMap<String, u64>,
+    originals: &FxHashSet<String>,
+    source_spec: &FxHashMap<String, u64>,
 ) -> Vec<(Complex, bool, String)> {
     // Representative origin of the batch (its triggering `@extend`). Every
     // single-extender split shares it; the rare derived entry keeps its source
@@ -2975,7 +2976,7 @@ fn extend_list_batch(
     };
     let batch_origin = rep.origin.clone();
     let batch_closure = std::rc::Rc::clone(&rep.origin_closure);
-    let mut ext_breaks: HashMap<String, bool> = HashMap::new();
+    let mut ext_breaks: FxHashMap<String, bool> = FxHashMap::default();
     for ext in batch {
         for (j, c) in ext.extenders.iter().enumerate() {
             let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
@@ -2984,9 +2985,9 @@ fn extend_list_batch(
         }
     }
     let mut out: Vec<(Complex, bool)> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
     // render -> owning origin, to re-attach after the order-/origin-agnostic trim.
-    let mut origin_of: HashMap<String, String> = HashMap::new();
+    let mut origin_of: FxHashMap<String, String> = FxHashMap::default();
     let mut changed = false;
     for (complex, in_break, c_origin) in list {
         let self_render = complex.render();
@@ -3062,7 +3063,7 @@ fn extend_to_fixpoint_inner(
     refeed: bool,
 ) -> (Vec<(Complex, bool)>, bool) {
     // Extender flags by rendered form, for the per-option lookup.
-    let mut ext_breaks: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    let mut ext_breaks: FxHashMap<String, bool> = FxHashMap::default();
     for ext in extensions {
         for (j, c) in ext.extenders.iter().enumerate() {
             let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
@@ -3071,7 +3072,7 @@ fn extend_to_fixpoint_inner(
         }
     }
     let mut result: Vec<(Complex, bool)> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut changed = false;
     // Worklist of selectors still to extend (originals first; the flag marks
     // an ORIGINAL input, whose unchanged round-trip doesn't count as a change).
@@ -3224,7 +3225,7 @@ fn extend_pseudo_compound_target(
 /// them); a different-`(name, An+B)` one is dropped (it can't be combined).
 fn finish_nth_of(name: &str, anb: &str, original: &[Complex], extended: Vec<Complex>) -> Option<Vec<Simple>> {
     let mut flattened: Vec<Complex> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut push = |c: Complex, flattened: &mut Vec<Complex>| {
         if seen.insert(c.render()) {
             flattened.push(c);
@@ -3379,7 +3380,7 @@ fn finish_extend_pseudo(
     // Dedup the rewritten argument list so a second extension pass (our
     // worklist re-feed; dart-sass extends in a single simultaneous pass)
     // settles instead of appending the same selectors again.
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
     let rendered: Vec<String> = complexes
         .iter()
         .map(|c| c.render())
@@ -3492,7 +3493,7 @@ fn expand_pseudos_in_compound(compound: &Compound, extensions: &[Extension]) -> 
 fn extend_component(
     comp: &TComp,
     extensions: &[Extension],
-    ext_breaks: &std::collections::HashMap<String, bool>,
+    ext_breaks: &FxHashMap<String, bool>,
     one_shot: bool,
 ) -> Option<Vec<(DComplex, bool)>> {
     // First, extend any selector-pseudo arguments (`:not(...)`, `:is(...)`,
@@ -3518,7 +3519,7 @@ fn extend_component(
     let mut any = false;
     for s in simples {
         let mut opts: Vec<Option<(Complex, bool)>> = vec![None];
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: FxHashSet<String> = FxHashSet::default();
         for extender in collect_extenders(s, extensions, &mut Vec::new()) {
             let key = extender.render();
             if seen.contains(&key) {
@@ -3579,7 +3580,7 @@ fn extend_component(
         }
     }
 
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
     seen.insert(render_dcomplex(&options[0].0));
     for path in &paths {
         // Skip the all-self path (the original compound, already option 0).
@@ -3965,7 +3966,7 @@ pub(crate) fn list_is_superselector(sup: &[Complex], sub: &[Complex]) -> bool {
 pub(crate) fn unify_complex(c1: &Complex, c2: &Complex) -> Option<Vec<Complex>> {
     let unified = unify_complex_list(&[to_dart(c1), to_dart(c2)])?;
     let mut out = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     for d in unified {
         let complex = from_dart(&d);
         if seen.insert(complex.render()) {
@@ -4068,7 +4069,7 @@ fn unify_complex_list(complexes: &[DComplex]) -> Option<Vec<DComplex>> {
 /// `SelectorList.unify`). Returns `None` if nothing unifies.
 pub(crate) fn unify_lists(list1: &[Complex], list2: &[Complex]) -> Option<Vec<Complex>> {
     let mut out = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     for c1 in list1 {
         for c2 in list2 {
             if let Some(unified) = unify_complex(c1, c2) {
@@ -4137,7 +4138,7 @@ pub(crate) fn extend_compound_target(
     // Originals are never trimmed away (dart-sass keeps the input selectors so a
     // rule still matches what it always matched). In replace mode the matched
     // originals are dropped before this point, so the set is the surviving ones.
-    let mut originals: HashSet<String> = HashSet::new();
+    let mut originals: FxHashSet<String> = FxHashSet::default();
     if !replace {
         for complex in selectors {
             originals.insert(complex.render());
@@ -4145,7 +4146,7 @@ pub(crate) fn extend_compound_target(
     }
 
     let mut result: Vec<Complex> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
     // Each input complex is extended independently and its results emitted
     // consecutively (dart-sass groups a selector's extensions right after it),
     // so the per-complex fixpoint stays local to its input.
@@ -4155,7 +4156,7 @@ pub(crate) fn extend_compound_target(
         // simultaneously). Bounded to guarantee termination.
         let mut queue: std::collections::VecDeque<Complex> = std::collections::VecDeque::new();
         queue.push_back(complex.clone());
-        let mut local_seen: HashSet<String> = HashSet::new();
+        let mut local_seen: FxHashSet<String> = FxHashSet::default();
         // dart `_extendComplex` promotes the FIRST product of extending an
         // original input complex to an original itself (extension_store.dart
         // `if (first && _originals.contains(complex)) _originals.add(output)`).
@@ -4224,7 +4225,7 @@ pub(crate) fn extend_compound_target(
     // (dart-sass `_trim`), keeping originals. The one-off builtin store never
     // fills `_sourceSpecificity` (only `@extend`'s addExtension does), so
     // every max-specificity here is 0 and plain superselector coverage trims.
-    let source_spec = std::collections::HashMap::new();
+    let source_spec = FxHashMap::default();
     trim(result, &originals, &source_spec)
 }
 
@@ -4298,7 +4299,7 @@ fn extend_complex_compound(
     }
 
     let mut out = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     for path in combos {
         for woven in weave(&path) {
             let c = from_dart(&woven);
@@ -4351,7 +4352,7 @@ fn extend_component_compound(
     if !replace {
         options.push(original);
     }
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
     for target in matching {
         // The simples of this compound not covered by this target.
         let remaining: Vec<Simple> = comp
@@ -4518,8 +4519,8 @@ fn all_simples_of(complex: &Complex, out: &mut Vec<Simple>) {
 
 /// Build dart's `_sourceSpecificity` map: every simple selector of every
 /// extender records (first write wins) its complex's specificity.
-pub(crate) fn source_specificity_map(extensions: &[Extension]) -> std::collections::HashMap<String, u64> {
-    let mut map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+pub(crate) fn source_specificity_map(extensions: &[Extension]) -> FxHashMap<String, u64> {
+    let mut map: FxHashMap<String, u64> = FxHashMap::default();
     for ext in extensions {
         for complex in &ext.extenders {
             let spec = complex_specificity(complex);
