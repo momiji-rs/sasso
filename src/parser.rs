@@ -1193,6 +1193,35 @@ impl Parser {
                 self.parse_keyframes(name)
             }
             "extend" => self.parse_extend(pos),
+            // `@charset` takes exactly one quoted string. A non-string (or
+            // missing) argument is dart's "Expected string."; anything after
+            // the string is left for the next statement (so `@charset "a" "b"`
+            // fails as a malformed following rule, `expected "{".`). The value
+            // itself is not emitted — the serializer re-derives `@charset` from
+            // the output's own non-ASCII content.
+            "charset" => {
+                self.skip_ws_inline();
+                let line = self.sc.position().line as u32;
+                if !matches!(self.sc.peek(), Some('"' | '\'')) {
+                    return Err(Error::at("Expected string.", self.sc.position()));
+                }
+                let mut prelude = vec![TplPiece::Lit("\"".to_string())];
+                prelude.extend(self.parse_quoted_string()?);
+                prelude.push(TplPiece::Lit("\"".to_string()));
+                self.skip_ws_inline();
+                self.sc.eat(';');
+                Ok(Stmt::AtRule {
+                    name,
+                    prelude,
+                    body: None,
+                    lines: SrcLines {
+                        file: 0,
+                        start: line,
+                        end: line,
+                        col: 0,
+                    },
+                })
+            }
             "supports" => self.parse_supports(),
             "use" => self.parse_use(pos),
             // @forward is parked for the module-system epic.
@@ -2478,8 +2507,7 @@ impl Parser {
     fn parse_at_root(&mut self) -> Result<Stmt, Error> {
         self.skip_ws_inline();
         let query = if self.sc.peek() == Some('(') {
-            let q = self.parse_template(&['{'])?;
-            Some(trim_prelude(q))
+            Some(self.parse_at_root_query()?)
         } else if self.sc.peek() == Some('{') {
             None
         } else {
@@ -2503,8 +2531,50 @@ impl Parser {
                 })],
             });
         };
+        // Whitespace / comments / newlines may sit between a `(…)` query (or
+        // the bare `@at-root`) and the body block.
+        self.skip_ws_trivia();
         let body = self.parse_braced_body()?;
         Ok(Stmt::AtRoot { query, body })
+    }
+
+    /// Parse and validate the `@at-root (with: …)` / `(without: …)` query
+    /// (the scanner is on the opening `(`), returning the reconstructed query
+    /// template for eval. dart-sass requires `( "with"|"without" : <expr> )`:
+    /// a bad keyword is `Expected "with" or "without".`, a missing colon
+    /// `expected ":".`, an empty value `Expected expression.`, and a stray
+    /// token (e.g. a comma in the value, or junk after `)`) errors in turn
+    /// (`expected ")".` / `expected "{".`) — none are silently accepted.
+    fn parse_at_root_query(&mut self) -> Result<Vec<TplPiece>, Error> {
+        self.sc.bump(); // '('
+        self.skip_ws_inline();
+        let kw_pos = self.sc.position();
+        let kw = self.read_ident_name().unwrap_or_default();
+        if !kw.eq_ignore_ascii_case("with") && !kw.eq_ignore_ascii_case("without") {
+            return Err(Error::at("Expected \"with\" or \"without\".", kw_pos));
+        }
+        self.skip_ws_inline();
+        if !self.sc.eat(':') {
+            return Err(Error::at("expected \":\".", self.sc.position()));
+        }
+        self.skip_ws_inline();
+        let value_pos = self.sc.position();
+        // The value is a space-separated expression; a top-level comma ends it
+        // and then dart expects `)` (`(with: rule, media)` → `expected ")".`).
+        let value = self.parse_template(&[')', ','])?;
+        if value
+            .iter()
+            .all(|p| matches!(p, TplPiece::Lit(s) if s.trim().is_empty()))
+        {
+            return Err(Error::at("Expected expression.", value_pos));
+        }
+        if !self.sc.eat(')') {
+            return Err(Error::at("expected \")\".", self.sc.position()));
+        }
+        let mut pieces = vec![TplPiece::Lit(format!("({kw}: "))];
+        pieces.extend(trim_prelude(value));
+        pieces.push(TplPiece::Lit(")".to_string()));
+        Ok(pieces)
     }
 
     /// Parse `@keyframes <name> { from {…} 50% {…} … }`. The body is parsed as

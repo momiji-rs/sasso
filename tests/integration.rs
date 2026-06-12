@@ -502,6 +502,35 @@ fn selector_bang_and_extend_leading_comma_match_dart() {
     assert!(compile("a{x:1}.x{@extend a,}", &Options::default()).is_ok());
 }
 
+#[test]
+fn at_charset_and_at_root_query_match_dart() {
+    let err = |src: &str| compile(src, &Options::default()).unwrap_err().message;
+
+    // @charset takes exactly one quoted string.
+    assert_eq!(err("@charset utf-8;a{b:1}"), "Expected string.");
+    assert_eq!(err("@charset;a{b:1}"), "Expected string.");
+    assert!(compile("@charset \"utf-8\";a{b:1}", &Options::default()).is_ok());
+    assert!(compile("@charset \"utf-8\" \"extra\";a{b:1}", &Options::default()).is_err());
+
+    // @at-root (...) query grammar: with|without : <expr>.
+    assert_eq!(
+        err("@at-root (foo) {a{b:c}}"),
+        "Expected \"with\" or \"without\"."
+    );
+    assert_eq!(err("@at-root (with) {a{b:c}}"), "expected \":\".");
+    assert_eq!(err("@at-root (with:) {a{b:c}}"), "Expected expression.");
+    assert_eq!(err("@at-root (with: rule) junk {a{b:c}}"), "expected \"{\".");
+    for ok in [
+        "@at-root (with: rule) {a{b:c}}",
+        "@at-root (without: media) {a{b:c}}",
+        "@at-root (with: a b) {a{b:c}}",
+        "@at-root {a{b:c}}",
+        "@at-root .x {a{b:c}}",
+    ] {
+        assert!(compile(ok, &Options::default()).is_ok(), "{ok}");
+    }
+}
+
 // --- scoped-arena escape safety (perf #5) ----------------------------------
 //
 // `compile` brackets its work in a bump-arena scope (when `ScopedAlloc` is the
