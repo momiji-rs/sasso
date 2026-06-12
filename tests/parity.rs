@@ -2813,6 +2813,43 @@ fn extend_pseudo_element_superselector() {
 }
 
 #[test]
+fn extend_self_referential_pseudo_converges() {
+    // issue_2055: a `:not(...)`/`:has(...)` extender whose argument names the
+    // extended target (`.thing`) is self-referential. dart-sass derives the
+    // exact bounded nesting via `addSelector`'s pre-extension plus the
+    // self-inclusive `_extendExistingExtensions` snapshot; sasso reproduces it
+    // (`pseudo_arg_has_target_deep` gating + single registration-order pass).
+    // Byte-locked to dart-sass 1.100.0 so the convergence can't silently drift.
+    let input = r#"
+:not(.thing) {
+    color: red;
+}
+:not(.thing[disabled]) {
+    @extend .thing;
+    background: blue;
+}
+:has(:not(.thing[disabled])) {
+    @extend .thing;
+    background: blue;
+}
+
+"#;
+    let expected = r#":not(.thing):not(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))) {
+  color: red;
+}
+
+:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))):not([disabled]:has(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))):not([disabled]:has(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))))))) {
+  background: blue;
+}
+
+:has(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))):not([disabled]:has(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))):not([disabled]:has(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))))))) {
+  background: blue;
+}
+"#;
+    assert_eq!(ours(input), expected);
+}
+
+#[test]
 fn fs_importer_partial_extension_and_import_only_resolution() {
     use std::fs;
     use std::path::PathBuf;

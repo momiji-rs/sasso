@@ -912,7 +912,34 @@ pub(crate) fn extend_selectors(
                 .iter()
                 .any(|c| pseudo_arg_has_target(c, &targets, false))
         });
-    let result = if one_shot || pseudo_self_ref {
+    let result = if pseudo_self_ref && !one_shot {
+        // A self-referential pseudo chain (`:not(.thing[disabled])` extending
+        // `.thing`, issue_2055). dart applies each `@extend`'s
+        // `newExtensionsByTarget` (its single extension PLUS the
+        // `additionalExtensions` derived by `_extendExistingExtensions`) to the
+        // selector list EXACTLY ONCE, in registration order — the nesting depth
+        // comes from `_extendPseudo` recursing into `_extendList`, NOT from
+        // re-applying the whole store. Re-applying the registry as a worklist
+        // over-generates (the full set cross-products every `.thing` against
+        // every derived extender), and re-folding the batches to a fixpoint
+        // blows up combinatorially. So: fold the batches once each, faithful to
+        // dart's single registration-order pass.
+        let mut current: Vec<(Complex, bool, String)> = original
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                (
+                    c.clone(),
+                    original_breaks.get(i).copied().unwrap_or(false),
+                    scope.to_string(),
+                )
+            })
+            .collect();
+        for batch in &batches {
+            current = extend_list_batch(&current, batch, &originals, &source_spec);
+        }
+        current.into_iter().map(|(c, f, _)| (c, f)).collect()
+    } else if one_shot {
         let (result, changed) = extend_to_fixpoint_breaks(original, original_breaks, &registry, one_shot);
         if changed {
             trim_breaks(result, &originals, &source_spec)
@@ -2470,6 +2497,37 @@ fn pseudo_arg_has_target(complex: &Complex, targets: &HashSet<String>, only_not:
     })
 }
 
+/// Whether `complex` mentions one of `targets` inside a selector-pseudo's
+/// argument at ANY nesting depth (`:has(:not(.thing[disabled]))` reaches the
+/// `.thing` target two pseudos deep). The shallow [`pseudo_arg_has_target`] only
+/// inspects the immediate argument, so it misses a target buried under an outer
+/// pseudo; this recursion is what flags issue_2055's `:has(:not(...))` extender
+/// as self-referential so the `addSelector` pre-extension and the self-inclusive
+/// `_extendExistingExtensions` re-extension apply to it.
+fn pseudo_arg_has_target_deep(complex: &Complex, targets: &HashSet<String>) -> bool {
+    complex.components.iter().any(|comp| {
+        comp.compound.simples.iter().any(|s| {
+            let Simple::Pseudo(text) = s else { return false };
+            let Some(parts) = parse_pseudo_parts(text) else {
+                return false;
+            };
+            if !is_selector_pseudo(&parts.name) {
+                return false;
+            }
+            parse_list(&parts.arg).is_some_and(|list| {
+                list.iter().any(|c| {
+                    c.components.iter().any(|cc| {
+                        cc.compound
+                            .simples
+                            .iter()
+                            .any(|inner| targets.contains(&inner.render()))
+                    }) || pseudo_arg_has_target_deep(c, targets)
+                })
+            })
+        })
+    })
+}
+
 /// Whether a pseudo name takes a selector list we should extend. `slotted` is
 /// the selector-bearing pseudo-*element* (dart-sass `_selectorPseudoElements`).
 fn is_selector_pseudo(name: &str) -> bool {
@@ -2502,7 +2560,7 @@ fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
     for complex in list {
         originals.insert(complex.render());
     }
-    let (result, changed) = extend_to_fixpoint_breaks(list, &[], extensions, false);
+    let (result, changed) = extend_to_fixpoint_inner(list, &[], extensions, false, false);
     // dart `_extendList`: when no complex was changed the ORIGINAL list is
     // returned untouched — no trim, duplicates preserved.
     if !changed {
@@ -2615,6 +2673,12 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
     // each `.a.mod1.modN` away (covered by `.a.mod1` at equal specificity) before
     // it can become a registered extender, so the derivation terminates.
     let source_spec = source_specificity_map(input);
+    // Every `@extend` target, for detecting a self-referential pseudo extender
+    // (one whose `:not(...)`/`:has(...)` argument names a target — issue_2055).
+    let all_targets: HashSet<String> = input
+        .iter()
+        .filter_map(|e| e.target.as_ref().map(Simple::render))
+        .collect();
 
     for ext in input {
         let Some(target) = ext.target.clone() else {
@@ -2625,11 +2689,63 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
         // BEFORE this @extend's own extenders are registered, so it can never
         // re-extend itself. Snapshot it now.
         let existing: Vec<usize> = by_extender.get(&target_key).cloned().unwrap_or_default();
+        // dart `ExtensionStore.addSelector`: BEFORE this rule's `@extend` runs,
+        // dart added the rule's own selector to the store, extending it by every
+        // extension registered SO FAR (`selector = _extendList(selector,
+        // _extensions)`). The extender passed to `addExtension` is therefore the
+        // ALREADY-EXTENDED rule selector, not the raw one. sasso keeps the raw
+        // extender per `@extend`, so reproduce `addSelector` here: pre-extend each
+        // extender by the registry accumulated from earlier `@extend`s. This is
+        // what gives issue_2055 its extra nesting — rule3's `:has(:not(.thing
+        // [disabled]))` is registered as `:has(:not(.thing[disabled]):not(
+        // [disabled]:not(.thing[disabled])))` because the earlier `:not(.thing
+        // [disabled])` extension already extended its `.thing`. The pre-extension
+        // is a no-op for the first `@extend` (empty registry) and for extenders
+        // with no extendable simple — so issue_2399 (a single first `@extend`)
+        // is untouched and stays shallow.
+        // The `addSelector` pre-extension only changes the outcome for a
+        // SELF-REFERENTIAL pseudo extender — one whose `:not(...)`/`:has(...)`
+        // argument names a target (issue_2055). For a plain extender
+        // (`.a.mod1`), the existing `_extendExistingExtensions` + application
+        // fold already reproduce dart, and pre-extending there double-counts the
+        // self-overlapping chains (`after_target:multiple_recursive` blows up).
+        // So gate the pre-extension (and the self-inclusion below) to that case,
+        // and trim like dart's `_extendList` so a derived super-broad extender
+        // can't snowball.
+        let self_ref_extender = ext
+            .extenders
+            .iter()
+            .any(|c| pseudo_arg_has_target_deep(c, &all_targets));
+        let pre_extended: Vec<(Complex, bool)> = {
+            let mut out: Vec<(Complex, bool)> = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            for (j, extender) in ext.extenders.iter().enumerate() {
+                let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
+                let products = if registry.is_empty() || !self_ref_extender {
+                    vec![extender.clone()]
+                } else {
+                    // dart `addSelector` = `_extendList(selector, _extensions)`.
+                    // For a self-referential pseudo extender the extension is an
+                    // in-place pseudo-argument rewrite (`:has(:not(.thing[…]))`
+                    // becomes `:has(:not(.thing[…]):not([disabled]:not(…)))`), so
+                    // it REPLACES the bare extender rather than coexisting — no
+                    // top-level trim is needed and the `:not`/`:has` dedup inside
+                    // `extend_complex` already bounds the recursion.
+                    extend_complex(extender, &registry)
+                };
+                for c in products {
+                    if seen.insert(c.render()) {
+                        out.push((c, flag));
+                    }
+                }
+            }
+            out
+        };
         // This @extend's new extensions (dart `newExtensionsByTarget`): the
         // triggering single-extender splits, then the derived ones below.
         let mut batch: Vec<Extension> = Vec::new();
         let mut new_slice: Vec<Extension> = Vec::new();
-        for (j, extender) in ext.extenders.iter().enumerate() {
+        for (extender, flag) in pre_extended.iter().map(|(c, f)| (c, *f)) {
             // Useless (multi-combinator) extenders are kept registered so the
             // extension is still applied — which marks the target "found" (so a
             // mandatory `@extend` doesn't wrongly error) — while the per-product
@@ -2649,7 +2765,6 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
             }
             let idx = registry.len();
             target_sources.insert(ext_key, idx);
-            let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
             let single = single_extension(ext, target.clone(), extender.clone(), flag);
             new_slice.push(single.clone());
             batch.push(single.clone());
@@ -2661,11 +2776,32 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
             }
         }
         // dart `_extendExistingExtensions`: re-extend each existing extender
-        // (one whose extender contained `target`) by the new extension(s). ONE
-        // pass over the snapshot, no inner feedback — multi-level closure comes
-        // from the sequence of @extends.
-        if !new_slice.is_empty() && !existing.is_empty() {
-            for old_idx in existing {
+        // (one whose extender contained `target`) by the new extension(s).
+        //
+        // dart snapshots `existingExtensions = _extensionsByExtender[target]` at
+        // the TOP of `addExtension` and only enters this block when it was
+        // NON-NULL (so the very first `@extend` for a target never re-extends —
+        // issue_2399 stays shallow). But the snapshot is the LIVE list object,
+        // and this `@extend`'s OWN extenders were appended to it (line above)
+        // before `_extendExistingExtensions` reads `.toList()`. So when the block
+        // runs, it iterates the EXISTING extenders PLUS this `@extend`'s own
+        // extenders that contain `target`. That self-inclusion is what derives
+        // issue_2055's deeper `:has(...)` (extender `[1]` re-extends its own
+        // `.thing` by `[1]`). Derived extensions registered DURING the loop are
+        // NOT re-processed (dart's `.toList()` is a one-time snapshot), so the
+        // chain still terminates. We restrict this self-inclusion to the
+        // self-referential pseudo extender — the only case where it changes the
+        // result — so plain self-overlapping chains keep dart's TOP snapshot
+        // exactly and gain no self-derivation step they never had.
+        let process: Vec<usize> = if existing.is_empty() {
+            Vec::new()
+        } else if self_ref_extender {
+            by_extender.get(&target_key).cloned().unwrap_or_default()
+        } else {
+            existing.clone()
+        };
+        if !new_slice.is_empty() && !process.is_empty() {
+            for old_idx in process {
                 if !consume_extend_work() {
                     break;
                 }
@@ -2833,6 +2969,25 @@ fn extend_to_fixpoint_breaks(
     extensions: &[Extension],
     one_shot: bool,
 ) -> (Vec<(Complex, bool)>, bool) {
+    extend_to_fixpoint_inner(list, list_breaks, extensions, one_shot, true)
+}
+
+/// As [`extend_to_fixpoint_breaks`], with explicit control over re-feeding a
+/// freshly-produced pseudo-bearing selector. dart's `_extendList` is a SINGLE
+/// pass over the components; ALL nested extension comes from `_extendPseudo`
+/// recursing back into `_extendList` on a pseudo's argument. A pseudo ARGUMENT
+/// therefore must NOT also re-feed at the list level: doing so runs a redundant
+/// extra fixpoint at every recursion level, multiplying the work geometrically
+/// with depth (the self-referential `:not`/`:has` blowup that exhausted the
+/// budget in issue_2055). The top-level selector list keeps the re-feed, which
+/// resolves a few plain transitive chains a lone pass misses.
+fn extend_to_fixpoint_inner(
+    list: &[Complex],
+    list_breaks: &[bool],
+    extensions: &[Extension],
+    one_shot: bool,
+    refeed: bool,
+) -> (Vec<(Complex, bool)>, bool) {
     // Extender flags by rendered form, for the per-option lookup.
     let mut ext_breaks: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
     for ext in extensions {
@@ -2875,7 +3030,7 @@ fn extend_to_fixpoint_breaks(
                 // only risk re-deriving cyclic self-extends without producing
                 // anything new. An over-long selector (a self-referential
                 // blowup) is emitted but not re-fed.
-                if complex_has_selector_pseudo(&c) && len <= EXTEND_REFEED_MAX_LEN {
+                if refeed && complex_has_selector_pseudo(&c) && len <= EXTEND_REFEED_MAX_LEN {
                     queue.push_back((c.clone(), flag, false));
                 }
                 result.push((c, flag));
