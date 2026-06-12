@@ -189,13 +189,18 @@ diff are in [`bench/three_way.md`](bench/three_way.md); run it yourself with
 ## WebAssembly
 
 Because the library is zero-dependency and pure `std`, it compiles to
-`wasm32-unknown-unknown` and `wasm32-wasip1` out of the box (built in CI).
-A whole SCSS compiler stays small: the deployable `.wasm` cdylib
-(`opt-level = "z"` + LTO + `panic = "abort"` + `strip` + `wasm-opt -Oz`) is
-**~447 KB / ~184 KB gzip** over the wire — published to npm as
-[`@momiji-rs/sasso`](https://www.npmjs.com/package/@momiji-rs/sasso), an order
-of magnitude smaller than shipping dart-sass as JavaScript. A browser
-playground is tracked in the issues.
+`wasm32-unknown-unknown` and `wasm32-wasip1` out of the box (built in CI). The
+deployable `.wasm` cdylib ships in two variants, published to npm as
+[`@momiji-rs/sasso`](https://www.npmjs.com/package/@momiji-rs/sasso):
+
+| Variant | Build | Over the wire |
+| --- | --- | --- |
+| **size** (default) | `opt-level = "z"` + LTO + `panic = "abort"` + `strip` + `wasm-opt -Oz` | **~851 KB / ~356 KB gzip** |
+| **speed** (`@momiji-rs/sasso/speed`) | `opt-level = 3` + `wasm-opt -O3` | **~1.9 MB / ~634 KB gzip** |
+
+A whole modern Sass compiler — `@use`/`@forward`, `@extend`, the calc engine,
+CSS Color 4 — in a few hundred KB gzipped, far smaller than shipping the
+dart-sass compiler as JavaScript. A browser playground is tracked in the issues.
 
 ## Testing & coverage
 
