@@ -11,11 +11,17 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-11
+
 Everything since the initial `0.1.0` crates.io publish. This grew the compiler
 from an early vertical slice to **100% of the *attempted* official sass-spec
 suite** (13,896 / 13,896, zero failures — 11,405 byte-exact CSS outputs plus
 2,491 error specs correctly rejected; the 8 remaining cases are tagged `:todo`
 for dart-sass itself upstream), matching current dart-sass (1.100) byte-for-byte.
+The pass is measured against a conformance harness tightened to reproduce the
+official sass-spec comparator (`normalizeOutput`) exactly — collapse newline
+runs only, no extra whitespace leniency — so the count holds under the upstream
+comparator, not just a looser local one.
 
 ### Added
 
@@ -96,11 +102,21 @@ over dart-sass to ~16–25×):
   verified by unit tests, Miri (no UB), AddressSanitizer, and the full sass-spec
   suite run through it (zero crashes, byte-identical output); the
   rest of the crate is `deny(unsafe_code)`. Still zero runtime dependencies.
+- **Smaller `Value`** — the `Color` variant's modern-color payload is boxed, so
+  the `Value` enum drops from 128 to **64 bytes** (a compile-time `size_of`
+  guard prevents regressions). Halves every scope-map slot, `Vec<Value>` element
+  and lookup clone, with byte-identical output.
+- **Zero-dependency Ryū float formatter** — a from-scratch `d2s` shortest-round-
+  trip formatter on the float-to-string hot path, replacing `core::fmt`, with a
+  differential fuzz test against a reference.
 
 ### Tooling
 
 - The conformance ratchet pins the sass-spec commit (`spec/SPEC_VERSION.txt`)
   for reproducibility, with a `--latest`/`--canary` drift-detection mode.
+- The conformance harness now reproduces the official sass-spec comparator
+  (`sass-spec/lib/test-case/compare.ts` `normalizeOutput`) exactly, so a "pass"
+  means byte-identical under the upstream comparator — no extra local leniency.
 
 ## [0.1.0] - 2026-06-06
 
@@ -124,5 +140,6 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/momiji-rs/sasso/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/momiji-rs/sasso/releases/tag/v0.1.0
