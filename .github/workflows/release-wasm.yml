@@ -37,10 +37,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y binaryen
       - uses: actions/setup-node@v6
         with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-      - name: ensure OIDC-capable npm (Trusted Publishing needs >= 11.5.1)
-        run: npm install -g npm@latest
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false # never cache in release builds (npm OIDC)
       - name: build wasm module
         run: bash wasm/build.sh
       - name: stage license files
