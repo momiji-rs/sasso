@@ -299,6 +299,49 @@ fn incompatible_units_error() {
     assert!(err.message.contains("incompatible units"));
 }
 
+#[test]
+fn hex_color_validation_matches_dart() {
+    // A `#` followed by a digit is a hex color or an error — never a silent
+    // hash-identifier. These all match dart-sass byte-for-byte.
+
+    // Valid 3/4/6/8-digit forms (digit- and letter-start alike).
+    assert_eq!(css("a{color:#000}"), "a {\n  color: #000;\n}\n");
+    assert_eq!(css("a{color:#abc}"), "a {\n  color: #abc;\n}\n");
+    assert_eq!(css("a{color:#000000}"), "a {\n  color: #000000;\n}\n");
+    assert_eq!(css("a{color:#abcd12}"), "a {\n  color: #abcd12;\n}\n");
+    assert_eq!(css("a{color:#0000}"), "a {\n  color: rgba(0, 0, 0, 0);\n}\n");
+    assert_eq!(css("a{color:#00000000}"), "a {\n  color: rgba(0, 0, 0, 0);\n}\n");
+
+    // A digit-start run of an invalid length (or a non-hex char before a valid
+    // length) is "Expected hex digit." — sasso used to accept these verbatim.
+    for bad in [
+        "a{color:#0}",
+        "a{color:#00}",
+        "a{color:#00000}",
+        "a{color:#0000000}",
+        "a{color:#0g}",
+        "a{color:#00g}",
+        "a{color:#12g}",
+    ] {
+        let err = compile(bad, &Options::default()).unwrap_err();
+        assert!(
+            err.message.contains("Expected hex digit"),
+            "{bad} should error, got {}",
+            err.message
+        );
+    }
+
+    // A valid digit-start color followed by a name char keeps the color and
+    // leaves the rest as a trailing token (`#000g` -> `#000` + `g`).
+    assert_eq!(css("a{color:#000g}"), "a {\n  color: #000 g;\n}\n");
+    assert_eq!(css("a{color:#000000g}"), "a {\n  color: #000000 g;\n}\n");
+
+    // A name-start `#` that isn't a whole valid hex is a `#…` identifier string.
+    assert_eq!(css("a{color:#abcde}"), "a {\n  color: #abcde;\n}\n");
+    assert_eq!(css("a{color:#abcg}"), "a {\n  color: #abcg;\n}\n");
+    assert_eq!(css("a{color:#xyz}"), "a {\n  color: #xyz;\n}\n");
+}
+
 // --- scoped-arena escape safety (perf #5) ----------------------------------
 //
 // `compile` brackets its work in a bump-arena scope (when `ScopedAlloc` is the
