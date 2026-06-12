@@ -1032,11 +1032,18 @@ pub(crate) fn extend_selectors(
     // matches what it always matched). Start from the scope-wide store originals
     // (dart `_originals` — every extender written in this module, protected from
     // a broader generated one trimming it) and add the rule's own selectors.
-    let mut originals: FxHashSet<Complex> = plan.scope_originals.clone();
+    // Originals membership for `_trim` (originals are never trimmed). The
+    // scope-wide store originals are BORROWED from the plan (no per-rule clone);
+    // only the rule's own selectors are owned here.
+    let mut rule_originals: FxHashSet<Complex> = FxHashSet::default();
     for complex in original {
         assert_render_injective(complex);
-        originals.insert(complex.clone());
+        rule_originals.insert(complex.clone());
     }
+    let originals = RuleOriginals {
+        scope: &plan.scope_originals,
+        rule: rule_originals,
+    };
 
     // dart `addSelector` ONE-SHOT vs `_extendExistingSelectors` INCREMENTAL.
     // When a rule's selector was established AFTER every applicable `@extend`
@@ -1301,13 +1308,29 @@ fn simplify_one_pseudo(text: &str) -> PseudoResult {
     PseudoResult::Keep(format!("{head}({inner})"))
 }
 
+/// `_trim`'s "originals are never trimmed" membership WITHOUT cloning the
+/// scope-wide originals set into every rule. `extend_selectors` runs per rule;
+/// cloning `plan.scope_originals` (every extender in the module) each time was
+/// an O(rules × |scope_originals|) `Complex`-clone cost. Here the scope set is
+/// BORROWED and only the rule's own few selectors live in `rule`.
+struct RuleOriginals<'a> {
+    scope: &'a FxHashSet<Complex>,
+    rule: FxHashSet<Complex>,
+}
+
+impl RuleOriginals<'_> {
+    fn contains(&self, c: &Complex) -> bool {
+        self.scope.contains(c) || self.rule.contains(c)
+    }
+}
+
 /// Remove complex selectors that are subselectors of another in the list,
 /// preserving original selectors. Mirrors dart-sass `ExtensionStore._trim`:
 /// iterate last-to-first, dropping a selector when an already-kept (or
 /// later-in-input) selector is its superselector. Originals are always kept.
 fn trim(
     selectors: Vec<Complex>,
-    originals: &FxHashSet<Complex>,
+    originals: &RuleOriginals<'_>,
     source_spec: &FxHashMap<Simple, u64>,
 ) -> Vec<Complex> {
     trim_breaks(
@@ -1323,7 +1346,7 @@ fn trim(
 /// Like [`trim`], preserving each selector's line-break flag.
 fn trim_breaks(
     selectors: Vec<(Complex, bool)>,
-    originals: &FxHashSet<Complex>,
+    originals: &RuleOriginals<'_>,
     source_spec: &FxHashMap<Simple, u64>,
 ) -> Vec<(Complex, bool)> {
     // Quadratic; dart-sass bails above 100 to avoid pathological cost.
@@ -2820,7 +2843,10 @@ fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
     let source_spec = source_specificity_map(extensions);
     trim(
         result.into_iter().map(|(c, _)| c).collect(),
-        &originals,
+        &RuleOriginals {
+            scope: &originals,
+            rule: FxHashSet::default(),
+        },
         &source_spec,
     )
 }
@@ -3075,7 +3101,10 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
                 origin_set.insert(old_extender.clone());
                 let extended = trim(
                     extend_complex(&old_extender, &new_slice),
-                    &origin_set,
+                    &RuleOriginals {
+                        scope: &origin_set,
+                        rule: FxHashSet::default(),
+                    },
                     &source_spec,
                 );
                 // dart: skip the first product when it's the unchanged extender.
@@ -3136,7 +3165,7 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
 fn extend_list_batch(
     list: &[(Complex, bool, String)],
     batch: &[Extension],
-    originals: &FxHashSet<Complex>,
+    originals: &RuleOriginals<'_>,
     source_spec: &FxHashMap<Simple, u64>,
 ) -> Vec<(Complex, bool, String)> {
     // Representative origin of the batch (its triggering `@extend`). Every
@@ -4404,7 +4433,14 @@ pub(crate) fn extend_compound_target(
     // fills `_sourceSpecificity` (only `@extend`'s addExtension does), so
     // every max-specificity here is 0 and plain superselector coverage trims.
     let source_spec: FxHashMap<Simple, u64> = FxHashMap::default();
-    trim(result, &originals, &source_spec)
+    trim(
+        result,
+        &RuleOriginals {
+            scope: &originals,
+            rule: FxHashSet::default(),
+        },
+        &source_spec,
+    )
 }
 
 /// Extend one complex selector against one or more compound targets: compute
