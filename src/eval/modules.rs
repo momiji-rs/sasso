@@ -23,6 +23,13 @@ impl<'a> Evaluator<'a> {
         if target.trim().is_empty() {
             return Err(Error::at("expected selector.", pos));
         }
+        // dart rejects a *leading* empty component (`@extend ,a`) as
+        // "expected selector.", while still allowing a trailing comma
+        // (`@extend a,`); an empty middle component falls through to the
+        // usual "target selector was not found." path.
+        if target.trim_start().starts_with(',') {
+            return Err(Error::at("expected selector.", pos));
+        }
         let in_media = !self.media_queries.is_empty();
         for t in split_commas(&target) {
             let t = t.trim();

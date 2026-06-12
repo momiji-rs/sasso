@@ -483,6 +483,25 @@ fn selector_pseudo_grammar_matches_dart() {
     }
 }
 
+#[test]
+fn selector_bang_and_extend_leading_comma_match_dart() {
+    let err = |src: &str| compile(src, &Options::default()).unwrap_err().message;
+
+    // A top-level `!` is not valid in a selector — dart stops there and fails
+    // to find the `{`. A `!` inside an attribute value or string is fine.
+    assert_eq!(err("a !important {b:c}"), "expected \"{\".");
+    assert_eq!(err("div !default {color:red}"), "expected \"{\".");
+    assert!(compile("[data-x=\"a!b\"]{c:d}", &Options::default()).is_ok());
+    assert_eq!(
+        css("a{color:red !important}"),
+        "a {\n  color: red !important;\n}\n"
+    );
+
+    // @extend rejects a leading empty component but allows a trailing comma.
+    assert_eq!(err("a{x:1}.x{@extend ,a}"), "expected selector.");
+    assert!(compile("a{x:1}.x{@extend a,}", &Options::default()).is_ok());
+}
+
 // --- scoped-arena escape safety (perf #5) ----------------------------------
 //
 // `compile` brackets its work in a bump-arena scope (when `ScopedAlloc` is the

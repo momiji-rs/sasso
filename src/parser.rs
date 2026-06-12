@@ -853,13 +853,17 @@ impl Parser {
         let selector_pos = self.sc.position();
         let saved_spans = std::mem::take(&mut self.interp_spans);
         let saved_collect = std::mem::replace(&mut self.collect_interp_spans, true);
-        let selector = self.parse_template_mode(&['{'], CommentMode::Strip);
+        // A top-level `!` is not valid in a selector: dart-sass stops the
+        // selector there and then fails to find the `{` (`a !important {…}` →
+        // `expected "{".`). It is only a stop at depth 0 — a `!` inside an
+        // attribute selector (`[a="x!y"]`) or a string is consumed normally.
+        let selector = self.parse_template_mode(&['{', '!'], CommentMode::Strip);
         self.collect_interp_spans = saved_collect;
         let selector_interp_spans = std::mem::replace(&mut self.interp_spans, saved_spans);
         let selector = selector?;
         let brace_line = self.sc.position().line as u32;
         if !self.sc.eat('{') {
-            return Err(Error::at("expected \"{\"", self.sc.position()));
+            return Err(Error::at("expected \"{\".", self.sc.position()));
         }
         self.block_depth += 1;
         let body = self.parse_statements(false);
@@ -3749,7 +3753,7 @@ impl Parser {
         self.skip_ws_inline();
         let brace_line = self.sc.position().line as u32;
         if !self.sc.eat('{') {
-            return Err(Error::at("expected \"{\"", self.sc.position()));
+            return Err(Error::at("expected \"{\".", self.sc.position()));
         }
         self.block_depth += 1;
         let body = self.parse_statements(false);
