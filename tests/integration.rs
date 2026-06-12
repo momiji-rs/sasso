@@ -374,6 +374,41 @@ fn rejects_lenient_parser_forms_like_dart() {
     assert_eq!(err("@forward \"sass:math\" as 9-*;"), "Expected identifier.");
 }
 
+#[test]
+fn rgb_hsl_argument_validation_matches_dart() {
+    let err = |src: &str| compile(src, &Options::default()).unwrap_err().message;
+
+    // Each rgb channel must be unitless or `%` (dart names the offending param).
+    assert_eq!(
+        err("a{b:rgb(1px,2,3)}"),
+        "$red: Expected 1px to have unit \"%\" or no units."
+    );
+    assert_eq!(
+        err("a{b:rgb(2,1px,3)}"),
+        "$green: Expected 1px to have unit \"%\" or no units."
+    );
+    assert_eq!(
+        err("a{b:rgb(1,2,3px)}"),
+        "$blue: Expected 3px to have unit \"%\" or no units."
+    );
+
+    // A 2-arg comma call is the legacy `rgb($color, $alpha)` — $color must be a
+    // color, so a space-list (modern channels shape) is rejected.
+    assert_eq!(err("a{color:rgb(1 2 3, 0.5)}"), "$color: (1 2 3) is not a color.");
+    assert_eq!(err("a{color:hsl(1 2% 3%, 0.5)}"), "Missing argument $lightness.");
+
+    // Valid forms still compile (legacy, modern space-list, slash-alpha, var()).
+    for ok in [
+        "a{color:rgb(255 0 0)}",
+        "a{color:rgb(1,2,3)}",
+        "a{color:rgb(1 2 3 / 0.5)}",
+        "a{color:hsl(120, 50%, 40%)}",
+        "a{color:rgb(1, var(--foo))}",
+    ] {
+        assert!(compile(ok, &Options::default()).is_ok(), "{ok}");
+    }
+}
+
 // --- scoped-arena escape safety (perf #5) ----------------------------------
 //
 // `compile` brackets its work in a bump-arena scope (when `ScopedAlloc` is the
