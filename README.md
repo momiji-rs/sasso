@@ -1,16 +1,23 @@
 # sasso
 
+[![crates.io](https://img.shields.io/crates/v/sasso.svg)](https://crates.io/crates/sasso)
+[![docs.rs](https://img.shields.io/docsrs/sasso)](https://docs.rs/sasso)
+[![CI](https://github.com/momiji-rs/sasso/actions/workflows/ci.yml/badge.svg)](https://github.com/momiji-rs/sasso/actions/workflows/ci.yml)
+[![sass-spec](https://img.shields.io/badge/sass--spec-100%25_of_attempted-brightgreen)](#conformance)
+[![runtime deps](https://img.shields.io/badge/runtime_deps-0-brightgreen)](Cargo.toml)
+[![license](https://img.shields.io/crates/l/sasso.svg)](#license)
+
 A pure-Rust **SCSS → CSS compiler** — a from-scratch dart-sass alternative.
 Zero runtime dependencies, wasm-friendly, usable as a **library** and a
 **CLI**, and designed to match **current** dart-sass byte-for-byte on the
 subset it implements.
 
-> Status: early vertical slice (v0.0.1). It already compiles real-world
-> SCSS (variables, nesting, `&`, interpolation, unit math, a focused color
-> function set, and `@import` partials) byte-identically to dart-sass 1.100.
-> The north-star target is **100% of the official
-> [sass-spec](https://github.com/sass/sass-spec) suite**, tracked as a
-> ratchet (see [Conformance](#conformance)).
+> Status: v0.x, maturing fast. Compiles real-world SCSS and indented `.sass`
+> byte-identically to dart-sass 1.100, and **passes 100% of the *attempted*
+> official [sass-spec](https://github.com/sass/sass-spec) suite
+> (13,896 / 13,896, zero failures)** — tracked as a ratchet (see
+> [Conformance](#conformance) for exactly what that denominator means). What
+> remains is real-world breadth and hardening, not spec coverage.
 
 ## Why another Sass compiler?
 
@@ -47,9 +54,11 @@ Since this slice was written the ratchet has added a great deal more —
 and `%placeholder`s, a `calc()` engine, the CSS unit system + math functions,
 full CSS Color 4 color spaces (`oklch`/`lab`/`color()`…), structured
 `@media`/`@supports`, maps, the `@use`/`@forward` module system (built-in
-`sass:*` modules + user files), and the indented `.sass` syntax. **82% of the
-official sass-spec suite now passes** (see [Conformance](#conformance)); what
-remains is a long tail of byte-level edge cases.
+`sass:*` modules + user files), and the indented `.sass` syntax. **The
+compiler now passes 100% of the attempted sass-spec suite (13,896 / 13,896,
+zero failures)** byte-for-byte against dart-sass 1.100 — 11,405 byte-exact CSS
+outputs plus 2,491 error specs it correctly rejects (see
+[Conformance](#conformance)).
 
 ## Install
 
@@ -132,8 +141,17 @@ pass rate; we ratchet it upward over time.
 | --- | --- |
 | sass-spec commit | `c6ac9a3` (dart-sass 1.100.0) |
 | Total cases | 13,904 |
-| Attempted (excl. a few :todo) | 13,896 |
-| **Passing** | **11,445 (82.4% of attempted, 82.3% of all 13,904)** |
+| Attempted (excl. 8 dart-sass `:todo`) | 13,896 |
+| **Passing** | **13,896 — 100% of attempted · 0 failures** (99.94% of all 13,904) |
+| ↳ byte-exact CSS output | 11,405 |
+| ↳ error specs correctly rejected | 2,491 |
+
+*Passing* = byte-exact CSS output match **plus** error specs the compiler
+correctly rejects — the standard sass-spec conformance metric (the harness
+checks that an error spec errors; the error *message* is tracked separately as
+a non-gating metric). The 8 excluded cases are tagged `:todo` for **dart-sass
+itself** upstream — dart-sass doesn't pass them either; sasso matches
+dart-sass's actual behaviour on all 8 regardless.
 
 Run it yourself:
 

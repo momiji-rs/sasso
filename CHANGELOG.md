@@ -12,8 +12,10 @@ Conformance is tracked separately as a ratchet against the official
 ## [Unreleased]
 
 Everything since the initial `0.1.0` crates.io publish. This grew the compiler
-from an early vertical slice to roughly **82% of the official sass-spec suite**,
-matching current dart-sass (1.100) byte-for-byte on the implemented subset.
+from an early vertical slice to **100% of the *attempted* official sass-spec
+suite** (13,896 / 13,896, zero failures — 11,405 byte-exact CSS outputs plus
+2,491 error specs correctly rejected; the 8 remaining cases are tagged `:todo`
+for dart-sass itself upstream), matching current dart-sass (1.100) byte-for-byte.
 
 ### Added
 
@@ -34,8 +36,11 @@ matching current dart-sass (1.100) byte-for-byte on the implemented subset.
   `@import` of partials by file extension.
 - **CSS Color 4 color spaces** — `srgb`/`display-p3`/`lab`/`lch`/`oklab`/
   `oklch`/`xyz` via `color()`, with modern color serialization.
-- **`@extend` and `%placeholder`s** — selector weaving with dart-sass-compatible
-  trailing-combinator handling and escape canonicalization.
+- **`@extend` and `%placeholder`s** — a faithful port of dart-sass's
+  `ExtensionStore` engine: registration-order extension folding, selector
+  weaving/unification/trimming, `@use`/`@forward` cross-module visibility, and
+  the self-referential `:not`/`:has` pseudo cases — closing the suite's
+  `@extend` family to byte-exact parity.
 - **Built-in function modules** — `meta` (first-class function references via
   `get-function`/`call`, existence predicates), `math` (`clamp`/`min`/`max`/
   `round`/`log` and friends), `list` (bracket-preserving `join`/`append`),
@@ -89,7 +94,7 @@ over dart-sass to ~16–25×):
   forwards to the system allocator outside a compile, so it's safe to install
   unconditionally). This is the library's one audited `unsafe` module —
   verified by unit tests, Miri (no UB), AddressSanitizer, and the full sass-spec
-  suite run through it (11,445 cases, zero crashes, byte-identical output); the
+  suite run through it (zero crashes, byte-identical output); the
   rest of the crate is `deny(unsafe_code)`. Still zero runtime dependencies.
 
 ### Tooling
