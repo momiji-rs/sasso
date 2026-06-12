@@ -3704,51 +3704,194 @@ enum DeclScope {
     Mixin,
 }
 
-/// Reject `@function`/`@mixin` declarations nested where dart-sass forbids
-/// them: inside control directives, function bodies, or mixin bodies. Runs once
-/// after parsing, so an unexecuted `@while (false) { @function … }` still
-/// errors (it is a compile-time, not run-time, restriction).
-pub(crate) fn validate_declarations(sheet: &Stylesheet) -> Result<(), Error> {
-    validate_decl_scope(&sheet.stmts, DeclScope::Allowed)
+/// The lexical context a statement is nested in, used to statically reject
+/// misplaced statements exactly like dart-sass — *before* evaluation, so even
+/// an unexecuted `@if false { … }` branch is validated.
+#[derive(Clone, Copy)]
+struct ScopeCtx {
+    /// `@function`/`@mixin`/control declaration scope (see [`DeclScope`]).
+    decl: DeclScope,
+    /// Lexically inside a style rule (dart-sass's parser `_inStyleRule`). Set by
+    /// [`Stmt::Rule`]; preserved through `@media`/`@supports`/`@keyframes`/
+    /// generic at-rules and control directives. Governs where `@extend` may
+    /// appear lexically.
+    in_style_rule: bool,
+    /// Inside an `@at-root` body or an `@include` content block: the lexical
+    /// `@extend` placement check is deferred to the evaluator, which checks the
+    /// *runtime* style-rule context (the `@at-root` query and the include site
+    /// determine whether a style rule survives — neither is knowable statically).
+    /// All other validations still apply.
+    defer_extend: bool,
 }
 
-fn validate_decl_scope(stmts: &[Stmt], scope: DeclScope) -> Result<(), Error> {
+impl ScopeCtx {
+    fn root() -> Self {
+        ScopeCtx {
+            decl: DeclScope::Allowed,
+            in_style_rule: false,
+            defer_extend: false,
+        }
+    }
+    fn with(self, decl: DeclScope) -> Self {
+        ScopeCtx { decl, ..self }
+    }
+}
+
+/// Reject statements nested where dart-sass forbids them. Runs once after
+/// parsing, so an unexecuted `@while (false) { @function … }` still errors (it
+/// is a compile-time, not run-time, restriction). Covers:
+/// - `@function`/`@mixin` declarations in control/function/mixin bodies;
+/// - the full set of statements illegal inside a `@function` body (style rules,
+///   declarations, and everything that isn't a var assignment / control flow /
+///   `@return` / `@warn` / `@debug` / `@error`);
+/// - `@content` outside a `@mixin` declaration;
+/// - `@extend` outside a style rule or mixin.
+pub(crate) fn validate_declarations(sheet: &Stylesheet) -> Result<(), Error> {
+    validate_decl_scope(&sheet.stmts, ScopeCtx::root())
+}
+
+fn validate_decl_scope(stmts: &[Stmt], ctx: ScopeCtx) -> Result<(), Error> {
+    let scope = ctx.decl;
     for stmt in stmts {
+        // Inside a `@function` body dart-sass only permits variable
+        // assignments, control flow, `@return`, `@warn`/`@debug`/`@error`, and
+        // comments. Reject the rest here (with dart's precedence ordering)
+        // before the generic per-statement handling below.
+        if scope == DeclScope::Function {
+            match stmt {
+                // The indented-syntax parser can attach a function header's
+                // parameter list on a continuation line (`@function a\n  ()`) as
+                // a spurious empty-`()` "style rule" in the body. dart-sass reads
+                // it as the (empty) parameter list, not a rule — and `()` is not
+                // a valid selector dart would ever produce — so this artifact is
+                // not a real style rule. Skip it; a genuine rule is rejected.
+                Stmt::Rule(r) if is_empty_parens_selector(&r.selector) => {}
+                Stmt::Rule(_) => {
+                    return Err(Error::unpositioned(
+                        "@function rules may not contain style rules.".to_string(),
+                    ));
+                }
+                Stmt::Decl(_) | Stmt::CustomDecl(_) | Stmt::PropertySet(_) => {
+                    return Err(Error::unpositioned(
+                        "@function rules may not contain declarations.".to_string(),
+                    ));
+                }
+                // Allowed in a function body: keep walking (control flow) or
+                // accept verbatim (assignments / `@return` / diagnostics /
+                // comments). Function/mixin definitions fall through to the
+                // declaration check below, which already yields dart's
+                // "This at-rule is not allowed here." for a nested function.
+                Stmt::VarDecl(_)
+                | Stmt::Return(_)
+                | Stmt::Warn { .. }
+                | Stmt::Debug { .. }
+                | Stmt::Error { .. }
+                | Stmt::Comment(..)
+                | Stmt::If(_)
+                | Stmt::For { .. }
+                | Stmt::Each { .. }
+                | Stmt::While { .. }
+                | Stmt::FunctionDef(_)
+                | Stmt::MixinDef(_) => {}
+                // Anything else (@extend, @content, @include, @media, @at-root,
+                // @use, @import, @charset, generic at-rules, …) is rejected.
+                _ => {
+                    return Err(Error::unpositioned(
+                        "This at-rule is not allowed here.".to_string(),
+                    ));
+                }
+            }
+        }
         match stmt {
             Stmt::FunctionDef(c) => {
                 if let Some(msg) = decl_error(scope, "function") {
                     return Err(Error::unpositioned(msg));
                 }
-                validate_decl_scope(&c.body, DeclScope::Function)?;
+                validate_decl_scope(&c.body, ctx.with(DeclScope::Function))?;
             }
             Stmt::MixinDef(c) => {
                 if let Some(msg) = decl_error(scope, "mixin") {
                     return Err(Error::unpositioned(msg));
                 }
-                validate_decl_scope(&c.body, DeclScope::Mixin)?;
+                validate_decl_scope(&c.body, ctx.with(DeclScope::Mixin))?;
+            }
+            // `@content` is only legal lexically within a `@mixin` declaration
+            // (directly or nested through style rules / control / at-rules). The
+            // `decl` scope is `Mixin` throughout a mixin body, so testing it
+            // captures every nesting. (Inside a `@function` the earlier guard
+            // already emitted "This at-rule is not allowed here.".)
+            Stmt::Content(_) if scope != DeclScope::Mixin => {
+                return Err(Error::unpositioned(
+                    "@content is only allowed within mixin declarations.".to_string(),
+                ));
+            }
+            // `@extend` applies at the include site, so lexically it is legal
+            // only within a style rule or a mixin. Elsewhere — top level, or a
+            // control directive not inside a style rule — dart-sass errors at
+            // parse time. (Inside a `@function` the earlier guard wins; inside
+            // an `@at-root` body or an `@include` content block the check is
+            // deferred to the evaluator — see `defer_extend`.)
+            Stmt::Extend { .. } if !ctx.defer_extend && !ctx.in_style_rule && scope != DeclScope::Mixin => {
+                return Err(Error::unpositioned(
+                    "@extend may only be used within style rules.".to_string(),
+                ));
             }
             // Control directives establish (or keep) the control/function/mixin
             // scope; a `@function`/`@mixin` body's scope sticks through them.
+            // They preserve the enclosing `in_style_rule` flag.
             Stmt::If(branches) => {
-                let inner = enter_control(scope);
+                let inner = ctx.with(enter_control(scope));
                 for b in branches {
                     validate_decl_scope(&b.body, inner)?;
                 }
             }
             Stmt::For { body, .. } | Stmt::Each { body, .. } | Stmt::While { body, .. } => {
-                validate_decl_scope(body, enter_control(scope))?;
+                validate_decl_scope(body, ctx.with(enter_control(scope)))?;
             }
-            // Style rules and plain at-rules preserve the current scope.
-            Stmt::Rule(r) => validate_decl_scope(&r.body, scope)?,
+            // A style rule establishes the style-rule context for `@extend`.
+            Stmt::Rule(r) => {
+                validate_decl_scope(
+                    &r.body,
+                    ScopeCtx {
+                        in_style_rule: true,
+                        ..ctx
+                    },
+                )?;
+            }
+            // `@at-root` runs its body at the document root: whether a style
+            // rule survives depends on the (runtime-evaluated) `with`/`without`
+            // query, so defer the `@extend` placement check to the evaluator.
+            // A nested style rule inside the body re-establishes `in_style_rule`
+            // for its own descendants (handled by the `Stmt::Rule` arm).
+            Stmt::AtRoot { body, .. } => {
+                validate_decl_scope(
+                    body,
+                    ScopeCtx {
+                        defer_extend: true,
+                        ..ctx
+                    },
+                )?;
+            }
+            // Plain at-rules / `@media` / `@supports` / `@keyframes` preserve
+            // both the declaration scope and the style-rule context.
             Stmt::AtRule { body: Some(body), .. }
             | Stmt::Media { body, .. }
             | Stmt::Supports { body, .. }
-            | Stmt::AtRoot { body, .. }
-            | Stmt::Keyframes { body, .. } => validate_decl_scope(body, scope)?,
+            | Stmt::Keyframes { body, .. } => validate_decl_scope(body, ctx)?,
+            // An `@include`'s content block resolves at the include site, so its
+            // `@extend` placement is only knowable at runtime — defer it. The
+            // block is still mixin-body-like for declaration validation, so the
+            // other checks keep running with the surrounding scope.
             Stmt::Include {
                 content: Some(content),
                 ..
-            } => validate_decl_scope(content, scope)?,
+            } => validate_decl_scope(
+                content,
+                ScopeCtx {
+                    defer_extend: true,
+                    ..ctx
+                },
+            )?,
             // A Sass `@import` (one that inlines a partial) is forbidden inside
             // a control directive or a function/mixin body; a plain-CSS
             // `@import` is always allowed (passed through verbatim).
@@ -3764,6 +3907,17 @@ fn validate_decl_scope(stmts: &[Stmt], scope: DeclScope) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// True when a rule selector is the empty-`()` artifact the indented-syntax
+/// parser emits for a `@function` header whose parameter list spills onto a
+/// continuation line. dart-sass treats `()` there as the parameter list, never
+/// a selector, so it must not count as a style rule inside a `@function` body.
+fn is_empty_parens_selector(selector: &[TplPiece]) -> bool {
+    match selector {
+        [TplPiece::Lit(s)] => s.trim() == "()",
+        _ => false,
+    }
 }
 
 /// Entering a control directive: a `@function`/`@mixin` body keeps its own
