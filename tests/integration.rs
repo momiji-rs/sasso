@@ -342,6 +342,38 @@ fn hex_color_validation_matches_dart() {
     assert_eq!(css("a{color:#xyz}"), "a {\n  color: #xyz;\n}\n");
 }
 
+#[test]
+fn rejects_lenient_parser_forms_like_dart() {
+    let err = |src: &str| compile(src, &Options::default()).unwrap_err().message;
+
+    // Duplicate @mixin/@function parameter (dart treats `-`/`_` as identical).
+    assert_eq!(
+        err("@mixin m($a,$a){x:$a}a{@include m(1,2)}"),
+        "Duplicate parameter."
+    );
+    assert_eq!(
+        err("@function f($a,$a){@return $a}a{x:f(1,2)}"),
+        "Duplicate parameter."
+    );
+    assert_eq!(
+        err("@mixin m($a-b,$a_b){x:$a-b}c{@include m(1,2)}"),
+        "Duplicate parameter."
+    );
+    assert!(compile("@mixin ok($a,$b){x:$a}a{@include ok(1,2)}", &Options::default()).is_ok());
+
+    // A committed exponent (`e` then a sign or digit) requires a digit.
+    for bad in ["a{b:1e-}", "a{b:1e-x}", "a{b:1e++5}", "a{b:1e--5}"] {
+        assert_eq!(err(bad), "Expected digit.", "{bad}");
+    }
+    assert_eq!(css("a{b:1e5}"), "a {\n  b: 100000;\n}\n");
+    assert_eq!(css("a{b:1e+2}"), "a {\n  b: 100;\n}\n");
+    assert_eq!(css("a{b:1em}"), "a {\n  b: 1em;\n}\n"); // `e` + letter is a unit
+
+    // A module namespace must be a real identifier (not digit-leading).
+    assert_eq!(err("@use \"sass:math\" as 0;a{b:1}"), "Expected identifier.");
+    assert_eq!(err("@forward \"sass:math\" as 9-*;"), "Expected identifier.");
+}
+
 // --- scoped-arena escape safety (perf #5) ----------------------------------
 //
 // `compile` brackets its work in a bump-arena scope (when `ScopedAlloc` is the

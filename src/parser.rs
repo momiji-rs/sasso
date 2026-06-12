@@ -1262,7 +1262,7 @@ impl Parser {
             if self.sc.eat('*') {
                 star = true;
             } else {
-                namespace = Some(self.read_ident_name()?);
+                namespace = Some(self.read_namespace_ident()?);
             }
             self.skip_ws_trivia();
         }
@@ -1299,7 +1299,7 @@ impl Parser {
         let mut prefix = None;
         if self.try_keyword("as") {
             self.skip_ws_inline();
-            let name = self.read_ident_name()?;
+            let name = self.read_namespace_ident()?;
             if !self.sc.eat('*') {
                 return Err(Error::at("expected \"*\".", self.sc.position()));
             }
@@ -3466,6 +3466,10 @@ impl Parser {
     fn parse_param_list(&mut self) -> Result<ParamList, Error> {
         let mut params = Vec::new();
         let mut rest = None;
+        // dart-sass forbids two parameters with the same name, treating `-` and
+        // `_` as identical (`$a-b` and `$a_b` collide) — track the normalized
+        // names seen so far and reject a repeat with "Duplicate parameter.".
+        let mut seen: Vec<String> = Vec::new();
         self.skip_ws_inline();
         if self.sc.peek() != Some('(') {
             return Ok(ParamList { params, rest });
@@ -3478,10 +3482,16 @@ impl Parser {
         }
         loop {
             self.skip_ws_inline();
+            let name_pos = self.sc.position();
             if !self.sc.eat('$') {
                 return Err(Error::at("expected a parameter", self.sc.position()));
             }
             let name = self.read_variable_name()?;
+            let norm = name.replace('_', "-");
+            if seen.contains(&norm) {
+                return Err(Error::at("Duplicate parameter.", name_pos));
+            }
+            seen.push(norm);
             self.skip_ws_inline();
             if self.sc.peek() == Some('.')
                 && self.sc.peek_at(1) == Some('.')
@@ -4107,6 +4117,16 @@ impl Parser {
             return Err(Error::at("expected an identifier", self.sc.position()));
         }
         Ok(s)
+    }
+
+    /// Read a module namespace / forward prefix. dart-sass requires a real
+    /// identifier here, so a digit-leading name (`@use "x" as 0`) is
+    /// "Expected identifier." rather than a silently-accepted namespace.
+    fn read_namespace_ident(&mut self) -> Result<String, Error> {
+        if matches!(self.sc.peek(), Some(c) if c.is_ascii_digit()) {
+            return Err(Error::at("Expected identifier.", self.sc.position()));
+        }
+        self.read_ident_name()
     }
 
     /// Decode a `\` escape inside an identifier (dart `escapeCharacter`):
@@ -5200,14 +5220,15 @@ impl Parser {
                 }
             }
         }
-        // Scientific notation: `e`/`E` is an exponent only when followed by
-        // (an optionally-signed) digit; otherwise it begins a unit (`1em`).
+        // Scientific notation: dart-sass commits to an exponent as soon as
+        // `e`/`E` is followed by a digit OR a sign, then *requires* at least
+        // one digit — so `1e-`, `1e-x`, `1e++5`, `1e--5` are "Expected digit.",
+        // not a fall-through to a `1e-` unit. A unit like `1em` (or a spaced
+        // `1e + 2`) is unaffected: `e` is followed by a letter / whitespace.
         if matches!(self.sc.peek(), Some('e' | 'E')) {
             let after = self.sc.peek_at(1);
-            let exp_digit = matches!(after, Some(c) if c.is_ascii_digit())
-                || (matches!(after, Some('+' | '-'))
-                    && matches!(self.sc.peek_at(2), Some(c) if c.is_ascii_digit()));
-            if exp_digit {
+            let is_exp = matches!(after, Some(c) if c.is_ascii_digit() || c == '+' || c == '-');
+            if is_exp {
                 if let Some(c) = self.sc.bump() {
                     s.push(c);
                 }
@@ -5215,6 +5236,9 @@ impl Parser {
                     if let Some(c) = self.sc.bump() {
                         s.push(c);
                     }
+                }
+                if !matches!(self.sc.peek(), Some(c) if c.is_ascii_digit()) {
+                    return Err(Error::at("Expected digit.", self.sc.position()));
                 }
                 while matches!(self.sc.peek(), Some(c) if c.is_ascii_digit()) {
                     if let Some(c) = self.sc.bump() {
