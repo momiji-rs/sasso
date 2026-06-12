@@ -21,3 +21,9 @@ bench/grass_runner/target/
 
 # Claude Code session-local state (never commit).
 /.claude/
+
+# Stray AI-tool / editor local state (never publish)
+.antigravitycli/
+.gemini/
+.cursor/
+.DS_Store
