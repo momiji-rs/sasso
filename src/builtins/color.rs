@@ -746,11 +746,11 @@ fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     // space so `color.space`/`color.channel` work; serialization uses the
     // classic comma form via `ModernColor::legacy_css`.
     let h_norm = h.rem_euclid(360.0);
-    c.modern = Some(ModernColor {
+    c.modern = Some(Box::new(ModernColor {
         space: ColorSpace::Hsl,
         channels: [Some(h_norm), Some(s_pct), Some(l_pct)],
         alpha: Some(a),
-    });
+    }));
     Ok(Value::Color(c))
 }
 
@@ -1029,11 +1029,11 @@ fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     // Carry the modern Hwb tag (so `color.space`/`color.channel` work);
     // serialization uses the classic hsl comma form via `legacy_css`.
     let h_norm = h.rem_euclid(360.0);
-    out.modern = Some(ModernColor {
+    out.modern = Some(Box::new(ModernColor {
         space: ColorSpace::Hwb,
         channels: [Some(h_norm), Some(w_pct), Some(b_pct)],
         alpha: Some(a),
-    });
+    }));
     Ok(Value::Color(out))
 }
 
@@ -1993,7 +1993,7 @@ fn convert_modern_filled(mc: &ModernColor, target: ColorSpace) -> ModernColor {
 /// `rgb`/`hsl`/`hwb` per `mc.modern`, or plain sRGB → `rgb`).
 pub(super) fn legacy_to_modern(c: &Color) -> ModernColor {
     if let Some(m) = &c.modern {
-        return m.clone();
+        return (**m).clone();
     }
     ModernColor {
         space: ColorSpace::Rgb,
@@ -2015,7 +2015,7 @@ fn make_modern(mc: ModernColor) -> Color {
         z(srgb.channels[2]).clamp(0.0, 255.0),
         mc.alpha.unwrap_or(1.0),
     );
-    c.modern = Some(mc);
+    c.modern = Some(Box::new(mc));
     c
 }
 
@@ -2275,7 +2275,7 @@ pub(super) fn make_modern_in(mc: ModernColor, _space: ColorSpace) -> Color {
         // uses its CSS named-color spelling when it matches one.
         let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
         if !(in_gamut(r) && in_gamut(g) && in_gamut(b)) {
-            c.modern = Some(mc);
+            c.modern = Some(Box::new(mc));
         } else {
             c.repr = named_repr(r, g, b, a);
         }

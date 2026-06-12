@@ -44,6 +44,12 @@ pub(crate) enum Value {
     Mixin(SassMixin),
 }
 
+/// `Value` is moved/cloned constantly (every scope slot, every `Vec<Value>`
+/// element, every `$var` read), so its size is a hot-path constant. `Color` was
+/// the sole 128-byte variant (its 72-byte `ModernColor` is now boxed); keep
+/// `Value` at one cache line. Bump this only with a deliberate measurement.
+const _: () = assert!(std::mem::size_of::<Value>() <= 64);
+
 /// A first-class function reference. Built-in references compare equal by name
 /// (and CSS flag); user references compare by identity of the captured
 /// definition (so a redefined `@function` yields a distinct reference). The
@@ -645,8 +651,11 @@ pub(crate) struct Color {
     /// the color is emitted unchanged; `None` for computed colors.
     pub repr: Option<String>,
     /// Modern CSS Color 4 representation. `None` for plain legacy sRGB
-    /// colors (the common case); `Some` once the color is space-aware.
-    pub modern: Option<ModernColor>,
+    /// colors (the common case); `Some` once the color is space-aware. BOXED so
+    /// the 72-byte `ModernColor` doesn't inflate every `Color` (and thus every
+    /// `Value`, since `Color` is the largest variant): `Color` shrinks 128 -> 64
+    /// bytes, halving every scope slot / `Vec<Value>` element / lookup clone.
+    pub modern: Option<Box<ModernColor>>,
 }
 
 /// A CSS Color 4 color space.
