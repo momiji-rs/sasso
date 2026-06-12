@@ -42,7 +42,7 @@ build_variant() {
   local raw="$tdir/$TARGET/release/sasso_wasm.wasm"
   if command -v wasm-opt >/dev/null 2>&1; then
     echo ">> [$name] wasm-opt $wopt"
-    wasm-opt "$wopt" --enable-bulk-memory --enable-nontrapping-float-to-int "$raw" -o "$out"
+    wasm-opt "$wopt" --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext "$raw" -o "$out"
   else
     echo "note: wasm-opt not found; shipping the unoptimized $name module"
     cp "$raw" "$out"
