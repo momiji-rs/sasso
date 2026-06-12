@@ -917,6 +917,95 @@ pub(crate) struct ExtendResult {
     pub all_placeholders: bool,
 }
 
+/// The scope-fixed derivation shared by every rule in one module `scope` with
+/// one fixed `extensions` list. Building this is the expensive part — it folds
+/// the whole `ExtensionStore` transitive closure (dart's `_extensions` /
+/// `_extensionsByExtender` / `_sourceSpecificity`) — and the result depends ONLY
+/// on `(extensions, scope)`, NOT on the per-rule selector list. dart builds its
+/// store ONCE and then incrementally extends each rule's selector against it; we
+/// reproduce that by computing this plan ONCE per scope (in `rewrite_nodes`) and
+/// reusing it across every rule, instead of re-deriving the closure per rule
+/// (the old O(rules × extensions) blow-up).
+pub(crate) struct ExtendPlan {
+    /// dart `newExtensionsByTarget` per registration — the per-`@extend` batches
+    /// applied by the registration-order fold.
+    batches: Vec<Vec<Extension>>,
+    /// The full flat extension registry incl. the transitive closure (dart
+    /// `_extensions`), driving the one-shot / pseudo-self-ref worklist.
+    registry: Vec<Extension>,
+    /// Store-wide source specificities (dart `_sourceSpecificity`) for `trim`.
+    source_spec: FxHashMap<Simple, u64>,
+    /// The store-wide original extenders (dart `_originals`) for THIS scope —
+    /// protected from trimming. The per-rule call unions in its own originals.
+    scope_originals: FxHashSet<Complex>,
+    /// The visible extension count (`extensions.len()`), against which the
+    /// per-rule `extend_base` is compared to choose the one-shot path. Stored so
+    /// the comparison stays exactly the old `extend_base >= extensions.len()`.
+    n_extensions: usize,
+    /// dart `single-module` flag: every extension's origin is this scope.
+    single_module: bool,
+    /// A self-referential pseudo chain is present (issue_2055) — routes to the
+    /// single-pass batch fold rather than the registration fixpoint.
+    pseudo_self_ref: bool,
+    /// How many units of the shared work budget `expand_extensions` consumes
+    /// while deriving the closure. The old per-rule path reset the budget then
+    /// ran `expand_extensions`, so each rule's fold saw `BUDGET − this`; with
+    /// the plan computed once, we replay this deduction per rule to keep the
+    /// budget state — and therefore the output — byte-identical.
+    expand_budget_cost: usize,
+}
+
+impl ExtendPlan {
+    /// True when no extensions are visible in this scope (the caller's fast
+    /// path: a rule with no `@extend` and no placeholder is untouched).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.n_extensions == 0
+    }
+}
+
+/// Build the scope-fixed [`ExtendPlan`] for one module `scope` and its fixed
+/// `extensions` list. Call ONCE per scope; reuse across every rule.
+pub(crate) fn build_extend_plan(extensions: &[Extension], scope: &str) -> ExtendPlan {
+    // The store-wide originals (dart `_originals`): every extender written in
+    // THIS module is a source selector, protected from being trimmed away by a
+    // broader generated one. (The per-rule call adds the rule's own selectors.)
+    let mut scope_originals: FxHashSet<Complex> = FxHashSet::default();
+    for ext in extensions {
+        if ext.origin != scope {
+            continue;
+        }
+        for complex in &ext.extenders {
+            scope_originals.insert(complex.clone());
+        }
+    }
+    let source_spec = source_specificity_map(extensions);
+    // Run the closure derivation under a fresh budget and record exactly how
+    // much it consumed, so the per-rule path can replay the same deduction.
+    reset_extend_budget();
+    let budget_before = EXTEND_WORK.with(|w| w.get());
+    let (batches, registry) = expand_extensions(extensions);
+    let budget_after = EXTEND_WORK.with(|w| w.get());
+    let expand_budget_cost = budget_before.saturating_sub(budget_after);
+    let single_module = extensions.iter().all(|e| e.origin == scope);
+    let targets: FxHashSet<Simple> = extensions.iter().filter_map(|e| e.target.clone()).collect();
+    let pseudo_self_ref = single_module
+        && registry.iter().any(|e| {
+            e.extenders
+                .iter()
+                .any(|c| pseudo_arg_has_target(c, &targets, false))
+        });
+    ExtendPlan {
+        batches,
+        registry,
+        source_spec,
+        scope_originals,
+        n_extensions: extensions.len(),
+        single_module,
+        pseudo_self_ref,
+        expand_budget_cost,
+    }
+}
+
 /// Apply `extensions` to the parsed selector list `original`, returning the
 /// extended selector list (original selectors first, then generated ones, in
 /// dart-sass order). Placeholder-only complex selectors are dropped from the
@@ -924,42 +1013,31 @@ pub(crate) struct ExtendResult {
 pub(crate) fn extend_selectors(
     original: &[Complex],
     original_breaks: &[bool],
-    extensions: &[Extension],
+    plan: &ExtendPlan,
     scope: &str,
     extend_base: usize,
 ) -> ExtendResult {
+    // Reset the shared work budget for this rule, then replay the deduction the
+    // closure derivation would have taken if it ran here (it now ran ONCE in
+    // `build_extend_plan`). This keeps the budget state — and therefore the
+    // fold's truncation behaviour and output — byte-identical to the old
+    // per-rule path that called `expand_extensions` after `reset_extend_budget`.
     reset_extend_budget();
+    EXTEND_WORK.with(|w| w.set(w.get().saturating_sub(plan.expand_budget_cost)));
+    let batches = &plan.batches;
+    let registry = &plan.registry;
+    let source_spec = &plan.source_spec;
     // The set of "original" rendered selectors — the unextended input. Original
     // selectors are never trimmed (dart-sass keeps them so the rule still
-    // matches what it always matched).
-    let mut originals: FxHashSet<Complex> = FxHashSet::default();
+    // matches what it always matched). Start from the scope-wide store originals
+    // (dart `_originals` — every extender written in this module, protected from
+    // a broader generated one trimming it) and add the rule's own selectors.
+    let mut originals: FxHashSet<Complex> = plan.scope_originals.clone();
     for complex in original {
         assert_render_injective(complex);
         originals.insert(complex.clone());
     }
-    // Extenders are source selectors too (dart-sass's `_originals` is
-    // store-wide), so a source extender is protected from being trimmed away
-    // by a broader generated one — e.g. a transitive `:is(a, b)` must not
-    // trim the original `:is(a)` that produced it. But only within the
-    // extender's OWN module: an extender added to an upstream module's CSS is
-    // not one of that store's originals, so an in-place pseudo rewrite there
-    // REPLACES it (`:is(in-midstream)` becomes `:is(in-midstream, in-input)`
-    // in the used module, while the same-file case keeps both).
-    for ext in extensions {
-        if ext.origin != scope {
-            continue;
-        }
-        for complex in &ext.extenders {
-            originals.insert(complex.clone());
-        }
-    }
 
-    // Remove selectors that are subselectors of another (redundant), keeping
-    // originals (dart-sass `_trim` with extender source specificities). When
-    // NOTHING changed, dart returns the original list untouched — no trim,
-    // duplicate selectors preserved (issue_2291's reparsed `A, B, C-foo...`).
-    let source_spec = source_specificity_map(extensions);
-    let (batches, registry) = expand_extensions(extensions);
     // dart `addSelector` ONE-SHOT vs `_extendExistingSelectors` INCREMENTAL.
     // When a rule's selector was established AFTER every applicable `@extend`
     // (`extend_base >= extensions.len()`), dart extends it by the whole store at
@@ -973,22 +1051,10 @@ pub(crate) fn extend_selectors(
     // incremental path is the registration-order FOLD (per-origin gating intact).
     // Gated to single-module: there the closure-size sort is stable so the index
     // equals registration order; multi-module keeps the fold.
-    let single_module = extensions.iter().all(|e| e.origin == scope);
-    let one_shot = single_module && extend_base != usize::MAX && extend_base >= extensions.len();
-    // A SELF-REFERENTIAL pseudo chain — an extender carries a selector pseudo
-    // whose argument mentions an extension target (`:not(.thing[disabled])`
-    // extending `.thing`, issue_2055) — loops through the pseudo machinery and
-    // needs the worklist's re-feed (the per-batch fold expands a pseudo once and
-    // can't converge the nesting). Route it to the worklist over the full
-    // registry regardless of registration position (no cartesian flip unless it
-    // is also one-shot).
-    let targets: FxHashSet<Simple> = extensions.iter().filter_map(|e| e.target.clone()).collect();
-    let pseudo_self_ref = single_module
-        && registry.iter().any(|e| {
-            e.extenders
-                .iter()
-                .any(|c| pseudo_arg_has_target(c, &targets, false))
-        });
+    let single_module = plan.single_module;
+    let one_shot = single_module && extend_base != usize::MAX && extend_base >= plan.n_extensions;
+    // A SELF-REFERENTIAL pseudo chain (issue_2055) — precomputed in the plan.
+    let pseudo_self_ref = plan.pseudo_self_ref;
     let result = if pseudo_self_ref && !one_shot {
         // A self-referential pseudo chain (`:not(.thing[disabled])` extending
         // `.thing`, issue_2055). dart applies each `@extend`'s
@@ -1012,14 +1078,14 @@ pub(crate) fn extend_selectors(
                 )
             })
             .collect();
-        for batch in &batches {
-            current = extend_list_batch(&current, batch, &originals, &source_spec);
+        for batch in batches.iter() {
+            current = extend_list_batch(&current, batch, &originals, source_spec);
         }
         current.into_iter().map(|(c, f, _)| (c, f)).collect()
     } else if one_shot {
-        let (result, changed) = extend_to_fixpoint_breaks(original, original_breaks, &registry, one_shot);
+        let (result, changed) = extend_to_fixpoint_breaks(original, original_breaks, registry, one_shot);
         if changed {
-            trim_breaks(result, &originals, &source_spec)
+            trim_breaks(result, &originals, source_spec)
         } else {
             original
                 .iter()
@@ -1056,8 +1122,8 @@ pub(crate) fn extend_selectors(
         };
         let mut guard = render_of(&current);
         loop {
-            for batch in &batches {
-                current = extend_list_batch(&current, batch, &originals, &source_spec);
+            for batch in batches.iter() {
+                current = extend_list_batch(&current, batch, &originals, source_spec);
             }
             let render = render_of(&current);
             if render == guard || !consume_extend_work() {

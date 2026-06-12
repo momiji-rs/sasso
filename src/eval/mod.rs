@@ -5114,15 +5114,20 @@ fn rewrite_nodes_scoped(
         })
         .map(|(e, _)| e.clone())
         .collect();
-    rewrite_with_scopes(nodes, &visible, scope, all, origins, closures);
+    // dart builds ONE `ExtensionStore` per module scope, then extends each rule
+    // against it incrementally. Build the scope-fixed extend plan ONCE here and
+    // reuse it for every rule in this scope, rather than re-deriving the whole
+    // transitive closure per rule (the old O(rules × extensions) blow-up).
+    let plan = crate::selector::build_extend_plan(&visible, scope);
+    rewrite_with_scopes(nodes, &plan, scope, all, origins, closures);
 }
 
 /// The walk shared by [`rewrite_nodes_scoped`]: rules use the current scope's
-/// `visible` extensions; a nested [`OutNode::ModuleScope`] re-enters with its
-/// own scope.
+/// `plan` (the prebuilt extend closure); a nested [`OutNode::ModuleScope`]
+/// re-enters with its own scope and its own plan.
 fn rewrite_with_scopes(
     nodes: &mut Vec<OutNode>,
-    visible: &[crate::selector::Extension],
+    plan: &crate::selector::ExtendPlan,
     scope: &str,
     all: &[crate::selector::Extension],
     origins: &[String],
@@ -5135,15 +5140,15 @@ fn rewrite_with_scopes(
                 rewrite_nodes_scoped(nodes, &key, all, origins, closures);
             }
             OutNode::AtRule { name, body, .. } if !is_keyframes_name(name) => {
-                rewrite_with_scopes(body, visible, scope, all, origins, closures);
+                rewrite_with_scopes(body, plan, scope, all, origins, closures);
             }
             _ => {}
         }
     }
-    rewrite_nodes(nodes, visible, scope);
+    rewrite_nodes(nodes, plan, scope);
 }
 
-fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extension], scope: &str) {
+fn rewrite_nodes(nodes: &mut Vec<OutNode>, plan: &crate::selector::ExtendPlan, scope: &str) {
     let mut i = 0;
     while i < nodes.len() {
         let drop = match &mut nodes[i] {
@@ -5157,7 +5162,7 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, extensions: &[crate::selector::Extens
                 extend_base,
                 ..
             } => {
-                let new_sel = extend_selector_list(selectors, linebreaks, extensions, scope, *extend_base);
+                let new_sel = extend_selector_list(selectors, linebreaks, plan, scope, *extend_base);
                 match new_sel {
                     Some((s, b)) => {
                         // Line-break flags travel with their selectors (dart's
@@ -5313,7 +5318,7 @@ fn is_valid_namespace(s: &str) -> bool {
 fn extend_selector_list(
     selectors: &RuleSelectors,
     breaks: &[bool],
-    extensions: &[crate::selector::Extension],
+    plan: &crate::selector::ExtendPlan,
     scope: &str,
     extend_base: usize,
 ) -> Option<(RuleSelectors, Vec<bool>)> {
@@ -5324,7 +5329,7 @@ fn extend_selector_list(
     // Fast path: no extensions and no placeholder → the selector is untouched.
     // Crucially this leaves selectors we don't model (keyframe stops are handled
     // separately, but also unusual selectors) byte-for-byte intact.
-    if extensions.is_empty() && !has_placeholder {
+    if plan.is_empty() && !has_placeholder {
         return Some((selectors.clone(), breaks.to_vec()));
     }
     // Parse the rule's selectors into the typed model exactly once. A `Raw`
@@ -5346,7 +5351,7 @@ fn extend_selector_list(
         }
         RuleSelectors::Parsed(v) => v,
     };
-    let result = crate::selector::extend_selectors(parsed, breaks, extensions, scope, extend_base);
+    let result = crate::selector::extend_selectors(parsed, breaks, plan, scope, extend_base);
     if result.all_placeholders {
         return None;
     }
