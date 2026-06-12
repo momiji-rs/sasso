@@ -109,6 +109,185 @@ impl Simple {
     }
 }
 
+/// Validate the arguments of every grammar-typed pseudo in a resolved selector
+/// string the way dart-sass does, returning the exact dart error message on a
+/// malformed one. Two pseudo families carry a strict grammar. The An+B pseudos
+/// `:nth-child` / `:nth-last-child` (see [`validate_nth`]) — including a vendor
+/// prefix (`unvendor(name)` must equal the bare name) — take an An+B argument.
+/// The selector-argument pseudos `:not` / `:is` / `:where` / `:has` / `:matches`
+/// / `:any` / `:-*-any` / `:host` / `:host-context` / `:current` take a non-empty
+/// selector list (an empty leading or trailing component is dart's
+/// `expected selector.`), recursively validated. Every OTHER pseudo (`:lang`,
+/// `:dir`, custom `:--foo`, unknown `:foo`) takes an opaque argument and is left
+/// untouched. The input is already interpolation-resolved, so this matches dart
+/// validating the resolved text.
+pub(crate) fn validate_pseudo_args(sel: &str) -> Result<(), &'static str> {
+    let chars: Vec<char> = sel.chars().collect();
+    validate_pseudo_args_inner(&chars)
+}
+
+fn validate_pseudo_args_inner(chars: &[char]) -> Result<(), &'static str> {
+    let mut i = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                i += 2;
+                continue;
+            }
+            '"' | '\'' => {
+                i = skip_quoted(chars, i);
+                continue;
+            }
+            '[' => {
+                // Skip a whole attribute selector; commas/parens inside it are
+                // not selector structure.
+                i = skip_attribute(chars, i);
+                continue;
+            }
+            ':' => {
+                // A pseudo: read the name, then (if present) its `(...)` arg.
+                let name_start = i + 1 + usize::from(chars.get(i + 1) == Some(&':'));
+                let mut j = name_start;
+                while j < chars.len()
+                    && (chars[j].is_ascii_alphanumeric()
+                        || chars[j] == '-'
+                        || chars[j] == '_'
+                        || (chars[j] as u32) >= 0x80)
+                {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == '(' {
+                    let close = matching_paren(chars, j);
+                    let name: String = chars[name_start..j].iter().collect();
+                    let inner = &chars[j + 1..close.min(chars.len())];
+                    validate_one_pseudo_arg(&name, inner)?;
+                    i = if close < chars.len() {
+                        close + 1
+                    } else {
+                        chars.len()
+                    };
+                    continue;
+                }
+                i = j;
+                continue;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Validate one pseudo's `(...)` argument (`inner`, without the parens) given
+/// its `name` (without the leading colon). Dispatches on the unvendored
+/// lowercase name; opaque pseudos return `Ok` untouched.
+fn validate_one_pseudo_arg(name: &str, inner: &[char]) -> Result<(), &'static str> {
+    let unv = unvendor(name);
+    // An+B pseudos.
+    if unv == "nth-child" || unv == "nth-last-child" {
+        let arg: String = inner.iter().collect();
+        validate_nth(&arg)?;
+        // Recurse into the `of <selector>` tail's selector list (validated
+        // non-empty by `validate_nth`; here its nested pseudos are checked).
+        if let Some(of_sel) = nth_of_selector(inner) {
+            validate_selector_list_arg(&of_sel)?;
+        }
+        return Ok(());
+    }
+    // Selector-argument pseudos.
+    let is_selector_pseudo = matches!(
+        unv,
+        "not" | "is" | "where" | "has" | "matches" | "any" | "host" | "host-context" | "current"
+    ) || unv.ends_with("-any");
+    if is_selector_pseudo {
+        let arg: String = inner.iter().collect();
+        return validate_selector_list_arg(&arg);
+    }
+    // Any other pseudo carries an opaque argument.
+    Ok(())
+}
+
+/// Validate a selector-list argument (the inside of a `:not(...)` etc., or an
+/// `of` tail): split on top-level commas; the FIRST and LAST components must be
+/// non-empty (dart reads complexes around comma runs and errors on an empty
+/// leading/trailing one — `:not(, .a)`, `:not(.a, )`, `:not()` all
+/// `expected selector.`; an empty MIDDLE part `:not(.a,, .b)` is tolerated).
+/// Each non-empty component is recursively scanned for nested pseudo grammar.
+fn validate_selector_list_arg(arg: &str) -> Result<(), &'static str> {
+    let parts = split_top(arg, ',');
+    // An all-empty argument (`()`, `( )`) has no first complex.
+    if parts.iter().all(|p| p.trim().is_empty()) {
+        return Err("expected selector.");
+    }
+    if parts.first().is_some_and(|p| p.trim().is_empty()) || parts.last().is_some_and(|p| p.trim().is_empty())
+    {
+        return Err("expected selector.");
+    }
+    for part in &parts {
+        if part.trim().is_empty() {
+            continue;
+        }
+        let cs: Vec<char> = part.chars().collect();
+        validate_pseudo_args_inner(&cs)?;
+    }
+    Ok(())
+}
+
+/// Index of the `)` matching the `(` at `open`, honouring strings/escapes and
+/// nested parens. Returns `chars.len()` when unmatched.
+fn matching_paren(chars: &[char], open: usize) -> usize {
+    let mut depth = 0i32;
+    let mut i = open;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '"' | '\'' => i = skip_quoted(chars, i),
+            '(' => {
+                depth += 1;
+                i += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    chars.len()
+}
+
+/// Index just past a quoted string starting at `start`, honouring `\` escapes;
+/// `chars.len()` for an unterminated string.
+fn skip_quoted(chars: &[char], start: usize) -> usize {
+    let q = chars[start];
+    let mut i = start + 1;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            c if c == q => return i + 1,
+            _ => i += 1,
+        }
+    }
+    chars.len()
+}
+
+/// Index just past a `[...]` attribute selector starting at `start`, honouring
+/// strings/escapes; `chars.len()` for an unterminated one.
+fn skip_attribute(chars: &[char], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '"' | '\'' => i = skip_quoted(chars, i),
+            ']' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    chars.len()
+}
+
 /// Normalize a `:nth-child(…)` / `:nth-last-child(…)` pseudo's An+B argument
 /// (`2n + 1` → `2n+1`, `2N + 1` → `2n+1`, `3n - 2` → `3n-2`), preserving an
 /// `of <selector>` tail. Only the lowercase `nth-child`/`nth-last-child`
@@ -141,6 +320,179 @@ pub(crate) fn normalize_nth(text: &str) -> Option<String> {
         Some(sel) => format!("{name}({anb_norm} of {sel})"),
         None => format!("{name}({anb_norm})"),
     })
+}
+
+/// Validate an `:nth-child` / `:nth-last-child` An+B argument the way dart-sass's
+/// `_aNPlusB` (plus the surrounding `of <selector>` handling) does, returning the
+/// exact dart error message on a malformed argument. `arg` is the raw text BETWEEN
+/// the parentheses (interpolation already resolved). Only the `:nth-child` and
+/// `:nth-last-child` pseudos are validated; dart leaves `:nth-of-type` and
+/// `:nth-last-of-type` permissive, so their callers never reach here.
+///
+/// Grammar (dart `_aNPlusB`, scanner-based, derived empirically):
+///   leading whitespace is skipped, then one of:
+///     - `even` / `odd` (case-insensitive, a whole-identifier match), OR
+///     - an optional `+`/`-` sign, optional run of digits, then either:
+///         * `n`/`N` (only after the optional sign+digits, with NO whitespace
+///           skipped before it UNLESS digits were consumed), followed by an
+///           optional ` [+-] <digits>` tail; OR
+///         * nothing more (a pure integer — requires at least one digit).
+///   After the An+B, an optional ` of <selector>` tail (whitespace-introduced)
+///   is allowed; any other trailing content is rejected.
+pub(crate) fn validate_nth(arg: &str) -> Result<(), &'static str> {
+    let chars: Vec<char> = arg.chars().collect();
+    let mut i = 0usize;
+    let skip_ws = |i: &mut usize| {
+        while *i < chars.len() && chars[*i].is_whitespace() {
+            *i += 1;
+        }
+    };
+    skip_ws(&mut i);
+    // `even` / `odd` — a whole keyword, case-insensitive.
+    match chars.get(i).map(|c| c.to_ascii_lowercase()) {
+        Some('e') => return finish_nth(&chars, scan_keyword(&chars, &mut i, "even")?),
+        Some('o') => return finish_nth(&chars, scan_keyword(&chars, &mut i, "odd")?),
+        _ => {}
+    }
+    // Optional sign.
+    if matches!(chars.get(i), Some('+' | '-')) {
+        i += 1;
+    }
+    // Optional run of digits.
+    let digits_start = i;
+    while matches!(chars.get(i), Some(c) if c.is_ascii_digit()) {
+        i += 1;
+    }
+    let saw_digit = i > digits_start;
+    // Position right after the An+B body so far (before any speculative ws skip),
+    // so `finish_nth` can tell whether whitespace separated trailing content.
+    let mut body_end = i;
+    // dart skips whitespace before `n` ONLY when digits were consumed (`5 n`
+    // is `5n`, but `+ n` errors). With no digits, `n` must follow immediately.
+    if saw_digit {
+        skip_ws(&mut i);
+    }
+    if matches!(chars.get(i), Some('n' | 'N')) {
+        i += 1;
+        body_end = i;
+        // Optional ` [+-] <digits>` tail.
+        skip_ws(&mut i);
+        if matches!(chars.get(i), Some('+' | '-')) {
+            i += 1;
+            skip_ws(&mut i);
+            if !matches!(chars.get(i), Some(c) if c.is_ascii_digit()) {
+                return Err("Expected a number.");
+            }
+            while matches!(chars.get(i), Some(c) if c.is_ascii_digit()) {
+                i += 1;
+            }
+            body_end = i;
+        }
+        return finish_nth(&chars, body_end);
+    }
+    // No `n`: a pure integer needs at least one digit; otherwise dart expects `n`.
+    if !saw_digit {
+        return Err("Expected \"n\".");
+    }
+    finish_nth(&chars, body_end)
+}
+
+/// After the An+B is consumed at `i`, validate the remaining text: either
+/// nothing (modulo trailing whitespace before the close — dart's caller is at
+/// `)`), or a whitespace-introduced ` of <selector>` tail whose selector list
+/// is non-empty. Trailing junk with no `of` is dart's `Expected "of".`; junk
+/// glued with no whitespace before it is the caller's `expected ")".`.
+fn finish_nth(chars: &[char], mut i: usize) -> Result<(), &'static str> {
+    // dart only treats trailing content as an `of` clause when whitespace
+    // separates it from the An+B; glued junk (`n1`, `2n+1of`) is left for the
+    // caller, which then reports `expected ")".`.
+    let had_ws = i < chars.len() && chars[i].is_whitespace();
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    if i >= chars.len() {
+        return Ok(());
+    }
+    if !had_ws {
+        return Err("expected \")\".");
+    }
+    // Must be `of` (a complete, case-insensitive identifier) before the
+    // selector. dart's `scanIdentifier("of")` distinguishes a mid-scan mismatch
+    // (`Expected "of".` WITH a period — wrong char where `o`/`f` was expected)
+    // from a fully-matched `of` glued to an extra identifier char (`ofx`,
+    // `of-x`, `of9` → `Expected "of"` WITHOUT one). `of.a`/`of#x`/`of:hover` are
+    // a complete `of` with the selector glued on (the next char isn't an ident
+    // char), so they're accepted.
+    if !(matches!(chars.get(i), Some('o' | 'O')) && matches!(chars.get(i + 1), Some('f' | 'F'))) {
+        return Err("Expected \"of\".");
+    }
+    let of_complete = match chars.get(i + 2) {
+        None => true,
+        Some(c) => !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || (*c as u32) >= 0x80),
+    };
+    if !of_complete {
+        return Err("Expected \"of\"");
+    }
+    i += 2;
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    let rest: String = chars[i..].iter().collect();
+    if rest.trim().is_empty() {
+        return Err("expected selector.");
+    }
+    // The `of` selector list is validated by the caller's recursive selector
+    // validation; non-empty is the only check made here.
+    Ok(())
+}
+
+/// Extract the `of <selector>` tail's selector text from an already-validated
+/// `:nth-child` argument (the part after a whitespace-introduced, complete-
+/// identifier `of` keyword), or `None` when there is no `of` clause.
+fn nth_of_selector(inner: &[char]) -> Option<String> {
+    let mut i = 0usize;
+    // Find a whitespace-bounded `of` that is a complete identifier.
+    while i + 1 < inner.len() {
+        let before_ws = i > 0 && inner[i - 1].is_whitespace();
+        let of_complete = match inner.get(i + 2) {
+            None => true,
+            Some(c) => !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || (*c as u32) >= 0x80),
+        };
+        if before_ws && matches!(inner[i], 'o' | 'O') && matches!(inner[i + 1], 'f' | 'F') && of_complete {
+            let mut j = i + 2;
+            while j < inner.len() && inner[j].is_whitespace() {
+                j += 1;
+            }
+            return Some(inner[j..].iter().collect());
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Scan a whole keyword (`even`/`odd`) case-insensitively starting at `*i`,
+/// returning the index past it. dart's `scanIdentifier` distinguishes two
+/// failures with DIFFERENT messages: a char that doesn't match the keyword
+/// mid-scan (or a too-short input) is `Expected "<kw>".` WITH a period; a full
+/// keyword followed by an extra identifier-continuation char (`oddx`, `even1`)
+/// is `Expected "<kw>"` WITHOUT one.
+fn scan_keyword(chars: &[char], i: &mut usize, kw: &str) -> Result<usize, &'static str> {
+    let (mismatch, trailing): (&'static str, &'static str) = match kw {
+        "even" => ("Expected \"even\".", "Expected \"even\""),
+        _ => ("Expected \"odd\".", "Expected \"odd\""),
+    };
+    for k in kw.chars() {
+        match chars.get(*i) {
+            Some(c) if c.to_ascii_lowercase() == k => *i += 1,
+            _ => return Err(mismatch),
+        }
+    }
+    // No identifier character may immediately follow the keyword (`oddx`,
+    // `even1` are dart errors), but a sign/digit-less boundary is fine.
+    if matches!(chars.get(*i), Some(c) if c.is_ascii_alphanumeric() || *c == '-' || *c == '_') {
+        return Err(trailing);
+    }
+    Ok(*i)
 }
 
 /// If `text` is a `:nth-child`/`:nth-last-child` with an `of <selector>` tail,

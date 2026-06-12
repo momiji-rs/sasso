@@ -4842,33 +4842,18 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
             }
         }
     }
-    // The `:nth-*` pseudos require an An+B argument: `:nth-child()` is
-    // dart's selector-parse error `Expected "n".` (issue_2175). Gated on a
-    // zero-alloc case-insensitive ":nth-" byte scan — the lowercase copy and
-    // four substring searches below cost real allocations per selector.
-    if sel.as_bytes().windows(5).any(|w| {
-        w[0] == b':'
-            && (w[1] | 0x20) == b'n'
-            && (w[2] | 0x20) == b't'
-            && (w[3] | 0x20) == b'h'
-            && w[4] == b'-'
-    }) {
-        let lower = sel.to_ascii_lowercase();
-        for pat in [
-            ":nth-child(",
-            ":nth-last-child(",
-            ":nth-of-type(",
-            ":nth-last-of-type(",
-        ] {
-            let mut from = 0;
-            while let Some(p) = lower[from..].find(pat) {
-                let start = from + p + pat.len();
-                if lower[start..].trim_start().starts_with(')') {
-                    return Err(Error::unpositioned("Expected \"n\"."));
-                }
-                from = start;
-            }
-        }
+    // Any pseudo-class/element must name an identifier: a bare or repeated colon
+    // with no ident-start after it (`a::`, `a:::before`, `::before::`, `a:`) is
+    // dart's `Expected identifier.`. Gated on a `:` being present.
+    if sel.as_bytes().contains(&b':') {
+        validate_pseudo_names(sel)?;
+    }
+    // Grammar-typed pseudo arguments — the An+B microsyntax of
+    // `:nth-child`/`:nth-last-child` and the non-empty selector list of
+    // `:not`/`:is`/`:where`/`:has`/… — are validated against dart's parser.
+    // Gated on a parenthesized pseudo (a `:` somewhere before a `(`).
+    if sel.as_bytes().contains(&b'(') && sel.as_bytes().contains(&b':') {
+        crate::selector::validate_pseudo_args(sel).map_err(Error::unpositioned)?;
     }
     // One byte pre-scan classifies the rest of the validation: most resolved
     // selectors are plain (idents/classes/combinators/spaces) and need at
@@ -4895,6 +4880,51 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
         validate_plain_sigils(sel)
     } else {
         Ok(())
+    }
+}
+
+/// Every pseudo-class/element must name an identifier: after its leading `:`
+/// (or `::`), an identifier-start character is required. A bare or repeated
+/// colon (`a::`, `a:::before`, `a:`, `::before::`) — including one nested in a
+/// selector-argument pseudo (`:not(::)`) — is dart's `Expected identifier.`.
+/// Colons inside `[...]` attribute selectors and string literals are exempt.
+fn validate_pseudo_names(sel: &str) -> Result<(), Error> {
+    let chars: Vec<char> = sel.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                i += 2;
+            }
+            '"' | '\'' => i = skip_string(&chars, i),
+            '[' => i = matching_bracket(&chars, i) + 1,
+            ':' => {
+                i += 1;
+                // A second colon makes a pseudo-element (`::before`).
+                if chars.get(i) == Some(&':') {
+                    i += 1;
+                }
+                // The name must begin with a CSS identifier-start character.
+                if !pseudo_name_starts_at(&chars, i) {
+                    return Err(Error::unpositioned("Expected identifier."));
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Whether `chars[i..]` begins a CSS identifier (the pseudo name after a colon):
+/// a letter, `_`, escape, or non-ASCII char; or a `-` provided the NEXT
+/// character is itself an identifier-start (`-foo`, `--foo`) — a lone `-`, a
+/// `-` then a digit (`-9`), and a leading digit (`0`, `9x`) are not.
+fn pseudo_name_starts_at(chars: &[char], i: usize) -> bool {
+    let is_start = |c: char| c.is_ascii_alphabetic() || c == '_' || c == '\\' || (c as u32) >= 0x80;
+    match chars.get(i).copied() {
+        Some(c) if is_start(c) => true,
+        Some('-') => matches!(chars.get(i + 1).copied(), Some(n) if is_start(n) || n == '-'),
+        _ => false,
     }
 }
 
