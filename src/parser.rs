@@ -5278,6 +5278,17 @@ impl Parser {
     fn parse_hex(&mut self) -> Result<Expr, Error> {
         let pos = self.sc.position();
         self.sc.bump(); // '#'
+
+        // dart-sass splits on the character right after `#`. A *digit* commits
+        // to a hex color: it must be 3/4/6/8 hex digits (read in committed
+        // stages), and a short or malformed run is "Expected hex digit." —
+        // never a hash-identifier (`#0`, `#00000`, `#0g`, `#12g` all error).
+        // A *name-start* char is read as a full identifier that is a color only
+        // when the whole spelling is a valid hex (`#abc`/`#abcd12` -> color;
+        // `#abcde`/`#xyz`/`#foo` -> `#…` string).
+        if matches!(self.sc.peek(), Some(c) if c.is_ascii_digit()) {
+            return self.parse_hex_color_contents();
+        }
         let mut hex = String::new();
         while matches!(self.sc.peek(), Some(c) if c.is_ascii_hexdigit()) {
             if let Some(c) = self.sc.bump() {
@@ -5314,6 +5325,53 @@ impl Parser {
             return Err(Error::at("Expected identifier.", pos));
         }
         Ok(Expr::Ident(vec![TplPiece::Lit(format!("#{ident}"))]))
+    }
+
+    /// dart-sass `_hexColorContents`: the character after `#` was a digit, so
+    /// this is a hex color or an error. Read 3/4/6/8 hex digits in committed
+    /// stages (each `read_hex_digit` is mandatory, mirroring dart's `_hexDigit`)
+    /// and leave any trailing token for the caller (`#000g` -> `#000` color +
+    /// `g`; `#0000g` -> 4-digit color + `g`).
+    fn parse_hex_color_contents(&mut self) -> Result<Expr, Error> {
+        let mut hex = String::new();
+        // digit1..3 are mandatory (`#0`, `#00`, `#0g` error here).
+        self.read_hex_digit(&mut hex)?;
+        self.read_hex_digit(&mut hex)?;
+        self.read_hex_digit(&mut hex)?;
+        if matches!(self.sc.peek(), Some(c) if c.is_ascii_hexdigit()) {
+            // a 4th digit -> #RGBA, unless a 5th follows...
+            self.read_hex_digit(&mut hex)?;
+            if matches!(self.sc.peek(), Some(c) if c.is_ascii_hexdigit()) {
+                // ...which commits to #RRGGBB — digit5, digit6 are mandatory
+                // (`#00000`, `#0000000` error here).
+                self.read_hex_digit(&mut hex)?;
+                self.read_hex_digit(&mut hex)?;
+                if matches!(self.sc.peek(), Some(c) if c.is_ascii_hexdigit()) {
+                    // ...and a 7th commits to #RRGGBBAA — digit7, digit8 too.
+                    self.read_hex_digit(&mut hex)?;
+                    self.read_hex_digit(&mut hex)?;
+                }
+            }
+        }
+        // The staged read only ever accumulates 3/4/6/8 digits, so `from_hex`
+        // always succeeds; the error arm is unreachable defence (no panic).
+        match Color::from_hex(&hex) {
+            Some(c) => Ok(Expr::Color(c)),
+            None => Err(Error::at("Expected hex digit.", self.sc.position())),
+        }
+    }
+
+    /// Read one required hex digit into `out`, or raise dart's
+    /// "Expected hex digit." at the offending position.
+    fn read_hex_digit(&mut self, out: &mut String) -> Result<(), Error> {
+        match self.sc.peek() {
+            Some(c) if c.is_ascii_hexdigit() => {
+                self.sc.bump();
+                out.push(c);
+                Ok(())
+            }
+            _ => Err(Error::at("Expected hex digit.", self.sc.position())),
+        }
     }
 
     fn parse_quoted_string(&mut self) -> Result<Vec<TplPiece>, Error> {
