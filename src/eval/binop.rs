@@ -46,10 +46,17 @@ pub(crate) fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Valu
         // to a `calc()`/`var()` special value survive (and what carries the
         // alpha slash through `rgb(1 2 var(--x) / 0.4)`). A slash-division
         // operand keeps its chained spelling (`1/2/foo()`, not `0.5/foo()`).
-        _ => Ok(Value::Str(SassStr {
-            text: format!("{}/{}", slash_repr(&l), slash_repr(&r)),
-            quoted: false,
-        })),
+        // A map or empty-list operand has no CSS serialization, so the slash
+        // join itself errors (`() / 1` → `()`, `1 / (a: 1)` → `(a: 1)`).
+        _ => {
+            if let Some(e) = serialize_pair_error(&l, &r, pos) {
+                return Err(e);
+            }
+            Ok(Value::Str(SassStr {
+                text: format!("{}/{}", slash_repr(&l), slash_repr(&r)),
+                quoted: false,
+            }))
+        }
     }
 }
 
@@ -132,13 +139,11 @@ pub(super) fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     if calc_with_nonstring {
         return Err(undefined_op(&l, "+", &r, pos));
     }
-    // A map cannot be serialized for string concatenation, so `map + x`
-    // errors like dart-sass with "(…) isn't a valid CSS value.".
-    if let Some(m) = find_map(&l).or_else(|| find_map(&r)) {
-        return Err(Error::at(
-            format!("{} isn't a valid CSS value.", m.to_css(false)),
-            pos,
-        ));
+    // A map or empty list cannot be serialized for string concatenation, so
+    // `map + x` / `() + x` errors like dart-sass with "(…) isn't a valid CSS
+    // value." (`1 + ()` → `()`, `1 + (a: 1)` → `(a: 1)`).
+    if let Some(e) = serialize_pair_error(&l, &r, pos) {
+        return Err(e);
     }
     // String concatenation. When the left operand is a string the result keeps
     // the left string's quotedness; for any other left operand dart-sass's
@@ -174,11 +179,8 @@ pub(super) fn binary_sub(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
     if matches!(&l, Value::Calc(_)) || matches!(&r, Value::Calc(_)) {
         return Err(undefined_op(&l, "-", &r, pos));
     }
-    if let Some(m) = find_map(&l).or_else(|| find_map(&r)) {
-        return Err(Error::at(
-            format!("{} isn't a valid CSS value.", m.to_css(false)),
-            pos,
-        ));
+    if let Some(e) = serialize_pair_error(&l, &r, pos) {
+        return Err(e);
     }
     let text = format!("{}-{}", l.to_css(false), r.to_css(false));
     Ok(Value::Str(SassStr { text, quoted: false }))
@@ -299,6 +301,17 @@ pub(super) fn concat_str(v: &Value) -> String {
 pub(super) fn color_arith_undefined(l: &Value, r: &Value) -> bool {
     let numeric = |v: &Value| matches!(v, Value::Color(_) | Value::Number(_));
     (matches!(l, Value::Color(_)) && numeric(r)) || (matches!(r, Value::Color(_)) && numeric(l))
+}
+
+/// A map or empty list cannot be serialized into the unquoted `left<op>right`
+/// string that dart-sass's default `Value.plus`/`minus`/`dividedBy` build, so
+/// such an operand makes the whole `+`/`-`/`/` join an error — checking the
+/// left operand before the right, exactly as dart's left-then-right
+/// serialization order surfaces it (`() / 1` → `()`, `1 / (a: 1)` → `(a: 1)`).
+pub(super) fn serialize_pair_error(l: &Value, r: &Value, pos: Pos) -> Option<Error> {
+    css_value_error_msg(l)
+        .or_else(|| css_value_error_msg(r))
+        .map(|msg| Error::at(msg, pos))
 }
 
 /// A first-class function or mixin reference is not a valid CSS value, so it

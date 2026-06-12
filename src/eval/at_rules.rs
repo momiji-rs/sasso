@@ -371,7 +371,7 @@ impl<'a> Evaluator<'a> {
             }
             MediaInParens::Interp(e) => {
                 let v = self.eval_expr(e)?;
-                Ok(v.to_interp())
+                interp_checked(&v)
             }
         }
     }
@@ -382,10 +382,10 @@ impl<'a> Evaluator<'a> {
                 // Media-feature names and values serialize in interpolation
                 // context: a quoted string unquotes (`("min-width:#{$w}")`
                 // emits `(min-width:20px)`), numbers are unchanged.
-                let n = self.eval_expr(name)?.to_interp();
+                let n = interp_checked(&self.eval_expr(name)?)?;
                 match value {
                     Some(v) => {
-                        let val = self.eval_expr(v)?.to_interp();
+                        let val = interp_checked(&self.eval_expr(v)?)?;
                         Ok(format!("{n}: {val}"))
                     }
                     None => Ok(n),
@@ -506,7 +506,7 @@ impl<'a> Evaluator<'a> {
             SupportsCondition::Negation(inner) => {
                 Ok(format!("not {}", self.parenthesize_supports(inner, None)?))
             }
-            SupportsCondition::Interpolation(expr) => Ok(self.eval_expr(expr)?.to_interp()),
+            SupportsCondition::Interpolation(expr) => interp_checked(&self.eval_expr(expr)?),
             SupportsCondition::Declaration { name, value, custom } => {
                 // dart-sass evaluates BOTH the name and the value with
                 // `_inSupportsDeclaration` set, so a calc in the name

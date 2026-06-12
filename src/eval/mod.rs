@@ -2577,7 +2577,7 @@ impl<'a> Evaluator<'a> {
                 TplPiece::Lit(t) => s.push_str(t),
                 TplPiece::Interp(e) => {
                     let v = self.eval_expr(e)?;
-                    s.push_str(&v.to_interp());
+                    s.push_str(&interp_checked(&v)?);
                 }
             }
         }
@@ -2600,7 +2600,7 @@ impl<'a> Evaluator<'a> {
                 }
                 TplPiece::Interp(e) => {
                     let v = self.eval_expr(e)?;
-                    let out = v.to_interp();
+                    let out = interp_checked(&v)?;
                     let len = out.chars().count();
                     bounds.push((chars, len));
                     s.push_str(&out);
@@ -2735,8 +2735,11 @@ impl<'a> Evaluator<'a> {
                 let saved = std::mem::replace(&mut self.in_supports_declaration, false);
                 let v = self.eval_expr(inner);
                 self.in_supports_declaration = saved;
+                // A map or empty list has no CSS serialization, so it cannot be
+                // interpolated (`#{(a: 1)}`, `#{()}`); dart-sass errors instead
+                // of injecting the inspected/empty text.
                 Ok(Value::Str(SassStr {
-                    text: v?.to_interp(),
+                    text: interp_checked(&v?)?,
                     quoted: false,
                 }))
             }
@@ -2787,10 +2790,16 @@ impl<'a> Evaluator<'a> {
                             "Undefined operation \"-{}\".",
                             v.to_css(false)
                         ))),
-                        other => Ok(Value::Str(SassStr {
-                            text: format!("-{}", other.to_css(false)),
-                            quoted: false,
-                        })),
+                        // A map or empty list cannot be serialized into the
+                        // unquoted `-<value>` string dart-sass produces, so it
+                        // errors before the join (`-(a: 1)`, `-()`).
+                        other => match css_value_error_msg(&other) {
+                            Some(msg) => Err(Error::unpositioned(msg)),
+                            None => Ok(Value::Str(SassStr {
+                                text: format!("-{}", other.to_css(false)),
+                                quoted: false,
+                            })),
+                        },
                     },
                     // Unary plus is numeric identity; on any other operand it
                     // prepends `+` as an unquoted string (`+foo` -> `+foo`). A
@@ -2802,10 +2811,15 @@ impl<'a> Evaluator<'a> {
                             "Undefined operation \"+{}\".",
                             v.to_css(false)
                         ))),
-                        other => Ok(Value::Str(SassStr {
-                            text: format!("+{}", other.to_css(false)),
-                            quoted: false,
-                        })),
+                        // As with unary `-`, a map or empty list has no CSS
+                        // serialization to prepend `+` to (`+(a: 1)`, `+()`).
+                        other => match css_value_error_msg(&other) {
+                            Some(msg) => Err(Error::unpositioned(msg)),
+                            None => Ok(Value::Str(SassStr {
+                                text: format!("+{}", other.to_css(false)),
+                                quoted: false,
+                            })),
+                        },
                     },
                     UnOp::Not => Ok(Value::Bool(!v.is_truthy())),
                 }
@@ -4383,6 +4397,39 @@ fn find_map(v: &Value) -> Option<&Map> {
         Value::List(l) => l.items.iter().find_map(find_map),
         _ => None,
     }
+}
+
+/// The dart-sass "isn't a valid CSS value." error message for a value that
+/// cannot be serialized to CSS, or `None` if it can. Mirrors the
+/// declaration-emit guard exactly: a MAP found anywhere (including nested in a
+/// list) is rejected with its own serialization, and a TOP-LEVEL empty
+/// unbracketed list (`()`) is rejected as `()`. A bracketed `[]`, and an empty
+/// list merely nested inside a non-empty list, both serialize fine. Reused at
+/// every other CSS-serialization site (unary `-`/`+`, the `+`/`-`/`/` string
+/// joins, and `#{…}` interpolation) so they reject the same shapes dart does
+/// instead of silently emitting bogus output.
+pub(super) fn css_value_error_msg(v: &Value) -> Option<String> {
+    if let Some(m) = find_map(v) {
+        return Some(format!("{} isn't a valid CSS value.", m.to_css(false)));
+    }
+    if let Value::List(l) = v {
+        if l.items.is_empty() && !l.bracketed {
+            return Some("() isn't a valid CSS value.".to_string());
+        }
+    }
+    None
+}
+
+/// Serialize a value for interpolation, erroring (like dart-sass) if it is a
+/// map or empty list that cannot become CSS. Shared by every interpolation
+/// context that turns a value into text (`@media`/`@supports` queries and
+/// feature decls). The error carries no span — these template sites have no
+/// per-piece source position — but matches dart's message and non-zero exit.
+pub(super) fn interp_checked(v: &Value) -> Result<String, Error> {
+    if let Some(msg) = css_value_error_msg(v) {
+        return Err(Error::unpositioned(msg));
+    }
+    Ok(v.to_interp())
 }
 
 fn for_indices(start: i64, end: i64, inclusive: bool) -> Vec<i64> {
