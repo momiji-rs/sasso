@@ -8,6 +8,49 @@
 //! and placeholder-rule dropping).
 
 use crate::fxhash::{FxHashMap, FxHashSet};
+use std::hash::{Hash, Hasher};
+
+/// A value paired with its precomputed FxHash, so a map keyed by `Hashed<T>`
+/// hashes the (already-walked) inner `T` exactly ONCE — at construction — and
+/// every subsequent map probe just re-mixes the cached `u64`. `Eq` still
+/// compares the inner `value` structurally, so the map partitions IDENTICALLY
+/// to one keyed by the bare `T` (byte-exact: these maps are only probed for
+/// membership/lookup, never iterated for output order). Used for the `@extend`
+/// engine's per-batch `Complex`-keyed maps, whose derived `Hash` otherwise
+/// re-walks the whole components→compounds→simples→`String` tree on every probe.
+struct Hashed<T> {
+    hash: u64,
+    value: T,
+}
+
+impl<T: Hash> Hashed<T> {
+    #[inline]
+    fn new(value: T) -> Self {
+        let mut h = crate::fxhash::FxHasher::default();
+        value.hash(&mut h);
+        Hashed {
+            hash: h.finish(),
+            value,
+        }
+    }
+}
+
+impl<T> Hash for Hashed<T> {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+impl<T: PartialEq> PartialEq for Hashed<T> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        // The cached hash is a cheap discriminator before the structural compare.
+        self.hash == other.hash && self.value == other.value
+    }
+}
+
+impl<T: Eq> Eq for Hashed<T> {}
 
 /// A combinator joining two compound selectors.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -3190,10 +3233,14 @@ fn extend_list_batch(
     // is skipped entirely — this is the cut to the extend-heavy O(n^2) malloc.
     let batch_targets: FxHashSet<Simple> = batch.iter().filter_map(|e| e.target.clone()).collect();
     let mut out: Vec<(Complex, bool)> = Vec::new();
-    let mut seen: FxHashSet<Complex> = FxHashSet::default();
-    // complex -> owning origin, to re-attach after the order-/origin-agnostic trim.
-    // (Phase-1a proved typed `Complex` keys partition identically to `render()`.)
-    let mut origin_of: FxHashMap<Complex, String> = FxHashMap::default();
+    // complex -> owning origin, also serving as the `seen` set (a key's presence
+    // marks it emitted). Keyed by `Hashed<Complex>` so each product's `Complex`
+    // tree is walked ONCE (at `Hashed::new`) and reused for the entry probe AND
+    // the post-trim origin lookup, instead of the derived `Complex` `Hash`
+    // re-walking components→compounds→simples→`String` on every map operation.
+    // (Phase-1a proved typed `Complex` keys partition identically to `render()`;
+    // `Hashed` keeps `Eq` structural so the partition is byte-identical.)
+    let mut origin_of: FxHashMap<Hashed<Complex>, String> = FxHashMap::default();
     let mut changed = false;
     for (complex, in_break, c_origin) in list {
         let visible = batch_closure.contains(c_origin);
@@ -3212,15 +3259,22 @@ fn extend_list_batch(
         for (c, f) in products {
             // The unchanged self-copy keeps its origin; a genuinely new product
             // takes the batch's origin so further batches gate against it. The
-            // FIRST product carrying a given selector sets its origin (`or_insert`).
-            let o = if c == *complex {
-                c_origin.clone()
-            } else {
-                batch_origin.clone()
-            };
-            origin_of.entry(c.clone()).or_insert(o);
-            if seen.insert(c.clone()) {
-                out.push((c, f));
+            // FIRST product carrying a given selector sets its origin AND is the
+            // one pushed to `out` — the `seen` membership and `or_insert` fired
+            // together, so a single vacant-entry probe drives both.
+            use std::collections::hash_map::Entry;
+            let key = Hashed::new(c.clone());
+            match origin_of.entry(key) {
+                Entry::Vacant(slot) => {
+                    let o = if c == *complex {
+                        c_origin.clone()
+                    } else {
+                        batch_origin.clone()
+                    };
+                    slot.insert(o);
+                    out.push((c, f));
+                }
+                Entry::Occupied(_) => {}
             }
         }
     }
@@ -3230,8 +3284,9 @@ fn extend_list_batch(
     trim_breaks(out, originals, source_spec)
         .into_iter()
         .map(|(c, f)| {
-            let o = origin_of.get(&c).cloned().unwrap_or_else(|| batch_origin.clone());
-            (c, f, o)
+            let key = Hashed::new(c);
+            let o = origin_of.remove(&key).unwrap_or_else(|| batch_origin.clone());
+            (key.value, f, o)
         })
         .collect()
 }
