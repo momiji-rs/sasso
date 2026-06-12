@@ -1078,8 +1078,29 @@ pub(crate) fn extend_selectors(
                 )
             })
             .collect();
+        // OPT 1 (single registration-order pass): skip a batch none of whose
+        // targets the running list can match — a no-op, budget-neutral batch.
+        let mut current_simples: FxHashSet<Simple> = FxHashSet::default();
+        for (c, _, _) in &current {
+            collect_match_simples(c, &mut current_simples);
+        }
         for batch in batches.iter() {
+            let mut any = false;
+            for e in batch.iter() {
+                if let Some(t) = &e.target {
+                    if current_simples.contains(t) {
+                        any = true;
+                        break;
+                    }
+                }
+            }
+            if !any {
+                continue;
+            }
             current = extend_list_batch(&current, batch, &originals, source_spec);
+            for (c, _, _) in &current {
+                collect_match_simples(c, &mut current_simples);
+            }
         }
         current.into_iter().map(|(c, f, _)| (c, f)).collect()
     } else if one_shot {
@@ -1114,22 +1135,53 @@ pub(crate) fn extend_selectors(
                 )
             })
             .collect();
-        let render_of = |cur: &[(Complex, bool, String)]| {
-            cur.iter()
-                .map(|(c, _, _)| c.render())
-                .collect::<Vec<_>>()
-                .join("\u{1}")
+        // OPT 1: the set `S` of simples the running list can match against —
+        // exactly those `s` for which some complex `complex_may_match_targets`
+        // `{s}`. A batch ALL of whose targets are absent from `S` changes
+        // nothing AND consumes zero budget (the `can_match` gate fires before
+        // `consume_extend_work`), so it can be skipped entirely — byte-exact.
+        // Maintained INCREMENTALLY: only an applied batch mutates `current`, so
+        // its products' simples are unioned in; skipped batches leave `S` alone.
+        let mut current_simples: FxHashSet<Simple> = FxHashSet::default();
+        for (c, _, _) in &current {
+            collect_match_simples(c, &mut current_simples);
+        }
+        // OPT 2(b): the fixpoint guard compares the TYPED list (Phase-1a proved
+        // typed `Complex` Eq ⇔ `render()` equality), dropping the per-pass
+        // `render()` + String join the old guard paid every pass.
+        let typed_of = |cur: &[(Complex, bool, String)]| -> Vec<(Complex, bool)> {
+            cur.iter().map(|(c, f, _)| (c.clone(), *f)).collect()
         };
-        let mut guard = render_of(&current);
+        let mut guard = typed_of(&current);
         loop {
             for batch in batches.iter() {
-                current = extend_list_batch(&current, batch, &originals, source_spec);
+                // Skip a batch none of whose targets the running list can match.
+                let mut any = false;
+                for e in batch.iter() {
+                    if let Some(t) = &e.target {
+                        if current_simples.contains(t) {
+                            any = true;
+                            break;
+                        }
+                    }
+                }
+                if !any {
+                    continue;
+                }
+                let next = extend_list_batch(&current, batch, &originals, source_spec);
+                // Union the (possibly new) products' simples into `S`. Only an
+                // applied batch reaches here; recomputing from scratch per batch
+                // would defeat the win, so fold incrementally.
+                for (c, _, _) in &next {
+                    collect_match_simples(c, &mut current_simples);
+                }
+                current = next;
             }
-            let render = render_of(&current);
-            if render == guard || !consume_extend_work() {
+            let typed = typed_of(&current);
+            if typed == guard || !consume_extend_work() {
                 break;
             }
-            guard = render;
+            guard = typed;
         }
         current.into_iter().map(|(c, f, _)| (c, f)).collect()
     };
@@ -2691,6 +2743,40 @@ fn complex_may_match_targets(complex: &Complex, targets: &FxHashSet<Simple>) -> 
         .iter()
         .any(|comp| comp.compound.simples.iter().any(|s| targets.contains(s)))
         || pseudo_arg_has_target_deep(complex, targets)
+}
+
+/// Collect the EXACT set `S` of simples such that
+/// `complex_may_match_targets(complex, {s})` is true: every `Simple` appearing
+/// DIRECTLY in a compound, PLUS every `Simple` appearing inside a selector-pseudo
+/// argument at ANY nesting depth. Mirrors [`complex_may_match_targets`] /
+/// [`pseudo_arg_has_target_deep`] inverted (the membership predicate built into
+/// an enumeration), so for any non-empty `targets`:
+/// `complex_may_match_targets(complex, targets)` ==
+/// `targets.iter().any(|t| collect_match_simples(complex).contains(t))`.
+/// Used by the per-rule fold to skip a batch ALL of whose targets are absent from
+/// the running selector list — a provably no-op (output- and budget-neutral)
+/// batch, since `extend_list_batch` gates each complex by `can_match` BEFORE it
+/// consumes any work budget.
+fn collect_match_simples(complex: &Complex, out: &mut FxHashSet<Simple>) {
+    for comp in &complex.components {
+        for s in &comp.compound.simples {
+            // Direct compound membership.
+            out.insert(s.clone());
+            // Recurse into selector-pseudo arguments at any depth.
+            let Simple::Pseudo(text) = s else { continue };
+            let Some(parts) = parse_pseudo_parts(text) else {
+                continue;
+            };
+            if !is_selector_pseudo(&parts.name) {
+                continue;
+            }
+            if let Some(list) = parse_list(&parts.arg) {
+                for c in &list {
+                    collect_match_simples(c, out);
+                }
+            }
+        }
+    }
 }
 
 /// Whether a pseudo name takes a selector list we should extend. `slotted` is
