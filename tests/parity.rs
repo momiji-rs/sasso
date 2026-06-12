@@ -1796,6 +1796,32 @@ fn equality_is_unit_and_format_aware() {
     assert_eq!(ours("a {b: red == hsl(0, 0%, 50%)}\n"), "a {\n  b: false;\n}\n");
 }
 
+/// Phase-1a parity proof (offline). The `@extend` engine keys its ~28 maps/sets
+/// by `render()` strings; Phase 1c/1d migrate those to typed `Complex`/`Simple`
+/// keys, which is behaviour-preserving iff `render()` is INJECTIVE over the
+/// typed model — no two structurally-distinct selectors share a render string
+/// (the converse is free: `render()` is pure and a derived `Hash` agrees with
+/// `Eq`). `selector.rs::assert_render_injective` guards this at the engine's key
+/// sites in debug builds; compiling a broad spread of `@extend` inputs here
+/// (`:is`/`:not`/`:has` args, attributes, pseudo-elements, combinators,
+/// namespaces, placeholders, universal, `nth-of`) fires the guard on any
+/// violation. The full sass-spec suite was also run guard-active with zero
+/// violations, byte-identical output.
+#[test]
+fn selector_render_injective() {
+    for scss in [
+        ".a {c: d}\n:is(.x, .y) .z[w=v i] {@extend .a}\n",
+        ".a {c: d}\n* > .b ~ .c:not(.d):has(> .e) {@extend .a}\n",
+        ".a {c: d}\nns|el::before, *|*:hover {@extend .a}\n",
+        "%p {c: d}\n.q:nth-child(2n + 1 of .r) {@extend %p}\n",
+        ".a.b {c: d}\n.x {@extend .a}\n.y {@extend .b}\n",
+        "#id:not(:is(.a, [b])) {c: d}\n.z {@extend #id}\n",
+    ] {
+        // In a debug build the render-injectivity guard panics on any violation.
+        let _ = ours(scss);
+    }
+}
+
 #[test]
 fn extend_basic_and_placeholders() {
     // A class extend adds the extender as an alternative selector.

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 /// A combinator joining two compound selectors.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Combinator {
     Child,            // >
     NextSibling,      // +
@@ -29,7 +29,7 @@ impl Combinator {
 }
 
 /// One simple selector: the atoms of a compound selector.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Simple {
     /// `*` or `ns|*`. Stores the optional namespace prefix verbatim.
     Universal { ns: Option<String> },
@@ -140,7 +140,7 @@ fn find_of_keyword(lower: &str) -> Option<usize> {
 
 /// A compound selector: a non-empty run of simple selectors with no
 /// combinator between them, e.g. `.foo.bar:hover`.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct Compound {
     pub simples: Vec<Simple>,
 }
@@ -159,7 +159,7 @@ impl Compound {
 /// empty or single) run of combinators that joins it to the previous component.
 /// A run of more than one combinator (`c > > d`) or a leading run (`~ ~ c`) is a
 /// "bogus" but parseable selector dart-sass preserves.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct ComplexComponent {
     pub combinators: Vec<Combinator>,
     pub compound: Compound,
@@ -180,7 +180,7 @@ impl ComplexComponent {
 /// (whitespace) or explicit combinators, e.g. `.a > .b .c`. `trailing` holds a
 /// "bogus" trailing combinator run (`c >`, `c + >`) — or, when `components` is
 /// empty, a combinator-only selector (`>`) — that dart-sass preserves.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub(crate) struct Complex {
     pub components: Vec<ComplexComponent>,
     pub trailing: Vec<Combinator>,
@@ -212,6 +212,74 @@ impl Complex {
         self.components.iter().any(|c| c.compound.has_placeholder())
     }
 }
+
+// ---- Phase 1a parity proof: render() injectivity over the typed model ----
+
+/// Debug-only guard for the selector campaign's core invariant: typed
+/// `Eq`/`Hash` on [`Complex`] partitions selectors **identically** to their
+/// `render()` strings, so the `@extend` engine can migrate its ~28 map/set keys
+/// from `render()` `String`s to typed `Complex` keys (Phase 1c/1d) with zero
+/// behaviour change. The converse direction is free — `render()` is a pure
+/// function (equal structures render equally) and a *derived* `Hash` agrees
+/// with `Eq` — so the only non-trivial property is that `render()` is
+/// INJECTIVE: no two structurally-distinct selectors share a render string.
+/// This guard, called at the engine's key sites, accumulates every keyed
+/// `Complex` and panics on the first collision with the offending pair. Proven
+/// never to fire across the full sass-spec suite in a debug build (see the
+/// `selector_render_injective` parity test).
+#[cfg(debug_assertions)]
+pub(crate) fn assert_render_injective(c: &Complex) {
+    thread_local! {
+        static SEEN: std::cell::RefCell<HashMap<String, Complex>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    SEEN.with(|seen| {
+        let key = c.render();
+        let mut seen = seen.borrow_mut();
+        match seen.get(&key) {
+            Some(prev) if prev != c => panic!(
+                "Phase-1a parity violation (Complex): two structurally distinct \
+                 selectors share render {key:?}\n  a = {prev:?}\n  b = {c:?}"
+            ),
+            Some(_) => {}
+            None => {
+                seen.insert(key, c.clone());
+            }
+        }
+    });
+}
+
+/// As [`assert_render_injective`], for `Simple` keys (the `by_extender` map
+/// keys simple selectors by `render()`).
+#[cfg(debug_assertions)]
+pub(crate) fn assert_simple_render_injective(s: &Simple) {
+    thread_local! {
+        static SEEN: std::cell::RefCell<HashMap<String, Simple>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    SEEN.with(|seen| {
+        let key = s.render();
+        let mut seen = seen.borrow_mut();
+        match seen.get(&key) {
+            Some(prev) if prev != s => panic!(
+                "Phase-1a parity violation (Simple): two structurally distinct \
+                 simples share render {key:?}\n  a = {prev:?}\n  b = {s:?}"
+            ),
+            Some(_) => {}
+            None => {
+                seen.insert(key, s.clone());
+            }
+        }
+    });
+}
+
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+pub(crate) fn assert_render_injective(_c: &Complex) {}
+
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+pub(crate) fn assert_simple_render_injective(_s: &Simple) {}
 
 // ---- parsing -----------------------------------------------------------
 
@@ -855,6 +923,7 @@ pub(crate) fn extend_selectors(
     // matches what it always matched).
     let mut originals: HashSet<String> = HashSet::new();
     for complex in original {
+        assert_render_injective(complex);
         originals.insert(complex.render());
     }
     // Extenders are source selectors too (dart-sass's `_originals` is
@@ -2611,6 +2680,7 @@ fn register_derived(
     old_target_key: &str,
     complex: Complex,
 ) {
+    assert_render_injective(&complex);
     let key = complex.render();
     let target_sources = sources.entry(old_target_key.to_string()).or_default();
     if let Some(&idx) = target_sources.get(&key) {
@@ -2632,6 +2702,7 @@ fn register_derived(
         batch.push(derived);
     }
     for s in simples {
+        assert_simple_render_injective(&s);
         by_extender.entry(s.render()).or_default().push(idx);
     }
 }
@@ -2753,6 +2824,7 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
             // tracks "found" via `_selectors[target]` independently; sasso flips
             // the shared `matched` cell during application, so the extension must
             // run. A single leading combinator (`> d`) is NOT useless and emits.
+            assert_render_injective(extender);
             let ext_key = extender.render();
             let target_sources = sources.entry(target_key.clone()).or_default();
             if let Some(&idx) = target_sources.get(&ext_key) {
@@ -2772,6 +2844,7 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
             let mut simples = Vec::new();
             all_simples_of(extender, &mut simples);
             for s in simples {
+                assert_simple_render_injective(&s);
                 by_extender.entry(s.render()).or_default().push(idx);
             }
         }
