@@ -154,6 +154,7 @@ fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     }
     channels.validate_numeric(&["red", "green", "blue"], pos)?;
     channels.validate_count("rgb", pos)?;
+    channels.validate_rgb_units(&["red", "green", "blue"], pos)?;
     let Channels { comps, alpha, .. } = channels;
     let r = rgb_channel(&comps[0], pos)?;
     let g = rgb_channel(&comps[1], pos)?;
@@ -365,6 +366,57 @@ impl Channels {
                     ),
                     pos,
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the unit of every `rgb`/`rgba` channel, matching dart-sass:
+    /// each `$red`/`$green`/`$blue` must be unitless or carry exactly `%`. Any
+    /// other unit (`px`, `deg`, a complex `px*px`, or a unit-bearing degenerate
+    /// `calc(infinity * 1px)`) raises `$<param>: Expected <value> to have unit
+    /// "%" or no units.`.
+    ///
+    /// Run only after the special/`none`/relative passthroughs (so `var()`,
+    /// `none`, `from …` are preserved) and after the numeric and count checks
+    /// (dart reports a non-number or wrong-channel-count channel first). For the
+    /// positional comma form (`single == None`) this also supplies the
+    /// `$<param>:` prefix on the per-channel "is not a number" error, which
+    /// dart attaches but the bare [`channel`] helper does not; the check runs
+    /// left-to-right so a non-number channel is reported before a later
+    /// bad-unit one, matching dart's two-pass (coerce-then-unit) order.
+    fn validate_rgb_units(&self, names: &[&str], pos: Pos) -> Result<(), Error> {
+        // The positional form skips `validate_numeric`, so confirm every
+        // channel is a number first (with dart's `$<param>:` prefix), matching
+        // dart's all-numeric pass before any unit is examined.
+        if self.single.is_none() {
+            for (i, comp) in self.comps.iter().enumerate() {
+                let numeric = matches!(comp, Value::Number(_) | Value::Slash(..)) || is_degenerate_calc(comp);
+                if !numeric {
+                    return Err(Error::at(
+                        format!(
+                            "${}: {} is not a number.",
+                            names[i.min(names.len() - 1)],
+                            comp.to_css(false)
+                        ),
+                        pos,
+                    ));
+                }
+            }
+        }
+        for (i, comp) in self.comps.iter().enumerate() {
+            if let Some(num) = channel_unit_number(comp) {
+                let ok = num.is_unitless() || (!num.has_complex_units() && num.unit() == "%");
+                if !ok {
+                    return Err(Error::at(
+                        format!(
+                            "${}: Expected {} to have unit \"%\" or no units.",
+                            names[i.min(names.len() - 1)],
+                            comp.to_css(false)
+                        ),
+                        pos,
+                    ));
+                }
             }
         }
         Ok(())
@@ -789,6 +841,19 @@ fn degenerate_value(v: &Value) -> Option<f64> {
             CalcNode::Number(n) if !n.value.is_finite() => Some(n.value),
             _ => degenerate_const(node),
         },
+        _ => None,
+    }
+}
+
+/// The [`Number`] underlying a legacy color channel for unit inspection: a
+/// plain number, the quotient of a slash-division (`6px/2`, whose unit decides
+/// the channel's), or a degenerate `calc()` that folded to a unit-bearing
+/// number (`calc(infinity * 1px)`). Returns `None` for any non-numeric channel
+/// (handled by the "is not a number" / passthrough paths).
+fn channel_unit_number(v: &Value) -> Option<&Number> {
+    match v {
+        Value::Number(n) | Value::Slash(n, _) => Some(n),
+        Value::Calc(CalcNode::Number(n)) => Some(n),
         _ => None,
     }
 }
