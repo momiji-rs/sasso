@@ -1022,44 +1022,170 @@ fn quote_import_urls(logical: &str) -> String {
     out
 }
 
+/// A single-pass cursor over a `.sass` logical line's chars.
+///
+/// The indented-syntax line analysis needs to scan a line while *skipping over*
+/// quoted strings, `#{…}` interpolation and `/* … */` loud comments in eight
+/// slightly different queries (top-level comma split, declaration `:`, statement
+/// `;`, bracket depth, `@include … using`, …). The top-level dispatch differs
+/// per query, but the three skip sub-loops — the byte-accounting,
+/// escape-handling, brace-matching parts where bugs hide — are identical. This
+/// cursor owns the one `Vec<char>` allocation and centralises those three
+/// primitives. It tracks both a char index (`i`) and the matching byte offset
+/// (`byte`) so byte-indexing callers (`find_decl_colon`,
+/// `find_top_level_semicolon`, `strip_silent_comment`) and char-only callers
+/// share one implementation.
+struct LineScanner {
+    cs: Vec<char>,
+    /// Char index of the cursor.
+    i: usize,
+    /// Byte offset corresponding to `i` — maintained only for non-ASCII input
+    /// (see [`LineScanner::offset`]); left at 0 on the common all-ASCII path,
+    /// where the byte offset equals the char index.
+    byte: usize,
+    /// Whether the line is pure ASCII (byte offset == char index, so the
+    /// per-char `len_utf8` bookkeeping in [`bump`](Self::bump) is skippable).
+    ascii: bool,
+}
+
+impl LineScanner {
+    fn new(s: &str) -> Self {
+        LineScanner {
+            cs: s.chars().collect(),
+            i: 0,
+            byte: 0,
+            ascii: s.is_ascii(),
+        }
+    }
+
+    #[inline]
+    fn done(&self) -> bool {
+        self.i >= self.cs.len()
+    }
+
+    /// The char under the cursor. Caller must ensure `!done()`.
+    #[inline]
+    fn cur(&self) -> char {
+        self.cs[self.i]
+    }
+
+    /// The char `k` positions ahead, or `None` past the end.
+    #[inline]
+    fn peek(&self, k: usize) -> Option<char> {
+        self.cs.get(self.i + k).copied()
+    }
+
+    /// The byte offset of the cursor into the original `&str`. On all-ASCII
+    /// input this is just the char index; otherwise it is the tracked sum.
+    #[inline]
+    fn offset(&self) -> usize {
+        if self.ascii {
+            self.i
+        } else {
+            self.byte
+        }
+    }
+
+    /// Advance one char, keeping the byte offset in step (skipped on the
+    /// all-ASCII fast path, where `offset()` reads the char index directly).
+    #[inline]
+    fn bump(&mut self) {
+        if !self.ascii {
+            self.byte += self.cs[self.i].len_utf8();
+        }
+        self.i += 1;
+    }
+
+    /// At an opening quote: advance past the matching closing quote (honouring
+    /// `\`-escapes), or to end-of-line if the string is unterminated. Returns
+    /// `true` iff the string was terminated on this line.
+    #[inline]
+    fn skip_quoted(&mut self) -> bool {
+        let q = self.cur();
+        self.bump(); // opening quote
+        while self.i < self.cs.len() && self.cs[self.i] != q {
+            // A backslash escapes the next char (which may be the quote).
+            if self.cs[self.i] == '\\' && self.i + 1 < self.cs.len() {
+                self.bump();
+            }
+            self.bump();
+        }
+        if self.i < self.cs.len() {
+            self.bump(); // closing quote
+            true
+        } else {
+            false
+        }
+    }
+
+    /// At `#{`: advance past the brace-matched closing `}` (or to end-of-line).
+    #[inline]
+    fn skip_interp(&mut self) {
+        self.bump(); // '#'
+        self.bump(); // '{'
+        let mut depth = 1;
+        while self.i < self.cs.len() && depth > 0 {
+            match self.cs[self.i] {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+            self.bump();
+        }
+    }
+
+    /// At `/*`: advance past the closing `*/` (or to end-of-line). Returns
+    /// `true` iff the comment closed on this line.
+    #[inline]
+    fn skip_loud_comment(&mut self) -> bool {
+        self.bump(); // '/'
+        self.bump(); // '*'
+        while self.i + 1 < self.cs.len() && !(self.cs[self.i] == '*' && self.cs[self.i + 1] == '/') {
+            self.bump();
+        }
+        if self.i + 1 < self.cs.len() {
+            self.bump(); // '*'
+            self.bump(); // '/'
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Split on top-level commas (outside brackets and quoted strings).
 fn split_top_level_commas(s: &str) -> Vec<String> {
-    let cs: Vec<char> = s.chars().collect();
+    let mut sc = LineScanner::new(s);
     let mut parts = Vec::new();
     let mut cur = String::new();
     let mut depth = 0i32;
-    let mut i = 0;
-    while i < cs.len() {
-        let c = cs[i];
-        match c {
+    while !sc.done() {
+        match sc.cur() {
             '"' | '\'' => {
-                cur.push(c);
-                i += 1;
-                while i < cs.len() {
-                    cur.push(cs[i]);
-                    if cs[i] == '\\' && i + 1 < cs.len() {
-                        i += 1;
-                        cur.push(cs[i]);
-                    } else if cs[i] == c {
-                        break;
-                    }
-                    i += 1;
-                }
+                let start = sc.i;
+                sc.skip_quoted();
+                cur.extend(&sc.cs[start..sc.i]);
+                continue;
             }
             '(' | '[' => {
                 depth += 1;
-                cur.push(c);
+                cur.push(sc.cur());
+                sc.bump();
             }
             ')' | ']' => {
                 depth -= 1;
-                cur.push(c);
+                cur.push(sc.cur());
+                sc.bump();
             }
             ',' if depth == 0 => {
                 parts.push(std::mem::take(&mut cur));
+                sc.bump();
             }
-            _ => cur.push(c),
+            c => {
+                cur.push(c);
+                sc.bump();
+            }
         }
-        i += 1;
     }
     parts.push(cur);
     parts
@@ -1132,67 +1258,25 @@ fn trim_trailing_loud_comments(s: &str) -> &str {
 /// loud comment is not a silent comment). Returns the line with the comment (if
 /// any) removed and trailing whitespace trimmed.
 fn strip_silent_comment(s: &str) -> String {
-    let cs: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    let mut byte = 0usize;
-    while i < cs.len() {
-        let c = cs[i];
-        match c {
+    let mut sc = LineScanner::new(s);
+    while !sc.done() {
+        match sc.cur() {
             '"' | '\'' => {
-                let q = c;
-                byte += c.len_utf8();
-                i += 1;
-                while i < cs.len() && cs[i] != q {
-                    if cs[i] == '\\' && i + 1 < cs.len() {
-                        byte += cs[i].len_utf8();
-                        i += 1;
-                    }
-                    byte += cs[i].len_utf8();
-                    i += 1;
-                }
-                if i < cs.len() {
-                    byte += cs[i].len_utf8();
-                    i += 1;
-                }
-                continue;
+                sc.skip_quoted();
             }
-            '/' if cs.get(i + 1) == Some(&'*') => {
-                // A loud comment: skip to its close (it may not close on this
-                // line, in which case the rest is comment body — leave it).
-                byte += 2;
-                i += 2;
-                while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
-                    byte += cs[i].len_utf8();
-                    i += 1;
-                }
-                if i + 1 < cs.len() {
-                    byte += 2;
-                    i += 2;
-                }
-                continue;
+            // A loud comment: skip to its close (it may not close on this line,
+            // in which case the rest is comment body — leave it).
+            '/' if sc.peek(1) == Some('*') => {
+                sc.skip_loud_comment();
             }
-            '/' if cs.get(i + 1) == Some(&'/') => {
-                return s[..byte].trim_end().to_string();
+            '/' if sc.peek(1) == Some('/') => {
+                return s[..sc.offset()].trim_end().to_string();
             }
-            '#' if cs.get(i + 1) == Some(&'{') => {
-                byte += c.len_utf8() + '{'.len_utf8();
-                i += 2;
-                let mut d = 1;
-                while i < cs.len() && d > 0 {
-                    match cs[i] {
-                        '{' => d += 1,
-                        '}' => d -= 1,
-                        _ => {}
-                    }
-                    byte += cs[i].len_utf8();
-                    i += 1;
-                }
-                continue;
+            '#' if sc.peek(1) == Some('{') => {
+                sc.skip_interp();
             }
-            _ => {}
+            _ => sc.bump(),
         }
-        byte += c.len_utf8();
-        i += 1;
     }
     s.trim_end().to_string()
 }
@@ -1220,26 +1304,25 @@ struct ScanState {
 /// `#{` interpolation (so the next line continues it verbatim). Quoted
 /// strings are skipped; a custom value's braces count as brackets.
 fn custom_value_open(s: &str) -> bool {
-    let cs: Vec<char> = s.chars().collect();
+    let mut sc = LineScanner::new(s);
     let mut depth = 0i32;
-    let mut i = 0;
-    while i < cs.len() {
-        match cs[i] {
+    while !sc.done() {
+        match sc.cur() {
             '"' | '\'' => {
-                let q = cs[i];
-                i += 1;
-                while i < cs.len() && cs[i] != q {
-                    if cs[i] == '\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
+                sc.skip_quoted();
             }
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            _ => {}
+            // A custom value's braces count as brackets (so an `#{` is just an
+            // open brace here, not interpolation).
+            '(' | '[' | '{' => {
+                depth += 1;
+                sc.bump();
+            }
+            ')' | ']' | '}' => {
+                depth -= 1;
+                sc.bump();
+            }
+            _ => sc.bump(),
         }
-        i += 1;
     }
     depth > 0
 }
@@ -1248,55 +1331,43 @@ fn custom_value_open(s: &str) -> bool {
 /// loud-comment text too (unlike [`scan_state`], which skips comment bodies):
 /// a `#{` opens interpolation even within `/* … */`.
 fn interp_open_anywhere(s: &str) -> bool {
-    let cs: Vec<char> = s.chars().collect();
+    let mut sc = LineScanner::new(s);
     let mut interp = 0i32;
-    let mut i = 0;
-    while i < cs.len() {
-        match cs[i] {
+    while !sc.done() {
+        match sc.cur() {
             // Quoted strings only have meaning inside interpolation here.
             '"' | '\'' if interp > 0 => {
-                let q = cs[i];
-                i += 1;
-                while i < cs.len() && cs[i] != q {
-                    if cs[i] == '\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
+                sc.skip_quoted();
             }
-            '#' if cs.get(i + 1) == Some(&'{') => {
+            // Counted (not skipped-to-close) so an *unclosed* `#{` is detected.
+            '#' if sc.peek(1) == Some('{') => {
                 interp += 1;
-                i += 2;
-                continue;
+                sc.bump();
+                sc.bump();
             }
-            '{' if interp > 0 => interp += 1,
-            '}' if interp > 0 => interp -= 1,
-            _ => {}
+            '{' if interp > 0 => {
+                interp += 1;
+                sc.bump();
+            }
+            '}' if interp > 0 => {
+                interp -= 1;
+                sc.bump();
+            }
+            _ => sc.bump(),
         }
-        i += 1;
     }
     interp > 0
 }
 
 fn scan_state(s: &str) -> ScanState {
-    let cs: Vec<char> = s.chars().collect();
+    let mut sc = LineScanner::new(s);
     let mut depth = 0i32;
     // Stack of `#{` interpolation brace depths still open.
     let mut interp_depth = 0i32;
-    let mut i = 0;
-    while i < cs.len() {
-        let c = cs[i];
-        match c {
+    while !sc.done() {
+        match sc.cur() {
             '"' | '\'' => {
-                let q = c;
-                i += 1;
-                while i < cs.len() && cs[i] != q {
-                    if cs[i] == '\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-                if i >= cs.len() {
+                if !sc.skip_quoted() {
                     // Unterminated quoted string at end of line.
                     return ScanState {
                         bracket_depth: depth,
@@ -1306,13 +1377,9 @@ fn scan_state(s: &str) -> ScanState {
                     };
                 }
             }
-            '/' if cs.get(i + 1) == Some(&'/') => break,
-            '/' if cs.get(i + 1) == Some(&'*') => {
-                i += 2;
-                while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
-                    i += 1;
-                }
-                if i + 1 >= cs.len() && !(cs.get(i) == Some(&'*') && cs.get(i + 1) == Some(&'/')) {
+            '/' if sc.peek(1) == Some('/') => break,
+            '/' if sc.peek(1) == Some('*') => {
+                if !sc.skip_loud_comment() {
                     // Reached end of line without closing the loud comment.
                     return ScanState {
                         bracket_depth: depth,
@@ -1321,21 +1388,31 @@ fn scan_state(s: &str) -> ScanState {
                         in_string: false,
                     };
                 }
-                i += 2;
-                continue;
             }
-            '#' if cs.get(i + 1) == Some(&'{') => {
-                i += 2;
+            // Counted (not skipped-to-close) so an *unclosed* `#{` is reported.
+            '#' if sc.peek(1) == Some('{') => {
                 interp_depth += 1;
-                continue;
+                sc.bump();
+                sc.bump();
             }
-            '{' if interp_depth > 0 => interp_depth += 1,
-            '}' if interp_depth > 0 => interp_depth -= 1,
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth -= 1,
-            _ => {}
+            '{' if interp_depth > 0 => {
+                interp_depth += 1;
+                sc.bump();
+            }
+            '}' if interp_depth > 0 => {
+                interp_depth -= 1;
+                sc.bump();
+            }
+            '(' | '[' => {
+                depth += 1;
+                sc.bump();
+            }
+            ')' | ']' => {
+                depth -= 1;
+                sc.bump();
+            }
+            _ => sc.bump(),
         }
-        i += 1;
     }
     ScanState {
         bracket_depth: depth,
@@ -1349,58 +1426,36 @@ fn scan_state(s: &str) -> ScanState {
 /// `:` separating a property/custom-property name from its value), skipping
 /// strings, brackets, comments and interpolation. Returns `None` if absent.
 fn find_decl_colon(logical: &str) -> Option<usize> {
-    let cs: Vec<char> = logical.chars().collect();
-    let mut byte = 0usize;
+    let mut sc = LineScanner::new(logical);
     let mut paren = 0i32;
     let mut bracket = 0i32;
-    let mut i = 0;
-    while i < cs.len() {
-        let c = cs[i];
-        match c {
+    while !sc.done() {
+        match sc.cur() {
             '"' | '\'' => {
-                let q = c;
-                byte += c.len_utf8();
-                i += 1;
-                while i < cs.len() && cs[i] != q {
-                    if cs[i] == '\\' {
-                        byte += cs[i].len_utf8();
-                        i += 1;
-                    }
-                    if i < cs.len() {
-                        byte += cs[i].len_utf8();
-                        i += 1;
-                    }
-                }
-                if i < cs.len() {
-                    byte += cs[i].len_utf8();
-                    i += 1;
-                }
-                continue;
+                sc.skip_quoted();
             }
-            '#' if cs.get(i + 1) == Some(&'{') => {
-                byte += c.len_utf8() + '{'.len_utf8();
-                i += 2;
-                let mut d = 1;
-                while i < cs.len() && d > 0 {
-                    match cs[i] {
-                        '{' => d += 1,
-                        '}' => d -= 1,
-                        _ => {}
-                    }
-                    byte += cs[i].len_utf8();
-                    i += 1;
-                }
-                continue;
+            '#' if sc.peek(1) == Some('{') => {
+                sc.skip_interp();
             }
-            '(' => paren += 1,
-            ')' => paren -= 1,
-            '[' => bracket += 1,
-            ']' => bracket -= 1,
-            ':' if paren == 0 && bracket == 0 => return Some(byte),
-            _ => {}
+            '(' => {
+                paren += 1;
+                sc.bump();
+            }
+            ')' => {
+                paren -= 1;
+                sc.bump();
+            }
+            '[' => {
+                bracket += 1;
+                sc.bump();
+            }
+            ']' => {
+                bracket -= 1;
+                sc.bump();
+            }
+            ':' if paren == 0 && bracket == 0 => return Some(sc.offset()),
+            _ => sc.bump(),
         }
-        byte += c.len_utf8();
-        i += 1;
     }
     None
 }
@@ -1412,104 +1467,587 @@ fn find_decl_colon(logical: &str) -> Option<usize> {
 /// Whether an `@include` logical line carries a top-level `using` keyword
 /// (outside brackets and strings) — i.e. a content-block parameter clause.
 fn has_top_level_using(logical: &str) -> bool {
-    let cs: Vec<char> = logical.chars().collect();
+    let mut sc = LineScanner::new(logical);
     let mut depth = 0i32;
-    let mut i = 0;
-    while i < cs.len() {
-        match cs[i] {
+    while !sc.done() {
+        match sc.cur() {
             '"' | '\'' => {
-                let q = cs[i];
-                i += 1;
-                while i < cs.len() && cs[i] != q {
-                    if cs[i] == '\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
+                sc.skip_quoted();
             }
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth -= 1,
+            '(' | '[' => {
+                depth += 1;
+                sc.bump();
+            }
+            ')' | ']' => {
+                depth -= 1;
+                sc.bump();
+            }
             'u' | 'U' if depth == 0 => {
-                let prev_ident = i > 0 && is_ident_char(cs[i - 1]);
-                let word: String = cs[i..].iter().take_while(|c| is_ident_char(**c)).collect();
+                let prev_ident = sc.i > 0 && is_ident_char(sc.cs[sc.i - 1]);
+                let word: String = sc.cs[sc.i..].iter().take_while(|c| is_ident_char(**c)).collect();
                 if !prev_ident && word.eq_ignore_ascii_case("using") {
                     return true;
                 }
-                i += word.len().max(1);
-                continue;
+                // Skip the whole identifier run (at least one char, since the
+                // cursor is on `u`/`U`).
+                for _ in 0..word.len().max(1) {
+                    sc.bump();
+                }
             }
-            _ => {}
+            _ => sc.bump(),
         }
-        i += 1;
     }
     false
 }
 
 fn find_top_level_semicolon(logical: &str) -> Option<usize> {
-    let cs: Vec<char> = logical.chars().collect();
+    let mut sc = LineScanner::new(logical);
     let mut paren = 0i32;
     let mut bracket = 0i32;
-    let mut byte = 0usize;
-    let mut i = 0;
-    while i < cs.len() {
-        let c = cs[i];
-        match c {
+    while !sc.done() {
+        match sc.cur() {
             '"' | '\'' => {
-                let q = c;
-                byte += c.len_utf8();
-                i += 1;
-                while i < cs.len() && cs[i] != q {
-                    if cs[i] == '\\' && i + 1 < cs.len() {
+                sc.skip_quoted();
+            }
+            '/' if sc.peek(1) == Some('/') => break,
+            '/' if sc.peek(1) == Some('*') => {
+                sc.skip_loud_comment();
+            }
+            '#' if sc.peek(1) == Some('{') => {
+                sc.skip_interp();
+            }
+            '(' => {
+                paren += 1;
+                sc.bump();
+            }
+            ')' => {
+                paren -= 1;
+                sc.bump();
+            }
+            '[' => {
+                bracket += 1;
+                sc.bump();
+            }
+            ']' => {
+                bracket -= 1;
+                sc.bump();
+            }
+            ';' if paren == 0 && bracket == 0 => return Some(sc.offset()),
+            _ => sc.bump(),
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod line_scanner_parity {
+    //! Parity oracle for the `LineScanner` refactor (refactor round-2 T1.1).
+    //!
+    //! Each of the eight `.sass` line-analysis queries used to hand-roll its own
+    //! quote / `#{…}` / `/* */` skipping loop; they were collapsed onto the one
+    //! [`super::LineScanner`] cursor. To guarantee that collapse is byte-exact,
+    //! the pre-refactor implementations are preserved verbatim below (suffixed
+    //! `_ref`) and a differential test asserts the live functions agree with
+    //! them over a broad corpus of tricky inputs (escapes, unterminated strings
+    //! and comments, nested interpolation, multibyte chars). If a future change
+    //! to `LineScanner` diverges from the original semantics, this fails.
+
+    fn split_top_level_commas_ref(s: &str) -> Vec<String> {
+        let cs: Vec<char> = s.chars().collect();
+        let mut parts = Vec::new();
+        let mut cur = String::new();
+        let mut depth = 0i32;
+        let mut i = 0;
+        while i < cs.len() {
+            let c = cs[i];
+            match c {
+                '"' | '\'' => {
+                    cur.push(c);
+                    i += 1;
+                    while i < cs.len() {
+                        cur.push(cs[i]);
+                        if cs[i] == '\\' && i + 1 < cs.len() {
+                            i += 1;
+                            cur.push(cs[i]);
+                        } else if cs[i] == c {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '(' | '[' => {
+                    depth += 1;
+                    cur.push(c);
+                }
+                ')' | ']' => {
+                    depth -= 1;
+                    cur.push(c);
+                }
+                ',' if depth == 0 => {
+                    parts.push(std::mem::take(&mut cur));
+                }
+                _ => cur.push(c),
+            }
+            i += 1;
+        }
+        parts.push(cur);
+        parts
+    }
+
+    fn strip_silent_comment_ref(s: &str) -> String {
+        let cs: Vec<char> = s.chars().collect();
+        let mut i = 0;
+        let mut byte = 0usize;
+        while i < cs.len() {
+            let c = cs[i];
+            match c {
+                '"' | '\'' => {
+                    let q = c;
+                    byte += c.len_utf8();
+                    i += 1;
+                    while i < cs.len() && cs[i] != q {
+                        if cs[i] == '\\' && i + 1 < cs.len() {
+                            byte += cs[i].len_utf8();
+                            i += 1;
+                        }
                         byte += cs[i].len_utf8();
                         i += 1;
                     }
-                    byte += cs[i].len_utf8();
-                    i += 1;
+                    if i < cs.len() {
+                        byte += cs[i].len_utf8();
+                        i += 1;
+                    }
+                    continue;
                 }
-                if i < cs.len() {
-                    byte += cs[i].len_utf8();
-                    i += 1;
-                }
-                continue;
-            }
-            '/' if cs.get(i + 1) == Some(&'/') => break,
-            '/' if cs.get(i + 1) == Some(&'*') => {
-                byte += 2;
-                i += 2;
-                while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
-                    byte += cs[i].len_utf8();
-                    i += 1;
-                }
-                if i + 1 < cs.len() {
+                '/' if cs.get(i + 1) == Some(&'*') => {
                     byte += 2;
                     i += 2;
-                }
-                continue;
-            }
-            '#' if cs.get(i + 1) == Some(&'{') => {
-                byte += c.len_utf8() + '{'.len_utf8();
-                i += 2;
-                let mut d = 1;
-                while i < cs.len() && d > 0 {
-                    match cs[i] {
-                        '{' => d += 1,
-                        '}' => d -= 1,
-                        _ => {}
+                    while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
+                        byte += cs[i].len_utf8();
+                        i += 1;
                     }
-                    byte += cs[i].len_utf8();
-                    i += 1;
+                    if i + 1 < cs.len() {
+                        byte += 2;
+                        i += 2;
+                    }
+                    continue;
                 }
-                continue;
+                '/' if cs.get(i + 1) == Some(&'/') => {
+                    return s[..byte].trim_end().to_string();
+                }
+                '#' if cs.get(i + 1) == Some(&'{') => {
+                    byte += c.len_utf8() + '{'.len_utf8();
+                    i += 2;
+                    let mut d = 1;
+                    while i < cs.len() && d > 0 {
+                        match cs[i] {
+                            '{' => d += 1,
+                            '}' => d -= 1,
+                            _ => {}
+                        }
+                        byte += cs[i].len_utf8();
+                        i += 1;
+                    }
+                    continue;
+                }
+                _ => {}
             }
-            '(' => paren += 1,
-            ')' => paren -= 1,
-            '[' => bracket += 1,
-            ']' => bracket -= 1,
-            ';' if paren == 0 && bracket == 0 => return Some(byte),
-            _ => {}
+            byte += c.len_utf8();
+            i += 1;
         }
-        byte += c.len_utf8();
-        i += 1;
+        s.trim_end().to_string()
     }
-    None
+
+    fn custom_value_open_ref(s: &str) -> bool {
+        let cs: Vec<char> = s.chars().collect();
+        let mut depth = 0i32;
+        let mut i = 0;
+        while i < cs.len() {
+            match cs[i] {
+                '"' | '\'' => {
+                    let q = cs[i];
+                    i += 1;
+                    while i < cs.len() && cs[i] != q {
+                        if cs[i] == '\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        depth > 0
+    }
+
+    fn interp_open_anywhere_ref(s: &str) -> bool {
+        let cs: Vec<char> = s.chars().collect();
+        let mut interp = 0i32;
+        let mut i = 0;
+        while i < cs.len() {
+            match cs[i] {
+                '"' | '\'' if interp > 0 => {
+                    let q = cs[i];
+                    i += 1;
+                    while i < cs.len() && cs[i] != q {
+                        if cs[i] == '\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                '#' if cs.get(i + 1) == Some(&'{') => {
+                    interp += 1;
+                    i += 2;
+                    continue;
+                }
+                '{' if interp > 0 => interp += 1,
+                '}' if interp > 0 => interp -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        interp > 0
+    }
+
+    fn scan_state_ref(s: &str) -> (i32, bool, bool, bool) {
+        let cs: Vec<char> = s.chars().collect();
+        let mut depth = 0i32;
+        let mut interp_depth = 0i32;
+        let mut i = 0;
+        while i < cs.len() {
+            let c = cs[i];
+            match c {
+                '"' | '\'' => {
+                    let q = c;
+                    i += 1;
+                    while i < cs.len() && cs[i] != q {
+                        if cs[i] == '\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    if i >= cs.len() {
+                        return (depth, interp_depth > 0, false, true);
+                    }
+                }
+                '/' if cs.get(i + 1) == Some(&'/') => break,
+                '/' if cs.get(i + 1) == Some(&'*') => {
+                    i += 2;
+                    while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
+                        i += 1;
+                    }
+                    if i + 1 >= cs.len() && !(cs.get(i) == Some(&'*') && cs.get(i + 1) == Some(&'/')) {
+                        return (depth, interp_depth > 0, true, false);
+                    }
+                    i += 2;
+                    continue;
+                }
+                '#' if cs.get(i + 1) == Some(&'{') => {
+                    i += 2;
+                    interp_depth += 1;
+                    continue;
+                }
+                '{' if interp_depth > 0 => interp_depth += 1,
+                '}' if interp_depth > 0 => interp_depth -= 1,
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        (depth, interp_depth > 0, false, false)
+    }
+
+    fn find_decl_colon_ref(logical: &str) -> Option<usize> {
+        let cs: Vec<char> = logical.chars().collect();
+        let mut byte = 0usize;
+        let mut paren = 0i32;
+        let mut bracket = 0i32;
+        let mut i = 0;
+        while i < cs.len() {
+            let c = cs[i];
+            match c {
+                '"' | '\'' => {
+                    let q = c;
+                    byte += c.len_utf8();
+                    i += 1;
+                    while i < cs.len() && cs[i] != q {
+                        if cs[i] == '\\' {
+                            byte += cs[i].len_utf8();
+                            i += 1;
+                        }
+                        if i < cs.len() {
+                            byte += cs[i].len_utf8();
+                            i += 1;
+                        }
+                    }
+                    if i < cs.len() {
+                        byte += cs[i].len_utf8();
+                        i += 1;
+                    }
+                    continue;
+                }
+                '#' if cs.get(i + 1) == Some(&'{') => {
+                    byte += c.len_utf8() + '{'.len_utf8();
+                    i += 2;
+                    let mut d = 1;
+                    while i < cs.len() && d > 0 {
+                        match cs[i] {
+                            '{' => d += 1,
+                            '}' => d -= 1,
+                            _ => {}
+                        }
+                        byte += cs[i].len_utf8();
+                        i += 1;
+                    }
+                    continue;
+                }
+                '(' => paren += 1,
+                ')' => paren -= 1,
+                '[' => bracket += 1,
+                ']' => bracket -= 1,
+                ':' if paren == 0 && bracket == 0 => return Some(byte),
+                _ => {}
+            }
+            byte += c.len_utf8();
+            i += 1;
+        }
+        None
+    }
+
+    fn has_top_level_using_ref(logical: &str) -> bool {
+        let cs: Vec<char> = logical.chars().collect();
+        let mut depth = 0i32;
+        let mut i = 0;
+        while i < cs.len() {
+            match cs[i] {
+                '"' | '\'' => {
+                    let q = cs[i];
+                    i += 1;
+                    while i < cs.len() && cs[i] != q {
+                        if cs[i] == '\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                'u' | 'U' if depth == 0 => {
+                    let prev_ident = i > 0 && super::is_ident_char(cs[i - 1]);
+                    let word: String = cs[i..].iter().take_while(|c| super::is_ident_char(**c)).collect();
+                    if !prev_ident && word.eq_ignore_ascii_case("using") {
+                        return true;
+                    }
+                    i += word.len().max(1);
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn find_top_level_semicolon_ref(logical: &str) -> Option<usize> {
+        let cs: Vec<char> = logical.chars().collect();
+        let mut paren = 0i32;
+        let mut bracket = 0i32;
+        let mut byte = 0usize;
+        let mut i = 0;
+        while i < cs.len() {
+            let c = cs[i];
+            match c {
+                '"' | '\'' => {
+                    let q = c;
+                    byte += c.len_utf8();
+                    i += 1;
+                    while i < cs.len() && cs[i] != q {
+                        if cs[i] == '\\' && i + 1 < cs.len() {
+                            byte += cs[i].len_utf8();
+                            i += 1;
+                        }
+                        byte += cs[i].len_utf8();
+                        i += 1;
+                    }
+                    if i < cs.len() {
+                        byte += cs[i].len_utf8();
+                        i += 1;
+                    }
+                    continue;
+                }
+                '/' if cs.get(i + 1) == Some(&'/') => break,
+                '/' if cs.get(i + 1) == Some(&'*') => {
+                    byte += 2;
+                    i += 2;
+                    while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
+                        byte += cs[i].len_utf8();
+                        i += 1;
+                    }
+                    if i + 1 < cs.len() {
+                        byte += 2;
+                        i += 2;
+                    }
+                    continue;
+                }
+                '#' if cs.get(i + 1) == Some(&'{') => {
+                    byte += c.len_utf8() + '{'.len_utf8();
+                    i += 2;
+                    let mut d = 1;
+                    while i < cs.len() && d > 0 {
+                        match cs[i] {
+                            '{' => d += 1,
+                            '}' => d -= 1,
+                            _ => {}
+                        }
+                        byte += cs[i].len_utf8();
+                        i += 1;
+                    }
+                    continue;
+                }
+                '(' => paren += 1,
+                ')' => paren -= 1,
+                '[' => bracket += 1,
+                ']' => bracket -= 1,
+                ';' if paren == 0 && bracket == 0 => return Some(byte),
+                _ => {}
+            }
+            byte += c.len_utf8();
+            i += 1;
+        }
+        None
+    }
+
+    /// A broad corpus exercising every branch + edge case of the eight scanners.
+    fn corpus() -> Vec<String> {
+        let fragments = [
+            "",
+            "a, b, c",
+            "color: red",
+            "foo: bar; baz: qux",
+            "@include thing($a, $b) using ($c)",
+            "@include thing(using: 1)",
+            "url(a, b)",
+            "\"a, b\", c",
+            "'a; b': c",
+            "a: \"unterminated",
+            "a: 'half \\' quote'",
+            "a: \"esc \\\" still in\", b",
+            "trailing backslash \\",
+            "trailing backslash in str \"x\\",
+            "map: (a: 1, b: 2)",
+            "list: [1, 2, 3]",
+            "nested: (a: (b: c), d: [e, f])",
+            "interp: #{1 + 2}px",
+            "interp colon #{$a: b}",
+            "unclosed interp #{1 + 2",
+            "nested interp #{ #{x} }",
+            "interp with brace #{ {a} }",
+            "interp in comment /* #{x} */",
+            "// just a comment",
+            "value // trailing comment",
+            "value /* loud */ more",
+            "value /* unclosed loud",
+            "a: b /* c */ // d",
+            "/* #{x} */ : y",
+            "weird: a:b:c",
+            "深: 値; другой: значение",
+            "emoji 😀: 🎉, x",
+            "multi 字\\符 byte",
+            "semi inside (a; b); real",
+            "colon inside [a:b]: outside",
+            "@media screen",
+            "$var: value",
+            "url(\"x; y\")",
+            "a\\:escaped colon: v",
+            "#{} : after empty interp",
+            "} stray close",
+            ") stray paren",
+            "using",
+            "  using  ",
+            "foousing: 1",
+            "x using y",
+            "\"\"",
+            "''",
+            "()",
+            "#{",
+            "/*",
+            "*/",
+            "//",
+        ];
+        fragments.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn line_scanner_matches_reference_implementations() {
+        for s in corpus() {
+            let s = s.as_str();
+            assert_eq!(
+                super::split_top_level_commas(s),
+                split_top_level_commas_ref(s),
+                "split_top_level_commas diverged on {s:?}"
+            );
+            assert_eq!(
+                super::strip_silent_comment(s),
+                strip_silent_comment_ref(s),
+                "strip_silent_comment diverged on {s:?}"
+            );
+            assert_eq!(
+                super::custom_value_open(s),
+                custom_value_open_ref(s),
+                "custom_value_open diverged on {s:?}"
+            );
+            assert_eq!(
+                super::interp_open_anywhere(s),
+                interp_open_anywhere_ref(s),
+                "interp_open_anywhere diverged on {s:?}"
+            );
+            let st = super::scan_state(s);
+            assert_eq!(
+                (st.bracket_depth, st.in_interp, st.in_loud_comment, st.in_string),
+                scan_state_ref(s),
+                "scan_state diverged on {s:?}"
+            );
+            assert_eq!(
+                super::find_decl_colon(s),
+                find_decl_colon_ref(s),
+                "find_decl_colon diverged on {s:?}"
+            );
+            assert_eq!(
+                super::has_top_level_using(s),
+                has_top_level_using_ref(s),
+                "has_top_level_using diverged on {s:?}"
+            );
+            assert_eq!(
+                super::find_top_level_semicolon(s),
+                find_top_level_semicolon_ref(s),
+                "find_top_level_semicolon diverged on {s:?}"
+            );
+        }
+    }
+
+    /// Any byte offset the scanners return must land on a UTF-8 char boundary of
+    /// the input (a guard against the byte/char-index bookkeeping drifting).
+    #[test]
+    fn returned_byte_offsets_are_char_boundaries() {
+        for s in corpus() {
+            let s = s.as_str();
+            if let Some(b) = super::find_decl_colon(s) {
+                assert!(
+                    s.is_char_boundary(b),
+                    "find_decl_colon offset {b} not a boundary in {s:?}"
+                );
+            }
+            if let Some(b) = super::find_top_level_semicolon(s) {
+                assert!(
+                    s.is_char_boundary(b),
+                    "find_top_level_semicolon offset {b} not a boundary in {s:?}"
+                );
+            }
+        }
+    }
 }
