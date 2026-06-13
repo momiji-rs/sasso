@@ -11,6 +11,8 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-13
+
 Since `0.2.0`. Conformance holds at **100% of the attempted sass-spec suite**
 (13,896 / 13,896) — but that suite covers *valid* inputs plus the errors it
 expects; this cycle hardened sasso to reject the same *malformed* inputs
@@ -196,6 +198,7 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/momiji-rs/sasso/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/momiji-rs/sasso/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/momiji-rs/sasso/releases/tag/v0.1.0
