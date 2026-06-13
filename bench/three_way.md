@@ -19,10 +19,16 @@ fastest form (the native-VM compiler daemon that `sass-embedded` runs), and
 > single large file 15.4 → **12.2 ms**, batch (40 files) 65.2 → **50.1 ms**;
 > grass/dart unchanged (cold 26.7 ms / 357 ms, batch 135 ms / 933 ms, startup
 > 1.9 ms / 138 ms / 520 ms npx). Ratios: sasso ~2.2–2.8× faster than grass,
-> ~19–29× faster than the dart-sass JS bin. The detailed tables below
-> (native-VM dart, `sass-embedded`, wasm) are from the earlier full run and are
-> retained as a historical snapshot; the README's headline table reflects this
-> refresh.
+> ~19–29× faster than the dart-sass JS bin. Fresh **wasm** rebuild (Node 22,
+> large file, best-of-N): size build **~27 ms / 854 KB (356 KB gzip)**, speed
+> build **~12 ms / 1.84 MB (637 KB gzip)** — vs the older 38.3/21.1 ms; the
+> speed build now *beats* native grass (was a tie). **Startup**: sasso and
+> grass stay tied at the OS process-spawn floor (~1.6 ms here; reported
+> min-of-N because the mean is scheduler-jitter-dominated at this scale —
+> sasso is fractionally ahead, not behind). The detailed tables below
+> (native-VM dart, `sass-embedded`, the §5 wasm numbers) are from the earlier
+> full run and are retained as a historical snapshot; the README's headline
+> tables reflect this refresh.
 
 ## Environment
 

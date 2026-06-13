@@ -180,15 +180,20 @@ compiler) by ~2.2–2.8×:
 
 | Axis | sasso | grass | dart-sass (bin) | npx sass |
 | --- | --- | --- | --- | --- |
-| Startup | **2.4 ms** | 1.9 ms | 138 ms | 520 ms |
+| Startup² | **2.3 ms** | 2.4 ms | 138 ms | 520 ms |
 | Cold single large file | **12.2 ms** | 26.7 ms | 357 ms | 964 ms |
 | Batch (40 files, 1 process) | **50.1 ms** | 135 ms | 933 ms | — |
 | Pure compile (startup removed) | **7.7 ms** | 21.4 ms | ~219 ms¹ | — |
 
 ¹ derived (cold − startup) — dart-sass has no in-process loop mode. So sasso is
 ~28× faster than dart-sass on **pure compute**, ~29× on a cold single file, and
-~57× on startup (the ~2 ms figures sit near the OS process-spawn floor, so that
-ratio is the noisiest); vs `grass` it is ~2.2× cold / ~2.7× batch / ~2.8× pure. A
+~60× on startup; vs `grass` it is ~2.2× cold / ~2.7× batch / ~2.8× pure.
+
+² Startup is min-of-N (compiling a 1-rule file). At the ~1.6 ms OS
+process-spawn floor on this machine the *mean* is dominated by scheduler
+jitter, so sasso and grass are effectively **tied** here — both add ~0.7 ms of
+their own over a bare process; sasso is fractionally ahead. The native library
+and wasm builds remove process startup entirely. A
 **scoped bump-arena allocator** (one audited `unsafe` module, Miri- and
 AddressSanitizer-verified; the rest of the library stays `unsafe`-free) gives a
 further ~1.5× by turning each compile's allocations into a pointer bump freed
@@ -207,10 +212,16 @@ Because the library is zero-dependency and pure `std`, it compiles to
 deployable `.wasm` cdylib ships in two variants, published to npm as
 [`@momiji-rs/sasso`](https://www.npmjs.com/package/@momiji-rs/sasso):
 
-| Variant | Build | Over the wire |
-| --- | --- | --- |
-| **size** (default) | `opt-level = "z"` + LTO + `panic = "abort"` + `strip` + `wasm-opt -Oz` | **~851 KB / ~356 KB gzip** |
-| **speed** (`@momiji-rs/sasso/speed`) | `opt-level = 3` + `wasm-opt -O3` | **~1.9 MB / ~634 KB gzip** |
+| Variant | Build | Over the wire | Compile (large, in Node)³ |
+| --- | --- | --- | --- |
+| **size** (default) | `opt-level = "z"` + LTO + `panic = "abort"` + `strip` + `wasm-opt -Oz` | **~854 KB / ~356 KB gzip** | ~27 ms |
+| **speed** (`@momiji-rs/sasso/speed`) | `opt-level = 3` + `wasm-opt -O3` | **~1.84 MB / ~637 KB gzip** | ~12 ms |
+
+³ in-process compile of the same large file, Node 22 (best-of-N). The wasm tax
+over native `sasso` (7.7 ms) is ~1.5× for the speed build and ~3.5× for the
+size build; the wasm build runs without the bump arena. Even so the **speed
+build (~12 ms) beats native `grass` (21 ms)** and every dart-sass form a Node
+toolchain can run.
 
 A whole modern Sass compiler — `@use`/`@forward`, `@extend`, the calc engine,
 CSS Color 4 — in a few hundred KB gzipped, far smaller than shipping the
