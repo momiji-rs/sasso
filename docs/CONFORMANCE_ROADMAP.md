@@ -1,7 +1,7 @@
 # sasso conformance roadmap (sass-spec)
 
 > Evidence-based, ROI-ranked plan from bucketing every failing official
-> sass-spec case (commit `c6ac9a3`, dart-sass 1.100) by the language
+> sass-spec case (commit `1b03109a`, dart-sass 1.101) by the language
 > feature sasso is missing. 11 parallel read-only analysis agents + synthesis.
 
 **Baseline:** 1,110 / 4,528 attempted (24.5%); 9,376 skipped (mostly `@use`).

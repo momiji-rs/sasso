@@ -12,7 +12,7 @@
 ## TL;DR
 
 - **grass is good and fast, but frozen behind modern dart-sass.** It targets dart-sass
-  **1.54.3** (released mid-2022). The reference implementation is now at **1.100.0**.
+  **1.54.3** (released mid-2022). The reference implementation is now at **1.101.0**.
   That ~46-minor-version gap is the single biggest opportunity: grass is missing the
   entire **CSS Color Level 4 color model** (color spaces, `color.channel()`, `oklch/lab/lch`,
   fractional/out-of-gamut RGB channels), the new `round($step)` signature, and relative

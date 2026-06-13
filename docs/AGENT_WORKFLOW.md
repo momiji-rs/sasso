@@ -40,7 +40,7 @@ src/emit.rs     emit(&[OutNode], OutputStyle) -> String
 - The CLI it drives accepts `--style=...` and a positional input path (see `src/main.rs`), and `-I`/`--load-path`. The harness writes `input.scss` + sibling `@import` files to a temp dir, so importer behavior is exercised through `FsImporter`.
 
 **The two test layers that lock in coverage:**
-- `tests/integration.rs` — deterministic goldens, every expected string produced by dart-sass 1.100 and verified byte-for-byte. **Runs offline on every `cargo test`. This is where regression protection lives.**
+- `tests/integration.rs` — deterministic goldens, every expected string produced by dart-sass 1.101 and verified byte-for-byte. **Runs offline on every `cargo test`. This is where regression protection lives.**
 - `tests/parity.rs` — opt-in live diff vs dart-sass, gated by `SASSO_PARITY=1` + `SASS_BIN`. Returns early otherwise. CI runs it in a dedicated job.
 
 **CI (`.github/workflows/ci.yml`)** has three jobs: `test` (`cargo fmt --check`, `cargo clippy --all-targets --all-features -D warnings`, `cargo test --all-features`), `parity` (installs dart-sass, runs `tests/parity.rs`), `wasm` (builds the lib for `wasm32-wasip1`). **`RUSTFLAGS: -D warnings` is global — a single clippy lint fails the build.** The ratchet adds a fourth gate (§4).

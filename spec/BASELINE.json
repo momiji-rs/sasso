@@ -1,6 +1,6 @@
 {
-  "spec_commit": "c6ac9a3e5b0d9cffb4ab7a37ee2cbc20badae148",
-  "dart_sass": "1.100.0",
+  "spec_commit": "1b03109a6205c8cff146defeae8488094b147c88",
+  "dart_sass": "1.101.0",
   "attempted": 13896,
   "pass": 11405,
   "error_expected": 2491,

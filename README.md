@@ -13,7 +13,7 @@ Zero runtime dependencies, wasm-friendly, usable as a **library** and a
 subset it implements.
 
 > Status: v0.x, maturing fast. Compiles real-world SCSS and indented `.sass`
-> byte-identically to dart-sass 1.100, and **passes 100% of the *attempted*
+> byte-identically to dart-sass 1.101, and **passes 100% of the *attempted*
 > official [sass-spec](https://github.com/sass/sass-spec) suite
 > (13,896 / 13,896, zero failures)** — tracked as a ratchet (see
 > [Conformance](#conformance) for exactly what that denominator means). What
@@ -56,7 +56,7 @@ full CSS Color 4 color spaces (`oklch`/`lab`/`color()`…), structured
 `@media`/`@supports`, maps, the `@use`/`@forward` module system (built-in
 `sass:*` modules + user files), and the indented `.sass` syntax. **The
 compiler now passes 100% of the attempted sass-spec suite (13,896 / 13,896,
-zero failures)** byte-for-byte against dart-sass 1.100 — 11,405 byte-exact CSS
+zero failures)** byte-for-byte against dart-sass 1.101 — 11,405 byte-exact CSS
 outputs plus 2,491 error specs it correctly rejects (see
 [Conformance](#conformance)).
 
@@ -139,7 +139,7 @@ pass rate; we ratchet it upward over time.
 
 | Metric | Value |
 | --- | --- |
-| sass-spec commit | `c6ac9a3` (dart-sass 1.100.0) |
+| sass-spec commit | `1b03109a` (dart-sass 1.101.0) |
 | Total cases | 13,904 |
 | Attempted (excl. 8 dart-sass `:todo`) | 13,896 |
 | **Passing** | **13,896 — 100% of attempted · 0 failures** (99.94% of all 13,904) |

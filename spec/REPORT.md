@@ -9,9 +9,9 @@ suite. Goal: 100% of sass-spec, raised over time.
 | | |
 |---|---|
 | repo | `https://github.com/sass/sass-spec.git` |
-| commit | **`c6ac9a3e5b0d9cffb4ab7a37ee2cbc20badae148`** |
-| upstream date | 2026-06-04 |
-| fetched | 2026-06-06 |
+| commit | **`1b03109a6205c8cff146defeae8488094b147c88`** |
+| upstream date | 2026-06-11 |
+| fetched | 2026-06-13 |
 
 Recorded in [`SPEC_VERSION.txt`](./SPEC_VERSION.txt). The upstream tree is
 `.gitignore`'d; re-fetch with `bash spec/fetch.sh`.
@@ -73,7 +73,7 @@ To prove the harness + normalization are correct, we scored **real dart-sass**
 correct implementation must pass ~100% of the *attempted* (non-skipped) cases;
 any failure would mean our normalization is wrong, not the implementation.
 
-* **dart-sass version:** `1.100.0 (compiled with dart2js 3.12.0)`
+* **dart-sass version:** `1.101.0`
 * npx cold-starts at ~1s/case, so we validated on representative slices.
 
 | Sample (`--filter`) | total | skip | attempted | PASS | ERROR_EXPECTED | FAIL | PASS% attempted |
