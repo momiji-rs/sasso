@@ -45,7 +45,11 @@ echo "dart-sass bin: ${SASS_BIN:-<not found>}" >&2
 LARGE=corpus/generated/large.scss
 HAND=corpus/handwritten/main.scss
 BATCH_DIR=corpus/batch
-TINY=$(mktemp /tmp/tiny.XXXX.scss); echo '.a{b:c}' > "$TINY"
+# A unique temp dir + a `.scss` file inside it. (`mktemp -d` is portable across
+# BSD/macOS and GNU; a `tiny.XXXX.scss` *template* is NOT — BSD mktemp only
+# substitutes a TRAILING run of X's, so the `.scss` suffix makes it a literal
+# name that collides with a stale file and aborts the run under `set -e`.)
+TINY_DIR=$(mktemp -d); TINY="$TINY_DIR/tiny.scss"; echo '.a{b:c}' > "$TINY"
 
 RESULTS=results
 mkdir -p "$RESULTS"
@@ -95,5 +99,5 @@ echo "Compiling $HAND x$((LOOP_N*5)) in-process:"
 $SASSO --quiet --loop "$((LOOP_N*5))" "$HAND"
 $GRASS --quiet --loop "$((LOOP_N*5))" "$HAND"
 
-rm -f "$TINY"
+rm -rf "$TINY_DIR"
 echo "Raw JSON written to $RESULTS/"
