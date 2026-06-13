@@ -11,6 +11,15 @@ incrementalisation and the arena in-place realloc. This round catalogues what
 that campaign **left behind** — derived from a fresh 4-subsystem re-analysis of
 the current tree (eval / front-end / value+arena+emit / selector+builtins).
 
+## Round-2 status (2026-06-13)
+
+- **T1.1 LineScanner** — ✅ shipped `0e282dd` (byte-identity parity oracle).
+- **T1.2 eval split** — ✅ shipped `35ae035` (eval/mod.rs 7084→6108; base==refactor 13904 cases, 0 diff).
+- **T2.3 string-serializer fast-path** — ✅ shipped `39f3c51` (string-dense −4.0%, general flat; byte-identical).
+- **T1.3 is_builtin single source** — ✅ shipped `dc189b9` (per-family `NAMES` consts; equivalence test proved no pre-existing drift).
+- **T2.1 Rc-back callable env** — ❌ **CLOSED (bench-first showed flat).** A 600k-`@function` profile (`sample`) put `capture_callable` at ~1% of top-of-stack even on that pathological corpus; the dominant definition-time cost is the intrinsic `HashMap` insert/rehash + arena alloc, which T2.1's Vec-clone optimization does not touch. The maximal design (Rc-ifying the live scope stack + `Rc::make_mut` COW, which ~negates the call-path save) carries a large blast radius and the scope-lazy-frame correctness hazard for a ~0% real-world gain. Per the tier's "if a bench is flat, close it" rule — the general path has no remaining big lever.
+- **T1.4 / T2.2 / T2.4** — remain opportunistic; fold into adjacent work only (T1.4) or merge only if a future bench justifies (T2.2/T2.4). Not pursued standalone.
+
 ---
 
 ## The honest framing
