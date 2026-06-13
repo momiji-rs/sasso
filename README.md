@@ -226,6 +226,18 @@ A whole modern Sass compiler — `@use`/`@forward`, `@extend`, the calc engine,
 CSS Color 4 — in a few hundred KB gzipped, far smaller than shipping the
 dart-sass compiler as JavaScript. A browser playground is tracked in the issues.
 
+## Language bindings
+
+The compiler is usable beyond Rust:
+
+| Language | Package | How |
+| --- | --- | --- |
+| **JavaScript / wasm** | [`@momiji-rs/sasso`](https://www.npmjs.com/package/@momiji-rs/sasso) (npm) | the in-repo [`wasm/`](wasm/) cdylib — see [WebAssembly](#webassembly) above |
+| **Ruby** | [`sasso`](https://rubygems.org/gems/sasso) (RubyGems) | [`momiji-rs/sasso-ruby`](https://github.com/momiji-rs/sasso-ruby) — an in-process native extension (`magnus` + `rb-sys`) around this crate |
+
+The Ruby gem lives in its own repo (the norm for Rust-backed gems) and pins a
+published `sasso` crate version; file gem-specific issues there.
+
 ## Testing & coverage
 
 ```console
