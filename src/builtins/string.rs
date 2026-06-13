@@ -90,7 +90,7 @@ fn require_string<'v>(
 ) -> Result<(&'v str, bool), Error> {
     let v = super::require(params, pos_args, named, i, fname, pos)?;
     match v {
-        Value::Str(SassStr { text, quoted }) => Ok((text.as_str(), *quoted)),
+        Value::Str(SassStr { text, quoted }) => Ok((text.as_ref(), *quoted)),
         other => Err(Error::at(
             format!(
                 "${}: {} is not a string.",
@@ -141,7 +141,10 @@ fn require_index(
 }
 
 fn quoted_str(text: String, quoted: bool) -> Value {
-    Value::Str(SassStr { text, quoted })
+    Value::Str(SassStr {
+        text: text.into(),
+        quoted,
+    })
 }
 
 /// `quote($string)` / `unquote($string)`. dart-sass 1.x rejects non-string
@@ -291,7 +294,7 @@ fn fn_unique_id() -> Value {
     let range = 36u64.pow(6) - 36u64.pow(5);
     let n = 36u64.pow(5) + (x % range);
     Value::Str(SassStr {
-        text: format!("u{}", to_base36(n)),
+        text: format!("u{}", to_base36(n)).into(),
         quoted: false,
     })
 }
@@ -354,7 +357,7 @@ fn fn_split(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
         .into_iter()
         .map(|p| {
             Value::Str(SassStr {
-                text: p,
+                text: p.into(),
                 quoted: text_quoted,
             })
         })
@@ -413,7 +416,7 @@ mod tests {
 
     fn s(text: &str, quoted: bool) -> Value {
         Value::Str(SassStr {
-            text: text.to_string(),
+            text: text.into(),
             quoted,
         })
     }

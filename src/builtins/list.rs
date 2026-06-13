@@ -60,7 +60,7 @@ fn fn_slash(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
         return Err(Error::at("At least two elements are required.".to_string(), pos));
     }
     Ok(Value::List(List {
-        items: pos_args.to_vec(),
+        items: pos_args.to_vec().into(),
         sep: ListSep::Slash,
         bracketed: false,
         keywords: None,
@@ -73,14 +73,14 @@ fn fn_slash(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
 /// single-element list. dart-sass reports a lone non-list as space-separated.
 fn as_items(v: &Value) -> (Vec<Value>, ListSep) {
     match v {
-        Value::List(l) => (l.items.clone(), l.sep),
+        Value::List(l) => (l.items.to_vec(), l.sep),
         Value::Map(m) => {
             let items = m
                 .entries
                 .iter()
                 .map(|(k, val)| {
                     Value::List(List {
-                        items: vec![k.clone(), val.clone()],
+                        items: vec![k.clone(), val.clone()].into(),
                         sep: ListSep::Space,
                         bracketed: false,
                         keywords: None,
@@ -160,7 +160,7 @@ fn resolve_index(
 /// keyword `auto`. Accepts `space`/`comma`/`slash`.
 fn parse_separator(v: &Value, pos: Pos) -> Result<Option<ListSep>, Error> {
     if let Value::Str(SassStr { text, .. }) = v {
-        match text.as_str() {
+        match text.as_ref() {
             "auto" => return Ok(None),
             "comma" => return Ok(Some(ListSep::Comma)),
             "space" => return Ok(Some(ListSep::Space)),
@@ -256,7 +256,7 @@ fn fn_join(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
     // is truthy/falsey.
     let bracketed = match super::arg(&params, pos_args, named, 3) {
         None => matches!(list1, Value::List(l) if l.bracketed),
-        Some(Value::Str(s)) if !s.quoted && s.text == "auto" => {
+        Some(Value::Str(s)) if !s.quoted && &*s.text == "auto" => {
             matches!(list1, Value::List(l) if l.bracketed)
         }
         Some(v) => v.is_truthy(),
@@ -363,7 +363,7 @@ fn fn_list_separator(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
         ListSep::Slash => "slash",
     };
     Ok(Value::Str(SassStr {
-        text: text.to_string(),
+        text: text.into(),
         quoted: false,
     }))
 }
@@ -394,14 +394,14 @@ fn fn_zip(pos_args: &[Value], named: &[(String, Value)]) -> Result<Value, Error>
     for i in 0..rows {
         let row: Vec<Value> = lists.iter().map(|l| l[i].clone()).collect();
         out.push(Value::List(List {
-            items: row,
+            items: row.into(),
             sep: ListSep::Space,
             bracketed: false,
             keywords: None,
         }));
     }
     Ok(Value::List(List {
-        items: out,
+        items: out.into(),
         sep: ListSep::Comma,
         bracketed: false,
         keywords: None,
@@ -426,14 +426,14 @@ mod tests {
 
     fn s(text: &str) -> Value {
         Value::Str(SassStr {
-            text: text.to_string(),
+            text: text.into(),
             quoted: false,
         })
     }
 
     fn list(items: Vec<Value>, sep: ListSep) -> Value {
         Value::List(List {
-            items,
+            items: items.into(),
             sep,
             bracketed: false,
             keywords: None,
@@ -596,7 +596,7 @@ mod tests {
     #[test]
     fn is_bracketed_reports_flag() {
         let bracketed = Value::List(List {
-            items: vec![s("a"), s("b")],
+            items: vec![s("a"), s("b")].into(),
             sep: ListSep::Space,
             bracketed: true,
             keywords: None,

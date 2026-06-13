@@ -97,9 +97,9 @@ impl<'a> Evaluator<'a> {
             .or_else(|| named.iter().find(|(n, _)| n == "args").map(|(_, v)| v))
             .ok_or_else(|| Error::at("Missing argument $args.".to_string(), pos))?;
         match v {
-            Value::List(l) if l.keywords.is_some() => Ok(Value::Map(Map {
-                entries: l.keywords.clone().unwrap_or_default(),
-            })),
+            Value::List(l) if l.keywords.is_some() => {
+                Ok(Value::Map(Map::new(l.keywords.clone().unwrap_or_default())))
+            }
             other => Err(Error::at(
                 format!("$args: {} is not an argument list.", other.to_css(false)),
                 pos,
@@ -166,7 +166,7 @@ impl<'a> Evaluator<'a> {
                 .or_else(|| named.iter().find(|(n, _)| n == params[i]).map(|(_, v)| v))
         };
         let name = match arg(0) {
-            Some(Value::Str(s)) => s.text.clone(),
+            Some(Value::Str(s)) => s.text.to_string(),
             Some(other) => {
                 return Err(Error::at(
                     format!("$name: {} is not a string.", other.to_css(false)),
@@ -255,7 +255,7 @@ impl<'a> Evaluator<'a> {
                 .or_else(|| named.iter().find(|(n, _)| n == params[i]).map(|(_, v)| v))
         };
         let name = match arg(0) {
-            Some(Value::Str(s)) => s.text.clone(),
+            Some(Value::Str(s)) => s.text.to_string(),
             Some(other) => {
                 return Err(Error::at(
                     format!("$name: {} is not a string.", other.to_css(false)),
@@ -416,7 +416,7 @@ impl<'a> Evaluator<'a> {
             // The deprecated string form: look up by name.
             Value::Str(s) => {
                 let f = SassFunction {
-                    name: s.text.clone(),
+                    name: s.text.to_string(),
                     css: false,
                     user: self
                         .lookup_function_norm(&normalize_arg_name(&s.text))
@@ -483,7 +483,7 @@ impl<'a> Evaluator<'a> {
                 parts.push(format!("${n}: {}", v.to_css(false)));
             }
             return Ok(Value::Str(SassStr {
-                text: format!("{}({})", f.name, parts.join(", ")),
+                text: format!("{}({})", f.name, parts.join(", ")).into(),
                 quoted: false,
             }));
         }
@@ -525,7 +525,7 @@ impl<'a> Evaluator<'a> {
             .or_else(|| named.iter().find(|(n, _)| n == "name").map(|(_, v)| v))
             .ok_or_else(|| Error::at(format!("Missing argument $name for {fname}()."), pos))?;
         let name = match name_v {
-            Value::Str(s) => s.text.clone(),
+            Value::Str(s) => s.text.to_string(),
             other => {
                 return Err(Error::at(
                     format!("$name: {} is not a string.", other.to_css(false)),
@@ -539,7 +539,7 @@ impl<'a> Evaluator<'a> {
                 .or_else(|| named.iter().find(|(n, _)| n == "module").map(|(_, v)| v));
             match m {
                 None | Some(Value::Null) => None,
-                Some(Value::Str(s)) => Some(s.text.clone()),
+                Some(Value::Str(s)) => Some(s.text.to_string()),
                 Some(other) => {
                     return Err(Error::at(
                         format!("$module: {} is not a string.", other.to_css(false)),
@@ -604,7 +604,7 @@ impl<'a> Evaluator<'a> {
             .or_else(|| named.iter().find(|(n, _)| n == "module").map(|(_, v)| v))
             .ok_or_else(|| Error::at(format!("Missing argument $module for {fname}()."), pos))?;
         let ns = match v {
-            Value::Str(s) => s.text.clone(),
+            Value::Str(s) => s.text.to_string(),
             other => {
                 return Err(Error::at(
                     format!("$module: {} is not a string.", other.to_css(false)),
@@ -627,7 +627,7 @@ impl<'a> Evaluator<'a> {
                     .into_iter()
                     .map(|name| {
                         let key = Value::Str(SassStr {
-                            text: name.to_string(),
+                            text: name.to_string().into(),
                             quoted: true,
                         });
                         let val = match kind {
@@ -646,7 +646,7 @@ impl<'a> Evaluator<'a> {
                         (key, val)
                     })
                     .collect();
-                return Ok(Value::Map(Map { entries }));
+                return Ok(Value::Map(Map::new(entries)));
             }
             return Err(Error::at(
                 format!("There is no module with the namespace \"{ns}\"."),
@@ -667,7 +667,7 @@ impl<'a> Evaluator<'a> {
                 // key (dart-sass: `$e_f` is keyed `"e-f"`); the value keeps the
                 // variable's own value verbatim.
                 let key = Value::Str(SassStr {
-                    text: name.replace('_', "-"),
+                    text: name.replace('_', "-").into(),
                     quoted: true,
                 });
                 let val = match kind {
@@ -690,7 +690,7 @@ impl<'a> Evaluator<'a> {
                 (key, val)
             })
             .collect();
-        Ok(Value::Map(Map { entries }))
+        Ok(Value::Map(Map::new(entries)))
     }
 
     /// `meta.variable-exists($name)` / `meta.global-variable-exists($name)`:

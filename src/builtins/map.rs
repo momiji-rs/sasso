@@ -67,7 +67,7 @@ fn first_is_map(pos_args: &[Value], named: &[(String, Value)]) -> bool {
 /// `()` is the empty map; any other value is not a map (an error).
 fn as_map(v: &Value, fname: &str, pos: Pos) -> Result<Vec<(Value, Value)>, Error> {
     match v {
-        Value::Map(m) => Ok(m.entries.clone()),
+        Value::Map(m) => Ok(m.entries.as_ref().clone()),
         // The empty list doubles as the empty map.
         Value::List(l) if l.items.is_empty() => Ok(Vec::new()),
         other => Err(Error::at(
@@ -86,7 +86,7 @@ fn unitless(value: f64) -> Value {
 /// empty result reports `comma`).
 fn comma_list(items: Vec<Value>) -> Value {
     Value::List(List {
-        items,
+        items: items.into(),
         sep: ListSep::Comma,
         bracketed: false,
         keywords: None,
@@ -133,7 +133,7 @@ fn fn_map_get(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
                 }
                 // Descend; a non-map intermediate value means "not found".
                 match &v {
-                    Value::Map(m) => entries = m.entries.clone(),
+                    Value::Map(m) => entries = m.entries.as_ref().clone(),
                     Value::List(l) if l.items.is_empty() => entries = Vec::new(),
                     _ => return Ok(Value::Null),
                 }
@@ -195,7 +195,7 @@ fn fn_map_has_key(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
                     return Ok(Value::Bool(true));
                 }
                 match &v {
-                    Value::Map(m) => entries = m.entries.clone(),
+                    Value::Map(m) => entries = m.entries.as_ref().clone(),
                     Value::List(l) if l.items.is_empty() => entries = Vec::new(),
                     _ => return Ok(Value::Bool(false)),
                 }
@@ -209,7 +209,7 @@ fn fn_map_has_key(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
 /// Merge `b`'s entries into `a` (shallow): `a` keeps its order, shared keys take
 /// `b`'s value, and `b`'s new keys append in order.
 fn shallow_merge(a: Vec<(Value, Value)>, b: Vec<(Value, Value)>) -> Map {
-    let mut map = Map { entries: a };
+    let mut map = Map::new(a);
     for (k, v) in b {
         map.insert(k, v);
     }
@@ -220,7 +220,7 @@ fn shallow_merge(a: Vec<(Value, Value)>, b: Vec<(Value, Value)>) -> Map {
 /// doubles as the empty map), else `None`.
 fn entries_of(v: &Value) -> Option<Vec<(Value, Value)>> {
     match v {
-        Value::Map(m) => Some(m.entries.clone()),
+        Value::Map(m) => Some(m.entries.as_ref().clone()),
         Value::List(l) if l.items.is_empty() => Some(Vec::new()),
         _ => None,
     }
@@ -230,7 +230,7 @@ fn entries_of(v: &Value) -> Option<Vec<(Value, Value)>> {
 /// merged in turn; otherwise `b`'s value wins (dart-sass `deepMergeImpl`). The
 /// empty list `()` counts as the empty map on either side.
 fn deep_merge(a: Vec<(Value, Value)>, b: Vec<(Value, Value)>) -> Map {
-    let mut map = Map { entries: a };
+    let mut map = Map::new(a);
     for (k, v) in b {
         let merged = match (map.get(&k).and_then(entries_of), entries_of(&v)) {
             (Some(existing), Some(incoming)) => Value::Map(deep_merge(existing, incoming)),
@@ -252,30 +252,28 @@ fn modify_map(
     match keys.split_first() {
         None => {
             // No keys: transform receives the whole map and replaces it.
-            match transform(Some(Value::Map(Map { entries }))) {
-                Value::Map(m) => m.entries,
+            match transform(Some(Value::Map(Map::new(entries)))) {
+                Value::Map(m) => m.entries.as_ref().clone(),
                 // A non-map result at the root degrades to an empty map spine;
                 // callers always pass at least the map itself for this case.
                 _ => Vec::new(),
             }
         }
         Some((key, rest)) => {
-            let mut map = Map { entries };
+            let mut map = Map::new(entries);
             let child = map.get(key).cloned();
             let new_child = if rest.is_empty() {
                 transform(child)
             } else {
                 let child_entries = match child {
-                    Some(Value::Map(m)) => m.entries,
+                    Some(Value::Map(m)) => m.entries.as_ref().clone(),
                     Some(Value::List(l)) if l.items.is_empty() => Vec::new(),
                     _ => Vec::new(),
                 };
-                Value::Map(Map {
-                    entries: modify_map(child_entries, rest, transform),
-                })
+                Value::Map(Map::new(modify_map(child_entries, rest, transform)))
             };
             map.insert((*key).clone(), new_child);
-            map.entries
+            map.entries.as_ref().clone()
         }
     }
 }
@@ -330,15 +328,13 @@ fn merge_impl(
     }
     let mut transform = |child: Option<Value>| {
         let child_entries = match child {
-            Some(Value::Map(m)) => m.entries,
+            Some(Value::Map(m)) => m.entries.as_ref().clone(),
             Some(Value::List(l)) if l.items.is_empty() => Vec::new(),
             _ => Vec::new(),
         };
         Value::Map(merge(child_entries, map2.clone()))
     };
-    Ok(Value::Map(Map {
-        entries: modify_map(map1, &keys, &mut transform),
-    }))
+    Ok(Value::Map(Map::new(modify_map(map1, &keys, &mut transform))))
 }
 
 /// `map-set($map, $key, $keys..., $value)`: set the value at the nested key
@@ -363,9 +359,7 @@ fn fn_map_set(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
         }
     };
     let mut transform = |_old: Option<Value>| value.clone();
-    Ok(Value::Map(Map {
-        entries: modify_map(entries, &keys, &mut transform),
-    }))
+    Ok(Value::Map(Map::new(modify_map(entries, &keys, &mut transform))))
 }
 
 /// `map-remove($map, $keys...)`: drop every entry whose key matches one of the
@@ -388,7 +382,7 @@ fn fn_map_remove(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
         keys.push(v.clone());
     }
     entries.retain(|(k, _)| !keys.iter().any(|rk| rk.sass_eq(k)));
-    Ok(Value::Map(Map { entries }))
+    Ok(Value::Map(Map::new(entries)))
 }
 
 /// `map-deep-remove($map, $key, $keys...)`: remove the entry at the nested key
@@ -400,11 +394,9 @@ fn fn_map_deep_remove(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -
     // The last key is removed; the keys before it locate the parent submap.
     let (last, parents) = match keys.split_last() {
         Some(pair) => pair,
-        None => return Ok(Value::Map(Map { entries })),
+        None => return Ok(Value::Map(Map::new(entries))),
     };
-    Ok(Value::Map(Map {
-        entries: deep_remove(entries, parents, last),
-    }))
+    Ok(Value::Map(Map::new(deep_remove(entries, parents, last))))
 }
 
 /// Navigate `entries` along `parents`; at the located submap, drop `last`. A
@@ -417,12 +409,12 @@ fn deep_remove(entries: Vec<(Value, Value)>, parents: &[&Value], last: &Value) -
             entries
         }
         Some((key, rest)) => {
-            let mut map = Map { entries };
+            let mut map = Map::new(entries);
             if let Some(Value::Map(child)) = map.get(key).cloned().as_ref() {
-                let new_child = deep_remove(child.entries.clone(), rest, last);
-                map.insert((*key).clone(), Value::Map(Map { entries: new_child }));
+                let new_child = deep_remove(child.entries.as_ref().clone(), rest, last);
+                map.insert((*key).clone(), Value::Map(Map::new(new_child)));
             }
-            map.entries
+            map.entries.as_ref().clone()
         }
     }
 }
@@ -431,7 +423,7 @@ fn deep_remove(entries: Vec<(Value, Value)>, parents: &[&Value], last: &Value) -
 /// (`$map1: 1 is not a map.`) matching dart-sass.
 fn as_map_named(v: &Value, param: &str, pos: Pos) -> Result<Vec<(Value, Value)>, Error> {
     match v {
-        Value::Map(m) => Ok(m.entries.clone()),
+        Value::Map(m) => Ok(m.entries.as_ref().clone()),
         Value::List(l) if l.items.is_empty() => Ok(Vec::new()),
         other => Err(Error::at(
             format!("${param}: {} is not a map.", other.to_css(false)),
@@ -480,7 +472,7 @@ fn fn_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
     let zero_based = if index > 0 { index - 1 } else { len + index } as usize;
     let (k, v) = entries[zero_based].clone();
     Ok(Value::List(List {
-        items: vec![k, v],
+        items: vec![k, v].into(),
         sep: ListSep::Space,
         bracketed: false,
         keywords: None,
@@ -498,7 +490,7 @@ mod tests {
 
     fn s(text: &str) -> Value {
         Value::Str(SassStr {
-            text: text.to_string(),
+            text: text.into(),
             quoted: false,
         })
     }
@@ -508,9 +500,7 @@ mod tests {
     }
 
     fn map(pairs: &[(&str, Value)]) -> Value {
-        Value::Map(Map {
-            entries: pairs.iter().map(|(k, v)| (s(k), v.clone())).collect(),
-        })
+        Value::Map(Map::new(pairs.iter().map(|(k, v)| (s(k), v.clone())).collect()))
     }
 
     fn call(name: &str, args: &[Value]) -> Value {
@@ -573,7 +563,7 @@ mod tests {
     #[test]
     fn empty_list_acts_as_empty_map() {
         let empty = Value::List(List {
-            items: Vec::new(),
+            items: Vec::new().into(),
             sep: ListSep::Space,
             bracketed: false,
             keywords: None,

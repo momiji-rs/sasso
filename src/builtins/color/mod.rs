@@ -98,7 +98,7 @@ pub(super) fn is_none_keyword(v: &Value) -> bool {
 fn special_call(name: &str, args: &[&Value]) -> Value {
     let parts: Vec<String> = args.iter().map(|v| v.to_css(false)).collect();
     Value::Str(crate::value::SassStr {
-        text: format!("{name}({})", parts.join(", ")),
+        text: format!("{name}({})", parts.join(", ")).into(),
         quoted: false,
     })
 }
@@ -108,7 +108,7 @@ fn special_call(name: &str, args: &[&Value]) -> Value {
 /// (`rgb(var(--foo) 2)` → `rgb(var(--foo) 2)`).
 fn verbatim_call(name: &str, channels: &Value) -> Value {
     Value::Str(crate::value::SassStr {
-        text: format!("{name}({})", channels.to_css(false)),
+        text: format!("{name}({})", channels.to_css(false)).into(),
         quoted: false,
     })
 }

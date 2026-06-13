@@ -285,7 +285,7 @@ fn is_css_special(v: &Value) -> bool {
 /// `grayscale(var(--c))`).
 fn plain_filter(name: &str, arg: &Value) -> Value {
     Value::Str(SassStr {
-        text: format!("{name}({})", arg.to_css(false)),
+        text: format!("{name}({})", arg.to_css(false)).into(),
         quoted: false,
     })
 }
@@ -687,7 +687,10 @@ fn fn_ie_hex_str(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
         byte(c.g),
         byte(c.b)
     );
-    Ok(Value::Str(SassStr { text, quoted: false }))
+    Ok(Value::Str(SassStr {
+        text: text.into(),
+        quoted: false,
+    }))
 }
 
 // ---- scale-color / adjust-color / change-color ------------------------

@@ -69,7 +69,7 @@ fn fn_calc_name(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resu
                 _ => "calc",
             };
             Ok(Value::Str(SassStr {
-                text: name.to_string(),
+                text: name.into(),
                 quoted: true,
             }))
         }
@@ -90,7 +90,7 @@ fn fn_calc_args(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resu
         // A function calculation (`min`/`clamp`/…) exposes its own arguments; a
         // bare `calc()` has a single argument, its expression.
         Value::Calc(CalcNode::Func { args, .. }) => Ok(Value::List(List::new(
-            args.iter().map(calc_node_to_value).collect(),
+            args.iter().map(calc_node_to_value).collect::<Vec<Value>>(),
             ListSep::Comma,
             false,
         ))),
@@ -113,12 +113,12 @@ fn calc_node_to_value(node: &CalcNode) -> Value {
     match node {
         CalcNode::Number(n) => Value::Number(n.clone()),
         CalcNode::Str(s) => Value::Str(SassStr {
-            text: s.clone(),
+            text: s.clone().into(),
             quoted: false,
         }),
         CalcNode::Func { .. } => Value::Calc(node.clone()),
         CalcNode::Op { .. } => Value::Str(SassStr {
-            text: node.to_calc_css(false),
+            text: node.to_calc_css(false).into(),
             quoted: false,
         }),
     }
@@ -127,7 +127,7 @@ fn calc_node_to_value(node: &CalcNode) -> Value {
 /// An unquoted string value.
 fn unquoted(text: impl Into<String>) -> Value {
     Value::Str(SassStr {
-        text: text.into(),
+        text: text.into().into(),
         quoted: false,
     })
 }
@@ -135,7 +135,7 @@ fn unquoted(text: impl Into<String>) -> Value {
 /// A quoted string value.
 fn quoted(text: impl Into<String>) -> Value {
     Value::Str(SassStr {
-        text: text.into(),
+        text: text.into().into(),
         quoted: true,
     })
 }
@@ -221,7 +221,7 @@ fn fn_feature_exists(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     };
     // The canonical dart-sass feature set (all long-stable language features).
     let known = matches!(
-        name.as_str(),
+        name.as_ref(),
         "global-variable-shadowing"
             | "extend-selector-pseudoclass"
             | "units-level-3"
@@ -317,7 +317,7 @@ pub(crate) fn inspect_value(v: &Value) -> String {
             if s.quoted {
                 format!("\"{}\"", s.text)
             } else {
-                s.text.clone()
+                s.text.to_string()
             }
         }
         Value::List(l) => {
@@ -445,14 +445,14 @@ mod tests {
 
     fn sq(text: &str) -> Value {
         Value::Str(SassStr {
-            text: text.to_string(),
+            text: text.into(),
             quoted: true,
         })
     }
 
     fn su(text: &str) -> Value {
         Value::Str(SassStr {
-            text: text.to_string(),
+            text: text.into(),
             quoted: false,
         })
     }
@@ -653,7 +653,7 @@ mod tests {
             call(
                 "feature-exists",
                 &[Value::Str(SassStr {
-                    text: name.to_string(),
+                    text: name.into(),
                     quoted,
                 })],
             )

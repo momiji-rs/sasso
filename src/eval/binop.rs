@@ -53,7 +53,7 @@ pub(crate) fn eval_div(l: Value, r: Value, slash: bool, pos: Pos) -> Result<Valu
                 return Err(e);
             }
             Ok(Value::Str(SassStr {
-                text: format!("{}/{}", slash_repr(&l), slash_repr(&r)),
+                text: format!("{}/{}", slash_repr(&l), slash_repr(&r)).into(),
                 quoted: false,
             }))
         }
@@ -96,7 +96,7 @@ pub(super) fn eval_binary(op: BinOp, l: Value, r: Value, pos: Pos) -> Result<Val
         // with `=` (no surrounding whitespace) into an unquoted string,
         // matching dart-sass (`alpha(opacity=80)` -> `alpha(opacity=80)`).
         BinOp::SingleEq => Ok(Value::Str(SassStr {
-            text: format!("{}={}", l.to_css(false), r.to_css(false)),
+            text: format!("{}={}", l.to_css(false), r.to_css(false)).into(),
             quoted: false,
         })),
     }
@@ -154,7 +154,10 @@ pub(super) fn binary_add(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
         _ => matches!(&r, Value::Str(s) if s.quoted),
     };
     let text = format!("{}{}", concat_str(&l), concat_str(&r));
-    Ok(Value::Str(SassStr { text, quoted }))
+    Ok(Value::Str(SassStr {
+        text: text.into(),
+        quoted,
+    }))
 }
 
 /// The `-` (minus) operator. Two numbers subtract numerically (coercing to a
@@ -183,7 +186,10 @@ pub(super) fn binary_sub(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
         return Err(e);
     }
     let text = format!("{}-{}", l.to_css(false), r.to_css(false));
-    Ok(Value::Str(SassStr { text, quoted: false }))
+    Ok(Value::Str(SassStr {
+        text: text.into(),
+        quoted: false,
+    }))
 }
 
 pub(super) fn binary_mul(l: Value, r: Value, pos: Pos) -> Result<Value, Error> {
@@ -289,7 +295,7 @@ pub(super) fn coerce_pair(a: &Number, b: &Number, pos: Pos) -> Result<(f64, f64,
 
 pub(super) fn concat_str(v: &Value) -> String {
     match v {
-        Value::Str(s) => s.text.clone(),
+        Value::Str(s) => s.text.to_string(),
         other => other.to_css(false),
     }
 }

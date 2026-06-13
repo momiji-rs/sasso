@@ -25,7 +25,7 @@ impl<'a> Evaluator<'a> {
             }
         }
         Ok(Value::Str(SassStr {
-            text: format!("{name}({})", parts.join(", ")),
+            text: format!("{name}({})", parts.join(", ")).into(),
             quoted: false,
         }))
     }
@@ -69,7 +69,7 @@ impl<'a> Evaluator<'a> {
         let lname = name.to_ascii_lowercase();
         let parts: Vec<String> = nodes.iter().map(|n| n.to_calc_css(self.compressed())).collect();
         Ok(Some(Value::Str(SassStr {
-            text: format!("{lname}({})", parts.join(", ")),
+            text: format!("{lname}({})", parts.join(", ")).into(),
             quoted: false,
         })))
     }
@@ -111,7 +111,7 @@ impl<'a> Evaluator<'a> {
         }
         let parts: Vec<String> = nodes.iter().map(|n| n.to_calc_css(self.compressed())).collect();
         Ok(Value::Str(SassStr {
-            text: format!("clamp({})", parts.join(", ")),
+            text: format!("clamp({})", parts.join(", ")).into(),
             quoted: false,
         }))
     }
@@ -136,7 +136,7 @@ impl<'a> Evaluator<'a> {
             parts.push(self.eval_calc(&a.value)?.to_calc_css(self.compressed()));
         }
         Ok(Value::Str(SassStr {
-            text: format!("calc-size({})", parts.join(", ")),
+            text: format!("calc-size({})", parts.join(", ")).into(),
             quoted: false,
         }))
     }

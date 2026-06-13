@@ -25,7 +25,7 @@ pub(super) fn try_call_modern(
 /// string"; a non-string errors "… is not a string".
 fn channel_name_arg(v: &Value, pos: Pos) -> Result<String, Error> {
     match v {
-        Value::Str(s) if s.quoted => Ok(s.text.clone()),
+        Value::Str(s) if s.quoted => Ok(s.text.to_string()),
         Value::Str(s) => Err(Error::at(
             format!("$channel: Expected {} to be a quoted string.", s.text),
             pos,
@@ -42,7 +42,7 @@ fn fn_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
     max_positional(pos_args, params.len(), pos)?;
     let c = as_color(require(&params, pos_args, named, 0, "space", pos)?, pos)?;
     Ok(Value::Str(crate::value::SassStr {
-        text: color_space_of(&c).name().to_string(),
+        text: color_space_of(&c).name().to_string().into(),
         quoted: false,
     }))
 }

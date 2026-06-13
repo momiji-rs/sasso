@@ -5,6 +5,8 @@
 //! `rgb(63.75, 127.5, 191.25)`), and colors remember their authored
 //! spelling so untransformed literals round-trip unchanged.
 
+use std::rc::Rc;
+
 /// A fully-evaluated Sass value.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Value {
@@ -418,9 +420,14 @@ impl Number {
 }
 
 /// A string value; `quoted` controls whether it serializes with quotes.
+///
+/// The payload is held as `Rc<str>` so cloning a `Value::Str` (e.g. on every
+/// read-only `$var` lookup) is an O(1) refcount bump rather than a heap copy of
+/// the text. Strings are immutable Sass values, so the sharing is invisible:
+/// any "mutating" string builtin builds a fresh `Rc<str>`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SassStr {
-    pub text: String,
+    pub text: Rc<str>,
     pub quoted: bool,
 }
 
@@ -517,9 +524,16 @@ pub(crate) fn serialize_unquoted(text: &str) -> String {
 }
 
 /// A list value.
+///
+/// `items` is held as `Rc<[Value]>` so cloning a `Value::List` (e.g. on every
+/// read-only `$var` lookup, or passing a list through a function) is an O(1)
+/// refcount bump rather than a deep element copy. Lists are immutable Sass
+/// values; every "mutating" list builtin (`append`, `join`, `set-nth`, …)
+/// builds a fresh `Vec<Value>` and re-wraps it in a new `Rc`, so the sharing is
+/// invisible.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct List {
-    pub items: Vec<Value>,
+    pub items: Rc<[Value]>,
     pub sep: ListSep,
     /// Whether the list was written with square brackets (`[a b]`); such
     /// lists serialize wrapped in `[`...`]` and report `true` from
@@ -534,9 +548,9 @@ pub(crate) struct List {
 
 impl List {
     /// An ordinary (non-argument) list.
-    pub(crate) fn new(items: Vec<Value>, sep: ListSep, bracketed: bool) -> Self {
+    pub(crate) fn new(items: impl Into<Rc<[Value]>>, sep: ListSep, bracketed: bool) -> Self {
         List {
-            items,
+            items: items.into(),
             sep,
             bracketed,
             keywords: None,
@@ -547,24 +561,41 @@ impl List {
 /// A map value: an ordered list of key/value entries. Insertion order is
 /// preserved (dart-sass maps are ordered); duplicate keys are resolved by the
 /// constructor so at most one entry exists per Sass-equal key.
+///
+/// `entries` is held as `Rc<Vec<…>>` so cloning a `Value::Map` (e.g. on every
+/// read-only `$var` lookup) is an O(1) refcount bump rather than a deep copy of
+/// every entry. Maps are immutable Sass values; `Map::insert` and the mutating
+/// map builtins (`map.merge`, `map.set`, `map.remove`, …) use copy-on-write
+/// (`Rc::make_mut` on a uniquely-owned `Rc`, or build a fresh `Vec`), so the
+/// sharing never lets one binding observe another's mutation.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Map {
-    pub entries: Vec<(Value, Value)>,
+    pub entries: Rc<Vec<(Value, Value)>>,
 }
 
 impl Map {
+    /// Construct a map from an owned entry vector.
+    pub(crate) fn new(entries: Vec<(Value, Value)>) -> Self {
+        Map {
+            entries: Rc::new(entries),
+        }
+    }
+
     /// Look up a value by key (Sass `==`), or `None` when absent.
     pub(crate) fn get(&self, key: &Value) -> Option<&Value> {
         self.entries.iter().find(|(k, _)| k.sass_eq(key)).map(|(_, v)| v)
     }
 
     /// Insert or overwrite an entry, preserving the position of an existing
-    /// key (matching dart-sass map ordering).
+    /// key (matching dart-sass map ordering). Copy-on-write: if the entry
+    /// vector is shared, `Rc::make_mut` clones it first so no other `Map`
+    /// observes the change.
     pub(crate) fn insert(&mut self, key: Value, value: Value) {
-        if let Some(slot) = self.entries.iter_mut().find(|(k, _)| k.sass_eq(&key)) {
+        let entries = Rc::make_mut(&mut self.entries);
+        if let Some(slot) = entries.iter_mut().find(|(k, _)| k.sass_eq(&key)) {
             slot.1 = value;
         } else {
-            self.entries.push((key, value));
+            entries.push((key, value));
         }
     }
 
@@ -795,7 +826,7 @@ impl Value {
             // `_performInterpolation` takes `result.text` verbatim); only a
             // string nested in a composite value goes through the unquoted
             // serializer (see `List::to_interp`).
-            Value::Str(s) => s.text.clone(),
+            Value::Str(s) => s.text.to_string(),
             Value::Null => String::new(),
             Value::List(l) => l.to_interp(),
             Value::Map(m) => m.to_map_css(false),
@@ -811,7 +842,7 @@ impl Value {
     /// `(k: v)`). Matches dart-sass's `value.toString()`.
     pub(crate) fn to_message(&self) -> String {
         match self {
-            Value::Str(s) => s.text.clone(),
+            Value::Str(s) => s.text.to_string(),
             other => crate::builtins::inspect_value(other),
         }
     }
@@ -892,7 +923,7 @@ impl Value {
                 a.sep == b.sep
                     && a.bracketed == b.bracketed
                     && a.items.len() == b.items.len()
-                    && a.items.iter().zip(&b.items).all(|(x, y)| x.sass_eq(y))
+                    && a.items.iter().zip(b.items.iter()).all(|(x, y)| x.sass_eq(y))
             }
             // Maps compare by content regardless of entry order.
             (Value::Map(a), Value::Map(b)) => {

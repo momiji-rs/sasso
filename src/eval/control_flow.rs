@@ -56,15 +56,17 @@ impl<'a> Evaluator<'a> {
     /// nothing, and any other value is iterated once.
     pub(super) fn eval_each_items(&mut self, e: &Expr) -> Result<Vec<Value>, Error> {
         match self.eval_expr(e)? {
-            Value::List(l) => Ok(l.items),
+            Value::List(l) => Ok(l.items.to_vec()),
             // `@each` over a map yields each `key value` pair as a two-element
             // space list, so `@each $k, $v in $map` destructures correctly.
             Value::Map(m) => Ok(m
                 .entries
+                .as_ref()
+                .clone()
                 .into_iter()
                 .map(|(k, v)| {
                     Value::List(List {
-                        items: vec![k, v],
+                        items: vec![k, v].into(),
                         sep: ListSep::Space,
                         bracketed: false,
                         keywords: None,
@@ -84,7 +86,7 @@ impl<'a> Evaluator<'a> {
             return;
         }
         let elems: Vec<Value> = match item {
-            Value::List(l) => l.items,
+            Value::List(l) => l.items.to_vec(),
             other => vec![other],
         };
         for (i, v) in vars.iter().enumerate() {
@@ -129,9 +131,9 @@ impl<'a> Evaluator<'a> {
                 // value acts as one positional arg; `null` spreads to nothing.
                 match v {
                     Value::Map(m) => {
-                        for (k, val) in m.entries {
+                        for (k, val) in m.entries.as_ref().clone() {
                             let key = match &k {
-                                Value::Str(s) => s.text.clone(),
+                                Value::Str(s) => s.text.to_string(),
                                 other => {
                                     return Err(Error::unpositioned(format!(
                                         "{} is not a string in $args.",
@@ -146,13 +148,13 @@ impl<'a> Evaluator<'a> {
                         if !matches!(l.sep, ListSep::Undecided) {
                             rest_sep = l.sep;
                         }
-                        splat_pos.extend(l.items);
+                        splat_pos.extend(l.items.to_vec());
                         // An argument-list splat (`$args...`) also forwards its
                         // captured keyword arguments as named arguments.
                         if let Some(kw) = l.keywords {
                             for (k, val) in kw {
                                 if let Value::Str(s) = k {
-                                    push_named(&mut keyword, s.text, val)?;
+                                    push_named(&mut keyword, s.text.to_string(), val)?;
                                 }
                             }
                         }
@@ -235,7 +237,7 @@ impl<'a> Evaluator<'a> {
                     keyword.remove(norm).map(|v| {
                         (
                             Value::Str(SassStr {
-                                text: norm.clone(),
+                                text: norm.clone().into(),
                                 quoted: false,
                             }),
                             v,
@@ -247,7 +249,7 @@ impl<'a> Evaluator<'a> {
                 sc.borrow_mut().insert(
                     rest.clone(),
                     Value::List(List {
-                        items: remaining,
+                        items: remaining.into(),
                         sep: rest_sep,
                         bracketed: false,
                         keywords: Some(kw),
@@ -327,7 +329,7 @@ impl<'a> Evaluator<'a> {
                     keyword.remove(norm).map(|v| {
                         (
                             Value::Str(SassStr {
-                                text: norm.clone(),
+                                text: norm.clone().into(),
                                 quoted: false,
                             }),
                             v,
@@ -338,7 +340,7 @@ impl<'a> Evaluator<'a> {
             frame.insert(
                 rest.clone(),
                 Value::List(List {
-                    items: remaining,
+                    items: remaining.into(),
                     sep: rest_sep,
                     bracketed: false,
                     keywords: Some(kw),
@@ -933,12 +935,12 @@ impl<'a> Evaluator<'a> {
                                 }
                             }
                         }
-                        for item in l.items {
+                        for item in l.items.iter().cloned() {
                             by_pos.push(IfArg::Eager(item));
                         }
                     }
                     Value::Map(m) => {
-                        for (k, v) in m.entries {
+                        for (k, v) in m.entries.as_ref().clone() {
                             let name = match k {
                                 Value::Str(s) => s.text,
                                 other => {
@@ -1043,7 +1045,7 @@ impl<'a> Evaluator<'a> {
         }
         match verbatim {
             Some(parts) => Ok(Value::Str(SassStr {
-                text: format!("if({})", parts.join("; ")),
+                text: format!("if({})", parts.join("; ")).into(),
                 quoted: false,
             })),
             // No clause matched and no `else`: the modern `if()` is null.

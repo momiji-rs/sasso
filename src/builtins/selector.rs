@@ -74,12 +74,12 @@ fn value_to_selector_string(v: &Value, pname: &str, pos: Pos) -> Result<String, 
     /// `None` for anything else (a comma/slash list, or a nested list).
     fn space_or_string(v: &Value) -> Option<String> {
         match v {
-            Value::Str(s) => Some(s.text.clone()),
+            Value::Str(s) => Some(s.text.to_string()),
             Value::List(l) if l.sep == ListSep::Space && !l.items.is_empty() => {
                 let mut parts = Vec::with_capacity(l.items.len());
-                for item in &l.items {
+                for item in l.items.iter() {
                     match item {
-                        Value::Str(s) => parts.push(s.text.clone()),
+                        Value::Str(s) => parts.push(s.text.to_string()),
                         _ => return None,
                     }
                 }
@@ -90,12 +90,12 @@ fn value_to_selector_string(v: &Value, pname: &str, pos: Pos) -> Result<String, 
     }
     fn render(v: &Value) -> Option<String> {
         match v {
-            Value::Str(s) => Some(s.text.clone()),
+            Value::Str(s) => Some(s.text.to_string()),
             Value::List(l) if l.items.is_empty() => None,
             Value::List(l) => match l.sep {
                 ListSep::Comma => {
                     let mut parts = Vec::with_capacity(l.items.len());
-                    for item in &l.items {
+                    for item in l.items.iter() {
                         parts.push(space_or_string(item)?);
                     }
                     Some(parts.join(", "))
@@ -157,7 +157,7 @@ fn parse_selector_text(text: &str, pname: &str, pos: Pos) -> Result<Vec<Complex>
 fn selectors_to_value(complexes: &[Complex]) -> Value {
     let items: Vec<Value> = complexes.iter().map(complex_to_value).collect();
     Value::List(List {
-        items,
+        items: items.into(),
         sep: ListSep::Comma,
         bracketed: false,
         keywords: None,
@@ -170,11 +170,16 @@ fn complex_to_value(c: &Complex) -> Value {
     let parts = selector::complex_to_list_parts(c);
     let items: Vec<Value> = parts
         .into_iter()
-        .map(|text| Value::Str(SassStr { text, quoted: false }))
+        .map(|text| {
+            Value::Str(SassStr {
+                text: text.into(),
+                quoted: false,
+            })
+        })
         .collect();
     // A single-component complex selector is still a (one-element) space list.
     Value::List(List {
-        items,
+        items: items.into(),
         sep: ListSep::Space,
         bracketed: false,
         keywords: None,
@@ -245,7 +250,12 @@ fn selector_strings_to_value(complexes: &[String]) -> Value {
             Value::List(List {
                 items: parts
                     .into_iter()
-                    .map(|text| Value::Str(SassStr { text, quoted: false }))
+                    .map(|text| {
+                        Value::Str(SassStr {
+                            text: text.into(),
+                            quoted: false,
+                        })
+                    })
                     .collect(),
                 sep: ListSep::Space,
                 bracketed: false,
@@ -254,7 +264,7 @@ fn selector_strings_to_value(complexes: &[String]) -> Value {
         })
         .collect();
     Value::List(List {
-        items,
+        items: items.into(),
         sep: ListSep::Comma,
         bracketed: false,
         keywords: None,
@@ -771,10 +781,15 @@ fn fn_simple_selectors(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
         .ok_or_else(|| Error::at("$selector: expected selector.".to_string(), pos))?;
     let items: Vec<Value> = simples
         .into_iter()
-        .map(|text| Value::Str(SassStr { text, quoted: false }))
+        .map(|text| {
+            Value::Str(SassStr {
+                text: text.into(),
+                quoted: false,
+            })
+        })
         .collect();
     Ok(Value::List(List {
-        items,
+        items: items.into(),
         sep: ListSep::Comma,
         bracketed: false,
         keywords: None,

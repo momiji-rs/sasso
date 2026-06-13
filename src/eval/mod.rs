@@ -2662,13 +2662,13 @@ impl<'a> Evaluator<'a> {
                     .split_whitespace()
                     .map(|c| {
                         Value::Str(SassStr {
-                            text: c.to_string(),
+                            text: c.to_string().into(),
                             quoted: false,
                         })
                     })
                     .collect();
                 Value::List(List {
-                    items: compounds,
+                    items: compounds.into(),
                     sep: ListSep::Space,
                     bracketed: false,
                     keywords: None,
@@ -2676,7 +2676,7 @@ impl<'a> Evaluator<'a> {
             })
             .collect();
         Value::List(List {
-            items,
+            items: items.into(),
             sep: ListSep::Comma,
             bracketed: false,
             keywords: None,
@@ -2748,7 +2748,7 @@ impl<'a> Evaluator<'a> {
                 let text = self.eval_template(pieces);
                 self.in_supports_declaration = saved;
                 Ok(Value::Str(SassStr {
-                    text: text?,
+                    text: text?.into(),
                     quoted: true,
                 }))
             }
@@ -2757,7 +2757,7 @@ impl<'a> Evaluator<'a> {
                 let text = self.eval_template(pieces);
                 self.in_supports_declaration = saved;
                 Ok(Value::Str(SassStr {
-                    text: text?,
+                    text: text?.into(),
                     quoted: false,
                 }))
             }
@@ -2769,7 +2769,7 @@ impl<'a> Evaluator<'a> {
                 // interpolated (`#{(a: 1)}`, `#{()}`); dart-sass errors instead
                 // of injecting the inspected/empty text.
                 Ok(Value::Str(SassStr {
-                    text: interp_checked(&v?)?,
+                    text: interp_checked(&v?)?.into(),
                     quoted: false,
                 }))
             }
@@ -2787,14 +2787,16 @@ impl<'a> Evaluator<'a> {
                     vals.push(self.eval_expr(it)?);
                 }
                 Ok(Value::List(List {
-                    items: vals,
+                    items: vals.into(),
                     sep: *sep,
                     bracketed: *bracketed,
                     keywords: None,
                 }))
             }
             Expr::Map(entries) => {
-                let mut map = Map { entries: Vec::new() };
+                let mut map = Map {
+                    entries: std::rc::Rc::new(Vec::new()),
+                };
                 for (k, v) in entries {
                     let key = self.eval_expr(k)?.without_slash();
                     let val = self.eval_expr(v)?;
@@ -2826,7 +2828,7 @@ impl<'a> Evaluator<'a> {
                         other => match css_value_error_msg(&other) {
                             Some(msg) => Err(Error::unpositioned(msg)),
                             None => Ok(Value::Str(SassStr {
-                                text: format!("-{}", other.to_css(false)),
+                                text: format!("-{}", other.to_css(false)).into(),
                                 quoted: false,
                             })),
                         },
@@ -2846,7 +2848,7 @@ impl<'a> Evaluator<'a> {
                         other => match css_value_error_msg(&other) {
                             Some(msg) => Err(Error::unpositioned(msg)),
                             None => Ok(Value::Str(SassStr {
-                                text: format!("+{}", other.to_css(false)),
+                                text: format!("+{}", other.to_css(false)).into(),
                                 quoted: false,
                             })),
                         },
@@ -2929,7 +2931,7 @@ impl<'a> Evaluator<'a> {
                     // the inner calculation directly. (A non-calculation leaf
                     // such as `calc(var(--x))` keeps its wrapper.)
                     CalcNode::Str(s) if is_complete_calculation(&s) => Ok(Value::Str(SassStr {
-                        text: s,
+                        text: s.into(),
                         quoted: false,
                     })),
                     other => Ok(Value::Calc(other)),
@@ -2953,7 +2955,7 @@ impl<'a> Evaluator<'a> {
                     parts.push(v.to_css(self.compressed()));
                 }
                 Ok(Value::Str(SassStr {
-                    text: format!("{fname}({})", parts.join(", ")),
+                    text: format!("{fname}({})", parts.join(", ")).into(),
                     quoted: false,
                 }))
             }
@@ -2983,7 +2985,7 @@ impl<'a> Evaluator<'a> {
                         parts.push(self.eval_expr(&a.value)?.to_css(self.compressed()));
                     }
                     return Ok(Value::Str(SassStr {
-                        text: format!("{name}({})", parts.join(", ")),
+                        text: format!("{name}({})", parts.join(", ")).into(),
                         quoted: false,
                     }));
                 }
@@ -3102,7 +3104,7 @@ impl<'a> Evaluator<'a> {
                 {
                     let node = self.eval_calc(&args[0].value)?;
                     return Ok(Value::Str(SassStr {
-                        text: format!("abs({})", node.to_calc_css(self.compressed())),
+                        text: format!("abs({})", node.to_calc_css(self.compressed())).into(),
                         quoted: false,
                     }));
                 }
@@ -3238,7 +3240,7 @@ impl<'a> Evaluator<'a> {
                         .collect::<Vec<_>>()
                         .join(", ");
                     return Ok(Value::Str(SassStr {
-                        text: format!("alpha({inner})"),
+                        text: format!("alpha({inner})").into(),
                         quoted: false,
                     }));
                 }

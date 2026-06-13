@@ -276,7 +276,7 @@ impl<'a> Evaluator<'a> {
             // An empty literal `()` parses as an empty list, not a map.
             Some(Value::List(l)) if l.items.is_empty() => {}
             Some(Value::Map(m)) => {
-                for (k, v) in m.entries {
+                for (k, v) in m.entries.as_ref().clone() {
                     let key = match k {
                         Value::Str(s) => normalize_var_name(&s.text).into_owned(),
                         other => {

@@ -305,7 +305,7 @@ fn plain_css_function(
         }
     }
     Ok(Value::Str(SassStr {
-        text: format!("{name}({})", parts.join(", ")),
+        text: format!("{name}({})", parts.join(", ")).into(),
         quoted: false,
     }))
 }

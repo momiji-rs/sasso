@@ -449,7 +449,10 @@ fn preserved_round_nums(strategy: RoundStrategy, number: &Number, step: &Number,
     } else {
         format!("round({kw}, {}, {})", number.to_css(false), step.to_css(false))
     };
-    Value::Str(SassStr { text, quoted: false })
+    Value::Str(SassStr {
+        text: text.into(),
+        quoted: false,
+    })
 }
 
 /// Apply a unit-preserving unary numeric operation, requiring a number.
@@ -1318,7 +1321,7 @@ mod tests {
     fn round_strategies_with_step() {
         let kw = |s: &str| {
             Value::Str(SassStr {
-                text: s.to_string(),
+                text: s.into(),
                 quoted: false,
             })
         };

@@ -446,7 +446,10 @@ impl Channels {
             Some(a) => format!("{name}({body} / {})", a.to_css(false)),
             None => format!("{name}({body})"),
         };
-        Value::Str(crate::value::SassStr { text, quoted: false })
+        Value::Str(crate::value::SassStr {
+            text: text.into(),
+            quoted: false,
+        })
     }
 }
 
@@ -489,7 +492,7 @@ fn split_channels(channels: &Value) -> SplitChannels {
             // first element stays a single value so the caller rejects it
             // ("Expected an unbracketed list"), matching dart-sass.
             let comps = match &l.items[0] {
-                Value::List(inner) if inner.sep == ListSep::Space && !inner.bracketed => inner.items.clone(),
+                Value::List(inner) if inner.sep == ListSep::Space && !inner.bracketed => inner.items.to_vec(),
                 other => vec![other.clone()],
             };
             return SplitChannels {
@@ -498,12 +501,12 @@ fn split_channels(channels: &Value) -> SplitChannels {
                 alpha_split: true,
             };
         }
-        return no_split(l.items.clone());
+        return no_split(l.items.to_vec());
     }
     if l.sep != ListSep::Space {
-        return no_split(l.items.clone());
+        return no_split(l.items.to_vec());
     }
-    let mut items: Vec<Value> = l.items.clone();
+    let mut items: Vec<Value> = l.items.to_vec();
     // A trailing `n / a` slash-division shows up as a `Slash` whose textual
     // spelling contains `/`; recover the channel and alpha (each may carry a
     // unit, e.g. `50%/0.4`).
@@ -581,7 +584,7 @@ fn channel_token(s: &str) -> Value {
         return Value::Calc(CalcNode::Str(inner));
     }
     Value::Str(crate::value::SassStr {
-        text: s.to_string(),
+        text: s.to_string().into(),
         quoted: false,
     })
 }
@@ -793,14 +796,14 @@ fn hsl_degenerate(channels: &Channels, pos: Pos) -> Result<Value, Error> {
         Some(a) => {
             let av = alpha_value(a, pos)?;
             return Ok(Value::Str(crate::value::SassStr {
-                text: format!("hsla({hue}, {sat}, {light}, {})", fmt_num(av, false)),
+                text: format!("hsla({hue}, {sat}, {light}, {})", fmt_num(av, false)).into(),
                 quoted: false,
             }));
         }
         None => "hsl",
     };
     Ok(Value::Str(crate::value::SassStr {
-        text: format!("{name}({hue}, {sat}, {light})"),
+        text: format!("{name}({hue}, {sat}, {light})").into(),
         quoted: false,
     }))
 }
@@ -1041,14 +1044,14 @@ fn fn_color_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resu
     let params = ["hue", "whiteness", "blackness", "alpha"];
     let ch = Channels::collect("hwb", &params, pos_args, named, pos)?;
     let space = Value::List(List {
-        items: ch.comps,
+        items: ch.comps.into(),
         sep: ListSep::Space,
         bracketed: false,
         keywords: None,
     });
     let channels = match ch.alpha {
         Some(a) => Value::List(List {
-            items: vec![space, a],
+            items: vec![space, a].into(),
             sep: ListSep::Slash,
             bracketed: false,
             keywords: None,
@@ -1456,7 +1459,10 @@ fn modern_color(space: &str, channels: &[Value], alpha: Option<&Value>, pos: Pos
     } else {
         format!("color({space} {body} / {})", fmt_num(a, false))
     };
-    Value::Str(crate::value::SassStr { text, quoted: false })
+    Value::Str(crate::value::SassStr {
+        text: text.into(),
+        quoted: false,
+    })
 }
 
 /// Serialize a `color()` description for its channel-count error message:
@@ -1769,7 +1775,7 @@ pub(super) fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
             .collect::<Vec<_>>()
             .join(", ");
         return Ok(Value::Str(crate::value::SassStr {
-            text: format!("alpha({inner})"),
+            text: format!("alpha({inner})").into(),
             quoted: false,
         }));
     }
