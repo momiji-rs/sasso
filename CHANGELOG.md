@@ -11,6 +11,62 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+Since `0.2.0`. Conformance holds at **100% of the attempted sass-spec suite**
+(13,896 / 13,896) — but that suite covers *valid* inputs plus the errors it
+expects; this cycle hardened sasso to reject the same *malformed* inputs
+dart-sass rejects, and cut more of the `@extend` and value hot paths.
+
+### Changed
+
+- **Strict input validation.** Beyond matching dart-sass's output, sasso now
+  *errors* — rather than silently accepting — on malformed input, each with
+  dart-sass's exact message: an invalid hex literal (`#00000`, `#0g`),
+  out-of-grammar `rgb()`/`hsl()` channel units and legacy-vs-modern argument
+  shapes, a duplicate `@mixin`/`@function` parameter, a malformed number
+  exponent (`1e-`), a non-identifier `@use`/`@forward` namespace, a misplaced
+  `@content`/`@extend`, a style rule / declaration / `@extend` in a `@function`
+  body, a map or empty list used as a CSS value (`#{(a:1)}`, `-()`), a
+  malformed `:nth-child()` An+B or empty `:not()` selector, a stray `!` in a
+  selector, a leading-empty `@extend` target, and a malformed `@charset` /
+  `@at-root (…)` query. Found by a leniency-mining sweep that diffed every
+  category against dart-sass; the fixes are uncovered by the spec, so the
+  ratchet is unchanged.
+
+### Performance
+
+- **Transitive `@extend`** went from ~151× *slower* than dart-sass to *faster*
+  on a deep extend chain: a match pre-filter with typed dedup, an incremental
+  per-rule fold (killing the O(N²) closure re-derivation), borrowed
+  scope-originals, and cached typed selector hashes — the `@extend` maps are
+  now FxHash + typed `Complex`/`Simple` keys, guarded by a render-injectivity
+  parity proof. Byte-identical output throughout.
+- **Reference-counted composite values** — `Str`/`List`/`Map` are `Rc`-backed,
+  so cloning a read-only `$variable` is an O(1) refcount bump instead of a deep
+  copy (copy-on-write for the mutating builtins): ~7× fewer instructions and
+  ~13× less peak memory when a large list/map is passed through a call chain.
+- **`Cow`-borrowed argument-name normalization** (called 4–6× per function
+  call) plus trimmed function-call-path allocations — ~15% fewer instructions
+  on a function-heavy compile.
+- **Arena in-place `realloc`** — the scoped bump arena extends its tail
+  allocation in place instead of stranding a dead buffer on every `Vec`
+  doubling, trimming peak memory on parse-heavy compiles.
+- Net: pure-compile throughput ~7.4 ms on the large benchmark (was ~9–10),
+  ~2.3–2.9× faster than `grass` and ~19–30× faster than the dart-sass JS bin.
+
+### Internal
+
+- `eval.rs` split into an `eval/` module directory and `color.rs` into a
+  `color/` directory (pure code moves); the typed selector model gained a
+  parity-proof harness; the stringly hoist markers became typed `OutNode`
+  variants; the `@extend` cartesian-order bool became a `CartesianOrder` enum;
+  `OutNode` rule/at-rule constructors collapsed duplicated construction sites.
+  All byte-identical, each verified base-binary-vs-refactor.
+
+### Tooling
+
+- The WebAssembly npm package publishes via OIDC Trusted Publishing (no token).
+- Benchmark harness uses portable temp-file handling (`mktemp -d`).
+
 ## [0.2.0] - 2026-06-11
 
 Everything since the initial `0.1.0` crates.io publish. This grew the compiler
