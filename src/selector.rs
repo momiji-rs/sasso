@@ -1454,10 +1454,14 @@ pub(crate) fn extend_selectors(
     // Gated to single-module: there the closure-size sort is stable so the index
     // equals registration order; multi-module keeps the fold.
     let single_module = plan.single_module;
-    let one_shot = single_module && extend_base != usize::MAX && extend_base >= plan.n_extensions;
+    let order = if single_module && extend_base != usize::MAX && extend_base >= plan.n_extensions {
+        CartesianOrder::OneShot
+    } else {
+        CartesianOrder::Fold
+    };
     // A SELF-REFERENTIAL pseudo chain (issue_2055) — precomputed in the plan.
     let pseudo_self_ref = plan.pseudo_self_ref;
-    let result = if pseudo_self_ref && !one_shot {
+    let result = if pseudo_self_ref && order == CartesianOrder::Fold {
         // A self-referential pseudo chain (`:not(.thing[disabled])` extending
         // `.thing`, issue_2055). dart applies each `@extend`'s
         // `newExtensionsByTarget` (its single extension PLUS the
@@ -1505,8 +1509,8 @@ pub(crate) fn extend_selectors(
             }
         }
         current.into_iter().map(|(c, f, _)| (c, f)).collect()
-    } else if one_shot {
-        let (result, changed) = extend_to_fixpoint_breaks(original, original_breaks, registry, one_shot);
+    } else if order == CartesianOrder::OneShot {
+        let (result, changed) = extend_to_fixpoint_breaks(original, original_breaks, registry, order);
         if changed {
             trim_breaks(result, &originals, source_spec)
         } else {
@@ -2278,10 +2282,25 @@ fn type_namespace(t: &str) -> Option<String> {
 /// out first. (dart-sass `Extender._extendComplex`.)
 fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
     let empty: FxHashMap<Complex, bool> = FxHashMap::default();
-    extend_complex_breaks(complex, false, extensions, &empty, false)
+    extend_complex_breaks(complex, false, extensions, &empty, CartesianOrder::Fold)
         .into_iter()
         .map(|(c, _)| c)
         .collect()
+}
+
+/// Which cartesian-product ITERATION ORDER the `@extend` engine uses when
+/// crossing per-component / per-simple option lists. dart-sass has two:
+/// `OneShot` is the literal `paths(...)` order (the LAST component/simple
+/// varies SLOWEST) used by the single-shot transitive-closure path; `Fold`
+/// is the registration-order incremental fold (the FIRST component/simple
+/// varies slowest). This only selects which nested loop is outer — it never
+/// changes WHICH products are generated, only their byte order, which dart
+/// pins exactly. See the call sites at `extend_complex_breaks` /
+/// `extend_component` for the two loop forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CartesianOrder {
+    OneShot,
+    Fold,
 }
 
 /// Like [`extend_complex`], but every product carries its line-break flag:
@@ -2292,7 +2311,7 @@ fn extend_complex_breaks(
     in_break: bool,
     extensions: &[Extension],
     ext_breaks: &FxHashMap<Complex, bool>,
-    one_shot: bool,
+    order: CartesianOrder,
 ) -> Vec<(Complex, bool)> {
     let d = to_dart(complex);
     // dart-sass: a complex selector with more than one leading combinator is
@@ -2306,7 +2325,7 @@ fn extend_complex_breaks(
     let mut per_component: Vec<Vec<(DComplex, bool)>> = Vec::new();
     let mut any_extended = false;
     for (i, comp) in d.comps.iter().enumerate() {
-        match extend_component(comp, extensions, ext_breaks, one_shot) {
+        match extend_component(comp, extensions, ext_breaks, order) {
             // dart-sass folds unextended leading components into a prefix
             // complex carrying the selector's leading run; keeping the run on
             // the first component's sole option is equivalent.
@@ -2358,7 +2377,7 @@ fn extend_complex_breaks(
     let mut combos: Vec<(Vec<DComplex>, bool)> = vec![(Vec::new(), false)];
     for opts in &per_component {
         let mut next: Vec<(Vec<DComplex>, bool)> = Vec::new();
-        if one_shot {
+        if order == CartesianOrder::OneShot {
             for (opt, oflag) in opts {
                 for (combo, cflag) in &combos {
                     let mut c = combo.clone();
@@ -3229,7 +3248,7 @@ fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
     for complex in list {
         originals.insert(complex.clone());
     }
-    let (result, changed) = extend_to_fixpoint_inner(list, &[], extensions, false, false);
+    let (result, changed) = extend_to_fixpoint_inner(list, &[], extensions, CartesianOrder::Fold, false);
     // dart `_extendList`: when no complex was changed the ORIGINAL list is
     // returned untouched — no trim, duplicates preserved.
     if !changed {
@@ -3601,7 +3620,7 @@ fn extend_list_batch(
         // `to_dart`, or `extend_complex_breaks`.
         let can_match = visible && complex_may_match_targets(complex, &batch_targets);
         let products = if can_match && consume_extend_work() && out.len() <= 100_000 {
-            extend_complex_breaks(complex, *in_break, batch, &ext_breaks, false)
+            extend_complex_breaks(complex, *in_break, batch, &ext_breaks, CartesianOrder::Fold)
         } else {
             vec![(complex.clone(), *in_break)]
         };
@@ -3656,9 +3675,9 @@ fn extend_to_fixpoint_breaks(
     list: &[Complex],
     list_breaks: &[bool],
     extensions: &[Extension],
-    one_shot: bool,
+    order: CartesianOrder,
 ) -> (Vec<(Complex, bool)>, bool) {
-    extend_to_fixpoint_inner(list, list_breaks, extensions, one_shot, true)
+    extend_to_fixpoint_inner(list, list_breaks, extensions, order, true)
 }
 
 /// As [`extend_to_fixpoint_breaks`], with explicit control over re-feeding a
@@ -3674,7 +3693,7 @@ fn extend_to_fixpoint_inner(
     list: &[Complex],
     list_breaks: &[bool],
     extensions: &[Extension],
-    one_shot: bool,
+    order: CartesianOrder,
     refeed: bool,
 ) -> (Vec<(Complex, bool)>, bool) {
     // Extender flags by extender selector, for the per-option lookup.
@@ -3700,7 +3719,7 @@ fn extend_to_fixpoint_inner(
         if !consume_extend_work() || result.len() > 100_000 {
             break;
         }
-        let products = extend_complex_breaks(&complex, in_break, extensions, &ext_breaks, one_shot);
+        let products = extend_complex_breaks(&complex, in_break, extensions, &ext_breaks, order);
         if is_input && !(products.len() == 1 && products[0].0.render() == complex.render()) {
             changed = true;
         }
@@ -4109,7 +4128,7 @@ fn extend_component(
     comp: &TComp,
     extensions: &[Extension],
     ext_breaks: &FxHashMap<Complex, bool>,
-    one_shot: bool,
+    order: CartesianOrder,
 ) -> Option<Vec<(DComplex, bool)>> {
     // First, extend any selector-pseudo arguments (`:not(...)`, `:is(...)`,
     // etc.) in place, producing an "effective" compound. For `:not()` with a
@@ -4171,7 +4190,7 @@ fn extend_component(
     let mut paths: Vec<Vec<&Option<(Complex, bool)>>> = vec![Vec::new()];
     for opts in &per_simple {
         let mut next = Vec::new();
-        if one_shot {
+        if order == CartesianOrder::OneShot {
             for opt in opts {
                 for path in &paths {
                     let mut p = path.clone();
