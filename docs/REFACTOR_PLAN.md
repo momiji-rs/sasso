@@ -1,5 +1,9 @@
 # sasso refactor plan — maintainability · performance · memory
 
+> **STATUS: ✅ fully shipped (2026-06-13).** Every sequenced step below landed —
+> see git history and [`REFACTOR_NEXT.md`](./REFACTOR_NEXT.md) for the post-campaign
+> round-2 backlog. This document is kept as the historical record + rationale.
+
 Status snapshot: master @`60559a6`, **13895/13896 sass-spec (99.99%)**, zero
 runtime deps, `unsafe` only in `src/arena.rs`, byte-exact dart-sass output.
 The engine is functionally excellent and already **heavily perf-tuned** (arena,
