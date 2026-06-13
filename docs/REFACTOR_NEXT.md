@@ -18,7 +18,11 @@ the current tree (eval / front-end / value+arena+emit / selector+builtins).
 - **T2.3 string-serializer fast-path** — ✅ shipped `39f3c51` (string-dense −4.0%, general flat; byte-identical).
 - **T1.3 is_builtin single source** — ✅ shipped `dc189b9` (per-family `NAMES` consts; equivalence test proved no pre-existing drift).
 - **T2.1 Rc-back callable env** — ❌ **CLOSED (bench-first showed flat).** A 600k-`@function` profile (`sample`) put `capture_callable` at ~1% of top-of-stack even on that pathological corpus; the dominant definition-time cost is the intrinsic `HashMap` insert/rehash + arena alloc, which T2.1's Vec-clone optimization does not touch. The maximal design (Rc-ifying the live scope stack + `Rc::make_mut` COW, which ~negates the call-path save) carries a large blast radius and the scope-lazy-frame correctness hazard for a ~0% real-world gain. Per the tier's "if a bench is flat, close it" rule — the general path has no remaining big lever.
-- **T1.4 / T2.2 / T2.4** — remain opportunistic; fold into adjacent work only (T1.4) or merge only if a future bench justifies (T2.2/T2.4). Not pursued standalone.
+- **T1.4 extract selector/parse.rs** — ✅ shipped `c84e9a4` (selector.rs 5175→4634 + selector/parse.rs 551; the @extend/weave core stays in mod.rs; byte-identity over 1232 cases incl 581 @extend). The `parser.rs` domain split is deliberately NOT done standalone — per this doc it folds into the next PR that already touches parser.rs (a standalone split is pure churn).
+- **T2.2 Slash → Rc<str>** — ❌ **CLOSED (bench-first showed flat).** `Value::Slash` never surfaced in a `sample` profile of a 23 MB slash-dense corpus; Slash is rare and its `String` clone is not a measurable cost. Consistency-only motivation does not justify the churn.
+- **T2.4 borrowed-buffer compressed emit** — ❌ **CLOSED (bench-first showed flat).** On a pure-compressed 11 MB corpus (T2.4's best case), the `join_generic_copy` it removes was ~0.8% of total and the whole compressed serializer only ~7.4%; the run is dominated by eval + parser. Expanded output (the default, common case) already streams into `&mut String` so T2.4 does nothing there. A ~0.8%-on-compressed-only win against the don't-touch `emit.rs` at med risk is negative ROI.
+
+**Round-2 is complete: 5 items shipped (T1.1, T1.2, T2.3, T1.3, T1.4-selector), 3 closed bench-first (T2.1, T2.2, T2.4). The doc's thesis holds — the general path has no remaining big lever; the one real perf win this round was T2.3 (string-dense −4%).**
 
 ---
 
