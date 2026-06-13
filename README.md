@@ -175,25 +175,24 @@ $ SASS_BIN=target/release/sasso python3 spec/run_spec.py
 `sasso` is a native, in-process library — no subprocess, no Node, no Dart VM —
 so startup is effectively free, which dominates when a build compiles many
 files. On an Apple M2 Max it is the **fastest** of the three engines measured,
-beating dart-sass by 19–29× end-to-end and leading `grass` (the incumbent Rust
-compiler) by ~2.2–2.8×:
+beating dart-sass by 19–30× end-to-end and leading `grass` (the incumbent Rust
+compiler) by ~2.3–2.9×:
 
 | Axis | sasso | grass | dart-sass (bin) | npx sass |
 | --- | --- | --- | --- | --- |
-| Startup² | **2.3 ms** | 2.4 ms | 138 ms | 520 ms |
-| Cold single large file | **12.2 ms** | 26.7 ms | 357 ms | 964 ms |
-| Batch (40 files, 1 process) | **50.1 ms** | 135 ms | 933 ms | — |
-| Pure compile (startup removed) | **7.7 ms** | 21.4 ms | ~219 ms¹ | — |
+| Startup² | **1.8 ms** | 1.8 ms | 139 ms | 495 ms |
+| Cold single large file | **11.7 ms** | 26.5 ms | 354 ms | 710 ms |
+| Batch (40 files, 1 process) | **49.0 ms** | 136 ms | 916 ms | — |
+| Pure compile (startup removed) | **7.4 ms** | 21.3 ms | ~216 ms¹ | — |
 
 ¹ derived (cold − startup) — dart-sass has no in-process loop mode. So sasso is
-~28× faster than dart-sass on **pure compute**, ~29× on a cold single file, and
-~60× on startup; vs `grass` it is ~2.2× cold / ~2.7× batch / ~2.8× pure.
+~29× faster than dart-sass on **pure compute**, ~30× on a cold single file, and
+~77× on startup; vs `grass` it is ~2.3× cold / ~2.8× batch / ~2.9× pure.
 
-² Startup is min-of-N (compiling a 1-rule file). At the ~1.6 ms OS
-process-spawn floor on this machine the *mean* is dominated by scheduler
-jitter, so sasso and grass are effectively **tied** here — both add ~0.7 ms of
-their own over a bare process; sasso is fractionally ahead. The native library
-and wasm builds remove process startup entirely. A
+² Startup compiles a 1-rule file, so it sits at the OS process-spawn floor —
+sasso and grass measure **identically (1.8 ms)** here (the *mean* is dominated
+by scheduler jitter at this sub-2 ms scale). The native library and wasm builds
+remove process startup entirely. A
 **scoped bump-arena allocator** (one audited `unsafe` module, Miri- and
 AddressSanitizer-verified; the rest of the library stays `unsafe`-free) gives a
 further ~1.5× by turning each compile's allocations into a pointer bump freed
