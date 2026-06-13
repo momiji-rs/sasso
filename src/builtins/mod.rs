@@ -76,21 +76,94 @@ pub(crate) fn call(
 /// decide whether a slash-division argument should collapse to its number:
 /// Sass functions collapse it, plain CSS functions keep the `a/b` spelling.
 ///
-/// Each family's `try_call` returns `None` only for names it does not own,
-/// and the families are pure, so probing with empty arguments is a
-/// side-effect-free ownership test.
+/// This is a pure name-only ownership test: each family's `try_call` decides
+/// ownership solely from the function name (returning `Some(..)` — possibly an
+/// arity/type `Err` — for the names it owns, `None` otherwise), so the set
+/// below is exactly the union of those families' name-match arms. The set is
+/// kept in lockstep with the dispatch in `call` / each family's `try_call`.
+///
+/// Two name-only subtleties mirror the dispatch exactly:
+/// - the `math` family lowercases the name before matching (its functions
+///   double as case-insensitive CSS calc functions like `SiN`), so its names
+///   are matched case-insensitively here;
+/// - `length`/`nth` are owned unconditionally by the `list` family (the `map`
+///   family only claims them when the first argument is a map, which never
+///   removes them from the builtin set), so they appear once below.
 pub(crate) fn is_builtin(name: &str) -> bool {
-    let pos: &[Value] = &[];
-    let named: &[(String, Value)] = &[];
-    let p = Pos { line: 1, col: 1 };
-    color::try_call(name, pos, named, p).is_some()
-        || color_ext::try_call(name, pos, named, p).is_some()
-        || math::try_call(name, pos, named, p).is_some()
-        || string::try_call(name, pos, named, p).is_some()
-        || map::try_call(name, pos, named, p).is_some()
-        || list::try_call(name, pos, named, p).is_some()
-        || meta::try_call(name, pos, named, p).is_some()
-        || selector::try_call(name, pos, named, p).is_some()
+    // The `math` family matches `name.to_ascii_lowercase()`, so it owns these
+    // names case-insensitively.
+    if is_math_builtin_name(name) {
+        return true;
+    }
+    matches!(
+        name,
+        // color (legacy + modern)
+        "rgb" | "rgba" | "hsl" | "hsla" | "hwb"
+        | "lab" | "lch" | "oklab" | "oklch" | "color"
+        | "mix" | "lighten" | "darken" | "percentage"
+        | "red" | "green" | "blue" | "alpha"
+        | "color-space" | "color-channel" | "color-to-space"
+        | "color-is-legacy" | "color-is-missing" | "color-is-in-gamut"
+        | "color-is-powerless" | "color-to-gamut" | "color-same"
+        // color_ext
+        | "adjust-hue" | "complement" | "invert" | "grayscale"
+        | "saturate" | "desaturate" | "opacify" | "fade-in"
+        | "transparentize" | "fade-out" | "hue" | "saturation"
+        | "lightness" | "whiteness" | "blackness" | "opacity"
+        | "ie-hex-str" | "scale-color" | "adjust-color" | "change-color"
+        // string
+        | "quote" | "unquote" | "to-upper-case" | "to-lower-case"
+        | "str-length" | "str-index" | "str-slice" | "str-insert" | "unique-id"
+        // map
+        | "map-get" | "map-keys" | "map-values" | "map-has-key"
+        | "map-merge" | "map-remove"
+        // list (length/nth are list-owned)
+        | "length" | "nth" | "set-nth" | "join" | "append"
+        | "index" | "list-separator" | "is-bracketed" | "zip"
+        // meta
+        | "get-function" | "type-of" | "unit" | "unitless" | "comparable"
+        | "inspect" | "feature-exists" | "function-exists"
+        | "calc-name" | "calc-args"
+        // selector
+        | "selector-nest" | "selector-append" | "selector-extend"
+        | "selector-replace" | "selector-unify" | "is-superselector"
+        | "simple-selectors" | "selector-parse"
+    )
+}
+
+/// Whether `name` (case-insensitively) is a `math` builtin. The math family
+/// folds the name with `to_ascii_lowercase` before dispatch, so `SiN` and
+/// `sin` both count.
+fn is_math_builtin_name(name: &str) -> bool {
+    // Fast reject for names that obviously aren't math builtins; otherwise
+    // lowercase once and compare (math names are short and ASCII).
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "abs"
+            | "ceil"
+            | "floor"
+            | "round"
+            | "min"
+            | "max"
+            | "clamp"
+            | "sign"
+            | "pow"
+            | "sqrt"
+            | "exp"
+            | "log"
+            | "hypot"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "atan2"
+            | "rem"
+            | "mod"
+            | "random"
+    )
 }
 
 // ---- shared argument helpers, available to every family module --------

@@ -6,6 +6,7 @@
 //! gathered into a single block emitted *before* its nested rules bubble
 //! out after it.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -1539,14 +1540,18 @@ impl<'a> Evaluator<'a> {
     /// AST keeps the original spelling for plain-CSS fallback and messages).
     fn define_function(&mut self, name: &str, c: Rc<UserCallable>) {
         if let Some(frame) = self.functions.last() {
-            frame.borrow_mut().insert(normalize_arg_name(name), c);
+            frame
+                .borrow_mut()
+                .insert(normalize_arg_name(name).into_owned(), c);
         }
     }
 
     /// Define a user `@mixin` in the innermost frame (dart `visitMixinRule`).
     fn define_mixin(&mut self, name: &str, c: Rc<UserCallable>) {
         if let Some(frame) = self.mixins.last() {
-            frame.borrow_mut().insert(normalize_arg_name(name), c);
+            frame
+                .borrow_mut()
+                .insert(normalize_arg_name(name).into_owned(), c);
         }
     }
 
@@ -1555,7 +1560,7 @@ impl<'a> Evaluator<'a> {
     fn lookup_function(&self, name: &str) -> Option<Rc<UserCallable>> {
         let key = normalize_arg_name(name);
         for frame in self.functions.iter().rev() {
-            if let Some(f) = frame.borrow().get(&key) {
+            if let Some(f) = frame.borrow().get(key.as_ref()) {
                 return Some(Rc::clone(f));
             }
         }
@@ -1567,7 +1572,7 @@ impl<'a> Evaluator<'a> {
     fn lookup_mixin(&self, name: &str) -> Option<Rc<UserCallable>> {
         let key = normalize_arg_name(name);
         for frame in self.mixins.iter().rev() {
-            if let Some(m) = frame.borrow().get(&key) {
+            if let Some(m) = frame.borrow().get(key.as_ref()) {
                 return Some(Rc::clone(m));
             }
         }
@@ -1657,8 +1662,8 @@ impl<'a> Evaluator<'a> {
         // Configuration is keyed by the canonical (dashed) variable name.
         if v.is_default && self.scopes.len() == 1 {
             let key = normalize_var_name(&v.name);
-            if let Some((cfg_val, cfg_is_default)) = self.pending_config.get(&key).cloned() {
-                self.consumed_config.push(key);
+            if let Some((cfg_val, cfg_is_default)) = self.pending_config.get(key.as_ref()).cloned() {
+                self.consumed_config.push(key.into_owned());
                 let already_set = matches!(self.lookup(&v.name), Some(x) if !matches!(x, Value::Null));
                 // A `null` configuration value leaves the `!default` in place;
                 // a `@forward ... with ($x !default)` only applies if the module
@@ -2451,7 +2456,8 @@ impl<'a> Evaluator<'a> {
                                 let mut implicit_config: HashMap<String, (Value, bool)> = HashMap::default();
                                 for scope in &self.scopes {
                                     for (k, v) in scope.borrow().iter() {
-                                        implicit_config.insert(normalize_var_name(k), (v.clone(), false));
+                                        implicit_config
+                                            .insert(normalize_var_name(k).into_owned(), (v.clone(), false));
                                     }
                                 }
                                 Some((
@@ -2981,30 +2987,34 @@ impl<'a> Evaluator<'a> {
                         quoted: false,
                     }));
                 }
+                // Resolve a user `@function` of this name ONCE (it was probed
+                // 6+ times along this arm). A `--`-prefixed call is always plain
+                // CSS (dart reserves it for custom functions), so it never binds
+                // to a user function even though `@function __a` would normalize
+                // to the same `--a` key. Every later "no user override" guard
+                // reuses `has_user_fn`.
+                let user_fn = if name.starts_with("--") {
+                    None
+                } else {
+                    self.lookup_function(name)
+                };
+                let has_user_fn = user_fn.is_some();
                 // Inside a `@supports` declaration, a CSS math function
                 // (`min`/`max`/`clamp`/…) is kept unsimplified: its arguments
                 // are resolved through the (non-folding) calc machinery and the
                 // call is serialized verbatim, matching dart-sass
                 // `simplify: false`. A user-defined function of the same name
                 // still wins, so this only applies to builtins.
-                if self.in_supports_declaration
-                    && is_supports_calc_function(name)
-                    && self.lookup_function(name).is_none()
-                {
+                if self.in_supports_declaration && is_supports_calc_function(name) && !has_user_fn {
                     return self.eval_supports_calc_func(name, args, *pos);
                 }
                 // if() is lazy: only the selected branch is evaluated.
                 if name == "if" {
                     return self.eval_if_function(args, *pos);
                 }
-                // User-defined @function takes precedence over builtins — but
-                // a `--`-prefixed call is always plain CSS (dart reserves it
-                // for custom functions), even though `@function __a`
-                // normalizes to the same `--a` key.
-                if !name.starts_with("--") {
-                    if let Some(func) = self.lookup_function(name) {
-                        return self.call_function(&func, args, Some((*pos, *length)));
-                    }
+                // User-defined @function takes precedence over builtins.
+                if let Some(func) = user_fn {
+                    return self.call_function(&func, args, Some((*pos, *length)));
                 }
                 // A user module function exposed unprefixed via `@use … as *`.
                 if !self.star_user_modules.is_empty() && !is_private_member(name) {
@@ -3048,7 +3058,7 @@ impl<'a> Evaluator<'a> {
                 // computes the result (and applies its unit checks), so this only
                 // changes the two calc-specific behaviours above.
                 if is_pure_calc_math_function(name)
-                    && self.lookup_function(name).is_none()
+                    && !has_user_fn
                     && !args.iter().any(|a| a.splat || a.name.is_some())
                 {
                     if let Some(v) = self.try_eval_calc_math_call(name, args, *pos)? {
@@ -3058,7 +3068,7 @@ impl<'a> Evaluator<'a> {
                 // `calc-size()` is a two-argument calculation: a sizing keyword
                 // (or `var()`/calculation) plus a calculation, always preserved.
                 if name.eq_ignore_ascii_case("calc-size")
-                    && self.lookup_function(name).is_none()
+                    && !has_user_fn
                     && !args.iter().any(|a| a.splat || a.name.is_some())
                 {
                     return self.eval_calc_size(args, *pos);
@@ -3069,7 +3079,7 @@ impl<'a> Evaluator<'a> {
                 // arithmetic. Other arities (a preserved single argument, or an
                 // arity error) fall through to the builtin.
                 if name.eq_ignore_ascii_case("clamp")
-                    && self.lookup_function(name).is_none()
+                    && !has_user_fn
                     && args.len() == 3
                     && !args.iter().any(|a| a.splat || a.name.is_some())
                 {
@@ -3084,7 +3094,7 @@ impl<'a> Evaluator<'a> {
                 // number, so the deprecated `math.abs` global handles it as
                 // before (`abs(1 + 1px)` -> `2px`, `abs(-3) -> 3`).
                 if name.eq_ignore_ascii_case("abs")
-                    && self.lookup_function(name).is_none()
+                    && !has_user_fn
                     && args.len() == 1
                     && args[0].name.is_none()
                     && !args[0].splat
@@ -3106,7 +3116,7 @@ impl<'a> Evaluator<'a> {
                 // to the legacy one-argument `math.round` (arity errors and
                 // all).
                 if name.eq_ignore_ascii_case("round")
-                    && self.lookup_function(name).is_none()
+                    && !has_user_fn
                     && (1..=3).contains(&args.len())
                     && !args.iter().any(|a| a.splat || a.name.is_some())
                 {
@@ -3160,7 +3170,7 @@ impl<'a> Evaluator<'a> {
                 // before, and SassScript-only operators (`7 % 3`) keep the
                 // whole call on the legacy path.
                 if (name.eq_ignore_ascii_case("min") || name.eq_ignore_ascii_case("max"))
-                    && self.lookup_function(name).is_none()
+                    && !has_user_fn
                     && !args.is_empty()
                     && !args.iter().any(|a| a.splat || a.name.is_some())
                     && !args.iter().any(|a| expr_has_non_calc_op(&a.value))
@@ -4258,11 +4268,17 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
 /// containing CSS escapes is decoded first, so the raw definition spelling
 /// `foo\func` and a call site's canonical `foo\f unc` agree (issue_553) —
 /// dart decodes escapes into the identifier text at parse time.
-fn normalize_arg_name(name: &str) -> String {
+fn normalize_arg_name(name: &str) -> Cow<'_, str> {
     if name.contains('\\') {
-        return decode_ident_escapes(name).replace('_', "-");
+        return Cow::Owned(decode_ident_escapes(name).replace('_', "-"));
     }
-    name.replace('_', "-")
+    // The common case is a name with no underscore: borrow it untouched
+    // (this runs 4-6x per function call, so the no-alloc path matters).
+    if name.contains('_') {
+        Cow::Owned(name.replace('_', "-"))
+    } else {
+        Cow::Borrowed(name)
+    }
 }
 
 /// Decode CSS escapes (`\66 ` / `\func` / `\\`) to their code points: up to
@@ -5482,10 +5498,10 @@ fn forward_var_visibility(
     move |name: &str| -> bool {
         let n = normalize_var_name(name);
         if let Some(s) = &show {
-            return s.contains(&n);
+            return s.contains(n.as_ref());
         }
         if let Some(h) = &hide {
-            return !h.contains(&n);
+            return !h.contains(n.as_ref());
         }
         true
     }
@@ -5493,8 +5509,14 @@ fn forward_var_visibility(
 
 /// Canonicalize a Sass variable name: `-` and `_` are interchangeable, so the
 /// canonical form replaces every `_` with `-` (dart-sass dash-insensitivity).
-fn normalize_var_name(name: &str) -> String {
-    name.replace('_', "-")
+fn normalize_var_name(name: &str) -> Cow<'_, str> {
+    // `-`/`_` are interchangeable; borrow when there is nothing to replace
+    // (the overwhelmingly common case).
+    if name.contains('_') {
+        Cow::Owned(name.replace('_', "-"))
+    } else {
+        Cow::Borrowed(name)
+    }
 }
 
 /// Whether a member name is private (dart-sass: a leading `-` or `_`), so it is
@@ -5510,7 +5532,7 @@ fn is_builtin_mixin(module: &str, name: &str) -> bool {
     if module != "meta" {
         return false;
     }
-    matches!(normalize_arg_name(name).as_str(), "load-css" | "apply")
+    matches!(normalize_arg_name(name).as_ref(), "load-css" | "apply")
 }
 
 /// Collect the names from a `@forward` `show`/`hide` member list, selecting
@@ -5523,8 +5545,8 @@ fn member_set(
     members.as_ref().map(|list| {
         list.iter()
             .filter_map(|m| match (m, vars) {
-                (crate::ast::ForwardMember::Var(n), true) => Some(normalize_var_name(n)),
-                (crate::ast::ForwardMember::Name(n), false) => Some(normalize_var_name(n)),
+                (crate::ast::ForwardMember::Var(n), true) => Some(normalize_var_name(n).into_owned()),
+                (crate::ast::ForwardMember::Name(n), false) => Some(normalize_var_name(n).into_owned()),
                 _ => None,
             })
             .collect()

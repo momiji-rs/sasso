@@ -278,7 +278,7 @@ impl<'a> Evaluator<'a> {
             Some(Value::Map(m)) => {
                 for (k, v) in m.entries {
                     let key = match k {
-                        Value::Str(s) => normalize_var_name(&s.text),
+                        Value::Str(s) => normalize_var_name(&s.text).into_owned(),
                         other => {
                             return Err(Error::at(
                                 format!("$with key: {} is not a string.", other.to_css(false)),
@@ -489,7 +489,7 @@ impl<'a> Evaluator<'a> {
             // Variable names are dash/underscore-insensitive: store the
             // canonical (dashed) form so `$a_b` and `$a-b` configure the same
             // variable. A duplicate key is an error.
-            let key = normalize_var_name(&entry.name);
+            let key = normalize_var_name(&entry.name).into_owned();
             if map.contains_key(&key) {
                 return Err(Error::unpositioned(format!(
                     "The variable ${} was configured twice.",
@@ -1150,9 +1150,15 @@ impl<'a> Evaluator<'a> {
             }
             let n = normalize_var_name(name);
             if has_show {
-                show_vars.as_ref().map(|s| s.contains(&n)).unwrap_or(false)
+                show_vars
+                    .as_ref()
+                    .map(|s| s.contains(n.as_ref()))
+                    .unwrap_or(false)
             } else {
-                !hide_vars.as_ref().map(|s| s.contains(&n)).unwrap_or(false)
+                !hide_vars
+                    .as_ref()
+                    .map(|s| s.contains(n.as_ref()))
+                    .unwrap_or(false)
             }
         };
         let visible_name = |name: &str| -> bool {
@@ -1161,9 +1167,15 @@ impl<'a> Evaluator<'a> {
             }
             let n = normalize_var_name(name);
             if has_show {
-                show_names.as_ref().map(|s| s.contains(&n)).unwrap_or(false)
+                show_names
+                    .as_ref()
+                    .map(|s| s.contains(n.as_ref()))
+                    .unwrap_or(false)
             } else {
-                !hide_names.as_ref().map(|s| s.contains(&n)).unwrap_or(false)
+                !hide_names
+                    .as_ref()
+                    .map(|s| s.contains(n.as_ref()))
+                    .unwrap_or(false)
             }
         };
 

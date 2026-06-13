@@ -206,7 +206,7 @@ impl<'a> Evaluator<'a> {
         let mut keyword: HashMap<String, Value> = HashMap::default();
         let mut keyword_order: Vec<(String, String)> = Vec::new();
         for (n, v) in keyword_vec {
-            let norm = normalize_arg_name(&n);
+            let norm = normalize_arg_name(&n).into_owned();
             if !keyword.contains_key(&norm) {
                 keyword_order.push((norm.clone(), n));
             }
@@ -216,7 +216,7 @@ impl<'a> Evaluator<'a> {
         for param in &params.params {
             let val = if let Some(v) = pos_iter.next() {
                 v
-            } else if let Some(v) = keyword.remove(&normalize_arg_name(&param.name)) {
+            } else if let Some(v) = keyword.remove(normalize_arg_name(&param.name).as_ref()) {
                 v
             } else if let Some(def) = &param.default {
                 self.eval_expr(def)?
@@ -296,7 +296,7 @@ impl<'a> Evaluator<'a> {
         // "unknown parameter" error can list them as the caller wrote them.
         let mut keyword_order: Vec<(String, String)> = Vec::new();
         for (n, v) in keyword_vec {
-            let norm = normalize_arg_name(&n);
+            let norm = normalize_arg_name(&n).into_owned();
             if !keyword.contains_key(&norm) {
                 keyword_order.push((norm.clone(), n));
             }
@@ -307,7 +307,7 @@ impl<'a> Evaluator<'a> {
         for param in &params.params {
             let val = if let Some(v) = pos_iter.next() {
                 v
-            } else if let Some(v) = keyword.remove(&normalize_arg_name(&param.name)) {
+            } else if let Some(v) = keyword.remove(normalize_arg_name(&param.name).as_ref()) {
                 v
             } else if let Some(def) = &param.default {
                 self.eval_expr(def)?

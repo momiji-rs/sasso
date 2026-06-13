@@ -859,13 +859,27 @@ impl Value {
     /// Sass `==` equality. Numbers compare by value and unit; strings by
     /// text (quotedness is ignored); colors by channel; lists structurally.
     pub(crate) fn sass_eq(&self, other: &Value) -> bool {
-        // A slash-division value compares as the plain number it wraps.
-        let unslash = |v: &Value| match v {
-            Value::Slash(n, _) => Value::Number(n.clone()),
-            other => other.clone(),
-        };
+        // A slash-division value compares as the plain number it wraps. Unwrap
+        // only the slash operand(s) — the non-slash side is compared by
+        // reference (no clone of a potentially large list/map).
         if matches!(self, Value::Slash(_, _)) || matches!(other, Value::Slash(_, _)) {
-            return unslash(self).sass_eq(&unslash(other));
+            let unwrap_num;
+            let lhs: &Value = match self {
+                Value::Slash(n, _) => {
+                    unwrap_num = Value::Number(n.clone());
+                    &unwrap_num
+                }
+                other => other,
+            };
+            let unwrap_num2;
+            let rhs: &Value = match other {
+                Value::Slash(n, _) => {
+                    unwrap_num2 = Value::Number(n.clone());
+                    &unwrap_num2
+                }
+                other => other,
+            };
+            return lhs.sass_eq(rhs);
         }
         match (self, other) {
             (Value::Number(a), Value::Number(b)) => numbers_eq(a, b),
