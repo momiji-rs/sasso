@@ -21,6 +21,19 @@ use crate::selector::{self, Complex};
 // path in `compound_target`'s signature.
 use crate::value::{List, ListSep, SassStr, Value};
 
+/// The names the selector family owns by name (the single source of truth,
+/// mirroring the `try_call` match arms below).
+pub(super) const NAMES: &[&str] = &[
+    "selector-nest",
+    "selector-append",
+    "selector-extend",
+    "selector-replace",
+    "selector-unify",
+    "is-superselector",
+    "simple-selectors",
+    "selector-parse",
+];
+
 pub(super) fn try_call(
     name: &str,
     pos_args: &[Value],

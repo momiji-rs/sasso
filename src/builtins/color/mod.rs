@@ -124,6 +124,37 @@ fn legacy_channel_name(names: &[&str], i: usize) -> String {
     }
 }
 
+// The modern color-space member names live with their dispatch in `modern`;
+// aliased here (a `const` alias, not a `use` re-export, to keep `modern::NAMES`
+// `pub(super)`) so `is_builtin`'s family table can fold them into the color
+// family without duplicating the list.
+pub(super) const MODERN_NAMES: &[&str] = modern::NAMES;
+
+/// The core color names this module's `try_call` owns by name (the single
+/// source of truth, mirroring the match arms below). The modern CSS Color 4
+/// members `try_call` delegates to live in [`MODERN_NAMES`]; the family's full
+/// name set is the union of the two (see `is_builtin`).
+pub(super) const NAMES: &[&str] = &[
+    "rgb",
+    "rgba",
+    "hsl",
+    "hsla",
+    "hwb",
+    "lab",
+    "lch",
+    "oklab",
+    "oklch",
+    "color",
+    "mix",
+    "lighten",
+    "darken",
+    "percentage",
+    "red",
+    "green",
+    "blue",
+    "alpha",
+];
+
 pub(super) fn try_call(
     name: &str,
     pos_args: &[Value],

@@ -19,6 +19,17 @@ use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{convert_factor, CalcNode, Number, SassStr, Value};
 
+/// The names the math family owns (the single source of truth, mirroring the
+/// `unary_op` set plus the `try_call` match arms below). The math family
+/// lowercases the name before dispatch (so `SiN` folds to `sin`), so these are
+/// the *lowercase* names; `is_builtin` lowercases before testing membership.
+pub(super) const NAMES: &[&str] = &[
+    // `unary_op`
+    "abs", "ceil", "floor", // `try_call` match arms
+    "round", "min", "max", "clamp", "sign", "pow", "sqrt", "exp", "log", "hypot", "sin", "cos", "tan",
+    "asin", "acos", "atan", "atan2", "rem", "mod", "random",
+];
+
 pub(super) fn try_call(
     name: &str,
     pos_args: &[Value],

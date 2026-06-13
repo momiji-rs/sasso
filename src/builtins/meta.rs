@@ -12,6 +12,22 @@ use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{CalcNode, List, ListSep, SassStr, Value};
 
+/// The names the meta family owns by name (the single source of truth,
+/// mirroring the `try_call` arms below — including `get-function`, which is
+/// dispatched ahead of the `match` but is still owned by this family).
+pub(super) const NAMES: &[&str] = &[
+    "get-function",
+    "type-of",
+    "unit",
+    "unitless",
+    "comparable",
+    "inspect",
+    "feature-exists",
+    "function-exists",
+    "calc-name",
+    "calc-args",
+];
+
 pub(super) fn try_call(
     name: &str,
     pos_args: &[Value],

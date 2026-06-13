@@ -226,6 +226,31 @@ pub(super) fn named_repr(r: f64, g: f64, b: f64, a: f64) -> Option<String> {
     Some(name.to_string())
 }
 
+/// The names the `color_ext` family owns by name (the single source of truth,
+/// mirroring the `try_call` match arms below).
+pub(super) const NAMES: &[&str] = &[
+    "adjust-hue",
+    "complement",
+    "invert",
+    "grayscale",
+    "saturate",
+    "desaturate",
+    "opacify",
+    "fade-in",
+    "transparentize",
+    "fade-out",
+    "hue",
+    "saturation",
+    "lightness",
+    "whiteness",
+    "blackness",
+    "opacity",
+    "ie-hex-str",
+    "scale-color",
+    "adjust-color",
+    "change-color",
+];
+
 pub(super) fn try_call(
     name: &str,
     pos_args: &[Value],

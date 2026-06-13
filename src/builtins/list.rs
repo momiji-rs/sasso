@@ -12,6 +12,22 @@ use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{List, ListSep, Number, SassStr, Value};
 
+/// The names the list family owns by name (the single source of truth,
+/// mirroring the `try_call` match arms below). `length`/`nth` are list-owned:
+/// the map family only claims them when the first argument is a map, so they
+/// belong here (and are absent from [`super::map::NAMES`]).
+pub(super) const NAMES: &[&str] = &[
+    "length",
+    "nth",
+    "set-nth",
+    "join",
+    "append",
+    "index",
+    "list-separator",
+    "is-bracketed",
+    "zip",
+];
+
 pub(super) fn try_call(
     name: &str,
     pos_args: &[Value],

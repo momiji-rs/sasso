@@ -12,6 +12,20 @@ use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{List, ListSep, Number, SassStr, Value};
 
+/// The names the string family owns by name (the single source of truth,
+/// mirroring the `try_call` match arms below).
+pub(super) const NAMES: &[&str] = &[
+    "quote",
+    "unquote",
+    "to-upper-case",
+    "to-lower-case",
+    "str-length",
+    "str-index",
+    "str-slice",
+    "str-insert",
+    "unique-id",
+];
+
 pub(super) fn try_call(
     name: &str,
     pos_args: &[Value],

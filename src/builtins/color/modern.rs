@@ -1,5 +1,20 @@
 use super::*;
 
+/// The modern CSS Color 4 `sass:color` members this submodule owns by name
+/// (the single source of truth, mirroring the `try_call_modern` match arms
+/// below). Folded into the family's [`super::NAMES`].
+pub(super) const NAMES: &[&str] = &[
+    "color-space",
+    "color-channel",
+    "color-to-space",
+    "color-is-legacy",
+    "color-is-missing",
+    "color-is-in-gamut",
+    "color-is-powerless",
+    "color-to-gamut",
+    "color-same",
+];
+
 pub(super) fn try_call_modern(
     name: &str,
     pos_args: &[Value],

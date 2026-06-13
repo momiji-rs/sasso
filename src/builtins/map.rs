@@ -13,6 +13,20 @@ use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{List, ListSep, Map, Number, Value};
 
+/// The names the map family owns *unconditionally* by name (the single source
+/// of truth, mirroring the `map-*` match arms below). `length`/`nth` are
+/// deliberately absent: they are owned by the list family and only claimed here
+/// when the first argument is a map (a runtime condition that never removes
+/// them from the builtin set), so they live in [`super::list::NAMES`].
+pub(super) const NAMES: &[&str] = &[
+    "map-get",
+    "map-keys",
+    "map-values",
+    "map-has-key",
+    "map-merge",
+    "map-remove",
+];
+
 pub(super) fn try_call(
     name: &str,
     pos_args: &[Value],

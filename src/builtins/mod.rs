@@ -78,92 +78,45 @@ pub(crate) fn call(
 ///
 /// This is a pure name-only ownership test: each family's `try_call` decides
 /// ownership solely from the function name (returning `Some(..)` — possibly an
-/// arity/type `Err` — for the names it owns, `None` otherwise), so the set
-/// below is exactly the union of those families' name-match arms. The set is
-/// kept in lockstep with the dispatch in `call` / each family's `try_call`.
+/// arity/type `Err` — for the names it owns, `None` otherwise). To kill the
+/// old two-point sync hazard, each family now declares its owned names in a
+/// `pub(super) const NAMES` placed directly above its `try_call` (the source of
+/// truth), and this test is exactly the union of those per-family `NAMES`. A new
+/// builtin is therefore a single-site change in its family module.
 ///
 /// Two name-only subtleties mirror the dispatch exactly:
 /// - the `math` family lowercases the name before matching (its functions
-///   double as case-insensitive CSS calc functions like `SiN`), so its names
-///   are matched case-insensitively here;
+///   double as case-insensitive CSS calc functions like `SiN`), so `math::NAMES`
+///   holds the *lowercase* names and is tested against the lowercased input;
 /// - `length`/`nth` are owned unconditionally by the `list` family (the `map`
 ///   family only claims them when the first argument is a map, which never
-///   removes them from the builtin set), so they appear once below.
+///   removes them from the builtin set), so they live in `list::NAMES` and are
+///   deliberately absent from `map::NAMES`.
 pub(crate) fn is_builtin(name: &str) -> bool {
     // The `math` family matches `name.to_ascii_lowercase()`, so it owns these
     // names case-insensitively.
     if is_math_builtin_name(name) {
         return true;
     }
-    matches!(
-        name,
-        // color (legacy + modern)
-        "rgb" | "rgba" | "hsl" | "hsla" | "hwb"
-        | "lab" | "lch" | "oklab" | "oklch" | "color"
-        | "mix" | "lighten" | "darken" | "percentage"
-        | "red" | "green" | "blue" | "alpha"
-        | "color-space" | "color-channel" | "color-to-space"
-        | "color-is-legacy" | "color-is-missing" | "color-is-in-gamut"
-        | "color-is-powerless" | "color-to-gamut" | "color-same"
-        // color_ext
-        | "adjust-hue" | "complement" | "invert" | "grayscale"
-        | "saturate" | "desaturate" | "opacify" | "fade-in"
-        | "transparentize" | "fade-out" | "hue" | "saturation"
-        | "lightness" | "whiteness" | "blackness" | "opacity"
-        | "ie-hex-str" | "scale-color" | "adjust-color" | "change-color"
-        // string
-        | "quote" | "unquote" | "to-upper-case" | "to-lower-case"
-        | "str-length" | "str-index" | "str-slice" | "str-insert" | "unique-id"
-        // map
-        | "map-get" | "map-keys" | "map-values" | "map-has-key"
-        | "map-merge" | "map-remove"
-        // list (length/nth are list-owned)
-        | "length" | "nth" | "set-nth" | "join" | "append"
-        | "index" | "list-separator" | "is-bracketed" | "zip"
-        // meta
-        | "get-function" | "type-of" | "unit" | "unitless" | "comparable"
-        | "inspect" | "feature-exists" | "function-exists"
-        | "calc-name" | "calc-args"
-        // selector
-        | "selector-nest" | "selector-append" | "selector-extend"
-        | "selector-replace" | "selector-unify" | "is-superselector"
-        | "simple-selectors" | "selector-parse"
-    )
+    [
+        color::NAMES,
+        color::MODERN_NAMES,
+        color_ext::NAMES,
+        string::NAMES,
+        map::NAMES,
+        list::NAMES,
+        meta::NAMES,
+        selector::NAMES,
+    ]
+    .iter()
+    .any(|family| family.contains(&name))
 }
 
 /// Whether `name` (case-insensitively) is a `math` builtin. The math family
 /// folds the name with `to_ascii_lowercase` before dispatch, so `SiN` and
-/// `sin` both count.
+/// `sin` both count; `math::NAMES` holds the lowercase names accordingly.
 fn is_math_builtin_name(name: &str) -> bool {
-    // Fast reject for names that obviously aren't math builtins; otherwise
-    // lowercase once and compare (math names are short and ASCII).
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "abs"
-            | "ceil"
-            | "floor"
-            | "round"
-            | "min"
-            | "max"
-            | "clamp"
-            | "sign"
-            | "pow"
-            | "sqrt"
-            | "exp"
-            | "log"
-            | "hypot"
-            | "sin"
-            | "cos"
-            | "tan"
-            | "asin"
-            | "acos"
-            | "atan"
-            | "atan2"
-            | "rem"
-            | "mod"
-            | "random"
-    )
+    math::NAMES.contains(&name.to_ascii_lowercase().as_str())
 }
 
 // ---- shared argument helpers, available to every family module --------
@@ -603,4 +556,180 @@ pub(crate) fn module_var(module: &str, name: &str, pos: Pos) -> Result<Value, Er
         };
     }
     Err(Error::at("Undefined variable.".to_string(), pos))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_builtin;
+
+    /// Lock the byte-observable `is_builtin` classification: a sample across
+    /// every family must report `true` (including the case-insensitive math
+    /// name `SiN`, the list-owned `length`, and a function-existence-relevant
+    /// name like `function-exists`), and unknown / plain-CSS names must report
+    /// `false`. Mis-classification flips CSS output (slash-division collapse,
+    /// `function-exists`/`feature-exists`), so this is a real behavior lock.
+    #[test]
+    fn is_builtin_locks_classification() {
+        for name in [
+            "lighten",         // color_ext
+            "rgb",             // color
+            "color-space",     // color (modern)
+            "sin",             // math
+            "SiN",             // math, case-insensitive
+            "map-get",         // map
+            "length",          // list (not map)
+            "selector-parse",  // selector
+            "function-exists", // meta
+        ] {
+            assert!(is_builtin(name), "expected `{name}` to be a builtin");
+        }
+        for name in ["totally-unknown-fn", "rotate", "translatex"] {
+            assert!(!is_builtin(name), "expected `{name}` not to be a builtin");
+        }
+    }
+
+    /// Equivalence guard: the new per-family-`NAMES` union must classify
+    /// *exactly* the historical hardcoded set (the union of the pre-refactor
+    /// `is_builtin` `matches!` arms + `is_math_builtin_name` arms). Locks that
+    /// the single-source refactor changed no name's classification, and that no
+    /// extra name leaked into the union. Math names are tested case-insensitively
+    /// (`SiN`) since the family lowercases before dispatch.
+    #[test]
+    fn is_builtin_matches_historical_set() {
+        // The exact pre-refactor non-math `matches!` arms.
+        const OLD_NON_MATH: &[&str] = &[
+            // color (legacy + modern)
+            "rgb",
+            "rgba",
+            "hsl",
+            "hsla",
+            "hwb",
+            "lab",
+            "lch",
+            "oklab",
+            "oklch",
+            "color",
+            "mix",
+            "lighten",
+            "darken",
+            "percentage",
+            "red",
+            "green",
+            "blue",
+            "alpha",
+            "color-space",
+            "color-channel",
+            "color-to-space",
+            "color-is-legacy",
+            "color-is-missing",
+            "color-is-in-gamut",
+            "color-is-powerless",
+            "color-to-gamut",
+            "color-same",
+            // color_ext
+            "adjust-hue",
+            "complement",
+            "invert",
+            "grayscale",
+            "saturate",
+            "desaturate",
+            "opacify",
+            "fade-in",
+            "transparentize",
+            "fade-out",
+            "hue",
+            "saturation",
+            "lightness",
+            "whiteness",
+            "blackness",
+            "opacity",
+            "ie-hex-str",
+            "scale-color",
+            "adjust-color",
+            "change-color",
+            // string
+            "quote",
+            "unquote",
+            "to-upper-case",
+            "to-lower-case",
+            "str-length",
+            "str-index",
+            "str-slice",
+            "str-insert",
+            "unique-id",
+            // map
+            "map-get",
+            "map-keys",
+            "map-values",
+            "map-has-key",
+            "map-merge",
+            "map-remove",
+            // list (length/nth are list-owned)
+            "length",
+            "nth",
+            "set-nth",
+            "join",
+            "append",
+            "index",
+            "list-separator",
+            "is-bracketed",
+            "zip",
+            // meta
+            "get-function",
+            "type-of",
+            "unit",
+            "unitless",
+            "comparable",
+            "inspect",
+            "feature-exists",
+            "function-exists",
+            "calc-name",
+            "calc-args",
+            // selector
+            "selector-nest",
+            "selector-append",
+            "selector-extend",
+            "selector-replace",
+            "selector-unify",
+            "is-superselector",
+            "simple-selectors",
+            "selector-parse",
+        ];
+        // The exact pre-refactor `is_math_builtin_name` arms (lowercase).
+        const OLD_MATH: &[&str] = &[
+            "abs", "ceil", "floor", "round", "min", "max", "clamp", "sign", "pow", "sqrt", "exp", "log",
+            "hypot", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "rem", "mod", "random",
+        ];
+
+        // Direction 1: every name the old set owned is still a builtin.
+        for &name in OLD_NON_MATH.iter().chain(OLD_MATH.iter()) {
+            assert!(is_builtin(name), "old builtin `{name}` no longer classified");
+        }
+
+        // Direction 2: the new union introduces no name the old set lacked.
+        let new_union: Vec<&str> = super::color::NAMES
+            .iter()
+            .chain(super::color::MODERN_NAMES.iter())
+            .chain(super::color_ext::NAMES.iter())
+            .chain(super::string::NAMES.iter())
+            .chain(super::map::NAMES.iter())
+            .chain(super::list::NAMES.iter())
+            .chain(super::meta::NAMES.iter())
+            .chain(super::selector::NAMES.iter())
+            .chain(super::math::NAMES.iter())
+            .copied()
+            .collect();
+        let old_set: std::collections::BTreeSet<&str> =
+            OLD_NON_MATH.iter().chain(OLD_MATH.iter()).copied().collect();
+        for name in &new_union {
+            assert!(
+                old_set.contains(name),
+                "new union introduced unexpected name `{name}`"
+            );
+        }
+        // Cardinality match (no duplicates within the families, exact size).
+        let new_set: std::collections::BTreeSet<&str> = new_union.iter().copied().collect();
+        assert_eq!(new_set.len(), new_union.len(), "duplicate name in family NAMES");
+        assert_eq!(new_set, old_set, "new union != historical builtin set");
+    }
 }
