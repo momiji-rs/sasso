@@ -194,6 +194,34 @@ pub(crate) enum OutNode {
     },
 }
 
+impl OutNode {
+    /// A non-evaluated style rule — a plain-CSS passthrough, an `@at-root`
+    /// graft, a reparent shell, etc. It carries no per-complex line breaks and
+    /// `extend_base` `usize::MAX`, so the `@extend` pass always applies the
+    /// sequential default. Only `selectors`, `items` and `lines` vary across
+    /// the call sites; the rest is shared boilerplate.
+    pub(crate) fn plain_rule(selectors: Vec<String>, items: Vec<OutItem>, lines: SrcLines) -> OutNode {
+        OutNode::Rule {
+            selectors: RuleSelectors::Raw(selectors),
+            linebreaks: Vec::new(),
+            items,
+            lines,
+            extend_base: usize::MAX,
+        }
+    }
+
+    /// A childless at-rule (`@name prelude;`) — no body, no block.
+    pub(crate) fn childless_at_rule(name: String, prelude: String, lines: SrcLines) -> OutNode {
+        OutNode::AtRule {
+            name,
+            prelude,
+            body: Vec::new(),
+            has_block: false,
+            lines,
+        }
+    }
+}
+
 /// A media query resolved to its final string components, ready to serialize
 /// and to merge with nested queries (dart-sass `CssMediaQuery`).
 #[derive(Clone, PartialEq, Eq)]
@@ -324,13 +352,7 @@ impl Sink<'_> {
     fn push_childless_at_rule(&mut self, name: String, prelude: String, lines: SrcLines) {
         match self {
             Sink::Rule { items, .. } => items.push(OutItem::ChildlessAtRule { name, prelude, lines }),
-            _ => self.push_at_rule(OutNode::AtRule {
-                name,
-                prelude,
-                body: Vec::new(),
-                has_block: false,
-                lines,
-            }),
+            _ => self.push_at_rule(OutNode::childless_at_rule(name, prelude, lines)),
         }
     }
 
@@ -378,22 +400,14 @@ impl Sink<'_> {
                     lines,
                 }),
                 OutItem::Comment(text, lines) => body.push(OutNode::Comment(text, lines)),
-                OutItem::ChildlessAtRule { name, prelude, lines } => body.push(OutNode::AtRule {
-                    name,
-                    prelude,
-                    body: Vec::new(),
-                    has_block: false,
-                    lines,
-                }),
+                OutItem::ChildlessAtRule { name, prelude, lines } => {
+                    body.push(OutNode::childless_at_rule(name, prelude, lines))
+                }
                 // A plain-CSS nested rule reaching an at-root sink becomes a
                 // top-level rule carrying its items.
-                OutItem::NestedRule { selectors, items } => body.push(OutNode::Rule {
-                    selectors: RuleSelectors::Raw(selectors),
-                    linebreaks: Vec::new(),
-                    items,
-                    lines: SrcLines::default(),
-                    extend_base: usize::MAX,
-                }),
+                OutItem::NestedRule { selectors, items } => {
+                    body.push(OutNode::plain_rule(selectors, items, SrcLines::default()))
+                }
                 // Likewise a plain-CSS nested at-rule becomes a top-level one,
                 // its items wrapped as bare at-rule children.
                 OutItem::NestedAtRule { name, prelude, items } => body.push(OutNode::AtRule {
@@ -416,30 +430,16 @@ impl Sink<'_> {
                                 lines,
                             },
                             OutItem::Comment(text, lines) => OutNode::Comment(text, lines),
-                            OutItem::NestedRule { selectors, items } => OutNode::Rule {
-                                selectors: RuleSelectors::Raw(selectors),
-                                linebreaks: Vec::new(),
-                                items,
-                                lines: SrcLines::default(),
-                                extend_base: usize::MAX,
-                            },
-                            OutItem::ChildlessAtRule { name, prelude, lines } => OutNode::AtRule {
-                                name,
-                                prelude,
-                                body: Vec::new(),
-                                has_block: false,
-                                lines,
-                            },
+                            OutItem::NestedRule { selectors, items } => {
+                                OutNode::plain_rule(selectors, items, SrcLines::default())
+                            }
+                            OutItem::ChildlessAtRule { name, prelude, lines } => {
+                                OutNode::childless_at_rule(name, prelude, lines)
+                            }
                             OutItem::NestedAtRule { name, prelude, items } => OutNode::AtRule {
                                 name,
                                 prelude,
-                                body: vec![OutNode::Rule {
-                                    selectors: RuleSelectors::Raw(Vec::new()),
-                                    linebreaks: Vec::new(),
-                                    items,
-                                    lines: SrcLines::default(),
-                                    extend_base: usize::MAX,
-                                }],
+                                body: vec![OutNode::plain_rule(Vec::new(), items, SrcLines::default())],
                                 has_block: true,
                                 lines: SrcLines::default(),
                             },
@@ -3392,13 +3392,11 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
     }
     let mut out = Vec::new();
     if !preserved.is_empty() {
-        out.push(OutNode::Rule {
-            selectors: RuleSelectors::Raw(parents.to_vec()),
-            linebreaks: Vec::new(),
-            items: preserved,
-            lines: SrcLines::default(),
-            extend_base: usize::MAX,
-        });
+        out.push(OutNode::plain_rule(
+            parents.to_vec(),
+            preserved,
+            SrcLines::default(),
+        ));
     }
     out.extend(rest);
     out

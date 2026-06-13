@@ -103,10 +103,16 @@ the full spec. **Do not merge 1c/1d without this.** Two selectors must hash/
 compare equal *iff* their render strings are equal, or dedup/origin/trim
 ordering silently corrupts on `:is()`/`:not()` args + pseudo self-ref.
 
-**1b. Decide the `ComplexComponent` combinator storage shrink NOW** (before any
-`Hash` derive). `[memory · S]` `Vec<Combinator>` per component → `Option<
-Combinator>` or a hand-rolled inline-1 (std only). Must precede 1c — it changes
-the derived `Hash`/`Eq`, so doing it after would rehash the maps twice.
+**1b. ~~Decide the `ComplexComponent` combinator storage shrink NOW~~ — WONTFIX
+(2026-06-12).** `[memory · S]` `Vec<Combinator>` per component → an inline-1-
+with-spill (`Option` loses the bogus multi-combinator case `c > > d`). Closed as
+low-ROI: the common descendant join is an *empty* Vec (already no heap alloc),
+`Combinator` is 1 B, and the strategic window passed — this was meant to precede
+1c to avoid rehashing the maps twice, but 1c/1d shipped without it, so doing it
+now means re-touching the `Hash`/`Eq` derives + re-running the 1a parity proof +
+re-bench for a ~16 B/component win. A re-bench after the leniency campaign
+confirmed the cost of *not* doing 1b is nil: 1a parity proof clean (0 violations
+across 13 896), sasso 1.14× faster than dart, byte-identical output.
 
 **1c. FxHash + typed-key the extend maps.** `[perf·memory · M · the higher-ROI
 half]` Derive `Hash`/`Eq` on `Complex`/`Compound`/`Simple`; key

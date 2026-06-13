@@ -777,13 +777,11 @@ impl<'a> Evaluator<'a> {
             let mut decls: Vec<OutItem> = Vec::new();
             let flush = |decls: &mut Vec<OutItem>, wrapped: &mut Vec<OutNode>| {
                 if !decls.is_empty() {
-                    wrapped.push(OutNode::Rule {
-                        selectors: RuleSelectors::Raw(parents.to_vec()),
-                        linebreaks: Vec::new(),
-                        items: std::mem::take(decls),
-                        lines: SrcLines::default(),
-                        extend_base: usize::MAX,
-                    });
+                    wrapped.push(OutNode::plain_rule(
+                        parents.to_vec(),
+                        std::mem::take(decls),
+                        SrcLines::default(),
+                    ));
                 }
             };
             for n in out {

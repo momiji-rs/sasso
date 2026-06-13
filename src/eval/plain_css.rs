@@ -46,13 +46,11 @@ impl<'a> Evaluator<'a> {
                 }
             }
             if !preserved.is_empty() {
-                sink.push_at_rule(OutNode::Rule {
-                    selectors: RuleSelectors::Raw(parents.to_vec()),
-                    linebreaks: Vec::new(),
-                    items: preserved,
-                    lines: SrcLines::default(),
-                    extend_base: usize::MAX,
-                });
+                sink.push_at_rule(OutNode::plain_rule(
+                    parents.to_vec(),
+                    preserved,
+                    SrcLines::default(),
+                ));
             }
         }
         for stmt in stmts {
@@ -82,18 +80,16 @@ impl<'a> Evaluator<'a> {
                     // A childless rule is invisible (dart-sass skips it when
                     // serializing) — e.g. when its whole body bubbled out.
                     if !items.is_empty() {
-                        sink.push_at_rule(OutNode::Rule {
-                            selectors: RuleSelectors::Raw(selectors),
-                            linebreaks: Vec::new(),
+                        sink.push_at_rule(OutNode::plain_rule(
+                            selectors,
                             items,
-                            lines: self.stamp(SrcLines {
+                            self.stamp(SrcLines {
                                 file: 0,
                                 start: r.brace_line,
                                 end: r.end_line,
                                 col: 0,
                             }),
-                            extend_base: usize::MAX,
-                        });
+                        ));
                     }
                     for node in bubbled {
                         sink.push_at_rule(node);
@@ -211,18 +207,16 @@ impl<'a> Evaluator<'a> {
                     let selectors = self.css_selectors(&r.selector, false)?;
                     let (items, bubbled) = self.css_rule_children(&r.body, &selectors)?;
                     if !items.is_empty() {
-                        out.push(OutNode::Rule {
-                            selectors: RuleSelectors::Raw(selectors),
-                            linebreaks: Vec::new(),
+                        out.push(OutNode::plain_rule(
+                            selectors,
                             items,
-                            lines: self.stamp(SrcLines {
+                            self.stamp(SrcLines {
                                 file: 0,
                                 start: r.brace_line,
                                 end: r.end_line,
                                 col: 0,
                             }),
-                            extend_base: usize::MAX,
-                        });
+                        ));
                     }
                     out.extend(bubbled);
                 }
@@ -354,13 +348,11 @@ impl<'a> Evaluator<'a> {
             bubbled.push(OutNode::AtRule {
                 name: name.to_string(),
                 prelude,
-                body: vec![OutNode::Rule {
-                    selectors: RuleSelectors::Raw(parent_selectors.to_vec()),
-                    linebreaks: Vec::new(),
-                    items: inner,
-                    lines: SrcLines::default(),
-                    extend_base: usize::MAX,
-                }],
+                body: vec![OutNode::plain_rule(
+                    parent_selectors.to_vec(),
+                    inner,
+                    SrcLines::default(),
+                )],
                 has_block: true,
                 lines: SrcLines::default(),
             });
