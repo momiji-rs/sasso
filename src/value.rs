@@ -449,6 +449,20 @@ pub(crate) fn serialize_quoted(text: &str) -> String {
     let has_single = text.contains('\'');
     // Use single quotes only when the text has a `"` and no `'`.
     let quote = if has_double && !has_single { '\'' } else { '"' };
+    // Fast path: when no character needs escaping, the body is `text` verbatim
+    // between the quotes — skip the `Vec<char>` and the per-char loop. The
+    // predicate mirrors the loop's two escape branches exactly.
+    let needs_escape = text.chars().any(|c| {
+        let cp = c as u32;
+        c == quote || c == '\\' || (cp <= 0x1F && c != '\t') || cp == 0x7F || is_private_use(cp)
+    });
+    if !needs_escape {
+        let mut out = String::with_capacity(text.len() + 2);
+        out.push(quote);
+        out.push_str(text);
+        out.push(quote);
+        return out;
+    }
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len() + 2);
     out.push(quote);
@@ -484,10 +498,13 @@ pub(crate) fn serialize_quoted(text: &str) -> String {
 /// unlike in a quoted string, are written verbatim here); every other code
 /// point is written verbatim.
 pub(crate) fn serialize_unquoted(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if !chars.iter().any(|&c| c == '\n' || is_private_use(c as u32)) {
+    // Fast path: nothing to rewrite unless a newline or private-use char is
+    // present. Scan without allocating; only collect into a `Vec<char>` (needed
+    // for the escape look-ahead) on the rare slow path.
+    if !text.chars().any(|c| c == '\n' || is_private_use(c as u32)) {
         return text.to_string();
     }
+    let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut after_newline = false;
     for (i, &c) in chars.iter().enumerate() {
