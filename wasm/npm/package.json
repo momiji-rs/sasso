@@ -1,6 +1,6 @@
 {
   "name": "@momiji-rs/sasso",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A pure-Rust SCSS to CSS compiler (a dart-sass alternative), as a tiny dependency-free WebAssembly module.",
   "type": "module",
   "main": "./sasso.mjs",

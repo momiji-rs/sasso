@@ -11,6 +11,8 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-13
+
 ### Fixed
 
 - Compressed output now emits a color's canonical CSS name when it is no longer
