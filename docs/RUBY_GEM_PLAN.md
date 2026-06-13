@@ -4,6 +4,43 @@
 > Produced by a 5-agent research workflow (2026-06-13), verified against the repo.
 > Path A (in-process `Sasso.compile`); a `sasso-rails` gem layers on top later.
 
+## ⚠️ REPO-LAYOUT DECISION — REVISED after a second research pass (2026-06-13)
+
+A follow-up WebSearch-grounded study **overturned this plan's "in-repo `ruby/`
++ `path` dependency" assumption.** Corrected decision:
+
+> **The gem lives in a SEPARATE repo `momiji-rs/sasso-ruby`, and `ext/sasso/Cargo.toml`
+> depends on the PUBLISHED crate `sasso = "=X.Y.Z"` from crates.io — NOT a `path` dep.**
+
+Why (all verified live, not from memory):
+- **`grass-ruby`** — the exact analog (a pure-Rust Sass compiler wrapped via
+  magnus+rb-sys) — is a separate repo depending on `grass_compiler` from
+  crates.io. So are **wasmtime-rb** (`wasmtime = "=45.0.0"`), **ankane/ruby-polars**
+  (`polars = "=0.54.4"`), **ankane/tokenizers-ruby** (`=0.23.1`), **commonmarker**/
+  **selma**. **Zero** verified examples of a same-owner Rust-core + rb-sys gem in
+  the core monorepo via a path dep.
+- **`cargo publish` refuses path-only deps**, and a *source* gem compiles on the
+  end-user's machine — so a shipped gem can't carry an unresolved `path` dep
+  pointing outside its payload. sasso v0.3.0 is already on crates.io, so the
+  exact-pin crates.io dep is free + clean (no vendoring / publish-time rewrite).
+- **Release decoupling**: the gem tags itself on its own cadence (bump the `=`
+  pin when you choose); a `sasso` core release does NOT drag the heavy
+  cross-platform fat-gem matrix.
+
+**Unchanged**: the native-extension *architecture* below (magnus + rb-sys,
+`ext/sasso/` layout, the `Sasso.compile` API, the §2 skeletons) is correct —
+only (a) it moves to the separate repo, (b) `ext/sasso/Cargo.toml` uses
+`sasso = "=0.3.0"` instead of `path = "../../.."`, (c) no root-`Cargo.toml`
+workspace-exclude edit is needed, and (d) the release workflow lives in the gem
+repo (gem-owned `v*` tag, **floating** gem version + **exact `=`** core pin — the
+ankane pattern). **`wasm/` stays in THIS repo** (same-toolchain first-party
+artifact); the Ruby gem is the well-precedented exception that goes external.
+
+Everything from "## 0" down is the original in-repo plan; read it for the
+binding mechanics + skeletons, applying the four deltas above.
+
+---
+
 # Implementation Plan: `sasso` Ruby native-extension gem (magnus + rb-sys, precompiled, RubyGems Trusted Publishing)
 
 ## 0. Ground truth (verified against the repo @ `36abc7c`)
