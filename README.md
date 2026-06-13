@@ -153,6 +153,15 @@ a non-gating metric). The 8 excluded cases are tagged `:todo` for **dart-sass
 itself** upstream — dart-sass doesn't pass them either; sasso matches
 dart-sass's actual behaviour on all 8 regardless.
 
+**Strict input validation, too.** Matching dart-sass means rejecting what
+dart-sass rejects, not just reproducing its output. sasso errors — rather than
+silently accepting — on an invalid hex literal (`#00000`), out-of-grammar
+`rgb()`/`hsl()` arguments, a duplicate `@mixin`/`@function` parameter, a
+misplaced `@content`/`@extend`, a style rule or declaration inside a
+`@function` body, a malformed `:nth-child()` / empty `:not()` selector, a bad
+`@charset` or `@at-root (…)` query, and more — each with dart-sass's exact
+message.
+
 Run it yourself:
 
 ```console
@@ -182,8 +191,12 @@ compiler) by ~1.9–2.4×:
 **scoped bump-arena allocator** (one audited `unsafe` module, Miri- and
 AddressSanitizer-verified; the rest of the library stays `unsafe`-free) gives a
 further ~1.5× by turning each compile's allocations into a pointer bump freed
-wholesale at the end. Full methodology, per-file numbers and the correctness
-diff are in [`bench/three_way.md`](bench/three_way.md); run it yourself with
+wholesale at the end. Composite values (strings, lists, maps) are
+reference-counted, so reading a `$variable` is an O(1) refcount bump, not a
+deep copy — on a large list passed through a call chain without mutation this
+cuts both instructions (~7×) and peak memory (~13×). Full methodology,
+per-file numbers and the correctness diff are in
+[`bench/three_way.md`](bench/three_way.md); run it yourself with
 `cd bench && RUNS=12 WARMUP=3 LOOP_N=200 bash scripts/run_bench.sh`.
 
 ## WebAssembly
