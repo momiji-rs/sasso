@@ -306,6 +306,56 @@ unsafe impl GlobalAlloc for ScopedAlloc {
         }
         // in-arena: no-op (reclaimed wholesale on scope reset)
     }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // Bump-arena fast path: if `ptr` is the MOST RECENT allocation in this
+        // thread's arena (its end sits exactly at the cursor), resize it in
+        // place by moving the cursor — no copy, and no dead intermediate buffer
+        // left behind. A naive realloc (alloc-new + copy + no-op dealloc) is
+        // what makes a growing `Vec` leak arena space on every doubling
+        // (4→8→16→…); this reclaims it for the common "grow the value just
+        // allocated" pattern, the dominant case in the parser/evaluator.
+        let resized = TL.with(|tl| {
+            if tl.depth.get() == 0 {
+                return false;
+            }
+            let base = tl.base.get();
+            if base.is_null() {
+                return false;
+            }
+            let addr = ptr as usize;
+            // `ptr` must lie in THIS arena (≥ base) AND be the last bump
+            // (`addr + old_size == cursor`). A system pointer or an earlier
+            // (non-tail) arena block fails this and takes the copy fallback.
+            if addr < base as usize || addr + layout.size() != tl.cursor.get() {
+                return false;
+            }
+            match addr.checked_add(new_size) {
+                Some(new_end) if new_end <= tl.end.get() => {
+                    tl.cursor.set(new_end);
+                    true
+                }
+                // A grow past the arena end (or overflow) → copy fallback.
+                _ => false,
+            }
+        });
+        if resized {
+            return ptr;
+        }
+        // Fallback: the stock `GlobalAlloc::realloc` (alloc new, copy the
+        // overlap, free old). `self.alloc`/`self.dealloc` route arena-vs-system
+        // themselves; the old block, if in-arena, is reclaimed at scope reset.
+        // SAFETY: same contract and aliasing as the default impl.
+        unsafe {
+            let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+            let new_ptr = self.alloc(new_layout);
+            if !new_ptr.is_null() {
+                core::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
+                self.dealloc(ptr, layout);
+            }
+            new_ptr
+        }
+    }
 }
 
 /// An RAII scope marker. Construct it on entering a compile; on `drop` (the
@@ -415,6 +465,23 @@ impl Arena {
         let p = ptr as usize;
         p >= self.base as usize && p < self.end
     }
+
+    /// Twin of [`ScopedAlloc::realloc`]'s logic: extend the last bump in place,
+    /// else copy to a fresh allocation.
+    fn realloc(&self, ptr: *mut u8, old: Layout, new_size: usize) -> Option<*mut u8> {
+        let addr = ptr as usize;
+        if addr >= self.base as usize && addr + old.size() == self.cursor.get() {
+            let new_end = addr.checked_add(new_size)?;
+            if new_end <= self.end {
+                self.cursor.set(new_end);
+                return Some(ptr);
+            }
+        }
+        let np = self.alloc(Layout::from_size_align(new_size, old.align()).ok()?)?;
+        // SAFETY: np is a fresh, non-overlapping allocation of >= copy length.
+        unsafe { core::ptr::copy_nonoverlapping(ptr, np, old.size().min(new_size)) };
+        Some(np)
+    }
 }
 
 #[cfg(test)]
@@ -471,6 +538,29 @@ mod tests {
 
     fn layout(size: usize, align: usize) -> Layout {
         Layout::from_size_align(size, align).unwrap()
+    }
+
+    #[test]
+    fn realloc_extends_tail_in_place_else_copies() {
+        let a = Arena::with_system_backing(64 * 1024).unwrap();
+        let p = a.alloc(layout(8, 8)).unwrap();
+        // SAFETY: p is a live 8-byte allocation.
+        unsafe { std::ptr::write_bytes(p, 0xCD, 8) };
+        let used = a.used();
+        // Tail grow: same pointer, only the delta is bumped (no dead buffer).
+        let p2 = a.realloc(p, layout(8, 8), 16).unwrap();
+        assert_eq!(p, p2, "tail realloc grows in place");
+        assert_eq!(a.used(), used + 8, "only the +8 delta is consumed");
+        // SAFETY: p2 still points at the (now larger) live block.
+        unsafe { assert_eq!(*p2, 0xCD, "data preserved in place") };
+        // Intervening allocation makes p2 no longer the tail → copy fallback.
+        let _q = a.alloc(layout(8, 8)).unwrap();
+        let used_mid = a.used();
+        let p3 = a.realloc(p2, layout(16, 8), 32).unwrap();
+        assert_ne!(p2, p3, "non-tail realloc copies to a fresh block");
+        assert!(a.used() > used_mid, "fallback allocates fresh");
+        // SAFETY: p3 is the fresh block holding the copied bytes.
+        unsafe { assert_eq!(*p3, 0xCD, "data copied to the new block") };
     }
 
     #[test]
