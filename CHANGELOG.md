@@ -11,6 +11,14 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Fixed
+
+- Compressed output now emits a color's canonical CSS name when it is no longer
+  than the shortest hex, matching dart-sass (`red` not `#f00`, `aqua` not
+  `#0ff`; duplicate names resolve to dart's canonical pick — `cyan`/`grey` →
+  `aqua`/`gray`). Expanded output (which preserves the authored spelling) is
+  unchanged.
+
 ## [0.3.0] - 2026-06-13
 
 Since `0.2.0`. Conformance holds at **100% of the attempted sass-spec suite**

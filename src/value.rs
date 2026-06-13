@@ -1606,14 +1606,23 @@ impl Color {
         }
         let opaque = (self.a - 1.0).abs() < f64::EPSILON;
         if opaque && self.channels_are_int() {
-            let hex = format!(
-                "#{:02x}{:02x}{:02x}",
-                self.r.round().clamp(0.0, 255.0) as u8,
-                self.g.round().clamp(0.0, 255.0) as u8,
-                self.b.round().clamp(0.0, 255.0) as u8
-            );
+            let r = self.r.round().clamp(0.0, 255.0) as u8;
+            let g = self.g.round().clamp(0.0, 255.0) as u8;
+            let b = self.b.round().clamp(0.0, 255.0) as u8;
+            let hex = format!("#{r:02x}{g:02x}{b:02x}");
             if compressed {
-                return shorten_hex(&hex);
+                // dart-sass compressed: emit whichever is shorter, the shortest
+                // hex or the color's canonical CSS name (name wins ties — e.g.
+                // `aqua` == `#0ff`). `compressed_color_name` is the value-keyed
+                // reverse table of exactly the names that are no longer than the
+                // hex; absent => hex is shorter.
+                let short = shorten_hex(&hex);
+                if let Some(name) = compressed_color_name(r, g, b) {
+                    if name.len() <= short.len() {
+                        return name.to_string();
+                    }
+                }
+                return short;
             }
             return hex;
         }
@@ -1805,6 +1814,59 @@ fn shorten_hex(hex: &str) -> String {
     } else {
         hex.to_string()
     }
+}
+
+/// The canonical CSS name for an opaque RGB value, but ONLY for the colors whose
+/// name is no longer than their shortest hex — i.e. the exact set dart-sass
+/// prefers in compressed output (`red` over `#f00`, `aqua` over `#0ff`). Colors
+/// whose hex is shorter (e.g. `magenta` -> `#f0f`) are deliberately absent.
+/// Derived from the dart-sass oracle, so duplicate names resolve to dart's
+/// canonical pick (cyan -> aqua, grey -> gray).
+fn compressed_color_name(r: u8, g: u8, b: u8) -> Option<&'static str> {
+    Some(match (r, g, b) {
+        (0, 255, 255) => "aqua",
+        (240, 255, 255) => "azure",
+        (245, 245, 220) => "beige",
+        (255, 228, 196) => "bisque",
+        (0, 0, 255) => "blue",
+        (165, 42, 42) => "brown",
+        (255, 127, 80) => "coral",
+        (220, 20, 60) => "crimson",
+        (139, 0, 0) => "darkred",
+        (105, 105, 105) => "dimgray",
+        (255, 215, 0) => "gold",
+        (128, 128, 128) => "gray",
+        (0, 128, 0) => "green",
+        (255, 105, 180) => "hotpink",
+        (75, 0, 130) => "indigo",
+        (255, 255, 240) => "ivory",
+        (240, 230, 140) => "khaki",
+        (0, 255, 0) => "lime",
+        (250, 240, 230) => "linen",
+        (128, 0, 0) => "maroon",
+        (0, 0, 128) => "navy",
+        (253, 245, 230) => "oldlace",
+        (128, 128, 0) => "olive",
+        (255, 165, 0) => "orange",
+        (218, 112, 214) => "orchid",
+        (205, 133, 63) => "peru",
+        (255, 192, 203) => "pink",
+        (221, 160, 221) => "plum",
+        (128, 0, 128) => "purple",
+        (255, 0, 0) => "red",
+        (250, 128, 114) => "salmon",
+        (160, 82, 45) => "sienna",
+        (192, 192, 192) => "silver",
+        (135, 206, 235) => "skyblue",
+        (255, 250, 250) => "snow",
+        (210, 180, 140) => "tan",
+        (0, 128, 128) => "teal",
+        (216, 191, 216) => "thistle",
+        (255, 99, 71) => "tomato",
+        (238, 130, 238) => "violet",
+        (245, 222, 179) => "wheat",
+        _ => return None,
+    })
 }
 
 impl ModernColor {
@@ -2701,6 +2763,36 @@ mod tests {
         assert_eq!(opaque4.to_css(false), "#336699");
         let partial = Color::from_hex("33669980").expect("valid hex");
         assert!(partial.to_css(false).starts_with("rgba("));
+    }
+
+    #[test]
+    fn compressed_uses_shortest_of_name_or_hex() {
+        // dart-sass compressed emits whichever is shorter, the canonical name or
+        // the shortest hex (name wins ties).
+        let name = |hex: &str| Color::from_hex(hex).expect("valid hex").to_css(true);
+
+        // Name strictly shorter than hex -> name.
+        assert_eq!(name("ff0000"), "red"); // red(3) < #f00(4)
+        assert_eq!(name("ffa500"), "orange"); // orange(6) < #ffa500(7)
+                                              // Tie (#rgb-expandable, 4 vs 4) -> name wins.
+        assert_eq!(name("00ffff"), "aqua");
+        assert_eq!(name("0000ff"), "blue");
+        assert_eq!(name("00ff00"), "lime");
+        // Hex shorter than name -> hex.
+        assert_eq!(name("ff00ff"), "#f0f"); // magenta(7) > #f0f(4)
+        assert_eq!(name("ffffff"), "#fff"); // white(5) > #fff(4)
+                                            // No name -> hex.
+        assert_eq!(name("3366cc"), "#36c");
+
+        // Duplicate names resolve to dart's canonical pick (value, not spelling).
+        assert_eq!(named_color("cyan").unwrap().to_css(true), "aqua");
+        assert_eq!(named_color("grey").unwrap().to_css(true), "gray");
+        // A computed (non-literal) color still names by value.
+        assert_eq!(Color::rgb(0.0, 255.0, 255.0, 1.0).to_css(true), "aqua");
+
+        // Expanded is unaffected: authored spelling is preserved.
+        assert_eq!(Color::from_hex("ff0000").unwrap().to_css(false), "#ff0000");
+        assert_eq!(named_color("red").unwrap().to_css(false), "red");
     }
 
     #[test]
