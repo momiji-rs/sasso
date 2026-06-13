@@ -158,15 +158,15 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             *prev = *lines;
         }
         OutNode::Raw(s) => {
-            // Internal sentinels (style-group-end) never reach the output —
-            // and don't disturb the previous-sibling line state.
-            if s.starts_with('\u{0}') {
-                return false;
-            }
             out.push_str(indent);
             out.push_str(s);
             out.push('\n');
             *prev = SrcLines::default();
+        }
+        // Control-only hoist markers (consumed by the bubbling passes) never
+        // reach the output and don't disturb the previous-sibling line state.
+        OutNode::GroupEnd | OutNode::MediaHoist | OutNode::AtRootHoist { .. } | OutNode::AtRootPackTight => {
+            return false;
         }
         OutNode::Blank => {
             // A synthetic group separator: dart has no such node, so it leaves
@@ -591,12 +591,10 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
         // Loud comments are dropped in compressed output (the slice does
         // not yet special-case `/*!` important comments).
         OutNode::Comment(..) => {}
-        OutNode::Raw(s) => {
-            if !s.starts_with('\u{0}') {
-                out.push_str(s)
-            }
-        }
+        OutNode::Raw(s) => out.push_str(s),
         OutNode::Blank => {}
+        // Control-only hoist markers never reach the output.
+        OutNode::GroupEnd | OutNode::MediaHoist | OutNode::AtRootHoist { .. } | OutNode::AtRootPackTight => {}
         OutNode::AtDecl {
             prop,
             value,

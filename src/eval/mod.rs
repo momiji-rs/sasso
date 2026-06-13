@@ -192,6 +192,30 @@ pub(crate) enum OutNode {
         /// serializer's trailing-comment rule; default = disabled.
         lines: SrcLines,
     },
+    /// Control-only marker (never serialized): the end of a completed top-level
+    /// style rule's output group (dart-sass `isGroupEnd`). The next group gets a
+    /// blank line even when the group ended in a bubbled at-rule. Consumed by the
+    /// next `push_group`; any survivor is skipped by the emitters.
+    GroupEnd,
+    /// Control-only marker (never serialized): left in an enclosing `@media` body
+    /// where a merged nested media rule bubbled out; the outer rule splits its own
+    /// children around it.
+    MediaHoist,
+    /// Control-only marker (never serialized): left where an `@at-root` hoisted a
+    /// batch out of one or more enclosing at-rules. `target` is the batch's graft
+    /// target (the index of the topmost EXCLUDED at-rule layer — dart
+    /// `_trimIncluded`). Each enclosing layer below the target splits around the
+    /// marker and passes it outward; the layer whose body sits at the target depth
+    /// consumes it — target 0 means the batch re-enters at the document root,
+    /// between the outermost layer's segments, while a deeper target grafts INTO
+    /// that layer's own body.
+    AtRootHoist {
+        target: usize,
+    },
+    /// Control-only marker (never serialized): trailing sentinel after a placed
+    /// at-root batch — the next top-level group packs tight against it (no blank
+    /// line), and the emitters skip it.
+    AtRootPackTight,
 }
 
 impl OutNode {
@@ -368,7 +392,7 @@ impl Sink<'_> {
             // next top-level group blank-separates; inside a block (or at-root
             // body) the comment vanishes with no separator, as dart does.
             if let Sink::Top(out) = self {
-                out.push(OutNode::Raw(STYLE_GROUP_END.to_string()));
+                out.push(OutNode::GroupEnd);
             }
             return;
         }
@@ -523,7 +547,7 @@ impl Sink<'_> {
                 // next group gets a blank line even after an at-rule
                 // (dart-sass isGroupEnd, set only by visitStyleRule).
                 if !out.is_empty() {
-                    out.push(OutNode::Raw(STYLE_GROUP_END.to_string()));
+                    out.push(OutNode::GroupEnd);
                 }
             }
             Sink::Rule { .. } => {
@@ -664,12 +688,12 @@ pub(crate) struct Evaluator<'a> {
     /// Monotonic counter for unique load-css copy keys.
     copy_counter: std::cell::Cell<usize>,
     /// Queue of merged nested `@media` nodes bubbling out of an enclosing
-    /// media rule, taken in order at the `\u{0}MEDIA_HOIST\u{0}` markers the
+    /// media rule, taken in order at the [`OutNode::MediaHoist`] markers the
     /// inner rule leaves in the outer body.
     media_hoist: Vec<Vec<OutNode>>,
     /// Batches hoisted by `@at-root` queries, taken in order at the
-    /// `AT_ROOT_HOIST_MARKER`s; each batch is already re-wrapped in the kept
-    /// at-rule layers BELOW its graft target and travels outward to it.
+    /// [`OutNode::AtRootHoist`] markers; each batch is already re-wrapped in the
+    /// kept at-rule layers BELOW its graft target and travels outward to it.
     at_root_hoist: std::collections::VecDeque<AtRootBatch>,
     /// The enclosing at-rule layers (outermost first), so `@at-root` queries
     /// can re-wrap their body in the layers the query keeps.
@@ -4173,12 +4197,6 @@ fn trim_leading_blanks(nodes: &mut Vec<OutNode>) {
     }
 }
 
-/// Sentinel marking the end of a completed top-level style rule's output
-/// group (dart-sass `isGroupEnd`): the next group gets a blank line even when
-/// the group ended in a bubbled at-rule. Consumed by the next `push_group`;
-/// any survivor is skipped by the emitters.
-const STYLE_GROUP_END: &str = "\u{0}STYLE_GROUP_END\u{0}";
-
 fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     if group.is_empty() {
         return;
@@ -4186,9 +4204,7 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     // A pack-tight or group-end sentinel attaches to the previous group
     // verbatim — no separator logic now; the NEXT group packs tight against
     // a pack-tight sentinel and blank-separates after a group-end one.
-    if group.len() == 1
-        && matches!(&group[0], OutNode::Raw(s) if s == AT_ROOT_PACK_TIGHT || s == STYLE_GROUP_END)
-    {
+    if group.len() == 1 && matches!(&group[0], OutNode::AtRootPackTight | OutNode::GroupEnd) {
         out.append(&mut group);
         return;
     }
@@ -4206,19 +4222,24 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     // A completed style rule always separates from the next group (dart
     // isGroupEnd); a top-level sentinel is consumed here, one inside a
     // wrapper just informs the decision (the emitters skip it).
-    let top_marker = matches!(out.last(), Some(OutNode::Raw(s)) if s == STYLE_GROUP_END);
+    let top_marker = matches!(out.last(), Some(OutNode::GroupEnd));
     if top_marker {
         out.pop();
     }
     let last_eff = out.last().map(last_effective);
-    let prev_group_end = top_marker || matches!(last_eff, Some(OutNode::Raw(s)) if s == STYLE_GROUP_END);
+    let prev_group_end = top_marker || matches!(last_eff, Some(OutNode::GroupEnd));
     // dart-sass never prefixes a blank line after an at-rule, a passed-through
     // CSS `@import` (a `Raw` at-rule), or a loud comment: the next group packs
     // tight against them. A blank line is only inserted after a style rule (or
     // top-level declaration) that already emitted CSS.
     let prev_packs_tight = match last_eff {
         Some(OutNode::AtRule { .. } | OutNode::Comment(..)) => true,
-        Some(OutNode::Raw(s)) => s != STYLE_GROUP_END,
+        // A passed-through CSS `@import` and the remaining hoist markers (which a
+        // module wrapper's last child can be) pack tight; only a group-end marker
+        // forces the separator.
+        Some(
+            OutNode::Raw(_) | OutNode::MediaHoist | OutNode::AtRootHoist { .. } | OutNode::AtRootPackTight,
+        ) => true,
         _ => false,
     };
     // A consumed group-end sentinel forces the separator even when popping it
@@ -4513,23 +4534,6 @@ fn dirname_of(key: &str) -> Option<String> {
         .map(|d| d.to_string_lossy().into_owned())
 }
 
-/// Sentinel left in an enclosing `@media` body where a merged nested media
-/// rule bubbled out; the outer rule splits its own children around it.
-const MEDIA_HOIST_MARKER: &str = "\u{0}MEDIA_HOIST\u{0}";
-
-/// Sentinel left where an `@at-root` hoisted a batch out of one or more
-/// enclosing at-rules, suffixed with the batch's graft target (the index of
-/// the topmost EXCLUDED at-rule layer — dart `_trimIncluded`). Each enclosing
-/// layer below the target splits around the marker and passes it outward; the
-/// layer whose body sits at the target depth consumes it — target 0 means the
-/// batch re-enters at the document root, between the outermost layer's
-/// segments, while a deeper target grafts INTO that layer's own body.
-const AT_ROOT_HOIST_MARKER: &str = "\u{0}AT_ROOT_HOIST\u{0}";
-
-/// Trailing sentinel after a placed at-root batch: the next top-level group
-/// packs tight against it (no blank line), and the emitters skip it.
-const AT_ROOT_PACK_TIGHT: &str = "\u{0}ATR_TIGHT\u{0}";
-
 /// An `@at-root` batch awaiting its graft point (paired with a hoist marker).
 struct AtRootBatch {
     /// Index of the topmost excluded at-rule layer = the depth the batch
@@ -4542,18 +4546,14 @@ struct AtRootBatch {
     nodes: Vec<OutNode>,
 }
 
-/// Parse an `@at-root` hoist marker's encoded graft target.
-fn at_root_marker_target(s: &str) -> Option<usize> {
-    s.strip_prefix(AT_ROOT_HOIST_MARKER).and_then(|t| t.parse().ok())
-}
-
 /// Whether `n` is a hoist marker whose batch escapes a body at `depth`:
 /// media hoists always escape; an at-root batch escapes when its graft
 /// target lies outside this body. Escaping markers are transparent to
 /// block anchoring (the batch is not a sibling inside this node).
 fn is_escaping_marker(n: &OutNode, depth: usize) -> bool {
     match n {
-        OutNode::Raw(s) => s == MEDIA_HOIST_MARKER || at_root_marker_target(s).is_some_and(|t| t < depth),
+        OutNode::MediaHoist => true,
+        OutNode::AtRootHoist { target } => *target < depth,
         _ => false,
     }
 }
@@ -4723,7 +4723,14 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
                 }
             }
             OutNode::ModuleScope { nodes, .. } => items.extend(at_body_to_items(nodes)),
-            OutNode::Raw(_) | OutNode::Blank => {}
+            // Raw passthroughs, blanks, and the control-only hoist markers carry
+            // no rule-block item.
+            OutNode::Raw(_)
+            | OutNode::Blank
+            | OutNode::GroupEnd
+            | OutNode::MediaHoist
+            | OutNode::AtRootHoist { .. }
+            | OutNode::AtRootPackTight => {}
         }
     }
     items

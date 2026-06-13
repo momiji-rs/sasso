@@ -227,10 +227,10 @@ impl<'a> Evaluator<'a> {
         };
         for n in out_body {
             let at_root_target = match &n {
-                OutNode::Raw(s) => at_root_marker_target(s),
+                OutNode::AtRootHoist { target } => Some(*target),
                 _ => None,
             };
-            if matches!(&n, OutNode::Raw(s) if s == MEDIA_HOIST_MARKER) {
+            if matches!(&n, OutNode::MediaHoist) {
                 flush(&mut segment, &mut result, &prelude);
                 if let Some(batch) = hoist_iter.next() {
                     result.extend(batch);
@@ -251,14 +251,11 @@ impl<'a> Evaluator<'a> {
                     if let Some(b) = self.at_root_hoist.pop_front() {
                         debug_assert_eq!(b.target, t);
                         result.extend(b.nodes);
-                        result.push(OutNode::Raw(
-                            if b.group_end {
-                                STYLE_GROUP_END
-                            } else {
-                                AT_ROOT_PACK_TIGHT
-                            }
-                            .to_string(),
-                        ));
+                        result.push(if b.group_end {
+                            OutNode::GroupEnd
+                        } else {
+                            OutNode::AtRootPackTight
+                        });
                     }
                 } else {
                     // Bound further out: split and pass the marker outward.
@@ -279,7 +276,7 @@ impl<'a> Evaluator<'a> {
         // out through the enclosing rule (leaving a marker at this source
         // position); otherwise emit in place.
         if bubble_out && enclosing {
-            sink.push_at_rule(OutNode::Raw(MEDIA_HOIST_MARKER.to_string()));
+            sink.push_at_rule(OutNode::MediaHoist);
             self.media_hoist.push(result);
         } else {
             for n in result {
@@ -448,7 +445,7 @@ impl<'a> Evaluator<'a> {
         };
         for n in out_body {
             let at_root_target = match &n {
-                OutNode::Raw(s) => at_root_marker_target(s),
+                OutNode::AtRootHoist { target } => Some(*target),
                 _ => None,
             };
             if let Some(t) = at_root_target {
@@ -462,14 +459,11 @@ impl<'a> Evaluator<'a> {
                     flush(&mut segment, &mut result);
                     if let Some(b) = self.at_root_hoist.pop_front() {
                         result.extend(b.nodes);
-                        result.push(OutNode::Raw(
-                            if b.group_end {
-                                STYLE_GROUP_END
-                            } else {
-                                AT_ROOT_PACK_TIGHT
-                            }
-                            .to_string(),
-                        ));
+                        result.push(if b.group_end {
+                            OutNode::GroupEnd
+                        } else {
+                            OutNode::AtRootPackTight
+                        });
                     }
                 } else {
                     flush(&mut segment, &mut result);
@@ -652,7 +646,7 @@ impl<'a> Evaluator<'a> {
         let mut after: Vec<OutNode> = Vec::new();
         for n in out_body {
             let at_root_target = match &n {
-                OutNode::Raw(s) => at_root_marker_target(s),
+                OutNode::AtRootHoist { target } => Some(*target),
                 _ => None,
             };
             if let Some(t) = at_root_target {
@@ -663,14 +657,11 @@ impl<'a> Evaluator<'a> {
                 } else if own_depth == 0 {
                     if let Some(b) = self.at_root_hoist.pop_front() {
                         after.extend(b.nodes);
-                        after.push(OutNode::Raw(
-                            if b.group_end {
-                                STYLE_GROUP_END
-                            } else {
-                                AT_ROOT_PACK_TIGHT
-                            }
-                            .to_string(),
-                        ));
+                        after.push(if b.group_end {
+                            OutNode::GroupEnd
+                        } else {
+                            OutNode::AtRootPackTight
+                        });
                     }
                 } else {
                     after.push(n);
@@ -842,7 +833,7 @@ impl<'a> Evaluator<'a> {
                 group_end: parents.is_empty(),
                 nodes: batch,
             });
-            sink.push_at_rule(OutNode::Raw(format!("{AT_ROOT_HOIST_MARKER}{te}")));
+            sink.push_at_rule(OutNode::AtRootHoist { target: te });
         } else {
             // No layer escaped: the body stays inside the enclosing at-rules
             // (only the style-rule join was disabled), so emit in place.
