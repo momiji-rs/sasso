@@ -11,6 +11,8 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-14
+
 ### Added
 
 - **wasm: source maps.** The `@momiji-rs/sasso` package's `compile(scss, {
@@ -18,7 +20,14 @@ Conformance is tracked separately as a ratchet against the official
   `{ css, sourceMap }` (the v3 map as a parsed object) instead of a bare CSS
   string; without `sourceMap` it still returns the string (backwards
   compatible). New `sasso_compile_map` export returns a framed `[u32 css_len][css]
-  [map json]` buffer.
+  [map json]` buffer. Source maps are now exposed on every surface (lib, CLI,
+  wasm).
+
+### Fixed
+
+- **Compressed source maps** now emit one segment per source line, matching
+  dart-sass (compressed packs many tokens onto a line; dart maps only the first
+  per source line). Expanded maps are unchanged. The map's CSS is unaffected.
 
 ## [0.4.0] - 2026-06-14
 
