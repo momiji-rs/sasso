@@ -1,6 +1,11 @@
 use super::*;
 
-pub(super) fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+pub(super) fn fn_rgb(
+    name: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Result<Value, Error> {
     let params = ["red", "green", "blue", "alpha"];
     let n = pos_args.len() + named.len();
     if n > 4 {
@@ -21,11 +26,21 @@ pub(super) fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
         // legacy `rgb($color, $alpha)` overload.
         if let Value::Color(c) = color {
             if is_special_legacy(alpha) {
-                // rgb(blue, calc(0.4)) → rgb(0, 0, 255, calc(0.4)).
+                // A special alpha decomposes the color into four channels. The
+                // function name dart-sass emits depends on the alpha's kind: a
+                // `calc()` alpha folds into the resolved serialization and is
+                // always spelled `rgba` (`rgb(blue, calc(0.4))` → `rgba(...)`),
+                // while a `var()`/`env()` alpha keeps the call opaque and echoes
+                // the caller's spelling (`rgb(blue, var(--a))` stays `rgb`).
+                let out_name = if matches!(alpha, Value::Calc(_)) {
+                    "rgba"
+                } else {
+                    name
+                };
                 let r = Value::Number(int_num(c.r));
                 let g = Value::Number(int_num(c.g));
                 let b = Value::Number(int_num(c.b));
-                return Ok(special_call("rgb", &[&r, &g, &b, alpha]));
+                return Ok(special_call(out_name, &[&r, &g, &b, alpha]));
             }
             let a = alpha_value(alpha, pos)?;
             return Ok(Value::Color(computed(c.r, c.g, c.b, a)));
@@ -45,13 +60,16 @@ pub(super) fn fn_rgb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     }
     // Otherwise gather the channel list and an optional alpha.
     let channels = Channels::collect("rgb", &params, pos_args, named, pos)?;
-    if let Some(verbatim) = channels.relative_passthrough("rgb") {
+    // The special/relative passthroughs echo the spelling the caller used
+    // (`rgb` vs `rgba`), matching dart-sass; the `none`-only passthrough inside
+    // `special_passthrough` normalizes to the canonical `rgb`.
+    if let Some(verbatim) = channels.relative_passthrough(name) {
         return Ok(verbatim);
     }
     if let Some(c) = legacy_none_color(&channels, ColorSpace::Rgb, pos)? {
         return Ok(c);
     }
-    if let Some(verbatim) = channels.special_passthrough("rgb") {
+    if let Some(verbatim) = channels.special_passthrough(name, "rgb") {
         return Ok(verbatim);
     }
     channels.validate_numeric(&["red", "green", "blue"], pos)?;
@@ -375,7 +393,7 @@ impl Channels {
     /// `none` keyword, return the re-serialized passthrough call dart-sass
     /// would emit; otherwise `None` (the channels are all plain numbers and a
     /// real color should be computed, or a count error should be raised).
-    fn special_passthrough(&self, name: &str) -> Option<Value> {
+    fn special_passthrough(&self, name: &str, canonical: &str) -> Option<Value> {
         let comps_special = self.comps.iter().any(is_special_legacy);
         let alpha_special = self.alpha.as_ref().is_some_and(is_special_legacy);
         let comps_none = self.comps.iter().any(is_none_keyword);
@@ -405,8 +423,11 @@ impl Channels {
         if self.comps.len() != 3 {
             return None;
         }
-        let is_hsl = name.eq_ignore_ascii_case("hsl") || name.eq_ignore_ascii_case("hsla");
-        Some(self.none_verbatim(name, is_hsl))
+        // A `none`-only call normalizes to the canonical space name (dart-sass
+        // emits `rgb`/`hsl` here, never the `rgba`/`hsla` the caller may have
+        // written).
+        let is_hsl = canonical.eq_ignore_ascii_case("hsl");
+        Some(self.none_verbatim(canonical, is_hsl))
     }
 
     /// Re-serialize a special-value passthrough whose channel count is not the
@@ -661,7 +682,12 @@ pub(super) fn rgb_repr(r: f64, g: f64, b: f64, a: f64) -> String {
     }
 }
 
-pub(super) fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+pub(super) fn fn_hsl(
+    name: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Result<Value, Error> {
     let params = ["hue", "saturation", "lightness", "alpha"];
     let n = pos_args.len() + named.len();
     if n > 4 {
@@ -671,7 +697,9 @@ pub(super) fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
         ));
     }
     let channels = Channels::collect("hsl", &params, pos_args, named, pos)?;
-    if let Some(verbatim) = channels.relative_passthrough("hsl") {
+    // Echo the caller's spelling (`hsl` vs `hsla`) in the special/relative
+    // passthroughs; the `none`-only path normalizes to canonical `hsl`.
+    if let Some(verbatim) = channels.relative_passthrough(name) {
         return Ok(verbatim);
     }
     // A `none` channel (with no real special function) builds a modern legacy
@@ -679,7 +707,7 @@ pub(super) fn fn_hsl(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     if let Some(c) = legacy_none_color(&channels, ColorSpace::Hsl, pos)? {
         return Ok(c);
     }
-    if let Some(verbatim) = channels.special_passthrough("hsl") {
+    if let Some(verbatim) = channels.special_passthrough(name, "hsl") {
         return Ok(verbatim);
     }
     // hsl/hsla has no two-argument `$color, $alpha` overload (unlike rgb). A

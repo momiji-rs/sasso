@@ -162,8 +162,8 @@ pub(super) fn try_call(
     pos: Pos,
 ) -> Option<Result<Value, Error>> {
     Some(match name {
-        "rgb" | "rgba" => fn_rgb(pos_args, named, pos),
-        "hsl" | "hsla" => fn_hsl(pos_args, named, pos),
+        "rgb" | "rgba" => fn_rgb(name, pos_args, named, pos),
+        "hsl" | "hsla" => fn_hsl(name, pos_args, named, pos),
         "hwb" => fn_hwb(pos_args, named, pos),
         "lab" | "lch" | "oklab" | "oklch" => fn_lab_family(name, pos_args, named, pos),
         "color" => fn_color(pos_args, named, pos),
