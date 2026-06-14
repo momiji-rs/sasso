@@ -95,6 +95,8 @@ impl Parser {
                             col: start.col as u32,
                             // The `/*`'s 0-based column, for source-map output.
                             start_col: col0 as u32,
+                            map_file: 0,
+                            map_line: 0,
                         },
                     ));
                 }

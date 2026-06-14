@@ -701,6 +701,12 @@ pub(crate) struct Evaluator<'a> {
     /// The enclosing at-rule layers (outermost first), so `@at-root` queries
     /// can re-wrap their body in the layers the query keeps.
     at_rule_ctx: Vec<AtCtx>,
+    /// Source-map position of the innermost enclosing style rule's selector
+    /// (its `rule_lines`). A bubbled `@media`/`@at-root` wrapper re-uses this so
+    /// the duplicated parent selector maps to the ORIGINAL rule's span (dart
+    /// parity); `SrcLines::default()` when not inside a style rule. Used ONLY
+    /// for source maps — never affects CSS bytes.
+    cur_rule_lines: SrcLines,
     /// Bogus-combinator selectors omitted from the CSS (`.a > + x`): they
     /// still satisfy `@extend` target matching like dart's extend graph.
     bogus_selectors: Vec<String>,
@@ -1104,6 +1110,7 @@ impl<'a> Evaluator<'a> {
             media_hoist: Vec::new(),
             at_root_hoist: std::collections::VecDeque::new(),
             at_rule_ctx: Vec::new(),
+            cur_rule_lines: SrcLines::default(),
             bogus_selectors: Vec::new(),
             placeholder_rules: Vec::new(),
             used_modules: HashMap::default(),
@@ -1900,7 +1907,13 @@ impl<'a> Evaluator<'a> {
             // Source-map: the selector's 0-based start column (its first
             // character), mapped on the rule's first output line.
             start_col: (rule.selector_pos.col as u32).saturating_sub(1),
+            map_file: 0,
+            map_line: 0,
         });
+        // A `@media`/`@at-root` nested in this rule's body bubbles a copy of the
+        // selector out; that copy maps back to THIS selector's source position
+        // (dart parity). Source-map only — never touches CSS.
+        let prev_rule_lines = std::mem::replace(&mut self.cur_rule_lines, rule_lines);
         let mut items: Vec<OutItem> = Vec::new();
         let mut nested: Vec<OutNode> = Vec::new();
         let mut flushed: Option<usize> = None;
@@ -1933,6 +1946,7 @@ impl<'a> Evaluator<'a> {
         self.current_selector = prev_selector;
         self.current_linebreaks = prev_linebreaks;
         self.at_root_excluding_style_rule = prev_at_root;
+        self.cur_rule_lines = prev_rule_lines;
         self.pop_scope();
         result?;
         sink.emit_style_rule(nested);
@@ -1996,6 +2010,8 @@ impl<'a> Evaluator<'a> {
                 col: 0,
                 // Source-map: the property name's 0-based start column.
                 start_col: (d.pos.col as u32).saturating_sub(1),
+                map_file: 0,
+                map_line: 0,
             }),
         }))
     }
@@ -2021,6 +2037,8 @@ impl<'a> Evaluator<'a> {
                 col: d.pos.col.saturating_sub(1) as u32,
                 // Source-map: the property name's 0-based start column.
                 start_col: (d.pos.col as u32).saturating_sub(1),
+                map_file: 0,
+                map_line: 0,
             }),
         }))
     }

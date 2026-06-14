@@ -156,13 +156,17 @@ pub(crate) struct RawEntry {
 #[derive(Default)]
 pub(crate) struct SmCollector {
     entries: Vec<RawEntry>,
-    /// Compressed output coalesces to ONE mapping per source line (matching
-    /// dart-sass): expanded maps every selector + declaration, but compressed
-    /// packs many tokens onto a line and dart only maps the first per source
-    /// line. `false` keeps every token (expanded).
+    /// Compressed output skips a token whose source line repeats the
+    /// IMMEDIATELY PRECEDING mapped token's (matching dart-sass): expanded maps
+    /// every selector + declaration, but compressed packs many tokens onto one
+    /// line and dart coalesces consecutive same-source-line runs. This is a
+    /// consecutive-run skip, NOT a global one-per-source-line: a source line
+    /// that recurs non-consecutively (e.g. a `@media`-bubbled parent selector
+    /// mapping back to its original line) is mapped again. `false` keeps every
+    /// token (expanded).
     compressed: bool,
     /// The `(file_id, src_line)` of the last recorded entry, for the compressed
-    /// same-source-line skip.
+    /// consecutive-same-source-line skip.
     last: Option<(u32, u32)>,
 }
 
@@ -182,8 +186,9 @@ impl SmCollector {
         if file_id == 0 {
             return;
         }
-        // Compressed: skip a token whose source line repeats the previous mapped
-        // token's (dart emits one mapping per source line in compressed output).
+        // Compressed: skip a token whose source line repeats the IMMEDIATELY
+        // PRECEDING mapped token's (dart coalesces consecutive same-source-line
+        // runs in compressed output; non-consecutive recurrences still map).
         if self.compressed && self.last == Some((file_id, src_line)) {
             return;
         }

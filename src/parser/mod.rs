@@ -665,6 +665,8 @@ impl Parser {
             end: self.sc.position().line as u32,
             col: 0,
             start_col: 0,
+            map_file: 0,
+            map_line: 0,
         };
         Ok((body, lines))
     }

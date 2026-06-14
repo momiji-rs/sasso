@@ -35,6 +35,17 @@ pub(crate) struct SrcLines {
     /// trailing-comment / custom-property-reindent heuristics; this field is a
     /// pure additive carrier and changes no CSS output.
     pub start_col: u32,
+    /// Source-map-only OVERRIDE for the mapped source file id (0 = fall back to
+    /// [`Self::file`]). A bubbled `@media`/`@at-root` wrapper re-uses the
+    /// enclosing rule's selector position for its mapping while keeping
+    /// `file`/`start`/`end` at 0 so the trailing-comment heuristic stays
+    /// disabled (dart maps the duplicated parent selector to the ORIGINAL rule's
+    /// span). Like [`Self::start_col`] this changes no CSS output.
+    pub map_file: u32,
+    /// Source-map-only OVERRIDE for the mapped 1-based source line (0 = fall
+    /// back to [`Self::start`]). Set together with [`Self::map_file`] on a
+    /// bubbled-selector wrapper; see that field.
+    pub map_line: u32,
 }
 
 /// A statement, valid at the top level or inside a rule body.

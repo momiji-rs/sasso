@@ -111,9 +111,18 @@ impl<'a> Evaluator<'a> {
                 let mut child = Sink::Rule {
                     selectors: parents,
                     linebreaks: &[],
-                    // No source rule of its own (the wrap re-uses the enclosing
-                    // selectors); the trailing-comment rule stays disabled.
-                    lines: SrcLines::default(),
+                    // The wrap re-uses the enclosing selectors, so it has no
+                    // source rule of its own: `file`/`start`/`end` stay 0 to keep
+                    // the trailing-comment rule disabled. For SOURCE MAPS only it
+                    // carries the enclosing rule's selector position in the
+                    // map-override fields, so the bubbled parent selector maps
+                    // back to the ORIGINAL rule's span (dart parity). No CSS effect.
+                    lines: SrcLines {
+                        map_file: self.cur_rule_lines.file,
+                        map_line: self.cur_rule_lines.start,
+                        start_col: self.cur_rule_lines.start_col,
+                        ..SrcLines::default()
+                    },
                     items: &mut items,
                     nested: &mut nested,
                     at_depth,

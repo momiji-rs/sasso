@@ -321,10 +321,14 @@ fn sasso_compressed_map_is_valid() {
 }
 
 #[test]
-fn sasso_compressed_coalesces_to_one_mapping_per_source_line() {
-    // dart-sass compressed emits only the FIRST token on each SOURCE line (it
-    // packs many tokens onto few output lines). These expected strings are
-    // byte-exact dart-sass 1.101 output. (Expanded maps every token; see above.)
+fn sasso_compressed_skips_consecutive_same_source_line() {
+    // dart-sass compressed maps every selector/declaration token but SKIPS a
+    // token whose source line repeats the IMMEDIATELY PRECEDING mapped token's
+    // (compressed packs many tokens onto one output line). It is a consecutive-
+    // run skip, NOT a global "one mapping per source line": a source line that
+    // recurs non-consecutively (e.g. a bubbled parent selector) is mapped again
+    // — see `sasso_compressed_bubbled_media_matches_dart`. These expected
+    // strings are byte-exact dart-sass 1.101 output. (Expanded maps every token.)
     let opts = Options::default()
         .with_style(OutputStyle::Compressed)
         .with_url("in.scss");
@@ -340,6 +344,36 @@ fn sasso_compressed_coalesces_to_one_mapping_per_source_line() {
         &opts,
     );
     assert_eq!(sasso_mappings(&json), "AAAA,GACE,UACA");
+}
+
+#[test]
+fn sasso_compressed_bubbled_media_matches_dart() {
+    // A `@media` nested in a style rule bubbles a COPY of the parent selector
+    // out (`@media screen{.a{...}}`); that copy must map back to the ORIGINAL
+    // `.a {` selector's source position (source line 0), NOT the @media's line.
+    // Because its source line (0) differs from the neighbouring @media (line 2),
+    // the consecutive-same-line skip keeps it AND the following `width` decl, so
+    // compressed regains the two segments a naive same-line dedup would drop.
+    // Regression guard for the bubbled-selector source-map fix. Expected strings
+    // are byte-exact dart-sass 1.101 (`sass in.scss out --style=compressed
+    // --source-map`).
+    let src = ".a {\n  color: red;\n  @media screen { width: 1px; }\n  height: 2px;\n}\n";
+
+    let (css, _m, json) = sasso_map(
+        src,
+        &Options::default()
+            .with_style(OutputStyle::Compressed)
+            .with_url("in.scss"),
+    );
+    assert_eq!(css, ".a{color:red}@media screen{.a{width:1px}}.a{height:2px}");
+    // 7 segments: .a(l0), color(l1), @media(l2), bubbled .a(l0), width(l2),
+    // trailing .a(l0), height(l3) — none consecutive-same-line, so none dropped.
+    assert_eq!(sasso_mappings(&json), "AAAA,GACE,UACA,cAFF,GAEkB,WAFlB,GAGE");
+
+    // Expanded maps the bubbled selector too (dart parity): the `EAFF` segment
+    // at generated line 4 is the bubbled `.a` mapping back to source 0:0.
+    let (_c, _m, json) = sasso_map(src, &Options::default().with_url("in.scss"));
+    assert_eq!(sasso_mappings(&json), "AAAA;EACE;;AACA;EAFF;IAEkB;;;AAFlB;EAGE");
 }
 
 #[test]

@@ -89,6 +89,8 @@ impl<'a> Evaluator<'a> {
                                 end: r.end_line,
                                 col: 0,
                                 start_col: (r.selector_pos.col as u32).saturating_sub(1),
+                                map_file: 0,
+                                map_line: 0,
                             }),
                         ));
                     }
@@ -217,6 +219,8 @@ impl<'a> Evaluator<'a> {
                                 end: r.end_line,
                                 col: 0,
                                 start_col: (r.selector_pos.col as u32).saturating_sub(1),
+                                map_file: 0,
+                                map_line: 0,
                             }),
                         ));
                     }
@@ -236,6 +240,8 @@ impl<'a> Evaluator<'a> {
                             end: d.end_line,
                             col: 0,
                             start_col: (d.pos.col as u32).saturating_sub(1),
+                            map_file: 0,
+                            map_line: 0,
                         }),
                     });
                 }
@@ -253,6 +259,8 @@ impl<'a> Evaluator<'a> {
                             end: d.end_line,
                             col: 0,
                             start_col: (d.pos.col as u32).saturating_sub(1),
+                            map_file: 0,
+                            map_line: 0,
                         }),
                     });
                 }
@@ -441,6 +449,8 @@ impl<'a> Evaluator<'a> {
                         end: d.end_line,
                         col: 0,
                         start_col: (d.pos.col as u32).saturating_sub(1),
+                        map_file: 0,
+                        map_line: 0,
                     }),
                 });
             }
@@ -458,6 +468,8 @@ impl<'a> Evaluator<'a> {
                         end: d.end_line,
                         col: 0,
                         start_col: (d.pos.col as u32).saturating_sub(1),
+                        map_file: 0,
+                        map_line: 0,
                     }),
                 });
             }

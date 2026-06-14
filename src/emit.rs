@@ -52,11 +52,24 @@ fn emit_inner(nodes: &[OutNode], style: OutputStyle, collector: &mut Option<SmCo
 /// `out.len()` and the SrcLines — never mutates the output.
 fn record(out: &str, lines: SrcLines, collector: &mut Option<SmCollector>) {
     if let Some(c) = collector {
-        // `start` is the 1-based source line; 0 means "unknown" — skip it.
-        if lines.start == 0 {
+        // A bubbled-selector wrapper carries its mapping in the source-map-only
+        // override fields (so `file`/`start` stay 0 and the trailing-comment
+        // heuristic stays disabled); everything else maps from `file`/`start`.
+        let file = if lines.map_file != 0 {
+            lines.map_file
+        } else {
+            lines.file
+        };
+        let line = if lines.map_line != 0 {
+            lines.map_line
+        } else {
+            lines.start
+        };
+        // `line` is the 1-based source line; 0 means "unknown" — skip it.
+        if line == 0 {
             return;
         }
-        c.record(out.len(), lines.file, lines.start - 1, lines.start_col);
+        c.record(out.len(), file, line - 1, lines.start_col);
     }
 }
 
@@ -91,6 +104,10 @@ fn block_start(lines: SrcLines) -> SrcLines {
         end: lines.start,
         col: 0,
         start_col: 0,
+        // The trailing-comment seed never feeds source-map output; map overrides
+        // are irrelevant here.
+        map_file: 0,
+        map_line: 0,
     }
 }
 

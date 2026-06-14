@@ -124,6 +124,8 @@ impl Parser {
                         end: line,
                         col: 0,
                         start_col: 0,
+                        map_file: 0,
+                        map_line: 0,
                     },
                 })
             }
@@ -1578,6 +1580,8 @@ impl Parser {
                     end: line,
                     col: 0,
                     start_col: 0,
+                    map_file: 0,
+                    map_line: 0,
                 },
             )
         };
