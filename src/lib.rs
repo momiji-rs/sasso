@@ -48,6 +48,10 @@ mod ryu;
 mod sass_parser;
 mod scanner;
 mod selector;
+// Source Map v3 generation. Phase A landed the encoding primitives + JSON model;
+// `allow(dead_code)` until later phases wire it into emit + the public API.
+#[allow(dead_code)]
+mod sourcemap;
 mod value;
 
 pub use arena::{set_arena_bytes, ScopedAlloc};
