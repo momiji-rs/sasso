@@ -4,6 +4,7 @@
 [![docs.rs](https://img.shields.io/docsrs/sasso)](https://docs.rs/sasso)
 [![CI](https://github.com/momiji-rs/sasso/actions/workflows/ci.yml/badge.svg)](https://github.com/momiji-rs/sasso/actions/workflows/ci.yml)
 [![sass-spec](https://img.shields.io/badge/sass--spec-100%25_of_attempted-brightgreen)](#conformance)
+[![dart-sass](https://img.shields.io/badge/dart--sass-1.101_parity-blue)](#conformance)
 [![runtime deps](https://img.shields.io/badge/runtime_deps-0-brightgreen)](Cargo.toml)
 [![license](https://img.shields.io/crates/l/sasso.svg)](#license)
 
@@ -46,6 +47,9 @@ zero-dependency, sandbox-friendly core. See
 - `@import` partial inlining through a pluggable [`Importer`] (CSS imports
   pass through)
 - `expanded` and `compressed` output styles
+- **Source maps (v3)** — byte-exact to dart-sass 1.101, on the library
+  (`compile_with_source_map`), the CLI (`--source-map`), and wasm
+  (`compile(scss, { sourceMap: true })`)
 - Verbatim preservation of CSS functions it doesn't own (`calc`, `var`,
   `clamp`, `translateX`, …)
 
