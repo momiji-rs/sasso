@@ -377,6 +377,29 @@ fn sasso_compressed_bubbled_media_matches_dart() {
 }
 
 #[test]
+fn sasso_supports_header_maps_to_keyword() {
+    // dart-sass maps the bubbled `@supports` at-rule HEADER back to the
+    // `@supports` keyword's source position; sasso historically emitted the
+    // node with `SrcLines::default()` (file 0), dropping that mapping. Regression
+    // guard. `.a { @supports (display: grid) { d: grid; } }` -> dart 1.101
+    // expanded `AAAK;EAAL;IAAiC` (genline0 = `@supports`@src0:5, genline1 = the
+    // bubbled `.a`@src0:0, genline2 = `d:grid`).
+    let src = ".a { @supports (display: grid) { d: grid; } }\n";
+    let (_c, _m, json) = sasso_map(src, &Options::default().with_url("in.scss"));
+    assert_eq!(sasso_mappings(&json), "AAAK;EAAL;IAAiC");
+
+    // Compressed: the header is the only mapping (everything else coalesces onto
+    // its source line) -> `AAAK`.
+    let (_c, _m, json) = sasso_map(
+        src,
+        &Options::default()
+            .with_style(OutputStyle::Compressed)
+            .with_url("in.scss"),
+    );
+    assert_eq!(sasso_mappings(&json), "AAAK");
+}
+
+#[test]
 fn sasso_sources_content_round_trips() {
     let src = ".a { color: red; }\n";
     let opts = Options::default()

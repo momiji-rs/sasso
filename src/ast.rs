@@ -188,6 +188,9 @@ pub(crate) enum Stmt {
     Supports {
         condition: SupportsCondition,
         body: Vec<Stmt>,
+        /// `{`/`}` source lines (+ the `@` keyword column in `start_col`) for
+        /// the serializer's trailing-comment rule and source-map output.
+        lines: SrcLines,
     },
     /// `@at-root [query] { body }` — runs the body with the parent selector
     /// reset to the document root.

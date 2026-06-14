@@ -423,6 +423,7 @@ impl<'a> Evaluator<'a> {
         &mut self,
         condition: &SupportsCondition,
         body: &[Stmt],
+        lines: SrcLines,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -448,7 +449,7 @@ impl<'a> Evaluator<'a> {
                     prelude: prelude.clone(),
                     body: std::mem::take(segment),
                     has_block: true,
-                    lines: SrcLines::default(),
+                    lines,
                 });
             }
         };

@@ -147,8 +147,10 @@ impl Parser {
         // by source-map generation, never by the serializer.
         let mut stmt = stmt?;
         let at_col = (pos.col as u32).saturating_sub(1);
-        if let Stmt::AtRule { lines, .. } | Stmt::Media { lines, .. } | Stmt::Keyframes { lines, .. } =
-            &mut stmt
+        if let Stmt::AtRule { lines, .. }
+        | Stmt::Media { lines, .. }
+        | Stmt::Supports { lines, .. }
+        | Stmt::Keyframes { lines, .. } = &mut stmt
         {
             lines.start_col = at_col;
         }
@@ -778,8 +780,12 @@ impl Parser {
     fn parse_supports(&mut self) -> Result<Stmt, Error> {
         self.skip_ws_inline();
         let condition = self.parse_supports_condition()?;
-        let body = self.parse_braced_body()?;
-        Ok(Stmt::Supports { condition, body })
+        let (body, lines) = self.parse_braced_body_lines()?;
+        Ok(Stmt::Supports {
+            condition,
+            body,
+            lines,
+        })
     }
 
     /// dart-sass `_supportsCondition`: an optional leading `not`, otherwise a

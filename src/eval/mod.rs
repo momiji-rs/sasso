@@ -1755,8 +1755,13 @@ impl<'a> Evaluator<'a> {
                     let stamped = self.stamp(*lines);
                     self.eval_media(query, body, stamped, parents, sink)?;
                 }
-                Stmt::Supports { condition, body } => {
-                    self.eval_supports(condition, body, parents, sink)?;
+                Stmt::Supports {
+                    condition,
+                    body,
+                    lines,
+                } => {
+                    let stamped = self.stamp(*lines);
+                    self.eval_supports(condition, body, stamped, parents, sink)?;
                 }
                 Stmt::AtRoot { query, body } => {
                     self.eval_at_root(query.as_deref(), body, parents, sink)?;

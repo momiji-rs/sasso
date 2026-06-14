@@ -130,7 +130,11 @@ impl<'a> Evaluator<'a> {
                         });
                     }
                 }
-                Stmt::Supports { condition, body } => {
+                Stmt::Supports {
+                    condition,
+                    body,
+                    lines,
+                } => {
                     let prelude = self.serialize_supports_condition(condition)?;
                     let out_body = self.css_at_body(body)?;
                     if !out_body.is_empty() {
@@ -139,7 +143,7 @@ impl<'a> Evaluator<'a> {
                             prelude,
                             body: out_body,
                             has_block: true,
-                            lines: SrcLines::default(),
+                            lines: self.stamp(*lines),
                         });
                     }
                 }
@@ -284,7 +288,11 @@ impl<'a> Evaluator<'a> {
                         });
                     }
                 }
-                Stmt::Supports { condition, body } => {
+                Stmt::Supports {
+                    condition,
+                    body,
+                    lines,
+                } => {
                     let prelude = self.serialize_supports_condition(condition)?;
                     let inner = self.css_at_body(body)?;
                     if !inner.is_empty() {
@@ -293,7 +301,7 @@ impl<'a> Evaluator<'a> {
                             prelude,
                             body: inner,
                             has_block: true,
-                            lines: SrcLines::default(),
+                            lines: self.stamp(*lines),
                         });
                     }
                 }
@@ -381,7 +389,7 @@ impl<'a> Evaluator<'a> {
                     let inner = self.css_body(body)?;
                     bubble("media", prelude, inner, &mut bubbled);
                 }
-                Stmt::Supports { condition, body } => {
+                Stmt::Supports { condition, body, .. } => {
                     let prelude = self.serialize_supports_condition(condition)?;
                     let inner = self.css_body(body)?;
                     bubble("supports", prelude, inner, &mut bubbled);
@@ -521,7 +529,7 @@ impl<'a> Evaluator<'a> {
                     });
                 }
             }
-            Stmt::Supports { condition, body } => {
+            Stmt::Supports { condition, body, .. } => {
                 let prelude = self.serialize_supports_condition(condition)?;
                 let inner = self.css_body(body)?;
                 if !inner.is_empty() {
