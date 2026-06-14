@@ -11,6 +11,22 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-06-14
+
+### Fixed
+
+- **Expanded `@at-root` group-separation blank lines.** dart-sass writes one
+  blank line at an `@at-root` hoist→resume boundary when the hoisted chunk ends
+  in a style rule, while keeping a nested-`@at-root` chain and a rule + its own
+  bubbled `@media` contiguous. sasso previously diverged BOTH ways — it never
+  emitted the blank before a resumed parent rule, and it over-emitted (three
+  blanks between top-level bare-`@at-root` siblings, spurious blanks between a
+  nested-`@at-root` chain's rules / between a rule and its own bubbled `@media` /
+  before an `@at-root` body's trailing comment). Now byte-exact vs dart-sass
+  1.101 across a dedicated 54-shape group-separation sweep, with non-`@at-root`
+  output byte-identical. Compressed output is unaffected (no blank lines).
+  (sass-spec does not cover these `@at-root`-resume blanks.)
+
 ## [0.5.1] - 2026-06-14
 
 Source-map fidelity + compressed-output corrections, all byte-exact vs
