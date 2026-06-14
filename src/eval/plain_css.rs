@@ -117,7 +117,7 @@ impl<'a> Evaluator<'a> {
                 }
                 Stmt::Media { query, body, lines } => {
                     let queries = self.resolve_media_queries(query)?;
-                    let prelude = serialize_media_queries(&queries);
+                    let prelude = serialize_media_queries(&queries, self.compressed());
                     let out_body = self.css_at_body(body)?;
                     if !out_body.is_empty() {
                         let lines = self.stamp(*lines);
@@ -275,7 +275,7 @@ impl<'a> Evaluator<'a> {
                 }
                 Stmt::Media { query, body, lines } => {
                     let queries = self.resolve_media_queries(query)?;
-                    let prelude = serialize_media_queries(&queries);
+                    let prelude = serialize_media_queries(&queries, self.compressed());
                     let inner = self.css_at_body(body)?;
                     if !inner.is_empty() {
                         let lines = self.stamp(*lines);
@@ -385,7 +385,7 @@ impl<'a> Evaluator<'a> {
                     lines: _,
                 } => {
                     let queries = self.resolve_media_queries(query)?;
-                    let prelude = serialize_media_queries(&queries);
+                    let prelude = serialize_media_queries(&queries, self.compressed());
                     let inner = self.css_body(body)?;
                     bubble("media", prelude, inner, &mut bubbled);
                 }
@@ -519,7 +519,7 @@ impl<'a> Evaluator<'a> {
                 lines: _,
             } => {
                 let queries = self.resolve_media_queries(query)?;
-                let prelude = serialize_media_queries(&queries);
+                let prelude = serialize_media_queries(&queries, self.compressed());
                 let inner = self.css_body(body)?;
                 if !inner.is_empty() {
                     items.push(OutItem::NestedAtRule {

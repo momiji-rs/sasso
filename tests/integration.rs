@@ -178,6 +178,45 @@ fn compressed_output() {
 }
 
 #[test]
+fn compressed_at_rule_prelude_spacing() {
+    // dart-sass 1.101 compressed: `@media`/`@supports` drop the space before a
+    // prelude that begins with `(`; within a `@media` query the space before
+    // `and`/`or` is dropped after a `)` and the comma between queries loses its
+    // space — but `@supports` conditions and other at-rules (`@container`) keep
+    // their spaces, and an identifier media type keeps its `and` space.
+    assert_eq!(
+        css_compressed("@media (min-width: 1px) { a { x: 1 } }"),
+        "@media(min-width: 1px){a{x:1}}"
+    );
+    assert_eq!(
+        css_compressed("@media (a: 1) and (b: 2) { a { x: 1 } }"),
+        "@media(a: 1)and (b: 2){a{x:1}}"
+    );
+    assert_eq!(
+        css_compressed("@media (a: 1), (b: 2) { a { x: 1 } }"),
+        "@media(a: 1),(b: 2){a{x:1}}"
+    );
+    assert_eq!(
+        css_compressed("@media screen and (a: 1) { a { x: 1 } }"),
+        "@media screen and (a: 1){a{x:1}}"
+    );
+    // @supports drops the leading `(` space but does NOT tighten `and`/`or`.
+    assert_eq!(
+        css_compressed("@supports (display: grid) { a { x: 1 } }"),
+        "@supports(display: grid){a{x:1}}"
+    );
+    assert_eq!(
+        css_compressed("@supports (a: 1) and (b: 2) { a { x: 1 } }"),
+        "@supports(a: 1) and (b: 2){a{x:1}}"
+    );
+    // @container (and other at-rules) keep the space even before `(`.
+    assert_eq!(
+        css_compressed("@container (min-width: 1px) { a { x: 1 } }"),
+        "@container (min-width: 1px){a{x:1}}"
+    );
+}
+
+#[test]
 fn comparison_and_logical_operators() {
     assert_eq!(css(".a { x: if(3 > 2, big, small); }"), ".a {\n  x: big;\n}\n");
     assert_eq!(css(".a { x: 1 + 2 == 3; }"), ".a {\n  x: true;\n}\n");

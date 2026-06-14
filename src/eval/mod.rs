@@ -5735,9 +5735,26 @@ fn type_selector_starts_at(chars: &[char], i: usize) -> bool {
 
 // ---- media queries -----------------------------------------------------
 
+/// Append an `and`/`or` media-query separator. dart-sass's compressed media
+/// serializer omits the space BEFORE the keyword when the text so far ends in
+/// `)` (`(a)and (b)`) but keeps it after an identifier (`screen and (a)`); the
+/// trailing space is always present. Expanded always emits ` and `/` or `.
+/// (`@supports` conditions are serialized elsewhere and are NOT tightened.)
+fn push_media_sep(s: &mut String, is_and: bool, compressed: bool) {
+    let word = if is_and { "and" } else { "or" };
+    if compressed && s.ends_with(')') {
+        s.push_str(word);
+    } else {
+        s.push(' ');
+        s.push_str(word);
+    }
+    s.push(' ');
+}
+
 impl ResolvedQuery {
-    /// Serialize one query (dart-sass `CssMediaQuery.toString`).
-    fn render(&self) -> String {
+    /// Serialize one query (dart-sass `CssMediaQuery.toString`). `compressed`
+    /// tightens the `and`/`or` separators per dart's compressed serializer.
+    fn render(&self, compressed: bool) -> String {
         let mut s = String::new();
         if let Some(m) = &self.modifier {
             s.push_str(m);
@@ -5746,11 +5763,17 @@ impl ResolvedQuery {
         if let Some(t) = &self.mtype {
             s.push_str(t);
             if !self.conditions.is_empty() {
-                s.push_str(" and ");
+                // A media type is an identifier, so the space is kept
+                // (`screen and (a)`) — the `ends_with(')')` rule yields that.
+                push_media_sep(&mut s, true, compressed);
             }
         }
-        let sep = if self.conjunction_and { " and " } else { " or " };
-        s.push_str(&self.conditions.join(sep));
+        for (i, c) in self.conditions.iter().enumerate() {
+            if i > 0 {
+                push_media_sep(&mut s, self.conjunction_and, compressed);
+            }
+            s.push_str(c);
+        }
         s
     }
 }
@@ -5970,12 +5993,14 @@ fn css_media_parse_one(t: &str) -> Result<ResolvedQuery, Error> {
     })
 }
 
-fn serialize_media_queries(queries: &[ResolvedQuery]) -> String {
+fn serialize_media_queries(queries: &[ResolvedQuery], compressed: bool) -> String {
+    // Compressed drops the space after the comma between queries (`(a),(b)`).
+    let sep = if compressed { "," } else { ", " };
     queries
         .iter()
-        .map(ResolvedQuery::render)
+        .map(|q| q.render(compressed))
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(sep)
 }
 
 /// Merge an enclosing query list with a nested query list (dart-sass

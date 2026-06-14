@@ -609,6 +609,14 @@ fn fold_value_compressed<'v>(value: &'v str, custom: bool) -> std::borrow::Cow<'
     std::borrow::Cow::Owned(out)
 }
 
+/// dart-sass omits the space between the at-rule name and a prelude that begins
+/// with `(` in compressed output, but ONLY for `@media`
+/// (`visitCssMediaRule`) and `@supports` (`visitCssSupportsRule`). Every other
+/// at-rule keeps the space even before `(` — e.g. `@container (min-width:1px)`.
+fn compressed_at_rule_omits_space(name: &str, prelude: &str) -> bool {
+    matches!(name, "media" | "supports") && prelude.starts_with('(')
+}
+
 /// Serialize a plain-CSS nested at-rule for compressed output (rare path; see
 /// [`compressed_nested_rule`]).
 fn compressed_nested_at_rule(name: &str, prelude: &str, items: &[OutItem]) -> String {
@@ -616,6 +624,8 @@ fn compressed_nested_at_rule(name: &str, prelude: &str, items: &[OutItem]) -> St
     // `compressed_nested_rule` with no selectors renders `{...}`; reuse its body.
     if prelude.is_empty() {
         format!("@{name}{body}")
+    } else if compressed_at_rule_omits_space(name, prelude) {
+        format!("@{name}{prelude}{body}")
     } else {
         format!("@{name} {prelude}{body}")
     }
@@ -725,10 +735,9 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
-                // Compressed `@supports` omits the space before a prelude that
-                // begins with `(` (dart-sass `visitCssSupportsRule`).
-                let omit_space = name == "supports" && prelude.starts_with('(');
-                if !omit_space {
+                // Compressed `@media`/`@supports` omit the space before a prelude
+                // that begins with `(` (dart `visitCssMediaRule`/`visitCssSupportsRule`).
+                if !compressed_at_rule_omits_space(name, prelude) {
                     out.push(' ');
                 }
                 out.push_str(prelude);

@@ -174,7 +174,7 @@ impl<'a> Evaluator<'a> {
         // Inside a keyframe block an at-rule nests verbatim: the frame is not
         // a style rule in dart-sass, so there is no bubbling/wrapping.
         if self.in_keyframes && sink.is_rule() {
-            let prelude = serialize_media_queries(&queries);
+            let prelude = serialize_media_queries(&queries, self.compressed());
             let out_body = self.eval_at_body(body, &[])?;
             sink.push_item(OutItem::NestedAtRule {
                 name: "media".to_string(),
@@ -201,7 +201,7 @@ impl<'a> Evaluator<'a> {
         // bubbles past the enclosing media; otherwise it stays nested.
         let bubble_out = merged.is_some();
         let node_queries = if bubble_out { &child_queries } else { &queries };
-        let prelude = serialize_media_queries(node_queries);
+        let prelude = serialize_media_queries(node_queries, self.compressed());
 
         let enclosing = !self.media_queries.is_empty();
         let saved = std::mem::replace(&mut self.media_queries, child_queries);
@@ -310,7 +310,7 @@ impl<'a> Evaluator<'a> {
         // (`scr#{"een, pri"}nt` splits into two queries). Only a prelude that
         // actually contained interpolation needs the round-trip.
         if list.queries.iter().any(media_query_has_interp) {
-            let text = serialize_media_queries(&out);
+            let text = serialize_media_queries(&out, self.compressed());
             return css_media_parse_list(&text);
         }
         Ok(out)
@@ -583,7 +583,7 @@ impl<'a> Evaluator<'a> {
                 ImportModifier::Media { list, comma_before } => {
                     out.push_str(if *comma_before { ", " } else { " " });
                     let queries = self.resolve_media_queries(list)?;
-                    out.push_str(&serialize_media_queries(&queries));
+                    out.push_str(&serialize_media_queries(&queries, self.compressed()));
                 }
             }
         }
