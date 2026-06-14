@@ -53,7 +53,7 @@ impl Parser {
                 return Err(Error::at("This at-rule isn't allowed in plain CSS.", pos));
             }
         }
-        match name.as_str() {
+        let stmt = match name.as_str() {
             "import" => self.parse_import(pos),
             "if" => self.parse_if(),
             // A stray `@else` (one not consumed as part of an `@if` chain by
@@ -123,6 +123,7 @@ impl Parser {
                         start: line,
                         end: line,
                         col: 0,
+                        start_col: 0,
                     },
                 })
             }
@@ -138,7 +139,18 @@ impl Parser {
                 self.parse_css_custom_callable(name)
             }
             _ => self.parse_generic_at_rule(name),
+        };
+        // Source-map: stamp the `@` keyword's 0-based column onto the lines-
+        // carrying at-rule variants. Purely additive — `start_col` is read only
+        // by source-map generation, never by the serializer.
+        let mut stmt = stmt?;
+        let at_col = (pos.col as u32).saturating_sub(1);
+        if let Stmt::AtRule { lines, .. } | Stmt::Media { lines, .. } | Stmt::Keyframes { lines, .. } =
+            &mut stmt
+        {
+            lines.start_col = at_col;
         }
+        Ok(stmt)
     }
 
     /// Parse `@import <arg> [, <arg>]* ;`. Each argument is either a Sass
@@ -1565,6 +1577,7 @@ impl Parser {
                     start: line,
                     end: line,
                     col: 0,
+                    start_col: 0,
                 },
             )
         };

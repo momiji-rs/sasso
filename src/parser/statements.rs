@@ -93,6 +93,8 @@ impl Parser {
                             start: start.line as u32,
                             end: end_line,
                             col: start.col as u32,
+                            // The `/*`'s 0-based column, for source-map output.
+                            start_col: col0 as u32,
                         },
                     ));
                 }

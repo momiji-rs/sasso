@@ -664,6 +664,7 @@ impl Parser {
             start: brace_line,
             end: self.sc.position().line as u32,
             col: 0,
+            start_col: 0,
         };
         Ok((body, lines))
     }

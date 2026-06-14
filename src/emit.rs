@@ -51,6 +51,7 @@ fn block_start(lines: SrcLines) -> SrcLines {
         start: lines.start,
         end: lines.start,
         col: 0,
+        start_col: 0,
     }
 }
 

@@ -28,6 +28,13 @@ pub(crate) struct SrcLines {
     /// imported twice), which dart's span-containment branch rejects as
     /// trailing — distinct same-line comments differ in column and still join.
     pub col: u32,
+    /// The 0-based source COLUMN of the mapped token's start (a selector's
+    /// first character, a declaration/at-rule keyword, a comment's `/*`), used
+    /// ONLY by source-map generation — never by the serializer. Default 0 when
+    /// unknown. Distinct from [`Self::col`], which is overloaded for the
+    /// trailing-comment / custom-property-reindent heuristics; this field is a
+    /// pure additive carrier and changes no CSS output.
+    pub start_col: u32,
 }
 
 /// A statement, valid at the top level or inside a rule body.

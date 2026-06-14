@@ -1859,6 +1859,9 @@ impl<'a> Evaluator<'a> {
             start: rule.brace_line,
             end: rule.end_line,
             col: 0,
+            // Source-map: the selector's 0-based start column (its first
+            // character), mapped on the rule's first output line.
+            start_col: (rule.selector_pos.col as u32).saturating_sub(1),
         });
         let mut items: Vec<OutItem> = Vec::new();
         let mut nested: Vec<OutNode> = Vec::new();
@@ -1953,6 +1956,8 @@ impl<'a> Evaluator<'a> {
                 start: d.pos.line as u32,
                 end: d.end_line,
                 col: 0,
+                // Source-map: the property name's 0-based start column.
+                start_col: (d.pos.col as u32).saturating_sub(1),
             }),
         }))
     }
@@ -1976,6 +1981,8 @@ impl<'a> Evaluator<'a> {
                 // The name's 0-based source column caps the re-indentation
                 // strip for a multi-line value (dart _writeReindentedValue).
                 col: d.pos.col.saturating_sub(1) as u32,
+                // Source-map: the property name's 0-based start column.
+                start_col: (d.pos.col as u32).saturating_sub(1),
             }),
         }))
     }

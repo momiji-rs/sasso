@@ -88,6 +88,7 @@ impl<'a> Evaluator<'a> {
                                 start: r.brace_line,
                                 end: r.end_line,
                                 col: 0,
+                                start_col: (r.selector_pos.col as u32).saturating_sub(1),
                             }),
                         ));
                     }
@@ -215,6 +216,7 @@ impl<'a> Evaluator<'a> {
                                 start: r.brace_line,
                                 end: r.end_line,
                                 col: 0,
+                                start_col: (r.selector_pos.col as u32).saturating_sub(1),
                             }),
                         ));
                     }
@@ -233,6 +235,7 @@ impl<'a> Evaluator<'a> {
                             start: d.pos.line as u32,
                             end: d.end_line,
                             col: 0,
+                            start_col: (d.pos.col as u32).saturating_sub(1),
                         }),
                     });
                 }
@@ -249,6 +252,7 @@ impl<'a> Evaluator<'a> {
                             start: d.pos.line as u32,
                             end: d.end_line,
                             col: 0,
+                            start_col: (d.pos.col as u32).saturating_sub(1),
                         }),
                     });
                 }
@@ -436,6 +440,7 @@ impl<'a> Evaluator<'a> {
                         start: d.pos.line as u32,
                         end: d.end_line,
                         col: 0,
+                        start_col: (d.pos.col as u32).saturating_sub(1),
                     }),
                 });
             }
@@ -452,6 +457,7 @@ impl<'a> Evaluator<'a> {
                         start: d.pos.line as u32,
                         end: d.end_line,
                         col: 0,
+                        start_col: (d.pos.col as u32).saturating_sub(1),
                     }),
                 });
             }
