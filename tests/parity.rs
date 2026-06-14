@@ -437,6 +437,36 @@ fn rgb_hsl_special_value_passthrough() {
         ours("a {b: rgb(var(--foo), 0.4)}\n"),
         "a {\n  b: rgb(var(--foo), 0.4);\n}\n"
     );
+    // A special-value passthrough echoes the spelling the caller used: `rgba`
+    // and `hsla` stay `rgba`/`hsla` (dart-sass does not normalize them to
+    // `rgb`/`hsl`). Regression for Bootstrap's `rgba(var(--x), …)` output.
+    assert_eq!(
+        ours("a {b: rgba(var(--foo), 0.65)}\n"),
+        "a {\n  b: rgba(var(--foo), 0.65);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgba(var(--foo) 2 3)}\n"),
+        "a {\n  b: rgba(var(--foo), 2, 3);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hsla(var(--x) 50% 50%)}\n"),
+        "a {\n  b: hsla(var(--x), 50%, 50%);\n}\n"
+    );
+    // The two-argument `$color, $alpha` form: a `var()` alpha echoes the called
+    // name, but a `calc()` alpha folds to the resolved `rgba` serialization.
+    assert_eq!(
+        ours("a {b: rgba(blue, var(--foo))}\n"),
+        "a {\n  b: rgba(0, 0, 255, var(--foo));\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(blue, calc(0.4))}\n"),
+        "a {\n  b: rgba(0, 0, 255, 0.4);\n}\n"
+    );
+    // A `none`-only call still normalizes to the canonical space name.
+    assert_eq!(
+        ours("a {b: rgba(none none none)}\n"),
+        "a {\n  b: rgb(none none none);\n}\n"
+    );
 }
 
 #[test]

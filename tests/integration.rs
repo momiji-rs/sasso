@@ -707,3 +707,29 @@ fn default_assignment_does_not_eval_rhs_when_already_set() {
     ));
     assert_eq!(out, ".a {\n  width: 1rem;\n  padding: 1.5rem;\n}\n");
 }
+
+#[test]
+fn rgba_hsla_special_value_passthrough_keeps_name() {
+    // When an rgb()/hsl() call can't resolve to a concrete color because a
+    // channel is a CSS `var()`, dart-sass preserves the call AND the exact
+    // function name the caller wrote. We previously normalized `rgba`/`hsla`
+    // down to `rgb`/`hsl`. (Bootstrap relies on `rgba(var(--x), …)`.)
+    assert_eq!(
+        css(".a { color: rgba(var(--bs-body-color-rgb), 0.65); }\n"),
+        ".a {\n  color: rgba(var(--bs-body-color-rgb), 0.65);\n}\n"
+    );
+    assert_eq!(
+        css(".a { color: hsla(var(--h), 50%, 50%, 0.5); }\n"),
+        ".a {\n  color: hsla(var(--h), 50%, 50%, 0.5);\n}\n"
+    );
+    // A genuine `rgb()`/`hsl()` call keeps its name too (unchanged behavior).
+    assert_eq!(
+        css(".a { color: rgb(var(--y), 0.5); }\n"),
+        ".a {\n  color: rgb(var(--y), 0.5);\n}\n"
+    );
+    // A `none`-only call normalizes to the canonical space name, not the alias.
+    assert_eq!(
+        css(".a { color: rgba(none none none); }\n"),
+        ".a {\n  color: rgb(none none none);\n}\n"
+    );
+}
