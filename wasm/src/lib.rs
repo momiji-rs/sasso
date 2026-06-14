@@ -105,6 +105,60 @@ pub extern "C" fn sasso_compile(
         Err(_) => (b"input is not valid UTF-8".to_vec(), 0),
     };
 
+    into_result(bytes, ok, out_len_ptr, ok_ptr)
+}
+
+/// Like [`sasso_compile`], but also produces a Source Map v3. On success the
+/// result buffer is FRAMED: a little-endian `u32` CSS byte length, then the CSS
+/// bytes, then the source-map JSON bytes. `include_sources != 0` embeds the
+/// source text in the map's `sourcesContent`. On failure the buffer is the
+/// error message (as for `sasso_compile`) and `*ok_ptr` is `0` — JS must check
+/// `ok` before treating the buffer as framed.
+#[no_mangle]
+pub extern "C" fn sasso_compile_map(
+    input_ptr: *const u8,
+    input_len: usize,
+    compressed: u8,
+    include_sources: u8,
+    out_len_ptr: *mut usize,
+    ok_ptr: *mut u8,
+) -> *mut u8 {
+    let input: &[u8] = if input_ptr.is_null() || input_len == 0 {
+        &[]
+    } else {
+        // SAFETY: JS guarantees [input_ptr, input_len) is a live buffer it
+        // just allocated via sasso_alloc and filled.
+        unsafe { std::slice::from_raw_parts(input_ptr, input_len) }
+    };
+
+    let (bytes, ok): (Vec<u8>, u8) = match std::str::from_utf8(input) {
+        Ok(scss) => {
+            let mut opts = sasso::Options::default().with_source_map_include_sources(include_sources != 0);
+            if compressed != 0 {
+                opts = opts.with_style(sasso::OutputStyle::Compressed);
+            }
+            match sasso::compile_with_source_map(scss, &opts) {
+                Ok(result) => {
+                    let css = result.css.into_bytes();
+                    let map = result.source_map.to_json().into_bytes();
+                    let mut framed = Vec::with_capacity(4 + css.len() + map.len());
+                    framed.extend_from_slice(&(css.len() as u32).to_le_bytes());
+                    framed.extend_from_slice(&css);
+                    framed.extend_from_slice(&map);
+                    (framed, 1)
+                }
+                Err(err) => (err.to_string().into_bytes(), 0),
+            }
+        }
+        Err(_) => (b"input is not valid UTF-8".to_vec(), 0),
+    };
+
+    into_result(bytes, ok, out_len_ptr, ok_ptr)
+}
+
+/// Box a result buffer, write its length + ok flag to the scratch cells, and
+/// return a pointer JS frees with `sasso_free(ptr, *out_len_ptr)`.
+fn into_result(bytes: Vec<u8>, ok: u8, out_len_ptr: *mut usize, ok_ptr: *mut u8) -> *mut u8 {
     let len = bytes.len();
     let mut boxed = bytes.into_boxed_slice();
     let ptr = boxed.as_mut_ptr();

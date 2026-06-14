@@ -11,6 +11,15 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Added
+
+- **wasm: source maps.** The `@momiji-rs/sasso` package's `compile(scss, {
+  sourceMap: true [, sourceMapIncludeSources: true] })` now returns
+  `{ css, sourceMap }` (the v3 map as a parsed object) instead of a bare CSS
+  string; without `sourceMap` it still returns the string (backwards
+  compatible). New `sasso_compile_map` export returns a framed `[u32 css_len][css]
+  [map json]` buffer.
+
 ## [0.4.0] - 2026-06-14
 
 ### Added

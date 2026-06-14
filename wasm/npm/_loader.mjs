@@ -73,7 +73,10 @@ export function makeApi(wasmUrl) {
     }
 
     const compressed = options.style === "compressed" ? 1 : 0;
-    const outPtr = w.sasso_compile(inPtr, input.length, compressed, scratch, scratch + 4);
+    const wantMap = !!options.sourceMap;
+    const outPtr = wantMap
+      ? w.sasso_compile_map(inPtr, input.length, compressed, options.sourceMapIncludeSources ? 1 : 0, scratch, scratch + 4)
+      : w.sasso_compile(inPtr, input.length, compressed, scratch, scratch + 4);
 
     // Re-read against the current buffer (compile may have grown memory).
     const view = new DataView(w.memory.buffer);
@@ -85,9 +88,15 @@ export function makeApi(wasmUrl) {
     w.sasso_free(scratch, 8);
     w.sasso_free(outPtr, outLen);
 
-    const text = decoder.decode(out);
-    if (!ok) throw new Error(text);
-    return text;
+    if (!ok) throw new Error(decoder.decode(out));
+    if (!wantMap) return decoder.decode(out);
+
+    // Framed result: [cssLen: u32 LE][css bytes][sourceMap JSON bytes].
+    const cssLen = new DataView(out.buffer, out.byteOffset, 4).getUint32(0, true);
+    return {
+      css: decoder.decode(out.subarray(4, 4 + cssLen)),
+      sourceMap: JSON.parse(decoder.decode(out.subarray(4 + cssLen))),
+    };
   }
 
   return { compile, configure };
