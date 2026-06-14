@@ -197,14 +197,36 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
-        let val = self.eval_expr(&v.value)?;
+        // A `!default` assignment whose target already holds a non-null value
+        // is a no-op — and crucially, the right-hand side must NOT be evaluated
+        // (dart-sass short-circuits a guarded declaration before evaluating its
+        // expression). Evaluating it would surface errors from an expression
+        // that is never actually used, e.g. Bootstrap's
+        // `$x: 1rem + .5em !default` after `$x` was already set to a `rem`.
         if v.is_default {
             if let Some(existing) = self.lookup(&v.name) {
                 if !matches!(existing, Value::Null) {
                     return Ok(());
                 }
             }
+            // Same guard for a name owned by exactly one `@use … as *` module.
+            if (self.scopes.len() == 1 || v.is_global) && !is_private_member(&v.name) {
+                if let Some(g) = self.scopes.first() {
+                    if !g.borrow().contains_key(&v.name) {
+                        let mut targets = self
+                            .star_user_modules
+                            .iter()
+                            .filter_map(|m| m.var(&v.name));
+                        if let Some(existing) = targets.next() {
+                            if targets.next().is_none() && !matches!(existing, Value::Null) {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
         }
+        let val = self.eval_expr(&v.value)?;
         // A top-level (or nested `!global`) assignment to a name not in the
         // global scope but exposed by exactly one `@use … as *` module updates
         // that module's variable (so the module's own functions/mixins observe
@@ -219,13 +241,6 @@ impl<'a> Evaluator<'a> {
                         .cloned()
                         .collect();
                     if targets.len() == 1 {
-                        if v.is_default {
-                            if let Some(existing) = targets[0].var(&v.name) {
-                                if !matches!(existing, Value::Null) {
-                                    return Ok(());
-                                }
-                            }
-                        }
                         targets[0].vars.borrow_mut().insert(v.name.clone(), val);
                         return Ok(());
                     }
@@ -272,6 +287,8 @@ impl<'a> Evaluator<'a> {
         if !exists {
             return Err(Error::unpositioned("Undefined variable."));
         }
+        // Short-circuit a `!default` no-op before evaluating the RHS, so an
+        // unused guarded expression can't raise an error (matches dart-sass).
         if v.is_default {
             if let Some(existing) = target.var(&name) {
                 if !matches!(existing, Value::Null) {

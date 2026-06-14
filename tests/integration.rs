@@ -615,3 +615,21 @@ fn importer_cached_strings_survive_compile_reset() {
         assert!(p == "mod" || p == "partial", "unexpected cached path {p:?}");
     }
 }
+
+#[test]
+fn default_assignment_does_not_eval_rhs_when_already_set() {
+    // A guarded (`!default`) declaration whose target already holds a non-null
+    // value must NOT evaluate its right-hand side. dart-sass short-circuits
+    // before evaluation, so an otherwise-erroring expression is fine here.
+    // This mirrors Bootstrap's `$form-check-padding-start: $w + .5em !default`
+    // after a Shopware-style override sets `$w: 1rem` and the var to `1.5rem`,
+    // where `1rem + .5em` would be an "incompatible units" error if evaluated.
+    let out = css(concat!(
+        "$w: 1rem !default;\n",
+        "$p: 1.5rem !default;\n",
+        "$w: 1em !default;\n",
+        "$p: $w + .5em !default;\n",
+        ".a { width: $w; padding: $p; }\n",
+    ));
+    assert_eq!(out, ".a {\n  width: 1rem;\n  padding: 1.5rem;\n}\n");
+}
