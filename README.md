@@ -242,6 +242,19 @@ The compiler is usable beyond Rust:
 The Ruby gem lives in its own repo (the norm for Rust-backed gems) and pins a
 published `sasso` crate version; file gem-specific issues there.
 
+**Ruby framework integrations** build on that gem — drop-in Sass for your stack,
+compiled **in-process** (no Node, no Dart, no subprocess) and byte-for-byte
+identical to dart-sass:
+
+| Framework | Gem | Repo |
+| --- | --- | --- |
+| **Rails** (Propshaft + Sprockets) | [`sasso-rails`](https://rubygems.org/gems/sasso-rails) | [`momiji-rs/sasso-rails`](https://github.com/momiji-rs/sasso-rails) |
+| **Bridgetown** | [`bridgetown-sasso`](https://rubygems.org/gems/bridgetown-sasso) | [`momiji-rs/bridgetown-sasso`](https://github.com/momiji-rs/bridgetown-sasso) |
+| **Hanami** (2.1+) | [`hanami-sasso`](https://rubygems.org/gems/hanami-sasso) | [`momiji-rs/hanami-sasso`](https://github.com/momiji-rs/hanami-sasso) |
+
+Each compiles Sass without a Node toolchain — typically ~6–7× faster per compile
+than the Node `sass` default (and far faster cold, with no process spawn).
+
 ## Testing & coverage
 
 ```console
