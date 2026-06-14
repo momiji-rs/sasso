@@ -2,30 +2,69 @@
 
 use crate::ast::SrcLines;
 use crate::eval::{OutItem, OutNode};
+use crate::sourcemap::SmCollector;
 use crate::OutputStyle;
 
 pub(crate) fn emit(nodes: &[OutNode], style: OutputStyle) -> String {
+    // The default path collects nothing: `&mut None` makes every `record_*`
+    // call inert, so the output is byte-for-byte the historical CSS.
+    emit_inner(nodes, style, &mut None).0
+}
+
+/// Like [`emit`], but also records a source map. Returns the final CSS, the
+/// byte length of the `@charset`/BOM prefix that shifts every body offset, and
+/// the populated collector (raw body offsets, not yet resolved to lines).
+pub(crate) fn emit_with_map(nodes: &[OutNode], style: OutputStyle) -> (String, usize, SmCollector) {
+    let mut collector = Some(SmCollector::new());
+    let (css, body_off) = emit_inner(nodes, style, &mut collector);
+    (css, body_off, collector.expect("collector present"))
+}
+
+/// Shared serializer. `collector = Some` records mapped-token body offsets;
+/// `None` records nothing (the default path). Returns `(css, body_off)` where
+/// `body_off` is the length of the prepended `@charset`/BOM prefix (0 when the
+/// body is pure ASCII).
+fn emit_inner(nodes: &[OutNode], style: OutputStyle, collector: &mut Option<SmCollector>) -> (String, usize) {
     let body = match style {
-        OutputStyle::Expanded => emit_expanded(nodes),
-        OutputStyle::Compressed => emit_compressed(nodes),
+        OutputStyle::Expanded => emit_expanded(nodes, collector),
+        OutputStyle::Compressed => emit_compressed(nodes, collector),
     };
     // dart-sass declares UTF-8 when the output contains any non-ASCII code
     // point: expanded output gets a leading `@charset "UTF-8";`, compressed
-    // output gets a UTF-8 byte-order mark instead.
+    // output gets a UTF-8 byte-order mark instead. The prefix shifts every
+    // recorded body offset by its byte length (reported as `body_off`).
     if body.is_ascii() {
-        return body;
+        return (body, 0);
     }
     match style {
-        OutputStyle::Expanded => format!("@charset \"UTF-8\";\n{body}"),
-        OutputStyle::Compressed => format!("\u{FEFF}{body}"),
+        OutputStyle::Expanded => {
+            const PREFIX: &str = "@charset \"UTF-8\";\n";
+            (format!("{PREFIX}{body}"), PREFIX.len())
+        }
+        OutputStyle::Compressed => {
+            let prefix = "\u{FEFF}";
+            (format!("{prefix}{body}"), prefix.len())
+        }
     }
 }
 
-fn emit_expanded(nodes: &[OutNode]) -> String {
+/// Record a mapped token at the current end of `out` if collecting. Reads only
+/// `out.len()` and the SrcLines — never mutates the output.
+fn record(out: &str, lines: SrcLines, collector: &mut Option<SmCollector>) {
+    if let Some(c) = collector {
+        // `start` is the 1-based source line; 0 means "unknown" — skip it.
+        if lines.start == 0 {
+            return;
+        }
+        c.record(out.len(), lines.file, lines.start - 1, lines.start_col);
+    }
+}
+
+fn emit_expanded(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> String {
     let mut out = String::new();
     let mut prev = SrcLines::default();
     for node in nodes {
-        emit_node_expanded(&mut out, node, 0, &mut prev);
+        emit_node_expanded(&mut out, node, 0, &mut prev, collector);
     }
     out
 }
@@ -59,11 +98,14 @@ fn block_start(lines: SrcLines) -> SrcLines {
 /// newline(s) — at the root a group blank line may sit between — then write
 /// ` /*…*/` with continuation lines at indentation 0 (dart saves and zeroes
 /// `_indentation` for trailing comments).
-fn push_trailing_comment(out: &mut String, text: &str) {
+fn push_trailing_comment(out: &mut String, text: &str, lines: SrcLines, collector: &mut Option<SmCollector>) {
     while out.ends_with('\n') {
         out.pop();
     }
-    out.push_str(" /*");
+    out.push(' ');
+    // Source-map: the joined comment's `/*`.
+    record(out, lines, collector);
+    out.push_str("/*");
     push_comment_text(out, text, "");
     out.push_str("*/\n");
 }
@@ -98,7 +140,13 @@ fn indent_for(depth: usize) -> std::borrow::Cow<'static, str> {
 /// sibling's source lines for the trailing-comment rule (its `end` is the
 /// comparison line); returns whether THIS node was emitted as a trailing
 /// comment joined onto the previous line.
-fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut SrcLines) -> bool {
+fn emit_node_expanded(
+    out: &mut String,
+    node: &OutNode,
+    depth: usize,
+    prev: &mut SrcLines,
+    collector: &mut Option<SmCollector>,
+) -> bool {
     let indent = indent_for(depth);
     let indent = indent.as_ref();
     match node {
@@ -107,7 +155,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
         OutNode::ModuleScope { nodes, .. } => {
             let mut joined = false;
             for n in nodes {
-                joined = emit_node_expanded(out, n, depth, prev);
+                joined = emit_node_expanded(out, n, depth, prev, collector);
             }
             return joined;
         }
@@ -123,6 +171,8 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             // `Raw` selectors borrow directly.
             let selectors = selectors.to_strings();
             out.push_str(indent);
+            // Source-map: the selector list's first character.
+            record(out, *lines, collector);
             // A complex selector flagged with a source line break starts on its
             // own line (aligned to the rule's indent); others are `, `-joined.
             for (i, sel) in selectors.iter().enumerate() {
@@ -141,18 +191,21 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             let mut inner = block_start(*lines);
             let mut joined = false;
             for item in items {
-                joined = emit_item_expanded(out, item, depth + 1, &mut inner);
+                joined = emit_item_expanded(out, item, depth + 1, &mut inner, collector);
             }
             close_block(out, indent, items.len(), joined);
             *prev = *lines;
         }
         OutNode::Comment(text, lines) => {
             if is_trailing(*lines, *prev) {
-                push_trailing_comment(out, text);
+                // Source-map: the joined `/*` (after the dropped newline + space).
+                push_trailing_comment(out, text, *lines, collector);
                 *prev = *lines;
                 return true;
             }
             out.push_str(indent);
+            // Source-map: the comment's `/*`.
+            record(out, *lines, collector);
             out.push_str("/*");
             push_comment_text(out, text, indent);
             out.push_str("*/\n");
@@ -183,6 +236,8 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             lines,
         } => {
             out.push_str(indent);
+            // Source-map: the declaration property name.
+            record(out, *lines, collector);
             out.push_str(prop);
             emit_decl_value_expanded(out, value, *important, *custom, lines.col as usize, indent);
             out.push_str(";\n");
@@ -196,6 +251,8 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             lines,
         } => {
             out.push_str(indent);
+            // Source-map: the at-rule's `@` keyword.
+            record(out, *lines, collector);
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
@@ -217,7 +274,7 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
             let mut joined = false;
             for child in body {
                 let before = out.len();
-                let j = emit_node_expanded(out, child, depth + 1, &mut inner);
+                let j = emit_node_expanded(out, child, depth + 1, &mut inner, collector);
                 // Sentinels emit nothing and don't count as children.
                 if out.len() > before {
                     children += 1;
@@ -232,7 +289,13 @@ fn emit_node_expanded(out: &mut String, node: &OutNode, depth: usize, prev: &mut
 
 /// Render one rule-block item; same `prev`/return contract as
 /// [`emit_node_expanded`].
-fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize, prev: &mut SrcLines) -> bool {
+fn emit_item_expanded(
+    out: &mut String,
+    item: &OutItem,
+    depth: usize,
+    prev: &mut SrcLines,
+    collector: &mut Option<SmCollector>,
+) -> bool {
     let indent = indent_for(depth);
     let indent = indent.as_ref();
     match item {
@@ -244,6 +307,8 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize, prev: &mut
             lines,
         } => {
             out.push_str(indent);
+            // Source-map: the declaration property name.
+            record(out, *lines, collector);
             out.push_str(prop);
             emit_decl_value_expanded(out, value, *important, *custom, lines.col as usize, indent);
             out.push_str(";\n");
@@ -251,11 +316,13 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize, prev: &mut
         }
         OutItem::Comment(text, lines) => {
             if is_trailing(*lines, *prev) {
-                push_trailing_comment(out, text);
+                push_trailing_comment(out, text, *lines, collector);
                 *prev = *lines;
                 return true;
             }
             out.push_str(indent);
+            // Source-map: the comment's `/*`.
+            record(out, *lines, collector);
             out.push_str("/*");
             push_comment_text(out, text, indent);
             out.push_str("*/\n");
@@ -263,6 +330,8 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize, prev: &mut
         }
         OutItem::ChildlessAtRule { name, prelude, lines } => {
             out.push_str(indent);
+            // Source-map: the at-rule's `@` keyword.
+            record(out, *lines, collector);
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
@@ -279,7 +348,7 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize, prev: &mut
             let mut inner = SrcLines::default();
             let mut joined = false;
             for child in items {
-                joined = emit_item_expanded(out, child, depth + 1, &mut inner);
+                joined = emit_item_expanded(out, child, depth + 1, &mut inner, collector);
             }
             close_block(out, indent, items.len(), joined);
             *prev = SrcLines::default();
@@ -296,7 +365,7 @@ fn emit_item_expanded(out: &mut String, item: &OutItem, depth: usize, prev: &mut
             let mut inner = SrcLines::default();
             let mut joined = false;
             for child in items {
-                joined = emit_item_expanded(out, child, depth + 1, &mut inner);
+                joined = emit_item_expanded(out, child, depth + 1, &mut inner, collector);
             }
             close_block(out, indent, items.len(), joined);
             *prev = SrcLines::default();
@@ -445,10 +514,10 @@ fn write_with_indent(out: &mut String, text: &str, min_indent: usize, indent: &s
     }
 }
 
-fn emit_compressed(nodes: &[OutNode]) -> String {
+fn emit_compressed(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> String {
     let mut out = String::new();
     for node in nodes {
-        emit_node_compressed(&mut out, node);
+        emit_node_compressed(&mut out, node, collector);
     }
     out
 }
@@ -456,7 +525,7 @@ fn emit_compressed(nodes: &[OutNode]) -> String {
 /// Render `nodes` joined for compressed output. A declaration is terminated by
 /// `;` before whatever follows it, but a preceding rule/at-rule `}` is its own
 /// separator, so no `;` is inserted after it (matching dart-sass).
-fn emit_compressed_body(out: &mut String, nodes: &[OutNode]) {
+fn emit_compressed_body(out: &mut String, nodes: &[OutNode], collector: &mut Option<SmCollector>) {
     let mut prev_was_decl = false;
     for node in nodes {
         // Comments and blanks produce no compressed output; don't let them
@@ -467,7 +536,7 @@ fn emit_compressed_body(out: &mut String, nodes: &[OutNode]) {
         if prev_was_decl {
             out.push(';');
         }
-        emit_node_compressed(out, node);
+        emit_node_compressed(out, node, collector);
         prev_was_decl = matches!(node, OutNode::AtDecl { .. });
     }
 }
@@ -535,20 +604,24 @@ fn compressed_nested_at_rule(name: &str, prelude: &str, items: &[OutItem]) -> St
     }
 }
 
-fn emit_node_compressed(out: &mut String, node: &OutNode) {
+fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option<SmCollector>) {
     match node {
         OutNode::ModuleScope { nodes, .. } => {
             for n in nodes {
-                emit_node_compressed(out, n);
+                emit_node_compressed(out, n, collector);
             }
         }
         OutNode::Rule {
             selectors,
             linebreaks: _,
             items,
+            lines,
             ..
         } => {
-            let decls: Vec<String> = items
+            // Pre-render each visible item to a string, keeping its source lines
+            // for the source map (`None` = no usable mapping, e.g. a plain-CSS
+            // nested rule whose leading token is a selector we don't map here).
+            let decls: Vec<(String, Option<SrcLines>)> = items
                 .iter()
                 .filter_map(|it| match it {
                     OutItem::Decl {
@@ -556,37 +629,49 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
                         value,
                         important,
                         custom,
-                        ..
+                        lines,
                     } => {
                         // A custom property emits its value verbatim (its
                         // leading whitespace is part of `value`) and never gains
                         // an `!important` flag.
                         let imp = if *important && !*custom { "!important" } else { "" };
                         let value = fold_value_compressed(value, *custom);
-                        Some(format!("{prop}:{value}{imp}"))
+                        Some((format!("{prop}:{value}{imp}"), Some(*lines)))
                     }
                     OutItem::Comment(..) => None,
-                    OutItem::ChildlessAtRule { name, prelude, .. } => {
-                        if prelude.is_empty() {
-                            Some(format!("@{name}"))
+                    OutItem::ChildlessAtRule { name, prelude, lines } => {
+                        let s = if prelude.is_empty() {
+                            format!("@{name}")
                         } else {
-                            Some(format!("@{name} {prelude}"))
-                        }
+                            format!("@{name} {prelude}")
+                        };
+                        Some((s, Some(*lines)))
                     }
                     OutItem::NestedRule { selectors, items } => {
-                        Some(compressed_nested_rule(selectors, items))
+                        Some((compressed_nested_rule(selectors, items), None))
                     }
                     OutItem::NestedAtRule { name, prelude, items } => {
-                        Some(compressed_nested_at_rule(name, prelude, items))
+                        Some((compressed_nested_at_rule(name, prelude, items), None))
                     }
                 })
                 .collect();
             if decls.is_empty() {
                 return;
             }
+            // Source-map: the selector list's first character.
+            record(out, *lines, collector);
             out.push_str(&selectors.to_strings().join(","));
             out.push('{');
-            out.push_str(&decls.join(";"));
+            for (i, (s, dlines)) in decls.iter().enumerate() {
+                if i > 0 {
+                    out.push(';');
+                }
+                if let Some(l) = dlines {
+                    // Source-map: the item's leading token (property name / `@`).
+                    record(out, *l, collector);
+                }
+                out.push_str(s);
+            }
             out.push('}');
         }
         // Loud comments are dropped in compressed output (the slice does
@@ -601,9 +686,11 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
             value,
             important,
             custom,
-            ..
+            lines,
         } => {
             let imp = if *important && !*custom { "!important" } else { "" };
+            // Source-map: the declaration property name.
+            record(out, *lines, collector);
             out.push_str(prop);
             out.push(':');
             out.push_str(&fold_value_compressed(value, *custom));
@@ -614,8 +701,10 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
             prelude,
             body,
             has_block,
-            ..
+            lines,
         } => {
+            // Source-map: the at-rule's `@` keyword.
+            record(out, *lines, collector);
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
@@ -632,7 +721,7 @@ fn emit_node_compressed(out: &mut String, node: &OutNode) {
                 return;
             }
             out.push('{');
-            emit_compressed_body(out, body);
+            emit_compressed_body(out, body, collector);
             out.push('}');
         }
     }

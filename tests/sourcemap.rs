@@ -205,3 +205,278 @@ fn invariant_checker_rejects_a_corrupted_map() {
         "checker must reject a map whose source column is wrong"
     );
 }
+
+// =====================================================================
+// sasso-output tests: compile fixtures with `compile_with_source_map`,
+// then validate the produced map with the harness above.
+// =====================================================================
+
+use sasso::{compile, compile_with_source_map, Options, OutputStyle};
+
+/// Compile `src` with a source map and return `(css, decoded_mappings, raw_json)`.
+fn sasso_map(src: &str, options: &Options<'_>) -> (String, Vec<Mapping>, String) {
+    let r = compile_with_source_map(src, options).expect("compile_with_source_map failed");
+    let json = r.source_map.to_json();
+    // The `mappings` is the last JSON string in our hand-built JSON.
+    let mappings = r.source_map.mappings.clone();
+    (r.css, decode_mappings(&mappings), json)
+}
+
+#[test]
+fn sasso_css_matches_plain_compile() {
+    // The map is generated ALONGSIDE the CSS — the CSS must equal `compile`'s.
+    for src in [
+        DART_INPUT,
+        "a { color: red; b { x: 1px; } }\n",
+        "@media screen { a { color: red; } }\n",
+        "/* hi */\na { color: red; }\n",
+    ] {
+        let plain = compile(src, &Options::default()).unwrap();
+        let r = compile_with_source_map(src, &Options::default()).unwrap();
+        assert_eq!(plain, r.css, "css mismatch for {src:?}");
+    }
+}
+
+#[test]
+fn sasso_nested_rule_map_is_valid() {
+    // The DART_INPUT fixture: nested rule, two declarations, selector flattening.
+    let (css, _maps, json) = sasso_map(DART_INPUT, &Options::default().with_url("sm_in.scss"));
+    assert_eq!(css, DART_OUTPUT_CSS, "sasso css must match the dart fixture css");
+    let strict = check_declaration_invariants(&[("sm_in.scss", DART_INPUT)], &css, &sasso_mappings(&json));
+    assert!(
+        strict >= 2,
+        "expected to strictly verify >=2 decl names, got {strict}"
+    );
+    assert!(json.contains("\"version\":3"));
+    assert!(json.contains("\"sources\":[\"sm_in.scss\"]"));
+    assert!(json.contains("\"file\":\"sm_in.scss\""));
+}
+
+#[test]
+fn sasso_multiline_decl_block_map_is_valid() {
+    // A rule whose declarations span several source lines.
+    let src = "\
+.card {
+  color: red;
+  background: blue;
+  border: 1px solid green;
+}
+";
+    let (css, _m, json) = sasso_map(src, &Options::default().with_url("in.scss"));
+    let strict = check_declaration_invariants(&[("in.scss", src)], &css, &sasso_mappings(&json));
+    // color, background, border — three strictly-verified declaration names.
+    assert!(strict >= 3, "expected >=3 strict decl mappings, got {strict}");
+}
+
+#[test]
+fn sasso_media_block_map_is_valid() {
+    let src = "\
+@media screen {
+  .a {
+    color: red;
+  }
+}
+";
+    let (css, maps, json) = sasso_map(src, &Options::default().with_url("in.scss"));
+    let strict = check_declaration_invariants(&[("in.scss", src)], &css, &sasso_mappings(&json));
+    assert!(strict >= 1, "expected the `color` decl mapped, got {strict}");
+    // The `@media` keyword should map to the source `@` (line 0, col 0).
+    assert!(
+        maps.iter().any(|m| m.src_line == 0 && m.src_col == 0),
+        "expected a mapping at source 0:0 for the @media keyword"
+    );
+}
+
+#[test]
+fn sasso_comment_map_is_valid() {
+    let src = "/* a loud comment */\n.a {\n  color: red;\n}\n";
+    let (css, maps, json) = sasso_map(src, &Options::default().with_url("in.scss"));
+    // The comment's `/*` maps to source 0:0.
+    assert!(
+        maps.iter().any(|m| m.src_line == 0 && m.src_col == 0),
+        "expected the comment `/*` mapped to source 0:0"
+    );
+    let strict = check_declaration_invariants(&[("in.scss", src)], &css, &sasso_mappings(&json));
+    assert!(strict >= 1);
+}
+
+#[test]
+fn sasso_compressed_map_is_valid() {
+    let src = ".a {\n  color: red;\n  width: 10px;\n}\n";
+    let opts = Options::default()
+        .with_style(OutputStyle::Compressed)
+        .with_url("in.scss");
+    let (css, maps, _json) = sasso_map(src, &opts);
+    assert_eq!(css, ".a{color:red;width:10px}", "compressed css");
+    // The two declaration names map to their source columns (both at col 2).
+    assert_eq!(
+        maps.iter().filter(|m| m.src_col == 2).count(),
+        2,
+        "both compressed decl names should map to source col 2: {maps:?}"
+    );
+    // The selector maps to source 0:0.
+    assert!(maps
+        .iter()
+        .any(|m| m.gen_line == 0 && m.src_line == 0 && m.src_col == 0));
+}
+
+#[test]
+fn sasso_sources_content_round_trips() {
+    let src = ".a { color: red; }\n";
+    let opts = Options::default()
+        .with_url("in.scss")
+        .with_source_map_include_sources(true);
+    let r = compile_with_source_map(src, &opts).unwrap();
+    assert_eq!(r.source_map.sources, vec!["in.scss".to_string()]);
+    assert_eq!(
+        r.source_map.sources_content.as_deref(),
+        Some(&[src.to_string()][..]),
+        "sourcesContent must hold the entry source"
+    );
+    // Default: no sourcesContent.
+    let r2 = compile_with_source_map(src, &Options::default().with_url("in.scss")).unwrap();
+    assert!(r2.source_map.sources_content.is_none());
+    assert!(!r2.source_map.to_json().contains("sourcesContent"));
+}
+
+#[test]
+fn sasso_stdin_file_name() {
+    // No URL -> the `file` field is "stdin" and the single source is "stdin".
+    let r = compile_with_source_map(".a { x: 1px; }\n", &Options::default()).unwrap();
+    assert_eq!(r.source_map.file.as_deref(), Some("stdin"));
+    assert_eq!(r.source_map.sources, vec!["stdin".to_string()]);
+}
+
+/// Extract the `mappings` JSON string value from sasso's hand-built map JSON.
+fn sasso_mappings(json: &str) -> String {
+    let key = "\"mappings\":\"";
+    let start = json.find(key).expect("mappings field") + key.len();
+    let rest = &json[start..];
+    let end = rest.find('"').expect("mappings close quote");
+    rest[..end].to_string()
+}
+
+// =====================================================================
+// Gated dart-sass differential: compare sasso's map to dart's for the
+// SAME input. Opt-in via SASSO_PARITY=1 + a reachable SASS_BIN dart-sass
+// (mirrors tests/parity.rs). Decodes BOTH maps and asserts the declaration
+// and selector SOURCE positions agree (semantic, not byte, comparison).
+// =====================================================================
+
+fn dart_enabled() -> bool {
+    std::env::var("SASSO_PARITY").map(|v| v != "0").unwrap_or(false)
+}
+
+/// Run dart-sass with `--source-map` over a temp input file and return its
+/// decoded mappings + sources, or `None` if dart is unavailable.
+fn dart_map(src: &str) -> Option<(Vec<Mapping>, Vec<String>)> {
+    use std::io::Write as _;
+    let bin = std::env::var("SASS_BIN").ok()?;
+    let dir = std::env::temp_dir();
+    let stem = format!("sasso_dartdiff_{}", std::process::id());
+    let in_path = dir.join(format!("{stem}.scss"));
+    let out_path = dir.join(format!("{stem}.css"));
+    let map_path = dir.join(format!("{stem}.css.map"));
+    std::fs::File::create(&in_path)
+        .ok()?
+        .write_all(src.as_bytes())
+        .ok()?;
+    let status = std::process::Command::new(&bin)
+        .arg("--source-map")
+        .arg(&in_path)
+        .arg(&out_path)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let map_json = std::fs::read_to_string(&map_path).ok()?;
+    let mappings = sasso_mappings(&map_json);
+    // sources: parse the simple JSON array of strings.
+    let sources = {
+        let key = "\"sources\":[";
+        let s = map_json.find(key)? + key.len();
+        let rest = &map_json[s..];
+        let e = rest.find(']')?;
+        rest[..e]
+            .split(',')
+            .filter(|t| !t.is_empty())
+            .map(|t| t.trim().trim_matches('"').to_string())
+            .collect()
+    };
+    // Best-effort cleanup.
+    let _ = std::fs::remove_file(&in_path);
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&map_path);
+    Some((decode_mappings(&mappings), sources))
+}
+
+/// The set of SOURCE positions a map points at (id,line,col) — order- and
+/// generated-position-independent. Selector flattening means the GENERATED side
+/// differs between impls, but the SOURCE side a declaration/selector points to
+/// should agree.
+fn source_positions(maps: &[Mapping]) -> std::collections::BTreeSet<(u32, u32, u32)> {
+    maps.iter().map(|m| (m.src_id, m.src_line, m.src_col)).collect()
+}
+
+#[test]
+fn dart_differential_source_positions_agree() {
+    if !dart_enabled() {
+        return;
+    }
+    // Single-line selectors keep sasso's selector-line approximation exact
+    // (sasso maps a selector to its brace line; for single-line rules that IS
+    // the selector line). Each case exercises a different construct.
+    let cases = [
+        ".a {\n  color: red;\n  .b { width: 10px; }\n}\n",
+        "a {\n  color: red;\n}\nb {\n  width: 10px;\n}\n",
+        "@media screen {\n  .a {\n    color: red;\n  }\n}\n",
+        ".card {\n  color: red;\n  background: blue;\n}\n",
+    ];
+    for src in cases {
+        let Some((dart, _dsrc)) = dart_map(src) else {
+            eprintln!("skipping dart-diff: dart-sass unavailable");
+            return;
+        };
+        // sasso: name the entry the same as dart (the temp file's basename is
+        // arbitrary, but both maps use src_id 0 for the single entry file).
+        let opts = Options::default().with_url("in.scss");
+        let r = compile_with_source_map(src, &opts).unwrap();
+        let ours = decode_mappings(&r.source_map.mappings);
+        let dart_pos = source_positions(&dart);
+        let our_pos = source_positions(&ours);
+        // Every source position dart maps to, sasso must also map to (sasso may
+        // additionally map the closing-token columns dart omits, so this is a
+        // superset check on dart's positions).
+        for p in &dart_pos {
+            assert!(
+                our_pos.contains(p),
+                "dart maps source {p:?} that sasso does not.\nsrc:\n{src}\nours: {our_pos:?}\ndart: {dart_pos:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn sasso_charset_prefix_and_utf16_columns() {
+    // Non-ASCII content makes the serializer prepend `@charset "UTF-8";\n`,
+    // which shifts every generated line down by one (the leading empty group
+    // in `mappings`). The astral `𝕏` is 2 UTF-16 code units, so the following
+    // line's columns must still be counted in UTF-16 units. This map is
+    // byte-identical to dart-sass 1.x for the same input.
+    let src = ".a {\n  content: \"héllo 𝕏\";\n  color: red;\n}\n";
+    let r = compile_with_source_map(src, &Options::default().with_url("u_in.scss")).unwrap();
+    assert!(
+        r.css.starts_with("@charset \"UTF-8\";\n"),
+        "expected a charset prefix"
+    );
+    assert_eq!(
+        r.source_map.mappings, ";AAAA;EACE;EACA",
+        "charset-shifted + UTF-16 map"
+    );
+    // The selector is now on generated line 1 (after the @charset line).
+    let maps = decode_mappings(&r.source_map.mappings);
+    assert!(maps
+        .iter()
+        .any(|m| m.gen_line == 1 && m.src_line == 0 && m.src_col == 0));
+}

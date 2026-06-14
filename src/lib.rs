@@ -48,14 +48,14 @@ mod ryu;
 mod sass_parser;
 mod scanner;
 mod selector;
-// Source Map v3 generation. Phase A landed the encoding primitives + JSON model;
-// `allow(dead_code)` until later phases wire it into emit + the public API.
-#[allow(dead_code)]
+// Source Map v3 generation: the encoding primitives + JSON model (Phase A),
+// wired into emit (Phase B/C) and surfaced through `compile_with_source_map`.
 mod sourcemap;
 mod value;
 
 pub use arena::{set_arena_bytes, ScopedAlloc};
 pub use error::Error;
+pub use sourcemap::SourceMap;
 
 use std::path::{Path, PathBuf};
 
@@ -166,6 +166,11 @@ pub struct Options<'a> {
     /// (`true`, the default) or the ASCII fallback (`false`, dart's
     /// `--no-unicode`).
     pub unicode: bool,
+    /// Whether [`compile_with_source_map`] populates the source map's
+    /// `sourcesContent` field with the full text of each source (dart-sass
+    /// `--embed-sources`). Default `false` (the map references sources by URL
+    /// only). Ignored by the plain [`compile`] path.
+    pub source_map_include_sources: bool,
 }
 
 impl Default for Options<'_> {
@@ -176,6 +181,7 @@ impl Default for Options<'_> {
             importer: None,
             url: None,
             unicode: true,
+            source_map_include_sources: false,
         }
     }
 }
@@ -218,6 +224,14 @@ impl<'a> Options<'a> {
     #[must_use]
     pub fn with_unicode(mut self, unicode: bool) -> Self {
         self.unicode = unicode;
+        self
+    }
+
+    /// Builder: whether [`compile_with_source_map`] embeds each source's full
+    /// text in the map's `sourcesContent` (default `false`).
+    #[must_use]
+    pub fn with_source_map_include_sources(mut self, include: bool) -> Self {
+        self.source_map_include_sources = include;
         self
     }
 }
@@ -266,6 +280,112 @@ pub fn compile(source: &str, options: &Options<'_>) -> Result<String, Error> {
     // second leave/reset.
     std::mem::forget(guard);
     owned
+}
+
+/// The CSS plus its source map, returned by [`compile_with_source_map`].
+#[derive(Clone, Debug)]
+pub struct CompileResult {
+    /// The compiled CSS (identical to what [`compile`] would return for the
+    /// same `source`/`options` — the map is generated alongside, not instead).
+    pub css: String,
+    /// The Source Map v3 describing `css`. Serialize it with
+    /// [`SourceMap::to_json`].
+    pub source_map: SourceMap,
+}
+
+/// Compile SCSS source to CSS *and* a [Source Map v3](SourceMap).
+///
+/// The `css` field is byte-for-byte what [`compile`] returns; the map is built
+/// alongside it. The map's `file` is the basename of [`Options::url`] (or
+/// `"stdin"` when no URL is set) and its `sources` are the source URLs.
+/// [`Options::with_source_map_include_sources`] controls whether each source's
+/// full text is embedded in `sourcesContent`.
+///
+/// V1 granularity maps the start of each selector, declaration property name,
+/// at-rule keyword, and comment; the declaration *value* start is not yet
+/// mapped.
+///
+/// # Errors
+///
+/// Returns [`Error`] on a parse or evaluation failure, like [`compile`].
+pub fn compile_with_source_map(source: &str, options: &Options<'_>) -> Result<CompileResult, Error> {
+    // Mirror `compile`'s arena bracketing so the returned value is deep-cloned
+    // out to the system allocator before the arena is reset.
+    let guard = arena::Scope::enter();
+    let result = compile_inner_sm(source, options);
+    let outermost = arena::leave_no_reset();
+    let owned = result.clone();
+    drop(result);
+    if outermost {
+        arena::reset();
+    }
+    std::mem::forget(guard);
+    owned
+}
+
+/// The basename of a path/URL (everything after the last `/`), used for the
+/// source map's `file` field.
+fn basename(url: &str) -> &str {
+    url.rsplit('/').next().unwrap_or(url)
+}
+
+/// The source-map compile pipeline: parse + evaluate exactly like
+/// [`compile_inner`], then emit with the source-map collector and assemble the
+/// [`SourceMap`].
+fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult, Error> {
+    let glyphs = if options.unicode {
+        diag::GlyphSet::Unicode
+    } else {
+        diag::GlyphSet::Ascii
+    };
+    let sheet = match options.syntax {
+        Syntax::Scss => parser::parse(source),
+        Syntax::Css => parser::parse_plain_css(source),
+        Syntax::Sass => sass_parser::parse(source),
+    };
+    let sheet = match sheet {
+        Ok(s) => s,
+        Err(mut e) => {
+            if let Some(url) = options.url {
+                if e.rendered.is_none() && e.has_position() {
+                    let span = diag::Span {
+                        line: e.line,
+                        col: e.col,
+                        length: e.length,
+                    };
+                    e.rendered = Some(diag::render_error(&e.message, source, url, span, glyphs));
+                }
+            }
+            return Err(e);
+        }
+    };
+    eval::validate_declarations(&sheet)?;
+    // The entry name labels the entry source in the map (`file`/`sources[0]`).
+    // It is also the evaluator's `current_url`, so every entry-file node is
+    // stamped with a non-zero file id; its source text is kept for
+    // `sourcesContent`. The source-map path always passes the real source (so
+    // `sourcesContent` works even without a diagnostic URL); this only enriches
+    // the *error* path with snippets — the CSS/map success path is unaffected.
+    let entry_name = options.url.unwrap_or("stdin");
+    let mut ev = eval::Evaluator::new(eval::EvalOptions {
+        style: options.style,
+        importer: options.importer,
+        source,
+        url: entry_name,
+        glyphs,
+    });
+    let mut out = Vec::new();
+    ev.eval_sheet(&sheet, &mut out)?;
+    let (css, body_off, collector) = emit::emit_with_map(&out, options.style);
+    let mappings = collector.finalize(&css, body_off).encode();
+    let (sources, sources_content) = ev.source_table(entry_name, options.source_map_include_sources);
+    let source_map = SourceMap {
+        file: Some(basename(entry_name).to_string()),
+        sources,
+        sources_content,
+        mappings,
+    };
+    Ok(CompileResult { css, source_map })
 }
 
 /// The actual compile pipeline. Runs inside the arena scope established by

@@ -1158,6 +1158,44 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
+    /// The source-map `sources` table, ordered so that an interned file id `i`
+    /// (1-based, as stamped into [`SrcLines::file`]) lands at `sources[i - 1]`.
+    /// `entry_url` is forced to index 0 even when no node was stamped (an empty
+    /// or output-less stylesheet), matching dart-sass always listing the entry.
+    /// When `include_sources` is set, the parallel `sourcesContent` is built
+    /// from the recorded file sources (empty string for a source seen only by
+    /// URL, never by text).
+    pub(crate) fn source_table(
+        &mut self,
+        entry_url: &str,
+        include_sources: bool,
+    ) -> (Vec<String>, Option<Vec<String>>) {
+        // Guarantee the entry url occupies id 1 (index 0) even if nothing was
+        // stamped during evaluation.
+        if self.file_ids.is_empty() {
+            self.file_ids.insert(entry_url.to_string(), 1);
+        }
+        let mut by_id: Vec<(u32, &str)> = self
+            .file_ids
+            .iter()
+            .map(|(url, &id)| (id, url.as_str()))
+            .collect();
+        by_id.sort_by_key(|&(id, _)| id);
+        let sources: Vec<String> = by_id.iter().map(|&(_, url)| url.to_string()).collect();
+        let content = if include_sources {
+            let srcs = self.file_sources.borrow();
+            Some(
+                by_id
+                    .iter()
+                    .map(|&(_, url)| srcs.get(url).map(|s| s.to_string()).unwrap_or_default())
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        (sources, content)
+    }
+
     // ---- diagnostic rendering -------------------------------------------
 
     /// Whether the entrypoint supplied source text (so snippets can render).
