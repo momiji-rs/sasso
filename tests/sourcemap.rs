@@ -321,6 +321,28 @@ fn sasso_compressed_map_is_valid() {
 }
 
 #[test]
+fn sasso_compressed_coalesces_to_one_mapping_per_source_line() {
+    // dart-sass compressed emits only the FIRST token on each SOURCE line (it
+    // packs many tokens onto few output lines). These expected strings are
+    // byte-exact dart-sass 1.101 output. (Expanded maps every token; see above.)
+    let opts = Options::default()
+        .with_style(OutputStyle::Compressed)
+        .with_url("in.scss");
+
+    // Selector + both decls share source line 0 -> only the selector is mapped.
+    let (_c, _m, json) = sasso_map(".a { color: red; width: 1px; }\n", &opts);
+    assert_eq!(sasso_mappings(&json), "AAAA");
+
+    // Nested: `.a` (l0), `color` (l1), `.a .b` (l2); the l2 width/height repeat
+    // the `.b` source line and are dropped.
+    let (_c, _m, json) = sasso_map(
+        ".a {\n  color: red;\n  .b { width: 1px; height: 2px; }\n}\n",
+        &opts,
+    );
+    assert_eq!(sasso_mappings(&json), "AAAA,GACE,UACA");
+}
+
+#[test]
 fn sasso_sources_content_round_trips() {
     let src = ".a { color: red; }\n";
     let opts = Options::default()

@@ -15,7 +15,7 @@ pub(crate) fn emit(nodes: &[OutNode], style: OutputStyle) -> String {
 /// byte length of the `@charset`/BOM prefix that shifts every body offset, and
 /// the populated collector (raw body offsets, not yet resolved to lines).
 pub(crate) fn emit_with_map(nodes: &[OutNode], style: OutputStyle) -> (String, usize, SmCollector) {
-    let mut collector = Some(SmCollector::new());
+    let mut collector = Some(SmCollector::new(matches!(style, OutputStyle::Compressed)));
     let (css, body_off) = emit_inner(nodes, style, &mut collector);
     (css, body_off, collector.expect("collector present"))
 }

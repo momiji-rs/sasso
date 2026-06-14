@@ -156,11 +156,22 @@ pub(crate) struct RawEntry {
 #[derive(Default)]
 pub(crate) struct SmCollector {
     entries: Vec<RawEntry>,
+    /// Compressed output coalesces to ONE mapping per source line (matching
+    /// dart-sass): expanded maps every selector + declaration, but compressed
+    /// packs many tokens onto a line and dart only maps the first per source
+    /// line. `false` keeps every token (expanded).
+    compressed: bool,
+    /// The `(file_id, src_line)` of the last recorded entry, for the compressed
+    /// same-source-line skip.
+    last: Option<(u32, u32)>,
 }
 
 impl SmCollector {
-    pub(crate) fn new() -> Self {
-        SmCollector::default()
+    pub(crate) fn new(compressed: bool) -> Self {
+        SmCollector {
+            compressed,
+            ..SmCollector::default()
+        }
     }
 
     /// Record a mapped token at body byte offset `byte_off` whose source
@@ -171,6 +182,12 @@ impl SmCollector {
         if file_id == 0 {
             return;
         }
+        // Compressed: skip a token whose source line repeats the previous mapped
+        // token's (dart emits one mapping per source line in compressed output).
+        if self.compressed && self.last == Some((file_id, src_line)) {
+            return;
+        }
+        self.last = Some((file_id, src_line));
         self.entries.push(RawEntry {
             byte_off: byte_off as u32,
             file_id,
