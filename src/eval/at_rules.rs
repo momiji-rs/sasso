@@ -815,13 +815,24 @@ impl<'a> Evaluator<'a> {
         // Hoisted root-level nodes separate with a blank line only after a
         // completed style rule (dart's isGroupEnd: `#inc {…}` → blank →
         // `@supports`, but `@supports {…}` → `@foo` packs tight).
+        // A rule already FOLLOWED by a group-end marker is a self-separated unit
+        // hoisted out by a NESTED `@at-root` (`@at-root .b { @at-root .c{} }`):
+        // dart keeps the whole nested chain contiguous, so it must not be
+        // re-separated from the rule before it.
+        let followed_by_ge: Vec<bool> =
+            (0..out.len()).map(|i| matches!(out.get(i + 1), Some(OutNode::GroupEnd))).collect();
         let mut spaced: Vec<OutNode> = Vec::new();
         let mut prev_was_rule = false;
-        for node in out {
-            if prev_was_rule {
+        for (i, node) in out.into_iter().enumerate() {
+            let cur_is_rule = matches!(node, OutNode::Rule { .. });
+            // Separate only two consecutive STYLE RULES (each a dart isGroupEnd):
+            // a rule followed by its OWN bubbled at-rule (`@at-root .x{ @media…}`)
+            // stays contiguous — same group, no blank — as does a nested-@at-root
+            // unit that already carries its own trailing group-end.
+            if prev_was_rule && cur_is_rule && !followed_by_ge[i] {
                 spaced.push(OutNode::Blank);
             }
-            prev_was_rule = matches!(node, OutNode::Rule { .. });
+            prev_was_rule = cur_is_rule;
             spaced.push(node);
         }
         if spaced.is_empty() {
@@ -847,8 +858,26 @@ impl<'a> Evaluator<'a> {
         } else {
             // No layer escaped: the body stays inside the enclosing at-rules
             // (only the style-rule join was disabled), so emit in place.
+            // When the hoisted chunk ends in a style rule AND an enclosing style
+            // rule resumes after it, dart separates the resumed parent with one
+            // blank line (isGroupEnd). Leave a group-end marker that
+            // `emit_style_rule` materializes into that blank (a trailing marker —
+            // nothing resumes — stays a no-op, so no spurious trailing blank).
+            let ends_in_rule = matches!(spaced.last(), Some(OutNode::Rule { .. }));
             for node in spaced {
-                sink.push_at_rule(node);
+                // Push inter-rule separators as GROUP-END markers, not literal
+                // blanks, so the group machinery inserts EXACTLY one blank: at the
+                // document root `push_group` turns the marker into one separator
+                // (a literal blank would be double-counted into three), and inside
+                // a resumed rule `emit_style_rule` materializes it into one.
+                if matches!(node, OutNode::Blank) {
+                    sink.push_at_rule(OutNode::GroupEnd);
+                } else {
+                    sink.push_at_rule(node);
+                }
+            }
+            if ends_in_rule && !parents.is_empty() {
+                sink.push_at_rule(OutNode::GroupEnd);
             }
         }
         Ok(())

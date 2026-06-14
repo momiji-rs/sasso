@@ -544,6 +544,12 @@ impl Sink<'_> {
         match self {
             Sink::Top(out) => {
                 let out = &mut **out;
+                // An `@at-root` chunk hoisted in-place leaves an INTERIOR
+                // group-end marker before the resumed parent rule; materialize it
+                // into the one blank line dart emits there. A TRAILING marker
+                // (nothing resumes) is left untouched — it's the rule's own
+                // isGroupEnd, consumed by the next group's `push_group`.
+                let output = materialize_interior_group_ends(output);
                 push_group(out, output);
                 // A completed top-level style rule marks its LAST produced
                 // node (which may be a bubbled at-rule) as a group end: the
@@ -3299,6 +3305,36 @@ fn trim_leading_blanks(nodes: &mut Vec<OutNode>) {
     while matches!(nodes.first(), Some(OutNode::Blank)) {
         nodes.remove(0);
     }
+}
+
+/// Turn an INTERIOR `GroupEnd` marker (one that is immediately followed by an
+/// output-producing node) into a single `Blank`, leaving a trailing marker
+/// untouched. An in-place `@at-root` hoist that resumes its enclosing style rule
+/// leaves such a marker between the hoisted style rule and the resumed parent;
+/// dart separates them with one blank line. Today the only `GroupEnd` reaching a
+/// style rule's `nested` is that one (top-level post-rule markers stay trailing,
+/// consumed by the next `push_group`), so this is a no-op for every other shape.
+fn materialize_interior_group_ends(nodes: Vec<OutNode>) -> Vec<OutNode> {
+    let is_content = |n: &OutNode| {
+        !matches!(
+            n,
+            OutNode::Blank
+                | OutNode::GroupEnd
+                | OutNode::MediaHoist
+                | OutNode::AtRootHoist { .. }
+                | OutNode::AtRootPackTight
+        )
+    };
+    let mut result: Vec<OutNode> = Vec::with_capacity(nodes.len());
+    let mut iter = nodes.into_iter().peekable();
+    while let Some(node) = iter.next() {
+        if matches!(node, OutNode::GroupEnd) && iter.peek().is_some_and(is_content) {
+            result.push(OutNode::Blank);
+        } else {
+            result.push(node);
+        }
+    }
+    result
 }
 
 fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {

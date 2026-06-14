@@ -570,6 +570,41 @@ fn at_charset_and_at_root_query_match_dart() {
     }
 }
 
+#[test]
+fn at_root_group_separation_matches_dart() {
+    // dart-sass treats an @at-root-hoisted chunk as its own top-level group and
+    // separates the RESUMED parent rule with one blank line (isGroupEnd), but
+    // ONLY when the chunk ends in a style rule. Bare-@at-root siblings separate;
+    // a nested-@at-root chain and a rule + its OWN bubbled @media stay
+    // contiguous. Every expected string is byte-exact dart-sass 1.101.
+
+    // Resume after a single @at-root rule -> one blank before the resumed rule.
+    assert_eq!(
+        css(".a {\n  x: 1;\n  @at-root .b {\n    y: 2;\n  }\n  z: 3;\n}\n"),
+        ".a {\n  x: 1;\n}\n.b {\n  y: 2;\n}\n\n.a {\n  z: 3;\n}\n"
+    );
+    // Bare @at-root with multiple rules: blank between siblings AND before resume.
+    assert_eq!(
+        css(".a {\n  x: 1;\n  @at-root {\n    .b { y: 2; }\n    .c { w: 4; }\n  }\n  z: 3;\n}\n"),
+        ".a {\n  x: 1;\n}\n.b {\n  y: 2;\n}\n\n.c {\n  w: 4;\n}\n\n.a {\n  z: 3;\n}\n"
+    );
+    // Nested @at-root chain stays contiguous: NO blank between .b and .c.
+    assert_eq!(
+        css(".a {\n  x: 1;\n  @at-root .b {\n    y: 2;\n    @at-root .c { w: 4; }\n  }\n  z: 3;\n}\n"),
+        ".a {\n  x: 1;\n}\n.b {\n  y: 2;\n}\n.c {\n  w: 4;\n}\n\n.a {\n  z: 3;\n}\n"
+    );
+    // A rule + its OWN bubbled @media stays contiguous: NO blank between them.
+    assert_eq!(
+        css(".parent {\n  color: red;\n  @at-root .top {\n    color: green;\n    @media screen { color: blue; }\n  }\n}\n"),
+        ".parent {\n  color: red;\n}\n.top {\n  color: green;\n}\n@media screen {\n  .top {\n    color: blue;\n  }\n}\n"
+    );
+    // No resume after the @at-root -> no trailing blank.
+    assert_eq!(
+        css(".a {\n  x: 1;\n  @at-root .b { y: 2; }\n}\n"),
+        ".a {\n  x: 1;\n}\n.b {\n  y: 2;\n}\n"
+    );
+}
+
 // --- scoped-arena escape safety (perf #5) ----------------------------------
 //
 // `compile` brackets its work in a bump-arena scope (when `ScopedAlloc` is the
