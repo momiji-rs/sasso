@@ -11,6 +11,31 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-14
+
+Source-map fidelity + compressed-output corrections, all byte-exact vs
+dart-sass 1.101.
+
+### Fixed
+
+- **Source maps: `@media`/`@at-root`/`@supports` bubbled parent selector.** When
+  one of these at-rules nested in a style rule bubbles a copy of the enclosing
+  selector out (`@media screen { .a { … } }`), that copy now maps back to the
+  ORIGINAL rule's source position, matching dart-sass. It previously had no
+  mapping at all — which in compressed output also let the consecutive-same-
+  source-line coalescing drop a following declaration's mapping (a 0.5.0
+  regression vs 0.4.0 for `@media`/`@at-root`-bubbled rules). CSS is unchanged.
+- **Source maps: `@supports` header.** The `@supports (…)` at-rule header now
+  maps to its `@supports` keyword (as `@media` already did); previously it had
+  no mapping. CSS is unchanged.
+- **Compressed `@media`/`@supports` whitespace.** Compressed output now omits the
+  space before a prelude beginning with `(` for `@media`/`@supports`
+  (`@media(min-width: 1px)`), and within a `@media` query drops the space before
+  `and`/`or` after a `)` (`(a)and (b)`) and after the comma between queries
+  (`(a),(b)`) — matching dart-sass. Other at-rules (`@container`) and `@supports`
+  conditions keep their spaces. (Compressed CSS output change; expanded
+  unchanged.)
+
 ## [0.5.0] - 2026-06-14
 
 ### Added
