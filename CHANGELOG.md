@@ -11,6 +11,28 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-14
+
+### Added
+
+- **Source map (v3) support.** New `compile_with_source_map(source, &Options)
+  -> CompileResult { css, source_map: SourceMap }`, with `SourceMap::to_json()`
+  and `Options::with_source_map_include_sources(bool)`. The CLI gains
+  `-o/--output <file>` (write CSS to a file), `--source-map` (also write a
+  `<output>.map` sidecar + append the `sourceMappingURL` footer),
+  `--embed-sources`, and `--source-map-urls=relative|absolute`. Output is
+  byte-for-byte identical to dart-sass for the common cases (selector +
+  declaration-name mappings; expanded + compressed). The plain `compile` path
+  and stdout output are unchanged. (Deferred for now: declaration-value-start
+  mappings, the inline `--embed-source-map` data URI.)
+
+### Changed
+
+- Internal maintainability refactors only (no behaviour change, byte-identical
+  output): the `.sass` line scanners, the `is_builtin` name table, and the
+  oversized `eval`/`selector`/`parser` files were split into domain modules;
+  the string serializers gained a no-escape fast path.
+
 ## [0.3.1] - 2026-06-13
 
 ### Fixed
