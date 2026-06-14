@@ -819,8 +819,9 @@ impl<'a> Evaluator<'a> {
         // hoisted out by a NESTED `@at-root` (`@at-root .b { @at-root .c{} }`):
         // dart keeps the whole nested chain contiguous, so it must not be
         // re-separated from the rule before it.
-        let followed_by_ge: Vec<bool> =
-            (0..out.len()).map(|i| matches!(out.get(i + 1), Some(OutNode::GroupEnd))).collect();
+        let followed_by_ge: Vec<bool> = (0..out.len())
+            .map(|i| matches!(out.get(i + 1), Some(OutNode::GroupEnd)))
+            .collect();
         let mut spaced: Vec<OutNode> = Vec::new();
         let mut prev_was_rule = false;
         for (i, node) in out.into_iter().enumerate() {
