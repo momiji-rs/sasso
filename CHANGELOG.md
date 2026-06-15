@@ -11,6 +11,29 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-06-15
+
+### Fixed
+
+- **`!default` no longer evaluates its right-hand side when the variable is
+  already set.** dart-sass short-circuits a guarded (`!default`) assignment
+  *before* evaluating the RHS, so an expression that would otherwise error is
+  harmless once the variable already holds a non-null value; sasso evaluated the
+  RHS first. This surfaced in Bootstrap-on-Shopware setups where, after an
+  override sets `$w: 1rem`, a later `$p: $w + .5em !default` raised an
+  "incompatible units" error instead of being skipped. Thanks to
+  [@shyim](https://github.com/shyim) (#2).
+- **Legacy `rgb()`/`hsl()` preserve the caller's `rgba`/`hsla` spelling in
+  special-value and relative-color passthroughs.** When a call can't resolve to
+  a concrete color (a channel or alpha is a `var()`/`env()`/non-foldable
+  `calc()`), dart-sass keeps the call *and* the exact function name written;
+  sasso normalized `rgba`/`hsla` down to `rgb`/`hsl`, breaking Bootstrap's
+  `rgba(var(--bs-body-color-rgb), …)` output. The called name is now threaded
+  through every passthrough, keeping dart's carve-out that a `none`-only call
+  still normalizes to the canonical `rgb`/`hsl` (and a `calc()` alpha that folds
+  to a number resolves to a real color rather than a passthrough). Thanks to
+  [@shyim](https://github.com/shyim) (#3).
+
 ## [0.5.2] - 2026-06-14
 
 ### Fixed

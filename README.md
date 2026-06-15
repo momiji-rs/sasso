@@ -238,9 +238,12 @@ The compiler is usable beyond Rust:
 | --- | --- | --- |
 | **JavaScript / wasm** | [`@momiji-rs/sasso`](https://www.npmjs.com/package/@momiji-rs/sasso) (npm) | the in-repo [`wasm/`](wasm/) cdylib — see [WebAssembly](#webassembly) above |
 | **Ruby** | [`sasso`](https://rubygems.org/gems/sasso) (RubyGems) | [`momiji-rs/sasso-ruby`](https://github.com/momiji-rs/sasso-ruby) — an in-process native extension (`magnus` + `rb-sys`) around this crate |
+| **PHP** | [`shyim/php-sasso`](https://github.com/shyim/php-sasso) (PIE / pecl) | a community [ext-php-rs](https://github.com/davidcole1340/ext-php-rs) extension (`Sasso\Compiler`) wrapping this crate in-process; prebuilt for PHP 8.2–8.5 (Linux glibc/musl, macOS) |
 
 The Ruby gem lives in its own repo (the norm for Rust-backed gems) and pins a
-published `sasso` crate version; file gem-specific issues there.
+published `sasso` crate version; file gem-specific issues there. The PHP
+extension is community-maintained by [@shyim](https://github.com/shyim) (who
+also contributed the fixes in #2/#3); file extension-specific issues on its repo.
 
 **Ruby framework integrations** build on that gem — drop-in Sass for your stack,
 compiled **in-process** (no Node, no Dart, no subprocess) and byte-for-byte
