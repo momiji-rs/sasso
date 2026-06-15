@@ -55,8 +55,22 @@ expose *that* (not the lossy `resolve`) to the gem / PHP ext / FFI.
 /// The canonical, absolute identity of a stylesheet (dart's canonical `Uri`).
 /// Two import URLs that canonicalize to the same `CanonicalUrl` are the same
 /// stylesheet — loaded and evaluated once, shared by every `@use`/`@forward`.
+///
+/// Opaque newtype: what "canonical" *means* is the importer's to define (any
+/// scheme it likes) and sasso only uses it as an `Eq`/`Hash` key — but keeping
+/// the field private lets us add normalization/constraints later without an API
+/// break.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct CanonicalUrl(pub String);
+pub struct CanonicalUrl(String);
+
+impl CanonicalUrl {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self(url.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// What `Importer::load` returns — dart's `ImporterResult`.
 pub struct ImporterResult {
@@ -134,9 +148,11 @@ in the same change.
 ## FFI v2 mapping (sketch, for when we get there)
 
 ```c
-/* Every string is an explicit (ptr, len) pair — never NUL-terminated — which
- * is the convention this ABI adopts (binary-safe, no strlen, no NUL ambiguity),
- * consistent with the v1 surface proposed in #5. */
+/* The importer-callback boundary uses explicit (ptr, len) for every string,
+ * never NUL-terminated (binary-safe, no strlen, no NUL ambiguity). NOTE: this
+ * is a deliberate v2 convention, NOT inherited from v1 — the v1 surface (#5)
+ * NUL-terminates css/error (alongside their lengths) and host paths; v2's
+ * callbacks standardize on (ptr, len) throughout. */
 typedef struct {
   const char *contents;       size_t contents_len;
   int32_t     syntax;                                /* SASSO_SYNTAX_* */
