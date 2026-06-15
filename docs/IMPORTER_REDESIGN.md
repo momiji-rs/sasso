@@ -122,9 +122,14 @@ typedef struct {
   const char *source_map_url;       /* NUL-terminated, or NULL */
 } SassoImporterResult;
 
-/* return a heap canonical URL (caller frees via a provided fn), or NULL */
+/* return a heap canonical URL (caller frees via a provided fn), or NULL.
+ * `containing_url` is the canonical URL of the importing stylesheet (NULL +
+ * len 0 for an entrypoint) — needed for dart-faithful relative resolution,
+ * mirroring `CanonicalizeContext::containing_url`. */
 typedef char *(*sasso_canonicalize_fn)(void *user_data, const char *url,
-                                       size_t url_len, int from_import);
+                                       size_t url_len, int from_import,
+                                       const char *containing_url,
+                                       size_t containing_url_len);
 /* fill *out (sasso copies it), return 1 on hit / 0 on miss */
 typedef int   (*sasso_load_fn)(void *user_data, const char *canonical_url,
                                size_t len, SassoImporterResult *out);
