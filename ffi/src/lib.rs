@@ -145,6 +145,21 @@ pub struct SassoImporter {
     pub load: Option<SassoLoadFn>,
 }
 
+// ABI layout lock. These sizes/offsets are what `include/sasso.h` and every
+// language binding encode by hand; a change here is a BREAKING ABI change, so it
+// must fail to compile until `sasso.h` and the bindings are updated in lockstep.
+// (Gated to 64-bit, the only width the prebuilt library ships for; the i32+
+// pointer layout is identical across our LP64/LLP64 64-bit targets.)
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(std::mem::size_of::<SassoOptions>() == 48);
+    assert!(std::mem::offset_of!(SassoOptions, importer) == 40);
+    assert!(std::mem::size_of::<SassoResult>() == 48);
+    assert!(std::mem::offset_of!(SassoResult, error_line) == 40);
+    assert!(std::mem::size_of::<SassoImporter>() == 24);
+    assert!(std::mem::size_of::<SassoCanonicalizeContext>() == 16);
+};
+
 /// An opaque, sasso-owned collector handed to an importer callback. The host
 /// delivers its result by calling one of the `sasso_importer_set_*` functions
 /// with it; those COPY the bytes immediately, so the host keeps ownership of its
