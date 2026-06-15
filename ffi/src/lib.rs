@@ -292,7 +292,7 @@ unsafe fn compile_inner(
 /// Narrow a core `usize` line/column to the ABI's `u32`, saturating instead of
 /// wrapping. Truncation needs a >4-billion-line/column source (>4 GiB), so this
 /// is defensive only — but a silent wraparound would report a wrong small
-/// position, whereas saturating keeps it unmistakably large (Copilot #5).
+/// position, whereas saturating keeps it unmistakably large.
 fn saturate_u32(v: usize) -> u32 {
     u32::try_from(v).unwrap_or(u32::MAX)
 }
