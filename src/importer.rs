@@ -5,66 +5,86 @@ use std::path::{Path, PathBuf};
 
 use crate::Syntax;
 
-/// Resolves `@import` arguments to SCSS source.
+/// An opaque, importer-defined canonical identifier for a resolved stylesheet.
 ///
-/// Implementing this gives the caller full control over where partials
-/// come from — and, crucially, keeps all file access on the caller's side
-/// of a sandbox boundary.
+/// Two URLs that canonicalize to the same `CanonicalUrl` are the SAME loaded
+/// file — it is the module-cache / dedup key. What "canonical" *means* is the
+/// importer's to define; sasso only uses it as an `Eq`/`Hash` key. For
+/// [`FsImporter`] it is the absolute filesystem path. The field is private so
+/// constraints/normalization can be added later without an API break.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CanonicalUrl(String);
+
+impl CanonicalUrl {
+    /// Wrap an importer-chosen canonical identifier.
+    pub fn new(url: impl Into<String>) -> Self {
+        CanonicalUrl(url.into())
+    }
+
+    /// The underlying string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The source an [`Importer::load`] produced for a [`CanonicalUrl`] — dart-sass's
+/// `ImporterResult`.
+#[derive(Clone, Debug)]
+pub struct ImporterResult {
+    /// The stylesheet source text.
+    pub contents: String,
+    /// The syntax `contents` should be parsed with (SCSS / indented / plain CSS).
+    pub syntax: Syntax,
+    /// The URL to record for this source in generated source maps (dart-sass
+    /// `ImporterResult.sourceMapUrl`); `None` falls back to the canonical URL.
+    pub source_map_url: Option<String>,
+}
+
+/// A real importer failure — an I/O error, a permission error, an ambiguous
+/// match, an invalid URL, … — as distinct from a plain miss. Surfaced as an
+/// actionable compile [`crate::Error`], never silently treated as "not found".
+#[derive(Clone, Debug)]
+pub struct ImporterError {
+    /// Human-readable description, used as the compile error message.
+    pub message: String,
+}
+
+/// Context passed to [`Importer::canonicalize`] (dart-sass's `CanonicalizeContext`).
+pub struct CanonicalizeContext<'a> {
+    /// `true` when resolving an `@import` (which additionally considers
+    /// import-only `*.import.{scss,sass}` files), `false` for `@use`/`@forward`.
+    pub from_import: bool,
+    /// The canonical URL of the stylesheet containing the rule being resolved,
+    /// if any (`None` only when there is no containing file). Relative URLs
+    /// resolve against it.
+    pub containing_url: Option<&'a CanonicalUrl>,
+}
+
+/// Resolves `@use` / `@forward` / `@import` URLs in dart-sass's two phases.
+///
+/// [`canonicalize`](Importer::canonicalize) maps a (possibly relative,
+/// extension-less) URL to a stable canonical identity WITHOUT loading it (the
+/// result is the module-cache key); [`load`](Importer::load) then fetches that
+/// identity's source. Both methods distinguish three outcomes: `Ok(Some(_))` =
+/// handled; `Ok(None)` = this importer doesn't handle the URL; `Err(_)` =
+/// handled but failed (a real, reportable error).
+///
+/// Implementing this gives the caller full control over where partials come
+/// from — and, crucially, keeps all file access on the caller's side of a
+/// sandbox boundary.
 pub trait Importer {
-    /// Resolve an `@import` argument (e.g. `"minima/base"`) to SCSS
-    /// source, or `None` if it cannot be found.
-    fn resolve(&self, path: &str) -> Option<String>;
-
-    /// Resolve a `@use`/`@forward` module URL to a `(canonical_key, source)`
-    /// pair, or `None` if it cannot be found. The canonical key uniquely
-    /// identifies the loaded file so the module system can evaluate it once and
-    /// share the instance between every `@use`/`@forward` of the same file
-    /// (regardless of the spelling of the URL). The default implementation
-    /// resolves through [`Importer::resolve`] and uses the URL itself as the
-    /// key (adequate when each distinct file is referenced by a single URL).
-    fn resolve_module(&self, path: &str) -> Option<(String, String)> {
-        self.resolve(path).map(|src| (path.to_string(), src))
-    }
-
-    /// Like [`Importer::resolve`], but also reports the syntax of the resolved
-    /// file so a `.sass` partial imported from `.scss` (or vice versa) is parsed
-    /// with the correct front-end. The default keeps backward compatibility by
-    /// resolving through [`Importer::resolve`] and reporting [`Syntax::Scss`].
-    fn resolve_with_syntax(&self, path: &str) -> Option<(String, Syntax)> {
-        self.resolve(path).map(|src| (src, Syntax::Scss))
-    }
-
-    /// Like [`Importer::resolve_module`], but also reports the resolved file's
-    /// syntax (see [`Importer::resolve_with_syntax`]). The default reports
-    /// [`Syntax::Scss`].
-    fn resolve_module_with_syntax(&self, path: &str) -> Option<(String, String, Syntax)> {
-        self.resolve_module(path)
-            .map(|(key, src)| (key, src, Syntax::Scss))
-    }
-
-    /// Like [`Importer::resolve_module_with_syntax`], but tries `base_dir`
-    /// (the directory of the file containing the rule) before the importer's
-    /// own search paths — dart-sass resolves relative URLs against the
-    /// containing file first. The default ignores the base.
-    fn resolve_module_with_syntax_in(
+    /// Map `url` to its canonical identity, or `Ok(None)` if this importer
+    /// cannot resolve it. MUST NOT load the file.
+    fn canonicalize(
         &self,
-        path: &str,
-        _base_dir: Option<&str>,
-    ) -> Option<(String, String, Syntax)> {
-        self.resolve_module_with_syntax(path)
-    }
+        url: &str,
+        ctx: &CanonicalizeContext<'_>,
+    ) -> Result<Option<CanonicalUrl>, ImporterError>;
 
-    /// Like [`Importer::resolve_with_syntax`] for `@import`, but reports the
-    /// resolved file's canonical path (empty when unknown) and tries
-    /// `base_dir` first. The default ignores the base and reports no path.
-    fn resolve_import_with_path(
-        &self,
-        path: &str,
-        _base_dir: Option<&str>,
-    ) -> Option<(String, String, Syntax)> {
-        self.resolve_with_syntax(path)
-            .map(|(src, syntax)| (String::new(), src, syntax))
-    }
+    /// Load the source for a [`CanonicalUrl`] previously returned by
+    /// [`canonicalize`](Importer::canonicalize); `Ok(None)` if it can no longer
+    /// be found.
+    fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError>;
 }
 
 /// A filesystem [`Importer`] resolving Sass partials (`_name.scss`,
@@ -85,106 +105,59 @@ impl FsImporter {
 }
 
 impl Importer for FsImporter {
-    fn resolve(&self, path: &str) -> Option<String> {
-        for base in &self.load_paths {
-            match resolve_in_base(base, path, true) {
-                Resolution::Found(p) => {
-                    if let Ok(src) = std::fs::read_to_string(&p) {
-                        return Some(src);
-                    }
-                }
-                // An ambiguous match is an error in dart-sass; we surface it as
-                // "not found" (the eval layer turns that into an import error),
-                // which is enough for callers that only care about pass/fail.
-                Resolution::Ambiguous => return None,
-                Resolution::NotFound => {}
-            }
-        }
-        None
-    }
-
-    fn resolve_module(&self, path: &str) -> Option<(String, String)> {
-        self.resolve_module_with_syntax(path)
-            .map(|(key, src, _)| (key, src))
-    }
-
-    fn resolve_with_syntax(&self, path: &str) -> Option<(String, Syntax)> {
-        for base in &self.load_paths {
-            match resolve_in_base(base, path, true) {
-                Resolution::Found(p) => {
-                    if let Ok(src) = std::fs::read_to_string(&p) {
-                        return Some((src, syntax_for_path(&p)));
-                    }
-                }
-                Resolution::Ambiguous => return None,
-                Resolution::NotFound => {}
-            }
-        }
-        None
-    }
-
-    fn resolve_module_with_syntax(&self, path: &str) -> Option<(String, String, Syntax)> {
-        self.resolve_module_with_syntax_in(path, None)
-    }
-
-    fn resolve_module_with_syntax_in(
+    fn canonicalize(
         &self,
-        path: &str,
-        base_dir: Option<&str>,
-    ) -> Option<(String, String, Syntax)> {
+        url: &str,
+        ctx: &CanonicalizeContext<'_>,
+    ) -> Result<Option<CanonicalUrl>, ImporterError> {
         // dart-sass resolves a relative URL against the containing file's
-        // directory first, then the configured load paths.
-        let bases = base_dir
-            .map(|b| vec![PathBuf::from(b)])
-            .unwrap_or_default()
-            .into_iter()
-            .chain(self.load_paths.iter().cloned());
+        // directory first, then the configured load paths. A `CanonicalUrl`
+        // here IS the absolute fs path, so the containing dir is its parent; a
+        // containing URL with no parent (a bare entry name like `input.scss`)
+        // means the current directory — reproducing the old base of
+        // `dirname_of(url).unwrap_or_default()` (an empty string => CWD).
+        let base_dir: PathBuf = match ctx.containing_url {
+            Some(c) => match Path::new(c.as_str()).parent() {
+                Some(par) if !par.as_os_str().is_empty() => par.to_path_buf(),
+                _ => PathBuf::new(),
+            },
+            None => PathBuf::new(),
+        };
+        let bases = std::iter::once(base_dir).chain(self.load_paths.iter().cloned());
         for base in bases {
-            // `@use`/`@forward` never consider `.import` files (those are an
-            // `@import`-only escape hatch).
-            match resolve_in_base(&base, path, false) {
+            // `@use`/`@forward` (`from_import == false`) never consider
+            // `.import` files (those are an `@import`-only escape hatch).
+            match resolve_in_base(&base, url, ctx.from_import) {
                 Resolution::Found(p) => {
-                    if let Ok(src) = std::fs::read_to_string(&p) {
-                        // The canonical key is the resolved absolute path so the
-                        // same file loaded via different URLs is cached once.
-                        let key = std::fs::canonicalize(&p)
-                            .map(|c| c.to_string_lossy().into_owned())
-                            .unwrap_or_else(|_| p.to_string_lossy().into_owned());
-                        return Some((key, src, syntax_for_path(&p)));
-                    }
+                    // The canonical key is the resolved absolute path so the
+                    // same file loaded via different URLs is cached once.
+                    let key = std::fs::canonicalize(&p)
+                        .map(|c| c.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| p.to_string_lossy().into_owned());
+                    return Ok(Some(CanonicalUrl::new(key)));
                 }
-                Resolution::Ambiguous => return None,
+                // An ambiguous match is an error in dart-sass; we preserve the
+                // existing behavior of surfacing it as a miss (the eval layer
+                // turns that into the import error) rather than an `Err`.
+                Resolution::Ambiguous => return Ok(None),
                 Resolution::NotFound => {}
             }
         }
-        None
+        Ok(None)
     }
 
-    fn resolve_import_with_path(
-        &self,
-        path: &str,
-        base_dir: Option<&str>,
-    ) -> Option<(String, String, Syntax)> {
-        let bases = base_dir
-            .map(|b| vec![PathBuf::from(b)])
-            .unwrap_or_default()
-            .into_iter()
-            .chain(self.load_paths.iter().cloned());
-        for base in bases {
-            match resolve_in_base(&base, path, true) {
-                Resolution::Found(p) => {
-                    if let Ok(src) = std::fs::read_to_string(&p) {
-                        let key = std::fs::canonicalize(&p)
-                            .map(|c| c.to_string_lossy().into_owned())
-                            .unwrap_or_else(|_| p.to_string_lossy().into_owned());
-                        return Some((key, src, syntax_for_path(&p)));
-                    }
-                }
-                Resolution::Ambiguous => return None,
-                Resolution::NotFound => {}
-            }
+    fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError> {
+        let p = Path::new(canonical.as_str());
+        match std::fs::read_to_string(p) {
+            Ok(contents) => Ok(Some(ImporterResult {
+                contents,
+                syntax: syntax_for_path(p),
+                source_map_url: None,
+            })),
+            // A file that resolved but cannot be read falls through to "not
+            // found", matching the old `if let Ok(src)` behavior.
+            Err(_) => Ok(None),
         }
-        None
     }
 }
 
