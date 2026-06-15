@@ -43,7 +43,10 @@ pub(crate) enum Value {
     /// A first-class mixin reference (`meta.get-mixin(...)`), invoked via
     /// `@include meta.apply(...)`. Not a valid CSS value; `inspect` renders it
     /// as `get-mixin("name")`.
-    Mixin(SassMixin),
+    // Boxed: a first-class mixin carries an optional captured file context, so
+    // the inline struct is larger than Value's 64-byte budget. Mixins are never
+    // emitted as CSS, so the indirection is off every hot path.
+    Mixin(Box<SassMixin>),
 }
 
 /// `Value` is moved/cloned constantly (every scope slot, every `Vec<Value>`
@@ -117,6 +120,28 @@ pub(crate) struct SassMixin {
     /// another `@use`d module (so its body runs in that module's environment).
     /// `None` for a same-module reference. Type-erased to break the cycle.
     pub module: Option<std::rc::Rc<dyn std::any::Any>>,
+    /// The file context the mixin was captured in, used only for a same-module
+    /// (`module: None`) first-class capture: when such a reference is applied
+    /// via `meta.apply` from another file, a relative `meta.load-css` in its
+    /// body must still resolve against the file that defined the mixin, not the
+    /// caller. (The cross-module case carries its `module` and resolves via the
+    /// module's own file context instead.) Held as plain strings to keep
+    /// `value` free of `eval`/`ast` types.
+    pub origin: Option<MixinOrigin>,
+}
+
+/// The defining-file context captured with a same-module first-class mixin —
+/// the fields [`crate::eval::Evaluator::enter_module_file`] would otherwise pull
+/// from a `Module`, so a `meta.apply`'d body resolves relative loads correctly.
+#[derive(Clone)]
+pub(crate) struct MixinOrigin {
+    /// The diagnostic display URL of the defining file (e.g. `_mod.scss`).
+    pub diag_url: String,
+    /// The defining file's directory (the legacy `@import` resolution base);
+    /// empty when there is none.
+    pub file_dir: String,
+    /// The defining file's canonical URL (the importer resolution base).
+    pub canonical: String,
 }
 
 impl std::fmt::Debug for SassMixin {
