@@ -381,6 +381,23 @@ pub extern "C" fn sasso_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
 }
 
+/// The all-defaults `SassoOptions` (expanded, SCSS, Unicode diagnostics, no url /
+/// load paths / importer). `struct_size` is the only field that differs between
+/// callers, so it is a parameter — keeping a single source of truth for the
+/// defaults shared by `sasso_options_init` and `read_options`.
+fn default_options(struct_size: u32) -> SassoOptions {
+    SassoOptions {
+        struct_size,
+        style: SASSO_STYLE_EXPANDED,
+        syntax: SASSO_SYNTAX_SCSS,
+        unicode: 1,
+        url: ptr::null(),
+        load_paths: ptr::null(),
+        load_paths_len: 0,
+        importer: ptr::null(),
+    }
+}
+
 /// Fill `options` with defaults (expanded, SCSS, Unicode diagnostics, no url /
 /// load paths). `struct_size` is the caller's `sizeof(SassoOptions)`: only that
 /// many bytes are written (capped at this build's size), so a smaller/older
@@ -393,18 +410,9 @@ pub unsafe extern "C" fn sasso_options_init(options: *mut SassoOptions, struct_s
     if options.is_null() {
         return;
     }
-    let defaults = SassoOptions {
-        // Saturate rather than truncate: a buggy caller passing > u32::MAX must
-        // not wrap to a small value (which read_options would then trust).
-        struct_size: saturate_u32(struct_size),
-        style: SASSO_STYLE_EXPANDED,
-        syntax: SASSO_SYNTAX_SCSS,
-        unicode: 1,
-        url: ptr::null(),
-        load_paths: ptr::null(),
-        load_paths_len: 0,
-        importer: ptr::null(),
-    };
+    // Saturate rather than truncate: a buggy caller passing > u32::MAX must not
+    // wrap to a small value (which read_options would then trust).
+    let defaults = default_options(saturate_u32(struct_size));
     // Write only what the caller's struct can hold — never past their buffer.
     let n = struct_size.min(std::mem::size_of::<SassoOptions>());
     ptr::copy_nonoverlapping(
@@ -425,16 +433,7 @@ pub unsafe extern "C" fn sasso_options_init(options: *mut SassoOptions, struct_s
 /// bytes (the minimal contract a `SassoOptions` pointer already implies).
 unsafe fn read_options(options: *const SassoOptions) -> SassoOptions {
     let size = std::mem::size_of::<SassoOptions>();
-    let mut local = SassoOptions {
-        struct_size: size as u32,
-        style: SASSO_STYLE_EXPANDED,
-        syntax: SASSO_SYNTAX_SCSS,
-        unicode: 1,
-        url: ptr::null(),
-        load_paths: ptr::null(),
-        load_paths_len: 0,
-        importer: ptr::null(),
-    };
+    let mut local = default_options(size as u32);
     if options.is_null() {
         return local;
     }
