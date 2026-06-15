@@ -5,8 +5,9 @@
 #
 # Like `../wasm`, this lives OUTSIDE the core `sasso` workspace (see
 # ../Cargo.toml `[workspace] exclude` / this crate's own empty `[workspace]`):
-# the core crate keeps `unsafe_code = "forbid"`, while this thin layer needs the
-# `unsafe` that a raw `extern "C"` ABI requires.
+# the core crate keeps `unsafe_code = "deny"` (locally `#[allow]`-able only in
+# its audited arena module), while this thin layer needs the `unsafe` that a raw
+# `extern "C"` ABI requires.
 #
 # Self-contained workspace root: an empty `[workspace]` stops cargo's upward
 # manifest walk here, so the crate resolves identically from the main checkout
