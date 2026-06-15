@@ -1,12 +1,17 @@
 # sasso C-ABI examples — one ABI, many languages
 
-Each subdirectory is a self-contained, **runnable** binding to the prebuilt
-`libsasso` shared library, exercising the full C ABI: `sasso_version`,
-`sasso_compile` (+ `SassoOptions`), `sasso_result_free`, and the **v2 userland
-importer callback** (`SassoImporter` + the `sasso_importer_set_*` setters). Every
-example asserts the same five checks — version, an expanded compile, a compressed
-compile, the error path, and a custom in-memory importer resolving a relative
-`@use` — so they double as cross-language conformance tests.
+Each is a self-contained, **runnable** binding to the prebuilt `libsasso` shared
+library, exercising the C ABI: `sasso_version`, `sasso_compile` (+ `SassoOptions`),
+`sasso_result_free`, and the **v2 userland importer callback** (`SassoImporter` +
+the `sasso_importer_set_*` setters).
+
+The eight dedicated binding directories (`c`, `go`, `ruby`, `swift`, `deno`,
+`bun`, `luajit`, `csharp`) each assert the same five checks — version, an
+expanded compile, a compressed compile, the error path, and a custom in-memory
+importer resolving a relative `@use` — so they double as cross-language
+conformance tests. The two top-level Python files split that coverage
+(`smoke.py` = version/compile/compressed/error, `importer.py` = the importer
+callback), and `example.php` is a v1 compile-only demo (no importer).
 
 Build the library once, then run any example:
 
