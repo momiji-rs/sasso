@@ -280,18 +280,16 @@ impl<'a> Evaluator<'a> {
             Some((m, o)) => (m, o),
             None => (Rc::clone(&module), v.name.clone()),
         };
-        let exists = target.var(&name).is_some();
-        if !exists {
+        // One lookup feeds both the existence check and the `!default` guard
+        // (`Module::var` clones the value, so don't call it twice).
+        let existing = target.var(&name);
+        if existing.is_none() {
             return Err(Error::unpositioned("Undefined variable."));
         }
         // Short-circuit a `!default` no-op before evaluating the RHS, so an
         // unused guarded expression can't raise an error (matches dart-sass).
-        if v.is_default {
-            if let Some(existing) = target.var(&name) {
-                if !matches!(existing, Value::Null) {
-                    return Ok(());
-                }
-            }
+        if v.is_default && existing.is_some_and(|x| !matches!(x, Value::Null)) {
+            return Ok(());
         }
         let val = self.eval_expr(&v.value)?.without_slash();
         target.vars.borrow_mut().insert(name, val);
