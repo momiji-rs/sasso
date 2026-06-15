@@ -77,8 +77,10 @@ typedef struct SassoResult {
 /* Bundled compiler version as a static NUL-terminated string. Do NOT free. */
 const char *sasso_version(void);
 
-/* Fill *options with defaults and set struct_size. No-op if options is NULL. */
-void sasso_options_init(SassoOptions *options);
+/* Fill *options with defaults and set struct_size to the caller's
+ * sizeof(SassoOptions). Only that many bytes are written, so an older/smaller
+ * caller is never written past — pass sizeof(SassoOptions). No-op if NULL. */
+void sasso_options_init(SassoOptions *options, size_t struct_size);
 
 /* Compile a UTF-8 source buffer (source_len bytes) to CSS. Returns a heap
  * SassoResult* the caller must release with sasso_result_free(). options may be
