@@ -155,13 +155,17 @@ unsafe fn read_options(options: *const SassoOptions) -> SassoOptions {
         (&mut local as *mut SassoOptions).cast::<u8>(),
         n,
     );
-    if n < size {
-        // The pointer fields live in the struct tail; a shorter caller struct
-        // may have left them partially written, so drop them rather than
-        // dereference a half-formed pointer. (A future version appending fields
-        // past the pointers would refine this to a per-field check.)
-        local.url = ptr::null();
+    // Drop any tail field the caller's `struct_size` did not FULLY cover, so we
+    // never dereference a half-copied pointer. Gated per field (not "any time
+    // n < size") so that if a future version appends fields *after* these
+    // pointers, an older caller that did provide url/load_paths keeps them.
+    if caller_size < std::mem::offset_of!(SassoOptions, load_paths) {
+        local.url = ptr::null(); // url spans [offset_of(url), offset_of(load_paths))
+    }
+    if caller_size < std::mem::offset_of!(SassoOptions, load_paths_len) {
         local.load_paths = ptr::null();
+    }
+    if caller_size < std::mem::offset_of!(SassoOptions, load_paths_len) + std::mem::size_of::<usize>() {
         local.load_paths_len = 0;
     }
     local
