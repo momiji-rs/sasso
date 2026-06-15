@@ -1,9 +1,12 @@
 # RFC: a dart-faithful `Importer` API (before we freeze it in the FFI)
 
-Status: **draft for discussion** (raised by @shyim in #4). Not implemented yet —
-this proposes the trait shape so we can agree on it before the FFI v2 importer
-callback (#5) bakes it into a C ABI contract. *"Stable API, then work on how to
-expose."*
+Status: **implemented.** The core trait shipped in **sasso 0.6.0** (PR #7); the
+FFI v2 importer callback this RFC was written to de-risk is implemented in
+**PR #5** (the C ABI). Kept as the design record — the trait below is what
+shipped; the *FFI v2 mapping* section has been updated to the **as-built** ABI,
+which deliberately diverged from the original sketch (see that section).
+*"Stable API, then work on how to expose"* — done in that order. (Raised by
+@shyim in #4.)
 
 **Decision (per #6, w/ @shyim):** the project is early-stage / pre-1.0 with only
 a handful of known, in-house importer implementors, so this is a **clean break**
@@ -136,52 +139,73 @@ in the same change.
 
 ## Migration (each step independently shippable, parity-gated)
 
-1. **Core:** add the trait + `ImporterResult` + `CanonicalUrl`; make `FsImporter`
-   native; route `eval` through `canonicalize`/`load`; **delete the old
-   `resolve_*` overloads** (no shim). Add parity tests for import syntax, `@use`
-   dedup, and `sourceMapUrl`. → core minor bump (breaking, pre-1.0).
-2. **Bindings:** update the gem + PHP ext to the two-phase trait in lockstep
-   (their Ruby/PHP `Importer` surface changes — fine pre-1.0).
-3. **FFI v2 (#5):** expose the two phases as C function pointers + a result
-   struct (sketch below), now that the shape is stable.
+1. ✅ **Core — shipped (0.6.0 / PR #7).** Added the trait + `ImporterResult` +
+   `CanonicalUrl`; made `FsImporter` native; routed `eval` through
+   `canonicalize`/`load`; **deleted the old `resolve_*` overloads** (no shim);
+   added parity tests for import syntax, `@use` dedup, and `source_map_url`.
+   Verified byte-for-byte (ratchet delta +0).
+2. ◑ **Bindings.** The Ruby gem is `FsImporter`-only — recompile-only against
+   0.6.0, it exposes no userland importer, so nothing changed there. php-sasso's
+   `resolve` bridge still needs migrating (shyim's repo; tracked in #4).
+3. ✅ **FFI v2 (#5) — implemented.** The two phases are exposed as C function
+   pointers + a sink-based result. The shipped shape **differs** from the sketch
+   that was here — see "FFI v2 mapping (as implemented)" below.
 
-## FFI v2 mapping (sketch, for when we get there)
+## FFI v2 mapping (as implemented, PR #5)
+
+The shipped C ABI **diverged from the original sketch in two ways, both for
+soundness** (the ownership/re-entrancy rules were exactly the delicate part the
+RFC flagged):
+
+1. **No `free_fn`, no host-owned out-pointers** (the sketch's "heap string the
+   caller frees via a provided fn" model is unsound). A callback never hands
+   sasso an owned `char*`. Instead the host calls a sasso-provided **setter**
+   with an opaque sink; sasso **copies the bytes immediately** and the host frees
+   its own memory. This avoids cross-allocator `free` — a string produced inside
+   a ctypes / PHP-FFI callback is owned by the host runtime, not C `malloc`, so a
+   C `free()` on it is UB (and ctypes often has no matching free to hand back) —
+   and the dangling-after-return hazard. Each setter is wrapped in its own
+   `catch_unwind` because it runs *inside* the host's C callback frame.
+2. **Inputs are NUL-terminated; only the sink delivery carries `(ptr, len)`.**
+   The `url` / `canonical` / `containing_url` passed *into* the callbacks are
+   NUL-terminated C strings (cheap for hosts to read); the values handed *back*
+   via the setters take an explicit length.
 
 ```c
-/* The importer-callback boundary uses explicit (ptr, len) for every string,
- * never NUL-terminated (binary-safe, no strlen, no NUL ambiguity). NOTE: this
- * is a deliberate v2 convention, NOT inherited from v1 — the v1 surface (#5)
- * NUL-terminates css/error (alongside their lengths) and host paths; v2's
- * callbacks standardize on (ptr, len) throughout. */
-typedef struct {
-  const char *contents;       size_t contents_len;
-  int32_t     syntax;                                /* SASSO_SYNTAX_* */
-  const char *source_map_url; size_t source_map_url_len;  /* or NULL / 0 */
-} SassoImporterResult;
+typedef struct SassoCanonicalizeContext {
+  int32_t from_import;          /* non-zero for a legacy @import */
+  const char *containing_url;   /* NUL-term canonical URL of the importer, or NULL at entry */
+} SassoCanonicalizeContext;
 
-/* Three-state return mirroring the Rust trait's Result<Option<_>, _>:
- *   1 = handled (out-params filled), 0 = not handled (miss), -1 = error
- * (set *out_error + *out_error_len to an owned message the caller frees). */
+/* Opaque, sasso-owned; valid ONLY for the duration of the one callback. */
+typedef struct SassoImporterSink SassoImporterSink;
 
-/* Canonicalize `url`. On a hit, set *out_canonical (a heap string the caller
- * frees via a provided fn) + *out_canonical_len. `containing_url` (+ len) is the
- * importing stylesheet's canonical URL (NULL / 0 for an entrypoint), for
- * dart-faithful relative resolution. */
-typedef int (*sasso_canonicalize_fn)(void *user_data,
-                                     const char *url, size_t url_len,
-                                     int from_import,
-                                     const char *containing_url, size_t containing_url_len,
-                                     char **out_canonical, size_t *out_canonical_len,
-                                     char **out_error, size_t *out_error_len);
-/* Load a canonical URL: fill *out (sasso copies it). 1 = hit, 0 = miss, -1 = error. */
-typedef int (*sasso_load_fn)(void *user_data,
-                             const char *canonical_url, size_t canonical_url_len,
-                             SassoImporterResult *out,
-                             char **out_error, size_t *out_error_len);
+/* Tri-state return mirroring Result<Option<_>, _>. */
+#define SASSO_IMPORTER_OK         1   /* handled: host called a set_* */
+#define SASSO_IMPORTER_NOT_FOUND  0   /* this importer doesn't handle the URL */
+#define SASSO_IMPORTER_ERROR    (-1)  /* handled but failed: host called set_error */
+
+typedef struct SassoImporter {
+  void *user_data;
+  int32_t (*canonicalize)(void *user_data, const char *url,
+                          const SassoCanonicalizeContext *ctx, SassoImporterSink *sink);
+  int32_t (*load)(void *user_data, const char *canonical, SassoImporterSink *sink);
+} SassoImporter;
+
+/* Called by the host FROM INSIDE its callback; each copies immediately. */
+void sasso_importer_set_canonical(SassoImporterSink *sink, const char *ptr, size_t len);
+void sasso_importer_set_result(SassoImporterSink *sink,
+                               const char *contents, size_t contents_len,
+                               int32_t syntax,            /* SASSO_SYNTAX_* */
+                               const char *source_map_url, size_t source_map_url_len /* NULL,0 = none */);
+void sasso_importer_set_error(SassoImporterSink *sink, const char *ptr, size_t len);
 ```
 
-Ownership/re-entrancy rules across the boundary are the delicate part — exactly
-why this waits for the Rust shape to settle first.
+A custom importer is attached via a new trailing `SassoOptions.importer` field
+(gated by the existing `struct_size` forward-compat scheme; a non-NULL importer
+takes precedence over `load_paths`). Validated end-to-end against the prebuilt
+library across **8 languages** — `ffi/examples/{c,go,ruby,swift,deno,bun,luajit,csharp}/`.
+See [`../ffi/include/sasso.h`](../ffi/include/sasso.h) for the authoritative header.
 
 ## Open questions (for @shyim / discussion)
 
@@ -199,12 +223,15 @@ why this waits for the Rust shape to settle first.
 3. **`modificationTime`** (dart has it for caching) — include now or skip?
 4. **URL vs path type.** dart uses `Uri`; sasso uses path strings. Keep
    `String`/newtype, or introduce a real URL type (schemes, `file:`)?
-5. **`sourceMapUrl` plumbing.** Threading it through the source-map builder is
-   the one genuinely new capability — worth doing in step 1, or a follow-up?
-6. **`ImporterError` shape.** The error channel (`Result<Option<_>, ImporterError>`)
-   distinguishes a miss from a real failure. What does the concrete type carry —
-   just a message, or a kind (NotFound vs Ambiguous vs Io vs InvalidUrl) + an
-   optional span — and how does it map onto a host exception over FFI?
+5. **`sourceMapUrl` plumbing.** ✅ **Resolved** — done in step 1 (PR #7) via the
+   evaluator's `file_map_urls` override; `FsImporter` returns `None` so default
+   source maps stay byte-identical, and the FFI surfaces it as the
+   `source_map_url` arg of `sasso_importer_set_result`.
+6. **`ImporterError` shape.** ✅ **Resolved** — shipped as just `{ message }`
+   (miss vs failure already distinguished by `Ok(None)` vs `Err`). Over the FFI
+   it maps to `sasso_importer_set_error` (a `(ptr, len)` message) + the `-1`
+   return. A richer `kind` enum (NotFound / Ambiguous / Io / InvalidUrl) + span
+   remains a future, non-breaking addition if a real need shows up.
 
 ## dart-sass parity (as implemented)
 
