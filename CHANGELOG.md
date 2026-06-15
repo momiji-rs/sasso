@@ -11,6 +11,34 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **The `Importer` trait is now dart-sass's two-phase `canonicalize`/`load`**
+  (issue #4, RFC in `docs/IMPORTER_REDESIGN.md`). It replaces the old
+  `resolve(path) -> Option<String>` plus the accreted `resolve_*` overloads:
+
+  ```rust
+  fn canonicalize(&self, url: &str, ctx: &CanonicalizeContext)
+      -> Result<Option<CanonicalUrl>, ImporterError>;
+  fn load(&self, canonical: &CanonicalUrl)
+      -> Result<Option<ImporterResult>, ImporterError>;
+  ```
+
+  `canonicalize` resolves a URL to a stable identity without loading (its result
+  is the module-cache key); `load` fetches the source as an
+  `ImporterResult { contents, syntax, source_map_url }`. Three outcomes:
+  `Ok(Some)` = handled, `Ok(None)` = not handled, `Err(ImporterError)` =
+  handled-but-failed (an actionable compile error rather than a silent miss).
+  New public types: `CanonicalUrl`, `ImporterResult`, `ImporterError`,
+  `CanonicalizeContext`. A clean break with no compatibility shim (pre-1.0).
+  `FsImporter` and the built-in resolution are unchanged in behavior (sass-spec
+  ratchet delta +0); only custom `Importer` implementations must migrate.
+
+### Added
+
+- `ImporterResult.source_map_url` lets an importer set the URL recorded for a
+  loaded file in generated source maps (dart-sass `ImporterResult.sourceMapUrl`).
+
 ## [0.5.3] - 2026-06-15
 
 ### Fixed
