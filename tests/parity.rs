@@ -6479,6 +6479,27 @@ fn entry_relative_import_resolves_against_entry_dir() {
 }
 
 #[test]
+fn fs_importer_unreadable_file_surfaces_error_not_miss() {
+    // A file the importer FOUND but can't read (here: invalid UTF-8) surfaces a
+    // real error through the ImporterError channel — not a misleading
+    // "Can't find stylesheet to import." (`load` distinguishes ENOENT = a miss
+    // from a genuine read failure).
+    let dir = std::env::temp_dir().join("sasso_parity_unreadable");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("_bad.scss"), [0xff, 0xfe, 0x00]).unwrap();
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    let msg = compile("@use \"bad\";\n", &opts).unwrap_err().to_string();
+    assert!(
+        !msg.contains("Can't find stylesheet"),
+        "an unreadable file must not be reported as 'not found', got: {msg}"
+    );
+    assert!(msg.contains("Cannot read"), "expected a read error, got: {msg}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn use_url_dotdot_and_nested_global_writethrough() {
     let dir = std::env::temp_dir().join("sasso_parity_dotdot");
     let _ = std::fs::remove_dir_all(&dir);
