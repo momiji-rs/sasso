@@ -12,9 +12,14 @@
 
 // Resolve the prebuilt dylib relative to this file (ffi/examples/deno/ ->
 // ffi/target/release/), with an optional SASSO_DYLIB env override.
+const libName = Deno.build.os === "windows"
+  ? "sasso.dll"
+  : Deno.build.os === "darwin"
+    ? "libsasso.dylib"
+    : "libsasso.so";
 const DYLIB =
   Deno.env.get("SASSO_DYLIB") ??
-  new URL("../../target/release/libsasso.dylib", import.meta.url).pathname;
+  new URL(`../../target/release/${libName}`, import.meta.url).pathname;
 
 const SASSO_STYLE_EXPANDED = 0;
 const SASSO_STYLE_COMPRESSED = 1;

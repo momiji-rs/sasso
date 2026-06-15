@@ -19,12 +19,12 @@ Each example resolves the library relative to this repo (override with the
 
 | Language | File | Mechanism | Run (from this directory) |
 | --- | --- | --- | --- |
-| **C** | [`c/test.c`](c/test.c) | link + `sasso.h` | `clang test.c -I ../../include -L ../../target/release -lsasso -o test && DYLD_LIBRARY_PATH=../../target/release ./test` |
-| **Go** | [`go/main.go`](go/main.go) | cgo (+ `shim.c`) | `DYLD_LIBRARY_PATH=../../target/release go run .` |
+| **C** | [`c/test.c`](c/test.c) | link + `sasso.h` | `clang test.c -I ../../include -L ../../target/release -lsasso -o test && DYLD_LIBRARY_PATH=../../target/release LD_LIBRARY_PATH=../../target/release ./test` |
+| **Go** | [`go/main.go`](go/main.go) | cgo (+ `shim.c`) | `DYLD_LIBRARY_PATH=../../target/release LD_LIBRARY_PATH=../../target/release go run .` |
 | **Python** | [`smoke.py`](smoke.py), [`importer.py`](importer.py) | `ctypes` | `python3 smoke.py` · `python3 importer.py` |
 | **Ruby** | [`ruby/test.rb`](ruby/test.rb) | `Fiddle` (stdlib) | `ruby test.rb` |
 | **PHP** | [`example.php`](example.php) | `ext-ffi` | `php example.php` |
-| **Swift** | [`swift/test.swift`](swift/test.swift) | module map + `@convention(c)` | `swiftc -I swift -L ../../target/release -lsasso swift/test.swift -o swift/test && DYLD_LIBRARY_PATH=../../target/release swift/test` |
+| **Swift** | [`swift/test.swift`](swift/test.swift) | module map + `@convention(c)` | `swiftc -I swift -L ../../target/release -lsasso swift/test.swift -o swift/test && DYLD_LIBRARY_PATH=../../target/release LD_LIBRARY_PATH=../../target/release swift/test` |
 | **Deno** (TS) | [`deno/test.ts`](deno/test.ts) | `Deno.dlopen` | `deno run --allow-ffi --allow-read --allow-env deno/test.ts` |
 | **Bun** (TS) | [`bun/test.ts`](bun/test.ts) | `bun:ffi` | `bun run bun/test.ts` |
 | **LuaJIT** | [`luajit/test.lua`](luajit/test.lua) | `ffi` | `luajit luajit/test.lua` |

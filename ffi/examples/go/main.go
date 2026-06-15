@@ -1,9 +1,9 @@
 // Idiomatic Go (cgo) binding + conformance test for the sasso C ABI (FFI v2).
 //
-// Build/run (macOS arm64):
+// Build/run (the go.mod is committed — no `go mod init` needed):
 //
-//	cd ffi/examples/go && go mod init sassoffi   # once
-//	DYLD_LIBRARY_PATH=../../target/release go run .
+//	cd ffi/examples/go
+//	DYLD_LIBRARY_PATH=../../target/release LD_LIBRARY_PATH=../../target/release go run .   # macOS / Linux
 //
 // We link against the prebuilt libsasso (already built — do NOT cargo build).
 // cgo expands ${SRCDIR} to this file's directory, so the include/lib paths
