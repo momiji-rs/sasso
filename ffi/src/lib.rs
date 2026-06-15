@@ -300,8 +300,14 @@ impl FfiImporter {
         match rc {
             SASSO_IMPORTER_OK => match value {
                 Some(v) => Ok(Some(v)),
+                // OK without a delivered value is a contract violation; if the
+                // host left an error message (e.g. it hit a problem but returned
+                // OK, or a setter rejected its input), surface THAT — it is far
+                // more actionable than the generic note.
                 None => Err(ImporterError {
-                    message: format!("sasso: importer {what} returned OK but delivered no value"),
+                    message: error.unwrap_or_else(|| {
+                        format!("sasso: importer {what} returned OK but delivered no value")
+                    }),
                 }),
             },
             SASSO_IMPORTER_NOT_FOUND => Ok(None),
