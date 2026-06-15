@@ -732,8 +732,14 @@ pub(crate) struct Evaluator<'a> {
     /// first (dart-sass resolution order).
     current_file_dir: Option<String>,
     /// The canonical URL of the file currently being evaluated, passed to the
-    /// importer as `CanonicalizeContext::containing_url`. Tracked in lockstep
-    /// with [`Self::current_file_dir`] (entry init + module/`@import` enter).
+    /// importer as `CanonicalizeContext::containing_url`.
+    ///
+    /// INVARIANT: tracked in **lockstep** with [`Self::current_file_dir`] — every
+    /// site that swaps `current_file_dir` must swap this too, or a relative
+    /// `@use`/`@import`/`meta.load-css` resolves against the wrong file. The four
+    /// sites: entry init (`Evaluator::new`), `eval_module`, the `@import` enter,
+    /// and `enter_module_file`. (The two are kept separate rather than derived
+    /// because `current_file_dir` is also the `@import` cache key.)
     current_canonical: Option<CanonicalUrl>,
     /// Whether evaluation is inside a `@keyframes` body: frame blocks are not
     /// style rules in dart-sass, so nested at-rules do not bubble out of them
@@ -2212,6 +2218,11 @@ impl<'a> Evaluator<'a> {
                                                 return Err(Error::unpositioned(e.message));
                                             }
                                             Ok(None) => None,
+                                            // `res.source_map_url` is intentionally dropped here:
+                                            // `@import` is textual, so the imported file gets NO
+                                            // distinct source-map entry (its tokens map under the
+                                            // importing file). Only `@use`/`@forward` (modules.rs)
+                                            // record the override.
                                             Ok(Some(res)) => {
                                                 Some((canon.as_str().to_string(), res.contents, res.syntax))
                                             }

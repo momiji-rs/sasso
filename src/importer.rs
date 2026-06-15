@@ -116,6 +116,11 @@ impl Importer for FsImporter {
         // containing URL with no parent (a bare entry name like `input.scss`)
         // means the current directory — reproducing the old base of
         // `dirname_of(url).unwrap_or_default()` (an empty string => CWD).
+        //
+        // NB: this `parent()`-based dirname must stay consistent with the
+        // evaluator's `dirname_of` (eval/mod.rs), which derives
+        // `current_file_dir` (the `@import` cache key) from the same canonical
+        // URL — both use `Path::parent` + treat an empty parent as CWD.
         let base_dir: PathBuf = match ctx.containing_url {
             Some(c) => match Path::new(c.as_str()).parent() {
                 Some(par) if !par.as_os_str().is_empty() => par.to_path_buf(),
