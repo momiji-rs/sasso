@@ -180,23 +180,22 @@ impl SassoImporterSink {
     }
 }
 
-/// Copy a host `(ptr, len)` UTF-8 buffer into an owned `String`. `None` for a
-/// NULL pointer or invalid UTF-8 (the caller treats that as "nothing delivered").
-unsafe fn copy_utf8(ptr: *const c_char, len: usize) -> Option<String> {
+/// Copy a host `(ptr, len)` buffer, distinguishing the three cases a setter must
+/// handle separately: `None` = NULL pointer (nothing delivered); `Some(Ok(s))` =
+/// valid UTF-8; `Some(Err(()))` = non-UTF-8 bytes (an actionable host error, not
+/// a silent miss). `len == 0` with a non-NULL pointer yields an empty string —
+/// `slice::from_raw_parts(ptr, 0)` is valid for any non-NULL `c_char` pointer.
+unsafe fn read_utf8(ptr: *const c_char, len: usize) -> Option<Result<String, ()>> {
     if ptr.is_null() {
         return None;
     }
-    let bytes = if len == 0 {
-        &[][..]
-    } else {
-        slice::from_raw_parts(ptr as *const u8, len)
-    };
-    std::str::from_utf8(bytes).ok().map(|s| s.to_owned())
+    let bytes = slice::from_raw_parts(ptr as *const u8, len);
+    Some(std::str::from_utf8(bytes).map(|s| s.to_owned()).map_err(|_| ()))
 }
 
 /// Deliver the canonical URL from a `canonicalize` callback (copied immediately).
-/// Call once, then return [`SASSO_IMPORTER_OK`]. A NULL `sink` or invalid UTF-8
-/// is ignored (the callback is then treated as if it delivered nothing).
+/// Call once, then return [`SASSO_IMPORTER_OK`]. A NULL pointer delivers nothing;
+/// non-UTF-8 bytes record an error (surfaced as the compile failure).
 ///
 /// # Safety
 /// `sink` must be the pointer passed to the current callback; `ptr` must point to
@@ -211,15 +210,19 @@ pub unsafe extern "C" fn sasso_importer_set_canonical(
     // unwind across it — guard the whole body (mirrors `sasso_result_free`).
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if let Some(sink) = sink.as_mut() {
-            if let Some(s) = copy_utf8(ptr, len) {
-                sink.canonical = Some(s);
+            match read_utf8(ptr, len) {
+                None => {} // NULL: delivered nothing
+                Some(Ok(s)) => sink.canonical = Some(s),
+                Some(Err(())) => {
+                    sink.error = Some("sasso: importer delivered a non-UTF-8 canonical URL".to_string());
+                }
             }
         }
     }));
 }
 
 /// Deliver the loaded stylesheet from a `load` callback (copied immediately).
-/// `syntax` is one of `SASSO_SYNTAX_*` (an unknown value falls back to SCSS);
+/// `syntax` is one of `SASSO_SYNTAX_*` (an unknown value records an error);
 /// `source_map_url` may be `NULL`. Call once, then return [`SASSO_IMPORTER_OK`].
 ///
 /// # Safety
@@ -239,9 +242,13 @@ pub unsafe extern "C" fn sasso_importer_set_result(
             Some(s) => s,
             None => return,
         };
-        let contents = match copy_utf8(contents, contents_len) {
-            Some(c) => c,
-            None => return,
+        let contents = match read_utf8(contents, contents_len) {
+            Some(Ok(c)) => c,
+            None => return, // NULL contents: delivered nothing
+            Some(Err(())) => {
+                sink.error = Some("sasso: importer delivered non-UTF-8 contents".to_string());
+                return;
+            }
         };
         let syntax = match syntax_from_i32(syntax) {
             Some(s) => s,
@@ -249,15 +256,17 @@ pub unsafe extern "C" fn sasso_importer_set_result(
                 // Consistent with sasso_compile: an out-of-range syntax is a host
                 // bug, surfaced as an error (via interpret) rather than silently
                 // parsed as SCSS — which would emit subtly wrong CSS.
-                sink.error =
-                    Some(format!("sasso: importer delivered an invalid syntax value {syntax}"));
+                sink.error = Some(format!(
+                    "sasso: importer delivered an invalid syntax value {syntax}"
+                ));
                 return;
             }
         };
-        let source_map_url = if source_map_url.is_null() {
-            None
-        } else {
-            copy_utf8(source_map_url, source_map_url_len)
+        // The source-map URL is optional: a NULL or non-UTF-8 value just means
+        // "no override" rather than an error.
+        let source_map_url = match read_utf8(source_map_url, source_map_url_len) {
+            Some(Ok(u)) => Some(u),
+            _ => None,
         };
         sink.result = Some(ImporterResult {
             contents,
@@ -268,7 +277,8 @@ pub unsafe extern "C" fn sasso_importer_set_result(
 }
 
 /// Deliver an error message from either callback (copied immediately). Call, then
-/// return [`SASSO_IMPORTER_ERROR`]. A NULL/invalid message still marks the failure.
+/// return [`SASSO_IMPORTER_ERROR`]. A NULL, empty, or non-UTF-8 message falls back
+/// to a generic string so the failure always carries some diagnostic text.
 ///
 /// # Safety
 /// `sink` must be the pointer passed to the current callback; `ptr` must point to
@@ -281,7 +291,11 @@ pub unsafe extern "C" fn sasso_importer_set_error(
 ) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if let Some(sink) = sink.as_mut() {
-            sink.error = Some(copy_utf8(ptr, len).unwrap_or_else(|| "importer error".to_string()));
+            let msg = match read_utf8(ptr, len) {
+                Some(Ok(s)) if !s.is_empty() => s,
+                _ => "importer error".to_string(),
+            };
+            sink.error = Some(msg);
         }
     }));
 }
