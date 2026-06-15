@@ -13,7 +13,7 @@ categories = ["compilers", "web-programming"]
 # Keep the published crate lean: ship only the library, binary, examples,
 # tests, licenses and README — not the conformance harness, benchmarks, or
 # analysis docs (those live in the git repo).
-exclude = ["/bench", "/spec", "/docs", "/.github", "/wasm"]
+exclude = ["/bench", "/spec", "/docs", "/.github", "/wasm", "/ffi"]
 
 [lib]
 name = "sasso"
@@ -60,7 +60,7 @@ all = { level = "warn", priority = -1 }
 # (`/wasm`, a cdylib that needs `unsafe` for its FFI exports) is kept OUT of
 # this workspace so the core crate keeps `unsafe_code = "forbid"`.
 [workspace]
-exclude = ["wasm"]
+exclude = ["wasm", "ffi"]
 
 # Config for 'dist'
 [workspace.metadata.dist]
