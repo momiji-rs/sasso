@@ -39,11 +39,14 @@ class SassoOptions(ctypes.Structure):
 
 
 class SassoResult(ctypes.Structure):
+    # css/error are c_void_p (not c_char_p) so we keep the raw pointer and read
+    # exactly css_len/error_len bytes via ctypes.string_at — honoring the ABI's
+    # explicit lengths rather than assuming NUL-termination (binary-safe).
     _fields_ = [
         ("ok", ctypes.c_int32),
-        ("css", ctypes.c_char_p),
+        ("css", ctypes.c_void_p),
         ("css_len", ctypes.c_size_t),
-        ("error", ctypes.c_char_p),
+        ("error", ctypes.c_void_p),
         ("error_len", ctypes.c_size_t),
         ("error_line", ctypes.c_uint32),
         ("error_column", ctypes.c_uint32),
@@ -66,8 +69,10 @@ def compile_scss(src: str, options=None):
     res = res_ptr.contents
     try:
         if res.ok:
-            return True, res.css.decode("utf-8"), None
-        return False, None, (res.error.decode("utf-8"), res.error_line, res.error_column)
+            css = ctypes.string_at(res.css, res.css_len).decode("utf-8")
+            return True, css, None
+        err = ctypes.string_at(res.error, res.error_len).decode("utf-8")
+        return False, None, (err, res.error_line, res.error_column)
     finally:
         lib.sasso_result_free(res_ptr)
 
