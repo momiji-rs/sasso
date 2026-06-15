@@ -650,15 +650,20 @@ impl<'a> Evaluator<'a> {
                             return Err(Error::at(e.message, pos));
                         }
                         Ok(None) => None,
-                        Ok(Some(res)) => Some((canon.as_str().to_string(), res.contents, res.syntax)),
+                        Ok(Some(res)) => Some((
+                            canon.as_str().to_string(),
+                            res.contents,
+                            res.syntax,
+                            res.source_map_url,
+                        )),
                     },
                 }
             }
             None => None,
         };
         crate::arena::resume(saved);
-        let (key, src, syntax) = match two_phase {
-            Some(triple) => triple,
+        let (key, src, syntax, source_map_url) = match two_phase {
+            Some(quad) => quad,
             None => {
                 return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
             }
@@ -777,6 +782,12 @@ impl<'a> Evaluator<'a> {
             self.file_sources
                 .borrow_mut()
                 .insert(diag_url.clone(), Rc::from(src.as_str()));
+        }
+        // If the importer asked for a custom source-map URL for this file, record
+        // it under the same display URL the source map keys on (`@import` is
+        // textual and has no distinct source entry, so it carries no override).
+        if let Some(smu) = source_map_url {
+            self.file_map_urls.insert(diag_url.clone(), smu);
         }
         let is_css = matches!(syntax, Syntax::Css);
         // A `meta.load-css` first load also records only the copy edge (see
