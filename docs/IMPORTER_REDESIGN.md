@@ -71,8 +71,9 @@ pub struct ImporterResult {
 
 /// Context for `canonicalize` (dart `CanonicalizeContext`).
 pub struct CanonicalizeContext<'a> {
-    /// True for `@import` (which also considers import-only `*.import.scss`
-    /// files), false for `@use`/`@forward`.
+    /// True for `@import` (which also considers import-only files —
+    /// `*.import.scss` / `*.import.sass`, plus their `_partial` and index
+    /// variants), false for `@use`/`@forward`.
     pub from_import: bool,
     /// Canonical URL of the stylesheet doing the importing, if any — relative
     /// URLs resolve against it first.
@@ -116,23 +117,27 @@ in the same change.
 ## FFI v2 mapping (sketch, for when we get there)
 
 ```c
+/* Every string is an explicit (ptr, len) pair — never NUL-terminated —
+ * matching the rest of the FFI (binary-safe, no strlen, no NUL ambiguity). */
 typedef struct {
-  const char *contents; size_t contents_len;
-  int32_t     syntax;               /* SASSO_SYNTAX_* */
-  const char *source_map_url;       /* NUL-terminated, or NULL */
+  const char *contents;       size_t contents_len;
+  int32_t     syntax;                                /* SASSO_SYNTAX_* */
+  const char *source_map_url; size_t source_map_url_len;  /* or NULL / 0 */
 } SassoImporterResult;
 
-/* return a heap canonical URL (caller frees via a provided fn), or NULL.
- * `containing_url` is the canonical URL of the importing stylesheet (NULL +
- * len 0 for an entrypoint) — needed for dart-faithful relative resolution,
- * mirroring `CanonicalizeContext::containing_url`. */
-typedef char *(*sasso_canonicalize_fn)(void *user_data, const char *url,
-                                       size_t url_len, int from_import,
-                                       const char *containing_url,
-                                       size_t containing_url_len);
-/* fill *out (sasso copies it), return 1 on hit / 0 on miss */
-typedef int   (*sasso_load_fn)(void *user_data, const char *canonical_url,
-                               size_t len, SassoImporterResult *out);
+/* Canonicalize `url`. On a hit, set *out_canonical (a heap string the caller
+ * frees via a provided fn) + *out_canonical_len and return 1; return 0 for a
+ * miss. `containing_url` (+ len) is the importing stylesheet's canonical URL
+ * (NULL / 0 for an entrypoint), for dart-faithful relative resolution. */
+typedef int (*sasso_canonicalize_fn)(void *user_data,
+                                     const char *url, size_t url_len,
+                                     int from_import,
+                                     const char *containing_url, size_t containing_url_len,
+                                     char **out_canonical, size_t *out_canonical_len);
+/* Load a canonical URL: fill *out (sasso copies it), return 1 on hit / 0 on miss. */
+typedef int (*sasso_load_fn)(void *user_data,
+                             const char *canonical_url, size_t canonical_url_len,
+                             SassoImporterResult *out);
 ```
 
 Ownership/re-entrancy rules across the boundary are the delicate part — exactly
