@@ -243,12 +243,16 @@ pub unsafe extern "C" fn sasso_importer_set_result(
             Some(c) => c,
             None => return,
         };
-        let syntax = match syntax {
-            SASSO_SYNTAX_SASS => Syntax::Sass,
-            SASSO_SYNTAX_CSS => Syntax::Css,
-            // SCSS for the explicit constant and any out-of-range value: a bad
-            // syntax int must not abort a resolution mid-callback.
-            _ => Syntax::Scss,
+        let syntax = match syntax_from_i32(syntax) {
+            Some(s) => s,
+            None => {
+                // Consistent with sasso_compile: an out-of-range syntax is a host
+                // bug, surfaced as an error (via interpret) rather than silently
+                // parsed as SCSS — which would emit subtly wrong CSS.
+                sink.error =
+                    Some(format!("sasso: importer delivered an invalid syntax value {syntax}"));
+                return;
+            }
         };
         let source_map_url = if source_map_url.is_null() {
             None
@@ -564,11 +568,9 @@ unsafe fn compile_inner(
         SASSO_STYLE_COMPRESSED => OutputStyle::Compressed,
         other => return make_error(&format!("sasso: invalid style {other}"), 0, 0),
     };
-    let syntax = match opts.syntax {
-        SASSO_SYNTAX_SCSS => Syntax::Scss,
-        SASSO_SYNTAX_SASS => Syntax::Sass,
-        SASSO_SYNTAX_CSS => Syntax::Css,
-        other => return make_error(&format!("sasso: invalid syntax {other}"), 0, 0),
+    let syntax = match syntax_from_i32(opts.syntax) {
+        Some(s) => s,
+        None => return make_error(&format!("sasso: invalid syntax {}", opts.syntax), 0, 0),
     };
     let unicode = opts.unicode != 0;
     let url_owned: Option<String> = if opts.url.is_null() {
@@ -615,6 +617,18 @@ unsafe fn compile_inner(
     match compile(src, &o) {
         Ok(css) => make_success(css),
         Err(e) => make_error(&e.to_string(), saturate_u32(e.line), saturate_u32(e.col)),
+    }
+}
+
+/// Decode a `SASSO_SYNTAX_*` integer to a core [`Syntax`], or `None` for an
+/// out-of-range value. Single source of truth shared by `sasso_compile` and the
+/// importer's `sasso_importer_set_result`, so both treat a bad value identically.
+fn syntax_from_i32(v: i32) -> Option<Syntax> {
+    match v {
+        SASSO_SYNTAX_SCSS => Some(Syntax::Scss),
+        SASSO_SYNTAX_SASS => Some(Syntax::Sass),
+        SASSO_SYNTAX_CSS => Some(Syntax::Css),
+        _ => None,
     }
 }
 
