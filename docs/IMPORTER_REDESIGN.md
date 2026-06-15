@@ -205,3 +205,36 @@ why this waits for the Rust shape to settle first.
    distinguishes a miss from a real failure. What does the concrete type carry —
    just a message, or a kind (NotFound vs Ambiguous vs Io vs InvalidUrl) + an
    optional span — and how does it map onto a host exception over FFI?
+
+## dart-sass parity (as implemented)
+
+Compared against dart-sass's
+[`Importer`](https://pub.dev/documentation/sass/latest/sass/Importer-class.html)
+and
+[`ImporterResult`](https://pub.dev/documentation/sass/latest/sass/ImporterResult-class.html).
+The two gaps that prompted this redesign (issue #4) are **closed**: the importer
+is no longer a single `resolve(path) -> Option<String>` but dart's two-phase
+`canonicalize`/`load`, and `load` returns a struct (`contents` + `syntax` +
+`source_map_url`) rather than a bare string.
+
+| dart-sass `Importer` | sasso | status |
+| --- | --- | --- |
+| `canonicalize(Uri) -> Uri?` (may throw) | `canonicalize(&str, &CanonicalizeContext) -> Result<Option<CanonicalUrl>, ImporterError>` | ✅ aligned |
+| `load(Uri) -> ImporterResult?` (may throw) | `load(&CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError>` | ✅ aligned |
+| `fromImport` / `containingUrl` (zone-scoped) | `CanonicalizeContext { from_import, containing_url }` (explicit arg) | ✅ same info |
+| throw → error | `Err(ImporterError)` | ✅ corresponds |
+| `Uri` (schemes, `file:`) | `CanonicalUrl` (opaque `String`) | ◑ analogous; no URI-scheme system |
+| `modificationTime` (cache), `couldCanonicalize` (opt.), `isNonCanonicalScheme` / `nonCanonicalSchemes`, `noOp`, `AsyncImporter` | — | ❌ intentionally omitted |
+| separate `FileImporter` (`findFileUrl`) convenience | — | ❌ deferred (open Q1) |
+
+| dart-sass `ImporterResult` | sasso `ImporterResult` | status |
+| --- | --- | --- |
+| `contents: String` | `contents: String` | ✅ |
+| `syntax: Syntax` | `syntax: Syntax` | ✅ |
+| `sourceMapUrl: Uri?` | `source_map_url: Option<String>` | ✅ (type `Uri` → `String`) |
+| `indented` (deprecated ctor param) | — | ✅ not carried (clean) |
+
+So the **model and the issue-#4 gaps are aligned**; what remains unaligned is
+dart's advanced/optional machinery (the URI-scheme system, caching/optimization
+hooks, `FileImporter`), which is deliberately out of scope or deferred — not the
+original "returns a string" mismatch.
