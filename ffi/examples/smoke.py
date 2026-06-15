@@ -54,7 +54,7 @@ SASSO_STYLE_COMPRESSED = 1
 
 lib = ctypes.CDLL(find_lib())
 lib.sasso_version.restype = ctypes.c_char_p
-lib.sasso_options_init.argtypes = [ctypes.POINTER(SassoOptions)]
+lib.sasso_options_init.argtypes = [ctypes.POINTER(SassoOptions), ctypes.c_size_t]
 lib.sasso_compile.restype = ctypes.POINTER(SassoResult)
 lib.sasso_compile.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(SassoOptions)]
 lib.sasso_result_free.argtypes = [ctypes.POINTER(SassoResult)]
@@ -93,7 +93,7 @@ check("rgba(var()) passthrough", ok and css.strip() == ".a {\n  color: rgba(var(
 
 # 3. Compressed output via an options struct.
 opts = SassoOptions()
-lib.sasso_options_init(ctypes.byref(opts))
+lib.sasso_options_init(ctypes.byref(opts), ctypes.sizeof(opts))
 opts.style = SASSO_STYLE_COMPRESSED
 ok, css, _ = compile_scss(".a { color: #336699; }", ctypes.byref(opts))
 check("compressed style", ok and css == ".a{color:#369}")

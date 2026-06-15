@@ -24,7 +24,7 @@ regenerated with `cbindgen --config cbindgen.toml --output include/sasso.h`).
 | Symbol | Purpose |
 | --- | --- |
 | `const char *sasso_version(void)` | Bundled compiler version (static; do not free). |
-| `void sasso_options_init(SassoOptions*)` | Fill an options struct with defaults + `struct_size`. |
+| `void sasso_options_init(SassoOptions*, size_t)` | Fill an options struct with defaults; pass `sizeof(SassoOptions)`. |
 | `SassoResult *sasso_compile(const char *src, size_t len, const SassoOptions*)` | Compile a UTF-8 buffer; returns an owned result. |
 | `void sasso_result_free(SassoResult*)` | Release a result (and its `css`/`error`). |
 

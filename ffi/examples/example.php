@@ -35,7 +35,7 @@ typedef struct SassoResult {
 } SassoResult;
 
 const char *sasso_version(void);
-void sasso_options_init(SassoOptions *options);
+void sasso_options_init(SassoOptions *options, size_t struct_size);
 SassoResult *sasso_compile(const char *source, size_t source_len, const SassoOptions *options);
 void sasso_result_free(SassoResult *result);
 CDEF, $lib);
@@ -46,7 +46,7 @@ const SASSO_STYLE_COMPRESSED = 1;
 function sasso_compile(FFI $ffi, string $scss, bool $compressed = false): string
 {
     $opts = $ffi->new('SassoOptions');
-    $ffi->sasso_options_init(FFI::addr($opts));
+    $ffi->sasso_options_init(FFI::addr($opts), FFI::sizeof($opts));
     if ($compressed) {
         $opts->style = SASSO_STYLE_COMPRESSED;
     }

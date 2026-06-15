@@ -44,8 +44,8 @@ pub const SASSO_SYNTAX_CSS: i32 = 2;
 /// Compile options. `#[repr(C)]`; a `NULL` pointer means "all defaults".
 ///
 /// The leading `struct_size` lets the ABI grow without breaking older callers:
-/// initialize with [`sasso_options_init`] (which sets it to `sizeof`), then set
-/// the fields you care about.
+/// initialize with `sasso_options_init(opts, sizeof(SassoOptions))` (which sets
+/// it), then set the fields you care about.
 #[repr(C)]
 pub struct SassoOptions {
     /// `sizeof(SassoOptions)` as the caller sees it — set by [`sasso_options_init`].
@@ -96,27 +96,75 @@ pub extern "C" fn sasso_version() -> *const c_char {
 }
 
 /// Fill `options` with defaults (expanded, SCSS, Unicode diagnostics, no url /
-/// load paths) and set `struct_size`.
+/// load paths). `struct_size` is the caller's `sizeof(SassoOptions)`: only that
+/// many bytes are written (capped at this build's size), so a smaller/older
+/// caller is never written past. Pass `sizeof(SassoOptions)`.
 ///
 /// # Safety
-/// `options` must be `NULL` or a valid, writable pointer to a `SassoOptions`.
+/// `options` must be `NULL` or point to at least `struct_size` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn sasso_options_init(options: *mut SassoOptions) {
+pub unsafe extern "C" fn sasso_options_init(options: *mut SassoOptions, struct_size: usize) {
     if options.is_null() {
         return;
     }
-    ptr::write(
-        options,
-        SassoOptions {
-            struct_size: std::mem::size_of::<SassoOptions>() as u32,
-            style: SASSO_STYLE_EXPANDED,
-            syntax: SASSO_SYNTAX_SCSS,
-            unicode: 1,
-            url: ptr::null(),
-            load_paths: ptr::null(),
-            load_paths_len: 0,
-        },
+    let defaults = SassoOptions {
+        struct_size: struct_size as u32,
+        style: SASSO_STYLE_EXPANDED,
+        syntax: SASSO_SYNTAX_SCSS,
+        unicode: 1,
+        url: ptr::null(),
+        load_paths: ptr::null(),
+        load_paths_len: 0,
+    };
+    // Write only what the caller's struct can hold — never past their buffer.
+    let n = struct_size.min(std::mem::size_of::<SassoOptions>());
+    ptr::copy_nonoverlapping(
+        (&defaults as *const SassoOptions).cast::<u8>(),
+        options.cast::<u8>(),
+        n,
     );
+}
+
+/// Read a caller-supplied `SassoOptions` in a version-tolerant way: the leading
+/// `struct_size` says how many bytes the caller actually provided, so we copy
+/// only that prefix over a defaults-filled local. A caller with an older,
+/// smaller struct gets our defaults for the missing tail, and we never read past
+/// their allocation. `NULL` yields all defaults.
+///
+/// # Safety
+/// `options` must be `NULL` or point to at least its own leading `struct_size`
+/// bytes (the minimal contract a `SassoOptions` pointer already implies).
+unsafe fn read_options(options: *const SassoOptions) -> SassoOptions {
+    let size = std::mem::size_of::<SassoOptions>();
+    let mut local = SassoOptions {
+        struct_size: size as u32,
+        style: SASSO_STYLE_EXPANDED,
+        syntax: SASSO_SYNTAX_SCSS,
+        unicode: 1,
+        url: ptr::null(),
+        load_paths: ptr::null(),
+        load_paths_len: 0,
+    };
+    if options.is_null() {
+        return local;
+    }
+    let caller_size = ptr::read_unaligned(ptr::addr_of!((*options).struct_size)) as usize;
+    let n = caller_size.min(size);
+    ptr::copy_nonoverlapping(
+        options.cast::<u8>(),
+        (&mut local as *mut SassoOptions).cast::<u8>(),
+        n,
+    );
+    if n < size {
+        // The pointer fields live in the struct tail; a shorter caller struct
+        // may have left them partially written, so drop them rather than
+        // dereference a half-formed pointer. (A future version appending fields
+        // past the pointers would refine this to a per-field check.)
+        local.url = ptr::null();
+        local.load_paths = ptr::null();
+        local.load_paths_len = 0;
+    }
+    local
 }
 
 /// Compile `source` (a UTF-8 buffer of `source_len` bytes) to CSS.
@@ -184,58 +232,39 @@ unsafe fn compile_inner(
         Err(_) => return make_error("sasso: source is not valid UTF-8", 0, 0),
     };
 
-    let mut style = OutputStyle::Expanded;
-    let mut syntax = Syntax::Scss;
-    let mut unicode = true;
-    let mut url_owned: Option<String> = None;
+    // Read the options version-tolerantly (defaults if NULL / for any field the
+    // caller's `struct_size` doesn't cover); never reads past the caller's struct.
+    let opts = read_options(options);
+    let style = match opts.style {
+        SASSO_STYLE_EXPANDED => OutputStyle::Expanded,
+        SASSO_STYLE_COMPRESSED => OutputStyle::Compressed,
+        other => return make_error(&format!("sasso: invalid style {other}"), 0, 0),
+    };
+    let syntax = match opts.syntax {
+        SASSO_SYNTAX_SCSS => Syntax::Scss,
+        SASSO_SYNTAX_SASS => Syntax::Sass,
+        SASSO_SYNTAX_CSS => Syntax::Css,
+        other => return make_error(&format!("sasso: invalid syntax {other}"), 0, 0),
+    };
+    let unicode = opts.unicode != 0;
+    let url_owned: Option<String> = if opts.url.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(opts.url).to_str() {
+            Ok(u) => Some(u.to_owned()),
+            Err(_) => return make_error("sasso: url is not valid UTF-8", 0, 0),
+        }
+    };
     let mut load_paths: Vec<PathBuf> = Vec::new();
-
-    if !options.is_null() {
-        // Honor the forward-compat `struct_size`: require the caller to have
-        // provided at least the fields this build reads, so we never read past
-        // their allocation (Copilot #5). A future, LARGER struct is fine — we
-        // read our known fields and ignore the extra tail; a smaller one is
-        // rejected (callers fill `struct_size` via `sasso_options_init`).
-        // (`struct_size` is the first field, at offset 0, so reading it only
-        // needs the minimal `SassoOptions` pointer the contract already requires.)
-        let caller_size = ptr::read_unaligned(ptr::addr_of!((*options).struct_size)) as usize;
-        if caller_size < std::mem::size_of::<SassoOptions>() {
-            return make_error(
-                "sasso: SassoOptions.struct_size is smaller than this build expects; \
-                 initialize it with sasso_options_init",
-                0,
-                0,
-            );
-        }
-        let opts = &*options;
-        style = match opts.style {
-            SASSO_STYLE_EXPANDED => OutputStyle::Expanded,
-            SASSO_STYLE_COMPRESSED => OutputStyle::Compressed,
-            other => return make_error(&format!("sasso: invalid style {other}"), 0, 0),
-        };
-        syntax = match opts.syntax {
-            SASSO_SYNTAX_SCSS => Syntax::Scss,
-            SASSO_SYNTAX_SASS => Syntax::Sass,
-            SASSO_SYNTAX_CSS => Syntax::Css,
-            other => return make_error(&format!("sasso: invalid syntax {other}"), 0, 0),
-        };
-        unicode = opts.unicode != 0;
-        if !opts.url.is_null() {
-            match CStr::from_ptr(opts.url).to_str() {
-                Ok(u) => url_owned = Some(u.to_owned()),
-                Err(_) => return make_error("sasso: url is not valid UTF-8", 0, 0),
+    if !opts.load_paths.is_null() && opts.load_paths_len > 0 {
+        let arr = slice::from_raw_parts(opts.load_paths, opts.load_paths_len);
+        for &p in arr {
+            if p.is_null() {
+                continue;
             }
-        }
-        if !opts.load_paths.is_null() && opts.load_paths_len > 0 {
-            let arr = slice::from_raw_parts(opts.load_paths, opts.load_paths_len);
-            for &p in arr {
-                if p.is_null() {
-                    continue;
-                }
-                match CStr::from_ptr(p).to_str() {
-                    Ok(s) => load_paths.push(PathBuf::from(s)),
-                    Err(_) => return make_error("sasso: a load path is not valid UTF-8", 0, 0),
-                }
+            match CStr::from_ptr(p).to_str() {
+                Ok(s) => load_paths.push(PathBuf::from(s)),
+                Err(_) => return make_error("sasso: a load path is not valid UTF-8", 0, 0),
             }
         }
     }
