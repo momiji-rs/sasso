@@ -191,6 +191,22 @@ unsafe fn compile_inner(
     let mut load_paths: Vec<PathBuf> = Vec::new();
 
     if !options.is_null() {
+        // Honor the forward-compat `struct_size`: require the caller to have
+        // provided at least the fields this build reads, so we never read past
+        // their allocation (Copilot #5). A future, LARGER struct is fine — we
+        // read our known fields and ignore the extra tail; a smaller one is
+        // rejected (callers fill `struct_size` via `sasso_options_init`).
+        // (`struct_size` is the first field, at offset 0, so reading it only
+        // needs the minimal `SassoOptions` pointer the contract already requires.)
+        let caller_size = ptr::read_unaligned(ptr::addr_of!((*options).struct_size)) as usize;
+        if caller_size < std::mem::size_of::<SassoOptions>() {
+            return make_error(
+                "sasso: SassoOptions.struct_size is smaller than this build expects; \
+                 initialize it with sasso_options_init",
+                0,
+                0,
+            );
+        }
         let opts = &*options;
         style = match opts.style {
             SASSO_STYLE_EXPANDED => OutputStyle::Expanded,
