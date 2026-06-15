@@ -256,8 +256,16 @@ unsafe fn compile_inner(
 
     match compile(src, &o) {
         Ok(css) => make_success(css),
-        Err(e) => make_error(&e.to_string(), e.line as u32, e.col as u32),
+        Err(e) => make_error(&e.to_string(), saturate_u32(e.line), saturate_u32(e.col)),
     }
+}
+
+/// Narrow a core `usize` line/column to the ABI's `u32`, saturating instead of
+/// wrapping. Truncation needs a >4-billion-line/column source (>4 GiB), so this
+/// is defensive only — but a silent wraparound would report a wrong small
+/// position, whereas saturating keeps it unmistakably large (Copilot #5).
+fn saturate_u32(v: usize) -> u32 {
+    u32::try_from(v).unwrap_or(u32::MAX)
 }
 
 /// Box a success result, moving `css` into an owned C string.
