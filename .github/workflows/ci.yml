@@ -53,6 +53,32 @@ jobs:
       - name: build (lib) for wasm
         run: cargo build --lib --target wasm32-wasip1
 
+  ffi:
+    name: C ABI (ffi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ffi
+      # The ffi crate lives outside the core workspace, so fmt/clippy/build run
+      # inside ffi/ (the root `cargo fmt --all` / `--all-targets` don't reach it).
+      - name: rustfmt (ffi)
+        run: cargo fmt --check
+        working-directory: ffi
+      - name: clippy (ffi)
+        run: cargo clippy --release --all-targets -- -D warnings
+        working-directory: ffi
+      - name: build cdylib + staticlib
+        run: cargo build --release
+        working-directory: ffi
+      - name: python ctypes smoke test
+        run: python3 examples/smoke.py
+        working-directory: ffi
+
   conformance:
     name: sass-spec ratchet
     runs-on: ubuntu-latest
