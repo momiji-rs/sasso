@@ -36,7 +36,7 @@ just not in dart's shape:
 | canonical-key dedup (`@use` once) | `canonicalize` | ✅ `resolve_module*` (key, src) | ❌ only `resolve` |
 | per-file syntax (`.sass` from `.scss`) | `ImporterResult.syntax` | ✅ `resolve_with_syntax` | ❌ |
 | relative-to-containing-file | canonicalize ctx | ✅ `resolve_*_in(base_dir)` | ❌ |
-| canonical path for diagnostics | canonical Uri | ✅ `resolve_import_with_path` | ❌ |
+| resolved key + per-file base dir | canonical Uri | ◑ `resolve_import_with_path` — feeds the import cache + `current_file_dir`; `@import` does NOT switch `current_url`/`current_source` to the imported file the way `@use` does, so per-import diagnostic context isn't wired | ❌ |
 | **source-map URL of a loaded file** | `ImporterResult.sourceMapUrl` | ❌ **missing** | ❌ |
 | **clean canonicalize / load split** | two methods | ❌ accreted `resolve_*` overloads | ❌ |
 | `@import` vs `@use` context (import-only files) | `fromImport` | partial (`resolve_import_*` vs `resolve_module_*`) | ❌ |
@@ -80,16 +80,33 @@ pub struct CanonicalizeContext<'a> {
     pub containing_url: Option<&'a CanonicalUrl>,
 }
 
+/// An importer failure that is NOT a plain miss — an I/O error, a permission
+/// error, an ambiguous match (dart: "It's not clear which … to import"), an
+/// invalid URL, etc. Surfaced as an actionable compile error, not silently
+/// treated as "not found". (Concrete shape TBD — see open questions.)
+pub struct ImporterError {
+    pub message: String,
+}
+
 /// Resolves `@use` / `@forward` / `@import` URLs in dart's two phases.
+///
+/// Both methods distinguish THREE outcomes (dart's `Uri?` + the ability to
+/// throw): `Ok(Some(_))` = handled, here it is; `Ok(None)` = this importer
+/// doesn't handle the URL (try the next / fall through to "not found");
+/// `Err(_)` = this importer OWNS the URL but failed — a real, reportable error.
 pub trait Importer {
-    /// Map `url` to its canonical identity, or `None` if this importer can't
-    /// handle it. MUST NOT load the file. The returned `CanonicalUrl` is the
-    /// module-cache key.
-    fn canonicalize(&self, url: &str, ctx: &CanonicalizeContext<'_>) -> Option<CanonicalUrl>;
+    /// Map `url` to its canonical identity. MUST NOT load the file. The returned
+    /// `CanonicalUrl` is the module-cache key. `Ok(None)` = not handled;
+    /// `Err` = handled but failed (e.g. ambiguous match).
+    fn canonicalize(
+        &self,
+        url: &str,
+        ctx: &CanonicalizeContext<'_>,
+    ) -> Result<Option<CanonicalUrl>, ImporterError>;
 
     /// Load the source for a `CanonicalUrl` previously returned by
-    /// `canonicalize`. `None` if it can no longer be found.
-    fn load(&self, canonical: &CanonicalUrl) -> Option<ImporterResult>;
+    /// `canonicalize`. `Ok(None)` = vanished; `Err` = found but unreadable.
+    fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError>;
 }
 ```
 
@@ -117,27 +134,34 @@ in the same change.
 ## FFI v2 mapping (sketch, for when we get there)
 
 ```c
-/* Every string is an explicit (ptr, len) pair — never NUL-terminated —
- * matching the rest of the FFI (binary-safe, no strlen, no NUL ambiguity). */
+/* Every string is an explicit (ptr, len) pair — never NUL-terminated — which
+ * is the convention this ABI adopts (binary-safe, no strlen, no NUL ambiguity),
+ * consistent with the v1 surface proposed in #5. */
 typedef struct {
   const char *contents;       size_t contents_len;
   int32_t     syntax;                                /* SASSO_SYNTAX_* */
   const char *source_map_url; size_t source_map_url_len;  /* or NULL / 0 */
 } SassoImporterResult;
 
+/* Three-state return mirroring the Rust trait's Result<Option<_>, _>:
+ *   1 = handled (out-params filled), 0 = not handled (miss), -1 = error
+ * (set *out_error + *out_error_len to an owned message the caller frees). */
+
 /* Canonicalize `url`. On a hit, set *out_canonical (a heap string the caller
- * frees via a provided fn) + *out_canonical_len and return 1; return 0 for a
- * miss. `containing_url` (+ len) is the importing stylesheet's canonical URL
- * (NULL / 0 for an entrypoint), for dart-faithful relative resolution. */
+ * frees via a provided fn) + *out_canonical_len. `containing_url` (+ len) is the
+ * importing stylesheet's canonical URL (NULL / 0 for an entrypoint), for
+ * dart-faithful relative resolution. */
 typedef int (*sasso_canonicalize_fn)(void *user_data,
                                      const char *url, size_t url_len,
                                      int from_import,
                                      const char *containing_url, size_t containing_url_len,
-                                     char **out_canonical, size_t *out_canonical_len);
-/* Load a canonical URL: fill *out (sasso copies it), return 1 on hit / 0 on miss. */
+                                     char **out_canonical, size_t *out_canonical_len,
+                                     char **out_error, size_t *out_error_len);
+/* Load a canonical URL: fill *out (sasso copies it). 1 = hit, 0 = miss, -1 = error. */
 typedef int (*sasso_load_fn)(void *user_data,
                              const char *canonical_url, size_t canonical_url_len,
-                             SassoImporterResult *out);
+                             SassoImporterResult *out,
+                             char **out_error, size_t *out_error_len);
 ```
 
 Ownership/re-entrancy rules across the boundary are the delicate part — exactly
@@ -161,3 +185,7 @@ why this waits for the Rust shape to settle first.
    `String`/newtype, or introduce a real URL type (schemes, `file:`)?
 5. **`sourceMapUrl` plumbing.** Threading it through the source-map builder is
    the one genuinely new capability — worth doing in step 1, or a follow-up?
+6. **`ImporterError` shape.** The error channel (`Result<Option<_>, ImporterError>`)
+   distinguishes a miss from a real failure. What does the concrete type carry —
+   just a message, or a kind (NotFound vs Ambiguous vs Io vs InvalidUrl) + an
+   optional span — and how does it map onto a host exception over FFI?
