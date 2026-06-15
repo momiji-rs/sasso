@@ -59,14 +59,16 @@ A minimal C use:
 ```c
 #include "sasso.h"
 #include <stdio.h>
+#include <string.h>
 
 int main(void) {
     const char *src = ".a { color: red; }";
     SassoResult *r = sasso_compile(src, strlen(src), NULL);
-    if (r->ok) printf("%s", r->css);
-    else       fprintf(stderr, "%s\n", r->error);
+    int ok = r->ok;                 /* capture before freeing the result */
+    if (ok) printf("%s", r->css);
+    else    fprintf(stderr, "%s\n", r->error);
     sasso_result_free(r);
-    return r->ok ? 0 : 1;
+    return ok ? 0 : 1;
 }
 ```
 
