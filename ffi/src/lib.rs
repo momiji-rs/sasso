@@ -21,13 +21,16 @@
 //! - [`SassoOptions`] is `#[repr(C)]` with a leading `struct_size` for forward
 //!   compatibility; fill it with [`sasso_options_init`] and override fields.
 
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::ptr;
 use std::slice;
 
-use sasso_core::{compile, FsImporter, Options, OutputStyle, Syntax};
+use sasso_core::{
+    compile, CanonicalUrl, CanonicalizeContext, FsImporter, Importer, ImporterError, ImporterResult, Options,
+    OutputStyle, Syntax,
+};
 
 /// Output style: human-readable, indented CSS (`SassoOptions::style`).
 pub const SASSO_STYLE_EXPANDED: i32 = 0;
@@ -40,6 +43,16 @@ pub const SASSO_SYNTAX_SCSS: i32 = 0;
 pub const SASSO_SYNTAX_SASS: i32 = 1;
 /// Input syntax: plain CSS (Sass features rejected, values emitted verbatim).
 pub const SASSO_SYNTAX_CSS: i32 = 2;
+
+/// Importer callback return: handled — the host called `sasso_importer_set_canonical`
+/// (from `canonicalize`) or `sasso_importer_set_result` (from `load`).
+pub const SASSO_IMPORTER_OK: i32 = 1;
+/// Importer callback return: this importer does not handle the URL (try the next
+/// resolution step / treat as not-found). The host need not set anything.
+pub const SASSO_IMPORTER_NOT_FOUND: i32 = 0;
+/// Importer callback return: handled but failed — the host called
+/// `sasso_importer_set_error` with a diagnostic message.
+pub const SASSO_IMPORTER_ERROR: i32 = -1;
 
 /// Compile options. `#[repr(C)]`; a `NULL` pointer means "all defaults".
 ///
@@ -64,6 +77,11 @@ pub struct SassoOptions {
     pub load_paths: *const *const c_char,
     /// Number of entries in `load_paths`.
     pub load_paths_len: usize,
+    /// Optional custom [`SassoImporter`] driving `@use`/`@forward`/`@import`
+    /// resolution. `NULL` uses the built-in filesystem importer (`load_paths`).
+    /// A non-NULL importer takes precedence over `load_paths`. The pointee must
+    /// stay valid for the duration of the [`sasso_compile`] call.
+    pub importer: *const SassoImporter,
 }
 
 /// The outcome of a compile. Allocated by [`sasso_compile`]; release with
@@ -85,6 +103,274 @@ pub struct SassoResult {
     pub error_line: u32,
     /// 1-based column of the error, or `0` if unknown.
     pub error_column: u32,
+}
+
+/// Context passed to a [`SassoImporter::canonicalize`] callback.
+#[repr(C)]
+pub struct SassoCanonicalizeContext {
+    /// Non-zero when this resolution is for a legacy `@import` (as opposed to
+    /// `@use`/`@forward`), so the importer may prefer an import-only partial.
+    pub from_import: i32,
+    /// The canonical URL of the file that contains the `@use`/`@import`, as a
+    /// NUL-terminated UTF-8 string, or `NULL` for the entry stylesheet.
+    pub containing_url: *const c_char,
+}
+
+/// `canonicalize` callback: map `url` to a canonical key. Return one of the
+/// `SASSO_IMPORTER_*` codes; on `OK` the host must have called
+/// [`sasso_importer_set_canonical`]; on `ERROR`, [`sasso_importer_set_error`].
+pub type SassoCanonicalizeFn = extern "C" fn(
+    user_data: *mut c_void,
+    url: *const c_char,
+    ctx: *const SassoCanonicalizeContext,
+    sink: *mut SassoImporterSink,
+) -> i32;
+
+/// `load` callback: fetch the source for a canonical key previously produced by
+/// `canonicalize`. On `OK` the host must have called [`sasso_importer_set_result`].
+pub type SassoLoadFn =
+    extern "C" fn(user_data: *mut c_void, canonical: *const c_char, sink: *mut SassoImporterSink) -> i32;
+
+/// A userland importer: two callbacks plus an opaque `user_data` threaded back
+/// into each. Set [`SassoOptions::importer`] to use it. The two phases mirror
+/// dart-sass: `canonicalize` resolves a (possibly relative, extension-less) URL
+/// to a stable key WITHOUT loading; `load` then fetches that key's source.
+#[repr(C)]
+pub struct SassoImporter {
+    /// Opaque pointer passed verbatim as the first argument of each callback.
+    pub user_data: *mut c_void,
+    /// Resolve a URL to its canonical key (`NULL` = no importer; resolution fails).
+    pub canonicalize: Option<SassoCanonicalizeFn>,
+    /// Load a canonical key's source (`NULL` = no importer; loading fails).
+    pub load: Option<SassoLoadFn>,
+}
+
+/// An opaque, sasso-owned collector handed to an importer callback. The host
+/// delivers its result by calling one of the `sasso_importer_set_*` functions
+/// with it; those COPY the bytes immediately, so the host keeps ownership of its
+/// own buffers. The pointer is valid ONLY for the duration of that one callback.
+pub struct SassoImporterSink {
+    canonical: Option<String>,
+    result: Option<ImporterResult>,
+    error: Option<String>,
+}
+
+impl SassoImporterSink {
+    fn new() -> Self {
+        SassoImporterSink {
+            canonical: None,
+            result: None,
+            error: None,
+        }
+    }
+}
+
+/// Copy a host `(ptr, len)` UTF-8 buffer into an owned `String`. `None` for a
+/// NULL pointer or invalid UTF-8 (the caller treats that as "nothing delivered").
+unsafe fn copy_utf8(ptr: *const c_char, len: usize) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let bytes = if len == 0 {
+        &[][..]
+    } else {
+        slice::from_raw_parts(ptr as *const u8, len)
+    };
+    std::str::from_utf8(bytes).ok().map(|s| s.to_owned())
+}
+
+/// Deliver the canonical URL from a `canonicalize` callback (copied immediately).
+/// Call once, then return [`SASSO_IMPORTER_OK`]. A NULL `sink` or invalid UTF-8
+/// is ignored (the callback is then treated as if it delivered nothing).
+///
+/// # Safety
+/// `sink` must be the pointer passed to the current callback; `ptr` must point to
+/// `len` readable bytes (or be NULL).
+#[no_mangle]
+pub unsafe extern "C" fn sasso_importer_set_canonical(
+    sink: *mut SassoImporterSink,
+    ptr: *const c_char,
+    len: usize,
+) {
+    // Invoked from inside the host's C callback frame, so a Rust panic must never
+    // unwind across it — guard the whole body (mirrors `sasso_result_free`).
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Some(sink) = sink.as_mut() {
+            if let Some(s) = copy_utf8(ptr, len) {
+                sink.canonical = Some(s);
+            }
+        }
+    }));
+}
+
+/// Deliver the loaded stylesheet from a `load` callback (copied immediately).
+/// `syntax` is one of `SASSO_SYNTAX_*` (an unknown value falls back to SCSS);
+/// `source_map_url` may be `NULL`. Call once, then return [`SASSO_IMPORTER_OK`].
+///
+/// # Safety
+/// `sink` must be the pointer passed to the current callback; `contents` /
+/// `source_map_url` must point to their stated lengths of readable bytes (or be NULL).
+#[no_mangle]
+pub unsafe extern "C" fn sasso_importer_set_result(
+    sink: *mut SassoImporterSink,
+    contents: *const c_char,
+    contents_len: usize,
+    syntax: i32,
+    source_map_url: *const c_char,
+    source_map_url_len: usize,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let sink = match sink.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+        let contents = match copy_utf8(contents, contents_len) {
+            Some(c) => c,
+            None => return,
+        };
+        let syntax = match syntax {
+            SASSO_SYNTAX_SASS => Syntax::Sass,
+            SASSO_SYNTAX_CSS => Syntax::Css,
+            // SCSS for the explicit constant and any out-of-range value: a bad
+            // syntax int must not abort a resolution mid-callback.
+            _ => Syntax::Scss,
+        };
+        let source_map_url = if source_map_url.is_null() {
+            None
+        } else {
+            copy_utf8(source_map_url, source_map_url_len)
+        };
+        sink.result = Some(ImporterResult {
+            contents,
+            syntax,
+            source_map_url,
+        });
+    }));
+}
+
+/// Deliver an error message from either callback (copied immediately). Call, then
+/// return [`SASSO_IMPORTER_ERROR`]. A NULL/invalid message still marks the failure.
+///
+/// # Safety
+/// `sink` must be the pointer passed to the current callback; `ptr` must point to
+/// `len` readable bytes (or be NULL).
+#[no_mangle]
+pub unsafe extern "C" fn sasso_importer_set_error(
+    sink: *mut SassoImporterSink,
+    ptr: *const c_char,
+    len: usize,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Some(sink) = sink.as_mut() {
+            sink.error = Some(copy_utf8(ptr, len).unwrap_or_else(|| "importer error".to_string()));
+        }
+    }));
+}
+
+/// Bridges a C [`SassoImporter`] to the core [`Importer`] trait. Holds a pointer
+/// to the caller's struct, which the host guarantees valid for the compile.
+struct FfiImporter {
+    inner: *const SassoImporter,
+}
+
+impl FfiImporter {
+    /// Map a tri-state callback return + the sink's collected value/error into the
+    /// trait's `Result<Option<T>, ImporterError>`.
+    fn interpret<T>(
+        rc: i32,
+        value: Option<T>,
+        error: Option<String>,
+        what: &str,
+    ) -> Result<Option<T>, ImporterError> {
+        match rc {
+            SASSO_IMPORTER_OK => match value {
+                Some(v) => Ok(Some(v)),
+                None => Err(ImporterError {
+                    message: format!("sasso: importer {what} returned OK but delivered no value"),
+                }),
+            },
+            SASSO_IMPORTER_NOT_FOUND => Ok(None),
+            // ERROR, and any out-of-range code, are failures.
+            _ => Err(ImporterError {
+                message: error.unwrap_or_else(|| format!("sasso: importer {what} failed")),
+            }),
+        }
+    }
+}
+
+impl Importer for FfiImporter {
+    fn canonicalize(
+        &self,
+        url: &str,
+        ctx: &CanonicalizeContext<'_>,
+    ) -> Result<Option<CanonicalUrl>, ImporterError> {
+        // SAFETY: the caller's `SassoImporter` is valid for the compile (the
+        // documented contract for `SassoOptions::importer`).
+        let inner = unsafe { &*self.inner };
+        let cb = match inner.canonicalize {
+            Some(f) => f,
+            None => {
+                return Err(ImporterError {
+                    message: "sasso: importer has no canonicalize callback".to_string(),
+                })
+            }
+        };
+        let url_c = match CString::new(url) {
+            Ok(c) => c,
+            Err(_) => {
+                return Err(ImporterError {
+                    message: "sasso: url contains an interior NUL byte".to_string(),
+                })
+            }
+        };
+        // Keep the containing-url CString alive across the call.
+        let containing_c = match ctx.containing_url {
+            Some(c) => match CString::new(c.as_str()) {
+                Ok(s) => Some(s),
+                Err(_) => {
+                    return Err(ImporterError {
+                        message: "sasso: containing url contains an interior NUL byte".to_string(),
+                    })
+                }
+            },
+            None => None,
+        };
+        let c_ctx = SassoCanonicalizeContext {
+            from_import: ctx.from_import as i32,
+            containing_url: containing_c.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+        };
+        let mut sink = SassoImporterSink::new();
+        let rc = cb(inner.user_data, url_c.as_ptr(), &c_ctx, &mut sink);
+        FfiImporter::interpret(
+            rc,
+            sink.canonical.map(CanonicalUrl::new),
+            sink.error,
+            "canonicalize",
+        )
+    }
+
+    fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError> {
+        let inner = unsafe { &*self.inner };
+        let cb = match inner.load {
+            Some(f) => f,
+            None => {
+                return Err(ImporterError {
+                    message: "sasso: importer has no load callback".to_string(),
+                })
+            }
+        };
+        let canon_c = match CString::new(canonical.as_str()) {
+            Ok(c) => c,
+            Err(_) => {
+                return Err(ImporterError {
+                    message: "sasso: canonical url contains an interior NUL byte".to_string(),
+                })
+            }
+        };
+        let mut sink = SassoImporterSink::new();
+        let rc = cb(inner.user_data, canon_c.as_ptr(), &mut sink);
+        FfiImporter::interpret(rc, sink.result, sink.error, "load")
+    }
 }
 
 /// Return the bundled compiler version as a static NUL-terminated string.
@@ -117,6 +403,7 @@ pub unsafe extern "C" fn sasso_options_init(options: *mut SassoOptions, struct_s
         url: ptr::null(),
         load_paths: ptr::null(),
         load_paths_len: 0,
+        importer: ptr::null(),
     };
     // Write only what the caller's struct can hold — never past their buffer.
     let n = struct_size.min(std::mem::size_of::<SassoOptions>());
@@ -146,6 +433,7 @@ unsafe fn read_options(options: *const SassoOptions) -> SassoOptions {
         url: ptr::null(),
         load_paths: ptr::null(),
         load_paths_len: 0,
+        importer: ptr::null(),
     };
     if options.is_null() {
         return local;
@@ -169,6 +457,11 @@ unsafe fn read_options(options: *const SassoOptions) -> SassoOptions {
     }
     if caller_size < std::mem::offset_of!(SassoOptions, load_paths_len) + std::mem::size_of::<usize>() {
         local.load_paths_len = 0;
+    }
+    if caller_size
+        < std::mem::offset_of!(SassoOptions, importer) + std::mem::size_of::<*const SassoImporter>()
+    {
+        local.importer = ptr::null();
     }
     local
 }
@@ -282,9 +575,14 @@ unsafe fn compile_inner(
     if let Some(u) = &url_owned {
         o = o.with_url(u);
     }
-    // `FsImporter` must outlive the `compile` borrow, so bind it here.
+    // A custom importer (if supplied) wins over `load_paths`/`FsImporter`. Both
+    // bridge objects must outlive the `compile` borrow, so bind them here.
     let fs;
-    if !load_paths.is_empty() {
+    let ffi_imp;
+    if !opts.importer.is_null() {
+        ffi_imp = FfiImporter { inner: opts.importer };
+        o = o.with_importer(&ffi_imp);
+    } else if !load_paths.is_empty() {
         fs = FsImporter::new(load_paths);
         o = o.with_importer(&fs);
     }

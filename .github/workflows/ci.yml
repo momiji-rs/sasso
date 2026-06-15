@@ -78,6 +78,9 @@ jobs:
       - name: python ctypes smoke test
         run: python3 examples/smoke.py
         working-directory: ffi
+      - name: python ctypes custom-importer test
+        run: python3 examples/importer.py
+        working-directory: ffi
 
   conformance:
     name: sass-spec ratchet

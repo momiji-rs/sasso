@@ -6,8 +6,8 @@ pure-Rust SCSS → CSS compiler. One prebuilt `libsasso.{so,dylib}` + one header
 FFI** — PHP FFI, Python `ctypes`/`cffi`, Ruby `Fiddle`, Go `cgo`, LuaJIT, … —
 in-process, with no Node, no Dart VM, and no per-language native extension.
 
-> Status: **v1 scaffold.** Compile + options + load paths are implemented and
-> smoke-tested. A userland importer callback is planned for v2 (see Roadmap).
+> Status: compile + options + load paths **and a userland importer callback**
+> are implemented and tested (see [Importer callbacks](#importer-callbacks)).
 
 ## Build
 
@@ -27,6 +27,9 @@ regenerated with `cbindgen --config cbindgen.toml --output include/sasso.h`).
 | `void sasso_options_init(SassoOptions*, size_t)` | Fill an options struct with defaults; pass `sizeof(SassoOptions)`. |
 | `SassoResult *sasso_compile(const char *src, size_t len, const SassoOptions*)` | Compile a UTF-8 buffer; returns an owned result. |
 | `void sasso_result_free(SassoResult*)` | Release a result (and its `css`/`error`). |
+| `void sasso_importer_set_canonical(SassoImporterSink*, const char*, size_t)` | Deliver a canonical URL from a `canonicalize` callback. |
+| `void sasso_importer_set_result(SassoImporterSink*, …)` | Deliver loaded contents + syntax (+ optional source-map URL) from a `load` callback. |
+| `void sasso_importer_set_error(SassoImporterSink*, const char*, size_t)` | Deliver an error message from either callback. |
 
 ### Ownership & safety contract
 
@@ -43,11 +46,48 @@ regenerated with `cbindgen --config cbindgen.toml --output include/sasso.h`).
   compatibility — initialize with `sasso_options_init`, then override fields.
   Pass `NULL` options for all defaults.
 
+## Importer callbacks
+
+Set `SassoOptions.importer` to a `SassoImporter` to resolve
+`@use`/`@forward`/`@import` yourself — from a database, a virtual filesystem, an
+archive, anything. A non-NULL importer takes precedence over `load_paths`; NULL
+keeps the built-in filesystem importer. It mirrors dart-sass's **two phases**:
+
+- `canonicalize(user_data, url, ctx, sink)` maps a (possibly relative,
+  extension-less) URL to a stable canonical key **without** loading it. `ctx`
+  carries `from_import` and the importing file's `containing_url` (NULL at the
+  entry) so you can resolve relatively.
+- `load(user_data, canonical, sink)` fetches that key's source.
+
+Each callback returns a tri-state code:
+
+| Return | Meaning | What you must deliver first |
+| --- | --- | --- |
+| `SASSO_IMPORTER_OK` (1) | Handled. | `sasso_importer_set_canonical` / `sasso_importer_set_result`. |
+| `SASSO_IMPORTER_NOT_FOUND` (0) | This importer doesn't handle the URL. | nothing |
+| `SASSO_IMPORTER_ERROR` (-1) | Handled but failed. | `sasso_importer_set_error` |
+
+**Memory model — no `free` callback.** You never hand sasso an owned pointer.
+You deliver each value by calling a `sasso_importer_set_*` function with the
+`sink`; sasso **copies the bytes immediately**, so you keep and free your own
+buffers. This sidesteps cross-allocator `free` (e.g. a ctypes/PHP-FFI string is
+owned by the host runtime, not C `malloc`). The `sink` is valid **only** for the
+duration of that one callback — don't stash it.
+
+The `sasso_importer_set_*` functions are panic-safe at the boundary, so a value
+delivered from inside your callback can never unwind across your C frame.
+
 ## Examples
 
-- **Python** (ctypes): [`examples/smoke.py`](examples/smoke.py) — also the smoke test:
+- **Python** (ctypes): [`examples/smoke.py`](examples/smoke.py) — basic compile,
+  options, error path; also a smoke test:
   ```console
   $ python3 examples/smoke.py
+  ```
+- **Python** (ctypes): [`examples/importer.py`](examples/importer.py) — a custom
+  in-memory importer resolving a nested, directory-relative module graph:
+  ```console
+  $ python3 examples/importer.py
   ```
 - **PHP** (ext-ffi, no compiled extension): [`examples/example.php`](examples/example.php)
   ```console
@@ -74,14 +114,11 @@ int main(void) {
 
 ## Roadmap
 
-- **v2 — userland importer callback.** A function-pointer importer
-  (`const char* (*)(void *user_data, const char *url, size_t url_len)`) so
-  `@import`/`@use`/`@forward` can be resolved from a host (DB, virtual FS,
-  archive), mirroring the library's `Importer` trait. Deferred so the v1 ABI can
-  stabilize first; the callback's string-ownership and re-entrancy rules are the
-  delicate part.
 - **Source maps.** The core already exposes `compile_with_source_map`; a
-  result-carrying-map variant can follow.
+  result-carrying-map variant (and the importer's `source_map_url`, already
+  plumbed through `sasso_importer_set_result`) can surface a map alongside `css`.
+- **Convenience importer helpers.** An ordered importer list and a
+  `load`-only file importer could follow if hosts ask for them.
 
 ## Relationship to php-sasso
 
