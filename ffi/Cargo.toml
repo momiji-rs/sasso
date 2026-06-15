@@ -35,9 +35,11 @@ crate-type = ["cdylib", "staticlib"]
 sasso_core = { package = "sasso", path = ".." }
 
 [profile.release]
-# Balanced for a callable library. NOTE: `panic` is left at the default
-# "unwind" (NOT "abort") on purpose — the ABI relies on `catch_unwind` to keep
-# a Rust panic from unwinding across the C boundary (which would be UB).
+# Balanced for a callable library. `panic = "unwind"` is set EXPLICITLY (not
+# left to the default): the ABI's safety relies on `catch_unwind` to stop a
+# Rust panic from crossing the C boundary (which would be UB), and that only
+# works under the unwind strategy — `abort` would make `catch_unwind` a no-op.
+panic = "unwind"
 lto = "thin"
 codegen-units = 1
 strip = true
