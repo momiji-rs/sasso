@@ -815,6 +815,11 @@ pub(crate) struct Evaluator<'a> {
     /// Small interned ids for source URLs, stamped into [`SrcLines`] so the
     /// serializer's trailing-comment rule can require same-file adjacency.
     file_ids: HashMap<String, u32>,
+    /// Source-map URL OVERRIDES: a loaded file's display URL -> the URL an
+    /// importer asked the source map to record for it (`ImporterResult
+    /// .source_map_url`). Empty for the filesystem importer / entry file, so the
+    /// generated source map is byte-identical unless a custom importer sets it.
+    file_map_urls: HashMap<String, String>,
 }
 
 /// One frame of the diagnostic call stack: the call site (file + 1-based
@@ -1089,6 +1094,7 @@ impl<'a> Evaluator<'a> {
             deprecations_omitted: 0,
             deprecations_seen: std::collections::HashSet::new(),
             file_ids: HashMap::default(),
+            file_map_urls: HashMap::default(),
             scopes: vec![new_scope()],
             // The global scope is treated as semi-global so a top-level control
             // flow scope (its child) becomes semi-global too.
@@ -1207,7 +1213,17 @@ impl<'a> Evaluator<'a> {
             .map(|(url, &id)| (id, url.as_str()))
             .collect();
         by_id.sort_by_key(|&(id, _)| id);
-        let sources: Vec<String> = by_id.iter().map(|&(_, url)| url.to_string()).collect();
+        // Apply any importer-supplied source-map URL override; the `content`
+        // lookup below still keys on the original url, so they stay consistent.
+        let sources: Vec<String> = by_id
+            .iter()
+            .map(|&(_, url)| {
+                self.file_map_urls
+                    .get(url)
+                    .cloned()
+                    .unwrap_or_else(|| url.to_string())
+            })
+            .collect();
         let content = if include_sources {
             let srcs = self.file_sources.borrow();
             Some(

@@ -211,7 +211,10 @@ fn invariant_checker_rejects_a_corrupted_map() {
 // then validate the produced map with the harness above.
 // =====================================================================
 
-use sasso::{compile, compile_with_source_map, Options, OutputStyle};
+use sasso::{
+    compile, compile_with_source_map, CanonicalUrl, CanonicalizeContext, Importer, ImporterError,
+    ImporterResult, Options, OutputStyle, Syntax,
+};
 
 /// Compile `src` with a source map and return `(css, decoded_mappings, raw_json)`.
 fn sasso_map(src: &str, options: &Options<'_>) -> (String, Vec<Mapping>, String) {
@@ -558,4 +561,54 @@ fn sasso_charset_prefix_and_utf16_columns() {
     assert!(maps
         .iter()
         .any(|m| m.gen_line == 1 && m.src_line == 0 && m.src_col == 0));
+}
+
+/// A custom importer that resolves one virtual module and reports a custom
+/// `source_map_url` for it (dart-sass `ImporterResult.sourceMapUrl`).
+struct SourceMapUrlImporter;
+
+impl Importer for SourceMapUrlImporter {
+    fn canonicalize(
+        &self,
+        url: &str,
+        _ctx: &CanonicalizeContext<'_>,
+    ) -> Result<Option<CanonicalUrl>, ImporterError> {
+        Ok((url == "mod").then(|| CanonicalUrl::new("mod")))
+    }
+
+    fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError> {
+        if canonical.as_str() == "mod" {
+            Ok(Some(ImporterResult {
+                // Emit a rule so the module's source position is mapped (and thus
+                // appears in the source map's `sources[]`).
+                contents: ".m { x: 1px; }".to_string(),
+                syntax: Syntax::Scss,
+                source_map_url: Some("custom://virtual/mod.scss".to_string()),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[test]
+fn importer_source_map_url_override_appears_in_sources() {
+    // The loaded module's `sources[]` entry uses the importer's source_map_url
+    // (not its canonical key), while the entry file keeps its own URL.
+    let imp = SourceMapUrlImporter;
+    let opts = Options::default().with_importer(&imp).with_url("entry.scss");
+    // Both the entry and the module emit a rule, so both are mapped sources.
+    let r = compile_with_source_map("@use \"mod\";\n.a { y: 2px; }\n", &opts).unwrap();
+    assert!(
+        r.source_map
+            .sources
+            .contains(&"custom://virtual/mod.scss".to_string()),
+        "sources should carry the importer's source_map_url override, got {:?}",
+        r.source_map.sources
+    );
+    assert!(
+        r.source_map.sources.contains(&"entry.scss".to_string()),
+        "the entry file keeps its own URL, got {:?}",
+        r.source_map.sources
+    );
 }
