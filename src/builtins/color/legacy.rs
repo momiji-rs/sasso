@@ -26,21 +26,18 @@ pub(super) fn fn_rgb(
         // legacy `rgb($color, $alpha)` overload.
         if let Value::Color(c) = color {
             if is_special_legacy(alpha) {
-                // A special alpha decomposes the color into four channels. The
-                // function name dart-sass emits depends on the alpha's kind: a
-                // `calc()` alpha folds into the resolved serialization and is
-                // always spelled `rgba` (`rgb(blue, calc(0.4))` → `rgba(...)`),
-                // while a `var()`/`env()` alpha keeps the call opaque and echoes
-                // the caller's spelling (`rgb(blue, var(--a))` stays `rgb`).
-                let out_name = if matches!(alpha, Value::Calc(_)) {
-                    "rgba"
-                } else {
-                    name
-                };
+                // A special alpha (`var()`/`env()` or a non-foldable `calc()`
+                // such as `calc(var(--a))`) keeps the call opaque, so dart-sass
+                // echoes the spelling the caller wrote: `rgb(blue, calc(var(--a)))`
+                // stays `rgb`, `rgba(blue, var(--a))` stays `rgba`. (A `calc()`
+                // that folds to a number, e.g. `calc(0.4)`, is a `Value::Number`
+                // before this point and never reaches this branch — it resolves
+                // to a real color via the `computed` path below, where the
+                // `rgb`/`rgba` spelling is chosen by the alpha value.)
                 let r = Value::Number(int_num(c.r));
                 let g = Value::Number(int_num(c.g));
                 let b = Value::Number(int_num(c.b));
-                return Ok(special_call(out_name, &[&r, &g, &b, alpha]));
+                return Ok(special_call(name, &[&r, &g, &b, alpha]));
             }
             let a = alpha_value(alpha, pos)?;
             return Ok(Value::Color(computed(c.r, c.g, c.b, a)));

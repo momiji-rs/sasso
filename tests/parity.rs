@@ -452,15 +452,41 @@ fn rgb_hsl_special_value_passthrough() {
         ours("a {b: hsla(var(--x) 50% 50%)}\n"),
         "a {\n  b: hsla(var(--x), 50%, 50%);\n}\n"
     );
-    // The two-argument `$color, $alpha` form: a `var()` alpha echoes the called
-    // name, but a `calc()` alpha folds to the resolved `rgba` serialization.
+    // The two-argument `$color, $alpha` form echoes the spelling the caller
+    // used whenever the alpha stays opaque — a `var()`/`env()` alpha, or a
+    // non-foldable `calc(var())`. An `rgb()` caller stays `rgb`, `rgba()` stays
+    // `rgba`; the opaque alpha must NOT force `rgba`.
     assert_eq!(
         ours("a {b: rgba(blue, var(--foo))}\n"),
         "a {\n  b: rgba(0, 0, 255, var(--foo));\n}\n"
     );
     assert_eq!(
+        ours("a {b: rgb(blue, env(--foo))}\n"),
+        "a {\n  b: rgb(0, 0, 255, env(--foo));\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgb(blue, calc(var(--foo)))}\n"),
+        "a {\n  b: rgb(0, 0, 255, calc(var(--foo)));\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: rgba(blue, calc(var(--foo)))}\n"),
+        "a {\n  b: rgba(0, 0, 255, calc(var(--foo)));\n}\n"
+    );
+    // A `calc()` alpha that folds to a number is resolved to a real color via
+    // the normal compute path (not the opaque branch above), so it serializes
+    // as `rgba` purely because the resolved alpha is < 1.
+    assert_eq!(
         ours("a {b: rgb(blue, calc(0.4))}\n"),
         "a {\n  b: rgba(0, 0, 255, 0.4);\n}\n"
+    );
+    // The relative-color `from` form also echoes the caller's spelling.
+    assert_eq!(
+        ours("a {b: rgba(from red r g b)}\n"),
+        "a {\n  b: rgba(from red r g b);\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: hsla(from red h s l)}\n"),
+        "a {\n  b: hsla(from red h s l);\n}\n"
     );
     // A `none`-only call still normalizes to the canonical space name.
     assert_eq!(
