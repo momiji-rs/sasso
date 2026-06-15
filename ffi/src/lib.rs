@@ -108,7 +108,9 @@ pub unsafe extern "C" fn sasso_options_init(options: *mut SassoOptions, struct_s
         return;
     }
     let defaults = SassoOptions {
-        struct_size: struct_size as u32,
+        // Saturate rather than truncate: a buggy caller passing > u32::MAX must
+        // not wrap to a small value (which read_options would then trust).
+        struct_size: saturate_u32(struct_size),
         style: SASSO_STYLE_EXPANDED,
         syntax: SASSO_SYNTAX_SCSS,
         unicode: 1,
