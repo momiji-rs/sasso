@@ -805,6 +805,16 @@ impl<'a> Evaluator<'a> {
             .as_ref()
             .and_then(|m| Rc::clone(m).downcast::<Module>().ok());
         let saved = module.as_ref().map(|m| self.enter_module(m));
+        // Restore the mixin's defining-FILE context for the body (mirroring
+        // `run_module_mixin`), so a relative `meta.load-css` resolves against
+        // the file that defined the mixin, not the caller. A cross-module
+        // capture carries its `Module`; a same-module first-class capture has
+        // no `Module` in hand, so it carries a lightweight `origin` snapshot.
+        let saved_file = match (module.as_ref(), &mixin.origin) {
+            (Some(m), _) => Some(self.enter_module_file(m)),
+            (None, Some(o)) => Some(self.enter_file_context(&o.diag_url, &o.file_dir, &o.canonical)),
+            (None, None) => None,
+        };
         let saved_scopes = std::mem::replace(&mut self.scopes, callable.env.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, callable.env_semi.clone());
         let saved_fns = std::mem::replace(&mut self.functions, callable.env_fns.clone());
@@ -829,6 +839,9 @@ impl<'a> Evaluator<'a> {
         self.scope_semi_global = saved_semi;
         self.functions = saved_fns;
         self.mixins = saved_mixins;
+        if let Some(saved_file) = saved_file {
+            self.leave_module_file(saved_file);
+        }
         if let Some(saved) = saved {
             self.leave_module(saved);
         }

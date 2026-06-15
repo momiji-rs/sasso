@@ -1305,25 +1305,57 @@ impl<'a> Evaluator<'a> {
     /// Swap in `module`'s source file for diagnostics during a cross-module
     /// member invocation. Returns the previous `(url, source)` to restore.
     pub(super) fn enter_module_file(&mut self, module: &Rc<Module>) -> Option<SavedModuleFile> {
-        if module.diag_url.is_empty() {
+        self.enter_file_context(&module.diag_url, &module.file_dir, &module.canonical)
+    }
+
+    /// Swap the current diagnostic + resolution file context to the given file,
+    /// returning the displaced state for [`Self::leave_module_file`]. Shared by
+    /// [`Self::enter_module_file`] (cross-module member invocation) and the
+    /// first-class-mixin path (which restores a captured [`crate::value::MixinOrigin`]
+    /// rather than a `Module`). A relative `meta.load-css` inside the body then
+    /// resolves against this file, not the caller's.
+    pub(super) fn enter_file_context(
+        &mut self,
+        diag_url: &str,
+        file_dir: &str,
+        canonical: &str,
+    ) -> Option<SavedModuleFile> {
+        if diag_url.is_empty() {
             return None;
         }
-        let source = self.source_for(&module.diag_url);
-        let dir = if module.file_dir.is_empty() {
+        let source = self.source_for(diag_url);
+        let dir = if file_dir.is_empty() {
             None
         } else {
-            Some(module.file_dir.clone())
+            Some(file_dir.to_string())
         };
         self.current_url_stamp = 0;
         Some((
-            std::mem::replace(&mut self.current_url, module.diag_url.clone()),
+            std::mem::replace(&mut self.current_url, diag_url.to_string()),
             std::mem::replace(&mut self.current_source, source),
             std::mem::replace(&mut self.current_file_dir, dir),
-            // A relative `meta.load-css` inside one of this module's mixins must
-            // resolve against the module's own file, so carry its canonical URL.
             self.current_canonical
-                .replace(CanonicalUrl::new(module.canonical.clone())),
+                .replace(CanonicalUrl::new(canonical.to_string())),
         ))
+    }
+
+    /// Snapshot the current file context as a [`crate::value::MixinOrigin`], to
+    /// be stamped onto a same-module first-class mixin so a later `meta.apply`
+    /// from another file still resolves its relative loads here. `None` when
+    /// there is no file context (no diagnostic URL to anchor against).
+    pub(super) fn current_mixin_origin(&self) -> Option<crate::value::MixinOrigin> {
+        if self.current_url.is_empty() {
+            return None;
+        }
+        Some(crate::value::MixinOrigin {
+            diag_url: self.current_url.clone(),
+            file_dir: self.current_file_dir.clone().unwrap_or_default(),
+            canonical: self
+                .current_canonical
+                .as_ref()
+                .map(|c| c.as_str().to_string())
+                .unwrap_or_default(),
+        })
     }
 
     /// Restore the file swapped out by [`Self::enter_module_file`].

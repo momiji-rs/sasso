@@ -282,11 +282,14 @@ impl<'a> Evaluator<'a> {
         // A user `@mixin` of that name (dash/underscore-insensitive) wins.
         let key = normalize_arg_name(&name);
         if let Some(m) = self.lookup_mixin_norm(&key) {
-            return Ok(Value::Mixin(SassMixin {
+            return Ok(Value::Mixin(Box::new(SassMixin {
                 name,
                 user: Some(m as Rc<dyn std::any::Any>),
                 module: None,
-            }));
+                // Same-module capture: remember the defining file so a later
+                // `meta.apply` from elsewhere resolves relative loads here.
+                origin: self.current_mixin_origin(),
+            })));
         }
         // A mixin exposed unprefixed via `@use … as *`. Its body runs in the
         // owning module's environment, so capture that module too.
@@ -306,11 +309,13 @@ impl<'a> Evaluator<'a> {
                 let m = module
                     .mixin(&name)
                     .ok_or_else(|| Error::at(format!("Mixin not found: {name}"), pos))?;
-                return Ok(Value::Mixin(SassMixin {
+                return Ok(Value::Mixin(Box::new(SassMixin {
                     name,
                     user: Some(Rc::clone(&m) as Rc<dyn std::any::Any>),
                     module: Some(Rc::clone(module) as Rc<dyn std::any::Any>),
-                }));
+                    // Cross-module capture resolves via the module's own file.
+                    origin: None,
+                })));
             }
         }
         Err(Error::at(format!("Mixin not found: {name}"), pos))
@@ -370,21 +375,24 @@ impl<'a> Evaluator<'a> {
                 ));
             }
             if let Some(m) = module.mixin(name) {
-                return Ok(Value::Mixin(SassMixin {
+                return Ok(Value::Mixin(Box::new(SassMixin {
                     name: name.to_string(),
                     user: Some(Rc::clone(&m) as Rc<dyn std::any::Any>),
                     module: Some(Rc::clone(module) as Rc<dyn std::any::Any>),
-                }));
+                    // Cross-module capture resolves via the module's own file.
+                    origin: None,
+                })));
             }
             return Err(Error::at(format!("Mixin not found: {name}"), pos));
         }
         if self.used_modules.contains_key(module_name) {
             if is_builtin_mixin(module_name, name) {
-                return Ok(Value::Mixin(SassMixin {
+                return Ok(Value::Mixin(Box::new(SassMixin {
                     name: name.to_string(),
                     user: None,
                     module: None,
-                }));
+                    origin: None, // a built-in reference has no user body
+                })));
             }
             return Err(Error::at(format!("Mixin not found: {name}"), pos));
         }
@@ -636,11 +644,12 @@ impl<'a> Evaluator<'a> {
                                 css: false,
                                 user: None,
                             }),
-                            MemberKind::Mixin => Value::Mixin(SassMixin {
+                            MemberKind::Mixin => Value::Mixin(Box::new(SassMixin {
                                 name: name.to_string(),
                                 user: None,
                                 module: None,
-                            }),
+                                origin: None, // built-in reference, no user body
+                            })),
                             MemberKind::Variable => Value::Null,
                         };
                         (key, val)
@@ -679,13 +688,15 @@ impl<'a> Evaluator<'a> {
                             .function(&name)
                             .map(|f| Rc::clone(&f) as Rc<dyn std::any::Any>),
                     }),
-                    MemberKind::Mixin => Value::Mixin(SassMixin {
+                    MemberKind::Mixin => Value::Mixin(Box::new(SassMixin {
                         name: name.clone(),
                         user: module
                             .mixin(&name)
                             .map(|m| Rc::clone(&m) as Rc<dyn std::any::Any>),
                         module: Some(Rc::clone(&module) as Rc<dyn std::any::Any>),
-                    }),
+                        // Cross-module capture resolves via the module's file.
+                        origin: None,
+                    })),
                 };
                 (key, val)
             })

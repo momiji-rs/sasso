@@ -186,6 +186,91 @@ fn preserves_css_functions_verbatim() {
     );
 }
 
+/// A directory-relative in-memory importer: resolves a relative URL against the
+/// directory of `ctx.containing_url` (the root for the entry), with dart's
+/// partial (`_name`) fallback. Unlike [`MemImporter`] (which keys by the
+/// verbatim URL) this models the *directory-relative* resolution that
+/// `containing_url` drives — the axis exercised by issue #8.
+struct DirImporter(HashMap<String, String>);
+
+impl DirImporter {
+    fn dirname(p: &str) -> &str {
+        match p.rfind('/') {
+            Some(0) => "/",
+            Some(i) => &p[..i],
+            None => "",
+        }
+    }
+    /// The partial spelling: `/sub/mod` -> `/sub/_mod`, `/dep` -> `/_dep`.
+    fn as_partial(p: &str) -> String {
+        match p.rfind('/') {
+            Some(i) => format!("{}/_{}", &p[..i], &p[i + 1..]),
+            None => format!("_{p}"),
+        }
+    }
+}
+
+impl Importer for DirImporter {
+    fn canonicalize(
+        &self,
+        url: &str,
+        ctx: &CanonicalizeContext<'_>,
+    ) -> Result<Option<CanonicalUrl>, ImporterError> {
+        let base = ctx
+            .containing_url
+            .map(|c| Self::dirname(c.as_str()))
+            .unwrap_or("");
+        let joined = format!("{}/{}", base.trim_end_matches('/'), url);
+        for cand in [joined.clone(), Self::as_partial(&joined)] {
+            if self.0.contains_key(&cand) {
+                return Ok(Some(CanonicalUrl::new(&cand)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError> {
+        Ok(self.0.get(canonical.as_str()).map(|c| ImporterResult {
+            contents: c.clone(),
+            syntax: Syntax::Scss,
+            source_map_url: None,
+        }))
+    }
+}
+
+#[test]
+fn first_class_mixin_load_css_resolves_against_defining_module() {
+    // Regression test for issue #8: a relative `meta.load-css` inside a mixin
+    // captured via `meta.get-mixin` and invoked with `meta.apply` from another
+    // file must resolve the URL against the *defining* module's directory, not
+    // the caller's. Two `_dep` partials exist — `/sub/_dep` (correct, next to
+    // the mixin) and `/_dep` (wrong, next to the entry) — so a caller-relative
+    // resolution picks the wrong file and is observable in the output.
+    let mut files = HashMap::new();
+    files.insert(
+        "/sub/_mod".to_string(),
+        "@use \"sass:meta\";\n@mixin go { @include meta.load-css(\"dep\"); }\n\
+         $m: meta.get-mixin(\"go\");\n"
+            .to_string(),
+    );
+    files.insert(
+        "/sub/_dep".to_string(),
+        ".loaded { x: from-sub-dep; }\n".to_string(),
+    );
+    files.insert(
+        "/_dep".to_string(),
+        ".loaded { x: from-ROOT-WRONG; }\n".to_string(),
+    );
+    let importer = DirImporter(files);
+    let out = compile(
+        "@use \"sub/mod\";\n@use \"sass:meta\";\n.out { @include meta.apply(mod.$m); }\n",
+        &Options::default().with_url("/entry").with_importer(&importer),
+    )
+    .expect("compile");
+    // Byte-for-byte dart-sass 1.101 (resolves "dep" against /sub).
+    assert_eq!(out, ".out .loaded {\n  x: from-sub-dep;\n}\n");
+}
+
 #[test]
 fn compressed_output() {
     let out = css_compressed(".a { color: #336699; width: 10px; .b { color: #2a7ae2; } }");
