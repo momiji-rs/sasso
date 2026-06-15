@@ -105,16 +105,20 @@ namespace SassoExample
 
     internal static class Program
     {
-        // Resolve the prebuilt dylib portably: an explicit SASSO_DYLIB env var
+        // Resolve the prebuilt library portably: an explicit SASSO_DYLIB env var
         // wins; otherwise walk up from the running binary (bin/Release/netX/) to
-        // find ffi/target/release/libsasso.dylib.
+        // find ffi/target/release/libsasso.{dylib,so} (or sasso.dll on Windows).
         private static string ResolveDylibPath()
         {
             string env = Environment.GetEnvironmentVariable("SASSO_DYLIB");
             if (!string.IsNullOrEmpty(env))
                 return env;
 
-            const string relative = "ffi/target/release/libsasso.dylib";
+            // Match cargo's per-OS artifact name.
+            string libName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "sasso.dll"
+                : RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? "libsasso.dylib"
+                : "libsasso.so";
+            string relative = Path.Combine("ffi", "target", "release", libName);
             DirectoryInfo dir = new DirectoryInfo(AppContext.BaseDirectory);
             while (dir != null)
             {
@@ -161,8 +165,9 @@ namespace SassoExample
         private static string Utf8Read(IntPtr ptr, ulong len)
         {
             if (ptr == IntPtr.Zero || len == 0) return string.Empty;
-            byte[] bytes = new byte[len];
-            Marshal.Copy(ptr, bytes, 0, (int)len);
+            int n = checked((int)len);
+            byte[] bytes = new byte[n];
+            Marshal.Copy(ptr, bytes, 0, n);
             return Encoding.UTF8.GetString(bytes);
         }
 

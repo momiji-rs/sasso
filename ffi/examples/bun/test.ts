@@ -23,9 +23,14 @@ import {
 } from "bun:ffi";
 import { resolve as pathResolve } from "node:path";
 
+const libName = process.platform === "win32"
+  ? "sasso.dll"
+  : process.platform === "darwin"
+    ? "libsasso.dylib"
+    : "libsasso.so";
 const DYLIB =
   process.env.SASSO_DYLIB ??
-  pathResolve(import.meta.dir, "../../target/release/libsasso.dylib");
+  pathResolve(import.meta.dir, `../../target/release/${libName}`);
 
 // ── ABI constants ─────────────────────────────────────────────────────────
 const SASSO_STYLE_EXPANDED = 0;
