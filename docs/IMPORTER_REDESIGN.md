@@ -5,6 +5,12 @@ this proposes the trait shape so we can agree on it before the FFI v2 importer
 callback (#5) bakes it into a C ABI contract. *"Stable API, then work on how to
 expose."*
 
+**Decision (per #6, w/ @shyim):** the project is early-stage / pre-1.0 with only
+a handful of known, in-house importer implementors, so this is a **clean break**
+— replace the old `resolve_*` trait outright and update the implementors in
+lockstep. **No backward-compat shim** (a shim would just re-create the lossy old
+model we're removing).
+
 ## Why
 
 dart-sass's importer is a two-phase interface returning a rich result:
@@ -86,40 +92,24 @@ pub trait Importer {
 }
 ```
 
-## Backward compatibility
+## No back-compat shim (clean break)
 
-The current one-method resolvers (and the gem / PHP ext, which only do
-`resolve(path) -> string`) keep working via a blanket adapter:
-
-```rust
-/// Adapts a legacy `Fn(&str) -> Option<String>` to the two-phase `Importer`:
-/// canonicalizes a URL to itself (dedup by spelling — fine when each file has
-/// one URL) and loads via the closure, assuming SCSS with no source-map URL.
-pub struct LegacyResolver<F>(pub F);
-
-impl<F: Fn(&str) -> Option<String>> Importer for LegacyResolver<F> {
-    fn canonicalize(&self, url: &str, _: &CanonicalizeContext<'_>) -> Option<CanonicalUrl> {
-        self.0(url).map(|_| CanonicalUrl(url.to_string())) // ⚠ see open Q1
-    }
-    fn load(&self, c: &CanonicalUrl) -> Option<ImporterResult> {
-        self.0(&c.0).map(|contents| ImporterResult {
-            contents, syntax: Syntax::Scss, source_map_url: None,
-        })
-    }
-}
-```
-
-`FsImporter` implements the new trait *natively* (it already canonicalizes via
-`std::fs::canonicalize` and infers syntax from the extension).
+Per #6 this replaces the old `resolve_*` trait outright — no `LegacyResolver`
+adapter, no deprecation window. Keeping a one-method-resolver shim would re-admit
+the lossy model this redesign removes, and pre-1.0 with a known implementor set
+makes a coordinated break cheap. `FsImporter` implements the new trait
+*natively* (it already canonicalizes via `std::fs::canonicalize` and infers
+syntax from the extension); the gem / PHP ext are updated to the two-phase trait
+in the same change.
 
 ## Migration (each step independently shippable, parity-gated)
 
 1. **Core:** add the trait + `ImporterResult` + `CanonicalUrl`; make `FsImporter`
-   native; route `eval` through `canonicalize`/`load`; replace the `resolve_*`
-   overloads with the `LegacyResolver` shim. Add parity tests for import syntax,
-   `@use` dedup, and `sourceMapUrl`. → core minor/major bump.
-2. **Bindings:** gem + PHP ext keep their simple resolver via `LegacyResolver`;
-   optionally surface the richer interface.
+   native; route `eval` through `canonicalize`/`load`; **delete the old
+   `resolve_*` overloads** (no shim). Add parity tests for import syntax, `@use`
+   dedup, and `sourceMapUrl`. → core minor bump (breaking, pre-1.0).
+2. **Bindings:** update the gem + PHP ext to the two-phase trait in lockstep
+   (their Ruby/PHP `Importer` surface changes — fine pre-1.0).
 3. **FFI v2 (#5):** expose the two phases as C function pointers + a result
    struct (sketch below), now that the shape is stable.
 
@@ -145,10 +135,13 @@ why this waits for the Rust shape to settle first.
 
 ## Open questions (for @shyim / discussion)
 
-1. **`canonicalize` cheapness for legacy/userland resolvers.** dart assumes
-   `canonicalize` is cheap (no I/O beyond a stat). A one-method `resolve` can't
-   separate "does it exist?" from "load it", so the shim probes by loading
-   (double work). Acceptable, or keep a `resolve` fast-path for simple importers?
+1. **Ergonomics for trivial importers.** With a pure two-phase trait, an
+   in-memory/DB importer must write both `canonicalize` (without loading) and
+   `load` + build an `ImporterResult`. dart eases this with a simpler
+   [`FileImporter`](https://pub.dev/documentation/sass/latest/sass/FileImporter-class.html)
+   (just `findFileUrl`). We've deferred any convenience layer for now (YAGNI) —
+   revisit a `FileImporter`-style helper only if real friction shows up. (NOT a
+   back-compat shim; a deliberate forward convenience.)
 2. **Multiple importers / load-path chain.** dart takes an *ordered list* of
    importers and tries each `canonicalize`. sasso currently has a single
    `Option<&dyn Importer>`. Move to a list now (cleaner for the FFI too), or
