@@ -207,22 +207,29 @@ takes precedence over `load_paths`). Validated end-to-end against the prebuilt
 library across **8 languages** — `ffi/examples/{c,go,ruby,swift,deno,bun,luajit,csharp}/`.
 See [`../ffi/include/sasso.h`](../ffi/include/sasso.h) for the authoritative header.
 
-## Open questions (for @shyim / discussion)
+## Design questions (all resolved)
 
-1. **Ergonomics for trivial importers.** With a pure two-phase trait, an
-   in-memory/DB importer must write both `canonicalize` (without loading) and
-   `load` + build an `ImporterResult`. dart eases this with a simpler
+These were the open questions raised for discussion with @shyim; all are now settled.
+
+1. **Ergonomics for trivial importers.** ✅ **Resolved: add on demand.** dart eases
+   filesystem-like importers with a simpler
    [`FileImporter`](https://pub.dev/documentation/sass/latest/sass/FileImporter-class.html)
-   (just `findFileUrl`). We've deferred any convenience layer for now (YAGNI) —
-   revisit a `FileImporter`-style helper only if real friction shows up. (NOT a
-   back-compat shim; a deliberate forward convenience.)
-2. **Multiple importers / load-path chain.** dart takes an *ordered list* of
-   importers and tries each `canonicalize`. sasso currently has a single
-   `Option<&dyn Importer>`. Move to a list now (cleaner for the FFI too), or
-   later?
-3. **`modificationTime`** (dart has it for caching) — include now or skip?
-4. **URL vs path type.** dart uses `Uri`; sasso uses path strings. Keep
-   `String`/newtype, or introduce a real URL type (schemes, `file:`)?
+   (just `findFileUrl`); the built-in [`FsImporter`] already covers the common
+   case, so a helper waits for a real host reporting friction (see *Deliberately
+   out of scope*). NOT a back-compat shim; a deliberate forward convenience.
+2. **Multiple importers / load-path chain.** ✅ **Resolved: single importer, add a
+   list on demand.** dart's semantics are plain first-match-wins with no
+   cross-importer ambiguity check, which a host composes inside one
+   `canonicalize`/`load` today; promote to a built-in list only if the C ABI
+   wants native multi-importer input.
+3. **`modificationTime`.** ✅ **Resolved: skip.** It is cross-compile cache
+   machinery (dart's import-cache invalidation); sasso is single-shot with no
+   such cache. Revisit only with incremental/watch recompilation.
+4. **URL vs path type.** ✅ **Resolved: keep the opaque `String` newtype.** For a
+   host-defined importer it is a *superset* of a `Uri` type (any scheme allowed),
+   and the private field leaves room to add normalization later without an API
+   break. A real URI type only earns its keep alongside an importer list +
+   non-canonical schemes, which we don't carry.
 5. **`sourceMapUrl` plumbing.** ✅ **Resolved** — done in step 1 (PR #7) via the
    evaluator's `file_map_urls` override; `FsImporter` returns `None` so default
    source maps stay byte-identical, and the FFI surfaces it as the
@@ -250,9 +257,9 @@ is no longer a single `resolve(path) -> Option<String>` but dart's two-phase
 | `load(Uri) -> ImporterResult?` (may throw) | `load(&CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError>` | ✅ aligned |
 | `fromImport` / `containingUrl` (zone-scoped) | `CanonicalizeContext { from_import, containing_url }` (explicit arg) | ✅ same info |
 | throw → error | `Err(ImporterError)` | ✅ corresponds |
-| `Uri` (schemes, `file:`) | `CanonicalUrl` (opaque `String`) | ◑ analogous; no URI-scheme system |
-| `modificationTime` (cache), `couldCanonicalize` (opt.), `isNonCanonicalScheme` / `nonCanonicalSchemes`, `noOp`, `AsyncImporter` | — | ❌ intentionally omitted |
-| separate `FileImporter` (`findFileUrl`) convenience | — | ❌ deferred (open Q1) |
+| `Uri` (schemes, `file:`) | `CanonicalUrl` (opaque `String`) | ◑ a superset for a host-defined importer — see [below](#deliberately-out-of-scope-these--are-not-a-backlog) |
+| `modificationTime`, `couldCanonicalize`, `isNonCanonicalScheme` / `nonCanonicalSchemes`, `noOp`, `AsyncImporter` | — | ❌ N/A to a sync, single-importer model — see [below](#deliberately-out-of-scope-these--are-not-a-backlog) |
+| separate `FileImporter` (`findFileUrl`) convenience | — | deferred — add on demand — see [below](#deliberately-out-of-scope-these--are-not-a-backlog) |
 
 | dart-sass `ImporterResult` | sasso `ImporterResult` | status |
 | --- | --- | --- |
@@ -262,6 +269,44 @@ is no longer a single `resolve(path) -> Option<String>` but dart's two-phase
 | `indented` (deprecated ctor param) | — | ✅ not carried (clean) |
 
 So the **model and the issue-#4 gaps are aligned**; what remains unaligned is
-dart's advanced/optional machinery (the URI-scheme system, caching/optimization
-hooks, `FileImporter`), which is deliberately out of scope or deferred — not the
-original "returns a string" mismatch.
+dart's advanced/optional machinery, which is deliberately out of scope or
+deferred — not the original "returns a string" mismatch.
+
+## Deliberately out of scope (these `❌` are NOT a backlog)
+
+Each dart-sass importer feature sasso doesn't carry was checked against dart's
+actual API/source. Every one is either machinery for a capability sasso
+*intentionally* lacks, or a convenience the host already gets another way — none
+is a capability gap that blocks real use. **This list is a scope record, not a
+TODO list to burn down.**
+
+- **`AsyncImporter`** — would contradict sasso's synchronous, zero-runtime
+  identity (dart needs it only for its async `compile()`). A host that needs I/O
+  does *blocking* I/O inside the synchronous `load` callback.
+- **`modificationTime` / `couldCanonicalize`** — exist only for dart's
+  *persistent cross-compile cache* invalidation (used in dart's
+  `clearCanonicalize`/import-cache, not the in-compile dedup, which keys on the
+  canonical URL alone). sasso is single-shot with no cross-compile module cache,
+  so there is nothing to invalidate. Revisit only if sasso grows incremental /
+  watch recompilation.
+- **`Uri` scheme system / `isNonCanonicalScheme`** — dart forces canonical URLs
+  to be absolute, scheme-qualified `Uri`s to keep keys disjoint across an *ordered
+  importer list*, and uses non-canonical schemes to decide when to expose
+  `containingUrl`. sasso's `CanonicalUrl(String)` is a *superset* (the host may use
+  any scheme it likes), and `containing_url` is provided *unconditionally* — so the
+  one user-visible benefit is already free, with no scheme-classification API.
+- **`noOp`** — an internal dart sentinel (the "no importer" state for a
+  string-compiled stylesheet); Rust spells it `Option::None`.
+
+Two items are *convenience, not capability*, and are correctly **deferred (add on
+demand)**:
+
+- **`FileImporter` / `findFileUrl`** — lets a host return just a `file:` URL and
+  have the compiler do partial / `_index` / extension resolution. The built-in
+  [`FsImporter`] already covers the common filesystem case; add a helper only if a
+  real host reports friction re-implementing that probing for a *custom* root.
+- **Ordered importer list** — dart tries each importer's `canonicalize` in order,
+  first match wins, with no cross-importer ambiguity check. A host reproduces this
+  exactly today by composing sub-importers inside one `canonicalize`/`load`
+  (~20 lines). Promote to a built-in list only if the C ABI wants to accept
+  multiple importers natively.
