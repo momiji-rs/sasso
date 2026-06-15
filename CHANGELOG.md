@@ -11,6 +11,8 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-15
+
 ### Changed (breaking)
 
 - **The `Importer` trait is now dart-sass's two-phase `canonicalize`/`load`**
