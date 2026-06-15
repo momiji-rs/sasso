@@ -154,9 +154,14 @@ impl Importer for FsImporter {
                 syntax: syntax_for_path(p),
                 source_map_url: None,
             })),
-            // A file that resolved but cannot be read falls through to "not
-            // found", matching the old `if let Ok(src)` behavior.
-            Err(_) => Ok(None),
+            // The file vanished between `canonicalize` and `load` -> a miss.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            // Any other read failure (permission, invalid UTF-8, I/O) is a real,
+            // reportable error via the `ImporterError` channel, not a misleading
+            // "can't find stylesheet".
+            Err(e) => Err(ImporterError {
+                message: format!("Cannot read {}: {e}", p.display()),
+            }),
         }
     }
 }
