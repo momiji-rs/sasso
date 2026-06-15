@@ -213,10 +213,7 @@ impl<'a> Evaluator<'a> {
             if (self.scopes.len() == 1 || v.is_global) && !is_private_member(&v.name) {
                 if let Some(g) = self.scopes.first() {
                     if !g.borrow().contains_key(&v.name) {
-                        let mut targets = self
-                            .star_user_modules
-                            .iter()
-                            .filter_map(|m| m.var(&v.name));
+                        let mut targets = self.star_user_modules.iter().filter_map(|m| m.var(&v.name));
                         if let Some(existing) = targets.next() {
                             if targets.next().is_none() && !matches!(existing, Value::Null) {
                                 return Ok(());
