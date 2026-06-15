@@ -448,10 +448,15 @@ unsafe fn read_options(options: *const SassoOptions) -> SassoOptions {
     // never dereference a half-copied pointer. Gated per field (not "any time
     // n < size") so that if a future version appends fields *after* these
     // pointers, an older caller that did provide url/load_paths keeps them.
-    if caller_size < std::mem::offset_of!(SassoOptions, load_paths) {
-        local.url = ptr::null(); // url spans [offset_of(url), offset_of(load_paths))
+    // Gate each pointer on the end of its OWN field (offset + size), not the
+    // offset of the next field — so inserting a non-pointer field later cannot
+    // silently widen this guard and leave a half-copied pointer non-null.
+    if caller_size < std::mem::offset_of!(SassoOptions, url) + std::mem::size_of::<*const c_char>() {
+        local.url = ptr::null();
     }
-    if caller_size < std::mem::offset_of!(SassoOptions, load_paths_len) {
+    if caller_size
+        < std::mem::offset_of!(SassoOptions, load_paths) + std::mem::size_of::<*const *const c_char>()
+    {
         local.load_paths = ptr::null();
     }
     if caller_size < std::mem::offset_of!(SassoOptions, load_paths_len) + std::mem::size_of::<usize>() {
