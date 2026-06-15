@@ -6,7 +6,10 @@
 
 use std::collections::HashMap;
 
-use sasso::{compile, Importer, Options, OutputStyle};
+use sasso::{
+    compile, CanonicalUrl, CanonicalizeContext, Importer, ImporterError, ImporterResult, Options,
+    OutputStyle, Syntax,
+};
 
 fn css(input: &str) -> String {
     compile(input, &Options::default()).expect("compile should succeed")
@@ -20,8 +23,20 @@ fn css_compressed(input: &str) -> String {
 struct MemImporter(HashMap<String, String>);
 
 impl Importer for MemImporter {
-    fn resolve(&self, path: &str) -> Option<String> {
-        self.0.get(path).cloned()
+    fn canonicalize(
+        &self,
+        url: &str,
+        _ctx: &CanonicalizeContext<'_>,
+    ) -> Result<Option<CanonicalUrl>, ImporterError> {
+        Ok(self.0.contains_key(url).then(|| CanonicalUrl::new(url)))
+    }
+
+    fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError> {
+        Ok(self.0.get(canonical.as_str()).map(|c| ImporterResult {
+            contents: c.clone(),
+            syntax: Syntax::Scss,
+            source_map_url: None,
+        }))
     }
 }
 
@@ -633,17 +648,24 @@ struct CachingImporter {
 }
 
 impl Importer for CachingImporter {
-    fn resolve(&self, path: &str) -> Option<String> {
+    fn canonicalize(
+        &self,
+        url: &str,
+        _ctx: &CanonicalizeContext<'_>,
+    ) -> Result<Option<CanonicalUrl>, ImporterError> {
         // Record the request in importer-owned state. This allocation happens
         // *inside* the importer callback; the pause/resume boundary must keep it
         // on the system allocator so it outlives the compile's arena reset.
-        self.requested.borrow_mut().push(path.to_string());
-        self.files.get(path).cloned()
+        self.requested.borrow_mut().push(url.to_string());
+        Ok(self.files.contains_key(url).then(|| CanonicalUrl::new(url)))
     }
 
-    fn resolve_module(&self, path: &str) -> Option<(String, String)> {
-        self.requested.borrow_mut().push(path.to_string());
-        self.files.get(path).map(|src| (path.to_string(), src.clone()))
+    fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError> {
+        Ok(self.files.get(canonical.as_str()).map(|src| ImporterResult {
+            contents: src.clone(),
+            syntax: Syntax::Scss,
+            source_map_url: None,
+        }))
     }
 }
 

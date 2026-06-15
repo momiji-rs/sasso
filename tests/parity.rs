@@ -809,8 +809,23 @@ fn parity_import_modifier_grammar() {
 struct MapImporter(std::collections::HashMap<String, String>);
 
 impl sasso::Importer for MapImporter {
-    fn resolve(&self, path: &str) -> Option<String> {
-        self.0.get(path).cloned()
+    fn canonicalize(
+        &self,
+        url: &str,
+        _ctx: &sasso::CanonicalizeContext<'_>,
+    ) -> Result<Option<sasso::CanonicalUrl>, sasso::ImporterError> {
+        Ok(self.0.contains_key(url).then(|| sasso::CanonicalUrl::new(url)))
+    }
+
+    fn load(
+        &self,
+        canonical: &sasso::CanonicalUrl,
+    ) -> Result<Option<sasso::ImporterResult>, sasso::ImporterError> {
+        Ok(self.0.get(canonical.as_str()).map(|c| sasso::ImporterResult {
+            contents: c.clone(),
+            syntax: sasso::Syntax::Scss,
+            source_map_url: None,
+        }))
     }
 }
 
@@ -6437,6 +6452,29 @@ fn relative_resolution_and_distributed_config() {
         .unwrap(),
         "a {\n  b: in subdir;\n}\n"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn entry_relative_import_resolves_against_entry_dir() {
+    // An entry file in a subdirectory importing a sibling partial by BARE name
+    // must resolve against the entry file's own directory (threaded to the
+    // importer as `containing_url`), not only the load paths. The importer here
+    // has NO load paths, so the partial is findable solely via the entry dir.
+    let dir = std::env::temp_dir().join("sasso_parity_entryrel");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/_part.scss"), "$c: tomato;\n").unwrap();
+    let imp = FsImporter::new(vec![]);
+    let entry = dir.join("sub/entry.scss");
+    let out = compile(
+        "@use \"part\" as p;\n.a { color: p.$c; }\n",
+        &Options::default()
+            .with_importer(&imp)
+            .with_url(entry.to_str().unwrap()),
+    )
+    .expect("entry-relative @use should resolve against the entry's directory");
+    assert_eq!(out, ".a {\n  color: tomato;\n}\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

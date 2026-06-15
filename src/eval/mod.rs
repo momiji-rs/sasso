@@ -26,7 +26,7 @@ use crate::ast::{
 use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{CalcNode, CalcOp, List, ListSep, Map, Number, SassFunction, SassMixin, SassStr, Value};
-use crate::{Importer, OutputStyle, Syntax};
+use crate::{CanonicalUrl, CanonicalizeContext, Importer, OutputStyle, Syntax};
 
 mod at_rules;
 mod binop;
@@ -731,6 +731,10 @@ pub(crate) struct Evaluator<'a> {
     /// relative `@use`/`@forward`/`@import` URLs against the containing file
     /// first (dart-sass resolution order).
     current_file_dir: Option<String>,
+    /// The canonical URL of the file currently being evaluated, passed to the
+    /// importer as `CanonicalizeContext::containing_url`. Tracked in lockstep
+    /// with [`Self::current_file_dir`] (entry init + module/`@import` enter).
+    current_canonical: Option<CanonicalUrl>,
     /// Whether evaluation is inside a `@keyframes` body: frame blocks are not
     /// style rules in dart-sass, so nested at-rules do not bubble out of them
     /// and frame selectors get keyframe normalization (`E` -> `e`).
@@ -867,6 +871,10 @@ struct Module {
     /// The directory of the module's resolved file (for relative URL
     /// resolution while the module's own code runs); empty when unknown.
     file_dir: String,
+    /// The module's canonical URL (the importer's dedup key), passed as the
+    /// importer's `containing_url` while the module's own code (incl. a
+    /// `meta.load-css` in one of its mixins) resolves relative URLs.
+    canonical: String,
     /// Whether this module's CSS has been emitted into the MAIN tree (an
     /// ordinary `@use`/`@forward` load). A module first loaded inside an
     /// `@import`/load-css clone has not — the next plain load emits it.
@@ -1066,6 +1074,7 @@ struct PendingExtend {
 impl<'a> Evaluator<'a> {
     pub(crate) fn new(options: EvalOptions<'a>) -> Self {
         let url = options.url.to_string();
+        let entry_canonical = CanonicalUrl::new(options.url);
         let entry_dir = dirname_of(options.url).unwrap_or_default();
         let source: Rc<str> = Rc::from(options.source);
         let file_sources: HashMap<String, Rc<str>> =
@@ -1113,6 +1122,10 @@ impl<'a> Evaluator<'a> {
             // CWD-relative root): relative imports resolve against it first,
             // like dart — NOT via an implicit load path.
             current_file_dir: Some(entry_dir),
+            // The entry file's canonical URL = its display URL; the FsImporter
+            // derives the same search base from its dirname (a bare name like
+            // `input.scss` -> "" = CWD, matching `entry_dir`).
+            current_canonical: Some(entry_canonical),
             media_hoist: Vec::new(),
             at_root_hoist: std::collections::VecDeque::new(),
             at_rule_ctx: Vec::new(),
@@ -2162,8 +2175,35 @@ impl<'a> Evaluator<'a> {
                             // this compile's arena reset; see the matching note
                             // in `load_module`.
                             let saved = crate::arena::pause();
-                            let resolved =
-                                importer.and_then(|imp| imp.resolve_import_with_path(path, base.as_deref()));
+                            // Two-phase resolution (canonicalize, then load),
+                            // both inside ONE arena pause so the importer's owned
+                            // allocations survive this compile's arena reset.
+                            let resolved = match importer {
+                                Some(imp) => {
+                                    let ctx = CanonicalizeContext {
+                                        from_import: true,
+                                        containing_url: self.current_canonical.as_ref(),
+                                    };
+                                    match imp.canonicalize(path, &ctx) {
+                                        Err(e) => {
+                                            crate::arena::resume(saved);
+                                            return Err(Error::unpositioned(e.message));
+                                        }
+                                        Ok(None) => None,
+                                        Ok(Some(canon)) => match imp.load(&canon) {
+                                            Err(e) => {
+                                                crate::arena::resume(saved);
+                                                return Err(Error::unpositioned(e.message));
+                                            }
+                                            Ok(None) => None,
+                                            Ok(Some(res)) => {
+                                                Some((canon.as_str().to_string(), res.contents, res.syntax))
+                                            }
+                                        },
+                                    }
+                                }
+                                None => None,
+                            };
                             crate::arena::resume(saved);
                             match resolved {
                                 Some((resolved_key, src, syntax)) => {
@@ -2258,6 +2298,15 @@ impl<'a> Evaluator<'a> {
                             } else {
                                 std::mem::replace(&mut self.current_file_dir, dirname_of(resolved_key))
                             };
+                            // Track the imported file's canonical URL in lockstep
+                            // (so a nested relative `@use`/`@import` inside it
+                            // resolves against ITS directory).
+                            let saved_canonical = if resolved_key.is_empty() {
+                                self.current_canonical.clone()
+                            } else {
+                                self.current_canonical
+                                    .replace(CanonicalUrl::new(resolved_key.clone()))
+                            };
                             let saved_clone = if loads_modules {
                                 let n = self.copy_counter.get() + 1;
                                 self.copy_counter.set(n);
@@ -2286,6 +2335,7 @@ impl<'a> Evaluator<'a> {
                             }
                             let result = self.exec(&sheet.stmts, parents, sink);
                             self.current_file_dir = saved_dir;
+                            self.current_canonical = saved_canonical;
                             self.import_clone = saved_clone;
                             if let Some((p, c, i, id)) = saved_pending_consumed {
                                 self.pending_config = p;

@@ -56,7 +56,7 @@ mod value;
 
 pub use arena::{set_arena_bytes, ScopedAlloc};
 pub use error::Error;
-pub use importer::{FsImporter, Importer};
+pub use importer::{CanonicalUrl, CanonicalizeContext, FsImporter, Importer, ImporterError, ImporterResult};
 pub use sourcemap::SourceMap;
 
 /// Output formatting style.

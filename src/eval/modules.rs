@@ -1,5 +1,10 @@
 use super::*;
 
+/// The evaluator file-context fields swapped by [`Evaluator::enter_module_file`]
+/// and restored by [`Evaluator::leave_module_file`]:
+/// `(current_url, current_source, current_file_dir, current_canonical)`.
+type SavedModuleFile = (String, Rc<str>, Option<String>, Option<CanonicalUrl>);
+
 impl<'a> Evaluator<'a> {
     /// Register an `@extend` directive: validate the (interpolation-resolved)
     /// target, then record one [`PendingExtend`] per comma-separated target.
@@ -624,10 +629,35 @@ impl<'a> Evaluator<'a> {
         // allocator. The returned `String`s are then deep-copied into the arena
         // below by the parse/eval pipeline.
         let saved = crate::arena::pause();
-        let base = self.current_file_dir.clone();
-        let resolved = importer.and_then(|imp| imp.resolve_module_with_syntax_in(url, base.as_deref()));
+        // Two-phase resolution (canonicalize, then load), both inside ONE arena
+        // pause so the importer's owned allocations survive this compile's arena
+        // reset. `@use`/`@forward` never consider import-only files.
+        let two_phase = match importer {
+            Some(imp) => {
+                let ctx = CanonicalizeContext {
+                    from_import: false,
+                    containing_url: self.current_canonical.as_ref(),
+                };
+                match imp.canonicalize(url, &ctx) {
+                    Err(e) => {
+                        crate::arena::resume(saved);
+                        return Err(Error::at(e.message, pos));
+                    }
+                    Ok(None) => None,
+                    Ok(Some(canon)) => match imp.load(&canon) {
+                        Err(e) => {
+                            crate::arena::resume(saved);
+                            return Err(Error::at(e.message, pos));
+                        }
+                        Ok(None) => None,
+                        Ok(Some(res)) => Some((canon.as_str().to_string(), res.contents, res.syntax)),
+                    },
+                }
+            }
+            None => None,
+        };
         crate::arena::resume(saved);
-        let (key, src, syntax) = match resolved {
+        let (key, src, syntax) = match two_phase {
             Some(triple) => triple,
             None => {
                 return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
@@ -832,6 +862,9 @@ impl<'a> Evaluator<'a> {
         // Relative URLs inside the module resolve against ITS directory.
         let module_dir = dirname_of(key);
         let saved_dir = std::mem::replace(&mut self.current_file_dir, module_dir);
+        // Track the module's canonical URL in lockstep with its directory, so a
+        // relative `@use`/`@import` inside the module resolves against IT.
+        let saved_canonical = self.current_canonical.replace(CanonicalUrl::new(key));
         let saved_url = std::mem::replace(&mut self.current_url, diag_url.to_string());
         self.current_url_stamp = 0;
         let saved_source = std::mem::replace(&mut self.current_source, module_source);
@@ -916,6 +949,7 @@ impl<'a> Evaluator<'a> {
         self.current_selector = saved_selector;
         self.current_module = saved_module;
         self.current_file_dir = saved_dir;
+        self.current_canonical = saved_canonical;
         self.current_url = saved_url;
         self.current_url_stamp = 0;
         self.current_source = saved_source;
@@ -987,6 +1021,7 @@ impl<'a> Evaluator<'a> {
                 diag_url: diag_url.to_string(),
                 config_origin: std::cell::Cell::new(self.pending_config_id),
                 file_dir: dirname_of(key).unwrap_or_default(),
+                canonical: key.to_string(),
                 emitted_main: std::cell::Cell::new(false),
                 css: Vec::new(),
             },
@@ -1258,10 +1293,7 @@ impl<'a> Evaluator<'a> {
 
     /// Swap in `module`'s source file for diagnostics during a cross-module
     /// member invocation. Returns the previous `(url, source)` to restore.
-    pub(super) fn enter_module_file(
-        &mut self,
-        module: &Rc<Module>,
-    ) -> Option<(String, Rc<str>, Option<String>)> {
+    pub(super) fn enter_module_file(&mut self, module: &Rc<Module>) -> Option<SavedModuleFile> {
         if module.diag_url.is_empty() {
             return None;
         }
@@ -1276,16 +1308,21 @@ impl<'a> Evaluator<'a> {
             std::mem::replace(&mut self.current_url, module.diag_url.clone()),
             std::mem::replace(&mut self.current_source, source),
             std::mem::replace(&mut self.current_file_dir, dir),
+            // A relative `meta.load-css` inside one of this module's mixins must
+            // resolve against the module's own file, so carry its canonical URL.
+            self.current_canonical
+                .replace(CanonicalUrl::new(module.canonical.clone())),
         ))
     }
 
     /// Restore the file swapped out by [`Self::enter_module_file`].
-    pub(super) fn leave_module_file(&mut self, saved: Option<(String, Rc<str>, Option<String>)>) {
-        if let Some((url, source, dir)) = saved {
+    pub(super) fn leave_module_file(&mut self, saved: Option<SavedModuleFile>) {
+        if let Some((url, source, dir, canonical)) = saved {
             self.current_url = url;
             self.current_url_stamp = 0;
             self.current_source = source;
             self.current_file_dir = dir;
+            self.current_canonical = canonical;
         }
     }
 
