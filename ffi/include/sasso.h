@@ -13,6 +13,15 @@
  *     length (css_len/error_len) so binary-safe callers can avoid strlen().
  *   - Every entry point is panic-safe: an internal Rust panic becomes an error
  *     result rather than crossing the C boundary.
+ *   - Thread-safety: independent sasso_compile() calls are self-contained and
+ *     may run concurrently on separate threads. A SassoImporterSink is valid
+ *     ONLY during the one callback it is passed to — never store it, use it
+ *     after the callback returns, or touch it from another thread. Do not call
+ *     sasso_compile() re-entrantly from inside an importer callback.
+ *   - Forward-compat: SassoOptions grows by APPENDING fields only (the leading
+ *     struct_size lets older callers stay compatible — the library copies just
+ *     min(your struct_size, its own) bytes); existing fields are never reordered
+ *     or resized.
  *
  * This header is curated to match the ABI exactly; it can also be regenerated
  * with `cbindgen` (see cbindgen.toml).
@@ -36,7 +45,13 @@ extern "C" {
 #define SASSO_SYNTAX_SASS 1
 #define SASSO_SYNTAX_CSS  2
 
-/* SassoImporter callback return codes. */
+/* SassoImporter callback return codes. Effect on the overall compile:
+ *   SASSO_IMPORTER_ERROR     -> the message you passed to sasso_importer_set_error
+ *                               becomes the compile error and ABORTS the compile.
+ *   SASSO_IMPORTER_NOT_FOUND -> this importer can't resolve the URL; with a single
+ *                               importer (no fallback chain) the load is unresolved
+ *                               and the compile fails with a "can't find stylesheet"
+ *                               error. */
 #define SASSO_IMPORTER_OK         1   /* handled: host called set_canonical / set_result */
 #define SASSO_IMPORTER_NOT_FOUND  0   /* this importer doesn't handle the URL */
 #define SASSO_IMPORTER_ERROR    (-1)  /* handled but failed: host called set_error */
@@ -51,8 +66,11 @@ typedef struct SassoCanonicalizeContext {
 
 /* Opaque, sasso-owned collector handed to an importer callback. Deliver your
  * result by calling one sasso_importer_set_*() with it; the bytes are COPIED
- * immediately (you keep and free your own buffers). Valid ONLY for the duration
- * of the one callback it was passed to. */
+ * immediately — this is SQLite's SQLITE_TRANSIENT convention, so you keep and
+ * free your own buffers and there is deliberately NO free callback (a string
+ * made inside a ctypes/PHP-FFI/managed callback isn't C-malloc'd, so a foreign
+ * free would be undefined). Valid ONLY for the duration of the one callback it
+ * was passed to. */
 typedef struct SassoImporterSink SassoImporterSink;
 
 /* A userland importer (set SassoOptions.importer to use it). Two dart-sass-style
