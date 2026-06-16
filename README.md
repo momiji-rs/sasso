@@ -257,6 +257,65 @@ identical to dart-sass:
 Each compiles Sass without a Node toolchain — typically ~6–7× faster per compile
 than the Node `sass` default (and far faster cold, with no process spawn).
 
+## C ABI — use sasso from any language
+
+Beyond the packages above, sasso ships a **C ABI** ([`ffi/`](ffi/)) so any
+language with a C FFI can drive the compiler in-process. Each
+[release](https://github.com/momiji-rs/sasso/releases) attaches a per-target
+**`sasso-<version>-<target>-c-api.tar.xz`** (`.zip` on Windows) containing the
+prebuilt library and the header — the universal substrate every binding sits on:
+
+```
+include/sasso.h
+lib/  libsasso.a            # static — link it for a self-contained binary, no runtime dep
+      libsasso.so|.dylib    # dynamic (Windows: sasso.dll + sasso.dll.lib + sasso.lib)
+```
+
+The ABI is two owned calls plus an optional importer callback — see
+[`ffi/include/sasso.h`](ffi/include/sasso.h), the contract notes there, and
+runnable bindings for **8 languages** under
+[`ffi/examples/`](ffi/examples/) (C, Go, Ruby, Swift, Deno, Bun, LuaJIT, C#).
+
+### From Go
+
+Statically link `libsasso.a` via cgo for a single self-contained binary
+(no `CGO_ENABLED=0`, but no runtime dependency either):
+
+```go
+package main
+
+/*
+#cgo CFLAGS: -I./sasso-c-api/include
+#cgo LDFLAGS: ./sasso-c-api/lib/libsasso.a
+#include <stdlib.h>
+#include "sasso.h"
+*/
+import "C"
+import (
+	"fmt"
+	"unsafe"
+)
+
+func main() {
+	src := ".a { .b { color: #336699 } }"
+	cs := C.CString(src)
+	defer C.free(unsafe.Pointer(cs))
+	r := C.sasso_compile(cs, C.size_t(len(src)), nil)
+	defer C.sasso_result_free(r)
+	if r.ok == 0 {
+		panic(C.GoString(r.error))
+	}
+	fmt.Print(C.GoStringN(r.css, C.int(r.css_len)))
+}
+```
+
+A fuller cgo binding — options, errors, and a custom importer — is in
+[`ffi/examples/go/`](ffi/examples/go/). Prefer no cgo? `dlopen` the dynamic lib
+at runtime with [`purego`](https://github.com/ebitengine/purego), or run the
+[wasm build](#webassembly) in pure Go with
+[`wazero`](https://github.com/tetratelabs/wazero) — both keep `CGO_ENABLED=0` and
+trivial cross-compilation.
+
 ## Testing & coverage
 
 ```console
