@@ -242,6 +242,7 @@ packages are released by this project and pin a published `sasso` crate version;
 | **JavaScript / wasm** | [`@momiji-rs/sasso`](https://www.npmjs.com/package/@momiji-rs/sasso) (npm) | First-party | the in-repo [`wasm/`](wasm/) cdylib — see [WebAssembly](#webassembly) above |
 | **Ruby** | [`sasso`](https://rubygems.org/gems/sasso) (RubyGems) | First-party | [`momiji-rs/sasso-ruby`](https://github.com/momiji-rs/sasso-ruby) — an in-process native extension (`magnus` + `rb-sys`) around this crate |
 | **Python** | [`sasso`](https://pypi.org/project/sasso/) (PyPI) | First-party | [`momiji-rs/sasso-python`](https://github.com/momiji-rs/sasso-python) — `ctypes` over the C ABI; one prebuilt wheel per platform, no build step |
+| **Go** | [`sasso-go`](https://github.com/momiji-rs/sasso-go) (`go get`) | First-party | [`momiji-rs/sasso-go`](https://github.com/momiji-rs/sasso-go) — **pure Go, no cgo**: embeds the [wasm build](#webassembly) and runs it with [`wazero`](https://github.com/tetratelabs/wazero), so `CGO_ENABLED=0` and cross-compilation just work. String-in/CSS-out (for file-based importers use the C ABI via cgo, [below](#from-go)) |
 | **PHP** | [`shyim/php-sasso`](https://github.com/shyim/php-sasso) (PIE / pecl) | Community ([@shyim](https://github.com/shyim)) | an [ext-php-rs](https://github.com/davidcole1340/ext-php-rs) extension (`Sasso\Compiler`) wrapping this crate in-process; prebuilt for PHP 8.2–8.5 (Linux glibc/musl, macOS) |
 
 **Ruby framework integrations** build on that gem — drop-in Sass for your stack,
@@ -310,11 +311,13 @@ func main() {
 ```
 
 A fuller cgo binding — options, errors, and a custom importer — is in
-[`ffi/examples/go/`](ffi/examples/go/). Prefer no cgo? `dlopen` the dynamic lib
-at runtime with [`purego`](https://github.com/ebitengine/purego), or run the
-[wasm build](#webassembly) in pure Go with
-[`wazero`](https://github.com/tetratelabs/wazero) — both keep `CGO_ENABLED=0` and
-trivial cross-compilation.
+[`ffi/examples/go/`](ffi/examples/go/). Prefer no cgo? The first-party
+**[`sasso-go`](https://github.com/momiji-rs/sasso-go)** package is ready-made:
+`go get` it and it embeds the [wasm build](#webassembly) and runs it with
+[`wazero`](https://github.com/tetratelabs/wazero), keeping `CGO_ENABLED=0` and
+trivial cross-compilation (string-in/CSS-out; use the cgo path above when you
+need file-based importers). Or `dlopen` the dynamic lib at runtime with
+[`purego`](https://github.com/ebitengine/purego).
 
 ## Testing & coverage
 
