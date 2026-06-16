@@ -17,7 +17,7 @@
 [package]
 name = "sasso-ffi"
 # Tracks the bundled core `sasso` compiler version (reported by `sasso_version`).
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 # 1.77 for `std::mem::offset_of!` (per-field versioned-struct gating in
 # read_options). This FFI cdylib is internal (publish = false); the core crate

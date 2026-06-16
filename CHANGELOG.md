@@ -11,6 +11,22 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-16
+
+### Fixed
+
+- A relative `meta.load-css` inside a **first-class mixin** (captured with
+  `meta.get-mixin` and invoked via `meta.apply`) now resolves against the
+  mixin's **defining** file, not the caller's (issue #8). The regular
+  namespaced include path was already correct.
+
+### Added
+
+- A **C ABI** (`ffi/`, `libsasso` + `sasso.h`) — drive sasso in-process from any
+  language with a C FFI, with a userland importer callback. Releases now attach a
+  per-target `sasso-<version>-<target>-c-api.{tar.xz,zip}` (prebuilt static +
+  dynamic library + header). See the "C ABI" section in the README.
+
 ## [0.6.0] - 2026-06-15
 
 ### Changed (breaking)
