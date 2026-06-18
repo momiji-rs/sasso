@@ -1664,8 +1664,8 @@ impl<'a> Evaluator<'a> {
                     let items = self.eval_each_items(list)?;
                     self.push_scope(true);
                     let mut result = Ok(());
-                    for item in items {
-                        self.bind_each(vars, item);
+                    for i in 0..items.len() {
+                        self.bind_each(vars, items.get(i));
                         result = self.exec(body, parents, sink);
                         if result.is_err() {
                             break;
