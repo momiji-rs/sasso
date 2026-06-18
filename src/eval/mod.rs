@@ -1854,8 +1854,12 @@ impl<'a> Evaluator<'a> {
         }
         // A selector starting with a digit is dart's "expected selector."
         // (`1a {}`, issue_2023) — except keyframe stops (`50%`, `13E2%`).
+        // Split the selector list into its top-level comma parts ONCE; reused
+        // by the leading-digit check, the keyframe-stop path, and
+        // resolve_selectors_opt (which used to re-split the same string).
+        let comma_parts = split_commas(&sel_str);
         if !self.in_keyframes {
-            for part in split_commas(&sel_str) {
+            for part in &comma_parts {
                 if part.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
                     return Err(Error::unpositioned("expected selector."));
                 }
@@ -1864,13 +1868,13 @@ impl<'a> Evaluator<'a> {
         // A keyframe selector list is stops (`from`, `to`, `13E+1%`), not CSS
         // selectors: no combinator normalization or parent resolution.
         let current = if self.in_keyframes {
-            split_commas(&sel_str)
-                .into_iter()
+            comma_parts
+                .iter()
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty())
                 .collect()
         } else {
-            resolve_selectors_opt(&sel_str, parents, !self.at_root_excluding_style_rule)?
+            resolve_selectors_opt(&comma_parts, parents, !self.at_root_excluding_style_rule)?
         };
         // Drop "bogus combinator" complex selectors from the emitted block;
         // dart-sass omits them from the generated CSS. A top-level TRAILING
@@ -4981,10 +4985,14 @@ fn replace_parent_refs(part: &str, parent: &str) -> String {
 /// Resolve a selector against its parents with dart's `implicitParent` switch: inside
 /// `@at-root` (before the first nested style rule) a part WITHOUT `&` stays
 /// at the root instead of joining the parent, while `&` still substitutes.
-fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -> Result<Vec<String>, Error> {
-    let parts: Vec<String> = split_commas(sel)
-        .into_iter()
-        .map(|p| trim_selector_part(p).to_string())
+fn resolve_selectors_opt(
+    parts: &[&str],
+    parents: &[String],
+    implicit_parent: bool,
+) -> Result<Vec<String>, Error> {
+    let parts: Vec<String> = parts
+        .iter()
+        .map(|&p| trim_selector_part(p).to_string())
         .filter(|p| !p.is_empty())
         .collect();
     // dart: a parent that ends in a combinator can't substitute into a `&`
