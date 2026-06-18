@@ -1909,8 +1909,8 @@ impl<'a> Evaluator<'a> {
                 })
                 .collect()
         };
-        let mut emit_selectors: Vec<String> = Vec::new();
-        let mut emit_linebreaks: Vec<bool> = Vec::new();
+        let mut emit_selectors: Vec<String> = Vec::with_capacity(current.len());
+        let mut emit_linebreaks: Vec<bool> = Vec::with_capacity(current.len());
         for (i, s) in current.iter().enumerate() {
             if complex_selector_block_is_bogus(s) {
                 // The omitted selector still participates in @extend target

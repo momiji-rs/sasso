@@ -147,7 +147,7 @@ impl<'a> Evaluator<'a> {
         // Explicit positional args are gathered first; positionals spread from
         // a `...` splat are appended after them, so `f([1, 2]..., 3)` binds
         // `3` before `1, 2` (matching dart-sass's misplaced-rest behaviour).
-        let mut explicit_pos = Vec::new();
+        let mut explicit_pos = Vec::with_capacity(args.len());
         let mut splat_pos = Vec::new();
         let mut keyword: Vec<(String, Value)> = Vec::new();
         let mut seen_named = false;
