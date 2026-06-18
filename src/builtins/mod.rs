@@ -116,7 +116,7 @@ pub(crate) fn is_builtin(name: &str) -> bool {
 /// folds the name with `to_ascii_lowercase` before dispatch, so `SiN` and
 /// `sin` both count; `math::NAMES` holds the lowercase names accordingly.
 fn is_math_builtin_name(name: &str) -> bool {
-    math::NAMES.contains(&name.to_ascii_lowercase().as_str())
+    math::NAMES.iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
 // ---- shared argument helpers, available to every family module --------

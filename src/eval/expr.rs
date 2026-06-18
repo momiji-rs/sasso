@@ -654,8 +654,9 @@ impl<'a> Evaluator<'a> {
                 // the bare name is not already a global builtin, route it to the
                 // first star module that owns it (e.g. `div` -> `math.div`,
                 // `set` -> `map.set`). Global builtins keep their own behaviour.
-                if !crate::builtins::is_builtin(name) {
-                    for m in self.star_modules.clone() {
+                let is_builtin = crate::builtins::is_builtin(name);
+                if !is_builtin && !self.star_modules.is_empty() {
+                    for m in &self.star_modules {
                         if crate::builtins::module_has_member(&m, name) {
                             for v in &mut pos_args {
                                 *v = std::mem::replace(v, Value::Null).without_slash();
@@ -672,7 +673,7 @@ impl<'a> Evaluator<'a> {
                 // A bare slash-division argument collapses to its number when
                 // passed to a real Sass function (dart-sass `withoutSlash`);
                 // plain CSS functions (`foo(1/2)`) keep the slash verbatim.
-                if crate::builtins::is_builtin(name) {
+                if is_builtin {
                     for v in &mut pos_args {
                         *v = std::mem::replace(v, Value::Null).without_slash();
                     }

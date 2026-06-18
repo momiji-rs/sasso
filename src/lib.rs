@@ -197,19 +197,21 @@ pub fn compile(source: &str, options: &Options<'_>) -> Result<String, Error> {
     // on the *panic* path; the success path below finishes manually and forgets
     // the guard, so there is no double-leave.
     let guard = arena::Scope::enter();
-    // All allocations here bump from the arena (when ScopedAlloc is installed).
-    let result = compile_inner(source, options);
+    // Parse + eval allocate from the arena (when ScopedAlloc is installed).
+    // The flattened output tree is arena-resident, but it is still readable
+    // after leaving the scope and before reset.
+    let result = compile_inner_out(source, options);
     // Leave the scope WITHOUT resetting yet: depth drops to 0, so the arena is
     // now inactive and subsequent allocations route to the system allocator —
     // but the arena memory is still intact and `result` may point into it.
     let outermost = arena::leave_no_reset();
-    // Deep-clone the result to the system allocator while the scope is inactive.
-    // `Error` derives `Clone`, so both the `Ok(String)` and `Err(message)` cases
-    // are copied out byte-for-byte to system-owned memory.
-    let owned = result.clone();
-    // Drop the arena-resident original (in-arena `dealloc` is a no-op) before
-    // the region it lives in is reclaimed.
-    drop(result);
+    // Emit after leaving the arena scope, so the returned CSS is allocated
+    // directly in the system allocator. Error values are still cloned out
+    // because their messages/rendered diagnostics were built inside the arena.
+    let owned = match result {
+        Ok(out) => Ok(emit::emit(&out, options.style)),
+        Err(e) => Err(e.clone()),
+    };
     // Only the outermost scope owns the arena's lifetime; reset frees it all.
     if outermost {
         arena::reset();
@@ -326,10 +328,11 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
     Ok(CompileResult { css, source_map })
 }
 
-/// The actual compile pipeline. Runs inside the arena scope established by
-/// [`compile`]; all of its allocations may be arena-resident, so its result is
-/// copied out by the wrapper before the arena is reset.
-fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
+/// The actual parse + evaluate pipeline. Runs inside the arena scope
+/// established by [`compile`]; all of its allocations may be arena-resident, so
+/// the caller must finish using the returned output tree before resetting the
+/// arena.
+fn compile_inner_out(source: &str, options: &Options<'_>) -> Result<Vec<eval::OutNode>, Error> {
     let glyphs_for = || {
         if options.unicode {
             diag::GlyphSet::Unicode
@@ -384,5 +387,5 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
     });
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;
-    Ok(emit::emit(&out, options.style))
+    Ok(out)
 }
