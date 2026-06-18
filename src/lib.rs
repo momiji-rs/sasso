@@ -184,14 +184,15 @@ impl<'a> Options<'a> {
 /// # Allocator scope
 ///
 /// When the binary installs [`ScopedAlloc`] as its `#[global_allocator]`, this
-/// function brackets the whole compile in a bump-arena scope: every allocation
-/// `compile_inner` makes is a pointer bump from a per-thread arena that is freed
-/// wholesale when the scope ends. The returned `Result` is allocated *in* the
-/// arena, so it is deep-cloned out to the system allocator *before* the arena is
-/// reset — the value handed back to the caller never points into the arena. When
-/// no `ScopedAlloc` is installed the scope primitives are inert (depth tracking
-/// only) and every allocation goes to the system allocator as usual, so this
-/// wrapper is correct (just with a redundant clone) under any global allocator.
+/// function brackets parse + evaluate in a bump-arena scope: every allocation
+/// those phases make is a pointer bump from a per-thread arena that is freed
+/// wholesale when the scope ends. The arena-resident output tree is then emitted
+/// to CSS *after* leaving the scope, so the returned `Ok(String)` is allocated
+/// directly by the system allocator and never points into the arena; an `Err` is
+/// cloned out instead, because its rendered diagnostic was built inside the
+/// arena. When no `ScopedAlloc` is installed the scope primitives are inert
+/// (depth tracking only) and every allocation goes to the system allocator as
+/// usual, so this wrapper is correct under any global allocator.
 pub fn compile(source: &str, options: &Options<'_>) -> Result<String, Error> {
     // Enter the arena scope. The RAII guard's `Drop` leaves + resets the arena
     // on the *panic* path; the success path below finishes manually and forgets
@@ -201,9 +202,11 @@ pub fn compile(source: &str, options: &Options<'_>) -> Result<String, Error> {
     // The flattened output tree is arena-resident, but it is still readable
     // after leaving the scope and before reset.
     let result = compile_inner_out(source, options);
-    // Leave the scope WITHOUT resetting yet: depth drops to 0, so the arena is
-    // now inactive and subsequent allocations route to the system allocator —
-    // but the arena memory is still intact and `result` may point into it.
+    // Leave the scope WITHOUT resetting yet. The public entry points are the
+    // sole arena-scope owners — `compile` is never called inside another active
+    // scope — so depth drops to 0 here: the arena goes inactive and the `emit`
+    // below routes to the system allocator, while the arena memory stays intact
+    // so `result`'s output tree is still readable.
     let outermost = arena::leave_no_reset();
     // Emit after leaving the arena scope, so the returned CSS is allocated
     // directly in the system allocator. Error values are still cloned out
@@ -270,8 +273,8 @@ fn basename(url: &str) -> &str {
 }
 
 /// The source-map compile pipeline: parse + evaluate exactly like
-/// [`compile_inner`], then emit with the source-map collector and assemble the
-/// [`SourceMap`].
+/// [`compile_inner_out`], then emit with the source-map collector and assemble
+/// the [`SourceMap`].
 fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult, Error> {
     let glyphs = if options.unicode {
         diag::GlyphSet::Unicode
