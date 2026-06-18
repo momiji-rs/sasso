@@ -1,5 +1,31 @@
 use super::*;
 
+/// Iteration source for `@each`. A list is held as its shared `Rc<[Value]>`
+/// handle so each iteration clones a single element on demand (avoiding the
+/// up-front `Vec<Value>` copy of the whole collection); maps and scalars are
+/// materialised into a small owned set.
+pub(super) enum EachItems {
+    Shared(std::rc::Rc<[Value]>),
+    Owned(Vec<Value>),
+}
+
+impl EachItems {
+    pub(super) fn len(&self) -> usize {
+        match self {
+            EachItems::Shared(items) => items.len(),
+            EachItems::Owned(items) => items.len(),
+        }
+    }
+
+    /// Clone the `i`th item — one element, never the whole collection.
+    pub(super) fn get(&self, i: usize) -> Value {
+        match self {
+            EachItems::Shared(items) => items[i].clone(),
+            EachItems::Owned(items) => items[i].clone(),
+        }
+    }
+}
+
 impl<'a> Evaluator<'a> {
     /// Evaluate a `@for` bound to a [`Number`], preserving its unit (the loop
     /// variable inherits the `from` bound's unit).
@@ -53,28 +79,32 @@ impl<'a> Evaluator<'a> {
     }
 
     /// The values `@each` iterates: a list yields its items, `null` yields
-    /// nothing, and any other value is iterated once.
-    pub(super) fn eval_each_items(&mut self, e: &Expr) -> Result<Vec<Value>, Error> {
+    /// nothing, and any other value is iterated once. A list returns its
+    /// `Rc<[Value]>` handle directly (a refcount bump) so the loop can clone
+    /// one element per iteration instead of deep-copying the whole collection
+    /// up front; maps and scalars build a small owned set.
+    pub(super) fn eval_each_items(&mut self, e: &Expr) -> Result<EachItems, Error> {
         match self.eval_expr(e)? {
-            Value::List(l) => Ok(l.items.to_vec()),
+            Value::List(l) => Ok(EachItems::Shared(l.items)),
             // `@each` over a map yields each `key value` pair as a two-element
             // space list, so `@each $k, $v in $map` destructures correctly.
-            Value::Map(m) => Ok(m
-                .entries
-                .as_ref()
-                .clone()
-                .into_iter()
-                .map(|(k, v)| {
-                    Value::List(List {
-                        items: vec![k, v].into(),
-                        sep: ListSep::Space,
-                        bracketed: false,
-                        keywords: None,
+            Value::Map(m) => Ok(EachItems::Owned(
+                m.entries
+                    .as_ref()
+                    .clone()
+                    .into_iter()
+                    .map(|(k, v)| {
+                        Value::List(List {
+                            items: vec![k, v].into(),
+                            sep: ListSep::Space,
+                            bracketed: false,
+                            keywords: None,
+                        })
                     })
-                })
-                .collect()),
-            Value::Null => Ok(Vec::new()),
-            other => Ok(vec![other]),
+                    .collect(),
+            )),
+            Value::Null => Ok(EachItems::Owned(Vec::new())),
+            other => Ok(EachItems::Owned(vec![other])),
         }
     }
 
@@ -85,13 +115,22 @@ impl<'a> Evaluator<'a> {
             self.set_local(&vars[0], item);
             return;
         }
-        let elems: Vec<Value> = match item {
-            Value::List(l) => l.items.to_vec(),
-            other => vec![other],
-        };
-        for (i, v) in vars.iter().enumerate() {
-            let val = elems.get(i).cloned().unwrap_or(Value::Null);
-            self.set_local(v, val);
+        match item {
+            // Index the list's `Rc<[Value]>` directly — cloning only the
+            // elements the vars need, with no intermediate `Vec<Value>`.
+            Value::List(l) => {
+                for (i, v) in vars.iter().enumerate() {
+                    let val = l.items.get(i).cloned().unwrap_or(Value::Null);
+                    self.set_local(v, val);
+                }
+            }
+            // A non-list binds to the first var; the remaining vars are null.
+            other => {
+                self.set_local(&vars[0], other);
+                for v in &vars[1..] {
+                    self.set_local(v, Value::Null);
+                }
+            }
         }
     }
 
@@ -482,8 +521,8 @@ impl<'a> Evaluator<'a> {
                     let items = self.eval_each_items(list)?;
                     self.push_scope(true);
                     let mut result = Ok(None);
-                    for item in items {
-                        self.bind_each(vars, item);
+                    for i in 0..items.len() {
+                        self.bind_each(vars, items.get(i));
                         result = self.run_fn_body(body);
                         if matches!(result, Ok(None)) {
                             continue;
