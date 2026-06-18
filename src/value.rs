@@ -2355,10 +2355,13 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
         s = "0".to_string();
     }
     if compressed {
-        if let Some(rest) = s.strip_prefix("0.") {
-            s = format!(".{rest}");
-        } else if let Some(rest) = s.strip_prefix("-0.") {
-            s = format!("-.{rest}");
+        // Drop the leading `0` of `0.5`/`-0.5` -> `.5`/`-.5` in place (the `0`
+        // is ASCII, so the byte index is the char index) rather than building a
+        // fresh String with `format!`.
+        if s.starts_with("0.") {
+            s.remove(0);
+        } else if s.starts_with("-0.") {
+            s.remove(1);
         }
     }
     s
