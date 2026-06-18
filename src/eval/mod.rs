@@ -4621,9 +4621,10 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, plan: &crate::selector::ExtendPlan, s
                 extend_base,
                 ..
             } => {
-                let new_sel = extend_selector_list(selectors, linebreaks, plan, scope, *extend_base);
-                match new_sel {
-                    Some((s, b)) => {
+                match extend_selector_list(selectors, linebreaks, plan, scope, *extend_base) {
+                    // No change → skip the clone + write-back entirely.
+                    SelectorRewrite::Unchanged => false,
+                    SelectorRewrite::Changed(s, b) => {
                         // Line-break flags travel with their selectors (dart's
                         // ComplexSelector.lineBreak): an original keeps its
                         // flag, an extend product takes its extender's.
@@ -4631,8 +4632,8 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, plan: &crate::selector::ExtendPlan, s
                         *selectors = s;
                         false
                     }
-                    // None means the rule is entirely placeholders → drop.
-                    None => true,
+                    // Entirely placeholders → drop the rule.
+                    SelectorRewrite::Drop => true,
                 }
             }
             OutNode::AtRule {
@@ -4770,9 +4771,22 @@ fn is_valid_namespace(s: &str) -> bool {
     chars.all(|c| c == '_' || c == '-' || c.is_ascii_alphanumeric() || !c.is_ascii())
 }
 
-/// Compute the extended selector list for a rule. Returns `None` when, after
-/// extension, every complex selector still contains a placeholder (the rule
-/// emits no CSS). Returns `Some(unchanged)` when the selector needs no change.
+/// The outcome of extending one rule's selector list.
+enum SelectorRewrite {
+    /// The selector needs no change — leave the rule's selectors in place
+    /// (no clone, no write-back). The common case on extend-free stylesheets.
+    Unchanged,
+    /// The selector was extended/placeholder-stripped — replace it.
+    Changed(RuleSelectors, Vec<bool>),
+    /// Every complex selector is still a placeholder after extension, so the
+    /// rule emits no CSS — drop it.
+    Drop,
+}
+
+/// Compute the extended selector list for a rule. [`SelectorRewrite::Drop`]
+/// when, after extension, every complex selector still contains a placeholder
+/// (the rule emits no CSS); [`SelectorRewrite::Unchanged`] when the selector
+/// needs no change (so the caller skips the clone + write-back entirely).
 ///
 /// Phase 1d: the engine works on the typed [`crate::selector::Complex`] model
 /// and the result is carried as [`RuleSelectors::Parsed`] — emit renders it
@@ -4786,7 +4800,7 @@ fn extend_selector_list(
     plan: &crate::selector::ExtendPlan,
     scope: &str,
     extend_base: usize,
-) -> Option<(RuleSelectors, Vec<bool>)> {
+) -> SelectorRewrite {
     let has_placeholder = match selectors {
         RuleSelectors::Raw(v) => v.iter().any(|s| s.contains('%')),
         RuleSelectors::Parsed(v) => v.iter().any(crate::selector::complex_has_placeholder),
@@ -4795,7 +4809,7 @@ fn extend_selector_list(
     // Crucially this leaves selectors we don't model (keyframe stops are handled
     // separately, but also unusual selectors) byte-for-byte intact.
     if plan.is_empty() && !has_placeholder {
-        return Some((selectors.clone(), breaks.to_vec()));
+        return SelectorRewrite::Unchanged;
     }
     // Parse the rule's selectors into the typed model exactly once. A `Raw`
     // rule (the only shape an evaluated rule arrives in) is joined and parsed
@@ -4811,16 +4825,16 @@ fn extend_selector_list(
                     &parsed_owned
                 }
                 // Unparseable selector: never lose it; leave untouched.
-                None => return Some((selectors.clone(), breaks.to_vec())),
+                None => return SelectorRewrite::Unchanged,
             }
         }
         RuleSelectors::Parsed(v) => v,
     };
     let result = crate::selector::extend_selectors(parsed, breaks, plan, scope, extend_base);
     if result.all_placeholders {
-        return None;
+        return SelectorRewrite::Drop;
     }
-    Some((RuleSelectors::Parsed(result.selectors.into()), result.breaks))
+    SelectorRewrite::Changed(RuleSelectors::Parsed(result.selectors.into()), result.breaks)
 }
 
 /// For each non-empty top-level comma part of a selector list, whether the
