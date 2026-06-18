@@ -657,7 +657,7 @@ impl<'a> Evaluator<'a> {
                 let is_builtin = crate::builtins::is_builtin(name);
                 if !is_builtin && !self.star_modules.is_empty() {
                     for m in &self.star_modules {
-                        if crate::builtins::module_has_member(&m, name) {
+                        if crate::builtins::module_has_member(m, name) {
                             for v in &mut pos_args {
                                 *v = std::mem::replace(v, Value::Null).without_slash();
                             }
@@ -665,7 +665,7 @@ impl<'a> Evaluator<'a> {
                                 *v = std::mem::replace(v, Value::Null).without_slash();
                                 let _ = n;
                             }
-                            return crate::builtins::call_module(&m, name, &pos_args, &named, *pos)
+                            return crate::builtins::call_module(m, name, &pos_args, &named, *pos)
                                 .map(Value::without_slash);
                         }
                     }
