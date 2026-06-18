@@ -5069,6 +5069,14 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
     // expands to the parents' k-fold cartesian product (`& &` under
     // `ul, ol` is `ul ul, ul ol, ol ul, ol ol`, issue_1710).
     let split_parent_refs = |part: &str| -> Option<Vec<String>> {
+        // Cartesian expansion needs >=2 top-level `&`; a part with fewer than
+        // two `&` at all (the overwhelming common case — a `&`-free descendant
+        // part, or a single-`&` part like `&:hover`) provably yields `None`, so
+        // skip building/copying the per-char `segments` Vec for it. `&` is
+        // ASCII, so the byte count is exact.
+        if part.bytes().filter(|&b| b == b'&').count() < 2 {
+            return None;
+        }
         let mut segments = vec![String::new()];
         let mut depth = 0i32;
         let mut quote: Option<char> = None;
