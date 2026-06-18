@@ -2000,7 +2000,7 @@ impl<'a> Evaluator<'a> {
     }
 
     fn eval_decl(&mut self, d: &Declaration) -> Result<Option<OutItem>, Error> {
-        let name = self.eval_template(&d.property)?.trim().to_string();
+        let name = trim_owned(self.eval_template(&d.property)?);
         let prop = match &self.decl_prefix {
             Some(prefix) => format!("{prefix}-{name}"),
             None => name,
@@ -2067,7 +2067,7 @@ impl<'a> Evaluator<'a> {
     /// emitted exactly as written (no SassScript evaluation). An empty value
     /// (`--x: ;`) still emits.
     fn eval_custom_decl(&mut self, d: &CustomDecl) -> Result<Option<OutItem>, Error> {
-        let prop = self.eval_template(&d.property)?.trim().to_string();
+        let prop = trim_owned(self.eval_template(&d.property)?);
         let value = self.eval_template(&d.value)?;
         Ok(Some(OutItem::Decl {
             prop,
@@ -2107,7 +2107,7 @@ impl<'a> Evaluator<'a> {
                 ps.pos,
             ));
         }
-        let name = self.eval_template(&ps.property)?.trim().to_string();
+        let name = trim_owned(self.eval_template(&ps.property)?);
         let full = match &self.decl_prefix {
             Some(prefix) => format!("{prefix}-{name}"),
             None => name,
@@ -5193,6 +5193,18 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
 /// slices of `s` — no per-part allocation. Commas inside `(...)`/`[...]` stay
 /// within their part. Each part is a contiguous substring of `s`, so callers
 /// that need an owned `String` call `.to_string()` themselves.
+/// `s.trim().to_string()` without the allocation when `s` has no surrounding
+/// whitespace — the common case for an evaluated property name. Reuses the
+/// owned buffer in place (`trim` removed nothing → same length) instead of
+/// copying the bytes into a fresh `String`.
+fn trim_owned(s: String) -> String {
+    if s.trim().len() == s.len() {
+        s
+    } else {
+        s.trim().to_string()
+    }
+}
+
 fn split_commas(s: &str) -> Vec<&str> {
     // No comma anywhere means one segment, whatever the nesting structure.
     if !s.as_bytes().contains(&b',') {
