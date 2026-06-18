@@ -203,8 +203,13 @@ further ~1.5× by turning each compile's allocations into a pointer bump freed
 wholesale at the end. Composite values (strings, lists, maps) are
 reference-counted, so reading a `$variable` is an O(1) refcount bump, not a
 deep copy — on a large list passed through a call chain without mutation this
-cuts both instructions (~7×) and peak memory (~13×). Full methodology,
-per-file numbers and the correctness diff are in
+cuts both instructions (~7×) and peak memory (~13×). A round of evaluator
+allocation trimming — skipping the per-rule selector clone when nothing extends
+it, iterating `@each` over the list's shared handle, and dropping redundant
+per-declaration copies — shaves a further ~2.8% off pure compile on
+representative stylesheets (measured by instructions-retired, since the win is
+below wall-clock jitter at this ms scale; byte-identical output). Full
+methodology, per-file numbers and the correctness diff are in
 [`bench/three_way.md`](bench/three_way.md); run it yourself with
 `cd bench && RUNS=12 WARMUP=3 LOOP_N=200 bash scripts/run_bench.sh`.
 
