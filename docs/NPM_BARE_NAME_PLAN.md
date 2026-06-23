@@ -208,6 +208,12 @@ interface CompileResult { css: string; loadedUrls: URL[]; sourceMap?: RawSourceM
 - [x] `wasm/npm/{_loader,sasso,sasso.speed}.mjs` — header comments
 - [x] `wasm/npm/README.md` — install + import examples
 - [x] root `README.md` — WebAssembly section + Language-bindings table
-- [ ] downstream binding docs (`sasso-go`, etc.) `npm install @momiji-rs/sasso`
-- [ ] after first publish: `npm deprecate @momiji-rs/sasso "renamed to 'sasso'"`
+- [x] downstream binding docs — **verified nothing to change**: none of the
+  binding repos (sasso-go/ruby/python/rails, hanami-/bridgetown-sasso) ever
+  advertised the npm package, so there were no `@momiji-rs/sasso` references to
+  rename (checked via `gh search` + each README, 2026-06-23).
+- [x] after first publish: `npm deprecate @momiji-rs/sasso` → "Renamed to
+  'sasso'" (all versions; done 2026-06-23). Also overwrote the abandoned
+  `sasso@1.0.1–1.2.10` deprecation to redirect to the compiler.
 - [ ] `CHANGELOG.md` — keep history; add the rename entry at release time
+      (CHANGELOG is the *crate*'s; npm 0.7.0 is decoupled — decide whether to log)
