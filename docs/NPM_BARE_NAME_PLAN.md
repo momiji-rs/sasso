@@ -67,25 +67,41 @@ The bare name was previously an **unrelated, abandoned 2017 package**:
 `0.x` is the *correct* semver range while the drop-in API churns through the
 phases below (pre-1.0 = breaking changes allowed in minor bumps).
 
-### Takeover commands (run once, by the npm account owner — NOT from CI)
+### Release mechanism — decoupled `npm-v*` tags (OIDC, from CI)
+
+The npm version line is **decoupled from the crate**, and so are the release
+triggers: the crate / cargo-dist / c-api workflows fire on `v*` tags, and the
+npm workflow (`release-wasm.yml`) fires on **`npm-v*`** tags. So an npm cut is:
 
 ```bash
-# 1) Publish 0.7.0 on a temp tag so the publish never tries to move `latest`.
-npm publish --tag next
+git tag npm-v0.7.0 && git push origin npm-v0.7.0
+```
 
-# 2) Explicitly promote it to `latest` (idempotent; the one step that matters).
-npm dist-tag add sasso@0.7.0 latest
-npm dist-tag rm  sasso next
+That triggers `release-wasm.yml` ONLY: it builds both wasm variants, syncs
+`package.json` to `0.7.0` (strips the `npm-v` prefix), and `npm publish
+--provenance` via **Trusted Publishing (OIDC)** — no token. A plain publish of a
+non-prerelease version sets the `latest` dist-tag to `0.7.0` even though the
+abandoned squatter's `1.2.10` is numerically higher (the registry sets `latest`
+to whatever was just published; it is not "highest-wins").
 
-# 3) Deprecate the entire abandoned old line (closed range — cannot ever touch
-#    a future version of ours).
+> ⚠️ `release.yml` is cargo-dist-generated; its `on.tags` was hand-tightened to
+> `v[0-9]+…` so `npm-v*` won't fire it. Re-running `dist init`/`generate` would
+> revert that — re-apply the `v`-prefix after any cargo-dist regen.
+
+### Post-publish, once (by the npm account owner — needs `npm login`)
+
+```bash
+# Deprecate the entire abandoned old line (closed range — cannot ever touch a
+# future version of ours). Keeps it installable, just adds a warning.
 npm deprecate "sasso@>=1.0.1 <=1.2.10" \
   "This name now hosts sasso — a pure-Rust SCSS→CSS compiler. Versions <=1.2.10 were an unrelated, abandoned 'Simple sass framework' (github.com/afuh/sasso). Install the compiler: npm i sasso@latest"
+
+# Belt-and-suspenders: confirm `latest` points at our build (idempotent).
+npm dist-tag add sasso@0.7.0 latest
 ```
 
 Do **not** `npm unpublish` the old versions: they are far past the 72h
-self-unpublish window, and deprecate (keeps them installable, adds a warning)
-is friendlier to any residual dependents.
+self-unpublish window, and deprecate is friendlier to any residual dependents.
 
 > ⚠️ **FORWARD-LOOKING RULE — do not reuse `1.0.0`–`1.2.10`.** Those numbers are
 > permanently associated with the old framework in npm history and downstream

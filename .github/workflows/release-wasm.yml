@@ -1,15 +1,17 @@
 name: Publish wasm (npm)
 
-# Builds the wasm cdylib and publishes the bare-name `sasso` package to npm on a
-# version tag, alongside the cargo-dist binary release. Authenticates via npm
-# Trusted Publishing (OIDC) — NO NPM_TOKEN secret needed. One-time setup on
-# npmjs.com: add a trusted publisher for `sasso` (GitHub repo momiji-rs/sasso,
-# workflow release-wasm.yml). Publishes with provenance via the same id-token.
+# Builds the wasm cdylib and publishes the bare-name `sasso` package to npm on an
+# `npm-v*` tag. The npm version line is DECOUPLED from the crate (which releases
+# on `v*` tags), so npm cuts ride their own `npm-vX.Y.Z` tags and do not trigger
+# the crate / cargo-dist / c-api workflows. Authenticates via npm Trusted
+# Publishing (OIDC) — NO NPM_TOKEN secret needed. One-time setup on npmjs.com:
+# add a trusted publisher for `sasso` (GitHub repo momiji-rs/sasso, workflow
+# release-wasm.yml). Publishes with provenance via the same id-token.
 
 on:
   push:
     tags:
-      - '**[0-9]+.[0-9]+.[0-9]+*'
+      - 'npm-v[0-9]+.[0-9]+.[0-9]+*'
 
 permissions: {}
 
@@ -46,7 +48,8 @@ jobs:
         run: cp LICENSE-APACHE LICENSE-MIT wasm/npm/
       - name: sync version to the release tag
         working-directory: wasm/npm
-        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
+        # Strip the `npm-v` prefix: tag `npm-v0.7.0` -> npm version `0.7.0`.
+        run: npm version "${GITHUB_REF_NAME#npm-v}" --no-git-tag-version --allow-same-version
       - name: npm publish
         working-directory: wasm/npm
         # No NODE_AUTH_TOKEN: npm >= 11.5.1 performs the OIDC Trusted Publishing

@@ -13,7 +13,9 @@ name: Publish crate
 on:
   push:
     tags:
-      - '**[0-9]+.[0-9]+.[0-9]+*'
+      # Crate releases ride `v*` tags. The decoupled npm line uses `npm-v*`
+      # (see release-wasm.yml) and deliberately does NOT match here.
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
 
 permissions: {}
 

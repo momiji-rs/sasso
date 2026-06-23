@@ -42,7 +42,9 @@ on:
   pull_request:
   push:
     tags:
-      - '**[0-9]+.[0-9]+.[0-9]+*'
+      # Crate / binary releases ride `v*` tags. `npm-v*` (the decoupled npm line,
+      # see release-wasm.yml) deliberately does NOT match, so it won't fire here.
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
