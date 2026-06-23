@@ -33,6 +33,7 @@ import {
   syntaxCode,
   syntaxForPath,
 } from "./_importer.mjs";
+import { deserializeArgs, serializeValue } from "./_value.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -260,9 +261,29 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     );
   }
 
+  // Register `options.functions` on a freshly-cleared instance registry and
+  // return the callbacks array (index -> user function), matching the indices
+  // `sasso_register_function` assigns.
+  function registerFunctions(w, options) {
+    w.sasso_clear_functions();
+    const callbacks = [];
+    if (options.functions) {
+      for (const [sig, fn] of Object.entries(options.functions)) {
+        const b = encoder.encode(sig);
+        const p = b.length ? w.sasso_alloc(b.length) : 0;
+        if (b.length) new Uint8Array(w.memory.buffer, p, b.length).set(b);
+        w.sasso_register_function(p, b.length);
+        if (b.length) w.sasso_free(p, b.length);
+        callbacks.push(fn);
+      }
+    }
+    return callbacks;
+  }
+
   // ============================ SYNC instance ============================
   let syncEx; // cached sync exports
   let syncChain = null; // importer chain for the in-flight sync compile
+  let syncFunctions = []; // index -> user custom function for the in-flight compile
 
   const syncHost = {
     host_canonicalize(uPtr, uLen, fromImport, cPtr, cLen, outPtr, outLen) {
@@ -284,6 +305,23 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
         const res = syncChain ? syncChain.load(canon) : null;
         if (res == null) return 0;
         deliver(syncEx, frameLoad(res), outPtr, outLen);
+        return 1;
+      } catch (e) {
+        deliver(syncEx, encoder.encode(errMessage(e)), outPtr, outLen);
+        return -1;
+      }
+    },
+    host_call_function(index, argsPtr, argsLen, outPtr, outLen) {
+      try {
+        const argBytes = argsLen ? new Uint8Array(syncEx.memory.buffer, argsPtr, argsLen).slice() : new Uint8Array(0);
+        const fn = syncFunctions[index];
+        if (!fn) throw new Error(`sasso: custom function #${index} is not registered`);
+        const r = fn(deserializeArgs(argBytes));
+        if (r && typeof r.then === "function") {
+          throw new Error("sasso: asynchronous custom functions require compileStringAsync / compileAsync");
+        }
+        if (r == null) throw new Error("sasso: a custom function returned no value");
+        deliver(syncEx, serializeValue(r), outPtr, outLen);
         return 1;
       } catch (e) {
         deliver(syncEx, encoder.encode(errMessage(e)), outPtr, outLen);
@@ -312,6 +350,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
   let asyncData = 0; // asyncify stack-state struct pointer
   let asyncReady = false; // module actually carries the asyncify_* exports
   let asyncChain = null; // importer chain for the in-flight async compile
+  let asyncFunctions = []; // index -> user custom function for the in-flight compile
   let pendingDelivery = null; // a Promise<{rc, bytes}>, then its resolved value
   let asyncLock = Promise.resolve(); // serialize async compiles (one asyncify stack)
 
@@ -351,6 +390,19 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     host_load: asyncHostFn(
       (args) => asyncChain.load(readStr(asyncEx, args[0], args[1])),
       (res) => frameLoad(res),
+    ),
+    host_call_function: asyncHostFn(
+      (args) => {
+        const argBytes = args[2] ? new Uint8Array(asyncEx.memory.buffer, args[1], args[2]).slice() : new Uint8Array(0);
+        const fn = asyncFunctions[args[0]];
+        if (!fn) throw new Error(`sasso: custom function #${args[0]} is not registered`);
+        // Resolve sync or async; reject on a null return (functions must return).
+        return Promise.resolve(fn(deserializeArgs(argBytes))).then((v) => {
+          if (v == null) throw new Error("sasso: a custom function returned no value");
+          return v;
+        });
+      },
+      (v) => serializeValue(v),
     ),
   };
 
@@ -413,13 +465,18 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       throw new TypeError("compileString(source): source must be a string");
     }
     const chain = buildChain(options, false);
-    const prev = syncChain;
+    const callbacks = registerFunctions(syncInstance(), options);
+    const prevChain = syncChain;
+    const prevFns = syncFunctions;
     syncChain = chain;
+    syncFunctions = callbacks;
     let raw;
     try {
       raw = compileRawSync(source, rawOpts(options, syntaxCode(options.syntax)));
     } finally {
-      syncChain = prev;
+      syncChain = prevChain;
+      syncFunctions = prevFns;
+      syncEx.sasso_clear_functions();
     }
     return makeResult(raw, options.url ? toFileUrl(options.url).href : null, chain.loaded);
   }
@@ -436,13 +493,18 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     const entryHref = toFileUrl(realPath).href;
     const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(realPath);
     const chain = buildChain(options, false);
-    const prev = syncChain;
+    const callbacks = registerFunctions(syncInstance(), options);
+    const prevChain = syncChain;
+    const prevFns = syncFunctions;
     syncChain = chain;
+    syncFunctions = callbacks;
     let raw;
     try {
       raw = compileRawSync(source, { ...rawOpts(options, syntax), url: entryHref });
     } finally {
-      syncChain = prev;
+      syncChain = prevChain;
+      syncFunctions = prevFns;
+      syncEx.sasso_clear_functions();
     }
     return makeResult(raw, entryHref, chain.loaded);
   }
@@ -463,12 +525,16 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
         throw new TypeError("compileStringAsync(source): source must be a string");
       }
       const chain = buildChain(options, true);
+      const callbacks = registerFunctions(asyncInstance(), options);
       asyncChain = chain;
+      asyncFunctions = callbacks;
       try {
         const raw = await compileRawAsync(source, rawOpts(options, syntaxCode(options.syntax)));
         return makeResult(raw, options.url ? toFileUrl(options.url).href : null, chain.loaded);
       } finally {
         asyncChain = null;
+        asyncFunctions = [];
+        asyncEx.sasso_clear_functions();
       }
     });
   }
@@ -486,12 +552,16 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       const entryHref = toFileUrl(realPath).href;
       const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(realPath);
       const chain = buildChain(options, true);
+      const callbacks = registerFunctions(asyncInstance(), options);
       asyncChain = chain;
+      asyncFunctions = callbacks;
       try {
         const raw = await compileRawAsync(source, { ...rawOpts(options, syntax), url: entryHref });
         return makeResult(raw, entryHref, chain.loaded);
       } finally {
         asyncChain = null;
+        asyncFunctions = [];
+        asyncEx.sasso_clear_functions();
       }
     });
   }

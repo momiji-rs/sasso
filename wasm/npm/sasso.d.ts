@@ -13,7 +13,18 @@ export interface Options {
   loadPaths?: string[];
   /** Custom importers, tried (in order) before the filesystem. **Synchronous only.** */
   importers?: (Importer | FileImporter)[];
+  /**
+   * Host-defined Sass functions, keyed by signature (`"pow($base, $exponent)"`).
+   * Each callback receives the bound {@link Value} arguments and returns a
+   * {@link Value}. They override built-in global functions but lose to user
+   * `@function`s. A callback may be async, but only under the async compile APIs
+   * (`compileStringAsync`/`compileAsync`); the sync APIs throw on a Promise.
+   */
+  functions?: Record<string, CustomFunction>;
 }
+
+/** A host-defined Sass function. */
+export type CustomFunction = (args: Value[]) => Value | Promise<Value>;
 
 export interface StringOptions extends Options {
   /**
@@ -143,6 +154,92 @@ export function initAsyncCompiler(): Promise<AsyncCompiler>;
  */
 export function configure(options?: ConfigureOptions): void;
 
+// ----- the dart-sass `Value` type system (custom-function arguments/returns) -----
+
+export type ColorSpace =
+  | "rgb" | "srgb" | "srgb-linear" | "display-p3" | "a98-rgb" | "prophoto-rgb"
+  | "rec2020" | "hsl" | "hwb" | "lab" | "oklab" | "lch" | "oklch"
+  | "xyz" | "xyz-d50" | "xyz-d65";
+
+/** Base class for every Sass value. */
+export abstract class Value {
+  readonly isTruthy: boolean;
+  readonly realNull: Value | null;
+  readonly asList: Value[];
+  readonly hasBrackets: boolean;
+  readonly separator: string | null;
+  assertNumber(name?: string): SassNumber;
+  assertString(name?: string): SassString;
+  assertColor(name?: string): SassColor;
+  assertMap(name?: string): SassMap;
+  assertBoolean(name?: string): SassBoolean;
+  equals(other: Value): boolean;
+}
+
+export class SassBoolean extends Value {
+  constructor(value: boolean);
+  readonly value: boolean;
+}
+export const sassTrue: SassBoolean;
+export const sassFalse: SassBoolean;
+export const sassNull: Value;
+
+export class SassString extends Value {
+  constructor(text?: string, options?: { quotes?: boolean });
+  readonly text: string;
+  readonly hasQuotes: boolean;
+  readonly sassLength: number;
+}
+
+export class SassNumber extends Value {
+  constructor(value: number, unit?: string);
+  constructor(value: number, options: { numeratorUnits?: string[]; denominatorUnits?: string[] });
+  readonly value: number;
+  readonly numeratorUnits: string[];
+  readonly denominatorUnits: string[];
+  readonly hasUnits: boolean;
+  readonly isInt: boolean;
+  readonly asInt: number | null;
+  hasUnit(unit: string): boolean;
+  assertInt(name?: string): number;
+  assertUnit(unit: string, name?: string): SassNumber;
+}
+
+export class SassColor extends Value {
+  constructor(options: {
+    space?: ColorSpace;
+    alpha?: number;
+    /** Channel values by name (e.g. red/green/blue, lightness/chroma/hue); `null` = missing. */
+    [channel: string]: ColorSpace | number | null | undefined;
+  });
+  readonly space: ColorSpace;
+  readonly channels: number[];
+  readonly channelsOrNull: (number | null)[];
+  readonly alpha: number;
+  readonly red: number;
+  readonly green: number;
+  readonly blue: number;
+  channel(name: string): number;
+  isChannelMissing(name: string): boolean;
+}
+
+export class SassList extends Value {
+  constructor(contents?: Value[], options?: { separator?: string | null; brackets?: boolean });
+  /** 0-based element access. */
+  get(index: number): Value | undefined;
+}
+
+export class SassArgumentList extends SassList {
+  constructor(contents?: Value[], keywords?: Map<string, Value>, options?: { separator?: string | null; brackets?: boolean });
+  readonly keywords: Map<string, Value>;
+}
+
+export class SassMap extends Value {
+  constructor(contents?: Map<Value, Value>);
+  readonly contents: Map<Value, Value>;
+  get(key: Value): Value | undefined;
+}
+
 declare const _default: {
   compile: typeof compile;
   compileAsync: typeof compileAsync;
@@ -153,5 +250,16 @@ declare const _default: {
   configure: typeof configure;
   info: typeof info;
   Exception: typeof Exception;
+  Value: typeof Value;
+  SassBoolean: typeof SassBoolean;
+  SassString: typeof SassString;
+  SassNumber: typeof SassNumber;
+  SassColor: typeof SassColor;
+  SassList: typeof SassList;
+  SassArgumentList: typeof SassArgumentList;
+  SassMap: typeof SassMap;
+  sassTrue: typeof sassTrue;
+  sassFalse: typeof sassFalse;
+  sassNull: typeof sassNull;
 };
 export default _default;

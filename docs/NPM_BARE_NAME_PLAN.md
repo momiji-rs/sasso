@@ -9,8 +9,9 @@
 > **Progress:** hard-cut rename ✅ · **Phase 1 (modern JS API) ✅** · **Phase 2
 > (sync importers) ✅** · **Phase 2.5 (async importers via Asyncify) ✅ — full
 > zero-config sass-loader + Vite drop-in.** · **Phase 3 (CLI bin) ✅ — `npx
-> sasso`.** Phase 4 (custom `functions`) deferred. `sasso@0.7.0` published
-> (Phases 1+2); 2.5 + 3 ship on the next `npm-v*` cut.
+> sasso`.** · **Phase 4 (custom `functions`) ✅ — full `Value` system, sync +
+> async.** ALL PHASES DONE. `sasso@0.7.1` published (Phases 1+2+2.5+3); Phase 4
+> ships on the next `npm-v*` cut.
 
 ## Why the bare name matters
 
@@ -207,10 +208,27 @@ interface CompileResult { css: string; loadedUrls: URL[]; sourceMap?: RawSourceM
   `--help`, `--version`. Sass errors print to stderr and exit non-zero.
   `--watch` and inline `--embed-source-map` are still TODO. Smoke-tested in
   `wasm/test.mjs`.
-- **Phase 4 — custom `functions` (deferred / optional).** JS-defined Sass
-  functions need the full `Value` type system (SassNumber/String/Color/List/Map).
-  Large surface, not on the common sass-loader/Vite path. **v1 ships it as
-  unsupported;** revisit before tagging the stable line.
+- **Phase 4 — custom `functions`. ✅ DONE 2026-06-23.** JS-defined Sass functions
+  via the dart-sass `functions` option. Built in increments:
+  - **Core** (`src/host_fn.rs`, `Options::with_function`): a byte-protocol
+    callback (`HostFunction = Rc<dyn Fn(&[u8]) -> Result<Vec<u8>, String>>`) so
+    the internal `Value` stays private; the engine (de)serializes args/return
+    internally. Dispatch sits below user `@function`s / module members and above
+    built-in globals. Full `Value` fidelity: number (units), string, color (every
+    CSS Color 4 space), list (+ arglist keywords), map, bool, null. (calc / first-
+    class fn refs are the only unsupported arg types — niche; clear error.)
+  - **wasm bridge** (`wasm/src/lib.rs`): `sasso_register_function` +
+    `host_call_function` (added to the asyncify suspend set, so **async custom
+    functions** work — sass-loader/Vite can register async functions).
+  - **JS** (`wasm/npm/_value.mjs`): the full `Value` class hierarchy
+    (`SassNumber`/`SassString`/`SassColor`/`SassList`/`SassArgumentList`/
+    `SassMap`/`SassBoolean`/`sassNull`) + wire (de)serializers mirroring the Rust
+    protocol; `_loader.mjs` registers `options.functions` and routes
+    `host_call_function` to the JS callbacks (sync rejects a Promise; async
+    suspends via asyncify). d.ts + README updated; covered in `wasm/test.mjs`
+    (number/string/color/list/map/rest, override, error, async) and tsc-clean.
+
+  **The entire npm bare-name campaign (Phases 0–4) is now complete.**
 
 ## Hard-cut checklist (rename `@momiji-rs/sasso` → `sasso`)
 

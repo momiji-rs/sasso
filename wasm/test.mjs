@@ -192,7 +192,13 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   const recover = await mod.compileStringAsync(`@use "remote" as r;\n.z { color: r.$c; }\n`, { importers: [asyncImporter] });
   assert.ok(recover.css.includes("rebeccapurple"), `${name}: async engine recovers after an importer error`);
 
-  console.log(`ok: ${name} build — modern + Compiler API + sync & async importers (Phase 1 + 2 + 2.5)`);
+  // === Phase 4: custom functions (sync path, both builds) ===
+  const rfn = mod.compileString(`.a { x: pow(2, 10); }`, {
+    functions: { "pow($base, $exp)": (args) => new mod.SassNumber(args[0].value ** args[1].value) },
+  });
+  assert.ok(rfn.css.includes("x: 1024"), `${name}: sync custom function`);
+
+  console.log(`ok: ${name} build — modern + Compiler API + sync & async importers + custom fns (Phase 1+2+2.5+4)`);
 }
 
 // === Phase 3: CLI (bin) smoke test ===
@@ -214,4 +220,79 @@ try { cli(["/no/such/file.scss"]); } catch (e) { cliMissing = /no such file/.tes
 assert.ok(cliMissing, "cli: a missing input file errors cleanly");
 console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
 
-console.log("all wasm modern-API + importer + CLI tests passed");
+// === Phase 4: custom functions — full Value coverage (sync + async) ===
+{
+  const { SassNumber, SassString, SassColor, SassList, SassMap, sassTrue, sassNull } = size;
+
+  // number with units
+  const rn = size.compileString(`.a { w: rem(32); }`, {
+    functions: { "rem($px)": (a) => new SassNumber(a[0].assertNumber().value / 16, "rem") },
+  });
+  assert.ok(rn.css.includes("w: 2rem"), "fn: number with unit");
+
+  // string assert + quotes
+  const rs = size.compileString(`.a { content: shout("hi"); }`, {
+    functions: { "shout($s)": (a) => new SassString(a[0].assertString().text.toUpperCase() + "!", { quotes: true }) },
+  });
+  assert.ok(rs.css.includes('"HI!"'), "fn: string in/out");
+
+  // color in/out (read channel, build a new color)
+  const rc = size.compileString(`.a { color: setred(rgb(1, 2, 3)); }`, {
+    functions: { "setred($c)": (a) => { const c = a[0].assertColor(); return new SassColor({ red: 255, green: c.green, blue: c.blue, alpha: c.alpha }); } },
+  });
+  assert.ok(rc.css.includes("#ff0203"), "fn: color in/out");
+
+  // modern color space round-trip (oklch built in JS)
+  const rok = size.compileString(`.a { color: brand(); }`, {
+    functions: { "brand()": () => new SassColor({ space: "oklch", lightness: 0.7, chroma: 0.15, hue: 250, alpha: 1 }) },
+  });
+  assert.ok(rok.css.includes("oklch("), "fn: modern color space");
+
+  // list + map args, boolean/null returns
+  const rl = size.compileString(`.a { n: len((a, b, c)); }`, {
+    functions: { "len($l)": (a) => new SassNumber(a[0].asList.length) },
+  });
+  assert.ok(rl.css.includes("n: 3"), "fn: list arg");
+  const rm = size.compileString(`.a { v: pick((x: 1, y: 2), y); }`, {
+    functions: { "pick($m, $k)": (a) => a[0].assertMap().get(a[1]) ?? sassNull },
+  });
+  assert.ok(rm.css.includes("v: 2"), "fn: map arg + value-equality get");
+
+  // rest args ($args...)
+  const rr = size.compileString(`.a { s: total(1, 2, 3, 4); }`, {
+    functions: { "total($nums...)": (a) => new SassNumber(a[0].asList.reduce((s, n) => s + n.value, 0)) },
+  });
+  assert.ok(rr.css.includes("s: 10"), "fn: rest args");
+
+  // a custom function overrides a builtin global, loses to a user @function
+  const rov = size.compileString(`.a { x: type-of(1); }`, {
+    functions: { "type-of($v)": () => new SassString("custom", { quotes: false }) },
+  });
+  assert.ok(rov.css.includes("x: custom"), "fn: overrides builtin");
+
+  // error from a function surfaces as a compile error
+  let fnErr;
+  try { size.compileString(`.a { x: boom(1); }`, { functions: { "boom($x)": () => { throw new Error("kaboom"); } } }); } catch (e) { fnErr = e; }
+  assert.ok(fnErr && /kaboom/.test(fnErr.message), "fn: error surfaces");
+
+  // async custom function suspends/resumes the engine
+  const ra = await size.compileStringAsync(`.a { x: aplus(40); }`, {
+    functions: { "aplus($n)": async (a) => { await new Promise((r) => setTimeout(r, 2)); return new SassNumber(a[0].value + 2); } },
+  });
+  assert.ok(ra.css.includes("x: 42"), "fn: async custom function");
+
+  // a Promise-returning function is rejected on the SYNC path
+  assert.throws(
+    () => size.compileString(`.a { x: ap(1); }`, { functions: { "ap($n)": async () => new SassNumber(1) } }),
+    /asynchronous custom functions require/,
+    "fn: sync path rejects async function",
+  );
+
+  // boolean / sassTrue usable
+  const rb = size.compileString(`.a { x: yes(); }`, { functions: { "yes()": () => sassTrue } });
+  assert.ok(rb.css.includes("x: true"), "fn: boolean return");
+
+  console.log("ok: custom functions — number/string/color/list/map/rest, override, error, async (Phase 4)");
+}
+
+console.log("all wasm modern-API + importer + CLI + custom-function tests passed");

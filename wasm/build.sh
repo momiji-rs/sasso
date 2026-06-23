@@ -67,7 +67,7 @@ build_async() {
     echo ">> [async] wasm-opt --asyncify -Oz"
     wasm-opt "$raw" -o "$out" \
       --asyncify \
-      --pass-arg=asyncify-imports@sasso_host.host_canonicalize,sasso_host.host_load \
+      --pass-arg=asyncify-imports@sasso_host.host_canonicalize,sasso_host.host_load,sasso_host.host_call_function \
       -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext
   else
     # No wasm-opt -> ship the non-asyncify'd module. The loader detects the

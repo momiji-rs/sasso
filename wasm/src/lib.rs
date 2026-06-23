@@ -106,6 +106,71 @@ extern "C" {
     /// success the `out` buffer is a framed load result (see `parse_load_frame`):
     /// `[syntax: u8][smu_present: u8][smu_len: u32 LE][smu bytes][contents bytes]`.
     fn host_load(canon_ptr: *const u8, canon_len: usize, out_ptr: *mut *mut u8, out_len: *mut usize) -> i32;
+
+    /// Invoke the host's custom function `index` (registered via
+    /// `sasso_register_function`) with the serialized arguments. Returns `1` on
+    /// success (the `out` buffer is the serialized return value) or `<0` on
+    /// error (the `out` buffer is a UTF-8 message). With the asyncify'd module
+    /// this may suspend the compile while the host awaits an async function.
+    fn host_call_function(
+        index: u32,
+        args_ptr: *const u8,
+        args_len: usize,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> i32;
+}
+
+// Custom-function signatures the host registers before a compile (cleared
+// after). `sasso_compile2` turns each into an `Options::with_function` whose
+// callback bridges to `host_call_function` by index.
+thread_local! {
+    static FUNCTIONS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Register a custom-function signature (`"pow($base, $exponent)"`); returns its
+/// index, which the callback passes to `host_call_function`. Call before
+/// `sasso_compile2`; pair with `sasso_clear_functions`.
+#[no_mangle]
+pub extern "C" fn sasso_register_function(sig_ptr: *const u8, sig_len: usize) -> u32 {
+    let sig = if sig_ptr.is_null() || sig_len == 0 {
+        String::new()
+    } else {
+        // SAFETY: JS passes a live UTF-8 buffer it just allocated.
+        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(sig_ptr, sig_len) }).into_owned()
+    };
+    FUNCTIONS.with(|f| {
+        let mut v = f.borrow_mut();
+        v.push(sig);
+        (v.len() - 1) as u32
+    })
+}
+
+/// Drop all registered custom-function signatures.
+#[no_mangle]
+pub extern "C" fn sasso_clear_functions() {
+    FUNCTIONS.with(|f| f.borrow_mut().clear());
+}
+
+/// Build the byte-protocol callback for custom function `index`, bridging to the
+/// host's `host_call_function`.
+fn make_host_callback(index: u32) -> sasso::HostFunction {
+    std::rc::Rc::new(move |args: &[u8]| -> Result<Vec<u8>, String> {
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        // SAFETY: `args` is a live slice; the host writes the result (ptr, len)
+        // into the two out cells.
+        let rc = unsafe { host_call_function(index, args.as_ptr(), args.len(), &mut out_ptr, &mut out_len) };
+        let bytes = take_host_bytes(out_ptr, out_len);
+        match rc {
+            1 => Ok(bytes),
+            _ => Err(if bytes.is_empty() {
+                format!("sasso: custom function #{index} failed")
+            } else {
+                String::from_utf8_lossy(&bytes).into_owned()
+            }),
+        }
+    })
 }
 
 /// Copy a host-delivered `(ptr, len)` buffer out to an owned `Vec`, then free
@@ -286,6 +351,11 @@ pub extern "C" fn sasso_compile2(
             }
             if use_importer != 0 {
                 opts = opts.with_importer(&importer);
+            }
+            // Register host custom functions (each bridges to host_call_function).
+            let sigs: Vec<String> = FUNCTIONS.with(|f| f.borrow().clone());
+            for (i, sig) in sigs.iter().enumerate() {
+                opts = opts.with_function(sig, make_host_callback(i as u32));
             }
             if want_map != 0 {
                 match sasso::compile_with_source_map(scss, &opts) {

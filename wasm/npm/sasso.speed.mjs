@@ -4,6 +4,7 @@
 // APIs share the size-optimized asyncify'd module (the async path is
 // importer-I/O bound, so its raw throughput matters little).
 import { makeApi, Exception, info } from "./_loader.mjs";
+import { valueApi } from "./_value.mjs";
 
 const api = makeApi(
   new URL("./sasso.speed.wasm", import.meta.url),
@@ -18,4 +19,17 @@ export const initCompiler = api.initCompiler;
 export const initAsyncCompiler = api.initAsyncCompiler;
 export const configure = api.configure;
 export { Exception, info };
-export default { ...api, Exception };
+export {
+  Value,
+  SassBoolean,
+  SassColor,
+  SassList,
+  SassArgumentList,
+  SassMap,
+  SassNumber,
+  SassString,
+  sassTrue,
+  sassFalse,
+  sassNull,
+} from "./_value.mjs";
+export default { ...api, Exception, ...valueApi };

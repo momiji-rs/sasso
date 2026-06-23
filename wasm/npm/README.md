@@ -75,6 +75,30 @@ compileString(`@use "virtual:colors" as c; .a { color: c.$brand; }`, {
 > require synchronous importers; an importer (or `findFileUrl`) that returns a
 > `Promise` throws there. Use the async API when your importers are async.
 
+## Custom functions
+
+Define Sass functions in JS with the dart-sass `functions` option. A callback
+receives the bound `Value` arguments and returns a `Value` (the full type
+system — `SassNumber`, `SassString`, `SassColor`, `SassList`, `SassMap`,
+`SassBoolean`, `sassNull` — is exported):
+
+```js
+import { compileString, SassNumber, SassColor } from "sasso";
+
+compileString(`.a { width: pow(2, 10) * 1px; color: brand(); }`, {
+  functions: {
+    "pow($base, $exp)": (args) =>
+      new SassNumber(args[0].assertNumber().value ** args[1].assertNumber().value),
+    "brand()": () =>
+      new SassColor({ space: "oklch", lightness: 0.7, chroma: 0.15, hue: 250 }),
+  },
+});
+```
+
+Custom functions override built-in globals but lose to user `@function`s. A
+callback may be **async** — but only under the async APIs (`compileStringAsync`
+/ `compileAsync` / the Compiler API); the sync APIs throw on a `Promise`.
+
 > **Migrating from `@momiji-rs/sasso`?** The old `compile(scss) → string` is now
 > `compileString(scss).css`, and `compile` takes a **file path** (to match
 > dart-sass). See the [changelog](https://github.com/momiji-rs/sasso/releases).
