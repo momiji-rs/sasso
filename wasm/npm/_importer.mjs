@@ -228,23 +228,30 @@ function toHref(urlOrString) {
   return urlOrString instanceof URL ? urlOrString.href : new URL(urlOrString).href;
 }
 
-/** Wrap a user `{ canonicalize, load }` dart-sass Importer. */
-function wrapImporter(imp) {
+// Settle a possibly-thenable user return into the chain interface. In `async`
+// mode the result is always a Promise (so async importers are awaited by the
+// async engine); in sync mode a Promise is a hard error (the sync engine can't
+// await it), and a plain value maps through immediately.
+function settle(raw, map, async) {
+  if (async) return Promise.resolve(raw).then((v) => (v == null ? null : map(v)));
+  if (isThenable(raw)) throw new Error(ASYNC_UNSUPPORTED);
+  return raw == null ? null : map(raw);
+}
+
+const loadMap = (r) => ({
+  contents: r.contents,
+  syntax: syntaxCode(r.syntax),
+  sourceMapUrl: r.sourceMapUrl != null ? String(r.sourceMapUrl) : null,
+});
+
+/** Wrap a user `{ canonicalize, load }` dart-sass Importer (`async` = await Promises). */
+function wrapImporter(imp, async) {
   return {
     canonicalize(url, fromImport, containingHref) {
-      const r = imp.canonicalize(url, ctxFor(fromImport, containingHref));
-      if (isThenable(r)) throw new Error(ASYNC_UNSUPPORTED);
-      return r == null ? null : toHref(r);
+      return settle(imp.canonicalize(url, ctxFor(fromImport, containingHref)), toHref, async);
     },
     load(canonicalHref) {
-      const r = imp.load(new URL(canonicalHref));
-      if (isThenable(r)) throw new Error(ASYNC_UNSUPPORTED);
-      if (r == null) return null;
-      return {
-        contents: r.contents,
-        syntax: syntaxCode(r.syntax),
-        sourceMapUrl: r.sourceMapUrl != null ? String(r.sourceMapUrl) : null,
-      };
+      return settle(imp.load(new URL(canonicalHref)), loadMap, async);
     },
   };
 }
@@ -252,28 +259,27 @@ function wrapImporter(imp) {
 /**
  * Wrap a user `{ findFileUrl }` dart-sass FileImporter: `findFileUrl` returns a
  * `file:` URL, which we then resolve on disk with the standard partial/index
- * precedence and read.
+ * precedence and read. (`async` = await an async `findFileUrl`.)
  */
-function wrapFileImporter(imp) {
+function wrapFileImporter(imp, async) {
+  const finish = (r, fromImport) => {
+    if (r == null) return null;
+    const fileUrl = r instanceof URL ? r : new URL(r);
+    if (fileUrl.protocol !== "file:") {
+      throw new Error(
+        `sasso: FileImporter.findFileUrl must return a file: URL, got ${fileUrl.protocol}`,
+      );
+    }
+    const target = fileURLToPath(fileUrl);
+    const resolved = resolveInBase(nodePath.dirname(target), nodePath.basename(target), fromImport);
+    return !resolved || resolved === "ambiguous" ? null : canonicalHrefFor(resolved);
+  };
   return {
     canonicalize(url, fromImport, containingHref) {
-      const r = imp.findFileUrl(url, ctxFor(fromImport, containingHref));
-      if (isThenable(r)) throw new Error(ASYNC_UNSUPPORTED);
-      if (r == null) return null;
-      const fileUrl = r instanceof URL ? r : new URL(r);
-      if (fileUrl.protocol !== "file:") {
-        throw new Error(
-          `sasso: FileImporter.findFileUrl must return a file: URL, got ${fileUrl.protocol}`,
-        );
-      }
-      const target = fileURLToPath(fileUrl);
-      const resolved = resolveInBase(
-        nodePath.dirname(target),
-        nodePath.basename(target),
-        fromImport,
-      );
-      if (!resolved || resolved === "ambiguous") return null;
-      return canonicalHrefFor(resolved);
+      const raw = imp.findFileUrl(url, ctxFor(fromImport, containingHref));
+      if (async) return Promise.resolve(raw).then((r) => finish(r, fromImport));
+      if (isThenable(raw)) throw new Error(ASYNC_UNSUPPORTED);
+      return finish(raw, fromImport);
     },
     load(canonicalHref) {
       try {
@@ -285,13 +291,17 @@ function wrapFileImporter(imp) {
   };
 }
 
-/** Normalize one user importer (Importer or FileImporter) to the chain interface. */
-export function normalizeImporter(imp) {
+/**
+ * Normalize one user importer (Importer or FileImporter) to the chain interface.
+ * Pass `async = true` for the asyncified engine (callbacks may return Promises);
+ * the default (sync engine) rejects Promises with a clear error.
+ */
+export function normalizeImporter(imp, async = false) {
   if (imp && typeof imp.canonicalize === "function" && typeof imp.load === "function") {
-    return wrapImporter(imp);
+    return wrapImporter(imp, async);
   }
   if (imp && typeof imp.findFileUrl === "function") {
-    return wrapFileImporter(imp);
+    return wrapFileImporter(imp, async);
   }
   throw new Error(
     "sasso: each importer must be a dart-sass Importer ({ canonicalize, load }) " +

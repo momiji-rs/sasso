@@ -1,9 +1,14 @@
 // sasso — size-optimized (`-Oz`) wasm build (default).
 // For ~2x throughput at a larger module, import "sasso/speed".
 // Public API mirrors the dart-sass *modern* JS API (drop-in for `sass`).
+// Sync APIs use ./sasso.wasm; the async APIs use the asyncify'd ./sasso.async.wasm
+// (loaded lazily) so asynchronous importers can suspend the engine.
 import { makeApi, Exception, info } from "./_loader.mjs";
 
-const api = makeApi(new URL("./sasso.wasm", import.meta.url));
+const api = makeApi(
+  new URL("./sasso.wasm", import.meta.url),
+  new URL("./sasso.async.wasm", import.meta.url),
+);
 
 export const compile = api.compile;
 export const compileAsync = api.compileAsync;

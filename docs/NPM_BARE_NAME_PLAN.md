@@ -7,8 +7,9 @@
 > `sass` (dart-sass) npm package.
 >
 > **Progress:** hard-cut rename ✅ · **Phase 1 (modern JS API) ✅** · **Phase 2
-> (importers — synchronous) ✅** · Phase 2.5 (async importers via Asyncify) → the
-> remaining gap for a full sass-loader/Vite drop-in. Not yet published.
+> (sync importers) ✅** · **Phase 2.5 (async importers via Asyncify) ✅ — full
+> zero-config sass-loader + Vite drop-in, cross-file imports and all.** Phase 3
+> (CLI bin) → next. `sasso@0.7.0` published (Phases 1+2); 2.5 ships next cut.
 
 ## Why the bare name matters
 
@@ -175,22 +176,28 @@ interface CompileResult { css: string; loadedUrls: URL[]; sourceMap?: RawSourceM
   `@use`/`@import` from disk. Tested for both wasm variants in `wasm/test.mjs`;
   CI job `wasm-npm` builds + runs it.
 
-  ⚠️ **THE SYNC LIMITATION IS SHARPER THAN EXPECTED — it gates the drop-in.**
-  The engine is synchronous, so importer callbacks must return synchronously; a
-  Promise throws a clear error (even under `compileStringAsync`). But verification
-  found that **both sass-loader (its `webpackImporter`) and Vite (its
-  `internalImporter`) inject *async* importers by default.** So:
-  - **Direct JS API** (`compileString`/`compile` + `loadPaths` + sync
-    `Importer`/`FileImporter`): cross-file imports fully work. ✅
-  - **sass-loader:** set **`webpackImporter: false`** + use `sassOptions.loadPaths`
-    → imports resolve via sasso's sync fs importer. ✅ (Verified.) The default
-    async webpack importer is unsupported. ❌
-  - **Vite:** its async importer can't be disabled → cross-file imports do **not**
-    work; only import-free sheets + inline `@use "sass:*"` builtins compile. ❌
-  - Closing the Vite gap (and zero-config sass-loader) requires an **async engine
-    — Phase 2.5 via Asyncify** (`wasm-opt --asyncify`, suspend/resume across the
-    async host call). Deferred; it ~doubles module size and adds overhead, so it
-    is a deliberate, separate step.
+  The sync engine requires synchronous importers (a Promise throws). Verification
+  found **both sass-loader (`webpackImporter`) and Vite (`internalImporter`)
+  inject *async* importers by default** — closed by Phase 2.5 below.
+
+- **Phase 2.5 — async importers via Asyncify. ✅ DONE 2026-06-23.** A THIRD wasm
+  module, `sasso.async.wasm`, is the size build run through
+  `wasm-opt --asyncify` (only `host_canonicalize`/`host_load` marked as the
+  suspend points). The loader (`_loader.mjs`) now lazily instantiates TWO
+  modules: the fast sync module backs `compileString`/`compile`; the asyncify'd
+  module backs `compileStringAsync`/`compileAsync`/the Compiler API, driving the
+  unwind/rewind loop so a compile SUSPENDS across each `await` of an async
+  importer, then resumes. So:
+  - **Vite** (drives `initAsyncCompiler().compileStringAsync` with its async
+    importer): **zero-config cross-file imports work.** ✅ (Verified vs Vite 8.1.)
+  - **sass-loader** (default async `webpackImporter`): **works, no
+    `webpackImporter:false` needed.** ✅ (Verified vs sass-loader 17.)
+  - The **sync** API still requires sync importers (a Promise throws there) — use
+    the async API for async importers.
+  - Cost: `sasso.async.wasm` ≈ 1.68 MB / 577 KB gzip (~1.55× the sync size
+    build), shipped alongside and **loaded lazily only when an async API is
+    used**, so the sync fast path is untouched. Async compiles SERIALIZE (one
+    asyncify stack; the loader chains them). The async stack region is 1 MiB.
 - **Phase 3 — CLI bin.** `"bin": { "sasso": "./cli.mjs" }`, pure Node + wasm.
   Flags mirror the dart-sass `sass` CLI: `[input] [output]`, `--style`,
   `-I/--load-path`, `--[no-]source-map`, `--embed-sources`, `--stdin`,

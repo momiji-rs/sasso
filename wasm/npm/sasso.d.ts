@@ -43,17 +43,22 @@ export interface ImporterResult {
 }
 
 /**
- * A dart-sass *modern* importer. **Synchronous only** — returning a `Promise`
- * throws (the wasm engine cannot await), even under `compileStringAsync`.
+ * A dart-sass *modern* importer. The callbacks may return a value or a
+ * `Promise` — but the **synchronous** APIs (`compileString`/`compile`) require
+ * the synchronous form (a `Promise` throws there); the **async** APIs
+ * (`compileStringAsync`/`compileAsync`/the Compiler API) accept either.
  */
 export interface Importer {
-  canonicalize(url: string, context: CanonicalizeContext): URL | string | null;
-  load(canonicalUrl: URL): ImporterResult | null;
+  canonicalize(url: string, context: CanonicalizeContext): URL | string | null | Promise<URL | string | null>;
+  load(canonicalUrl: URL): ImporterResult | null | Promise<ImporterResult | null>;
 }
 
-/** A dart-sass *modern* FileImporter (resolved on disk). **Synchronous only.** */
+/**
+ * A dart-sass *modern* FileImporter (resolved on disk). Like {@link Importer},
+ * `findFileUrl` may be async — but only under the async compile APIs.
+ */
 export interface FileImporter {
-  findFileUrl(url: string, context: CanonicalizeContext): URL | string | null;
+  findFileUrl(url: string, context: CanonicalizeContext): URL | string | null | Promise<URL | string | null>;
 }
 
 /** A Source Map v3 (the parsed JSON object). */
@@ -69,7 +74,7 @@ export interface RawSourceMap {
 /** The dart-sass `CompileResult` returned by every `compile*` entry point. */
 export interface CompileResult {
   css: string;
-  /** Canonical URLs of all loaded stylesheets (the entry point in Phase 1). */
+  /** Canonical URLs of all loaded stylesheets (the entry plus every import). */
   loadedUrls: URL[];
   /** Present only when `options.sourceMap` is `true`. */
   sourceMap?: RawSourceMap;

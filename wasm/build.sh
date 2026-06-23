@@ -55,4 +55,30 @@ build_variant() {
 build_variant size  z -Oz npm/sasso.wasm
 build_variant speed 3 -O3 npm/sasso.speed.wasm
 
-echo ">> done: npm/sasso.wasm (size), npm/sasso.speed.wasm (speed)"
+# Async variant: asyncify the size build so the *async* JS APIs (compileStringAsync
+# / compileAsync / the Compiler API) can suspend the whole compile across an
+# `await` and thus support ASYNCHRONOUS importers — the kind sass-loader and Vite
+# inject by default. ~2x the size build, so the loader uses it only on the async
+# path (sync compiles keep the fast non-asyncify'd module). Reuses the size raw.
+build_async() {
+  local raw="target-size/$TARGET/release/sasso_wasm.wasm"
+  local out="npm/sasso.async.wasm"
+  if command -v wasm-opt >/dev/null 2>&1; then
+    echo ">> [async] wasm-opt --asyncify -Oz"
+    wasm-opt "$raw" -o "$out" \
+      --asyncify \
+      --pass-arg=asyncify-imports@sasso_host.host_canonicalize,sasso_host.host_load \
+      -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext
+  else
+    # No wasm-opt -> ship the non-asyncify'd module. The loader detects the
+    # missing asyncify_* exports and degrades gracefully (async importers then
+    # behave as on the sync path).
+    echo "note: wasm-opt not found; async module will NOT support async importers"
+    cp "$raw" "$out"
+  fi
+  local out_sz gz_sz; out_sz=$(wc -c <"$out"); gz_sz=$(gzip -9 -c "$out" | wc -c)
+  printf '   [async] wasm-opt=%s  gzip=%s bytes -> %s\n' "$out_sz" "$gz_sz" "$out"
+}
+build_async
+
+echo ">> done: npm/sasso.wasm (size), npm/sasso.speed.wasm (speed), npm/sasso.async.wasm (async)"

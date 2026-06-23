@@ -67,9 +67,13 @@ compileString(`@use "virtual:colors" as c; .a { color: c.$brand; }`, {
 });
 ```
 
-> ⚠️ **Importers are synchronous only.** The wasm engine is synchronous, so an
-> importer (or `findFileUrl`) that returns a `Promise` throws — even under
-> `compileStringAsync`. This affects build-tool integration (below).
+> **Sync vs. async importers.** The **async** APIs (`compileStringAsync`,
+> `compileAsync`, the Compiler API) support **asynchronous** importers — the kind
+> sass-loader and Vite inject by default — via an `asyncify`'d wasm module that
+> suspends the compile across each `await`. The **synchronous** APIs
+> (`compileString`, `compile`) run a faster non-asyncify'd module and therefore
+> require synchronous importers; an importer (or `findFileUrl`) that returns a
+> `Promise` throws there. Use the async API when your importers are async.
 
 > **Migrating from `@momiji-rs/sasso`?** The old `compile(scss) → string` is now
 > `compileString(scss).css`, and `compile` takes a **file path** (to match
@@ -77,30 +81,21 @@ compileString(`@use "virtual:colors" as c; .a { color: c.$brand; }`, {
 
 ## Drop-in for `sass` in build tools
 
-Both sass-loader and Vite drive sasso through the dart-sass *modern* API, and
-both work for stylesheets without cross-file imports out of the box. Cross-file
-`@use`/`@import` need a little care, because **both tools resolve imports with
-*asynchronous* importers by default**, which sasso's synchronous engine can't
-run (see the warning above).
+Both tools drive sasso through the dart-sass *modern* async API and its default
+asynchronous importer — both work **zero-config**, including cross-file
+`@use`/`@import`.
 
-**webpack / sass-loader** — pass sasso as the implementation. To import across
-files, disable sass-loader's async webpack importer and use `loadPaths` (sasso's
-synchronous filesystem resolver handles relative paths + load paths):
+**webpack / sass-loader** — pass sasso as the implementation:
 
 ```js
 {
   loader: "sass-loader",
-  options: {
-    implementation: require("sasso"),
-    api: "modern",
-    webpackImporter: false,                 // the default importer is async
-    sassOptions: { loadPaths: ["node_modules", "src/styles"] },
-  },
+  options: { implementation: require("sasso"), api: "modern" },
 }
 ```
 
 **Vite** — Vite resolves its Sass implementation by the package name `sass`, so
-alias it to sasso in `package.json`:
+alias it to sasso in `package.json`, then use it as usual:
 
 ```json
 { "devDependencies": { "sass": "npm:sasso@^0.7.0" } }
@@ -110,12 +105,6 @@ alias it to sasso in `package.json`:
 // vite.config.js — modern API (Vite's default)
 export default { css: { preprocessorOptions: { scss: {} } } };
 ```
-
-Vite always resolves imports through its own asynchronous importer, which can't
-be disabled — so under Vite, sasso currently compiles only import-free
-stylesheets (plus inline `@use "sass:*"` built-in modules). Full async-importer
-support (the remaining gap for a zero-config Vite drop-in) is tracked for a
-later release.
 
 > **Phase-1 limitation:** custom importers and `loadPaths` (so `@use` / `@import`
 > resolve files from disk or a bundler resolver) are not wired through the wasm

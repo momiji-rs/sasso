@@ -25,6 +25,7 @@
     "sasso.speed.mjs",
     "sasso.wasm",
     "sasso.speed.wasm",
+    "sasso.async.wasm",
     "sasso.d.ts",
     "sasso.speed.d.ts",
     "README.md",

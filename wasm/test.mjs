@@ -143,7 +143,55 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   const rasync = await mod.compileAsync(mainRel);
   assert.ok(rasync.css.includes("color: blue"), `${name}: compileAsync resolves imports`);
 
-  console.log(`ok: ${name} build — modern API + Compiler API + importers (Phase 1 + 2)`);
+  // === Phase 2.5: ASYNC importers (asyncify suspends the engine across await) ===
+
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  const asyncImporter = {
+    async canonicalize(url) { await delay(2); return url === "remote" ? new URL("custom:remote") : null; },
+    async load(u) { await delay(2); return u.href === "custom:remote" ? { contents: "$c: rebeccapurple;", syntax: "scss" } : null; },
+  };
+
+  // compileStringAsync awaits an async importer that the sync API rejects.
+  const ar = await mod.compileStringAsync(`@use "remote" as r;\n.a { color: r.$c; }\n`, { importers: [asyncImporter] });
+  assert.ok(ar.css.includes("rebeccapurple"), `${name}: async importer suspends/resumes the engine`);
+  assert.ok(ar.loadedUrls.some((u) => u.href === "custom:remote"), `${name}: async importer loadedUrls`);
+  // the SYNC API still rejects the very same async importer
+  assert.throws(() => mod.compileString(`@use "remote";`, { importers: [asyncImporter] }), /asynchronous importers are not supported/, `${name}: sync API rejects async importer`);
+
+  // Compiler API async path (this is exactly how Vite drives it)
+  const acompiler = await mod.initAsyncCompiler();
+  const cr = await acompiler.compileStringAsync(`@use "remote" as r;\n.b { color: r.$c; }\n`, { importers: [asyncImporter] });
+  assert.ok(cr.css.includes("rebeccapurple"), `${name}: Compiler API async importer (Vite path)`);
+  await acompiler.dispose();
+
+  // async FileImporter (async findFileUrl -> on-disk resolution)
+  const asyncFile = {
+    async findFileUrl(url) { await delay(2); return url === "shared" ? pathToFileURL(join(root, "fi", "shared")) : null; },
+  };
+  const af = await mod.compileStringAsync(`@use "shared" as s;\n.a { height: s.$s; }\n`, { importers: [asyncFile] });
+  assert.ok(af.css.includes("height: 10px"), `${name}: async FileImporter`);
+
+  // the async path also resolves plain sync fs imports (loadPaths/relative)
+  const amix = await mod.compileStringAsync(`@use "vars" as v;\n.a { color: v.$c; }\n`, { url: pathToFileURL(mainRel) });
+  assert.ok(amix.css.includes("color: blue"), `${name}: async path resolves sync fs imports`);
+
+  // concurrent async compiles must serialize on the single asyncify stack
+  const [c1, c2] = await Promise.all([
+    mod.compileStringAsync(`@use "remote" as r;\n.x { color: r.$c; }\n`, { importers: [asyncImporter] }),
+    mod.compileStringAsync(`@use "remote" as r;\n.y { color: r.$c; }\n`, { importers: [asyncImporter] }),
+  ]);
+  assert.ok(c1.css.includes(".x") && c1.css.includes("rebeccapurple"), `${name}: concurrent async compile #1`);
+  assert.ok(c2.css.includes(".y") && c2.css.includes("rebeccapurple"), `${name}: concurrent async compile #2`);
+
+  // async importer error -> rejected promise carrying the message
+  const asyncBoom = { canonicalize: async () => new URL("custom:boom2"), load: async () => { throw new Error("async-kaboom"); } };
+  await assert.rejects(() => mod.compileStringAsync(`@use "boom2";`, { importers: [asyncBoom] }), /async-kaboom/, `${name}: async importer error rejects`);
+
+  // after an error the asyncify stack is clean — a subsequent async compile works
+  const recover = await mod.compileStringAsync(`@use "remote" as r;\n.z { color: r.$c; }\n`, { importers: [asyncImporter] });
+  assert.ok(recover.css.includes("rebeccapurple"), `${name}: async engine recovers after an importer error`);
+
+  console.log(`ok: ${name} build — modern + Compiler API + sync & async importers (Phase 1 + 2 + 2.5)`);
 }
 
 console.log("all wasm modern-API + importer tests passed");

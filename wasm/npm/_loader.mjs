@@ -7,18 +7,23 @@
 // The public surface mirrors the dart-sass *modern* JS API — `compileString`,
 // `compileStringAsync`, path-based `compile` / `compileAsync`, the
 // `CompileResult` shape (`{ css, loadedUrls, sourceMap? }`), an `info` string,
-// and an `Exception` error class — so `sasso` is a drop-in for the `sass` npm
-// package (sass-loader `api: "modern"`, Vite). Both the default (size, `-Oz`)
-// and `/speed` (`-O3`) entry points are thin wrappers around
-// `makeApi(<their wasm URL>)`. The wasm is instantiated lazily and
-// synchronously on first use.
+// the Compiler API, and an `Exception` error class — so `sasso` is a drop-in for
+// the `sass` npm package (sass-loader `api: "modern"`, Vite).
 //
-// Phase-2 (see ../../docs/NPM_BARE_NAME_PLAN.md): `@use`/`@forward`/`@import` are
-// resolved by calling back into JS. wasm has no filesystem, so when the engine
-// resolves an import it invokes the host functions installed here, which drive
-// the per-compile importer chain in `_importer.mjs` (user importers + a Node-fs
-// importer for `loadPaths` / relative loads) and record `loadedUrls`. The engine
-// is synchronous, so importer callbacks must be synchronous too.
+// TWO wasm modules (each lazily instantiated):
+//   • a SYNC module (fast) drives the synchronous APIs (`compileString`,
+//     `compile`). A custom importer that returns a Promise is rejected here —
+//     the engine cannot await.
+//   • an ASYNCIFY'd module (built with `wasm-opt --asyncify`) drives the async
+//     APIs (`compileStringAsync`, `compileAsync`, the Compiler API's async
+//     methods). It can SUSPEND the whole compile across an `await`, so
+//     asynchronous importers — the kind sass-loader and Vite inject by default —
+//     work. This is the dart-sass async story without a native binary.
+//
+// Importers (`@use`/`@forward`/`@import`) are resolved by calling back into JS
+// (wasm has no filesystem): the host functions below drive the per-compile
+// importer chain in `_importer.mjs` (user importers + a Node-fs importer for
+// `loadPaths`/relative loads) and record `loadedUrls`.
 
 import { readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -31,6 +36,14 @@ import {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+// Asyncify runtime states (from `asyncify_get_state`).
+const ASYNCIFY_UNWINDING = 1;
+const ASYNCIFY_REWINDING = 2;
+// Asyncify stack-state region: [curr: u32][end: u32] header + this much stack.
+// Sized for a deep compile suspended at a nested import; a spill would corrupt,
+// so we reserve generously (one allocation per async instance).
+const ASYNCIFY_STACK_BYTES = 1 << 20; // 1 MiB
 
 // Package version, for `info`. Read once from the published package.json (the
 // release workflow syncs its `version` to the git tag). Best-effort: outside a
@@ -72,7 +85,6 @@ export const info = `dart-sass\t${DART_SASS_COMPAT}\t(sasso ${VERSION})\t[Rust]`
 /** Coerce a path or URL to a `file:` (or other-scheme) URL for `loadedUrls`. */
 function toFileUrl(pathOrUrl) {
   if (pathOrUrl instanceof URL) return pathOrUrl;
-  // Already a URL string (e.g. "file:///...") — keep its scheme.
   if (typeof pathOrUrl === "string" && /^[a-z][a-z0-9+.-]*:/i.test(pathOrUrl)) {
     return new URL(pathOrUrl);
   }
@@ -92,23 +104,61 @@ function errMessage(e) {
   return e && e.message ? String(e.message) : String(e);
 }
 
+/** Frame an importer load result for the wasm: [syntax][smu?][smuLen][smu][contents]. */
+function frameLoad(res) {
+  const contents = encoder.encode(res.contents);
+  const smu = res.sourceMapUrl != null ? encoder.encode(res.sourceMapUrl) : null;
+  const frame = new Uint8Array(6 + (smu ? smu.length : 0) + contents.length);
+  frame[0] = res.syntax & 0xff;
+  frame[1] = smu ? 1 : 0;
+  new DataView(frame.buffer).setUint32(2, smu ? smu.length : 0, true);
+  let off = 6;
+  if (smu) {
+    frame.set(smu, off);
+    off += smu.length;
+  }
+  frame.set(contents, off);
+  return frame;
+}
+
 /**
- * Build the per-compile importer chain: user `importers` (in order) then a
- * Node-fs importer for `loadPaths` and relative loads. Tracks the canonical URL
- * that resolved each import (so `load` routes back to the right resolver) and
- * the URLs actually loaded (for `loadedUrls`).
+ * Build the per-compile importer chain. `async` selects the asyncify path
+ * (importer callbacks may return Promises and are awaited) vs. the sync path
+ * (a Promise is a hard error). Tracks the resolver that owns each canonical URL
+ * (so `load` routes back) and the URLs actually loaded (for `loadedUrls`).
  */
-function buildChain(options) {
-  const userImporters = (options.importers || []).map(normalizeImporter);
+function buildChain(options, async) {
+  const userImporters = (options.importers || []).map((i) => normalizeImporter(i, async));
   const fsImporter = makeFsImporter(options.loadPaths);
   const resolvers = [...userImporters, fsImporter];
   const byCanonical = new Map();
   const loaded = [];
+  if (async) {
+    return {
+      loaded,
+      async canonicalize(url, fromImport, containing) {
+        for (const r of resolvers) {
+          const canon = await r.canonicalize(url, fromImport, containing);
+          if (canon != null) {
+            byCanonical.set(canon, r);
+            return canon;
+          }
+        }
+        return null;
+      },
+      async load(canon) {
+        const r = byCanonical.get(canon);
+        const res = r ? await r.load(canon) : null;
+        if (res != null) loaded.push(canon);
+        return res;
+      },
+    };
+  }
   return {
     loaded,
-    canonicalize(url, fromImport, containingHref) {
+    canonicalize(url, fromImport, containing) {
       for (const r of resolvers) {
-        const canon = r.canonicalize(url, fromImport, containingHref);
+        const canon = r.canonicalize(url, fromImport, containing);
         if (canon != null) {
           byCanonical.set(canon, r);
           return canon;
@@ -143,29 +193,23 @@ function makeResult(raw, entryHref, loaded) {
 }
 
 /**
- * Build the public API bound to one wasm module URL.
- * @param {URL} wasmUrl
+ * Build the public API bound to one SYNC wasm URL and one ASYNCIFY'd wasm URL
+ * (both lazily instantiated; the async module is loaded only when an async API
+ * is first used).
+ * @param {URL} syncWasmUrl
+ * @param {URL} asyncWasmUrl
  */
-export function makeApi(wasmUrl) {
-  let ex; // cached wasm exports
+export function makeApi(syncWasmUrl, asyncWasmUrl) {
   let pendingArenaBytes = null; // applied at instantiation, before any compile
-  let activeChain = null; // the importer chain for the in-flight compile
 
-  // --- wasm host functions (the import object) ---
-  // The engine calls these (re-entrantly, during a compile) to resolve imports.
-  // They read the request from linear memory, run the active importer chain,
-  // and `deliver` the result back into a `sasso_alloc` buffer whose (ptr, len)
-  // is written into the two out-cells the engine passed. Tri-state return:
-  // 1 = handled, 0 = miss, -1 = error (the buffer then holds the message).
-
-  function readStr(ptr, len) {
+  // --- shared marshalling against an instance's exports ---
+  function readStr(ex, ptr, len) {
     if (!ptr || !len) return "";
     // .slice() copies out of wasm memory immediately, before any alloc below
     // can grow (and detach) the backing buffer.
     return decoder.decode(new Uint8Array(ex.memory.buffer, ptr, len).slice());
   }
-
-  function deliver(bytes, outPtrCell, outLenCell) {
+  function deliver(ex, bytes, outPtrCell, outLenCell) {
     const p = bytes.length ? ex.sasso_alloc(bytes.length) : 0;
     // `sasso_alloc` may have grown memory — take fresh views afterwards.
     if (bytes.length) new Uint8Array(ex.memory.buffer, p, bytes.length).set(bytes);
@@ -174,129 +218,19 @@ export function makeApi(wasmUrl) {
     view.setUint32(outLenCell, bytes.length, true); // *out_len (usize == u32)
   }
 
-  function frameLoad(res) {
-    // [syntax: u8][smu_present: u8][smu_len: u32 LE][smu bytes][contents bytes]
-    const contents = encoder.encode(res.contents);
-    const smu = res.sourceMapUrl != null ? encoder.encode(res.sourceMapUrl) : null;
-    const frame = new Uint8Array(6 + (smu ? smu.length : 0) + contents.length);
-    frame[0] = res.syntax & 0xff;
-    frame[1] = smu ? 1 : 0;
-    new DataView(frame.buffer).setUint32(2, smu ? smu.length : 0, true);
-    let off = 6;
-    if (smu) {
-      frame.set(smu, off);
-      off += smu.length;
-    }
-    frame.set(contents, off);
-    return frame;
-  }
-
-  const hostFns = {
-    host_canonicalize(urlPtr, urlLen, fromImport, cPtr, cLen, outPtr, outLen) {
-      const url = readStr(urlPtr, urlLen);
-      const containing = cLen ? readStr(cPtr, cLen) : null;
-      try {
-        const canon = activeChain
-          ? activeChain.canonicalize(url, fromImport !== 0, containing)
-          : null;
-        if (canon == null) return 0;
-        deliver(encoder.encode(canon), outPtr, outLen);
-        return 1;
-      } catch (e) {
-        deliver(encoder.encode(errMessage(e)), outPtr, outLen);
-        return -1;
-      }
-    },
-    host_load(canonPtr, canonLen, outPtr, outLen) {
-      const canon = readStr(canonPtr, canonLen);
-      try {
-        const res = activeChain ? activeChain.load(canon) : null;
-        if (res == null) return 0;
-        deliver(frameLoad(res), outPtr, outLen);
-        return 1;
-      } catch (e) {
-        deliver(encoder.encode(errMessage(e)), outPtr, outLen);
-        return -1;
-      }
-    },
-  };
-
-  function instance() {
-    if (ex) return ex;
-    const bytes = readFileSync(wasmUrl);
-    const module = new WebAssembly.Module(bytes);
-    ex = new WebAssembly.Instance(module, { sasso_host: hostFns }).exports;
-    // Apply a pending arena override before the first compile reserves it.
-    if (pendingArenaBytes !== null) ex.sasso_set_arena_bytes(pendingArenaBytes);
-    return ex;
-  }
-
-  /**
-   * Configure the bump-arena allocator. MUST be called before the first
-   * compile — the arena region is reserved on first use and then fixed.
-   *
-   * @param {{ arenaMiB?: number }} [options]
-   *   `arenaMiB`: arena reservation in MiB (default 32 at build time). `0`
-   *   disables the arena: every allocation forwards to the system allocator
-   *   (lower memory footprint, slower). Fractional MiB are rounded down.
-   */
-  function configure(options = {}) {
-    if (typeof options.arenaMiB === "number") {
-      pendingArenaBytes = Math.max(0, Math.floor(options.arenaMiB * 1024 * 1024));
-      // Instantiate now (if not already) so the override lands before the
-      // first compile's first allocation reserves the region.
-      instance().sasso_set_arena_bytes(pendingArenaBytes);
-    }
-  }
-
-  /**
-   * Raw compile -> `{ css, sourceMap? }`. Throws {@link Exception} on a Sass
-   * error. The caller installs `activeChain` first; the host functions above
-   * service any imports the engine hits during the call.
-   */
-  function compileRaw(scss, { compressed, syntax, url, wantMap, includeSources }) {
-    const w = instance();
-    const input = encoder.encode(scss);
-    const urlBytes = url ? encoder.encode(url) : null;
-    const urlLen = urlBytes ? urlBytes.length : 0;
-
-    // Allocate input + url + an 8-byte scratch cell ([outLen: u32][ok: u8]) up
-    // front, then write — so a memory grow during alloc can't strand a view.
-    const inPtr = input.length ? w.sasso_alloc(input.length) : 0;
-    const urlPtr = urlLen ? w.sasso_alloc(urlLen) : 0;
-    const scratch = w.sasso_alloc(8);
-    if (input.length) new Uint8Array(w.memory.buffer, inPtr, input.length).set(input);
-    if (urlLen) new Uint8Array(w.memory.buffer, urlPtr, urlLen).set(urlBytes);
-
-    const outPtr = w.sasso_compile2(
-      inPtr,
-      input.length,
-      compressed ? 1 : 0,
-      syntax,
-      1, // use_importer: the chain (incl. the fs importer) is always installed
-      urlPtr,
-      urlLen,
-      wantMap ? 1 : 0,
-      includeSources ? 1 : 0,
-      scratch,
-      scratch + 4,
-    );
-
-    // Re-read against the current buffer (compile may have grown memory).
+  // Read the result buffer after a sasso_compile2 call, free scratch, and throw
+  // on a Sass error. Shared by the sync and async drivers.
+  function readResult(w, outPtr, scratch, inPtr, inLen, urlPtr, urlLen, wantMap) {
     const view = new DataView(w.memory.buffer);
     const outLen = view.getUint32(scratch, true);
     const ok = view.getUint8(scratch + 4);
     const out = new Uint8Array(w.memory.buffer, outPtr, outLen).slice();
-
-    if (input.length) w.sasso_free(inPtr, input.length);
+    if (inLen) w.sasso_free(inPtr, inLen);
     if (urlLen) w.sasso_free(urlPtr, urlLen);
     w.sasso_free(scratch, 8);
     w.sasso_free(outPtr, outLen);
-
     if (!ok) throw new Exception(decoder.decode(out));
     if (!wantMap) return { css: decoder.decode(out) };
-
-    // Framed result: [cssLen: u32 LE][css bytes][sourceMap JSON bytes].
     const cssLen = new DataView(out.buffer, out.byteOffset, 4).getUint32(0, true);
     return {
       css: decoder.decode(out.subarray(4, 4 + cssLen)),
@@ -304,74 +238,262 @@ export function makeApi(wasmUrl) {
     };
   }
 
-  // Run one compile with its importer chain installed, then assemble the result.
-  function runCompile(source, options, entryHref, syntax) {
-    const chain = buildChain(options);
-    const prev = activeChain;
-    activeChain = chain;
-    let raw;
-    try {
-      raw = compileRaw(source, {
-        compressed: options.style === "compressed",
-        syntax,
-        url: entryHref,
-        wantMap: !!options.sourceMap,
-        includeSources: !!options.sourceMapIncludeSources,
-      });
-    } finally {
-      activeChain = prev;
-    }
-    return makeResult(raw, entryHref, chain.loaded);
+  // Allocate input + url + scratch and write them in. Returns the handles the
+  // driver passes to sasso_compile2 and on to readResult.
+  function marshalIn(w, scss, opts) {
+    const input = encoder.encode(scss);
+    const urlBytes = opts.url ? encoder.encode(opts.url) : null;
+    const urlLen = urlBytes ? urlBytes.length : 0;
+    const inPtr = input.length ? w.sasso_alloc(input.length) : 0;
+    const urlPtr = urlLen ? w.sasso_alloc(urlLen) : 0;
+    const scratch = w.sasso_alloc(8);
+    if (input.length) new Uint8Array(w.memory.buffer, inPtr, input.length).set(input);
+    if (urlLen) new Uint8Array(w.memory.buffer, urlPtr, urlLen).set(urlBytes);
+    return { inPtr, inLen: input.length, urlPtr, urlLen, scratch };
   }
 
-  // --- dart-sass *modern* API ---
+  function callCompile2(w, m, opts) {
+    return w.sasso_compile2(
+      m.inPtr, m.inLen, opts.compressed ? 1 : 0, opts.syntax, 1,
+      m.urlPtr, m.urlLen, opts.wantMap ? 1 : 0, opts.includeSources ? 1 : 0,
+      m.scratch, m.scratch + 4,
+    );
+  }
 
-  /**
-   * Compile an SCSS source string. dart-sass `compileString`.
-   *
-   * @param {string} source
-   * @param {{ style?, sourceMap?, sourceMapIncludeSources?, syntax?, url?,
-   *   loadPaths?: string[], importers?: object[] }} [options]
-   */
+  // ============================ SYNC instance ============================
+  let syncEx; // cached sync exports
+  let syncChain = null; // importer chain for the in-flight sync compile
+
+  const syncHost = {
+    host_canonicalize(uPtr, uLen, fromImport, cPtr, cLen, outPtr, outLen) {
+      const url = readStr(syncEx, uPtr, uLen);
+      const containing = cLen ? readStr(syncEx, cPtr, cLen) : null;
+      try {
+        const canon = syncChain ? syncChain.canonicalize(url, fromImport !== 0, containing) : null;
+        if (canon == null) return 0;
+        deliver(syncEx, encoder.encode(canon), outPtr, outLen);
+        return 1;
+      } catch (e) {
+        deliver(syncEx, encoder.encode(errMessage(e)), outPtr, outLen);
+        return -1;
+      }
+    },
+    host_load(kPtr, kLen, outPtr, outLen) {
+      const canon = readStr(syncEx, kPtr, kLen);
+      try {
+        const res = syncChain ? syncChain.load(canon) : null;
+        if (res == null) return 0;
+        deliver(syncEx, frameLoad(res), outPtr, outLen);
+        return 1;
+      } catch (e) {
+        deliver(syncEx, encoder.encode(errMessage(e)), outPtr, outLen);
+        return -1;
+      }
+    },
+  };
+
+  function syncInstance() {
+    if (syncEx) return syncEx;
+    const module = new WebAssembly.Module(readFileSync(syncWasmUrl));
+    syncEx = new WebAssembly.Instance(module, { sasso_host: syncHost }).exports;
+    if (pendingArenaBytes !== null) syncEx.sasso_set_arena_bytes(pendingArenaBytes);
+    return syncEx;
+  }
+
+  function compileRawSync(scss, opts) {
+    const w = syncInstance();
+    const m = marshalIn(w, scss, opts);
+    const outPtr = callCompile2(w, m, opts);
+    return readResult(w, outPtr, m.scratch, m.inPtr, m.inLen, m.urlPtr, m.urlLen, opts.wantMap);
+  }
+
+  // ========================== ASYNCIFY instance ==========================
+  let asyncEx; // cached asyncify'd exports
+  let asyncData = 0; // asyncify stack-state struct pointer
+  let asyncReady = false; // module actually carries the asyncify_* exports
+  let asyncChain = null; // importer chain for the in-flight async compile
+  let pendingDelivery = null; // a Promise<{rc, bytes}>, then its resolved value
+  let asyncLock = Promise.resolve(); // serialize async compiles (one asyncify stack)
+
+  // On a normal call, kick off the (possibly async) chain lookup, suspend the
+  // engine, and stash a Promise<{rc, bytes}>. On the rewind re-entry, stop the
+  // rewind and hand that delivery back to the engine.
+  function asyncHostFn(lookup, encodeOk) {
+    return (...args) => {
+      const outPtr = args[args.length - 2];
+      const outLen = args[args.length - 1];
+      if (asyncEx.asyncify_get_state() === ASYNCIFY_REWINDING) {
+        asyncEx.asyncify_stop_rewind();
+        const d = pendingDelivery;
+        pendingDelivery = null;
+        if (!d || d.rc === 0) return 0;
+        deliver(asyncEx, d.bytes, outPtr, outLen);
+        return d.rc;
+      }
+      pendingDelivery = Promise.resolve()
+        .then(() => lookup(args))
+        .then((v) => (v == null ? { rc: 0 } : { rc: 1, bytes: encodeOk(v) }))
+        .catch((e) => ({ rc: -1, bytes: encoder.encode(errMessage(e)) }));
+      asyncEx.asyncify_start_unwind(asyncData);
+      return 0; // ignored while unwinding
+    };
+  }
+
+  const asyncHost = {
+    host_canonicalize: asyncHostFn(
+      (args) => {
+        const url = readStr(asyncEx, args[0], args[1]);
+        const containing = args[4] ? readStr(asyncEx, args[3], args[4]) : null;
+        return asyncChain.canonicalize(url, args[2] !== 0, containing);
+      },
+      (canon) => encoder.encode(canon),
+    ),
+    host_load: asyncHostFn(
+      (args) => asyncChain.load(readStr(asyncEx, args[0], args[1])),
+      (res) => frameLoad(res),
+    ),
+  };
+
+  function asyncInstance() {
+    if (asyncEx) return asyncEx;
+    const module = new WebAssembly.Module(readFileSync(asyncWasmUrl));
+    asyncEx = new WebAssembly.Instance(module, { sasso_host: asyncHost }).exports;
+    if (pendingArenaBytes !== null) asyncEx.sasso_set_arena_bytes(pendingArenaBytes);
+    asyncReady = typeof asyncEx.asyncify_start_unwind === "function";
+    if (asyncReady) {
+      asyncData = asyncEx.sasso_alloc(8 + ASYNCIFY_STACK_BYTES);
+      const v = new DataView(asyncEx.memory.buffer);
+      v.setUint32(asyncData, asyncData + 8, true); // current stack pointer
+      v.setUint32(asyncData + 4, asyncData + 8 + ASYNCIFY_STACK_BYTES, true); // end
+    }
+    return asyncEx;
+  }
+
+  // Drives the asyncify unwind/rewind loop so async importers can suspend.
+  async function compileRawAsync(scss, opts) {
+    const w = asyncInstance();
+    const m = marshalIn(w, scss, opts);
+    let outPtr = callCompile2(w, m, opts);
+    if (asyncReady) {
+      while (w.asyncify_get_state() === ASYNCIFY_UNWINDING) {
+        w.asyncify_stop_unwind();
+        pendingDelivery = await pendingDelivery; // Promise<{rc,bytes}> -> value
+        w.asyncify_start_rewind(asyncData);
+        outPtr = callCompile2(w, m, opts);
+      }
+    }
+    return readResult(w, outPtr, m.scratch, m.inPtr, m.inLen, m.urlPtr, m.urlLen, opts.wantMap);
+  }
+
+  function rawOpts(options, syntax) {
+    return {
+      compressed: options.style === "compressed",
+      syntax,
+      url: options.url ? toFileUrl(options.url).href : null,
+      wantMap: !!options.sourceMap,
+      includeSources: !!options.sourceMapIncludeSources,
+    };
+  }
+
+  // ------------------------- configure -------------------------
+  function configure(options = {}) {
+    if (typeof options.arenaMiB === "number") {
+      pendingArenaBytes = Math.max(0, Math.floor(options.arenaMiB * 1024 * 1024));
+      // Apply to whichever instances already exist (and stash for the rest).
+      if (syncEx) syncEx.sasso_set_arena_bytes(pendingArenaBytes);
+      if (asyncEx) asyncEx.sasso_set_arena_bytes(pendingArenaBytes);
+      if (!syncEx && !asyncEx) syncInstance().sasso_set_arena_bytes(pendingArenaBytes);
+    }
+  }
+
+  // --------------------- dart-sass *modern* API ---------------------
+
   function compileString(source, options = {}) {
     if (typeof source !== "string") {
       throw new TypeError("compileString(source): source must be a string");
     }
-    const entryHref = options.url ? toFileUrl(options.url).href : null;
-    return runCompile(source, options, entryHref, syntaxCode(options.syntax));
+    const chain = buildChain(options, false);
+    const prev = syncChain;
+    syncChain = chain;
+    let raw;
+    try {
+      raw = compileRawSync(source, rawOpts(options, syntaxCode(options.syntax)));
+    } finally {
+      syncChain = prev;
+    }
+    return makeResult(raw, options.url ? toFileUrl(options.url).href : null, chain.loaded);
   }
 
-  /**
-   * Compile an SCSS file by path. dart-sass `compile` — **Node only** (reads
-   * the file from disk). For an in-memory string, use {@link compileString}.
-   *
-   * @param {string|URL} path
-   * @param {object} [options] same as {@link compileString} (minus `url`)
-   */
   function compile(path, options = {}) {
     const fsPath = toFsPath(path);
     const source = readFileSync(fsPath, "utf8");
-    // Realpath the entry so its URL matches the canonical URL the fs importer
-    // derives for the same file (it realpaths too) — keeps `loadedUrls`
-    // consistent and lets a relative self-import dedup against the entry.
     let realPath = fsPath;
     try {
       realPath = realpathSync(fsPath);
     } catch {
-      // keep fsPath if realpath fails (e.g. unusual mounts)
+      // keep fsPath if realpath fails
     }
     const entryHref = toFileUrl(realPath).href;
     const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(realPath);
-    return runCompile(source, options, entryHref, syntax);
+    const chain = buildChain(options, false);
+    const prev = syncChain;
+    syncChain = chain;
+    let raw;
+    try {
+      raw = compileRawSync(source, { ...rawOpts(options, syntax), url: entryHref });
+    } finally {
+      syncChain = prev;
+    }
+    return makeResult(raw, entryHref, chain.loaded);
   }
 
-  // Async variants: the engine is synchronous, so these just resolve the sync
-  // result (a thrown error becomes a rejected promise via the async function).
-  async function compileStringAsync(source, options) {
-    return compileString(source, options);
+  // Async APIs run on the asyncify'd module and SERIALIZE (one asyncify stack).
+  function runAsyncLocked(task) {
+    const result = asyncLock.then(task, task);
+    asyncLock = result.then(
+      () => {},
+      () => {},
+    );
+    return result;
   }
-  async function compileAsync(path, options) {
-    return compile(path, options);
+
+  function compileStringAsync(source, options = {}) {
+    return runAsyncLocked(async () => {
+      if (typeof source !== "string") {
+        throw new TypeError("compileStringAsync(source): source must be a string");
+      }
+      const chain = buildChain(options, true);
+      asyncChain = chain;
+      try {
+        const raw = await compileRawAsync(source, rawOpts(options, syntaxCode(options.syntax)));
+        return makeResult(raw, options.url ? toFileUrl(options.url).href : null, chain.loaded);
+      } finally {
+        asyncChain = null;
+      }
+    });
+  }
+
+  function compileAsync(path, options = {}) {
+    return runAsyncLocked(async () => {
+      const fsPath = toFsPath(path);
+      const source = readFileSync(fsPath, "utf8");
+      let realPath = fsPath;
+      try {
+        realPath = realpathSync(fsPath);
+      } catch {
+        // keep fsPath
+      }
+      const entryHref = toFileUrl(realPath).href;
+      const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(realPath);
+      const chain = buildChain(options, true);
+      asyncChain = chain;
+      try {
+        const raw = await compileRawAsync(source, { ...rawOpts(options, syntax), url: entryHref });
+        return makeResult(raw, entryHref, chain.loaded);
+      } finally {
+        asyncChain = null;
+      }
+    });
   }
 
   // dart-sass Compiler API (1.70+). Vite's scss pipeline calls
