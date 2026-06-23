@@ -3,7 +3,7 @@
 // as the default "sasso" entry point. Sync APIs use the speed module; the async
 // APIs share the size-optimized asyncify'd module (the async path is
 // importer-I/O bound, so its raw throughput matters little).
-import { makeApi, Exception, info } from "./_loader.mjs";
+import { makeApi, Exception, info, Logger } from "./_loader.mjs";
 import { valueApi } from "./_value.mjs";
 
 const api = makeApi(
@@ -18,7 +18,7 @@ export const compileStringAsync = api.compileStringAsync;
 export const initCompiler = api.initCompiler;
 export const initAsyncCompiler = api.initAsyncCompiler;
 export const configure = api.configure;
-export { Exception, info };
+export { Exception, info, Logger };
 export {
   Value,
   SassBoolean,
@@ -36,4 +36,4 @@ export {
   sassFalse,
   sassNull,
 } from "./_value.mjs";
-export default { ...api, Exception, ...valueApi };
+export default { ...api, Exception, Logger, ...valueApi };

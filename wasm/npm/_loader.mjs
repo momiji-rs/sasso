@@ -83,6 +83,11 @@ export class Exception extends Error {
 const DART_SASS_COMPAT = "1.89.0";
 export const info = `dart-sass\t${DART_SASS_COMPAT}\t(sasso ${VERSION})\t[Rust]`;
 
+/** dart-sass `Logger` namespace. `Logger.silent` discards all warnings/debugs. */
+export const Logger = {
+  silent: { warn() {}, debug() {} },
+};
+
 /** Coerce a path or URL to a `file:` (or other-scheme) URL for `loadedUrls`. */
 function toFileUrl(pathOrUrl) {
   if (pathOrUrl instanceof URL) return pathOrUrl;
@@ -284,6 +289,57 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
   let syncEx; // cached sync exports
   let syncChain = null; // importer chain for the in-flight sync compile
   let syncFunctions = []; // index -> user custom function for the in-flight compile
+  let syncLogger = null; // dart-sass `logger` for the in-flight sync compile
+
+  // Decode a host_warn buffer (see wasm/src/lib.rs make_host_warn).
+  function decodeWarn(ex, ptr, len) {
+    const view = new DataView(ex.memory.buffer, ptr, len);
+    let o = 0;
+    const kind = view.getUint8(o);
+    o += 1;
+    const deprecation = view.getUint8(o) !== 0;
+    o += 1;
+    const line = view.getUint32(o, true);
+    o += 4;
+    const rs = () => {
+      const n = view.getUint32(o, true);
+      o += 4;
+      const s = readStr(ex, ptr + o, n);
+      o += n;
+      return s;
+    };
+    const deprecationId = rs();
+    const url = rs();
+    const message = rs();
+    const formatted = rs();
+    return { kind, deprecation, line, deprecationId, url, message, formatted };
+  }
+  // A best-effort SourceSpan (full span is a separate item); enough for the
+  // common `span.url` / `span.start.line` reads. Lines are 0-based, like dart.
+  function spanOf(ev) {
+    if (!ev.url && !ev.line) return undefined;
+    const start = { line: ev.line > 0 ? ev.line - 1 : 0, column: 0 };
+    return { url: ev.url || undefined, start, end: start, text: "", context: "" };
+  }
+  // Print the formatted block to stderr (matching native sasso/dart output).
+  function defaultLog(ev) {
+    if (typeof process !== "undefined" && process.stderr) process.stderr.write(ev.formatted + "\n");
+    else console.error(ev.formatted);
+  }
+  // Route a decoded diagnostic to the in-flight `logger`, else print it.
+  function dispatchWarn(logger, ev) {
+    if (ev.kind === 1) {
+      if (logger && typeof logger.debug === "function") return logger.debug(ev.message, { span: spanOf(ev) });
+    } else if (logger && typeof logger.warn === "function") {
+      return logger.warn(ev.message, {
+        deprecation: ev.deprecation,
+        deprecationType: ev.deprecationId || undefined,
+        span: spanOf(ev),
+        stack: undefined,
+      });
+    }
+    defaultLog(ev);
+  }
 
   const syncHost = {
     host_canonicalize(uPtr, uLen, fromImport, cPtr, cLen, outPtr, outLen) {
@@ -326,6 +382,13 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       } catch (e) {
         deliver(syncEx, encoder.encode(errMessage(e)), outPtr, outLen);
         return -1;
+      }
+    },
+    host_warn(bufPtr, bufLen) {
+      try {
+        dispatchWarn(syncLogger, decodeWarn(syncEx, bufPtr, bufLen));
+      } catch {
+        // A logging failure must never fail the compile.
       }
     },
   };
@@ -373,6 +436,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
   let asyncReady = false; // module actually carries the asyncify_* exports
   let asyncChain = null; // importer chain for the in-flight async compile
   let asyncFunctions = []; // index -> user custom function for the in-flight compile
+  let asyncLogger = null; // dart-sass `logger` for the in-flight async compile
   let pendingDelivery = null; // a Promise<{rc, bytes}>, then its resolved value
   let asyncLock = Promise.resolve(); // serialize async compiles (one asyncify stack)
 
@@ -426,6 +490,13 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       },
       (v) => serializeValue(v),
     ),
+    host_warn(bufPtr, bufLen) {
+      try {
+        dispatchWarn(asyncLogger, decodeWarn(asyncEx, bufPtr, bufLen));
+      } catch {
+        // A logging failure must never fail the compile.
+      }
+    },
   };
 
   function asyncInstance() {
@@ -490,14 +561,17 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     const callbacks = registerFunctions(syncInstance(), options);
     const prevChain = syncChain;
     const prevFns = syncFunctions;
+    const prevLog = syncLogger;
     syncChain = chain;
     syncFunctions = callbacks;
+    syncLogger = options.logger ?? null;
     let raw;
     try {
       raw = compileRawSync(source, rawOpts(options, syntaxCode(options.syntax)));
     } finally {
       syncChain = prevChain;
       syncFunctions = prevFns;
+      syncLogger = prevLog;
       syncEx.sasso_clear_functions();
     }
     return makeResult(raw, options.url ? toFileUrl(options.url).href : null, chain.loaded);
@@ -518,14 +592,17 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     const callbacks = registerFunctions(syncInstance(), options);
     const prevChain = syncChain;
     const prevFns = syncFunctions;
+    const prevLog = syncLogger;
     syncChain = chain;
     syncFunctions = callbacks;
+    syncLogger = options.logger ?? null;
     let raw;
     try {
       raw = compileRawSync(source, { ...rawOpts(options, syntax), url: entryHref });
     } finally {
       syncChain = prevChain;
       syncFunctions = prevFns;
+      syncLogger = prevLog;
       syncEx.sasso_clear_functions();
     }
     return makeResult(raw, entryHref, chain.loaded);
@@ -550,12 +627,14 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       const callbacks = registerFunctions(asyncInstance(), options);
       asyncChain = chain;
       asyncFunctions = callbacks;
+      asyncLogger = options.logger ?? null;
       try {
         const raw = await compileRawAsync(source, rawOpts(options, syntaxCode(options.syntax)));
         return makeResult(raw, options.url ? toFileUrl(options.url).href : null, chain.loaded);
       } finally {
         asyncChain = null;
         asyncFunctions = [];
+        asyncLogger = null;
         asyncEx.sasso_clear_functions();
       }
     });
@@ -577,12 +656,14 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       const callbacks = registerFunctions(asyncInstance(), options);
       asyncChain = chain;
       asyncFunctions = callbacks;
+      asyncLogger = options.logger ?? null;
       try {
         const raw = await compileRawAsync(source, { ...rawOpts(options, syntax), url: entryHref });
         return makeResult(raw, entryHref, chain.loaded);
       } finally {
         asyncChain = null;
         asyncFunctions = [];
+        asyncLogger = null;
         asyncEx.sasso_clear_functions();
       }
     });

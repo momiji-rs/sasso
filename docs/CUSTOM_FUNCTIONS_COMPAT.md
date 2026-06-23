@@ -103,12 +103,18 @@ against dart-sass (`sass` npm) for message/behaviour parity.
    `assertNoUnits` (`Expected 5px to have no units.`) now use dart's `Expected … to
    …` form instead of the `… is not …` form. All 18 (with/without `$name:`)
    verified byte-identical; locked in test.mjs.
-3. **`logger` option** (`@warn` / `@debug` / deprecation warnings) — **real gap:
-   the core `eprintln!`s these, which the wasm/npm build drops entirely**, so a
-   build tool gets no warning output. Add a warning sink in the core (host
-   callback, like `functions`/`importer`), a `host_warn` wasm import, and a JS
-   `logger` option (`{ warn(message, opts), debug(message, opts) }`) defaulting to
-   `console.warn`/`console.error`. Carries `deprecation`/`span`-ish opts as dart.
+3. **`logger` option** (`@warn` / `@debug` / deprecation warnings) ✅ DONE — the
+   core now routes every `@warn`/`@debug`/deprecation through a `WarnHandler`
+   (`Options::with_warn_handler`, threaded into `EvalOptions`) instead of
+   `eprintln!`; the handler-less path still prints byte-identically to stderr
+   (native CLI unchanged). The wasm layer adds a `host_warn` import; the JS layer
+   adds a `logger` option (`{ warn(message, opts), debug(message, opts) }`,
+   dart-shaped: `opts.deprecation`/`deprecationType`/`span`) + `Logger.silent`,
+   defaulting to stderr. **Fixes the real gap** — `@warn`/`@debug` were silently
+   dropped in the npm build. Verified vs dart-sass 1.101: `@warn`/`@debug`/the
+   `@import` deprecation/async all route; tested in test.mjs. *(Note: sasso emits
+   only the `@import` deprecation today — other deprecation IDs like `slash-div`
+   aren't detected yet; that's a separate conformance item, not a logger gap.)*
 4. **`charset` option** + CLI `--no-charset` — `charset: false` suppresses the
    `@charset "UTF-8";` / BOM prefix (core emits it whenever output is non-ASCII).
 5. **CLI flags** — `--embed-source-map` (inline data-URI map), `--no-charset`,

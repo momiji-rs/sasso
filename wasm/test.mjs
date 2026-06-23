@@ -439,6 +439,17 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
   expectMsg(() => idxList.sassIndexToListIndex(new SassNumber(9)), "Invalid index 9 for a list with 2 elements.", "msg: index out of range");
   expectMsg(() => new SassString("hi").sassIndexToStringIndex(new SassNumber(9)), "Invalid index 9 for a string with 2 characters.", "msg: string index out of range");
 
+  // Polish: logger option — @warn / @debug routed to the JS logger (dart shape)
+  const logged = [];
+  size.compileString('@warn "wmsg"; @debug 1 + 2; .a { b: c; }', {
+    logger: {
+      warn: (m, o) => logged.push(["warn", m, o.deprecation]),
+      debug: (m) => logged.push(["debug", m]),
+    },
+  });
+  assert.deepEqual(logged, [["warn", "wmsg", false], ["debug", "3"]], "logger: @warn + @debug routed");
+  assert.equal(typeof size.Logger.silent.warn, "function", "logger: Logger.silent present");
+
   console.log("ok: custom functions — number/string/color/list/map/rest, override, error, async (Phase 4)");
 }
 

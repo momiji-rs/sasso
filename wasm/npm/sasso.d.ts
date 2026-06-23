@@ -21,10 +21,36 @@ export interface Options {
    * (`compileStringAsync`/`compileAsync`); the sync APIs throw on a Promise.
    */
   functions?: Record<string, CustomFunction>;
+  /**
+   * Diagnostic handler for `@warn` / `@debug` / deprecation warnings. When
+   * omitted, they print to stderr. Pass {@link Logger.silent} to discard them.
+   */
+  logger?: Logger;
 }
 
 /** A host-defined Sass function. */
 export type CustomFunction = (args: Value[]) => Value | Promise<Value>;
+
+/** A diagnostic handler (dart-sass `Logger`). */
+export interface Logger {
+  warn?(message: string, options: { deprecation: boolean; deprecationType?: string; span?: SourceSpan; stack?: string }): void;
+  debug?(message: string, options: { span?: SourceSpan }): void;
+}
+
+/** dart-sass `Logger` namespace. */
+export const Logger: {
+  /** A logger that discards every warning and debug message. */
+  silent: Logger;
+};
+
+/** A (partial) source span attached to a diagnostic. */
+export interface SourceSpan {
+  url?: string;
+  start: { line: number; column: number };
+  end: { line: number; column: number };
+  text: string;
+  context: string;
+}
 
 export interface StringOptions extends Options {
   /**
@@ -346,6 +372,7 @@ declare const _default: {
   configure: typeof configure;
   info: typeof info;
   Exception: typeof Exception;
+  Logger: typeof Logger;
   Value: typeof Value;
   SassBoolean: typeof SassBoolean;
   SassString: typeof SassString;

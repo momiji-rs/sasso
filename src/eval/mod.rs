@@ -617,6 +617,9 @@ pub(crate) struct EvalOptions<'a> {
     pub url: &'a str,
     /// The glyph set for snippet/gutter decoration (ASCII under `--no-unicode`).
     pub glyphs: crate::diag::GlyphSet,
+    /// Diagnostic handler (dart-sass `logger`). When set, `@warn`/`@debug`/
+    /// deprecation warnings are delivered here instead of printed to stderr.
+    pub warn: Option<&'a crate::WarnHandler>,
 }
 
 pub(crate) struct Evaluator<'a> {
@@ -1470,7 +1473,16 @@ impl<'a> Evaluator<'a> {
         ));
         block.push('\n');
         block.push_str(&Self::render_frame_block(&frames, 4));
-        eprintln!("{block}\n");
+        let formatted = format!("{block}\n");
+        self.emit_diag(crate::WarnEvent {
+            kind: crate::WarnKind::Warn,
+            deprecation: true,
+            deprecation_id: dep.id,
+            message: &dep.message,
+            formatted: &formatted,
+            url: &self.current_url,
+            line: pos.line,
+        });
     }
 
     /// Emit the aggregate "N repetitive deprecation warnings omitted" footer at
@@ -1479,10 +1491,20 @@ impl<'a> Evaluator<'a> {
         if self.deprecations_omitted == 0 {
             return;
         }
-        eprintln!(
-            "WARNING: {} repetitive deprecation warnings omitted.\nRun in verbose mode to see all warnings.\n",
+        let msg = format!(
+            "{} repetitive deprecation warnings omitted.",
             self.deprecations_omitted
         );
+        let formatted = format!("WARNING: {msg}\nRun in verbose mode to see all warnings.\n");
+        self.emit_diag(crate::WarnEvent {
+            kind: crate::WarnKind::Warn,
+            deprecation: true,
+            deprecation_id: "",
+            message: &msg,
+            formatted: &formatted,
+            url: "",
+            line: 0,
+        });
     }
 
     /// Enter a user callable (mixin/function) for diagnostics: record a stack
@@ -1505,18 +1527,38 @@ impl<'a> Evaluator<'a> {
         self.member = saved_member;
     }
 
+    /// Deliver a diagnostic to the embedder's handler (dart-sass `logger`), or —
+    /// when none is set — print its `formatted` block to stderr (preserving the
+    /// exact native output, since the handler-less path mirrors the old
+    /// `eprintln!`s byte-for-byte).
+    fn emit_diag(&self, ev: crate::WarnEvent<'_>) {
+        match self.options.warn {
+            Some(handler) => handler(&ev),
+            None => eprintln!("{}", ev.formatted),
+        }
+    }
+
     /// Execute a `@warn`: emit `WARNING: <message>` + the 4-space-indented stack
     /// trace + a trailing blank line to stderr. The message is the string value
     /// unquoted; exit code is unaffected.
     fn emit_warn(&mut self, value: &Expr, pos: Pos) -> Result<(), Error> {
         let v = self.eval_expr(value)?;
         let msg = v.to_message();
-        if self.diag_enabled() {
+        let formatted = if self.diag_enabled() {
             let frames = self.frames_for(pos);
-            eprintln!("WARNING: {}\n{}\n", msg, Self::render_frame_block(&frames, 4));
+            format!("WARNING: {}\n{}\n", msg, Self::render_frame_block(&frames, 4))
         } else {
-            eprintln!("WARNING: {msg}");
-        }
+            format!("WARNING: {msg}")
+        };
+        self.emit_diag(crate::WarnEvent {
+            kind: crate::WarnKind::Warn,
+            deprecation: false,
+            deprecation_id: "",
+            message: &msg,
+            formatted: &formatted,
+            url: "",
+            line: 0,
+        });
         Ok(())
     }
 
@@ -1525,11 +1567,21 @@ impl<'a> Evaluator<'a> {
     fn emit_debug(&mut self, value: &Expr, pos: Pos) -> Result<(), Error> {
         let v = self.eval_expr(value)?;
         let msg = v.to_message();
-        if self.diag_enabled() {
-            eprintln!("{}:{} DEBUG: {}", self.current_url, pos.line, msg);
+        let url = self.current_url.clone();
+        let formatted = if self.diag_enabled() {
+            format!("{url}:{} DEBUG: {msg}", pos.line)
         } else {
-            eprintln!("DEBUG: {msg}");
-        }
+            format!("DEBUG: {msg}")
+        };
+        self.emit_diag(crate::WarnEvent {
+            kind: crate::WarnKind::Debug,
+            deprecation: false,
+            deprecation_id: "",
+            message: &msg,
+            formatted: &formatted,
+            url: &url,
+            line: pos.line,
+        });
         Ok(())
     }
 

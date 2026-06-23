@@ -119,6 +119,13 @@ extern "C" {
         out_ptr: *mut *mut u8,
         out_len: *mut usize,
     ) -> i32;
+
+    /// Deliver a `@warn` / `@debug` / deprecation diagnostic to the host's logger
+    /// (dart-sass `logger`). `buf` is
+    /// `[kind: u8 (0 warn, 1 debug)][deprecation: u8][line: u32 LE]` followed by
+    /// four `[u32 LE len][UTF-8]` strings: deprecation id, url, raw message, and
+    /// the full formatted block. Never fails the compile.
+    fn host_warn(buf_ptr: *const u8, buf_len: usize);
 }
 
 // Custom-function signatures the host registers before a compile (cleared
@@ -170,6 +177,30 @@ fn make_host_callback(index: u32) -> sasso::HostFunction {
                 String::from_utf8_lossy(&bytes).into_owned()
             }),
         }
+    })
+}
+
+/// Build the diagnostic handler that forwards every `@warn`/`@debug`/deprecation
+/// to the host's `host_warn` (see its wire format).
+fn make_host_warn() -> sasso::WarnHandler {
+    fn put_str(buf: &mut Vec<u8>, s: &str) {
+        buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+    std::rc::Rc::new(|ev: &sasso::WarnEvent<'_>| {
+        let mut buf = Vec::new();
+        buf.push(match ev.kind {
+            sasso::WarnKind::Warn => 0u8,
+            sasso::WarnKind::Debug => 1u8,
+        });
+        buf.push(ev.deprecation as u8);
+        buf.extend_from_slice(&(ev.line as u32).to_le_bytes());
+        put_str(&mut buf, ev.deprecation_id);
+        put_str(&mut buf, ev.url);
+        put_str(&mut buf, ev.message);
+        put_str(&mut buf, ev.formatted);
+        // SAFETY: `buf` is live for the call; the host copies it before returning.
+        unsafe { host_warn(buf.as_ptr(), buf.len()) };
     })
 }
 
@@ -357,6 +388,9 @@ pub extern "C" fn sasso_compile2(
             for (i, sig) in sigs.iter().enumerate() {
                 opts = opts.with_function(sig, make_host_callback(i as u32));
             }
+            // Route @warn/@debug/deprecation diagnostics to the host's logger
+            // (the JS side always supplies a default that prints to stderr).
+            opts = opts.with_warn_handler(make_host_warn());
             if want_map != 0 {
                 match sasso::compile_with_source_map(scss, &opts) {
                     Ok(result) => {

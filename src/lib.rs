@@ -115,7 +115,43 @@ pub struct Options<'a> {
     /// [`Options::with_function`]. Consulted after user `@function`s and module
     /// members but before built-in global functions.
     pub(crate) functions: Vec<host_fn::HostFn>,
+    /// Diagnostic handler (dart-sass `logger`). When set, every `@warn`/`@debug`/
+    /// deprecation warning is delivered here instead of printed to stderr.
+    pub(crate) warn: Option<WarnHandler>,
 }
+
+/// The kind of a diagnostic delivered to a [`WarnHandler`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarnKind {
+    /// A `@warn` directive (or a deprecation warning).
+    Warn,
+    /// A `@debug` directive.
+    Debug,
+}
+
+/// A `@warn` / `@debug` / deprecation diagnostic delivered to an embedder's
+/// [`WarnHandler`] (dart-sass `logger`).
+pub struct WarnEvent<'a> {
+    /// Warning vs debug.
+    pub kind: WarnKind,
+    /// True for a deprecation warning.
+    pub deprecation: bool,
+    /// The deprecation id (e.g. `"slash-div"`), or `""` when not a deprecation.
+    pub deprecation_id: &'a str,
+    /// The raw message text (the `@warn`/`@debug` value, or deprecation message).
+    pub message: &'a str,
+    /// The full dart-style block sasso would otherwise print to stderr (header +
+    /// snippet + stack trace), for a faithful default logger.
+    pub formatted: &'a str,
+    /// The source URL for the diagnostic's span; `""` when not available.
+    pub url: &'a str,
+    /// The 1-based line for the diagnostic's span; `0` when not available.
+    pub line: usize,
+}
+
+/// An embedder's diagnostic handler (dart-sass `logger`). Receives every
+/// `@warn` / `@debug` / deprecation warning; if unset, they print to stderr.
+pub type WarnHandler = std::rc::Rc<dyn Fn(&WarnEvent<'_>)>;
 
 impl Default for Options<'_> {
     fn default() -> Self {
@@ -127,6 +163,7 @@ impl Default for Options<'_> {
             unicode: true,
             source_map_include_sources: false,
             functions: Vec::new(),
+            warn: None,
         }
     }
 }
@@ -201,6 +238,15 @@ impl<'a> Options<'a> {
             params,
             callback,
         });
+        self
+    }
+
+    /// Set the diagnostic handler (dart-sass `logger`). Every `@warn`/`@debug`/
+    /// deprecation warning is delivered to `handler` instead of being printed to
+    /// stderr (the default when unset).
+    #[must_use]
+    pub fn with_warn_handler(mut self, handler: WarnHandler) -> Self {
+        self.warn = Some(handler);
         self
     }
 }
@@ -343,6 +389,7 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
         source,
         url: entry_name,
         glyphs,
+        warn: options.warn.as_ref(),
     });
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;
@@ -414,6 +461,7 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
         source: diag_source,
         url: diag_url,
         glyphs,
+        warn: options.warn.as_ref(),
     });
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;
