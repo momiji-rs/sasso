@@ -83,17 +83,21 @@ $ cargo install sasso         # build from source (needs a Rust toolchain)
 $ cargo add sasso
 ```
 
-**WebAssembly — npm.** A tiny, dependency-free wasm build for JS build tools
-and the browser (no wasm-bindgen, no native add-ons):
+**WebAssembly — npm.** A tiny, dependency-free wasm build that mirrors the
+dart-sass *modern* JS API, so it's a drop-in for the `sass` npm package in build
+tools (no wasm-bindgen, no native add-ons):
 
 ```console
-$ npm install @momiji-rs/sasso
+$ npm install sasso
 ```
 
 ```js
-import { compile } from "@momiji-rs/sasso";
-compile("a { color: #ffffff }", { style: "compressed" }); // a{color:#fff}
+import { compileString } from "sasso";
+compileString("a { color: #ffffff }", { style: "compressed" }).css; // a{color:#fff}
 ```
+
+Works as the `sass` implementation in **webpack/sass-loader** (`implementation:
+require("sasso"), api: "modern"`) and **Vite** (alias `"sass": "npm:sasso"`).
 
 ## Library usage
 
@@ -218,12 +222,12 @@ methodology, per-file numbers and the correctness diff are in
 Because the library is zero-dependency and pure `std`, it compiles to
 `wasm32-unknown-unknown` and `wasm32-wasip1` out of the box (built in CI). The
 deployable `.wasm` cdylib ships in two variants, published to npm as
-[`@momiji-rs/sasso`](https://www.npmjs.com/package/@momiji-rs/sasso):
+[`sasso`](https://www.npmjs.com/package/sasso):
 
 | Variant | Build | Over the wire | Compile (large, in Node)³ |
 | --- | --- | --- | --- |
 | **size** (default) | `opt-level = "z"` + LTO + `panic = "abort"` + `strip` + `wasm-opt -Oz` | **~854 KB / ~356 KB gzip** | ~27 ms |
-| **speed** (`@momiji-rs/sasso/speed`) | `opt-level = 3` + `wasm-opt -O3` | **~1.84 MB / ~637 KB gzip** | ~12 ms |
+| **speed** (`sasso/speed`) | `opt-level = 3` + `wasm-opt -O3` | **~1.84 MB / ~637 KB gzip** | ~12 ms |
 
 ³ in-process compile of the same large file, Node 22 (best-of-N). The wasm tax
 over native `sasso` (7.7 ms) is ~1.5× for the speed build and ~3.5× for the
@@ -244,7 +248,7 @@ packages are released by this project and pin a published `sasso` crate version;
 | Language | Package | Maintained by | How |
 | --- | --- | --- | --- |
 | **Rust** | [`sasso`](https://crates.io/crates/sasso) (crates.io) | First-party | the core library — see [Library usage](#library-usage) above |
-| **JavaScript / wasm** | [`@momiji-rs/sasso`](https://www.npmjs.com/package/@momiji-rs/sasso) (npm) | First-party | the in-repo [`wasm/`](wasm/) cdylib — see [WebAssembly](#webassembly) above |
+| **JavaScript / wasm** | [`sasso`](https://www.npmjs.com/package/sasso) (npm) | First-party | the in-repo [`wasm/`](wasm/) cdylib — see [WebAssembly](#webassembly) above |
 | **Ruby** | [`sasso`](https://rubygems.org/gems/sasso) (RubyGems) | First-party | [`momiji-rs/sasso-ruby`](https://github.com/momiji-rs/sasso-ruby) — an in-process native extension (`magnus` + `rb-sys`) around this crate |
 | **Python** | [`sasso`](https://pypi.org/project/sasso/) (PyPI) | First-party | [`momiji-rs/sasso-python`](https://github.com/momiji-rs/sasso-python) — `ctypes` over the C ABI; one prebuilt wheel per platform, no build step |
 | **Go** | [`sasso-go`](https://github.com/momiji-rs/sasso-go) (`go get`) | First-party | [`momiji-rs/sasso-go`](https://github.com/momiji-rs/sasso-go) — **pure Go, no cgo**: embeds the [wasm build](#webassembly) and runs it with [`wazero`](https://github.com/tetratelabs/wazero), so `CGO_ENABLED=0` and cross-compilation just work. String-in/CSS-out (for file-based importers use the C ABI via cgo, [below](#from-go)) |

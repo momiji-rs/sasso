@@ -1,14 +1,63 @@
+// sasso — types for the dart-sass *modern* JS API (drop-in for `sass`).
+
+export type OutputStyle = "expanded" | "compressed";
+
 export interface Options {
   /** Output style. Defaults to `"expanded"`. */
-  style?: "expanded" | "compressed";
-  /** Also produce a Source Map v3. When `true`, `compile` returns a {@link CompileResult}. */
+  style?: OutputStyle;
+  /** Also produce a Source Map v3 (populates {@link CompileResult.sourceMap}). */
   sourceMap?: boolean;
   /** Embed each source's full text in the map's `sourcesContent`. Requires `sourceMap`. */
   sourceMapIncludeSources?: boolean;
+  /** Filesystem directories searched (in order) when resolving `@use`/`@import`. */
+  loadPaths?: string[];
+  /** Custom importers, tried (in order) before the filesystem. **Synchronous only.** */
+  importers?: (Importer | FileImporter)[];
+}
+
+export interface StringOptions extends Options {
+  /**
+   * The canonical URL of `source`. Included in {@link CompileResult.loadedUrls}
+   * and used as the base for the source's relative imports. Accepts a `file:`
+   * (or other-scheme) URL, as a string or `URL`.
+   */
+  url?: string | URL;
+  /** The syntax of `source`. Defaults to `"scss"`. */
+  syntax?: "scss" | "indented" | "css";
+}
+
+/** Context passed to importer callbacks (dart-sass `CanonicalizeContext`). */
+export interface CanonicalizeContext {
+  /** `true` for `@import` (which also considers `*.import` files), else `false`. */
+  fromImport: boolean;
+  /** The canonical URL of the stylesheet containing the rule, if any. */
+  containingUrl: URL | undefined;
+}
+
+/** What an {@link Importer.load} returns for a canonical URL. */
+export interface ImporterResult {
+  contents: string;
+  /** Defaults to `"scss"`. */
+  syntax?: "scss" | "indented" | "css";
+  sourceMapUrl?: URL | string;
+}
+
+/**
+ * A dart-sass *modern* importer. **Synchronous only** — returning a `Promise`
+ * throws (the wasm engine cannot await), even under `compileStringAsync`.
+ */
+export interface Importer {
+  canonicalize(url: string, context: CanonicalizeContext): URL | string | null;
+  load(canonicalUrl: URL): ImporterResult | null;
+}
+
+/** A dart-sass *modern* FileImporter (resolved on disk). **Synchronous only.** */
+export interface FileImporter {
+  findFileUrl(url: string, context: CanonicalizeContext): URL | string | null;
 }
 
 /** A Source Map v3 (the parsed JSON object). */
-export interface SourceMap {
+export interface RawSourceMap {
   version: 3;
   file?: string;
   sources: string[];
@@ -17,34 +66,87 @@ export interface SourceMap {
   mappings: string;
 }
 
-/** Returned by `compile` when `sourceMap: true`. */
+/** The dart-sass `CompileResult` returned by every `compile*` entry point. */
 export interface CompileResult {
   css: string;
-  sourceMap: SourceMap;
+  /** Canonical URLs of all loaded stylesheets (the entry point in Phase 1). */
+  loadedUrls: URL[];
+  /** Present only when `options.sourceMap` is `true`. */
+  sourceMap?: RawSourceMap;
 }
 
 export interface ConfigureOptions {
   /**
    * Bump-arena reservation in MiB (default 32). `0` disables the arena, so
    * every allocation forwards to the system allocator — a lower memory
-   * footprint at a lower throughput. Must be set before the first `compile`.
+   * footprint at a lower throughput. Must be set before the first compile.
    */
   arenaMiB?: number;
 }
 
 /**
- * Compile an SCSS string to CSS. Throws an `Error` (carrying the compiler's
- * message) on a Sass error. With `sourceMap: true` it returns a
- * {@link CompileResult} (`{ css, sourceMap }`) instead of a bare CSS string.
+ * A Sass compilation error. Approximates the dart-sass `Exception`: an `Error`
+ * subclass with `name === "Exception"` and a `sassMessage` (the message without
+ * the leading `Error: `).
  */
-export function compile(scss: string, options: Options & { sourceMap: true }): CompileResult;
-export function compile(scss: string, options?: Options): string;
+export class Exception extends Error {
+  readonly name: "Exception";
+  readonly sassMessage: string;
+}
+
+/** dart-sass-style implementation string: `"sasso\t<version>"`. */
+export const info: string;
+
+/** Compile an SCSS source string. dart-sass `compileString`. */
+export function compileString(source: string, options?: StringOptions): CompileResult;
+
+/** Async `compileString` — resolves the synchronous result. */
+export function compileStringAsync(source: string, options?: StringOptions): Promise<CompileResult>;
 
 /**
- * Configure the bump-arena allocator. MUST be called before the first
- * `compile()` — the arena region is reserved on first use and then fixed.
+ * Compile an SCSS file by path. dart-sass `compile` — **Node only** (reads the
+ * file from disk). For an in-memory string, use {@link compileString}.
+ */
+export function compile(path: string | URL, options?: Options): CompileResult;
+
+/** Async `compile` — resolves the synchronous result. */
+export function compileAsync(path: string | URL, options?: Options): Promise<CompileResult>;
+
+/** A reusable synchronous compiler (dart-sass Compiler API). */
+export interface Compiler {
+  compile(path: string | URL, options?: Options): CompileResult;
+  compileString(source: string, options?: StringOptions): CompileResult;
+  dispose(): void;
+}
+
+/** A reusable async compiler (dart-sass AsyncCompiler API; used by Vite). */
+export interface AsyncCompiler {
+  compileAsync(path: string | URL, options?: Options): Promise<CompileResult>;
+  compileStringAsync(source: string, options?: StringOptions): Promise<CompileResult>;
+  dispose(): Promise<void>;
+}
+
+/** Create a reusable synchronous compiler. dart-sass `initCompiler`. */
+export function initCompiler(): Compiler;
+
+/** Create a reusable async compiler. dart-sass `initAsyncCompiler` (Vite calls this). */
+export function initAsyncCompiler(): Promise<AsyncCompiler>;
+
+/**
+ * Configure the bump-arena allocator. MUST be called before the first compile —
+ * the arena region is reserved on first use and then fixed.
  */
 export function configure(options?: ConfigureOptions): void;
 
-declare const _default: { compile: typeof compile; configure: typeof configure };
+declare const _default: {
+  compile: typeof compile;
+  compileAsync: typeof compileAsync;
+  compileString: typeof compileString;
+  compileStringAsync: typeof compileStringAsync;
+  initCompiler: typeof initCompiler;
+  initAsyncCompiler: typeof initAsyncCompiler;
+  configure: typeof configure;
+  info: typeof info;
+  Exception: typeof Exception;
+};
 export default _default;

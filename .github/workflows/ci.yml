@@ -53,6 +53,42 @@ jobs:
       - name: build (lib) for wasm
         run: cargo build --lib --target wasm32-wasip1
 
+  wasm-npm:
+    name: wasm npm package (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wasm
+          cache-directories: |
+            wasm/target-size
+            wasm/target-speed
+      - name: install binaryen (wasm-opt)
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      # The wasm crate lives outside the core workspace, so fmt/clippy run inside
+      # wasm/ (the root `cargo fmt --all` / `--all-targets` don't reach it).
+      - name: rustfmt (wasm)
+        run: cargo fmt --check
+        working-directory: wasm
+      - name: clippy (wasm)
+        run: cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
+        working-directory: wasm
+      # Build BOTH wasm variants (size + speed), then exercise the full JS API
+      # surface — compileString/compile/async, source maps, the Compiler API,
+      # and the importer bridge (loadPaths, relative, user Importer/FileImporter).
+      - name: build wasm modules
+        run: bash wasm/build.sh
+      - name: node API + importer tests
+        run: node wasm/test.mjs
+
   ffi:
     name: C ABI (ffi)
     runs-on: ubuntu-latest
