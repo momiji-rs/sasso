@@ -180,6 +180,30 @@ fn make_host_callback(index: u32) -> sasso::HostFunction {
     })
 }
 
+/// Frame a compile error for the host: `[line: u32 LE][col: u32 LE]` then three
+/// `[u32 LE len][UTF-8]` strings — the source url, the raw `sassMessage`, and the
+/// fully rendered diagnostic block. `line`/`col` are 1-based (0 when unknown);
+/// `url` is the entry url (`""` when none). The JS side rebuilds an `Exception`
+/// with `.sassMessage` + `.span` from this.
+fn frame_error(line: u32, col: u32, url: &str, message: &str, rendered: &str) -> Vec<u8> {
+    fn put_str(buf: &mut Vec<u8>, s: &str) {
+        buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&line.to_le_bytes());
+    buf.extend_from_slice(&col.to_le_bytes());
+    put_str(&mut buf, url);
+    put_str(&mut buf, message);
+    put_str(&mut buf, rendered);
+    buf
+}
+
+/// Frame a [`sasso::Error`] (raw message + position + entry url + rendered block).
+fn frame_sass_error(err: &sasso::Error, url: Option<&str>) -> Vec<u8> {
+    frame_error(err.line as u32, err.col as u32, url.unwrap_or(""), &err.message, &err.to_string())
+}
+
 /// Build the diagnostic handler that forwards every `@warn`/`@debug`/deprecation
 /// to the host's `host_warn` (see its wire format).
 fn make_host_warn() -> sasso::WarnHandler {
@@ -404,16 +428,16 @@ pub extern "C" fn sasso_compile2(
                         framed.extend_from_slice(&map);
                         (framed, 1)
                     }
-                    Err(err) => (err.to_string().into_bytes(), 0),
+                    Err(err) => (frame_sass_error(&err, url), 0),
                 }
             } else {
                 match sasso::compile(scss, &opts) {
                     Ok(css) => (css.into_bytes(), 1),
-                    Err(err) => (err.to_string().into_bytes(), 0),
+                    Err(err) => (frame_sass_error(&err, url), 0),
                 }
             }
         }
-        Err(_) => (b"input is not valid UTF-8".to_vec(), 0),
+        Err(_) => (frame_error(0, 0, "", "input is not valid UTF-8", "Error: input is not valid UTF-8"), 0),
     };
 
     into_result(bytes, ok, out_len_ptr, ok_ptr)

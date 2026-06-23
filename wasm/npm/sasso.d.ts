@@ -133,7 +133,10 @@ export interface ConfigureOptions {
  */
 export class Exception extends Error {
   readonly name: "Exception";
+  /** The raw error message (no `Error:` header or source snippet). */
   readonly sassMessage: string;
+  /** The source span of the error, when a position is known. */
+  readonly span?: SourceSpan;
 }
 
 /** dart-sass-style implementation string: `"sasso\t<version>"`. */

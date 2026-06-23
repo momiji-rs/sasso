@@ -67,10 +67,13 @@ try {
  * without the leading `Error: `). Structured `span` data awaits a later release.
  */
 export class Exception extends Error {
-  constructor(message) {
+  constructor(message, sassMessage, span) {
     super(message);
     this.name = "Exception";
-    this.sassMessage = message.replace(/^Error:\s*/, "");
+    // dart-sass `sassMessage` is the raw one-line message (no "Error:" header /
+    // snippet); fall back to stripping the header off the rendered block.
+    this.sassMessage = sassMessage ?? message.replace(/^Error:\s*/, "");
+    if (span) this.span = span;
   }
   toString() {
     return this.message;
@@ -238,7 +241,27 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     if (urlLen) w.sasso_free(urlPtr, urlLen);
     w.sasso_free(scratch, 8);
     w.sasso_free(outPtr, outLen);
-    if (!ok) throw new Exception(decoder.decode(out));
+    if (!ok) {
+      // Structured error frame: [line u32][col u32][url str][sassMessage str][rendered str].
+      const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+      let o = 0;
+      const line = dv.getUint32(o, true);
+      o += 4;
+      const col = dv.getUint32(o, true);
+      o += 4;
+      const rd = () => {
+        const n = dv.getUint32(o, true);
+        o += 4;
+        const s = decoder.decode(out.subarray(o, o + n));
+        o += n;
+        return s;
+      };
+      const url = rd();
+      const sassMessage = rd();
+      const rendered = rd();
+      const span = line > 0 ? { url: url || undefined, start: { line: line - 1, column: Math.max(0, col - 1), offset: 0 }, end: { line: line - 1, column: Math.max(0, col - 1), offset: 0 }, text: "", context: "" } : undefined;
+      throw new Exception(rendered, sassMessage, span);
+    }
     if (!wantMap) return { css: cssDecoder.decode(out) };
     const cssLen = new DataView(out.buffer, out.byteOffset, 4).getUint32(0, true);
     return {

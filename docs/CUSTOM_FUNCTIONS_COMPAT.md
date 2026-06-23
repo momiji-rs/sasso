@@ -131,9 +131,21 @@ against dart-sass (`sass` npm) for message/behaviour parity.
    `--[no-]unicode` needs a wasm ABI param to switch error-snippet glyphs to
    ASCII; `--color`/`--no-color` is a no-op since sasso diagnostics aren't
    ANSI-colorized. Noted, not blocking drop-in use.)*
-6. **`Exception.span`** (assess) — structured `.span` (`url`/`start`/`end`/`text`)
-   on thrown errors; build tools format from it. Needs the core to surface span
-   data across the boundary — feasibility TBD; may defer.
+6. **`Exception.span` + `sassMessage`** ✅ DONE — the wasm error path now returns
+   a structured frame (`line`/`col`/`url`/raw `sassMessage`/rendered block) instead
+   of just the rendered string, so the JS `Exception` carries `.sassMessage` (the
+   raw one-liner — **fixes a bug**: it used to be the whole block) and `.span`
+   (`url` + 0-based `start`/`end`). Verified vs dart-sass 1.101: `span.start`
+   line/column match exactly (e.g. `0:12`); structure (`name`/`span.url`/`message`)
+   matches. *(`span.url` is the entry url — exact for single-file; a cross-file
+   error reports the entry rather than the failing import. The raw-message
+   **wording** still differs from dart in places — that's the broader
+   diagnostic-conformance track, not the Exception shape.)* Tested in test.mjs.
+
+**🎉 POLISH TRACK COMPLETE** — all six items done. No known Value-API or option
+gaps remain for drop-in use; the residual items are deeper diagnostic-message
+*wording* parity and a few low-value CLI flags (`--error-css`, `--[no-]unicode`,
+`--color`), all noted above.
 
 ## CLI gaps (separate track)
 

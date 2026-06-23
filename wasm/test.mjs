@@ -245,6 +245,24 @@ assert.ok(
 }
 console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + embed-map/quiet/multi-IO/update");
 
+// Polish: structured Exception (sassMessage + span), shape verified vs dart-sass
+{
+  let caught;
+  try {
+    size.compileString(".a { color: ; }", { url: "file:///x.scss" });
+  } catch (e) {
+    caught = e;
+  }
+  assert.equal(caught.name, "Exception", "error: name is Exception");
+  assert.ok(caught instanceof Error, "error: instanceof Error");
+  assert.equal(caught.span.url, "file:///x.scss", "error: span.url");
+  assert.equal(caught.span.start.line, 0, "error: span.start.line is 0-based");
+  assert.equal(caught.span.start.column, 12, "error: span.start.column (matches dart)");
+  assert.ok(caught.message.startsWith("Error:"), "error: message is the rendered block");
+  assert.ok(caught.sassMessage.length > 0 && !caught.sassMessage.includes("\n"), "error: sassMessage is a raw one-liner");
+  console.log("ok: structured Exception (sassMessage + span)");
+}
+
 // === Phase 3: CLI --watch (recompiles on dependency change) ===
 {
   const waitFor = async (pred, timeoutMs) => {
