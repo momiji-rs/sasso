@@ -31,6 +31,8 @@ export {
   SassString,
   SassCalculation,
   CalculationOperation,
+  SassFunction,
+  SassMixin,
   sassTrue,
   sassFalse,
   sassNull,

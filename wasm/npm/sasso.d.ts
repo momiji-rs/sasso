@@ -213,8 +213,8 @@ export abstract class Value {
   assertMap(name?: string): SassMap;
   assertBoolean(name?: string): SassBoolean;
   assertCalculation(name?: string): SassCalculation;
-  assertFunction(name?: string): never;
-  assertMixin(name?: string): never;
+  assertFunction(name?: string): SassFunction;
+  assertMixin(name?: string): SassMixin;
   equals(other: Value): boolean;
   hashCode(): number;
 }
@@ -330,6 +330,12 @@ export class SassCalculation extends Value {
   readonly arguments: List<CalculationValue>;
 }
 
+/** An opaque first-class function reference — round-trips to/from the engine only. */
+export class SassFunction extends Value {}
+
+/** An opaque first-class mixin reference — round-trips to/from the engine only. */
+export class SassMixin extends Value {}
+
 declare const _default: {
   compile: typeof compile;
   compileAsync: typeof compileAsync;
@@ -350,6 +356,8 @@ declare const _default: {
   SassMap: typeof SassMap;
   SassCalculation: typeof SassCalculation;
   CalculationOperation: typeof CalculationOperation;
+  SassFunction: typeof SassFunction;
+  SassMixin: typeof SassMixin;
   sassTrue: typeof sassTrue;
   sassFalse: typeof sassFalse;
   sassNull: typeof sassNull;

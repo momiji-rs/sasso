@@ -703,12 +703,15 @@ impl<'a> Evaluator<'a> {
                             &norm,
                         )
                         .map_err(|e| Error::at(e, *pos))?;
-                        let in_bytes =
-                            crate::host_fn::serialize_args(&bound).map_err(|e| Error::at(e, *pos))?;
-                        let out_bytes = callback(&in_bytes).map_err(|e| Error::at(e, *pos))?;
-                        return crate::host_fn::deserialize_value(&out_bytes)
-                            .map_err(|e| Error::at(e, *pos))
-                            .map(Value::without_slash);
+                        // First-class function/mixin args round-trip as opaque
+                        // handles into a per-dispatch table; save/restore the
+                        // outer table so a nested custom-function call is safe.
+                        let saved = crate::host_fn::swap_handles(Vec::new());
+                        let result: Result<Value, String> = crate::host_fn::serialize_args(&bound)
+                            .and_then(|b| callback(&b))
+                            .and_then(|b| crate::host_fn::deserialize_value(&b));
+                        crate::host_fn::swap_handles(saved);
+                        return result.map_err(|e| Error::at(e, *pos)).map(Value::without_slash);
                     }
                 }
                 // A bare slash-division argument collapses to its number when

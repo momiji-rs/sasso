@@ -638,9 +638,47 @@ export class SassCalculation extends Value {
   }
 }
 
+/**
+ * An opaque first-class function reference (dart-sass `SassFunction`). It can't
+ * be invoked from JS — only received from, and passed back to, the engine (which
+ * resolves it via the handle); it round-trips by an engine-side handle id.
+ */
+export class SassFunction extends Value {
+  constructor(id) {
+    super();
+    this.__handle = id;
+  }
+  assertFunction() {
+    return this;
+  }
+  equals(o) {
+    return o instanceof SassFunction && o.__handle === this.__handle;
+  }
+  toString() {
+    return "get-function(...)";
+  }
+}
+
+/** An opaque first-class mixin reference (dart-sass `SassMixin`). */
+export class SassMixin extends Value {
+  constructor(id) {
+    super();
+    this.__handle = id;
+  }
+  assertMixin() {
+    return this;
+  }
+  equals(o) {
+    return o instanceof SassMixin && o.__handle === this.__handle;
+  }
+  toString() {
+    return "get-mixin(...)";
+  }
+}
+
 // ---------------- wire (de)serialization (mirrors ../src/host_fn.rs) ----------------
 
-const TAG = { NULL: 0, BOOL: 1, NUMBER: 2, STRING: 3, LIST: 4, MAP: 5, COLOR: 6, CALC: 7 };
+const TAG = { NULL: 0, BOOL: 1, NUMBER: 2, STRING: 3, LIST: 4, MAP: 5, COLOR: 6, CALC: 7, FUNCTION: 8, MIXIN: 9 };
 const CALC_OP_CODE = { "+": 0, "-": 1, "*": 2, "/": 3 };
 const CALC_OP_SYM = ["+", "-", "*", "/"];
 
@@ -784,6 +822,12 @@ function writeValue(w, v) {
       writeValue(w, k);
       writeValue(w, val);
     }
+  } else if (v instanceof SassFunction) {
+    w.u8(TAG.FUNCTION);
+    w.u32(v.__handle);
+  } else if (v instanceof SassMixin) {
+    w.u8(TAG.MIXIN);
+    w.u32(v.__handle);
   } else {
     throw new Error(`sasso: a custom function returned a value sasso can't represent (${v})`);
   }
@@ -880,6 +924,10 @@ function readValue(r) {
       }
       return new SassMap(m);
     }
+    case TAG.FUNCTION:
+      return new SassFunction(r.u32());
+    case TAG.MIXIN:
+      return new SassMixin(r.u32());
     default:
       throw new Error(`sasso: unknown value tag ${tag} from the engine`);
   }
@@ -906,6 +954,8 @@ export const valueApi = {
   SassString,
   SassCalculation,
   CalculationOperation,
+  SassFunction,
+  SassMixin,
   sassTrue,
   sassFalse,
   sassNull,

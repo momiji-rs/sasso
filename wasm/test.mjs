@@ -392,6 +392,18 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
   });
   assert.ok(rcalcMin.css.includes("width: min(10px, var(--x))"), "Tier3a: return min() with var()");
 
+  // Tier 3b: first-class function/mixin refs round-trip as opaque handles
+  const rfnref = size.compileString(
+    `@use "sass:meta";\n@function double($x) { @return $x * 2; }\n.a { x: meta.call(passthru(meta.get-function("double")), 5); }`,
+    { functions: { "passthru($f)": (a) => a[0].assertFunction() } },
+  );
+  assert.ok(rfnref.css.includes("x: 10"), "Tier3b: SassFunction opaque round-trip (meta.call)");
+  const rmixref = size.compileString(
+    `@use "sass:meta";\n@mixin paint { color: red; }\n.a { @include meta.apply(passmix(meta.get-mixin("paint"))); }`,
+    { functions: { "passmix($m)": (a) => a[0].assertMixin() } },
+  );
+  assert.ok(rmixref.css.includes("color: red"), "Tier3b: SassMixin opaque round-trip (meta.apply)");
+
   console.log("ok: custom functions — number/string/color/list/map/rest, override, error, async (Phase 4)");
 }
 

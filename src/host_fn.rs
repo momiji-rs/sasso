@@ -375,6 +375,36 @@ const TAG_LIST: u8 = 4;
 const TAG_MAP: u8 = 5;
 const TAG_COLOR: u8 = 6;
 const TAG_CALC: u8 = 7;
+const TAG_FUNCTION: u8 = 8;
+const TAG_MIXIN: u8 = 9;
+
+// First-class function/mixin references can't be reconstructed on the JS side, so
+// they cross the boundary as OPAQUE HANDLES: serialization stores the `Value` here
+// and emits its index; the JS side holds an opaque object and, when it passes the
+// reference back, sends the index, which deserialization looks up. The table is
+// per custom-function dispatch (expr.rs swaps a fresh one in, restoring the outer
+// one afterwards, so a nested custom-function call is safe).
+thread_local! {
+    static HANDLES: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Install a fresh handle table and return the previous one (to restore). Called
+/// by the evaluator around each custom-function call.
+pub(crate) fn swap_handles(next: Vec<Value>) -> Vec<Value> {
+    HANDLES.with(|h| std::mem::replace(&mut *h.borrow_mut(), next))
+}
+fn push_handle(v: Value) -> usize {
+    HANDLES.with(|h| {
+        let mut b = h.borrow_mut();
+        b.push(v);
+        b.len() - 1
+    })
+}
+fn get_handle(i: usize) -> Result<Value, String> {
+    HANDLES
+        .with(|h| h.borrow().get(i).cloned())
+        .ok_or_else(|| "sasso: stale function/mixin reference from a custom function".to_string())
+}
 
 /// Write an optional channel: a present flag then (if present) the f64.
 fn put_opt_f64(out: &mut Vec<u8>, v: Option<f64>) {
@@ -484,10 +514,13 @@ fn serialize_value(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
             // before binding, and JS can't construct one).
             return Err("sasso: slash-division values are not supported as custom-function values".into());
         }
-        Value::Function(_) | Value::Mixin(_) => {
-            return Err(
-                "sasso: function/mixin references are not yet supported as custom-function values".into(),
-            )
+        Value::Function(_) => {
+            out.push(TAG_FUNCTION);
+            put_u32(out, push_handle(v.clone()));
+        }
+        Value::Mixin(_) => {
+            out.push(TAG_MIXIN);
+            put_u32(out, push_handle(v.clone()));
         }
     }
     Ok(())
@@ -726,6 +759,8 @@ fn read_value(r: &mut Reader<'_>) -> Result<Value, String> {
             }
         }
         TAG_CALC => Value::Calc(read_calc_node(r)?),
+        // Opaque handles: look the original Value back up in the per-dispatch table.
+        TAG_FUNCTION | TAG_MIXIN => get_handle(r.u32()?)?,
         other => {
             return Err(format!(
                 "sasso: unknown value tag {other} in custom-function result"

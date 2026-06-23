@@ -76,11 +76,14 @@ compile.
   (Number/Str/Op/Func). Tested (receive + inspect `calc(1px + 2%)`; return
   `calc`/`min` incl. `var()`). *(`CalculationInterpolation` is deprecated/legacy —
   not modelled.)*
-- **`SassFunction` ⏳ Tier 3b (open):** first-class function ref (for `meta.call`)
-  — needs an engine-side **opaque handle table** (JS holds an opaque handle,
-  passes it back). *(Currently a clear error. Very rare in custom functions.)*
-- **`SassMixin` ⏳ Tier 3b (open):** first-class mixin ref — same handle
-  mechanism. *(Very rare.)*
+- **`SassFunction` / `SassMixin` ✅ DONE (Tier 3b):** first-class refs round-trip
+  as **opaque handles** — `serialize_args` stores the `Value` in a per-dispatch
+  handle table (swapped/restored around each custom-function call for nesting
+  safety) and emits its index; JS holds an opaque `SassFunction`/`SassMixin` and
+  passes it back, which the engine looks up. Tested: receive a function ref and
+  return it → `meta.call(it, 5)` = 10; same for a mixin → `meta.apply(it)`.
+
+  **🎉 THE FULL dart-sass `Value` TYPE SYSTEM IS NOW SUPPORTED.**
 
 ## CLI gaps (separate track)
 
