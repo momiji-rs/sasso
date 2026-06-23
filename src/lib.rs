@@ -42,6 +42,7 @@ mod emit;
 mod error;
 mod eval;
 mod fxhash;
+mod host_fn;
 mod importer;
 mod musl_math;
 mod parser;
@@ -56,6 +57,7 @@ mod value;
 
 pub use arena::{set_arena_bytes, ScopedAlloc};
 pub use error::Error;
+pub use host_fn::HostFunction;
 pub use importer::{CanonicalUrl, CanonicalizeContext, FsImporter, Importer, ImporterError, ImporterResult};
 pub use sourcemap::SourceMap;
 
@@ -109,6 +111,10 @@ pub struct Options<'a> {
     /// `--embed-sources`). Default `false` (the map references sources by URL
     /// only). Ignored by the plain [`compile`] path.
     pub source_map_include_sources: bool,
+    /// Host-defined custom functions (dart-sass `functions`), registered via
+    /// [`Options::with_function`]. Consulted after user `@function`s and module
+    /// members but before built-in global functions.
+    pub(crate) functions: Vec<host_fn::HostFn>,
 }
 
 impl Default for Options<'_> {
@@ -120,6 +126,7 @@ impl Default for Options<'_> {
             url: None,
             unicode: true,
             source_map_include_sources: false,
+            functions: Vec::new(),
         }
     }
 }
@@ -170,6 +177,30 @@ impl<'a> Options<'a> {
     #[must_use]
     pub fn with_source_map_include_sources(mut self, include: bool) -> Self {
         self.source_map_include_sources = include;
+        self
+    }
+
+    /// Register a host-defined custom function (dart-sass `functions`).
+    ///
+    /// `signature` is a Sass function signature — a name and parameter list,
+    /// e.g. `"pow($base, $exponent)"` or `"to-list($args...)"`. `callback`
+    /// receives the bound arguments serialized to sasso's host-value wire format
+    /// and returns the result serialized the same way (or an `Err(message)` that
+    /// becomes a compile error). This byte-oriented boundary lets embedders
+    /// (wasm/FFI) bridge to their own value system without exposing sasso's
+    /// internal `Value` type.
+    ///
+    /// Custom functions take precedence over built-in global functions but not
+    /// over user `@function` definitions or `@use`d module members. A malformed
+    /// signature is reported only if the function is actually called.
+    #[must_use]
+    pub fn with_function(mut self, signature: &str, callback: host_fn::HostFunction) -> Self {
+        let (name, params) = host_fn::parse_signature(signature);
+        self.functions.push(host_fn::HostFn {
+            name,
+            params,
+            callback,
+        });
         self
     }
 }
@@ -308,6 +339,7 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
     let mut ev = eval::Evaluator::new(eval::EvalOptions {
         style: options.style,
         importer: options.importer,
+        functions: &options.functions,
         source,
         url: entry_name,
         glyphs,
@@ -378,6 +410,7 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
     let mut ev = eval::Evaluator::new(eval::EvalOptions {
         style: options.style,
         importer: options.importer,
+        functions: &options.functions,
         source: diag_source,
         url: diag_url,
         glyphs,

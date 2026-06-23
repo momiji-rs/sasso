@@ -1,0 +1,584 @@
+//! Host-defined (embedder) custom Sass functions — the engine side of the
+//! dart-sass `functions` option.
+//!
+//! An embedder registers a function via [`crate::Options::with_function`] with a
+//! signature (`"pow($base, $exponent)"`) and a **byte-protocol callback**
+//! `Fn(&[u8]) -> Result<Vec<u8>, String>`. At call time the evaluator binds the
+//! arguments, serializes them to the wire format below, invokes the callback,
+//! and deserializes its returned bytes back into a [`Value`]. Keeping the
+//! callback byte-oriented means the public API never exposes the internal
+//! `Value` type, while the (de)serializers here — which DO touch `Value`'s
+//! internals — stay crate-private. The wasm/FFI layers are then dumb pipes that
+//! forward the bytes to the real host (e.g. a JS function).
+//!
+//! ## Wire format
+//! A value is a tag byte followed by a payload; integers are little-endian, and
+//! a "str" is a `u32` byte length followed by UTF-8. `serialize_args` writes a
+//! `u32` count then that many values (the bound, ordered arguments).
+//!
+//! Supported value types: null, bool, number (with full unit lists), string,
+//! list (separator + brackets + an optional argument-list keyword map), and
+//! map. Colors, calculations, slash-divisions, and first-class function/mixin
+//! references are not yet representable across the boundary and surface a clear
+//! error (added incrementally).
+
+use std::rc::Rc;
+
+use crate::ast::{Param, ParamList};
+use crate::value::{List, ListSep, Map, Number, SassStr, Value};
+
+/// An embedder's custom-function callback: it receives the bound arguments
+/// serialized to sasso's host-value wire format and returns the result
+/// serialized the same way (or an `Err(message)` that becomes a compile error).
+pub type HostFunction = Rc<dyn Fn(&[u8]) -> Result<Vec<u8>, String>>;
+
+/// A registered host function: the matched (normalized) name, its parsed
+/// signature (or a parse error to surface when the function is called), and the
+/// embedder's byte-protocol callback.
+pub(crate) struct HostFn {
+    /// Hyphen-normalized function name used for call-site matching.
+    pub name: String,
+    /// The parsed parameter list, or an error message if the signature was
+    /// malformed (surfaced as a compile error only if the function is called).
+    pub params: Result<ParamList, String>,
+    /// `Fn(serialized args) -> Ok(serialized return) | Err(message)`.
+    pub callback: HostFunction,
+}
+
+/// Sass treats `_` and `-` as equivalent in identifiers.
+pub(crate) fn normalize_name(s: &str) -> String {
+    s.replace('_', "-")
+}
+
+/// Parse a `name($a, $b, $rest...)` signature into a normalized name plus its
+/// parameter list. Default values (`$a: 1`) are not yet supported and yield an
+/// error (kept with the name so calling the function reports it).
+pub(crate) fn parse_signature(sig: &str) -> (String, Result<ParamList, String>) {
+    let sig = sig.trim();
+    let open = sig.find('(');
+    let (raw_name, args_src) = match open {
+        Some(i) => {
+            let rest = sig[i + 1..].trim_end();
+            let inner = rest.strip_suffix(')');
+            match inner {
+                Some(inner) => (&sig[..i], inner),
+                None => {
+                    return (
+                        normalize_name(sig[..i].trim()),
+                        Err("sasso: function signature is missing its closing ')'".into()),
+                    )
+                }
+            }
+        }
+        // No parens: a zero-arg function.
+        None => (sig, ""),
+    };
+    let name = normalize_name(raw_name.trim());
+    if name.is_empty() {
+        return (name, Err("sasso: function signature has no name".into()));
+    }
+
+    let mut params = Vec::new();
+    let mut rest = None;
+    for part in args_src.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let var = match part.strip_prefix('$') {
+            Some(v) => v.trim(),
+            None => {
+                return (
+                    name,
+                    Err(format!("sasso: signature parameter \"{part}\" must start with $")),
+                )
+            }
+        };
+        if let Some(r) = var.strip_suffix("...") {
+            rest = Some(normalize_name(r.trim()));
+            // A rest parameter must be last; ignore anything after it.
+            break;
+        }
+        if var.contains(':') {
+            return (
+                name,
+                Err("sasso: default values in custom-function signatures are not yet supported".into()),
+            );
+        }
+        params.push(Param {
+            name: var.to_string(),
+            default: None,
+        });
+    }
+    (name, Ok(ParamList { params, rest }))
+}
+
+/// Bind evaluated call arguments to a host function's parameters, producing the
+/// ordered positional values (plus a trailing argument-list value for a `$rest`
+/// parameter) that are handed to the callback — mirroring `bind_evaled` for the
+/// no-default host-function case. Names compare hyphen/underscore-insensitively.
+pub(crate) fn bind_host_args(
+    param_names: &[String],
+    rest: Option<&str>,
+    positional: Vec<Value>,
+    named: Vec<(String, Value)>,
+    rest_sep: ListSep,
+    fn_name: &str,
+) -> Result<Vec<Value>, String> {
+    use std::collections::HashMap;
+    let mut keyword: HashMap<String, Value> = HashMap::new();
+    let mut keyword_order: Vec<String> = Vec::new();
+    for (n, v) in named {
+        let norm = normalize_name(&n);
+        if !keyword.contains_key(&norm) {
+            keyword_order.push(norm.clone());
+        }
+        keyword.insert(norm, v);
+    }
+    let mut out = Vec::with_capacity(param_names.len() + rest.is_some() as usize);
+    let mut pos_iter = positional.into_iter();
+    for p in param_names {
+        let val = if let Some(v) = pos_iter.next() {
+            v
+        } else if let Some(v) = keyword.remove(&normalize_name(p)) {
+            v
+        } else {
+            return Err(format!("Missing argument ${p}."));
+        };
+        out.push(val);
+    }
+    if let Some(rest_name) = rest {
+        let remaining: Vec<Value> = pos_iter.collect();
+        let kw: Vec<(Value, Value)> = keyword_order
+            .iter()
+            .filter_map(|norm| {
+                keyword.remove(norm).map(|v| {
+                    (
+                        Value::Str(SassStr {
+                            text: norm.clone().into(),
+                            quoted: false,
+                        }),
+                        v,
+                    )
+                })
+            })
+            .collect();
+        let _ = rest_name;
+        out.push(Value::List(List {
+            items: remaining.into(),
+            sep: rest_sep,
+            bracketed: false,
+            keywords: Some(kw),
+        }));
+    } else if pos_iter.next().is_some() {
+        return Err(format!("{fn_name} was passed too many arguments."));
+    } else if let Some(extra) = keyword_order.into_iter().find(|k| keyword.contains_key(k)) {
+        return Err(format!("No argument named ${extra}."));
+    }
+    Ok(out)
+}
+
+// ---------------- serialization ----------------
+
+const TAG_NULL: u8 = 0;
+const TAG_BOOL: u8 = 1;
+const TAG_NUMBER: u8 = 2;
+const TAG_STRING: u8 = 3;
+const TAG_LIST: u8 = 4;
+const TAG_MAP: u8 = 5;
+
+fn put_u32(out: &mut Vec<u8>, n: usize) {
+    out.extend_from_slice(&(n as u32).to_le_bytes());
+}
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    put_u32(out, s.len());
+    out.extend_from_slice(s.as_bytes());
+}
+fn put_f64(out: &mut Vec<u8>, n: f64) {
+    out.extend_from_slice(&n.to_le_bytes());
+}
+
+/// Serialize the ordered, bound arguments: a `u32` count then each value.
+pub(crate) fn serialize_args(args: &[Value]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    put_u32(&mut out, args.len());
+    for a in args {
+        serialize_value(&mut out, a)?;
+    }
+    Ok(out)
+}
+
+/// Serialize a single value (the host side serializing a function's return).
+///
+/// Host-side helper: the wasm path encodes in JS (not Rust), so this is used by
+/// the in-crate tests now and the FFI host-function bridge later.
+#[allow(dead_code)]
+pub(crate) fn serialize_one(v: &Value) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    serialize_value(&mut out, v)?;
+    Ok(out)
+}
+
+fn serialize_value(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
+    match v {
+        Value::Null => out.push(TAG_NULL),
+        Value::Bool(b) => {
+            out.push(TAG_BOOL);
+            out.push(*b as u8);
+        }
+        Value::Number(n) => {
+            out.push(TAG_NUMBER);
+            put_f64(out, n.value);
+            put_u32(out, n.numer_units().len());
+            for u in n.numer_units() {
+                put_str(out, u);
+            }
+            put_u32(out, n.denom_units().len());
+            for u in n.denom_units() {
+                put_str(out, u);
+            }
+        }
+        Value::Str(s) => {
+            out.push(TAG_STRING);
+            out.push(s.quoted as u8);
+            put_str(out, &s.text);
+        }
+        Value::List(l) => {
+            out.push(TAG_LIST);
+            out.push(sep_code(l.sep));
+            out.push(l.bracketed as u8);
+            put_u32(out, l.items.len());
+            for it in l.items.iter() {
+                serialize_value(out, it)?;
+            }
+            match &l.keywords {
+                Some(kw) => {
+                    out.push(1);
+                    put_u32(out, kw.len());
+                    for (k, val) in kw {
+                        serialize_value(out, k)?;
+                        serialize_value(out, val)?;
+                    }
+                }
+                None => out.push(0),
+            }
+        }
+        Value::Map(m) => {
+            out.push(TAG_MAP);
+            put_u32(out, m.entries.len());
+            for (k, val) in m.entries.iter() {
+                serialize_value(out, k)?;
+                serialize_value(out, val)?;
+            }
+        }
+        Value::Color(_) => return Err("sasso: colors are not yet supported as custom-function values".into()),
+        Value::Calc(_) | Value::Slash(..) => {
+            return Err("sasso: calc()/slash values are not yet supported as custom-function values".into())
+        }
+        Value::Function(_) | Value::Mixin(_) => {
+            return Err(
+                "sasso: function/mixin references are not yet supported as custom-function values".into(),
+            )
+        }
+    }
+    Ok(())
+}
+
+fn sep_code(sep: ListSep) -> u8 {
+    match sep {
+        ListSep::Space => 0,
+        ListSep::Comma => 1,
+        ListSep::Slash => 2,
+        ListSep::Undecided => 3,
+    }
+}
+fn sep_from(code: u8) -> Result<ListSep, String> {
+    Ok(match code {
+        0 => ListSep::Space,
+        1 => ListSep::Comma,
+        2 => ListSep::Slash,
+        3 => ListSep::Undecided,
+        _ => return Err("sasso: bad list separator in custom-function result".into()),
+    })
+}
+
+// ---------------- deserialization ----------------
+
+struct Reader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+impl<'a> Reader<'a> {
+    fn u8(&mut self) -> Result<u8, String> {
+        let b = *self
+            .buf
+            .get(self.pos)
+            .ok_or("sasso: truncated custom-function result")?;
+        self.pos += 1;
+        Ok(b)
+    }
+    fn u32(&mut self) -> Result<usize, String> {
+        let end = self
+            .pos
+            .checked_add(4)
+            .ok_or("sasso: truncated custom-function result")?;
+        let b = self
+            .buf
+            .get(self.pos..end)
+            .ok_or("sasso: truncated custom-function result")?;
+        self.pos = end;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    }
+    fn f64(&mut self) -> Result<f64, String> {
+        let end = self
+            .pos
+            .checked_add(8)
+            .ok_or("sasso: truncated custom-function result")?;
+        let b = self
+            .buf
+            .get(self.pos..end)
+            .ok_or("sasso: truncated custom-function result")?;
+        self.pos = end;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(b);
+        Ok(f64::from_le_bytes(a))
+    }
+    fn str(&mut self) -> Result<String, String> {
+        let len = self.u32()?;
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or("sasso: truncated custom-function result")?;
+        let b = self
+            .buf
+            .get(self.pos..end)
+            .ok_or("sasso: truncated custom-function result")?;
+        self.pos = end;
+        String::from_utf8(b.to_vec())
+            .map_err(|_| "sasso: invalid UTF-8 in custom-function result".to_string())
+    }
+}
+
+/// Deserialize a single value (the function's return) from the wire format.
+pub(crate) fn deserialize_value(buf: &[u8]) -> Result<Value, String> {
+    let mut r = Reader { buf, pos: 0 };
+    let v = read_value(&mut r)?;
+    Ok(v)
+}
+
+/// Deserialize the argument vector (the host side reading what `serialize_args`
+/// produced): a `u32` count then that many values.
+///
+/// Host-side helper (see [`serialize_one`]): used by the in-crate tests now and
+/// the FFI host-function bridge later; the wasm path decodes in JS.
+#[allow(dead_code)]
+pub(crate) fn deserialize_args(buf: &[u8]) -> Result<Vec<Value>, String> {
+    let mut r = Reader { buf, pos: 0 };
+    let n = r.u32()?;
+    let mut args = Vec::with_capacity(n);
+    for _ in 0..n {
+        args.push(read_value(&mut r)?);
+    }
+    Ok(args)
+}
+
+fn read_value(r: &mut Reader<'_>) -> Result<Value, String> {
+    let tag = r.u8()?;
+    Ok(match tag {
+        TAG_NULL => Value::Null,
+        TAG_BOOL => Value::Bool(r.u8()? != 0),
+        TAG_NUMBER => {
+            let value = r.f64()?;
+            let nn = r.u32()?;
+            let mut numer = Vec::with_capacity(nn);
+            for _ in 0..nn {
+                numer.push(r.str()?);
+            }
+            let dn = r.u32()?;
+            let mut denom = Vec::with_capacity(dn);
+            for _ in 0..dn {
+                denom.push(r.str()?);
+            }
+            Value::Number(Number::with_units(value, numer, denom))
+        }
+        TAG_STRING => {
+            let quoted = r.u8()? != 0;
+            let text = r.str()?;
+            Value::Str(SassStr {
+                text: text.into(),
+                quoted,
+            })
+        }
+        TAG_LIST => {
+            let sep = sep_from(r.u8()?)?;
+            let bracketed = r.u8()? != 0;
+            let n = r.u32()?;
+            let mut items = Vec::with_capacity(n);
+            for _ in 0..n {
+                items.push(read_value(r)?);
+            }
+            let keywords = if r.u8()? != 0 {
+                let kn = r.u32()?;
+                let mut kw = Vec::with_capacity(kn);
+                for _ in 0..kn {
+                    let k = read_value(r)?;
+                    let v = read_value(r)?;
+                    kw.push((k, v));
+                }
+                Some(kw)
+            } else {
+                None
+            };
+            Value::List(List {
+                items: items.into(),
+                sep,
+                bracketed,
+                keywords,
+            })
+        }
+        TAG_MAP => {
+            let n = r.u32()?;
+            let mut entries = Vec::with_capacity(n);
+            for _ in 0..n {
+                let k = read_value(r)?;
+                let v = read_value(r)?;
+                entries.push((k, v));
+            }
+            Value::Map(Map::new(entries))
+        }
+        other => {
+            return Err(format!(
+                "sasso: unknown value tag {other} in custom-function result"
+            ))
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{compile, Options};
+    use std::rc::Rc;
+
+    use super::{deserialize_args, serialize_one};
+    use crate::value::{ListSep, Number, SassStr, Value};
+
+    fn opts_pow() -> Options<'static> {
+        // pow($base, $exponent) -> number
+        let cb: super::HostFunction = Rc::new(|bytes| {
+            let args = deserialize_args(bytes)?;
+            let base = match &args[0] {
+                Value::Number(n) => n.value,
+                _ => return Err("base must be a number".into()),
+            };
+            let exp = match &args[1] {
+                Value::Number(n) => n.value,
+                _ => return Err("exponent must be a number".into()),
+            };
+            serialize_one(&Value::Number(Number::unitless(base.powf(exp))))
+        });
+        Options::default().with_function("pow($base, $exponent)", cb)
+    }
+
+    #[test]
+    fn custom_function_number() {
+        let css = compile(".a { width: pow(2, 10) * 1px; }", &opts_pow()).unwrap();
+        assert!(css.contains("width: 1024px"), "got: {css}");
+    }
+
+    #[test]
+    fn custom_function_keyword_args() {
+        let css = compile(".a { x: pow($exponent: 3, $base: 2); }", &opts_pow()).unwrap();
+        assert!(css.contains("x: 8"), "got: {css}");
+    }
+
+    #[test]
+    fn custom_function_overrides_builtin_but_not_user() {
+        // A custom function shadows the builtin global of the same name...
+        let cb: super::HostFunction = Rc::new(|_| {
+            serialize_one(&Value::Str(SassStr {
+                text: "custom".into(),
+                quoted: false,
+            }))
+        });
+        let o = Options::default().with_function("type-of($v)", cb);
+        let css = compile(".a { x: type-of(1); }", &o).unwrap();
+        assert!(css.contains("x: custom"), "custom should override builtin: {css}");
+        // ...but a user @function still wins.
+        let cb2: super::HostFunction = Rc::new(|_| {
+            serialize_one(&Value::Str(SassStr {
+                text: "custom".into(),
+                quoted: false,
+            }))
+        });
+        let o2 = Options::default().with_function("foo($v)", cb2);
+        let css2 = compile("@function foo($v) { @return user; }\n.a { x: foo(1); }", &o2).unwrap();
+        assert!(css2.contains("x: user"), "user @function should win: {css2}");
+    }
+
+    #[test]
+    fn custom_function_string_list_map_roundtrip() {
+        // Receive a MAP + a LIST, read into them, and return a quoted STRING —
+        // exercising deserialization of all three on the way in.
+        let cb: super::HostFunction = Rc::new(|bytes| {
+            let args = deserialize_args(bytes)?;
+            let map = match &args[0] {
+                Value::Map(m) => m,
+                _ => return Err("arg 1 must be a map".into()),
+            };
+            // map value for key `b`
+            let b = map
+                .get(&Value::Str(SassStr {
+                    text: "b".into(),
+                    quoted: false,
+                }))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let bn = if let Value::Number(n) = b { n.value } else { -1.0 };
+            let list = match &args[1] {
+                Value::List(l) => l,
+                _ => return Err("arg 2 must be a list".into()),
+            };
+            let count = list.items.len();
+            serialize_one(&Value::Str(SassStr {
+                text: format!("b={bn} n={count}").into(),
+                quoted: true,
+            }))
+        });
+        let o = Options::default().with_function("probe($m, $l)", cb);
+        let css = compile(".a { x: probe((a: 1, b: 2), (x y z)); }", &o).unwrap();
+        assert!(
+            css.contains("\"b=2 n=3\""),
+            "map+list deserialized, string round-trips: {css}"
+        );
+        let _ = ListSep::Comma;
+    }
+
+    #[test]
+    fn custom_function_rest_args() {
+        // sum($nums...) -> number
+        let cb: super::HostFunction = Rc::new(|bytes| {
+            let args = deserialize_args(bytes)?;
+            let list = match &args[0] {
+                Value::List(l) => l,
+                _ => return Err("expected an arglist".into()),
+            };
+            let total: f64 = list
+                .items
+                .iter()
+                .map(|v| if let Value::Number(n) = v { n.value } else { 0.0 })
+                .sum();
+            serialize_one(&Value::Number(Number::unitless(total)))
+        });
+        let o = Options::default().with_function("sum($nums...)", cb);
+        let css = compile(".a { x: sum(1, 2, 3, 4); }", &o).unwrap();
+        assert!(css.contains("x: 10"), "got: {css}");
+    }
+
+    #[test]
+    fn custom_function_error_surfaces() {
+        let cb: super::HostFunction = Rc::new(|_| Err("boom".into()));
+        let o = Options::default().with_function("bad($x)", cb);
+        let err = compile(".a { x: bad(1); }", &o).unwrap_err();
+        assert!(err.message.contains("boom"), "got: {}", err.message);
+    }
+}

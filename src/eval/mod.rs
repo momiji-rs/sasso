@@ -606,6 +606,8 @@ impl Sink<'_> {
 pub(crate) struct EvalOptions<'a> {
     pub style: OutputStyle,
     pub importer: Option<&'a dyn Importer>,
+    /// Host-defined custom functions (dart-sass `functions`), matched by name.
+    pub functions: &'a [crate::host_fn::HostFn],
     /// The entrypoint's source text, for rendering byte-exact diagnostic
     /// snippets. Empty when the embedder does not supply it (diagnostics then
     /// fall back to the legacy one-liner).

@@ -601,7 +601,7 @@ impl<'a> Evaluator<'a> {
                 }
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.
-                let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
+                let (mut pos_args, mut named, call_sep) = self.eval_call_args(args)?;
                 // The global (deprecated) aliases of the `sass:meta` existence
                 // predicates resolve against the evaluator state, not the
                 // value-only builtin layer. A user-defined function of the same
@@ -667,6 +667,48 @@ impl<'a> Evaluator<'a> {
                             return crate::builtins::call_module(&m, name, &pos_args, &named, *pos)
                                 .map(Value::without_slash);
                         }
+                    }
+                }
+                // Host-defined custom functions (dart-sass `functions`): they
+                // override built-in globals but lose to user `@function`s and
+                // module members (checked above). Resolved by calling back into
+                // the embedder with the bound args serialized to the host-value
+                // wire format.
+                if !self.options.functions.is_empty() {
+                    let norm = crate::host_fn::normalize_name(name);
+                    if let Some(idx) = self.options.functions.iter().position(|f| f.name == norm) {
+                        // Extract the owned signature + callback so the immutable
+                        // borrow on `self.options` ends before any `&mut self`.
+                        let (param_names, rest_name): (Vec<String>, Option<String>) = {
+                            let hf = &self.options.functions[idx];
+                            match &hf.params {
+                                Ok(p) => (p.params.iter().map(|x| x.name.clone()).collect(), p.rest.clone()),
+                                Err(e) => return Err(Error::at(e.clone(), *pos)),
+                            }
+                        };
+                        let callback = self.options.functions[idx].callback.clone();
+                        // Real Sass function: collapse slash-division args.
+                        for v in &mut pos_args {
+                            *v = std::mem::replace(v, Value::Null).without_slash();
+                        }
+                        for (_, v) in &mut named {
+                            *v = std::mem::replace(v, Value::Null).without_slash();
+                        }
+                        let bound = crate::host_fn::bind_host_args(
+                            &param_names,
+                            rest_name.as_deref(),
+                            std::mem::take(&mut pos_args),
+                            std::mem::take(&mut named),
+                            call_sep,
+                            &norm,
+                        )
+                        .map_err(|e| Error::at(e, *pos))?;
+                        let in_bytes =
+                            crate::host_fn::serialize_args(&bound).map_err(|e| Error::at(e, *pos))?;
+                        let out_bytes = callback(&in_bytes).map_err(|e| Error::at(e, *pos))?;
+                        return crate::host_fn::deserialize_value(&out_bytes)
+                            .map_err(|e| Error::at(e, *pos))
+                            .map(Value::without_slash);
                     }
                 }
                 // A bare slash-division argument collapses to its number when
