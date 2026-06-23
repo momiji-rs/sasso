@@ -30,7 +30,8 @@ use std::rc::Rc;
 use crate::ast::{Param, ParamList};
 use crate::builtins::{legacy_to_modern, make_modern_in};
 use crate::value::{
-    unit_lists_factor, Color, ColorSpace, List, ListSep, Map, ModernColor, Number, SassStr, Value,
+    unit_lists_factor, CalcNode, CalcOp, Color, ColorSpace, List, ListSep, Map, ModernColor, Number, SassStr,
+    Value,
 };
 
 /// An embedder's custom-function callback: it receives the bound arguments
@@ -373,6 +374,7 @@ const TAG_STRING: u8 = 3;
 const TAG_LIST: u8 = 4;
 const TAG_MAP: u8 = 5;
 const TAG_COLOR: u8 = 6;
+const TAG_CALC: u8 = 7;
 
 /// Write an optional channel: a present flag then (if present) the f64.
 fn put_opt_f64(out: &mut Vec<u8>, v: Option<f64>) {
@@ -426,15 +428,7 @@ fn serialize_value(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
         }
         Value::Number(n) => {
             out.push(TAG_NUMBER);
-            put_f64(out, n.value);
-            put_u32(out, n.numer_units().len());
-            for u in n.numer_units() {
-                put_str(out, u);
-            }
-            put_u32(out, n.denom_units().len());
-            for u in n.denom_units() {
-                put_str(out, u);
-            }
+            write_number_body(out, n);
         }
         Value::Str(s) => {
             out.push(TAG_STRING);
@@ -481,8 +475,14 @@ fn serialize_value(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
             }
             put_opt_f64(out, mc.alpha);
         }
-        Value::Calc(_) | Value::Slash(..) => {
-            return Err("sasso: calc()/slash values are not yet supported as custom-function values".into())
+        Value::Calc(node) => {
+            out.push(TAG_CALC);
+            write_calc_node(out, node);
+        }
+        Value::Slash(..) => {
+            // A slash-division never reaches here (call args are slash-collapsed
+            // before binding, and JS can't construct one).
+            return Err("sasso: slash-division values are not supported as custom-function values".into());
         }
         Value::Function(_) | Value::Mixin(_) => {
             return Err(
@@ -491,6 +491,57 @@ fn serialize_value(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The `[f64 value][numer units][denom units]` body of a number (shared by the
+/// `TAG_NUMBER` value and a calc `Number` node).
+fn write_number_body(out: &mut Vec<u8>, n: &Number) {
+    put_f64(out, n.value);
+    put_u32(out, n.numer_units().len());
+    for u in n.numer_units() {
+        put_str(out, u);
+    }
+    put_u32(out, n.denom_units().len());
+    for u in n.denom_units() {
+        put_str(out, u);
+    }
+}
+
+fn calc_op_code(op: CalcOp) -> u8 {
+    match op {
+        CalcOp::Add => 0,
+        CalcOp::Sub => 1,
+        CalcOp::Mul => 2,
+        CalcOp::Div => 3,
+    }
+}
+
+/// Serialize a `CalcNode` tree: tag byte (0 Number, 1 Str, 2 Op, 3 Func) + payload.
+fn write_calc_node(out: &mut Vec<u8>, node: &CalcNode) {
+    match node {
+        CalcNode::Number(n) => {
+            out.push(0);
+            write_number_body(out, n);
+        }
+        CalcNode::Str(s) => {
+            out.push(1);
+            put_str(out, s);
+        }
+        CalcNode::Op { op, left, right } => {
+            out.push(2);
+            out.push(calc_op_code(*op));
+            write_calc_node(out, left);
+            write_calc_node(out, right);
+        }
+        CalcNode::Func { name, args } => {
+            out.push(3);
+            put_str(out, name);
+            put_u32(out, args.len());
+            for a in args {
+                write_calc_node(out, a);
+            }
+        }
+    }
 }
 
 fn sep_code(sep: ListSep) -> u8 {
@@ -603,20 +654,7 @@ fn read_value(r: &mut Reader<'_>) -> Result<Value, String> {
     Ok(match tag {
         TAG_NULL => Value::Null,
         TAG_BOOL => Value::Bool(r.u8()? != 0),
-        TAG_NUMBER => {
-            let value = r.f64()?;
-            let nn = r.u32()?;
-            let mut numer = Vec::with_capacity(nn);
-            for _ in 0..nn {
-                numer.push(r.str()?);
-            }
-            let dn = r.u32()?;
-            let mut denom = Vec::with_capacity(dn);
-            for _ in 0..dn {
-                denom.push(r.str()?);
-            }
-            Value::Number(Number::with_units(value, numer, denom))
-        }
+        TAG_NUMBER => Value::Number(read_number_body(r)?),
         TAG_STRING => {
             let quoted = r.u8()? != 0;
             let text = r.str()?;
@@ -687,9 +725,64 @@ fn read_value(r: &mut Reader<'_>) -> Result<Value, String> {
                 Value::Color(make_modern_in(mc, space))
             }
         }
+        TAG_CALC => Value::Calc(read_calc_node(r)?),
         other => {
             return Err(format!(
                 "sasso: unknown value tag {other} in custom-function result"
+            ))
+        }
+    })
+}
+
+/// Read a number body written by [`write_number_body`].
+fn read_number_body(r: &mut Reader<'_>) -> Result<Number, String> {
+    let value = r.f64()?;
+    let nn = r.u32()?;
+    let mut numer = Vec::with_capacity(nn);
+    for _ in 0..nn {
+        numer.push(r.str()?);
+    }
+    let dn = r.u32()?;
+    let mut denom = Vec::with_capacity(dn);
+    for _ in 0..dn {
+        denom.push(r.str()?);
+    }
+    Ok(Number::with_units(value, numer, denom))
+}
+
+fn calc_op_from(code: u8) -> Result<CalcOp, String> {
+    Ok(match code {
+        0 => CalcOp::Add,
+        1 => CalcOp::Sub,
+        2 => CalcOp::Mul,
+        3 => CalcOp::Div,
+        _ => return Err("sasso: bad calc operator in custom-function result".into()),
+    })
+}
+
+/// Read a `CalcNode` tree written by [`write_calc_node`].
+fn read_calc_node(r: &mut Reader<'_>) -> Result<CalcNode, String> {
+    Ok(match r.u8()? {
+        0 => CalcNode::Number(read_number_body(r)?),
+        1 => CalcNode::Str(r.str()?),
+        2 => {
+            let op = calc_op_from(r.u8()?)?;
+            let left = Box::new(read_calc_node(r)?);
+            let right = Box::new(read_calc_node(r)?);
+            CalcNode::Op { op, left, right }
+        }
+        3 => {
+            let name = r.str()?;
+            let n = r.u32()?;
+            let mut args = Vec::with_capacity(n);
+            for _ in 0..n {
+                args.push(read_calc_node(r)?);
+            }
+            CalcNode::Func { name, args }
+        }
+        other => {
+            return Err(format!(
+                "sasso: bad calc node tag {other} in custom-function result"
             ))
         }
     })

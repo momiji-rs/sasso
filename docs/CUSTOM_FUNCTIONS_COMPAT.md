@@ -70,13 +70,17 @@ compile.
 
 ### TIER 3 — missing value TYPES (LOW frequency, varied effort)
 
-- `SassCalculation` (`calc()` as an argument or return) + `CalculationOperation`
-  / `CalculationInterpolation` / `CalculationValue`, and `assertCalculation`.
-  Needs the `CalcNode` tree serialized both ways. *(Currently a clear error.)*
-- `SassFunction` (first-class function ref, for `meta.call`) — needs an
-  engine-side **opaque handle table** (JS holds an opaque handle, passes it
-  back). *(Currently a clear error.)*
-- `SassMixin` (first-class mixin ref) — same handle mechanism. *(Very rare.)*
+- **`SassCalculation` ✅ DONE (Tier 3a):** `calc()`/`min()`/`max()`/`clamp()` as
+  an argument or return, plus `CalculationOperation` and `assertCalculation`. The
+  `CalcNode` tree round-trips both ways over a new `TAG_CALC` wire encoding
+  (Number/Str/Op/Func). Tested (receive + inspect `calc(1px + 2%)`; return
+  `calc`/`min` incl. `var()`). *(`CalculationInterpolation` is deprecated/legacy —
+  not modelled.)*
+- **`SassFunction` ⏳ Tier 3b (open):** first-class function ref (for `meta.call`)
+  — needs an engine-side **opaque handle table** (JS holds an opaque handle,
+  passes it back). *(Currently a clear error. Very rare in custom functions.)*
+- **`SassMixin` ⏳ Tier 3b (open):** first-class mixin ref — same handle
+  mechanism. *(Very rare.)*
 
 ## CLI gaps (separate track)
 

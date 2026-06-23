@@ -29,6 +29,8 @@ export {
   SassMap,
   SassNumber,
   SassString,
+  SassCalculation,
+  CalculationOperation,
   sassTrue,
   sassFalse,
   sassNull,

@@ -573,9 +573,136 @@ export class SassMap extends Value {
   }
 }
 
+/** A binary operation inside a calculation (dart-sass `CalculationOperation`). */
+export class CalculationOperation {
+  constructor(operator, left, right) {
+    this.operator = operator; // "+" | "-" | "*" | "/"
+    this.left = left;
+    this.right = right;
+  }
+  equals(o) {
+    return (
+      o instanceof CalculationOperation &&
+      o.operator === this.operator &&
+      immutableIs(o.left, this.left) &&
+      immutableIs(o.right, this.right)
+    );
+  }
+  toString() {
+    return `${this.left} ${this.operator} ${this.right}`;
+  }
+}
+
+/** A `calc()` / `min()` / `max()` / `clamp()` calculation (dart-sass `SassCalculation`). */
+export class SassCalculation extends Value {
+  /** Prefer the `calc`/`min`/`max`/`clamp` static constructors. */
+  constructor(name, args) {
+    super();
+    this.name = name;
+    this._args = [...args];
+  }
+  static calc(argument) {
+    return new SassCalculation("calc", [argument]);
+  }
+  static min(args) {
+    return new SassCalculation("min", toArray(args));
+  }
+  static max(args) {
+    return new SassCalculation("max", toArray(args));
+  }
+  static clamp(min, value, max) {
+    const args = [min];
+    if (value !== undefined) args.push(value);
+    if (max !== undefined) args.push(max);
+    return new SassCalculation("clamp", args);
+  }
+  get arguments() {
+    return list(this._args);
+  }
+  assertCalculation() {
+    return this;
+  }
+  equals(o) {
+    return (
+      o instanceof SassCalculation &&
+      o.name === this.name &&
+      o._args.length === this._args.length &&
+      o._args.every((v, i) => immutableIs(v, this._args[i]))
+    );
+  }
+  hashCode() {
+    return hashStr(this.name);
+  }
+  toString() {
+    return `${this.name}(${this._args.join(", ")})`;
+  }
+}
+
 // ---------------- wire (de)serialization (mirrors ../src/host_fn.rs) ----------------
 
-const TAG = { NULL: 0, BOOL: 1, NUMBER: 2, STRING: 3, LIST: 4, MAP: 5, COLOR: 6 };
+const TAG = { NULL: 0, BOOL: 1, NUMBER: 2, STRING: 3, LIST: 4, MAP: 5, COLOR: 6, CALC: 7 };
+const CALC_OP_CODE = { "+": 0, "-": 1, "*": 2, "/": 3 };
+const CALC_OP_SYM = ["+", "-", "*", "/"];
+
+function writeNumberBody(w, n) {
+  w.f64(n.value);
+  w.u32(n._numeratorUnits.length);
+  for (const u of n._numeratorUnits) w.str(u);
+  w.u32(n._denominatorUnits.length);
+  for (const u of n._denominatorUnits) w.str(u);
+}
+function readNumberBody(r) {
+  const value = r.f64();
+  const numeratorUnits = [];
+  for (let n = r.u32(); n > 0; n--) numeratorUnits.push(r.str());
+  const denominatorUnits = [];
+  for (let n = r.u32(); n > 0; n--) denominatorUnits.push(r.str());
+  return new SassNumber(value, { numeratorUnits, denominatorUnits });
+}
+
+// A calc node (a `CalculationValue`): tag 0 number, 1 string, 2 operation, 3 calc.
+function writeCalcNode(w, v) {
+  if (v instanceof SassNumber) {
+    w.u8(0);
+    writeNumberBody(w, v);
+  } else if (typeof v === "string") {
+    w.u8(1);
+    w.str(v);
+  } else if (v instanceof SassString) {
+    w.u8(1);
+    w.str(v.text);
+  } else if (v instanceof CalculationOperation) {
+    w.u8(2);
+    w.u8(CALC_OP_CODE[v.operator]);
+    writeCalcNode(w, v.left);
+    writeCalcNode(w, v.right);
+  } else if (v instanceof SassCalculation) {
+    w.u8(3);
+    w.str(v.name);
+    w.u32(v._args.length);
+    for (const a of v._args) writeCalcNode(w, a);
+  } else {
+    throw new Error(`sasso: a calculation contains a value it can't represent (${v})`);
+  }
+}
+function readCalcNode(r) {
+  const t = r.u8();
+  if (t === 0) return readNumberBody(r);
+  if (t === 1) return new SassString(r.str(), { quotes: false });
+  if (t === 2) {
+    const op = CALC_OP_SYM[r.u8()];
+    const left = readCalcNode(r);
+    const right = readCalcNode(r);
+    return new CalculationOperation(op, left, right);
+  }
+  if (t === 3) {
+    const name = r.str();
+    const args = [];
+    for (let n = r.u32(); n > 0; n--) args.push(readCalcNode(r));
+    return new SassCalculation(name, args);
+  }
+  throw new Error(`sasso: bad calc node tag ${t} from the engine`);
+}
 
 class Writer {
   constructor() {
@@ -618,11 +745,12 @@ function writeValue(w, v) {
     w.u8(v.value ? 1 : 0);
   } else if (v instanceof SassNumber) {
     w.u8(TAG.NUMBER);
-    w.f64(v.value);
-    w.u32(v._numeratorUnits.length);
-    for (const u of v._numeratorUnits) w.str(u);
-    w.u32(v._denominatorUnits.length);
-    for (const u of v._denominatorUnits) w.str(u);
+    writeNumberBody(w, v);
+  } else if (v instanceof SassCalculation) {
+    w.u8(TAG.CALC);
+    // Unwrap a single-argument `calc(...)`; otherwise emit the calc as a func node.
+    if (v.name === "calc" && v._args.length === 1) writeCalcNode(w, v._args[0]);
+    else writeCalcNode(w, v);
   } else if (v instanceof SassString) {
     w.u8(TAG.STRING);
     w.u8(v.hasQuotes ? 1 : 0);
@@ -705,13 +833,12 @@ function readValue(r) {
       return sassNull;
     case TAG.BOOL:
       return r.u8() ? sassTrue : sassFalse;
-    case TAG.NUMBER: {
-      const value = r.f64();
-      const numeratorUnits = [];
-      for (let n = r.u32(); n > 0; n--) numeratorUnits.push(r.str());
-      const denominatorUnits = [];
-      for (let n = r.u32(); n > 0; n--) denominatorUnits.push(r.str());
-      return new SassNumber(value, { numeratorUnits, denominatorUnits });
+    case TAG.NUMBER:
+      return readNumberBody(r);
+    case TAG.CALC: {
+      const top = readCalcNode(r);
+      // A bare operand/operation is the single argument of an implicit `calc()`.
+      return top instanceof SassCalculation ? top : new SassCalculation("calc", [top]);
     }
     case TAG.STRING: {
       const quotes = r.u8() !== 0;
@@ -777,6 +904,8 @@ export const valueApi = {
   SassMap,
   SassNumber,
   SassString,
+  SassCalculation,
+  CalculationOperation,
   sassTrue,
   sassFalse,
   sassNull,

@@ -212,7 +212,7 @@ export abstract class Value {
   assertColor(name?: string): SassColor;
   assertMap(name?: string): SassMap;
   assertBoolean(name?: string): SassBoolean;
-  assertCalculation(name?: string): never;
+  assertCalculation(name?: string): SassCalculation;
   assertFunction(name?: string): never;
   assertMixin(name?: string): never;
   equals(other: Value): boolean;
@@ -308,6 +308,28 @@ export class SassMap extends Value {
   readonly contents: OrderedMap<Value, Value>;
 }
 
+/** A value usable inside a calculation. */
+export type CalculationValue = SassNumber | SassCalculation | CalculationOperation | SassString | string;
+
+/** A binary operation inside a calculation (`+`, `-`, `*`, `/`). */
+export class CalculationOperation {
+  constructor(operator: "+" | "-" | "*" | "/", left: CalculationValue, right: CalculationValue);
+  readonly operator: "+" | "-" | "*" | "/";
+  readonly left: CalculationValue;
+  readonly right: CalculationValue;
+  equals(other: unknown): boolean;
+}
+
+/** A `calc()` / `min()` / `max()` / `clamp()` calculation. */
+export class SassCalculation extends Value {
+  static calc(argument: CalculationValue): SassCalculation;
+  static min(args: CalculationValue[]): SassCalculation;
+  static max(args: CalculationValue[]): SassCalculation;
+  static clamp(min: CalculationValue, value?: CalculationValue, max?: CalculationValue): SassCalculation;
+  readonly name: string;
+  readonly arguments: List<CalculationValue>;
+}
+
 declare const _default: {
   compile: typeof compile;
   compileAsync: typeof compileAsync;
@@ -326,6 +348,8 @@ declare const _default: {
   SassList: typeof SassList;
   SassArgumentList: typeof SassArgumentList;
   SassMap: typeof SassMap;
+  SassCalculation: typeof SassCalculation;
+  CalculationOperation: typeof CalculationOperation;
   sassTrue: typeof sassTrue;
   sassFalse: typeof sassFalse;
   sassNull: typeof sassNull;

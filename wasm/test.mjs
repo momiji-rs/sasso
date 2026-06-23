@@ -371,6 +371,27 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
   );
   assert.equal(new SassColor({ space: "hsl", hue: 0, saturation: 0, lightness: 50 }).isChannelPowerless("hue"), true, "Tier2c: isChannelPowerless");
 
+  // Tier 3a: SassCalculation round-trip (receive + inspect, and return)
+  const { SassCalculation, CalculationOperation } = size;
+  const rcalcIn = size.compileString(`.a { x: probe(calc(1px + 2%)); }`, {
+    functions: {
+      "probe($c)": (a) => {
+        const c = a[0].assertCalculation();
+        const op = c.arguments.get(0);
+        return new SassString(`${c.name}|${op.operator}|${op.left}|${op.right}`, { quotes: true });
+      },
+    },
+  });
+  assert.ok(rcalcIn.css.includes('"calc|+|1px|2%"'), "Tier3a: receive + inspect calc()");
+  const rcalcOut = size.compileString(`.a { width: build(); }`, {
+    functions: { "build()": () => SassCalculation.calc(new CalculationOperation("+", new SassNumber(1, "px"), new SassNumber(2, "%"))) },
+  });
+  assert.ok(rcalcOut.css.includes("width: calc(1px + 2%)"), "Tier3a: return a SassCalculation");
+  const rcalcMin = size.compileString(`.a { width: mn(); }`, {
+    functions: { "mn()": () => SassCalculation.min([new SassNumber(10, "px"), new SassString("var(--x)", { quotes: false })]) },
+  });
+  assert.ok(rcalcMin.css.includes("width: min(10px, var(--x))"), "Tier3a: return min() with var()");
+
   console.log("ok: custom functions — number/string/color/list/map/rest, override, error, async (Phase 4)");
 }
 
