@@ -6,11 +6,11 @@
 // FileImporter, loadedUrls, importer errors, async rejection). Run after
 // build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as size from "./npm/sasso.mjs";
 import * as speed from "./npm/sasso.speed.mjs";
 
@@ -219,6 +219,31 @@ let cliMissing = false;
 try { cli(["/no/such/file.scss"]); } catch (e) { cliMissing = /no such file/.test(String(e.stderr || "")); }
 assert.ok(cliMissing, "cli: a missing input file errors cleanly");
 console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
+
+// === Phase 3: CLI --watch (recompiles on dependency change) ===
+{
+  const waitFor = async (pred, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (pred()) return true;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return false;
+  };
+  const wdir = mkdtempSync(join(tmpdir(), "sasso-watch-"));
+  writeFileSync(join(wdir, "main.scss"), `@use "v" as v;\n.a { color: v.$c; }\n`);
+  writeFileSync(join(wdir, "_v.scss"), `$c: red;\n`);
+  const outFile = join(wdir, "out.css");
+  const proc = spawn(process.execPath, [cliPath, "--watch", join(wdir, "main.scss"), outFile], { stdio: "ignore" });
+  try {
+    assert.ok(await waitFor(() => existsSync(outFile) && readFileSync(outFile, "utf8").includes("red"), 10000), "cli --watch: initial compile");
+    writeFileSync(join(wdir, "_v.scss"), `$c: blue;\n`); // change a DEPENDENCY, not the entry
+    assert.ok(await waitFor(() => readFileSync(outFile, "utf8").includes("blue"), 10000), "cli --watch: recompiles on dependency change");
+    console.log("ok: cli --watch — initial + recompile on dependency change");
+  } finally {
+    proc.kill();
+  }
+}
 
 // === Phase 4: custom functions — full Value coverage (sync + async) ===
 {

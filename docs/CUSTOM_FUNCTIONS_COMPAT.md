@@ -77,9 +77,9 @@ dart).
 
 ## CLI gaps (separate track)
 
-- **`--watch`** (flagged important): re-compile on change; track dependencies via
-  `loadedUrls`. Moderate effort (`fs.watch` + recompile loop).
-- `--embed-source-map` (inline), `--update`, `--error-css`, multiple
+- ~~**`--watch`**~~ ✅ DONE — `-w/--watch` recompiles on change, tracking
+  dependencies via `loadedUrls` (watches their directories, debounced).
+- Still open: `--embed-source-map` (inline), `--update`, `--error-css`, multiple
   `input:output` pairs, `--quiet`, `--color`, `--no-charset`,
   `--[no-]source-map-urls=relative|absolute`, `--stop-on-error`.
 
@@ -87,8 +87,8 @@ dart).
 
 1. ~~**Tier 0**~~ ✅ done (immutable shim + value-keyed `SassMap.contents`).
 2. ~~**Tier 1**~~ ✅ done (pure-JS methods; error-message *exactness* still open).
-3. **CLI `--watch`** — user-flagged, independent. ← next
-4. **Tier 2** (engine-routed conversions) — the big one; design the
+3. ~~**CLI `--watch`**~~ ✅ done (`-w/--watch`, dependency-tracked).
+4. **Tier 2** (engine-routed conversions) — the big one; design the ← next
    re-entrant value-conversion bridge once, reuse for number + color + equals.
 5. **Tier 3** (calc / function / mixin types) — niche; do last.
 6. Error-message byte-exactness pass (the Tier-1 caveat).

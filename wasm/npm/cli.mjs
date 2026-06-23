@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // sasso CLI — `npx sasso input.scss [output.css]`. Pure Node + wasm, no deps.
 // A subset of the dart-sass `sass` CLI flags, sharing the package's compiler.
-import { readFileSync, writeFileSync } from "node:fs";
-import { basename } from "node:path";
+import { readFileSync, writeFileSync, watch } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { compile, compileString, info, Exception } from "./sasso.mjs";
 
 const HELP = `sasso — compile SCSS/Sass to CSS
@@ -19,6 +20,8 @@ Options:
       --[no-]source-map              Emit a source map (default: on when writing
                                      to a file, off for stdout).
       --embed-sources                Embed source text in the map's sourcesContent.
+  -w, --watch                        Recompile when the input or any dependency
+                                     changes (requires <input> <output>).
   -h, --help                         Print this help.
       --version                      Print the version.
 
@@ -38,6 +41,7 @@ function parseArgs(argv) {
     indented: false,
     sourceMap: undefined, // tri-state: default depends on output target
     embedSources: false,
+    watch: false,
     positionals: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -61,6 +65,8 @@ function parseArgs(argv) {
       process.exit(0);
     } else if (a === "--stdin") {
       opts.stdin = true;
+    } else if (a === "-w" || a === "--watch") {
+      opts.watch = true;
     } else if (a === "--indented") {
       opts.indented = true;
     } else if (a === "--source-map") {
@@ -96,15 +102,82 @@ function readStdin() {
   }
 }
 
+// Write a compile result to `outPath` (file) or stdout, including the source-map
+// sidecar + footer for file output.
+function emit(result, outPath, wantMap) {
+  let css = result.css;
+  if (wantMap && outPath) {
+    const mapPath = outPath + ".map";
+    const map = { ...result.sourceMap, file: basename(outPath) };
+    css = css.replace(/\n?$/, "") + `\n/*# sourceMappingURL=${basename(mapPath)} */\n`;
+    writeFileSync(mapPath, JSON.stringify(map));
+  }
+  if (outPath) writeFileSync(outPath, css);
+  else process.stdout.write(css);
+}
+
+// `--watch`: recompile `input` -> `output` whenever the input or any of its
+// dependencies (the compile's `loadedUrls`) changes. Watches the directories of
+// all involved files (so editor atomic-saves are caught) and debounces bursts.
+function runWatch(input, output, common) {
+  if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
+  let watchers = [];
+  let timer = null;
+
+  const rewatch = (loadedUrls) => {
+    for (const w of watchers) w.close();
+    watchers = [];
+    const files = new Set([resolve(input)]);
+    for (const u of loadedUrls || []) {
+      try {
+        files.add(fileURLToPath(u));
+      } catch {
+        // non-file URL (a virtual importer) — nothing to watch
+      }
+    }
+    const dirs = new Set([...files].map((f) => dirname(f)));
+    for (const d of dirs) {
+      try {
+        watchers.push(
+          watch(d, (_event, fn) => {
+            if (!fn || files.has(join(d, fn))) schedule();
+          }),
+        );
+      } catch {
+        // directory vanished — ignore
+      }
+    }
+  };
+
+  const recompile = () => {
+    try {
+      const result = compile(input, common);
+      emit(result, output, common.sourceMap);
+      process.stderr.write(`Compiled ${input} to ${output}.\n`);
+      rewatch(result.loadedUrls);
+    } catch (e) {
+      const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
+      process.stderr.write(msg.replace(/\n?$/, "\n"));
+      // keep watching at least the entry so a fix re-triggers a compile
+      rewatch([pathToFileURL(resolve(input))]);
+    }
+  };
+
+  const schedule = () => {
+    clearTimeout(timer);
+    timer = setTimeout(recompile, 50);
+  };
+
+  recompile();
+  process.stderr.write("Watching for changes... (press Ctrl-C to stop)\n");
+}
+
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   const [input, output] = opts.positionals;
 
   if (!opts.stdin && input === undefined) {
     fail("error: no input file (pass a path, or --stdin). Try --help.");
-  }
-  if (opts.stdin && input !== undefined && output === undefined) {
-    // `sasso --stdin out.css` — the single positional is the OUTPUT.
   }
   const outPath = opts.stdin ? input : output;
   const wantMap = opts.sourceMap === undefined ? !!outPath : opts.sourceMap;
@@ -116,13 +189,16 @@ function main() {
     sourceMapIncludeSources: opts.embedSources,
   };
 
+  if (opts.watch) {
+    if (opts.stdin) fail("error: --watch cannot be used with --stdin");
+    runWatch(input, output, common);
+    return; // keep the process alive on the watchers
+  }
+
   let result;
   try {
     if (opts.stdin) {
-      result = compileString(readStdin(), {
-        ...common,
-        syntax: opts.indented ? "indented" : "scss",
-      });
+      result = compileString(readStdin(), { ...common, syntax: opts.indented ? "indented" : "scss" });
     } else {
       result = compile(input, common);
     }
@@ -132,19 +208,7 @@ function main() {
     fail(`error: ${e && e.message ? e.message : e}`);
   }
 
-  let css = result.css;
-  if (wantMap && outPath) {
-    // dart-sass appends a sourceMappingURL footer for file output and writes a
-    // sidecar map. `file` points at the output basename.
-    const mapPath = outPath + ".map";
-    const map = { ...result.sourceMap, file: basename(outPath) };
-    const footer = `\n/*# sourceMappingURL=${basename(mapPath)} */\n`;
-    css = css.replace(/\n?$/, "") + footer;
-    writeFileSync(mapPath, JSON.stringify(map));
-  }
-
-  if (outPath) writeFileSync(outPath, css);
-  else process.stdout.write(css);
+  emit(result, outPath, wantMap);
 }
 
 main();

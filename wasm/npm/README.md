@@ -140,13 +140,15 @@ npx sasso input.scss                      # compile to stdout
 npx sasso input.scss output.css           # write output.css (+ output.css.map)
 npx sasso --style=compressed input.scss
 npx sasso -I node_modules -I scss main.scss   # add load paths
+npx sasso --watch input.scss output.css   # recompile on change (deps tracked)
 echo '.a{b:1+2}' | npx sasso --stdin
 npx sasso --help
 ```
 
 Flags: `-s/--style <expanded|compressed>`, `-I/--load-path <dir>` (repeatable),
 `--stdin`, `--indented`, `--[no-]source-map` (on by default when writing a file),
-`--embed-sources`, `--help`, `--version`.
+`--embed-sources`, `-w/--watch` (re-compiles when the input or any dependency
+changes), `--help`, `--version`.
 
 ## Two builds: size vs speed
 
