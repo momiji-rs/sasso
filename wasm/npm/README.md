@@ -106,10 +106,23 @@ alias it to sasso in `package.json`, then use it as usual:
 export default { css: { preprocessorOptions: { scss: {} } } };
 ```
 
-> **Phase-1 limitation:** custom importers and `loadPaths` (so `@use` / `@import`
-> resolve files from disk or a bundler resolver) are not wired through the wasm
-> boundary yet — they land in the next release. Plain stylesheets and inline
-> `@use "sass:*"` built-in modules compile today; cross-file imports do not.
+## CLI — `npx sasso`
+
+The package ships a `sasso` bin (pure Node + wasm), with a subset of the
+dart-sass `sass` CLI flags:
+
+```bash
+npx sasso input.scss                      # compile to stdout
+npx sasso input.scss output.css           # write output.css (+ output.css.map)
+npx sasso --style=compressed input.scss
+npx sasso -I node_modules -I scss main.scss   # add load paths
+echo '.a{b:1+2}' | npx sasso --stdin
+npx sasso --help
+```
+
+Flags: `-s/--style <expanded|compressed>`, `-I/--load-path <dir>` (repeatable),
+`--stdin`, `--indented`, `--[no-]source-map` (on by default when writing a file),
+`--embed-sources`, `--help`, `--version`.
 
 ## Two builds: size vs speed
 

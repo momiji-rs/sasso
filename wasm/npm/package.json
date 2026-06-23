@@ -6,6 +6,7 @@
   "main": "./sasso.mjs",
   "module": "./sasso.mjs",
   "types": "./sasso.d.ts",
+  "bin": { "sasso": "./cli.mjs" },
   "exports": {
     ".": {
       "types": "./sasso.d.ts",
@@ -21,6 +22,7 @@
   "files": [
     "_loader.mjs",
     "_importer.mjs",
+    "cli.mjs",
     "sasso.mjs",
     "sasso.speed.mjs",
     "sasso.wasm",

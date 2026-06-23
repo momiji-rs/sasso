@@ -8,8 +8,9 @@
 >
 > **Progress:** hard-cut rename ✅ · **Phase 1 (modern JS API) ✅** · **Phase 2
 > (sync importers) ✅** · **Phase 2.5 (async importers via Asyncify) ✅ — full
-> zero-config sass-loader + Vite drop-in, cross-file imports and all.** Phase 3
-> (CLI bin) → next. `sasso@0.7.0` published (Phases 1+2); 2.5 ships next cut.
+> zero-config sass-loader + Vite drop-in.** · **Phase 3 (CLI bin) ✅ — `npx
+> sasso`.** Phase 4 (custom `functions`) deferred. `sasso@0.7.0` published
+> (Phases 1+2); 2.5 + 3 ship on the next `npm-v*` cut.
 
 ## Why the bare name matters
 
@@ -198,10 +199,14 @@ interface CompileResult { css: string; loadedUrls: URL[]; sourceMap?: RawSourceM
     build), shipped alongside and **loaded lazily only when an async API is
     used**, so the sync fast path is untouched. Async compiles SERIALIZE (one
     asyncify stack; the loader chains them). The async stack region is 1 MiB.
-- **Phase 3 — CLI bin.** `"bin": { "sasso": "./cli.mjs" }`, pure Node + wasm.
-  Flags mirror the dart-sass `sass` CLI: `[input] [output]`, `--style`,
-  `-I/--load-path`, `--[no-]source-map`, `--embed-sources`, `--stdin`,
-  `--help`, `--version` (`--watch` later).
+- **Phase 3 — CLI bin. ✅ DONE 2026-06-23.** `"bin": { "sasso": "./cli.mjs" }`
+  (`wasm/npm/cli.mjs`), pure Node + wasm, no deps. Flags mirror the dart-sass
+  `sass` CLI: `[input] [output]`, `-s/--style`, `-I/--load-path` (repeatable),
+  `--stdin`, `--indented`, `--[no-]source-map` (on by default for file output —
+  writes `<out>.map` + a `sourceMappingURL` footer), `--embed-sources`,
+  `--help`, `--version`. Sass errors print to stderr and exit non-zero.
+  `--watch` and inline `--embed-source-map` are still TODO. Smoke-tested in
+  `wasm/test.mjs`.
 - **Phase 4 — custom `functions` (deferred / optional).** JS-defined Sass
   functions need the full `Value` type system (SassNumber/String/Color/List/Map).
   Large surface, not on the common sass-loader/Vite path. **v1 ships it as

@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 import { writeFileSync, mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import * as size from "./npm/sasso.mjs";
 import * as speed from "./npm/sasso.speed.mjs";
 
@@ -194,4 +195,23 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   console.log(`ok: ${name} build — modern + Compiler API + sync & async importers (Phase 1 + 2 + 2.5)`);
 }
 
-console.log("all wasm modern-API + importer tests passed");
+// === Phase 3: CLI (bin) smoke test ===
+const cliPath = fileURLToPath(new URL("./npm/cli.mjs", import.meta.url));
+const cli = (args, input) =>
+  execFileSync(process.execPath, [cliPath, ...args], { input, encoding: "utf8" });
+
+assert.match(cli(["--version"]).trim(), /^\d+\.\d+\.\d+/, "cli: --version prints a version");
+assert.ok(cli(["--help"]).includes("Usage: sasso"), "cli: --help");
+assert.equal(cli(["--stdin"], ".a{b: 1 + 2}\n").trim(), ".a {\n  b: 3;\n}", "cli: --stdin compile");
+assert.equal(cli(["--style=compressed", "--stdin"], ".a{b:1+2}\n").trim(), ".a{b:3}", "cli: --style=compressed");
+assert.ok(cli([mainRel]).includes("color: blue"), "cli: file compile resolves relative @use");
+assert.ok(cli(["-I", join(root, "inc"), "--stdin"], "@use 'lib' as l;\n.a{width: l.$w}\n").includes("width: 7px"), "cli: -I load-path");
+let cliErr = false;
+try { cli(["--stdin"], ".a{color:}\n"); } catch { cliErr = true; }
+assert.ok(cliErr, "cli: a Sass error exits non-zero");
+let cliMissing = false;
+try { cli(["/no/such/file.scss"]); } catch (e) { cliMissing = /no such file/.test(String(e.stderr || "")); }
+assert.ok(cliMissing, "cli: a missing input file errors cleanly");
+console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
+
+console.log("all wasm modern-API + importer + CLI tests passed");
