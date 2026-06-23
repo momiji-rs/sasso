@@ -37,6 +37,8 @@ const OP_NUMBER_COMPATIBLE = 2;
 const OP_COLOR_TO_SPACE = 3;
 const OP_COLOR_IN_GAMUT = 4;
 const OP_COLOR_TO_GAMUT = 5;
+const OP_COLOR_POWERLESS = 6;
+const OP_COLOR_INTERPOLATE = 7;
 
 function runOp(op, args) {
   if (!engine) throw new Error("sasso: the value engine is not initialized (import the package first)");
@@ -399,6 +401,33 @@ export class SassColor extends Value {
       new SassString(options.space ?? this.space, { quotes: false }),
       new SassString(options.method ?? "local-minde", { quotes: false }),
     ]);
+  }
+  isChannelPowerless(name, options) {
+    return runOp(OP_COLOR_POWERLESS, [
+      this,
+      new SassString(name, { quotes: false }),
+      new SassString((options && options.space) || this.space, { quotes: false }),
+    ]).value;
+  }
+  interpolate(color2, options = {}) {
+    const weight = options.weight === undefined ? 0.5 : options.weight;
+    return runOp(OP_COLOR_INTERPOLATE, [
+      this,
+      color2,
+      new SassNumber(weight * 100, "%"),
+      new SassString(options.method ?? "oklab", { quotes: false }),
+    ]);
+  }
+  /** Return a copy with the named channels (and/or alpha/space) replaced. */
+  change(options = {}) {
+    const space = options.space ?? this.space;
+    const base = space === this.space ? this : this.toSpace(space);
+    const names = COLOR_CHANNELS[space];
+    const opts = { space, alpha: options.alpha !== undefined ? options.alpha : base.alpha };
+    names.forEach((n, i) => {
+      opts[n] = n in options ? options[n] : base._channels[i];
+    });
+    return new SassColor(opts);
   }
   _legacyChannel(space, name) {
     return (this.space === space ? this : this.toSpace(space)).channel(name);

@@ -283,9 +283,13 @@ export class SassColor extends Value {
   readonly blackness: number;
   channel(name: string, options?: { space?: ColorSpace }): number;
   isChannelMissing(name: string): boolean;
+  isChannelPowerless(name: string, options?: { space?: ColorSpace }): boolean;
   toSpace(space: ColorSpace): SassColor;
   isInGamut(space?: ColorSpace): boolean;
   toGamut(options?: { space?: ColorSpace; method?: string }): SassColor;
+  /** A copy with the named channels (and/or `alpha`/`space`) replaced. */
+  change(options: { space?: ColorSpace; alpha?: number; [channel: string]: ColorSpace | number | null | undefined }): SassColor;
+  interpolate(color2: SassColor, options?: { weight?: number; method?: string }): SassColor;
 }
 
 export class SassList extends Value {

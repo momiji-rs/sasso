@@ -207,6 +207,10 @@ const OP_COLOR_TO_SPACE: u32 = 3;
 const OP_COLOR_IN_GAMUT: u32 = 4;
 /// `SassColor.toGamut(space, method)` — `[color, Str(space), Str(method)]` -> color.
 const OP_COLOR_TO_GAMUT: u32 = 5;
+/// `SassColor.isChannelPowerless(channel, space?)` — `[color, Str(channel), Str(space)]` -> bool.
+const OP_COLOR_POWERLESS: u32 = 6;
+/// `SassColor.interpolate(other, weight%, method)` — `[c1, c2, Number, Str(method)]` -> color.
+const OP_COLOR_INTERPOLATE: u32 = 7;
 
 /// Run a value operation: deserialize the operands, dispatch on `op`, and return
 /// the serialized result (or an `Err(message)` surfaced to the JS caller).
@@ -237,6 +241,24 @@ pub fn host_value_op(op: u32, input: &[u8]) -> Result<Vec<u8>, String> {
                 "to-gamut",
                 &[arg(&args, 0)?],
                 &[("space", space), ("method", method)],
+            )?
+        }
+        OP_COLOR_POWERLESS => {
+            // `color.is-powerless($color, $channel, $space)` — channel is quoted.
+            let channel = Value::Str(SassStr {
+                text: as_string(args.get(1))?.into(),
+                quoted: true,
+            });
+            let space = unquoted(as_string(args.get(2))?);
+            call_color("is-powerless", &[arg(&args, 0)?, channel], &[("space", space)])?
+        }
+        OP_COLOR_INTERPOLATE => {
+            // `color.mix($c1, $c2, $weight, $method)` — weight already a %, method a string.
+            let method = unquoted(as_string(args.get(3))?);
+            call_color(
+                "mix",
+                &[arg(&args, 0)?, arg(&args, 1)?, arg(&args, 2)?, method],
+                &[],
             )?
         }
         _ => return Err(format!("sasso: unknown value op {op}")),

@@ -361,6 +361,16 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
   });
   assert.ok(rcolor.css.includes("l: 50"), "Tier2: re-entrant toSpace inside a custom function");
 
+  // Tier 2c: change / interpolate / isChannelPowerless
+  assert.equal(red.change({ green: 128 }).toSpace("rgb").channels.toArray().join(","), "255,128,0", "Tier2c: change channel");
+  assert.equal(red.change({ space: "oklch", lightness: 0.9 }).channel("lightness"), 0.9, "Tier2c: change with space");
+  assert.equal(
+    red.interpolate(new SassColor({ red: 0, green: 0, blue: 255 }), { weight: 0.5, method: "srgb" }).toSpace("rgb").channels.toArray().map(Math.round).join(","),
+    "128,0,128",
+    "Tier2c: interpolate",
+  );
+  assert.equal(new SassColor({ space: "hsl", hue: 0, saturation: 0, lightness: 50 }).isChannelPowerless("hue"), true, "Tier2c: isChannelPowerless");
+
   console.log("ok: custom functions — number/string/color/list/map/rest, override, error, async (Phase 4)");
 }
 
