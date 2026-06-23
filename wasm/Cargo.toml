@@ -1,5 +1,5 @@
 # The wasm-export wrapper: a tiny cdylib around `sasso::compile`, published to
-# npm as `@momiji-rs/sasso` (NOT to crates.io). It is deliberately OUTSIDE the
+# npm as the bare-name `sasso` package (NOT to crates.io). It is deliberately OUTSIDE the
 # `sasso` workspace (see ../Cargo.toml `[workspace] exclude = ["wasm"]`) so the
 # core crate keeps `unsafe_code = "forbid"` while this thin FFI layer may use
 # the `unsafe` needed for the raw `extern "C"` ABI. No wasm-bindgen — the JS

@@ -1,6 +1,6 @@
 {
-  "name": "@momiji-rs/sasso",
-  "version": "0.6.1",
+  "name": "sasso",
+  "version": "0.7.0",
   "description": "A pure-Rust SCSS to CSS compiler (a dart-sass alternative), as a tiny dependency-free WebAssembly module.",
   "type": "module",
   "main": "./sasso.mjs",
@@ -9,15 +9,18 @@
   "exports": {
     ".": {
       "types": "./sasso.d.ts",
-      "import": "./sasso.mjs"
+      "import": "./sasso.mjs",
+      "default": "./sasso.mjs"
     },
     "./speed": {
       "types": "./sasso.speed.d.ts",
-      "import": "./sasso.speed.mjs"
+      "import": "./sasso.speed.mjs",
+      "default": "./sasso.speed.mjs"
     }
   },
   "files": [
     "_loader.mjs",
+    "_importer.mjs",
     "sasso.mjs",
     "sasso.speed.mjs",
     "sasso.wasm",

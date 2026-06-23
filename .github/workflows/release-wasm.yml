@@ -1,9 +1,9 @@
 name: Publish wasm (npm)
 
-# Builds the wasm cdylib and publishes @momiji-rs/sasso to npm on a version
-# tag, alongside the cargo-dist binary release. Authenticates via npm Trusted
-# Publishing (OIDC) — NO NPM_TOKEN secret needed. One-time setup on npmjs.com:
-# add a trusted publisher for @momiji-rs/sasso (GitHub repo momiji-rs/sasso,
+# Builds the wasm cdylib and publishes the bare-name `sasso` package to npm on a
+# version tag, alongside the cargo-dist binary release. Authenticates via npm
+# Trusted Publishing (OIDC) — NO NPM_TOKEN secret needed. One-time setup on
+# npmjs.com: add a trusted publisher for `sasso` (GitHub repo momiji-rs/sasso,
 # workflow release-wasm.yml). Publishes with provenance via the same id-token.
 
 on:

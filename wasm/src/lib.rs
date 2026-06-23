@@ -1,39 +1,49 @@
 //! Minimal raw-cdylib wasm export wrapper around [`sasso::compile`].
 //!
-//! No wasm-bindgen: the ABI is a hand-rolled `alloc` / `free` / `compile`
-//! trio so the module stays tiny and dependency-free. The JS loader
-//! (`npm/sasso.mjs`) marshals UTF-8 in and out of linear memory by hand.
+//! No wasm-bindgen: the ABI is a hand-rolled `alloc` / `free` / `compile` set
+//! so the module stays tiny and dependency-free. The JS loader
+//! (`npm/_loader.mjs`) marshals UTF-8 in and out of linear memory by hand.
 //!
-//! Protocol: JS calls `sasso_alloc(len)` to get a buffer, writes the SCSS
-//! bytes, then calls `sasso_compile(ptr, len, compressed, out_len_ptr,
-//! ok_ptr)`. That returns a pointer to a UTF-8 result (CSS on success, the
-//! error message on failure); the length is written to `*out_len_ptr` and a
-//! `1`/`0` ok flag to `*ok_ptr`. JS reads the bytes, then frees the input,
-//! the result, and any scratch with `sasso_free(ptr, len)`.
+//! Protocol: JS calls `sasso_alloc(len)` for a buffer, writes the SCSS bytes,
+//! then calls `sasso_compile2(...)`. That returns a pointer to a UTF-8 result
+//! (the CSS — or, with `want_map`, a framed `[cssLen u32][css][sourceMap json]`
+//! — on success, or the error message on failure); the byte length is written
+//! to `*out_len_ptr` and a `1`/`0` ok flag to `*ok_ptr`. JS reads the bytes,
+//! then frees the input, the result, and any scratch with `sasso_free`.
+//!
+//! Importers (`@use`/`@forward`/`@import`) are resolved by calling back into the
+//! host: when `use_importer != 0`, [`HostImporter`] bridges the core two-phase
+//! [`sasso::Importer`] trait to the imported `host_canonicalize` / `host_load`
+//! functions (wasm has no filesystem, so all file access lives in JS). This is
+//! the wasm analogue of the C-ABI `FfiImporter` in `../../ffi/src/lib.rs`.
 
 // These are FFI entry points: they dereference raw pointers by contract (the
-// JS loader in npm/sasso.mjs upholds the invariants documented per function).
+// JS loader in npm/_loader.mjs upholds the invariants documented per function).
 // Keeping the C ABI signatures pointer-typed (not `unsafe fn`) is intentional.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::alloc::{alloc, dealloc, Layout};
 
-// PoC: install sasso's scoped bump arena as the wasm global allocator. Every
+use sasso::{
+    CanonicalUrl, CanonicalizeContext, Importer, ImporterError, ImporterResult, Options, OutputStyle, Syntax,
+};
+
+// Install sasso's scoped bump arena as the wasm global allocator. Every
 // allocation inside a `compile()` scope becomes a pointer bump from a single
-// pre-grown region that is reset (not freed) when the compile ends; the FFI
-// buffers below (sasso_alloc / the boxed result) are allocated OUTSIDE any
-// scope, so they route to the system allocator and outlive the reset. On
-// wasm32 the region is 128 MiB (see arena.rs) — grown once on the first
-// compile and reused. Outside a scope every request forwards to System, so
-// installing it is safe even though sasso_alloc runs before compile.
+// pre-grown region that is reset (not freed) when the compile ends. The FFI
+// buffers (sasso_alloc / the boxed result) allocated OUTSIDE any scope route to
+// the system allocator and outlive the reset. Buffers the host allocates DURING
+// a compile (importer results — see `take_host_bytes`) come from the arena and
+// are reclaimed at scope reset; freeing them mid-compile is a no-op there and a
+// real free if the arena was disabled/spilled, so we always free them.
 #[global_allocator]
 static GLOBAL: sasso::ScopedAlloc = sasso::ScopedAlloc;
 
 /// Override the bump arena's reservation size, in **bytes**, before the first
-/// `sasso_compile`. `0` disables the arena (every allocation forwards to the
-/// system allocator: lower memory, slower). The region is reserved on the
-/// first compile and then fixed, so this is a no-op once compilation started.
-/// The compile-time default is 32 MiB (or `SASSO_WASM_ARENA_MB` at build time).
+/// compile. `0` disables the arena (every allocation forwards to the system
+/// allocator: lower memory, slower). The region is reserved on the first
+/// compile and then fixed, so this is a no-op once compilation started. The
+/// compile-time default is 32 MiB (or `SASSO_WASM_ARENA_MB` at build time).
 #[no_mangle]
 pub extern "C" fn sasso_set_arena_bytes(bytes: usize) {
     sasso::set_arena_bytes(bytes);
@@ -54,7 +64,7 @@ pub extern "C" fn sasso_alloc(len: usize) -> *mut u8 {
     }
 }
 
-/// Free a buffer returned by [`sasso_alloc`] or [`sasso_compile`].
+/// Free a buffer returned by [`sasso_alloc`] or [`sasso_compile2`].
 ///
 /// `(ptr, len)` must be exactly a pair previously handed to JS by this module.
 #[no_mangle]
@@ -69,56 +79,175 @@ pub extern "C" fn sasso_free(ptr: *mut u8, len: usize) {
     }
 }
 
-/// Compile the SCSS in `[input_ptr, input_ptr + input_len)` to CSS.
-///
-/// `compressed != 0` selects compressed output. Writes the result byte length
-/// to `*out_len_ptr` and `1` (ok) / `0` (error) to `*ok_ptr`, and returns a
-/// pointer to the UTF-8 result — the CSS on success, or the error message on
-/// failure. Free the result with `sasso_free(result_ptr, *out_len_ptr)`.
-#[no_mangle]
-pub extern "C" fn sasso_compile(
-    input_ptr: *const u8,
-    input_len: usize,
-    compressed: u8,
-    out_len_ptr: *mut usize,
-    ok_ptr: *mut u8,
-) -> *mut u8 {
-    let input: &[u8] = if input_ptr.is_null() || input_len == 0 {
-        &[]
-    } else {
-        // SAFETY: JS guarantees [input_ptr, input_len) is a live buffer it
-        // just allocated via sasso_alloc and filled.
-        unsafe { std::slice::from_raw_parts(input_ptr, input_len) }
-    };
+// --- Host importer bridge -------------------------------------------------
 
-    let (bytes, ok): (Vec<u8>, u8) = match std::str::from_utf8(input) {
-        Ok(scss) => {
-            let mut opts = sasso::Options::default();
-            if compressed != 0 {
-                opts = opts.with_style(sasso::OutputStyle::Compressed);
-            }
-            match sasso::compile(scss, &opts) {
-                Ok(css) => (css.into_bytes(), 1),
-                Err(err) => (err.to_string().into_bytes(), 0),
-            }
-        }
-        Err(_) => (b"input is not valid UTF-8".to_vec(), 0),
-    };
+// Functions the host (JS) supplies in the wasm import object under the module
+// name `sasso_host`. Each returns a tri-state:
+//   1  = handled (the `out` cells point at a `sasso_alloc`-owned result buffer),
+//   0  = not handled by this importer (a plain miss),
+//   <0 = handled but failed (the `out` cells point at a UTF-8 error message).
+// On `0` the host leaves `*out_ptr` null. The host allocates result buffers via
+// `sasso_alloc`; this module copies them out and frees them (`take_host_bytes`).
+#[link(wasm_import_module = "sasso_host")]
+extern "C" {
+    /// Map `url` (with the `from_import` flag and optional containing URL) to a
+    /// canonical URL. On success the `out` buffer is the canonical URL's UTF-8.
+    fn host_canonicalize(
+        url_ptr: *const u8,
+        url_len: usize,
+        from_import: u32,
+        containing_ptr: *const u8,
+        containing_len: usize,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> i32;
 
-    into_result(bytes, ok, out_len_ptr, ok_ptr)
+    /// Load a canonical URL previously returned by `host_canonicalize`. On
+    /// success the `out` buffer is a framed load result (see `parse_load_frame`):
+    /// `[syntax: u8][smu_present: u8][smu_len: u32 LE][smu bytes][contents bytes]`.
+    fn host_load(canon_ptr: *const u8, canon_len: usize, out_ptr: *mut *mut u8, out_len: *mut usize) -> i32;
 }
 
-/// Like [`sasso_compile`], but also produces a Source Map v3. On success the
-/// result buffer is FRAMED: a little-endian `u32` CSS byte length, then the CSS
-/// bytes, then the source-map JSON bytes. `include_sources != 0` embeds the
-/// source text in the map's `sourcesContent`. On failure the buffer is the
-/// error message (as for `sasso_compile`) and `*ok_ptr` is `0` — JS must check
-/// `ok` before treating the buffer as framed.
+/// Copy a host-delivered `(ptr, len)` buffer out to an owned `Vec`, then free
+/// the original. Returns an empty `Vec` for a null/empty buffer.
+fn take_host_bytes(ptr: *mut u8, len: usize) -> Vec<u8> {
+    if ptr.is_null() || len == 0 {
+        return Vec::new();
+    }
+    // SAFETY: the host wrote `len` readable bytes at `ptr` (a `sasso_alloc`
+    // buffer) before returning; we copy them out immediately.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+    sasso_free(ptr, len);
+    bytes
+}
+
+/// Turn a tri-state host return code + the delivered bytes into an error
+/// message string when the code signals failure.
+fn host_error(bytes: Vec<u8>, what: &str) -> ImporterError {
+    let message = if bytes.is_empty() {
+        format!("sasso: importer {what} failed")
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    ImporterError { message }
+}
+
+/// Parse a `host_load` success frame into an [`ImporterResult`].
+fn parse_load_frame(bytes: &[u8]) -> Result<ImporterResult, ImporterError> {
+    let bad = || ImporterError {
+        message: "sasso: importer load returned a malformed result".to_string(),
+    };
+    if bytes.len() < 6 {
+        return Err(bad());
+    }
+    let syntax = match bytes[0] {
+        0 => Syntax::Scss,
+        1 => Syntax::Sass,
+        2 => Syntax::Css,
+        _ => return Err(bad()),
+    };
+    let smu_present = bytes[1] != 0;
+    let smu_len = u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) as usize;
+    let smu_end = 6usize.checked_add(smu_len).ok_or_else(bad)?;
+    if smu_end > bytes.len() {
+        return Err(bad());
+    }
+    let source_map_url = if smu_present {
+        Some(String::from_utf8_lossy(&bytes[6..smu_end]).into_owned())
+    } else {
+        None
+    };
+    let contents = String::from_utf8_lossy(&bytes[smu_end..]).into_owned();
+    Ok(ImporterResult {
+        contents,
+        syntax,
+        source_map_url,
+    })
+}
+
+/// Bridges the core two-phase [`Importer`] trait to the host's
+/// `host_canonicalize` / `host_load` import functions.
+struct HostImporter;
+
+impl Importer for HostImporter {
+    fn canonicalize(
+        &self,
+        url: &str,
+        ctx: &CanonicalizeContext<'_>,
+    ) -> Result<Option<CanonicalUrl>, ImporterError> {
+        let (cptr, clen) = match ctx.containing_url {
+            Some(c) => (c.as_str().as_ptr(), c.as_str().len()),
+            None => (std::ptr::null(), 0),
+        };
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        // SAFETY: pointers/lengths describe live wasm-memory slices; the host
+        // writes the result `(ptr, len)` into the two out cells.
+        let rc = unsafe {
+            host_canonicalize(
+                url.as_ptr(),
+                url.len(),
+                ctx.from_import as u32,
+                cptr,
+                clen,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+        let bytes = take_host_bytes(out_ptr, out_len);
+        match rc {
+            1 => Ok(Some(CanonicalUrl::new(
+                String::from_utf8_lossy(&bytes).into_owned(),
+            ))),
+            0 => Ok(None),
+            _ => Err(host_error(bytes, "canonicalize")),
+        }
+    }
+
+    fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError> {
+        let s = canonical.as_str();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        // SAFETY: as above; the host writes the framed result into the out cells.
+        let rc = unsafe { host_load(s.as_ptr(), s.len(), &mut out_ptr, &mut out_len) };
+        let bytes = take_host_bytes(out_ptr, out_len);
+        match rc {
+            1 => Ok(Some(parse_load_frame(&bytes)?)),
+            0 => Ok(None),
+            _ => Err(host_error(bytes, "load")),
+        }
+    }
+}
+
+// --- Compile entry point --------------------------------------------------
+
+/// Compile the SCSS in `[input_ptr, input_ptr + input_len)` to CSS.
+///
+/// - `compressed != 0` selects compressed output.
+/// - `syntax`: `0` SCSS, `1` indented `.sass`, `2` plain CSS.
+/// - `use_importer != 0` installs [`HostImporter`], so `@use`/`@forward`/
+///   `@import` call back into the host; `0` disables file imports.
+/// - `(url_ptr, url_len)`: the entry's URL for diagnostics, source-map sources,
+///   and as the base for the first level of relative imports (`0`/`0` = none).
+/// - `want_map != 0` also produces a Source Map v3 — the result buffer is then
+///   FRAMED: a little-endian `u32` CSS byte length, the CSS bytes, then the
+///   source-map JSON bytes. `include_sources != 0` embeds source text in the
+///   map's `sourcesContent`.
+///
+/// Writes the result byte length to `*out_len_ptr` and `1` (ok) / `0` (error)
+/// to `*ok_ptr`, and returns a pointer to the UTF-8 result (CSS / framed map on
+/// success, error message on failure). Free it with `sasso_free(ptr, *out_len_ptr)`.
 #[no_mangle]
-pub extern "C" fn sasso_compile_map(
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn sasso_compile2(
     input_ptr: *const u8,
     input_len: usize,
     compressed: u8,
+    syntax: u8,
+    use_importer: u8,
+    url_ptr: *const u8,
+    url_len: usize,
+    want_map: u8,
     include_sources: u8,
     out_len_ptr: *mut usize,
     ok_ptr: *mut u8,
@@ -130,24 +259,52 @@ pub extern "C" fn sasso_compile_map(
         // just allocated via sasso_alloc and filled.
         unsafe { std::slice::from_raw_parts(input_ptr, input_len) }
     };
+    let url: Option<&str> = if url_ptr.is_null() || url_len == 0 {
+        None
+    } else {
+        // SAFETY: JS guarantees [url_ptr, url_len) is a live UTF-8 buffer.
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(url_ptr, url_len) }).ok()
+    };
+
+    let syntax = match syntax {
+        1 => Syntax::Sass,
+        2 => Syntax::Css,
+        _ => Syntax::Scss,
+    };
+    let importer = HostImporter;
 
     let (bytes, ok): (Vec<u8>, u8) = match std::str::from_utf8(input) {
         Ok(scss) => {
-            let mut opts = sasso::Options::default().with_source_map_include_sources(include_sources != 0);
+            let mut opts = Options::default()
+                .with_syntax(syntax)
+                .with_source_map_include_sources(include_sources != 0);
             if compressed != 0 {
-                opts = opts.with_style(sasso::OutputStyle::Compressed);
+                opts = opts.with_style(OutputStyle::Compressed);
             }
-            match sasso::compile_with_source_map(scss, &opts) {
-                Ok(result) => {
-                    let css = result.css.into_bytes();
-                    let map = result.source_map.to_json().into_bytes();
-                    let mut framed = Vec::with_capacity(4 + css.len() + map.len());
-                    framed.extend_from_slice(&(css.len() as u32).to_le_bytes());
-                    framed.extend_from_slice(&css);
-                    framed.extend_from_slice(&map);
-                    (framed, 1)
+            if let Some(u) = url {
+                opts = opts.with_url(u);
+            }
+            if use_importer != 0 {
+                opts = opts.with_importer(&importer);
+            }
+            if want_map != 0 {
+                match sasso::compile_with_source_map(scss, &opts) {
+                    Ok(result) => {
+                        let css = result.css.into_bytes();
+                        let map = result.source_map.to_json().into_bytes();
+                        let mut framed = Vec::with_capacity(4 + css.len() + map.len());
+                        framed.extend_from_slice(&(css.len() as u32).to_le_bytes());
+                        framed.extend_from_slice(&css);
+                        framed.extend_from_slice(&map);
+                        (framed, 1)
+                    }
+                    Err(err) => (err.to_string().into_bytes(), 0),
                 }
-                Err(err) => (err.to_string().into_bytes(), 0),
+            } else {
+                match sasso::compile(scss, &opts) {
+                    Ok(css) => (css.into_bytes(), 1),
+                    Err(err) => (err.to_string().into_bytes(), 0),
+                }
             }
         }
         Err(_) => (b"input is not valid UTF-8".to_vec(), 0),
