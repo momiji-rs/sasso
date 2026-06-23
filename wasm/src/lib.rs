@@ -345,6 +345,7 @@ pub extern "C" fn sasso_compile2(
     url_len: usize,
     want_map: u8,
     include_sources: u8,
+    charset: u8,
     out_len_ptr: *mut usize,
     ok_ptr: *mut u8,
 ) -> *mut u8 {
@@ -373,7 +374,8 @@ pub extern "C" fn sasso_compile2(
         Ok(scss) => {
             let mut opts = Options::default()
                 .with_syntax(syntax)
-                .with_source_map_include_sources(include_sources != 0);
+                .with_source_map_include_sources(include_sources != 0)
+                .with_charset(charset != 0);
             if compressed != 0 {
                 opts = opts.with_style(OutputStyle::Compressed);
             }

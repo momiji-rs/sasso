@@ -37,6 +37,9 @@ import { deserializeArgs, serializeValue, setEngine } from "./_value.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+// The default decoder strips a leading BOM; the compressed-output charset prefix
+// IS a U+FEFF BOM, so decode CSS with a BOM-preserving decoder to keep it (dart).
+const cssDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
 
 // Asyncify runtime states (from `asyncify_get_state`).
 const ASYNCIFY_UNWINDING = 1;
@@ -236,10 +239,10 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     w.sasso_free(scratch, 8);
     w.sasso_free(outPtr, outLen);
     if (!ok) throw new Exception(decoder.decode(out));
-    if (!wantMap) return { css: decoder.decode(out) };
+    if (!wantMap) return { css: cssDecoder.decode(out) };
     const cssLen = new DataView(out.buffer, out.byteOffset, 4).getUint32(0, true);
     return {
-      css: decoder.decode(out.subarray(4, 4 + cssLen)),
+      css: cssDecoder.decode(out.subarray(4, 4 + cssLen)),
       sourceMap: JSON.parse(decoder.decode(out.subarray(4 + cssLen))),
     };
   }
@@ -261,7 +264,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
   function callCompile2(w, m, opts) {
     return w.sasso_compile2(
       m.inPtr, m.inLen, opts.compressed ? 1 : 0, opts.syntax, 1,
-      m.urlPtr, m.urlLen, opts.wantMap ? 1 : 0, opts.includeSources ? 1 : 0,
+      m.urlPtr, m.urlLen, opts.wantMap ? 1 : 0, opts.includeSources ? 1 : 0, opts.charset ? 1 : 0,
       m.scratch, m.scratch + 4,
     );
   }
@@ -537,6 +540,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       url: options.url ? toFileUrl(options.url).href : null,
       wantMap: !!options.sourceMap,
       includeSources: !!options.sourceMapIncludeSources,
+      charset: options.charset !== false, // dart-sass default: true
     };
   }
 

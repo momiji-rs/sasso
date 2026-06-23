@@ -5,18 +5,22 @@ use crate::eval::{OutItem, OutNode};
 use crate::sourcemap::SmCollector;
 use crate::OutputStyle;
 
-pub(crate) fn emit(nodes: &[OutNode], style: OutputStyle) -> String {
+pub(crate) fn emit(nodes: &[OutNode], style: OutputStyle, charset: bool) -> String {
     // The default path collects nothing: `&mut None` makes every `record_*`
     // call inert, so the output is byte-for-byte the historical CSS.
-    emit_inner(nodes, style, &mut None).0
+    emit_inner(nodes, style, &mut None, charset).0
 }
 
 /// Like [`emit`], but also records a source map. Returns the final CSS, the
 /// byte length of the `@charset`/BOM prefix that shifts every body offset, and
 /// the populated collector (raw body offsets, not yet resolved to lines).
-pub(crate) fn emit_with_map(nodes: &[OutNode], style: OutputStyle) -> (String, usize, SmCollector) {
+pub(crate) fn emit_with_map(
+    nodes: &[OutNode],
+    style: OutputStyle,
+    charset: bool,
+) -> (String, usize, SmCollector) {
     let mut collector = Some(SmCollector::new(matches!(style, OutputStyle::Compressed)));
-    let (css, body_off) = emit_inner(nodes, style, &mut collector);
+    let (css, body_off) = emit_inner(nodes, style, &mut collector, charset);
     (css, body_off, collector.expect("collector present"))
 }
 
@@ -24,7 +28,12 @@ pub(crate) fn emit_with_map(nodes: &[OutNode], style: OutputStyle) -> (String, u
 /// `None` records nothing (the default path). Returns `(css, body_off)` where
 /// `body_off` is the length of the prepended `@charset`/BOM prefix (0 when the
 /// body is pure ASCII).
-fn emit_inner(nodes: &[OutNode], style: OutputStyle, collector: &mut Option<SmCollector>) -> (String, usize) {
+fn emit_inner(
+    nodes: &[OutNode],
+    style: OutputStyle,
+    collector: &mut Option<SmCollector>,
+    charset: bool,
+) -> (String, usize) {
     let body = match style {
         OutputStyle::Expanded => emit_expanded(nodes, collector),
         OutputStyle::Compressed => emit_compressed(nodes, collector),
@@ -33,7 +42,8 @@ fn emit_inner(nodes: &[OutNode], style: OutputStyle, collector: &mut Option<SmCo
     // point: expanded output gets a leading `@charset "UTF-8";`, compressed
     // output gets a UTF-8 byte-order mark instead. The prefix shifts every
     // recorded body offset by its byte length (reported as `body_off`).
-    if body.is_ascii() {
+    // `charset: false` (dart-sass `--no-charset`) suppresses it entirely.
+    if !charset || body.is_ascii() {
         return (body, 0);
     }
     match style {

@@ -115,8 +115,13 @@ against dart-sass (`sass` npm) for message/behaviour parity.
    `@import` deprecation/async all route; tested in test.mjs. *(Note: sasso emits
    only the `@import` deprecation today — other deprecation IDs like `slash-div`
    aren't detected yet; that's a separate conformance item, not a logger gap.)*
-4. **`charset` option** + CLI `--no-charset` — `charset: false` suppresses the
-   `@charset "UTF-8";` / BOM prefix (core emits it whenever output is non-ASCII).
+4. **`charset` option** + CLI `--no-charset` ✅ DONE — `Options::with_charset`
+   (core, default `true`), threaded through `emit`/`sasso_compile2` + a JS
+   `charset` option + CLI `--[no-]charset`. **Also fixed a pre-existing bug:** the
+   JS `TextDecoder` was silently stripping the compressed-output U+FEFF BOM — CSS
+   is now decoded BOM-preserving, so compressed non-ASCII output carries the BOM
+   like dart. Verified all four cases (expanded `@charset`, compressed BOM, both
+   suppressed by `charset:false`) vs dart-sass 1.101; tested in test.mjs + CLI.
 5. **CLI flags** — `--embed-source-map` (inline data-URI map), `--no-charset`,
    `--[no-]unicode` (ASCII diagnostics; core has `unicode`), `--quiet`,
    `--update`, multiple `input:output` pairs, `--color`/`--no-color`.

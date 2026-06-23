@@ -450,6 +450,13 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
   assert.deepEqual(logged, [["warn", "wmsg", false], ["debug", "3"]], "logger: @warn + @debug routed");
   assert.equal(typeof size.Logger.silent.warn, "function", "logger: Logger.silent present");
 
+  // Polish: charset option (verified == dart-sass 1.101)
+  const nonAscii = '.a { content: "café"; }';
+  assert.ok(size.compileString(nonAscii).css.startsWith("@charset"), "charset: default emits @charset");
+  assert.ok(!size.compileString(nonAscii, { charset: false }).css.startsWith("@charset"), "charset: false suppresses @charset");
+  assert.equal(size.compileString(nonAscii, { style: "compressed" }).css.charCodeAt(0), 0xfeff, "charset: compressed default BOM");
+  assert.notEqual(size.compileString(nonAscii, { style: "compressed", charset: false }).css.charCodeAt(0), 0xfeff, "charset: compressed false no BOM");
+
   console.log("ok: custom functions — number/string/color/list/map/rest, override, error, async (Phase 4)");
 }
 

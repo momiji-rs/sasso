@@ -20,6 +20,8 @@ Options:
       --[no-]source-map              Emit a source map (default: on when writing
                                      to a file, off for stdout).
       --embed-sources                Embed source text in the map's sourcesContent.
+      --[no-]charset                 Emit @charset/BOM for non-ASCII output
+                                     (default: on).
   -w, --watch                        Recompile when the input or any dependency
                                      changes (requires <input> <output>).
   -h, --help                         Print this help.
@@ -41,6 +43,7 @@ function parseArgs(argv) {
     indented: false,
     sourceMap: undefined, // tri-state: default depends on output target
     embedSources: false,
+    charset: true,
     watch: false,
     positionals: [],
   };
@@ -75,6 +78,10 @@ function parseArgs(argv) {
       opts.sourceMap = false;
     } else if (a === "--embed-sources") {
       opts.embedSources = true;
+    } else if (a === "--charset") {
+      opts.charset = true;
+    } else if (a === "--no-charset") {
+      opts.charset = false;
     } else if (a === "-s" || a === "--style" || a.startsWith("--style=")) {
       const inline = a.startsWith("--style=") ? a.slice(8) : undefined;
       const v = takeValue(inline);
@@ -187,6 +194,7 @@ function main() {
     loadPaths: opts.loadPaths,
     sourceMap: wantMap,
     sourceMapIncludeSources: opts.embedSources,
+    charset: opts.charset,
   };
 
   if (opts.watch) {

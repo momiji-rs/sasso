@@ -118,6 +118,10 @@ pub struct Options<'a> {
     /// Diagnostic handler (dart-sass `logger`). When set, every `@warn`/`@debug`/
     /// deprecation warning is delivered here instead of printed to stderr.
     pub(crate) warn: Option<WarnHandler>,
+    /// Emit a `@charset "UTF-8";` (expanded) / U+FEFF BOM (compressed) prefix
+    /// when the output contains non-ASCII (dart-sass `charset`, default `true`).
+    /// `false` suppresses it.
+    pub charset: bool,
 }
 
 /// The kind of a diagnostic delivered to a [`WarnHandler`].
@@ -164,6 +168,7 @@ impl Default for Options<'_> {
             source_map_include_sources: false,
             functions: Vec::new(),
             warn: None,
+            charset: true,
         }
     }
 }
@@ -247,6 +252,14 @@ impl<'a> Options<'a> {
     #[must_use]
     pub fn with_warn_handler(mut self, handler: WarnHandler) -> Self {
         self.warn = Some(handler);
+        self
+    }
+
+    /// Set whether to emit the `@charset`/BOM prefix for non-ASCII output
+    /// (dart-sass `charset`, default `true`).
+    #[must_use]
+    pub fn with_charset(mut self, charset: bool) -> Self {
+        self.charset = charset;
         self
     }
 }
@@ -393,7 +406,7 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
     });
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;
-    let (css, body_off, collector) = emit::emit_with_map(&out, options.style);
+    let (css, body_off, collector) = emit::emit_with_map(&out, options.style, options.charset);
     let mappings = collector.finalize(&css, body_off).encode();
     let (sources, sources_content) = ev.source_table(entry_name, options.source_map_include_sources);
     let source_map = SourceMap {
@@ -465,5 +478,5 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
     });
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;
-    Ok(emit::emit(&out, options.style))
+    Ok(emit::emit(&out, options.style, options.charset))
 }
