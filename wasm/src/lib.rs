@@ -386,7 +386,7 @@ pub extern "C" fn sasso_compile2(
 /// Run an engine-routed `Value` method (e.g. `SassNumber.convert`,
 /// `SassColor.toSpace`) — forwards to [`sasso::host_value_op`]. `in` is the
 /// serialized operands; the result is returned like `sasso_compile2` (a pointer
-/// + `*out_len_ptr`/`*ok_ptr`): on `ok` the buffer is the serialized result
+/// plus `*out_len_ptr`/`*ok_ptr`): on `ok` the buffer is the serialized result
 /// value, otherwise a UTF-8 error message. This is independent of any in-flight
 /// compile, so JS `Value` methods work standalone and re-entrantly.
 #[no_mangle]
