@@ -222,7 +222,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
 
 // === Phase 4: custom functions — full Value coverage (sync + async) ===
 {
-  const { SassNumber, SassString, SassColor, SassList, SassMap, sassTrue, sassNull } = size;
+  const { SassNumber, SassString, SassColor, SassList, SassMap, sassTrue, sassFalse, sassNull } = size;
 
   // number with units
   const rn = size.compileString(`.a { w: rem(32); }`, {
@@ -249,12 +249,17 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
   assert.ok(rok.css.includes("oklch("), "fn: modern color space");
 
   // list + map args, boolean/null returns
-  const rl = size.compileString(`.a { n: len((a, b, c)); }`, {
-    functions: { "len($l)": (a) => new SassNumber(a[0].asList.length) },
+  // list arg -> immutable List (.size / .get), incl. negative indexing
+  const rl = size.compileString(`.a { n: len((a, b, c)); l: last((a, b, c)); }`, {
+    functions: {
+      "len($l)": (a) => new SassNumber(a[0].asList.size),
+      "last($l)": (a) => a[0].get(-1),
+    },
   });
-  assert.ok(rl.css.includes("n: 3"), "fn: list arg");
+  assert.ok(rl.css.includes("n: 3") && rl.css.includes("l: c"), "fn: list arg (immutable List + negative get)");
+  // map arg -> value-equality lookup via .contents.get (dart-sass shape)
   const rm = size.compileString(`.a { v: pick((x: 1, y: 2), y); }`, {
-    functions: { "pick($m, $k)": (a) => a[0].assertMap().get(a[1]) ?? sassNull },
+    functions: { "pick($m, $k)": (a) => a[0].assertMap().contents.get(a[1]) ?? sassNull },
   });
   assert.ok(rm.css.includes("v: 2"), "fn: map arg + value-equality get");
 
@@ -263,6 +268,18 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
     functions: { "total($nums...)": (a) => new SassNumber(a[0].asList.reduce((s, n) => s + n.value, 0)) },
   });
   assert.ok(rr.css.includes("s: 10"), "fn: rest args");
+
+  // Tier 0/1: sassIndexToListIndex (1-based + negative), tryMap, assertNoUnits
+  const rt = size.compileString(`.a { x: nth((10, 20, 30), -1); }`, {
+    functions: {
+      "nth($l, $i)": (a) => a[0].get(a[0].sassIndexToListIndex(a[1], "i")),
+    },
+  });
+  assert.ok(rt.css.includes("x: 30"), "fn: sassIndexToListIndex negative");
+  const rempty = size.compileString(`.a { x: ismap(()); }`, {
+    functions: { "ismap($v)": (a) => (a[0].tryMap() ? sassTrue : sassFalse) },
+  });
+  assert.ok(rempty.css.includes("x: true"), "fn: tryMap on empty list");
 
   // a custom function overrides a builtin global, loses to a user @function
   const rov = size.compileString(`.a { x: type-of(1); }`, {

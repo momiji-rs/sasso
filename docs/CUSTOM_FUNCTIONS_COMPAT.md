@@ -24,32 +24,26 @@
 
 ## Gaps, by tier
 
-### TIER 0 — return-type fidelity (HIGH impact, pervasive)
+### TIER 0 — return-type fidelity ✅ DONE (zero-dep shim, `_immutable.mjs`)
 
-dart-sass returns **`immutable.List` / `immutable.OrderedMap`** from `asList`,
-`numeratorUnits`, `denominatorUnits`, `channels`, `channelsOrNull`,
-`SassList`'s contents, and `SassMap.contents`. We return plain JS arrays/`Map`s,
-so a function calling `.get(i)` / `.size` / `.equals()` on them — or doing
-`map.contents.get(key)` (value-equality keyed) — breaks.
+`asList`, `numeratorUnits`, `denominatorUnits`, `channels`, `channelsOrNull`,
+`SassList` contents and `SassMap.contents` now return the dependency-free
+`List`/`OrderedMap` (`_immutable.mjs`) — the common `immutable` read subset
+(`get`/`size`/`has`/`keys`/`values`/`forEach`/iterate/`map`/`filter`/`slice`/
+`equals`, `toArray`/`toJS` to escape). `SassMap.contents` is value-equality
+keyed; the non-standard `SassMap.get(key)` was removed (use
+`map.contents.get(key)`, matching dart). Chose the shim over a dependency to keep
+the package dep-free; `.toArray()` covers any esoteric `immutable` method.
 
-- **Decision needed:** (A) depend on the `immutable` npm package (exactly what
-  dart-sass does, but ends our zero-dependency story), or (B) ship a tiny
-  dependency-free shim implementing the `immutable` `List`/`OrderedMap` *read*
-  API we expose. Recommend **B**.
-- `SassMap.contents` must be value-equality-keyed; our convenience
-  `SassMap.get(key)` is non-standard (dart uses `map.contents.get(key)`).
+### TIER 1 — pure-JS methods ✅ DONE (one caveat)
 
-### TIER 1 — pure-JS methods, no conversion math (MODERATE, low effort)
-
-- `Value.sassIndexToListIndex(sassIndex, name?)` + negative indexing in `get()`
-  (1-based, negatives, bounds errors) — used by most list-handling functions.
-- `Value.tryMap()` (empty list `()` → empty map), `Value.hashCode()`.
-- `Value.assertCalculation/assertFunction/assertMixin` (throwers).
-- `SassNumber.assertNoUnits`, `assertInRange(min,max,name?)`.
-- `SassString.sassIndexToStringIndex(sassIndex, name?)`, `SassString.empty`.
-- `SassColor.isLegacy`.
-- **Error-message fidelity:** `assert*`/index errors must match dart's exact
-  wording (incl. the `$name:` prefix). Ours are approximate.
+`Value.get()` negative indexing, `sassIndexToListIndex`, `tryMap` (incl. empty
+list → empty map), `hashCode`, `assertCalculation/Function/Mixin`;
+`SassNumber.assertNoUnits` + `assertInRange`; `SassString.sassIndexToStringIndex`
++ `empty`; `SassColor.isLegacy`. All covered in `wasm/test.mjs` + tsc.
+- **Caveat (still open):** `assert*`/index error MESSAGES are dart-like but not
+  yet byte-exact (the `$name:` prefix is there; exact wording/inspect formatting
+  is follow-up polish).
 
 ### TIER 2 — conversion-dependent methods (MODERATE, HIGH effort)
 
@@ -91,10 +85,10 @@ dart).
 
 ## Recommended sequencing
 
-1. **Tier 0** (immutable shim + `SassMap.contents`) — pervasive; unblocks
-   real-world functions.
-2. **Tier 1** (pure-JS methods + error-message fidelity) — cheap, high coverage.
-3. **CLI `--watch`** — user-flagged, independent.
+1. ~~**Tier 0**~~ ✅ done (immutable shim + value-keyed `SassMap.contents`).
+2. ~~**Tier 1**~~ ✅ done (pure-JS methods; error-message *exactness* still open).
+3. **CLI `--watch`** — user-flagged, independent. ← next
 4. **Tier 2** (engine-routed conversions) — the big one; design the
    re-entrant value-conversion bridge once, reuse for number + color + equals.
 5. **Tier 3** (calc / function / mixin types) — niche; do last.
+6. Error-message byte-exactness pass (the Tier-1 caveat).

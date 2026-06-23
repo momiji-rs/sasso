@@ -8,9 +8,17 @@
 // function's returned `Value` back. The two encodings MUST stay in lockstep with
 // the Rust `host_fn` (de)serializers.
 //
-// Supported types mirror the engine bridge: SassNumber (with units), SassString,
-// SassColor (every CSS Color 4 space), SassList / SassArgumentList, SassMap,
-// SassBoolean (sassTrue/sassFalse) and sassNull.
+// Collection accessors (`asList`, `channels`, `numeratorUnits`,
+// `SassMap.contents`, …) return the immutable `List`/`OrderedMap` from
+// `./_immutable.mjs`, matching dart-sass so a function written for `sass` runs
+// unchanged.
+//
+// Supported types: SassNumber (with units), SassString, SassColor (every CSS
+// Color 4 space), SassList / SassArgumentList, SassMap, SassBoolean
+// (sassTrue/sassFalse) and sassNull. (calc() and first-class function/mixin refs
+// are not yet representable — see ../../docs/CUSTOM_FUNCTIONS_COMPAT.md.)
+
+import { List, OrderedMap, list, immutableIs } from "./_immutable.mjs";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -26,9 +34,9 @@ export class Value {
   get realNull() {
     return this;
   }
-  /** This value as a list of values (a scalar is a one-element list). */
+  /** This value as an immutable list (a scalar is a one-element list). */
   get asList() {
-    return [this];
+    return list([this]);
   }
   get hasBrackets() {
     return false;
@@ -36,33 +44,66 @@ export class Value {
   get separator() {
     return null;
   }
+  /** dart-sass `Value.get(index)` — 0-based, supports negative indexing. */
+  get(index) {
+    return this.asList.get(index);
+  }
+  /** Convert a 1-based Sass index (negatives count from the end) to 0-based. */
+  sassIndexToListIndex(sassIndex, name) {
+    const index = sassIndex.assertNumber(name).assertInt(name);
+    if (index === 0) throw new Error(prefix(name) + "List index may not be 0.");
+    const size = this.asList.size;
+    if (Math.abs(index) > size) {
+      throw new Error(prefix(name) + `Invalid index ${index} for a list with ${size} elements.`);
+    }
+    return index < 0 ? size + index : index - 1;
+  }
+  /** This value as a map if it is one (or the empty list `()`), else `null`. */
+  tryMap() {
+    return null;
+  }
   assertNumber(name) {
-    throw new Error(errMsg(this, name, "a number"));
+    throw new Error(notA(this, name, "a number"));
   }
   assertString(name) {
-    throw new Error(errMsg(this, name, "a string"));
+    throw new Error(notA(this, name, "a string"));
   }
   assertColor(name) {
-    throw new Error(errMsg(this, name, "a color"));
+    throw new Error(notA(this, name, "a color"));
   }
   assertMap(name) {
-    throw new Error(errMsg(this, name, "a map"));
+    throw new Error(notA(this, name, "a map"));
   }
   assertBoolean(name) {
-    throw new Error(errMsg(this, name, "a boolean"));
+    throw new Error(notA(this, name, "a boolean"));
   }
-  /** dart-sass `Value.get(index)` — 0-based element access; scalars yield self. */
-  get(index) {
-    return index === 0 ? this : undefined;
+  assertCalculation(name) {
+    throw new Error(notA(this, name, "a calculation"));
+  }
+  assertFunction(name) {
+    throw new Error(notA(this, name, "a function reference"));
+  }
+  assertMixin(name) {
+    throw new Error(notA(this, name, "a mixin reference"));
   }
   equals(other) {
     return this === other;
   }
+  hashCode() {
+    return 0;
+  }
 }
 
-function errMsg(value, name, expected) {
-  const what = name ? `$${name}: ` : "";
-  return `${what}${value} is not ${expected}.`;
+function prefix(name) {
+  return name ? `$${name}: ` : "";
+}
+function notA(value, name, expected) {
+  return `${prefix(name)}${value} is not ${expected}.`;
+}
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return h;
 }
 
 class SassNull extends Value {
@@ -73,7 +114,10 @@ class SassNull extends Value {
     return null;
   }
   get asList() {
-    return [];
+    return list([]);
+  }
+  hashCode() {
+    return 0;
   }
   toString() {
     return "null";
@@ -95,6 +139,9 @@ export class SassBoolean extends Value {
   equals(o) {
     return o instanceof SassBoolean && o.value === this.value;
   }
+  hashCode() {
+    return this.value ? 1 : 2;
+  }
   toString() {
     return String(this.value);
   }
@@ -109,14 +156,30 @@ export class SassString extends Value {
     this.text = String(text);
     this.hasQuotes = options.quotes !== false;
   }
+  static empty(options = {}) {
+    return new SassString("", options);
+  }
   get sassLength() {
     return [...this.text].length;
+  }
+  /** Convert a 1-based Sass string index (by code point) to a 0-based one. */
+  sassIndexToStringIndex(sassIndex, name) {
+    const index = sassIndex.assertNumber(name).assertInt(name);
+    if (index === 0) throw new Error(prefix(name) + "String index may not be 0.");
+    const len = this.sassLength;
+    if (Math.abs(index) > len) {
+      throw new Error(prefix(name) + `Invalid index ${index} for a string with ${len} characters.`);
+    }
+    return index < 0 ? len + index : index - 1;
   }
   assertString() {
     return this;
   }
   equals(o) {
     return o instanceof SassString && o.text === this.text;
+  }
+  hashCode() {
+    return hashStr(this.text);
   }
   toString() {
     return this.hasQuotes ? JSON.stringify(this.text) : this.text;
@@ -125,25 +188,31 @@ export class SassString extends Value {
 
 export class SassNumber extends Value {
   /**
-   * `new SassNumber(8)` or `new SassNumber(8, "px")` or
+   * `new SassNumber(8)`, `new SassNumber(8, "px")`, or
    * `new SassNumber(8, { numeratorUnits: ["px"], denominatorUnits: ["s"] })`.
    */
   constructor(value, unitOrOptions) {
     super();
     this.value = value;
     if (typeof unitOrOptions === "string") {
-      this.numeratorUnits = [unitOrOptions];
-      this.denominatorUnits = [];
+      this._numeratorUnits = [unitOrOptions];
+      this._denominatorUnits = [];
     } else if (unitOrOptions) {
-      this.numeratorUnits = unitOrOptions.numeratorUnits ?? [];
-      this.denominatorUnits = unitOrOptions.denominatorUnits ?? [];
+      this._numeratorUnits = toArray(unitOrOptions.numeratorUnits);
+      this._denominatorUnits = toArray(unitOrOptions.denominatorUnits);
     } else {
-      this.numeratorUnits = [];
-      this.denominatorUnits = [];
+      this._numeratorUnits = [];
+      this._denominatorUnits = [];
     }
   }
+  get numeratorUnits() {
+    return list(this._numeratorUnits);
+  }
+  get denominatorUnits() {
+    return list(this._denominatorUnits);
+  }
   get hasUnits() {
-    return this.numeratorUnits.length > 0 || this.denominatorUnits.length > 0;
+    return this._numeratorUnits.length > 0 || this._denominatorUnits.length > 0;
   }
   get isInt() {
     return Number.isInteger(this.value) || Math.abs(this.value - Math.round(this.value)) < 1e-11;
@@ -152,33 +221,50 @@ export class SassNumber extends Value {
     return this.isInt ? Math.round(this.value) : null;
   }
   hasUnit(unit) {
-    return this.denominatorUnits.length === 0 && this.numeratorUnits.length === 1 && this.numeratorUnits[0] === unit;
+    return this._denominatorUnits.length === 0 && this._numeratorUnits.length === 1 && this._numeratorUnits[0] === unit;
   }
   assertNumber() {
     return this;
   }
   assertInt(name) {
     const i = this.asInt;
-    if (i === null) throw new Error(errMsg(this, name, "an int"));
+    if (i === null) throw new Error(notA(this, name, "an int"));
     return i;
   }
-  assertUnit(unit, name) {
-    if (!this.hasUnit(unit)) throw new Error(errMsg(this, name, `a number with unit ${unit}`));
+  assertNoUnits(name) {
+    if (this.hasUnits) throw new Error(notA(this, name, "unitless"));
     return this;
+  }
+  assertUnit(unit, name) {
+    if (!this.hasUnit(unit)) throw new Error(notA(this, name, `a number with unit ${unit}`));
+    return this;
+  }
+  assertInRange(min, max, name) {
+    if (this.value < min - 1e-11 || this.value > max + 1e-11) {
+      throw new Error(prefix(name) + `Expected ${this} to be within ${min} and ${max}.`);
+    }
+    return this.value < min ? min : this.value > max ? max : this.value;
   }
   equals(o) {
     return (
       o instanceof SassNumber &&
       o.value === this.value &&
-      sameUnits(o.numeratorUnits, this.numeratorUnits) &&
-      sameUnits(o.denominatorUnits, this.denominatorUnits)
+      sameUnits(o._numeratorUnits, this._numeratorUnits) &&
+      sameUnits(o._denominatorUnits, this._denominatorUnits)
     );
   }
+  hashCode() {
+    return (this.value | 0) ^ hashStr(this._numeratorUnits.join("*"));
+  }
   toString() {
-    return this.value + this.numeratorUnits.map((u) => u).join("*");
+    return this.value + this._numeratorUnits.join("*");
   }
 }
 
+function toArray(x) {
+  if (!x) return [];
+  return Array.isArray(x) ? x.slice() : typeof x.toArray === "function" ? x.toArray() : [...x];
+}
 function sameUnits(a, b) {
   return a.length === b.length && a.every((u, i) => u === b[i]);
 }
@@ -203,6 +289,7 @@ const COLOR_CHANNELS = {
   "xyz-d50": ["x", "y", "z"],
   "xyz-d65": ["x", "y", "z"],
 };
+const LEGACY_SPACES = new Set(["rgb", "hsl", "hwb"]);
 
 export class SassColor extends Value {
   /**
@@ -219,11 +306,14 @@ export class SassColor extends Value {
     this._channels = names.map((n) => (options[n] === undefined ? null : options[n]));
     this.alpha = options.alpha === undefined ? 1 : options.alpha;
   }
+  get isLegacy() {
+    return LEGACY_SPACES.has(this.space);
+  }
   get channelsOrNull() {
-    return this._channels.slice();
+    return list(this._channels);
   }
   get channels() {
-    return this._channels.map((c) => c ?? 0);
+    return list(this._channels.map((c) => c ?? 0));
   }
   channel(name) {
     const i = (COLOR_CHANNELS[this.space] || []).indexOf(name);
@@ -234,7 +324,8 @@ export class SassColor extends Value {
     const i = (COLOR_CHANNELS[this.space] || []).indexOf(name);
     return i >= 0 && this._channels[i] === null;
   }
-  // Legacy accessors (valid for the rgb space).
+  // Legacy accessors (valid for the rgb space; cross-space conversion is a
+  // Tier-2 item — see docs/CUSTOM_FUNCTIONS_COMPAT.md).
   get red() {
     return this.channel("red");
   }
@@ -255,6 +346,9 @@ export class SassColor extends Value {
       sameUnits(o._channels.map(String), this._channels.map(String))
     );
   }
+  hashCode() {
+    return hashStr(this.space) ^ ((this.alpha * 1000) | 0);
+  }
   toString() {
     return `${this.space}(${this._channels.join(" ")} / ${this.alpha})`;
   }
@@ -267,12 +361,12 @@ export class SassList extends Value {
   /** `new SassList([...], { separator: ",", brackets: false })`. */
   constructor(contents = [], options = {}) {
     super();
-    this._contents = [...contents];
+    this._contents = toArray(contents);
     this._separator = options.separator === undefined ? "," : options.separator;
     this._brackets = !!options.brackets;
   }
   get asList() {
-    return this._contents.slice();
+    return list(this._contents);
   }
   get separator() {
     return this._separator;
@@ -280,8 +374,12 @@ export class SassList extends Value {
   get hasBrackets() {
     return this._brackets;
   }
-  get(index) {
-    return this._contents[index];
+  tryMap() {
+    return this._contents.length === 0 ? new SassMap() : null;
+  }
+  assertMap(name) {
+    if (this._contents.length === 0) return new SassMap();
+    throw new Error(notA(this, name, "a map"));
   }
   equals(o) {
     return (
@@ -289,8 +387,11 @@ export class SassList extends Value {
       o._separator === this._separator &&
       o._brackets === this._brackets &&
       o._contents.length === this._contents.length &&
-      o._contents.every((v, i) => valuesEqual(v, this._contents[i]))
+      o._contents.every((v, i) => immutableIs(v, this._contents[i]))
     );
+  }
+  hashCode() {
+    return this._contents.reduce((h, v) => (Math.imul(31, h) + (v.hashCode?.() ?? 0)) | 0, 7);
   }
   toString() {
     return this._contents.map(String).join(this._separator === " " ? " " : `${this._separator} `);
@@ -310,17 +411,24 @@ export class SassMap extends Value {
   constructor(contents = new Map()) {
     super();
     // Store as pairs for Sass value-equality lookups.
-    this._pairs = [...contents.entries()];
+    if (contents instanceof OrderedMap) this._pairs = contents.toArray();
+    else this._pairs = [...contents].map(([k, v]) => [k, v]);
   }
+  static empty() {
+    return new SassMap();
+  }
+  /** The map's contents as an immutable, value-keyed `OrderedMap`. */
   get contents() {
-    return new Map(this._pairs);
+    return new OrderedMap(this._pairs);
   }
   get asList() {
-    return this._pairs.map(([k, v]) => new SassList([k, v], { separator: " " }));
+    return list(this._pairs.map(([k, v]) => new SassList([k, v], { separator: " " })));
   }
-  get(key) {
-    const hit = this._pairs.find(([k]) => valuesEqual(k, key));
-    return hit ? hit[1] : undefined;
+  get separator() {
+    return ",";
+  }
+  tryMap() {
+    return this;
   }
   assertMap() {
     return this;
@@ -330,18 +438,17 @@ export class SassMap extends Value {
       o instanceof SassMap &&
       o._pairs.length === this._pairs.length &&
       this._pairs.every(([k, v]) => {
-        const ov = o.get(k);
-        return ov !== undefined && valuesEqual(ov, v);
+        const ov = o.contents.get(k);
+        return ov !== undefined && immutableIs(ov, v);
       })
     );
+  }
+  hashCode() {
+    return this._pairs.reduce((h, [k, v]) => (h + ((k.hashCode?.() ?? 0) ^ (v.hashCode?.() ?? 0))) | 0, 11);
   }
   toString() {
     return `(${this._pairs.map(([k, v]) => `${k}: ${v}`).join(", ")})`;
   }
-}
-
-function valuesEqual(a, b) {
-  return a === b || (a instanceof Value && a.equals(b));
 }
 
 // ---------------- wire (de)serialization (mirrors ../src/host_fn.rs) ----------------
@@ -390,10 +497,10 @@ function writeValue(w, v) {
   } else if (v instanceof SassNumber) {
     w.u8(TAG.NUMBER);
     w.f64(v.value);
-    w.u32(v.numeratorUnits.length);
-    for (const u of v.numeratorUnits) w.str(u);
-    w.u32(v.denominatorUnits.length);
-    for (const u of v.denominatorUnits) w.str(u);
+    w.u32(v._numeratorUnits.length);
+    for (const u of v._numeratorUnits) w.str(u);
+    w.u32(v._denominatorUnits.length);
+    for (const u of v._denominatorUnits) w.str(u);
   } else if (v instanceof SassString) {
     w.u8(TAG.STRING);
     w.u8(v.hasQuotes ? 1 : 0);
@@ -551,4 +658,6 @@ export const valueApi = {
   sassTrue,
   sassFalse,
   sassNull,
+  List,
+  OrderedMap,
 };

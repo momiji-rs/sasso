@@ -23,6 +23,7 @@
     "_loader.mjs",
     "_importer.mjs",
     "_value.mjs",
+    "_immutable.mjs",
     "cli.mjs",
     "sasso.mjs",
     "sasso.speed.mjs",

@@ -161,19 +161,62 @@ export type ColorSpace =
   | "rec2020" | "hsl" | "hwb" | "lab" | "oklab" | "lch" | "oklch"
   | "xyz" | "xyz-d50" | "xyz-d65";
 
+/** Immutable, indexed collection returned by `Value` accessors (subset of `immutable.List`). */
+export interface List<T> extends Iterable<T> {
+  readonly size: number;
+  get(index: number, notSetValue?: T): T | undefined;
+  has(index: number): boolean;
+  first(notSetValue?: T): T | undefined;
+  last(notSetValue?: T): T | undefined;
+  isEmpty(): boolean;
+  includes(value: T): boolean;
+  indexOf(value: T): number;
+  toArray(): T[];
+  toJS(): T[];
+  map<U>(fn: (value: T, index: number, list: List<T>) => U): List<U>;
+  filter(fn: (value: T, index: number, list: List<T>) => boolean): List<T>;
+  forEach(fn: (value: T, index: number, list: List<T>) => void): number;
+  reduce<U>(fn: (acc: U, value: T, index: number, list: List<T>) => U, initial?: U): U;
+  slice(begin?: number, end?: number): List<T>;
+  equals(other: unknown): boolean;
+}
+
+/** Immutable, insertion-ordered, value-keyed map (subset of `immutable.OrderedMap`). */
+export interface OrderedMap<K, V> extends Iterable<[K, V]> {
+  readonly size: number;
+  get(key: K, notSetValue?: V): V | undefined;
+  has(key: K): boolean;
+  isEmpty(): boolean;
+  keys(): IterableIterator<K>;
+  values(): IterableIterator<V>;
+  entries(): IterableIterator<[K, V]>;
+  toArray(): [K, V][];
+  forEach(fn: (value: V, key: K, map: OrderedMap<K, V>) => void): number;
+  equals(other: unknown): boolean;
+}
+
+export type ListSeparator = "," | " " | "/" | null;
+
 /** Base class for every Sass value. */
 export abstract class Value {
   readonly isTruthy: boolean;
   readonly realNull: Value | null;
-  readonly asList: Value[];
+  readonly asList: List<Value>;
   readonly hasBrackets: boolean;
-  readonly separator: string | null;
+  readonly separator: ListSeparator;
+  get(index: number): Value | undefined;
+  sassIndexToListIndex(sassIndex: Value, name?: string): number;
+  tryMap(): SassMap | null;
   assertNumber(name?: string): SassNumber;
   assertString(name?: string): SassString;
   assertColor(name?: string): SassColor;
   assertMap(name?: string): SassMap;
   assertBoolean(name?: string): SassBoolean;
+  assertCalculation(name?: string): never;
+  assertFunction(name?: string): never;
+  assertMixin(name?: string): never;
   equals(other: Value): boolean;
+  hashCode(): number;
 }
 
 export class SassBoolean extends Value {
@@ -186,23 +229,27 @@ export const sassNull: Value;
 
 export class SassString extends Value {
   constructor(text?: string, options?: { quotes?: boolean });
+  static empty(options?: { quotes?: boolean }): SassString;
   readonly text: string;
   readonly hasQuotes: boolean;
   readonly sassLength: number;
+  sassIndexToStringIndex(sassIndex: Value, name?: string): number;
 }
 
 export class SassNumber extends Value {
   constructor(value: number, unit?: string);
   constructor(value: number, options: { numeratorUnits?: string[]; denominatorUnits?: string[] });
   readonly value: number;
-  readonly numeratorUnits: string[];
-  readonly denominatorUnits: string[];
+  readonly numeratorUnits: List<string>;
+  readonly denominatorUnits: List<string>;
   readonly hasUnits: boolean;
   readonly isInt: boolean;
   readonly asInt: number | null;
   hasUnit(unit: string): boolean;
   assertInt(name?: string): number;
+  assertNoUnits(name?: string): SassNumber;
   assertUnit(unit: string, name?: string): SassNumber;
+  assertInRange(min: number, max: number, name?: string): number;
 }
 
 export class SassColor extends Value {
@@ -213,8 +260,9 @@ export class SassColor extends Value {
     [channel: string]: ColorSpace | number | null | undefined;
   });
   readonly space: ColorSpace;
-  readonly channels: number[];
-  readonly channelsOrNull: (number | null)[];
+  readonly isLegacy: boolean;
+  readonly channels: List<number>;
+  readonly channelsOrNull: List<number | null>;
   readonly alpha: number;
   readonly red: number;
   readonly green: number;
@@ -224,20 +272,19 @@ export class SassColor extends Value {
 }
 
 export class SassList extends Value {
-  constructor(contents?: Value[], options?: { separator?: string | null; brackets?: boolean });
-  /** 0-based element access. */
-  get(index: number): Value | undefined;
+  constructor(contents?: Value[] | List<Value>, options?: { separator?: ListSeparator; brackets?: boolean });
 }
 
 export class SassArgumentList extends SassList {
-  constructor(contents?: Value[], keywords?: Map<string, Value>, options?: { separator?: string | null; brackets?: boolean });
+  constructor(contents?: Value[] | List<Value>, keywords?: Map<string, Value>, options?: { separator?: ListSeparator; brackets?: boolean });
   readonly keywords: Map<string, Value>;
 }
 
 export class SassMap extends Value {
-  constructor(contents?: Map<Value, Value>);
-  readonly contents: Map<Value, Value>;
-  get(key: Value): Value | undefined;
+  constructor(contents?: Map<Value, Value> | OrderedMap<Value, Value>);
+  static empty(): SassMap;
+  /** The map's contents as a value-keyed, insertion-ordered immutable map. */
+  readonly contents: OrderedMap<Value, Value>;
 }
 
 declare const _default: {
