@@ -33,7 +33,7 @@ import {
   syntaxCode,
   syntaxForPath,
 } from "./_importer.mjs";
-import { deserializeArgs, serializeValue } from "./_value.mjs";
+import { deserializeArgs, serializeValue, setEngine } from "./_value.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -344,6 +344,28 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     const outPtr = callCompile2(w, m, opts);
     return readResult(w, outPtr, m.scratch, m.inPtr, m.inLen, m.urlPtr, m.urlLen, opts.wantMap);
   }
+
+  // Engine for routed Value methods (SassNumber.convert, SassColor.toSpace, …):
+  // runs `sasso_value_op` on the sync instance, independent of any compile, so
+  // the methods work standalone and re-entrantly during a compile. Returns the
+  // result bytes; throws the engine's message on failure.
+  function valueOpEngine(op, argsBytes) {
+    const w = syncInstance();
+    const inPtr = argsBytes.length ? w.sasso_alloc(argsBytes.length) : 0;
+    const scratch = w.sasso_alloc(8);
+    if (argsBytes.length) new Uint8Array(w.memory.buffer, inPtr, argsBytes.length).set(argsBytes);
+    const outPtr = w.sasso_value_op(op, inPtr, argsBytes.length, scratch, scratch + 4);
+    const view = new DataView(w.memory.buffer);
+    const outLen = view.getUint32(scratch, true);
+    const ok = view.getUint8(scratch + 4);
+    const out = new Uint8Array(w.memory.buffer, outPtr, outLen).slice();
+    if (argsBytes.length) w.sasso_free(inPtr, argsBytes.length);
+    w.sasso_free(scratch, 8);
+    w.sasso_free(outPtr, outLen);
+    if (!ok) throw new Error(decoder.decode(out));
+    return out;
+  }
+  setEngine(valueOpEngine);
 
   // ========================== ASYNCIFY instance ==========================
   let asyncEx; // cached asyncify'd exports

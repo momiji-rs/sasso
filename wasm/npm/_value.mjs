@@ -23,6 +23,31 @@ import { List, OrderedMap, list, immutableIs } from "./_immutable.mjs";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+// Engine-routed value operations: methods that need unit / color-space math
+// (e.g. SassNumber.convert, SassColor.toSpace) call back into the wasm engine so
+// the conversions reuse the exact Rust math. The loader injects `engine` (an
+// independent value instance, so these work standalone and re-entrantly).
+let engine = null;
+/** Injected by the loader: `(op, argsBytes) => resultBytes` (throws on error). */
+export function setEngine(fn) {
+  engine = fn;
+}
+const OP_NUMBER_CONVERT = 1;
+const OP_NUMBER_COMPATIBLE = 2;
+
+function runOp(op, args) {
+  if (!engine) throw new Error("sasso: the value engine is not initialized (import the package first)");
+  const w = new Writer();
+  w.u32(args.length);
+  for (const a of args) writeValue(w, a);
+  return readValue(new Reader(engine(op, w.finish())));
+}
+
+/** A space-separated SassList of unquoted unit-name strings, for a convert op. */
+function unitList(units) {
+  return new SassList(toArray(units).map((u) => new SassString(String(u), { quotes: false })), { separator: " " });
+}
+
 // ---------------- value classes ----------------
 
 /** Base class for every Sass value. dart-sass `Value`. */
@@ -244,6 +269,36 @@ export class SassNumber extends Value {
       throw new Error(prefix(name) + `Expected ${this} to be within ${min} and ${max}.`);
     }
     return this.value < min ? min : this.value > max ? max : this.value;
+  }
+  // --- unit conversion (routed to the engine's Rust math) ---
+  compatibleWithUnit(unit) {
+    return runOp(OP_NUMBER_COMPATIBLE, [this, new SassString(unit, { quotes: false })]).value;
+  }
+  convert(newNumerators, newDenominators, name) {
+    const r = runOp(OP_NUMBER_CONVERT, [this, unitList(newNumerators), unitList(newDenominators), sassFalse]);
+    if (name && r instanceof SassNumber === false) throw new Error(prefix(name) + "conversion failed");
+    return r;
+  }
+  coerce(newNumerators, newDenominators) {
+    return runOp(OP_NUMBER_CONVERT, [this, unitList(newNumerators), unitList(newDenominators), sassTrue]);
+  }
+  convertToMatch(other) {
+    return this.convert(other.numeratorUnits.toArray(), other.denominatorUnits.toArray());
+  }
+  coerceToMatch(other) {
+    return this.coerce(other.numeratorUnits.toArray(), other.denominatorUnits.toArray());
+  }
+  convertValue(newNumerators, newDenominators) {
+    return this.convert(newNumerators, newDenominators).value;
+  }
+  convertValueToMatch(other) {
+    return this.convertToMatch(other).value;
+  }
+  coerceValue(newNumerators, newDenominators) {
+    return this.coerce(newNumerators, newDenominators).value;
+  }
+  coerceValueToMatch(other) {
+    return this.coerceToMatch(other).value;
   }
   equals(o) {
     return (

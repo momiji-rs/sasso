@@ -250,6 +250,15 @@ export class SassNumber extends Value {
   assertNoUnits(name?: string): SassNumber;
   assertUnit(unit: string, name?: string): SassNumber;
   assertInRange(min: number, max: number, name?: string): number;
+  compatibleWithUnit(unit: string): boolean;
+  convert(newNumerators: string[] | List<string>, newDenominators: string[] | List<string>, name?: string): SassNumber;
+  convertToMatch(other: SassNumber, name?: string, otherName?: string): SassNumber;
+  convertValue(newNumerators: string[] | List<string>, newDenominators: string[] | List<string>, name?: string): number;
+  convertValueToMatch(other: SassNumber, name?: string, otherName?: string): number;
+  coerce(newNumerators: string[] | List<string>, newDenominators: string[] | List<string>, name?: string): SassNumber;
+  coerceToMatch(other: SassNumber, name?: string, otherName?: string): SassNumber;
+  coerceValue(newNumerators: string[] | List<string>, newDenominators: string[] | List<string>, name?: string): number;
+  coerceValueToMatch(other: SassNumber, name?: string, otherName?: string): number;
 }
 
 export class SassColor extends Value {

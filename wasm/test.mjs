@@ -334,6 +334,22 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
   const rb = size.compileString(`.a { x: yes(); }`, { functions: { "yes()": () => sassTrue } });
   assert.ok(rb.css.includes("x: true"), "fn: boolean return");
 
+  // Tier 2: engine-routed SassNumber unit conversion (standalone + re-entrant)
+  assert.equal(new SassNumber(96, "px").convert(["in"], []).value, 1, "Tier2: convert 96px -> 1in (standalone)");
+  assert.equal(new SassNumber(1, "in").convertValue(["px"], []), 96, "Tier2: convertValue 1in -> 96px");
+  assert.equal(new SassNumber(5).coerce(["px"], []).toString(), "5px", "Tier2: coerce unitless");
+  assert.equal(new SassNumber(1, "in").compatibleWithUnit("px"), true, "Tier2: compatibleWithUnit true");
+  assert.equal(new SassNumber(1, "s").compatibleWithUnit("px"), false, "Tier2: compatibleWithUnit false");
+  assert.throws(() => new SassNumber(1, "s").convert(["px"], []), /can't be converted/, "Tier2: incompatible convert throws");
+  const rconv = size.compileString(`.a { w: topx(2in); }`, {
+    functions: { "topx($n)": (a) => a[0].assertNumber().convert(["px"], []) },
+  });
+  assert.ok(rconv.css.includes("w: 192px"), "Tier2: re-entrant convert inside a custom function");
+  const rconvA = await size.compileStringAsync(`.a { w: topx(1in); }`, {
+    functions: { "topx($n)": async (a) => a[0].assertNumber().convertToMatch(new SassNumber(0, "px")) },
+  });
+  assert.ok(rconvA.css.includes("w: 96px"), "Tier2: re-entrant convert in an async custom function");
+
   console.log("ok: custom functions — number/string/color/list/map/rest, override, error, async (Phase 4)");
 }
 

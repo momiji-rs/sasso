@@ -45,25 +45,26 @@ list → empty map), `hashCode`, `assertCalculation/Function/Mixin`;
   yet byte-exact (the `$name:` prefix is there; exact wording/inspect formatting
   is follow-up polish).
 
-### TIER 2 — conversion-dependent methods (MODERATE, HIGH effort)
+### TIER 2 — conversion-dependent methods (engine-routed)
 
-These need sasso's Rust unit / CSS Color 4 conversion math. **Recommended
-approach: route through the engine** — add wasm exports (e.g.
-`sasso_number_convert`, `sasso_color_to_space`, `sasso_value_equals`) operating
-on serialized values, callable re-entrantly from a JS `Value` method during a
-host call — so we reuse the battle-tested Rust math with ZERO divergence
-(reimplementing the conversion tables/matrices in JS risks last-ulp drift from
-dart).
+The **engine-routing bridge is built**: a JS `Value` method serializes its
+operands and calls a wasm `sasso_value_op` export → core `host_value_op` (reuses
+the exact Rust math, ZERO divergence). It runs on an independent value instance,
+so methods work **standalone** and **re-entrantly** during a (sync or async)
+compile.
 
-- `SassNumber`: `convert` / `convertToMatch` / `convertValue` /
-  `convertValueToMatch` / `coerce` / `coerceToMatch` / `coerceValue` /
-  `coerceValueToMatch`, `compatibleWithUnit`.
-- `SassColor`: `toSpace`, `channel(name, {space})`, `change({…})`, `isInGamut`,
-  `toGamut`, `isChannelPowerless`, and the legacy getters that imply conversion
-  (`hue/saturation/lightness/whiteness/blackness`).
-- **Value equality with unit conversion** (`1in == 96px`) + matching `hashCode`,
-  and color equality semantics — needed for correct `SassMap` keys. Route to
-  sasso's `sass_eq`.
+- **`SassNumber` ✅ DONE (Tier 2a):** `convert` / `convertToMatch` /
+  `convertValue` / `convertValueToMatch` / `coerce` / `coerceToMatch` /
+  `coerceValue` / `coerceValueToMatch`, `compatibleWithUnit` — routed to
+  `unit_lists_factor` with dart's convert/coerce unitless rules. Tested
+  standalone + re-entrant (sync & async).
+- **`SassColor` ⏳ Tier 2b (next):** `toSpace`, `channel(name, {space})`,
+  `change({…})`, `isInGamut`, `toGamut`, `interpolate`, `isChannelPowerless`, and
+  the legacy getters that imply conversion (`hue/saturation/…`). Plan: add color
+  ops to `host_value_op`, routing to the `color.*` builtins.
+- **Value equality with unit conversion** (`1in == 96px`) + matching `hashCode`:
+  still pure-JS exact-units (can't route — `.equals` is called outside a compile
+  too). Minor divergence for unit-mismatched map keys; documented.
 
 ### TIER 3 — missing value TYPES (LOW frequency, varied effort)
 

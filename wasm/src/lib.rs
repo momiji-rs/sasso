@@ -383,6 +383,33 @@ pub extern "C" fn sasso_compile2(
     into_result(bytes, ok, out_len_ptr, ok_ptr)
 }
 
+/// Run an engine-routed `Value` method (e.g. `SassNumber.convert`,
+/// `SassColor.toSpace`) — forwards to [`sasso::host_value_op`]. `in` is the
+/// serialized operands; the result is returned like `sasso_compile2` (a pointer
+/// + `*out_len_ptr`/`*ok_ptr`): on `ok` the buffer is the serialized result
+/// value, otherwise a UTF-8 error message. This is independent of any in-flight
+/// compile, so JS `Value` methods work standalone and re-entrantly.
+#[no_mangle]
+pub extern "C" fn sasso_value_op(
+    op: u32,
+    in_ptr: *const u8,
+    in_len: usize,
+    out_len_ptr: *mut usize,
+    ok_ptr: *mut u8,
+) -> *mut u8 {
+    let input: &[u8] = if in_ptr.is_null() || in_len == 0 {
+        &[]
+    } else {
+        // SAFETY: JS guarantees [in_ptr, in_len) is a live buffer it allocated.
+        unsafe { std::slice::from_raw_parts(in_ptr, in_len) }
+    };
+    let (bytes, ok) = match sasso::host_value_op(op, input) {
+        Ok(b) => (b, 1u8),
+        Err(e) => (e.into_bytes(), 0u8),
+    };
+    into_result(bytes, ok, out_len_ptr, ok_ptr)
+}
+
 /// Box a result buffer, write its length + ok flag to the scratch cells, and
 /// return a pointer JS frees with `sasso_free(ptr, *out_len_ptr)`.
 fn into_result(bytes: Vec<u8>, ok: u8, out_len_ptr: *mut usize, ok_ptr: *mut u8) -> *mut u8 {

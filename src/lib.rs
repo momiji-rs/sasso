@@ -57,7 +57,7 @@ mod value;
 
 pub use arena::{set_arena_bytes, ScopedAlloc};
 pub use error::Error;
-pub use host_fn::HostFunction;
+pub use host_fn::{host_value_op, HostFunction};
 pub use importer::{CanonicalUrl, CanonicalizeContext, FsImporter, Importer, ImporterError, ImporterResult};
 pub use sourcemap::SourceMap;
 

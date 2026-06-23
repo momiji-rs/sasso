@@ -29,7 +29,9 @@ use std::rc::Rc;
 
 use crate::ast::{Param, ParamList};
 use crate::builtins::{legacy_to_modern, make_modern_in};
-use crate::value::{Color, ColorSpace, List, ListSep, Map, ModernColor, Number, SassStr, Value};
+use crate::value::{
+    unit_lists_factor, Color, ColorSpace, List, ListSep, Map, ModernColor, Number, SassStr, Value,
+};
 
 /// An embedder's custom-function callback: it receives the bound arguments
 /// serialized to sasso's host-value wire format and returns the result
@@ -180,6 +182,117 @@ pub(crate) fn bind_host_args(
         return Err(format!("No argument named ${extra}."));
     }
     Ok(out)
+}
+
+// ---------------- value operations (engine-routed Value methods) ----------------
+//
+// dart-sass `Value` methods that need unit / color-space math (e.g.
+// `SassNumber.convert`, `SassColor.toSpace`) route from JS back into the engine
+// here, so the conversions reuse the exact Rust math instead of being
+// reimplemented (and drifting) in JS. The JS side calls a wasm `sasso_value_op`
+// export that forwards to [`host_value_op`]; both sides speak the same byte
+// protocol as custom functions, on a value instance that is independent of any
+// in-flight compile (so the methods also work standalone).
+
+/// Convert/coerce a number to target units. dart-sass:
+/// - **convert**: both unitless → ok; one unitless and the other not → error;
+///   both have units → must be compatible.
+/// - **coerce**: a unitless side is treated as compatible (factor 1).
+const OP_NUMBER_CONVERT: u32 = 1;
+/// Test whether a number is convertible to a single unit (`compatibleWithUnit`).
+const OP_NUMBER_COMPATIBLE: u32 = 2;
+
+/// Run a value operation: deserialize the operands, dispatch on `op`, and return
+/// the serialized result (or an `Err(message)` surfaced to the JS caller).
+pub fn host_value_op(op: u32, input: &[u8]) -> Result<Vec<u8>, String> {
+    let args = deserialize_args(input)?;
+    let result = match op {
+        OP_NUMBER_CONVERT => number_convert(&args)?,
+        OP_NUMBER_COMPATIBLE => {
+            let n = as_number(args.first())?;
+            let unit = as_string(args.get(1))?;
+            let from = (n.numer_units(), n.denom_units());
+            let to_numer = if unit.is_empty() { vec![] } else { vec![unit] };
+            let ok = number_factor(from, (&to_numer, &[]), true).is_some();
+            Value::Bool(ok)
+        }
+        _ => return Err(format!("sasso: unknown value op {op}")),
+    };
+    serialize_one(&result)
+}
+
+fn as_number(v: Option<&Value>) -> Result<&Number, String> {
+    match v {
+        Some(Value::Number(n)) => Ok(n),
+        _ => Err("sasso: value op expected a number".to_string()),
+    }
+}
+fn as_string(v: Option<&Value>) -> Result<String, String> {
+    match v {
+        Some(Value::Str(s)) => Ok(s.text.to_string()),
+        _ => Err("sasso: value op expected a string".to_string()),
+    }
+}
+/// Extract a `Vec<String>` from a list (or single string / empty / null) value.
+fn as_string_list(v: Option<&Value>) -> Vec<String> {
+    match v {
+        Some(Value::List(l)) => l
+            .items
+            .iter()
+            .filter_map(|i| {
+                if let Value::Str(s) = i {
+                    Some(s.text.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Some(Value::Str(s)) => vec![s.text.to_string()],
+        _ => vec![],
+    }
+}
+
+/// The multiplier from `from` units to `to` units under convert/coerce rules,
+/// or `None` if the conversion is illegal.
+fn number_factor(from: (&[String], &[String]), to: (&[String], &[String]), coerce: bool) -> Option<f64> {
+    let from_unitless = from.0.is_empty() && from.1.is_empty();
+    let to_unitless = to.0.is_empty() && to.1.is_empty();
+    if from_unitless || to_unitless {
+        if coerce || (from_unitless && to_unitless) {
+            Some(1.0)
+        } else {
+            None // convert: can't cross the unitless boundary
+        }
+    } else {
+        unit_lists_factor(from, to)
+    }
+}
+
+fn number_convert(args: &[Value]) -> Result<Value, String> {
+    let n = as_number(args.first())?;
+    let numer = as_string_list(args.get(1));
+    let denom = as_string_list(args.get(2));
+    let coerce = matches!(args.get(3), Some(Value::Bool(true)));
+    let from = (n.numer_units(), n.denom_units());
+    match number_factor(from, (&numer, &denom), coerce) {
+        Some(f) => Ok(Value::Number(Number::with_units(n.value * f, numer, denom))),
+        None => {
+            let to = if numer.is_empty() && denom.is_empty() {
+                "no units".to_string()
+            } else {
+                let mut s = numer.join("*");
+                if !denom.is_empty() {
+                    s.push('/');
+                    s.push_str(&denom.join("*"));
+                }
+                s
+            };
+            Err(format!(
+                "{} can't be converted to {to}.",
+                Value::Number(n.clone()).to_css(false)
+            ))
+        }
+    }
 }
 
 // ---------------- serialization ----------------
@@ -680,5 +793,42 @@ mod tests {
         let o = Options::default().with_function("bad($x)", cb);
         let err = compile(".a { x: bad(1); }", &o).unwrap_err();
         assert!(err.message.contains("boom"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn value_op_number_convert() {
+        use super::{deserialize_value, host_value_op, serialize_args, OP_NUMBER_CONVERT};
+        use crate::value::List;
+        let strs = |u: &str| {
+            Value::List(List::new(
+                vec![Value::Str(SassStr {
+                    text: u.into(),
+                    quoted: false,
+                })],
+                ListSep::Space,
+                false,
+            ))
+        };
+        let empty = Value::List(List::new(Vec::<Value>::new(), ListSep::Space, false));
+        // 96px -> in == 1in (convert)
+        let args = vec![
+            Value::Number(Number::with_unit(96.0, "px")),
+            strs("in"),
+            empty.clone(),
+            Value::Bool(false),
+        ];
+        let out = host_value_op(OP_NUMBER_CONVERT, &serialize_args(&args).unwrap()).unwrap();
+        match deserialize_value(&out).unwrap() {
+            Value::Number(n) => assert!((n.value - 1.0).abs() < 1e-9, "got {}", n.value),
+            v => panic!("expected number, got {v:?}"),
+        }
+        // incompatible (s -> px) errors
+        let bad = vec![
+            Value::Number(Number::with_unit(1.0, "s")),
+            strs("px"),
+            empty,
+            Value::Bool(false),
+        ];
+        assert!(host_value_op(OP_NUMBER_CONVERT, &serialize_args(&bad).unwrap()).is_err());
     }
 }
