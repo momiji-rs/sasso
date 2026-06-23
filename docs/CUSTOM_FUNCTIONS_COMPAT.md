@@ -58,10 +58,12 @@ compile.
   `coerceValue` / `coerceValueToMatch`, `compatibleWithUnit` — routed to
   `unit_lists_factor` with dart's convert/coerce unitless rules. Tested
   standalone + re-entrant (sync & async).
-- **`SassColor` ⏳ Tier 2b (next):** `toSpace`, `channel(name, {space})`,
-  `change({…})`, `isInGamut`, `toGamut`, `interpolate`, `isChannelPowerless`, and
-  the legacy getters that imply conversion (`hue/saturation/…`). Plan: add color
-  ops to `host_value_op`, routing to the `color.*` builtins.
+- **`SassColor` ✅ Tier 2b DONE:** `toSpace`, `channel(name, {space})`,
+  `isInGamut`, `toGamut`, and the legacy getters via conversion (`red/green/blue`
+  cross-space, `hue/saturation/lightness`, `whiteness/blackness`) — routed to the
+  `color.*` builtins through `host_value_op`. Tested standalone + re-entrant.
+  - **Tier 2c (still open):** `change({…})`, `interpolate`, `isChannelPowerless`
+    (rarer; same routing pattern).
 - **Value equality with unit conversion** (`1in == 96px`) + matching `hashCode`:
   still pure-JS exact-units (can't route — `.equals` is called outside a compile
   too). Minor divergence for unit-mismatched map keys; documented.

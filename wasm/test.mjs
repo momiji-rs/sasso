@@ -350,6 +350,17 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
   });
   assert.ok(rconvA.css.includes("w: 96px"), "Tier2: re-entrant convert in an async custom function");
 
+  // Tier 2b: engine-routed SassColor space conversion (standalone + re-entrant)
+  const red = new SassColor({ red: 255, green: 0, blue: 0 });
+  assert.equal(red.toSpace("oklch").space, "oklch", "Tier2: toSpace returns target space");
+  assert.ok(Math.abs(red.toSpace("oklch").channel("lightness") - 0.628) < 0.01, "Tier2: oklch lightness of red");
+  assert.equal(red.channel("lightness", { space: "hsl" }), 50, "Tier2: channel(name,{space})");
+  assert.equal(new SassColor({ space: "oklch", lightness: 0.7, chroma: 0.15, hue: 250 }).isInGamut("srgb"), true, "Tier2: isInGamut");
+  const rcolor = size.compileString(`.a { l: light(#3366cc); }`, {
+    functions: { "light($c)": (a) => new SassNumber(Math.round(a[0].assertColor().toSpace("hsl").channel("lightness"))) },
+  });
+  assert.ok(rcolor.css.includes("l: 50"), "Tier2: re-entrant toSpace inside a custom function");
+
   console.log("ok: custom functions — number/string/color/list/map/rest, override, error, async (Phase 4)");
 }
 

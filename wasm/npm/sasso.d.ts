@@ -276,8 +276,16 @@ export class SassColor extends Value {
   readonly red: number;
   readonly green: number;
   readonly blue: number;
-  channel(name: string): number;
+  readonly hue: number;
+  readonly saturation: number;
+  readonly lightness: number;
+  readonly whiteness: number;
+  readonly blackness: number;
+  channel(name: string, options?: { space?: ColorSpace }): number;
   isChannelMissing(name: string): boolean;
+  toSpace(space: ColorSpace): SassColor;
+  isInGamut(space?: ColorSpace): boolean;
+  toGamut(options?: { space?: ColorSpace; method?: string }): SassColor;
 }
 
 export class SassList extends Value {

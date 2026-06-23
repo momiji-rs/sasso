@@ -34,6 +34,9 @@ export function setEngine(fn) {
 }
 const OP_NUMBER_CONVERT = 1;
 const OP_NUMBER_COMPATIBLE = 2;
+const OP_COLOR_TO_SPACE = 3;
+const OP_COLOR_IN_GAMUT = 4;
+const OP_COLOR_TO_GAMUT = 5;
 
 function runOp(op, args) {
   if (!engine) throw new Error("sasso: the value engine is not initialized (import the package first)");
@@ -370,7 +373,11 @@ export class SassColor extends Value {
   get channels() {
     return list(this._channels.map((c) => c ?? 0));
   }
-  channel(name) {
+  /** `channel(name)` reads the current space; `channel(name, {space})` converts first. */
+  channel(name, options) {
+    if (options && options.space && options.space !== this.space) {
+      return this.toSpace(options.space).channel(name);
+    }
     const i = (COLOR_CHANNELS[this.space] || []).indexOf(name);
     if (i < 0) throw new Error(`sasso: color space "${this.space}" has no channel "${name}"`);
     return this._channels[i] ?? 0;
@@ -379,16 +386,47 @@ export class SassColor extends Value {
     const i = (COLOR_CHANNELS[this.space] || []).indexOf(name);
     return i >= 0 && this._channels[i] === null;
   }
-  // Legacy accessors (valid for the rgb space; cross-space conversion is a
-  // Tier-2 item — see docs/CUSTOM_FUNCTIONS_COMPAT.md).
+  // --- space conversion (routed to the engine's CSS Color 4 math) ---
+  toSpace(space) {
+    return space === this.space ? this : runOp(OP_COLOR_TO_SPACE, [this, new SassString(space, { quotes: false })]);
+  }
+  isInGamut(space) {
+    return runOp(OP_COLOR_IN_GAMUT, [this, new SassString(space ?? this.space, { quotes: false })]).value;
+  }
+  toGamut(options = {}) {
+    return runOp(OP_COLOR_TO_GAMUT, [
+      this,
+      new SassString(options.space ?? this.space, { quotes: false }),
+      new SassString(options.method ?? "local-minde", { quotes: false }),
+    ]);
+  }
+  _legacyChannel(space, name) {
+    return (this.space === space ? this : this.toSpace(space)).channel(name);
+  }
+  // Legacy accessors: convert to the relevant legacy space, then read.
   get red() {
-    return this.channel("red");
+    return this._legacyChannel("rgb", "red");
   }
   get green() {
-    return this.channel("green");
+    return this._legacyChannel("rgb", "green");
   }
   get blue() {
-    return this.channel("blue");
+    return this._legacyChannel("rgb", "blue");
+  }
+  get hue() {
+    return this._legacyChannel("hsl", "hue");
+  }
+  get saturation() {
+    return this._legacyChannel("hsl", "saturation");
+  }
+  get lightness() {
+    return this._legacyChannel("hsl", "lightness");
+  }
+  get whiteness() {
+    return this._legacyChannel("hwb", "whiteness");
+  }
+  get blackness() {
+    return this._legacyChannel("hwb", "blackness");
   }
   assertColor() {
     return this;

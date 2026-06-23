@@ -201,6 +201,12 @@ pub(crate) fn bind_host_args(
 const OP_NUMBER_CONVERT: u32 = 1;
 /// Test whether a number is convertible to a single unit (`compatibleWithUnit`).
 const OP_NUMBER_COMPATIBLE: u32 = 2;
+/// `SassColor.toSpace(space)` — `[color, Str(space)]` -> color.
+const OP_COLOR_TO_SPACE: u32 = 3;
+/// `SassColor.isInGamut(space?)` — `[color, Str(space)]` -> bool.
+const OP_COLOR_IN_GAMUT: u32 = 4;
+/// `SassColor.toGamut(space, method)` — `[color, Str(space), Str(method)]` -> color.
+const OP_COLOR_TO_GAMUT: u32 = 5;
 
 /// Run a value operation: deserialize the operands, dispatch on `op`, and return
 /// the serialized result (or an `Err(message)` surfaced to the JS caller).
@@ -216,9 +222,50 @@ pub fn host_value_op(op: u32, input: &[u8]) -> Result<Vec<u8>, String> {
             let ok = number_factor(from, (&to_numer, &[]), true).is_some();
             Value::Bool(ok)
         }
+        OP_COLOR_TO_SPACE => {
+            let space = unquoted(as_string(args.get(1))?);
+            call_color("to-space", &[arg(&args, 0)?, space], &[])?
+        }
+        OP_COLOR_IN_GAMUT => {
+            let space = unquoted(as_string(args.get(1))?);
+            call_color("is-in-gamut", &[arg(&args, 0)?], &[("space", space)])?
+        }
+        OP_COLOR_TO_GAMUT => {
+            let space = unquoted(as_string(args.get(1))?);
+            let method = unquoted(as_string(args.get(2))?);
+            call_color(
+                "to-gamut",
+                &[arg(&args, 0)?],
+                &[("space", space), ("method", method)],
+            )?
+        }
         _ => return Err(format!("sasso: unknown value op {op}")),
     };
     serialize_one(&result)
+}
+
+fn arg(args: &[Value], i: usize) -> Result<Value, String> {
+    args.get(i)
+        .cloned()
+        .ok_or_else(|| "sasso: value op missing an argument".to_string())
+}
+fn unquoted(text: String) -> Value {
+    Value::Str(SassStr {
+        text: text.into(),
+        quoted: false,
+    })
+}
+/// Route a color value-op to the corresponding `color.*` builtin.
+fn call_color(member: &str, pos_args: &[Value], named: &[(&str, Value)]) -> Result<Value, String> {
+    let named: Vec<(String, Value)> = named.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+    crate::builtins::call_module(
+        "color",
+        member,
+        pos_args,
+        &named,
+        crate::scanner::Pos { line: 1, col: 1 },
+    )
+    .map_err(|e| e.message)
 }
 
 fn as_number(v: Option<&Value>) -> Result<&Number, String> {
