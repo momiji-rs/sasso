@@ -415,6 +415,30 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
   const mUnit = new SassMap(new Map([[inch, new SassString("hit", { quotes: true })]]));
   assert.equal(mUnit.contents.get(new SassNumber(96, "px"))?.text, "hit", "equals: SassMap key 1in matched by 96px");
 
+  // Polish: assert / index error messages — byte-for-byte vs dart-sass 1.101
+  const expectMsg = (fn, want, label) => {
+    let msg = null;
+    try {
+      fn();
+    } catch (e) {
+      msg = e.message;
+    }
+    assert.equal(msg, want, label);
+  };
+  expectMsg(() => new SassString("hi").assertNumber(), '"hi" is not a number.', "msg: assertNumber");
+  expectMsg(() => new SassNumber(5).assertString("foo"), "$foo: 5 is not a string.", "msg: assertString named");
+  expectMsg(() => new SassNumber(5).assertColor(), "5 is not a color.", "msg: assertColor");
+  expectMsg(() => new SassNumber(5).assertFunction(), "5 is not a function reference.", "msg: assertFunction");
+  expectMsg(() => new SassNumber(5).assertMixin(), "5 is not a mixin reference.", "msg: assertMixin");
+  expectMsg(() => new SassNumber(5.5).assertInt(), "5.5 is not an int.", "msg: assertInt");
+  expectMsg(() => new SassNumber(5, "px").assertUnit("em"), 'Expected 5px to have unit "em".', "msg: assertUnit");
+  expectMsg(() => new SassNumber(5, "px").assertNoUnits("foo"), "$foo: Expected 5px to have no units.", "msg: assertNoUnits named");
+  expectMsg(() => new SassNumber(5).assertInRange(0, 3), "Expected 5 to be within 0 and 3.", "msg: assertInRange");
+  const idxList = new SassList([new SassNumber(1), new SassNumber(2)]);
+  expectMsg(() => idxList.sassIndexToListIndex(new SassNumber(0)), "List index may not be 0.", "msg: index 0");
+  expectMsg(() => idxList.sassIndexToListIndex(new SassNumber(9)), "Invalid index 9 for a list with 2 elements.", "msg: index out of range");
+  expectMsg(() => new SassString("hi").sassIndexToStringIndex(new SassNumber(9)), "Invalid index 9 for a string with 2 characters.", "msg: string index out of range");
+
   console.log("ok: custom functions — number/string/color/list/map/rest, override, error, async (Phase 4)");
 }
 

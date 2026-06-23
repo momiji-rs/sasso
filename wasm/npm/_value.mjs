@@ -271,11 +271,11 @@ export class SassNumber extends Value {
     return i;
   }
   assertNoUnits(name) {
-    if (this.hasUnits) throw new Error(notA(this, name, "unitless"));
+    if (this.hasUnits) throw new Error(prefix(name) + `Expected ${this} to have no units.`);
     return this;
   }
   assertUnit(unit, name) {
-    if (!this.hasUnit(unit)) throw new Error(notA(this, name, `a number with unit ${unit}`));
+    if (!this.hasUnit(unit)) throw new Error(prefix(name) + `Expected ${this} to have unit "${unit}".`);
     return this;
   }
   assertInRange(min, max, name) {

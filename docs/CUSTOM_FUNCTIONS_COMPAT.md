@@ -41,9 +41,8 @@ the package dep-free; `.toArray()` covers any esoteric `immutable` method.
 list → empty map), `hashCode`, `assertCalculation/Function/Mixin`;
 `SassNumber.assertNoUnits` + `assertInRange`; `SassString.sassIndexToStringIndex`
 + `empty`; `SassColor.isLegacy`. All covered in `wasm/test.mjs` + tsc.
-- **Caveat (still open):** `assert*`/index error MESSAGES are dart-like but not
-  yet byte-exact (the `$name:` prefix is there; exact wording/inspect formatting
-  is follow-up polish).
+- ~~**Caveat:** `assert*`/index error messages not byte-exact~~ ✅ FIXED — see
+  Polish #2 (now byte-for-byte vs dart-sass 1.101).
 
 ### TIER 2 — conversion-dependent methods (engine-routed)
 
@@ -98,10 +97,12 @@ against dart-sass (`sass` npm) for message/behaviour parity.
    `0.1+0.2==0.3`, `SassMap` key `1in` matched by `96px`; compound `m/s` vs
    `cm/s` is `false` in BOTH — dart's `convertToMatch` throws there too). Color
    equality already matched dart (space-aware structural). Tested in test.mjs.
-2. **assert / index error-message byte-exactness** — align `assertNumber/String/
-   Color/Map/Boolean/Calculation/Function/Mixin`, `assertInt/assertUnit/
-   assertInRange/assertNoUnits`, and `sassIndexToListIndex/StringIndex` wording +
-   value inspection to dart (verify each string against `sass`).
+2. **assert / index error-message byte-exactness** ✅ DONE — captured all 18
+   messages from dart-sass 1.101 and diffed: sasso already matched 16/18; fixed
+   the two outliers — `assertUnit` (`Expected 5px to have unit "em".`) and
+   `assertNoUnits` (`Expected 5px to have no units.`) now use dart's `Expected … to
+   …` form instead of the `… is not …` form. All 18 (with/without `$name:`)
+   verified byte-identical; locked in test.mjs.
 3. **`logger` option** (`@warn` / `@debug` / deprecation warnings) — **real gap:
    the core `eprintln!`s these, which the wasm/npm build drops entirely**, so a
    build tool gets no warning output. Add a warning sink in the core (host
