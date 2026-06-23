@@ -17,15 +17,19 @@
 //! `u32` count then that many values (the bound, ordered arguments).
 //!
 //! Supported value types: null, bool, number (with full unit lists), string,
-//! list (separator + brackets + an optional argument-list keyword map), and
-//! map. Colors, calculations, slash-divisions, and first-class function/mixin
-//! references are not yet representable across the boundary and surface a clear
-//! error (added incrementally).
+//! list (separator + brackets + an optional argument-list keyword map), map, and
+//! color (any CSS Color 4 space — serialized uniformly as a space name + three
+//! optional channels + optional alpha; legacy sRGB folds to the `rgb` space).
+//! Calculations and first-class function/mixin references are not yet
+//! representable across the boundary and surface a clear error (added
+//! incrementally); slash-divisions never reach here (call args are collapsed to
+//! plain numbers before binding).
 
 use std::rc::Rc;
 
 use crate::ast::{Param, ParamList};
-use crate::value::{List, ListSep, Map, Number, SassStr, Value};
+use crate::builtins::{legacy_to_modern, make_modern_in};
+use crate::value::{Color, ColorSpace, List, ListSep, Map, ModernColor, Number, SassStr, Value};
 
 /// An embedder's custom-function callback: it receives the bound arguments
 /// serialized to sasso's host-value wire format and returns the result
@@ -186,6 +190,18 @@ const TAG_NUMBER: u8 = 2;
 const TAG_STRING: u8 = 3;
 const TAG_LIST: u8 = 4;
 const TAG_MAP: u8 = 5;
+const TAG_COLOR: u8 = 6;
+
+/// Write an optional channel: a present flag then (if present) the f64.
+fn put_opt_f64(out: &mut Vec<u8>, v: Option<f64>) {
+    match v {
+        Some(n) => {
+            out.push(1);
+            put_f64(out, n);
+        }
+        None => out.push(0),
+    }
+}
 
 fn put_u32(out: &mut Vec<u8>, n: usize) {
     out.extend_from_slice(&(n as u32).to_le_bytes());
@@ -271,7 +287,18 @@ fn serialize_value(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
                 serialize_value(out, val)?;
             }
         }
-        Value::Color(_) => return Err("sasso: colors are not yet supported as custom-function values".into()),
+        Value::Color(c) => {
+            // Represent every color uniformly as a space + 3 channels + alpha
+            // (legacy sRGB folds to the "rgb" space). Missing channels (`none`)
+            // round-trip via the present flag.
+            out.push(TAG_COLOR);
+            let mc = legacy_to_modern(c);
+            put_str(out, mc.space.name());
+            for ch in mc.channels {
+                put_opt_f64(out, ch);
+            }
+            put_opt_f64(out, mc.alpha);
+        }
         Value::Calc(_) | Value::Slash(..) => {
             return Err("sasso: calc()/slash values are not yet supported as custom-function values".into())
         }
@@ -342,6 +369,13 @@ impl<'a> Reader<'a> {
         let mut a = [0u8; 8];
         a.copy_from_slice(b);
         Ok(f64::from_le_bytes(a))
+    }
+    fn opt_f64(&mut self) -> Result<Option<f64>, String> {
+        if self.u8()? != 0 {
+            Ok(Some(self.f64()?))
+        } else {
+            Ok(None)
+        }
     }
     fn str(&mut self) -> Result<String, String> {
         let len = self.u32()?;
@@ -445,6 +479,31 @@ fn read_value(r: &mut Reader<'_>) -> Result<Value, String> {
                 entries.push((k, v));
             }
             Value::Map(Map::new(entries))
+        }
+        TAG_COLOR => {
+            let space_name = r.str()?;
+            let space = ColorSpace::from_name(&space_name).ok_or_else(|| {
+                format!("sasso: unknown color space \"{space_name}\" from a custom function")
+            })?;
+            let channels = [r.opt_f64()?, r.opt_f64()?, r.opt_f64()?];
+            let alpha = r.opt_f64()?;
+            if space == ColorSpace::Rgb {
+                // The legacy sRGB space: reconstruct a plain legacy color so it
+                // serializes via the legacy (hex / rgb()) path, like dart-sass.
+                Value::Color(Color::rgb(
+                    channels[0].unwrap_or(0.0),
+                    channels[1].unwrap_or(0.0),
+                    channels[2].unwrap_or(0.0),
+                    alpha.unwrap_or(1.0),
+                ))
+            } else {
+                let mc = ModernColor {
+                    space,
+                    channels,
+                    alpha,
+                };
+                Value::Color(make_modern_in(mc, space))
+            }
         }
         other => {
             return Err(format!(
@@ -572,6 +631,47 @@ mod tests {
         let o = Options::default().with_function("sum($nums...)", cb);
         let css = compile(".a { x: sum(1, 2, 3, 4); }", &o).unwrap();
         assert!(css.contains("x: 10"), "got: {css}");
+    }
+
+    #[test]
+    fn custom_function_color_roundtrip() {
+        use crate::value::{Color, ColorSpace, ModernColor};
+        // ident($c) returns the color unchanged (forces a full serialize +
+        // reconstruct cycle); a legacy color stays legacy and re-emits as hex.
+        let ident: super::HostFunction = Rc::new(|bytes| {
+            let args = deserialize_args(bytes)?;
+            serialize_one(&args[0])
+        });
+        let o = Options::default().with_function("ident($c)", ident);
+        let css = compile(".a { color: ident(#0080ff); }", &o).unwrap();
+        assert!(css.contains("#0080ff"), "legacy color round-trips: {css}");
+
+        // read a channel out of a received color
+        let red: super::HostFunction = Rc::new(|bytes| {
+            let args = deserialize_args(bytes)?;
+            let c = match &args[0] {
+                Value::Color(c) => c,
+                _ => return Err("not a color".into()),
+            };
+            serialize_one(&Value::Number(Number::unitless(c.r)))
+        });
+        let o2 = Options::default().with_function("redof($c)", red);
+        let css2 = compile(".a { x: redof(rgb(12, 0, 0)); }", &o2).unwrap();
+        assert!(css2.contains("x: 12"), "channel read: {css2}");
+
+        // return a MODERN color (oklch) built by the callback
+        let mk: super::HostFunction = Rc::new(|_| {
+            let mc = ModernColor {
+                space: ColorSpace::Oklch,
+                channels: [Some(0.5), Some(0.2), Some(180.0)],
+                alpha: Some(1.0),
+            };
+            serialize_one(&Value::Color(super::make_modern_in(mc, ColorSpace::Oklch)))
+        });
+        let o3 = Options::default().with_function("mkcolor()", mk);
+        let css3 = compile(".a { color: mkcolor(); }", &o3).unwrap();
+        assert!(css3.contains("oklch("), "modern color round-trips: {css3}");
+        let _ = Color::rgb(0.0, 0.0, 0.0, 1.0);
     }
 
     #[test]

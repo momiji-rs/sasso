@@ -30,6 +30,9 @@ pub(crate) use meta::{inspect_element, inspect_value};
 // Color-space conversion, needed by `ModernColor::to_css` for the
 // out-of-range `color-mix(in …, color(xyz …) 100%, black)` fallback.
 pub(crate) use color::convert_modern;
+// Color <-> space conversion helpers reused by the host-function value bridge
+// (src/host_fn.rs) to serialize/reconstruct colors across the embedder boundary.
+pub(crate) use color::{legacy_to_modern, make_modern_in};
 
 // The engine's srgb -> hsl (dart's exact formula), used by the legacy
 // out-of-gamut rgb serialization in `value.rs`.
