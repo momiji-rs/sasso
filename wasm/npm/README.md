@@ -40,15 +40,20 @@ interface CompileResult { css: string; loadedUrls: URL[]; sourceMap?: object }
 ```
 
 - `options`: `{ style?: "expanded" | "compressed", sourceMap?: boolean,
-  sourceMapIncludeSources?: boolean, loadPaths?: string[], importers?: [...] }`.
-  `compileString` also accepts `url?: string | URL` (the source's canonical URL,
-  the base for its relative imports) and `syntax?: "scss" | "indented" | "css"`.
+  sourceMapIncludeSources?: boolean, loadPaths?: string[], importers?: [...],
+  functions?: {...}, charset?: boolean, logger?: Logger }`. `compileString` also
+  accepts `url?: string | URL` (the source's canonical URL, the base for its
+  relative imports) and `syntax?: "scss" | "indented" | "css"`.
 - **Imports.** `@use` / `@forward` / `@import` resolve via `loadPaths`, relative
   paths (against `url` / the `compile(path)` file), and custom `importers` —
   dart-sass *modern* `Importer` (`{ canonicalize, load }`) and `FileImporter`
   (`{ findFileUrl }`). All loaded URLs are reported in `loadedUrls`.
 - A Sass error throws an `Exception` (an `Error` subclass with `name ===
-  "Exception"` and a `sassMessage`).
+  "Exception"`, the raw `sassMessage`, and a `span` — `{ url, start, end }`).
+- **Warnings.** `@warn` / `@debug` / deprecation warnings print to stderr by
+  default, or go to a `logger` (`{ warn(message, opts), debug(message, opts) }`,
+  dart-sass-shaped). `Logger.silent` discards them.
+- `charset: false` suppresses the `@charset` / BOM prefix for non-ASCII output.
 - `info` is exported for build-tool auto-detection; `initCompiler()` /
   `initAsyncCompiler()` implement the dart-sass Compiler API (Vite uses these).
 
@@ -78,9 +83,11 @@ compileString(`@use "virtual:colors" as c; .a { color: c.$brand; }`, {
 ## Custom functions
 
 Define Sass functions in JS with the dart-sass `functions` option. A callback
-receives the bound `Value` arguments and returns a `Value` (the full type
-system — `SassNumber`, `SassString`, `SassColor`, `SassList`, `SassMap`,
-`SassBoolean`, `sassNull` — is exported):
+receives the bound `Value` arguments and returns a `Value` (the **full** dart-sass
+type system is exported — `SassNumber` (with unit conversion), `SassString`,
+`SassColor` (every CSS Color 4 space + conversions), `SassList`, `SassMap`,
+`SassBoolean`, `sassNull`, `SassCalculation`, and first-class `SassFunction` /
+`SassMixin`):
 
 ```js
 import { compileString, SassNumber, SassColor } from "sasso";
@@ -122,7 +129,7 @@ asynchronous importer — both work **zero-config**, including cross-file
 alias it to sasso in `package.json`, then use it as usual:
 
 ```json
-{ "devDependencies": { "sass": "npm:sasso@^0.7.0" } }
+{ "devDependencies": { "sass": "npm:sasso@^0.7.8" } }
 ```
 
 ```js
@@ -138,6 +145,7 @@ dart-sass `sass` CLI flags:
 ```bash
 npx sasso input.scss                      # compile to stdout
 npx sasso input.scss output.css           # write output.css (+ output.css.map)
+npx sasso a.scss:a.css b.scss:b.css       # multiple input:output pairs
 npx sasso --style=compressed input.scss
 npx sasso -I node_modules -I scss main.scss   # add load paths
 npx sasso --watch input.scss output.css   # recompile on change (deps tracked)
@@ -147,8 +155,10 @@ npx sasso --help
 
 Flags: `-s/--style <expanded|compressed>`, `-I/--load-path <dir>` (repeatable),
 `--stdin`, `--indented`, `--[no-]source-map` (on by default when writing a file),
-`--embed-sources`, `-w/--watch` (re-compiles when the input or any dependency
-changes), `--help`, `--version`.
+`--embed-sources`, `--embed-source-map` (inline the map), `--[no-]charset`,
+`-q/--quiet` (silence `@warn`/`@debug`), `--update` (skip outputs newer than their
+input), `-w/--watch` (re-compiles when the input or any dependency changes),
+`--help`, `--version`.
 
 ## Two builds: size vs speed
 

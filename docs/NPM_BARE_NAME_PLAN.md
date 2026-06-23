@@ -10,8 +10,10 @@
 > (sync importers) ✅** · **Phase 2.5 (async importers via Asyncify) ✅ — full
 > zero-config sass-loader + Vite drop-in.** · **Phase 3 (CLI bin) ✅ — `npx
 > sasso`.** · **Phase 4 (custom `functions`) ✅ — full `Value` system, sync +
-> async.** ALL PHASES DONE. `sasso@0.7.1` published (Phases 1+2+2.5+3); Phase 4
-> ships on the next `npm-v*` cut.
+> async.** ALL PHASES DONE + the full `Value` type system (Tier 0–3) + the
+> dart-fidelity polish track (unit-aware equality, byte-exact assert messages,
+> `logger`, `charset`, the CLI flag set, structured `Exception.span`). **Latest:
+> `sasso@0.7.8`** (npm `latest`).
 
 ## Why the bare name matters
 

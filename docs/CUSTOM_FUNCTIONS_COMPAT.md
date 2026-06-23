@@ -1,14 +1,15 @@
 # Custom-functions / `Value` API — dart-sass compatibility gap analysis
 
-> Status: Phase 4 shipped a **working** custom-functions feature in `sasso@0.7.2`
-> (number/string/color/list/map/bool/null, sync + async). This document tracks
-> what remains to reach **100% dart-sass JS `Value` API compatibility**, so a
-> custom function written for `sass` runs unchanged on `sasso`.
+> Status: Phase 4 shipped a **working** custom-functions feature in `sasso@0.7.2`;
+> the FULL dart-sass `Value` type system + the dart-fidelity polish track are now
+> done as of **`sasso@0.7.8`**. This document tracks the path to **100% dart-sass
+> JS `Value` API compatibility**, so a custom function written for `sass` runs
+> unchanged on `sasso`. (Tier 0–3 + Polish #1–6 below are all ✅.)
 >
 > Authoritative reference: the dart-sass JS API (`Value`, `SassNumber`,
 > `SassColor`, …). Frequency = how often real-world custom functions hit it.
 
-## What works today (`sasso@0.7.2`)
+## What works today (`sasso@0.7.8`)
 
 - Value types across the boundary: `null`, `bool`, `SassNumber` (full unit
   lists), `SassString`, `SassColor` (every CSS Color 4 space), `SassList` /
