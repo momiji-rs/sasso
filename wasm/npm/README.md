@@ -16,6 +16,7 @@ npm install sasso
 import { compileString } from "sasso";
 
 const { css } = compileString(`
+  @use "sass:color";
   $brand: #2a7ae2;
   .button {
     color: $brand;
@@ -129,7 +130,7 @@ asynchronous importer — both work **zero-config**, including cross-file
 alias it to sasso in `package.json`, then use it as usual:
 
 ```json
-{ "devDependencies": { "sass": "npm:sasso@^0.7.8" } }
+{ "devDependencies": { "sass": "npm:sasso@^0.7.9" } }
 ```
 
 ```js
