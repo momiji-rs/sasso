@@ -201,7 +201,13 @@ fn frame_error(line: u32, col: u32, url: &str, message: &str, rendered: &str) ->
 
 /// Frame a [`sasso::Error`] (raw message + position + entry url + rendered block).
 fn frame_sass_error(err: &sasso::Error, url: Option<&str>) -> Vec<u8> {
-    frame_error(err.line as u32, err.col as u32, url.unwrap_or(""), &err.message, &err.to_string())
+    frame_error(
+        err.line as u32,
+        err.col as u32,
+        url.unwrap_or(""),
+        &err.message,
+        &err.to_string(),
+    )
 }
 
 /// Build the diagnostic handler that forwards every `@warn`/`@debug`/deprecation
@@ -437,7 +443,16 @@ pub extern "C" fn sasso_compile2(
                 }
             }
         }
-        Err(_) => (frame_error(0, 0, "", "input is not valid UTF-8", "Error: input is not valid UTF-8"), 0),
+        Err(_) => (
+            frame_error(
+                0,
+                0,
+                "",
+                "input is not valid UTF-8",
+                "Error: input is not valid UTF-8",
+            ),
+            0,
+        ),
     };
 
     into_result(bytes, ok, out_len_ptr, ok_ptr)
