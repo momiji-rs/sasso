@@ -404,6 +404,17 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
   );
   assert.ok(rmixref.css.includes("color: red"), "Tier3b: SassMixin opaque round-trip (meta.apply)");
 
+  // Polish: unit-aware SassNumber equality + hashCode (verified == dart-sass 1.101)
+  const inch = new SassNumber(1, "in");
+  assert.equal(inch.equals(new SassNumber(96, "px")), true, "equals: 1in == 96px");
+  assert.equal(inch.hashCode() === new SassNumber(96, "px").hashCode(), true, "equals: 1in/96px hash equal");
+  assert.equal(inch.equals(new SassNumber(2, "px")), false, "equals: 1in != 2px");
+  assert.equal(new SassNumber(1).equals(new SassNumber(1, "px")), false, "equals: 1 != 1px (unitless vs united)");
+  assert.equal(inch.equals(new SassNumber(1, "s")), false, "equals: 1in != 1s (incompatible)");
+  assert.equal(new SassNumber(0.1 + 0.2).equals(new SassNumber(0.3)), true, "equals: 0.1+0.2 == 0.3 (fuzzy)");
+  const mUnit = new SassMap(new Map([[inch, new SassString("hit", { quotes: true })]]));
+  assert.equal(mUnit.contents.get(new SassNumber(96, "px"))?.text, "hit", "equals: SassMap key 1in matched by 96px");
+
   console.log("ok: custom functions — number/string/color/list/map/rest, override, error, async (Phase 4)");
 }
 

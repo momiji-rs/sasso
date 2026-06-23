@@ -64,9 +64,7 @@ compile.
   `interpolate` (→ `color.mix`), and `change({…})` (pure JS: a copy with channels
   replaced, converting via `toSpace` when a `space` is given). All routed to the
   Rust math; tested standalone + re-entrant. **Tier 2 is COMPLETE.**
-- **Value equality with unit conversion** (`1in == 96px`) + matching `hashCode`:
-  still pure-JS exact-units (can't route — `.equals` is called outside a compile
-  too). Minor divergence for unit-mismatched map keys; documented.
+- **Value equality with unit conversion** (`1in == 96px`) ✅ DONE — see Polish #1.
 
 ### TIER 3 — missing value TYPES (LOW frequency, varied effort)
 
@@ -84,6 +82,40 @@ compile.
   return it → `meta.call(it, 5)` = 10; same for a mixin → `meta.apply(it)`.
 
   **🎉 THE FULL dart-sass `Value` TYPE SYSTEM IS NOW SUPPORTED.**
+
+## POLISH TRACK — remaining for 100% (no more Value types) — 2026-06-23
+
+The full `Value` type system is done. What's left to be a byte-for-byte drop-in,
+in priority order. Each item must ship with test coverage **and** be verified
+against dart-sass (`sass` npm) for message/behaviour parity.
+
+1. **Unit-aware `.equals` / `hashCode`** ✅ DONE — `SassNumber.equals` is now
+   fuzzy + cross-unit (same units → fuzzy value compare; different → convert via
+   the already-routed `convertValueToMatch`, incompatible → false; one-unitless →
+   false). `hashCode` keeps the equal⇒equal invariant (unitless → value hash,
+   united → one bucket). No new core op needed; reuses Tier 2's convert routing.
+   Verified case-for-case against dart-sass 1.101 (incl. `1in==96px`, fuzzy
+   `0.1+0.2==0.3`, `SassMap` key `1in` matched by `96px`; compound `m/s` vs
+   `cm/s` is `false` in BOTH — dart's `convertToMatch` throws there too). Color
+   equality already matched dart (space-aware structural). Tested in test.mjs.
+2. **assert / index error-message byte-exactness** — align `assertNumber/String/
+   Color/Map/Boolean/Calculation/Function/Mixin`, `assertInt/assertUnit/
+   assertInRange/assertNoUnits`, and `sassIndexToListIndex/StringIndex` wording +
+   value inspection to dart (verify each string against `sass`).
+3. **`logger` option** (`@warn` / `@debug` / deprecation warnings) — **real gap:
+   the core `eprintln!`s these, which the wasm/npm build drops entirely**, so a
+   build tool gets no warning output. Add a warning sink in the core (host
+   callback, like `functions`/`importer`), a `host_warn` wasm import, and a JS
+   `logger` option (`{ warn(message, opts), debug(message, opts) }`) defaulting to
+   `console.warn`/`console.error`. Carries `deprecation`/`span`-ish opts as dart.
+4. **`charset` option** + CLI `--no-charset` — `charset: false` suppresses the
+   `@charset "UTF-8";` / BOM prefix (core emits it whenever output is non-ASCII).
+5. **CLI flags** — `--embed-source-map` (inline data-URI map), `--no-charset`,
+   `--[no-]unicode` (ASCII diagnostics; core has `unicode`), `--quiet`,
+   `--update`, multiple `input:output` pairs, `--color`/`--no-color`.
+6. **`Exception.span`** (assess) — structured `.span` (`url`/`start`/`end`/`text`)
+   on thrown errors; build tools format from it. Needs the core to surface span
+   data across the boundary — feasibility TBD; may defer.
 
 ## CLI gaps (separate track)
 

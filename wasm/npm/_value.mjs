@@ -136,6 +136,15 @@ function hashStr(s) {
   return h;
 }
 
+// dart-sass fuzzy numeric equality: equal when rounded to 1e-11 precision.
+const INV_EPSILON = 1e11;
+function fuzzyEquals(a, b) {
+  return a === b || (Math.abs(a - b) <= 1e-11 && Math.round(a * INV_EPSILON) === Math.round(b * INV_EPSILON));
+}
+function fuzzyHashInt(v) {
+  return Math.round(v * INV_EPSILON) | 0;
+}
+
 class SassNull extends Value {
   get isTruthy() {
     return false;
@@ -306,15 +315,26 @@ export class SassNumber extends Value {
     return this.coerceToMatch(other).value;
   }
   equals(o) {
-    return (
-      o instanceof SassNumber &&
-      o.value === this.value &&
-      sameUnits(o._numeratorUnits, this._numeratorUnits) &&
-      sameUnits(o._denominatorUnits, this._denominatorUnits)
-    );
+    if (!(o instanceof SassNumber)) return false;
+    // Same units: a plain fuzzy value comparison.
+    if (sameUnits(o._numeratorUnits, this._numeratorUnits) && sameUnits(o._denominatorUnits, this._denominatorUnits)) {
+      return fuzzyEquals(this.value, o.value);
+    }
+    // Different units: a unitless operand is never equal to a united one;
+    // otherwise convert through the engine (incompatible units → not equal).
+    if (!this.hasUnits || !o.hasUnits) return false;
+    try {
+      return fuzzyEquals(this.value, o.convertValueToMatch(this));
+    } catch {
+      return false;
+    }
   }
   hashCode() {
-    return (this.value | 0) ^ hashStr(this._numeratorUnits.join("*"));
+    // Equal numbers must hash equal (1in == 96px). Unitless values hash by
+    // value; united values that compare equal across different units can't share
+    // a raw-value hash, so they share one bucket (collision-safe — our maps key
+    // by `equals`, and a cross-impl hash integer never matches dart anyway).
+    return this.hasUnits ? 0x7fffffff : fuzzyHashInt(this.value);
   }
   toString() {
     return this.value + this._numeratorUnits.join("*");
