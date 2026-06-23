@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 // sasso CLI — `npx sasso input.scss [output.css]`. Pure Node + wasm, no deps.
 // A subset of the dart-sass `sass` CLI flags, sharing the package's compiler.
-import { readFileSync, writeFileSync, watch } from "node:fs";
+import { readFileSync, writeFileSync, watch, statSync, existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { compile, compileString, info, Exception } from "./sasso.mjs";
+import { compile, compileString, info, Exception, Logger } from "./sasso.mjs";
 
 const HELP = `sasso — compile SCSS/Sass to CSS
 
 Usage: sasso [options] <input.scss> [output.css]
+       sasso [options] <input.scss>:<output.css> [<in>:<out> ...]
        sasso [options] --stdin [output.css]
        cat a.scss | sasso --stdin
 
@@ -20,8 +21,11 @@ Options:
       --[no-]source-map              Emit a source map (default: on when writing
                                      to a file, off for stdout).
       --embed-sources                Embed source text in the map's sourcesContent.
+      --embed-source-map             Embed the source map as a data: URI in the CSS.
       --[no-]charset                 Emit @charset/BOM for non-ASCII output
                                      (default: on).
+  -q, --quiet                        Suppress @warn / @debug / deprecation output.
+      --update                       Skip outputs already newer than their input.
   -w, --watch                        Recompile when the input or any dependency
                                      changes (requires <input> <output>).
   -h, --help                         Print this help.
@@ -43,7 +47,10 @@ function parseArgs(argv) {
     indented: false,
     sourceMap: undefined, // tri-state: default depends on output target
     embedSources: false,
+    embedSourceMap: false,
     charset: true,
+    quiet: false,
+    update: false,
     watch: false,
     positionals: [],
   };
@@ -78,6 +85,12 @@ function parseArgs(argv) {
       opts.sourceMap = false;
     } else if (a === "--embed-sources") {
       opts.embedSources = true;
+    } else if (a === "--embed-source-map") {
+      opts.embedSourceMap = true;
+    } else if (a === "-q" || a === "--quiet") {
+      opts.quiet = true;
+    } else if (a === "--update") {
+      opts.update = true;
     } else if (a === "--charset") {
       opts.charset = true;
     } else if (a === "--no-charset") {
@@ -109,11 +122,15 @@ function readStdin() {
   }
 }
 
-// Write a compile result to `outPath` (file) or stdout, including the source-map
-// sidecar + footer for file output.
-function emit(result, outPath, wantMap) {
+// Write a compile result to `outPath` (file) or stdout. The source map is either
+// inlined as a data: URI (`embedMap`) or written as a `.map` sidecar + footer.
+function emit(result, outPath, wantMap, embedMap) {
   let css = result.css;
-  if (wantMap && outPath) {
+  if (wantMap && embedMap) {
+    const map = { ...result.sourceMap, file: outPath ? basename(outPath) : undefined };
+    const b64 = Buffer.from(JSON.stringify(map), "utf8").toString("base64");
+    css = css.replace(/\n?$/, "") + `\n/*# sourceMappingURL=data:application/json;base64,${b64} */\n`;
+  } else if (wantMap && outPath) {
     const mapPath = outPath + ".map";
     const map = { ...result.sourceMap, file: basename(outPath) };
     css = css.replace(/\n?$/, "") + `\n/*# sourceMappingURL=${basename(mapPath)} */\n`;
@@ -123,10 +140,35 @@ function emit(result, outPath, wantMap) {
   else process.stdout.write(css);
 }
 
+/** The `:` index separating `<input>:<output>` (skips a leading drive letter). */
+function colonIndex(p) {
+  return p.indexOf(":", /^[a-zA-Z]:[\\/]/.test(p) ? 2 : 0);
+}
+/** Parse positionals into `{input, output}` jobs (colon-pair form or space form). */
+function parseJobs(positionals) {
+  if (positionals.some((p) => colonIndex(p) >= 0)) {
+    return positionals.map((p) => {
+      const i = colonIndex(p);
+      if (i < 0) fail(`error: expected <input>:<output>, got "${p}"`);
+      return { input: p.slice(0, i), output: p.slice(i + 1) };
+    });
+  }
+  const [input, output] = positionals;
+  return input === undefined ? [] : [{ input, output }];
+}
+/** `--update`: true when `output` already exists and is newer than `input`. */
+function isFresh(output, input) {
+  try {
+    return existsSync(output) && statSync(output).mtimeMs >= statSync(input).mtimeMs;
+  } catch {
+    return false;
+  }
+}
+
 // `--watch`: recompile `input` -> `output` whenever the input or any of its
 // dependencies (the compile's `loadedUrls`) changes. Watches the directories of
 // all involved files (so editor atomic-saves are caught) and debounces bursts.
-function runWatch(input, output, common) {
+function runWatch(input, output, common, embedMap) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
   let watchers = [];
   let timer = null;
@@ -159,7 +201,7 @@ function runWatch(input, output, common) {
   const recompile = () => {
     try {
       const result = compile(input, common);
-      emit(result, output, common.sourceMap);
+      emit(result, output, common.sourceMap, embedMap);
       process.stderr.write(`Compiled ${input} to ${output}.\n`);
       rewatch(result.loadedUrls);
     } catch (e) {
@@ -181,42 +223,54 @@ function runWatch(input, output, common) {
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const [input, output] = opts.positionals;
-
-  if (!opts.stdin && input === undefined) {
-    fail("error: no input file (pass a path, or --stdin). Try --help.");
-  }
-  const outPath = opts.stdin ? input : output;
-  const wantMap = opts.sourceMap === undefined ? !!outPath : opts.sourceMap;
-
   const common = {
     style: opts.style,
     loadPaths: opts.loadPaths,
-    sourceMap: wantMap,
     sourceMapIncludeSources: opts.embedSources,
     charset: opts.charset,
   };
+  if (opts.quiet) common.logger = Logger.silent;
+
+  // --stdin: a single job reading source from standard input.
+  if (opts.stdin) {
+    if (opts.watch) fail("error: --watch cannot be used with --stdin");
+    const output = opts.positionals[0];
+    const wantMap = opts.sourceMap === undefined ? !!output || opts.embedSourceMap : opts.sourceMap;
+    let result;
+    try {
+      result = compileString(readStdin(), { ...common, sourceMap: wantMap, syntax: opts.indented ? "indented" : "scss" });
+    } catch (e) {
+      if (e instanceof Exception) fail(e.message);
+      fail(`error: ${e && e.message ? e.message : e}`);
+    }
+    emit(result, output, wantMap, opts.embedSourceMap);
+    return;
+  }
+
+  const jobs = parseJobs(opts.positionals);
+  if (jobs.length === 0) fail("error: no input file (pass a path, or --stdin). Try --help.");
 
   if (opts.watch) {
-    if (opts.stdin) fail("error: --watch cannot be used with --stdin");
-    runWatch(input, output, common);
+    if (jobs.length !== 1 || !jobs[0].output) fail("error: --watch requires <input> <output>");
+    const wantMap = opts.sourceMap === undefined ? true : opts.sourceMap;
+    runWatch(jobs[0].input, jobs[0].output, { ...common, sourceMap: wantMap }, opts.embedSourceMap);
     return; // keep the process alive on the watchers
   }
 
-  let result;
-  try {
-    if (opts.stdin) {
-      result = compileString(readStdin(), { ...common, syntax: opts.indented ? "indented" : "scss" });
-    } else {
-      result = compile(input, common);
+  for (const { input, output } of jobs) {
+    const wantMap = opts.sourceMap === undefined ? !!output || opts.embedSourceMap : opts.sourceMap;
+    // --update: leave outputs that are already newer than their input untouched.
+    if (opts.update && output && isFresh(output, input)) continue;
+    let result;
+    try {
+      result = compile(input, { ...common, sourceMap: wantMap });
+    } catch (e) {
+      if (e instanceof Exception) fail(e.message);
+      if (e && e.code === "ENOENT") fail(`error: cannot read "${input}": no such file`);
+      fail(`error: ${e && e.message ? e.message : e}`);
     }
-  } catch (e) {
-    if (e instanceof Exception) fail(e.message);
-    if (e && e.code === "ENOENT") fail(`error: cannot read "${input}": no such file`);
-    fail(`error: ${e && e.message ? e.message : e}`);
+    emit(result, output, wantMap, opts.embedSourceMap);
   }
-
-  emit(result, outPath, wantMap);
 }
 
 main();

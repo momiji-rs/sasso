@@ -6,11 +6,11 @@
 // FileImporter, loadedUrls, importer errors, async rejection). Run after
 // build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import * as size from "./npm/sasso.mjs";
 import * as speed from "./npm/sasso.speed.mjs";
 
@@ -218,7 +218,32 @@ assert.ok(cliErr, "cli: a Sass error exits non-zero");
 let cliMissing = false;
 try { cli(["/no/such/file.scss"]); } catch (e) { cliMissing = /no such file/.test(String(e.stderr || "")); }
 assert.ok(cliMissing, "cli: a missing input file errors cleanly");
-console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors");
+
+// CLI polish flags: --embed-source-map / --quiet / multiple input:output / --update
+assert.ok(
+  cli(["--embed-source-map", "--stdin"], ".a{b:1}\n").includes("sourceMappingURL=data:application/json;base64,"),
+  "cli: --embed-source-map inlines the map",
+);
+{
+  const warnSrc = '@warn "x"; .a{b:c}\n';
+  const loud = spawnSync(process.execPath, [cliPath, "--stdin"], { input: warnSrc, encoding: "utf8" });
+  assert.ok(loud.stderr.includes("WARNING"), "cli: @warn prints to stderr by default");
+  const quiet = spawnSync(process.execPath, [cliPath, "--quiet", "--stdin"], { input: warnSrc, encoding: "utf8" });
+  assert.equal(quiet.stderr.trim(), "", "cli: --quiet suppresses @warn");
+}
+{
+  const mio = mkdtempSync(join(tmpdir(), "sasso-mio-"));
+  const ina = join(mio, "a.scss"), inb = join(mio, "b.scss"), outa = join(mio, "a.css"), outb = join(mio, "b.css");
+  writeFileSync(ina, ".a{x:1}\n");
+  writeFileSync(inb, ".b{y:2}\n");
+  cli(["--quiet", `${ina}:${outa}`, `${inb}:${outb}`]);
+  assert.ok(existsSync(outa) && existsSync(outb), "cli: multiple input:output pairs");
+  assert.ok(readFileSync(outa, "utf8").includes("x: 1") && readFileSync(outb, "utf8").includes("y: 2"), "cli: multi-IO contents");
+  const before = statSync(outa).mtimeMs;
+  cli(["--quiet", "--update", `${ina}:${outa}`]);
+  assert.equal(statSync(outa).mtimeMs, before, "cli: --update leaves a fresh output untouched");
+}
+console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + embed-map/quiet/multi-IO/update");
 
 // === Phase 3: CLI --watch (recompiles on dependency change) ===
 {

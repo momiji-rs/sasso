@@ -122,9 +122,15 @@ against dart-sass (`sass` npm) for message/behaviour parity.
    is now decoded BOM-preserving, so compressed non-ASCII output carries the BOM
    like dart. Verified all four cases (expanded `@charset`, compressed BOM, both
    suppressed by `charset:false`) vs dart-sass 1.101; tested in test.mjs + CLI.
-5. **CLI flags** — `--embed-source-map` (inline data-URI map), `--no-charset`,
-   `--[no-]unicode` (ASCII diagnostics; core has `unicode`), `--quiet`,
-   `--update`, multiple `input:output` pairs, `--color`/`--no-color`.
+5. **CLI flags** ✅ DONE (high-value set) — added `--embed-source-map` (inline
+   data-URI map, implies source-map-on), `--no-charset` (#4), `-q`/`--quiet`
+   (routes to `Logger.silent`), `--update` (skip outputs already newer than their
+   input — entry-mtime based; transitive `@use`/`@import` dep tracking is a noted
+   limitation vs dart's dep cache), and multiple `<in>:<out>` pairs (colon form,
+   Windows-drive-aware). All tested in test.mjs. *(Deferred, low value:
+   `--[no-]unicode` needs a wasm ABI param to switch error-snippet glyphs to
+   ASCII; `--color`/`--no-color` is a no-op since sasso diagnostics aren't
+   ANSI-colorized. Noted, not blocking drop-in use.)*
 6. **`Exception.span`** (assess) — structured `.span` (`url`/`start`/`end`/`text`)
    on thrown errors; build tools format from it. Needs the core to surface span
    data across the boundary — feasibility TBD; may defer.
@@ -133,8 +139,9 @@ against dart-sass (`sass` npm) for message/behaviour parity.
 
 - ~~**`--watch`**~~ ✅ DONE — `-w/--watch` recompiles on change, tracking
   dependencies via `loadedUrls` (watches their directories, debounced).
-- Still open: `--embed-source-map` (inline), `--update`, `--error-css`, multiple
-  `input:output` pairs, `--quiet`, `--color`, `--no-charset`,
+- ~~`--embed-source-map`, `--update`, multiple `input:output`, `--quiet`,
+  `--no-charset`~~ ✅ DONE (Polish #4/#5). Still open (low value): `--error-css`,
+  `--color`/`--no-color` (no-op — no ANSI), `--[no-]unicode` (needs an ABI param),
   `--[no-]source-map-urls=relative|absolute`, `--stop-on-error`.
 
 ## Recommended sequencing
