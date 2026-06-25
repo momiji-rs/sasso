@@ -245,6 +245,29 @@ assert.ok(
 }
 console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + embed-map/quiet/multi-IO/update");
 
+// === Trailing-newline parity: the JS API omits it, the CLI appends one ===
+// dart-sass's `compileString().css` carries NO trailing newline (either style);
+// the CLI terminates NON-empty output with exactly one (empty output stays
+// empty). These pin both halves so the wasm package stays byte-identical to
+// dart-sass on both the sass-loader/Vite path (JS API) and the CLI path.
+{
+  for (const style of ["expanded", "compressed"]) {
+    for (const mod of [size, speed]) {
+      const out = mod.compileString(".a { color: red; }", { style }).css;
+      assert.ok(out.length > 0, `nl: ${style} css non-empty`);
+      assert.ok(!out.endsWith("\n"), `nl: JS API ${style} css has NO trailing newline`);
+    }
+    // CLI: exactly one trailing newline on non-empty output.
+    const styleArg = style === "compressed" ? ["--style=compressed"] : [];
+    const cliOut = cli([...styleArg, "--stdin"], ".a { color: red; }\n");
+    assert.ok(cliOut.endsWith("\n") && !cliOut.endsWith("\n\n"), `nl: CLI ${style} ends with exactly one newline`);
+  }
+  // Empty-output stylesheet: JS API "" and CLI 0 bytes (no lone newline) — dart parity.
+  assert.equal(size.compileString("$x: 1;").css, "", "nl: empty-output JS API css is empty");
+  assert.equal(cli(["--stdin"], "$x: 1;\n"), "", "nl: empty-output CLI emits nothing");
+  console.log("ok: trailing-newline parity — JS API omits, CLI appends one (empty stays empty)");
+}
+
 // Polish: structured Exception (sassMessage + span), shape verified vs dart-sass
 {
   let caught;
