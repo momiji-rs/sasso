@@ -11,6 +11,27 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-06-25
+
+### Fixed
+
+- **Trailing-newline parity with dart-sass, split correctly between the library
+  API and the CLI.** The library API (`compile`, `compile_with_source_map`, and
+  thus the wasm `compileString().css` and the Ruby gem) now returns the
+  serialized stylesheet with **no trailing newline** — byte-for-byte what
+  dart-sass's library API returns. Previously expanded output carried a stray
+  trailing newline, so a `sass-loader`/Vite integration saw one extra byte per
+  stylesheet versus dart-sass. The CLI front-ends (the `sasso` binary and the
+  wasm `sasso` CLI) now append the single trailing newline dart-sass's CLI adds
+  to **non-empty** output in **both** styles — compressed CLI output previously
+  omitted it — while empty output stays empty (0 bytes), also matching
+  dart-sass. Verified byte-for-byte against dart-sass 1.101.0 on both the
+  library and CLI paths (expanded, compressed, and empty output).
+- **The wasm package now reports `dart-sass 1.101.0` in `info`** (was
+  `1.89.0`), reflecting the modern-API surface it's compatible with. Tools such
+  as `sass-loader` and Vite parse this version for feature gating, so the stale
+  value could gate off newer behavior.
+
 ## [0.6.2] - 2026-06-25
 
 ### Fixed
