@@ -11,12 +11,54 @@ use sasso::{
     OutputStyle, Syntax,
 };
 
+// `compile` returns the stylesheet WITHOUT a trailing newline (byte-for-byte
+// what dart-sass's library API returns). The expanded goldens below were
+// captured from the dart-sass CLI, which appends one to NON-empty output (empty
+// output stays empty), so mirror that here. The library's no-trailing-newline
+// contract is pinned by `library_api_omits_trailing_newline`.
 fn css(input: &str) -> String {
-    compile(input, &Options::default()).expect("compile should succeed")
+    let out = compile(input, &Options::default()).expect("compile should succeed");
+    if out.is_empty() {
+        out
+    } else {
+        out + "\n"
+    }
 }
 
+// Compressed goldens were captured from the library API directly (no trailing
+// newline), so this helper compares against `compile` verbatim.
 fn css_compressed(input: &str) -> String {
     compile(input, &Options::default().with_style(OutputStyle::Compressed)).expect("compile should succeed")
+}
+
+/// The library API (`compile`) must not emit a trailing newline in either
+/// style — that matches dart-sass's library API (`compileString().css`) and is
+/// what the wasm `compileString().css` and the Ruby gem return. The single
+/// newline the dart-sass CLI appends is re-added only by the CLI front-ends
+/// (`src/main.rs`, `wasm/npm/cli.mjs`), guarded by the CLI tests.
+#[test]
+fn library_api_omits_trailing_newline() {
+    for input in [
+        ".a { color: red; }",
+        ".a { color: red; }\n",
+        "$c: blue;\n.a {\n  color: $c;\n  .b { width: 10px; }\n}\n",
+        ".a { color: red; }\n.b { color: blue; }\n",
+        // non-ASCII -> expanded prepends `@charset`, which must not reintroduce
+        // a trailing newline at the end.
+        ".a { content: \"café\"; }",
+    ] {
+        let expanded = compile(input, &Options::default()).expect("compile");
+        assert!(
+            !expanded.ends_with('\n'),
+            "expanded library output must not end with a newline: {expanded:?}"
+        );
+        let compressed =
+            compile(input, &Options::default().with_style(OutputStyle::Compressed)).expect("compile");
+        assert!(
+            !compressed.ends_with('\n'),
+            "compressed library output must not end with a newline: {compressed:?}"
+        );
+    }
 }
 
 /// An in-memory importer for `@import` tests.
@@ -162,7 +204,7 @@ fn import_inlining() {
     .expect("compile");
     assert_eq!(
         out,
-        "body {\n  margin: 0;\n  padding: 16px;\n}\n\n.wrap {\n  padding: 4px;\n}\n"
+        "body {\n  margin: 0;\n  padding: 16px;\n}\n\n.wrap {\n  padding: 4px;\n}"
     );
 }
 
@@ -267,8 +309,9 @@ fn first_class_mixin_load_css_resolves_against_defining_module() {
         &Options::default().with_url("/entry").with_importer(&importer),
     )
     .expect("compile");
-    // Byte-for-byte dart-sass 1.101 (resolves "dep" against /sub).
-    assert_eq!(out, ".out .loaded {\n  x: from-sub-dep;\n}\n");
+    // Byte-for-byte dart-sass 1.101 (resolves "dep" against /sub). The library
+    // API omits the trailing newline the CLI adds.
+    assert_eq!(out, ".out .loaded {\n  x: from-sub-dep;\n}");
 }
 
 #[test]
@@ -823,7 +866,7 @@ fn importer_cached_strings_survive_compile_reset() {
     )
     .expect("compile should succeed");
 
-    assert_eq!(out, "body {\n  padding: 8px;\n}\n\n.a {\n  margin: 4px;\n}\n");
+    assert_eq!(out, "body {\n  padding: 8px;\n}\n\n.a {\n  margin: 4px;\n}");
 
     // After the compile returns (and, under ScopedAlloc, the arena has been
     // reset) the importer-owned cache must still be intact and correct. If the

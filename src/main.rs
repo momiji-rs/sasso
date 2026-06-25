@@ -372,17 +372,27 @@ fn run(cli: Cli) -> ExitCode {
         let per = elapsed.as_secs_f64() * 1000.0 / f64::from(n);
         let per_sec = if per > 0.0 { 1000.0 / per } else { f64::INFINITY };
         eprintln!("sasso: {n} compiles in {elapsed:.3?} => {per:.3} ms/compile, {per_sec:.1} compiles/sec");
-        if !cli.quiet {
-            print!("{last}");
+        if !cli.quiet && !last.is_empty() {
+            // Match the CLI's single trailing newline (the library API omits it;
+            // dart-sass emits nothing at all for empty output).
+            println!("{last}");
         }
         return ExitCode::SUCCESS;
     }
 
     // One-shot: compile each input unit and stream the CSS to stdout in order.
+    // dart-sass terminates each NON-empty compiled stylesheet with a single
+    // newline that the library API omits (empty output stays empty), so append
+    // one per non-empty unit.
     let mut out = String::new();
     for (source, syntax, url) in &units {
         match compile(source, &opts_for(style, &importer, unicode, *syntax, url)) {
-            Ok(css) => out.push_str(&css),
+            Ok(css) => {
+                if !css.is_empty() {
+                    out.push_str(&css);
+                    out.push('\n');
+                }
+            }
             Err(e) => {
                 eprintln!("{e}");
                 return ExitCode::from(65);
@@ -449,13 +459,18 @@ fn write_output(
             return ExitCode::FAILURE;
         }
     } else {
-        let css = match compile(source, opts) {
+        let mut css = match compile(source, opts) {
             Ok(css) => css,
             Err(e) => {
                 eprintln!("{e}");
                 return ExitCode::from(65);
             }
         };
+        // The library API omits the trailing newline dart-sass's CLI writes to
+        // non-empty output (empty output stays empty).
+        if !css.is_empty() {
+            css.push('\n');
+        }
         if let Err(e) = std::fs::write(output, css.as_bytes()) {
             eprintln!("error: cannot write {}: {e}", output.display());
             return ExitCode::FAILURE;
@@ -464,8 +479,9 @@ fn write_output(
     ExitCode::SUCCESS
 }
 
-/// dart's `sourceMappingURL` footer. EXPANDED appends `\n/*# … */\n` to a CSS
-/// already ending in `\n` (yielding `…}\n\n/*# … */\n`); COMPRESSED appends
+/// dart's `sourceMappingURL` footer. The library CSS has no trailing newline,
+/// so EXPANDED appends `\n\n/*# … */\n` (the line terminator plus dart's blank
+/// separator line, yielding `…}\n\n/*# … */\n`); COMPRESSED appends
 /// `/*# … */\n` with no leading newline. Any `*/` in the URL is escaped as
 /// `%2A/` so it cannot terminate the comment early.
 fn append_source_map_footer(css: &str, url: &str, style: OutputStyle) -> String {
@@ -473,7 +489,7 @@ fn append_source_map_footer(css: &str, url: &str, style: OutputStyle) -> String 
     let mut out = String::with_capacity(css.len() + url.len() + 32);
     out.push_str(css);
     match style {
-        OutputStyle::Expanded => out.push_str(&format!("\n/*# sourceMappingURL={url} */\n")),
+        OutputStyle::Expanded => out.push_str(&format!("\n\n/*# sourceMappingURL={url} */\n")),
         OutputStyle::Compressed => out.push_str(&format!("/*# sourceMappingURL={url} */\n")),
     }
     out
