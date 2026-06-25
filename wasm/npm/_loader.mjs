@@ -86,7 +86,7 @@ export class Exception extends Error {
 // `info` entirely. The version field claims a recent dart-sass we're
 // API-compatible with (bump as the modern API evolves); the descriptive field
 // honestly discloses the real engine. See ../../docs/NPM_BARE_NAME_PLAN.md.
-const DART_SASS_COMPAT = "1.89.0";
+const DART_SASS_COMPAT = "1.101.0";
 export const info = `dart-sass\t${DART_SASS_COMPAT}\t(sasso ${VERSION})\t[Rust]`;
 
 /** dart-sass `Logger` namespace. `Logger.silent` discards all warnings/debugs. */
