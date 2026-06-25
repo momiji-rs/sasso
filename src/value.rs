@@ -1637,6 +1637,38 @@ impl Color {
         int(self.r) && int(self.g) && int(self.b)
     }
 
+    /// The compressed rgb-FAMILY serialization of an in-gamut legacy color: the
+    /// shortest of the hex, named-color, and `rgb()`/`rgba()` forms — but never
+    /// the hsl form. Used as one candidate when picking the globally-shortest
+    /// compressed representation (the hsl candidate is produced separately so a
+    /// stored hsl triple keeps its authored hue, e.g. `hsl(30, 0%, 50%)` must
+    /// not collapse its powerless hue to 0 just because the rgb round-trip does).
+    fn compressed_rgb_family(&self) -> String {
+        let opaque = (self.a - 1.0).abs() < f64::EPSILON;
+        if opaque && self.channels_are_int() {
+            let r = self.r.round().clamp(0.0, 255.0) as u8;
+            let g = self.g.round().clamp(0.0, 255.0) as u8;
+            let b = self.b.round().clamp(0.0, 255.0) as u8;
+            let short = shorten_hex(&format!("#{r:02x}{g:02x}{b:02x}"));
+            if let Some(name) = compressed_color_name(r, g, b) {
+                if name.len() <= short.len() {
+                    return name.to_string();
+                }
+            }
+            return short;
+        }
+        let (r, g, b) = (
+            fmt_num(self.r, true),
+            fmt_num(self.g, true),
+            fmt_num(self.b, true),
+        );
+        if opaque {
+            format!("rgb({r},{g},{b})")
+        } else {
+            format!("rgba({r},{g},{b},{})", fmt_num(self.a, true))
+        }
+    }
+
     pub(crate) fn to_css(&self, compressed: bool) -> String {
         if let Some(m) = &self.modern {
             return m.to_css(compressed);
@@ -1673,7 +1705,7 @@ impl Color {
             fmt_num(self.g, compressed),
             fmt_num(self.b, compressed),
         );
-        if opaque {
+        let rgb_css = if opaque {
             if compressed {
                 format!("rgb({r},{g},{b})")
             } else {
@@ -1686,7 +1718,33 @@ impl Color {
             } else {
                 format!("rgba({r}, {g}, {b}, {a})")
             }
+        };
+        // dart-sass compressed output emits whichever legacy form is SHORTER:
+        // the rgb()/rgba() form or the equivalent hsl()/hsla() form. A computed
+        // color such as `darken(#336699, 10%)` -> `rgb(38.25,76.5,114.75)` is
+        // therefore written as the shorter `hsl(210,50%,30%)`. Only an in-gamut
+        // color has an exact legacy hsl equivalent; an out-of-gamut channel (or
+        // any expanded output) keeps the rgb form. The hsl candidate is derived
+        // FROM the rgb channels, so float noise can only lengthen it (never
+        // shorten the rgb past it), keeping the choice safe.
+        if compressed {
+            let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
+            if in_gamut(self.r) && in_gamut(self.g) && in_gamut(self.b) {
+                let hsl = crate::builtins::srgb_to_hsl([self.r / 255.0, self.g / 255.0, self.b / 255.0]);
+                let hh = fmt_num(hsl[0], true);
+                let ss = fmt_num(hsl[1], true);
+                let ll = fmt_num(hsl[2], true);
+                let hsl_css = if opaque {
+                    format!("hsl({hh},{ss}%,{ll}%)")
+                } else {
+                    format!("hsla({hh},{ss}%,{ll}%,{})", fmt_num(self.a, true))
+                };
+                if hsl_css.len() < rgb_css.len() {
+                    return hsl_css;
+                }
+            }
         }
+        rgb_css
     }
 }
 
@@ -2200,7 +2258,24 @@ impl ModernColor {
             }
             ColorSpace::Hsl => {
                 let (h, s, l) = self.legacy_hsl_triple();
-                self.hsl_comma_css(h, s, l, a, opaque, compressed)
+                let hsl_css = self.hsl_comma_css(h, s, l, a, opaque, compressed);
+                // Compressed output uses the shortest equivalent form. Compare
+                // the hsl form (built from the stored triple, so it carries no
+                // round-trip noise) against the rgb/hex form of the same color;
+                // e.g. `hsl(210, 50%, 40%)` == `#336699` collapses to `#369`.
+                if compressed {
+                    let rgb = Color::from_hsl(h, s / 100.0, l / 100.0, a);
+                    let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
+                    if in_gamut(rgb.r) && in_gamut(rgb.g) && in_gamut(rgb.b) {
+                        // The rgb/hex form wins ties (dart-sass keeps the hsl
+                        // form only when it is strictly shorter).
+                        let other = rgb.compressed_rgb_family();
+                        if other.len() <= hsl_css.len() {
+                            return other;
+                        }
+                    }
+                }
+                hsl_css
             }
             ColorSpace::Hwb => {
                 // hwb serializes through its sRGB representation: an
@@ -2854,6 +2929,36 @@ mod tests {
     fn computed_fractional_channels_serialize_as_rgb() {
         let c = Color::rgb(153.0, 178.5, 204.0, 1.0);
         assert_eq!(c.to_css(false), "rgb(153, 178.5, 204)");
+    }
+
+    #[test]
+    fn compressed_picks_shortest_of_rgb_and_hsl() {
+        // dart-sass 1.101.0 compressed output emits whichever legacy form is
+        // shorter, the rgb()/rgba() form or the equivalent hsl()/hsla() form.
+
+        // A `darken(#336699, 10%)` result: fractional rgb whose hsl form is
+        // shorter -> hsl. Expanded output is unchanged (always the rgb form).
+        let darkened = Color::from_hsl(210.0, 0.5, 0.3, 1.0); // rgb(38.25, 76.5, 114.75)
+        assert_eq!(darkened.to_css(true), "hsl(210,50%,30%)");
+        assert_eq!(darkened.to_css(false), "rgb(38.25, 76.5, 114.75)");
+
+        // A `saturate(#888, 20%)` result: the hsl form is longer -> stays rgb.
+        let saturated = Color::rgb(159.8, 112.2, 112.2, 1.0);
+        assert_eq!(saturated.to_css(true), "rgb(159.8,112.2,112.2)");
+
+        // Non-opaque: rgba vs hsla, hsla shorter here -> hsla (alpha keeps `.5`).
+        let translucent = Color::from_hsl(210.0, 0.5, 0.3, 0.5);
+        assert_eq!(translucent.to_css(true), "hsla(210,50%,30%,.5)");
+
+        // A computed gray: the fractional rgb triple is far longer than hsl.
+        let gray = Color::rgb(127.5, 127.5, 127.5, 1.0);
+        assert_eq!(gray.to_css(true), "hsl(0,0%,50%)");
+
+        // An integer in-gamut color still collapses to hex/name (always
+        // shorter than hsl); the new hsl candidate must not regress this.
+        let integer = Color::from_hsl(210.0, 0.5, 0.4, 1.0); // == #336699
+        assert_eq!(integer.to_css(true), "#369");
+        assert_eq!(Color::rgb(0.0, 0.0, 0.0, 0.5).to_css(true), "rgba(0,0,0,.5)");
     }
 
     #[test]
