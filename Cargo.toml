@@ -82,3 +82,13 @@ install-path = "CARGO_HOME"
 # `v[0-9]+...` so the decoupled `npm-v*` line (release-wasm.yml) does NOT fire
 # here. Tell `dist plan` not to fail its generated-file freshness check on it.
 allow-dirty = ["ci"]
+
+[dev-dependencies]
+divan = { version = "5.0.0", package = "codspeed-divan-compat" }
+
+# CodSpeed performance benchmarks for the SCSS -> CSS pipeline. The `divan`
+# dependency above is the CodSpeed compatibility layer, which keeps the upstream
+# divan API and adds CPU-simulation instrumentation under cargo-codspeed.
+[[bench]]
+name = "compile"
+harness = false

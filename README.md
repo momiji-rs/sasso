@@ -3,6 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/sasso.svg)](https://crates.io/crates/sasso)
 [![docs.rs](https://img.shields.io/docsrs/sasso)](https://docs.rs/sasso)
 [![CI](https://github.com/momiji-rs/sasso/actions/workflows/ci.yml/badge.svg)](https://github.com/momiji-rs/sasso/actions/workflows/ci.yml)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/momiji-rs/sasso?utm_source=badge)
 [![sass-spec](https://img.shields.io/badge/sass--spec-100%25_of_attempted-brightgreen)](#conformance)
 [![dart-sass](https://img.shields.io/badge/dart--sass-1.101_parity-blue)](#conformance)
 [![runtime deps](https://img.shields.io/badge/runtime_deps-0-brightgreen)](Cargo.toml)
