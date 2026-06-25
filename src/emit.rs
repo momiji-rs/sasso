@@ -34,10 +34,22 @@ fn emit_inner(
     collector: &mut Option<SmCollector>,
     charset: bool,
 ) -> (String, usize) {
-    let body = match style {
+    let mut body = match style {
         OutputStyle::Expanded => emit_expanded(nodes, collector),
         OutputStyle::Compressed => emit_compressed(nodes, collector),
     };
+    // The library API (`compile`/`compile_with_source_map`, and thus the wasm
+    // `compileString().css` and the Ruby gem) returns the serialized stylesheet
+    // with NO trailing newline — byte-for-byte what dart-sass's library API
+    // returns. The expanded emitter terminates each statement with "\n", which
+    // leaves exactly one trailing newline; drop it. (Compressed never emits a
+    // trailing newline, so this is a no-op there.) The CLI front-ends
+    // (src/main.rs, wasm cli.mjs) re-append the single newline dart-sass's CLI
+    // adds. Stripping after emit keeps every recorded source-map offset valid:
+    // nothing maps to the final newline.
+    if body.ends_with('\n') {
+        body.pop();
+    }
     // dart-sass declares UTF-8 when the output contains any non-ASCII code
     // point: expanded output gets a leading `@charset "UTF-8";`, compressed
     // output gets a UTF-8 byte-order mark instead. The prefix shifts every

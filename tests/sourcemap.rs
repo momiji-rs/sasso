@@ -137,7 +137,9 @@ fn check_declaration_invariants(sources: &[(&str, &str)], output_css: &str, mapp
 // --- The dart-sass fixture: ground truth that validates the machinery above. ---
 // Produced by: dart-sass 1.101.0 `sass --source-map sm_in.scss sm_out.css`.
 const DART_INPUT: &str = ".a {\n  color: red;\n  .b { width: 10px; }\n}\n";
-const DART_OUTPUT_CSS: &str = ".a {\n  color: red;\n}\n.a .b {\n  width: 10px;\n}\n";
+// The library API (`compile_with_source_map().css`) returns no trailing
+// newline — matching dart-sass's library API.
+const DART_OUTPUT_CSS: &str = ".a {\n  color: red;\n}\n.a .b {\n  width: 10px;\n}";
 const DART_MAPPINGS: &str = "AAAA;EACE;;AACA;EAAK";
 
 #[test]

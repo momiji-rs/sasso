@@ -330,6 +330,39 @@ fn stdout_path_unchanged_with_no_output() {
 }
 
 // =====================================================================
+// (g) the CLI appends dart-sass's single trailing newline in BOTH styles —
+//     to stdout and to a `-o` file. The library API omits it (pinned by
+//     `library_api_omits_trailing_newline` in tests/integration.rs); these
+//     guard that the CLI front-end re-adds exactly one, matching dart-sass.
+// =====================================================================
+
+#[test]
+fn cli_appends_single_trailing_newline_both_styles() {
+    let dir = scratch("nl");
+    write(&dir, "in.scss", ".a {\n  color: red;\n}\n");
+
+    // Expanded + compressed, to stdout.
+    let (ok, exp, err) = run(&dir, &["in.scss"]);
+    assert!(ok, "expanded compile failed: {err}");
+    assert_eq!(
+        exp, ".a {\n  color: red;\n}\n",
+        "expanded stdout ends with one \\n"
+    );
+
+    let (ok, comp, err) = run(&dir, &["--style=compressed", "in.scss"]);
+    assert!(ok, "compressed compile failed: {err}");
+    assert_eq!(comp, ".a{color:red}\n", "compressed stdout ends with one \\n");
+
+    // Compressed to a `-o` file (no source map): same single trailing newline.
+    let (ok, _o, err) = run(&dir, &["--style=compressed", "in.scss", "-o", "out.css"]);
+    assert!(ok, "compressed -o failed: {err}");
+    let file = std::fs::read_to_string(dir.join("out.css")).expect("out.css");
+    assert_eq!(file, ".a{color:red}\n", "compressed file ends with one \\n");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// =====================================================================
 // Source map url forms: relative (output in a subdir) + absolute.
 // =====================================================================
 

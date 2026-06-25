@@ -50,7 +50,14 @@ fn dart_sass_styled(scss: &str, style: Option<&str>) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    String::from_utf8(out.stdout).ok()
+    Some(strip_cli_newline(String::from_utf8(out.stdout).ok()?))
+}
+
+/// Drop the single trailing newline the dart-sass CLI appends; its library API
+/// (and ours) omit it, so parity compares the serialized stylesheet, not the
+/// CLI's line terminator. (Our CLI re-adds it too — see the cli tests.)
+fn strip_cli_newline(s: String) -> String {
+    s.strip_suffix('\n').map(str::to_owned).unwrap_or(s)
 }
 
 fn assert_parity(scss: &str) {
@@ -97,14 +104,9 @@ fn assert_parity_compressed(scss: &str) {
     let ours =
         compile(scss, &Options::default().with_style(OutputStyle::Compressed)).expect("our compile failed");
     match dart_sass_compressed(scss) {
-        // The dart-sass CLI appends a trailing newline that neither its own
-        // embedded API nor our compiler emits in compressed mode; compare the
-        // CSS bytes without it.
-        Some(theirs) => assert_eq!(
-            ours.trim_end(),
-            theirs.trim_end(),
-            "\n--- scss (compressed) ---\n{scss}\n"
-        ),
+        // `dart_sass_styled` already strips the CLI's trailing newline, and our
+        // compressed output never has one, so compare the bytes directly.
+        Some(theirs) => assert_eq!(ours, theirs, "\n--- scss (compressed) ---\n{scss}\n"),
         None => eprintln!("skipping compressed parity case: dart-sass unavailable"),
     }
 }
@@ -452,13 +454,33 @@ fn media_rejects_bare_declarations_at_root() {
 
 /// Compile `scss` and return our CSS (panicking on error), for direct
 /// expected-output assertions that do not need a live dart-sass.
+///
+/// `compile` returns the stylesheet WITHOUT a trailing newline (the library
+/// API). The goldens here were captured from the dart-sass CLI, which appends
+/// one to NON-empty output (empty output stays empty), so mirror that —
+/// matching `tests/integration.rs::css`. The no-trailing-newline contract is
+/// pinned by `tests/integration.rs::library_api_omits_trailing_newline`.
 fn ours(scss: &str) -> String {
-    compile(scss, &Options::default()).expect("our compile failed")
+    cli_form(compile(scss, &Options::default()).expect("our compile failed"))
 }
 
 /// Compile indented-syntax `sass` and return our CSS (panicking on error).
+/// Re-attaches the CLI's trailing newline — see [`ours`].
 fn ours_sass(sass: &str) -> String {
-    compile(sass, &Options::default().with_syntax(sasso::Syntax::Sass)).expect("our indented compile failed")
+    cli_form(
+        compile(sass, &Options::default().with_syntax(sasso::Syntax::Sass))
+            .expect("our indented compile failed"),
+    )
+}
+
+/// Mirror the dart-sass CLI's output framing: a single trailing newline on
+/// non-empty CSS, nothing on empty CSS.
+fn cli_form(css: String) -> String {
+    if css.is_empty() {
+        css
+    } else {
+        css + "\n"
+    }
 }
 
 /// Compile `scss` and return the error message (panicking on success).
@@ -911,12 +933,12 @@ fn import_inlines_sass_partials() {
 
     // A bare quoted string with no modifiers is inlined at the top level.
     let css = compile("@import \"p\";\n", &opts).expect("import compile failed");
-    assert_eq!(css, "x {\n  y: z;\n}\n");
+    assert_eq!(css, "x {\n  y: z;\n}");
 
     // A nested `@import` runs the imported statements under the current parent
     // selector, so the imported rules nest beneath it.
     let css = compile("a {\n  @import \"nested\";\n}\n", &opts).expect("nested import failed");
-    assert_eq!(css, "a b {\n  color: red;\n}\na b nested {\n  x: y;\n}\n");
+    assert_eq!(css, "a b {\n  color: red;\n}\na b nested {\n  x: y;\n}");
 }
 
 #[test]
@@ -931,7 +953,7 @@ fn import_reimports_and_detects_cycles() {
     // Re-importing an already-finished file emits its content again (`@import`
     // re-evaluates), rather than being silently deduplicated.
     let css = compile("@import \"p\", \"p\";\n", &opts).expect("import compile failed");
-    assert_eq!(css, "x {\n  y: z;\n}\n\nx {\n  y: z;\n}\n");
+    assert_eq!(css, "x {\n  y: z;\n}\n\nx {\n  y: z;\n}");
 
     // A load cycle is an error rather than a silent skip or an infinite loop.
     assert!(compile("@import \"alpha\";\n", &opts).is_err());
@@ -3044,7 +3066,7 @@ fn fs_importer_partial_extension_and_import_only_resolution() {
     write("_other.scss", "a {import-only: false}\n");
     assert_eq!(
         compile("@import \"other\";\n", &opts).expect("import-only resolution"),
-        "a {\n  import-only: true;\n}\n"
+        "a {\n  import-only: true;\n}"
     );
 
     // A real-world import-only file re-exports with `@forward`, which this
@@ -3054,7 +3076,7 @@ fn fs_importer_partial_extension_and_import_only_resolution() {
     write("_other.scss", "b {c: fallback}\n");
     assert_eq!(
         compile("@import \"other\";\n", &opts).expect("fallback past @forward import-only"),
-        "b {\n  c: fallback;\n}\n"
+        "b {\n  c: fallback;\n}"
     );
 
     // Two candidates at the same precedence tier (non-partial + partial) are
@@ -3507,7 +3529,7 @@ fn assert_module_parity(files: &[(&str, &str)]) {
         eprintln!("skipping module parity case: dart-sass errored");
         return;
     }
-    let theirs = String::from_utf8(out.stdout).expect("utf8");
+    let theirs = strip_cli_newline(String::from_utf8(out.stdout).expect("utf8"));
     assert_eq!(ours, theirs, "\n--- input ---\n{input}\n");
 }
 
@@ -3624,7 +3646,7 @@ fn dart_sass_indented(sass: &str) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    String::from_utf8(out.stdout).ok()
+    Some(strip_cli_newline(String::from_utf8(out.stdout).ok()?))
 }
 
 /// Byte-verify our indented-syntax output against dart-sass.
@@ -3730,7 +3752,7 @@ fn parity_sass_imports_scss_partial() {
         eprintln!("skipping cross-syntax parity case: dart-sass errored");
         return;
     }
-    let theirs = String::from_utf8(out.stdout).expect("utf8");
+    let theirs = strip_cli_newline(String::from_utf8(out.stdout).expect("utf8"));
     assert_eq!(ours, theirs, "\n--- input.sass ---\n{input}\n");
 }
 
@@ -5539,7 +5561,7 @@ fn plain_css_at_rules() {
     let opts = Options::default().with_importer(&imp);
     let go = |css: &str| {
         std::fs::write(dir.join("plain.css"), css).expect("write plain.css");
-        compile("@use \"plain\";\n", &opts).expect("plain css compile")
+        cli_form(compile("@use \"plain\";\n", &opts).expect("plain css compile"))
     };
     // Canonical media-logic serialization (mixed case normalized).
     assert_eq!(
@@ -5577,7 +5599,7 @@ fn plain_css_value_semantics() {
     let opts = Options::default().with_importer(&imp);
     let go = |css: &str| {
         std::fs::write(dir.join("plain.css"), css).expect("write plain.css");
-        compile("@use \"plain\";\n", &opts).expect("plain css compile")
+        cli_form(compile("@use \"plain\";\n", &opts).expect("plain css compile"))
     };
     assert_eq!(go("a {b: alpha(0.1)}\n"), "a {\n  b: alpha(0.1);\n}\n");
     assert_eq!(go("a {b: rgb(255 0 0)}\n"), "a {\n  b: rgb(255 0 0);\n}\n");
@@ -5612,11 +5634,11 @@ fn import_plain_css_file() {
     std::fs::write(dir.join("plain.css"), "a { b {c: d}}\n").unwrap();
     assert_eq!(
         compile("@import \"plain\";\n", &opts).expect("import css"),
-        "a {\n  b {\n    c: d;\n  }\n}\n"
+        "a {\n  b {\n    c: d;\n  }\n}"
     );
     assert_eq!(
         compile("x {@import \"plain\";}\n", &opts).expect("nested import css"),
-        "x a {\n  b {\n    c: d;\n  }\n}\n"
+        "x a {\n  b {\n    c: d;\n  }\n}"
     );
 
     // css beats index.
@@ -5624,14 +5646,14 @@ fn import_plain_css_file() {
     std::fs::write(dir.join("both").join("index.scss"), "idx {x: y}\n").unwrap();
     assert_eq!(
         compile("@import \"both\";\n", &opts).expect("css before index"),
-        "css {\n  x: y;\n}\n"
+        "css {\n  x: y;\n}"
     );
 
     // An adjacent .scss still wins over .css.
     std::fs::write(dir.join("plain.scss"), "scss {x: y}\n").unwrap();
     assert_eq!(
         compile("@import \"plain\";\n", &opts).expect("scss wins"),
-        "scss {\n  x: y;\n}\n"
+        "scss {\n  x: y;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5648,13 +5670,13 @@ fn import_implicit_configuration() {
     std::fs::write(dir.join("_upstream.scss"), "$a: original !default;\nb {c: $a}\n").unwrap();
     assert_eq!(
         compile("$a: configured;\n@import \"midstream\";\n", &opts).expect("import cfg"),
-        "b {\n  c: configured;\n}\n"
+        "b {\n  c: configured;\n}"
     );
     // Without a matching variable the default applies; the unconsumed
     // implicit entry is not an error.
     assert_eq!(
         compile("$other: x;\n@import \"midstream\";\n", &opts).expect("unrelated"),
-        "b {\n  c: original;\n}\n"
+        "b {\n  c: original;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5800,7 +5822,7 @@ fn import_forward_module_semantics() {
             &opts
         )
         .expect("import twice"),
-        "b {\n  c: configured;\n}\n\nb {\n  c: configured;\n}\n"
+        "b {\n  c: configured;\n}\n\nb {\n  c: configured;\n}"
     );
     // An intervening assignment to a forwarded global survives a re-import.
     assert_eq!(
@@ -5809,13 +5831,13 @@ fn import_forward_module_semantics() {
             &opts
         )
         .expect("still changes"),
-        "b {\n  c: original;\n}\n\nb {\n  c: original;\n}\n\nd {\n  e: changed;\n}\n"
+        "b {\n  c: original;\n}\n\nb {\n  c: original;\n}\n\nd {\n  e: changed;\n}"
     );
     // A rule-scoped import nests the module CSS under the rule.
     std::fs::write(dir.join("_mid.scss"), "@forward \"other\";\n").unwrap();
     assert_eq!(
         compile("a {\n  $a: configured;\n  @import \"mid\";\n}\n", &opts).expect("nested"),
-        "a b {\n  c: configured;\n}\n"
+        "a b {\n  c: configured;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5836,7 +5858,7 @@ fn load_css_reemits_cached_module() {
             &opts
         )
         .expect("load twice"),
-        "b {\n  c: d;\n}\n\nx b {\n  c: d;\n}\n"
+        "b {\n  c: d;\n}\n\nx b {\n  c: d;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5861,7 +5883,7 @@ fn nested_global_decl_registers_module_slot() {
             &opts
         )
         .expect("nested global slot"),
-        "a {\n  b: null;\n}\n"
+        "a {\n  b: null;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5917,13 +5939,13 @@ fn module_scoped_extend() {
     .unwrap();
     assert_eq!(
         compile("@use \"left\";\n@use \"right\";\n", &opts).expect("sibling"),
-        "left-e {\n  in: left;\n}\n\nright-e {\n  in: right;\n}\n"
+        "left-e {\n  in: left;\n}\n\nright-e {\n  in: right;\n}"
     );
     // Upstream extends work; downstream don't.
     std::fs::write(dir.join("_up.scss"), "up-style {a: b}\n").unwrap();
     assert_eq!(
         compile("@use \"up\";\nme {@extend up-style}\n", &opts).expect("upstream"),
-        "up-style, me {\n  a: b;\n}\n"
+        "up-style, me {\n  a: b;\n}"
     );
     // Diamond: both sides extend shared, but don't chain through each other.
     std::fs::write(dir.join("_shared.scss"), "in-shared {x: y}\n").unwrap();
@@ -5939,13 +5961,13 @@ fn module_scoped_extend() {
     .unwrap();
     assert_eq!(
         compile("@use \"dl\";\n@use \"dr\";\n", &opts).expect("diamond"),
-        "in-shared, right-e2, left-e2 {\n  x: y;\n}\n"
+        "in-shared, right-e2, left-e2 {\n  x: y;\n}"
     );
     // A private placeholder can't be extended from another module.
     std::fs::write(dir.join("_po.scss"), "%-priv {x: y}\nin-other {@extend %-priv}\n").unwrap();
     assert_eq!(
         compile("@use \"po\";\nme {@extend %-priv !optional}\n", &opts).expect("private"),
-        "in-other {\n  x: y;\n}\n"
+        "in-other {\n  x: y;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5966,7 +5988,7 @@ fn midstream_pseudo_extender_replaced_across_modules() {
             &opts
         )
         .expect("midstream"),
-        "in-upstream, :is(in-midstream, in-input) {\n  a: b;\n}\n\nin-input {\n  y: z;\n}\n"
+        "in-upstream, :is(in-midstream, in-input) {\n  a: b;\n}\n\nin-input {\n  y: z;\n}"
     );
     // Same-file: both the added extender and its rewrite survive.
     assert_eq!(
@@ -6253,7 +6275,7 @@ fn forwarded_members_bind_their_defining_module() {
             &opts
         )
         .unwrap(),
-        "b {\n  c: new value;\n}\n"
+        "b {\n  c: new value;\n}"
     );
     // A module's own same-named variable shadows the forwarded one for
     // READS, but a namespaced assignment still writes the forwarded module.
@@ -6264,7 +6286,7 @@ fn forwarded_members_bind_their_defining_module() {
     .unwrap();
     assert_eq!(
         compile("@use \"shadow\";\nshadow.$a: new value;\nb {c: shadow.$a; s: shadow.get-shadow-a(); u: shadow.get-a()}\n", &opts).unwrap(),
-        "b {\n  c: shadow value;\n  s: shadow value;\n  u: new value;\n}\n"
+        "b {\n  c: shadow value;\n  s: shadow value;\n  u: new value;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -6294,7 +6316,7 @@ fn nested_import_forward_members_and_override() {
             &opts
         )
         .unwrap(),
-        "a {\n  c: d;\n  e: new;\n}\n"
+        "a {\n  c: d;\n  e: new;\n}"
     );
     // ...but they are NOT visible outside the rule.
     assert!(compile("a {@import \"midstream\"}\nb {@include b}\n", &opts).is_err());
@@ -6306,7 +6328,7 @@ fn nested_import_forward_members_and_override() {
             &opts
         )
         .unwrap(),
-        "f {\n  a: 1;\n}\n\ns {\n  a: 2;\n}\n"
+        "f {\n  a: 1;\n}\n\ns {\n  a: 2;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -6332,7 +6354,7 @@ fn load_css_copies_belong_to_their_caller() {
     // caller's extensions apply to it.
     assert_eq!(
         compile("@use \"left\";\n@use \"right\";\n", &opts).unwrap(),
-        "a, left {\n  b: c;\n}\n\na, right {\n  b: c;\n}\n"
+        "a, left {\n  b: c;\n}\n\na, right {\n  b: c;\n}"
     );
     // A built-in module loads as a no-op (no CSS, no error).
     assert_eq!(
@@ -6370,7 +6392,7 @@ fn load_css_subtree_clone_and_blank_gating() {
             &opts
         )
         .unwrap(),
-        "@c;\n.target {\n  a: b;\n}\n\n@c;\n.target, .extender {\n  a: b;\n}\n"
+        "@c;\n.target {\n  a: b;\n}\n\n@c;\n.target, .extender {\n  a: b;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
     // A blank line only follows a completed style rule (dart isGroupEnd):
@@ -6461,14 +6483,14 @@ fn import_subtree_clones_and_extension_store_order() {
     // come first; same-store extenders show in reverse source order.
     assert_eq!(
         compile("@use \"used\";\n@import \"imported\";\n", &opts).unwrap(),
-        "shared, in-used, in-imported {\n  x: y;\n}\n\nshared, in-imported {\n  x: y;\n}\n"
+        "shared, in-used, in-imported {\n  x: y;\n}\n\nshared, in-imported {\n  x: y;\n}"
     );
     // A module first loaded inside an import clone still emits its main-tree
     // copy at the next plain @use.
     w("_importer.scss", "@import \"imported\";\n");
     assert_eq!(
         compile("@use \"importer\";\n@use \"used\";\n", &opts).unwrap(),
-        "shared, in-imported {\n  x: y;\n}\n\nshared, in-used {\n  x: y;\n}\n"
+        "shared, in-imported {\n  x: y;\n}\n\nshared, in-used {\n  x: y;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
     // Same-module extenders alone keep dart's reverse source order.
@@ -6504,7 +6526,7 @@ fn relative_resolution_and_distributed_config() {
     // two forwards of the SAME member don't conflict.
     assert_eq!(
         compile("@use 'module' with ($a: 'a');\n", &opts).unwrap(),
-        ".a1 {\n  content: a;\n}\n\n.a2 {\n  content: a;\n}\n"
+        ".a1 {\n  content: a;\n}\n\n.a2 {\n  content: a;\n}"
     );
     // meta.load-css resolves relative to the DEFINING file of the mixin.
     w("_upstream.scss", "a {b: in main}\n");
@@ -6519,7 +6541,7 @@ fn relative_resolution_and_distributed_config() {
             &opts
         )
         .unwrap(),
-        "a {\n  b: in subdir;\n}\n"
+        "a {\n  b: in subdir;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -6543,7 +6565,7 @@ fn entry_relative_import_resolves_against_entry_dir() {
             .with_url(entry.to_str().unwrap()),
     )
     .expect("entry-relative @use should resolve against the entry's directory");
-    assert_eq!(out, ".a {\n  color: tomato;\n}\n");
+    assert_eq!(out, ".a {\n  color: tomato;\n}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -6589,7 +6611,7 @@ fn use_url_dotdot_and_nested_global_writethrough() {
             &opts
         )
         .unwrap(),
-        "a {\n  b: value;\n}\n"
+        "a {\n  b: value;\n}"
     );
     // A nested un-namespaced `!global` assignment writes through to the one
     // `as *` module that defines the variable.
@@ -6599,7 +6621,7 @@ fn use_url_dotdot_and_nested_global_writethrough() {
             &opts
         )
         .unwrap(),
-        "a {\n  b: new value;\n}\n"
+        "a {\n  b: new value;\n}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -7665,7 +7687,7 @@ fn plain_css_parent_rules_nest_verbatim_under_importing_rule() {
     let out = compile("a {@import \"plain\"}\n", &opts).expect("compile failed");
     assert_eq!(
         out,
-        "a {\n  & {\n    b {\n      c: d;\n    }\n  }\n}\na x {\n  y: z;\n}\n"
+        "a {\n  & {\n    b {\n      c: d;\n    }\n  }\n}\na x {\n  y: z;\n}"
     );
 }
 
@@ -7684,7 +7706,7 @@ fn load_css_parent_rules_nest_verbatim_too() {
         &opts,
     )
     .expect("compile failed");
-    assert_eq!(out, "a {\n  & {\n    b {\n      c: d;\n    }\n  }\n}\n");
+    assert_eq!(out, "a {\n  & {\n    b {\n      c: d;\n    }\n  }\n}");
 }
 
 #[test]
@@ -7709,7 +7731,7 @@ fn use_inside_imported_sheet_joins_importing_rule() {
     let out = compile("outer {@import \"imported\"}\n", &opts).expect("compile failed");
     assert_eq!(
         out,
-        "outer in-used {\n  parent: (in-used,);\n}\nouter in-imported {\n  parent: (outer in-imported,);\n}\n"
+        "outer in-used {\n  parent: (in-used,);\n}\nouter in-imported {\n  parent: (outer in-imported,);\n}"
     );
 }
 
@@ -7740,7 +7762,7 @@ fn module_import_hoist_keeps_comment_runs_with_their_imports() {
     .expect("compile failed");
     assert_eq!(
         out,
-        "/* before use in input */\n/* before use in midstream */\n/* before css in upstream */\n@import \"upstream.css\";\n/* after use in midstream */\n@import \"midstream.css\";\n@import \"input.css\";\na {\n  in: upstream;\n}\n\na {\n  in: midstream;\n}\n\na {\n  in: input;\n}\n"
+        "/* before use in input */\n/* before use in midstream */\n/* before css in upstream */\n@import \"upstream.css\";\n/* after use in midstream */\n@import \"midstream.css\";\n@import \"input.css\";\na {\n  in: upstream;\n}\n\na {\n  in: midstream;\n}\n\na {\n  in: input;\n}"
     );
 }
 
