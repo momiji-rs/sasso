@@ -277,6 +277,54 @@ fn compressed_output() {
     assert_eq!(out, ".a{color:#369;width:10px}.a .b{color:#2a7ae2}");
 }
 
+/// Compressed legacy colors are emitted in the SHORTEST equivalent form
+/// (hex / name / rgb() / hsl()), matching dart-sass 1.101.0. Every expected
+/// string below was produced by dart-sass 1.101.0 (`--style=compressed`).
+/// This is the offline regression gate for the color-serialization fix; the
+/// live cross-check lives in tests/parity.rs (compressed parity battery).
+#[test]
+fn compressed_color_picks_shortest_form() {
+    let case = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
+
+    // --- rgb-space results whose hsl form is shorter -> hsl() ---------------
+    assert_eq!(case("darken(#336699,10%)"), "a{x:hsl(210,50%,30%)}");
+    assert_eq!(case("lighten(#336699,10%)"), "a{x:hsl(210,50%,50%)}");
+    assert_eq!(case("saturate(#336699,10%)"), "a{x:hsl(210,60%,40%)}");
+    assert_eq!(case("grayscale(#ff6600)"), "a{x:hsl(0,0%,50%)}");
+    assert_eq!(
+        css_compressed("@use 'sass:color';a{x:color.mix(#ff6600,#fff,30%)}"),
+        "a{x:hsl(24,100%,85%)}"
+    );
+    assert_eq!(
+        css_compressed("@use 'sass:color';a{x:color.adjust(#336699,$lightness:-10%)}"),
+        "a{x:hsl(210,50%,30%)}"
+    );
+    // Non-opaque: rgba() vs hsla() -> the shorter hsla().
+    assert_eq!(case("rgba(darken(#336699,10%),.5)"), "a{x:hsla(210,50%,30%,.5)}");
+
+    // --- results whose rgb form is shorter (or equal) -> stays rgb/hex ------
+    // hsl form has long fractional channels here.
+    assert_eq!(case("saturate(#888,20%)"), "a{x:rgb(159.8,112.2,112.2)}");
+    // A hue rotation that lands on integers collapses to hex.
+    assert_eq!(case("adjust-hue(#336699,90deg)"), "a{x:#939}");
+
+    // --- hsl-space literals also pick the shortest form --------------------
+    // Integer-rgb-equivalent hsl collapses to hex.
+    assert_eq!(case("hsl(210,50%,40%)"), "a{x:#369}");
+    // Fractional hsl whose rgb form is longer stays hsl.
+    assert_eq!(case("hsl(210,50%,30%)"), "a{x:hsl(210,50%,30%)}");
+    // A tie (both 16 bytes) resolves to rgb, matching dart-sass.
+    assert_eq!(case("hsl(30,100%,50%)"), "a{x:rgb(255,127.5,0)}");
+    // A powerless (zero-saturation) hue is PRESERVED, not canonicalized to 0.
+    assert_eq!(case("hsl(30,0%,50%)"), "a{x:hsl(30,0%,50%)}");
+
+    // --- regression guards: unchanged cases -------------------------------
+    assert_eq!(case("#336699"), "a{x:#369}");
+    assert_eq!(case("red"), "a{x:red}");
+    assert_eq!(case("rgba(0,0,0,.5)"), "a{x:rgba(0,0,0,.5)}");
+    assert_eq!(case("hsl(0,0%,50%)"), "a{x:hsl(0,0%,50%)}");
+}
+
 #[test]
 fn compressed_at_rule_prelude_spacing() {
     // dart-sass 1.101 compressed: `@media`/`@supports` drop the space before a
