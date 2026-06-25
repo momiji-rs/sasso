@@ -8,7 +8,7 @@
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-use sasso::{compile, FsImporter, Options};
+use sasso::{compile, FsImporter, Options, OutputStyle};
 
 fn enabled() -> bool {
     std::env::var("SASSO_PARITY").map(|v| v != "0").unwrap_or(false)
@@ -16,6 +16,16 @@ fn enabled() -> bool {
 
 /// Compile `scss` with dart-sass (expanded, via stdin), returning its CSS.
 fn dart_sass(scss: &str) -> Option<String> {
+    dart_sass_styled(scss, None)
+}
+
+/// Compile `scss` with dart-sass in compressed mode.
+fn dart_sass_compressed(scss: &str) -> Option<String> {
+    dart_sass_styled(scss, Some("compressed"))
+}
+
+/// Shared dart-sass runner; `style` adds `--style=<style>` when set.
+fn dart_sass_styled(scss: &str, style: Option<&str>) -> Option<String> {
     let bin = std::env::var("SASS_BIN").unwrap_or_else(|_| "npx".to_string());
     let mut cmd = if bin == "npx" {
         let mut c = Command::new("npx");
@@ -26,6 +36,9 @@ fn dart_sass(scss: &str) -> Option<String> {
         c.args(["--no-source-map", "--stdin"]);
         c
     };
+    if let Some(s) = style {
+        cmd.arg(format!("--style={s}"));
+    }
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -74,6 +87,62 @@ fn parity_variables_nesting() {
 #[test]
 fn parity_colors() {
     assert_parity("$brand: #2a7ae2;\n.x {\n  color: rgba($brand, 0.5);\n  background: darken($brand, 15%);\n  border-color: hsl(120, 50%, 40%);\n  width: percentage(0.25);\n}\n");
+}
+
+/// Compile `scss` compressed with both engines and assert byte-for-byte parity.
+fn assert_parity_compressed(scss: &str) {
+    if !enabled() {
+        return;
+    }
+    let ours =
+        compile(scss, &Options::default().with_style(OutputStyle::Compressed)).expect("our compile failed");
+    match dart_sass_compressed(scss) {
+        // The dart-sass CLI appends a trailing newline that neither its own
+        // embedded API nor our compiler emits in compressed mode; compare the
+        // CSS bytes without it.
+        Some(theirs) => assert_eq!(
+            ours.trim_end(),
+            theirs.trim_end(),
+            "\n--- scss (compressed) ---\n{scss}\n"
+        ),
+        None => eprintln!("skipping compressed parity case: dart-sass unavailable"),
+    }
+}
+
+/// Compressed legacy-color serialization must match dart-sass byte-for-byte:
+/// the SHORTEST of the hex / name / rgb() / hsl() forms. This guards the
+/// compressed path that the conformance suite (expanded-only) cannot reach.
+#[test]
+fn parity_compressed_color_shortest_form() {
+    // rgb-space results whose hsl form is shorter -> hsl()/hsla().
+    for f in ["darken", "lighten", "saturate", "desaturate"] {
+        for amt in ["5%", "10%", "15%", "20%", "33%"] {
+            assert_parity_compressed(&format!("a {{ x: {f}(#336699, {amt}); }}"));
+            assert_parity_compressed(&format!("a {{ x: {f}(#ff6600, {amt}); }}"));
+        }
+    }
+    for scss in [
+        "a { x: grayscale(#ff6600); }",
+        "a { x: complement(#336699); }",
+        "a { x: adjust-hue(#336699, 90deg); }",
+        "a { x: rgba(darken(#336699, 10%), 0.5); }",
+        "a { x: mix(#ff6600, #fff, 30%); }",
+        "@use 'sass:color'; a { x: color.adjust(#336699, $lightness: -10%); }",
+        "@use 'sass:color'; a { x: color.scale(#336699, $lightness: 20%); }",
+        // hsl-space literals: integer -> hex, fractional -> hsl, tie -> rgb,
+        // powerless hue preserved.
+        "a { x: hsl(210, 50%, 40%); }",
+        "a { x: hsl(210, 50%, 30%); }",
+        "a { x: hsl(30, 100%, 50%); }",
+        "a { x: hsl(30, 0%, 50%); }",
+        // regression guards (must stay unchanged).
+        "a { x: #336699; }",
+        "a { x: red; }",
+        "a { x: rgba(0, 0, 0, 0.5); }",
+        "a { x: hsl(0, 0%, 50%); }",
+    ] {
+        assert_parity_compressed(scss);
+    }
 }
 
 #[test]
