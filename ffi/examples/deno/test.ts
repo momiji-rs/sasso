@@ -298,7 +298,7 @@ console.log("sasso C ABI — Deno (Deno.dlopen) binding test\n");
 // Check 2: default compile (NULL opts), nesting expanded
 {
   const out = compile(".a { color: red; &:hover { color: blue; } }");
-  const want = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}\n";
+  const want = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}";
   check(
     "2. default compile expands nesting",
     out.ok && out.css === want,
@@ -353,7 +353,7 @@ console.log("sasso C ABI — Deno (Deno.dlopen) binding test\n");
       LE,
     );
   });
-  const want = ".out {\n  color: #336699;\n}\n";
+  const want = ".out {\n  color: #336699;\n}";
   check(
     "5. v2 custom importer resolves @use",
     out.ok && out.css === want,

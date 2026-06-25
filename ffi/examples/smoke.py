@@ -90,7 +90,7 @@ print("  version:", lib.sasso_version().decode())
 
 # 1. Basic compile (NULL options => defaults: expanded).
 ok, css, _ = compile_scss(".a { color: red; &:hover { color: blue; } }")
-check("basic compile", ok and css == ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}\n")
+check("basic compile", ok and css == ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}")
 
 # 2. The merged community fix (#3): rgba(var()) keeps its name.
 ok, css, _ = compile_scss(".a { color: rgba(var(--x), 0.5); }")

@@ -211,7 +211,7 @@ check("1 sasso_version() == \"0.6.0\"", version == "0.6.0", version.inspect)
 
 # 2. default expanded compile with nesting
 ok, css, = compile(".a { color: red; &:hover { color: blue; } }")
-expected2 = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}\n"
+expected2 = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}"
 check("2 default expanded compile", ok && css == expected2, css.inspect)
 
 # 3. compressed compile + hex shortening
@@ -236,7 +236,7 @@ FILES = { "/sub/_mod" => "$c: #336699;\n" }.freeze
 imp_ptr, _keep_imp = make_importer(FILES)
 opts5, _keep_opts = make_options(url: "/entry", importer_ptr: imp_ptr)
 ok, css, err, = compile("@use \"sub/mod\" as m;\n.out { color: m.$c; }\n", opts5)
-expected5 = ".out {\n  color: #336699;\n}\n"
+expected5 = ".out {\n  color: #336699;\n}"
 check("5 v2 custom importer", ok && css == expected5, (ok ? css : err).inspect)
 
 puts

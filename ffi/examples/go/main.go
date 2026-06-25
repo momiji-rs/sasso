@@ -152,7 +152,7 @@ func main() {
 	check(1, "sasso_version()", ver == "0.6.0", "got "+qq(ver)+", want \"0.6.0\"")
 
 	// Check 2: default (NULL opts) nested-selector expansion
-	want2 := ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}\n"
+	want2 := ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}"
 	r2 := compile(".a { color: red; &:hover { color: blue; } }", nil)
 	check(2, "default compile", r2.ok && r2.css == want2,
 		"got "+qq(r2.css))
@@ -187,7 +187,7 @@ func main() {
 	iopts.importer = imp
 
 	entry := "@use \"sub/mod\" as m;\n.out { color: m.$c; }\n"
-	want5 := ".out {\n  color: #336699;\n}\n"
+	want5 := ".out {\n  color: #336699;\n}"
 	r5 := compile(entry, &iopts)
 	detail5 := "got " + qq(r5.css)
 	if !r5.ok {

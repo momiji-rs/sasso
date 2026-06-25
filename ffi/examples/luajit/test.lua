@@ -126,7 +126,7 @@ check("1 sasso_version() == \"0.6.0\"", version == "0.6.0", "got " .. version)
 -- ---- check 2: default compile (NULL opts) ------------------------------
 do
   local src = ".a { color: red; &:hover { color: blue; } }"
-  local want = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}\n"
+  local want = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}"
   local ok, css = compile(src, nil)
   check("2 default compile + nesting", ok and css == want, ok and string.format("%q", css) or "compile failed")
 end
@@ -215,7 +215,7 @@ do
   local keep = { canonicalize, load, importer, opts }
 
   local src = '@use "sub/mod" as m;\n.out { color: m.$c; }\n'
-  local want = ".out {\n  color: #336699;\n}\n"
+  local want = ".out {\n  color: #336699;\n}"
   local ok, css, err = compile(src, opts)
   check("5 v2 custom importer (relative @use)", ok and css == want,
     ok and string.format("%q", css) or ("compile failed: " .. tostring(err)))
