@@ -16,6 +16,11 @@ on:
       # Crate releases ride `v*` tags. The decoupled npm line uses `npm-v*`
       # (see release-wasm.yml) and deliberately does NOT match here.
       - 'v[0-9]+.[0-9]+.[0-9]+*'
+  # Manual fallback: re-publish from a branch when a tagged run failed AFTER the
+  # binary release was already cut (e.g. a dirty-lockfile `cargo publish` error),
+  # so we don't have to re-tag and re-run cargo-dist. Publishes whatever version
+  # the checked-out ref's Cargo.toml declares.
+  workflow_dispatch: {}
 
 permissions: {}
 
