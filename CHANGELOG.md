@@ -11,6 +11,22 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-25
+
+### Fixed
+
+- **Compressed output now emits the shortest equivalent legacy-color form**,
+  matching dart-sass 1.101.0 byte-for-byte. A computed color such as
+  `darken(#336699, 10%)` is written as `hsl(210,50%,30%)` instead of the longer
+  `rgb(38.25,76.5,114.75)`, and an integer-rgb-equivalent hsl literal
+  (`hsl(210, 50%, 40%)`) collapses to `#369`. The serializer now compares the
+  hex/name, `rgb()`/`rgba()`, and `hsl()`/`hsla()` candidates and keeps the
+  shortest — the rgb form winning ties — while a powerless (zero-saturation)
+  hue is preserved. Expanded output is unchanged. This compressed path had no
+  cross-check before (the conformance ratchet and the parity suite were both
+  expanded-only), so a compressed dart-sass parity battery now runs in
+  `tests/parity.rs`.
+
 ## [0.6.1] - 2026-06-16
 
 ### Fixed
