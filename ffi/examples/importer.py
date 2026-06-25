@@ -202,7 +202,7 @@ FILES = {
 }
 imp, keep = make_importer(FILES)
 ok, css, err = compile_with_importer('@use "sub/mod" as m;\n.out { color: m.$c; }\n', imp)
-check("relative @use resolves via containing_url", ok and css == ".out {\n  color: #336699;\n}\n", str((ok, css, err)))
+check("relative @use resolves via containing_url", ok and css == ".out {\n  color: #336699;\n}", str((ok, css, err)))
 
 # Not-found: the importer returns NOT_FOUND -> a clean compile error.
 imp2, keep2 = make_importer(FILES)

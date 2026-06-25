@@ -62,7 +62,7 @@ check("1 version", version == "0.6.0", detail: "got \(q(version))")
 
 do {
     let src = ".a { color: red; &:hover { color: blue; } }"
-    let expected = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}\n"
+    let expected = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}"
     let bytes = Array(src.utf8)
     let result = bytes.withUnsafeBufferPointer { buf in
         buf.baseAddress!.withMemoryRebound(to: CChar.self, capacity: buf.count) { p in
@@ -208,7 +208,7 @@ let loadFn: @convention(c) (
 
 do {
     let entry = "@use \"sub/mod\" as m;\n.out { color: m.$c; }\n"
-    let expected = ".out {\n  color: #336699;\n}\n"
+    let expected = ".out {\n  color: #336699;\n}"
 
     var importer = SassoImporter()
     importer.user_data = nil

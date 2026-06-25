@@ -308,7 +308,7 @@ namespace SassoExample
             // ---- Check 2: default compile (NULL opts) ----
             {
                 string src = ".a { color: red; &:hover { color: blue; } }";
-                string expected = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}\n";
+                string expected = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}";
                 var (r, raw) = Compile(src, IntPtr.Zero);
                 bool ok = r.ok != 0 && CssOf(r) == expected;
                 if (!ok) Console.WriteLine($"  got css (len={(ulong)r.css_len}): <<<{CssOf(r)}>>>");
@@ -381,7 +381,7 @@ namespace SassoExample
                     Marshal.StructureToPtr(opts, optsPtr, false);
 
                     string src = "@use \"sub/mod\" as m;\n.out { color: m.$c; }\n";
-                    string expected = ".out {\n  color: #336699;\n}\n";
+                    string expected = ".out {\n  color: #336699;\n}";
                     var (r, raw) = Compile(src, optsPtr);
                     bool ok = r.ok != 0 && CssOf(r) == expected;
                     if (r.ok == 0 && r.error != IntPtr.Zero)

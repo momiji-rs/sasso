@@ -292,7 +292,7 @@ check(`1. sasso_version() == "0.6.0"`, version === "0.6.0", `got ${JSON.stringif
 // 2. default compile (NULL opts) with nesting
 {
   const r = compile(".a { color: red; &:hover { color: blue; } }");
-  const expected = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}\n";
+  const expected = ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}";
   check(
     "2. default compile (nesting) matches",
     r.ok && r.css === expected,
@@ -331,7 +331,7 @@ check(`1. sasso_version() == "0.6.0"`, version === "0.6.0", `got ${JSON.stringif
   });
   check(
     "5. v2 custom importer resolves @use",
-    r.ok && r.css === ".out {\n  color: #336699;\n}\n",
+    r.ok && r.css === ".out {\n  color: #336699;\n}",
     JSON.stringify(r),
   );
   // keepAlive referenced past the compile call.

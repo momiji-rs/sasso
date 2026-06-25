@@ -140,7 +140,7 @@ int main(void) {
   {
     const char *src = ".a { color: red; &:hover { color: blue; } }";
     const char *expected =
-        ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}\n";
+        ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}";
     SassoResult *r = sasso_compile(src, strlen(src), NULL);
     int ok = css_equals(r, expected);
     if (!ok && r) {
@@ -198,7 +198,7 @@ int main(void) {
     opts.importer = &importer;
 
     const char *src = "@use \"sub/mod\" as m;\n.out { color: m.$c; }\n";
-    const char *expected = ".out {\n  color: #336699;\n}\n";
+    const char *expected = ".out {\n  color: #336699;\n}";
     SassoResult *r = sasso_compile(src, strlen(src), &opts);
     int ok = css_equals(r, expected);
     if (r && !r->ok && r->error) {
