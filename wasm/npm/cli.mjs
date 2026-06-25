@@ -135,6 +135,11 @@ function emit(result, outPath, wantMap, embedMap) {
     const map = { ...result.sourceMap, file: basename(outPath) };
     css = css.replace(/\n?$/, "") + `\n/*# sourceMappingURL=${basename(mapPath)} */\n`;
     writeFileSync(mapPath, JSON.stringify(map));
+  } else if (css) {
+    // No source map: dart-sass's CLI terminates non-empty output with a single
+    // newline that the library API (`compileString().css`) omits; empty output
+    // stays empty.
+    css = css.replace(/\n?$/, "") + "\n";
   }
   if (outPath) writeFileSync(outPath, css);
   else process.stdout.write(css);
