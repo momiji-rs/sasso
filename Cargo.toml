@@ -78,3 +78,7 @@ pr-run-mode = "plan"
 install-updater = false
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
+# release.yml is intentionally hand-edited: the tag trigger is narrowed to
+# `v[0-9]+...` so the decoupled `npm-v*` line (release-wasm.yml) does NOT fire
+# here. Tell `dist plan` not to fail its generated-file freshness check on it.
+allow-dirty = ["ci"]
