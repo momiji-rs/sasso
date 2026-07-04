@@ -80,6 +80,32 @@ compileString(`@use "virtual:colors" as c; .a { color: c.$brand; }`, {
 > (`compileString`, `compile`) run a faster non-asyncify'd module and therefore
 > require synchronous importers; an importer (or `findFileUrl`) that returns a
 > `Promise` throws there. Use the async API when your importers are async.
+>
+> Importers that happen to resolve **synchronously** on the async API (plain
+> return values, `loadPaths`, cache hits inside bundler importers) are
+> delivered without any suspension since 0.8.0 — you don't pay for asyncify
+> unless a callback actually returns a `Promise`.
+
+## Concurrent compiles (async APIs)
+
+Since 0.8.0, concurrent `compileStringAsync` / `compileAsync` calls no longer
+queue behind one another: while one compile awaits an asynchronous importer,
+others run on their own engine instances. A pool of asyncify instances grows
+lazily up to `min(4, cpu cores)` — a process that never overlaps async compiles
+only ever pays for one instance. Each extra instance reserves its own wasm
+memory (including the arena) plus a 1 MiB asyncify stack; tune or pin the cap
+with `configure()`:
+
+```js
+import { configure } from "sasso";
+
+configure({ asyncInstances: 2 }); // cap the pool (memory-constrained hosts)
+// configure({ asyncInstances: 1 }); // pre-0.8.0 behavior: fully serialized
+```
+
+Lowering the cap drops surplus instances as they finish their compiles. Note
+the pool overlaps compiles across importer *waits* (the bundler fan-out case) —
+pure CPU-bound compiles still share the one JS thread.
 
 ## Custom functions
 
@@ -130,7 +156,7 @@ asynchronous importer — both work **zero-config**, including cross-file
 alias it to sasso in `package.json`, then use it as usual:
 
 ```json
-{ "devDependencies": { "sass": "npm:sasso@^0.7.9" } }
+{ "devDependencies": { "sass": "npm:sasso@^0.8.0" } }
 ```
 
 ```js
@@ -163,14 +189,21 @@ input), `-w/--watch` (re-compiles when the input or any dependency changes),
 
 ## Two builds: size vs speed
 
-The default import is the **size-optimized** build (`-Oz`, ~350 KB gzip). For
-~2× compile throughput on a larger module (~610 KB gzip), import the
+The default import is the **size-optimized** build (~350 KB gzip sync + ~580 KB
+gzip async module). For ~2× compile throughput on larger modules, import the
 **speed-optimized** build instead — same API, same output:
 
 ```js
-import { compileString } from "sasso";        // default: smallest module
-import { compileString } from "sasso/speed";  // ~2x faster, larger module
+import { compileString } from "sasso";        // default: smallest modules
+import { compileString } from "sasso/speed";  // ~2x faster, larger modules
 ```
+
+Since 0.8.0 the speed entry's **async** APIs also run a speed-optimized
+asyncify module (~1 MB gzip) instead of sharing the size-optimized one, so
+bundler pipelines that only ever call `compileStringAsync` get the ~2× too.
+The speedup applies at V8 steady state — long-lived processes like a bundler
+watch/dev server; a one-shot CLI-style compile is dominated by V8's wasm
+tiering and won't see the difference.
 
 ## Tuning the bump-arena allocator
 
@@ -192,7 +225,9 @@ of correctness — just less speedup. The compile-time default is also settable
 when building from source: `SASSO_WASM_ARENA_MB=16 bash wasm/build.sh`.
 
 The loader reads the `.wasm` from disk via `node:fs`, so it targets **Node** (and
-bundlers that resolve `node:fs`). For the CLI and the Rust library, see the
-[main repository](https://github.com/momiji-rs/sasso).
+bundlers that resolve `node:fs`). For the CLI, the Rust library, and the
+work-in-progress **native Node addon** (~3× engine speed, true multi-core
+concurrent compiles; repo-buildable, prebuilt binaries not yet published), see
+the [main repository](https://github.com/momiji-rs/sasso).
 
 Licensed under MIT OR Apache-2.0.

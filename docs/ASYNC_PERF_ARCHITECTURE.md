@@ -1,6 +1,6 @@
 # Async-path performance: architecture plan & measurement harness
 
-**Status:** F1/F2/F3 LANDED (see §10) · **Date:** 2026-07-03 · **Baseline:** `92cd13b` + harness
+**Status:** F1/F2/F3 LANDED (§10) · F4 LANDED in-repo (§11) · **Baseline:** `92cd13b` + harness
 **Prerequisite reading:** `docs/HANDOFF_ASYNC_IMPORTER_PERF.md` (the evidence: E1–E4, fix
 ranking F1–F4). This doc turns that handoff into concrete designs plus a reproducible
 harness (`bench/asyncify/`) whose metrics double as each fix's acceptance criteria.
@@ -297,3 +297,42 @@ sync FileImporter on async, custom-function fast path + null-is-error, async log
 routing, 4-way concurrent isolation (importers/loggers/functions/loadedUrls), mixed
 outcomes under concurrency, pool overlap (deadlocked under the old lock), and
 `asyncInstances: 1` queue-and-drain semantics.
+
+## 11. F4 landed: the native addon (in-repo, 2026-07-04)
+
+`napi/` — napi2 addon binding the core crate directly (no wasm, no asyncify, no C ABI).
+Architecture: thread-per-async-compile (the core's `Options` is deliberately not `Send` —
+each compile builds its whole environment on its own OS thread); user importers / custom
+functions / logger cross a ThreadsafeFunction + reply-by-id bridge; **`loadPaths` and
+relative resolution run natively** (the core `FsImporter`) with zero JS round-trips. The
+JS wrapper (`napi/npm/index.mjs`) reuses `_importer.mjs` (maybe-async user chains),
+`_value.mjs` (custom-function byte protocol over a native `valueOp`), and the wasm
+loader's `Exception` — one source of truth for API semantics in-repo.
+
+**Correctness:** `napi/test.mjs` asserts **byte-identical CSS vs the wasm engine** (itself
+dart-sass-byte-exact via the sass-spec ratchet) across all 10 modular-corpus entries +
+handwritten + generated/large, sync/async/compressed/sourceMap, plus loadedUrls and
+sourceMap equivalence — and the full behavior-guard set (importer bridging, error
+mapping, logger routing, custom functions, 4-thread isolation, true overlap, re-entrant
+sync compiles, valueOp engine). CI job `napi` gates all of it on every PR.
+
+**Measured (idle 16-core x86 Linux, interleaved, wasm at `--no-liftoff` steady state):**
+
+| Scenario | native | wasm (post F1-F3) | × |
+|---|---|---|---|
+| modular corpus, sync median | **6.17 ms** | 18.4 ms | 3.0× |
+| modular corpus, async median | **7.3–8.0 ms** | 21.4 ms | ~2.8× |
+| **concurrency-8 cold build, makespan** | **9.0 ms** (serial-× 1.14) | 141.8 ms (serial-× 5.84) | **15.7×** |
+| concurrent sweep, delay=2 ms serial-× (N=2/4/8) | 1.00 / 1.00 / **1.02** | 1.20 / 1.05 / 2.28 | — |
+| concurrent sweep, delay=0 (CPU-bound) serial-× at N=8 | **2.84** | 7.37 | 2.6× |
+| bridge cost per host call (async user importer) | ~10.8 µs | ~7.7–11 µs (post-F3 fast path n/a: suspension) | parity |
+| fs chain per host call (loadPaths, sync) | **10.8 µs** | 51.7 µs (JS fs) | 4.8× |
+
+The two structural residuals of §10 are both resolved by F4: CPU-bound fan-out now
+scales across real threads (2.84× at N=8 instead of ≈N), and the asyncify
+instrumentation tax is gone entirely. Thread-per-compile is unbounded by design for
+now (bundler fan-outs are ~10s of compiles); a bounded worker pool is a follow-up knob.
+
+**Publish blocker (unchanged):** per-platform prebuilds (napi-rs artifact matrix or
+node-gyp-build). Until then the addon is repo-internal: `bash napi/build.sh` then import
+`napi/npm/index.mjs` — the bench harness scores it via `--impl` with zero changes.

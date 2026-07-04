@@ -11,6 +11,20 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Added (repo — native Node addon, not yet published)
+
+- **`napi/`: a native Node addon binding the core crate directly** (F4 of
+  `docs/ASYNC_PERF_ARCHITECTURE.md`) — no wasm, no asyncify. Same dart-sass
+  modern API as the `sasso` npm package, verified **byte-identical** to the
+  wasm engine's output across the in-repo corpora (which is itself dart-sass
+  byte-exact). Async compiles each run on their own OS thread: ~3× engine
+  speed over the wasm modules, and a concurrent 8-entry cold build finishes
+  in ~1.14× a single compile's time (true multi-core parallelism; the wasm
+  engine's single JS thread serializes CPU-bound fan-out). User importers, custom functions,
+  and loggers bridge to JS; `loadPaths`/relative resolution run natively.
+  Repo-buildable (`bash napi/build.sh`, `node napi/test.mjs`); publishing
+  waits on a per-platform prebuild matrix.
+
 ### Changed (npm package — async path performance; released as `sasso@0.8.0` on npm)
 
 - **Concurrent `compileStringAsync`/`compileAsync` calls no longer serialize.**
