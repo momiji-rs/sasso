@@ -3272,6 +3272,32 @@ fn indented_selector_comma_continues_despite_pseudo_colon() {
 }
 
 #[test]
+fn indented_loud_comment_block_matches_dart_reindent() {
+    // dart's _loudComment joins the first content line to `/*` with one
+    // space, gutters continuation lines with ` * ` (padding indentation
+    // beyond comment_col + 3), and its serializer strips min(1, comment_col)
+    // — so an indented comment loses the gutter's leading space while a
+    // top-level one keeps it (quasar's QSkeleton block comments).
+    assert_eq!(
+        ours_sass(".x\n  /*\n    one line\n    two line\n   */\n  b: c\n"),
+        ".x {\n  /* one line\n  * two line\n  * */\n  b: c;\n}\n"
+    );
+    assert_eq!(
+        ours_sass(".x\n  /*\n    one line\n      deeper line\n   */\n  b: c\n"),
+        ".x {\n  /* one line\n  *  deeper line\n  * */\n  b: c;\n}\n"
+    );
+    assert_eq!(
+        ours_sass("/*\n  top one\n  top two\n */\n.y\n  b: c\n"),
+        "/* top one\n * top two\n * */\n.y {\n  b: c;\n}\n"
+    );
+    // A blank line inside the block becomes a bare gutter line.
+    assert_eq!(
+        ours_sass(".x\n  /*\n    one\n\n    three\n   */\n  b: c\n"),
+        ".x {\n  /* one\n  *\n  * three\n  * */\n  b: c;\n}\n"
+    );
+}
+
+#[test]
 fn indented_loud_comment_first_line_stays_verbatim() {
     // The text after `/*` on a loud comment's first line is glued verbatim:
     // `/**` keeps its doubled star (quasar's normalize.sass banners) and

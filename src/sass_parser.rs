@@ -286,13 +286,17 @@ impl Transpiler {
             return Ok(());
         }
         // Unterminated on this line: gather the deeper-indented block as
-        // comment body. dart-sass reindents a multi-line loud comment so the
-        // first content line follows `/*` and each subsequent line keeps its
-        // *source column*, with ` *` written across columns 0-1 (so content
-        // never starts before column 3). Blank lines inside the block are
-        // preserved as a bare ` *`; trailing blanks after the block are not.
-        // Each entry is `(source_column, text)`; a blank line has no entry
-        // text — modelled as None.
+        // comment body. dart's `_loudComment` builds the text as `/*` + the
+        // first content line (joined with one space, extra indentation beyond
+        // `comment_col + 3` preserved), then `\n * ` per continuation line
+        // with the same padding rule; its serializer then strips
+        // `min(1, comment_col)` columns. The transform emits the
+        // POST-STRIP form directly (the transformed SCSS places comments at
+        // column 0, so the SCSS-side dedent is a no-op): gutter `* ` when the
+        // comment was indented, ` * ` at the top level. Blank lines inside
+        // the block become a bare gutter; trailing blanks after the block are
+        // not part of it. Each entry is `(source_column, text)`; a blank line
+        // has no entry text — modelled as None.
         let mut content_lines: Vec<Option<(usize, String)>> = Vec::new();
         // Line 0 content after the `/*` marker stays glued VERBATIM (dart
         // keeps `/**` and `/*  spaced` exactly as written); the sentinel
@@ -347,6 +351,10 @@ impl Transpiler {
                 }
             }
         }
+        // Post-strip gutter: dart's raw text always uses ` * `, and its
+        // serializer strips `min(1, comment_col)` — so an indented comment
+        // loses the gutter's leading space while a top-level one keeps it.
+        let gutter = if indent == 0 { " * " } else { "* " };
         for (i, line) in content_lines.iter().enumerate() {
             match line {
                 // The first-line remainder rides verbatim behind `/*`.
@@ -355,20 +363,20 @@ impl Transpiler {
                     self.out.push_str(text);
                 }
                 Some((col, text)) => {
-                    // `/*`/` *` occupy columns 0-1; pad so the text keeps its
-                    // source column (minimum column 3).
-                    let pad = col.max(&3) - 2;
+                    // Extra indentation beyond `comment_col + 3` is content
+                    // (dart pads for `3 .. current - parent`).
+                    let pad = col.saturating_sub(indent).saturating_sub(3);
                     if i == 0 {
-                        self.out.push_str("/*");
+                        self.out.push_str("/* ");
                     } else {
-                        self.out.push_str(" *");
+                        self.out.push_str(gutter);
                     }
                     for _ in 0..pad {
                         self.out.push(' ');
                     }
                     self.out.push_str(text);
                 }
-                None => self.out.push_str(" *"),
+                None => self.out.push_str(gutter.trim_end()),
             }
             self.out.push('\n');
         }
