@@ -3080,6 +3080,25 @@ fn pseudo_parent_ref_substitutes_inside_cartesian_parts() {
 }
 
 #[test]
+fn chained_extend_products_keep_registration_order() {
+    // dart's addSelector hands each @extend an ALREADY-EXTENDED extender
+    // list (the rule's selector was rewritten by every extension registered
+    // so far), so chained products arrive in forward registration order:
+    // `.cf`'s extenders land as [.c-sm, .c-md], not reversed (bootstrap's
+    // `.navbar > .container-{sm,md,lg,xl,xxl}` run).
+    assert_eq!(
+        ours(".cf { a: b; }\n.c-sm { @extend .cf; }\n.c-md { @extend .cf; }\n.nav {\n  %p { x: y; }\n  > .c,\n  > .cf { @extend %p; }\n}\n"),
+        ".cf, .c-md, .c-sm {\n  a: b;\n}\n\n.nav > .c,\n.nav > .cf,\n.nav > .c-sm,\n.nav > .c-md {\n  x: y;\n}\n"
+    );
+    assert_parity(".cf { a: b; }\n.c-sm { @extend .cf; }\n.c-md { @extend .cf; }\n.nav {\n  %p { x: y; }\n  > .c,\n  > .cf { @extend %p; }\n}\n");
+    // Transitive chains and cycles still resolve.
+    assert_parity(".a { x: y; @extend .b; }\n.b { @extend .c; }\n.c { z: w; }\n");
+    assert_parity(
+        ".foo { a: b; @extend .bar; }\n.bar { c: d; @extend .baz; }\n.baz { e: f; @extend .foo; }\n",
+    );
+}
+
+#[test]
 fn multi_parent_ref_expansion_interleaves_column_major() {
     // dart resolveParentSelectors flattens the per-part rows VERTICALLY:
     // with parents [.p, .v] and three templates each holding two `&`s, the

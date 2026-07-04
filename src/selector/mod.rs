@@ -2862,14 +2862,26 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
             .extenders
             .iter()
             .any(|c| pseudo_arg_has_target_deep(c, &all_targets));
+        // Extensions the pre-extension below may apply: the store so far,
+        // visibility-gated to what this `@extend`'s module can see (dart's
+        // per-module stores).
+        let visible_registry: Vec<Extension> = if registry.is_empty() {
+            Vec::new()
+        } else {
+            registry
+                .iter()
+                .filter(|r| ext.origin_closure.contains(&r.origin))
+                .cloned()
+                .collect()
+        };
         let pre_extended: Vec<(Complex, bool)> = {
             let mut out: Vec<(Complex, bool)> = Vec::new();
             let mut seen: FxHashSet<Complex> = FxHashSet::default();
             for (j, extender) in ext.extenders.iter().enumerate() {
                 let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
-                let products = if registry.is_empty() || !self_ref_extender {
+                let products = if registry.is_empty() {
                     vec![extender.clone()]
-                } else {
+                } else if self_ref_extender {
                     // dart `addSelector` = `_extendList(selector, _extensions)`.
                     // For a self-referential pseudo extender the extension is an
                     // in-place pseudo-argument rewrite (`:has(:not(.thing[…]))`
@@ -2878,6 +2890,26 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
                     // top-level trim is needed and the `:not`/`:has` dedup inside
                     // `extend_complex` already bounds the recursion.
                     extend_complex(extender, &registry)
+                } else if visible_registry.is_empty() {
+                    vec![extender.clone()]
+                } else {
+                    // dart `addSelector`: the rule's selector was ALREADY
+                    // extended by every extension registered so far when its
+                    // `@extend` runs, so the extender list arrives
+                    // pre-extended in registration order — this is where
+                    // chained extends get dart's FORWARD product order
+                    // (bootstrap's navbar containers). Trim like `_extendList`
+                    // so a product the original covers drops.
+                    let mut origin_set: FxHashSet<Complex> = FxHashSet::default();
+                    origin_set.insert(extender.clone());
+                    trim(
+                        extend_complex(extender, &visible_registry),
+                        &RuleOriginals {
+                            scope: &origin_set,
+                            rule: FxHashSet::default(),
+                        },
+                        &source_spec,
+                    )
                 };
                 for c in products {
                     if seen.insert(c.clone()) {
