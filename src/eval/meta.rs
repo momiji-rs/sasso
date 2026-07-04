@@ -901,6 +901,10 @@ impl<'a> Evaluator<'a> {
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());
         let saved_fns = std::mem::replace(&mut self.functions, func.env_fns.clone());
         let saved_mixins = std::mem::replace(&mut self.mixins, func.env_mixins.clone());
+        // The captured tables beat the module's own: a multi-hop `@forward`
+        // can hand us a module whose namespaces differ from the file that
+        // DEFINED the function (uswds `units()` reaching `sass:meta`).
+        let saved_env_modules = self.install_env_modules(&func.env_modules);
         self.push_scope(false);
         let result = self
             .bind_evaled_into_scope(&func.def.params, evaled, &func.def.name)
@@ -910,6 +914,7 @@ impl<'a> Evaluator<'a> {
         self.scope_semi_global = saved_semi;
         self.functions = saved_fns;
         self.mixins = saved_mixins;
+        self.restore_env_modules(saved_env_modules);
         self.leave_module_file(saved_file);
         self.leave_module(saved);
         if let Some(saved_member) = saved_member {

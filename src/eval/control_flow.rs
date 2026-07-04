@@ -433,6 +433,7 @@ impl<'a> Evaluator<'a> {
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());
         let saved_fns = std::mem::replace(&mut self.functions, func.env_fns.clone());
         let saved_mixins = std::mem::replace(&mut self.mixins, func.env_mixins.clone());
+        let saved_env_modules = self.install_env_modules(&func.env_modules);
         self.push_scope(false);
         let result = self
             .bind_evaled_into_scope(&func.def.params, evaled, &func.def.name)
@@ -449,6 +450,7 @@ impl<'a> Evaluator<'a> {
         self.scope_semi_global = saved_semi;
         self.functions = saved_fns;
         self.mixins = saved_mixins;
+        self.restore_env_modules(saved_env_modules);
         if let Some(saved) = saved {
             self.leave_call(saved);
         }
@@ -671,6 +673,7 @@ impl<'a> Evaluator<'a> {
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
         let saved_fns = std::mem::replace(&mut self.functions, mixin.env_fns.clone());
         let saved_mixins = std::mem::replace(&mut self.mixins, mixin.env_mixins.clone());
+        let saved_env_modules = self.install_env_modules(&mixin.env_modules);
         self.push_scope(false);
         let result = self
             .bind_evaled_into_scope(&mixin.def.params, evaled, &mixin.def.name)
@@ -687,6 +690,7 @@ impl<'a> Evaluator<'a> {
         self.scope_semi_global = saved_semi;
         self.functions = saved_fns;
         self.mixins = saved_mixins;
+        self.restore_env_modules(saved_env_modules);
         result
     }
 
@@ -726,6 +730,7 @@ impl<'a> Evaluator<'a> {
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
         let saved_fns = std::mem::replace(&mut self.functions, mixin.env_fns.clone());
         let saved_mixins = std::mem::replace(&mut self.mixins, mixin.env_mixins.clone());
+        let saved_env_modules = self.install_env_modules(&mixin.env_modules);
         self.push_scope(false);
         let result = self
             .bind_evaled_into_scope(&mixin.def.params, evaled, &mixin.def.name)
@@ -740,6 +745,7 @@ impl<'a> Evaluator<'a> {
         self.scope_semi_global = saved_semi;
         self.functions = saved_fns;
         self.mixins = saved_mixins;
+        self.restore_env_modules(saved_env_modules);
         self.leave_module_file(saved_file);
         self.leave_module(saved);
         result
@@ -858,6 +864,7 @@ impl<'a> Evaluator<'a> {
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, callable.env_semi.clone());
         let saved_fns = std::mem::replace(&mut self.functions, callable.env_fns.clone());
         let saved_mixins = std::mem::replace(&mut self.mixins, callable.env_mixins.clone());
+        let saved_env_modules = self.install_env_modules(&callable.env_modules);
         self.push_scope(false);
         let result = self
             .bind_evaled_into_scope(
@@ -878,6 +885,7 @@ impl<'a> Evaluator<'a> {
         self.scope_semi_global = saved_semi;
         self.functions = saved_fns;
         self.mixins = saved_mixins;
+        self.restore_env_modules(saved_env_modules);
         if let Some(saved_file) = saved_file {
             self.leave_module_file(saved_file);
         }

@@ -22,7 +22,31 @@ impl<'a> Evaluator<'a> {
             env_semi: self.scope_semi_global.clone(),
             env_fns: self.functions.clone(),
             env_mixins: self.mixins.clone(),
+            env_modules: EnvModules {
+                used_modules: self.used_modules.clone(),
+                star_modules: self.star_modules.clone(),
+                used_user_modules: self.used_user_modules.clone(),
+                star_user_modules: self.star_user_modules.clone(),
+            },
         })
+    }
+
+    /// Install a callable's captured `@use` namespace tables for the duration
+    /// of its body, returning the caller's tables for [`Self::restore_env_modules`].
+    pub(super) fn install_env_modules(&mut self, m: &EnvModules) -> EnvModules {
+        EnvModules {
+            used_modules: std::mem::replace(&mut self.used_modules, m.used_modules.clone()),
+            star_modules: std::mem::replace(&mut self.star_modules, m.star_modules.clone()),
+            used_user_modules: std::mem::replace(&mut self.used_user_modules, m.used_user_modules.clone()),
+            star_user_modules: std::mem::replace(&mut self.star_user_modules, m.star_user_modules.clone()),
+        }
+    }
+
+    pub(super) fn restore_env_modules(&mut self, saved: EnvModules) {
+        self.used_modules = saved.used_modules;
+        self.star_modules = saved.star_modules;
+        self.used_user_modules = saved.used_user_modules;
+        self.star_user_modules = saved.star_user_modules;
     }
 
     /// Push a new scope. `semi_global` requests semi-global behavior (control

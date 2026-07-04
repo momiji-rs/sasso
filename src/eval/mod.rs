@@ -87,6 +87,19 @@ fn new_fn_scope() -> FnScope {
     std::rc::Rc::new(std::cell::RefCell::new(HashMap::default()))
 }
 
+/// The `@use` namespace tables visible at a callable's definition site.
+/// dart's `Environment.closure()` carries them with the rest of the lexical
+/// environment: a callable inlined by `@import` must resolve `list.length()`
+/// against ITS file's `@use "sass:list"`, not whatever the caller has bound
+/// (uswds `units()`, quasar `str-fe()`).
+#[derive(Clone)]
+pub(crate) struct EnvModules {
+    pub(self) used_modules: HashMap<String, String>,
+    pub(self) star_modules: Vec<String>,
+    pub(self) used_user_modules: HashMap<String, Rc<Module>>,
+    pub(self) star_user_modules: Vec<Rc<Module>>,
+}
+
 /// A user `@function`/`@mixin` with its LEXICAL environment: the variable and
 /// function/mixin scope chains captured at the definition site (shared
 /// frames, dart's `Environment.closure()`). The body runs against these
@@ -97,6 +110,7 @@ pub(crate) struct UserCallable {
     pub env_semi: Vec<bool>,
     pub env_fns: Vec<FnScope>,
     pub env_mixins: Vec<FnScope>,
+    pub env_modules: EnvModules,
 }
 
 /// A style rule's selector list, carried through the output tree either as the

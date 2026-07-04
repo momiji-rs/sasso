@@ -3183,6 +3183,55 @@ fn invisible_rule_leaves_no_blank_line_group_end() {
 }
 
 #[test]
+fn callable_closure_captures_module_namespaces() {
+    use std::fs;
+
+    // dart Environment.closure() carries the `@use` namespace tables: a
+    // function/mixin inlined by `@import` (or reached through multi-hop
+    // `@forward`) resolves `list.length()`/`meta.type-of()` against the
+    // DEFINING file's `@use "sass:*"`, not the caller's bindings
+    // (uswds `units()`, quasar `str-fe()`).
+    let dir = std::env::temp_dir().join(format!(
+        "sasso-callable-ns-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(
+        dir.join("_nslib.scss"),
+        "@use \"sass:list\";\n@use \"sass:meta\";\n@function str-fe($x) { @return list.length($x); }\n@mixin dump() { x: meta.type-of(1); }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile(
+            "@import \"nslib\";\n.a { y: str-fe((1, 2)); @include dump(); }\n",
+            &opts
+        )
+        .expect("imported callables resolve their own namespaces"),
+        ".a {\n  y: 2;\n  x: number;\n}"
+    );
+    // Multi-hop @forward: the function's own file @uses sass:meta; the
+    // caller reaches it through a forwarding module used with `as *`.
+    fs::write(
+        dir.join("_units.scss"),
+        "@use \"sass:meta\";\n@function kind($v) { @return meta.type-of($v); }\n",
+    )
+    .unwrap();
+    fs::write(dir.join("_core.scss"), "@forward \"units\";\n").unwrap();
+    assert_eq!(
+        compile("@use \"core\" as *;\n.b { k: kind(3px); }\n", &opts)
+            .expect("forwarded function resolves defining file's namespaces"),
+        ".b {\n  k: number;\n}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn trailing_comment_never_joins_across_import_files() {
     use std::fs;
 
