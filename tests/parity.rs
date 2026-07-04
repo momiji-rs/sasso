@@ -353,6 +353,20 @@ fn parity_keyframes_list_and_interpolation() {
 }
 
 #[test]
+fn keyframes_selector_list_joins_on_one_line() {
+    // dart re-serializes keyframe stops joined with ", " and DROPS author
+    // line breaks (KeyframeSelectorParser) — unlike style-rule selector
+    // lists, which preserve where the author broke the line.
+    assert_eq!(
+        ours("@keyframes a {\n  0%,\n  60%,\n  100% {\n    opacity: 1;\n  }\n}\n"),
+        "@keyframes a {\n  0%, 60%, 100% {\n    opacity: 1;\n  }\n}\n"
+    );
+    // Control: the style-rule break stays.
+    assert_eq!(ours("a,\nb {\n  c: d;\n}\n"), "a,\nb {\n  c: d;\n}\n");
+    assert_parity("@keyframes a {\n  0%,\n  60%,\n  100% {\n    opacity: 1;\n  }\n}\na,\nb {\n  c: d;\n}\n");
+}
+
+#[test]
 fn parity_unit_converting_arithmetic() {
     assert_parity(
         ".a {\n  w: 1in + 1cm;\n  x: 1cm + 1in;\n  y: 5s - 100ms;\n  z: 10px % 3pt;\n  cmp: 1in > 2cm;\n  mix: 5 + 1px;\n  turn: 1turn + 90deg;\n}\n",

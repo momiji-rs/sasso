@@ -1943,7 +1943,12 @@ impl<'a> Evaluator<'a> {
         // consumers (`.get(i)` fallbacks, the `parents.len()` match below for
         // nested rules) already read as all-false. Skips the split/scan and
         // three per-rule allocations on the overwhelmingly common shape.
-        let full_lbs: Vec<bool> = if self.current_linebreaks.is_empty() && !sel_str.contains('\n') {
+        // Keyframe selector lists always take it: dart re-serializes the
+        // stops joined with ", " (KeyframeSelectorParser), dropping author
+        // line breaks that style-rule selectors would preserve.
+        let full_lbs: Vec<bool> = if self.in_keyframes
+            || (self.current_linebreaks.is_empty() && !sel_str.contains('\n'))
+        {
             Vec::new()
         } else {
             let part_lbs = comma_linebreaks(&sel_str, !parents.is_empty());

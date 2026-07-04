@@ -11,6 +11,16 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Fixed
+
+- **Keyframe selector lists now join on one line, matching dart-sass.** A
+  multi-line authored frame selector (`0%,\n60%,\n100% {`) was emitted with
+  the author's line breaks preserved, as style-rule selector lists are; dart
+  re-serializes keyframe stops joined with `", "` and drops the breaks
+  (`0%, 60%, 100% {`). Found compiling a real-world Rails corpus (a Bootstrap
+  → Tailwind compat layer) where this was the only byte difference across
+  ~132 KB of output.
+
 ## [0.6.3] - 2026-06-25
 
 ### Fixed
