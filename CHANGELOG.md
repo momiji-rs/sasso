@@ -11,7 +11,7 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
-### Changed (npm package — async path performance)
+### Changed (npm package — async path performance; released as `sasso@0.8.0` on npm)
 
 - **Concurrent `compileStringAsync`/`compileAsync` calls no longer serialize.**
   The single asyncify-instance lock is replaced by a lazily-grown pool of
