@@ -430,7 +430,13 @@ impl<'a> Evaluator<'a> {
         // clean context, but its emitted CSS joins the importing rule's
         // selectors (dart nests the whole import subtree's CSS —
         // nested_import_into_use).
-        let (module, consumed) = self.load_module(url, conf, config_id, pos, parents, false, sink)?;
+        // The load runs under a diagnostic `@use` frame so an error anywhere
+        // in the module (parse or eval) carries the loader chain
+        // (dart: `_mod.scss 3:19  @use` / `main.scss 1:1  root stylesheet`).
+        let saved_member = self.enter_call(pos, 0, "@use");
+        let result = self.load_module(url, conf, config_id, pos, parents, false, sink);
+        self.leave_call(saved_member);
+        let (module, consumed) = result?;
         // Any configured variable the module did not consume via a `!default`
         // declaration is an error.
         if conf_keys.iter().any(|k| !consumed.contains(k)) {
@@ -839,7 +845,6 @@ impl<'a> Evaluator<'a> {
                 pos,
             ));
         }
-        let sheet = parse_with_syntax(&src, syntax)?;
         // Register the module's source under a diagnostic display URL so a
         // snippet/frame that points into this file renders against its text.
         let diag_url = self.module_diag_url(url, &key);
@@ -848,6 +853,21 @@ impl<'a> Evaluator<'a> {
                 .borrow_mut()
                 .insert(diag_url.clone(), Rc::from(src.as_str()));
         }
+        let sheet = match parse_with_syntax(&src, syntax) {
+            Ok(sheet) => sheet,
+            Err(e) => {
+                // A parse error names the LOADED file: render eagerly under
+                // its url/source (the caller's `@use`/`@forward` frame is
+                // already on the stack), like dart's
+                // `_mod.scss 3:19  @use` + loader chain.
+                let saved_url = std::mem::replace(&mut self.current_url, diag_url.clone());
+                let saved_source = std::mem::replace(&mut self.current_source, Rc::from(src.as_str()));
+                let e = self.finalize_error(e);
+                self.current_url = saved_url;
+                self.current_source = saved_source;
+                return Err(e);
+            }
+        };
         // If the importer asked for a custom source-map URL for this file, record
         // it under the same display URL the source map keys on (`@import` is
         // textual and has no distinct source entry, so it carries no override).
@@ -1003,6 +1023,10 @@ impl<'a> Evaluator<'a> {
         } else {
             self.exec(&sheet.stmts, &[], sink)
         };
+        // Render a body error NOW, while the module's url/source and the
+        // loader's `@use`/`@forward` frame are still current — after the
+        // restores below, finalize would name the caller's file instead.
+        let result = result.map_err(|e| self.finalize_error(e));
 
         self.loading.pop();
         // Capture this module's evaluated members before restoring the caller's
@@ -1241,7 +1265,11 @@ impl<'a> Evaluator<'a> {
         } else {
             self.fresh_config_id()
         };
+        // Diagnostic `@forward` frame — see the matching `@use` wrap in
+        // `exec_use`.
+        let saved_member = self.enter_call(pos, 0, "@forward");
         let load_result = self.load_module(url, combined, combined_id, pos, parents, false, sink);
+        self.leave_call(saved_member);
         self.config_is_implicit = saved_implicit;
         let (module, consumed) = load_result?;
 

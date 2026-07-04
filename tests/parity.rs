@@ -3314,6 +3314,58 @@ fn escaped_bang_in_selector_parses() {
 }
 
 #[test]
+fn errors_in_loaded_files_name_that_file_with_loader_frames() {
+    use std::fs;
+
+    // dart names the ERRORING file in the snippet and stacks a frame per
+    // loader (`_mod.scss 1:18  @use` / `main.scss 1:1  root stylesheet`).
+    // Regression: sasso rendered the ROOT file's name/snippet with the inner
+    // file's line numbers, for both parse and eval errors — which misled two
+    // bench/real-world triages.
+    let dir = std::env::temp_dir().join(format!(
+        "sasso-err-attribution-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp).with_url("main.scss");
+    // Eval error (undefined variable) inside a @use'd module.
+    fs::write(dir.join("_broke.scss"), ".x { color: $nope; }\n").unwrap();
+    let err = compile("@use \"broke\";\n", &opts)
+        .expect_err("must fail")
+        .to_string();
+    assert!(err.contains("_broke.scss 1:13  @use"), "got:\n{err}");
+    assert!(err.contains("root stylesheet"), "got:\n{err}");
+    assert!(
+        err.contains("color: $nope"),
+        "snippet from the module file:\n{err}"
+    );
+    // Same through legacy @import (frame caret on the URL token).
+    let err = compile("@import \"broke\";\n", &opts)
+        .expect_err("must fail")
+        .to_string();
+    assert!(err.contains("_broke.scss 1:13  @import"), "got:\n{err}");
+    // Parse error inside a nested @use chain: innermost frame names the
+    // broken file, with one @use frame per intermediate loader.
+    fs::write(dir.join("_badparse.scss"), ".x {\n  broken westward{{{\n}\n").unwrap();
+    fs::write(dir.join("_mid.scss"), "@use \"badparse\";\n").unwrap();
+    let err = compile("@use \"mid\";\n", &opts)
+        .expect_err("must fail")
+        .to_string();
+    assert!(err.contains("_badparse.scss"), "got:\n{err}");
+    assert!(err.contains("_mid.scss 1:1"), "intermediate @use frame:\n{err}");
+    assert!(
+        !err.contains("_mid.scss 1:1        root stylesheet"),
+        "mid is @use, not root:\n{err}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn callable_closure_captures_module_namespaces() {
     use std::fs;
 

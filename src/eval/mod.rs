@@ -2343,7 +2343,28 @@ impl<'a> Evaluator<'a> {
                                             "This file is already being loaded.",
                                         ));
                                     }
-                                    let sheet = parse_with_syntax(&src, syntax)?;
+                                    let sheet = match parse_with_syntax(&src, syntax) {
+                                        Ok(sheet) => sheet,
+                                        Err(err) => {
+                                            // A parse error names the IMPORTED
+                                            // file: render eagerly under its
+                                            // url/source with an `@import`
+                                            // frame at the URL token (dart:
+                                            // `_mod.scss 3:19  @import`).
+                                            let diag = self.module_diag_url(path, &resolved_key);
+                                            let saved_member = self.enter_call(*pos, *length, "@import");
+                                            let saved_url = std::mem::replace(&mut self.current_url, diag);
+                                            let saved_source = std::mem::replace(
+                                                &mut self.current_source,
+                                                Rc::from(src.as_str()),
+                                            );
+                                            let err = self.finalize_error(err);
+                                            self.current_url = saved_url;
+                                            self.current_source = saved_source;
+                                            self.leave_call(saved_member);
+                                            return Err(err);
+                                        }
+                                    };
                                     let e = std::rc::Rc::new((
                                         resolved_key,
                                         syntax,
@@ -2360,6 +2381,10 @@ impl<'a> Evaluator<'a> {
                     match entry {
                         Some(entry) => {
                             let (resolved_key, syntax, sheet) = (&entry.0, entry.1, &entry.2);
+                            // The diagnostic `@import` frame records the
+                            // IMPORTING file at the URL token — push it before
+                            // the context swap below rebinds current_url.
+                            let saved_member = self.enter_call(*pos, *length, "@import");
                             // The imported file becomes the diagnostics/stamp
                             // context while its body runs (dart shows ITS name
                             // in error frames, and the trailing-comment check
@@ -2384,11 +2409,14 @@ impl<'a> Evaluator<'a> {
                             // preserved, no Sass evaluation (same as `@use`).
                             if matches!(syntax, Syntax::Css) {
                                 self.loading.push(path.clone());
-                                let result = self.exec_css(&sheet.stmts, parents, sink);
+                                let result = self
+                                    .exec_css(&sheet.stmts, parents, sink)
+                                    .map_err(|e| self.finalize_error(e));
                                 self.loading.pop();
                                 self.current_url = saved_import_url;
                                 self.current_source = saved_import_source;
                                 self.current_url_stamp = 0;
+                                self.leave_call(saved_member);
                                 result?;
                                 continue;
                             }
@@ -2492,7 +2520,13 @@ impl<'a> Evaluator<'a> {
                             if has_top_decl(&sheet.stmts) {
                                 return Err(Error::unpositioned("expected \"{\"."));
                             }
-                            let result = self.exec(&sheet.stmts, parents, sink);
+                            // Render any error before the context restores
+                            // below strip its attribution (the `@import`
+                            // frame from above is still on the stack).
+                            let result = self
+                                .exec(&sheet.stmts, parents, sink)
+                                .map_err(|e| self.finalize_error(e));
+                            self.leave_call(saved_member);
                             self.current_url = saved_import_url;
                             self.current_source = saved_import_source;
                             self.current_url_stamp = 0;
