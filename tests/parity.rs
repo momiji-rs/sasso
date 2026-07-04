@@ -3194,6 +3194,22 @@ fn invisible_rule_leaves_no_blank_line_group_end() {
 }
 
 #[test]
+fn indented_loud_comment_first_line_stays_verbatim() {
+    // The text after `/*` on a loud comment's first line is glued verbatim:
+    // `/**` keeps its doubled star (quasar's normalize.sass banners) and
+    // extra spacing is preserved; continuation lines keep their source
+    // column behind the ` *` gutter.
+    assert_eq!(
+        ours_sass("/**\n * Remove the border.\n */\nimg\n  b: 0\n"),
+        "/**\n * * Remove the border.\n * */\nimg {\n  b: 0;\n}\n"
+    );
+    assert_eq!(
+        ours_sass("/*  two spaces\n  * mid\n */\n.a\n  b: c\n"),
+        "/*  two spaces\n * * mid\n * */\n.a {\n  b: c;\n}\n"
+    );
+}
+
+#[test]
 fn indented_use_as_star_does_not_continue_prelude() {
     use std::fs;
 

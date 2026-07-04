@@ -294,10 +294,13 @@ impl Transpiler {
         // Each entry is `(source_column, text)`; a blank line has no entry
         // text — modelled as None.
         let mut content_lines: Vec<Option<(usize, String)>> = Vec::new();
-        // Line 0 content after the `/*` marker (drop it if only whitespace).
-        let first = content.trim_start_matches("/*");
+        // Line 0 content after the `/*` marker stays glued VERBATIM (dart
+        // keeps `/**` and `/*  spaced` exactly as written); the sentinel
+        // column marks it so the renderer skips the source-column padding.
+        // Dropped if only whitespace.
+        let first = content.strip_prefix("/*").unwrap_or(&content).to_string();
         if !first.trim().is_empty() {
-            content_lines.push(Some((3, first.trim_start().to_string())));
+            content_lines.push(Some((usize::MAX, first)));
         }
         self.idx = first_line_end;
         let mut closed = false;
@@ -346,6 +349,11 @@ impl Transpiler {
         }
         for (i, line) in content_lines.iter().enumerate() {
             match line {
+                // The first-line remainder rides verbatim behind `/*`.
+                Some((col, text)) if *col == usize::MAX => {
+                    self.out.push_str("/*");
+                    self.out.push_str(text);
+                }
                 Some((col, text)) => {
                     // `/*`/` *` occupy columns 0-1; pad so the text keeps its
                     // source column (minimum column 3).
