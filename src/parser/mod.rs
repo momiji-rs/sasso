@@ -225,47 +225,6 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_' || (c as u32) >= 0x80
 }
 
-/// dart `_minimumIndentation` + `_writeWithIndent`: a loud comment's
-/// continuation lines drop `min(<their minimum indentation>, <the comment's
-/// own start column>)` leading spaces at PARSE time; the emitter then adds
-/// the current output indentation back. Only applied to interpolation-free
-/// comments (the common case).
-fn strip_comment_indent(pieces: &mut [TplPiece], start_col: usize) {
-    if pieces.len() != 1 {
-        return;
-    }
-    let TplPiece::Lit(text) = &mut pieces[0] else {
-        return;
-    };
-    if !text.contains('\n') {
-        return;
-    }
-    let mut min_indent: Option<usize> = None;
-    for line in text.split('\n').skip(1) {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let ind = line.len() - line.trim_start_matches(' ').len();
-        min_indent = Some(min_indent.map_or(ind, |m| m.min(ind)));
-    }
-    let Some(min_indent) = min_indent else { return };
-    let strip = min_indent.min(start_col);
-    if strip == 0 {
-        return;
-    }
-    let mut out = String::with_capacity(text.len());
-    for (i, line) in text.split('\n').enumerate() {
-        if i > 0 {
-            out.push('\n');
-            let avail = line.len() - line.trim_start_matches(' ').len();
-            out.push_str(&line[strip.min(avail)..]);
-        } else {
-            out.push_str(line);
-        }
-    }
-    *text = out;
-}
-
 /// Reject generic/unknown at-rules in a context that forbids them (function
 /// bodies, nested property sets), recursing into control-flow bodies.
 fn reject_at_rules_in(stmts: &[Stmt]) -> Result<(), Error> {

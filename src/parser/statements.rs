@@ -83,8 +83,7 @@ impl Parser {
                     let col0 = start.col - 1;
                     self.sc.bump();
                     self.sc.bump();
-                    let mut pieces = self.parse_loud_comment_body()?;
-                    strip_comment_indent(&mut pieces, col0);
+                    let pieces = self.parse_loud_comment_body()?;
                     let end_line = self.sc.position().line as u32;
                     out.push(Stmt::Comment(
                         pieces,

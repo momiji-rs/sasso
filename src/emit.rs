@@ -145,7 +145,7 @@ fn push_trailing_comment(out: &mut String, text: &str, lines: SrcLines, collecto
     // Source-map: the joined comment's `/*`.
     record(out, lines, collector);
     out.push_str("/*");
-    push_comment_text(out, text, "");
+    push_comment_text(out, text, "", lines.start_col as usize);
     out.push_str("*/\n");
 }
 
@@ -246,7 +246,7 @@ fn emit_node_expanded(
             // Source-map: the comment's `/*`.
             record(out, *lines, collector);
             out.push_str("/*");
-            push_comment_text(out, text, indent);
+            push_comment_text(out, text, indent, lines.start_col as usize);
             out.push_str("*/\n");
             *prev = *lines;
         }
@@ -363,7 +363,7 @@ fn emit_item_expanded(
             // Source-map: the comment's `/*`.
             record(out, *lines, collector);
             out.push_str("/*");
-            push_comment_text(out, text, indent);
+            push_comment_text(out, text, indent, lines.start_col as usize);
             out.push_str("*/\n");
             *prev = *lines;
         }
@@ -775,19 +775,36 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
     }
 }
 
-/// Write a loud comment's text with dart's continuation-line handling: every
-/// line after the first gains the CURRENT output indentation on top of its
-/// own source indentation.
-fn push_comment_text(out: &mut String, text: &str, indent: &str) {
-    let mut first = true;
-    for line in text.split('\n') {
-        if !first {
-            out.push('\n');
-            if !line.is_empty() {
-                out.push_str(indent);
-            }
+/// Write a loud comment's text with dart's continuation-line handling
+/// (`_minimumIndentation` + `_writeWithIndent`, run on the EVALUATED text so
+/// interpolated comments dedent too): continuation lines lose
+/// `min(<minimum indentation across them>, <the comment's own source start
+/// column>)` leading whitespace and gain the CURRENT output indentation;
+/// whitespace-only interior lines collapse to bare newlines. The final line
+/// always counts as content — the `*/` closer follows this text.
+fn push_comment_text(out: &mut String, text: &str, indent: &str, start_col: usize) {
+    if !text.contains('\n') {
+        out.push_str(text);
+        return;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut min: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate().skip(1) {
+        if i + 1 != lines.len() && line.trim().is_empty() {
+            continue;
         }
-        out.push_str(line);
-        first = false;
+        let ind = line.len() - line.trim_start_matches([' ', '\t']).len();
+        min = Some(min.map_or(ind, |m| m.min(ind)));
+    }
+    let strip = min.map_or(0, |m| m.min(start_col));
+    out.push_str(lines[0]);
+    for (i, line) in lines.iter().enumerate().skip(1) {
+        out.push('\n');
+        if i + 1 != lines.len() && line.trim().is_empty() {
+            continue;
+        }
+        let ind = line.len() - line.trim_start_matches([' ', '\t']).len();
+        out.push_str(indent);
+        out.push_str(&line[strip.min(ind)..]);
     }
 }

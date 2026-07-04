@@ -1727,6 +1727,23 @@ fn selector_comment_stripping() {
 }
 
 #[test]
+fn interpolated_loud_comment_dedents_like_plain() {
+    // dart dedents a loud comment's continuation lines at SERIALIZE time on
+    // the evaluated text (`_minimumIndentation` clamped by the comment's own
+    // start column, `_writeWithIndent` re-adds the output indentation), so a
+    // banner built inside a mixin with `#{}` interpolation loses its source
+    // indentation exactly like a plain comment does. Byte-matched offline;
+    // the live case double-checks against dart-sass.
+    assert_eq!(
+        ours("@mixin banner($f) {\n  /*!\n   * Banner #{$f}text\n   * line two\n   */\n}\n@include banner(\"\");\n"),
+        "/*!\n * Banner text\n * line two\n */\n"
+    );
+    assert_parity(
+        "@mixin banner($f) {\n  /*!\n   * Banner #{$f}text\n   * line two\n   */\n}\n@include banner(\"\");\n.a { x: y; }\n",
+    );
+}
+
+#[test]
 fn declaration_property_comment_stripping() {
     // A loud or silent comment between a declaration's property name and the
     // `:` is dropped (the property template strips it as whitespace, and the
