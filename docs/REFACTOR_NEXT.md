@@ -214,23 +214,25 @@ attribution across `@use`/`@forward`/`@import` chains incl. loader frames
 (commit `0c5e6d0`); `@media` in unknown at-rules (Tailwind v4 `@utility`,
 commit `5ad4889`).
 
-Remaining, in priority order (all whitespace/order-only — every corpus
-project is at least canonical-identical):
+Round 3 (2026-07-04, after the 0.7.0 release): linebreak-flag propagation
+(pseudo-arg newlines + parent-resolution flags, `32eea4e`), indented comment
+re-indent (`c5da8d5`), the invisible-last-child group seam + a drop-loop
+index bug (`9520965`), and dart's addSelector one-shot timing for pre-rule
+extensions (`461ff10`). bootstrap, quasar, mastodon and govuk-frontend all
+moved to byte-identical — **8 of 10 corpus projects are now byte-identical**.
 
-1. **Cross-module `@extend` application order** — govuk
-   (`.govuk-body-l` vs `.govuk-body-lead` product order, 6 lines), bulma and
-   uswds selector runs. The fold applies downstream origins first; dart
-   sequences per-module stores upstream-first over each rule with the rule's
-   CURRENT selector visible to later stores. Needs the per-module story, not
-   the batch order alone (a naive single-pass broke
-   directives/use/extend/{diamond,extended} + extend-loop).
-2. **Blank line after a resurrected placeholder rule** — bootstrap's last
-   byte diff: `%container-flex-properties` (visible only via extend) inside
-   `.navbar` leaves a blank-line group seam before `.navbar-brand`; dart
-   decides separators at serialize time on the post-extend tree, sasso at
-   eval time.
-3. **Selector line-break flag propagation, two cases** — (a) multi-`&`
-   cross-product products: dart line-breaks per combo where sasso joins
-   (mastodon, "identical (canonical)"); (b) newlines INSIDE pseudo args
-   (`:is(:-webkit-autofill,\n[type=color],…)`) survive dart's
-   re-serialization (quasar). Both whitespace-only.
+Remaining (whitespace/order-only; both projects canonical-equivalent):
+
+1. **Cross-module `@extend` store order** — bulma (`%block` extenders from
+   sibling modules interleave differently) and part of uswds. Same-file
+   registrations must come out FORWARD even when the rule lives upstream
+   (grid.scss's `.fixed-grid`/`.grid`), while sibling modules apply
+   reverse-first-load. A three-phase attempt (own-pre one-shot / own-post
+   fold / foreign one-shot concat) regressed 6 spec cases and made bulma
+   WORSE — the faithful model needs dart's `_extendModules` downstream-store
+   merge semantics, not a batch reorder. Reverted; branch point is
+   `461ff10`'s phase split.
+2. **uswds pre-module comment duplication edge** — sasso re-emits a doc
+   header comment where dart doesn't (uswds `@forward ... with` chains;
+   likely a configured-instance or load-css edge of the `_preModuleComments`
+   model) plus one group-seam blank variant.
