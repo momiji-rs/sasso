@@ -51,7 +51,9 @@ jobs:
       matrix:
         include:
           - { target: darwin-arm64,    runner: macos-14 }
-          - { target: darwin-x64,      runner: macos-13 }
+          # macos-13 is retired/starved; macos-15-intel is GitHub's continued
+          # Intel-mac runner label.
+          - { target: darwin-x64,      runner: macos-15-intel }
           - { target: linux-x64-gnu,   runner: ubuntu-latest }
           - { target: linux-arm64-gnu, runner: ubuntu-24.04-arm }
     steps:
@@ -79,7 +81,16 @@ jobs:
         run: node napi/make-platform-package.mjs "${{ matrix.target }}" "${GITHUB_REF_NAME#npm-v}" napi/npm/sasso.node dist-native
       - name: npm publish (platform package)
         working-directory: dist-native
-        run: npm publish --provenance --access public
+        # Idempotent: a retried release run (e.g. after one leg's runner
+        # starved) must no-op on the legs that already published this version
+        # instead of failing the whole matrix on EPUBLISHCONFLICT.
+        run: |
+          V="${GITHUB_REF_NAME#npm-v}"
+          if [ "$(npm view "sasso-native-${{ matrix.target }}@$V" version 2>/dev/null)" = "$V" ]; then
+            echo "sasso-native-${{ matrix.target }}@$V already on the registry — skipping publish"
+          else
+            npm publish --provenance --access public
+          fi
 
   publish-wasm:
     name: build + npm publish
