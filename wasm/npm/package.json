@@ -30,6 +30,7 @@
     "sasso.wasm",
     "sasso.speed.wasm",
     "sasso.async.wasm",
+    "sasso.speed.async.wasm",
     "sasso.d.ts",
     "sasso.speed.d.ts",
     "README.md",

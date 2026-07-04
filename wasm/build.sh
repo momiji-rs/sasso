@@ -55,30 +55,34 @@ build_variant() {
 build_variant size  z -Oz npm/sasso.wasm
 build_variant speed 3 -O3 npm/sasso.speed.wasm
 
-# Async variant: asyncify the size build so the *async* JS APIs (compileStringAsync
+# Async variants: asyncify each build so the *async* JS APIs (compileStringAsync
 # / compileAsync / the Compiler API) can suspend the whole compile across an
 # `await` and thus support ASYNCHRONOUS importers — the kind sass-loader and Vite
-# inject by default. ~2x the size build, so the loader uses it only on the async
-# path (sync compiles keep the fast non-asyncify'd module). Reuses the size raw.
+# inject by default. ~2x the source module's size, so the loader uses them only
+# on the async path (sync compiles keep the fast non-asyncify'd modules). Reuses
+# each variant's raw artifact; the --asyncify pass runs BEFORE the opt level
+# (same ordering for both variants — do not reorder).
+# build_async <name> <raw-target-dir> <wasm-opt-flag> <out.wasm>
 build_async() {
-  local raw="target-size/$TARGET/release/sasso_wasm.wasm"
-  local out="npm/sasso.async.wasm"
+  local name="$1" tdir="$2" wopt="$3" out="$4"
+  local raw="$tdir/$TARGET/release/sasso_wasm.wasm"
   if command -v wasm-opt >/dev/null 2>&1; then
-    echo ">> [async] wasm-opt --asyncify -Oz"
+    echo ">> [$name] wasm-opt --asyncify $wopt"
     wasm-opt "$raw" -o "$out" \
       --asyncify \
       --pass-arg=asyncify-imports@sasso_host.host_canonicalize,sasso_host.host_load,sasso_host.host_call_function \
-      -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext
+      "$wopt" --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext
   else
     # No wasm-opt -> ship the non-asyncify'd module. The loader detects the
     # missing asyncify_* exports and degrades gracefully (async importers then
     # behave as on the sync path).
-    echo "note: wasm-opt not found; async module will NOT support async importers"
+    echo "note: wasm-opt not found; $name module will NOT support async importers"
     cp "$raw" "$out"
   fi
   local out_sz gz_sz; out_sz=$(wc -c <"$out"); gz_sz=$(gzip -9 -c "$out" | wc -c)
-  printf '   [async] wasm-opt=%s  gzip=%s bytes -> %s\n' "$out_sz" "$gz_sz" "$out"
+  printf '   [%s] wasm-opt=%s  gzip=%s bytes -> %s\n' "$name" "$out_sz" "$gz_sz" "$out"
 }
-build_async
+build_async async       target-size  -Oz npm/sasso.async.wasm
+build_async speed-async target-speed -O3 npm/sasso.speed.async.wasm
 
-echo ">> done: npm/sasso.wasm (size), npm/sasso.speed.wasm (speed), npm/sasso.async.wasm (async)"
+echo ">> done: npm/sasso.wasm (size), npm/sasso.speed.wasm (speed), npm/sasso.async.wasm (async), npm/sasso.speed.async.wasm (speed async)"
