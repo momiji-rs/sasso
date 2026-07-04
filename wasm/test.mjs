@@ -231,6 +231,44 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
     `${name}: sync-throwing load rejects the async compile with the message`,
   );
 
+  // (b2) F3: MIXED chains — the maybe-async walk must continue past a missing
+  // resolver in both directions: a thenable miss followed by a sync hit, and a
+  // sync miss followed by a thenable hit.
+  const asyncMiss = { canonicalize: async (url) => { await delay(1); return null; }, load: async () => null };
+  const syncHit = {
+    canonicalize: (url) => (url === "mx" ? new URL("custom:mx-sync") : null),
+    load: (u) => (u.href === "custom:mx-sync" ? { contents: ".mx { from: sync; }", syntax: "scss" } : null),
+  };
+  const syncMiss = { canonicalize: () => null, load: () => null };
+  const asyncHit = {
+    canonicalize: async (url) => (url === "mx" ? new URL("custom:mx-async") : null),
+    load: async (u) => (u.href === "custom:mx-async" ? { contents: ".mx { from: async; }", syntax: "scss" } : null),
+  };
+  const mx1 = await mod.compileStringAsync(`@use "mx";`, { importers: [asyncMiss, syncHit] });
+  assert.ok(mx1.css.includes("from: sync"), `${name}: async-miss then sync-hit chain resolves`);
+  const mx2 = await mod.compileStringAsync(`@use "mx";`, { importers: [syncMiss, asyncHit] });
+  assert.ok(mx2.css.includes("from: async"), `${name}: sync-miss then async-hit chain resolves`);
+
+  // (b3) F3: a sync-returning FileImporter on the ASYNC API (findFileUrl
+  // returns a plain file: URL) matches the sync API's output.
+  const syncFi = { findFileUrl(url) { return url === "shared" ? pathToFileURL(join(root, "fi", "shared")) : null; } };
+  const fiSrc = `@use "shared" as s;\n.a { height: s.$s; }\n`;
+  const aFi = await mod.compileStringAsync(fiSrc, { importers: [syncFi] });
+  assert.equal(aFi.css, mod.compileString(fiSrc, { importers: [syncFi] }).css, `${name}: sync FileImporter on the async API equals the sync API`);
+
+  // (b4) F3: custom functions on the async API — a plain (non-Promise) return
+  // takes the fast path with identical output, and a null return is an ERROR
+  // ("returned no value"), never a canonicalize-style miss.
+  const powSrc = `.a { x: pow(3, 4); }`;
+  const powFns = { "pow($base, $exp)": (args) => new mod.SassNumber(args[0].value ** args[1].value) };
+  const aPow = await mod.compileStringAsync(powSrc, { functions: powFns });
+  assert.equal(aPow.css, mod.compileString(powSrc, { functions: powFns }).css, `${name}: sync-returning custom function on the async API equals the sync API`);
+  await assert.rejects(
+    () => mod.compileStringAsync(`.a { x: nil(); }`, { functions: { "nil()": () => null } }),
+    (e) => e instanceof mod.Exception && e.message.includes("returned no value"),
+    `${name}: null-returning custom function rejects the async compile`,
+  );
+
   // (c) logger on the async path: @warn/@debug during compileStringAsync
   // route through asyncHost.host_warn to the user logger (dart shape).
   const aLogged = [];

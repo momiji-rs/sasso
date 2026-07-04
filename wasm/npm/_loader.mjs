@@ -28,6 +28,7 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import {
+  isThenable,
   makeFsImporter,
   normalizeImporter,
   syntaxCode,
@@ -135,9 +136,14 @@ function frameLoad(res) {
 
 /**
  * Build the per-compile importer chain. `async` selects the asyncify path
- * (importer callbacks may return Promises and are awaited) vs. the sync path
- * (a Promise is a hard error). Tracks the resolver that owns each canonical URL
- * (so `load` routes back) and the URLs actually loaded (for `loadedUrls`).
+ * (importer callbacks may return Promises) vs. the sync path (a Promise is a
+ * hard error). Tracks the resolver that owns each canonical URL (so `load`
+ * routes back) and the URLs actually loaded (for `loadedUrls`).
+ *
+ * The async chain is MAYBE-ASYNC: its results stay plain values while every
+ * step settles synchronously, becoming a Promise only when a resolver actually
+ * returns a thenable. `asyncHostFn` delivers a plain value without an asyncify
+ * unwind, so fully-sync chains (loadPaths, sync importers) never suspend.
  */
 function buildChain(options, async) {
   const userImporters = (options.importers || []).map((i) => normalizeImporter(i, async));
@@ -146,21 +152,42 @@ function buildChain(options, async) {
   const byCanonical = new Map();
   const loaded = [];
   if (async) {
+    // Walk the resolver list synchronously; on the first thenable, switch to
+    // a Promise continuation that resumes the walk where it left off.
+    const walk = (i, url, fromImport, containing) => {
+      for (; i < resolvers.length; i++) {
+        const r = resolvers[i];
+        const canon = r.canonicalize(url, fromImport, containing);
+        if (isThenable(canon)) {
+          return canon.then((c) => {
+            if (c != null) {
+              byCanonical.set(c, r);
+              return c;
+            }
+            return walk(i + 1, url, fromImport, containing);
+          });
+        }
+        if (canon != null) {
+          byCanonical.set(canon, r);
+          return canon;
+        }
+      }
+      return null;
+    };
     return {
       loaded,
-      async canonicalize(url, fromImport, containing) {
-        for (const r of resolvers) {
-          const canon = await r.canonicalize(url, fromImport, containing);
-          if (canon != null) {
-            byCanonical.set(canon, r);
-            return canon;
-          }
-        }
-        return null;
+      canonicalize(url, fromImport, containing) {
+        return walk(0, url, fromImport, containing);
       },
-      async load(canon) {
+      load(canon) {
         const r = byCanonical.get(canon);
-        const res = r ? await r.load(canon) : null;
+        const res = r ? r.load(canon) : null;
+        if (isThenable(res)) {
+          return res.then((v) => {
+            if (v != null) loaded.push(canon);
+            return v;
+          });
+        }
         if (res != null) loaded.push(canon);
         return res;
       },
@@ -466,14 +493,27 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
   let pendingDelivery = null; // a Promise<{rc, bytes}>, then its resolved value
   let asyncLock = Promise.resolve(); // serialize async compiles (one asyncify stack)
 
-  // On a normal call, kick off the (possibly async) chain lookup, suspend the
-  // engine, and stash a Promise<{rc, bytes}>. On the rewind re-entry, stop the
+  const ASYNCIFY_MISSING =
+    "sasso: this async module was built without asyncify (wasm-opt was missing " +
+    "at build time), so asynchronous importers and custom functions cannot " +
+    "suspend the engine — return values synchronously or rebuild with wasm-opt";
+
+  // On a normal call, run the chain lookup SYNCHRONOUSLY: a plain (non-thenable)
+  // result is delivered immediately and the final rc returned with the asyncify
+  // state left NORMAL — no unwind, no microtask, no rewind. Asyncify imports may
+  // suspend only *sometimes*; this fast path is the exact contract the
+  // non-asyncified sync module always runs. Only a thenable pays the suspension:
+  // stash a Promise<{rc, bytes}> and unwind; on the rewind re-entry, stop the
   // rewind and hand that delivery back to the engine.
+  //
+  // rc contract (wasm/src/lib.rs): 1 = delivered, 0 = miss, -1 = error. rc 0 is
+  // an ERROR for host_call_function, whose lookup therefore never returns null
+  // (it throws instead), keeping the miss branch unreachable there.
   function asyncHostFn(lookup, encodeOk) {
     return (...args) => {
       const outPtr = args[args.length - 2];
       const outLen = args[args.length - 1];
-      if (asyncEx.asyncify_get_state() === ASYNCIFY_REWINDING) {
+      if (asyncReady && asyncEx.asyncify_get_state() === ASYNCIFY_REWINDING) {
         asyncEx.asyncify_stop_rewind();
         const d = pendingDelivery;
         pendingDelivery = null;
@@ -481,12 +521,36 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
         deliver(asyncEx, d.bytes, outPtr, outLen);
         return d.rc;
       }
-      pendingDelivery = Promise.resolve()
-        .then(() => lookup(args))
-        .then((v) => (v == null ? { rc: 0 } : { rc: 1, bytes: encodeOk(v) }))
-        .catch((e) => ({ rc: -1, bytes: encoder.encode(errMessage(e)) }));
-      asyncEx.asyncify_start_unwind(asyncData);
-      return 0; // ignored while unwinding
+      let v;
+      try {
+        v = lookup(args);
+      } catch (e) {
+        deliver(asyncEx, encoder.encode(errMessage(e)), outPtr, outLen);
+        return -1;
+      }
+      if (isThenable(v)) {
+        if (!asyncReady) {
+          // Degraded module (built without wasm-opt): it cannot suspend, so a
+          // genuinely-async result is undeliverable — fail this load clearly.
+          deliver(asyncEx, encoder.encode(ASYNCIFY_MISSING), outPtr, outLen);
+          return -1;
+        }
+        pendingDelivery = Promise.resolve(v)
+          .then((r) => (r == null ? { rc: 0 } : { rc: 1, bytes: encodeOk(r) }))
+          .catch((e) => ({ rc: -1, bytes: encoder.encode(errMessage(e)) }));
+        asyncEx.asyncify_start_unwind(asyncData);
+        return 0; // ignored while unwinding
+      }
+      if (v == null) return 0; // miss (canonicalize/load only — see above)
+      let bytes;
+      try {
+        bytes = encodeOk(v);
+      } catch (e) {
+        deliver(asyncEx, encoder.encode(errMessage(e)), outPtr, outLen);
+        return -1;
+      }
+      deliver(asyncEx, bytes, outPtr, outLen);
+      return 1;
     };
   }
 
@@ -508,11 +572,17 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
         const argBytes = args[2] ? new Uint8Array(asyncEx.memory.buffer, args[1], args[2]).slice() : new Uint8Array(0);
         const fn = asyncFunctions[args[0]];
         if (!fn) throw new Error(`sasso: custom function #${args[0]} is not registered`);
-        // Resolve sync or async; reject on a null return (functions must return).
-        return Promise.resolve(fn(deserializeArgs(argBytes))).then((v) => {
-          if (v == null) throw new Error("sasso: a custom function returned no value");
-          return v;
-        });
+        // Resolve sync or async. A null return is an error (functions must
+        // return a value) and must NOT map to the miss rc — throw instead.
+        const r = fn(deserializeArgs(argBytes));
+        if (isThenable(r)) {
+          return Promise.resolve(r).then((v) => {
+            if (v == null) throw new Error("sasso: a custom function returned no value");
+            return v;
+          });
+        }
+        if (r == null) throw new Error("sasso: a custom function returned no value");
+        return r;
       },
       (v) => serializeValue(v),
     ),

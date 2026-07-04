@@ -12,14 +12,17 @@
 //     importers — both `{ canonicalize, load }` Importers and `{ findFileUrl }`
 //     FileImporters.
 //
-// The internal resolver interface is sync and string-based:
-//   canonicalize(url, fromImport, containingHref|null) -> canonicalHref|null
-//   load(canonicalHref) -> { contents, syntax: 0|1|2, sourceMapUrl: string|null } | null
+// The internal resolver interface is string-based and MAYBE-ASYNC:
+//   canonicalize(url, fromImport, containingHref|null) -> canonicalHref|null (or a Promise of it)
+//   load(canonicalHref) -> { contents, syntax: 0|1|2, sourceMapUrl: string|null } | null (or a Promise)
 // `syntax`: 0 = SCSS, 1 = indented `.sass`, 2 = plain CSS.
 //
-// **Synchronous only.** The engine is sync, so importer callbacks cannot await;
-// a user importer that returns a Promise throws a clear error (even under
-// `compileStringAsync`). Truly-async importers are unsupported.
+// In sync mode (`compileString`/`compile`) a user importer that returns a
+// Promise throws a clear error — the sync engine cannot await. In async mode
+// results stay PLAIN VALUES whenever the user callback returned one and become
+// Promises only when it actually returned a thenable: the asyncify engine
+// delivers a plain value without suspending (`_loader.mjs` `asyncHostFn`), so
+// keeping sync resolutions synchronous is a performance contract, not style.
 
 import { existsSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -29,7 +32,7 @@ const SYNTAX_SCSS = 0;
 const SYNTAX_SASS = 1;
 const SYNTAX_CSS = 2;
 
-function isThenable(x) {
+export function isThenable(x) {
   return x != null && typeof x.then === "function";
 }
 
@@ -228,13 +231,16 @@ function toHref(urlOrString) {
   return urlOrString instanceof URL ? urlOrString.href : new URL(urlOrString).href;
 }
 
-// Settle a possibly-thenable user return into the chain interface. In `async`
-// mode the result is always a Promise (so async importers are awaited by the
-// async engine); in sync mode a Promise is a hard error (the sync engine can't
-// await it), and a plain value maps through immediately.
+// Settle a possibly-thenable user return into the chain interface. A plain
+// value maps through synchronously in BOTH modes — in async mode that lets the
+// asyncify engine deliver it without a suspension (the maybe-async contract);
+// only an actual thenable becomes a Promise. In sync mode a thenable is a hard
+// error (the sync engine can't await it).
 function settle(raw, map, async) {
-  if (async) return Promise.resolve(raw).then((v) => (v == null ? null : map(v)));
-  if (isThenable(raw)) throw new Error(ASYNC_UNSUPPORTED);
+  if (isThenable(raw)) {
+    if (!async) throw new Error(ASYNC_UNSUPPORTED);
+    return Promise.resolve(raw).then((v) => (v == null ? null : map(v)));
+  }
   return raw == null ? null : map(raw);
 }
 
@@ -277,8 +283,10 @@ function wrapFileImporter(imp, async) {
   return {
     canonicalize(url, fromImport, containingHref) {
       const raw = imp.findFileUrl(url, ctxFor(fromImport, containingHref));
-      if (async) return Promise.resolve(raw).then((r) => finish(r, fromImport));
-      if (isThenable(raw)) throw new Error(ASYNC_UNSUPPORTED);
+      if (isThenable(raw)) {
+        if (!async) throw new Error(ASYNC_UNSUPPORTED);
+        return Promise.resolve(raw).then((r) => finish(r, fromImport));
+      }
       return finish(raw, fromImport);
     },
     load(canonicalHref) {
