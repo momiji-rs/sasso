@@ -11,7 +11,14 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
-### Added (npm package — `sasso/native`, ships with the next npm release)
+## [0.7.0] - 2026-07-04
+
+_Crate release `v0.7.0`; ships on npm as `sasso@0.10.0` (wasm + native — same
+core). The dart-sass byte-parity campaign: every project in the new
+real-world corpus ([`bench/real-world/real_world.md`](bench/real-world/real_world.md))
+now compiles, and most match dart-sass 1.101 byte-for-byte._
+
+### Added (npm package — `sasso/native`; released as `sasso@0.9.0` on npm)
 
 - **`sasso/native` subpath: the native addon as a first-class npm entry.**
   Prebuilt binaries publish as exact-version-pinned `optionalDependencies`
@@ -64,6 +71,39 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **Real-world corpora now compile — four previously failed.** Callable
+  closures capture the defining file's `@use` namespace tables (dart
+  `Environment.closure()`), fixing "There is no module with the namespace
+  X" for functions/mixins reached via `@import` or multi-hop `@forward`
+  (uswds's `units()`, quasar's `str-fe()`). CSS escapes are literal
+  identifier text in selector scans (`.govuk-\!-font-size-19`,
+  govuk-frontend). In the indented syntax, `as *` terminates a
+  `@use`/`@forward` prelude instead of reading as a pending multiplication
+  (vuetify), and a trailing-comma selector line with a pseudo-glued colon
+  (`&:active,` / `i[type="s"]::-webkit-x,`) continues the list instead of
+  being **silently dropped** (quasar — a correctness bug, not formatting).
+- **Byte-parity with dart-sass across the serialization surface.** Loud
+  comments dedent at serialize time (interpolated banners included) and an
+  indented `/**` opener stays glued; comments registered before a module's
+  first load re-emit at every dependency edge (bulma's `/* Bulma Form */`);
+  `@import`ed files carry their own file identity (no cross-file trailing
+  -comment gluing); invisible `@extend`-only rules leave no blank-line group
+  end; selector lists keep their authored line structure inside nested
+  at-rule wraps and plain-CSS imports (which also unquote identifier
+  attribute values like dart's parser); multi-`&` parent expansion
+  interleaves column-major (mastodon's adjacent-state selectors); a `&`
+  nested in pseudo parens substitutes inside multi-`&` parts
+  (`:not(&--mini-animate)`).
+- **Chained `@extend` products keep dart's registration order.** Each
+  `@extend`'s extender list is pre-extended by the store accumulated so far
+  (dart's `addSelector`), so `.navbar > .container, … .container-xxl` comes
+  out in forward order instead of reversed.
+- **Errors inside loaded files are attributed to that file.** The snippet
+  renders from the erring file and the trace stacks one frame per loader
+  (`_mod.scss 1:13  @use` / `main.scss 1:1  root stylesheet`), matching
+  dart for `@use`, `@forward`, and `@import` chains — parse errors
+  included. Previously the root file's name and snippet were shown with the
+  inner file's line numbers.
 - **`@media` nested inside an unknown at-rule now compiles.** dart's
   `_inUnknownAtRule` context legalizes bare declarations without an enclosing
   style rule, so the canonical Tailwind v4 idiom
@@ -464,7 +504,8 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/momiji-rs/sasso/compare/v0.6.3...v0.7.0
 [0.3.0]: https://github.com/momiji-rs/sasso/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/momiji-rs/sasso/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/momiji-rs/sasso/releases/tag/v0.1.0
