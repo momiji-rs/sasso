@@ -1,9 +1,10 @@
 # Async-path performance: architecture plan & measurement harness
 
-**Status:** plan-of-record · **Date:** 2026-07-03 · **Baseline:** `92cd13b` + harness
+**Status:** F1/F2/F3 LANDED (see §10) · **Date:** 2026-07-03 · **Baseline:** `92cd13b` + harness
 **Prerequisite reading:** `docs/HANDOFF_ASYNC_IMPORTER_PERF.md` (the evidence: E1–E4, fix
 ranking F1–F4). This doc turns that handoff into concrete designs plus a reproducible
 harness (`bench/asyncify/`) whose metrics double as each fix's acceptance criteria.
+Landed as `d48296d` (F2), `922b2d2` (F3), `34e2a4e` (F1); measured outcomes in §10.
 
 ## 1. Where the time actually goes (recap, one paragraph)
 
@@ -257,3 +258,42 @@ because its async APIs run the `-Oz` module. Acceptance: speed-async → speed-s
 small asyncify tax. The concurrency-8 row is the realistic bundler cold-build shape for
 F1 (CPU-bound corpus, so post-F1 the factor drops toward the overlap-bound, not 1.0 —
 the programmed-delay `concurrent` scenario is the clean F1 verdict).
+
+## 10. Landed results (2026-07-03, idle 16-core x86 Linux, interleaved ABBA + sign test)
+
+All three fixes landed in rising-risk order, each verified against the immediately
+preceding commit with `ab-compare.mjs run` (before-impl = HEAD loader + identical
+binaries, so each A/B isolates exactly one change):
+
+| Fix | Canonical metric | Before → After | Verdict |
+|---|---|---|---|
+| **F2** `d48296d` | speed-async corpus median (steady state) | 23.6 → 16.9 ms (−29%) | 6/6 pairs, p=0.031 |
+| **F2** | pure-compute (zero-import large.scss, `--no-liftoff`) | 45.5 → 23.0 ms (−50%, 2.0×) | 6/6 pairs |
+| **F3** `922b2d2` | suspension async-syncimp K=50 | −9.6% | 6/6 pairs, p=0.031 |
+| **F3** | K=200 steady state, vs sync-module 1.77 ms | 2.74 → 2.37 ms; residual gap ≡ instrumentation tax ⇒ **zero suspensions** on sync chains | 3/3 rounds |
+| **F1** `34e2a4e` | concurrent N=8, delay=2 ms, K=12 makespan | 500 → 122 ms (−75.6%) | 6/6 pairs, p=0.031 |
+| **F1** | full sweep serial-× at delay=2 (N=2/4/8) | 1.95/3.98/7.89 → **1.20/1.05/2.28** | N=8 hits the cap-4 floor (two waves = 2.0) |
+
+Honest residuals:
+
+- **CPU-bound fan-out still serializes** (delay=0 rows stay ≈N; post-F3 a loadPaths
+  corpus compile never yields, so corpus@c8 stays ~6×). One JS thread cannot
+  parallelize engine CPU — the pool buys overlap with *importer latency*, which is the
+  real bundler cold-build shape. CPU parallelism is F4's (native addon) territory.
+- **v8 tiering discovery (measure this way or get lied to):** short-lived bench
+  processes spend most of their time in liftoff-compiled wasm, where `-O3` vs `-Oz`
+  module differences *measure at parity* and early-run timings are bimodal. Steady
+  state (`node --no-liftoff`, or any long-lived bundler/watch process) is the
+  representative regime — F2's 2× only exists there. The suspension/concurrent
+  scenarios are delay- or count-dominated and survive tiering; absolute engine medians
+  from short default-tiering processes do not.
+- The remaining async-vs-sync gap on sync chains is the asyncify instrumentation tax
+  on engine code (~+30-50%), not suspensions. Shrinking it means asyncify pass tuning
+  (e.g. `asyncify-only-list`) or F4 — both unscheduled.
+
+Test coverage added with the fixes (CI-gated via `wasm/test.mjs`, both variants):
+sync-returning/sync-throwing importers on the async API, mixed sync/async chains,
+sync FileImporter on async, custom-function fast path + null-is-error, async logger
+routing, 4-way concurrent isolation (importers/loggers/functions/loadedUrls), mixed
+outcomes under concurrency, pool overlap (deadlocked under the old lock), and
+`asyncInstances: 1` queue-and-drain semantics.

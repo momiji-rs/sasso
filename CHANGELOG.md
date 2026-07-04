@@ -11,6 +11,32 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Changed (npm package — async path performance)
+
+- **Concurrent `compileStringAsync`/`compileAsync` calls no longer serialize.**
+  The single asyncify-instance lock is replaced by a lazily-grown pool of
+  asyncify engines (default cap: `min(4, cpu cores)`, tunable via the new
+  `configure({ asyncInstances })`). While one compile awaits an asynchronous
+  importer, other compiles run on other engines — a bundler fanning out N
+  sass entries no longer queues them end-to-end (measured: N=8 fan-out with
+  2 ms importer latency, makespan −75.6%). A process that never overlaps
+  async compiles still pays for exactly one instance; each additional engine
+  reserves its own wasm memory (incl. the arena) plus a 1 MiB asyncify stack.
+- **Synchronously-resolving importers and custom functions no longer pay the
+  asyncify suspension on the async APIs.** Results that settle synchronously
+  (plain return values — including the built-in `loadPaths` filesystem chain
+  and sass-loader's cache-hit resolutions) are delivered without an
+  unwind/rewind cycle. A `loadPaths`-only `compileStringAsync` now suspends
+  zero times. Genuinely-async importers behave exactly as before.
+- **`sasso/speed`'s async APIs now run a speed-optimized (`-O3`) asyncify
+  module** (`sasso.speed.async.wasm`, ~3.2 MB / 1.0 MB gzip) instead of
+  sharing the size-optimized one — ~2× engine throughput at v8 steady state
+  (long-lived processes; one-shot CLI-style runs are dominated by v8 tiering
+  and see little change). The default `sasso` entry is unchanged.
+- Degraded async modules (built without `wasm-opt`) previously crashed on the
+  first importer callback; they now work for synchronously-resolving chains
+  and reject genuinely-async importers with a clear error.
+
 ### Fixed
 
 - **Keyframe selector lists now join on one line, matching dart-sass.** A
