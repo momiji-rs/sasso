@@ -29,7 +29,10 @@
 // `loadPaths`/relative loads) and record `loadedUrls`.
 
 import { readFileSync, realpathSync } from "node:fs";
-import { availableParallelism } from "node:os";
+// Default import, NOT a named one: `availableParallelism` only exists on
+// Node >= 18.14, and a missing named export fails ESM *linking* — the whole
+// package (sync APIs included) would throw at import time on older Nodes.
+import os from "node:os";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import {
   isThenable,
@@ -504,7 +507,8 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
 
   function defaultMaxEngines() {
     try {
-      return Math.max(1, Math.min(4, availableParallelism()));
+      const n = typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length;
+      return Math.max(1, Math.min(4, n || 1));
     } catch {
       return 2; // non-Node host without os support
     }
@@ -555,6 +559,9 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
           if (!engine.ready) {
             // Degraded module (built without wasm-opt): it cannot suspend, so a
             // genuinely-async result is undeliverable — fail this load clearly.
+            // Adopt the abandoned thenable's rejection so it can't surface
+            // later as an unhandledRejection.
+            Promise.resolve(v).catch(() => {});
             deliver(engine.ex, encoder.encode(ASYNCIFY_MISSING), outPtr, outLen);
             return -1;
           }
@@ -722,19 +729,29 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
 
   // ------------------------- configure -------------------------
   function configure(options = {}) {
-    if (typeof options.arenaMiB === "number") {
+    if (Number.isFinite(options.arenaMiB)) {
       pendingArenaBytes = Math.max(0, Math.floor(options.arenaMiB * 1024 * 1024));
       // Apply to whichever instances already exist (and stash for the rest).
       if (syncEx) syncEx.sasso_set_arena_bytes(pendingArenaBytes);
       for (const engine of enginePool) engine.ex.sasso_set_arena_bytes(pendingArenaBytes);
       if (!syncEx && enginePool.length === 0) syncInstance().sasso_set_arena_bytes(pendingArenaBytes);
     }
-    if (typeof options.asyncInstances === "number") {
+    // Number.isFinite, not typeof: NaN passes typeof and would freeze the
+    // pool (`length < NaN` never grows it) — every async compile then queues
+    // forever. Realistic trigger: Number(unset env var).
+    if (Number.isFinite(options.asyncInstances)) {
       maxAsyncEngines = Math.max(1, Math.floor(options.asyncInstances));
       // Shrink toward a lowered cap now (idle engines) and as compiles finish
       // (busy ones — see releaseEngine).
       for (let i = enginePool.length - 1; i >= 0 && enginePool.length > maxAsyncEngines; i--) {
         if (!enginePool[i].busy) enginePool.splice(i, 1);
+      }
+      // A raised cap must serve the queue: waiters were parked because growth
+      // was capped, and nothing else ever grows the pool on their behalf.
+      while (engineWaiters.length > 0 && enginePool.length < maxAsyncEngines) {
+        const engine = makeEngine();
+        engine.busy = true;
+        engineWaiters.shift()(engine);
       }
     }
   }

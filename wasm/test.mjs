@@ -333,6 +333,9 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   // independent compile B must run to completion on another engine. Under the
   // old asyncLock this deadlocks (B queued behind A forever), so this is the
   // pool's defining semantic test — keep it FIRST awaiting B, not the gate.
+  // Pin the cap >= 2 explicitly: the default is min(4, cores), which is 1 on
+  // a cpu-limited CI container — and at cap 1 this test would deadlock.
+  mod.configure({ asyncInstances: 2 });
   let releaseGate;
   const gate = new Promise((r) => { releaseGate = r; });
   const blocked = mod.compileStringAsync(`@use "g";`, {
@@ -378,6 +381,23 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   assert.ok(rfn.css.includes("x: 1024"), `${name}: sync custom function`);
 
   console.log(`ok: ${name} build — modern + Compiler API + sync & async importers + custom fns (Phase 1+2+2.5+4)`);
+}
+
+// === Packaging guards: what `npm pack` ships must match what the code loads ===
+// A .wasm missing from the files array ships a production-broken entry while
+// every repo-checkout test stays green (the binaries exist locally); likewise
+// the speed entry silently falling back to the size async module is invisible
+// to behavior tests. Assert the wiring textually.
+{
+  const pkg = JSON.parse(readFileSync(new URL("./npm/package.json", import.meta.url), "utf8"));
+  const shipped = new Set(pkg.files);
+  for (const w of ["sasso.wasm", "sasso.speed.wasm", "sasso.async.wasm", "sasso.speed.async.wasm"]) {
+    assert.ok(shipped.has(w), `package.json files array ships ${w}`);
+  }
+  const speedEntry = readFileSync(new URL("./npm/sasso.speed.mjs", import.meta.url), "utf8");
+  assert.ok(speedEntry.includes('"./sasso.speed.wasm"'), "speed entry loads the -O3 sync module");
+  assert.ok(speedEntry.includes('"./sasso.speed.async.wasm"'), "speed entry loads the -O3 async module (F2)");
+  console.log("ok: packaging — files array ships all four wasm binaries; speed entry wired to -O3 modules");
 }
 
 // === Phase 3: CLI (bin) smoke test ===
