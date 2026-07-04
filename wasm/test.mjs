@@ -3,8 +3,11 @@
 // the Phase-1 surface (compileString / compile(path) / async / source maps /
 // loadedUrls / info / Exception) and the Phase-2 importer surface (loadPaths,
 // relative imports, partial/index/import-only resolution, user Importer +
-// FileImporter, loadedUrls, importer errors, async rejection). Run after
-// build.sh: `node wasm/test.mjs`.
+// FileImporter, loadedUrls, importer errors, async rejection), plus the
+// async-path correctness guards (sync importers/throws on the async API,
+// async loggers, concurrent isolation, mixed outcomes) that the F1/F3
+// asyncify refactors must preserve (docs/HANDOFF_ASYNC_IMPORTER_PERF.md).
+// Run after build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
 import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -191,6 +194,102 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   // after an error the asyncify stack is clean — a subsequent async compile works
   const recover = await mod.compileStringAsync(`@use "remote" as r;\n.z { color: r.$c; }\n`, { importers: [asyncImporter] });
   assert.ok(recover.css.includes("rebeccapurple"), `${name}: async engine recovers after an importer error`);
+
+  // --- Async-path correctness guards for the asyncify refactors ---
+  // Pins the behavior that F1 (asyncLock -> instance pool) and F3 (sync
+  // fast-path in asyncHostFn) must preserve — see
+  // docs/HANDOFF_ASYNC_IMPORTER_PERF.md. Today the lock serializes all async
+  // compiles so isolation holds trivially; once a pool lands these become the
+  // real regression guards.
+
+  // (a) F3: a sync-RETURNING importer on the ASYNC API (plain values, no
+  // Promises) must produce exactly the sync API's output — this is the path
+  // the sync fast-path rewrites.
+  const syncRetImporter = {
+    canonicalize(url) { return url === "syncret" ? new URL("custom:syncret") : null; },
+    load(u) { return u.href === "custom:syncret" ? { contents: "$c: teal;", syntax: "scss" } : null; },
+  };
+  const syncRetSrc = `@use "syncret" as s;\n.a { color: s.$c; }\n`;
+  const aRet = await mod.compileStringAsync(syncRetSrc, { importers: [syncRetImporter] });
+  assert.ok(aRet.css.includes("teal"), `${name}: sync-returning importer works on the async API`);
+  assert.equal(aRet.css, mod.compileString(syncRetSrc, { importers: [syncRetImporter] }).css, `${name}: async CSS with a sync importer equals the sync API's CSS`);
+
+  // (b) F3: a SYNC throw in canonicalize/load on the async API must reject
+  // with an Exception carrying the thrown text (today the throw is absorbed
+  // into pendingDelivery; the fast-path's synchronous branch must keep the
+  // rc=-1 delivery identical).
+  const syncThrowCanon = { canonicalize() { throw new Error("sync-canon-throw"); }, load: () => null };
+  await assert.rejects(
+    () => mod.compileStringAsync(`@use "q";`, { importers: [syncThrowCanon] }),
+    (e) => e instanceof mod.Exception && e.message.includes("sync-canon-throw"),
+    `${name}: sync-throwing canonicalize rejects the async compile with the message`,
+  );
+  const syncThrowLoad = { canonicalize: () => new URL("custom:sthrow"), load() { throw new Error("sync-load-throw"); } };
+  await assert.rejects(
+    () => mod.compileStringAsync(`@use "sthrow";`, { importers: [syncThrowLoad] }),
+    (e) => e instanceof mod.Exception && e.message.includes("sync-load-throw"),
+    `${name}: sync-throwing load rejects the async compile with the message`,
+  );
+
+  // (c) logger on the async path: @warn/@debug during compileStringAsync
+  // route through asyncHost.host_warn to the user logger (dart shape).
+  const aLogged = [];
+  const alr = await mod.compileStringAsync('@warn "awmsg"; @debug 40 + 2; .a { b: c; }', {
+    logger: {
+      warn: (m, o) => aLogged.push(["warn", m, o.deprecation]),
+      debug: (m) => aLogged.push(["debug", m]),
+    },
+  });
+  assert.ok(alr.css.includes(".a"), `${name}: async logger compile still emits CSS`);
+  assert.deepEqual(aLogged, [["warn", "awmsg", false], ["debug", "42"]], `${name}: async @warn + @debug routed to the logger`);
+
+  // (d) concurrent ISOLATION (pool regression guard): 4 concurrent compiles,
+  // each with a DISTINCT importer (same "isomod" specifier, per-compile
+  // canonical + content), a DISTINCT logger, and a DISTINCT async custom
+  // function — nothing may leak across compiles, including loadedUrls.
+  const isoLogs = [[], [], [], []];
+  const isoCompile = (i) =>
+    mod.compileStringAsync(`@use "isomod";\n@warn "w${i}";\n.o-${i} { t: tag(); }\n`, {
+      importers: [{
+        async canonicalize(url) { await delay(1); return url === "isomod" ? new URL(`custom:iso-${i}`) : null; },
+        async load(u) { await delay(1); return u.href === `custom:iso-${i}` ? { contents: `.uniq-${i} { v: ${i}; }`, syntax: "scss" } : null; },
+      }],
+      logger: { warn: (m) => isoLogs[i].push(m) },
+      functions: { "tag()": async () => { await delay(1); return new mod.SassString(`t${i}`, { quotes: false }); } },
+    });
+  const iso = await Promise.all([0, 1, 2, 3].map(isoCompile));
+  for (let i = 0; i < 4; i++) {
+    assert.ok(iso[i].css.includes(`.uniq-${i}`) && iso[i].css.includes(`t${i}`), `${name}: concurrent compile #${i} got its own importer + custom function`);
+    for (let j = 0; j < 4; j++) {
+      if (j === i) continue;
+      assert.ok(!iso[i].css.includes(`.uniq-${j}`) && !iso[i].css.includes(`t${j}`), `${name}: concurrent compile #${i} has no leakage from #${j}`);
+    }
+    assert.deepEqual(isoLogs[i], [`w${i}`], `${name}: concurrent logger #${i} captured exactly its own warn`);
+    assert.deepEqual(iso[i].loadedUrls.map((u) => u.href), [`custom:iso-${i}`], `${name}: loadedUrls #${i} isolated to its own module`);
+  }
+
+  // (e) MIXED outcomes under concurrency: the middle compile's load()
+  // rejects; the lock (or a future pool slot) must be released on error so
+  // the flanking compiles still fulfill with the right CSS.
+  const mixOk = (tag) => ({
+    canonicalize: async (url) => (url === "mix" ? new URL(`custom:mix-${tag}`) : null),
+    load: async () => { await delay(2); return { contents: `.mix-${tag} { m: 1; }`, syntax: "scss" }; },
+  });
+  const mixBad = {
+    canonicalize: async (url) => (url === "mix" ? new URL("custom:mix-bad") : null),
+    load: () => Promise.reject(new Error("mid-load-boom")),
+  };
+  const settled = await Promise.allSettled([
+    mod.compileStringAsync(`@use "mix";`, { importers: [mixOk("a")] }),
+    mod.compileStringAsync(`@use "mix";`, { importers: [mixBad] }),
+    mod.compileStringAsync(`@use "mix";`, { importers: [mixOk("b")] }),
+  ]);
+  assert.equal(settled[0].status, "fulfilled", `${name}: mixed-outcome compile #0 fulfilled`);
+  assert.ok(settled[0].value.css.includes(".mix-a"), `${name}: mixed-outcome compile #0 CSS correct`);
+  assert.equal(settled[1].status, "rejected", `${name}: mixed-outcome compile #1 rejected`);
+  assert.ok(settled[1].reason instanceof mod.Exception && settled[1].reason.message.includes("mid-load-boom"), `${name}: mixed-outcome rejection carries the load error`);
+  assert.equal(settled[2].status, "fulfilled", `${name}: mixed-outcome compile #2 fulfilled`);
+  assert.ok(settled[2].value.css.includes(".mix-b"), `${name}: mixed-outcome compile #2 CSS correct`);
 
   // === Phase 4: custom functions (sync path, both builds) ===
   const rfn = mod.compileString(`.a { x: pow(2, 10); }`, {

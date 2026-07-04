@@ -160,3 +160,17 @@ don't-touch list, so only if the bench justifies it.
 Each step = atomic commit + a new `tests/parity.rs` case byte-verified vs
 dart-sass + `spec/check_baseline.py` (≥13895, no regression) + clippy/fmt + a
 `bench/` before/after for any T2 item. No `Co-Authored-By` trailer.
+
+---
+
+## Adjacent track: wasm async-path performance (not core-crate work)
+
+The npm package's asyncify path has its own measured backlog — F1 (asyncLock →
+instance pool), F2 (speed `-O3` async wasm variant), F3 (sync-delivery fast
+path in `asyncHostFn`), F4 (native Node addon, long-term) — with designs,
+acceptance criteria, and a reproducible harness in
+[`ASYNC_PERF_ARCHITECTURE.md`](./ASYNC_PERF_ARCHITECTURE.md) (evidence:
+[`HANDOFF_ASYNC_IMPORTER_PERF.md`](./HANDOFF_ASYNC_IMPORTER_PERF.md); harness:
+`bench/asyncify/`). Same discipline as this doc: every fix lands with a
+before/after from `bench/asyncify/ab-compare.mjs` and the async guards in
+`wasm/test.mjs` green. None of it touches the core crate's hot path.
