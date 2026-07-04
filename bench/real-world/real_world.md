@@ -13,7 +13,7 @@ Process-startup baseline (empty input): dart-sass 147 ms, sasso 2 ms. Full-invoc
 
 | project | stars | pin | sass sources | dart-sass | sasso | speedup | output parity |
 |---|---|---|---|---|---|---|---|
-| [bootstrap](https://github.com/twbs/bootstrap) | 174,424 | `d35950e` | 99 files / 344 KB | 618 ms | 80 ms | **7.7×** | selector-order only (1) |
+| [bootstrap](https://github.com/twbs/bootstrap) | 174,424 | `d35950e` | 99 files / 344 KB | 618 ms | 80 ms | **7.7×** | identical (canonical) |
 | [bulma](https://github.com/jgthms/bulma) | 50,072 | `741da22` | 182 files / 1078 KB | 1353 ms | 233 ms | **5.8×** | comments/selector-order only |
 | [govuk-frontend](https://github.com/alphagov/govuk-frontend) | 1,420 | `cfd2224` | 304 files / 276 KB | 421 ms | 42 ms | **10.1×** | selector-order only (6) |
 | [uswds](https://github.com/uswds/uswds) | 7,123 | `95717ff` | 605 files / 800 KB | 3744 ms | 534 ms | **7.0×** | comments/selector-order only |

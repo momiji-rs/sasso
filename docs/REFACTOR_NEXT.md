@@ -208,21 +208,29 @@ Not a bug after all: carbon's `@forward 'scss/config'` resolves fine; carbon
 fails identically in dart-sass on its publish-time codegen output
 (`packages/layout/scss/generated/*`) and stays excluded.
 
-Remaining, in priority order:
+Fixed since: single-module chained-`@extend` order (dart addSelector
+pre-extension ungated — bootstrap navbar, commit `a445ede`); error
+attribution across `@use`/`@forward`/`@import` chains incl. loader frames
+(commit `0c5e6d0`); `@media` in unknown at-rules (Tailwind v4 `@utility`,
+commit `5ad4889`).
 
-1. **Chained-`@extend` product order** — when an extender is itself extended
-   (`.c-sm { @extend .cf; }` where `.cf` extends `%p`), dart appends the
-   derived products in registration order; sasso reverses them. Blocks
-   byte-identical for bootstrap (navbar containers, 1 rule) and parts of
-   bulma/uswds/govuk (all currently "selector-order only" — semantically
-   equal). Repro: `bench` scratch e25; dart's algorithm lives in
-   extension_store.dart (registerExtension → _extendExistingExtensions).
-2. **Selector line-break flag propagation, two cases** — (a) multi-`&`
+Remaining, in priority order (all whitespace/order-only — every corpus
+project is at least canonical-identical):
+
+1. **Cross-module `@extend` application order** — govuk
+   (`.govuk-body-l` vs `.govuk-body-lead` product order, 6 lines), bulma and
+   uswds selector runs. The fold applies downstream origins first; dart
+   sequences per-module stores upstream-first over each rule with the rule's
+   CURRENT selector visible to later stores. Needs the per-module story, not
+   the batch order alone (a naive single-pass broke
+   directives/use/extend/{diamond,extended} + extend-loop).
+2. **Blank line after a resurrected placeholder rule** — bootstrap's last
+   byte diff: `%container-flex-properties` (visible only via extend) inside
+   `.navbar` leaves a blank-line group seam before `.navbar-brand`; dart
+   decides separators at serialize time on the post-extend tree, sasso at
+   eval time.
+3. **Selector line-break flag propagation, two cases** — (a) multi-`&`
    cross-product products: dart line-breaks per combo where sasso joins
    (mastodon, "identical (canonical)"); (b) newlines INSIDE pseudo args
    (`:is(:-webkit-autofill,\n[type=color],…)`) survive dart's
    re-serialization (quasar). Both whitespace-only.
-3. **Load/parse error attribution across module chains** — an error inside a
-   `@use`d module renders the ROOT file's name/snippet with the inner file's
-   line numbers (this misled the original triage twice). The `@import` path
-   was fixed; `@use`/`@forward` parse errors still misattribute.
