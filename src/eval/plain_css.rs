@@ -33,7 +33,7 @@ impl<'a> Evaluator<'a> {
             let mut preserved: Vec<OutItem> = Vec::new();
             for stmt in stmts {
                 if let Stmt::Rule(r) = stmt {
-                    let own = self.css_selectors(&r.selector, true)?;
+                    let (own, _) = self.css_selectors(&r.selector, true)?;
                     if own.iter().any(|s| part_has_parent_ref(s)) {
                         let inner = self.css_body(&r.body)?;
                         if !inner.is_empty() {
@@ -62,12 +62,16 @@ impl<'a> Evaluator<'a> {
                     // with `preserveParentSelectors`). The sheet's own top level
                     // always rejects leading combinators — also when merged
                     // under a Sass parent (dart checks in the merge branch).
-                    let own = self.css_selectors(&r.selector, true)?;
+                    let (own, own_lbs) = self.css_selectors(&r.selector, true)?;
                     // A `&`-bearing rule was already emitted in the leading
                     // parent shell above.
                     if !parents.is_empty() && own.iter().any(|s| part_has_parent_ref(s)) {
                         continue;
                     }
+                    // Line structure carries through only for the sheet's own
+                    // top level; the descendant join under a Sass parent
+                    // re-shapes the list.
+                    let linebreaks = if parents.is_empty() { own_lbs } else { Vec::new() };
                     let selectors: Vec<String> = if parents.is_empty() {
                         own
                     } else {
@@ -80,10 +84,11 @@ impl<'a> Evaluator<'a> {
                     // A childless rule is invisible (dart-sass skips it when
                     // serializing) — e.g. when its whole body bubbled out.
                     if !items.is_empty() {
-                        sink.push_at_rule(OutNode::plain_rule(
-                            selectors,
+                        sink.push_at_rule(OutNode::Rule {
+                            selectors: RuleSelectors::Raw(selectors),
+                            linebreaks,
                             items,
-                            self.stamp(SrcLines {
+                            lines: self.stamp(SrcLines {
                                 file: 0,
                                 start: r.brace_line,
                                 end: r.end_line,
@@ -92,7 +97,8 @@ impl<'a> Evaluator<'a> {
                                 map_file: 0,
                                 map_line: 0,
                             }),
-                        ));
+                            extend_base: usize::MAX,
+                        });
                     }
                     for node in bubbled {
                         sink.push_at_rule(node);
@@ -211,13 +217,14 @@ impl<'a> Evaluator<'a> {
         for stmt in stmts {
             match stmt {
                 Stmt::Rule(r) => {
-                    let selectors = self.css_selectors(&r.selector, false)?;
+                    let (selectors, linebreaks) = self.css_selectors(&r.selector, false)?;
                     let (items, bubbled) = self.css_rule_children(&r.body, &selectors)?;
                     if !items.is_empty() {
-                        out.push(OutNode::plain_rule(
-                            selectors,
+                        out.push(OutNode::Rule {
+                            selectors: RuleSelectors::Raw(selectors),
+                            linebreaks,
                             items,
-                            self.stamp(SrcLines {
+                            lines: self.stamp(SrcLines {
                                 file: 0,
                                 start: r.brace_line,
                                 end: r.end_line,
@@ -226,7 +233,8 @@ impl<'a> Evaluator<'a> {
                                 map_file: 0,
                                 map_line: 0,
                             }),
-                        ));
+                            extend_base: usize::MAX,
+                        });
                     }
                     out.extend(bubbled);
                 }
@@ -412,8 +420,15 @@ impl<'a> Evaluator<'a> {
 
     /// Resolve a plain-CSS selector to its comma-separated parts, keeping `&`
     /// and combinators verbatim (no parent resolution), and rejecting the
-    /// Sass-only selector forms that plain CSS forbids.
-    fn css_selectors(&mut self, sel: &[crate::ast::TplPiece], top_level: bool) -> Result<Vec<String>, Error> {
+    /// Sass-only selector forms that plain CSS forbids. The parts come back
+    /// re-serialized the way dart's parser emits them (identifier attribute
+    /// values lose their quotes, whitespace collapses), along with the
+    /// source's per-complex line-break flags (`a,\nb` keeps its lines).
+    fn css_selectors(
+        &mut self,
+        sel: &[crate::ast::TplPiece],
+        top_level: bool,
+    ) -> Result<(Vec<String>, Vec<bool>), Error> {
         let s = self.eval_template(sel)?;
         let parts: Vec<String> = split_commas(&s)
             .into_iter()
@@ -423,7 +438,13 @@ impl<'a> Evaluator<'a> {
         for p in &parts {
             validate_plain_css_selector(p, top_level)?;
         }
-        Ok(parts)
+        let normalized: Vec<String> = parts.iter().map(|p| normalize_selector(p)).collect();
+        let linebreaks = if s.contains('\n') {
+            comma_linebreaks(&s, false)
+        } else {
+            Vec::new()
+        };
+        Ok((normalized, linebreaks))
     }
 
     /// Build a plain-CSS rule body below the first nesting level: declarations
@@ -482,7 +503,7 @@ impl<'a> Evaluator<'a> {
                 });
             }
             Stmt::Rule(r) => {
-                let selectors = self.css_selectors(&r.selector, false)?;
+                let (selectors, _) = self.css_selectors(&r.selector, false)?;
                 let inner = self.css_body(&r.body)?;
                 // An (recursively) empty nested rule is invisible (dart-sass
                 // skips childless rules when serializing).

@@ -3069,6 +3069,36 @@ fn extend_self_referential_pseudo_converges() {
 }
 
 #[test]
+fn plain_css_import_reserializes_selectors() {
+    use std::fs;
+
+    // dart re-serializes a plain-CSS import through its parser: identifier
+    // attribute values lose their quotes and the source's selector line
+    // structure is preserved (primer's @primer/primitives theme files).
+    let dir = std::env::temp_dir().join(format!(
+        "sasso-css-import-serialize-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(
+        dir.join("theme.css"),
+        "[data-q=\"light\"],\n[data-r=\"light\"] { x: y; }\n@media (a: b) {\n  [data-s=\"1px\"],\n  .m { x: y; }\n}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile("@import \"theme\";\n", &opts).expect("css import compiles"),
+        "[data-q=light],\n[data-r=light] {\n  x: y;\n}\n\n@media (a: b) {\n  [data-s=\"1px\"],\n  .m {\n    x: y;\n  }\n}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn nested_at_rule_wrap_keeps_selector_linebreaks() {
     // dart preserves the selector list's source line structure in the copy
     // of the rule hoisted into a nested @media (just-the-docs/minimal-
