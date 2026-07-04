@@ -14,6 +14,13 @@ and **grass** (Rust, in-process via `grass_runner`).
 Latest results: [`three_way.md`](./three_way.md) (sasso vs dart-sass vs grass).
 The older two-way report is [`dart_vs_grass.md`](./dart_vs_grass.md).
 
+There is also a **real-world corpus** harness in [`real-world/`](./real-world/):
+it sparse-clones pinned, vetted, currently-active OSS Sass codebases
+(bootstrap, bulma, mastodon, …), verifies output parity against dart-sass, and
+benchmarks full CLI invocations with hyperfine. Report:
+[`real-world/real_world.md`](./real-world/real_world.md); regenerate with
+`node real-world/run.mjs all`.
+
 ## Layout
 
 ```

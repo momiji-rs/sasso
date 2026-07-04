@@ -1,0 +1,9 @@
+{
+  "name": "sasso-bench-real-world",
+  "private": true,
+  "description": "Pinned dart-sass for the real-world corpus benchmark",
+  "dependencies": {
+    "@primer/primitives": "^11.9.0",
+    "sass": "^1.89.0"
+  }
+}

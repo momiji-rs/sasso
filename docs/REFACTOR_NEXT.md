@@ -174,3 +174,55 @@ acceptance criteria, and a reproducible harness in
 `bench/asyncify/`). Same discipline as this doc: every fix lands with a
 before/after from `bench/asyncify/ab-compare.mjs` and the async guards in
 `wasm/test.mjs` green. None of it touches the core crate's hot path.
+
+---
+
+## Adjacent track: real-world corpus compat (`bench/real-world/`, updated 2026-07-04)
+
+The real-world harness (`node bench/real-world/run.mjs all`) compiles 10
+vetted, currently-active, well-known OSS Sass codebases with dart-sass 1.101
+and sasso. Status after the 2026-07-04 fix campaign: **all 10 compile**, and
+the parity column reports byte-identical or canonical-identical for most
+(report: `bench/real-world/real_world.md`).
+
+Landed (each an atomic commit with parity tests + spec-baseline guard):
+
+- Loud-comment dedent at serialize time (interpolated banners) — bootstrap.
+- `@import`ed files get their own diagnostics/stamp context (also fixes
+  error attribution inside imported files) — minimal-mistakes.
+- Invisible (`@extend`-only) rules leave no blank-line group end — bootstrap.
+- dart's `_preModuleComments` per-edge re-emission, including the
+  inherited-map quirk — bulma.
+- Selector linebreaks survive the nested-at-rule wrap — just-the-docs.
+- Plain-CSS imports re-serialize selectors through the parser — primer.
+- Multi-`&` parent expansion flattens column-major — mastodon.
+- `@use` namespace tables captured in callable closures — uswds + quasar.
+- CSS escapes are literal in template scans (`.govuk-\!-…`) — govuk-frontend.
+- `as *` terminates a `@use`/`@forward` prelude (indented) — vuetify.
+- Indented loud-comment first line stays verbatim (`/**`) — quasar.
+- Indented selector comma-continuation vs pseudo colons (this one DROPPED
+  selectors — correctness) — quasar.
+- Pseudo-nested `&` substitutes inside multi-`&` cartesian parts — quasar.
+
+Not a bug after all: carbon's `@forward 'scss/config'` resolves fine; carbon
+fails identically in dart-sass on its publish-time codegen output
+(`packages/layout/scss/generated/*`) and stays excluded.
+
+Remaining, in priority order:
+
+1. **Chained-`@extend` product order** — when an extender is itself extended
+   (`.c-sm { @extend .cf; }` where `.cf` extends `%p`), dart appends the
+   derived products in registration order; sasso reverses them. Blocks
+   byte-identical for bootstrap (navbar containers, 1 rule) and parts of
+   bulma/uswds/govuk (all currently "selector-order only" — semantically
+   equal). Repro: `bench` scratch e25; dart's algorithm lives in
+   extension_store.dart (registerExtension → _extendExistingExtensions).
+2. **Selector line-break flag propagation, two cases** — (a) multi-`&`
+   cross-product products: dart line-breaks per combo where sasso joins
+   (mastodon, "identical (canonical)"); (b) newlines INSIDE pseudo args
+   (`:is(:-webkit-autofill,\n[type=color],…)`) survive dart's
+   re-serialization (quasar). Both whitespace-only.
+3. **Load/parse error attribution across module chains** — an error inside a
+   `@use`d module renders the ROOT file's name/snippet with the inner file's
+   line numbers (this misled the original triage twice). The `@import` path
+   was fixed; `@use`/`@forward` parse errors still misattribute.

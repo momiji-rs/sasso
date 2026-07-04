@@ -37,10 +37,15 @@ def sub_rgb(m):
     parts = [p.strip() for p in m.group(2).split(",")]
     nums = []
     for p in parts:
-        if p.endswith("%"):
-            nums.append(float(p[:-1]) * 255.0 / 100.0)
-        else:
-            nums.append(float(p))
+        try:
+            if p.endswith("%"):
+                nums.append(float(p[:-1]) * 255.0 / 100.0)
+            else:
+                nums.append(float(p))
+        except ValueError:
+            # Non-numeric channel — e.g. rgba(var(--x), .5) or a space-syntax
+            # rgb(r g b / a). Not a serialization difference; leave verbatim.
+            return m.group(0)
     if len(nums) == 4:
         return round_hex(nums[0], nums[1], nums[2], nums[3])
     return round_hex(nums[0], nums[1], nums[2])
@@ -49,6 +54,11 @@ def sub_rgb(m):
 def canon(text):
     # rgb(...) / rgba(...) -> hex
     text = re.sub(r"\b(rgba?)\(([^)]*)\)", sub_rgb, text)
+    # [a="b"] -> [a=b] when the value is a valid CSS identifier (dart-sass
+    # unquotes these; other compilers keep the author's quotes)
+    text = re.sub(
+        r"\[([-\w]+)([~^$*|]?=)\"([A-Za-z_-][\w-]*)\"\]", r"[\1\2\3]", text
+    )
     # #abc -> #aabbcc ; lowercase 6-digit hex
     text = re.sub(r"#([0-9a-fA-F]{3})\b", expand_short_hex, text)
     text = re.sub(
