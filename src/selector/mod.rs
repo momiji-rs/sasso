@@ -1411,8 +1411,54 @@ pub(crate) fn normalize_pseudo_arg(text: &str) -> Option<String> {
     if !known {
         return None;
     }
-    let list = parse_list(&text[open + 1..text.len() - 1])?;
-    let inner = list.iter().map(|c| c.render()).collect::<Vec<_>>().join(", ");
+    let raw = &text[open + 1..text.len() - 1];
+    let list = parse_list(raw)?;
+    // Keep the source's per-arg line structure: an arg that began on its own
+    // line (dart: the arg complex's lineBreak) re-joins with ",\n" — the
+    // serializer honors line breaks inside pseudo args too (quasar's
+    // `:is(:-webkit-autofill,\n[type=color], …)`).
+    let mut part_breaks: Vec<bool> = Vec::new();
+    {
+        let mut paren = 0i32;
+        let mut bracket = 0i32;
+        let mut leading = true;
+        let mut brk = false;
+        for ch in raw.chars() {
+            match ch {
+                '(' => paren += 1,
+                ')' => paren -= 1,
+                '[' => bracket += 1,
+                ']' => bracket -= 1,
+                ',' if paren == 0 && bracket == 0 => {
+                    part_breaks.push(brk);
+                    leading = true;
+                    brk = false;
+                    continue;
+                }
+                _ => {}
+            }
+            if leading {
+                if ch == '\n' {
+                    brk = true;
+                } else if !ch.is_whitespace() {
+                    leading = false;
+                }
+            }
+        }
+        part_breaks.push(brk);
+    }
+    let mut inner = String::new();
+    for (i, c) in list.iter().enumerate() {
+        if i > 0 {
+            inner.push(',');
+            inner.push(if part_breaks.get(i).copied().unwrap_or(false) {
+                '\n'
+            } else {
+                ' '
+            });
+        }
+        inner.push_str(&c.render());
+    }
     Some(format!("{head}({inner})"))
 }
 

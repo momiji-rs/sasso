@@ -3099,6 +3099,45 @@ fn chained_extend_products_keep_registration_order() {
 }
 
 #[test]
+fn pseudo_arg_newlines_survive_serialization() {
+    // dart's arg complexes carry their source lineBreak and the serializer
+    // honors it anywhere — inside pseudo args included, with continuation
+    // lines re-indented to the rule's indent in nested contexts (quasar's
+    // `:is(:-webkit-autofill,\n[type=color], …)` field selectors).
+    assert_eq!(
+        ours(".z:is(a,\n[type=color],\nb) { x: y; }\n"),
+        ".z:is(a,\n[type=color],\nb) {\n  x: y;\n}\n"
+    );
+    assert_eq!(
+        ours("@media (a: b) { .z:is(a,\n[type=color]) { x: y; } }\n"),
+        "@media (a: b) {\n  .z:is(a,\n  [type=color]) {\n    x: y;\n  }\n}\n"
+    );
+    // Through the extend machinery (parse -> render round trip).
+    assert_parity(".e { x: y; }\n.z:is(a,\nb) { @extend .e; }\n");
+    assert_parity("@media (a: b) { .z:is(a,\n[type=color],\nb) { x: y; } }\n");
+}
+
+#[test]
+fn parent_resolution_linebreak_flags_match_dart() {
+    // dart rebuilds `&`-bearing complexes from a lineBreak:false base, so a
+    // template's own flag is dropped and the product takes the substituted
+    // parent's; a k>=2 cartesian combo ORs its chosen parents' flags
+    // (mastodon's adjacent-state selectors); `&`-less parts keep
+    // template-OR-parent.
+    assert_eq!(
+        ours(".p,\n.v { &:a,\n&:b { x: y; } }\n"),
+        ".p:a, .p:b,\n.v:a,\n.v:b {\n  x: y;\n}\n"
+    );
+    assert_eq!(
+        ours(".p,\n.v { &:a + &:b,\n&:b + &:a { x: y; } }\n"),
+        ".p:a + .p:b, .p:b + .p:a,\n.p:a + .v:b,\n.p:b + .v:a,\n.v:a + .p:b,\n.v:b + .p:a,\n.v:a + .v:b,\n.v:b + .v:a {\n  x: y;\n}\n"
+    );
+    assert_parity(".p,\n.v { &:a + &:b,\n&:b + &:a { x: y; } }\n");
+    assert_parity(".p,\n.v { .x,\n&:b { x: y; } }\n");
+    assert_parity(".p, .v { .x,\n.y { x: y; } }\n");
+}
+
+#[test]
 fn multi_parent_ref_expansion_interleaves_column_major() {
     // dart resolveParentSelectors flattens the per-part rows VERTICALLY:
     // with parents [.p, .v] and three templates each holding two `&`s, the

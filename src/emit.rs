@@ -224,7 +224,22 @@ fn emit_node_expanded(
                         out.push(' ');
                     }
                 }
-                out.push_str(sel);
+                // A line break INSIDE the selector (a pseudo arg's preserved
+                // source line) continues at the rule's indent, like dart's
+                // _writeIndentation after every line feed.
+                if sel.contains('\n') && !indent.is_empty() {
+                    let mut first = true;
+                    for line in sel.split('\n') {
+                        if !first {
+                            out.push('\n');
+                            out.push_str(indent);
+                        }
+                        out.push_str(line);
+                        first = false;
+                    }
+                } else {
+                    out.push_str(sel);
+                }
             }
             out.push_str(" {\n");
             let mut inner = block_start(*lines);
