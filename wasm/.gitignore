@@ -5,6 +5,7 @@
 /npm/sasso.wasm
 /npm/sasso.speed.wasm
 /npm/sasso.async.wasm
+/npm/sasso.speed.async.wasm
 /npm/LICENSE-APACHE
 /npm/LICENSE-MIT
 /Cargo.lock
