@@ -3183,6 +3183,21 @@ fn invisible_rule_leaves_no_blank_line_group_end() {
 }
 
 #[test]
+fn escaped_bang_in_selector_parses() {
+    // `!` normally stops a selector scan (`a !important {` → expected "{"),
+    // but a CSS escape makes it identifier text: govuk-frontend's
+    // `.govuk-\!-font-size-#{$size}` classes must parse and round-trip.
+    assert_eq!(ours(".a-\\!-b { x: y; }\n"), ".a-\\!-b {\n  x: y;\n}\n");
+    assert_eq!(
+        ours("@each $s in (16, 19) { .e-\\!-f-#{$s} { x: y; } }\n"),
+        ".e-\\!-f-16 {\n  x: y;\n}\n\n.e-\\!-f-19 {\n  x: y;\n}\n"
+    );
+    assert_parity(".a-\\!-b { x: y; }\n");
+    // The unescaped form still errors like dart.
+    assert_error_parity("a !important { x: y; }\n");
+}
+
+#[test]
 fn callable_closure_captures_module_namespaces() {
     use std::fs;
 

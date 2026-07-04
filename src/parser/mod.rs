@@ -705,6 +705,17 @@ impl Parser {
         // (dart appends at most ONE `rawText(loudComment)` to the name).
         let mut glued = false;
         while let Some(c) = self.sc.peek() {
+            // A CSS escape makes the next character literal identifier text:
+            // an escaped stop char (`.govuk-\!-font-size-19`) is part of the
+            // selector, never a boundary (dart consumes `\X` in identifiers).
+            if c == '\\' {
+                lit.push(c);
+                self.sc.bump();
+                if let Some(n) = self.sc.bump() {
+                    lit.push(n);
+                }
+                continue;
+            }
             if paren == 0 && bracket == 0 && stops.contains(&c) {
                 break;
             }
