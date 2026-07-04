@@ -3264,6 +3264,41 @@ fn indented_use_as_star_does_not_continue_prelude() {
 }
 
 #[test]
+fn media_inside_unknown_at_rule() {
+    // dart `_inUnknownAtRule`: inside a generic/unknown at-rule's body, bare
+    // declarations are legal without an enclosing style rule — including
+    // directly inside a nested `@media` (the canonical Tailwind v4
+    // `@utility` responsive-override idiom). Byte-matched to dart-sass.
+    assert_eq!(
+        ours("@utility container { @media (width >= 96rem) { max-width: 87.5rem; } }\n"),
+        "@utility container {\n  @media (width >= 96rem) {\n    max-width: 87.5rem;\n  }\n}\n"
+    );
+    // With a declaration before the @media, and the classic min-width syntax.
+    assert_eq!(
+        ours("@utility container { margin: auto; @media (min-width: 100px) { max-width: 87.5rem; } }\n"),
+        "@utility container {\n  margin: auto;\n  @media (min-width: 100px) {\n    max-width: 87.5rem;\n  }\n}\n"
+    );
+    assert_eq!(
+        ours("@foo bar { @media (min-width: 100px) { a: b; } }\n"),
+        "@foo bar {\n  @media (min-width: 100px) {\n    a: b;\n  }\n}\n"
+    );
+    // Interpolated query in the same position.
+    assert_eq!(
+        ours("@utility x { @media #{\"(min-width: 5px)\"} { a: b; } }\n"),
+        "@utility x {\n  @media (min-width: 5px) {\n    a: b;\n  }\n}\n"
+    );
+    // Style rules nested in the unknown at-rule keep working alongside.
+    assert_parity("@utility x { .r { c: d; } @media (min-width: 5px) { a: b; } }\n");
+    assert_parity("@utility container { @media (width >= 96rem) { max-width: 87.5rem; } }\n");
+    // @supports in the identical position (regression guard for the variant
+    // matrix), and @media inside a KNOWN at-rule via a style rule.
+    assert_parity("@utility x { @supports (display: grid) { a: b; } }\n");
+    assert_parity("@layer base { @media (min-width: 100px) { a { color: red; } } }\n");
+    // A bare declaration in a TOP-LEVEL @media must still error like dart.
+    assert_error_parity("@media (min-width: 5px) { a: b; }\n");
+}
+
+#[test]
 fn escaped_bang_in_selector_parses() {
     // `!` normally stops a selector scan (`a !important {` → expected "{"),
     // but a CSS escape makes it identifier text: govuk-frontend's

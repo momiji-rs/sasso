@@ -37,7 +37,14 @@ impl<'a> Evaluator<'a> {
         } else {
             parents
         };
-        let out_body = self.eval_at_body(stmts, body_parents)?;
+        // dart `_inUnknownAtRule`: every at-rule without a dedicated visitor
+        // (this generic path) sets the flag for its body, legalizing bare
+        // declarations in nested contexts that would otherwise reject them
+        // (a `@media` directly inside `@utility`).
+        let saved_unknown = std::mem::replace(&mut self.in_unknown_at_rule, true);
+        let out_body = self.eval_at_body(stmts, body_parents);
+        self.in_unknown_at_rule = saved_unknown;
+        let out_body = out_body?;
         sink.push_at_rule(OutNode::AtRule {
             name: name.to_string(),
             prelude,
@@ -169,8 +176,10 @@ impl<'a> Evaluator<'a> {
         // Without an enclosing style rule, a bare declaration directly inside a
         // media block is invalid (dart-sass: "expected \"{\".") — only rules and
         // at-rules may appear there. With a style rule, declarations belong to
-        // its selector and are allowed.
-        if parents.is_empty() {
+        // its selector and are allowed — and inside an UNKNOWN at-rule dart's
+        // parser context (`_inUnknownAtRule`) legalizes them too
+        // (`@utility x { @media (…) { max-width: …; } }`, Tailwind v4).
+        if parents.is_empty() && !self.in_unknown_at_rule {
             for stmt in body {
                 if matches!(stmt, Stmt::Decl(_)) {
                     return Err(Error::unpositioned("expected \"{\"."));

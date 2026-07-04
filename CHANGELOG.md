@@ -64,6 +64,14 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **`@media` nested inside an unknown at-rule now compiles.** dart's
+  `_inUnknownAtRule` context legalizes bare declarations without an enclosing
+  style rule, so the canonical Tailwind v4 idiom
+  `@utility container { @media (width >= 96rem) { max-width: 87.5rem; } }`
+  parses and emits verbatim (byte-matched to dart-sass 1.101, including the
+  classic `min-width` syntax, interpolated queries, and mixed
+  declaration-plus-`@media` bodies). A bare declaration in a top-level
+  `@media` still errors like dart. Previously: `Error: expected "{".`
 - **Keyframe selector lists now join on one line, matching dart-sass.** A
   multi-line authored frame selector (`0%,\n60%,\n100% {`) was emitted with
   the author's line breaks preserved, as style-rule selector lists are; dart

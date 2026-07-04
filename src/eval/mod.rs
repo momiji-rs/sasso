@@ -788,6 +788,12 @@ pub(crate) struct Evaluator<'a> {
     /// style rules in dart-sass, so nested at-rules do not bubble out of them
     /// and frame selectors get keyframe normalization (`E` -> `e`).
     in_keyframes: bool,
+    /// dart `_inUnknownAtRule`: inside the body of a generic/unknown at-rule
+    /// (`@utility`, `@layer`, `@font-face`, vendor `@foo`, …). Bare
+    /// declarations are legal there even without an enclosing style rule —
+    /// including directly inside a nested `@media` (Tailwind v4's
+    /// `@utility x { @media (…) { max-width: …; } }`).
+    in_unknown_at_rule: bool,
     /// dart `_atRootExcludingStyleRule`: inside `@at-root` (before the first
     /// nested style rule) the implicit parent join is disabled — `&` still
     /// resolves against the enclosing rule, but a plain selector stays at the
@@ -1172,6 +1178,7 @@ impl<'a> Evaluator<'a> {
             load_css_copies: RefCell::new(Vec::new()),
             copy_counter: std::cell::Cell::new(0),
             in_keyframes: false,
+            in_unknown_at_rule: false,
             at_root_excluding_style_rule: false,
             import_clone: None,
             // The entry file's containing directory (possibly "" = the
