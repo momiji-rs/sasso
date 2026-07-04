@@ -5269,34 +5269,48 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
             }
         }
     } else {
-        for (pi, parent) in parents.iter().enumerate() {
-            for part in &parts {
-                // A pseudo-only `&` part resolves ONCE (whole parent list in
-                // place), emitted at its position in the first parent round.
-                if let Some(s) = substitute_pseudo_refs(part) {
-                    if pi == 0 {
-                        result.push(normalize_selector(&s));
-                    }
-                    continue;
+        // dart `resolveParentSelectors`: each part resolves to its own ROW of
+        // complexes, and the final list is `flattenVertically(rows)` —
+        // column-major across the parts. For `&`-less and single-`&` parts
+        // (rows of exactly `parents.len()`) that is the familiar parent-major
+        // order; a part with k >= 2 top-level refs contributes a row of
+        // `parents.len()^k` combos, interleaved column-by-column with its
+        // sibling parts (mastodon's `&:hover + &:is(...)` lists).
+        let mut rows: Vec<Vec<String>> = Vec::with_capacity(parts.len());
+        for part in &parts {
+            // A pseudo-only `&` part resolves ONCE (whole parent list in
+            // place): a single-entry row.
+            if let Some(s) = substitute_pseudo_refs(part) {
+                rows.push(vec![normalize_selector(&s)]);
+                continue;
+            }
+            if let Some(segments) = split_parent_refs(part) {
+                for parent in parents {
+                    check_compound_parent(part, parent)?;
                 }
-                // A part with k >= 2 top-level refs expands its full
-                // cartesian product once, in the first parent round.
-                if let Some(segments) = split_parent_refs(part) {
-                    if pi == 0 {
-                        for parent in parents {
-                            check_compound_parent(part, parent)?;
-                        }
-                        expand_cartesian(&segments, &mut result);
-                    }
-                    continue;
-                }
+                let mut row = Vec::new();
+                expand_cartesian(&segments, &mut row);
+                rows.push(row);
+                continue;
+            }
+            let mut row = Vec::with_capacity(parents.len());
+            for parent in parents {
                 let combined = if part_has_parent_ref(part) {
                     check_compound_parent(part, parent)?;
                     replace_parent_refs(part, parent)
                 } else {
                     format!("{parent} {part}")
                 };
-                result.push(normalize_selector(&combined));
+                row.push(normalize_selector(&combined));
+            }
+            rows.push(row);
+        }
+        let longest = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        for j in 0..longest {
+            for row in &rows {
+                if let Some(s) = row.get(j) {
+                    result.push(s.clone());
+                }
             }
         }
     }

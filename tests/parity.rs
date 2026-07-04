@@ -3069,6 +3069,20 @@ fn extend_self_referential_pseudo_converges() {
 }
 
 #[test]
+fn multi_parent_ref_expansion_interleaves_column_major() {
+    // dart resolveParentSelectors flattens the per-part rows VERTICALLY:
+    // with parents [.p, .v] and three templates each holding two `&`s, the
+    // output groups by parent COMBINATION (templates inner), not by template
+    // (mastodon's privacy-dropdown adjacent-state selectors).
+    assert_eq!(
+        ours(".p, .v {\n  &:a + &:b,\n  &:b + &:a { x: y; }\n}\n"),
+        ".p:a + .p:b, .p:b + .p:a, .p:a + .v:b, .p:b + .v:a, .v:a + .p:b, .v:b + .p:a, .v:a + .v:b, .v:b + .v:a {\n  x: y;\n}\n"
+    );
+    assert_parity(".p, .v {\n  &:a + &:b,\n  &:b + &:a { x: y; }\n}\n");
+    assert_parity(".p, .v { &:h + &:i, &:i + &:h, &:i + &:i { x: y; } }\n");
+}
+
+#[test]
 fn plain_css_import_reserializes_selectors() {
     use std::fs;
 
