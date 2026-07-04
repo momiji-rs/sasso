@@ -3069,6 +3069,44 @@ fn extend_self_referential_pseudo_converges() {
 }
 
 #[test]
+fn trailing_comment_never_joins_across_import_files() {
+    use std::fs;
+
+    // dart's `_isTrailingComment` compares source FILES, not just line
+    // numbers: a comment at the top of an `@import`ed file must not glue onto
+    // a comment that happens to end on the same line number in the importing
+    // chain. Regression: legacy `@import` did not re-stamp the file id, so
+    // `/* c1 */` (line 1 of one file) and a multi-line `/*! ... */` (line 1
+    // of the next) joined as ` /*…*/`. Offline, byte-matched to dart-sass.
+    let dir = std::env::temp_dir().join(format!(
+        "sasso-import-trailing-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(dir.join("_skin.scss"), "$v: 1px;\n").unwrap();
+    fs::write(
+        dir.join("_mmlike.scss"),
+        "/* c1 */\n@import \"copyrightish\";\n@import \"restish\";\n",
+    )
+    .unwrap();
+    fs::write(dir.join("_copyrightish.scss"), "/*!\n * banner\n */\n").unwrap();
+    fs::write(dir.join("_restish.scss"), ".r { top: $v; }\n").unwrap();
+    let out = compile(
+        "@charset \"utf-8\";\n\n@import \"skin\";\n@import \"mmlike\";\n",
+        &opts,
+    )
+    .expect("import chain compiles");
+    assert_eq!(out, "/* c1 */\n/*!\n * banner\n */\n.r {\n  top: 1px;\n}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn fs_importer_partial_extension_and_import_only_resolution() {
     use std::fs;
     use std::path::PathBuf;

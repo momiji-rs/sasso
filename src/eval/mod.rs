@@ -44,8 +44,10 @@ use binop::*;
 pub(crate) use binop::eval_div;
 
 /// One cached `@import` resolution: (resolved canonical key, syntax, parsed
-/// sheet), shared across repeated imports within a single compile.
-type CachedImport = std::rc::Rc<(String, Syntax, crate::ast::Stylesheet)>;
+/// sheet, source text), shared across repeated imports within a single
+/// compile. The source rides along so re-executions can swap it in as the
+/// current diagnostics/stamp context.
+type CachedImport = std::rc::Rc<(String, Syntax, crate::ast::Stylesheet, std::rc::Rc<str>)>;
 
 /// Parse imported/`@use`d source with the front-end matching its file syntax.
 fn parse_with_syntax(src: &str, syntax: Syntax) -> Result<crate::ast::Stylesheet, Error> {
@@ -2298,7 +2300,12 @@ impl<'a> Evaluator<'a> {
                                         ));
                                     }
                                     let sheet = parse_with_syntax(&src, syntax)?;
-                                    let e = std::rc::Rc::new((resolved_key, syntax, sheet));
+                                    let e = std::rc::Rc::new((
+                                        resolved_key,
+                                        syntax,
+                                        sheet,
+                                        std::rc::Rc::<str>::from(src.as_str()),
+                                    ));
                                     self.import_cache.insert(cache_key, e.clone());
                                     Some(e)
                                 }
@@ -2309,12 +2316,35 @@ impl<'a> Evaluator<'a> {
                     match entry {
                         Some(entry) => {
                             let (resolved_key, syntax, sheet) = (&entry.0, entry.1, &entry.2);
+                            // The imported file becomes the diagnostics/stamp
+                            // context while its body runs (dart shows ITS name
+                            // in error frames, and the trailing-comment check
+                            // compares file identity): swap in its display URL
+                            // and source, and re-intern the SrcLines file id.
+                            let import_diag = if resolved_key.is_empty() {
+                                self.current_url.clone()
+                            } else {
+                                self.module_diag_url(path, resolved_key)
+                            };
+                            if self.diag_enabled() && !resolved_key.is_empty() {
+                                self.file_sources
+                                    .borrow_mut()
+                                    .entry(import_diag.clone())
+                                    .or_insert_with(|| Rc::clone(&entry.3));
+                            }
+                            let saved_import_url = std::mem::replace(&mut self.current_url, import_diag);
+                            let saved_import_source =
+                                std::mem::replace(&mut self.current_source, Rc::clone(&entry.3));
+                            self.current_url_stamp = 0;
                             // A plain-CSS file imports as plain CSS: nesting
                             // preserved, no Sass evaluation (same as `@use`).
                             if matches!(syntax, Syntax::Css) {
                                 self.loading.push(path.clone());
                                 let result = self.exec_css(&sheet.stmts, parents, sink);
                                 self.loading.pop();
+                                self.current_url = saved_import_url;
+                                self.current_source = saved_import_source;
+                                self.current_url_stamp = 0;
                                 result?;
                                 continue;
                             }
@@ -2419,6 +2449,9 @@ impl<'a> Evaluator<'a> {
                                 return Err(Error::unpositioned("expected \"{\"."));
                             }
                             let result = self.exec(&sheet.stmts, parents, sink);
+                            self.current_url = saved_import_url;
+                            self.current_source = saved_import_source;
+                            self.current_url_stamp = 0;
                             self.current_file_dir = saved_dir;
                             self.current_canonical = saved_canonical;
                             self.import_clone = saved_clone;

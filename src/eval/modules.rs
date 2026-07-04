@@ -1372,7 +1372,7 @@ impl<'a> Evaluator<'a> {
     /// The diagnostic display URL for a `@use`/`@import`ed module: the basename
     /// of the resolved key (dart-sass shows e.g. `_libchain.scss`), falling back
     /// to the `@use` url spelling when the key has no useful tail.
-    fn module_diag_url(&self, url: &str, key: &str) -> String {
+    pub(super) fn module_diag_url(&self, url: &str, key: &str) -> String {
         let base = key.rsplit(['/', '\\']).next().unwrap_or(key);
         if base.is_empty() {
             url.to_string()
