@@ -785,6 +785,12 @@ fn ends_with_pending_operator(t: &str) -> bool {
     if t.ends_with('\\') {
         return true;
     }
+    // `@use "x" as *` / `@forward "x" as *`: the wildcard namespace ends the
+    // directive — this `*` is not a pending multiplication (vuetify's
+    // `@use '../settings' as *` must not swallow the next line).
+    if t.ends_with("as *") {
+        return false;
+    }
     // Trailing binary/relational/arithmetic operators.
     for op in ["+", "-", "*", "/", "%", "<", ">", "=", ":"] {
         if t.ends_with(op) {

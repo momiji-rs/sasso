@@ -3183,6 +3183,40 @@ fn invisible_rule_leaves_no_blank_line_group_end() {
 }
 
 #[test]
+fn indented_use_as_star_does_not_continue_prelude() {
+    use std::fs;
+
+    // In the indented syntax a trailing operator continues the logical line,
+    // but the `*` of `@use "x" as *` is the wildcard namespace terminator —
+    // it must not swallow the following line into the @use prelude
+    // (vuetify's tools/_display.sass: `@use '../settings' as *` followed by
+    // a `=mixin` definition died with "Nothing may be indented beneath a
+    // @use rule").
+    let dir = std::env::temp_dir().join(format!(
+        "sasso-as-star-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    fs::write(dir.join("_settings.sass"), "$w: 2px\n").unwrap();
+    let out = compile(
+        "@use 'settings' as *\n\n=media-up($n)\n  @media (min-width: $n)\n    @content\n\n.a\n  +media-up($w)\n    x: y\n",
+        &Options::default()
+            .with_syntax(sasso::Syntax::Sass)
+            .with_importer(&imp),
+    )
+    .expect("as-star followed by mixin definition compiles");
+    assert_eq!(out, "@media (min-width: 2px) {\n  .a {\n    x: y;\n  }\n}");
+    // A REAL pending multiplication still continues the line.
+    assert_eq!(ours_sass("$a: 2 *\n  3\n.b\n  c: $a\n"), ".b {\n  c: 6;\n}\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn escaped_bang_in_selector_parses() {
     // `!` normally stops a selector scan (`a !important {` → expected "{"),
     // but a CSS escape makes it identifier text: govuk-frontend's
