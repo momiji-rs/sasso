@@ -668,6 +668,43 @@ impl<'a> Evaluator<'a> {
                 return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
             }
         };
+        // dart moves the comments textually preceding a `@use`/`@forward`
+        // into `_preModuleComments[target]` and re-emits the full attached
+        // set at EVERY dependency edge into a module with visible CSS. Pop
+        // this site's trailing comment run; each outcome below re-emits it
+        // (plus any previously attached comments) before the module's CSS.
+        let own_run: Vec<OutNode> = match sink {
+            Sink::Top(out) => {
+                let mut i = out.len();
+                while i > 0 && matches!(out[i - 1], OutNode::Comment(..) | OutNode::Blank) {
+                    i -= 1;
+                }
+                out.split_off(i)
+            }
+            _ => Vec::new(),
+        };
+        let own_comments: Vec<(String, SrcLines)> = own_run
+            .iter()
+            .filter_map(|n| match n {
+                OutNode::Comment(t, l) => Some((t.clone(), *l)),
+                _ => None,
+            })
+            .collect();
+        fn push_run(sink: &mut Sink<'_>, run: Vec<OutNode>) {
+            if let Sink::Top(out) = sink {
+                out.extend(run);
+            }
+        }
+        // dart `transitivelyContainsCss`: a dependency's CSS is embedded as a
+        // ModuleScope wrapper, so recursing through wrappers covers the
+        // transitive check.
+        fn nodes_visible(nodes: &[OutNode]) -> bool {
+            nodes.iter().any(|n| match n {
+                OutNode::Blank | OutNode::GroupEnd | OutNode::AtRootPackTight => false,
+                OutNode::ModuleScope { nodes, .. } => nodes_visible(nodes),
+                _ => true,
+            })
+        }
         // A module evaluated once and cached is shared; its CSS is NOT
         // re-emitted. Re-loading it with configuration is an error — unless the
         // configuration targets no variable the module actually defines (a
@@ -699,6 +736,7 @@ impl<'a> Evaluator<'a> {
                             v.push(key.clone());
                         }
                     }
+                    push_run(sink, own_run);
                     splice_nodes(
                         sink,
                         vec![OutNode::ModuleScope {
@@ -713,6 +751,7 @@ impl<'a> Evaluator<'a> {
                 // with the same original silently reuses it (dart-sass
                 // sameOriginal).
                 if config_id != 0 && existing.config_origin.get() == config_id {
+                    push_run(sink, own_run);
                     return Ok((existing, consumed));
                 }
                 return Err(Error::at(
@@ -738,6 +777,32 @@ impl<'a> Evaluator<'a> {
                 if !v.contains(&key) {
                     v.push(key.clone());
                 }
+            }
+            // A repeat edge into a module with visible CSS re-emits the
+            // comments registered for it on its FIRST load (dart emits
+            // `module.preModuleComments[upstream]` per edge at combine time;
+            // the inherited-map quirk makes the loader's map visible here).
+            // This site's own comments are NOT registered (not a first load)
+            // and simply stay in place. The clones slot in after the run's
+            // leading blank so the group separator stays where it was.
+            let registered: Vec<(String, SrcLines)> = self
+                .pre_module_comments
+                .as_ref()
+                .and_then(|m| m.borrow().get(&key).cloned())
+                .unwrap_or_default();
+            if !force_reemit && !registered.is_empty() && nodes_visible(&existing.css) {
+                if let Sink::Top(out) = sink {
+                    let lead = own_run.iter().take_while(|n| matches!(n, OutNode::Blank)).count();
+                    let mut run = own_run;
+                    let tail = run.split_off(lead);
+                    out.extend(run);
+                    for (t, l) in registered {
+                        out.push(OutNode::Comment(t, l));
+                    }
+                    out.extend(tail);
+                }
+            } else {
+                push_run(sink, own_run);
             }
             if force_reemit {
                 // A `meta.load-css` copy re-emits the module's whole SUBTREE
@@ -826,6 +891,22 @@ impl<'a> Evaluator<'a> {
         self.module_cache
             .borrow_mut()
             .insert(key.clone(), Rc::clone(&module));
+        // dart `_registerCommentsForModule`, first load only: the loader's
+        // pending comments join the map for this module when it (transitively)
+        // contains CSS. The verbatim push-back below IS this first edge's
+        // emission; later edges re-emit from the map. A map created here is
+        // deliberately assigned to `self` so sibling loads and nested module
+        // evaluations see it (dart's inherited-reference quirk).
+        if !own_comments.is_empty() && nodes_visible(&css_buf) {
+            let map = self
+                .pre_module_comments
+                .get_or_insert_with(|| Rc::new(RefCell::new(HashMap::default())));
+            map.borrow_mut()
+                .entry(key.clone())
+                .or_default()
+                .extend(own_comments);
+        }
+        push_run(sink, own_run);
         // A first load through `meta.load-css` (force_reemit) splices the
         // module's whole subtree under a unique copy scope at the call site;
         // an ordinary `@use`/`@forward` load wraps its own CSS in its module
@@ -879,6 +960,11 @@ impl<'a> Evaluator<'a> {
         let saved_url = std::mem::replace(&mut self.current_url, diag_url.to_string());
         self.current_url_stamp = 0;
         let saved_source = std::mem::replace(&mut self.current_source, module_source);
+        // dart does NOT reset `_preModuleComments` for a nested module
+        // evaluation — the child inherits the loader's live map by reference
+        // (its registrations join it, and its edges consult it) — but a map
+        // the child CREATES is dropped again on restore.
+        let saved_pre_comments = self.pre_module_comments.clone();
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![new_scope()]);
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, vec![true]);
         let saved_funcs = std::mem::replace(&mut self.functions, vec![new_fn_scope()]);
@@ -964,6 +1050,7 @@ impl<'a> Evaluator<'a> {
         self.current_url = saved_url;
         self.current_url_stamp = 0;
         self.current_source = saved_source;
+        self.pre_module_comments = saved_pre_comments;
 
         result?;
         let _ = pos;

@@ -3069,6 +3069,48 @@ fn extend_self_referential_pseudo_converges() {
 }
 
 #[test]
+fn pre_module_comments_reemit_on_inherited_edges() {
+    use std::fs;
+
+    // dart `_preModuleComments`: on a module's FIRST load the loader's
+    // pending comments move into a map keyed by the loaded module, and —
+    // because dart does not reset the map for nested module evaluations —
+    // a child module's own edge into the same dependency re-emits them
+    // (bulma's `/* Bulma Form */` before each `@use "shared"`er's CSS).
+    // A NON-first load registers nothing: its comments stay in place
+    // (sass-spec use_only comment_order/diamond).
+    let dir = std::env::temp_dir().join(format!(
+        "sasso-premodule-comments-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(dir.join("_a.scss"), "@use \"sass:list\";\n.a { x: y; }\n").unwrap();
+    fs::write(dir.join("_b.scss"), "@use \"a\";\n.b { x: y; }\n").unwrap();
+    fs::write(dir.join("_i.scss"), "/* C */\n@forward \"a\";\n@forward \"b\";\n").unwrap();
+    // Inherited-map re-emission: C appears before a's AND b's CSS.
+    assert_eq!(
+        compile("@use \"i\";\n", &opts).expect("module chain compiles"),
+        "/* C */\n.a {\n  x: y;\n}\n\n/* C */\n.b {\n  x: y;\n}"
+    );
+    // Diamond via sibling loaders: right's non-first `@use` registers
+    // nothing, so left's comment is NOT re-emitted at right's edge.
+    fs::write(dir.join("_s.scss"), ".s { x: y; }\n").unwrap();
+    fs::write(dir.join("_l.scss"), "/* L */\n@use \"s\";\n").unwrap();
+    fs::write(dir.join("_r.scss"), "/* R */\n@use \"s\";\n").unwrap();
+    assert_eq!(
+        compile("@use \"l\";\n@use \"r\";\n", &opts).expect("diamond compiles"),
+        "/* L */\n.s {\n  x: y;\n}\n\n/* R */"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn invisible_rule_leaves_no_blank_line_group_end() {
     // An `@extend`-only rule produces no CSS, so dart never treats it as a
     // group end: the at-rules emitted around it from consecutive `@each`
