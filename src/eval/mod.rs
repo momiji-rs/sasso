@@ -5237,6 +5237,11 @@ fn resolve_selectors_opt(sel: &str, parents: &[String], implicit_parent: bool) -
                 s.push_str(&parents[idx[i]]);
             }
             s.push_str(&segments[k]);
+            // A `&` nested in pseudo parens is NOT a cartesian position (the
+            // split counts depth-0 refs only) but still substitutes — with
+            // the whole parent list, like any pseudo-`&`
+            // (quasar: `&-container:not(&--mini-animate) &--mini`).
+            let s = substitute_pseudo_refs(&s).unwrap_or(s);
             result.push(normalize_selector(&s));
             // Increment with the LAST ref fastest (dart's order).
             let mut j = k;

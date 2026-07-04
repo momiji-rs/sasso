@@ -3069,6 +3069,17 @@ fn extend_self_referential_pseudo_converges() {
 }
 
 #[test]
+fn pseudo_parent_ref_substitutes_inside_cartesian_parts() {
+    // A `&` nested in pseudo parens is not a cartesian position but still
+    // substitutes (quasar: `&-container:not(&--mini-animate) &--mini`).
+    assert_eq!(
+        ours(".q { &-c:not(&--anim) &--mini { x: y; } }\n"),
+        ".q-c:not(.q--anim) .q--mini {\n  x: y;\n}\n"
+    );
+    assert_parity(".q { &-c:not(&--anim) &--mini { x: y; } }\n");
+}
+
+#[test]
 fn multi_parent_ref_expansion_interleaves_column_major() {
     // dart resolveParentSelectors flattens the per-part rows VERTICALLY:
     // with parents [.p, .v] and three templates each holding two `&`s, the
