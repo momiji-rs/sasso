@@ -3069,6 +3069,20 @@ fn extend_self_referential_pseudo_converges() {
 }
 
 #[test]
+fn nested_at_rule_wrap_keeps_selector_linebreaks() {
+    // dart preserves the selector list's source line structure in the copy
+    // of the rule hoisted into a nested @media (just-the-docs/minimal-
+    // mistakes: `h1,\n.alpha { @include fs-with-media; }`).
+    assert_eq!(
+        ours("@mixin fs { font-size: 1px; @media (a: b) { font-size: 2px; } }\nh1,\n.alpha { @include fs; }\n"),
+        "h1,\n.alpha {\n  font-size: 1px;\n}\n@media (a: b) {\n  h1,\n  .alpha {\n    font-size: 2px;\n  }\n}\n"
+    );
+    assert_parity(
+        "@mixin fs { font-size: 1px; @media (a: b) { font-size: 2px; } }\nh1,\n.alpha { @include fs; }\n",
+    );
+}
+
+#[test]
 fn pre_module_comments_reemit_on_inherited_edges() {
     use std::fs;
 

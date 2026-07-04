@@ -107,10 +107,19 @@ impl<'a> Evaluator<'a> {
             let mut nested: Vec<OutNode> = Vec::new();
             let mut flushed: Option<usize> = None;
             let at_depth = self.at_rule_ctx.len();
+            // The wrap re-emits the enclosing selectors, and dart preserves
+            // their source line structure inside the hoisted at-rule copy too
+            // (`h1,\n.alpha { @include has-media; }`) — carry the enclosing
+            // rule's linebreaks when they line up with `parents`.
+            let wrap_linebreaks: Vec<bool> = if self.current_linebreaks.len() == parents.len() {
+                self.current_linebreaks.clone()
+            } else {
+                Vec::new()
+            };
             let res = {
                 let mut child = Sink::Rule {
                     selectors: parents,
-                    linebreaks: &[],
+                    linebreaks: &wrap_linebreaks,
                     // The wrap re-uses the enclosing selectors, so it has no
                     // source rule of its own: `file`/`start`/`end` stay 0 to keep
                     // the trailing-comment rule disabled. For SOURCE MAPS only it
