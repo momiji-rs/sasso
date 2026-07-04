@@ -206,9 +206,12 @@ function runWatch(input, output, common, embedMap) {
   const recompile = () => {
     try {
       const result = compile(input, common);
+      // Watch before emitting: once the output file is visible, dependency
+      // watchers are guaranteed live (a change saved right after the output
+      // appears must not fall between emit and watcher registration).
+      rewatch(result.loadedUrls);
       emit(result, output, common.sourceMap, embedMap);
       process.stderr.write(`Compiled ${input} to ${output}.\n`);
-      rewatch(result.loadedUrls);
     } catch (e) {
       const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(msg.replace(/\n?$/, "\n"));
