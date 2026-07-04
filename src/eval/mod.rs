@@ -1946,28 +1946,27 @@ impl<'a> Evaluator<'a> {
         // Keyframe selector lists always take it: dart re-serializes the
         // stops joined with ", " (KeyframeSelectorParser), dropping author
         // line breaks that style-rule selectors would preserve.
-        let full_lbs: Vec<bool> = if self.in_keyframes
-            || (self.current_linebreaks.is_empty() && !sel_str.contains('\n'))
-        {
-            Vec::new()
-        } else {
-            let part_lbs = comma_linebreaks(&sel_str, !parents.is_empty());
-            let n = part_lbs.len().max(1);
-            // A nested complex came from parent `i / n` (`current` is
-            // parent-major `parents × parts`); it starts a fresh line when its
-            // own part did OR its parent did.
-            let parent_lbs: &[bool] = if self.current_linebreaks.len() == parents.len() {
-                &self.current_linebreaks
+        let full_lbs: Vec<bool> =
+            if self.in_keyframes || (self.current_linebreaks.is_empty() && !sel_str.contains('\n')) {
+                Vec::new()
             } else {
-                &[]
+                let part_lbs = comma_linebreaks(&sel_str, !parents.is_empty());
+                let n = part_lbs.len().max(1);
+                // A nested complex came from parent `i / n` (`current` is
+                // parent-major `parents × parts`); it starts a fresh line when its
+                // own part did OR its parent did.
+                let parent_lbs: &[bool] = if self.current_linebreaks.len() == parents.len() {
+                    &self.current_linebreaks
+                } else {
+                    &[]
+                };
+                (0..current.len())
+                    .map(|i| {
+                        part_lbs.get(i % n).copied().unwrap_or(false)
+                            || parent_lbs.get(i / n).copied().unwrap_or(false)
+                    })
+                    .collect()
             };
-            (0..current.len())
-                .map(|i| {
-                    part_lbs.get(i % n).copied().unwrap_or(false)
-                        || parent_lbs.get(i / n).copied().unwrap_or(false)
-                })
-                .collect()
-        };
         let mut emit_selectors: Vec<String> = Vec::with_capacity(current.len());
         let mut emit_linebreaks: Vec<bool> = Vec::with_capacity(current.len());
         for (i, s) in current.iter().enumerate() {
