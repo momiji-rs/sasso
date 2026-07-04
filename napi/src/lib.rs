@@ -407,7 +407,11 @@ impl Importer for NapiChain<'_> {
         //    (absolute path or file: URL container) use it directly; without
         //    one, search ONLY the load paths — the wasm JS chain never falls
         //    back to the CWD, and neither may we.
-        let canon = match ctx.containing_url.map(|c| c.as_str()).and_then(containing_fs_path) {
+        let canon = match ctx
+            .containing_url
+            .map(|c| c.as_str())
+            .and_then(containing_fs_path)
+        {
             Some(base) => {
                 let containing = CanonicalUrl::new(base);
                 let fs_ctx = CanonicalizeContext {
