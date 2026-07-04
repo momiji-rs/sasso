@@ -105,6 +105,9 @@ impl<'a> Evaluator<'a> {
     /// enclosing selectors; at the document root they emit directly.
     fn eval_at_body(&mut self, stmts: &[Stmt], parents: &[String]) -> Result<Vec<OutNode>, Error> {
         self.push_scope(false);
+        // The at-rule body's trailing-invisible tracking is its own; the
+        // exec arm that called us reports the at-rule itself to the parent.
+        let saved_last_invisible = std::mem::replace(&mut self.last_child_invisible, false);
         let mut body: Vec<OutNode> = Vec::new();
         let result = if parents.is_empty() {
             let mut child = Sink::AtRoot(&mut body);
@@ -157,6 +160,7 @@ impl<'a> Evaluator<'a> {
             res
         };
         self.pop_scope();
+        self.last_child_invisible = saved_last_invisible;
         result?;
         Ok(body)
     }

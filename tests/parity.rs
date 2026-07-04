@@ -3238,6 +3238,36 @@ fn pre_module_comments_reemit_on_inherited_edges() {
 }
 
 #[test]
+fn invisible_last_child_packs_next_group_tight() {
+    // dart's blank-line separator belongs to a group's LAST child node —
+    // created even for an empty (extend-only) rule, and never rendered when
+    // invisible. So a rule whose final child produced nothing packs the next
+    // top-level group TIGHT (bootstrap: `.navbar-brand` directly after the
+    // resurrected `%container-flex-properties` run).
+    assert_eq!(
+        ours(".nav {\n  %p { x: y; }\n  > .c { @extend %p; }\n}\n.brand { y: z; }\n"),
+        ".nav > .c {\n  x: y;\n}\n.brand {\n  y: z;\n}\n"
+    );
+    assert_parity(".nav {\n  %p { x: y; }\n  > .c { @extend %p; }\n}\n.brand { y: z; }\n");
+    // Through control flow (@each) — the flag rides the last inner statement.
+    assert_parity(
+        ".nav {\n  %p { x: y; }\n  @each $s in (sm, md) {\n    > .c-#{$s} { @extend %p; }\n  }\n}\n.brand { y: z; }\n"
+    );
+    // A VISIBLE last child still blank-separates; a variable decl after it
+    // creates no node and leaves the separator alone.
+    assert_parity(".nav {\n  .x { a: b; }\n  $v: 1;\n}\n.brand { y: z; }\n");
+    // Consecutive droppable placeholder rules after a blank exercise the
+    // rewrite loop's index handling (a preceding-Blank removal must not skip
+    // the shifted-in successor).
+    assert_parity(concat!(
+        "%default-color {color: red}\n%alt-color {color: green}\n",
+        "%default-style {\n@extend %default-color;\n&:hover {@extend %alt-color}\n",
+        "&:active {@extend %default-color}\n}\n",
+        ".test-case {@extend %default-style}\n"
+    ));
+}
+
+#[test]
 fn invisible_rule_leaves_no_blank_line_group_end() {
     // An `@extend`-only rule produces no CSS, so dart never treats it as a
     // group end: the at-rules emitted around it from consecutive `@each`

@@ -561,7 +561,7 @@ impl Sink<'_> {
 
     /// Emit a produced style rule's fully interleaved output (its own block
     /// fragments plus the rules that bubbled out of it, in source order).
-    fn emit_style_rule(&mut self, output: Vec<OutNode>) {
+    fn emit_style_rule(&mut self, output: Vec<OutNode>, allow_group_end: bool) {
         match self {
             Sink::Top(out) => {
                 let out = &mut **out;
@@ -582,9 +582,17 @@ impl Sink<'_> {
                 push_group(out, output);
                 // A completed top-level style rule marks its LAST produced
                 // node (which may be a bubbled at-rule) as a group end: the
-                // next group gets a blank line even after an at-rule.
+                // next group gets a blank line even after an at-rule —
+                // UNLESS the rule's own last child was an invisible empty
+                // rule, which owns the group end in dart and never renders;
+                // then the next group packs TIGHT (the pack-tight sentinel
+                // also suppresses push_group's default blank-after-rule).
                 if produced && !out.is_empty() {
-                    out.push(OutNode::GroupEnd);
+                    out.push(if allow_group_end {
+                        OutNode::GroupEnd
+                    } else {
+                        OutNode::AtRootPackTight
+                    });
                 }
             }
             Sink::Rule { .. } => {
@@ -794,6 +802,15 @@ pub(crate) struct Evaluator<'a> {
     /// including directly inside a nested `@media` (Tailwind v4's
     /// `@utility x { @media (…) { max-width: …; } }`).
     in_unknown_at_rule: bool,
+    /// Whether the most recent CSS-NODE-CREATING statement in the current
+    /// body was an EMPTY style rule (extend-only / no declarations). dart
+    /// creates a CssStyleRule node even then; being invisible it still OWNS
+    /// its group end, which the serializer never sees — so a rule whose LAST
+    /// child was such a statement emits no blank-line separator
+    /// (`.brand` stays tight after `.nav { %p {…} > .c { @extend %p; } }`).
+    /// Statements that create no node (variables, @extend, loads, control
+    /// flow shells) leave it untouched.
+    last_child_invisible: bool,
     /// dart `_atRootExcludingStyleRule`: inside `@at-root` (before the first
     /// nested style rule) the implicit parent join is disabled — `&` still
     /// resolves against the enclosing rule, but a plain selector stays at the
@@ -1179,6 +1196,7 @@ impl<'a> Evaluator<'a> {
             copy_counter: std::cell::Cell::new(0),
             in_keyframes: false,
             in_unknown_at_rule: false,
+            last_child_invisible: false,
             at_root_excluding_style_rule: false,
             import_clone: None,
             // The entry file's containing directory (possibly "" = the
@@ -1684,6 +1702,7 @@ impl<'a> Evaluator<'a> {
                     let text = self.eval_template(c)?;
                     let lines = self.stamp(*lines);
                     sink.push_comment(text, lines);
+                    self.last_child_invisible = false;
                 }
                 Stmt::Decl(d) => {
                     if sink.is_top() {
@@ -1691,6 +1710,7 @@ impl<'a> Evaluator<'a> {
                     }
                     if let Some(oi) = self.eval_decl(d)? {
                         sink.push_item(oi);
+                        self.last_child_invisible = false;
                     }
                 }
                 Stmt::PropertySet(ps) => {
@@ -1698,6 +1718,7 @@ impl<'a> Evaluator<'a> {
                         return Err(Error::at("top-level declarations aren't allowed", ps.pos));
                     }
                     self.eval_property_set(ps, parents, sink)?;
+                    self.last_child_invisible = false;
                 }
                 Stmt::CustomDecl(d) => {
                     if sink.is_top() {
@@ -1713,6 +1734,7 @@ impl<'a> Evaluator<'a> {
                     }
                     if let Some(oi) = self.eval_custom_decl(d)? {
                         sink.push_item(oi);
+                        self.last_child_invisible = false;
                     }
                 }
                 Stmt::Rule(r) => self.eval_style_rule(r, parents, sink)?,
@@ -1869,6 +1891,7 @@ impl<'a> Evaluator<'a> {
                 } => {
                     let lines = self.stamp(*lines);
                     self.eval_at_rule(name, prelude, body.as_deref(), lines, parents, sink)?;
+                    self.last_child_invisible = false;
                 }
                 Stmt::InterpAtRule { name, prelude, body } => {
                     // The name resolves at eval time; `@keyframes` is the one
@@ -1888,13 +1911,16 @@ impl<'a> Evaluator<'a> {
                             sink,
                         )?;
                     }
+                    self.last_child_invisible = false;
                 }
                 Stmt::CssCustomAtRule { name, prelude, body } => {
                     self.eval_css_custom_at_rule(name, prelude, body, sink)?;
+                    self.last_child_invisible = false;
                 }
                 Stmt::Media { query, body, lines } => {
                     let stamped = self.stamp(*lines);
                     self.eval_media(query, body, stamped, parents, sink)?;
+                    self.last_child_invisible = false;
                 }
                 Stmt::Supports {
                     condition,
@@ -1903,9 +1929,11 @@ impl<'a> Evaluator<'a> {
                 } => {
                     let stamped = self.stamp(*lines);
                     self.eval_supports(condition, body, stamped, parents, sink)?;
+                    self.last_child_invisible = false;
                 }
                 Stmt::AtRoot { query, body } => {
                     self.eval_at_root(query.as_deref(), body, parents, sink)?;
+                    self.last_child_invisible = false;
                 }
                 Stmt::Keyframes {
                     name,
@@ -1915,6 +1943,7 @@ impl<'a> Evaluator<'a> {
                 } => {
                     let lines = self.stamp(*lines);
                     self.eval_keyframes(name, prelude, body, lines, sink)?;
+                    self.last_child_invisible = false;
                 }
                 Stmt::Extend {
                     selector,
@@ -2080,6 +2109,10 @@ impl<'a> Evaluator<'a> {
         // `@extend`s is extended one-shot in dart's `paths` order; otherwise the
         // registration-order fold.
         let extend_base = self.extends.len();
+        // Fresh trailing-invisible tracking for THIS body (the exit below
+        // overwrites the flag with this rule's own contribution, so the
+        // parent needs no save).
+        self.last_child_invisible = false;
         let result = {
             let mut child = Sink::Rule {
                 selectors: &emit_selectors,
@@ -2105,7 +2138,13 @@ impl<'a> Evaluator<'a> {
         self.cur_rule_lines = prev_rule_lines;
         self.pop_scope();
         result?;
-        sink.emit_style_rule(nested);
+        // The body's own trailing-invisible state gates THIS rule's group
+        // end; then report this rule's contribution to the PARENT body
+        // (empty output = dart's invisible node).
+        let body_last_invisible = std::mem::replace(&mut self.last_child_invisible, false);
+        let this_rule_invisible = nested.is_empty() && !self.in_keyframes;
+        sink.emit_style_rule(nested, !body_last_invisible);
+        self.last_child_invisible = this_rule_invisible;
         Ok(())
     }
 
@@ -4796,19 +4835,21 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, plan: &crate::selector::ExtendPlan, s
                 extend_base,
                 ..
             } => {
-                match extend_selector_list(selectors, linebreaks, plan, scope, *extend_base) {
-                    // No change → skip the clone + write-back entirely.
-                    SelectorRewrite::Unchanged => false,
-                    SelectorRewrite::Changed(s, b) => {
-                        // Line-break flags travel with their selectors (dart's
-                        // ComplexSelector.lineBreak): an original keeps its
-                        // flag, an extend product takes its extender's.
-                        *linebreaks = b;
-                        *selectors = s;
-                        false
+                {
+                    match extend_selector_list(selectors, linebreaks, plan, scope, *extend_base) {
+                        // No change → skip the clone + write-back entirely.
+                        SelectorRewrite::Unchanged => false,
+                        SelectorRewrite::Changed(s, b) => {
+                            // Line-break flags travel with their selectors (dart's
+                            // ComplexSelector.lineBreak): an original keeps its
+                            // flag, an extend product takes its extender's.
+                            *linebreaks = b;
+                            *selectors = s;
+                            false
+                        }
+                        // Entirely placeholders → drop the rule.
+                        SelectorRewrite::Drop => true,
                     }
-                    // Entirely placeholders → drop the rule.
-                    SelectorRewrite::Drop => true,
                 }
             }
             OutNode::AtRule {
@@ -4833,8 +4874,10 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, plan: &crate::selector::ExtendPlan, s
             if i < nodes.len() && matches!(nodes[i], OutNode::Blank) {
                 nodes.remove(i);
             } else if i > 0 && matches!(nodes[i - 1], OutNode::Blank) {
+                // Removing the PRECEDING blank shifts the yet-unexamined
+                // successor down to `i - 1`; step back so it isn't skipped.
                 nodes.remove(i - 1);
-                continue;
+                i -= 1;
             }
         } else {
             i += 1;
