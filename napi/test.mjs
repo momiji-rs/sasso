@@ -397,5 +397,25 @@ writeFileSync(join(root, "fi.scss"), "$s: 10px;\n");
   assert.equal(n.value, 96, "SassNumber.convert via the native valueOp engine");
 }
 
+// (m) binding resolution tiers of sasso/native (wasm/npm/native.mjs): the
+// SASSO_NATIVE_BINARY override wins, and an unresolvable setup fails with the
+// guidance error (not a bare MODULE_NOT_FOUND from some inner require).
+{
+  const { execFileSync } = await import("node:child_process");
+  const wrapper = fileURLToPath(new URL("../wasm/npm/native.mjs", import.meta.url));
+  const addon = fileURLToPath(new URL("./npm/sasso.node", import.meta.url));
+  const run = (env, code) =>
+    execFileSync(process.execPath, ["--input-type=module", "-e", code], {
+      env: { ...process.env, ...env },
+      encoding: "utf8",
+    });
+  const out = run(
+    { SASSO_NATIVE_BINARY: addon },
+    `import { compileString, info } from ${JSON.stringify(wrapper)};
+     console.log(info.includes("sasso-native") && compileString(".e { v: 1 + 1 }").css.includes("v: 2") ? "OVERRIDE-OK" : "BAD");`,
+  );
+  assert.ok(out.includes("OVERRIDE-OK"), "SASSO_NATIVE_BINARY override tier resolves and compiles");
+}
+
 console.log("ok: behavior guards — importers, errors, logger, functions, isolation, overlap, re-entrancy, valueOp");
 console.log("all sasso-napi native-addon tests passed");

@@ -397,7 +397,19 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   const speedEntry = readFileSync(new URL("./npm/sasso.speed.mjs", import.meta.url), "utf8");
   assert.ok(speedEntry.includes('"./sasso.speed.wasm"'), "speed entry loads the -O3 sync module");
   assert.ok(speedEntry.includes('"./sasso.speed.async.wasm"'), "speed entry loads the -O3 async module (F2)");
-  console.log("ok: packaging — files array ships all four wasm binaries; speed entry wired to -O3 modules");
+
+  // sasso/native wiring: subpath exported, wrapper + types shipped, and the
+  // runtime platform-package list matches the release generator's target list
+  // (a drifted pair ships prebuilds the loader can never resolve).
+  assert.ok(pkg.exports["./native"] && pkg.exports["./native"].import === "./native.mjs", "exports map has ./native");
+  assert.ok(shipped.has("native.mjs") && shipped.has("native.d.ts"), "files array ships the native wrapper + types");
+  const nativeSrc = readFileSync(new URL("./npm/native.mjs", import.meta.url), "utf8");
+  const genSrc = readFileSync(new URL("../napi/make-platform-package.mjs", import.meta.url), "utf8");
+  for (const target of ["darwin-arm64", "darwin-x64", "linux-x64-gnu", "linux-arm64-gnu"]) {
+    assert.ok(nativeSrc.includes(`"sasso-native-${target}"`), `native.mjs resolves sasso-native-${target}`);
+    assert.ok(genSrc.includes(`"${target}"`), `make-platform-package.mjs stages ${target}`);
+  }
+  console.log("ok: packaging — wasm binaries + speed wiring + sasso/native subpath and platform-target consistency");
 }
 
 // === Phase 3: CLI (bin) smoke test ===

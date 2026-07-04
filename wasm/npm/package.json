@@ -6,7 +6,9 @@
   "main": "./sasso.mjs",
   "module": "./sasso.mjs",
   "types": "./sasso.d.ts",
-  "bin": { "sasso": "./cli.mjs" },
+  "bin": {
+    "sasso": "./cli.mjs"
+  },
   "exports": {
     ".": {
       "types": "./sasso.d.ts",
@@ -17,6 +19,11 @@
       "types": "./sasso.speed.d.ts",
       "import": "./sasso.speed.mjs",
       "default": "./sasso.speed.mjs"
+    },
+    "./native": {
+      "types": "./native.d.ts",
+      "import": "./native.mjs",
+      "default": "./native.mjs"
     }
   },
   "files": [
@@ -27,17 +34,27 @@
     "cli.mjs",
     "sasso.mjs",
     "sasso.speed.mjs",
+    "native.mjs",
     "sasso.wasm",
     "sasso.speed.wasm",
     "sasso.async.wasm",
     "sasso.speed.async.wasm",
     "sasso.d.ts",
     "sasso.speed.d.ts",
+    "native.d.ts",
     "README.md",
     "LICENSE-APACHE",
     "LICENSE-MIT"
   ],
-  "keywords": ["sass", "scss", "css", "compiler", "wasm", "webassembly", "dart-sass"],
+  "keywords": [
+    "sass",
+    "scss",
+    "css",
+    "compiler",
+    "wasm",
+    "webassembly",
+    "dart-sass"
+  ],
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",

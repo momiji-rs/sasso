@@ -11,7 +11,18 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
-### Added (repo — native Node addon, not yet published)
+### Added (npm package — `sasso/native`, ships with the next npm release)
+
+- **`sasso/native` subpath: the native addon as a first-class npm entry.**
+  Prebuilt binaries publish as exact-version-pinned `optionalDependencies`
+  (`sasso-native-{darwin-arm64, darwin-x64, linux-x64-gnu, linux-arm64-gnu}`) —
+  npm installs only the matching platform, the release workflow builds and
+  byte-parity-tests every binary against the wasm reference before publishing,
+  and unsupported platforms get a clear error pointing back at the wasm
+  entries. Resolution order: `SASSO_NATIVE_BINARY` override → platform
+  package → repo-local build.
+
+### Added (repo — native Node addon)
 
 - **`napi/`: a native Node addon binding the core crate directly** (F4 of
   `docs/ASYNC_PERF_ARCHITECTURE.md`) — no wasm, no asyncify. Same dart-sass

@@ -187,6 +187,32 @@ Flags: `-s/--style <expanded|compressed>`, `-I/--load-path <dir>` (repeatable),
 input), `-w/--watch` (re-compiles when the input or any dependency changes),
 `--help`, `--version`.
 
+## Native addon — `sasso/native`
+
+For the fastest engine, import the **native Node addon** — same API, byte-identical
+output (CI-verified against the wasm build), no wasm and no asyncify:
+
+```js
+import { compileString, compileStringAsync } from "sasso/native";
+```
+
+- **~3× engine speed** over the wasm modules, and **true multi-core concurrency**:
+  each async compile runs on its own OS thread, so a bundler fanning out N
+  entries finishes in roughly one compile's wall time instead of N.
+- **Zero extra install steps.** Prebuilt binaries ship as `optionalDependencies`
+  (`sasso-native-<platform>`); npm fetches only the one matching your machine.
+  Prebuilt platforms: macOS arm64/x64, Linux x64/arm64 (glibc).
+- On an unsupported platform the import throws a clear error — the wasm entries
+  (`sasso`, `sasso/speed`) work everywhere and remain the zero-surprise default.
+- `configure()` is accepted but a no-op here (`asyncInstances`/`arenaMiB` are
+  wasm-engine knobs); a repo checkout can also point `SASSO_NATIVE_BINARY` at a
+  locally built binary.
+
+```js
+// webpack / sass-loader
+{ loader: "sass-loader", options: { implementation: require("sasso/native"), api: "modern" } }
+```
+
 ## Two builds: size vs speed
 
 The default import is the **size-optimized** build (~350 KB gzip sync + ~580 KB
@@ -225,9 +251,7 @@ of correctness — just less speedup. The compile-time default is also settable
 when building from source: `SASSO_WASM_ARENA_MB=16 bash wasm/build.sh`.
 
 The loader reads the `.wasm` from disk via `node:fs`, so it targets **Node** (and
-bundlers that resolve `node:fs`). For the CLI, the Rust library, and the
-work-in-progress **native Node addon** (~3× engine speed, true multi-core
-concurrent compiles; repo-buildable, prebuilt binaries not yet published), see
-the [main repository](https://github.com/momiji-rs/sasso).
+bundlers that resolve `node:fs`). For the CLI and the Rust library, see the
+[main repository](https://github.com/momiji-rs/sasso).
 
 Licensed under MIT OR Apache-2.0.
