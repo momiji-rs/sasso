@@ -89,6 +89,44 @@ jobs:
       - name: node API + importer tests
         run: node wasm/test.mjs
 
+  napi:
+    name: native addon (build + parity + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            napi
+            wasm
+          cache-directories: |
+            wasm/target-size
+            wasm/target-speed
+      - name: install binaryen (wasm-opt)
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      # Like wasm/ and ffi/, the napi crate lives outside the core workspace.
+      - name: rustfmt (napi)
+        run: cargo fmt --check
+        working-directory: napi
+      - name: clippy (napi)
+        run: cargo clippy --release -- -D warnings
+        working-directory: napi
+      # The parity half of napi/test.mjs compiles every corpus with BOTH
+      # engines and asserts byte-identical CSS, so the wasm modules must exist.
+      - name: build wasm modules (parity reference)
+        run: bash wasm/build.sh
+      - name: build native addon
+        run: bash napi/build.sh
+      - name: node parity + behavior tests
+        run: node napi/test.mjs
+
   ffi:
     name: C ABI (ffi)
     runs-on: ubuntu-latest

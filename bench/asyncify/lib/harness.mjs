@@ -115,7 +115,8 @@ export function captureEnv(implPath = DEFAULT_IMPL) {
   const wasm = {};
   try {
     for (const f of readdirSync(implDir)) {
-      if (f.endsWith(".wasm")) wasm[f] = sha256(path.join(implDir, f));
+      // .node too: a napi --impl's measured binary is the addon, not a wasm.
+      if (f.endsWith(".wasm") || f.endsWith(".node")) wasm[f] = sha256(path.join(implDir, f));
     }
   } catch {
     // non-directory impl (e.g. a package specifier) — leave hashes empty

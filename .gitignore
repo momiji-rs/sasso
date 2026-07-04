@@ -1,5 +1,7 @@
 # Build artifacts (root crate; nested helper crates carry their own too).
 /target
+napi/target/
+napi/npm/sasso.node
 bench/grass_runner/target/
 
 # The root Cargo.lock IS committed (this crate ships a binary). Auxiliary
