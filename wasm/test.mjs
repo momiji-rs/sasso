@@ -329,6 +329,48 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   assert.equal(settled[2].status, "fulfilled", `${name}: mixed-outcome compile #2 fulfilled`);
   assert.ok(settled[2].value.css.includes(".mix-b"), `${name}: mixed-outcome compile #2 CSS correct`);
 
+  // (f) F1 pool OVERLAP: while compile A is suspended on a gated importer, an
+  // independent compile B must run to completion on another engine. Under the
+  // old asyncLock this deadlocks (B queued behind A forever), so this is the
+  // pool's defining semantic test — keep it FIRST awaiting B, not the gate.
+  let releaseGate;
+  const gate = new Promise((r) => { releaseGate = r; });
+  const blocked = mod.compileStringAsync(`@use "g";`, {
+    importers: [{
+      canonicalize: async (u) => (u === "g" ? new URL("custom:gated") : null),
+      load: async () => { await gate; return { contents: ".gated { ok: 1; }", syntax: "scss" }; },
+    }],
+  });
+  const overlapped = await mod.compileStringAsync(".quick { fast: 1; }");
+  assert.ok(overlapped.css.includes(".quick"), `${name}: a compile completes while another is suspended (engine pool overlap)`);
+  releaseGate();
+  const gated = await blocked;
+  assert.ok(gated.css.includes(".gated"), `${name}: the suspended compile completes after its importer resolves`);
+
+  // (g) F1 cap semantics: configure({ asyncInstances: 1 }) serializes again —
+  // B must NOT finish while A holds the only engine — and the queue drains in
+  // order once the gate opens. Restore the default cap afterwards.
+  mod.configure({ asyncInstances: 1 });
+  try {
+    let release1;
+    const gate1 = new Promise((r) => { release1 = r; });
+    const holdA = mod.compileStringAsync(`@use "h";`, {
+      importers: [{
+        canonicalize: async (u) => (u === "h" ? new URL("custom:held") : null),
+        load: async () => { await gate1; return { contents: ".held { ok: 1; }", syntax: "scss" }; },
+      }],
+    });
+    let bDone = false;
+    const queuedB = mod.compileStringAsync(".b { v: 1; }").then((r) => { bDone = true; return r; });
+    await delay(25);
+    assert.equal(bDone, false, `${name}: with asyncInstances=1 a second compile queues behind the suspended one`);
+    release1();
+    const [ra, rb] = await Promise.all([holdA, queuedB]);
+    assert.ok(ra.css.includes(".held") && rb.css.includes(".b"), `${name}: the single-engine queue drains after the gate opens`);
+  } finally {
+    mod.configure({ asyncInstances: 4 });
+  }
+
   // === Phase 4: custom functions (sync path, both builds) ===
   const rfn = mod.compileString(`.a { x: pow(2, 10); }`, {
     functions: { "pow($base, $exp)": (args) => new mod.SassNumber(args[0].value ** args[1].value) },

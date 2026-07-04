@@ -124,6 +124,15 @@ export interface ConfigureOptions {
    * footprint at a lower throughput. Must be set before the first compile.
    */
   arenaMiB?: number;
+  /**
+   * Maximum number of asyncify engine instances the async APIs
+   * (`compileStringAsync`, `compileAsync`) may run concurrently (default:
+   * `min(4, cpu cores)`). The pool grows lazily — a process that never
+   * overlaps async compiles only ever pays for one instance. Each instance
+   * reserves its own wasm memory (incl. the arena) plus a 1 MiB asyncify
+   * stack. Lowering the cap drops surplus instances as they become idle.
+   */
+  asyncInstances?: number;
 }
 
 /**

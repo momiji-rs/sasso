@@ -19,6 +19,9 @@
 //     methods). It can SUSPEND the whole compile across an `await`, so
 //     asynchronous importers — the kind sass-loader and Vite inject by default —
 //     work. This is the dart-sass async story without a native binary.
+//     Concurrent async compiles run on a lazily-grown POOL of asyncify
+//     instances (each suspends independently), capped by
+//     `configure({ asyncInstances })` — default min(4, cores).
 //
 // Importers (`@use`/`@forward`/`@import`) are resolved by calling back into JS
 // (wasm has no filesystem): the host functions below drive the per-compile
@@ -26,6 +29,7 @@
 // `loadPaths`/relative loads) and record `loadedUrls`.
 
 import { readFileSync, realpathSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import {
   isThenable,
@@ -483,15 +487,28 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
   }
   setEngine(valueOpEngine);
 
-  // ========================== ASYNCIFY instance ==========================
-  let asyncEx; // cached asyncify'd exports
-  let asyncData = 0; // asyncify stack-state struct pointer
-  let asyncReady = false; // module actually carries the asyncify_* exports
-  let asyncChain = null; // importer chain for the in-flight async compile
-  let asyncFunctions = []; // index -> user custom function for the in-flight compile
-  let asyncLogger = null; // dart-sass `logger` for the in-flight async compile
-  let pendingDelivery = null; // a Promise<{rc, bytes}>, then its resolved value
-  let asyncLock = Promise.resolve(); // serialize async compiles (one asyncify stack)
+  // ========================= ASYNCIFY engine pool =========================
+  // One AsyncEngine = one instantiation of the (cached) asyncify'd module with
+  // its own linear memory, its own 1 MiB asyncify stack, and its own in-flight
+  // compile state. An engine runs ONE compile at a time (single asyncify stack
+  // + the wasm-side custom-function registry), so concurrency comes from a
+  // lazily-grown pool: while one compile is SUSPENDED awaiting an importer,
+  // another engine's compile runs — a bundler fanning out N entries no longer
+  // queues them behind one another. Memory cost per engine = module memory
+  // (incl. the arena reservation) + the asyncify stack; the pool grows only on
+  // demand, capped at `maxAsyncEngines` (configure({ asyncInstances })).
+  let asyncModule = null; // compiled WebAssembly.Module, shared by all engines
+  const enginePool = []; // every live engine (busy and idle)
+  const engineWaiters = []; // FIFO resolvers awaiting a freed engine
+  let maxAsyncEngines = defaultMaxEngines();
+
+  function defaultMaxEngines() {
+    try {
+      return Math.max(1, Math.min(4, availableParallelism()));
+    } catch {
+      return 2; // non-Node host without os support
+    }
+  }
 
   const ASYNCIFY_MISSING =
     "sasso: this async module was built without asyncify (wasm-opt was missing " +
@@ -509,117 +526,183 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
   // rc contract (wasm/src/lib.rs): 1 = delivered, 0 = miss, -1 = error. rc 0 is
   // an ERROR for host_call_function, whose lookup therefore never returns null
   // (it throws instead), keeping the miss branch unreachable there.
-  function asyncHostFn(lookup, encodeOk) {
-    return (...args) => {
-      const outPtr = args[args.length - 2];
-      const outLen = args[args.length - 1];
-      if (asyncReady && asyncEx.asyncify_get_state() === ASYNCIFY_REWINDING) {
-        asyncEx.asyncify_stop_rewind();
-        const d = pendingDelivery;
-        pendingDelivery = null;
-        if (!d || d.rc === 0) return 0;
-        deliver(asyncEx, d.bytes, outPtr, outLen);
-        return d.rc;
-      }
-      let v;
-      try {
-        v = lookup(args);
-      } catch (e) {
-        deliver(asyncEx, encoder.encode(errMessage(e)), outPtr, outLen);
-        return -1;
-      }
-      if (isThenable(v)) {
-        if (!asyncReady) {
-          // Degraded module (built without wasm-opt): it cannot suspend, so a
-          // genuinely-async result is undeliverable — fail this load clearly.
-          deliver(asyncEx, encoder.encode(ASYNCIFY_MISSING), outPtr, outLen);
+  //
+  // The import object is built PER ENGINE: every host fn closes over its
+  // engine's record (exports, asyncify stack, in-flight chain/functions/logger,
+  // pending delivery), so concurrent compiles on different engines never touch
+  // each other's state.
+  function makeAsyncHost(engine) {
+    function hostFn(lookup, encodeOk) {
+      return (...args) => {
+        const outPtr = args[args.length - 2];
+        const outLen = args[args.length - 1];
+        if (engine.ready && engine.ex.asyncify_get_state() === ASYNCIFY_REWINDING) {
+          engine.ex.asyncify_stop_rewind();
+          const d = engine.pendingDelivery;
+          engine.pendingDelivery = null;
+          if (!d || d.rc === 0) return 0;
+          deliver(engine.ex, d.bytes, outPtr, outLen);
+          return d.rc;
+        }
+        let v;
+        try {
+          v = lookup(args);
+        } catch (e) {
+          deliver(engine.ex, encoder.encode(errMessage(e)), outPtr, outLen);
           return -1;
         }
-        pendingDelivery = Promise.resolve(v)
-          .then((r) => (r == null ? { rc: 0 } : { rc: 1, bytes: encodeOk(r) }))
-          .catch((e) => ({ rc: -1, bytes: encoder.encode(errMessage(e)) }));
-        asyncEx.asyncify_start_unwind(asyncData);
-        return 0; // ignored while unwinding
-      }
-      if (v == null) return 0; // miss (canonicalize/load only — see above)
-      let bytes;
-      try {
-        bytes = encodeOk(v);
-      } catch (e) {
-        deliver(asyncEx, encoder.encode(errMessage(e)), outPtr, outLen);
-        return -1;
-      }
-      deliver(asyncEx, bytes, outPtr, outLen);
-      return 1;
+        if (isThenable(v)) {
+          if (!engine.ready) {
+            // Degraded module (built without wasm-opt): it cannot suspend, so a
+            // genuinely-async result is undeliverable — fail this load clearly.
+            deliver(engine.ex, encoder.encode(ASYNCIFY_MISSING), outPtr, outLen);
+            return -1;
+          }
+          engine.pendingDelivery = Promise.resolve(v)
+            .then((r) => (r == null ? { rc: 0 } : { rc: 1, bytes: encodeOk(r) }))
+            .catch((e) => ({ rc: -1, bytes: encoder.encode(errMessage(e)) }));
+          engine.ex.asyncify_start_unwind(engine.data);
+          return 0; // ignored while unwinding
+        }
+        if (v == null) return 0; // miss (canonicalize/load only — see above)
+        let bytes;
+        try {
+          bytes = encodeOk(v);
+        } catch (e) {
+          deliver(engine.ex, encoder.encode(errMessage(e)), outPtr, outLen);
+          return -1;
+        }
+        deliver(engine.ex, bytes, outPtr, outLen);
+        return 1;
+      };
+    }
+    return {
+      host_canonicalize: hostFn(
+        (args) => {
+          const url = readStr(engine.ex, args[0], args[1]);
+          const containing = args[4] ? readStr(engine.ex, args[3], args[4]) : null;
+          return engine.chain.canonicalize(url, args[2] !== 0, containing);
+        },
+        (canon) => encoder.encode(canon),
+      ),
+      host_load: hostFn(
+        (args) => engine.chain.load(readStr(engine.ex, args[0], args[1])),
+        (res) => frameLoad(res),
+      ),
+      host_call_function: hostFn(
+        (args) => {
+          const argBytes = args[2] ? new Uint8Array(engine.ex.memory.buffer, args[1], args[2]).slice() : new Uint8Array(0);
+          const fn = engine.functions[args[0]];
+          if (!fn) throw new Error(`sasso: custom function #${args[0]} is not registered`);
+          // Resolve sync or async. A null return is an error (functions must
+          // return a value) and must NOT map to the miss rc — throw instead.
+          const r = fn(deserializeArgs(argBytes));
+          if (isThenable(r)) {
+            return Promise.resolve(r).then((v) => {
+              if (v == null) throw new Error("sasso: a custom function returned no value");
+              return v;
+            });
+          }
+          if (r == null) throw new Error("sasso: a custom function returned no value");
+          return r;
+        },
+        (v) => serializeValue(v),
+      ),
+      host_warn(bufPtr, bufLen) {
+        try {
+          dispatchWarn(engine.logger, decodeWarn(engine.ex, bufPtr, bufLen));
+        } catch {
+          // A logging failure must never fail the compile.
+        }
+      },
     };
   }
 
-  const asyncHost = {
-    host_canonicalize: asyncHostFn(
-      (args) => {
-        const url = readStr(asyncEx, args[0], args[1]);
-        const containing = args[4] ? readStr(asyncEx, args[3], args[4]) : null;
-        return asyncChain.canonicalize(url, args[2] !== 0, containing);
-      },
-      (canon) => encoder.encode(canon),
-    ),
-    host_load: asyncHostFn(
-      (args) => asyncChain.load(readStr(asyncEx, args[0], args[1])),
-      (res) => frameLoad(res),
-    ),
-    host_call_function: asyncHostFn(
-      (args) => {
-        const argBytes = args[2] ? new Uint8Array(asyncEx.memory.buffer, args[1], args[2]).slice() : new Uint8Array(0);
-        const fn = asyncFunctions[args[0]];
-        if (!fn) throw new Error(`sasso: custom function #${args[0]} is not registered`);
-        // Resolve sync or async. A null return is an error (functions must
-        // return a value) and must NOT map to the miss rc — throw instead.
-        const r = fn(deserializeArgs(argBytes));
-        if (isThenable(r)) {
-          return Promise.resolve(r).then((v) => {
-            if (v == null) throw new Error("sasso: a custom function returned no value");
-            return v;
-          });
-        }
-        if (r == null) throw new Error("sasso: a custom function returned no value");
-        return r;
-      },
-      (v) => serializeValue(v),
-    ),
-    host_warn(bufPtr, bufLen) {
-      try {
-        dispatchWarn(asyncLogger, decodeWarn(asyncEx, bufPtr, bufLen));
-      } catch {
-        // A logging failure must never fail the compile.
-      }
-    },
-  };
-
-  function asyncInstance() {
-    if (asyncEx) return asyncEx;
-    const module = new WebAssembly.Module(readFileSync(asyncWasmUrl));
-    asyncEx = new WebAssembly.Instance(module, { sasso_host: asyncHost }).exports;
-    if (pendingArenaBytes !== null) asyncEx.sasso_set_arena_bytes(pendingArenaBytes);
-    asyncReady = typeof asyncEx.asyncify_start_unwind === "function";
-    if (asyncReady) {
-      asyncData = asyncEx.sasso_alloc(8 + ASYNCIFY_STACK_BYTES);
-      const v = new DataView(asyncEx.memory.buffer);
-      v.setUint32(asyncData, asyncData + 8, true); // current stack pointer
-      v.setUint32(asyncData + 4, asyncData + 8 + ASYNCIFY_STACK_BYTES, true); // end
+  function makeEngine() {
+    if (!asyncModule) asyncModule = new WebAssembly.Module(readFileSync(asyncWasmUrl));
+    const engine = {
+      ex: null, // exports of this instantiation
+      data: 0, // asyncify stack-state struct pointer (in this engine's memory)
+      ready: false, // module actually carries the asyncify_* exports
+      busy: false, // exactly one compile at a time per engine
+      chain: null, // importer chain for the in-flight compile
+      functions: [], // index -> user custom function for the in-flight compile
+      logger: null, // dart-sass `logger` for the in-flight compile
+      pendingDelivery: null, // a Promise<{rc, bytes}>, then its resolved value
+    };
+    // Host fns read engine.ex lazily at call time, so wiring the import object
+    // before the instance exists is safe.
+    engine.ex = new WebAssembly.Instance(asyncModule, { sasso_host: makeAsyncHost(engine) }).exports;
+    if (pendingArenaBytes !== null) engine.ex.sasso_set_arena_bytes(pendingArenaBytes);
+    engine.ready = typeof engine.ex.asyncify_start_unwind === "function";
+    if (engine.ready) {
+      engine.data = engine.ex.sasso_alloc(8 + ASYNCIFY_STACK_BYTES);
+      const v = new DataView(engine.ex.memory.buffer);
+      v.setUint32(engine.data, engine.data + 8, true); // current stack pointer
+      v.setUint32(engine.data + 4, engine.data + 8 + ASYNCIFY_STACK_BYTES, true); // end
     }
-    return asyncEx;
+    enginePool.push(engine);
+    return engine;
   }
 
-  // Drives the asyncify unwind/rewind loop so async importers can suspend.
-  async function compileRawAsync(scss, opts) {
-    const w = asyncInstance();
+  // FIFO engine checkout: reuse an idle engine, grow the pool up to the cap,
+  // else queue. Release hands the engine straight to the next waiter (it stays
+  // busy), or drops it when the cap was lowered mid-flight.
+  function acquireEngine() {
+    const idle = enginePool.find((e) => !e.busy);
+    if (idle) {
+      idle.busy = true;
+      return Promise.resolve(idle);
+    }
+    if (enginePool.length < maxAsyncEngines) {
+      const engine = makeEngine();
+      engine.busy = true;
+      return Promise.resolve(engine);
+    }
+    return new Promise((resolve) => engineWaiters.push(resolve));
+  }
+
+  function releaseEngine(engine) {
+    engine.chain = null;
+    engine.functions = [];
+    engine.logger = null;
+    engine.pendingDelivery = null;
+    engine.ex.sasso_clear_functions();
+    const next = engineWaiters.shift();
+    if (next) {
+      next(engine); // handed over still busy
+      return;
+    }
+    if (enginePool.length > maxAsyncEngines) {
+      const i = enginePool.indexOf(engine);
+      if (i !== -1) enginePool.splice(i, 1); // shrink toward a lowered cap
+      return;
+    }
+    engine.busy = false;
+  }
+
+  // Check out an engine for one compile; the finally both frees the slot and
+  // clears the per-compile state, so errors release too (no stuck engines).
+  async function withEngine(task) {
+    const engine = await acquireEngine();
+    try {
+      return await task(engine);
+    } finally {
+      releaseEngine(engine);
+    }
+  }
+
+  // Drives one engine's asyncify unwind/rewind loop so async importers can
+  // suspend that compile (other engines keep running during the await).
+  async function compileRawAsync(engine, scss, opts) {
+    const w = engine.ex;
     const m = marshalIn(w, scss, opts);
     let outPtr = callCompile2(w, m, opts);
-    if (asyncReady) {
+    if (engine.ready) {
       while (w.asyncify_get_state() === ASYNCIFY_UNWINDING) {
         w.asyncify_stop_unwind();
-        pendingDelivery = await pendingDelivery; // Promise<{rc,bytes}> -> value
-        w.asyncify_start_rewind(asyncData);
+        engine.pendingDelivery = await engine.pendingDelivery; // Promise<{rc,bytes}> -> value
+        w.asyncify_start_rewind(engine.data);
         outPtr = callCompile2(w, m, opts);
       }
     }
@@ -643,8 +726,16 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       pendingArenaBytes = Math.max(0, Math.floor(options.arenaMiB * 1024 * 1024));
       // Apply to whichever instances already exist (and stash for the rest).
       if (syncEx) syncEx.sasso_set_arena_bytes(pendingArenaBytes);
-      if (asyncEx) asyncEx.sasso_set_arena_bytes(pendingArenaBytes);
-      if (!syncEx && !asyncEx) syncInstance().sasso_set_arena_bytes(pendingArenaBytes);
+      for (const engine of enginePool) engine.ex.sasso_set_arena_bytes(pendingArenaBytes);
+      if (!syncEx && enginePool.length === 0) syncInstance().sasso_set_arena_bytes(pendingArenaBytes);
+    }
+    if (typeof options.asyncInstances === "number") {
+      maxAsyncEngines = Math.max(1, Math.floor(options.asyncInstances));
+      // Shrink toward a lowered cap now (idle engines) and as compiles finish
+      // (busy ones — see releaseEngine).
+      for (let i = enginePool.length - 1; i >= 0 && enginePool.length > maxAsyncEngines; i--) {
+        if (!enginePool[i].busy) enginePool.splice(i, 1);
+      }
     }
   }
 
@@ -705,40 +796,22 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     return makeResult(raw, entryHref, chain.loaded);
   }
 
-  // Async APIs run on the asyncify'd module and SERIALIZE (one asyncify stack).
-  function runAsyncLocked(task) {
-    const result = asyncLock.then(task, task);
-    asyncLock = result.then(
-      () => {},
-      () => {},
-    );
-    return result;
-  }
-
   function compileStringAsync(source, options = {}) {
-    return runAsyncLocked(async () => {
+    return withEngine(async (engine) => {
       if (typeof source !== "string") {
         throw new TypeError("compileStringAsync(source): source must be a string");
       }
       const chain = buildChain(options, true);
-      const callbacks = registerFunctions(asyncInstance(), options);
-      asyncChain = chain;
-      asyncFunctions = callbacks;
-      asyncLogger = options.logger ?? null;
-      try {
-        const raw = await compileRawAsync(source, rawOpts(options, syntaxCode(options.syntax)));
-        return makeResult(raw, options.url ? toFileUrl(options.url).href : null, chain.loaded);
-      } finally {
-        asyncChain = null;
-        asyncFunctions = [];
-        asyncLogger = null;
-        asyncEx.sasso_clear_functions();
-      }
+      engine.functions = registerFunctions(engine.ex, options);
+      engine.chain = chain;
+      engine.logger = options.logger ?? null;
+      const raw = await compileRawAsync(engine, source, rawOpts(options, syntaxCode(options.syntax)));
+      return makeResult(raw, options.url ? toFileUrl(options.url).href : null, chain.loaded);
     });
   }
 
   function compileAsync(path, options = {}) {
-    return runAsyncLocked(async () => {
+    return withEngine(async (engine) => {
       const fsPath = toFsPath(path);
       const source = readFileSync(fsPath, "utf8");
       let realPath = fsPath;
@@ -750,19 +823,11 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       const entryHref = toFileUrl(realPath).href;
       const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(realPath);
       const chain = buildChain(options, true);
-      const callbacks = registerFunctions(asyncInstance(), options);
-      asyncChain = chain;
-      asyncFunctions = callbacks;
-      asyncLogger = options.logger ?? null;
-      try {
-        const raw = await compileRawAsync(source, { ...rawOpts(options, syntax), url: entryHref });
-        return makeResult(raw, entryHref, chain.loaded);
-      } finally {
-        asyncChain = null;
-        asyncFunctions = [];
-        asyncLogger = null;
-        asyncEx.sasso_clear_functions();
-      }
+      engine.functions = registerFunctions(engine.ex, options);
+      engine.chain = chain;
+      engine.logger = options.logger ?? null;
+      const raw = await compileRawAsync(engine, source, { ...rawOpts(options, syntax), url: entryHref });
+      return makeResult(raw, entryHref, chain.loaded);
     });
   }
 
