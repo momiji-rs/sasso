@@ -3069,6 +3069,20 @@ fn extend_self_referential_pseudo_converges() {
 }
 
 #[test]
+fn invisible_rule_leaves_no_blank_line_group_end() {
+    // An `@extend`-only rule produces no CSS, so dart never treats it as a
+    // group end: the at-rules emitted around it from consecutive `@each`
+    // rounds stay tight (bootstrap's responsive-container @media blocks).
+    assert_parity(
+        "$bps: (sm: 10px, md: 20px);\n.fluid { w: 1; }\n@each $bp, $w in $bps {\n  .c-#{$bp} { @extend .fluid; }\n  @media (min-width: $w) { .x { max-width: $w; } }\n}\n",
+    );
+    assert_eq!(
+        ours(".fluid { w: 1; }\n.a { @extend .fluid; }\n@media (a: b) { .x { y: z; } }\n@media (c: d) { .x { y: z; } }\n"),
+        ".fluid, .a {\n  w: 1;\n}\n\n@media (a: b) {\n  .x {\n    y: z;\n  }\n}\n@media (c: d) {\n  .x {\n    y: z;\n  }\n}\n"
+    );
+}
+
+#[test]
 fn trailing_comment_never_joins_across_import_files() {
     use std::fs;
 

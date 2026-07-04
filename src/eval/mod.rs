@@ -552,12 +552,19 @@ impl Sink<'_> {
                 // (nothing resumes) is left untouched — it's the rule's own
                 // isGroupEnd, consumed by the next group's `push_group`.
                 let output = materialize_interior_group_ends(output);
+                // dart-sass isGroupEnd is set only by visitStyleRule, and an
+                // INVISIBLE rule (e.g. `@extend`-only, no declarations) never
+                // becomes `previous` in _visitChildren — it must not leave a
+                // group-end behind, or the next sibling gains a phantom blank
+                // line (bootstrap: two @media from consecutive @each rounds).
+                let produced = output
+                    .iter()
+                    .any(|n| !matches!(n, OutNode::Blank | OutNode::AtRootPackTight | OutNode::GroupEnd));
                 push_group(out, output);
                 // A completed top-level style rule marks its LAST produced
                 // node (which may be a bubbled at-rule) as a group end: the
-                // next group gets a blank line even after an at-rule
-                // (dart-sass isGroupEnd, set only by visitStyleRule).
-                if !out.is_empty() {
+                // next group gets a blank line even after an at-rule.
+                if produced && !out.is_empty() {
                     out.push(OutNode::GroupEnd);
                 }
             }
