@@ -388,8 +388,16 @@ impl Transpiler {
         // declaration value (`b: c,`) does *not* wrap onto the next line in the
         // indented syntax. A directive prelude handles its own continuation
         // later, so a trailing comma there is also not consumed here.
-        let comma_continues =
-            !logical.starts_with('@') && !logical.starts_with('$') && find_decl_colon(&logical).is_none();
+        // A declaration colon is followed by whitespace; a selector pseudo's
+        // colon is glued to its name — dart continues `&:active,`,
+        // `a::-webkit-x,` and even `b:c,` as selector lists (quasar's
+        // normalize.sass), so only a whitespace-followed colon blocks it.
+        let comma_continues = !logical.starts_with('@')
+            && !logical.starts_with('$')
+            && match find_decl_colon(&logical) {
+                None => true,
+                Some(c) => !logical[c + 1..].starts_with(char::is_whitespace),
+            };
         // A *declaration value* mid-expression continues on a trailing binary
         // operator (`b: 3 %` + `2` is the modulo `3 % 2`).
         let op_continues =

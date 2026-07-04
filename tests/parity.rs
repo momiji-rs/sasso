@@ -3194,6 +3194,26 @@ fn invisible_rule_leaves_no_blank_line_group_end() {
 }
 
 #[test]
+fn indented_selector_comma_continues_despite_pseudo_colon() {
+    // A trailing top-level comma continues the selector list even when the
+    // line contains a colon, as long as that colon is not followed by
+    // whitespace (a declaration value): dart joins `&:active,`,
+    // `a::-webkit-x,` and even `b:c,` onto the next line (quasar's
+    // normalize.sass search-input selectors), while `m: a,` stays a
+    // declaration.
+    assert_eq!(
+        ours_sass(".p\n  &:active,\n  &.on\n    x: y\n"),
+        ".p:active, .p.on {\n  x: y;\n}\n"
+    );
+    assert_eq!(
+        ours_sass("i[type=\"s\"]::-webkit-a,\ni[type=\"s\"]::-webkit-b\n  x: y\n"),
+        "i[type=s]::-webkit-a,\ni[type=s]::-webkit-b {\n  x: y;\n}\n"
+    );
+    assert_eq!(ours_sass("b:c,\nd\n  x: y\n"), "b:c,\nd {\n  x: y;\n}\n");
+    assert_eq!(ours_sass(".q\n  m: a,\n  n: b\n"), ".q {\n  m: a;\n  n: b;\n}\n");
+}
+
+#[test]
 fn indented_loud_comment_first_line_stays_verbatim() {
     // The text after `/*` on a loud comment's first line is glued verbatim:
     // `/**` keeps its doubled star (quasar's normalize.sass banners) and
