@@ -146,7 +146,11 @@ impl<'a> Evaluator<'a> {
                     nested: &mut nested,
                     at_depth,
                     flushed: &mut flushed,
-                    extend_base: usize::MAX,
+                    // Inherit the enclosing rule's addSelector timing: the
+                    // wrapped copy exists from the moment the rule ran, so
+                    // pre-registered extensions apply one-shot to it too
+                    // (govuk's contextual rules inside their @media copies).
+                    extend_base: self.cur_rule_extend_base,
                 };
                 let r = self.exec(stmts, parents, &mut child);
                 if r.is_ok() {

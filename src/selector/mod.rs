@@ -710,6 +710,11 @@ pub(crate) struct Extension {
     /// extended) only links when the outer extension can see the inner one's
     /// origin (dart-sass per-module stores).
     pub origin: String,
+    /// Global registration index (position in the evaluator's `@extend`
+    /// sequence). A rule's `extend_base` splits this sequence: extensions
+    /// registered before the rule apply one-shot (dart `addSelector`),
+    /// later ones incrementally.
+    pub reg_idx: usize,
     // Module-origin set, built in eval (`closure_cache`); kept on std `HashSet`
     // so the FxHash migration stays scoped to this file's selector maps.
     pub origin_closure: std::rc::Rc<std::collections::HashSet<String>>,
@@ -787,6 +792,13 @@ pub(crate) struct ExtendPlan {
     /// The full flat extension registry incl. the transitive closure (dart
     /// `_extensions`), driving the one-shot / pseudo-self-ref worklist.
     registry: Vec<Extension>,
+    /// Registry length after each input `@extend` was processed: entry `i`
+    /// bounds the store visible to a rule created after registration `i`
+    /// (dart `addSelector` extends a new rule by the store SO FAR).
+    batch_registry_marks: Vec<usize>,
+    /// Each input batch's global registration index (ascending — the
+    /// visible-subset filter preserves the evaluator's order).
+    batch_reg_idx: Vec<usize>,
     /// Store-wide source specificities (dart `_sourceSpecificity`) for `trim`.
     source_spec: FxHashMap<Simple, u64>,
     /// The store-wide original extenders (dart `_originals`) for THIS scope —
@@ -837,7 +849,8 @@ pub(crate) fn build_extend_plan(extensions: &[Extension], scope: &str) -> Extend
     // much it consumed, so the per-rule path can replay the same deduction.
     reset_extend_budget();
     let budget_before = EXTEND_WORK.with(|w| w.get());
-    let (batches, registry) = expand_extensions(extensions);
+    let (batches, registry, batch_registry_marks) = expand_extensions(extensions);
+    let batch_reg_idx: Vec<usize> = extensions.iter().map(|e| e.reg_idx).collect();
     let budget_after = EXTEND_WORK.with(|w| w.get());
     let expand_budget_cost = budget_before.saturating_sub(budget_after);
     let single_module = extensions.iter().all(|e| e.origin == scope);
@@ -851,6 +864,8 @@ pub(crate) fn build_extend_plan(extensions: &[Extension], scope: &str) -> Extend
     ExtendPlan {
         batches,
         registry,
+        batch_registry_marks,
+        batch_reg_idx,
         source_spec,
         scope_originals,
         n_extensions: extensions.len(),
@@ -989,17 +1004,62 @@ pub(crate) fn extend_selectors(
         // diamond leaks). New products append after the established order and
         // `trim` drops any a kept selector covers, so order is preserved and
         // spurious blow-ups are pruned; the shared work budget bounds growth.
-        let mut current: Vec<(Complex, bool, String)> = original
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                (
-                    c.clone(),
-                    original_breaks.get(i).copied().unwrap_or(false),
-                    scope.to_string(),
-                )
-            })
-            .collect();
+        // dart `addSelector`: extensions registered BEFORE this rule was
+        // created apply as ONE `extendList` over the store-so-far (their
+        // products in extension-registration order — govuk's
+        // `.govuk-body-l, .govuk-body-lead` aliases); only LATER
+        // registrations re-extend the rule incrementally. Gated to a single
+        // module, where `extend_base` indexes the registration sequence.
+        // The batch list is ordered downstream-first (not registration
+        // order), so the pre-rule set is NOT a prefix: collect the batches
+        // whose registration index precedes the rule, in registration order,
+        // and splice their registry segments for the one-shot store.
+        let pre_batches: Vec<usize> = if extend_base != usize::MAX && extend_base > 0 {
+            let mut v: Vec<usize> = (0..batches.len())
+                .filter(|&i| plan.batch_reg_idx.get(i).copied().unwrap_or(usize::MAX) < extend_base)
+                .collect();
+            v.sort_by_key(|&i| plan.batch_reg_idx[i]);
+            v
+        } else {
+            Vec::new()
+        };
+        let pre_set: FxHashSet<usize> = pre_batches.iter().copied().collect();
+        let seed: Vec<(Complex, bool)> = if !pre_batches.is_empty() {
+            let one_shot_store: Vec<Extension> = pre_batches
+                .iter()
+                .flat_map(|&i| {
+                    let start = if i == 0 {
+                        0
+                    } else {
+                        plan.batch_registry_marks[i - 1]
+                    };
+                    registry[start..plan.batch_registry_marks[i]].iter().cloned()
+                })
+                .collect();
+            let (res, changed) = extend_to_fixpoint_breaks(
+                original,
+                original_breaks,
+                &one_shot_store,
+                CartesianOrder::OneShot,
+            );
+            if changed {
+                trim_breaks(res, &originals, source_spec)
+            } else {
+                original
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (c.clone(), original_breaks.get(i).copied().unwrap_or(false)))
+                    .collect()
+            }
+        } else {
+            original
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.clone(), original_breaks.get(i).copied().unwrap_or(false)))
+                .collect()
+        };
+        let mut current: Vec<(Complex, bool, String)> =
+            seed.into_iter().map(|(c, f)| (c, f, scope.to_string())).collect();
         // OPT 1: the set `S` of simples the running list can match against —
         // exactly those `s` for which some complex `complex_may_match_targets`
         // `{s}`. A batch ALL of whose targets are absent from `S` changes
@@ -1019,7 +1079,10 @@ pub(crate) fn extend_selectors(
         };
         let mut guard = typed_of(&current);
         loop {
-            for batch in batches.iter() {
+            for (bi, batch) in batches.iter().enumerate() {
+                if pre_set.contains(&bi) {
+                    continue;
+                }
                 // Skip a batch none of whose targets the running list can match.
                 let mut any = false;
                 for e in batch.iter() {
@@ -2781,6 +2844,7 @@ fn single_extension(src: &Extension, target: Simple, extender: Complex, break_fl
         optional: src.optional,
         matched: std::rc::Rc::clone(&src.matched),
         origin: src.origin.clone(),
+        reg_idx: src.reg_idx,
         origin_closure: std::rc::Rc::clone(&src.origin_closure),
     }
 }
@@ -2850,7 +2914,7 @@ fn register_derived(
 /// each batch as one multi-extension `_extendList`, reproducing dart's
 /// registration-order output. The store (`sources`/`by_extender`) accumulates
 /// across batches so a later `@extend` chains onto earlier derived extensions.
-fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension>) {
+fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension>, Vec<usize>) {
     // Flat registry of every registered single-extender extension, indexed by
     // `by_extender`/`sources` (dart `_extensions`/`_extensionsByExtender`). Also
     // returned for the pseudo path's legacy worklist, which needs the full set
@@ -2861,6 +2925,7 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
     let mut sources: FxHashMap<Simple, FxHashMap<Complex, usize>> = FxHashMap::default();
     let mut by_extender: FxHashMap<Simple, Vec<usize>> = FxHashMap::default();
     let mut batches: Vec<Vec<Extension>> = Vec::new();
+    let mut registry_marks: Vec<usize> = Vec::new();
     // Store-wide source specificity (dart `_sourceSpecificity`, from the
     // original extenders) used to TRIM each transitively-derived extender just
     // as dart's `_extendCompound` does — without it a self-overlapping extender
@@ -3091,12 +3156,14 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
                 optional: ext.optional,
                 matched: std::rc::Rc::clone(&ext.matched),
                 origin: ext.origin.clone(),
+                reg_idx: ext.reg_idx,
                 origin_closure: std::rc::Rc::clone(&ext.origin_closure),
             });
         }
         batches.push(batch);
+        registry_marks.push(registry.len());
     }
-    (batches, registry)
+    (batches, registry, registry_marks)
 }
 
 /// One fold step = dart `_extendList` against ONE registration's new extensions

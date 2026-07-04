@@ -764,6 +764,11 @@ pub(crate) struct Evaluator<'a> {
     /// parity); `SrcLines::default()` when not inside a style rule. Used ONLY
     /// for source maps — never affects CSS bytes.
     cur_rule_lines: SrcLines,
+    /// The enclosing style rule's `extend_base` (how many `@extend`s were
+    /// registered when it was created), inherited by the wrap that re-emits
+    /// its selectors inside a nested at-rule — the @media copy of a rule is
+    /// created "at the same time" as the rule for dart's addSelector timing.
+    cur_rule_extend_base: usize,
     /// Bogus-combinator selectors omitted from the CSS (`.a > + x`): they
     /// still satisfy `@extend` target matching like dart's extend graph.
     bogus_selectors: Vec<String>,
@@ -1211,6 +1216,7 @@ impl<'a> Evaluator<'a> {
             at_root_hoist: std::collections::VecDeque::new(),
             at_rule_ctx: Vec::new(),
             cur_rule_lines: SrcLines::default(),
+            cur_rule_extend_base: usize::MAX,
             bogus_selectors: Vec::new(),
             placeholder_rules: Vec::new(),
             used_modules: HashMap::default(),
@@ -2099,6 +2105,7 @@ impl<'a> Evaluator<'a> {
         // selector out; that copy maps back to THIS selector's source position
         // (dart parity). Source-map only — never touches CSS.
         let prev_rule_lines = std::mem::replace(&mut self.cur_rule_lines, rule_lines);
+        let prev_rule_extend_base = std::mem::replace(&mut self.cur_rule_extend_base, self.extends.len());
         let mut items: Vec<OutItem> = Vec::new();
         let mut nested: Vec<OutNode> = Vec::new();
         let mut flushed: Option<usize> = None;
@@ -2136,6 +2143,7 @@ impl<'a> Evaluator<'a> {
         self.current_linebreaks = prev_linebreaks;
         self.at_root_excluding_style_rule = prev_at_root;
         self.cur_rule_lines = prev_rule_lines;
+        self.cur_rule_extend_base = prev_rule_extend_base;
         self.pop_scope();
         result?;
         // The body's own trailing-invisible state gates THIS rule's group

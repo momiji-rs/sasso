@@ -135,7 +135,7 @@ impl<'a> Evaluator<'a> {
             .map(|(k, v)| (k, std::rc::Rc::new(v)))
             .collect();
         let mut extensions: Vec<crate::selector::Extension> = Vec::new();
-        for pe in &self.extends {
+        for (reg_idx, pe) in self.extends.iter().enumerate() {
             let mut extenders = Vec::new();
             let mut extender_breaks = Vec::new();
             for (i, ext) in pe.extenders.iter().enumerate() {
@@ -155,6 +155,7 @@ impl<'a> Evaluator<'a> {
                 optional: pe.optional,
                 matched: std::rc::Rc::new(std::cell::Cell::new(false)),
                 origin: pe.origin.clone(),
+                reg_idx,
                 origin_closure: std::rc::Rc::clone(&closure_cache[&pe.origin]),
             });
         }

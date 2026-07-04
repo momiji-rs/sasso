@@ -3080,6 +3080,23 @@ fn pseudo_parent_ref_substitutes_inside_cartesian_parts() {
 }
 
 #[test]
+fn pre_rule_extensions_apply_one_shot_in_registration_order() {
+    // dart's addSelector extends a NEW rule by the store registered SO FAR
+    // in one extendList (products in registration order); only extensions
+    // registered AFTER the rule re-extend it incrementally (their products
+    // land closest to the original). govuk's `.govuk-body-l` /
+    // `.govuk-body-lead` aliases against the contextual
+    // `%govuk-body-l + %govuk-heading-l` rule.
+    assert_eq!(
+        ours(".hl { @extend %h; h: 1; }\n.bl { @extend %l; b: 1; }\n.lead { @extend %l; }\n%l + %h { p: 1; }\n.after { @extend %l; }\n"),
+        ".hl {\n  h: 1;\n}\n\n.bl {\n  b: 1;\n}\n\n.after + .hl, .bl + .hl, .lead + .hl {\n  p: 1;\n}\n"
+    );
+    assert_parity(".hl { @extend %h; h: 1; }\n.bl { @extend %l; b: 1; }\n.lead { @extend %l; }\n%l + %h { p: 1; }\n.after { @extend %l; }\n");
+    // The @media copy of the rule inherits the same addSelector timing.
+    assert_parity(".hl { @extend %h; h: 1; }\n.bl { @extend %l; b: 1; }\n.lead { @extend %l; }\n%l + %h { p: 1; @media (min-width: 5px) { p: 2; } }\n");
+}
+
+#[test]
 fn chained_extend_products_keep_registration_order() {
     // dart's addSelector hands each @extend an ALREADY-EXTENDED extender
     // list (the rule's selector was rewritten by every extension registered
