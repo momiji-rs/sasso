@@ -95,48 +95,7 @@ fn record(out: &str, lines: SrcLines, collector: &mut Option<SmCollector>) {
     }
 }
 
-pub(crate) fn debug_dump_nodes(nodes: &[OutNode]) {
-    fn dump(nodes: &[OutNode], depth: usize) {
-        for n in nodes {
-            let pad = "  ".repeat(depth);
-            match n {
-                OutNode::Comment(t, _) => eprintln!("{pad}Comment({:.20})", t.replace('\n', "|")),
-                OutNode::Blank => eprintln!("{pad}Blank"),
-                OutNode::GroupEnd => eprintln!("{pad}GroupEnd"),
-                OutNode::Rule { .. } => eprintln!("{pad}Rule"),
-                OutNode::AtRule { name, .. } => eprintln!("{pad}AtRule({name})"),
-                OutNode::ModuleScope { key, nodes } => {
-                    eprintln!("{pad}ModuleScope({:.30})", key.rsplit('/').next().unwrap_or(key));
-                    dump(nodes, depth + 1);
-                }
-                _ => eprintln!("{pad}Other"),
-            }
-        }
-    }
-    dump(nodes, 0);
-}
-
 fn emit_expanded(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> String {
-    if std::env::var("SASSO_NODE_DBG").is_ok() {
-        fn dump(nodes: &[OutNode], depth: usize) {
-            for n in nodes {
-                let pad = "  ".repeat(depth);
-                match n {
-                    OutNode::Comment(t, _) => eprintln!("{pad}Comment({:.20})", t.replace('\n', "|")),
-                    OutNode::Blank => eprintln!("{pad}Blank"),
-                    OutNode::GroupEnd => eprintln!("{pad}GroupEnd"),
-                    OutNode::Rule { .. } => eprintln!("{pad}Rule"),
-                    OutNode::AtRule { name, .. } => eprintln!("{pad}AtRule({name})"),
-                    OutNode::ModuleScope { key, nodes } => {
-                        eprintln!("{pad}ModuleScope({:.30})", key.rsplit('/').next().unwrap_or(key));
-                        dump(nodes, depth + 1);
-                    }
-                    _ => eprintln!("{pad}Other"),
-                }
-            }
-        }
-        dump(nodes, 0);
-    }
     let mut out = String::new();
     let mut prev = SrcLines::default();
     for node in nodes {

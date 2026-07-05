@@ -1277,15 +1277,7 @@ impl<'a> Evaluator<'a> {
                 return Err(e);
             }
         }
-        if std::env::var("SASSO_NODE_DBG").is_ok() {
-            eprintln!("== PRE-APPLY-EXTENDS ==");
-            crate::emit::debug_dump_nodes(out);
-        }
         self.apply_extends(out)?;
-        if std::env::var("SASSO_NODE_DBG").is_ok() {
-            eprintln!("== POST-APPLY-EXTENDS ==");
-            crate::emit::debug_dump_nodes(out);
-        }
         hoist_css_imports(out);
         self.emit_deprecation_footer();
         Ok(())
