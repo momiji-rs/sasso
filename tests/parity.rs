@@ -8691,3 +8691,20 @@ fn reemitted_comment_clones_never_reregister() {
         "/* outer */\n/* seed */\n/* note */\n/* lib */\n/* note */\n/* vis2 */"
     );
 }
+
+#[test]
+fn dropped_placeholder_modules_leave_no_blank() {
+    // Two placeholder-only modules under an index: the group-separator Blank
+    // materialized between their scopes must vanish when every rule inside is
+    // dropped (uswds `placeholders/` trailing blank line).
+    use std::fs;
+    let dir = comment_scratch("phblank");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(dir.join("_c.scss"), "/* c */\n$x: 1;\n").unwrap();
+    fs::write(dir.join("_pa.scss"), "%a1 {\n  q: 1;\n}\n\n%a2 {\n  q: 2;\n}\n").unwrap();
+    fs::write(dir.join("_pb.scss"), "%b1 {\n  q: 3;\n}\n\n%b2 {\n  q: 4;\n}\n").unwrap();
+    fs::write(dir.join("_ph.scss"), "@forward \"pa\";\n@forward \"pb\";\n").unwrap();
+    let out = compile("@use \"c\";\n@use \"ph\";\n", &opts).expect("ph compiles");
+    assert_eq!(out, "/* c */");
+}

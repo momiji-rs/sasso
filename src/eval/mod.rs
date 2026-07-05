@@ -4930,8 +4930,21 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, plan: &crate::selector::ExtendPlan, s
         let drop = match &mut nodes[i] {
             // Already rewritten (with its own scope) by rewrite_with_scopes;
             // drop the wrapper when nothing visible remains inside (so its
-            // group separator doesn't leave a stray blank line).
-            OutNode::ModuleScope { nodes, .. } => nodes.iter().all(|n| matches!(n, OutNode::Blank)),
+            // group separator doesn't leave a stray blank line). Post-eval,
+            // group-end/pack-tight sentinels are inert (their eval-time
+            // consumers have run), so a wrapper holding only markers — e.g. a
+            // placeholder-only module whose rules were all dropped — counts
+            // as empty too.
+            OutNode::ModuleScope { nodes, .. } => {
+                fn invisible(nodes: &[OutNode]) -> bool {
+                    nodes.iter().all(|n| match n {
+                        OutNode::Blank | OutNode::GroupEnd | OutNode::AtRootPackTight => true,
+                        OutNode::ModuleScope { nodes, .. } => invisible(nodes),
+                        _ => false,
+                    })
+                }
+                invisible(nodes)
+            }
             OutNode::Rule {
                 selectors,
                 linebreaks,
