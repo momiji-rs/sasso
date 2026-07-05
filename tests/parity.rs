@@ -8731,3 +8731,33 @@ fn multi_compound_extension_uses_paths_order() {
         ".g .b + .b, .g .e + .b, .g .b + .e, .g .e + .e {\n  q: 1;\n}\n"
     );
 }
+
+#[test]
+fn duplicate_extension_keeps_first_merged_store_position() {
+    // The same (target, extender) pair registered from TWO modules merges
+    // per-STORE in dart, so each keeps its own store-merge rank; the product
+    // dedup then keeps the FIRST applied position — the descending-first-load
+    // module's — with its linebreak flag (chirpy `#access-lastmod a:hover`).
+    use std::fs;
+    let dir = comment_scratch("dupext");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(dir.join("_ph.scss"), "%h {\n  color: red;\n}\n").unwrap();
+    fs::write(
+        dir.join("_l1.scss"),
+        "@use 'ph';\n.dup {\n  .in:hover {\n    @extend %h;\n  }\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("_l2.scss"), "@use 'ph';\n.l2 {\n  @extend %h;\n}\n").unwrap();
+    fs::write(dir.join("_l3.scss"), "@use 'ph';\n.l3 {\n  @extend %h;\n}\n").unwrap();
+    fs::write(
+        dir.join("_l4.scss"),
+        "@use 'ph';\n.x4,\n.dup {\n  .in:hover {\n    @extend %h;\n  }\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("_g1.scss"), "@forward 'l1';\n@forward 'l2';\n").unwrap();
+    fs::write(dir.join("_g2.scss"), "@forward 'l3';\n@forward 'l4';\n").unwrap();
+    fs::write(dir.join("_mainx.scss"), "@forward 'g1';\n@forward 'g2';\n").unwrap();
+    let out = compile("@use \"mainx\";\n", &opts).expect("compiles");
+    assert_eq!(out, ".x4 .in:hover,\n.dup .in:hover, .l3, .l2 {\n  color: red;\n}");
+}

@@ -3005,7 +3005,7 @@ fn single_extension(src: &Extension, target: Simple, extender: Complex, break_fl
 #[allow(clippy::too_many_arguments)]
 fn register_derived(
     registry: &mut Vec<Extension>,
-    sources: &mut FxHashMap<Simple, FxHashMap<Complex, usize>>,
+    sources: &mut FxHashMap<Simple, FxHashMap<(Complex, String), usize>>,
     by_extender: &mut FxHashMap<Simple, Vec<usize>>,
     batch: &mut Vec<Extension>,
     batch_target: &Simple,
@@ -3016,7 +3016,8 @@ fn register_derived(
 ) {
     assert_render_injective(&complex);
     let target_sources = sources.entry(old_target.clone()).or_default();
-    if let Some(&idx) = target_sources.get(&complex) {
+    let source_key = (complex.clone(), old.origin.clone());
+    if let Some(&idx) = target_sources.get(&source_key) {
         if !old.optional {
             registry[idx].optional = false;
         }
@@ -3025,7 +3026,7 @@ fn register_derived(
     let idx = registry.len();
     let mut simples = Vec::new();
     all_simples_of(&complex, &mut simples);
-    target_sources.insert(complex.clone(), idx);
+    target_sources.insert(source_key, idx);
     // Woven/derived products carry no source line break (dart's lineBreak only
     // travels with the original extender object); the fold's flag plumbing keeps
     // an original's own flag separately.
@@ -3069,7 +3070,7 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
     // batch applies them — e.g. `upstream <- :is(midstream, downstream)` for
     // dart#1297).
     let mut registry: Vec<Extension> = Vec::new();
-    let mut sources: FxHashMap<Simple, FxHashMap<Complex, usize>> = FxHashMap::default();
+    let mut sources: FxHashMap<Simple, FxHashMap<(Complex, String), usize>> = FxHashMap::default();
     let mut by_extender: FxHashMap<Simple, Vec<usize>> = FxHashMap::default();
     let mut batches: Vec<Vec<Extension>> = Vec::new();
     let mut registry_marks: Vec<usize> = Vec::new();
@@ -3191,16 +3192,19 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
             // run. A single leading combinator (`> d`) is NOT useless and emits.
             assert_render_injective(extender);
             let target_sources = sources.entry(target.clone()).or_default();
-            if let Some(&idx) = target_sources.get(extender) {
+            let source_key = (extender.clone(), ext.origin.clone());
+            if let Some(&idx) = target_sources.get(&source_key) {
                 // dart MergedExtension.merge: only the optional flag is
                 // observable in this model — a mandatory extension wins.
+                // Merging is PER-STORE (same origin); an identical extend
+                // from another module keeps its own entry and rank.
                 if !ext.optional {
                     registry[idx].optional = false;
                 }
                 continue;
             }
             let idx = registry.len();
-            target_sources.insert(extender.clone(), idx);
+            target_sources.insert(source_key, idx);
             let single = single_extension(ext, target.clone(), extender.clone(), flag);
             new_slice.push(single.clone());
             batch.push(single.clone());
