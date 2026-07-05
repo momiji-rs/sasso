@@ -8719,3 +8719,15 @@ fn each_over_null_iterates_once() {
         ".a {\n  n: 1;\n}\n"
     );
 }
+
+#[test]
+fn multi_compound_extension_uses_paths_order() {
+    // ONE extension hitting BOTH compounds of `.btn + .btn`: dart runs a
+    // single `_extendComplex` whose `paths` cartesian varies the FIRST
+    // component fastest — (o,o), (e,o), (o,e), (e,e) — even on the
+    // incremental fold path (forem `.crayons-btn + .crayons-btn`).
+    assert_eq!(
+        ours(".g .b + .b {\n  q: 1;\n}\n.e {\n  @extend .b;\n}\n"),
+        ".g .b + .b, .g .e + .b, .g .b + .e, .g .e + .e {\n  q: 1;\n}\n"
+    );
+}

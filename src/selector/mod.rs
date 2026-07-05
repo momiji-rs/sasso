@@ -2089,21 +2089,18 @@ fn extend_complex_breaks(
     let mut combos: Vec<(Vec<DComplex>, bool)> = vec![(Vec::new(), false)];
     for opts in &per_component {
         let mut next: Vec<(Vec<DComplex>, bool)> = Vec::new();
-        if order == CartesianOrder::OneShot {
-            for (opt, oflag) in opts {
-                for (combo, cflag) in &combos {
-                    let mut c = combo.clone();
-                    c.push(opt.clone());
-                    next.push((c, *cflag || *oflag));
-                }
-            }
-        } else {
+        // The COMPONENT axis always uses dart's literal `paths` order (the
+        // newest component's option is the outer loop, so the FIRST component
+        // varies fastest): dart runs ONE `_extendComplex` per selector even on
+        // the incremental fold path, and `paths` is the only order it has.
+        // `CartesianOrder` still swaps the per-SIMPLE loops inside
+        // `extend_component` (forem `.crayons-btn + .crayons-btn` both-ends
+        // extension vs the `:not` insertion order).
+        for (opt, oflag) in opts {
             for (combo, cflag) in &combos {
-                for (opt, oflag) in opts {
-                    let mut c = combo.clone();
-                    c.push(opt.clone());
-                    next.push((c, *cflag || *oflag));
-                }
+                let mut c = combo.clone();
+                c.push(opt.clone());
+                next.push((c, *cflag || *oflag));
             }
         }
         combos = next;
