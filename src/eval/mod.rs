@@ -4775,6 +4775,7 @@ fn rewrite_nodes_scoped(
     all: &[crate::selector::Extension],
     origins: &[String],
     closures: &HashMap<String, std::collections::HashSet<String>>,
+    order: &ExtendOrderCtx,
 ) {
     // The extensions whose origin can reach `scope` along load edges. A
     // private placeholder target (`%-name`/`%_name`) is module-private:
@@ -4799,13 +4800,76 @@ fn rewrite_nodes_scoped(
     // against it incrementally. Build the scope-fixed extend plan ONCE here and
     // reuse it for every rule in this scope, rather than re-deriving the whole
     // transitive closure per rule (the old O(rules × extensions) blow-up).
-    let plan = crate::selector::build_extend_plan(&visible, scope);
-    rewrite_with_scopes(nodes, &plan, scope, all, origins, closures);
+    let plan = crate::selector::build_extend_plan(
+        &visible,
+        scope,
+        if order.has_import_clones {
+            std::collections::HashMap::new()
+        } else {
+            order.rank_for(scope)
+        },
+        order.has_import_clones,
+    );
+    rewrite_with_scopes(nodes, &plan, scope, all, origins, closures, order);
 }
 
 /// The walk shared by [`rewrite_nodes_scoped`]: rules use the current scope's
 /// `plan` (the prebuilt extend closure); a nested [`OutNode::ModuleScope`]
 /// re-enters with its own scope and its own plan.
+/// The module-graph context for dart's store-merge ORDER: reverse load
+/// edges (who loads whom) plus each origin's first registration index.
+pub(crate) struct ExtendOrderCtx {
+    /// loaded module -> loaders (direct downstream modules).
+    pub rev_deps: HashMap<String, Vec<String>>,
+    /// origin -> smallest extension registration index (first-load rank).
+    pub first_reg: HashMap<String, usize>,
+    /// Module-loading `@import`s (clone scopes) are in play: dart merges the
+    /// cloned subtree's extension stores into the IMPORTING module's own,
+    /// which the pure-`@use` store-merge order below cannot express — fall
+    /// back to the legacy fold order for the whole compile.
+    pub has_import_clones: bool,
+}
+
+impl ExtendOrderCtx {
+    /// The per-origin rank in `scope`'s downstream store-merge flatten:
+    /// DFS from `scope` over reverse edges, visiting each level's direct
+    /// downstream modules in DESCENDING first-load order (a later-loaded
+    /// sibling's store registers earlier into the upstream's list), own
+    /// store before its absorbed downstreams (pre-order).
+    fn rank_for(&self, scope: &str) -> std::collections::HashMap<String, usize> {
+        let mut rank = std::collections::HashMap::new();
+        let mut next = 0usize;
+        let mut stack: Vec<String> = Vec::new();
+        let push_children =
+            |of: &str, stack: &mut Vec<String>, rank: &std::collections::HashMap<String, usize>| {
+                let mut kids: Vec<&String> = self
+                    .rev_deps
+                    .get(of)
+                    .map(|v| {
+                        v.iter()
+                            .filter(|k| !rank.contains_key(*k) && k.as_str() != scope)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Descending first-load; push reversed so the largest pops first.
+                kids.sort_by_key(|k| self.first_reg.get(*k).copied().unwrap_or(usize::MAX));
+                for k in kids {
+                    stack.push(k.clone());
+                }
+            };
+        push_children(scope, &mut stack, &rank);
+        while let Some(m) = stack.pop() {
+            if rank.contains_key(&m) {
+                continue;
+            }
+            rank.insert(m.clone(), next);
+            next += 1;
+            push_children(&m, &mut stack, &rank);
+        }
+        rank
+    }
+}
+
 fn rewrite_with_scopes(
     nodes: &mut Vec<OutNode>,
     plan: &crate::selector::ExtendPlan,
@@ -4813,15 +4877,16 @@ fn rewrite_with_scopes(
     all: &[crate::selector::Extension],
     origins: &[String],
     closures: &HashMap<String, std::collections::HashSet<String>>,
+    order: &ExtendOrderCtx,
 ) {
     for node in nodes.iter_mut() {
         match node {
             OutNode::ModuleScope { key, nodes } => {
                 let key = key.clone();
-                rewrite_nodes_scoped(nodes, &key, all, origins, closures);
+                rewrite_nodes_scoped(nodes, &key, all, origins, closures, order);
             }
             OutNode::AtRule { name, body, .. } if !is_keyframes_name(name) => {
-                rewrite_with_scopes(body, plan, scope, all, origins, closures);
+                rewrite_with_scopes(body, plan, scope, all, origins, closures, order);
             }
             _ => {}
         }

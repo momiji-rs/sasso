@@ -3080,6 +3080,82 @@ fn pseudo_parent_ref_substitutes_inside_cartesian_parts() {
 }
 
 #[test]
+fn cross_module_extend_store_order() {
+    use std::fs;
+
+    // dart merges downstream extension stores transitively and applies each
+    // upstream module's merged map in ONE extendList: extenders from one
+    // foreign module land in registration order (bulma's .fixed-grid/.grid
+    // from a single file), sibling stores in reverse first-load order, and
+    // a derived (chained) entry follows its HOME store's own extenders in
+    // the absorption order of its trigger.
+    let dir = std::env::temp_dir().join(format!(
+        "sasso-store-order-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&dir).expect("create scratch dir");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    // Same-file foreign extends stay forward.
+    fs::write(dir.join("_shared2.scss"), "%blk:not(:last-child) { m: 1; }\n").unwrap();
+    fs::write(
+        dir.join("_two.scss"),
+        "@use \"shared2\";\n.fixed-grid { @extend %blk; f: 1; }\n.grid { @extend %blk; g: 1; }\n",
+    )
+    .unwrap();
+    let out = compile("@use \"two\";\n", &opts).expect("two compiles");
+    assert!(
+        out.starts_with(".fixed-grid:not(:last-child), .grid:not(:last-child)"),
+        "same-file forward order:\n{out}"
+    );
+    // Sibling modules: reverse first-load order, forward within each.
+    fs::write(dir.join("_sh.scss"), "%b { m: 1; }\n").unwrap();
+    fs::write(
+        dir.join("_ma.scss"),
+        "@use \"sh\";\n.a1 { @extend %b; }\n.a2 { @extend %b; }\n",
+    )
+    .unwrap();
+    fs::write(dir.join("_mb.scss"), "@use \"sh\";\n.b1 { @extend %b; }\n").unwrap();
+    fs::write(
+        dir.join("_mc.scss"),
+        "@use \"sh\";\n.c1 { @extend %b; }\n.c2 { @extend %b; }\n",
+    )
+    .unwrap();
+    let out = compile("@use \"ma\";\n@use \"mc\";\n@use \"mb\";\n", &opts).expect("siblings compile");
+    assert!(
+        out.starts_with(".b1, .c1, .c2, .a1, .a2"),
+        "sibling order:\n{out}"
+    );
+    // Midstream chain: derived entries follow their home store.
+    fs::write(dir.join("_up.scss"), "in-upstream { a: b; }\n").unwrap();
+    fs::write(
+        dir.join("_mid.scss"),
+        "@use \"up\";\nin-midstream { @extend in-upstream; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("_l.scss"),
+        "@use \"mid\";\nin-left { @extend in-midstream; w: x; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("_r.scss"),
+        "@use \"mid\";\nin-right { @extend in-midstream; y: z; }\n",
+    )
+    .unwrap();
+    let out = compile("@use \"l\";\n@use \"r\";\n", &opts).expect("midstream compiles");
+    assert!(
+        out.starts_with("in-upstream, in-midstream, in-right, in-left"),
+        "midstream chain order:\n{out}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn pre_rule_extensions_apply_one_shot_in_registration_order() {
     // dart's addSelector extends a NEW rule by the store registered SO FAR
     // in one extendList (products in registration order); only extensions

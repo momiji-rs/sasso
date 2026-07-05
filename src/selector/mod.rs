@@ -715,6 +715,14 @@ pub(crate) struct Extension {
     /// registered before the rule apply one-shot (dart `addSelector`),
     /// later ones incrementally.
     pub reg_idx: usize,
+    /// A transitively-derived entry (dart creates these while merging a
+    /// downstream store into `origin`'s): it applies only STRICTLY upstream
+    /// of `origin`, and sorts after `origin`'s own raw extenders.
+    pub derived: bool,
+    /// For a derived entry, the origin of the TRIGGERING extension (the
+    /// downstream store whose absorption created it) — within a home store,
+    /// derived entries follow the absorption order of their trigger.
+    pub via_origin: Option<String>,
     // Module-origin set, built in eval (`closure_cache`); kept on std `HashSet`
     // so the FxHash migration stays scoped to this file's selector maps.
     pub origin_closure: std::rc::Rc<std::collections::HashSet<String>>,
@@ -799,6 +807,14 @@ pub(crate) struct ExtendPlan {
     /// Each input batch's global registration index (ascending — the
     /// visible-subset filter preserves the evaluator's order).
     batch_reg_idx: Vec<usize>,
+    /// Each input batch's origin module key.
+    batch_origin: Vec<String>,
+    /// Per-origin rank in this scope's downstream store-merge flatten
+    /// (dart `addExtensions` order): smaller = earlier in the merged map.
+    origin_rank: std::collections::HashMap<String, usize>,
+    /// Legacy fold order for @import-mixed compiles: no foreign one-shot,
+    /// pre-rule split ignores origins (the pre-store-merge model).
+    legacy_order: bool,
     /// Store-wide source specificities (dart `_sourceSpecificity`) for `trim`.
     source_spec: FxHashMap<Simple, u64>,
     /// The store-wide original extenders (dart `_originals`) for THIS scope —
@@ -831,7 +847,12 @@ impl ExtendPlan {
 
 /// Build the scope-fixed [`ExtendPlan`] for one module `scope` and its fixed
 /// `extensions` list. Call ONCE per scope; reuse across every rule.
-pub(crate) fn build_extend_plan(extensions: &[Extension], scope: &str) -> ExtendPlan {
+pub(crate) fn build_extend_plan(
+    extensions: &[Extension],
+    scope: &str,
+    origin_rank: std::collections::HashMap<String, usize>,
+    legacy_order: bool,
+) -> ExtendPlan {
     // The store-wide originals (dart `_originals`): every extender written in
     // THIS module is a source selector, protected from being trimmed away by a
     // broader generated one. (The per-rule call adds the rule's own selectors.)
@@ -849,8 +870,35 @@ pub(crate) fn build_extend_plan(extensions: &[Extension], scope: &str) -> Extend
     // much it consumed, so the per-rule path can replay the same deduction.
     reset_extend_budget();
     let budget_before = EXTEND_WORK.with(|w| w.get());
-    let (batches, registry, batch_registry_marks) = expand_extensions(extensions);
-    let batch_reg_idx: Vec<usize> = extensions.iter().map(|e| e.reg_idx).collect();
+    let (raw_batches, registry, raw_marks) = expand_extensions(extensions);
+    // dart applies a DOWNSTREAM module's whole store in ONE extendList
+    // (`addExtensions` accumulates every store's extensions and makes a
+    // single `_extendExistingSelectors` call), so same-target extenders from
+    // one foreign module land in registration order (bulma's
+    // `.fixed-grid`/`.grid` from grid.scss). Merge consecutive same-origin
+    // FOREIGN batches into one multi-extension batch; own-scope batches stay
+    // per-`@extend` (dart's incremental addExtension). A merged batch keeps
+    // its FIRST member's registration index and its LAST member's registry
+    // mark, so the pre-rule split and registry segments stay consistent.
+    let mut batches: Vec<Vec<Extension>> = Vec::new();
+    let mut batch_registry_marks: Vec<usize> = Vec::new();
+    let mut batch_reg_idx: Vec<usize> = Vec::new();
+    let mut batch_origin: Vec<String> = Vec::new();
+    let mut last_origin: Option<&str> = None;
+    for (i, batch) in raw_batches.into_iter().enumerate() {
+        let origin = extensions[i].origin.as_str();
+        if origin != scope && last_origin == Some(origin) {
+            let last = batches.last_mut().expect("non-empty on merge");
+            last.extend(batch);
+            *batch_registry_marks.last_mut().expect("mark") = raw_marks[i];
+        } else {
+            batches.push(batch);
+            batch_registry_marks.push(raw_marks[i]);
+            batch_reg_idx.push(extensions[i].reg_idx);
+            batch_origin.push(extensions[i].origin.clone());
+            last_origin = Some(origin);
+        }
+    }
     let budget_after = EXTEND_WORK.with(|w| w.get());
     let expand_budget_cost = budget_before.saturating_sub(budget_after);
     let single_module = extensions.iter().all(|e| e.origin == scope);
@@ -866,6 +914,9 @@ pub(crate) fn build_extend_plan(extensions: &[Extension], scope: &str) -> Extend
         registry,
         batch_registry_marks,
         batch_reg_idx,
+        batch_origin,
+        origin_rank,
+        legacy_order,
         source_spec,
         scope_originals,
         n_extensions: extensions.len(),
@@ -1014,16 +1065,36 @@ pub(crate) fn extend_selectors(
         // order), so the pre-rule set is NOT a prefix: collect the batches
         // whose registration index precedes the rule, in registration order,
         // and splice their registry segments for the one-shot store.
+        // Foreign (downstream-module) stores never fold incrementally: dart
+        // merges every downstream store transitively and applies the result
+        // in ONE `extendList` per upstream module at combine time. Entry
+        // order mirrors the merged map: each origin at its rank in the
+        // scope's store-merge flatten (plan.origin_rank), raw extenders
+        // before that origin's DERIVED entries, registration order within.
+        // A derived entry created AT this scope is excluded (it exists for
+        // strictly-upstream merges; the chain resolves here through the
+        // already-extended selector list instead).
+        let foreign: Vec<usize> = if plan.legacy_order {
+            Vec::new()
+        } else {
+            (0..batches.len())
+                .filter(|&i| plan.batch_origin.get(i).is_some_and(|o| o != scope))
+                .collect()
+        };
         let pre_batches: Vec<usize> = if extend_base != usize::MAX && extend_base > 0 {
             let mut v: Vec<usize> = (0..batches.len())
-                .filter(|&i| plan.batch_reg_idx.get(i).copied().unwrap_or(usize::MAX) < extend_base)
+                .filter(|&i| {
+                    (plan.legacy_order || plan.batch_origin.get(i).is_some_and(|o| o == scope))
+                        && plan.batch_reg_idx.get(i).copied().unwrap_or(usize::MAX) < extend_base
+                })
                 .collect();
             v.sort_by_key(|&i| plan.batch_reg_idx[i]);
             v
         } else {
             Vec::new()
         };
-        let pre_set: FxHashSet<usize> = pre_batches.iter().copied().collect();
+        let mut pre_set: FxHashSet<usize> = pre_batches.iter().copied().collect();
+        pre_set.extend(foreign.iter().copied());
         let seed: Vec<(Complex, bool)> = if !pre_batches.is_empty() {
             let one_shot_store: Vec<Extension> = pre_batches
                 .iter()
@@ -1110,6 +1181,70 @@ pub(crate) fn extend_selectors(
                 break;
             }
             guard = typed;
+        }
+        // Satisfaction snapshot (dart's `originalSelectors`): a foreign
+        // extension counts as matched only against selectors present BEFORE
+        // this merge — a product added by a SIBLING store in the same merge
+        // must not satisfy it (use/error/extend scope/diamond).
+        let pre_foreign_snapshot: Vec<Complex> = if foreign.is_empty() {
+            Vec::new()
+        } else {
+            current.iter().map(|(c, _, _)| c.clone()).collect()
+        };
+        if !foreign.is_empty() {
+            let mut foreign_entries: Vec<&Extension> =
+                registry.iter().filter(|e| e.origin != scope).collect();
+            foreign_entries.sort_by(|a, b| {
+                let rank = |e: &Extension| plan.origin_rank.get(&e.origin).copied().unwrap_or(usize::MAX);
+                // Within a home store, derived entries follow the absorption
+                // order of their TRIGGERING store (the via origin's rank),
+                // not registration order.
+                let via_rank = |e: &Extension| {
+                    e.via_origin
+                        .as_ref()
+                        .and_then(|o| plan.origin_rank.get(o).copied())
+                        .unwrap_or(usize::MAX)
+                };
+                rank(a)
+                    .cmp(&rank(b))
+                    .then(a.derived.cmp(&b.derived))
+                    .then(via_rank(a).cmp(&via_rank(b)))
+                    .then(a.reg_idx.cmp(&b.reg_idx))
+            });
+            let foreign_store: Vec<Extension> = foreign_entries.into_iter().cloned().collect();
+            let complexes: Vec<Complex> = current.iter().map(|(c, _, _)| c.clone()).collect();
+            let breaks: Vec<bool> = current.iter().map(|(_, f, _)| *f).collect();
+            let (res, changed) =
+                extend_to_fixpoint_breaks(&complexes, &breaks, &foreign_store, CartesianOrder::OneShot);
+            if changed {
+                current = trim_breaks(res, &originals, source_spec)
+                    .into_iter()
+                    .map(|(c, f)| (c, f, scope.to_string()))
+                    .collect();
+            }
+        }
+        // Mandatory-extend accounting for batches the fold never runs (the
+        // pre-rule one-shot and the foreign one-shot use registry segments,
+        // so a target-only MARKER — or an extension merged into an earlier
+        // identical registration — never reaches collect_extenders): flip
+        // its matched cell whenever the target appears in this rule's list
+        // (dart tracks "found" via _selectors[target], independent of
+        // application).
+        for (&i, snapshot) in pre_batches
+            .iter()
+            .map(|i| (i, original))
+            .chain(foreign.iter().map(|i| (i, pre_foreign_snapshot.as_slice())))
+        {
+            for e in &batches[i] {
+                if e.matched.get() {
+                    continue;
+                }
+                if let Some(t) = &e.target {
+                    if list_contains_simple(snapshot, t) {
+                        e.matched.set(true);
+                    }
+                }
+            }
         }
         current.into_iter().map(|(c, f, _)| (c, f)).collect()
     };
@@ -2845,6 +2980,8 @@ fn single_extension(src: &Extension, target: Simple, extender: Complex, break_fl
         matched: std::rc::Rc::clone(&src.matched),
         origin: src.origin.clone(),
         reg_idx: src.reg_idx,
+        derived: false,
+        via_origin: None,
         origin_closure: std::rc::Rc::clone(&src.origin_closure),
     }
 }
@@ -2868,6 +3005,7 @@ fn register_derived(
     batch_target: &Simple,
     old: &Extension,
     old_target: &Simple,
+    via: &Extension,
     complex: Complex,
 ) {
     assert_render_injective(&complex);
@@ -2885,7 +3023,10 @@ fn register_derived(
     // Woven/derived products carry no source line break (dart's lineBreak only
     // travels with the original extender object); the fold's flag plumbing keeps
     // an original's own flag separately.
-    let derived = single_extension(old, old_target.clone(), complex, false);
+    let mut derived = single_extension(old, old_target.clone(), complex, false);
+    derived.derived = true;
+    derived.via_origin = Some(via.origin.clone());
+    derived.reg_idx = via.reg_idx;
     registry.push(derived.clone());
     if old_target == batch_target {
         batch.push(derived);
@@ -3137,6 +3278,7 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
                         &target,
                         &old,
                         &old_target,
+                        ext,
                         complex,
                     );
                 }
@@ -3157,6 +3299,8 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
                 matched: std::rc::Rc::clone(&ext.matched),
                 origin: ext.origin.clone(),
                 reg_idx: ext.reg_idx,
+                derived: false,
+                via_origin: None,
                 origin_closure: std::rc::Rc::clone(&ext.origin_closure),
             });
         }

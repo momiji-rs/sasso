@@ -156,20 +156,21 @@ impl<'a> Evaluator<'a> {
                 matched: std::rc::Rc::new(std::cell::Cell::new(false)),
                 origin: pe.origin.clone(),
                 reg_idx,
+                derived: false,
+                via_origin: None,
                 origin_closure: std::rc::Rc::clone(&closure_cache[&pe.origin]),
             });
         }
-        // Apply DOWNSTREAM origins first (dart `_combineCss` concatenates module
-        // extension stores upstream-first, so the most-downstream store's
-        // products land LAST in the output). A downstream module's closure is a
-        // strict superset of its upstreams', so a STABLE sort by descending
-        // closure size orders the fold's batches downstream-first while keeping
-        // same-module document order. With the per-selector origin gating and the
-        // fixpoint re-fold, this reproduces dart's cross-module output order —
-        // e.g. a root `@import`ed `@extend` (closure = everything) applies first
-        // so its product trails a `@use`d module's (use/extend/scope:*), while a
-        // transitive upstream chain still settles via the fixpoint.
-        extensions.sort_by_key(|e| std::cmp::Reverse(closure_cache.get(&e.origin).map_or(0, |c| c.len())));
+        // Keep GLOBAL REGISTRATION ORDER (module eval order): a scope's own
+        // extensions register before its downstream loaders', and foreign
+        // modules follow first-load order — the incremental fold inserts each
+        // later application's products closest to the source complex, which
+        // reproduces dart's combine-time sequence (own products innermost,
+        // foreign stores reverse-load in the OUTPUT). Same-module extenders
+        // stay in document order for the merged per-store batches. (An
+        // earlier descending-closure-size sort approximated this but
+        // misplaced sibling stores with unequal upstream counts — bulma's
+        // form vs elements modules.)
 
         // An `@extend` registered inside `@media` may not extend a selector
         // outside any media context (dart-sass "You may not @extend selectors
@@ -187,12 +188,47 @@ impl<'a> Evaluator<'a> {
         // Per-module visibility: an extension's origin can rewrite a module's
         // CSS when that module is (transitively) loaded by the origin.
         // Parallel to the (sorted) extensions list.
-        let origins: Vec<String> = extensions.iter().map(|e| e.origin.clone()).collect();
+        let mut origins: Vec<String> = extensions.iter().map(|e| e.origin.clone()).collect();
         let closures: HashMap<String, std::collections::HashSet<String>> = closure_cache
             .iter()
             .map(|(k, v)| (k.clone(), (**v).clone()))
             .collect();
-        rewrite_nodes_scoped(out, "", &extensions, &origins, &closures);
+        // The store-merge order context: reverse load edges + first-load
+        // ranks (an origin's registrations are contiguous, so its smallest
+        // reg index is its load rank).
+        let mut rev_deps: HashMap<String, Vec<String>> = HashMap::default();
+        for (loader, loadeds) in self.module_deps.borrow().iter() {
+            for loaded in loadeds {
+                rev_deps.entry(loaded.clone()).or_default().push(loader.clone());
+            }
+        }
+        let mut first_reg: HashMap<String, usize> = HashMap::default();
+        for (i, pe) in self.extends.iter().enumerate() {
+            first_reg.entry(pe.origin.clone()).or_insert(i);
+        }
+        let has_import_clones = !self.load_css_copies.borrow().is_empty()
+            || rev_deps
+                .keys()
+                .any(|k| k.contains("#import") || k.contains("#copy"));
+        if has_import_clones {
+            // Legacy order for @import-mixed compiles (the store-merge model
+            // below assumes pure-@use module identity): downstream-first by
+            // closure size, stable within a module.
+            let mut keyed: Vec<(usize, crate::selector::Extension, String)> = extensions
+                .into_iter()
+                .zip(origins)
+                .map(|(e, o)| (closure_cache.get(&o).map_or(0, |c| c.len()), e, o))
+                .collect();
+            keyed.sort_by_key(|(n, _, _)| std::cmp::Reverse(*n));
+            extensions = keyed.iter().map(|(_, e, _)| e.clone()).collect();
+            origins = keyed.into_iter().map(|(_, _, o)| o).collect();
+        }
+        let order = ExtendOrderCtx {
+            rev_deps,
+            first_reg,
+            has_import_clones,
+        };
+        rewrite_nodes_scoped(out, "", &extensions, &origins, &closures, &order);
 
         // Report the first unmatched non-optional extend. A target that only
         // appears in an omitted bogus-combinator rule still counts as found
