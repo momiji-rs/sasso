@@ -8772,3 +8772,19 @@ fn trailing_invisible_chain_packs_next_group_tight() {
         "#al a:hover {\n  color: red;\n}\n\n#al a {\n  color: inherit;\n}\nfooter {\n  z: 1;\n}\n"
     );
 }
+
+#[test]
+fn hoisted_import_keeps_nested_flatten_tight() {
+    // Hoisting an out-of-order plain-CSS `@import` must not regroup the css
+    // flow: a parent rule still packs tight against its flattened nested
+    // children (forem `body`/`body.hidden-shell`), while a sibling seam the
+    // import USED to separate keeps its blank.
+    assert_eq!(
+        ours("body {\n  margin: 0;\n\n  &.x {\n    padding: 0;\n  }\n}\n@import \"y.css\";\n"),
+        "@import \"y.css\";\nbody {\n  margin: 0;\n}\nbody.x {\n  padding: 0;\n}\n"
+    );
+    assert_eq!(
+        ours(".a {\n  q: 1;\n}\n@import \"y.css\";\n.b {\n  w: 2;\n}\n"),
+        "@import \"y.css\";\n.a {\n  q: 1;\n}\n\n.b {\n  w: 2;\n}\n"
+    );
+}

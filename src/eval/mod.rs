@@ -3543,20 +3543,9 @@ fn hoist_css_imports(out: &mut Vec<OutNode>) {
                     let inner_rest = visit(inner, imports, css_seen);
                     if !inner_rest.is_empty() {
                         *css_seen = true;
-                        // Re-group the module's remaining flow: pulling its
-                        // leading imports out makes previously-separated
-                        // top-level neighbors adjacent, so the blank-line
-                        // separators are recomputed like dart's serializer.
-                        let mut regrouped: Vec<OutNode> = Vec::new();
-                        for n in inner_rest {
-                            match n {
-                                OutNode::Blank => {}
-                                other => push_group(&mut regrouped, vec![other]),
-                            }
-                        }
                         rest.push(OutNode::ModuleScope {
                             key,
-                            nodes: regrouped,
+                            nodes: inner_rest,
                         });
                     }
                 }
@@ -3576,9 +3565,22 @@ fn hoist_css_imports(out: &mut Vec<OutNode>) {
             }
         }
         if let Some(li) = last_import {
-            let tail = own.split_off(li + 1);
+            let mut tail = own.split_off(li + 1);
             imports.extend(own.into_iter().filter(|n| !matches!(n, OutNode::Blank)));
-            own = tail;
+            // Pulling the run leaves a NEW seam between the preceding css and
+            // the remainder: its eval-time separator left with the run, so
+            // re-derive it exactly like the eval-time `push_group` (dart's
+            // group-end rule). Everything after the seam keeps its eval-time
+            // grouping verbatim (a parent rule packs tight against its own
+            // flattened nested children).
+            while matches!(tail.first(), Some(OutNode::Blank)) {
+                tail.remove(0);
+            }
+            if tail.iter().any(|n| !matches!(n, OutNode::Blank)) {
+                *css_seen = true;
+            }
+            push_group(&mut rest, tail);
+            return rest;
         }
         if own.iter().any(|n| !matches!(n, OutNode::Blank)) {
             *css_seen = true;
@@ -3591,12 +3593,15 @@ fn hoist_css_imports(out: &mut Vec<OutNode>) {
     let mut css_seen = false;
     let rest = visit(original, &mut imports, &mut css_seen);
     out.extend(imports);
-    // Regroup the css flow, dropping stale top-level blanks.
-    for node in rest {
-        match node {
-            OutNode::Blank => {}
-            other => push_group(out, vec![other]),
-        }
+    // The css flow keeps its eval-time grouping and packs tight against the
+    // imports bucket (dart writes the flow right after the imports).
+    let mut rest = rest;
+    while matches!(rest.first(), Some(OutNode::Blank)) {
+        rest.remove(0);
+    }
+    out.extend(rest);
+    while matches!(out.last(), Some(OutNode::Blank)) {
+        out.pop();
     }
 }
 
