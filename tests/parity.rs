@@ -8761,3 +8761,14 @@ fn duplicate_extension_keeps_first_merged_store_position() {
     let out = compile("@use \"mainx\";\n", &opts).expect("compiles");
     assert_eq!(out, ".x4 .in:hover,\n.dup .in:hover, .l3, .l2 {\n  color: red;\n}");
 }
+
+#[test]
+fn trailing_invisible_chain_packs_next_group_tight() {
+    // The group separator rides the subtree's LAST flattened node: an
+    // extend-only rule nested ANY levels down owns the enclosing group's end
+    // and never renders, so the next group packs tight (chirpy panel→footer).
+    assert_eq!(
+        ours("%lh {\n  color: red;\n}\n#al {\n  a {\n    color: inherit;\n\n    &:hover {\n      @extend %lh;\n    }\n  }\n}\nfooter {\n  z: 1;\n}\n"),
+        "#al a:hover {\n  color: red;\n}\n\n#al a {\n  color: inherit;\n}\nfooter {\n  z: 1;\n}\n"
+    );
+}

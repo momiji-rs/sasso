@@ -507,7 +507,7 @@ impl Sink<'_> {
     /// declaration (or loud comment) following a nested rule appears AFTER that
     /// rule in the output. No-op for non-`Rule` sinks (which never accumulate a
     /// block) and when there are no pending items.
-    fn flush_rule_block(&mut self) {
+    fn flush_rule_block(&mut self) -> bool {
         if let Sink::Rule {
             selectors,
             linebreaks,
@@ -540,7 +540,7 @@ impl Sink<'_> {
                     if insert_at > 0 && **flushed == Some(insert_at - 1) {
                         if let Some(OutNode::Rule { items: prev, .. }) = nested.get_mut(insert_at - 1) {
                             prev.append(*items);
-                            return;
+                            return true;
                         }
                         // (a non-Rule at that index can't happen: `flushed`
                         // only ever records a flushed block fragment)
@@ -554,9 +554,11 @@ impl Sink<'_> {
                     };
                     nested.insert(insert_at, rule);
                     **flushed = Some(insert_at);
+                    return true;
                 }
             }
         }
+        false
     }
 
     /// Emit a produced style rule's fully interleaved output (its own block
@@ -2146,8 +2148,9 @@ impl<'a> Evaluator<'a> {
             let r = self.exec(&rule.body, &current, &mut child);
             // Flush any declarations/loud comments that follow the last nested
             // rule, so they emit (in their own block) after the bubbled rules.
-            if r.is_ok() {
-                child.flush_rule_block();
+            if r.is_ok() && child.flush_rule_block() {
+                // The flushed block is the subtree's last node — visible.
+                self.last_child_invisible = false;
             }
             r
         };
@@ -2164,7 +2167,11 @@ impl<'a> Evaluator<'a> {
         let body_last_invisible = std::mem::replace(&mut self.last_child_invisible, false);
         let this_rule_invisible = nested.is_empty() && !self.in_keyframes;
         sink.emit_style_rule(nested, !body_last_invisible);
-        self.last_child_invisible = this_rule_invisible;
+        // dart's group separator rides the subtree's LAST flattened node: a
+        // trailing invisible chain ANY levels down (`#al { a { &:hover {
+        // @extend } } }`) owns the enclosing group's end and never renders,
+        // so the next group packs tight (chirpy panel -> footer seam).
+        self.last_child_invisible = this_rule_invisible || body_last_invisible;
         Ok(())
     }
 
