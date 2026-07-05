@@ -8799,3 +8799,30 @@ fn at_root_wrapper_children_pack_tight() {
         ".footer {\n  color: red;\n}\n.slim .footer__a {\n  x: 1;\n}\n.slim .footer__b {\n  y: 2;\n}\n\n.next {\n  z: 3;\n}\n"
     );
 }
+
+#[test]
+fn load_css_copy_reacquires_group_separators() {
+    // dart's meta.load-css re-visits the combined css node-by-node
+    // (`_combineCss(module, clone: true).accept(this)`), so every re-visited
+    // top-level style rule re-acquires isGroupEnd — the copy's rules
+    // blank-separate even where the source module packed a parent tight
+    // against its flattened nested children (reveal.js print/pdf.scss).
+    use std::fs;
+    let dir = comment_scratch("loadcss");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(
+        dir.join("_pdf.scss"),
+        "html.rp {\n  * {\n    a: 1;\n  }\n\n  & {\n    b: 2;\n  }\n\n  body {\n    c: 3;\n  }\n}\n",
+    )
+    .unwrap();
+    let out = compile(
+        "@use \"sass:meta\";\n.first {\n  q: 0;\n}\n@include meta.load-css(\"pdf\");\n",
+        &opts,
+    )
+    .expect("compiles");
+    assert_eq!(
+        out,
+        ".first {\n  q: 0;\n}\n\nhtml.rp * {\n  a: 1;\n}\n\nhtml.rp {\n  b: 2;\n}\n\nhtml.rp body {\n  c: 3;\n}"
+    );
+}

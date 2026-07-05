@@ -664,6 +664,11 @@ impl<'a> Evaluator<'a> {
         sink: &mut Sink<'_>,
     ) -> Result<(Rc<Module>, Vec<String>), Error> {
         // Inside a module-loading `@import`, every load re-emits as a clone.
+        // A TRUE `meta.load-css` call (not an @import clone): dart re-visits
+        // the combined css node-by-node, so every re-visited top-level style
+        // rule re-acquires isGroupEnd — the copy's rules blank-separate like
+        // freshly written ones (reveal.js print/pdf.scss).
+        let is_load_css = force_reemit;
         let force_reemit = force_reemit || self.import_clone.is_some();
         let importer = self.options.importer;
         // The caller's importer runs OUTSIDE the arena scope: anything it
@@ -892,6 +897,12 @@ impl<'a> Evaluator<'a> {
                 // own extensions apply to the clone, and other loaders'
                 // extensions do not (dart `_combineCss` with `clone: true`).
                 let (copy_key, nodes) = self.clone_module_css(&key);
+                let nodes = if is_load_css {
+                    let mut prev_rule = false;
+                    regroup_load_css_copy(nodes, &mut prev_rule)
+                } else {
+                    nodes
+                };
                 splice_nodes(
                     sink,
                     vec![OutNode::ModuleScope {
@@ -1017,6 +1028,12 @@ impl<'a> Evaluator<'a> {
         // scope.
         if force_reemit {
             let (copy_key, nodes) = self.clone_module_css(&key);
+            let nodes = if is_load_css {
+                let mut prev_rule = false;
+                regroup_load_css_copy(nodes, &mut prev_rule)
+            } else {
+                nodes
+            };
             splice_nodes(
                 sink,
                 vec![OutNode::ModuleScope {
@@ -1654,4 +1671,32 @@ impl<'a> Evaluator<'a> {
             )),
         }
     }
+}
+
+/// dart `meta.load-css` re-visits the combined css node-by-node
+/// (`_combineCss(module, clone: true).accept(this)`), so each re-visited
+/// top-level STYLE RULE re-acquires `isGroupEnd` and the next visible node
+/// blank-separates — regardless of how the rules were grouped in the source
+/// module. Rebuild the copy's separators to that rule: drop the cloned
+/// grouping (blanks + sentinels), walk through module-scope wrappers, leave
+/// at-rule bodies untouched (their children keep their own separators).
+fn regroup_load_css_copy(nodes: Vec<OutNode>, prev_rule: &mut bool) -> Vec<OutNode> {
+    let mut out: Vec<OutNode> = Vec::new();
+    for n in nodes {
+        match n {
+            OutNode::Blank | OutNode::GroupEnd | OutNode::AtRootPackTight => {}
+            OutNode::ModuleScope { key, nodes } => {
+                let inner = regroup_load_css_copy(nodes, prev_rule);
+                out.push(OutNode::ModuleScope { key, nodes: inner });
+            }
+            other => {
+                if *prev_rule {
+                    out.push(OutNode::Blank);
+                }
+                *prev_rule = matches!(other, OutNode::Rule { .. });
+                out.push(other);
+            }
+        }
+    }
+    out
 }
