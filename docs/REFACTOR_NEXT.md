@@ -221,18 +221,24 @@ index bug (`9520965`), and dart's addSelector one-shot timing for pre-rule
 extensions (`461ff10`). bootstrap, quasar, mastodon and govuk-frontend all
 moved to byte-identical — **8 of 10 corpus projects are now byte-identical**.
 
-Remaining (whitespace/order-only; both projects canonical-equivalent):
+Round 4 (2026-07-04, later the same day): dart's `_extendModules`
+downstream-store merge order landed for real (`5e9c87a` store-merge model,
+`35b199c` one-shot gate, `95d2726` empty-module-scope anchor) — bulma went
+byte-identical. Then the uswds residue fell to three pre-module-comment
+engine fixes pinned against dart 1.101.0 (`4fe86ed`): registration
+deep-scans pending comments through invisible module-scope placeholders
+(dart's `_root.children` holds no placeholder for a CSS-less load), a
+`pre_comment_floor` fences re-emitted clones so they never re-register
+(dart materializes clones at combine time only), and `Module.phantom_css`
+mirrors dart's `transitivelyContainsCss |= preModuleComments.isNotEmpty`
+quirk (a css-less module built while the shared map is non-empty absorbs
+pending registrations). Finally, marker-only module wrappers (a
+placeholder-only module dropped to a bare GroupEnd) now count as empty in
+the extend drop pass, so their group-separator Blank collapses
+(`fbc6ee0`).
 
-1. **Cross-module `@extend` store order** — bulma (`%block` extenders from
-   sibling modules interleave differently) and part of uswds. Same-file
-   registrations must come out FORWARD even when the rule lives upstream
-   (grid.scss's `.fixed-grid`/`.grid`), while sibling modules apply
-   reverse-first-load. A three-phase attempt (own-pre one-shot / own-post
-   fold / foreign one-shot concat) regressed 6 spec cases and made bulma
-   WORSE — the faithful model needs dart's `_extendModules` downstream-store
-   merge semantics, not a batch reorder. Reverted; branch point is
-   `461ff10`'s phase split.
-2. **uswds pre-module comment duplication edge** — sasso re-emits a doc
-   header comment where dart doesn't (uswds `@forward ... with` chains;
-   likely a configured-instance or load-css edge of the `_preModuleComments`
-   model) plus one group-seam blank variant.
+**All 10 compilable corpus projects are byte-identical** (carbon stays
+excluded — publish-time codegen; fails identically in dart-sass). The
+real-world byte-parity campaign is COMPLETE; `bench/real-world/run.mjs
+check` is the regression gate. These fixes are unreleased on master
+(post-0.7.0/npm-0.10.0) — ship with the next release.
