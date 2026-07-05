@@ -8708,3 +8708,14 @@ fn dropped_placeholder_modules_leave_no_blank() {
     let out = compile("@use \"c\";\n@use \"ph\";\n", &opts).expect("ph compiles");
     assert_eq!(out, "/* c */");
 }
+
+#[test]
+fn each_over_null_iterates_once() {
+    // dart `Value.asList` defaults to `[this]` — null included. Bootstrap's
+    // `valid-radius(null)` relies on the single `$v: null` round (tabler
+    // avatars: `@include border-radius(map.get($size, border-radius))`).
+    assert_eq!(
+        ours("$out: ();\n@each $v in null {\n  $out: append($out, $v);\n}\n.a {\n  n: length($out);\n}\n"),
+        ".a {\n  n: 1;\n}\n"
+    );
+}

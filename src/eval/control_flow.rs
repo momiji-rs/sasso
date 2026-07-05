@@ -103,7 +103,9 @@ impl<'a> Evaluator<'a> {
                     })
                     .collect(),
             )),
-            Value::Null => Ok(EachItems::Owned(Vec::new())),
+            // Any non-list — INCLUDING null — iterates as a singleton (dart
+            // `Value.asList` defaults to `[this]`; bootstrap's `valid-radius`
+            // relies on `@each $v in null` running once with `$v: null`).
             other => Ok(EachItems::Owned(vec![other])),
         }
     }
