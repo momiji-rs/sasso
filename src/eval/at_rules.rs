@@ -110,7 +110,7 @@ impl<'a> Evaluator<'a> {
         let saved_last_invisible = std::mem::replace(&mut self.last_child_invisible, false);
         let mut body: Vec<OutNode> = Vec::new();
         let result = if parents.is_empty() {
-            let mut child = Sink::AtRoot(&mut body);
+            let mut child = Sink::AtRoot { body: &mut body, group_ends: false };
             self.exec(stmts, &[], &mut child)
         } else {
             let mut items: Vec<OutItem> = Vec::new();
@@ -772,7 +772,7 @@ impl<'a> Evaluator<'a> {
         };
         let mut out: Vec<OutNode> = Vec::new();
         let res = {
-            let mut child = Sink::AtRoot(&mut out);
+            let mut child = Sink::AtRoot { body: &mut out, group_ends: true };
             self.exec(body, parents, &mut child)
         };
         self.at_root_excluding_style_rule = saved;
@@ -809,6 +809,8 @@ impl<'a> Evaluator<'a> {
                         std::mem::take(decls),
                         SrcLines::default(),
                     ));
+                    // The re-wrapped copy is a completed style rule too.
+                    wrapped.push(OutNode::GroupEnd);
                 }
             };
             for n in out {
@@ -840,29 +842,22 @@ impl<'a> Evaluator<'a> {
 
         // Hoisted root-level nodes separate with a blank line only after a
         // completed style rule (dart's isGroupEnd: `#inc {…}` → blank →
-        // `@supports`, but `@supports {…}` → `@foo` packs tight).
-        // A rule already FOLLOWED by a group-end marker is a self-separated unit
-        // hoisted out by a NESTED `@at-root` (`@at-root .b { @at-root .c{} }`):
-        // dart keeps the whole nested chain contiguous, so it must not be
-        // re-separated from the rule before it.
-        let followed_by_ge: Vec<bool> = (0..out.len())
-            .map(|i| matches!(out.get(i + 1), Some(OutNode::GroupEnd)))
-            .collect();
-        let mut spaced: Vec<OutNode> = Vec::new();
-        let mut prev_was_rule = false;
-        for (i, node) in out.into_iter().enumerate() {
-            let cur_is_rule = matches!(node, OutNode::Rule { .. });
-            // Separate only two consecutive STYLE RULES (each a dart isGroupEnd):
-            // a rule followed by its OWN bubbled at-rule (`@at-root .x{ @media…}`)
-            // stays contiguous — same group, no blank — as does a nested-@at-root
-            // unit that already carries its own trailing group-end.
-            if prev_was_rule && cur_is_rule && !followed_by_ge[i] {
-                spaced.push(OutNode::Blank);
-            }
-            prev_was_rule = cur_is_rule;
-            spaced.push(node);
+        // `@supports`, but `@supports {…}` → `@foo` packs tight). The
+        // group-end sentinels were pushed by `Sink::AtRoot`'s emit — one per
+        // rule completed at the body's own level; rules flattened out of a
+        // WRAPPER rule (`@at-root .slim & { &__a{} &__b{} }`) share one batch
+        // and pack tight, exactly like dart's `_styleRule == null` gate. An
+        // interior sentinel becomes the one blank line; a trailing one stays
+        // (the graft's next sibling separates against it).
+        let mut spaced: Vec<OutNode> = materialize_interior_group_ends(out);
+        // A TRAILING sentinel has done its job (it only gated the interior
+        // separators above): pop it so it can't ride into the escape path and
+        // conjure an empty resume shell (`@media print {}`), or double the
+        // top-level `push_group` default blank-after-rule.
+        while matches!(spaced.last(), Some(OutNode::GroupEnd)) {
+            spaced.pop();
         }
-        if spaced.is_empty() {
+        if spaced.iter().all(|n| matches!(n, OutNode::Blank | OutNode::GroupEnd | OutNode::AtRootPackTight)) {
             return Ok(());
         }
         if let Some(te) = first_excluded {

@@ -8788,3 +8788,14 @@ fn hoisted_import_keeps_nested_flatten_tight() {
         "@import \"y.css\";\n.a {\n  q: 1;\n}\n\n.b {\n  w: 2;\n}\n"
     );
 }
+
+#[test]
+fn at_root_wrapper_children_pack_tight() {
+    // Rules flattened out of an `@at-root` WRAPPER rule were visited with
+    // `_styleRule != null` in dart — no per-rule group end — so they pack
+    // tight; the blank belongs after the whole unit (wagtail sidebar).
+    assert_eq!(
+        ours(".footer {\n  color: red;\n\n  @at-root .slim #{&} {\n    &__a {\n      x: 1;\n    }\n\n    &__b {\n      y: 2;\n    }\n  }\n}\n.next {\n  z: 3;\n}\n"),
+        ".footer {\n  color: red;\n}\n.slim .footer__a {\n  x: 1;\n}\n.slim .footer__b {\n  y: 2;\n}\n\n.next {\n  z: 3;\n}\n"
+    );
+}

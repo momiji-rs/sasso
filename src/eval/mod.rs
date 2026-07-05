@@ -352,6 +352,10 @@ enum MemberKind {
 /// bodies, and every nested-block construct (conditionals, loops, mixins).
 enum Sink<'a> {
     Top(&'a mut Vec<OutNode>),
+    /// Root-hoisted buffer. `group_ends` is set only for a true `@at-root`
+    /// body deposit — a completed style rule then leaves a group-end
+    /// sentinel (dart marks isGroupEnd when `_styleRule == null`); generic
+    /// at-rule bodies (@media/@supports) keep their own separator logic.
     Rule {
         /// The enclosing rule's resolved selector list, used to build a block
         /// node when the accumulated `items` must be flushed (i.e. when a nested
@@ -382,7 +386,10 @@ enum Sink<'a> {
     /// The body of a top-level at-rule (no enclosing selector): bare
     /// declarations land here directly as [`OutNode::AtDecl`], interleaved
     /// in source order with bubbled child rules and nested at-rules.
-    AtRoot(&'a mut Vec<OutNode>),
+    AtRoot {
+        body: &'a mut Vec<OutNode>,
+        group_ends: bool,
+    },
 }
 
 impl Sink<'_> {
@@ -426,14 +433,14 @@ impl Sink<'_> {
                 push_group(out, vec![OutNode::Comment(text, lines)]);
             }
             Sink::Rule { items, .. } => items.push(OutItem::Comment(text, lines)),
-            Sink::AtRoot(body) => body.push(OutNode::Comment(text, lines)),
+            Sink::AtRoot { body, .. } => body.push(OutNode::Comment(text, lines)),
         }
     }
 
     fn push_item(&mut self, item: OutItem) {
         match self {
             Sink::Rule { items, .. } => items.push(item),
-            Sink::AtRoot(body) => match item {
+            Sink::AtRoot { body, .. } => match item {
                 OutItem::Decl {
                     prop,
                     value,
@@ -604,7 +611,25 @@ impl Sink<'_> {
                     nested.extend(output);
                 }
             }
-            Sink::AtRoot(body) => body.extend(output),
+            Sink::AtRoot { body, group_ends } => {
+                // For a true `@at-root` body: a completed style rule at the
+                // body's own level marks a group end (dart sets isGroupEnd
+                // only when `_styleRule == null` — rules flattened out of a
+                // wrapper rule arrive inside ONE batch and pack tight); an
+                // invisible trailing child packs the next group tight.
+                let produced = *group_ends
+                    && output
+                        .iter()
+                        .any(|n| !matches!(n, OutNode::Blank | OutNode::AtRootPackTight | OutNode::GroupEnd));
+                body.extend(output);
+                if produced {
+                    body.push(if allow_group_end {
+                        OutNode::GroupEnd
+                    } else {
+                        OutNode::AtRootPackTight
+                    });
+                }
+            }
         }
     }
 
@@ -635,7 +660,7 @@ impl Sink<'_> {
                     nested.push(node);
                 }
             }
-            Sink::AtRoot(body) => body.push(node),
+            Sink::AtRoot { body, .. } => body.push(node),
         }
     }
 }
@@ -3637,7 +3662,7 @@ fn trim_leading_blanks(nodes: &mut Vec<OutNode>) {
 /// dart separates them with one blank line. Today the only `GroupEnd` reaching a
 /// style rule's `nested` is that one (top-level post-rule markers stay trailing,
 /// consumed by the next `push_group`), so this is a no-op for every other shape.
-fn materialize_interior_group_ends(nodes: Vec<OutNode>) -> Vec<OutNode> {
+pub(super) fn materialize_interior_group_ends(nodes: Vec<OutNode>) -> Vec<OutNode> {
     let is_content = |n: &OutNode| {
         !matches!(
             n,
