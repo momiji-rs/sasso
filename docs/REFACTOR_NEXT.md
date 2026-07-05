@@ -242,3 +242,41 @@ excluded — publish-time codegen; fails identically in dart-sass). The
 real-world byte-parity campaign is COMPLETE; `bench/real-world/run.mjs
 check` is the regression gate. These fixes are unreleased on master
 (post-0.7.0/npm-0.10.0) — ship with the next release.
+
+Campaign 2 (2026-07-05): the corpus grew to 20 vetted projects (tabler,
+AdminLTE, reveal.js, Font Awesome, video.js, forem, nextcloud, chirpy,
+grafana, wagtail — 88c692a) and the sweep landed eight more compiler
+fixes, each pinned by a parity test:
+
+- `@each` over null iterates once, per dart `Value.asList` (b5ccff0 —
+  tabler wouldn't compile).
+- Extend component axis always uses dart's `paths` order (113e643 —
+  forem `.crayons-btn + .crayons-btn` both-ends products).
+- Duplicate (target, extender) pairs merge per module store, not
+  globally (9418745 — chirpy `#access-lastmod a:hover` position).
+- A trailing invisible chain owns the enclosing group's end at any
+  nesting depth (328a3b6 — chirpy panel→footer seam).
+- Import hoisting keeps the css flow's eval-time grouping; only the
+  seam the pulled run vacated is re-derived (881ea84 — forem `body` vs
+  `body.hidden-shell`; dart's blanks come ONLY from group-end flags,
+  never source gaps).
+- `@at-root` separators follow dart's `_styleRule == null` group-end
+  gate via sink sentinels (12d38a1 — wagtail sidebar slim block).
+- meta.load-css copies re-acquire per-rule separators — dart re-visits
+  the combined css node-by-node (f9f4e18 — reveal.js pdf/paper).
+- Re-emitted pre-module clones splice inside a `#premod` scope so the
+  import-run sweep can't lift them to the top (c33bded — nextcloud
+  SPDX header).
+
+**19 of 20 compilable projects are byte-identical.** The one residue is
+tabler (16 raw lines, selector-list only, semantically inert — see
+`knownDiff` in projects.json): sasso's extend fold applies batches to a
+FIXPOINT, deriving chained same-rule extender products
+(`body[data-theme=dark] body[data-theme=light] …`) that dart's
+single-`_extendList`-per-registration never creates. The fixpoint is
+load-bearing for non_conformant/extend-tests/extend-loop, so the
+faithful fix is dart's `addSelector` model — the extender registered is
+the rule's LIVE (already-extended) selector, with cycles resolved by
+`_extendExistingExtensions` derived registrations, not re-application.
+That refactor (plus the product-duplicates-original linebreak rotation)
+is the next extend-engine milestone.

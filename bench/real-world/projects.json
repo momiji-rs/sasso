@@ -1,5 +1,5 @@
 {
-  "//": "Real-world Sass corpora. Vetting criteria: well-known project, default-branch commit within the last 6 months (checked 2026-07-04), meaningful SCSS/Sass source, compiles standalone with dart-sass. Excluded and why: foundation-sites (last commit 2024-09), picocss/pico (default branch stale since 2025-03), element-plus (linguist reports 0 SCSS bytes), discourse (variables injected by Ruby pipeline, no honest standalone compile), angular/components (bazel-only build), patternfly & materializecss (fork/star signal too weak).",
+  "//": "Real-world Sass corpora. Vetting criteria: well-known project, default-branch commit within the last 6 months (checked 2026-07-04; batch 2 checked 2026-07-05), meaningful SCSS/Sass source, compiles standalone with dart-sass. Excluded and why: foundation-sites (last commit 2024-09), picocss/pico (default branch stale since 2025-03), element-plus (linguist reports 0 SCSS bytes), discourse (variables injected by Ruby pipeline, no honest standalone compile), angular/components (bazel-only build), patternfly & materializecss (fork/star signal too weak). Batch-2 exclusions: swiper (styles moved to less/css), coreui core repo (880 stars; the well-known repo is the admin template).",
   "projects": [
     {
       "name": "bootstrap",
@@ -202,7 +202,8 @@
         "core/scss"
       ],
       "entry": "core/scss/tabler.scss",
-      "loadPaths": []
+      "loadPaths": [],
+      "knownDiff": "16 raw diff lines, selector-list only, semantically inert: (a) sasso keeps chained same-rule extender products (body[data-theme=dark] body[data-theme=light] …) that dart's single-pass-per-registration model never derives — sasso's fold fixpoint is load-bearing for non_conformant/extend-tests/extend-loop, so the faithful fix is dart's addSelector live-selector-as-extender model; (b) an extend product equal to one of the rule's OWN original selectors keeps the product's position/linebreak instead of the original's; (c) one blank-line seam."
     },
     {
       "name": "adminlte",

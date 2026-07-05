@@ -247,8 +247,9 @@ function sourceStats(p) {
   const walk = (d) => {
     for (const e of readdirSync(d)) {
       const f = path.join(d, e);
-      const st = statSync(f);
-      if (st.isDirectory()) { if (e !== '.git') walk(f); }
+      let st;
+      try { st = statSync(f); } catch { continue; } // broken symlink (sparse checkout)
+      if (st.isDirectory()) { if (e !== '.git' && e !== 'node_modules') walk(f); }
       else if (/\.(scss|sass)$/.test(e)) { files += 1; bytes += st.size; }
     }
   };
@@ -291,7 +292,8 @@ function report() {
   const md = `# Real-world corpus: sasso vs dart-sass
 
 Well-known open-source Sass codebases, each pinned to its default-branch HEAD
-as of 2026-07-04 and verified active (last commit within 6 months). Each entry
+as of 2026-07-04 (batch 2: 2026-07-05) and verified active (last commit within
+six months). Each entry
 point is compiled standalone with both engines; output parity is checked after
 whitespace + color-serialization canonicalization (\`bench/scripts/\`).
 
