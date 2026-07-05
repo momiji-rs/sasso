@@ -99,9 +99,20 @@ function setup() {
       const { from, file, liquidDefault } = p.prep.jekyll;
       let src = readFileSync(path.join(dir, from), 'utf8');
       src = src.replace(/^---[\s\S]*?---\s*/, ''); // strip Jekyll front matter
+      // Liquid `{%- ... -%}` hyphens trim adjacent whitespace; dev mode drops
+      // the whole if-block, so eat the surrounding gap along with it.
+      src = src.replace(/\s*\{%-\s*if[\s\S]*?endif\s*-%\}\s*/g, '');
+      src = src.replace(/\{%-?\s*if[\s\S]*?endif\s*-?%\}/g, ''); // non-trimming if-blocks
+      src = src.replace(/\{%-?[\s\S]*?-?%\}/g, ''); // drop remaining Liquid tags
       src = src.replace(/\{\{[^}]*\}\}/g, liquidDefault); // resolve Liquid exprs
       mkdirSync(prepDir(p), { recursive: true });
       writeFileSync(path.join(prepDir(p), file), src);
+    }
+    if (p.prep?.linkNodeModules) {
+      // Repo-relative `node_modules/...` imports resolve against the shared
+      // harness install (deps pinned in bench/real-world/package.json).
+      const link = path.join(dir, 'node_modules');
+      if (!existsSync(link)) symlinkSync(path.join(HERE, 'node_modules'), link);
     }
   }
 }
