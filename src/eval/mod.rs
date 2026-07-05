@@ -1265,7 +1265,15 @@ impl<'a> Evaluator<'a> {
                 return Err(e);
             }
         }
+        if std::env::var("SASSO_NODE_DBG").is_ok() {
+            eprintln!("== PRE-APPLY-EXTENDS ==");
+            crate::emit::debug_dump_nodes(out);
+        }
         self.apply_extends(out)?;
+        if std::env::var("SASSO_NODE_DBG").is_ok() {
+            eprintln!("== POST-APPLY-EXTENDS ==");
+            crate::emit::debug_dump_nodes(out);
+        }
         hoist_css_imports(out);
         self.emit_deprecation_footer();
         Ok(())
@@ -3649,10 +3657,20 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
     }
     // The last EFFECTIVE node before this group: module-scope wrappers are
     // judged by their last non-blank child (a module's captured CSS may end
-    // in a style-group-end sentinel from its own evaluation).
+    // in a style-group-end sentinel from its own evaluation). An EMPTY
+    // module scope (e.g. a settings module of pure variables) is invisible
+    // and must not act as the separator anchor — skip it and keep drilling
+    // (uswds/bulma function modules ending in `@use "settings"`).
+    fn invisible_wrapper(n: &OutNode) -> bool {
+        match n {
+            OutNode::Blank => true,
+            OutNode::ModuleScope { nodes, .. } => nodes.iter().all(invisible_wrapper),
+            _ => false,
+        }
+    }
     fn last_effective(n: &OutNode) -> &OutNode {
         if let OutNode::ModuleScope { nodes, .. } = n {
-            if let Some(l) = nodes.iter().rev().find(|x| !matches!(x, OutNode::Blank)) {
+            if let Some(l) = nodes.iter().rev().find(|x| !invisible_wrapper(x)) {
                 return last_effective(l);
             }
         }
