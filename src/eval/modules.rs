@@ -880,9 +880,20 @@ impl<'a> Evaluator<'a> {
                     let mut run = own_run;
                     let tail = run.split_off(lead);
                     out.extend(run);
-                    for (t, l) in registered {
-                        out.push(OutNode::Comment(t, l));
-                    }
+                    // dart materializes the clones BETWEEN modules at combine
+                    // time — they are not statements of the loading file. The
+                    // wrapper scope keeps the import hoist from sweeping them
+                    // into the loader's own leading import run (nextcloud:
+                    // styles.scss's SPDX header re-emitted at icons.scss's
+                    // edge must stay in the css flow, not join icons' leading
+                    // `@import` bucket).
+                    out.push(OutNode::ModuleScope {
+                        key: format!("{key}#premod"),
+                        nodes: registered
+                            .into_iter()
+                            .map(|(t, l)| OutNode::Comment(t, l))
+                            .collect(),
+                    });
                     // Clones stop here; the pushed-back tail stays pending.
                     self.pre_comment_floor = out.len();
                     out.extend(tail);

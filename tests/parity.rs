@@ -8826,3 +8826,38 @@ fn load_css_copy_reacquires_group_separators() {
         ".first {\n  q: 0;\n}\n\nhtml.rp * {\n  a: 1;\n}\n\nhtml.rp {\n  b: 2;\n}\n\nhtml.rp body {\n  c: 3;\n}"
     );
 }
+
+#[test]
+fn reemitted_premodule_clone_stays_out_of_import_run() {
+    // A pre-module comment clone re-emitted at a repeat edge is combine-time
+    // material BETWEEN modules — dart never counts it among the loading
+    // file's own statements, so the loader's plain `@import` leading-run
+    // sweep must not carry it into the imports bucket (nextcloud:
+    // styles.scss's SPDX header at icons.scss's edge).
+    use std::fs;
+    let dir = comment_scratch("premodclone");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(dir.join("_seed.scss"), "/* seed */\n$s: 0;\n").unwrap();
+    fs::write(dir.join("_lib.scss"), "/* lib */\n$l: 1;\n").unwrap();
+    fs::write(
+        dir.join("_a.scss"),
+        "/*! A HEADER */\n@use \"lib\" as *;\n.a {\n  q: 1;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("_b.scss"),
+        "@use \"lib\" as *;\n@import \"x.css\";\n.b {\n  w: 2;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("_outer.scss"),
+        "/* outer */\n@use \"seed\" as *;\n@use \"a\" as *;\n@use \"b\" as *;\n",
+    )
+    .unwrap();
+    let out = compile("@use \"outer\";\n", &opts).expect("compiles");
+    assert_eq!(
+        out,
+        "/* outer */\n@import \"x.css\";\n/* seed */\n/*! A HEADER */\n/* lib */\n.a {\n  q: 1;\n}\n\n/*! A HEADER */\n.b {\n  w: 2;\n}"
+    );
+}
