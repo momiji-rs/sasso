@@ -977,9 +977,18 @@ pub(crate) fn extend_selectors(
     // dart#1297 derived extensions) with the `paths`-order cartesian; the
     // incremental path is the registration-order FOLD (per-origin gating intact).
     // Gated to single-module: there the closure-size sort is stable so the index
-    // equals registration order; multi-module keeps the fold.
+    // equals registration order; multi-module keeps the fold. `extend_base`
+    // is the GLOBAL registration counter, so "after every applicable
+    // @extend" must compare against the visible extensions' own global
+    // indices — not their count (a late-loaded module's rule has a large
+    // base while its scope sees only a couple of extensions; bulma's
+    // `.input`/`.textarea` register AFTER their placeholder rule and must
+    // fold incrementally).
     let single_module = plan.single_module;
-    let order = if single_module && extend_base != usize::MAX && extend_base >= plan.n_extensions {
+    let order = if single_module
+        && extend_base != usize::MAX
+        && plan.batch_reg_idx.iter().all(|&r| r < extend_base)
+    {
         CartesianOrder::OneShot
     } else {
         CartesianOrder::Fold
