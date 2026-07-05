@@ -716,23 +716,56 @@ impl<'a> Evaluator<'a> {
         // set at EVERY dependency edge into a module with visible CSS. Pop
         // this site's trailing comment run; each outcome below re-emits it
         // (plus any previously attached comments) before the module's CSS.
+        // `pre_comment_floor` fences off comment CLONES already re-emitted
+        // into this sink: dart materializes clones at combine time, so they
+        // never sit in `_root.children` and can never re-register (which
+        // would cascade the same comment onto ever more module keys).
+        let floor = self.pre_comment_floor;
         let own_run: Vec<OutNode> = match sink {
             Sink::Top(out) => {
+                let floor = floor.min(out.len());
                 let mut i = out.len();
-                while i > 0 && matches!(out[i - 1], OutNode::Comment(..) | OutNode::Blank) {
+                while i > floor && matches!(out[i - 1], OutNode::Comment(..) | OutNode::Blank) {
                     i -= 1;
                 }
                 out.split_off(i)
             }
             _ => Vec::new(),
         };
-        let own_comments: Vec<(String, SrcLines)> = own_run
-            .iter()
-            .filter_map(|n| match n {
+        // dart's `_root.children` holds no placeholder for a CSS-less load, so
+        // a comment stays pending across any number of invisible loads. For
+        // REGISTRATION the scan continues back through invisible module scopes
+        // (a visible scope acts as dart's `clearChildren`); those stranded
+        // comments stay in place — their in-stream copy is this edge's own
+        // emission, exactly like the popped run's push-back below.
+        let own_comments: Vec<(String, SrcLines)> = {
+            let mut deep: Vec<(String, SrcLines)> = match sink {
+                Sink::Top(out) => {
+                    let floor = floor.min(out.len());
+                    let mut i = out.len();
+                    while i > floor {
+                        match &out[i - 1] {
+                            OutNode::Comment(..) | OutNode::Blank => i -= 1,
+                            OutNode::ModuleScope { nodes, .. } if !nodes_visible(nodes) => i -= 1,
+                            _ => break,
+                        }
+                    }
+                    out[i..]
+                        .iter()
+                        .filter_map(|n| match n {
+                            OutNode::Comment(t, l) => Some((t.clone(), *l)),
+                            _ => None,
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
+            deep.extend(own_run.iter().filter_map(|n| match n {
                 OutNode::Comment(t, l) => Some((t.clone(), *l)),
                 _ => None,
-            })
-            .collect();
+            }));
+            deep
+        };
         fn push_run(sink: &mut Sink<'_>, run: Vec<OutNode>) {
             if let Sink::Top(out) = sink {
                 out.extend(run);
@@ -833,7 +866,10 @@ impl<'a> Evaluator<'a> {
                 .as_ref()
                 .and_then(|m| m.borrow().get(&key).cloned())
                 .unwrap_or_default();
-            if !force_reemit && !registered.is_empty() && nodes_visible(&existing.css) {
+            if !force_reemit
+                && !registered.is_empty()
+                && (nodes_visible(&existing.css) || existing.phantom_css)
+            {
                 if let Sink::Top(out) = sink {
                     let lead = own_run.iter().take_while(|n| matches!(n, OutNode::Blank)).count();
                     let mut run = own_run;
@@ -842,6 +878,8 @@ impl<'a> Evaluator<'a> {
                     for (t, l) in registered {
                         out.push(OutNode::Comment(t, l));
                     }
+                    // Clones stop here; the pushed-back tail stays pending.
+                    self.pre_comment_floor = out.len();
                     out.extend(tail);
                 }
             } else {
@@ -954,7 +992,8 @@ impl<'a> Evaluator<'a> {
         // emission; later edges re-emit from the map. A map created here is
         // deliberately assigned to `self` so sibling loads and nested module
         // evaluations see it (dart's inherited-reference quirk).
-        if !own_comments.is_empty() && nodes_visible(&css_buf) {
+        let did_register = !own_comments.is_empty() && (nodes_visible(&css_buf) || module.phantom_css);
+        if did_register {
             let map = self
                 .pre_module_comments
                 .get_or_insert_with(|| Rc::new(RefCell::new(HashMap::default())));
@@ -964,6 +1003,14 @@ impl<'a> Evaluator<'a> {
                 .extend(own_comments);
         }
         push_run(sink, own_run);
+        // dart `clearChildren`: registered comments are consumed — the copies
+        // left in place are this edge's own emission and must never register
+        // again at a later edge.
+        if did_register {
+            if let Sink::Top(out) = sink {
+                self.pre_comment_floor = out.len();
+            }
+        }
         // A first load through `meta.load-css` (force_reemit) splices the
         // module's whole subtree under a unique copy scope at the call site;
         // an ordinary `@use`/`@forward` load wraps its own CSS in its module
@@ -1022,6 +1069,9 @@ impl<'a> Evaluator<'a> {
         // (its registrations join it, and its edges consult it) — but a map
         // the child CREATES is dropped again on restore.
         let saved_pre_comments = self.pre_module_comments.clone();
+        // The clone floor indexes into the CURRENT top sink; a module body
+        // evaluates into a fresh buffer, so it starts at zero.
+        let saved_comment_floor = std::mem::replace(&mut self.pre_comment_floor, 0);
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![new_scope()]);
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, vec![true]);
         let saved_funcs = std::mem::replace(&mut self.functions, vec![new_fn_scope()]);
@@ -1112,6 +1162,7 @@ impl<'a> Evaluator<'a> {
         self.current_url_stamp = 0;
         self.current_source = saved_source;
         self.pre_module_comments = saved_pre_comments;
+        self.pre_comment_floor = saved_comment_floor;
 
         result?;
         let _ = pos;
@@ -1183,6 +1234,10 @@ impl<'a> Evaluator<'a> {
                 canonical: key.to_string(),
                 emitted_main: std::cell::Cell::new(false),
                 css: Vec::new(),
+                phantom_css: self
+                    .pre_module_comments
+                    .as_ref()
+                    .is_some_and(|m| !m.borrow().is_empty()),
             },
             consumed,
         ))

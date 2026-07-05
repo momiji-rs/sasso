@@ -8557,3 +8557,137 @@ fn extend_one_shot_vs_incremental_order() {
         ":not(.x):not(.y):not(.z) {\n  a: b;\n}\n"
     );
 }
+
+/// Shared scratch-dir helper for multi-file pre-module-comment tests.
+fn comment_scratch(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "sasso-premod-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    dir
+}
+
+#[test]
+fn pre_module_comment_registers_through_invisible_loads() {
+    // dart's `_root.children` holds no placeholder for a CSS-less load: a
+    // file-heading comment stays pending across `@use "tokens"` (pure vars)
+    // and registers at the NEXT css-bearing edge (`@use "lib"`), then
+    // re-emits at every later edge into that module — here the nested
+    // sibling's repeat edge (uswds `_palette-registry.scss` PALETTE header).
+    use std::fs;
+    let dir = comment_scratch("deep");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(dir.join("_lib.scss"), "/* lib */\n$l: 1;\n").unwrap();
+    fs::write(dir.join("_tokens.scss"), "$t: 1;\n").unwrap();
+    fs::write(
+        dir.join("_reg.scss"),
+        "/* reg header */\n@use \"tokens\" as *;\n@use \"lib\" as *;\n@use \"sib\" as *;\n$r: 1;\n",
+    )
+    .unwrap();
+    fs::write(dir.join("_sib.scss"), "@use \"lib\" as *;\n$s: 1;\n").unwrap();
+    let out = compile("@use \"reg\";\n", &opts).expect("reg compiles");
+    assert_eq!(out, "/* reg header */\n/* lib */\n/* reg header */");
+}
+
+#[test]
+fn pre_module_comment_reemits_at_sibling_edge() {
+    // A repeat edge from a SIBLING module re-emits the comments registered
+    // for the target on its first load, provided the shared map already
+    // existed when the registrar was evaluated (dart's inherited-map quirk).
+    use std::fs;
+    let dir = comment_scratch("sib");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(dir.join("_lib.scss"), "/* lib */\n$l: 1;\n").unwrap();
+    fs::write(dir.join("_tokens.scss"), "$t: 1;\n").unwrap();
+    fs::write(dir.join("_vis.scss"), "/* vis */\n$v: 0;\n").unwrap();
+    fs::write(
+        dir.join("_mid.scss"),
+        "/* mid header */\n@use \"lib\" as *;\n@use \"tokens\" as *;\n.m { x: 1; }\n",
+    )
+    .unwrap();
+    fs::write(dir.join("_user.scss"), "@use \"lib\" as *;\n$u: 4;\n").unwrap();
+    fs::write(
+        dir.join("_outer.scss"),
+        "/* outer note */\n@use \"vis\" as *;\n@use \"mid\" as *;\n@use \"user\" as *;\n",
+    )
+    .unwrap();
+    let out = compile("@use \"outer\";\n", &opts).expect("outer compiles");
+    assert_eq!(
+        out,
+        "/* outer note */\n/* vis */\n/* mid header */\n/* lib */\n.m {\n  x: 1;\n}\n\n/* mid header */"
+    );
+}
+
+#[test]
+fn phantom_css_module_absorbs_pending_comments() {
+    // dart `transitivelyContainsCss` counts a NON-EMPTY pre-module-comment
+    // map snapshot: a css-less module built while the shared map holds any
+    // entry is "css-bearing", so it absorbs the pending comment registration
+    // (`[tokens -> mid header]`) and the css-bearing edge after it gets
+    // nothing — no sibling re-emission (contrast with
+    // `pre_module_comment_reemits_at_sibling_edge`, where `tokens` is loaded
+    // AFTER `lib`).
+    use std::fs;
+    let dir = comment_scratch("phantom");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(dir.join("_lib.scss"), "/* lib */\n$l: 1;\n").unwrap();
+    fs::write(dir.join("_tokens.scss"), "$t: 1;\n").unwrap();
+    fs::write(dir.join("_vis.scss"), "/* vis */\n$v: 0;\n").unwrap();
+    fs::write(
+        dir.join("_mid.scss"),
+        "/* mid header */\n@use \"tokens\" as *;\n@use \"lib\" as *;\n.m { x: 1; }\n",
+    )
+    .unwrap();
+    fs::write(dir.join("_user.scss"), "@use \"lib\" as *;\n$u: 4;\n").unwrap();
+    fs::write(
+        dir.join("_outer.scss"),
+        "/* outer note */\n@use \"vis\" as *;\n@use \"mid\" as *;\n@use \"user\" as *;\n",
+    )
+    .unwrap();
+    let out = compile("@use \"outer\";\n", &opts).expect("outer compiles");
+    assert_eq!(
+        out,
+        "/* outer note */\n/* vis */\n/* mid header */\n/* lib */\n.m {\n  x: 1;\n}"
+    );
+}
+
+#[test]
+fn reemitted_comment_clones_never_reregister() {
+    // dart materializes pre-module-comment clones at COMBINE time, so they
+    // never sit in `_root.children` and can never register under a later
+    // first-load edge. Without the clone fence, `sib`'s in-stream clone of
+    // "/* note */" would cascade onto `vis2`'s key and `tail`'s repeat edge
+    // would emit a third copy (uswds color() 7-vs-6).
+    use std::fs;
+    let dir = comment_scratch("cascade");
+    let imp = FsImporter::new(vec![dir.clone()]);
+    let opts = Options::default().with_importer(&imp);
+    fs::write(dir.join("_seed.scss"), "/* seed */\n$sd: 0;\n").unwrap();
+    fs::write(dir.join("_lib.scss"), "/* lib */\n$l: 1;\n").unwrap();
+    fs::write(dir.join("_mid.scss"), "/* note */\n@use \"lib\" as *;\n$m: 1;\n").unwrap();
+    fs::write(dir.join("_vis2.scss"), "/* vis2 */\n$v: 1;\n").unwrap();
+    fs::write(
+        dir.join("_sib.scss"),
+        "@use \"lib\" as *;\n@use \"vis2\" as *;\n$s: 1;\n",
+    )
+    .unwrap();
+    fs::write(dir.join("_tail.scss"), "@use \"vis2\" as *;\n$t: 1;\n").unwrap();
+    fs::write(
+        dir.join("_outer.scss"),
+        "/* outer */\n@use \"seed\" as *;\n@use \"mid\" as *;\n@use \"sib\" as *;\n@use \"tail\" as *;\n",
+    )
+    .unwrap();
+    let out = compile("@use \"outer\";\n", &opts).expect("outer compiles");
+    assert_eq!(
+        out,
+        "/* outer */\n/* seed */\n/* note */\n/* lib */\n/* note */\n/* vis2 */"
+    );
+}

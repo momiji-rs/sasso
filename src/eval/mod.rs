@@ -741,6 +741,11 @@ pub(crate) struct Evaluator<'a> {
     /// CSS). `None` until a registration creates a map; eval_module
     /// saves/restores so a child-created map never leaks upward.
     pre_module_comments: Option<PreModuleComments>,
+    /// Top-sink index below which pending-comment scans must not reach:
+    /// everything below is a re-emitted comment CLONE (dart materializes
+    /// clones at combine time, so they never re-register as pending).
+    /// Indexes into the current module's top sink; reset per module eval.
+    pre_comment_floor: usize,
     /// `meta.load-css` copy scopes: (copy key, base module key). An origin
     /// inside the base's subtree also sees the copy (its extensions apply to
     /// the clone), in addition to the caller-edge reachability.
@@ -965,6 +970,12 @@ struct Module {
     /// `@import`-reached module can re-emit it at each import site (dart
     /// clones the module's CSS tree per import).
     css: Vec<OutNode>,
+    /// dart `transitivelyContainsCss` includes `preModuleComments.isNotEmpty`
+    /// on the map SNAPSHOT taken at module construction: a css-less module
+    /// built while the shared pre-module-comment map holds ANY entry counts
+    /// as css-bearing — it absorbs pending-comment registrations and its
+    /// edges re-emit like a visible module's.
+    phantom_css: bool,
 }
 
 impl Module {
@@ -1197,6 +1208,7 @@ impl<'a> Evaluator<'a> {
             module_deps: RefCell::new(HashMap::default()),
             module_dep_order: RefCell::new(HashMap::default()),
             pre_module_comments: None,
+            pre_comment_floor: 0,
             load_css_copies: RefCell::new(Vec::new()),
             copy_counter: std::cell::Cell::new(0),
             in_keyframes: false,
