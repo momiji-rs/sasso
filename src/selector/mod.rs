@@ -1127,8 +1127,10 @@ pub(crate) fn extend_selectors(
                 .map(|(i, c)| (c.clone(), original_breaks.get(i).copied().unwrap_or(false), true))
                 .collect()
         };
-        let mut current: Vec<(Complex, bool, bool, String)> =
-            seed.into_iter().map(|(c, f, o)| (c, f, o, scope.to_string())).collect();
+        let mut current: Vec<(Complex, bool, bool, String)> = seed
+            .into_iter()
+            .map(|(c, f, o)| (c, f, o, scope.to_string()))
+            .collect();
         // OPT 1: the set `S` of simples the running list can match against —
         // exactly those `s` for which some complex `complex_may_match_targets`
         // `{s}`. A batch ALL of whose targets are absent from `S` changes
@@ -1369,10 +1371,7 @@ fn simplify_one_pseudo(text: &str) -> PseudoResult {
 /// iterate last-to-first, dropping a selector when an already-kept (or
 /// later-in-input) selector is its superselector. Originals are always kept.
 /// [`trim_breaks`] over bare complexes tagged with per-entry ORIGINAL flags.
-fn trim(
-    selectors: Vec<(Complex, bool)>,
-    source_spec: &FxHashMap<Simple, u64>,
-) -> Vec<Complex> {
+fn trim(selectors: Vec<(Complex, bool)>, source_spec: &FxHashMap<Simple, u64>) -> Vec<Complex> {
     trim_breaks(
         selectors.into_iter().map(|(c, o)| (c, false, o)).collect(),
         source_spec,
@@ -1973,10 +1972,18 @@ fn type_namespace(t: &str) -> Option<String> {
 /// out first. (dart-sass `Extender._extendComplex`.)
 fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
     let empty: FxHashMap<Complex, bool> = FxHashMap::default();
-    extend_complex_breaks(complex, false, true, None, extensions, &empty, CartesianOrder::Fold)
-        .into_iter()
-        .map(|(c, _, _)| c)
-        .collect()
+    extend_complex_breaks(
+        complex,
+        false,
+        true,
+        None,
+        extensions,
+        &empty,
+        CartesianOrder::Fold,
+    )
+    .into_iter()
+    .map(|(c, _, _)| c)
+    .collect()
 }
 
 /// Which cartesian-product ITERATION ORDER the `@extend` engine uses when
@@ -2122,8 +2129,7 @@ fn extend_complex_breaks(
                 // dart marks the FIRST product of an original complex as an
                 // original itself (`_originals.add(outputComplex)`) — it is
                 // the reconstructed original, value-equal by construction.
-                let orig = (in_orig && out.is_empty())
-                    || (input_is_bare && bare_extenders.contains(&c));
+                let orig = (in_orig && out.is_empty()) || (input_is_bare && bare_extenders.contains(&c));
                 out.push((c, in_break || pflag, orig));
             }
         }
@@ -2962,18 +2968,22 @@ fn unvendor(name: &str) -> &str {
 /// dedup, and trim redundant superselectors. Used for pseudo arguments.
 fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
     let all_orig: Vec<bool> = vec![true; list.len()];
-    let (result, changed) =
-        extend_to_fixpoint_inner(list, &[], &all_orig, None, extensions, CartesianOrder::Fold, false);
+    let (result, changed) = extend_to_fixpoint_inner(
+        list,
+        &[],
+        &all_orig,
+        None,
+        extensions,
+        CartesianOrder::Fold,
+        false,
+    );
     // dart `_extendList`: when no complex was changed the ORIGINAL list is
     // returned untouched — no trim, duplicates preserved.
     if !changed {
         return list.to_vec();
     }
     let source_spec = source_specificity_map(extensions);
-    trim(
-        result.into_iter().map(|(c, _, o)| (c, o)).collect(),
-        &source_spec,
-    )
+    trim(result.into_iter().map(|(c, _, o)| (c, o)).collect(), &source_spec)
 }
 
 /// Build a single-extender [`Extension`] cloning `src`'s metadata. The `matched`
@@ -3394,7 +3404,15 @@ fn extend_list_batch(
         // `to_dart`, or `extend_complex_breaks`.
         let can_match = visible && complex_may_match_targets(complex, &batch_targets);
         let products = if can_match && consume_extend_work() && out.len() <= 100_000 {
-            extend_complex_breaks(complex, *in_break, *c_orig, orig_scope, batch, &ext_breaks, CartesianOrder::Fold)
+            extend_complex_breaks(
+                complex,
+                *in_break,
+                *c_orig,
+                orig_scope,
+                batch,
+                &ext_breaks,
+                CartesianOrder::Fold,
+            )
         } else {
             vec![(complex.clone(), *in_break, *c_orig)]
         };
@@ -3510,8 +3528,15 @@ fn extend_to_fixpoint_inner(
         if !consume_extend_work() || result.len() > 100_000 {
             break;
         }
-        let products =
-            extend_complex_breaks(&complex, in_break, is_orig, orig_scope, extensions, &ext_breaks, order);
+        let products = extend_complex_breaks(
+            &complex,
+            in_break,
+            is_orig,
+            orig_scope,
+            extensions,
+            &ext_breaks,
+            order,
+        );
         if is_input && !(products.len() == 1 && products[0].0.render() == complex.render()) {
             changed = true;
         }

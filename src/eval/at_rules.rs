@@ -110,7 +110,10 @@ impl<'a> Evaluator<'a> {
         let saved_last_invisible = std::mem::replace(&mut self.last_child_invisible, false);
         let mut body: Vec<OutNode> = Vec::new();
         let result = if parents.is_empty() {
-            let mut child = Sink::AtRoot { body: &mut body, group_ends: false };
+            let mut child = Sink::AtRoot {
+                body: &mut body,
+                group_ends: false,
+            };
             self.exec(stmts, &[], &mut child)
         } else {
             let mut items: Vec<OutItem> = Vec::new();
@@ -772,7 +775,10 @@ impl<'a> Evaluator<'a> {
         };
         let mut out: Vec<OutNode> = Vec::new();
         let res = {
-            let mut child = Sink::AtRoot { body: &mut out, group_ends: true };
+            let mut child = Sink::AtRoot {
+                body: &mut out,
+                group_ends: true,
+            };
             self.exec(body, parents, &mut child)
         };
         self.at_root_excluding_style_rule = saved;
@@ -857,7 +863,10 @@ impl<'a> Evaluator<'a> {
         while matches!(spaced.last(), Some(OutNode::GroupEnd)) {
             spaced.pop();
         }
-        if spaced.iter().all(|n| matches!(n, OutNode::Blank | OutNode::GroupEnd | OutNode::AtRootPackTight)) {
+        if spaced
+            .iter()
+            .all(|n| matches!(n, OutNode::Blank | OutNode::GroupEnd | OutNode::AtRootPackTight))
+        {
             return Ok(());
         }
         if let Some(te) = first_excluded {

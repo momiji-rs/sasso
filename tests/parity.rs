@@ -8759,7 +8759,10 @@ fn duplicate_extension_keeps_first_merged_store_position() {
     fs::write(dir.join("_g2.scss"), "@forward 'l3';\n@forward 'l4';\n").unwrap();
     fs::write(dir.join("_mainx.scss"), "@forward 'g1';\n@forward 'g2';\n").unwrap();
     let out = compile("@use \"mainx\";\n", &opts).expect("compiles");
-    assert_eq!(out, ".x4 .in:hover,\n.dup .in:hover, .l3, .l2 {\n  color: red;\n}");
+    assert_eq!(
+        out,
+        ".x4 .in:hover,\n.dup .in:hover, .l3, .l2 {\n  color: red;\n}"
+    );
 }
 
 #[test]
