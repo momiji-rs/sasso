@@ -11,6 +11,82 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-06
+
+_Crate release `v0.8.0`; ships on npm as `sasso@0.11.0` (wasm + native — same
+core). Byte-identity, complete: **all 20 projects in the real-world corpus
+compile byte-identical to dart-sass 1.101**
+([`bench/real-world/real_world.md`](bench/real-world/real_world.md), 2.9–51×
+faster end-to-end). The corpus doubled this release (tabler, AdminLTE,
+reveal.js, Font Awesome, video.js, forem, nextcloud server,
+jekyll-theme-chirpy, grafana, wagtail) and every divergence it surfaced was
+fixed against dart-sass semantics — each pinned by a parity test._
+
+### Fixed (`@extend` engine — dart's per-registration model)
+
+- **`@each` over a single value — `null` included — iterates once** (dart
+  `Value.asList`). Bootstrap's `valid-radius(null)` relies on it; previously
+  a css-less `border-radius` map key ERRORED the whole compile (tabler).
+- **The application fold runs each registration exactly once — no fixpoint.**
+  Extend cycles resolve the way dart's do: `_extensionsByExtender[target]` is
+  a LIVE list, so an extender that itself contains the target self-derives
+  within its own registration. The old fixpoint chained one extender of an
+  `@extend` through its sibling of the same rule, emitting selectors dart
+  never produces.
+- **Original selectors are identity-tracked** (dart `_originals` is a
+  `Set.identity()`): an extension product value-equal to one of the rule's
+  own selectors is coverage-trimmed in the original's favor, keeping the
+  original's position and source line break (`.btn-sm,\n.btn-group-sm > .btn`;
+  `h1, .h1` heading runs). dart's bare fast path (a single-simple compound
+  replaced wholesale returns the extender object) carries identity too,
+  scope-gated per module store — dart#1297 keeps the in-store `:is()` rewrite
+  alongside its source while the cross-module variant replaces it.
+- **Foreign extensions apply in dart's cross-module store-merge order**
+  (downstream stores merge transitively; sibling stores reverse-first-load;
+  derived entries follow their trigger's absorption order) — bulma's `%block`
+  extender interleaving.
+- **Identical `(target, extender)` registrations merge per module store, not
+  globally**, so each keeps its own store-merge rank (chirpy's
+  `#access-lastmod a:hover` position and line break).
+- **One `@extend` hitting several compounds of the same complex uses dart's
+  `paths` order** (first component varies fastest) on the incremental path
+  too (forem's `.crayons-btn + .crayons-btn` file-selector products).
+- **Pre-rule extensions apply one-shot per dart's `addSelector` timing**, and
+  the one-shot gate compares registration indices, not counts.
+- **A placeholder-only module whose rules were all dropped counts as empty**,
+  so its group-separator blank collapses (uswds `placeholders/`).
+
+### Fixed (module system & output fidelity)
+
+- **The pre-module comment engine matches dart on three fronts** (uswds):
+  registration deep-scans pending comments through invisible module-scope
+  placeholders; re-emitted clones are fenced and never re-register onto new
+  module keys; a css-less module built while the shared comment map is
+  non-empty absorbs pending registrations (dart's `transitivelyContainsCss`
+  includes `preModuleComments.isNotEmpty`).
+- **Re-emitted pre-module clones stay out of the loader's import-run sweep**
+  (nextcloud's SPDX header no longer jumps to the top of the document).
+- **CSS `@import` hoisting keeps the css flow's eval-time grouping** — dart's
+  blank lines come solely from group-end flags, never source gaps; only the
+  seam the pulled import run vacated is re-derived (forem).
+- **`meta.load-css` copies re-acquire per-rule group separators** — dart
+  re-visits the combined css node-by-node (reveal.js print styles).
+- **A trailing invisible chain owns the enclosing group's end at any nesting
+  depth**, packing the next group tight (chirpy).
+- **`@at-root` separators follow dart's `_styleRule == null` group-end gate**
+  — rules flattened out of a wrapper rule pack tight (wagtail's sidebar).
+- **Selector line-break parity with dart** (pseudo-arg newlines,
+  parent-resolution flags), **loud comment re-indentation** per dart's
+  `_loudComment`, **invisible-last-child groups pack the next group tight**,
+  and **an empty module scope no longer anchors a group separator**
+  (bootstrap, quasar, mastodon, govuk-frontend byte-identity).
+
+### Added
+
+- **`bench/real-world/`: the vetted corpus doubled to 20 projects** — every
+  one compiled standalone with both engines and byte-compared on every run
+  (`node bench/real-world/run.mjs check` is the regression gate).
+
 ## [0.7.0] - 2026-07-04
 
 _Crate release `v0.7.0`; ships on npm as `sasso@0.10.0` (wasm + native — same

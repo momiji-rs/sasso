@@ -376,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "sasso"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "codspeed-divan-compat",
 ]
