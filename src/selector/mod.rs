@@ -817,9 +817,6 @@ pub(crate) struct ExtendPlan {
     legacy_order: bool,
     /// Store-wide source specificities (dart `_sourceSpecificity`) for `trim`.
     source_spec: FxHashMap<Simple, u64>,
-    /// The store-wide original extenders (dart `_originals`) for THIS scope —
-    /// protected from trimming. The per-rule call unions in its own originals.
-    scope_originals: FxHashSet<Complex>,
     /// The visible extension count (`extensions.len()`), against which the
     /// per-rule `extend_base` is compared to choose the one-shot path. Stored so
     /// the comparison stays exactly the old `extend_base >= extensions.len()`.
@@ -853,18 +850,6 @@ pub(crate) fn build_extend_plan(
     origin_rank: std::collections::HashMap<String, usize>,
     legacy_order: bool,
 ) -> ExtendPlan {
-    // The store-wide originals (dart `_originals`): every extender written in
-    // THIS module is a source selector, protected from being trimmed away by a
-    // broader generated one. (The per-rule call adds the rule's own selectors.)
-    let mut scope_originals: FxHashSet<Complex> = FxHashSet::default();
-    for ext in extensions {
-        if ext.origin != scope {
-            continue;
-        }
-        for complex in &ext.extenders {
-            scope_originals.insert(complex.clone());
-        }
-    }
     let source_spec = source_specificity_map(extensions);
     // Run the closure derivation under a fresh budget and record exactly how
     // much it consumed, so the per-rule path can replay the same deduction.
@@ -918,7 +903,6 @@ pub(crate) fn build_extend_plan(
         origin_rank,
         legacy_order,
         source_spec,
-        scope_originals,
         n_extensions: extensions.len(),
         single_module,
         pseudo_self_ref,
@@ -952,18 +936,14 @@ pub(crate) fn extend_selectors(
     // matches what it always matched). Start from the scope-wide store originals
     // (dart `_originals` — every extender written in this module, protected from
     // a broader generated one trimming it) and add the rule's own selectors.
-    // Originals membership for `_trim` (originals are never trimmed). The
-    // scope-wide store originals are BORROWED from the plan (no per-rule clone);
-    // only the rule's own selectors are owned here.
-    let mut rule_originals: FxHashSet<Complex> = FxHashSet::default();
+    // dart's `_originals` is an IDENTITY set: original status travels with
+    // the INSTANCE, not the value. The pipeline threads a per-entry flag
+    // instead (seeded true for the rule's own selectors; the first product of
+    // each original round-trip inherits it), so a product VALUE-equal to an
+    // original is still coverage-trimmed in the original's favor.
     for complex in original {
         assert_render_injective(complex);
-        rule_originals.insert(complex.clone());
     }
-    let originals = RuleOriginals {
-        scope: &plan.scope_originals,
-        rule: rule_originals,
-    };
 
     // dart `addSelector` ONE-SHOT vs `_extendExistingSelectors` INCREMENTAL.
     // When a rule's selector was established AFTER every applicable `@extend`
@@ -995,7 +975,7 @@ pub(crate) fn extend_selectors(
     };
     // A SELF-REFERENTIAL pseudo chain (issue_2055) — precomputed in the plan.
     let pseudo_self_ref = plan.pseudo_self_ref;
-    let result = if pseudo_self_ref && order == CartesianOrder::Fold {
+    let result: Vec<(Complex, bool)> = if pseudo_self_ref && order == CartesianOrder::Fold {
         // A self-referential pseudo chain (`:not(.thing[disabled])` extending
         // `.thing`, issue_2055). dart applies each `@extend`'s
         // `newExtensionsByTarget` (its single extension PLUS the
@@ -1007,13 +987,14 @@ pub(crate) fn extend_selectors(
         // every derived extender), and re-folding the batches to a fixpoint
         // blows up combinatorially. So: fold the batches once each, faithful to
         // dart's single registration-order pass.
-        let mut current: Vec<(Complex, bool, String)> = original
+        let mut current: Vec<(Complex, bool, bool, String)> = original
             .iter()
             .enumerate()
             .map(|(i, c)| {
                 (
                     c.clone(),
                     original_breaks.get(i).copied().unwrap_or(false),
+                    true,
                     scope.to_string(),
                 )
             })
@@ -1021,7 +1002,7 @@ pub(crate) fn extend_selectors(
         // OPT 1 (single registration-order pass): skip a batch none of whose
         // targets the running list can match — a no-op, budget-neutral batch.
         let mut current_simples: FxHashSet<Simple> = FxHashSet::default();
-        for (c, _, _) in &current {
+        for (c, _, _, _) in &current {
             collect_match_simples(c, &mut current_simples);
         }
         for batch in batches.iter() {
@@ -1037,16 +1018,21 @@ pub(crate) fn extend_selectors(
             if !any {
                 continue;
             }
-            current = extend_list_batch(&current, batch, &originals, source_spec);
-            for (c, _, _) in &current {
+            current = extend_list_batch(&current, batch, Some(scope), source_spec);
+            for (c, _, _, _) in &current {
                 collect_match_simples(c, &mut current_simples);
             }
         }
-        current.into_iter().map(|(c, f, _)| (c, f)).collect()
+        current.into_iter().map(|(c, f, _, _)| (c, f)).collect()
     } else if order == CartesianOrder::OneShot {
-        let (result, changed) = extend_to_fixpoint_breaks(original, original_breaks, registry, order);
+        let all_orig: Vec<bool> = vec![true; original.len()];
+        let (result, changed) =
+            extend_to_fixpoint_breaks(original, original_breaks, &all_orig, Some(scope), registry, order);
         if changed {
-            trim_breaks(result, &originals, source_spec)
+            trim_breaks(result, source_spec)
+                .into_iter()
+                .map(|(c, f, _)| (c, f))
+                .collect()
         } else {
             original
                 .iter()
@@ -1104,7 +1090,7 @@ pub(crate) fn extend_selectors(
         };
         let mut pre_set: FxHashSet<usize> = pre_batches.iter().copied().collect();
         pre_set.extend(foreign.iter().copied());
-        let seed: Vec<(Complex, bool)> = if !pre_batches.is_empty() {
+        let seed: Vec<(Complex, bool, bool)> = if !pre_batches.is_empty() {
             let one_shot_store: Vec<Extension> = pre_batches
                 .iter()
                 .flat_map(|&i| {
@@ -1116,30 +1102,33 @@ pub(crate) fn extend_selectors(
                     registry[start..plan.batch_registry_marks[i]].iter().cloned()
                 })
                 .collect();
+            let all_orig: Vec<bool> = vec![true; original.len()];
             let (res, changed) = extend_to_fixpoint_breaks(
                 original,
                 original_breaks,
+                &all_orig,
+                Some(scope),
                 &one_shot_store,
                 CartesianOrder::OneShot,
             );
             if changed {
-                trim_breaks(res, &originals, source_spec)
+                trim_breaks(res, source_spec)
             } else {
                 original
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| (c.clone(), original_breaks.get(i).copied().unwrap_or(false)))
+                    .map(|(i, c)| (c.clone(), original_breaks.get(i).copied().unwrap_or(false), true))
                     .collect()
             }
         } else {
             original
                 .iter()
                 .enumerate()
-                .map(|(i, c)| (c.clone(), original_breaks.get(i).copied().unwrap_or(false)))
+                .map(|(i, c)| (c.clone(), original_breaks.get(i).copied().unwrap_or(false), true))
                 .collect()
         };
-        let mut current: Vec<(Complex, bool, String)> =
-            seed.into_iter().map(|(c, f)| (c, f, scope.to_string())).collect();
+        let mut current: Vec<(Complex, bool, bool, String)> =
+            seed.into_iter().map(|(c, f, o)| (c, f, o, scope.to_string())).collect();
         // OPT 1: the set `S` of simples the running list can match against —
         // exactly those `s` for which some complex `complex_may_match_targets`
         // `{s}`. A batch ALL of whose targets are absent from `S` changes
@@ -1148,17 +1137,16 @@ pub(crate) fn extend_selectors(
         // Maintained INCREMENTALLY: only an applied batch mutates `current`, so
         // its products' simples are unioned in; skipped batches leave `S` alone.
         let mut current_simples: FxHashSet<Simple> = FxHashSet::default();
-        for (c, _, _) in &current {
+        for (c, _, _, _) in &current {
             collect_match_simples(c, &mut current_simples);
         }
-        // OPT 2(b): the fixpoint guard compares the TYPED list (Phase-1a proved
-        // typed `Complex` Eq ⇔ `render()` equality), dropping the per-pass
-        // `render()` + String join the old guard paid every pass.
-        let typed_of = |cur: &[(Complex, bool, String)]| -> Vec<(Complex, bool)> {
-            cur.iter().map(|(c, f, _)| (c.clone(), *f)).collect()
-        };
-        let mut guard = typed_of(&current);
-        loop {
+        // dart's incremental path is ONE `_extendList` per registration —
+        // never a fixpoint. Chains across registrations are precomputed as
+        // DERIVED extensions (including the live-list self-derivation above),
+        // so re-running the batches would only conjure products dart never
+        // emits (tabler: `body[data-bs-theme=dark] [data-bs-theme=light]`
+        // chained through its sibling extender of the SAME rule).
+        {
             for (bi, batch) in batches.iter().enumerate() {
                 if pre_set.contains(&bi) {
                     continue;
@@ -1176,20 +1164,15 @@ pub(crate) fn extend_selectors(
                 if !any {
                     continue;
                 }
-                let next = extend_list_batch(&current, batch, &originals, source_spec);
+                let next = extend_list_batch(&current, batch, Some(scope), source_spec);
                 // Union the (possibly new) products' simples into `S`. Only an
                 // applied batch reaches here; recomputing from scratch per batch
                 // would defeat the win, so fold incrementally.
-                for (c, _, _) in &next {
+                for (c, _, _, _) in &next {
                     collect_match_simples(c, &mut current_simples);
                 }
                 current = next;
             }
-            let typed = typed_of(&current);
-            if typed == guard || !consume_extend_work() {
-                break;
-            }
-            guard = typed;
         }
         // Satisfaction snapshot (dart's `originalSelectors`): a foreign
         // extension counts as matched only against selectors present BEFORE
@@ -1198,7 +1181,7 @@ pub(crate) fn extend_selectors(
         let pre_foreign_snapshot: Vec<Complex> = if foreign.is_empty() {
             Vec::new()
         } else {
-            current.iter().map(|(c, _, _)| c.clone()).collect()
+            current.iter().map(|(c, _, _, _)| c.clone()).collect()
         };
         if !foreign.is_empty() {
             let mut foreign_entries: Vec<&Extension> =
@@ -1221,14 +1204,21 @@ pub(crate) fn extend_selectors(
                     .then(a.reg_idx.cmp(&b.reg_idx))
             });
             let foreign_store: Vec<Extension> = foreign_entries.into_iter().cloned().collect();
-            let complexes: Vec<Complex> = current.iter().map(|(c, _, _)| c.clone()).collect();
-            let breaks: Vec<bool> = current.iter().map(|(_, f, _)| *f).collect();
-            let (res, changed) =
-                extend_to_fixpoint_breaks(&complexes, &breaks, &foreign_store, CartesianOrder::OneShot);
+            let complexes: Vec<Complex> = current.iter().map(|(c, _, _, _)| c.clone()).collect();
+            let breaks: Vec<bool> = current.iter().map(|(_, f, _, _)| *f).collect();
+            let origs: Vec<bool> = current.iter().map(|(_, _, o, _)| *o).collect();
+            let (res, changed) = extend_to_fixpoint_breaks(
+                &complexes,
+                &breaks,
+                &origs,
+                Some(scope),
+                &foreign_store,
+                CartesianOrder::OneShot,
+            );
             if changed {
-                current = trim_breaks(res, &originals, source_spec)
+                current = trim_breaks(res, source_spec)
                     .into_iter()
-                    .map(|(c, f)| (c, f, scope.to_string()))
+                    .map(|(c, f, o)| (c, f, o, scope.to_string()))
                     .collect();
             }
         }
@@ -1255,7 +1245,7 @@ pub(crate) fn extend_selectors(
                 }
             }
         }
-        current.into_iter().map(|(c, f, _)| (c, f)).collect()
+        current.into_iter().map(|(c, f, _, _)| (c, f)).collect()
     };
 
     // Simplify placeholders inside `:is()/:where()/:not()`-style pseudo
@@ -1374,46 +1364,35 @@ fn simplify_one_pseudo(text: &str) -> PseudoResult {
 }
 
 /// `_trim`'s "originals are never trimmed" membership WITHOUT cloning the
-/// scope-wide originals set into every rule. `extend_selectors` runs per rule;
-/// cloning `plan.scope_originals` (every extender in the module) each time was
-/// an O(rules × |scope_originals|) `Complex`-clone cost. Here the scope set is
-/// BORROWED and only the rule's own few selectors live in `rule`.
-struct RuleOriginals<'a> {
-    scope: &'a FxHashSet<Complex>,
-    rule: FxHashSet<Complex>,
-}
-
-impl RuleOriginals<'_> {
-    fn contains(&self, c: &Complex) -> bool {
-        self.scope.contains(c) || self.rule.contains(c)
-    }
-}
-
 /// Remove complex selectors that are subselectors of another in the list,
 /// preserving original selectors. Mirrors dart-sass `ExtensionStore._trim`:
 /// iterate last-to-first, dropping a selector when an already-kept (or
 /// later-in-input) selector is its superselector. Originals are always kept.
+/// [`trim_breaks`] over bare complexes tagged with per-entry ORIGINAL flags.
 fn trim(
-    selectors: Vec<Complex>,
-    originals: &RuleOriginals<'_>,
+    selectors: Vec<(Complex, bool)>,
     source_spec: &FxHashMap<Simple, u64>,
 ) -> Vec<Complex> {
     trim_breaks(
-        selectors.into_iter().map(|c| (c, false)).collect(),
-        originals,
+        selectors.into_iter().map(|(c, o)| (c, false, o)).collect(),
         source_spec,
     )
     .into_iter()
-    .map(|(c, _)| c)
+    .map(|(c, _, _)| c)
     .collect()
 }
 
-/// Like [`trim`], preserving each selector's line-break flag.
+/// Like [`trim`], preserving each selector's line-break flag. Entries carry
+/// (complex, line-break, is-original-INSTANCE): dart's `_originals` is a
+/// `Set.identity()`, so an extension product that is VALUE-equal to one of
+/// the rule's original selectors is NOT an original — it falls through to
+/// the superselector coverage check, is covered by the original instance,
+/// and drops, leaving the original at its own position with its own
+/// line-break flag (tabler `.btn-sm,\n.btn-group-sm > .btn`).
 fn trim_breaks(
-    selectors: Vec<(Complex, bool)>,
-    originals: &RuleOriginals<'_>,
+    selectors: Vec<(Complex, bool, bool)>,
     source_spec: &FxHashMap<Simple, u64>,
-) -> Vec<(Complex, bool)> {
+) -> Vec<(Complex, bool, bool)> {
     // Quadratic; dart-sass bails above 100 to avoid pathological cost.
     if selectors.len() > 100 {
         return selectors;
@@ -1434,12 +1413,12 @@ fn trim_breaks(
             .max()
             .unwrap_or(0)
     };
-    let mut result: Vec<(Complex, bool)> = Vec::new();
+    let mut result: Vec<(Complex, bool, bool)> = Vec::new();
     let mut num_originals = 0usize;
     let n = selectors.len();
     'outer: for i in (0..n).rev() {
-        let (c1, f1) = &selectors[i];
-        if originals.contains(c1) {
+        let (c1, f1, o1) = &selectors[i];
+        if *o1 {
             // A duplicate original rotates to the front (dart `rotateSlice`),
             // preserving the EARLIEST source position's precedence.
             for j in 0..num_originals {
@@ -1450,7 +1429,7 @@ fn trim_breaks(
                 }
             }
             num_originals += 1;
-            result.insert(0, (c1.clone(), *f1));
+            result.insert(0, (c1.clone(), *f1, true));
             continue;
         }
         // Drop c1 only when a superselector ALSO has at least the max source
@@ -1458,10 +1437,10 @@ fn trim_breaks(
         // may not trim `.test-case:active` whose source weighs 2000.
         let max_spec = source_spec_for(c1);
         let covers = |c2: &Complex| complex_specificity(c2) >= max_spec && complex_is_superselector(c2, c1);
-        if result.iter().any(|(c2, _)| covers(c2)) || selectors[..i].iter().any(|(c2, _)| covers(c2)) {
+        if result.iter().any(|(c2, _, _)| covers(c2)) || selectors[..i].iter().any(|(c2, _, _)| covers(c2)) {
             continue;
         }
-        result.insert(0, (c1.clone(), *f1));
+        result.insert(0, (c1.clone(), *f1, false));
     }
     result
 }
@@ -1994,9 +1973,9 @@ fn type_namespace(t: &str) -> Option<String> {
 /// out first. (dart-sass `Extender._extendComplex`.)
 fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
     let empty: FxHashMap<Complex, bool> = FxHashMap::default();
-    extend_complex_breaks(complex, false, extensions, &empty, CartesianOrder::Fold)
+    extend_complex_breaks(complex, false, true, None, extensions, &empty, CartesianOrder::Fold)
         .into_iter()
-        .map(|(c, _)| c)
+        .map(|(c, _, _)| c)
         .collect()
 }
 
@@ -2021,15 +2000,17 @@ enum CartesianOrder {
 fn extend_complex_breaks(
     complex: &Complex,
     in_break: bool,
+    in_orig: bool,
+    orig_scope: Option<&str>,
     extensions: &[Extension],
     ext_breaks: &FxHashMap<Complex, bool>,
     order: CartesianOrder,
-) -> Vec<(Complex, bool)> {
+) -> Vec<(Complex, bool, bool)> {
     let d = to_dart(complex);
     // dart-sass: a complex selector with more than one leading combinator is
     // never extended (the caller keeps the original).
     if d.leading.len() > 1 {
-        return vec![(complex.clone(), in_break)];
+        return vec![(complex.clone(), in_break, in_orig)];
     }
 
     // For each component, the complex selectors it can expand to (the original
@@ -2076,7 +2057,7 @@ fn extend_complex_breaks(
         }
     }
     if !any_extended {
-        return vec![(complex.clone(), in_break)];
+        return vec![(complex.clone(), in_break, in_orig)];
     }
 
     // Take the Cartesian product across components and `weave` each path into
@@ -2109,14 +2090,41 @@ fn extend_complex_breaks(
         }
     }
 
-    let mut out = Vec::new();
+    // dart's fast path (`options case [var extenders]` over a bare single
+    // compound) returns the EXTENDER's own `ComplexSelector` object, and an
+    // extender is a rule selector already living in the identity `_originals`
+    // — so a full-compound replacement product carries original status. Any
+    // weave/unification builds NEW objects and does not.
+    let input_is_bare = d.leading.is_empty()
+        && d.comps.len() == 1
+        && d.comps[0].combinators.is_empty()
+        && d.comps[0].compound.simples.len() == 1;
+    // Identity-original status is PER STORE: `addExtensions` (the cross-
+    // module merge) never adds a downstream store's originals, so a foreign
+    // extender's bare product is NOT protected in this scope and a broader
+    // sibling product replaces it (midstream_extend_within_pseudoselector),
+    // while the same shape within one module keeps both (dart#1297).
+    let bare_extenders: FxHashSet<&Complex> = match (input_is_bare, orig_scope) {
+        (true, Some(scope)) => extensions
+            .iter()
+            .filter(|e| !e.derived && e.origin == scope)
+            .flat_map(|e| e.extenders.iter())
+            .collect(),
+        _ => FxHashSet::default(),
+    };
+    let mut out: Vec<(Complex, bool, bool)> = Vec::new();
     let mut seen = FxHashSet::default();
     for (path, pflag) in combos {
         for woven in weave(&path) {
             let c = from_dart(&woven);
             let r = c.render();
             if seen.insert(r) {
-                out.push((c, in_break || pflag));
+                // dart marks the FIRST product of an original complex as an
+                // original itself (`_originals.add(outputComplex)`) — it is
+                // the reconstructed original, value-equal by construction.
+                let orig = (in_orig && out.is_empty())
+                    || (input_is_bare && bare_extenders.contains(&c));
+                out.push((c, in_break || pflag, orig));
             }
         }
     }
@@ -2953,11 +2961,9 @@ fn unvendor(name: &str) -> &str {
 /// dart-sass `_extendList`: recursively extend a list of complex selectors,
 /// dedup, and trim redundant superselectors. Used for pseudo arguments.
 fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
-    let mut originals: FxHashSet<Complex> = FxHashSet::default();
-    for complex in list {
-        originals.insert(complex.clone());
-    }
-    let (result, changed) = extend_to_fixpoint_inner(list, &[], extensions, CartesianOrder::Fold, false);
+    let all_orig: Vec<bool> = vec![true; list.len()];
+    let (result, changed) =
+        extend_to_fixpoint_inner(list, &[], &all_orig, None, extensions, CartesianOrder::Fold, false);
     // dart `_extendList`: when no complex was changed the ORIGINAL list is
     // returned untouched — no trim, duplicates preserved.
     if !changed {
@@ -2965,11 +2971,7 @@ fn extend_list(list: &[Complex], extensions: &[Extension]) -> Vec<Complex> {
     }
     let source_spec = source_specificity_map(extensions);
     trim(
-        result.into_iter().map(|(c, _)| c).collect(),
-        &RuleOriginals {
-            scope: &originals,
-            rule: FxHashSet::default(),
-        },
+        result.into_iter().map(|(c, _, o)| (c, o)).collect(),
         &source_spec,
     )
 }
@@ -3159,14 +3161,20 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
                     // chained extends get dart's FORWARD product order
                     // (bootstrap's navbar containers). Trim like `_extendList`
                     // so a product the original covers drops.
-                    let mut origin_set: FxHashSet<Complex> = FxHashSet::default();
-                    origin_set.insert(extender.clone());
+                    let empty: FxHashMap<Complex, bool> = FxHashMap::default();
                     trim(
-                        extend_complex(extender, &visible_registry),
-                        &RuleOriginals {
-                            scope: &origin_set,
-                            rule: FxHashSet::default(),
-                        },
+                        extend_complex_breaks(
+                            extender,
+                            false,
+                            true,
+                            Some(&ext.origin),
+                            &visible_registry,
+                            &empty,
+                            CartesianOrder::Fold,
+                        )
+                        .into_iter()
+                        .map(|(c, _, o)| (c, o))
+                        .collect(),
                         &source_spec,
                     )
                 };
@@ -3230,16 +3238,18 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
         // issue_2055's deeper `:has(...)` (extender `[1]` re-extends its own
         // `.thing` by `[1]`). Derived extensions registered DURING the loop are
         // NOT re-processed (dart's `.toList()` is a one-time snapshot), so the
-        // chain still terminates. We restrict this self-inclusion to the
-        // self-referential pseudo extender — the only case where it changes the
-        // result — so plain self-overlapping chains keep dart's TOP snapshot
-        // exactly and gain no self-derivation step they never had.
+        // chain still terminates. dart gates the whole block on the TOP
+        // snapshot being non-null, but `existingExtensions` is the LIVE
+        // `_extensionsByExtender[target]` list and `.toList()` runs AFTER the
+        // registration loop appended this @extend's own extenders — so an
+        // extender that itself CONTAINS the target (`.z.x.y.c` extending
+        // `.c`, extend-loop) is re-extended within its own registration, and
+        // its derived products land in `additionalExtensions` (target ==
+        // this batch's target) and apply in the same pass.
         let process: Vec<usize> = if existing.is_empty() {
             Vec::new()
-        } else if self_ref_extender {
-            by_extender.get(&target).cloned().unwrap_or_default()
         } else {
-            existing.clone()
+            by_extender.get(&target).cloned().unwrap_or_default()
         };
         if !new_slice.is_empty() && !process.is_empty() {
             for old_idx in process {
@@ -3264,14 +3274,20 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
                 // so a derived extender covered by the original at equal-or-greater
                 // specificity is dropped before registration — the bound that keeps
                 // self-overlapping chains finite.
-                let mut origin_set: FxHashSet<Complex> = FxHashSet::default();
-                origin_set.insert(old_extender.clone());
+                let empty: FxHashMap<Complex, bool> = FxHashMap::default();
                 let extended = trim(
-                    extend_complex(&old_extender, &new_slice),
-                    &RuleOriginals {
-                        scope: &origin_set,
-                        rule: FxHashSet::default(),
-                    },
+                    extend_complex_breaks(
+                        &old_extender,
+                        false,
+                        true,
+                        Some(&old.origin),
+                        &new_slice,
+                        &empty,
+                        CartesianOrder::Fold,
+                    )
+                    .into_iter()
+                    .map(|(c, _, o)| (c, o))
+                    .collect(),
                     &source_spec,
                 );
                 // dart: skip the first product when it's the unchanged extender.
@@ -3335,11 +3351,11 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
 /// diamond: `left-extendee` (origin `left`) is not extended by a `right` module
 /// `@extend`, since `right` doesn't use `left` (directives/use/extend/scope:*).
 fn extend_list_batch(
-    list: &[(Complex, bool, String)],
+    list: &[(Complex, bool, bool, String)],
     batch: &[Extension],
-    originals: &RuleOriginals<'_>,
+    orig_scope: Option<&str>,
     source_spec: &FxHashMap<Simple, u64>,
-) -> Vec<(Complex, bool, String)> {
+) -> Vec<(Complex, bool, bool, String)> {
     // Representative origin of the batch (its triggering `@extend`). Every
     // single-extender split shares it; the rare derived entry keeps its source
     // module, but the batch as a whole is gated by the trigger's reach.
@@ -3361,7 +3377,7 @@ fn extend_list_batch(
     // this batch, so the per-complex `render()` + `to_dart`/`extend_complex_breaks`
     // is skipped entirely — this is the cut to the extend-heavy O(n^2) malloc.
     let batch_targets: FxHashSet<Simple> = batch.iter().filter_map(|e| e.target.clone()).collect();
-    let mut out: Vec<(Complex, bool)> = Vec::new();
+    let mut out: Vec<(Complex, bool, bool)> = Vec::new();
     // complex -> owning origin, also serving as the `seen` set (a key's presence
     // marks it emitted). Keyed by `Hashed<Complex>` so each product's `Complex`
     // tree is walked ONCE (at `Hashed::new`) and reused for the entry probe AND
@@ -3371,26 +3387,26 @@ fn extend_list_batch(
     // `Hashed` keeps `Eq` structural so the partition is byte-identical.)
     let mut origin_of: FxHashMap<Hashed<Complex>, String> = FxHashMap::default();
     let mut changed = false;
-    for (complex, in_break, c_origin) in list {
+    for (complex, in_break, c_orig, c_origin) in list {
         let visible = batch_closure.contains(c_origin);
         // Cheap sound pre-filter: a complex containing none of the batch's
         // targets is GUARANTEED unchanged, so pass it through without `render()`,
         // `to_dart`, or `extend_complex_breaks`.
         let can_match = visible && complex_may_match_targets(complex, &batch_targets);
         let products = if can_match && consume_extend_work() && out.len() <= 100_000 {
-            extend_complex_breaks(complex, *in_break, batch, &ext_breaks, CartesianOrder::Fold)
+            extend_complex_breaks(complex, *in_break, *c_orig, orig_scope, batch, &ext_breaks, CartesianOrder::Fold)
         } else {
-            vec![(complex.clone(), *in_break)]
+            vec![(complex.clone(), *in_break, *c_orig)]
         };
         if can_match && !(products.len() == 1 && products[0].0 == *complex) {
             changed = true;
         }
-        for (c, f) in products {
+        for (c, f, o_flag) in products {
             // The unchanged self-copy keeps its origin; a genuinely new product
-            // takes the batch's origin so further batches gate against it. The
-            // FIRST product carrying a given selector sets its origin AND is the
-            // one pushed to `out` — the `seen` membership and `or_insert` fired
-            // together, so a single vacant-entry probe drives both.
+            // takes the batch's origin so further batches gate against it. An
+            // ORIGINAL instance always joins `out` even when a value-equal
+            // product came first (dart's identity `_originals`; the coverage
+            // trim resolves the pair in the original's favor).
             use std::collections::hash_map::Entry;
             let key = Hashed::new(c.clone());
             match origin_of.entry(key) {
@@ -3401,21 +3417,25 @@ fn extend_list_batch(
                         batch_origin.clone()
                     };
                     slot.insert(o);
-                    out.push((c, f));
+                    out.push((c, f, o_flag));
                 }
-                Entry::Occupied(_) => {}
+                Entry::Occupied(_) => {
+                    if o_flag {
+                        out.push((c, f, o_flag));
+                    }
+                }
             }
         }
     }
     if !changed {
         return list.to_vec();
     }
-    trim_breaks(out, originals, source_spec)
+    trim_breaks(out, source_spec)
         .into_iter()
-        .map(|(c, f)| {
+        .map(|(c, f, o_flag)| {
             let key = Hashed::new(c);
             let o = origin_of.remove(&key).unwrap_or_else(|| batch_origin.clone());
-            (key.value, f, o)
+            (key.value, f, o_flag, o)
         })
         .collect()
 }
@@ -3432,10 +3452,12 @@ fn extend_list_batch(
 fn extend_to_fixpoint_breaks(
     list: &[Complex],
     list_breaks: &[bool],
+    list_origs: &[bool],
+    orig_scope: Option<&str>,
     extensions: &[Extension],
     order: CartesianOrder,
-) -> (Vec<(Complex, bool)>, bool) {
-    extend_to_fixpoint_inner(list, list_breaks, extensions, order, true)
+) -> (Vec<(Complex, bool, bool)>, bool) {
+    extend_to_fixpoint_inner(list, list_breaks, list_origs, orig_scope, extensions, order, true)
 }
 
 /// As [`extend_to_fixpoint_breaks`], with explicit control over re-feeding a
@@ -3450,10 +3472,12 @@ fn extend_to_fixpoint_breaks(
 fn extend_to_fixpoint_inner(
     list: &[Complex],
     list_breaks: &[bool],
+    list_origs: &[bool],
+    orig_scope: Option<&str>,
     extensions: &[Extension],
     order: CartesianOrder,
     refeed: bool,
-) -> (Vec<(Complex, bool)>, bool) {
+) -> (Vec<(Complex, bool, bool)>, bool) {
     // Extender flags by extender selector, for the per-option lookup.
     let mut ext_breaks: FxHashMap<Complex, bool> = FxHashMap::default();
     for ext in extensions {
@@ -3463,28 +3487,43 @@ fn extend_to_fixpoint_inner(
             *e = *e || flag;
         }
     }
-    let mut result: Vec<(Complex, bool)> = Vec::new();
+    let mut result: Vec<(Complex, bool, bool)> = Vec::new();
     let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut changed = false;
-    // Worklist of selectors still to extend (originals first; the flag marks
-    // an ORIGINAL input, whose unchanged round-trip doesn't count as a change).
-    let mut queue: std::collections::VecDeque<(Complex, bool, bool)> = list
+    // Worklist of selectors still to extend. `is_input` marks a caller-seeded
+    // entry (its unchanged round-trip doesn't count as a change); `is_orig`
+    // is the ORIGINAL-INSTANCE flag (dart's identity `_originals`), carried
+    // through to the first product of each round-trip.
+    let mut queue: std::collections::VecDeque<(Complex, bool, bool, bool)> = list
         .iter()
         .enumerate()
-        .map(|(i, c)| (c.clone(), list_breaks.get(i).copied().unwrap_or(false), true))
+        .map(|(i, c)| {
+            (
+                c.clone(),
+                list_breaks.get(i).copied().unwrap_or(false),
+                true,
+                list_origs.get(i).copied().unwrap_or(true),
+            )
+        })
         .collect();
-    while let Some((complex, in_break, is_input)) = queue.pop_front() {
+    while let Some((complex, in_break, is_input, is_orig)) = queue.pop_front() {
         if !consume_extend_work() || result.len() > 100_000 {
             break;
         }
-        let products = extend_complex_breaks(&complex, in_break, extensions, &ext_breaks, order);
+        let products =
+            extend_complex_breaks(&complex, in_break, is_orig, orig_scope, extensions, &ext_breaks, order);
         if is_input && !(products.len() == 1 && products[0].0.render() == complex.render()) {
             changed = true;
         }
-        for (c, flag) in products {
+        for (c, flag, orig) in products {
             let rendered = c.render();
             let len = rendered.len();
-            if seen.insert(rendered) {
+            // An ORIGINAL instance always joins the result even when a
+            // value-equal PRODUCT came first: dart's identity `_originals`
+            // keeps both until `_trim`, where the product (not identity-
+            // original) is coverage-dropped and the original survives at its
+            // own position with its own line break.
+            if seen.insert(rendered) || orig {
                 // Re-extend a freshly-produced selector only when it carries a
                 // selector-bearing pseudo: that's the sole case where a second
                 // pass can reveal *more* extensions (a target buried in a
@@ -3497,9 +3536,9 @@ fn extend_to_fixpoint_inner(
                 // anything new. An over-long selector (a self-referential
                 // blowup) is emitted but not re-fed.
                 if refeed && complex_has_selector_pseudo(&c) && len <= EXTEND_REFEED_MAX_LEN {
-                    queue.push_back((c.clone(), flag, false));
+                    queue.push_back((c.clone(), flag, false, false));
                 }
-                result.push((c, flag));
+                result.push((c, flag, orig));
             }
         }
     }
@@ -4618,11 +4657,13 @@ pub(crate) fn extend_compound_target(
     // every max-specificity here is 0 and plain superselector coverage trims.
     let source_spec: FxHashMap<Simple, u64> = FxHashMap::default();
     trim(
-        result,
-        &RuleOriginals {
-            scope: &originals,
-            rule: FxHashSet::default(),
-        },
+        result
+            .into_iter()
+            .map(|c| {
+                let o = originals.contains(&c);
+                (c, o)
+            })
+            .collect(),
         &source_spec,
     )
 }

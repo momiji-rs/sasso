@@ -8861,3 +8861,40 @@ fn reemitted_premodule_clone_stays_out_of_import_run() {
         "/* outer */\n@import \"x.css\";\n/* seed */\n/*! A HEADER */\n/* lib */\n.a {\n  q: 1;\n}\n\n/*! A HEADER */\n.b {\n  w: 2;\n}"
     );
 }
+
+#[test]
+fn same_rule_sibling_extenders_never_chain() {
+    // dart applies ONE `_extendList` per registration — an @extend whose two
+    // extender complexes both contain the target must not chain one through
+    // the other (tabler: `body[data-bs-theme=dark] [data-bs-theme=light],
+    // body[data-theme=dark] [data-theme=light] {@extend [data-bs-theme=dark]}`
+    // conjured `body[data-theme=dark] body[data-theme=light] […]`).
+    assert_eq!(
+        ours("[data-bs-theme=dark], [data-theme=dark] {\n  color-scheme: dark;\n}\nbody[data-bs-theme=dark] [data-bs-theme=light],\nbody[data-theme=dark] [data-theme=light] {\n  @extend [data-bs-theme=dark];\n}\n"),
+        "[data-bs-theme=dark], body[data-bs-theme=dark] [data-bs-theme=light],\nbody[data-theme=dark] [data-theme=light], [data-theme=dark] {\n  color-scheme: dark;\n}\n"
+    );
+}
+
+#[test]
+fn product_duplicating_original_keeps_original_position_and_break() {
+    // dart's `_originals` is `Set.identity()`: an extension product VALUE-
+    // equal to one of the rule's own selectors is not an original, so the
+    // coverage trim drops it and the original survives at its own position
+    // with its own line break (tabler `.btn-sm,\n.btn-group-sm > .btn`).
+    assert_eq!(
+        ours(".btn-sm,\n.btn-group-sm > .btn {\n  a: 1;\n}\n.btn-group-sm > .btn {\n  @extend .btn-sm;\n}\n"),
+        ".btn-sm,\n.btn-group-sm > .btn {\n  a: 1;\n}\n"
+    );
+    // Interleaved products across several duplicated originals: source order
+    // and breaks all preserved (tabler `h1, .h1 { a {} }` + `.h1 {@extend h1}`).
+    assert_eq!(
+        ours(".h1 {\n  @extend h1;\n}\n.h2 {\n  @extend h2;\n}\nh1 a,\nh2 a,\n.h1 a,\n.h2 a {\n  q: 1;\n}\n"),
+        "h1 a,\nh2 a,\n.h1 a,\n.h2 a {\n  q: 1;\n}\n"
+    );
+    // Without a duplicate, the product still appends (single line, extender's
+    // flag).
+    assert_eq!(
+        ours(".h1 {\n  @extend h1;\n}\nh1 a {\n  q: 1;\n}\n"),
+        "h1 a, .h1 a {\n  q: 1;\n}\n"
+    );
+}

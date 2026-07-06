@@ -864,7 +864,13 @@ def main():
     # gather
     all_cases = list(iter_all_cases(suite_scan, suite_scan))
     if args.filter:
-        all_cases = [c for c in all_cases if args.filter in c.name]
+        # Substring, or a regex when it contains altern/class metacharacters.
+        if any(ch in args.filter for ch in "|[]().*+?"):
+            import re as _re
+            _pat = _re.compile(args.filter)
+            all_cases = [c for c in all_cases if _pat.search(c.name)]
+        else:
+            all_cases = [c for c in all_cases if args.filter in c.name]
 
     results: list[Result] = []
     skip_breakdown: dict = {}
