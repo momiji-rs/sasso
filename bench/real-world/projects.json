@@ -202,8 +202,7 @@
         "core/scss"
       ],
       "entry": "core/scss/tabler.scss",
-      "loadPaths": [],
-      "knownDiff": "16 raw diff lines, selector-list only, semantically inert: (a) sasso keeps chained same-rule extender products (body[data-theme=dark] body[data-theme=light] …) that dart's single-pass-per-registration model never derives — sasso's fold fixpoint is load-bearing for non_conformant/extend-tests/extend-loop, so the faithful fix is dart's addSelector live-selector-as-extender model; (b) an extend product equal to one of the rule's OWN original selectors keeps the product's position/linebreak instead of the original's; (c) one blank-line seam."
+      "loadPaths": []
     },
     {
       "name": "adminlte",

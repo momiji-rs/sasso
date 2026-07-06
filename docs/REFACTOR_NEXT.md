@@ -268,15 +268,14 @@ fixes, each pinned by a parity test:
   import-run sweep can't lift them to the top (c33bded — nextcloud
   SPDX header).
 
-**19 of 20 compilable projects are byte-identical.** The one residue is
-tabler (16 raw lines, selector-list only, semantically inert — see
-`knownDiff` in projects.json): sasso's extend fold applies batches to a
-FIXPOINT, deriving chained same-rule extender products
-(`body[data-theme=dark] body[data-theme=light] …`) that dart's
-single-`_extendList`-per-registration never creates. The fixpoint is
-load-bearing for non_conformant/extend-tests/extend-loop, so the
-faithful fix is dart's `addSelector` model — the extender registered is
-the rule's LIVE (already-extended) selector, with cycles resolved by
-`_extendExistingExtensions` derived registrations, not re-application.
-That refactor (plus the product-duplicates-original linebreak rotation)
-is the next extend-engine milestone.
+Campaign 3 (2026-07-06): the extend-engine milestone landed (76f9e08)
+and **all 20 compilable corpus projects are byte-identical**. Three
+coupled dart semantics, each pinned by parity tests: the LIVE
+`_extensionsByExtender` list lets an extender containing its own target
+self-derive within its registration (extend-loop chains WITHOUT any
+application fixpoint); each batch then applies exactly once, killing
+tabler's chained same-rule products; and `_originals` is an IDENTITY
+set — original status is a per-INSTANCE flag threaded through the
+pipeline (with dart's bare-fast-path object identity, scope-gated per
+store), so products value-equal to originals coverage-trim away and the
+originals keep their positions and line breaks.
