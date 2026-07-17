@@ -11,6 +11,21 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-17
+
+_Release-tooling only — no compiler changes._
+
+### Changed
+
+- Releases now attach a conventionally-named source tarball
+  (`sasso-<version>.tar.xz`, extracting into `sasso-<version>/`) plus a
+  `.sha256`, built deterministically with `git archive`, replacing
+  cargo-dist's generic `source.tar.gz`. Requested by downstream packagers
+  (FreeBSD ports).
+- CI: bumped `moonrepo/setup-rust` v0 → v1 (Node 24 runtime, current cache
+  backend — fixes the deprecation warning and cache-service 400s in
+  benchmark runs).
+
 ## [0.8.0] - 2026-07-06
 
 _Crate release `v0.8.0`; ships on npm as `sasso@0.11.0` (wasm + native — same
@@ -580,7 +595,9 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/momiji-rs/sasso/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/momiji-rs/sasso/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/momiji-rs/sasso/compare/v0.6.3...v0.7.0
 [0.3.0]: https://github.com/momiji-rs/sasso/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/momiji-rs/sasso/compare/v0.1.0...v0.2.0
