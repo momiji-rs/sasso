@@ -78,6 +78,11 @@ pr-run-mode = "plan"
 install-updater = false
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
+# Don't emit cargo-dist's own source archive: its filename is hardcoded to the
+# generic `source.tar.gz`, which is confusing for downstream packagers (e.g. the
+# FreeBSD ports tree). release-source.yml attaches a conventionally-named
+# `sasso-<version>.tar.xz` instead.
+source-tarball = false
 # release.yml is intentionally hand-edited: the tag trigger is narrowed to
 # `v[0-9]+...` so the decoupled `npm-v*` line (release-wasm.yml) does NOT fire
 # here. Tell `dist plan` not to fail its generated-file freshness check on it.
