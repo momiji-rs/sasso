@@ -2,7 +2,7 @@
 //!
 //! A small, zero-dependency, embeddable Sass engine aiming at byte-exact
 //! parity with **current** dart-sass on the subset it implements (e.g.
-//! computed colors serialize as `rgb(63.75, 127.5, 191.25)`, not rounded
+//! computed colors serialize as `rgb(25%, 50%, 75%)`, not rounded
 //! hex). It is sandbox-friendly: `@import` resolution goes through a
 //! caller-supplied [`Importer`], so an embedder controls all file access.
 //!
