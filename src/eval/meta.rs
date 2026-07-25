@@ -454,14 +454,19 @@ impl<'a> Evaluator<'a> {
         if let Some(any) = &f.user {
             if let Ok(callable) = Rc::clone(any).downcast::<UserCallable>() {
                 let saved_scopes = std::mem::replace(&mut self.scopes, callable.env.clone());
+                let saved_var_spans = std::mem::replace(&mut self.var_spans, callable.env_spans.clone());
                 let saved_semi = std::mem::replace(&mut self.scope_semi_global, callable.env_semi.clone());
                 let saved_fns = std::mem::replace(&mut self.functions, callable.env_fns.clone());
                 let saved_mixins = std::mem::replace(&mut self.mixins, callable.env_mixins.clone());
                 self.push_scope(false);
+                // Like `invoke_mixin_ref`: the arguments arrive already
+                // evaluated and reordered by `meta.call`, so no per-argument
+                // span survives. Bind with none rather than guess.
                 let result = self
                     .bind_evaled_into_scope(
                         &callable.def.params,
                         (pos_args, named, ListSep::Comma),
+                        &ArgSpans::default(),
                         &callable.def.name,
                     )
                     .and_then(|()| {
@@ -472,6 +477,7 @@ impl<'a> Evaluator<'a> {
                     });
                 self.pop_scope();
                 self.scopes = saved_scopes;
+                self.var_spans = saved_var_spans;
                 self.scope_semi_global = saved_semi;
                 self.functions = saved_fns;
                 self.mixins = saved_mixins;
@@ -893,11 +899,12 @@ impl<'a> Evaluator<'a> {
         args: &[CallArg],
         call: Option<(Pos, usize)>,
     ) -> Result<Value, Error> {
-        let evaled = self.eval_call_args(args)?;
+        let (evaled, arg_spans) = self.eval_call_args_spanned(args)?;
         let saved_member = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.def.name)));
         let saved = self.enter_module(module);
         let saved_file = self.enter_module_file(module);
         let saved_scopes = std::mem::replace(&mut self.scopes, func.env.clone());
+        let saved_var_spans = std::mem::replace(&mut self.var_spans, func.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());
         let saved_fns = std::mem::replace(&mut self.functions, func.env_fns.clone());
         let saved_mixins = std::mem::replace(&mut self.mixins, func.env_mixins.clone());
@@ -907,10 +914,11 @@ impl<'a> Evaluator<'a> {
         let saved_env_modules = self.install_env_modules(&func.env_modules);
         self.push_scope(false);
         let result = self
-            .bind_evaled_into_scope(&func.def.params, evaled, &func.def.name)
+            .bind_evaled_into_scope(&func.def.params, evaled, &arg_spans, &func.def.name)
             .and_then(|()| self.run_fn_body(&func.def.body));
         self.pop_scope();
         self.scopes = saved_scopes;
+        self.var_spans = saved_var_spans;
         self.scope_semi_global = saved_semi;
         self.functions = saved_fns;
         self.mixins = saved_mixins;

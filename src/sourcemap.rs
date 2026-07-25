@@ -156,18 +156,21 @@ pub(crate) struct RawEntry {
 #[derive(Default)]
 pub(crate) struct SmCollector {
     entries: Vec<RawEntry>,
-    /// Compressed output skips a token whose source line repeats the
-    /// IMMEDIATELY PRECEDING mapped token's (matching dart-sass): expanded maps
-    /// every selector + declaration, but compressed packs many tokens onto one
-    /// line and dart coalesces consecutive same-source-line runs. This is a
-    /// consecutive-run skip, NOT a global one-per-source-line: a source line
-    /// that recurs non-consecutively (e.g. a `@media`-bubbled parent selector
-    /// mapping back to its original line) is mapped again. `false` keeps every
-    /// token (expanded).
+    /// Whether the output is compressed — i.e. whether every token lands on
+    /// generated line 0. See [`SmCollector::record`]: this is what decides
+    /// whether two consecutive tokens share a GENERATED line.
     compressed: bool,
-    /// The `(file_id, src_line)` of the last recorded entry, for the compressed
-    /// consecutive-same-source-line skip.
+    /// The `(src_line, gen_line)` of the last recorded entry, for dart's
+    /// redundancy rule. Generated lines are counted here (rather than resolved
+    /// later in `finalize`) only for the comparison; the entry itself still
+    /// stores a byte offset.
     last: Option<(u32, u32)>,
+    /// Generated line of the last `record` call, advanced incrementally by
+    /// counting the newlines the serializer appended since `scanned`.
+    gen_line: u32,
+    /// Body length already scanned for newlines, so the walk is O(body) overall
+    /// rather than O(body) per recorded token.
+    scanned: usize,
 }
 
 impl SmCollector {
@@ -180,25 +183,60 @@ impl SmCollector {
 
     /// Record a mapped token at body byte offset `byte_off` whose source
     /// position is `(file_id, src_line, src_col)` (all 0-based; `file_id` is the
-    /// 1-based interned id, 0 = unknown). Reads nothing from the output buffer.
-    pub(crate) fn record(&mut self, byte_off: usize, file_id: u32, src_line: u32, src_col: u32) {
+    /// 1-based interned id, 0 = unknown).
+    ///
+    /// dart's `SourceMapBuffer._addEntry` (util/source_map_buffer.dart:64)
+    /// DROPS an entry that is redundant with the previous one:
+    ///
+    /// > Browsers don't care about the position of a value within a line, so
+    /// > it's redundant to have two entries on the same target line that both
+    /// > point to the same source line, even if they point to different
+    /// > columns in that line.
+    ///
+    /// Note what that comparison does NOT include: the source FILE. Two tokens
+    /// on the same generated line whose source lines happen to be equal collapse
+    /// even when they come from different files — verified against dart 1.101.6,
+    /// where `.q1 { }` (file A line 0) followed by an `@import`ed `.p1 { }`
+    /// (file B line 0) emits a single segment in compressed output.
+    ///
+    /// This subsumes the old compressed-only heuristic: compressed output puts
+    /// everything on generated line 0, so "same generated line" is always true
+    /// there and the rule degenerates to "same source line as the previous
+    /// token". In expanded output it only fires WITHIN a line — which is
+    /// exactly where it matters now that a declaration emits a second entry for
+    /// its value.
+    /// `body` is the output written so far; only the slice appended since the
+    /// previous call is scanned (for newlines), so the whole emit stays linear.
+    pub(crate) fn record(&mut self, body: &str, file_id: u32, src_line: u32, src_col: u32) {
+        let byte_off = body.len();
         // A token with no known source file carries no usable mapping.
         if file_id == 0 {
             return;
         }
-        // Compressed: skip a token whose source line repeats the IMMEDIATELY
-        // PRECEDING mapped token's (dart coalesces consecutive same-source-line
-        // runs in compressed output; non-consecutive recurrences still map).
-        if self.compressed && self.last == Some((file_id, src_line)) {
+        let gen_line = self.gen_line_at(body);
+        if self.last == Some((src_line, gen_line)) {
             return;
         }
-        self.last = Some((file_id, src_line));
+        self.last = Some((src_line, gen_line));
         self.entries.push(RawEntry {
             byte_off: byte_off as u32,
             file_id,
             src_line,
             src_col,
         });
+    }
+
+    /// The generated line the end of `body` falls on. Compressed output is a
+    /// single line; expanded output advances by the newlines appended since the
+    /// last call (the serializer only ever appends, so the walk is monotonic).
+    fn gen_line_at(&mut self, body: &str) -> u32 {
+        if self.compressed {
+            return 0;
+        }
+        debug_assert!(body.len() >= self.scanned, "the body is only ever appended to");
+        self.gen_line += body[self.scanned..].bytes().filter(|&b| b == b'\n').count() as u32;
+        self.scanned = body.len();
+        self.gen_line
     }
 
     /// Convert the recorded body offsets into delta-encoded `mappings`.

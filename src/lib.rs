@@ -329,9 +329,9 @@ pub struct CompileResult {
 /// [`Options::with_source_map_include_sources`] controls whether each source's
 /// full text is embedded in `sourcesContent`.
 ///
-/// V1 granularity maps the start of each selector, declaration property name,
-/// at-rule keyword, and comment; the declaration *value* start is not yet
-/// mapped.
+/// Maps the start of each selector, declaration property name, declaration
+/// value, at-rule keyword, and comment. A value that is a bare `$name` maps
+/// back to where that variable was DEFINED, like dart-sass.
 ///
 /// # Errors
 ///

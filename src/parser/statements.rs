@@ -285,6 +285,9 @@ impl Parser {
         // resolves, no SassScript), and a trailing `{` is part of the value —
         // never a nested property set.
         if property_is_literal_custom(&property) {
+            // Source-map: the verbatim value text starts right after the colon,
+            // leading whitespace included (dart's `node.value.span`).
+            let value_pos = self.sc.position();
             let value = self.parse_custom_property_value()?;
             let end_line = self.sc.position().line as u32;
             self.sc.eat(';');
@@ -293,6 +296,7 @@ impl Parser {
                 value,
                 pos,
                 end_line,
+                value_pos,
             }));
         }
         let ws_after_colon = self.skip_ws_inline();
@@ -307,6 +311,10 @@ impl Parser {
                 pos,
             }));
         }
+        // Source-map: where the value's own text begins (dart's
+        // `CssValue.span.start` for a declaration value). Captured before
+        // `parse_value` consumes it.
+        let value_pos = self.sc.position();
         let value = self.parse_value()?;
         // The line where the declaration's span ends, for the serializer's
         // trailing-comment rule — captured before whitespace is skipped (an
@@ -355,6 +363,7 @@ impl Parser {
             important,
             pos,
             end_line,
+            value_pos,
         }))
     }
 
@@ -431,6 +440,10 @@ impl Parser {
             ));
         }
         self.skip_ws_inline();
+        // Source-map: where the assigned value's text begins. This is the span
+        // dart stores in `Environment._variableNodes` as the variable's
+        // definition node, which a later bare `$name` reference resolves to.
+        let value_pos = self.sc.position();
         let value = self.parse_value()?;
         let mut is_default = false;
         let mut is_global = false;
@@ -456,6 +469,7 @@ impl Parser {
             is_default,
             is_global,
             namespace,
+            value_pos,
         }))
     }
 

@@ -827,12 +827,14 @@ impl<'a> Evaluator<'a> {
                         important,
                         custom,
                         lines,
+                        value_span,
                     } => decls.push(OutItem::Decl {
                         prop,
                         value,
                         important,
                         custom,
                         lines,
+                        value_span,
                     }),
                     other => {
                         flush(&mut decls, &mut wrapped);

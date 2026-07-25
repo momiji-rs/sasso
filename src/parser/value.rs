@@ -2429,6 +2429,9 @@ impl Parser {
                         self.sc.reset(mark);
                     }
                 }
+                // Source-map: where this argument's value text begins — the
+                // span a bound parameter inherits as its definition node.
+                let value_pos = self.sc.position();
                 let value = self.arg_value()?;
                 // A trailing `...` marks a splat argument: a list spreads into
                 // positional args and a map into keyword args. A named arg may
@@ -2453,6 +2456,7 @@ impl Parser {
                     name: name_opt,
                     value,
                     splat,
+                    value_pos,
                 });
                 self.skip_ws_inline();
                 if self.sc.eat(',') {
@@ -2469,6 +2473,8 @@ impl Parser {
                                 name: None,
                                 value: Expr::Ident(Vec::new()),
                                 splat: false,
+                                // Synthesized, not written in the source.
+                                value_pos: crate::scanner::Pos::NONE,
                             });
                         }
                         break;

@@ -115,6 +115,8 @@ pub(crate) fn parse_signature(sig: &str) -> (String, Result<ParamList, String>) 
         params.push(Param {
             name: var.to_string(),
             default: None,
+            // A host-function signature has no source text to point at.
+            default_pos: crate::scanner::Pos::NONE,
         });
     }
     (name, Ok(ParamList { params, rest }))

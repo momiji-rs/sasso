@@ -112,9 +112,12 @@ impl<'a> Evaluator<'a> {
 
     /// Bind `@each` variables to an item, destructuring a list across
     /// multiple variables (missing elements become `null`).
-    pub(super) fn bind_each(&mut self, vars: &[String], item: Value) {
+    /// `span` is the definition span every bound variable gets — dart binds all
+    /// of them to `_expressionNode(node.list)`, the list expression itself
+    /// (evaluate.dart:1441, `_setMultipleVariables` at 1465).
+    pub(super) fn bind_each(&mut self, vars: &[String], item: Value, span: VarSpan) {
         if vars.len() == 1 {
-            self.set_local(&vars[0], item);
+            self.set_local(&vars[0], item, span);
             return;
         }
         match item {
@@ -123,29 +126,38 @@ impl<'a> Evaluator<'a> {
             Value::List(l) => {
                 for (i, v) in vars.iter().enumerate() {
                     let val = l.items.get(i).cloned().unwrap_or(Value::Null);
-                    self.set_local(v, val);
+                    self.set_local(v, val, span);
                 }
             }
             // A non-list binds to the first var; the remaining vars are null.
             other => {
-                self.set_local(&vars[0], other);
+                self.set_local(&vars[0], other, span);
                 for v in &vars[1..] {
-                    self.set_local(v, Value::Null);
+                    self.set_local(v, Value::Null, span);
                 }
             }
         }
     }
 
-    /// Evaluate call arguments and bind them to a parameter list, returning
-    /// the call frame: positional args fill params in order, then keyword
-    /// args by name, then declared defaults; extra positionals collect into
-    /// a `$rest...` parameter or are an error.
     /// Evaluate a call's argument list into separate positional and keyword
     /// vectors, expanding any `...` splat (a list spreads into positional
     /// args, a map into keyword args). Duplicate keyword names (after
     /// hyphen/underscore normalization) are rejected, and a positional arg
     /// after a keyword arg is an error — matching dart-sass.
+    ///
+    /// This form discards the source-map definition spans; callers that bind
+    /// the results to user parameters want [`Self::eval_call_args_spanned`].
     pub(super) fn eval_call_args(&mut self, args: &[CallArg]) -> Result<EvaledArgs, Error> {
+        Ok(self.eval_call_args_spanned(args)?.0)
+    }
+
+    /// As [`Self::eval_call_args`], but also returns each argument's definition
+    /// span (dart `ArgumentResults.positionalNodes` / `namedNodes`), so a bound
+    /// parameter can inherit the span of the argument it was bound to.
+    pub(super) fn eval_call_args_spanned(
+        &mut self,
+        args: &[CallArg],
+    ) -> Result<(EvaledArgs, ArgSpans), Error> {
         // Explicit positional args are gathered first; positionals spread from
         // a `...` splat are appended after them, so `f([1, 2]..., 3)` binds
         // `3` before `1, 2` (matching dart-sass's misplaced-rest behaviour).
@@ -153,19 +165,37 @@ impl<'a> Evaluator<'a> {
         let mut splat_pos = Vec::new();
         let mut keyword: Vec<(String, Value)> = Vec::new();
         let mut seen_named = false;
+        // Definition spans tracked in lockstep with the three value vectors
+        // above (dart builds `positionalNodes`/`namedNodes` the same way,
+        // evaluate.dart:3812-3824). Every element a splat expands to gets the
+        // SPLAT EXPRESSION's own span, not a per-element one — dart fills the
+        // whole run with `restNodeForSpan` (evaluate.dart:3851).
+        let mut explicit_pos_spans: Vec<VarSpan> = Vec::with_capacity(args.len());
+        let mut splat_pos_spans: Vec<VarSpan> = Vec::new();
+        let mut keyword_spans: Vec<(String, VarSpan)> = Vec::new();
         // A splatted list's separator survives into the callee's rest arglist
         // (`foo(c d e...)` binds `$zs` as a SPACE-separated arglist).
         let mut rest_sep = ListSep::Comma;
-        let push_named = |keyword: &mut Vec<(String, Value)>, name: String, v: Value| -> Result<(), Error> {
+        let push_named = |keyword: &mut Vec<(String, Value)>,
+                          spans: &mut Vec<(String, VarSpan)>,
+                          name: String,
+                          v: Value,
+                          sp: VarSpan|
+         -> Result<(), Error> {
             let norm = normalize_arg_name(&name);
             if keyword.iter().any(|(n, _)| normalize_arg_name(n) == norm) {
                 return Err(Error::unpositioned("Duplicate argument."));
             }
+            spans.push((name.clone(), sp));
             keyword.push((name, v));
             Ok(())
         };
         for a in args {
             let v = self.eval_expr(&a.value)?;
+            // dart resolves each argument's node right after evaluating it
+            // (evaluate.dart:3814), so a bare `$x` argument carries `$x`'s
+            // DEFINITION rather than the call site.
+            let sp = self.expression_node(&a.value, a.value_pos);
             if a.splat {
                 // A splat list spreads into positional args; a map spreads
                 // into keyword args (string keys only). A single non-list/map
@@ -182,32 +212,43 @@ impl<'a> Evaluator<'a> {
                                     )))
                                 }
                             };
-                            push_named(&mut keyword, key, val)?;
+                            push_named(&mut keyword, &mut keyword_spans, key, val, sp)?;
                         }
                     }
                     Value::List(l) => {
                         if !matches!(l.sep, ListSep::Undecided) {
                             rest_sep = l.sep;
                         }
+                        // `iter::repeat_n` is 1.82; the crate's MSRV is 1.74.
+                        splat_pos_spans.extend(std::iter::repeat(sp).take(l.items.len()));
                         splat_pos.extend(l.items.to_vec());
                         // An argument-list splat (`$args...`) also forwards its
                         // captured keyword arguments as named arguments.
                         if let Some(kw) = l.keywords {
                             for (k, val) in kw {
                                 if let Value::Str(s) = k {
-                                    push_named(&mut keyword, s.text.to_string(), val)?;
+                                    push_named(
+                                        &mut keyword,
+                                        &mut keyword_spans,
+                                        s.text.to_string(),
+                                        val,
+                                        sp,
+                                    )?;
                                 }
                             }
                         }
                     }
                     Value::Null => {}
-                    other => splat_pos.push(other),
+                    other => {
+                        splat_pos.push(other);
+                        splat_pos_spans.push(sp);
+                    }
                 }
                 continue;
             }
             match &a.name {
                 Some(n) => {
-                    push_named(&mut keyword, n.clone(), v)?;
+                    push_named(&mut keyword, &mut keyword_spans, n.clone(), v, sp)?;
                     seen_named = true;
                 }
                 None => {
@@ -218,31 +259,45 @@ impl<'a> Evaluator<'a> {
                         ));
                     }
                     explicit_pos.push(v);
+                    explicit_pos_spans.push(sp);
                 }
             }
         }
         explicit_pos.extend(splat_pos);
-        Ok((explicit_pos, keyword, rest_sep))
+        explicit_pos_spans.extend(splat_pos_spans);
+        Ok((
+            (explicit_pos, keyword, rest_sep),
+            ArgSpans {
+                positional: explicit_pos_spans,
+                named: keyword_spans,
+            },
+        ))
     }
 
-    fn bind_args(
-        &mut self,
-        params: &ParamList,
-        args: &[CallArg],
-        name: &str,
-    ) -> Result<HashMap<String, Value>, Error> {
-        let evaled = self.eval_call_args(args)?;
-        self.bind_evaled(params, evaled, name)
+    /// Evaluate call arguments and bind them to a parameter list, returning the
+    /// call frame: positional args fill params in order, then keyword args by
+    /// name, then declared defaults; extra positionals collect into a
+    /// `$rest...` parameter or are an error. The parallel definition-span frame
+    /// comes along for the source map.
+    fn bind_args(&mut self, params: &ParamList, args: &[CallArg], name: &str) -> Result<ArgFrame, Error> {
+        let (evaled, spans) = self.eval_call_args_spanned(args)?;
+        self.bind_evaled(params, evaled, &spans, name)
     }
 
     /// Bind evaluated arguments into the CURRENT (freshly pushed) scope.
     /// Parameter defaults evaluate inside the callee environment with the
     /// already-bound parameters visible (`@mixin m($a, $b: $a)`), matching
     /// dart's progressive binding.
+    ///
+    /// `spans` carries each argument's definition span; a parameter inherits the
+    /// span of whatever it was bound to — the matching argument, or, when it
+    /// falls back to its declared default, that default's own expression node
+    /// (dart evaluate.dart:3572-3592). Source-map only.
     pub(super) fn bind_evaled_into_scope(
         &mut self,
         params: &ParamList,
         evaled: EvaledArgs,
+        spans: &ArgSpans,
         name: &str,
     ) -> Result<(), Error> {
         let (positional, keyword_vec, rest_sep) = evaled;
@@ -255,23 +310,30 @@ impl<'a> Evaluator<'a> {
             }
             keyword.insert(norm, v);
         }
-        let mut pos_iter = positional.into_iter();
+        let mut pos_iter = positional.into_iter().enumerate();
         for param in &params.params {
-            let val = if let Some(v) = pos_iter.next() {
-                v
+            let (val, span) = if let Some((i, v)) = pos_iter.next() {
+                (v, spans.positional(i))
             } else if let Some(v) = keyword.remove(normalize_arg_name(&param.name).as_ref()) {
-                v
+                (v, spans.named(&param.name))
             } else if let Some(def) = &param.default {
-                self.eval_expr(def)?
+                let v = self.eval_expr(def)?;
+                // A default is resolved through `_expressionNode` too, so
+                // `@mixin m($a, $b: $a)` gives `$b` whatever `$a` points at.
+                let sp = self.expression_node(def, param.default_pos);
+                (v, sp)
             } else {
                 return Err(Error::unpositioned(format!("Missing argument ${}.", param.name)));
             };
             if let Some(sc) = self.scopes.last() {
                 sc.borrow_mut().insert(param.name.clone(), val);
             }
+            if let Some(frame) = self.var_spans.last() {
+                frame.borrow_mut().insert(param.name.clone(), span);
+            }
         }
         if let Some(rest) = &params.rest {
-            let remaining: Vec<Value> = pos_iter.collect();
+            let remaining: Vec<Value> = pos_iter.map(|(_, v)| v).collect();
             let kw: Vec<(Value, Value)> = keyword_order
                 .iter()
                 .filter_map(|(norm, _)| {
@@ -296,6 +358,12 @@ impl<'a> Evaluator<'a> {
                         keywords: Some(kw),
                     }),
                 );
+            }
+            // dart blames the CALL node for a `$rest...` arglist
+            // (evaluate.dart:3609), which is not a value position sasso maps;
+            // record "unknown" so no segment is emitted for it.
+            if let Some(frame) = self.var_spans.last() {
+                frame.borrow_mut().insert(rest.clone(), VarSpan::default());
             }
         } else if pos_iter.next().is_some() {
             return Err(Error::unpositioned(format!(
@@ -327,12 +395,16 @@ impl<'a> Evaluator<'a> {
 
     /// Bind already-evaluated `(positional, keyword)` arguments into a call
     /// frame. Used by `meta.call`, which has only evaluated values to pass on.
+    ///
+    /// Returns the value frame plus the parallel definition-span frame that
+    /// [`Self::push_scope_frame`] installs alongside it (source-map only).
     fn bind_evaled(
         &mut self,
         params: &ParamList,
         evaled: EvaledArgs,
+        spans: &ArgSpans,
         name: &str,
-    ) -> Result<HashMap<String, Value>, Error> {
+    ) -> Result<ArgFrame, Error> {
         let (positional, keyword_vec, rest_sep) = evaled;
         let mut keyword: HashMap<String, Value> = HashMap::default();
         // Track the order and source spelling of keyword names so an
@@ -346,21 +418,25 @@ impl<'a> Evaluator<'a> {
             keyword.insert(norm, v);
         }
         let mut frame = HashMap::default();
-        let mut pos_iter = positional.into_iter();
+        let mut span_frame: HashMap<String, VarSpan> = HashMap::default();
+        let mut pos_iter = positional.into_iter().enumerate();
         for param in &params.params {
-            let val = if let Some(v) = pos_iter.next() {
-                v
+            let (val, span) = if let Some((i, v)) = pos_iter.next() {
+                (v, spans.positional(i))
             } else if let Some(v) = keyword.remove(normalize_arg_name(&param.name).as_ref()) {
-                v
+                (v, spans.named(&param.name))
             } else if let Some(def) = &param.default {
-                self.eval_expr(def)?
+                let v = self.eval_expr(def)?;
+                let sp = self.expression_node(def, param.default_pos);
+                (v, sp)
             } else {
                 return Err(Error::unpositioned(format!("Missing argument ${}.", param.name)));
             };
             frame.insert(param.name.clone(), val);
+            span_frame.insert(param.name.clone(), span);
         }
         if let Some(rest) = &params.rest {
-            let remaining: Vec<Value> = pos_iter.collect();
+            let remaining: Vec<Value> = pos_iter.map(|(_, v)| v).collect();
             // Any keyword args left after binding the declared params become the
             // arglist's keywords, in caller order and keyed by their
             // hyphen-normalized name (what `meta.keywords` reports).
@@ -387,6 +463,9 @@ impl<'a> Evaluator<'a> {
                     keywords: Some(kw),
                 }),
             );
+            // As in `bind_evaled_into_scope`: a `$rest...` arglist has no value
+            // position to point at, so it gets the "unknown" span.
+            span_frame.insert(rest.clone(), VarSpan::default());
         } else if pos_iter.next().is_some() {
             return Err(Error::unpositioned(format!(
                 "{name} was passed too many arguments."
@@ -415,7 +494,7 @@ impl<'a> Evaluator<'a> {
                 return Err(Error::unpositioned(msg));
             }
         }
-        Ok(frame)
+        Ok((frame, span_frame))
     }
 
     /// Call a user-defined `@function`, returning its `@return` value. `call`,
@@ -429,16 +508,17 @@ impl<'a> Evaluator<'a> {
     ) -> Result<Value, Error> {
         // Arguments evaluate in the CALLER's environment; the body (and the
         // parameter defaults) run against the callable's LEXICAL closure.
-        let evaled = self.eval_call_args(args)?;
+        let (evaled, arg_spans) = self.eval_call_args_spanned(args)?;
         let saved = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.def.name)));
         let saved_scopes = std::mem::replace(&mut self.scopes, func.env.clone());
+        let saved_var_spans = std::mem::replace(&mut self.var_spans, func.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());
         let saved_fns = std::mem::replace(&mut self.functions, func.env_fns.clone());
         let saved_mixins = std::mem::replace(&mut self.mixins, func.env_mixins.clone());
         let saved_env_modules = self.install_env_modules(&func.env_modules);
         self.push_scope(false);
         let result = self
-            .bind_evaled_into_scope(&func.def.params, evaled, &func.def.name)
+            .bind_evaled_into_scope(&func.def.params, evaled, &arg_spans, &func.def.name)
             .and_then(|()| {
                 // A function body is not a mixin body: `meta.content-exists()`
                 // called from a function (even one invoked by a mixin) errors.
@@ -449,6 +529,7 @@ impl<'a> Evaluator<'a> {
             });
         self.pop_scope();
         self.scopes = saved_scopes;
+        self.var_spans = saved_var_spans;
         self.scope_semi_global = saved_semi;
         self.functions = saved_fns;
         self.mixins = saved_mixins;
@@ -504,12 +585,21 @@ impl<'a> Evaluator<'a> {
                     to,
                     inclusive,
                     body,
+                    from_pos,
                 } => {
                     let (start_i, end_i, unit) = self.for_bounds(from, to)?;
                     self.push_scope(true);
+                    // dart resolves the loop variable's node INSIDE the loop
+                    // scope (evaluate.dart:1666) — but `@for` pushes a fresh
+                    // frame, so the lookup still sees the outer bindings.
+                    let span = self.expression_node(from, *from_pos);
                     let mut result = Ok(None);
                     for i in for_indices(start_i, end_i, *inclusive) {
-                        self.set_local(var, Value::Number(Number::with_unit(i as f64, unit.clone())));
+                        self.set_local(
+                            var,
+                            Value::Number(Number::with_unit(i as f64, unit.clone())),
+                            span,
+                        );
                         result = self.run_fn_body(body);
                         if matches!(result, Ok(None)) {
                             continue;
@@ -521,12 +611,20 @@ impl<'a> Evaluator<'a> {
                         return Ok(Some(v));
                     }
                 }
-                Stmt::Each { vars, list, body } => {
+                Stmt::Each {
+                    vars,
+                    list,
+                    body,
+                    list_pos,
+                } => {
                     let items = self.eval_each_items(list)?;
+                    // Resolved BEFORE the loop scope is pushed, like dart
+                    // (evaluate.dart:1441 precedes `_environment.scope`).
+                    let span = self.expression_node(list, *list_pos);
                     self.push_scope(true);
                     let mut result = Ok(None);
                     for i in 0..items.len() {
-                        self.bind_each(vars, items.get(i));
+                        self.bind_each(vars, items.get(i), span);
                         result = self.run_fn_body(body);
                         if matches!(result, Ok(None)) {
                             continue;
@@ -662,7 +760,7 @@ impl<'a> Evaluator<'a> {
         // Arguments evaluate in the caller's environment; the body runs in
         // the mixin's lexical closure. The content block captures the CALL
         // SITE so `@content` sees the includer's variables.
-        let evaled = self.eval_call_args(args)?;
+        let (evaled, arg_spans) = self.eval_call_args_spanned(args)?;
         let content_block = content.map(|stmts| {
             let snapshot = self.snapshot_env();
             ContentBlock {
@@ -672,13 +770,14 @@ impl<'a> Evaluator<'a> {
             }
         });
         let saved_scopes = std::mem::replace(&mut self.scopes, mixin.env.clone());
+        let saved_var_spans = std::mem::replace(&mut self.var_spans, mixin.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
         let saved_fns = std::mem::replace(&mut self.functions, mixin.env_fns.clone());
         let saved_mixins = std::mem::replace(&mut self.mixins, mixin.env_mixins.clone());
         let saved_env_modules = self.install_env_modules(&mixin.env_modules);
         self.push_scope(false);
         let result = self
-            .bind_evaled_into_scope(&mixin.def.params, evaled, &mixin.def.name)
+            .bind_evaled_into_scope(&mixin.def.params, evaled, &arg_spans, &mixin.def.name)
             .and_then(|()| {
                 self.content_stack.push(content_block);
                 self.in_mixin.push(true);
@@ -689,6 +788,7 @@ impl<'a> Evaluator<'a> {
             });
         self.pop_scope();
         self.scopes = saved_scopes;
+        self.var_spans = saved_var_spans;
         self.scope_semi_global = saved_semi;
         self.functions = saved_fns;
         self.mixins = saved_mixins;
@@ -717,7 +817,7 @@ impl<'a> Evaluator<'a> {
         // caller's scope), then enter the module's environment and the
         // mixin's lexical closure for the body. Snapshot the call-site env
         // so a `@content` block runs there, not in the module.
-        let evaled = self.eval_call_args(args)?;
+        let (evaled, arg_spans) = self.eval_call_args_spanned(args)?;
         let content_block = content.map(|stmts| {
             let snapshot = self.snapshot_env();
             ContentBlock {
@@ -729,13 +829,14 @@ impl<'a> Evaluator<'a> {
         let saved = self.enter_module(module);
         let saved_file = self.enter_module_file(module);
         let saved_scopes = std::mem::replace(&mut self.scopes, mixin.env.clone());
+        let saved_var_spans = std::mem::replace(&mut self.var_spans, mixin.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
         let saved_fns = std::mem::replace(&mut self.functions, mixin.env_fns.clone());
         let saved_mixins = std::mem::replace(&mut self.mixins, mixin.env_mixins.clone());
         let saved_env_modules = self.install_env_modules(&mixin.env_modules);
         self.push_scope(false);
         let result = self
-            .bind_evaled_into_scope(&mixin.def.params, evaled, &mixin.def.name)
+            .bind_evaled_into_scope(&mixin.def.params, evaled, &arg_spans, &mixin.def.name)
             .and_then(|()| {
                 self.content_stack.push(content_block);
                 let r = self.exec(&mixin.def.body, parents, sink);
@@ -744,6 +845,7 @@ impl<'a> Evaluator<'a> {
             });
         self.pop_scope();
         self.scopes = saved_scopes;
+        self.var_spans = saved_var_spans;
         self.scope_semi_global = saved_semi;
         self.functions = saved_fns;
         self.mixins = saved_mixins;
@@ -863,15 +965,22 @@ impl<'a> Evaluator<'a> {
             (None, None) => None,
         };
         let saved_scopes = std::mem::replace(&mut self.scopes, callable.env.clone());
+        let saved_var_spans = std::mem::replace(&mut self.var_spans, callable.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, callable.env_semi.clone());
         let saved_fns = std::mem::replace(&mut self.functions, callable.env_fns.clone());
         let saved_mixins = std::mem::replace(&mut self.mixins, callable.env_mixins.clone());
         let saved_env_modules = self.install_env_modules(&callable.env_modules);
         self.push_scope(false);
+        // A first-class mixin reference arrives here with already-evaluated,
+        // RESHUFFLED arguments (`meta.apply` strips `$mixin` off the front), so
+        // the caller's per-argument spans no longer line up positionally. Bind
+        // with no spans: the parameters get the "unknown" span and emit no
+        // mapping segment, rather than a plausible-but-wrong one.
         let result = self
             .bind_evaled_into_scope(
                 &callable.def.params,
                 (pos_args, named, ListSep::Comma),
+                &ArgSpans::default(),
                 &callable.def.name,
             )
             .and_then(|()| {
@@ -884,6 +993,7 @@ impl<'a> Evaluator<'a> {
             });
         self.pop_scope();
         self.scopes = saved_scopes;
+        self.var_spans = saved_var_spans;
         self.scope_semi_global = saved_semi;
         self.functions = saved_fns;
         self.mixins = saved_mixins;
@@ -938,7 +1048,7 @@ impl<'a> Evaluator<'a> {
         // runs in a fresh child scope, so a `$var:` first declared inside it
         // stays local to the block (and a `using` frame binds there).
         match frame {
-            Some(frame) => self.push_scope_frame(frame),
+            Some((frame, spans)) => self.push_scope_frame(frame, spans),
             None => self.push_scope(false),
         }
         // The block runs in its DEFINITION environment's content context: a
