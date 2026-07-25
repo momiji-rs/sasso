@@ -87,7 +87,7 @@ fn variables_nesting_and_colors() {
     let out = css("$c: #336699;\n.a {\n  color: $c;\n  .b { color: lighten($c, 10%); }\n  &:hover { color: mix($c, white, 50%); }\n}\n");
     assert_eq!(
         out,
-        ".a {\n  color: #336699;\n}\n.a .b {\n  color: rgb(63.75, 127.5, 191.25);\n}\n.a:hover {\n  color: rgb(153, 178.5, 204);\n}\n"
+        ".a {\n  color: #336699;\n}\n.a .b {\n  color: rgb(25%, 50%, 75%);\n}\n.a:hover {\n  color: rgb(60%, 70%, 80%);\n}\n"
     );
 }
 
@@ -96,7 +96,7 @@ fn color_function_set() {
     let out = css("$brand: #2a7ae2;\n.x {\n  color: rgba($brand, 0.5);\n  background: darken($brand, 15%);\n  border-color: hsl(120, 50%, 40%);\n  width: percentage(0.25);\n}\n");
     assert_eq!(
         out,
-        ".x {\n  color: rgba(42, 122, 226, 0.5);\n  background: rgb(22.9483471074, 86.2541322314, 168.5516528926);\n  border-color: hsl(120, 50%, 40%);\n  width: 25%;\n}\n"
+        ".x {\n  color: rgba(42, 122, 226, 0.5);\n  background: rgb(8.9993518068%, 33.8251498947%, 66.0986874088%);\n  border-color: hsl(120, 50%, 40%);\n  width: 25%;\n}\n"
     );
 }
 
@@ -329,34 +329,38 @@ fn compressed_output() {
 fn compressed_color_picks_shortest_form() {
     let case = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
 
-    // --- rgb-space results whose hsl form is shorter -> hsl() ---------------
-    assert_eq!(case("darken(#336699,10%)"), "a{x:hsl(210,50%,30%)}");
-    assert_eq!(case("lighten(#336699,10%)"), "a{x:hsl(210,50%,50%)}");
-    assert_eq!(case("saturate(#336699,10%)"), "a{x:hsl(210,60%,40%)}");
+    // --- fractional triples: percentages, with hsl only when it wins by more
+    // --- than the two-character handicap dart gives it -----------------------
+    assert_eq!(case("darken(#336699,10%)"), "a{x:rgb(15%,30%,45%)}");
+    assert_eq!(case("lighten(#336699,10%)"), "a{x:rgb(25%,50%,75%)}");
+    assert_eq!(case("saturate(#336699,10%)"), "a{x:rgb(16%,40%,64%)}");
     assert_eq!(case("grayscale(#ff6600)"), "a{x:hsl(0,0%,50%)}");
     assert_eq!(
         css_compressed("@use 'sass:color';a{x:color.mix(#ff6600,#fff,30%)}"),
-        "a{x:hsl(24,100%,85%)}"
+        "a{x:rgb(100%,82%,70%)}"
     );
     assert_eq!(
         css_compressed("@use 'sass:color';a{x:color.adjust(#336699,$lightness:-10%)}"),
-        "a{x:hsl(210,50%,30%)}"
+        "a{x:rgb(15%,30%,45%)}"
     );
-    // Non-opaque: rgba() vs hsla() -> the shorter hsla().
-    assert_eq!(case("rgba(darken(#336699,10%),.5)"), "a{x:hsla(210,50%,30%,.5)}");
+    // Non-opaque: rgba() vs hsla(); the percentage rgba form wins.
+    assert_eq!(case("rgba(darken(#336699,10%),.5)"), "a{x:rgba(15%,30%,45%,.5)}");
 
     // --- results whose rgb form is shorter (or equal) -> stays rgb/hex ------
-    // hsl form has long fractional channels here.
-    assert_eq!(case("saturate(#888,20%)"), "a{x:rgb(159.8,112.2,112.2)}");
+    // The percentage form wins under dart's two-character hsl handicap.
+    assert_eq!(case("saturate(#888,20%)"), "a{x:rgb(62.6666666667%,44%,44%)}");
     // A hue rotation that lands on integers collapses to hex.
     assert_eq!(case("adjust-hue(#336699,90deg)"), "a{x:#939}");
 
     // --- hsl-space literals also pick the shortest form --------------------
     // Integer-rgb-equivalent hsl collapses to hex.
     assert_eq!(case("hsl(210,50%,40%)"), "a{x:#369}");
-    // Fractional hsl whose rgb form is longer stays hsl.
+    // An hsl() LITERAL keeps its authored spelling (`repr`), so the percentage
+    // rule does not reach it yet. dart emits `rgb(15%,30%,45%)` and
+    // `rgb(100%,50%,0%)` for these — see the note on hsl literals in
+    // `rgb_channel_text`. Tracked separately; pinning today's behaviour so the
+    // gap is visible rather than silent.
     assert_eq!(case("hsl(210,50%,30%)"), "a{x:hsl(210,50%,30%)}");
-    // A tie (both 16 bytes) resolves to rgb, matching dart-sass.
     assert_eq!(case("hsl(30,100%,50%)"), "a{x:rgb(255,127.5,0)}");
     // A powerless (zero-saturation) hue is PRESERVED, not canonicalized to 0.
     assert_eq!(case("hsl(30,0%,50%)"), "a{x:hsl(30,0%,50%)}");

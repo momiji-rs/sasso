@@ -2,7 +2,8 @@
 //!
 //! Numbers carry a unit, colors keep full `f64` channel precision (so
 //! computed colors serialize exactly like current dart-sass, e.g.
-//! `rgb(63.75, 127.5, 191.25)`), and colors remember their authored
+//! `rgb(25%, 50%, 75%)` — dart re-spells a fractional triple as
+//! percentages), and colors remember their authored
 //! spelling so untransformed literals round-trip unchanged.
 
 use std::rc::Rc;
@@ -1700,11 +1701,7 @@ impl Color {
             }
             return hex;
         }
-        let (r, g, b) = (
-            fmt_num(self.r, compressed),
-            fmt_num(self.g, compressed),
-            fmt_num(self.b, compressed),
-        );
+        let (r, g, b) = rgb_channel_text(self.r, self.g, self.b, compressed);
         let rgb_css = if opaque {
             if compressed {
                 format!("rgb({r},{g},{b})")
@@ -1739,7 +1736,12 @@ impl Color {
                 } else {
                     format!("hsla({hh},{ss}%,{ll}%,{})", fmt_num(self.a, true))
                 };
-                if hsl_css.len() < rgb_css.len() {
+                // dart gives HSL a TWO-CHARACTER handicap
+                // (serialize.dart:775, `rgbString.length <= hslString.length + 2`)
+                // — its comment: "Add two characters for HSL for the %s on
+                // saturation and lightness." So rgb wins ties AND wins when it is
+                // up to two characters longer.
+                if rgb_css.len() > hsl_css.len() + 2 {
                     return hsl_css;
                 }
             }
@@ -2387,6 +2389,35 @@ impl ModernColor {
     }
 }
 
+/// The three `rgb()` channel spellings dart-sass uses.
+///
+/// dart switches the WHOLE triple to percentages as soon as ANY channel is
+/// non-integral: `mix(red, blue)` is `rgb(50%, 0%, 50%)`, not
+/// `rgb(127.5, 0, 127.5)`. An all-integer triple keeps plain numbers
+/// (`rgb(1, 2, 3)`).
+///
+/// Integrality is EXACT (`v == v.round()`), not the fuzzy comparison used
+/// elsewhere in this file: dart switches on a channel that differs from an
+/// integer by as little as 1e-10, and the ~7e-15 dust an hsl round trip leaves
+/// behind is enough to flip it.
+fn rgb_channel_text(r: f64, g: f64, b: f64, compressed: bool) -> (String, String, String) {
+    // dart `_tryIntegerRgbChannels` -> `_asInt`: fuzzyIsInt AND in [0, 256).
+    // An out-of-gamut or non-integral channel sends the WHOLE triple to
+    // percentages (serialize.dart:869-886).
+    let as_int = |v: f64| (v - v.round()).abs() < 1e-11 && (0.0..256.0).contains(&v);
+    if as_int(r) && as_int(g) && as_int(b) {
+        return (
+            fmt_num(r, compressed),
+            fmt_num(g, compressed),
+            fmt_num(b, compressed),
+        );
+    }
+    // `v * 100 / 255`, in dart's operand order — `v / 255.0 * 100.0` differs in
+    // the last bit.
+    let pct = |v: f64| format!("{}%", fmt_num(v * 100.0 / 255.0, compressed));
+    (pct(r), pct(g), pct(b))
+}
+
 /// Format a number the way dart-sass does: round to 10 decimal places,
 /// trim trailing zeros, and (when compressed) drop a leading `0`.
 pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
@@ -2922,13 +2953,13 @@ mod tests {
         assert!((l - 0.4).abs() < 1e-9);
         // lighten by 10% -> exactly dart-sass's fractional rgb.
         let lit = Color::from_hsl(h, s, l + 0.1, 1.0);
-        assert_eq!(lit.to_css(false), "rgb(63.75, 127.5, 191.25)");
+        assert_eq!(lit.to_css(false), "rgb(25%, 50%, 75%)");
     }
 
     #[test]
     fn computed_fractional_channels_serialize_as_rgb() {
         let c = Color::rgb(153.0, 178.5, 204.0, 1.0);
-        assert_eq!(c.to_css(false), "rgb(153, 178.5, 204)");
+        assert_eq!(c.to_css(false), "rgb(60%, 70%, 80%)");
     }
 
     #[test]
@@ -2936,19 +2967,19 @@ mod tests {
         // dart-sass 1.101.0 compressed output emits whichever legacy form is
         // shorter, the rgb()/rgba() form or the equivalent hsl()/hsla() form.
 
-        // A `darken(#336699, 10%)` result: fractional rgb whose hsl form is
-        // shorter -> hsl. Expanded output is unchanged (always the rgb form).
+        // A `darken(#336699, 10%)` result: a fractional triple, so both forms
+        // spell the channels as percentages.
         let darkened = Color::from_hsl(210.0, 0.5, 0.3, 1.0); // rgb(38.25, 76.5, 114.75)
-        assert_eq!(darkened.to_css(true), "hsl(210,50%,30%)");
-        assert_eq!(darkened.to_css(false), "rgb(38.25, 76.5, 114.75)");
+        assert_eq!(darkened.to_css(true), "rgb(15%,30%,45%)");
+        assert_eq!(darkened.to_css(false), "rgb(15%, 30%, 45%)");
 
         // A `saturate(#888, 20%)` result: the hsl form is longer -> stays rgb.
         let saturated = Color::rgb(159.8, 112.2, 112.2, 1.0);
-        assert_eq!(saturated.to_css(true), "rgb(159.8,112.2,112.2)");
+        assert_eq!(saturated.to_css(true), "rgb(62.6666666667%,44%,44%)");
 
-        // Non-opaque: rgba vs hsla, hsla shorter here -> hsla (alpha keeps `.5`).
+        // Non-opaque: rgba vs hsla; the percentage rgba form wins (alpha keeps `.5`).
         let translucent = Color::from_hsl(210.0, 0.5, 0.3, 0.5);
-        assert_eq!(translucent.to_css(true), "hsla(210,50%,30%,.5)");
+        assert_eq!(translucent.to_css(true), "rgba(15%,30%,45%,.5)");
 
         // A computed gray: the fractional rgb triple is far longer than hsl.
         let gray = Color::rgb(127.5, 127.5, 127.5, 1.0);

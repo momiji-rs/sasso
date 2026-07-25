@@ -83,7 +83,14 @@ pub(super) fn fn_rgb(
     let mut c = Color::rgb(r, g, b, a);
     // rgb()/rgba() literals keep their function representation, matching
     // dart-sass (the channels form never collapses to a hex spelling).
-    c.repr = Some(rgb_repr(r, g, b, a));
+    //
+    // An ALL-INTEGER triple only: dart re-spells a triple with any non-integral
+    // channel as percentages (`rgb(127.5, 0, 127.5)` -> `rgb(50%, 0%, 50%)`),
+    // so leave `repr` unset there and let `Color::to_css` apply that rule.
+    let as_int = |v: f64| (v - v.round()).abs() < 1e-11 && (0.0..256.0).contains(&v);
+    if as_int(r) && as_int(g) && as_int(b) {
+        c.repr = Some(rgb_repr(r, g, b, a));
+    }
     Ok(Value::Color(c))
 }
 
