@@ -1015,11 +1015,11 @@ mod tests {
         assert_eq!(css("invert", &[col("#b37399")]), "#4c8c66");
         assert_eq!(
             css("invert", &[col("#b37399"), n(80.0, "%")]),
-            "rgb(96.6, 135, 112.2)"
+            "rgb(37.8823529412%, 52.9411764706%, 44%)"
         );
         assert_eq!(
             css("invert", &[col("#b37399"), n(50.0, "%")]),
-            "rgb(127.5, 127.5, 127.5)"
+            "rgb(50%, 50%, 50%)"
         );
     }
 
@@ -1028,7 +1028,7 @@ mod tests {
         assert_eq!(css("grayscale", &[col("#6b717f")]), "#757575");
         assert_eq!(
             css("saturate", &[col("#cc6699"), n(30.0, "%")]),
-            "rgb(234.6, 71.4, 153)"
+            "rgb(92%, 28%, 60%)"
         );
         assert_eq!(css("desaturate", &[col("#6b717f"), n(20.0, "%")]), "#757575");
     }
