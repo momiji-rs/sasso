@@ -640,6 +640,47 @@ fn rgb_hsl_argument_validation_matches_dart() {
 }
 
 #[test]
+fn unknown_channel_errors_render_the_color_with_inspect() {
+    let err = |src: &str| compile(src, &Options::default()).unwrap_err().message;
+    let call = |src: &str| format!("@use \"sass:color\";a{{b:{src}}}");
+
+    // dart builds these messages by interpolating the color into a string,
+    // which routes through `Value.toString()` => `serializeValue(inspect: true)`
+    // (lib/src/value.dart:439). So the color renders with INSPECT semantics, not
+    // CSS-output semantics: `hwb(...)` keeps its own form instead of collapsing
+    // to the `hsl(...)` it would be written as in a declaration.
+    // All expectations below were produced by running dart-sass 1.101.6.
+    assert_eq!(
+        err(&call("color.is-missing(hwb(200 20% 30%), \"red\")")),
+        "$channel: Color hwb(200 20% 30%) doesn't have a channel named \"red\"."
+    );
+    assert_eq!(
+        err(&call("color.is-powerless(hwb(200 20% 30%), \"red\")")),
+        "$channel: Color hwb(200 20% 30%) doesn't have a channel named \"red\"."
+    );
+    // `color.channel()` words its message differently (unquoted channel, "has no
+    // channel named"), but renders the color the same way.
+    assert_eq!(
+        err(&call("color.channel(hwb(200 20% 30% / 0.5), \"zzz\")")),
+        "$channel: Color hwb(200 20% 30% / 0.5) has no channel named zzz."
+    );
+
+    // A non-legacy space is unaffected by the reroute but must keep its own
+    // canonical inspect form (percent lightness, `deg` hue).
+    assert_eq!(
+        err(&call("color.is-missing(oklch(0.5 0.1 200), \"red\")")),
+        "$channel: Color oklch(50% 0.1 200deg) doesn't have a channel named \"red\"."
+    );
+
+    // A plain legacy sRGB color serializes identically under both renderers,
+    // including its authored hex spelling.
+    assert_eq!(
+        err(&call("color.is-missing(#336699, \"zzz\")")),
+        "$channel: Color #336699 doesn't have a channel named \"zzz\"."
+    );
+}
+
+#[test]
 fn static_placement_and_serialization_match_dart() {
     let err = |src: &str| compile(src, &Options::default()).unwrap_err().message;
 

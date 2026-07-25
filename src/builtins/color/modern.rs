@@ -112,7 +112,10 @@ fn fn_color_channel(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> 
     let target = convert_modern(&mc, space);
     let idx = channel_index_in(space, &chan).ok_or_else(|| {
         Error::at(
-            format!("$channel: Color {} has no channel named {chan}.", c.to_css(false)),
+            // dart interpolates the color with `Value.toString()`, i.e. the
+            // INSPECT serializer, not CSS output (lib/src/value.dart:439;
+            // message at lib/src/functions/color.dart:699).
+            format!("$channel: Color {} has no channel named {chan}.", c.inspect_css()),
             pos,
         )
     })?;
@@ -135,10 +138,13 @@ fn fn_is_missing(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
         match channel_index_in(mc.space, &chan) {
             Some(idx) => mc.channels[idx].is_none(),
             None => {
+                // Inspect semantics, as above: dart's message is built in
+                // `SassColor.isChannelMissing` (lib/src/value/color.dart:733)
+                // and interpolates `$this` through `Value.toString()`.
                 return Err(Error::at(
                     format!(
                         "$channel: Color {} doesn't have a channel named \"{chan}\".",
-                        c.to_css(false)
+                        c.inspect_css()
                     ),
                     pos,
                 ));
@@ -187,10 +193,12 @@ fn fn_is_powerless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
         return Ok(Value::Bool(false));
     }
     let idx = channel_index_in(space, &chan).ok_or_else(|| {
+        // Inspect semantics, as above: dart's message is built in
+        // `SassColor.isChannelPowerless` (lib/src/value/color.dart:757).
         Error::at(
             format!(
                 "$channel: Color {} doesn't have a channel named \"{chan}\".",
-                c.to_css(false)
+                c.inspect_css()
             ),
             pos,
         )

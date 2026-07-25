@@ -1746,6 +1746,22 @@ impl Color {
         }
         rgb_css
     }
+
+    /// The `inspect: true` serialization of this color.
+    ///
+    /// dart's `Value.toString()` is `serializeValue(this, inspect: true)`
+    /// (lib/src/value.dart:439), so EVERY color interpolated into an error
+    /// message (`"Color $color ..."`) renders with inspect semantics, not CSS
+    /// output semantics. The two differ for a space-aware color: `hwb(200 20%
+    /// 30%)` inspects as itself but writes as `hsl(200, 55.5555555556%, 45%)`.
+    /// Delegates to `ModernColor::inspect_css` when the color is space-aware;
+    /// a plain legacy sRGB color serializes identically either way.
+    pub(crate) fn inspect_css(&self) -> String {
+        match &self.modern {
+            Some(m) => m.inspect_css(),
+            None => self.to_css(false),
+        }
+    }
 }
 
 /// The CSS named-color spelling for an exact, fully-opaque integer RGB
