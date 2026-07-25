@@ -373,8 +373,9 @@ pub(crate) fn module_member_to_global(module: &str, member: &str) -> Option<&'st
             "hue" => Some("hue"),
             "saturation" => Some("saturation"),
             "lightness" => Some("lightness"),
-            "whiteness" => Some("whiteness"),
-            "blackness" => Some("blackness"),
+            // `whiteness`/`blackness` have no global alias in dart-sass (they
+            // live only in the `sass:color` module list) — they are dispatched
+            // directly in `call_module` via `color_ext::call_module_member`.
             "alpha" => Some("alpha"),
             "opacity" => Some("opacity"),
             "grayscale" => Some("grayscale"),
@@ -453,7 +454,10 @@ pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
     if module == "string" && member == "split" {
         return true;
     }
-    if module == "color" && member == "hwb" {
+    // `color.hwb` (comma form) and the deprecated `color.whiteness`/
+    // `color.blackness` getters are module-only: they have no global alias, so
+    // `module_member_to_global` cannot see them.
+    if module == "color" && matches!(member, "hwb" | "whiteness" | "blackness") {
         return true;
     }
     module_member_to_global(module, member).is_some()
@@ -511,9 +515,13 @@ pub(crate) fn call_module(
             return r;
         }
     }
-    // `sass:color` members without a global alias (the comma-form `hwb`).
+    // `sass:color` members without a global alias (the comma-form `hwb`, and
+    // the deprecated HWB getters `whiteness`/`blackness`).
     if module == "color" {
         if let Some(r) = color::call_module_member(member, pos_args, named, pos) {
+            return r;
+        }
+        if let Some(r) = color_ext::call_module_member(member, pos_args, named, pos) {
             return r;
         }
         // The module `color.grayscale`/`color.opacity` keep the global filter
@@ -643,8 +651,12 @@ mod tests {
             "hue",
             "saturation",
             "lightness",
-            "whiteness",
-            "blackness",
+            // `whiteness`/`blackness` were in the historical set but never
+            // belonged there: dart-sass has no *global* HWB getters (they exist
+            // only as `sass:color` members, lib/src/functions/color.dart:532-541
+            // vs. the `global` list at line 31). They were removed from
+            // `color_ext::NAMES`, so the historical baseline is corrected here
+            // rather than the union being bent back to match it.
             "opacity",
             "ie-hex-str",
             "scale-color",
