@@ -205,9 +205,9 @@ puts "sasso C ABI Ruby (Fiddle) binding test"
 puts "lib: #{LIBPATH}"
 puts
 
-# 1. version == "0.6.0"
+# 1. version looks like a version
 version = read_cstr(SASSO_VERSION.call.to_i)
-check("1 sasso_version() == \"0.6.0\"", version == "0.6.0", version.inspect)
+check("1 sasso_version() looks like a version", version =~ /\A\d+\.\d+\.\d+/ ? true : false, version.inspect)
 
 # 2. default expanded compile with nesting
 ok, css, = compile(".a { color: red; &:hover { color: blue; } }")

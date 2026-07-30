@@ -16,7 +16,9 @@
 
 [package]
 name = "sasso-ffi"
-# Tracks the bundled core `sasso` compiler version (reported by `sasso_version`).
+# This WRAPPER's own version, independent of the core compiler it bundles.
+# `sasso_version()` reports `sasso_core::VERSION`, NOT this number — it used to
+# report this one, which had drifted to 0.6.1 while the compiler was 0.8.1.
 version = "0.6.1"
 edition = "2021"
 # 1.77 for `std::mem::offset_of!` (per-field versioned-struct gating in

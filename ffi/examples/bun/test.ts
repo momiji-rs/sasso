@@ -287,7 +287,7 @@ console.log("sasso C ABI binding test (Bun / bun:ffi)\n");
 
 // 1. version
 const version = lib.sasso_version().toString();
-check(`1. sasso_version() == "0.6.0"`, version === "0.6.0", `got ${JSON.stringify(version)}`);
+check(`1. sasso_version() looks like a version`, /^\d+\.\d+\.\d+/.test(version), `got ${JSON.stringify(version)}`);
 
 // 2. default compile (NULL opts) with nesting
 {

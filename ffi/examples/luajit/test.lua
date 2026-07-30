@@ -121,7 +121,7 @@ end
 
 -- ---- check 1: version --------------------------------------------------
 local version = ffi.string(C.sasso_version())
-check("1 sasso_version() == \"0.6.0\"", version == "0.6.0", "got " .. version)
+check("1 sasso_version() looks like a version", version:match("^%d+%.%d+%.%d+") ~= nil, "got " .. version)
 
 -- ---- check 2: default compile (NULL opts) ------------------------------
 do

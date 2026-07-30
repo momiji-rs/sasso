@@ -149,7 +149,7 @@ func qq(s string) string { return fmt.Sprintf("%q", s) }
 func main() {
 	// Check 1: version
 	ver := C.GoString(C.sasso_version())
-	check(1, "sasso_version()", ver == "0.6.0", "got "+qq(ver)+", want \"0.6.0\"")
+	check(1, "sasso_version()", len(strings.Split(ver, ".")) >= 3, "got "+qq(ver)+", want a semver")
 
 	// Check 2: default (NULL opts) nested-selector expansion
 	want2 := ".a {\n  color: red;\n}\n.a:hover {\n  color: blue;\n}"

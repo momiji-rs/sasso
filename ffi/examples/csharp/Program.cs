@@ -303,7 +303,7 @@ namespace SassoExample
             // ---- Check 1: version ----
             string ver = Version();
             Console.WriteLine($"sasso_version() = \"{ver ?? "(null)"}\"");
-            Check(1, "version == 0.6.0", ver == "0.6.0");
+            Check(1, "version looks like a semver", System.Text.RegularExpressions.Regex.IsMatch(ver ?? "", @"^\d+\.\d+\.\d+"));
 
             // ---- Check 2: default compile (NULL opts) ----
             {

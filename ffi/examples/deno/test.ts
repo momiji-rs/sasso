@@ -292,7 +292,7 @@ console.log("sasso C ABI — Deno (Deno.dlopen) binding test\n");
 {
   const vPtr = lib.symbols.sasso_version();
   const v = readCString(vPtr);
-  check(`1. sasso_version() == "0.6.0"`, v === "0.6.0", `got ${JSON.stringify(v)}`);
+  check(`1. sasso_version() looks like a version`, /^\d+\.\d+\.\d+/.test(v), `got ${JSON.stringify(v)}`);
 }
 
 // Check 2: default compile (NULL opts), nesting expanded

@@ -55,6 +55,14 @@ mod selector;
 mod sourcemap;
 mod value;
 
+/// This compiler's version, as in `Cargo.toml`.
+///
+/// Exposed so a wrapper can report the version of the compiler it actually
+/// bundles rather than its own: the FFI crate (`ffi/`) is versioned separately,
+/// and its `sasso_version()` used to return `CARGO_PKG_VERSION`, i.e. the
+/// wrapper's number. Reading it from here cannot drift.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub use arena::{set_arena_bytes, ScopedAlloc};
 pub use error::Error;
 pub use host_fn::{host_value_op, HostFunction};

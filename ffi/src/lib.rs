@@ -412,12 +412,36 @@ impl Importer for FfiImporter {
     }
 }
 
+/// The bundled compiler's version with a trailing NUL, for the C ABI.
+///
+/// Built from `sasso_core::VERSION` — the CORE crate's version — deliberately
+/// NOT this crate's `CARGO_PKG_VERSION`. `sasso-ffi` is versioned independently
+/// of the compiler it wraps, so the old `concat!(env!("CARGO_PKG_VERSION"), …)`
+/// reported the WRAPPER's number: it had drifted to 0.6.1 while the bundled
+/// compiler was 0.8.1, even though `sasso_version()` is documented as the
+/// compiler version. Reading the core const cannot drift.
+///
+/// `concat!` is not usable here — it takes literals only, and
+/// `sasso_core::VERSION` is a const — so the NUL is appended in const code. The
+/// array is sized from the input, so it cannot overflow or truncate.
+const VERSION_NUL: [u8; sasso_core::VERSION.len() + 1] = {
+    let src = sasso_core::VERSION.as_bytes();
+    let mut buf = [0u8; sasso_core::VERSION.len() + 1];
+    let mut i = 0;
+    while i < src.len() {
+        buf[i] = src[i];
+        i += 1;
+    }
+    // buf[src.len()] stays 0: the terminator.
+    buf
+};
+
 /// Return the bundled compiler version as a static NUL-terminated string.
 ///
 /// The returned pointer is `'static` and must **not** be freed.
 #[no_mangle]
 pub extern "C" fn sasso_version() -> *const c_char {
-    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
+    VERSION_NUL.as_ptr() as *const c_char
 }
 
 /// The all-defaults `SassoOptions` (expanded, SCSS, Unicode diagnostics, no url /
