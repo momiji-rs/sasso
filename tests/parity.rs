@@ -7448,6 +7448,41 @@ fn hwb_construction_normalization() {
 }
 
 #[test]
+fn whiteness_blackness_are_module_only() {
+    // dart-sass has no GLOBAL `whiteness()`/`blackness()`. Its `global` list
+    // (lib/src/functions/color.dart:31-449) registers `_channelFunction`s only
+    // for red/green/blue and hue/saturation/lightness; the HWB getters appear
+    // solely in the `sass:color` `module` list (same file, lines 532-541). So a
+    // bare `whiteness(...)` is an unknown plain-CSS function and is emitted
+    // verbatim — note dart re-serializes the `hsl()` argument in its own comma
+    // form while passing the call through.
+    assert_eq!(
+        ours("a {b: whiteness(hsl(120 50% 50%))}\n"),
+        "a {\n  b: whiteness(hsl(120, 50%, 50%));\n}\n"
+    );
+    assert_eq!(
+        ours("a {b: blackness(hsl(120 50% 50%))}\n"),
+        "a {\n  b: blackness(hsl(120, 50%, 50%));\n}\n"
+    );
+    // Being plain-CSS rather than builtins is observable through
+    // `function-exists`, while the sibling legacy getter stays global.
+    assert_eq!(
+        ours("a {b: function-exists(\"whiteness\"); c: function-exists(\"blackness\"); d: function-exists(\"lightness\")}\n"),
+        "a {\n  b: false;\n  c: false;\n  d: true;\n}\n"
+    );
+    // The deprecated `sass:color` members still resolve and compute.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.whiteness(hsl(120 50% 50%)); c: color.blackness(hsl(120 50% 50%))}\n"),
+        "a {\n  b: 25%;\n  c: 25%;\n}\n"
+    );
+    // …as does the non-deprecated `color.channel()` replacement.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {b: color.channel(hsl(120 50% 50%), \"whiteness\", $space: hwb)}\n"),
+        "a {\n  b: 25%;\n}\n"
+    );
+}
+
+#[test]
 fn color_inspect_forms() {
     // inspect keeps hwb's own form (hue without `deg`, `/ alpha` tail) and
     // prints an out-of-gamut rgb without the hsl reroute; CSS output of the

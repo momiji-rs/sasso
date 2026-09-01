@@ -242,8 +242,14 @@ pub(super) const NAMES: &[&str] = &[
     "hue",
     "saturation",
     "lightness",
-    "whiteness",
-    "blackness",
+    // NOTE: `whiteness`/`blackness` are deliberately absent. dart-sass never
+    // had *global* HWB getters: its `global` list (lib/src/functions/color.dart
+    // :31-449) declares `_channelFunction`s only for red/green/blue and
+    // hue/saturation/lightness, while `whiteness`/`blackness` appear solely in
+    // the `sass:color` module list (same file, lines 532-541). Registering them
+    // globally made `whiteness(c)` compute 25% where dart emits the untouched
+    // plain-CSS `whiteness(hsl(120, 50%, 50%))`. They stay reachable as the
+    // deprecated module members via `call_module_member` below.
     "opacity",
     "ie-hex-str",
     "scale-color",
@@ -266,9 +272,9 @@ pub(super) fn try_call(
         "desaturate" => fn_saturate_two(name, pos_args, named, pos, -1.0),
         "opacify" | "fade-in" => fn_fade(name, pos_args, named, pos, 1.0),
         "transparentize" | "fade-out" => fn_fade(name, pos_args, named, pos, -1.0),
-        "hue" | "saturation" | "lightness" | "whiteness" | "blackness" => {
-            fn_hsl_getter(name, pos_args, named, pos)
-        }
+        // `whiteness`/`blackness` are *not* listed here: they are module-only
+        // (see `call_module_member`).
+        "hue" | "saturation" | "lightness" => fn_hsl_getter(name, pos_args, named, pos),
         "opacity" => return fn_opacity(pos_args, named, pos),
         "ie-hex-str" => fn_ie_hex_str(pos_args, named, pos),
         "scale-color" => fn_scale_color(pos_args, named, pos),
@@ -276,6 +282,27 @@ pub(super) fn try_call(
         "change-color" => fn_change_color(pos_args, named, pos),
         _ => return None,
     })
+}
+
+/// `sass:color` members of this family that have **no global alias**.
+///
+/// dart-sass exposes `whiteness`/`blackness` only on `sass:color`
+/// (lib/src/functions/color.dart:532-541, inside the `module` list); its
+/// `global` list (same file, line 31) has no such entries, so a bare
+/// `whiteness(…)` call is an unknown plain-CSS function that dart passes
+/// through verbatim. Dispatching them here — from `call_module` only — keeps
+/// `color.whiteness()` / `color.blackness()` working without leaking the names
+/// back into the global namespace via `NAMES`/`try_call`.
+pub(super) fn call_module_member(
+    member: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Option<Result<Value, Error>> {
+    match member {
+        "whiteness" | "blackness" => Some(fn_hsl_getter(member, pos_args, named, pos)),
+        _ => None,
+    }
 }
 
 /// Error when more than `max` positional/named arguments were supplied to a
