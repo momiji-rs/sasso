@@ -1265,17 +1265,19 @@ pub(super) fn fn_lab_family(
     // -infinity -> 0); a/b/chroma/hue instead keep their non-finite value, which
     // serializes as `calc(...)` (chroma is additionally floored at 0).
     let l = modern_channel(&comps[0], l_base).map(|v| if v.is_nan() { 0.0 } else { v.clamp(0.0, l_max) });
-    let c1;
-    let c2;
-    if is_polar {
+    let (c1, c2) = if is_polar {
         // [lightness, chroma, hue]
-        c1 = modern_channel(&comps[1], chroma_base).map(|v| v.max(0.0));
-        c2 = modern_hue(&comps[2]);
+        (
+            modern_channel(&comps[1], chroma_base).map(|v| v.max(0.0)),
+            modern_hue(&comps[2]),
+        )
     } else {
         // [lightness, a, b]
-        c1 = modern_channel(&comps[1], ab_base);
-        c2 = modern_channel(&comps[2], ab_base);
-    }
+        (
+            modern_channel(&comps[1], ab_base),
+            modern_channel(&comps[2], ab_base),
+        )
+    };
     let mc = ModernColor {
         space,
         channels: [l, c1, c2],
