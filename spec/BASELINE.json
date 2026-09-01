@@ -1,9 +1,9 @@
 {
-  "spec_commit": "1b03109a6205c8cff146defeae8488094b147c88",
-  "dart_sass": "1.101.0",
-  "attempted": 13896,
-  "pass": 11405,
+  "spec_commit": "4a9eea66f5d4ee52bb30293d902be921e01c9952",
+  "dart_sass": "1.103.1",
+  "attempted": 14210,
+  "pass": 11570,
   "error_expected": 2491,
-  "passing": 13896,
+  "passing": 14061,
   "note": "passing = pass (byte-exact CSS) + error_expected (error specs correctly rejected). Every feature that raises the count bumps this file in the same commit; CI (spec/check_baseline.py) fails if the count regresses below it."
 }
