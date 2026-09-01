@@ -1275,6 +1275,16 @@ fn trim_trailing_loud_comments(s: &str) -> &str {
         };
         // Only a comment that closes at the very end qualifies (the `*/` we
         // saw must belong to this `/*`).
+        //
+        // The length check comes first and is load-bearing: in `/*/` the opening
+        // `/*` and the closing `*/` OVERLAP on the shared `*`, so `open + 2`
+        // runs past `t.len() - 2` and the interior slice panics with
+        // "byte range starts at N but ends at N-1". An overlapping pair is not a
+        // completed comment, so stop trimming and let the parser report on the
+        // text as written (dart-sass emits a normal parse error here).
+        if open + 2 > t.len() - 2 {
+            break;
+        }
         if !t[open..].ends_with("*/") || t[open + 2..t.len() - 2].contains("/*") {
             break;
         }
@@ -2079,5 +2089,38 @@ mod line_scanner_parity {
                 );
             }
         }
+    }
+
+    /// An overlapping `/*/` — where the opening `/*` and the closing `*/` share
+    /// their `*` — is not a completed comment. It used to panic here
+    /// ("byte range starts at 5 but ends at 4"), reachable from any malformed
+    /// stylesheet: `Parser::parse` on `0"0/*/` aborted the process.
+    #[test]
+    fn overlapping_slash_star_slash_does_not_panic() {
+        for s in [
+            "/*/",
+            "a /*/",
+            "0\"0/*/",
+            "\u{e9}__ '%/*/",
+            ", in %+as *\t@\n'*/*/",
+        ] {
+            // The contract is only that this returns; the exact trim is
+            // incidental for an unterminated comment.
+            let _ = super::trim_trailing_loud_comments(s);
+        }
+    }
+
+    /// The overlap guard must not stop a well-formed trailing comment from
+    /// being trimmed.
+    #[test]
+    fn well_formed_trailing_comments_still_trim() {
+        assert_eq!(super::trim_trailing_loud_comments("a /* c */"), "a");
+        assert_eq!(super::trim_trailing_loud_comments("a /* c */ /* d */"), "a");
+        assert_eq!(super::trim_trailing_loud_comments("a /**/"), "a");
+        assert_eq!(super::trim_trailing_loud_comments("a"), "a");
+        // Unterminated: nothing to trim.
+        assert_eq!(super::trim_trailing_loud_comments("a /* c"), "a /* c");
+        // Overlapping: left as written.
+        assert_eq!(super::trim_trailing_loud_comments("a /*/"), "a /*/");
     }
 }
