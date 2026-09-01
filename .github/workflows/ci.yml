@@ -37,7 +37,11 @@ jobs:
         with:
           node-version: 24
       - name: install dart-sass
-        run: npm install -g sass
+        # Pinned like sass-spec (spec/SPEC_VERSION.txt): 1.101.4 changed legacy
+        # color serialization (percent channels) and 1.102.0 changed rec2020
+        # gamma, which sasso doesn't implement yet. Bump this together with the
+        # dart-sass catch-up work, not ad hoc.
+        run: npm install -g sass@1.101.3
       - name: parity tests vs dart-sass
         run: SASSO_PARITY=1 SASS_BIN=sass cargo test --test parity -- --nocapture
 
