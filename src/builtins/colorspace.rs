@@ -147,26 +147,14 @@ fn prophoto_from_linear(c: f64) -> f64 {
     }
 }
 
+// dart-sass 1.102.0 switched rec2020 from the BT.2020 piecewise curve to the
+// pure 2.4 gamma of the latest CSS Color 4 draft (rec2020.dart).
 fn rec2020_to_linear(c: f64) -> f64 {
-    let abs = c.abs();
-    if abs < 0.08124285829863151 {
-        c / 4.5
-    } else {
-        c.signum()
-            * pow(
-                (abs + 1.09929682680944 - 1.0) / 1.09929682680944,
-                2.2222222222222223,
-            )
-    }
+    c.signum() * pow(c.abs(), 2.4)
 }
 
 fn rec2020_from_linear(c: f64) -> f64 {
-    let abs = c.abs();
-    if abs > 0.018053968510807 {
-        c.signum() * (1.09929682680944 * pow(abs, 0.45) - 0.09929682680944008)
-    } else {
-        4.5 * c
-    }
+    c.signum() * pow(c.abs(), 1.0 / 2.4)
 }
 
 /// A space's (linear node, toLinear, fromLinear) triple.
