@@ -12,6 +12,80 @@ impl<'a> Evaluator<'a> {
         None
     }
 
+    /// The DEFINITION span of `name`, innermost frame first — dart
+    /// `Environment.getVariableNode` (environment.dart:488). Walks the same
+    /// chain as [`Self::lookup`], falling back to the `@use … as *` modules the
+    /// value lookup would have reached. Source-map only.
+    pub(super) fn lookup_var_span(&self, name: &str) -> Option<VarSpan> {
+        for frame in self.var_spans.iter().rev() {
+            if let Some(sp) = frame.borrow().get(name) {
+                return Some(*sp);
+            }
+        }
+        // A name resolved through `@use … as *` lives in the module's own
+        // frame; mirror `eval_expr`'s fallback order so the span matches the
+        // value that was actually read.
+        if !is_private_member(name) {
+            for m in &self.star_user_modules {
+                if m.vars.borrow().contains_key(name) {
+                    return m.var_spans.borrow().get(name).copied();
+                }
+            }
+        }
+        None
+    }
+
+    /// dart `_expressionNode` (evaluate.dart:4538): the node whose span should
+    /// be blamed for `expr`'s value. A bare variable reference resolves to
+    /// wherever that variable was DEFINED (transitively — `$b: $a` stored `$a`'s
+    /// own definition node, so `$b` reaches the original literal); every other
+    /// expression shape is its own node, which is `fallback` (the position where
+    /// `expr`'s text starts in the current file).
+    ///
+    /// Note the asymmetry this bakes in, and which dart's boundary confirms:
+    /// only a BARE `$x` resolves. `$x * 2`, `f($x)`, `#{$x}` and `$x $x` are
+    /// `Binary`/`Func`/`Interp`/`List` nodes, so they keep their own span.
+    pub(super) fn expression_node(&mut self, expr: &Expr, fallback: Pos) -> VarSpan {
+        if !self.options.source_map {
+            return VarSpan::default();
+        }
+        let resolved = match expr {
+            Expr::Var { name, .. } => self.lookup_var_span(name),
+            Expr::NsVar { module, name } => self.module_var_span(module, name),
+            _ => None,
+        };
+        match resolved {
+            Some(sp) => sp,
+            None => self.span_at(fallback),
+        }
+    }
+
+    /// The definition span of a `ns.$name` module variable, following a
+    /// `@forward` to the module that actually defines it (dart
+    /// `_getVariableNodeFromGlobalModule` / `Module.variableNodes`).
+    fn module_var_span(&self, ns: &str, name: &str) -> Option<VarSpan> {
+        let module = self.used_user_modules.get(ns)?;
+        let (target, orig) = module
+            .var_origin(name)
+            .unwrap_or_else(|| (Rc::clone(module), name.to_string()));
+        let sp = target.var_spans.borrow().get(&orig).copied();
+        sp
+    }
+
+    /// Turn a 1-based source position in the CURRENT file into a [`VarSpan`]
+    /// (interned file id + 0-based line/col). [`Pos::NONE`] yields the "unknown"
+    /// span, which the source map drops.
+    pub(super) fn span_at(&mut self, pos: Pos) -> VarSpan {
+        if !self.options.source_map || !pos.is_known() {
+            return VarSpan::default();
+        }
+        VarSpan {
+            file: self.intern_current_file(),
+            line: pos.line as u32 - 1,
+            col: pos.col as u32 - 1,
+        }
+    }
+
     /// Capture the current variable and function/mixin scope chains as a
     /// callable's lexical closure (dart `Environment.closure()` — shared
     /// frames, not snapshots).
@@ -19,6 +93,7 @@ impl<'a> Evaluator<'a> {
         Rc::new(UserCallable {
             def: Rc::clone(def),
             env: self.scopes.clone(),
+            env_spans: self.var_spans.clone(),
             env_semi: self.scope_semi_global.clone(),
             env_fns: self.functions.clone(),
             env_mixins: self.mixins.clone(),
@@ -56,15 +131,27 @@ impl<'a> Evaluator<'a> {
     pub(super) fn push_scope(&mut self, semi_global: bool) {
         let effective = semi_global && self.scope_semi_global.last().copied().unwrap_or(false);
         self.scopes.push(new_scope());
+        if self.options.source_map {
+            self.var_spans.push(new_span_scope());
+        }
         self.scope_semi_global.push(effective);
         self.functions.push(new_fn_scope());
         self.mixins.push(new_fn_scope());
     }
 
     /// Push a pre-populated, non-semi-global scope (a mixin/function argument
-    /// frame).
-    pub(super) fn push_scope_frame(&mut self, frame: HashMap<String, Value>) {
+    /// frame). `spans` holds the definition span of each binding in `frame`
+    /// (source-map only); names absent from it simply have no known span.
+    pub(super) fn push_scope_frame(
+        &mut self,
+        frame: HashMap<String, Value>,
+        spans: HashMap<String, VarSpan>,
+    ) {
         self.scopes.push(std::rc::Rc::new(std::cell::RefCell::new(frame)));
+        if self.options.source_map {
+            self.var_spans
+                .push(std::rc::Rc::new(std::cell::RefCell::new(spans)));
+        }
         self.scope_semi_global.push(false);
         self.functions.push(new_fn_scope());
         self.mixins.push(new_fn_scope());
@@ -72,6 +159,7 @@ impl<'a> Evaluator<'a> {
 
     pub(super) fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.var_spans.pop();
         self.scope_semi_global.pop();
         self.functions.pop();
         self.mixins.pop();
@@ -152,10 +240,13 @@ impl<'a> Evaluator<'a> {
     /// exists; if it exists only in the global scope and the current scope is
     /// not semi-global, a new local is created instead so a nested rule cannot
     /// silently rewrite a global.
-    pub(super) fn assign(&mut self, name: &str, val: Value) {
+    pub(super) fn assign(&mut self, name: &str, val: Value, span: VarSpan) {
         if self.scopes.len() == 1 {
             if let Some(g) = self.scopes.first_mut() {
                 g.borrow_mut().insert(name.to_string(), val);
+            }
+            if let Some(g) = self.var_spans.first_mut() {
+                g.borrow_mut().insert(name.to_string(), span);
             }
             return;
         }
@@ -175,6 +266,11 @@ impl<'a> Evaluator<'a> {
         };
         if let Some(scope) = self.scopes.get_mut(target) {
             scope.borrow_mut().insert(name.to_string(), val);
+        }
+        // The span frame is the same index in the parallel chain (dart writes
+        // `_variables[index]` and `_variableNodes[index]` together).
+        if let Some(frame) = self.var_spans.get_mut(target) {
+            frame.borrow_mut().insert(name.to_string(), span);
         }
     }
 
@@ -217,6 +313,16 @@ impl<'a> Evaluator<'a> {
                     if let Some(g) = self.scopes.first_mut() {
                         g.borrow_mut().insert(v.name.clone(), cfg_val);
                     }
+                    // dart blames `override.assignmentNode` here — the span of
+                    // the value inside the `@use … with (...)` clause, which
+                    // lives in the CONFIGURING file (evaluate.dart:2679). sasso
+                    // does not yet carry configuration spans across that
+                    // boundary, so record "unknown" rather than the `!default`
+                    // text we are overriding: an unknown span emits no mapping
+                    // segment, whereas a wrong one would emit a wrong segment.
+                    if let Some(g) = self.var_spans.first_mut() {
+                        g.borrow_mut().insert(v.name.clone(), VarSpan::default());
+                    }
                     return Ok(());
                 }
             }
@@ -248,6 +354,13 @@ impl<'a> Evaluator<'a> {
             }
         }
         let val = self.eval_expr(&v.value)?;
+        // dart `visitVariableDeclaration` stores `_expressionNode(node
+        // .expression)` as the binding's node (evaluate.dart:2721): a bare
+        // `$a: $b` inherits `$b`'s ORIGIN, so a chain `$a: red; $b: $a; c: $b`
+        // maps `c`'s value all the way back to `red`. Computed AFTER the RHS is
+        // evaluated so `$x: $x` still sees the outgoing binding, matching dart's
+        // evaluation order.
+        let span = self.expression_node(&v.value, v.value_pos);
         // A top-level (or nested `!global`) assignment to a name not in the
         // global scope but exposed by exactly one `@use … as *` module updates
         // that module's variable (so the module's own functions/mixins observe
@@ -263,6 +376,9 @@ impl<'a> Evaluator<'a> {
                         .collect();
                     if targets.len() == 1 {
                         targets[0].vars.borrow_mut().insert(v.name.clone(), val);
+                        if self.options.source_map {
+                            targets[0].var_spans.borrow_mut().insert(v.name.clone(), span);
+                        }
                         return Ok(());
                     }
                 }
@@ -272,8 +388,11 @@ impl<'a> Evaluator<'a> {
             if let Some(g) = self.scopes.first_mut() {
                 g.borrow_mut().insert(v.name.clone(), val);
             }
+            if let Some(g) = self.var_spans.first_mut() {
+                g.borrow_mut().insert(v.name.clone(), span);
+            }
         } else {
-            self.assign(&v.name, val);
+            self.assign(&v.name, val, span);
         }
         Ok(())
     }
@@ -316,7 +435,11 @@ impl<'a> Evaluator<'a> {
             return Ok(());
         }
         let val = self.eval_expr(&v.value)?.without_slash();
-        target.vars.borrow_mut().insert(name, val);
+        let span = self.expression_node(&v.value, v.value_pos);
+        target.vars.borrow_mut().insert(name.clone(), val);
+        if self.options.source_map {
+            target.var_spans.borrow_mut().insert(name, span);
+        }
         Ok(())
     }
 
@@ -325,9 +448,12 @@ impl<'a> Evaluator<'a> {
     /// Set a variable in the innermost scope. A loop pushes its own scope, so a
     /// loop variable bound here lives in the loop's scope and is re-bound each
     /// iteration (dart-sass `setLocalVariable`).
-    pub(super) fn set_local(&mut self, name: &str, val: Value) {
+    pub(super) fn set_local(&mut self, name: &str, val: Value, span: VarSpan) {
         if let Some(sc) = self.scopes.last_mut() {
             sc.borrow_mut().insert(name.to_string(), val);
+        }
+        if let Some(frame) = self.var_spans.last_mut() {
+            frame.borrow_mut().insert(name.to_string(), span);
         }
     }
 }

@@ -17,6 +17,8 @@ impl Parser {
             return Err(Error::at("expected \"from\"", self.sc.position()));
         }
         self.skip_ws_inline();
+        // Source-map: the loop variable's definition span is `from`'s.
+        let from_pos = self.sc.position();
         let from = self.additive()?;
         let inclusive = if self.try_keyword("through") {
             true
@@ -34,6 +36,7 @@ impl Parser {
             to,
             inclusive,
             body,
+            from_pos,
         })
     }
 
@@ -56,9 +59,16 @@ impl Parser {
             return Err(Error::at("expected \"in\"", self.sc.position()));
         }
         self.skip_ws_inline();
+        // Source-map: every `@each` variable's definition span is the list's.
+        let list_pos = self.sc.position();
         let list = self.parse_value()?;
         let body = self.parse_braced_body()?;
-        Ok(Stmt::Each { vars, list, body })
+        Ok(Stmt::Each {
+            vars,
+            list,
+            body,
+            list_pos,
+        })
     }
 
     /// `@while <cond> { … }`.

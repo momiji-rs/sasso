@@ -329,9 +329,9 @@ pub struct CompileResult {
 /// [`Options::with_source_map_include_sources`] controls whether each source's
 /// full text is embedded in `sourcesContent`.
 ///
-/// V1 granularity maps the start of each selector, declaration property name,
-/// at-rule keyword, and comment; the declaration *value* start is not yet
-/// mapped.
+/// Maps the start of each selector, declaration property name, declaration
+/// value, at-rule keyword, and comment. A value that is a bare `$name` maps
+/// back to where that variable was DEFINED, like dart-sass.
 ///
 /// # Errors
 ///
@@ -403,6 +403,7 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
         url: entry_name,
         glyphs,
         warn: options.warn.as_ref(),
+        source_map: true,
     });
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;
@@ -475,6 +476,7 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
         url: diag_url,
         glyphs,
         warn: options.warn.as_ref(),
+        source_map: false,
     });
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;

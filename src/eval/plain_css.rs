@@ -241,6 +241,9 @@ impl<'a> Evaluator<'a> {
                 Stmt::Decl(d) => {
                     let prop = self.eval_template(&d.property)?.trim().to_string();
                     let value = self.eval_expr(&d.value)?.to_css(false);
+                    // Plain CSS has no variables, so the value node is always
+                    // the value's own text (dart's `_expressionNode` fallback).
+                    let value_span = self.span_at(d.value_pos);
                     out.push(OutNode::AtDecl {
                         prop,
                         value,
@@ -255,11 +258,13 @@ impl<'a> Evaluator<'a> {
                             map_file: 0,
                             map_line: 0,
                         }),
+                        value_span,
                     });
                 }
                 Stmt::CustomDecl(d) => {
                     let prop = self.eval_template(&d.property)?.trim().to_string();
                     let value = self.eval_template(&d.value)?;
+                    let value_span = self.span_at(d.value_pos);
                     out.push(OutNode::AtDecl {
                         prop,
                         value,
@@ -274,6 +279,7 @@ impl<'a> Evaluator<'a> {
                             map_file: 0,
                             map_line: 0,
                         }),
+                        value_span,
                     });
                 }
                 Stmt::Comment(c, lines) => {
@@ -467,6 +473,9 @@ impl<'a> Evaluator<'a> {
             Stmt::Decl(d) => {
                 let prop = self.eval_template(&d.property)?.trim().to_string();
                 let value = self.eval_expr(&d.value)?.to_css(false);
+                // Plain CSS has no variables, so the value node is always the
+                // value's own text (dart's `_expressionNode` fallback).
+                let value_span = self.span_at(d.value_pos);
                 items.push(OutItem::Decl {
                     prop,
                     value,
@@ -481,11 +490,13 @@ impl<'a> Evaluator<'a> {
                         map_file: 0,
                         map_line: 0,
                     }),
+                    value_span,
                 });
             }
             Stmt::CustomDecl(d) => {
                 let prop = self.eval_template(&d.property)?.trim().to_string();
                 let value = self.eval_template(&d.value)?;
+                let value_span = self.span_at(d.value_pos);
                 items.push(OutItem::Decl {
                     prop,
                     value,
@@ -500,6 +511,7 @@ impl<'a> Evaluator<'a> {
                         map_file: 0,
                         map_line: 0,
                     }),
+                    value_span,
                 });
             }
             Stmt::Rule(r) => {

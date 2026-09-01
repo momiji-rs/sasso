@@ -390,6 +390,7 @@ impl<'a> Evaluator<'a> {
     pub(super) fn install_env(&mut self, env: SavedModuleEnv) -> SavedModuleEnv {
         SavedModuleEnv {
             scopes: std::mem::replace(&mut self.scopes, env.scopes),
+            var_spans: std::mem::replace(&mut self.var_spans, env.var_spans),
             scope_semi_global: std::mem::replace(&mut self.scope_semi_global, env.scope_semi_global),
             functions: std::mem::replace(&mut self.functions, env.functions),
             mixins: std::mem::replace(&mut self.mixins, env.mixins),
@@ -406,6 +407,7 @@ impl<'a> Evaluator<'a> {
     pub(super) fn snapshot_env(&self) -> SavedModuleEnv {
         SavedModuleEnv {
             scopes: self.scopes.clone(),
+            var_spans: self.var_spans.clone(),
             scope_semi_global: self.scope_semi_global.clone(),
             functions: self.functions.clone(),
             mixins: self.mixins.clone(),
@@ -1101,6 +1103,14 @@ impl<'a> Evaluator<'a> {
         // evaluates into a fresh buffer, so it starts at zero.
         let saved_comment_floor = std::mem::replace(&mut self.pre_comment_floor, 0);
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![new_scope()]);
+        let saved_var_spans = std::mem::replace(
+            &mut self.var_spans,
+            if self.options.source_map {
+                vec![new_span_scope()]
+            } else {
+                Vec::new()
+            },
+        );
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, vec![true]);
         let saved_funcs = std::mem::replace(&mut self.functions, vec![new_fn_scope()]);
         let saved_mixins = std::mem::replace(&mut self.mixins, vec![new_fn_scope()]);
@@ -1150,6 +1160,11 @@ impl<'a> Evaluator<'a> {
             .into_iter()
             .next()
             .unwrap_or_else(new_scope);
+        // The definition-span frame parallel to `vars_scope` (source-map only).
+        let var_spans_scope = std::mem::take(&mut self.var_spans)
+            .into_iter()
+            .next()
+            .unwrap_or_else(new_span_scope);
         // The module's top-level function/mixin frames, shared by Rc with the
         // chains the module's own callables captured.
         let functions = std::mem::take(&mut self.functions)
@@ -1171,6 +1186,7 @@ impl<'a> Evaluator<'a> {
 
         // Restore the caller's environment.
         self.scopes = saved_scopes;
+        self.var_spans = saved_var_spans;
         self.scope_semi_global = saved_semi;
         self.functions = saved_funcs;
         self.mixins = saved_mixins;
@@ -1210,9 +1226,14 @@ impl<'a> Evaluator<'a> {
             .collect();
         {
             let mut vars = vars_scope.borrow_mut();
+            let mut spans = var_spans_scope.borrow_mut();
             for (k, v) in forwarded.vars {
                 if let std::collections::hash_map::Entry::Vacant(e) = vars.entry(k.clone()) {
                     e.insert(v);
+                    // Carry the forwarded definition span alongside the value.
+                    if let Some(sp) = forwarded.var_spans.get(&k) {
+                        spans.insert(k.clone(), *sp);
+                    }
                     if let Some(o) = forwarded.var_origins.get(&k) {
                         var_origins.insert(k, (Rc::clone(&o.0), o.1.clone()));
                     }
@@ -1245,6 +1266,7 @@ impl<'a> Evaluator<'a> {
         Ok((
             Module {
                 vars: vars_scope,
+                var_spans: var_spans_scope,
                 functions,
                 mixins,
                 used_user_modules,
@@ -1494,6 +1516,9 @@ impl<'a> Evaluator<'a> {
                     }
                 }
                 self.forwarded.vars.insert(key.clone(), val.clone());
+                if let Some(sp) = module.var_spans.borrow().get(name) {
+                    self.forwarded.var_spans.insert(key.clone(), *sp);
+                }
                 self.forwarded.var_origins.insert(key.clone(), origin);
                 self.forwarded.var_src.insert(key, member_src);
             }
@@ -1623,8 +1648,14 @@ impl<'a> Evaluator<'a> {
         // captured), so writes inside the module are immediately visible to
         // its closures and to later cross-module reads.
         let module_scope = std::rc::Rc::clone(&module.vars);
+        let module_spans = if self.options.source_map {
+            vec![std::rc::Rc::clone(&module.var_spans)]
+        } else {
+            Vec::new()
+        };
         SavedModuleEnv {
             scopes: std::mem::replace(&mut self.scopes, vec![module_scope]),
+            var_spans: std::mem::replace(&mut self.var_spans, module_spans),
             scope_semi_global: std::mem::replace(&mut self.scope_semi_global, vec![true]),
             functions: std::mem::replace(&mut self.functions, vec![std::rc::Rc::clone(&module.functions)]),
             mixins: std::mem::replace(&mut self.mixins, vec![std::rc::Rc::clone(&module.mixins)]),

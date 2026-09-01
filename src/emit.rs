@@ -1,7 +1,7 @@
 //! Serialize the flattened output tree to CSS.
 
 use crate::ast::SrcLines;
-use crate::eval::{OutItem, OutNode};
+use crate::eval::{OutItem, OutNode, VarSpan};
 use crate::sourcemap::SmCollector;
 use crate::OutputStyle;
 
@@ -91,7 +91,16 @@ fn record(out: &str, lines: SrcLines, collector: &mut Option<SmCollector>) {
         if line == 0 {
             return;
         }
-        c.record(out.len(), file, line - 1, lines.start_col);
+        c.record(out, file, line - 1, lines.start_col);
+    }
+}
+
+/// Record a mapped token from an already-0-based [`VarSpan`] (a declaration
+/// VALUE's span, resolved at eval time). `file == 0` means "unknown" and is
+/// skipped. Like [`record`], reads the output but never mutates it.
+fn record_span(out: &str, span: VarSpan, collector: &mut Option<SmCollector>) {
+    if let Some(c) = collector {
+        c.record(out, span.file, span.line, span.col);
     }
 }
 
@@ -288,12 +297,22 @@ fn emit_node_expanded(
             important,
             custom,
             lines,
+            value_span,
         } => {
             out.push_str(indent);
             // Source-map: the declaration property name.
             record(out, *lines, collector);
             out.push_str(prop);
-            emit_decl_value_expanded(out, value, *important, *custom, lines.col as usize, indent);
+            emit_decl_value_expanded(
+                out,
+                value,
+                *important,
+                *custom,
+                lines.col as usize,
+                indent,
+                *value_span,
+                collector,
+            );
             out.push_str(";\n");
             *prev = *lines;
         }
@@ -359,12 +378,22 @@ fn emit_item_expanded(
             important,
             custom,
             lines,
+            value_span,
         } => {
             out.push_str(indent);
             // Source-map: the declaration property name.
             record(out, *lines, collector);
             out.push_str(prop);
-            emit_decl_value_expanded(out, value, *important, *custom, lines.col as usize, indent);
+            emit_decl_value_expanded(
+                out,
+                value,
+                *important,
+                *custom,
+                lines.col as usize,
+                indent,
+                *value_span,
+                collector,
+            );
             out.push_str(";\n");
             *prev = *lines;
         }
@@ -435,6 +464,7 @@ fn emit_item_expanded(
 /// A multi-line custom value is re-indented (dart `_writeReindentedValue`):
 /// `name_col` is the declaration name's 0-based source column and `indent`
 /// the current output indentation.
+#[allow(clippy::too_many_arguments)]
 fn emit_decl_value_expanded(
     out: &mut String,
     value: &str,
@@ -442,9 +472,15 @@ fn emit_decl_value_expanded(
     custom: bool,
     name_col: usize,
     indent: &str,
+    value_span: VarSpan,
+    collector: &mut Option<SmCollector>,
 ) {
     if custom {
         out.push(':');
+        // dart wraps a custom property's value in `_for(node.value, …)`
+        // (serialize.dart:379): the span opens at the value's own text, which
+        // begins immediately after the colon.
+        record_span(out, value_span, collector);
         match minimum_indentation(value) {
             MinIndent::SingleLine => out.push_str(value),
             MinIndent::Trailing => {
@@ -456,6 +492,12 @@ fn emit_decl_value_expanded(
         return;
     }
     out.push_str(": ");
+    // dart wraps a SassScript value in `_buffer.forSpan(node.valueSpanForMap,
+    // …)` (serialize.dart:389), so the mapping opens at the first byte of the
+    // serialized value — after the `: `, not at the property name. For a bare
+    // `$name` value this points at the variable's DEFINITION, which is the
+    // whole reason this second entry is not redundant with the property one.
+    record_span(out, value_span, collector);
     out.push_str(value);
     if important {
         out.push_str(" !important");
@@ -682,10 +724,19 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             lines,
             ..
         } => {
-            // Pre-render each visible item to a string, keeping its source lines
-            // for the source map (`None` = no usable mapping, e.g. a plain-CSS
-            // nested rule whose leading token is a selector we don't map here).
-            let decls: Vec<(String, Option<SrcLines>)> = items
+            // Pre-render each visible item, keeping its source lines for the
+            // source map (`None` = no usable mapping, e.g. a plain-CSS nested
+            // rule whose leading token is a selector we don't map here). A
+            // declaration is split into `head` (`prop:`) and `tail` (the value
+            // plus any `!important`) so the value's own mapping can be recorded
+            // between them, matching dart's `forSpan` around the value alone.
+            struct Rendered {
+                head: String,
+                tail: String,
+                lines: Option<SrcLines>,
+                value_span: VarSpan,
+            }
+            let decls: Vec<Rendered> = items
                 .iter()
                 .filter_map(|it| match it {
                     OutItem::Decl {
@@ -694,13 +745,19 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
                         important,
                         custom,
                         lines,
+                        value_span,
                     } => {
                         // A custom property emits its value verbatim (its
                         // leading whitespace is part of `value`) and never gains
                         // an `!important` flag.
                         let imp = if *important && !*custom { "!important" } else { "" };
                         let value = fold_value_compressed(value, *custom);
-                        Some((format!("{prop}:{value}{imp}"), Some(*lines)))
+                        Some(Rendered {
+                            head: format!("{prop}:"),
+                            tail: format!("{value}{imp}"),
+                            lines: Some(*lines),
+                            value_span: *value_span,
+                        })
                     }
                     OutItem::Comment(..) => None,
                     OutItem::ChildlessAtRule { name, prelude, lines } => {
@@ -709,14 +766,25 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
                         } else {
                             format!("@{name} {prelude}")
                         };
-                        Some((s, Some(*lines)))
+                        Some(Rendered {
+                            head: s,
+                            tail: String::new(),
+                            lines: Some(*lines),
+                            value_span: VarSpan::default(),
+                        })
                     }
-                    OutItem::NestedRule { selectors, items } => {
-                        Some((compressed_nested_rule(selectors, items), None))
-                    }
-                    OutItem::NestedAtRule { name, prelude, items } => {
-                        Some((compressed_nested_at_rule(name, prelude, items), None))
-                    }
+                    OutItem::NestedRule { selectors, items } => Some(Rendered {
+                        head: compressed_nested_rule(selectors, items),
+                        tail: String::new(),
+                        lines: None,
+                        value_span: VarSpan::default(),
+                    }),
+                    OutItem::NestedAtRule { name, prelude, items } => Some(Rendered {
+                        head: compressed_nested_at_rule(name, prelude, items),
+                        tail: String::new(),
+                        lines: None,
+                        value_span: VarSpan::default(),
+                    }),
                 })
                 .collect();
             if decls.is_empty() {
@@ -726,15 +794,19 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             record(out, *lines, collector);
             out.push_str(&selectors.to_strings().join(","));
             out.push('{');
-            for (i, (s, dlines)) in decls.iter().enumerate() {
+            for (i, d) in decls.iter().enumerate() {
                 if i > 0 {
                     out.push(';');
                 }
-                if let Some(l) = dlines {
+                if let Some(l) = d.lines {
                     // Source-map: the item's leading token (property name / `@`).
-                    record(out, *l, collector);
+                    record(out, l, collector);
                 }
-                out.push_str(s);
+                out.push_str(&d.head);
+                // Source-map: the value, which for a bare `$name` points at the
+                // variable's definition rather than at this line.
+                record_span(out, d.value_span, collector);
+                out.push_str(&d.tail);
             }
             out.push('}');
         }
@@ -751,12 +823,15 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             important,
             custom,
             lines,
+            value_span,
         } => {
             let imp = if *important && !*custom { "!important" } else { "" };
             // Source-map: the declaration property name.
             record(out, *lines, collector);
             out.push_str(prop);
             out.push(':');
+            // Source-map: the value (dart's `forSpan(valueSpanForMap)`).
+            record_span(out, *value_span, collector);
             out.push_str(&fold_value_compressed(value, *custom));
             out.push_str(imp);
         }

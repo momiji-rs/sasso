@@ -405,6 +405,116 @@ fn sasso_supports_header_maps_to_keyword() {
 }
 
 #[test]
+fn sasso_bare_variable_value_maps_to_its_definition() {
+    // A declaration whose value is a BARE `$name` gets a SECOND mapping segment,
+    // pointing at where that variable was DECLARED — dart serializes the value
+    // inside `_buffer.forSpan(node.valueSpanForMap, …)` (serialize.dart:389),
+    // and `valueSpanForMap` runs the value expression through `_expressionNode`
+    // (evaluate.dart:1414 -> 4538), which resolves a `VariableExpression` to
+    // `Environment.getVariableNode` — the node stored when the variable was set.
+    // sasso previously emitted no value segment at all, which both lost the
+    // mapping AND renumbered every following segment.
+    //
+    // All expected strings here were produced by RUNNING dart-sass 1.101.6
+    // (`sass.compileToResult(path, sourceMap: true)`), not by copying sasso's
+    // own output.
+    let opts = Options::default().with_url("in.scss");
+
+    // `color: $c` (src 2:9) maps back to the `red` in `$c: red` at src 0:4.
+    // Without the fix sasso emitted `AACA;EACE;;AACA;EAAK` — the `,OAFE` segment
+    // missing and the two trailing segments shifted.
+    let src = "$c: red;\n.a {\n  color: $c;\n  .b { top: 1px; }\n}\n";
+    let (_c, _m, json) = sasso_map(src, &opts);
+    assert_eq!(sasso_mappings(&json), "AACA;EACE,OAFE;;AAGF;EAAK");
+
+    // Compressed takes the same extra segment (`MAFE`).
+    let (_c, _m, json) = sasso_map(
+        src,
+        &Options::default()
+            .with_style(OutputStyle::Compressed)
+            .with_url("in.scss"),
+    );
+    assert_eq!(sasso_mappings(&json), "AACA,GACE,MAFE,IAGF");
+
+    // The resolution is TRANSITIVE: `$b: $a` stores `$a`'s node, so `c: $b`
+    // reaches the original `red` (src 0:4), not the `$b` declaration.
+    let (_c, _m, json) = sasso_map("$a: red;\n$b: $a;\n.x { c: $b; }\n", &opts);
+    assert_eq!(sasso_mappings(&json), "AAEA;EAAK,GAFD");
+
+    // A mixin/function PARAMETER resolves too — to the ARGUMENT at the call
+    // site, because `getVariableNode` returns the CURRENT binding: `pad: $p`
+    // maps back to the `4px` in `@include m(4px)` (src 1:16).
+    let (_c, _m, json) = sasso_map("@mixin m($p) { pad: $p; }\n.a { @include m(4px); }\n", &opts);
+    assert_eq!(sasso_mappings(&json), "AACA;EADe,KACC");
+
+    // ONLY a bare variable resolves. Every other expression shape keeps its own
+    // span, which sits on the declaration's own source line and is therefore
+    // dropped as redundant — so `a: $c` is the only one of these six to gain a
+    // segment (`,GAJE`). This is the boundary that makes the rule falsifiable:
+    // arithmetic, calls, interpolation, lists and literals must NOT resolve.
+    let src = concat!(
+        "$c: red;\n",
+        "$n: 2;\n",
+        "@function f($x) { @return $x; }\n",
+        ".a {\n",
+        "  a: $c;\n",     // bare variable   -> EXTRA segment
+        "  b: $n * 3;\n", // arithmetic      -> none
+        "  c: f($n);\n",  // call            -> none
+        "  d: #{$c};\n",  // interpolation   -> none
+        "  e: $c $c;\n",  // list            -> none
+        "  g: red;\n",    // literal         -> none
+        "}\n",
+    );
+    let (_c, _m, json) = sasso_map(src, &opts);
+    assert_eq!(sasso_mappings(&json), "AAGA;EACE,GAJE;EAKF;EACA;EACA;EACA;EACA");
+}
+
+#[test]
+fn sasso_redundant_entry_dropped_across_source_files() {
+    // dart's `SourceMapBuffer._addEntry` (util/source_map_buffer.dart:64) drops
+    // an entry whose SOURCE LINE and TARGET LINE both repeat the previous
+    // entry's. Crucially it compares neither the source FILE nor the column, so
+    // two tokens on one generated line collapse even when they come from
+    // different files. Verified by running dart-sass 1.101.6 on a two-file
+    // compressed fixture: `.q1` (in.scss line 0) then an imported `.p1`
+    // (_p.scss line 0) emit ONE segment, not two.
+    //
+    // sasso used to key this on `(file_id, src_line)`, which kept the second
+    // entry. The fix matters here because a declaration now emits a value
+    // segment on the SAME generated line as its property name.
+    struct TwoFile;
+    impl Importer for TwoFile {
+        fn canonicalize(
+            &self,
+            url: &str,
+            _ctx: &CanonicalizeContext<'_>,
+        ) -> Result<Option<CanonicalUrl>, ImporterError> {
+            Ok(Some(CanonicalUrl::new(format!("u:{url}"))))
+        }
+        fn load(&self, url: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError> {
+            assert_eq!(url.as_str(), "u:p");
+            Ok(Some(ImporterResult {
+                contents: ".p1 { a: 1px; }\n.p2 { b: 2px; }\n".to_string(),
+                syntax: Syntax::Scss,
+                source_map_url: None,
+            }))
+        }
+    }
+    let src = ".q1 { c: 3px; }\n@import \"p\";\n.q2 { d: 4px; }\n";
+    let (css, _m, json) = sasso_map(
+        src,
+        &Options::default()
+            .with_style(OutputStyle::Compressed)
+            .with_url("in.scss")
+            .with_importer(&TwoFile),
+    );
+    assert_eq!(css, ".q1{c:3px}.p1{a:1px}.p2{b:2px}.q2{d:4px}");
+    // 3 segments, not 4: `.p1` (file 1, line 0) is dropped as redundant with
+    // `.q1` (file 0, line 0) — same source line, same generated line.
+    assert_eq!(sasso_mappings(&json), "AAAA,oBCCA,UDCA");
+}
+
+#[test]
 fn sasso_sources_content_round_trips() {
     let src = ".a { color: red; }\n";
     let opts = Options::default()

@@ -105,12 +105,19 @@ pub(crate) enum Stmt {
         to: Expr,
         inclusive: bool,
         body: Vec<Stmt>,
+        /// 1-based start of `from`'s text. Source-map only: the loop variable's
+        /// definition node is `_expressionNode(node.from)` (evaluate.dart:1666).
+        from_pos: Pos,
     },
     /// `@each $v[, $k…] in <list> { … }`.
     Each {
         vars: Vec<String>,
         list: Expr,
         body: Vec<Stmt>,
+        /// 1-based start of `list`'s text. Source-map only: every `@each`
+        /// variable's definition node is `_expressionNode(node.list)`
+        /// (evaluate.dart:1441).
+        list_pos: Pos,
     },
     /// `@while <cond> { … }`.
     While { cond: Expr, body: Vec<Stmt> },
@@ -310,6 +317,12 @@ pub(crate) struct ParamList {
 pub(crate) struct Param {
     pub name: String,
     pub default: Option<Expr>,
+    /// 1-based position where `default`'s text starts ([`Pos::NONE`] when there
+    /// is no default). Source-map only: a parameter bound from its declared
+    /// default takes that default's span as its definition node, exactly like
+    /// a `$x: <value>` declaration (dart `_expressionNode(parameter
+    /// .defaultValue!)`, evaluate.dart:3588).
+    pub default_pos: Pos,
 }
 
 pub(crate) struct VarDecl {
@@ -320,6 +333,11 @@ pub(crate) struct VarDecl {
     /// `Some(ns)` for a namespaced assignment `ns.$name: value`, which updates
     /// the variable in the `@use`d module bound to `ns`.
     pub namespace: Option<String>,
+    /// 1-based position where `value`'s text starts. Source-map only: this is
+    /// the span dart records as the variable's *definition node* so a later
+    /// bare `$name` reference in a declaration maps back here (dart
+    /// `Environment._variableNodes`, environment.dart:93).
+    pub value_pos: Pos,
 }
 
 pub(crate) struct Rule {
@@ -369,6 +387,12 @@ pub(crate) struct Declaration {
     /// 1-based line where the declaration's value ends (0 when unavailable),
     /// for the serializer's trailing-comment rule.
     pub end_line: u32,
+    /// 1-based position where `value`'s text starts. Source-map only: dart
+    /// wraps the serialized value in `forSpan(valueSpanForMap)`
+    /// (serialize.dart:389), which defaults to the value expression's own span
+    /// and becomes the *variable definition's* span when the value is a bare
+    /// `$name` (evaluate.dart:1414 -> `_expressionNode`, evaluate.dart:4538).
+    pub value_pos: Pos,
 }
 
 /// A custom-property declaration (`--name: value`). The name and the value
@@ -381,6 +405,12 @@ pub(crate) struct CustomDecl {
     /// 1-based line where the declaration's value ends (0 when unavailable),
     /// for the serializer's trailing-comment rule.
     pub end_line: u32,
+    /// 1-based position where the verbatim value text starts. Source-map only:
+    /// a custom property is serialized inside `_for(node.value, …)`
+    /// (serialize.dart:379), i.e. always the value's OWN span — a custom
+    /// property never routes through `_expressionNode`, so `--x: $c` maps to
+    /// the `$c` text, not to `$c`'s definition.
+    pub value_pos: Pos,
 }
 
 /// A nested property set: a declaration whose value (which may be empty) is
@@ -536,6 +566,12 @@ pub(crate) struct CallArg {
     pub name: Option<String>,
     pub value: Expr,
     pub splat: bool,
+    /// 1-based position where `value`'s text starts. Source-map only: binding a
+    /// parameter to this argument records the argument's span as the
+    /// parameter's definition node, so `@mixin m($p) { pad: $p }` invoked as
+    /// `@include m(4px)` maps the emitted `4px` back to the CALL SITE (dart
+    /// `evaluated.positionalNodes` / `namedNodes`, evaluate.dart:3572-3592).
+    pub value_pos: Pos,
 }
 
 #[derive(Clone, Copy)]

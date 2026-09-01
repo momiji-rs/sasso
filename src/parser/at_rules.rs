@@ -2508,14 +2508,23 @@ impl Parser {
                 self.skip_ws_inline();
                 break;
             }
+            // Source-map: a parameter bound from its declared default takes
+            // that default's span as its definition node, so record where the
+            // default's text starts (Pos::NONE when there is no default).
+            let mut default_pos = crate::scanner::Pos::NONE;
             let default = if self.sc.peek() == Some(':') {
                 self.sc.bump();
                 self.skip_ws_inline();
+                default_pos = self.sc.position();
                 Some(self.space_list()?)
             } else {
                 None
             };
-            params.push(Param { name, default });
+            params.push(Param {
+                name,
+                default,
+                default_pos,
+            });
             self.skip_ws_inline();
             if self.sc.eat(',') {
                 self.skip_ws_inline();

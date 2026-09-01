@@ -69,12 +69,78 @@ fn parse_with_syntax(src: &str, syntax: Syntax) -> Result<crate::ast::Stylesheet
 /// callee's arglist; comma otherwise).
 type EvaledArgs = (Vec<Value>, Vec<(String, Value)>, ListSep);
 
+/// Definition spans for the values in an [`EvaledArgs`], parallel to its
+/// positional and keyword vectors (dart `ArgumentResults.positionalNodes` /
+/// `namedNodes`). Binding a parameter to an argument copies the matching span
+/// so `@mixin m($p) { pad: $p }` + `@include m(4px)` maps the emitted `4px`
+/// back to the CALL SITE. Source-map only.
+#[derive(Default)]
+pub(crate) struct ArgSpans {
+    positional: Vec<VarSpan>,
+    named: Vec<(String, VarSpan)>,
+}
+
+impl ArgSpans {
+    /// The span recorded for positional argument `i`, if any.
+    fn positional(&self, i: usize) -> VarSpan {
+        self.positional.get(i).copied().unwrap_or_default()
+    }
+
+    /// The span recorded for the keyword argument spelled `name` (compared
+    /// hyphen/underscore-insensitively, like the value lookup).
+    fn named(&self, name: &str) -> VarSpan {
+        let key = normalize_arg_name(name);
+        self.named
+            .iter()
+            .find(|(n, _)| normalize_arg_name(n) == key)
+            .map(|(_, sp)| *sp)
+            .unwrap_or_default()
+    }
+}
+
 /// One variable scope. Lexical scoping shares frames between the active
 /// chain and callable closures (dart's Environment maps), so a scope is a
 /// shared, interior-mutable map.
 pub(crate) type Scope = std::rc::Rc<std::cell::RefCell<HashMap<String, Value>>>;
 
 fn new_scope() -> Scope {
+    std::rc::Rc::new(std::cell::RefCell::new(HashMap::default()))
+}
+
+/// Where a variable was DEFINED: the interned source file id plus the 0-based
+/// line/column of the defining expression's first character.
+///
+/// This is sasso's equivalent of the `AstNode` dart stores in
+/// `Environment._variableNodes` (environment.dart:93) — a map kept in lockstep
+/// with `_variables`, holding, for each binding, the node whose span should be
+/// blamed for the value. It exists purely for source maps and diagnostics
+/// alignment: no CSS byte depends on it.
+///
+/// `file == 0` means "unknown" (a synthesized binding with no source text, e.g.
+/// a built-in module variable or a host-function argument); the source map
+/// drops such entries.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct VarSpan {
+    pub file: u32,
+    /// 0-based source line.
+    pub line: u32,
+    /// 0-based source column.
+    pub col: u32,
+}
+
+/// A callable's argument frame: the bound values plus the definition span of
+/// each binding, which [`Evaluator::push_scope_frame`] installs as parallel
+/// scope frames.
+type ArgFrame = (HashMap<String, Value>, HashMap<String, VarSpan>);
+
+/// One frame of the variable-definition-span chain, parallel to [`Scope`]
+/// (dart's `Environment._variableNodes` is a `List<Map<String, AstNode>>`
+/// pushed and popped in lockstep with `_variables`). Shared by `Rc` so a
+/// callable's captured closure sees later writes to the frames it closed over,
+/// exactly like the value chain.
+pub(crate) type SpanScope = std::rc::Rc<std::cell::RefCell<HashMap<String, VarSpan>>>;
+
+fn new_span_scope() -> SpanScope {
     std::rc::Rc::new(std::cell::RefCell::new(HashMap::default()))
 }
 
@@ -107,6 +173,10 @@ pub(crate) struct EnvModules {
 pub(crate) struct UserCallable {
     pub def: Rc<Callable>,
     pub env: Vec<Scope>,
+    /// The variable-definition-span chain captured alongside `env`, frame for
+    /// frame (dart closes over `_variableNodes` with the rest of the
+    /// environment).
+    pub env_spans: Vec<SpanScope>,
     pub env_semi: Vec<bool>,
     pub env_fns: Vec<FnScope>,
     pub env_mixins: Vec<FnScope>,
@@ -215,6 +285,9 @@ pub(crate) enum OutNode {
         /// Source lines (only `file` and `end` are meaningful) for the
         /// serializer's trailing-comment rule; default = disabled.
         lines: SrcLines,
+        /// Where the emitted VALUE maps back to (dart `valueSpanForMap`,
+        /// serialize.dart:390). Source-map only.
+        value_span: VarSpan,
     },
     /// Control-only marker (never serialized): the end of a completed top-level
     /// style rule's output group (dart-sass `isGroupEnd`). The next group gets a
@@ -307,6 +380,13 @@ pub(crate) enum OutItem {
         /// Source lines (only `file` and `end` are meaningful) for the
         /// serializer's trailing-comment rule; default = disabled.
         lines: SrcLines,
+        /// Where the emitted VALUE maps back to. dart wraps the serialized
+        /// value in `_buffer.forSpan(node.valueSpanForMap, …)`
+        /// (serialize.dart:389): normally the value expression's own start, but
+        /// the variable's DEFINITION when the value is a bare `$name`
+        /// (evaluate.dart:1414 -> `_expressionNode`). Source-map only — this
+        /// field can never change a CSS byte.
+        value_span: VarSpan,
     },
     Comment(String, SrcLines),
     /// A childless at-rule (`@e f;`) that appears directly inside a style rule:
@@ -447,12 +527,14 @@ impl Sink<'_> {
                     important,
                     custom,
                     lines,
+                    value_span,
                 } => body.push(OutNode::AtDecl {
                     prop,
                     value,
                     important,
                     custom,
                     lines,
+                    value_span,
                 }),
                 OutItem::Comment(text, lines) => body.push(OutNode::Comment(text, lines)),
                 OutItem::ChildlessAtRule { name, prelude, lines } => {
@@ -477,12 +559,14 @@ impl Sink<'_> {
                                 important,
                                 custom,
                                 lines,
+                                value_span,
                             } => OutNode::AtDecl {
                                 prop,
                                 value,
                                 important,
                                 custom,
                                 lines,
+                                value_span,
                             },
                             OutItem::Comment(text, lines) => OutNode::Comment(text, lines),
                             OutItem::NestedRule { selectors, items } => {
@@ -683,10 +767,20 @@ pub(crate) struct EvalOptions<'a> {
     /// Diagnostic handler (dart-sass `logger`). When set, `@warn`/`@debug`/
     /// deprecation warnings are delivered here instead of printed to stderr.
     pub warn: Option<&'a crate::WarnHandler>,
+    /// Whether this compile produces a source map. Gates the variable
+    /// definition-span bookkeeping (`var_spans` et al.), which only source-map
+    /// emission reads: when false the span chain stays empty and every
+    /// span lookup short-circuits to "unknown", so the plain [`crate::compile`]
+    /// path pays nothing for it.
+    pub source_map: bool,
 }
 
 pub(crate) struct Evaluator<'a> {
     scopes: Vec<Scope>,
+    /// Definition spans for the bindings in `scopes`, one frame per scope
+    /// (dart `Environment._variableNodes`). Pushed/popped in lockstep. Purely
+    /// additive: nothing here can change a CSS byte.
+    var_spans: Vec<SpanScope>,
     /// Whether each scope in `scopes` is "semi-global" (dart-sass): a control
     /// flow scope (`@for`/`@each`/`@while`/`@if`) that lets a fresh assignment
     /// reach the global scope, but only when every enclosing scope up to the
@@ -951,6 +1045,9 @@ struct Module {
     /// outside `ns.$var: value` assignment updates the module and its own
     /// functions/mixins observe the new value on their next call.
     vars: Scope,
+    /// Definition spans for `vars`, in lockstep (dart's module `Environment`
+    /// carries its `_variableNodes` the same way). Source-map only.
+    var_spans: SpanScope,
     /// Top-level functions/mixins (the module's global frame). Shared by Rc
     /// with the chains the module's own callables captured, so they resolve
     /// each other (and forwarded members merged after evaluation).
@@ -1111,6 +1208,8 @@ struct ContentBlock {
 #[derive(Clone)]
 struct SavedModuleEnv {
     scopes: Vec<Scope>,
+    /// Definition spans parallel to `scopes` (source-map only).
+    var_spans: Vec<SpanScope>,
     scope_semi_global: Vec<bool>,
     functions: Vec<FnScope>,
     mixins: Vec<FnScope>,
@@ -1128,6 +1227,10 @@ struct SavedModuleEnv {
 #[derive(Default)]
 struct Forwarded {
     vars: HashMap<String, Value>,
+    /// Definition spans for `vars`, keyed identically (source-map only): a
+    /// forwarded variable keeps pointing at the `$x: <value>` that defined it
+    /// in its home module.
+    var_spans: HashMap<String, VarSpan>,
     functions: HashMap<String, Rc<UserCallable>>,
     mixins: HashMap<String, Rc<UserCallable>>,
     /// The module each re-exported member actually lives in (with the
@@ -1211,6 +1314,14 @@ impl<'a> Evaluator<'a> {
             file_ids: HashMap::default(),
             file_map_urls: HashMap::default(),
             scopes: vec![new_scope()],
+            // Empty (not one empty frame) when spans aren't tracked: every
+            // push/insert/lookup site is guarded, so an empty chain makes the
+            // whole bookkeeping a no-op. See `EvalOptions::source_map`.
+            var_spans: if options.source_map {
+                vec![new_span_scope()]
+            } else {
+                Vec::new()
+            },
             // The global scope is treated as semi-global so a top-level control
             // flow scope (its child) becomes semi-global too.
             scope_semi_global: vec![true],
@@ -1278,18 +1389,22 @@ impl<'a> Evaluator<'a> {
         if lines == SrcLines::default() {
             return lines;
         }
-        // stamp runs for every source-line-carrying node; the id is interned
-        // once per file entry (every `current_url` assignment resets it), so
-        // the per-node cost is a u32 check.
+        lines.file = self.intern_current_file();
+        lines
+    }
+
+    /// The interned diagnostic/source-map file id of the file being evaluated,
+    /// assigning one on first use. Interned once per file entry (every
+    /// `current_url` assignment resets `current_url_stamp`), so the steady-state
+    /// cost is a `u32` check.
+    pub(crate) fn intern_current_file(&mut self) -> u32 {
         if self.current_url_stamp != 0 {
-            lines.file = self.current_url_stamp;
-            return lines;
+            return self.current_url_stamp;
         }
         let next = self.file_ids.len() as u32 + 1;
         let id = *self.file_ids.entry(self.current_url.clone()).or_insert(next);
         self.current_url_stamp = id;
-        lines.file = id;
-        lines
+        id
     }
 
     pub(crate) fn eval_sheet(&mut self, sheet: &Stylesheet, out: &mut Vec<OutNode>) -> Result<(), Error> {
@@ -1810,15 +1925,23 @@ impl<'a> Evaluator<'a> {
                     to,
                     inclusive,
                     body,
+                    from_pos,
                 } => {
                     let (start_i, end_i, unit) = self.for_bounds(from, to)?;
                     // The loop body runs in its own semi-global scope: the loop
                     // variable and any fresh assignments live there and vanish
                     // when the loop ends (dart-sass `visitForRule`).
                     self.push_scope(true);
+                    // Source-map: the loop variable is defined by `from`
+                    // (evaluate.dart:1666); resolved inside the scope like dart.
+                    let span = self.expression_node(from, *from_pos);
                     let mut result = Ok(());
                     for i in for_indices(start_i, end_i, *inclusive) {
-                        self.set_local(var, Value::Number(Number::with_unit(i as f64, unit.clone())));
+                        self.set_local(
+                            var,
+                            Value::Number(Number::with_unit(i as f64, unit.clone())),
+                            span,
+                        );
                         result = self.exec(body, parents, sink);
                         if result.is_err() {
                             break;
@@ -1827,12 +1950,21 @@ impl<'a> Evaluator<'a> {
                     self.pop_scope();
                     result?;
                 }
-                Stmt::Each { vars, list, body } => {
+                Stmt::Each {
+                    vars,
+                    list,
+                    body,
+                    list_pos,
+                } => {
                     let items = self.eval_each_items(list)?;
+                    // Source-map: every bound variable is defined by the list
+                    // expression, resolved before the scope is pushed
+                    // (evaluate.dart:1441).
+                    let span = self.expression_node(list, *list_pos);
                     self.push_scope(true);
                     let mut result = Ok(());
                     for i in 0..items.len() {
-                        self.bind_each(vars, items.get(i));
+                        self.bind_each(vars, items.get(i), span);
                         result = self.exec(body, parents, sink);
                         if result.is_err() {
                             break;
@@ -2245,6 +2377,10 @@ impl<'a> Evaluator<'a> {
         if vstr.is_empty() {
             return Ok(None);
         }
+        // dart computes `valueSpanForMap` as `_expressionNode(node.value).span`
+        // (evaluate.dart:1414): a BARE `$name` value resolves to wherever that
+        // variable was declared; any other expression shape keeps its own span.
+        let value_span = self.expression_node(&d.value, d.value_pos);
         Ok(Some(OutItem::Decl {
             prop,
             value: vstr,
@@ -2260,6 +2396,7 @@ impl<'a> Evaluator<'a> {
                 map_file: 0,
                 map_line: 0,
             }),
+            value_span,
         }))
     }
 
@@ -2270,6 +2407,10 @@ impl<'a> Evaluator<'a> {
     fn eval_custom_decl(&mut self, d: &CustomDecl) -> Result<Option<OutItem>, Error> {
         let prop = trim_owned(self.eval_template(&d.property)?);
         let value = self.eval_template(&d.value)?;
+        // A custom property is serialized inside `_for(node.value, …)`
+        // (serialize.dart:379) — the value's OWN span, never resolved through
+        // `_expressionNode`. So `--x: $c` maps to the literal `$c` text.
+        let value_span = self.span_at(d.value_pos);
         Ok(Some(OutItem::Decl {
             prop,
             value,
@@ -2287,6 +2428,7 @@ impl<'a> Evaluator<'a> {
                 map_file: 0,
                 map_line: 0,
             }),
+            value_span,
         }))
     }
 
@@ -2332,6 +2474,10 @@ impl<'a> Evaluator<'a> {
                     // No usable end line of its own (the value precedes the
                     // `{…}` block); the trailing-comment rule stays disabled.
                     lines: SrcLines::default(),
+                    // A property set's leading value carries no mapping today
+                    // (its `lines` are already blank), so neither does its
+                    // value — leaving both unmapped stays self-consistent.
+                    value_span: VarSpan::default(),
                 });
             }
         }
@@ -4195,12 +4341,14 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
                 important,
                 custom,
                 lines,
+                value_span,
             } => items.push(OutItem::Decl {
                 prop,
                 value,
                 important,
                 custom,
                 lines,
+                value_span,
             }),
             OutNode::Comment(t, lines) => items.push(OutItem::Comment(t, lines)),
             OutNode::Rule {
