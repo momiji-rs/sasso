@@ -1638,38 +1638,6 @@ impl Color {
         int(self.r) && int(self.g) && int(self.b)
     }
 
-    /// The compressed rgb-FAMILY serialization of an in-gamut legacy color: the
-    /// shortest of the hex, named-color, and `rgb()`/`rgba()` forms — but never
-    /// the hsl form. Used as one candidate when picking the globally-shortest
-    /// compressed representation (the hsl candidate is produced separately so a
-    /// stored hsl triple keeps its authored hue, e.g. `hsl(30, 0%, 50%)` must
-    /// not collapse its powerless hue to 0 just because the rgb round-trip does).
-    fn compressed_rgb_family(&self) -> String {
-        let opaque = (self.a - 1.0).abs() < f64::EPSILON;
-        if opaque && self.channels_are_int() {
-            let r = self.r.round().clamp(0.0, 255.0) as u8;
-            let g = self.g.round().clamp(0.0, 255.0) as u8;
-            let b = self.b.round().clamp(0.0, 255.0) as u8;
-            let short = shorten_hex(&format!("#{r:02x}{g:02x}{b:02x}"));
-            if let Some(name) = compressed_color_name(r, g, b) {
-                if name.len() <= short.len() {
-                    return name.to_string();
-                }
-            }
-            return short;
-        }
-        let (r, g, b) = (
-            fmt_num(self.r, true),
-            fmt_num(self.g, true),
-            fmt_num(self.b, true),
-        );
-        if opaque {
-            format!("rgb({r},{g},{b})")
-        } else {
-            format!("rgba({r},{g},{b},{})", fmt_num(self.a, true))
-        }
-    }
-
     pub(crate) fn to_css(&self, compressed: bool) -> String {
         if let Some(m) = &self.modern {
             return m.to_css(compressed);
@@ -1728,7 +1696,12 @@ impl Color {
             let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
             if in_gamut(self.r) && in_gamut(self.g) && in_gamut(self.b) {
                 let hsl = crate::builtins::srgb_to_hsl([self.r / 255.0, self.g / 255.0, self.b / 255.0]);
-                let hh = fmt_num(hsl[0], true);
+                // dart nulls the hue when saturation is fuzzy-zero (srgb.dart:
+                // `fuzzyEquals(saturation, 0) ? null : hue`), and a missing hue
+                // serializes as 0 — float dust in a gray triple must not leak
+                // a phantom hue.
+                let hue = if hsl[1].abs() < 1e-11 { 0.0 } else { hsl[0] };
+                let hh = fmt_num(hue, true);
                 let ss = fmt_num(hsl[1], true);
                 let ll = fmt_num(hsl[2], true);
                 let hsl_css = if opaque {
@@ -2276,24 +2249,20 @@ impl ModernColor {
             }
             ColorSpace::Hsl => {
                 let (h, s, l) = self.legacy_hsl_triple();
-                let hsl_css = self.hsl_comma_css(h, s, l, a, opaque, compressed);
-                // Compressed output uses the shortest equivalent form. Compare
-                // the hsl form (built from the stored triple, so it carries no
-                // round-trip noise) against the rgb/hex form of the same color;
-                // e.g. `hsl(210, 50%, 40%)` == `#336699` collapses to `#369`.
+                // Compressed output serializes through the rgb representation
+                // (dart `_writeLegacyColor`, serialize.dart: `color.toSpace(.rgb)`
+                // then hex/named, else the shorter of the rgb form and the hsl
+                // form DERIVED from that rgb) — the stored hsl triple doesn't
+                // participate, so a powerless authored hue collapses to the
+                // round-trip's 0. Only an out-of-gamut color keeps its hsl form.
                 if compressed {
                     let rgb = Color::from_hsl(h, s / 100.0, l / 100.0, a);
                     let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
                     if in_gamut(rgb.r) && in_gamut(rgb.g) && in_gamut(rgb.b) {
-                        // The rgb/hex form wins ties (dart-sass keeps the hsl
-                        // form only when it is strictly shorter).
-                        let other = rgb.compressed_rgb_family();
-                        if other.len() <= hsl_css.len() {
-                            return other;
-                        }
+                        return rgb.to_css(true);
                     }
                 }
-                hsl_css
+                self.hsl_comma_css(h, s, l, a, opaque, compressed)
             }
             ColorSpace::Hwb => {
                 // hwb serializes through its sRGB representation: an
@@ -2302,10 +2271,25 @@ impl ModernColor {
                 let (rgb, h, s, l) = self.hwb_rgb_and_hsl();
                 let int = |v: f64| (v - v.round()).abs() < 1e-9;
                 let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
+                // Compressed hwb serializes through rgb like every legacy space
+                // (dart `_writeLegacyColor`): hex/named/rgb()/derived-hsl,
+                // whichever is shortest — rgba() included for a non-opaque
+                // color. Only out-of-gamut keeps the hsl comma form.
+                if compressed && rgb.iter().all(|&v| in_gamut(v)) {
+                    return Color {
+                        r: rgb[0],
+                        g: rgb[1],
+                        b: rgb[2],
+                        a,
+                        repr: None,
+                        modern: None,
+                    }
+                    .to_css(true);
+                }
                 let rgb_ok = rgb.iter().all(|&v| int(v) && in_gamut(v));
-                // Only a fully-OPAQUE integer hwb collapses to a named color or
-                // hex; a non-opaque hwb always uses the hsl comma form (dart-sass
-                // never emits rgba() for an hwb color).
+                // Expanded: only a fully-OPAQUE integer hwb collapses to a named
+                // color or hex; a non-opaque hwb uses the hsl comma form
+                // (dart-sass never emits rgba() for an hwb color in expanded).
                 if rgb_ok && opaque {
                     if !compressed {
                         if let Some(name) = rgb_name(rgb[0], rgb[1], rgb[2]) {

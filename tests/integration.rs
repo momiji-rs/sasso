@@ -355,15 +355,15 @@ fn compressed_color_picks_shortest_form() {
     // --- hsl-space literals also pick the shortest form --------------------
     // Integer-rgb-equivalent hsl collapses to hex.
     assert_eq!(case("hsl(210,50%,40%)"), "a{x:#369}");
-    // An hsl() LITERAL keeps its authored spelling (`repr`), so the percentage
-    // rule does not reach it yet. dart emits `rgb(15%,30%,45%)` and
-    // `rgb(100%,50%,0%)` for these — see the note on hsl literals in
-    // `rgb_channel_text`. Tracked separately; pinning today's behaviour so the
-    // gap is visible rather than silent.
-    assert_eq!(case("hsl(210,50%,30%)"), "a{x:hsl(210,50%,30%)}");
-    assert_eq!(case("hsl(30,100%,50%)"), "a{x:rgb(255,127.5,0)}");
-    // A powerless (zero-saturation) hue is PRESERVED, not canonicalized to 0.
-    assert_eq!(case("hsl(30,0%,50%)"), "a{x:hsl(30,0%,50%)}");
+    // A fractional-rgb hsl literal serializes through rgb like every legacy
+    // color (dart `_writeLegacyColor`): the percent rgb form wins under the
+    // two-character hsl handicap.
+    assert_eq!(case("hsl(210,50%,30%)"), "a{x:rgb(15%,30%,45%)}");
+    assert_eq!(case("hsl(30,100%,50%)"), "a{x:rgb(100%,50%,0%)}");
+    // A powerless (zero-saturation) hue collapses to the rgb round-trip's 0:
+    // compressed serialization derives the hsl candidate from the rgb triple,
+    // so the authored hue does not participate.
+    assert_eq!(case("hsl(30,0%,50%)"), "a{x:hsl(0,0%,50%)}");
 
     // --- regression guards: unchanged cases -------------------------------
     assert_eq!(case("#336699"), "a{x:#369}");
