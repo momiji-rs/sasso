@@ -9,6 +9,11 @@ name: Release C ABI (c-api tarball)
 #
 # A manual run (workflow_dispatch) builds the tarballs as artifacts WITHOUT
 # uploading — a dry run to validate the matrix before cutting a tag.
+#
+# Every target ships `libsasso.a` plus a dynamic library, EXCEPT the two
+# `*-linux-musl` triples, which are static-only: a musl target defaults to
+# `+crt-static`, and rustc cannot build a cdylib under it (it warns "dropping
+# unsupported crate type `cdylib`"). See the packaging step.
 
 on:
   push:
@@ -30,6 +35,14 @@ jobs:
             runner: ubuntu-latest
           - triple: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm   # native ARM runner (free for public repos)
+          # musl: statically-linked libc, for Alpine and any distro-agnostic
+          # container (issue #18). Built on the NATIVE runner per arch so no
+          # cross-linker is needed — musl-tools provides `musl-gcc` for the
+          # host arch only.
+          - triple: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - triple: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
           - triple: aarch64-apple-darwin
             runner: macos-14
           - triple: x86_64-apple-darwin
@@ -43,6 +56,15 @@ jobs:
         with:
           targets: ${{ matrix.triple }}
 
+      # `musl-gcc`, which rustc drives as the linker for *-linux-musl. Only the
+      # host arch is provided, which is why each musl triple builds on its own
+      # native runner rather than cross-compiling.
+      - name: Install the musl toolchain
+        if: endsWith(matrix.triple, '-linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
       - name: Build the C ABI (cdylib + staticlib)
         run: cargo build --release --manifest-path ffi/Cargo.toml --target ${{ matrix.triple }}
 
@@ -55,13 +77,24 @@ jobs:
           mkdir -p "$name/lib" "$name/include"
           cp ffi/include/sasso.h "$name/include/"
           cp "$out/libsasso.a" "$name/lib/"
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            cp "$out/libsasso.dylib" "$name/lib/"
-            # Relocatable install name so consumers can rpath the dylib.
-            install_name_tool -id @rpath/libsasso.dylib "$name/lib/libsasso.dylib"
-          else
-            cp "$out/libsasso.so" "$name/lib/"
-          fi
+          case "${{ matrix.triple }}" in
+            *-apple-darwin)
+              cp "$out/libsasso.dylib" "$name/lib/"
+              # Relocatable install name so consumers can rpath the dylib.
+              install_name_tool -id @rpath/libsasso.dylib "$name/lib/libsasso.dylib"
+              ;;
+            *-linux-musl)
+              # STATIC ONLY, by design. A musl target defaults to
+              # `+crt-static`, under which rustc cannot produce a cdylib and
+              # emits "dropping unsupported crate type `cdylib`" — so there is
+              # no libsasso.so to copy, and blindly copying one would fail the
+              # build. Consumers that need a loadable module on musl should
+              # link libsasso.a into their own shared object.
+              ;;
+            *)
+              cp "$out/libsasso.so" "$name/lib/"
+              ;;
+          esac
           tar -cJf "$name.tar.xz" "$name"
           echo "ASSET=$name.tar.xz" >> "$GITHUB_ENV"
 
