@@ -11,6 +11,68 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-01
+
+_Crate release `v0.9.0`; ships on npm as `sasso@0.12.0`. **Output-format
+alignment with dart-sass 1.103.1** — the reference pins (CI parity binary,
+sass-spec, baseline) all move together. If you byte-compare sasso's output
+(snapshot tests, build caches), expect diffs on legacy colors and plain-CSS
+`if()`; the CSS is equivalent, only its spelling changed. sass-spec passing
+rose to **14061** (98.95% of attempted, +165 on a newer, larger suite).
+Minor — not patch — for the serialization changes and one removal below._
+
+### Changed (dart-sass 1.101.4–1.103.x alignment)
+
+- **A legacy color with any fractional channel serializes its rgb triple as
+  percentages** (dart 1.101.4): `rgb(127.5, 0, 127.5)` is now
+  `rgb(50%, 0%, 50%)`. Older browsers only support integer or percentage
+  channels in `rgb()`/`rgba()`, so this preserves backwards compatibility
+  without losing precision. Contributed by @shyim (#19).
+- **Plain-CSS `if()` values emit in CSS serialization format** (dart
+  1.101.4), not `meta.inspect()` format: lists lose their parens
+  (`if(css(): 1 2 3)`, invisible items drop out), `null` serializes to
+  nothing, a preserved slash-division keeps its slash, and a value with no
+  CSS form (`()`, a map, a function/mixin reference) is an error.
+- **rec2020 uses the pure 2.4 gamma transfer function** (dart 1.102.0, per
+  the latest CSS Color 4 draft), replacing the BT.2020 piecewise curve.
+- **Compressed hsl/hwb serialization routes through rgb** like every legacy
+  space (dart `_writeLegacyColor`): hex/named first, then the shorter of the
+  percent rgb form and the hsl form *derived from that rgb* under dart's
+  two-character hsl handicap. A powerless (zero-saturation) hue collapses to
+  0, and a non-opaque hwb can emit `rgba()`; only an out-of-gamut color
+  keeps its hsl form.
+- **Reference pins**: sass-spec `1b03109a` → `4a9eea66`, CI parity binary
+  `sass@1.101.3` → `sass@1.103.1`, `spec/BASELINE.json` 13896 → 14061
+  passing. The parity binary is now pinned (previously floating `latest`),
+  so upstream dart-sass releases can no longer redden unrelated PRs.
+
+### Removed
+
+- **Global `whiteness()` and `blackness()`**: like dart-sass, these are
+  `sass:color`-only (`color.whiteness()` / `color.blackness()`); the global
+  spellings now error. Contributed by @shyim (#21).
+
+### Fixed
+
+- **The indented syntax no longer panics on an overlapping `/*/`** comment
+  terminator. Contributed by @shyim (#17).
+- **Unknown-channel errors render the channel list with `inspect`**, not
+  `to_css`, matching dart-sass message spelling. Contributed by @shyim (#20).
+- **Source maps: a declaration whose value is a bare `$name` maps back to
+  the variable's definition** (dart `Environment._variableNodes`),
+  transitively through `$b: $a` chains, module members, and
+  mixin/function parameters (which resolve to the call-site argument).
+  Previously the segment was omitted entirely, which also renumbered every
+  following delta-encoded segment. Contributed by @shyim (#22).
+
+### Performance
+
+- The definition-span bookkeeping behind the source-map fix is gated on an
+  actual source-map compile — the plain `compile()` path pays nothing for it.
+- The percent channel formatter appends `%` in place instead of allocating a
+  second string per channel, keeping the `colors` benchmark at its
+  pre-percent-serialization baseline (CodSpeed gate green).
+
 ## [0.8.1] - 2026-07-17
 
 _Release-tooling only — no compiler changes._
@@ -595,7 +657,8 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/momiji-rs/sasso/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/momiji-rs/sasso/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/momiji-rs/sasso/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/momiji-rs/sasso/compare/v0.6.3...v0.7.0
