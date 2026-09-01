@@ -2414,7 +2414,11 @@ fn rgb_channel_text(r: f64, g: f64, b: f64, compressed: bool) -> (String, String
     }
     // `v * 100 / 255`, in dart's operand order — `v / 255.0 * 100.0` differs in
     // the last bit.
-    let pct = |v: f64| format!("{}%", fmt_num(v * 100.0 / 255.0, compressed));
+    let pct = |v: f64| {
+        let mut s = fmt_num(v * 100.0 / 255.0, compressed);
+        s.push('%');
+        s
+    };
     (pct(r), pct(g), pct(b))
 }
 
