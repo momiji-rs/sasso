@@ -6908,13 +6908,33 @@ fn combine_residuals(mut residuals: Vec<RCond>, is_and: bool) -> CondEval {
     }
 }
 
-/// Serialize a value for the modern `if()` value position, where dart-sass
-/// uses a parenthesized-expression context: lists (including the empty list)
-/// are wrapped in parentheses; other values serialize as usual.
-fn serialize_if_value(v: &Value) -> String {
+/// Serialize a value for the modern `if()` value position. dart-sass 1.101.4
+/// switched this from the `meta.inspect()` format to plain CSS serialization
+/// (`serializeValue`, evaluate.dart `visitIfExpression`): lists lose their
+/// parens (invisible items drop out), `null` serializes to nothing, and a
+/// value with no CSS form (the empty list, a map, a function/mixin reference)
+/// is an error. dart's own error here carries no source span, so ours is
+/// unpositioned too.
+fn serialize_if_value(v: &Value) -> Result<String, Error> {
     match v {
-        Value::List(_) => format!("({})", v.to_css(false)),
-        Value::Null => "null".to_string(),
-        other => other.to_css(false),
+        Value::Null => Ok(String::new()),
+        Value::List(l) if l.items.is_empty() && !l.bracketed => {
+            Err(Error::unpositioned("() isn't a valid CSS value."))
+        }
+        Value::Function(f) => Err(Error::unpositioned(format!(
+            "{} isn't a valid CSS value.",
+            f.inspect()
+        ))),
+        Value::Mixin(m) => Err(Error::unpositioned(format!(
+            "{} isn't a valid CSS value.",
+            m.inspect()
+        ))),
+        other => match find_map(other) {
+            Some(m) => Err(Error::unpositioned(format!(
+                "{} isn't a valid CSS value.",
+                m.to_css(false)
+            ))),
+            None => Ok(other.to_css(false)),
+        },
     }
 }

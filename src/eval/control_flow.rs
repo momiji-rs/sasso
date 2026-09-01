@@ -1227,12 +1227,13 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// Evaluate an `if()` clause value. dart-sass serializes the value in a
-    /// parenthesized-expression context, so lists are wrapped in parens and
-    /// a bare slash-division collapses to its number.
+    /// Evaluate an `if()` clause value. dart-sass emits it in plain CSS
+    /// serialization format (since 1.101.4), not `meta.inspect()` format.
     fn eval_if_value(&mut self, expr: &Expr) -> Result<String, Error> {
-        let v = self.eval_expr(expr)?.without_slash();
-        Ok(serialize_if_value(&v))
+        // No without_slash: dart serializes the clause value as-is, so a
+        // preserved slash-division (`20/10`) keeps its slash form.
+        let v = self.eval_expr(expr)?;
+        serialize_if_value(&v)
     }
 
     /// Evaluate a modern `if()` condition into a tri-state result: a static
