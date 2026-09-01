@@ -403,6 +403,7 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
         url: entry_name,
         glyphs,
         warn: options.warn.as_ref(),
+        source_map: true,
     });
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;
@@ -475,6 +476,7 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
         url: diag_url,
         glyphs,
         warn: options.warn.as_ref(),
+        source_map: false,
     });
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;

@@ -433,7 +433,9 @@ impl<'a> Evaluator<'a> {
                 return Err(Error::unpositioned(format!("Missing argument ${}.", param.name)));
             };
             frame.insert(param.name.clone(), val);
-            span_frame.insert(param.name.clone(), span);
+            if self.options.source_map {
+                span_frame.insert(param.name.clone(), span);
+            }
         }
         if let Some(rest) = &params.rest {
             let remaining: Vec<Value> = pos_iter.map(|(_, v)| v).collect();

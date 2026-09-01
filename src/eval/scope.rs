@@ -46,6 +46,9 @@ impl<'a> Evaluator<'a> {
     /// only a BARE `$x` resolves. `$x * 2`, `f($x)`, `#{$x}` and `$x $x` are
     /// `Binary`/`Func`/`Interp`/`List` nodes, so they keep their own span.
     pub(super) fn expression_node(&mut self, expr: &Expr, fallback: Pos) -> VarSpan {
+        if !self.options.source_map {
+            return VarSpan::default();
+        }
         let resolved = match expr {
             Expr::Var { name, .. } => self.lookup_var_span(name),
             Expr::NsVar { module, name } => self.module_var_span(module, name),
@@ -73,7 +76,7 @@ impl<'a> Evaluator<'a> {
     /// (interned file id + 0-based line/col). [`Pos::NONE`] yields the "unknown"
     /// span, which the source map drops.
     pub(super) fn span_at(&mut self, pos: Pos) -> VarSpan {
-        if !pos.is_known() {
+        if !self.options.source_map || !pos.is_known() {
             return VarSpan::default();
         }
         VarSpan {
@@ -128,7 +131,9 @@ impl<'a> Evaluator<'a> {
     pub(super) fn push_scope(&mut self, semi_global: bool) {
         let effective = semi_global && self.scope_semi_global.last().copied().unwrap_or(false);
         self.scopes.push(new_scope());
-        self.var_spans.push(new_span_scope());
+        if self.options.source_map {
+            self.var_spans.push(new_span_scope());
+        }
         self.scope_semi_global.push(effective);
         self.functions.push(new_fn_scope());
         self.mixins.push(new_fn_scope());
@@ -143,8 +148,10 @@ impl<'a> Evaluator<'a> {
         spans: HashMap<String, VarSpan>,
     ) {
         self.scopes.push(std::rc::Rc::new(std::cell::RefCell::new(frame)));
-        self.var_spans
-            .push(std::rc::Rc::new(std::cell::RefCell::new(spans)));
+        if self.options.source_map {
+            self.var_spans
+                .push(std::rc::Rc::new(std::cell::RefCell::new(spans)));
+        }
         self.scope_semi_global.push(false);
         self.functions.push(new_fn_scope());
         self.mixins.push(new_fn_scope());
@@ -369,7 +376,9 @@ impl<'a> Evaluator<'a> {
                         .collect();
                     if targets.len() == 1 {
                         targets[0].vars.borrow_mut().insert(v.name.clone(), val);
-                        targets[0].var_spans.borrow_mut().insert(v.name.clone(), span);
+                        if self.options.source_map {
+                            targets[0].var_spans.borrow_mut().insert(v.name.clone(), span);
+                        }
                         return Ok(());
                     }
                 }
@@ -428,7 +437,9 @@ impl<'a> Evaluator<'a> {
         let val = self.eval_expr(&v.value)?.without_slash();
         let span = self.expression_node(&v.value, v.value_pos);
         target.vars.borrow_mut().insert(name.clone(), val);
-        target.var_spans.borrow_mut().insert(name, span);
+        if self.options.source_map {
+            target.var_spans.borrow_mut().insert(name, span);
+        }
         Ok(())
     }
 

@@ -1103,7 +1103,14 @@ impl<'a> Evaluator<'a> {
         // evaluates into a fresh buffer, so it starts at zero.
         let saved_comment_floor = std::mem::replace(&mut self.pre_comment_floor, 0);
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![new_scope()]);
-        let saved_var_spans = std::mem::replace(&mut self.var_spans, vec![new_span_scope()]);
+        let saved_var_spans = std::mem::replace(
+            &mut self.var_spans,
+            if self.options.source_map {
+                vec![new_span_scope()]
+            } else {
+                Vec::new()
+            },
+        );
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, vec![true]);
         let saved_funcs = std::mem::replace(&mut self.functions, vec![new_fn_scope()]);
         let saved_mixins = std::mem::replace(&mut self.mixins, vec![new_fn_scope()]);
@@ -1641,10 +1648,14 @@ impl<'a> Evaluator<'a> {
         // captured), so writes inside the module are immediately visible to
         // its closures and to later cross-module reads.
         let module_scope = std::rc::Rc::clone(&module.vars);
-        let module_spans = std::rc::Rc::clone(&module.var_spans);
+        let module_spans = if self.options.source_map {
+            vec![std::rc::Rc::clone(&module.var_spans)]
+        } else {
+            Vec::new()
+        };
         SavedModuleEnv {
             scopes: std::mem::replace(&mut self.scopes, vec![module_scope]),
-            var_spans: std::mem::replace(&mut self.var_spans, vec![module_spans]),
+            var_spans: std::mem::replace(&mut self.var_spans, module_spans),
             scope_semi_global: std::mem::replace(&mut self.scope_semi_global, vec![true]),
             functions: std::mem::replace(&mut self.functions, vec![std::rc::Rc::clone(&module.functions)]),
             mixins: std::mem::replace(&mut self.mixins, vec![std::rc::Rc::clone(&module.mixins)]),

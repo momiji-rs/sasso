@@ -767,6 +767,12 @@ pub(crate) struct EvalOptions<'a> {
     /// Diagnostic handler (dart-sass `logger`). When set, `@warn`/`@debug`/
     /// deprecation warnings are delivered here instead of printed to stderr.
     pub warn: Option<&'a crate::WarnHandler>,
+    /// Whether this compile produces a source map. Gates the variable
+    /// definition-span bookkeeping (`var_spans` et al.), which only source-map
+    /// emission reads: when false the span chain stays empty and every
+    /// span lookup short-circuits to "unknown", so the plain [`crate::compile`]
+    /// path pays nothing for it.
+    pub source_map: bool,
 }
 
 pub(crate) struct Evaluator<'a> {
@@ -1308,7 +1314,14 @@ impl<'a> Evaluator<'a> {
             file_ids: HashMap::default(),
             file_map_urls: HashMap::default(),
             scopes: vec![new_scope()],
-            var_spans: vec![new_span_scope()],
+            // Empty (not one empty frame) when spans aren't tracked: every
+            // push/insert/lookup site is guarded, so an empty chain makes the
+            // whole bookkeeping a no-op. See `EvalOptions::source_map`.
+            var_spans: if options.source_map {
+                vec![new_span_scope()]
+            } else {
+                Vec::new()
+            },
             // The global scope is treated as semi-global so a top-level control
             // flow scope (its child) becomes semi-global too.
             scope_semi_global: vec![true],
