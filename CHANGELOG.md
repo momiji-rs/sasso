@@ -11,6 +11,29 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-01
+
+_C-ABI release fixes — no compiler changes. Ships musl c-api tarballs for
+Alpine (#18) and corrects the version string the C ABI reports._
+
+### Added
+
+- **musl c-api tarballs** (`x86_64-unknown-linux-musl`,
+  `aarch64-unknown-linux-musl`) for Alpine and distro-agnostic containers
+  (#18). musl artifacts are STATIC-ONLY by design: a musl target defaults to
+  `+crt-static`, under which rustc cannot build a cdylib, so the tarball
+  ships `libsasso.a` (and `sasso.h`) without a `.so` — link it into your own
+  binary or shared object. Verified end-to-end on Alpine 3.24 (gcc +
+  musl-dev, dynamic and fully-static links both pass the C smoke test).
+  Adapted from @shyim's fork.
+
+### Fixed
+
+- **`sasso_version()` reports the bundled compiler version** (now `0.9.1`),
+  not the FFI wrapper crate's own version (which had drifted to `0.6.1` —
+  the string the v0.9.0 c-api artifacts report). The core crate now exposes
+  `sasso::VERSION` so wrappers cannot drift again. Contributed by @shyim.
+
 ## [0.9.0] - 2026-09-01
 
 _Crate release `v0.9.0`; ships on npm as `sasso@0.12.0`. **Output-format
@@ -657,7 +680,8 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/momiji-rs/sasso/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/momiji-rs/sasso/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/momiji-rs/sasso/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/momiji-rs/sasso/compare/v0.7.0...v0.8.0
