@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."   # -> bench/
 # Engine binaries / commands
 # ---------------------------------------------------------------------------
 GRASS=./grass_runner/target/release/grass_runner
-SASSO=../target/release/sasso   # the real shipped CLI (one-shot + --loop/--quiet)
+SASSO=../target/release/sasso   # the real shipped CLI (one-shot + --loop/--no-css)
 
 # Locate the cached dart-sass bin (the dart2js/Node build that `npx sass` runs).
 # We call it directly to measure dart-sass's OWN startup, separate from the
@@ -64,7 +64,7 @@ echo "## Raw measurements (hyperfine, ${RUNS} runs, ${WARMUP} warmups)"
 # --- 1. Startup cost: compile the tiny file -------------------------------
 echo "### Startup (tiny file)"
 hf --export-json "$RESULTS/startup.json" \
-  -n "sasso startup"      "$SASSO --quiet $TINY" \
+  -n "sasso startup"      "$SASSO --no-css $TINY" \
   -n "grass startup"      "$GRASS --quiet $TINY" \
   -n "dart-sass startup"  "$SASS_BIN $TINY >/dev/null" \
   -n "npx-sass startup"   "npx --yes sass $TINY >/dev/null"
@@ -72,17 +72,18 @@ hf --export-json "$RESULTS/startup.json" \
 # --- 2. Cold single-file: the LARGE generated file ------------------------
 echo "### Cold single-file (large generated, ~25k-line CSS)"
 hf --export-json "$RESULTS/cold_large.json" \
-  -n "sasso large"     "$SASSO --quiet $LARGE" \
+  -n "sasso large"     "$SASSO --no-css $LARGE" \
   -n "grass large"     "$GRASS --quiet $LARGE" \
   -n "dart-sass large" "$SASS_BIN $LARGE >/dev/null" \
   -n "npx-sass large"  "npx --yes sass $LARGE >/dev/null"
 
 # --- 3. Amortized batch: whole dir in ONE invocation ----------------------
-# dart-sass: dir:dir mapping. grass: pass all files as argv (runner loops).
+# sasso + dart-sass: dir:dir mapping (sasso pinned to one worker so the
+# comparison stays per-file). grass: pass all files as argv (runner loops).
 OUTDIR=$(mktemp -d)
 echo "### Amortized batch ($(ls $BATCH_DIR/*.scss | wc -l | tr -d ' ') files, one invocation each)"
 hf --export-json "$RESULTS/batch.json" \
-  -n "sasso batch"     "$SASSO --quiet $BATCH_DIR/*.scss" \
+  -n "sasso batch"     "$SASSO -j 1 --no-source-map $BATCH_DIR:$OUTDIR" \
   -n "grass batch"     "$GRASS --quiet $BATCH_DIR/*.scss" \
   -n "dart-sass batch" "$SASS_BIN --no-source-map $BATCH_DIR:$OUTDIR" \
   --cleanup "rm -f $OUTDIR/*.css $OUTDIR/*.css.map 2>/dev/null || true"
@@ -92,11 +93,11 @@ rm -rf "$OUTDIR"
 echo "### Pure in-process throughput (--loop, startup excluded)"
 LOOP_N=${LOOP_N:-200}
 echo "Compiling $LARGE x$LOOP_N in-process:"
-$SASSO --quiet --loop "$LOOP_N" "$LARGE"
+$SASSO --no-css --loop "$LOOP_N" "$LARGE"
 $GRASS --quiet --loop "$LOOP_N" "$LARGE"
 echo
 echo "Compiling $HAND x$((LOOP_N*5)) in-process:"
-$SASSO --quiet --loop "$((LOOP_N*5))" "$HAND"
+$SASSO --no-css --loop "$((LOOP_N*5))" "$HAND"
 $GRASS --quiet --loop "$((LOOP_N*5))" "$HAND"
 
 rm -rf "$TINY_DIR"

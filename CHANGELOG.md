@@ -11,6 +11,91 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Added
+
+- **dart-sass-compatible CLI.** `sasso` now takes the same arguments as
+  `sass`, so a build script written for dart-sass runs unchanged (#24, the
+  Lichess build spawns one process with ~150 `src:out` pairs):
+  - the positional grammar is `<input> [output]` (a second positional is the
+    output file; `--stdin [output]`; an input of `-` is standard input, and a
+    `-:<out>` pair is standard input to a file alongside other pairs — dart's
+    rules, including `Duplicate source` for a repeated one; a bare directory
+    positional compiles in place, `sass dir` being `dir:dir`; `--` ends option
+    parsing so a name starting with `-` can be an input or output), and
+    `<in>:<out>` pairs — files or a whole directory tree (`scss/:css/`,
+    partials skipped, `.sass` and `.css` inputs by exact lowercase suffix as
+    in dart, a `.css` whose destination would be itself skipped as in dart;
+    two spellings of one source — explicit or directory-expanded — coalesce
+    to the later destination) — compile many stylesheets in one process;
+  - **several inputs compile in parallel**, one worker per CPU (`-j/--jobs N`
+    to cap it), with diagnostics and exit status reported in command-line
+    order; `--stop-on-error` stops scheduling more files after a failure.
+    The full Lichess corpus (148 entry points, source maps with embedded
+    sources) builds in 0.79 s against dart-sass's 1.40 s on an M2 Max;
+  - `--[no-]source-map` (on by default when writing a file, like dart; the
+    `.map` is written before the CSS that references it, and the map's `file`
+    and the footer URL are percent-encoded like dart's),
+    `--[no-]embed-source-map` (the map inlined as a `data:` URI, byte-exact
+    to dart including its percent-encoding; absolute `file://` sources and no
+    `file` field on stdout), `--[no-]embed-sources`, `--source-map-urls`; the
+    combinations dart rejects are usage errors here too, with dart's wording;
+  - `--[no-]error-css`: on a compile error, a file target receives dart's
+    error stylesheet (the diagnostic as a comment plus a `body::before` that
+    shows it in the browser), byte-exact to dart-sass; with it off, a stale
+    output from an earlier build is removed instead, as dart does. Invalid
+    UTF-8 input counts as a compile error here too. `--error-css` also
+    prints the stylesheet to stdout;
+  - `-q/--quiet` (no warnings), `--quiet-deps` (no compiler warnings from
+    dependencies — files resolved through a load path, by how they were
+    resolved rather than where they live; their `@warn` still prints),
+    `--[no-]charset`, `-c/--[no-]color` (accepted; sasso never colors),
+    `--no-css` (compile, report diagnostics, write nothing);
+  - dart's exit codes: 64 for a usage error, 65 for a compile error, 66 for
+    an unreadable input (`Error reading <path>: Cannot open file.`) or an
+    output that cannot be written (invalid UTF-8 on stdin is a compile error
+    with the same error-CSS handling as a file's — dart crashes there);
+    missing output directories are created; a CSS file always ends in one
+    newline, an empty stylesheet included (stdout gets nothing for empty
+    output), as dart writes it; one unit's diagnostics are separated from the
+    next by a blank line, as dart prints them.
+- **`WarnEvent::path`**: the stylesheet a `@warn`/`@debug`/deprecation came
+  from, as an identity rather than dart's short display form in `url` (a
+  load-path file's basename): for a file the importer loaded, the importer's
+  canonical URL (an absolute path with `FsImporter`); for the entry
+  stylesheet, `Options::url` exactly as supplied. Lets an embedder tell a
+  dependency from the entry, which is what `--quiet-deps` needs.
+- **`FsImporter::dependencies()`** returns a shared `DependencySet` that fills
+  in as the compile resolves imports: which files were reached through a load
+  path (or loaded relatively from one that was) — dart-sass's "dependencies".
+  Keyed by canonical URL, so it pairs with `WarnEvent::path`.
+  **`Options::with_quiet_deps(set)`** (dart-sass `quietDeps`) drops
+  deprecation warnings raised inside those files before they are counted, so
+  they neither use up the five visible repetitions nor surface as "N
+  repetitive deprecation warnings omitted". The record is per compilation:
+  a compile scoped on the set starts it empty, and a nested compile (a warn
+  handler running `compile` with the same importer) hands the enclosing
+  record back when it ends, so an importer reused sequentially or nested
+  cannot leak one compile's classification into another — concurrent
+  compiles sharing one set are not supported (`DependencySet::clear` for
+  embedders reading the set by hand). Provenance
+  also follows the evaluator's `@import` cache: a file a dependency loads is
+  a dependency even when its resolution was cached by an earlier load.
+
+### Changed
+
+- **Library:** `WarnEvent` is now `#[non_exhaustive]` and gained the `path`
+  field. Code that receives events (every handler in this repo and its
+  napi/wasm bridges) is unaffected; code that built a `WarnEvent` with a
+  struct literal or matched it exhaustively must adapt.
+- **CLI (breaking):** `-q/--quiet` now means "don't print warnings", as in
+  dart-sass. The old meaning — compile but discard the CSS, for timing runs —
+  is `--no-css`. Writing to a file (`-o`, a second positional, or a pair) now
+  produces a source map by default; pass `--no-source-map` to opt out. More
+  than one positional input is no longer a multi-file stdout batch (dart
+  reads a second positional as the output); use `in:out` pairs. `--source-map`
+  to stdout is a usage error unless `--embed-source-map` is given. Usage
+  errors exit 64 (was 1).
+
 ### Fixed
 
 - **`calc(#{-$x} …)` no longer errors** with "This expression can't be used
@@ -23,6 +108,15 @@ Conformance is tracked separately as a ratchet against the official
   block.** The "does this mixin use `@content`" scan descended into `@media`,
   `@at-root`, `@keyframes` and generic at-rules but skipped `@supports`, so
   `@include` with a block hit "Mixin doesn't accept a content block." (#24).
+- **Warn handlers may retain event data.** The library now pauses its
+  bump-arena scope while calling an embedder's `WarnHandler`, so a handler
+  that appends the event to a buffer no longer ends up with memory the
+  arena frees at the end of the compile (which surfaced as garbled or
+  cross-contaminated warnings under parallel compiles). Importer calls were
+  already paused the same way. The pause itself is now a counter behind an
+  RAII guard rather than a zeroed scope depth: a `compile` run from inside an
+  importer or warn callback nests instead of resetting the arena under its
+  caller, and a callback that panics no longer leaves the thread paused.
 
 ## [0.9.1] - 2026-09-01
 

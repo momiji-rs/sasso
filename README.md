@@ -49,7 +49,8 @@ zero-dependency, sandbox-friendly core. See
   pass through)
 - `expanded` and `compressed` output styles
 - **Source maps (v3)** — byte-exact to dart-sass 1.101, on the library
-  (`compile_with_source_map`), the CLI (`--source-map`), and wasm
+  (`compile_with_source_map`), the CLI (on by default when writing a file,
+  like dart-sass; `--embed-source-map` inlines one), and wasm
   (`compile(scss, { sourceMap: true })`)
 - Verbatim preservation of CSS functions it doesn't own (`calc`, `var`,
   `clamp`, `translateX`, …)
@@ -132,13 +133,29 @@ A ready-made [`FsImporter`] is provided for standalone/CLI use.
 
 ## CLI usage
 
+The CLI takes the same arguments as `sass`, so a build script written for
+dart-sass runs unchanged:
+
 ```console
-$ cargo install --path .            # installs the `sasso` binary
-$ sasso input.scss              # CSS to stdout (expanded)
-$ sasso --style=compressed input.scss
-$ sasso -I scss/ main.scss      # add @import load paths
+$ cargo install --path .              # installs the `sasso` binary
+$ sasso input.scss                    # CSS to stdout (expanded)
+$ sasso input.scss out.css            # to a file, with out.css.map (dart's default)
+$ sasso --style=compressed --no-source-map input.scss out.css
+$ sasso a.scss:out/a.css b.scss:out/b.css   # many files, compiled in parallel
+$ sasso scss/:css/                    # a whole tree (partials skipped)
+$ sasso -I scss/ main.scss            # add @use/@import load paths
 $ echo '.a{color:red}' | sasso --stdin
 ```
+
+Several inputs (`in:out` pairs or a directory pair) compile in parallel, one
+worker per CPU (`-j N` caps it), with diagnostics reported in command-line
+order. Supported dart-sass flags: `--[no-]source-map`, `--source-map-urls`,
+`--[no-]embed-sources`, `--[no-]embed-source-map`, `--[no-]error-css`,
+`--[no-]charset`, `-q/--quiet`, `--quiet-deps`, `--stop-on-error`,
+`--[no-]unicode`, `--[no-]color` (accepted; sasso never colors), `--indented`,
+`--stdin`. Exit codes match too (64 usage, 65 compile error, 66 unreadable
+input). Not supported: `--watch`, `--update`, `--pkg-importer`, and the
+deprecation-selection flags. `sasso --help` lists everything.
 
 ## Conformance
 

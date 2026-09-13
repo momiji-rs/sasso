@@ -1,33 +1,34 @@
 //! `sasso` command-line interface.
 //!
-//! A small, dependency-free CLI over the `sasso` library:
+//! A small, dependency-free CLI over the `sasso` library, flag-compatible with
+//! the dart-sass CLI wherever the two overlap:
 //!
 //! ```text
-//! sasso [options] <input.scss>
-//! sasso [options] <input.scss> -o <output.css>
-//! sasso --stdin [options] < input.scss
-//!
-//!   -s, --style <expanded|compressed>   output style (default: expanded)
-//!   -I, --load-path <dir>               add an @import search path (repeatable)
-//!   -o, --output <file>                 write CSS to <file> (else stdout)
-//!       --source-map                    also write <output>.map (requires -o)
-//!       --embed-sources                 inline source text in the map
-//!       --source-map-urls <relative|absolute>
-//!                                       how the map references sources (default: relative)
-//!       --stdin                         read SCSS from standard input
-//!       --loop <N>                      recompile in-process N times (throughput)
-//!   -q, --quiet                         suppress CSS on stdout (timing only)
-//!       --version                       print version and exit
-//!   -h, --help                          print this help and exit
+//! sasso [options] <input.scss> [<output.css>]     CSS to stdout, or to a file
+//! sasso [options] <in.scss>:<out.css>...          one output file per input
+//! sasso [options] <in-dir/>:<out-dir/>            compile a whole tree
+//! sasso --stdin [options] [<output.css>] < input.scss
 //! ```
 //!
-//! `--embed-source-map` (inline `data:` URI in the CSS) is not yet supported.
+//! The positional grammar is dart-sass's (`<input> [output]`); several files
+//! are compiled through `in:out` pairs, in parallel, one worker per CPU
+//! (`-j/--jobs N` to cap it), with diagnostics still reported in command-line
+//! order. Exit codes follow dart-sass too: `64` for a usage error, `65` for a
+//! compile error, `66` when an input cannot be read.
 
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
-use sasso::{compile, compile_with_source_map, FsImporter, Options, OutputStyle, Syntax};
+use sasso::{
+    compile, compile_with_source_map, FsImporter, Options, OutputStyle, SourceMap, Syntax, WarnEvent,
+    WarnHandler,
+};
 
 // Install the scoped bump-arena allocator (perf #5). Inside each `compile`
 // scope every allocation is a pointer bump from a per-thread arena that is
@@ -42,41 +43,87 @@ const USAGE: &str = "\
 sasso — a pure-Rust SCSS to CSS compiler
 
 USAGE:
-    sasso [options] <input.scss>
-    sasso --stdin [options] < input.scss
+    sasso [options] <input.scss> [<output.css>]     CSS to stdout, or to a file
+    sasso [options] <in.scss>:<out.css>...          one output file per input
+    sasso [options] <in-dir/>:<out-dir/>            compile a whole tree
+    sasso --stdin [options] [<output.css>] < input.scss
 
-OPTIONS:
+INPUT AND OUTPUT:
     -s, --style <expanded|compressed>   output style (default: expanded)
-    -I, --load-path <dir>               add an @import search path (repeatable)
-    -o, --output <file>                 write CSS to <file> instead of stdout
-        --source-map                    also write <output>.map and append a
-                                        sourceMappingURL footer (requires -o)
-        --embed-sources                 embed full source text in the map's
-                                        sourcesContent
+    -I, --load-path <dir>               add an @import/@use search path (repeatable)
+    -o, --output <file>                 write CSS to <file> (same as a second
+                                        positional argument)
+        --stdin                         read SCSS from standard input
+        --indented                      parse the indented .sass syntax
+        --[no-]charset                  emit @charset/BOM for non-ASCII CSS
+                                        (default: on)
+        --[no-]error-css                on a compile error, write a stylesheet
+                                        describing it (default: on when
+                                        compiling to a file)
+
+SOURCE MAPS:
+        --[no-]source-map               generate source maps (default: on when
+                                        compiling to a file, off for stdout)
         --source-map-urls <relative|absolute>
                                         how the map references its sources
                                         (default: relative)
-        --stdin                         read SCSS from standard input
-        --indented                      parse the indented .sass syntax
-        --no-unicode                    ASCII-only diagnostics (no box glyphs)
-        --loop <N>                      recompile in-process N times (throughput)
-    -q, --quiet                         suppress CSS on stdout (timing only)
+        --[no-]embed-sources            embed the source text in the map's
+                                        sourcesContent
+        --[no-]embed-source-map         inline the map into the CSS as a
+                                        data: URI instead of a .map file
+
+WARNINGS:
+    -q, --[no-]quiet                    don't print warnings
+        --[no-]quiet-deps               don't print compiler warnings from
+                                        dependencies (stylesheets reached
+                                        through load paths)
+
+OTHER:
+    -j, --jobs <N>                      compile at most N files at once
+                                        (default: one per CPU)
+        --[no-]stop-on-error            don't start more files once one fails
+    -c, --[no-]color                    accepted for dart-sass compatibility
+                                        (no-op: sasso never colors output)
+        --[no-]unicode                  Unicode box glyphs in diagnostics
+                                        (default: on)
+        --loop <N>                      recompile in-process N times and report
+                                        throughput (stdout inputs only)
+        --no-css                        compile but discard the CSS (timing or
+                                        lint runs)
         --version                       print version and exit
     -h, --help                          print this help and exit
-
-NOTE: --embed-source-map (inline data: URI) is not yet supported.
+    --                                  end of options: what follows are inputs
+                                        and outputs, even if they start with -
 ";
 
+/// Exit codes, as dart-sass (and BSD `sysexits.h`) define them.
+const EXIT_USAGE: u8 = 64;
+const EXIT_COMPILE: u8 = 65;
+const EXIT_IO: u8 = 66;
+
 struct Cli {
-    inputs: Vec<PathBuf>,
-    use_stdin: bool,
+    /// Positional arguments in order, a `-` included; resolved into `entry` /
+    /// `output` after parsing (dart's `<input> [output]`).
+    positionals: Vec<String>,
+    /// dart-style `source:destination` pairs (files or directories); a `-`
+    /// source is standard input.
+    pairs: Vec<(PathBuf, PathBuf)>,
+    /// The final value of `--[no-]stdin`.
+    stdin_flag: bool,
+    /// The single input of stdout / `-o` mode, once positionals are resolved.
+    entry: Option<Entry>,
     style: OutputStyle,
     load_paths: Vec<PathBuf>,
     /// Force the indented `.sass` syntax (otherwise inferred from the input
     /// path's extension; `--stdin` defaults to SCSS).
     indented: bool,
-    /// Suppress CSS on stdout (timing-only runs).
+    /// Don't print warnings (dart-sass `--quiet`).
     quiet: bool,
+    /// Don't print compiler (deprecation) warnings from dependencies —
+    /// stylesheets reached through a load path (dart-sass `--quiet-deps`).
+    quiet_deps: bool,
+    /// Compile but discard the CSS (timing-only runs).
+    no_css: bool,
     /// Recompile the input in-process this many times and report throughput.
     loop_n: Option<u32>,
     /// Render diagnostics with the ASCII glyph set (dart-sass `--no-unicode`).
@@ -84,14 +131,31 @@ struct Cli {
     /// Write the compiled CSS to this file instead of stdout (`-o`). Requires a
     /// single input.
     output: Option<PathBuf>,
-    /// Also write a `<output>.map` sidecar and append the `sourceMappingURL`
-    /// footer to the CSS file (`--source-map`; requires `-o`).
-    source_map: bool,
-    /// Embed each source's full text in the map's `sourcesContent`
-    /// (`--embed-sources`).
+    /// `--[no-]source-map`; `None` = dart's default (on for file output, off
+    /// for stdout).
+    source_map: Option<bool>,
+    /// Embed each source's full text in the map's `sourcesContent`.
     embed_sources: bool,
-    /// How the map's `sources[]` reference the inputs (`--source-map-urls`).
-    source_map_urls: SourceMapUrls,
+    /// Inline the map into the CSS as a `data:` URI instead of a sidecar.
+    embed_source_map: bool,
+    /// How the map's `sources[]` reference the inputs (`--source-map-urls`);
+    /// `None` when not given (dart's default, `relative`).
+    source_map_urls: Option<SourceMapUrls>,
+    /// `--[no-]error-css`; `None` = dart's default (on for file output).
+    error_css: Option<bool>,
+    /// Don't start compiling more files once one has failed.
+    stop_on_error: bool,
+    /// Emit `@charset`/BOM for non-ASCII output (dart-sass `--charset`).
+    charset: bool,
+    /// Worker-thread cap (`-j`); `None` = one per CPU.
+    jobs: Option<usize>,
+}
+
+/// The single input of stdout / `-o` mode.
+enum Entry {
+    /// `--stdin`, or a positional `-`.
+    Stdin,
+    File(PathBuf),
 }
 
 /// How the source map's `sources[]` entries reference the input files.
@@ -128,7 +192,7 @@ fn main() -> ExitCode {
         Err(msg) => {
             eprintln!("error: {msg}\n");
             eprint!("{USAGE}");
-            ExitCode::FAILURE
+            ExitCode::from(EXIT_USAGE)
         }
     }
 }
@@ -141,31 +205,69 @@ enum Action {
 
 fn parse_args(args: &[String]) -> Result<Action, String> {
     let mut cli = Cli {
-        inputs: Vec::new(),
-        use_stdin: false,
+        positionals: Vec::new(),
+        pairs: Vec::new(),
+        stdin_flag: false,
+        entry: None,
         style: OutputStyle::Expanded,
         load_paths: Vec::new(),
         indented: false,
         quiet: false,
+        quiet_deps: false,
+        no_css: false,
         loop_n: None,
         no_unicode: false,
         output: None,
-        source_map: false,
+        source_map: None,
         embed_sources: false,
-        source_map_urls: SourceMapUrls::Relative,
+        embed_source_map: false,
+        source_map_urls: None,
+        error_css: None,
+        stop_on_error: false,
+        charset: true,
+        jobs: None,
     };
     let mut i = 0;
+    // After `--` (end of options) every argument is an operand, so an input
+    // or output whose name starts with `-` can be named.
+    let mut only_operands = false;
     while i < args.len() {
         let a = &args[i];
+        if only_operands {
+            push_operand(&mut cli, a)?;
+            i += 1;
+            continue;
+        }
         match a.as_str() {
+            "--" => only_operands = true,
             "-h" | "--help" => return Ok(Action::Help),
             "--version" => return Ok(Action::Version),
-            "--stdin" => cli.use_stdin = true,
+            "--stdin" => cli.stdin_flag = true,
+            "--no-stdin" => cli.stdin_flag = false,
             "--indented" => cli.indented = true,
+            "--no-indented" => cli.indented = false,
+            "--unicode" => cli.no_unicode = false,
             "--no-unicode" => cli.no_unicode = true,
-            "--source-map" => cli.source_map = true,
+            "--source-map" => cli.source_map = Some(true),
+            "--no-source-map" => cli.source_map = Some(false),
             "--embed-sources" => cli.embed_sources = true,
+            "--no-embed-sources" => cli.embed_sources = false,
+            "--embed-source-map" => cli.embed_source_map = true,
+            "--no-embed-source-map" => cli.embed_source_map = false,
+            "--error-css" => cli.error_css = Some(true),
+            "--no-error-css" => cli.error_css = Some(false),
+            "--charset" => cli.charset = true,
+            "--no-charset" => cli.charset = false,
             "-q" | "--quiet" => cli.quiet = true,
+            "--no-quiet" => cli.quiet = false,
+            "--quiet-deps" => cli.quiet_deps = true,
+            "--no-quiet-deps" => cli.quiet_deps = false,
+            "--stop-on-error" => cli.stop_on_error = true,
+            "--no-stop-on-error" => cli.stop_on_error = false,
+            // sasso never emits ANSI colors; accept dart's flags so a build
+            // script written for `sass` runs unchanged.
+            "-c" | "--color" | "--no-color" => {}
+            "--no-css" => cli.no_css = true,
             "-o" | "--output" => {
                 i += 1;
                 let v = args.get(i).ok_or("--output requires a value")?;
@@ -174,12 +276,17 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
             "--source-map-urls" => {
                 i += 1;
                 let v = args.get(i).ok_or("--source-map-urls requires a value")?;
-                cli.source_map_urls = parse_source_map_urls(v)?;
+                cli.source_map_urls = Some(parse_source_map_urls(v)?);
             }
             "--loop" => {
                 i += 1;
                 let v = args.get(i).ok_or("--loop requires a value")?;
                 cli.loop_n = Some(parse_loop(v)?);
+            }
+            "-j" | "--jobs" => {
+                i += 1;
+                let v = args.get(i).ok_or("--jobs requires a value")?;
+                cli.jobs = Some(parse_jobs(v)?);
             }
             "-s" | "--style" => {
                 i += 1;
@@ -198,28 +305,196 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
                     cli.load_paths.push(PathBuf::from(v));
                 } else if let Some(v) = other.strip_prefix("--loop=") {
                     cli.loop_n = Some(parse_loop(v)?);
+                } else if let Some(v) = other.strip_prefix("--jobs=") {
+                    cli.jobs = Some(parse_jobs(v)?);
                 } else if let Some(v) = other.strip_prefix("--output=") {
                     cli.output = Some(PathBuf::from(v));
                 } else if let Some(v) = other.strip_prefix("--source-map-urls=") {
-                    cli.source_map_urls = parse_source_map_urls(v)?;
-                } else if other.starts_with('-') && other != "-" {
+                    cli.source_map_urls = Some(parse_source_map_urls(v)?);
+                } else if other.starts_with('-') && other != "-" && !other.starts_with("-:") {
                     return Err(format!("unknown option {other}"));
                 } else {
-                    cli.inputs.push(PathBuf::from(other));
+                    push_operand(&mut cli, other)?;
                 }
             }
         }
         i += 1;
     }
-    // `--source-map` (the sidecar + footer) only makes sense with a real output
-    // file; `--output` accepts exactly one input.
-    if cli.source_map && cli.output.is_none() {
-        return Err("--source-map requires --output".to_string());
+    // The same combinations dart-sass rejects, with its wording.
+    if cli.embed_source_map && cli.source_map == Some(false) {
+        return Err("--embed-source-map isn't allowed with --no-source-map.".to_string());
     }
-    if cli.output.is_some() && cli.inputs.len() + usize::from(cli.use_stdin) > 1 {
-        return Err("--output requires a single input".to_string());
+    if cli.embed_sources && cli.source_map == Some(false) {
+        return Err("--embed-sources isn't allowed with --no-source-map.".to_string());
+    }
+    if cli.source_map_urls.is_some() && cli.source_map == Some(false) {
+        return Err("--source-map-urls isn't allowed with --no-source-map.".to_string());
+    }
+    if !cli.pairs.is_empty() {
+        if !cli.positionals.is_empty() {
+            return Err("Positional and \":\" arguments may not both be used.".to_string());
+        }
+        if cli.stdin_flag {
+            return Err("--stdin may not be used with \":\" arguments.".to_string());
+        }
+        if cli.output.is_some() {
+            return Err("--output may not be used with \":\" arguments.".to_string());
+        }
+        if cli.loop_n.is_some() {
+            return Err("--loop compiles to stdout only (no \":\" arguments or --output).".to_string());
+        }
+        // dart: each source appears once (`-` included) …
+        let mut seen: std::collections::HashSet<&Path> = std::collections::HashSet::new();
+        for (src, _) in &cli.pairs {
+            if !seen.insert(src.as_path()) {
+                return Err(format!("Duplicate source {:?}.", src.to_string_lossy()));
+            }
+        }
+        // … and it keeps sources in a path-keyed map, so two spellings of one
+        // file (`a.scss` and `./a.scss`, `dir/../a.scss`) coalesce into a
+        // single compile whose destination is the later one.
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut keys: Vec<PathBuf> = Vec::new();
+        let mut kept: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for (src, dest) in std::mem::take(&mut cli.pairs) {
+            let key = if src == Path::new("-") {
+                src.clone()
+            } else {
+                normalize_path(&cwd.join(&src))
+            };
+            match keys.iter().position(|k| *k == key) {
+                Some(i) => kept[i].1 = dest,
+                None => {
+                    keys.push(key);
+                    kept.push((src, dest));
+                }
+            }
+        }
+        cli.pairs = kept;
+    } else {
+        // dart's positional grammar: `<input> [output]`, or just `[output]`
+        // with `--stdin`. An INPUT of `-` is standard input, whatever the
+        // final `--[no-]stdin` value; a `-` in the output position is a file
+        // called `-`, as in dart.
+        let max = if cli.stdin_flag { 1 } else { 2 };
+        if cli.positionals.len() > max {
+            return Err(if cli.stdin_flag {
+                "Only one argument is allowed with --stdin.".to_string()
+            } else {
+                "Only two positional args may be passed.".to_string()
+            });
+        }
+        let mut positionals = cli.positionals.iter();
+        cli.entry = if cli.stdin_flag {
+            Some(Entry::Stdin)
+        } else {
+            positionals.next().map(|p| {
+                if p == "-" {
+                    Entry::Stdin
+                } else {
+                    Entry::File(PathBuf::from(p))
+                }
+            })
+        };
+        if let Some(out) = positionals.next() {
+            if cli.output.is_some() {
+                return Err("--output requires a single input".to_string());
+            }
+            cli.output = Some(PathBuf::from(out));
+        }
+        if cli.output.is_some() && cli.loop_n.is_some() {
+            return Err("--loop compiles to stdout only (no \":\" arguments or --output).".to_string());
+        }
+    }
+    // A bare directory positional compiles in place (see `run`): file output,
+    // never stdout.
+    let entry_is_dir = matches!(&cli.entry, Some(Entry::File(p)) if p.is_dir());
+    if cli.loop_n.is_some() && entry_is_dir {
+        return Err(
+            "--loop compiles to stdout only (no directories, \":\" arguments or --output).".to_string(),
+        );
+    }
+    if cli.loop_n.is_some() && (cli.source_map == Some(true) || cli.embed_source_map || cli.embed_sources) {
+        return Err(
+            "--loop does not generate source maps (drop --source-map, --embed-source-map and --embed-sources)."
+                .to_string(),
+        );
+    }
+    let to_stdout = cli.pairs.is_empty() && cli.output.is_none() && !entry_is_dir;
+    if to_stdout {
+        // A stdout map can only be embedded, and its sources are always
+        // absolute `file://` URLs.
+        if cli.source_map_urls == Some(SourceMapUrls::Relative) {
+            return Err("--source-map-urls=relative isn't allowed when printing to stdout.".to_string());
+        }
+        if !cli.embed_source_map {
+            if cli.source_map == Some(true) {
+                return Err("When printing to stdout, --source-map requires --embed-source-map.".to_string());
+            }
+            if cli.embed_sources {
+                return Err(
+                    "When printing to stdout, --embed-sources requires --embed-source-map.".to_string(),
+                );
+            }
+            if cli.source_map_urls.is_some() {
+                return Err(
+                    "When printing to stdout, --source-map-urls requires --embed-source-map.".to_string(),
+                );
+            }
+        }
     }
     Ok(Action::Run(cli))
+}
+
+/// Record an operand: a `source:destination` pair, or a positional argument.
+fn push_operand(cli: &mut Cli, arg: &str) -> Result<(), String> {
+    match split_pair(arg)? {
+        Some(pair) => cli.pairs.push(pair),
+        None => cli.positionals.push(arg.to_string()),
+    }
+    Ok(())
+}
+
+/// Split a dart-style `source:destination` argument at its separating colon,
+/// or return `Ok(None)` for a plain path. On Windows the colon of a leading
+/// drive letter (`C:\in.scss`) is part of the path, not a separator.
+fn split_pair(arg: &str) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    let mut from = 0;
+    while let Some(off) = arg[from..].find(':') {
+        let idx = from + off;
+        let is_drive_colon = cfg!(windows) && idx == 1 && arg.as_bytes()[0].is_ascii_alphabetic();
+        if is_drive_colon {
+            from = idx + 1;
+            continue;
+        }
+        let (src, dest) = (&arg[..idx], &arg[idx + 1..]);
+        if src.is_empty() || dest.is_empty() {
+            return Err(format!("expected <source>:<destination>, got {arg:?}"));
+        }
+        // dart: exactly one separator; the destination may only carry a drive
+        // colon of its own (`C:\out.css`).
+        let dest_drive_colon = cfg!(windows)
+            && dest.len() > 1
+            && dest.as_bytes()[1] == b':'
+            && dest.as_bytes()[0].is_ascii_alphabetic();
+        let extra = if dest_drive_colon {
+            dest[2..].contains(':')
+        } else {
+            dest.contains(':')
+        };
+        if extra {
+            return Err(format!("{arg:?} may only contain one \":\"."));
+        }
+        return Ok(Some((PathBuf::from(src), PathBuf::from(dest))));
+    }
+    Ok(None)
+}
+
+/// Report a usage error the way `parse_args` failures are reported.
+fn usage_error(msg: &str) -> ExitCode {
+    eprintln!("error: {msg}\n");
+    eprint!("{USAGE}");
+    ExitCode::from(EXIT_USAGE)
 }
 
 fn parse_source_map_urls(s: &str) -> Result<SourceMapUrls, String> {
@@ -239,6 +514,13 @@ fn parse_loop(s: &str) -> Result<u32, String> {
     }
 }
 
+fn parse_jobs(s: &str) -> Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!("--jobs expects a positive integer (got {s:?})")),
+    }
+}
+
 fn parse_style(s: &str) -> Result<OutputStyle, String> {
     match s {
         "expanded" => Ok(OutputStyle::Expanded),
@@ -249,160 +531,723 @@ fn parse_style(s: &str) -> Result<OutputStyle, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Compile units
+// ---------------------------------------------------------------------------
+
+/// Where a unit's source text comes from.
+#[derive(Clone)]
+enum Source {
+    /// Already read (standard input).
+    Text(String),
+    /// Read from this file when the unit is compiled.
+    File(PathBuf),
+    /// Standard input was not valid UTF-8: a compile-class failure that gets
+    /// the same reporting (error stylesheet, stale-output cleanup) as a file's.
+    InvalidUtf8,
+}
+
+/// Where a unit's CSS goes.
+enum Target {
+    Stdout,
+    File(PathBuf),
+}
+
+/// One stylesheet to compile. `url` is the path as it appears in diagnostics
+/// (`-` for stdin, matching dart-sass).
+struct Unit {
+    source: Source,
+    url: String,
+    syntax: Syntax,
+    target: Target,
+}
+
+/// Settings shared by every unit (read-only across worker threads).
+struct Shared {
+    /// `-I` directories. Each unit builds its own `FsImporter` from them: the
+    /// importer's dependency record (`--quiet-deps`) is per compilation, as in
+    /// dart — the same file can be a dependency of one entry and not another.
+    load_paths: Vec<PathBuf>,
+    style: OutputStyle,
+    unicode: bool,
+    charset: bool,
+    quiet: bool,
+    quiet_deps: bool,
+    no_css: bool,
+    embed_sources: bool,
+    embed_source_map: bool,
+    source_map_urls: SourceMapUrls,
+    /// Generate a source map for file targets (dart default: yes).
+    file_source_map: bool,
+    /// Write an error stylesheet to a file target on failure (dart default: yes).
+    file_error_css: bool,
+    /// Print an error stylesheet to stdout on failure (`--error-css`, explicit).
+    stdout_error_css: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Ok,
+    /// A parse/eval error (or invalid UTF-8 input): exit 65.
+    CompileError,
+    /// The input could not be read or the output not written: exit 66.
+    IoError,
+}
+
+/// What one unit produced. Diagnostics are buffered so parallel workers can
+/// still be reported in command-line order.
+struct Outcome {
+    stderr: String,
+    stdout: String,
+    status: Status,
+}
+
+impl Outcome {
+    fn failed(status: Status, stderr: String) -> Self {
+        Outcome {
+            stderr,
+            stdout: String::new(),
+            status,
+        }
+    }
+}
+
+/// Infer a file's syntax from its extension (`--indented` forces `.sass`).
+/// Exact lowercase suffixes, like dart's `Syntax.forPath`: `input.CSS` or
+/// `input.SASS` is SCSS.
+fn syntax_for(path: &Path, indented: bool) -> Syntax {
+    if indented {
+        return Syntax::Sass;
+    }
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("sass") => Syntax::Sass,
+        Some("css") => Syntax::Css,
+        _ => Syntax::Scss,
+    }
+}
+
+/// Whether directory mode compiles this file: a `.scss`/`.sass`/`.css` (exact
+/// lowercase suffix) whose name does not start with `_` (a partial), like
+/// dart-sass.
+fn is_compilable(path: &Path) -> bool {
+    let name = match path.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return false,
+    };
+    // Exact lowercase suffixes, like dart's `_isEntrypoint`: `UPPER.SCSS` is
+    // skipped.
+    !name.starts_with('_')
+        && matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("scss" | "sass" | "css")
+        )
+}
+
+/// Expand a `dir:outdir` pair into one unit per compilable file under `src`
+/// (recursively), mirroring the tree under `dest` with a `.css` extension.
+/// Files are visited in sorted order so output is deterministic. Symlinked
+/// directories are followed (as dart does), but each directory is visited once
+/// by canonical identity, so a symlink cycle cannot loop or duplicate output.
+fn expand_dir(src: &Path, dest: &Path, indented: bool, units: &mut Vec<Unit>) -> Result<(), String> {
+    let mut files = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    seen.insert(std::fs::canonicalize(src).unwrap_or_else(|_| src.to_path_buf()));
+    let mut stack = vec![src.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|_| format!("Error reading {}: Cannot open file.", dir.display()))?;
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|_| format!("Error reading {}: Cannot open file.", dir.display()))?;
+            paths.push(entry.path());
+        }
+        // `read_dir` order is unspecified; sort so that, of two names for the
+        // same directory (symlinks), the same one is mirrored every run.
+        paths.sort();
+        for path in paths {
+            if path.is_dir() {
+                let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if seen.insert(identity) {
+                    stack.push(path);
+                }
+            } else if is_compilable(&path) {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    for path in files {
+        let rel = path.strip_prefix(src).unwrap_or(&path).with_extension("css");
+        let out = dest.join(rel);
+        // dart skips a CSS file whose destination is itself (`sasso dir`, or
+        // `dir:dir`, with a `plain.css` inside): it would only be rewritten in
+        // place. It does NOT skip files under a destination nested inside the
+        // source — nor do we — so `src:src/out` run twice nests, as in dart.
+        if normalize_path(&cwd.join(&out)) == normalize_path(&cwd.join(&path)) {
+            continue;
+        }
+        units.push(Unit {
+            url: path.to_string_lossy().into_owned(),
+            syntax: syntax_for(&path, indented),
+            source: Source::File(path),
+            target: Target::File(out),
+        });
+    }
+    Ok(())
+}
+
 fn run(cli: Cli) -> ExitCode {
-    // Gather the input units to compile, each paired with its syntax. `--stdin`
-    // is a single unit (SCSS unless `--indented`); otherwise every path on the
-    // command line is a unit, with its syntax inferred from the extension
-    // (`.sass` -> indented) unless `--indented` forces it. Multiple file inputs
-    // are compiled in one process so per-invocation startup is shared.
-    // Each unit is (source, syntax, diagnostic-url). The URL is the path as it
-    // should appear in stderr diagnostics (`-` for stdin, matching dart-sass).
-    let mut units: Vec<(String, Syntax, String)> = Vec::new();
-    if cli.use_stdin {
-        let syntax = if cli.indented { Syntax::Sass } else { Syntax::Scss };
-        match read_stdin() {
-            Ok(s) => units.push((s, syntax, "-".to_string())),
-            Err(e) => {
-                if is_invalid_utf8(&e) {
-                    eprintln!("Error: Invalid UTF-8.");
-                    return ExitCode::from(65);
-                }
-                eprintln!("error: failed to read stdin: {e}");
-                return ExitCode::FAILURE;
+    // Gather the units. `--stdin` or the positional input is a single stdout
+    // unit (redirected to a file by `-o` / a second positional); every `in:out`
+    // pair is a file unit (a directory pair expands to one per file). Relative
+    // imports resolve against the CONTAINING file's directory (the evaluator's
+    // current_file_dir), like dart — the input's directory is deliberately NOT
+    // an implicit load path.
+    let mut units: Vec<Unit> = Vec::new();
+    // Standard input is read at most once, however many units name it.
+    let mut stdin_cache: Option<Source> = None;
+    let stdin_syntax = if cli.indented { Syntax::Sass } else { Syntax::Scss };
+    let mut dir_entry = false;
+    if let Some(out) = &cli.output {
+        if out.is_dir() {
+            return usage_error(&format!(
+                "Directory {:?} may not be a positional arg.",
+                out.to_string_lossy()
+            ));
+        }
+    }
+    match &cli.entry {
+        Some(Entry::Stdin) => match stdin_source(&mut stdin_cache) {
+            Ok(source) => units.push(Unit {
+                source,
+                url: "-".to_string(),
+                syntax: stdin_syntax,
+                target: Target::Stdout,
+            }),
+            Err(code) => return code,
+        },
+        // dart: a bare directory compiles in place (`sass dir` is `dir:dir`);
+        // with an output it may not be a positional argument.
+        Some(Entry::File(path)) if path.is_dir() => {
+            if cli.output.is_some() {
+                return usage_error(&format!(
+                    "Directory {:?} may not be a positional arg.",
+                    path.to_string_lossy()
+                ));
             }
+            if let Err(msg) = expand_dir(path, path, cli.indented, &mut units) {
+                eprintln!("{msg}");
+                return ExitCode::from(EXIT_IO);
+            }
+            dir_entry = true;
         }
-    } else {
-        if cli.inputs.is_empty() {
-            eprintln!("error: no input file (pass a path or --stdin)\n");
-            eprint!("{USAGE}");
-            return ExitCode::FAILURE;
+        Some(Entry::File(path)) => units.push(Unit {
+            url: path.to_string_lossy().into_owned(),
+            syntax: syntax_for(path, cli.indented),
+            source: Source::File(path.clone()),
+            target: Target::Stdout,
+        }),
+        None => {}
+    }
+    for (src, dest) in &cli.pairs {
+        if src == Path::new("-") {
+            // `-:out.css`: standard input to a file, alongside other pairs.
+            match stdin_source(&mut stdin_cache) {
+                Ok(source) => units.push(Unit {
+                    source,
+                    url: "-".to_string(),
+                    syntax: stdin_syntax,
+                    target: Target::File(dest.clone()),
+                }),
+                Err(code) => return code,
+            }
+        } else if src.is_dir() {
+            if let Err(msg) = expand_dir(src, dest, cli.indented, &mut units) {
+                eprintln!("{msg}");
+                return ExitCode::from(EXIT_IO);
+            }
+        } else {
+            units.push(Unit {
+                url: src.to_string_lossy().into_owned(),
+                syntax: syntax_for(src, cli.indented),
+                source: Source::File(src.clone()),
+                target: Target::File(dest.clone()),
+            });
         }
-        for path in &cli.inputs {
-            // Relative imports resolve against the CONTAINING file's
-            // directory (the evaluator's current_file_dir), like dart — the
-            // input's directory is deliberately NOT an implicit load path
-            // (a file in a subdirectory must not see the entry's siblings).
-            let ext_is_sass = path
-                .extension()
-                .map(|e| e.eq_ignore_ascii_case("sass"))
-                .unwrap_or(false);
-            let syntax = if cli.indented || ext_is_sass {
-                Syntax::Sass
-            } else {
-                Syntax::Scss
+    }
+    // dart keeps every source — explicit pairs and directory-expanded files
+    // alike — in one path-keyed map, so a file named twice (`src:out` plus
+    // `src/a.scss:a.css`) compiles once, to the destination named last.
+    let units = {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut keys: Vec<PathBuf> = Vec::new();
+        let mut kept: Vec<Unit> = Vec::new();
+        for unit in units {
+            let key = match &unit.source {
+                Source::File(path) => normalize_path(&cwd.join(path)),
+                Source::Text(_) | Source::InvalidUtf8 => PathBuf::from("-"),
             };
-            match std::fs::read_to_string(path) {
-                Ok(s) => units.push((s, syntax, path.to_string_lossy().into_owned())),
-                Err(e) => {
-                    if is_invalid_utf8(&e) {
-                        eprintln!("Error: Invalid UTF-8.");
-                        return ExitCode::from(65);
-                    }
-                    eprintln!("error: cannot read {}: {e}", path.display());
-                    return ExitCode::FAILURE;
+            match keys.iter().position(|k| *k == key) {
+                Some(i) => kept[i].target = unit.target,
+                None => {
+                    keys.push(key);
+                    kept.push(unit);
                 }
             }
         }
-    }
-
-    let importer = FsImporter::new(cli.load_paths);
-    let style = cli.style;
-    let unicode = !cli.no_unicode;
-    // Build the per-unit options. Declared as a helper fn (not a closure) so the
-    // returned `Options` can borrow `url`/`importer` for the caller's lifetime.
-    fn opts_for<'a>(
-        style: OutputStyle,
-        importer: &'a FsImporter,
-        unicode: bool,
-        syntax: Syntax,
-        url: &'a str,
-    ) -> Options<'a> {
-        Options::default()
-            .with_style(style)
-            .with_syntax(syntax)
-            .with_importer(importer)
-            .with_url(url)
-            .with_unicode(unicode)
-    }
-
-    // File-output mode (`-o`): write the compiled CSS to a file (and, with
-    // `--source-map`, a `<output>.map` sidecar + footer) instead of stdout.
-    // `parse_args` guarantees exactly one input here. This is a distinct,
-    // dart-byte-compatible path; the stdout path below is left untouched.
+        kept
+    };
+    let mut units = units;
     if let Some(output) = &cli.output {
-        let (source, syntax, url) = &units[0];
-        let opts = opts_for(style, &importer, unicode, *syntax, url)
-            .with_source_map_include_sources(cli.embed_sources);
-        return write_output(
-            &opts,
-            source,
-            output,
-            url,
-            cli.source_map,
-            cli.style,
-            cli.source_map_urls,
-        );
+        // `parse_args` guarantees a single stdout unit here; redirect it.
+        if let Some(unit) = units.first_mut() {
+            unit.target = Target::File(output.clone());
+        }
     }
-
-    // Throughput mode: recompile the whole input set in-process N times, timing
-    // only the compile calls (sources are read once), and report ms/compile +
-    // compiles/sec to stderr. The CSS is still emitted once unless `--quiet`.
-    if let Some(n) = cli.loop_n {
-        // Warm + correctness pass (also catches compile errors before timing).
-        for (source, syntax, url) in &units {
-            if let Err(e) = compile(source, &opts_for(style, &importer, unicode, *syntax, url)) {
-                eprintln!("{e}");
-                return ExitCode::from(65);
-            }
-        }
-        let mut last = String::new();
-        let start = Instant::now();
-        for _ in 0..n {
-            for (source, syntax, url) in &units {
-                match compile(source, &opts_for(style, &importer, unicode, *syntax, url)) {
-                    Ok(css) => last = css,
-                    Err(e) => {
-                        eprintln!("{e}");
-                        return ExitCode::from(65);
-                    }
-                }
-            }
-        }
-        let elapsed = start.elapsed();
-        let per = elapsed.as_secs_f64() * 1000.0 / f64::from(n);
-        let per_sec = if per > 0.0 { 1000.0 / per } else { f64::INFINITY };
-        eprintln!("sasso: {n} compiles in {elapsed:.3?} => {per:.3} ms/compile, {per_sec:.1} compiles/sec");
-        if !cli.quiet && !last.is_empty() {
-            // Match the CLI's single trailing newline (the library API omits it;
-            // dart-sass emits nothing at all for empty output).
-            println!("{last}");
+    if units.is_empty() {
+        if cli.pairs.is_empty() && !dir_entry {
+            return usage_error("no input file (pass a path, an <in>:<out> pair, or --stdin)");
         }
         return ExitCode::SUCCESS;
     }
 
-    // One-shot: compile each input unit and stream the CSS to stdout in order.
-    // dart-sass terminates each NON-empty compiled stylesheet with a single
-    // newline that the library API omits (empty output stays empty), so append
-    // one per non-empty unit.
-    let mut out = String::new();
-    for (source, syntax, url) in &units {
-        match compile(source, &opts_for(style, &importer, unicode, *syntax, url)) {
-            Ok(css) => {
-                if !css.is_empty() {
-                    out.push_str(&css);
-                    out.push('\n');
+    let shared = Shared {
+        load_paths: cli.load_paths.clone(),
+        style: cli.style,
+        unicode: !cli.no_unicode,
+        charset: cli.charset,
+        quiet: cli.quiet,
+        quiet_deps: cli.quiet_deps,
+        no_css: cli.no_css,
+        embed_sources: cli.embed_sources,
+        embed_source_map: cli.embed_source_map,
+        source_map_urls: cli.source_map_urls.unwrap_or(SourceMapUrls::Relative),
+        // dart: source maps default ON when writing to a file; an explicit
+        // `--embed-source-map` implies one.
+        file_source_map: cli.source_map.unwrap_or(true) || cli.embed_source_map,
+        file_error_css: cli.error_css.unwrap_or(true),
+        stdout_error_css: cli.error_css == Some(true),
+    };
+
+    // Throughput mode: recompile the whole input set in-process N times, timing
+    // only the compile calls (sources are read once), and report ms/compile +
+    // compiles/sec to stderr. The CSS is still emitted once unless `--no-css`.
+    if let Some(n) = cli.loop_n {
+        return run_loop(&units, &shared, n);
+    }
+
+    let jobs = cli
+        .jobs
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let outcomes = compile_all(&units, &shared, jobs, cli.stop_on_error);
+
+    // Report in command-line order: each unit's diagnostics, then its CSS.
+    let mut worst = Status::Ok;
+    {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        // dart separates one unit's diagnostics from the next with a blank
+        // line; a warning block already ends in one, an error does not.
+        let mut stderr_ends_blank = true;
+        // A consumer that closed the pipe early is not an error (dart exits 0
+        // too, as does every Unix filter); any other stdout failure is.
+        let mut stdout_ok = true;
+        for outcome in outcomes.into_iter().flatten() {
+            worst = worse(worst, outcome.status);
+            if !outcome.stderr.is_empty() {
+                if !stderr_ends_blank {
+                    let _ = stderr.write_all(b"\n");
+                }
+                let _ = stderr.write_all(outcome.stderr.as_bytes());
+                stderr_ends_blank = outcome.stderr.ends_with("\n\n");
+            }
+            if stdout_ok && !outcome.stdout.is_empty() {
+                if let Err(e) = stdout.write_all(outcome.stdout.as_bytes()) {
+                    stdout_ok = false;
+                    if e.kind() != std::io::ErrorKind::BrokenPipe {
+                        let _ = writeln!(stderr, "error: cannot write to stdout: {e}");
+                        worst = Status::IoError;
+                    }
                 }
             }
-            Err(e) => {
-                eprintln!("{e}");
-                return ExitCode::from(65);
+        }
+        if stdout_ok {
+            if let Err(e) = stdout.flush() {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    let _ = writeln!(stderr, "error: cannot write to stdout: {e}");
+                    worst = Status::IoError;
+                }
             }
         }
     }
-    if !cli.quiet {
-        print!("{out}");
+    match worst {
+        Status::Ok => ExitCode::SUCCESS,
+        Status::CompileError => ExitCode::from(EXIT_COMPILE),
+        Status::IoError => ExitCode::from(EXIT_IO),
+    }
+}
+
+/// The more severe of two statuses (I/O error > compile error > ok).
+fn worse(a: Status, b: Status) -> Status {
+    match (a, b) {
+        (Status::IoError, _) | (_, Status::IoError) => Status::IoError,
+        (Status::CompileError, _) | (_, Status::CompileError) => Status::CompileError,
+        _ => Status::Ok,
+    }
+}
+
+/// Compile every unit, up to `jobs` at a time, returning one slot per unit in
+/// input order. A slot is `None` when `stop_on_error` skipped the unit.
+fn compile_all(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) -> Vec<Option<Outcome>> {
+    let n = units.len();
+    if jobs <= 1 || n <= 1 {
+        let mut results = Vec::with_capacity(n);
+        for unit in units {
+            let outcome = compile_unit(unit, shared);
+            let failed = outcome.status != Status::Ok;
+            results.push(Some(outcome));
+            if failed && stop_on_error {
+                break;
+            }
+        }
+        results.resize_with(n, || None);
+        return results;
+    }
+    // A shared counter hands out the next unit; each worker stores its result
+    // in that unit's slot, so ordering is recovered without a channel.
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let slots: Vec<Mutex<Option<Outcome>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..jobs.min(n) {
+            scope.spawn(|| loop {
+                if stop_on_error && failed.load(Ordering::Relaxed) {
+                    break;
+                }
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= n {
+                    break;
+                }
+                // Re-check after claiming: a failure another worker reported
+                // between the check above and the claim must not start this
+                // unit either (its slot stays `None`, "not run").
+                if stop_on_error && failed.load(Ordering::Relaxed) {
+                    break;
+                }
+                let outcome = compile_unit(&units[i], shared);
+                if outcome.status != Status::Ok {
+                    failed.store(true, Ordering::Relaxed);
+                }
+                *slots[i].lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome);
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| slot.into_inner().unwrap_or_else(|p| p.into_inner()))
+        .collect()
+}
+
+/// Read a unit's source text, or the outcome that reports why it could not be.
+fn read_source<'u>(unit: &'u Unit) -> Result<Cow<'u, str>, Outcome> {
+    match &unit.source {
+        Source::Text(s) => Ok(Cow::Borrowed(s.as_str())),
+        Source::InvalidUtf8 => Err(Outcome::failed(
+            Status::CompileError,
+            "Error: Invalid UTF-8.\n".to_string(),
+        )),
+        Source::File(path) => match std::fs::read_to_string(path) {
+            Ok(s) => Ok(Cow::Owned(s)),
+            Err(e) if is_invalid_utf8(&e) => Err(Outcome::failed(
+                Status::CompileError,
+                "Error: Invalid UTF-8.\n".to_string(),
+            )),
+            Err(_) => Err(Outcome::failed(
+                Status::IoError,
+                format!("Error reading {}: Cannot open file.\n", path.display()),
+            )),
+        },
+    }
+}
+
+/// Build the per-unit options. A helper fn (not a closure) so the returned
+/// `Options` can borrow `unit`/`shared` for the caller's lifetime.
+fn options_for<'a>(
+    unit: &'a Unit,
+    shared: &'a Shared,
+    importer: &'a FsImporter,
+    unicode: bool,
+    warn: WarnHandler,
+) -> Options<'a> {
+    let opts = Options::default()
+        .with_style(shared.style)
+        .with_syntax(unit.syntax)
+        .with_importer(importer)
+        .with_url(&unit.url)
+        .with_unicode(unicode)
+        .with_charset(shared.charset)
+        .with_source_map_include_sources(shared.embed_sources)
+        .with_warn_handler(warn);
+    if shared.quiet_deps {
+        // dart's `--quiet-deps`: compiler warnings from dependencies —
+        // stylesheets the importer reached through a load path, and whatever
+        // those load relatively — are dropped inside the compiler, ahead of its
+        // repetition cap. A dependency's own `@warn` still prints.
+        opts.with_quiet_deps(importer.dependencies())
+    } else {
+        opts
+    }
+}
+
+/// A warning handler that appends each diagnostic to `buf` exactly as the
+/// library's default logger would print it (the block plus a blank line),
+/// honouring `--quiet` and `--quiet-deps`.
+fn buffered_warn_handler(shared: &Shared, buf: Rc<RefCell<String>>) -> WarnHandler {
+    let quiet = shared.quiet;
+    Rc::new(move |ev: &WarnEvent<'_>| {
+        // `--quiet` drops everything (`--quiet-deps` is applied inside the
+        // compiler, see `options_for`).
+        if quiet {
+            return;
+        }
+        let mut b = buf.borrow_mut();
+        b.push_str(ev.formatted);
+        b.push('\n');
+    })
+}
+
+fn silent_warn_handler() -> WarnHandler {
+    Rc::new(|_: &WarnEvent<'_>| {})
+}
+
+/// Compile one unit end to end: read, compile (with a map when wanted), write
+/// or buffer the CSS, and on failure render the diagnostic (plus dart's error
+/// stylesheet where it applies).
+fn compile_unit(unit: &Unit, shared: &Shared) -> Outcome {
+    match read_source(unit) {
+        Ok(source) => compile_source(unit, &source, shared),
+        Err(mut outcome) => {
+            // A read failure never reaches the compiler, but dart treats
+            // invalid UTF-8 as a compile error all the same: the file target
+            // gets the error stylesheet (or, with `--no-error-css`, loses any
+            // stale CSS). There is no source span to render here.
+            if outcome.status == Status::CompileError {
+                let message = outcome.stderr.trim_end_matches('\n').to_string();
+                finish_compile_error(unit, shared, &message, &message, &mut outcome);
+            }
+            outcome
+        }
+    }
+}
+
+/// Wrap up a compile error for `unit`: write dart's error stylesheet where it
+/// applies — or, with error CSS off, remove a stale output file so nothing
+/// consumes the CSS of an earlier successful build (dart deletes it too; the
+/// `.map`, if any, is left alone). `rendered` is the diagnostic as printed to
+/// the terminal, `ascii` the same rendered with the ASCII glyph set.
+fn finish_compile_error(unit: &Unit, shared: &Shared, rendered: &str, ascii: &str, outcome: &mut Outcome) {
+    // `--no-css` means no output-side effects at all: no error stylesheet, and
+    // an existing output is left exactly as it was.
+    if shared.no_css {
+        return;
+    }
+    match &unit.target {
+        Target::Stdout => {
+            if shared.stdout_error_css {
+                outcome.stdout = error_css(rendered, ascii);
+            }
+        }
+        Target::File(output) => {
+            if shared.file_error_css {
+                if let Err(msg) = write_file(output, error_css(rendered, ascii).as_bytes()) {
+                    outcome.stderr.push_str(&msg);
+                    outcome.stderr.push('\n');
+                    outcome.status = Status::IoError;
+                }
+            } else if let Err(e) = std::fs::remove_file(output) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    outcome
+                        .stderr
+                        .push_str(&format!("error: cannot remove {}: {e}\n", output.display()));
+                    outcome.status = Status::IoError;
+                }
+            }
+        }
+    }
+}
+
+/// [`compile_unit`] for an already-read `source`.
+fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
+    let importer = FsImporter::new(shared.load_paths.clone());
+    let warnings = Rc::new(RefCell::new(String::new()));
+    let opts = options_for(
+        unit,
+        shared,
+        &importer,
+        shared.unicode,
+        buffered_warn_handler(shared, Rc::clone(&warnings)),
+    );
+
+    // No map when nothing will be written (`--no-css`): mapping is not free.
+    let want_map = !shared.no_css
+        && match &unit.target {
+            Target::File(_) => shared.file_source_map,
+            Target::Stdout => shared.embed_source_map,
+        };
+    // `(css, map)`: the map is `Some` only when one was requested.
+    let compiled: Result<(String, Option<SourceMap>), sasso::Error> = if want_map {
+        compile_with_source_map(source, &opts).map(|r| (r.css, Some(r.source_map)))
+    } else {
+        compile(source, &opts).map(|css| (css, None))
+    };
+    // A stdin unit's text: dart records it in the map as a `data:` URI.
+    let stdin_text = match &unit.source {
+        Source::Text(text) => Some(text.as_str()),
+        Source::File(_) | Source::InvalidUtf8 => None,
+    };
+
+    let mut outcome = Outcome {
+        stderr: std::mem::take(&mut *warnings.borrow_mut()),
+        stdout: String::new(),
+        status: Status::Ok,
+    };
+    match compiled {
+        // `--no-css`: the compile (and its diagnostics) was all that was wanted.
+        Ok(_) if shared.no_css => {}
+        Ok((css, map)) => match &unit.target {
+            Target::Stdout => {
+                outcome.stdout = match map {
+                    Some(map) => {
+                        // dart embeds a stdout map with absolute `file://` sources and
+                        // no `file` field.
+                        let sources = adjust_sources(
+                            &map.sources,
+                            &unit.url,
+                            stdin_text,
+                            Path::new(""),
+                            SourceMapUrls::Absolute,
+                        );
+                        let json =
+                            dart_map_json(None, &sources, map.sources_content.as_deref(), &map.mappings);
+                        append_source_map_footer(&css, &data_uri(&json), shared.style)
+                    }
+                    // The library API omits the trailing newline dart-sass's CLI
+                    // writes to non-empty output (empty output stays empty).
+                    None if css.is_empty() => css,
+                    None => format!("{css}\n"),
+                };
+            }
+            Target::File(output) => {
+                if let Err(msg) = write_css_file(output, &css, map.as_ref(), &unit.url, stdin_text, shared) {
+                    outcome.stderr.push_str(&msg);
+                    outcome.stderr.push('\n');
+                    outcome.status = Status::IoError;
+                }
+            }
+        },
+        Err(err) => {
+            let rendered = err.to_string();
+            outcome.stderr.push_str(&rendered);
+            outcome.stderr.push('\n');
+            outcome.status = Status::CompileError;
+            let want_error_css = match &unit.target {
+                Target::File(_) => shared.file_error_css,
+                Target::Stdout => shared.stdout_error_css,
+            };
+            // The comment block always uses the ASCII glyph set (dart avoids
+            // non-ASCII there so the file needs no @charset); re-render the
+            // error that way when the terminal rendering was Unicode.
+            let ascii = if want_error_css && shared.unicode {
+                let ascii_opts = options_for(unit, shared, &importer, false, silent_warn_handler());
+                compile(source, &ascii_opts)
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| rendered.clone())
+            } else {
+                rendered.clone()
+            };
+            finish_compile_error(unit, shared, &rendered, &ascii, &mut outcome);
+        }
+    }
+    outcome
+}
+
+/// Throughput mode (`--loop N`): a warm/correctness pass reports diagnostics
+/// once, then the whole set is recompiled N times with a silent logger.
+fn run_loop(units: &[Unit], shared: &Shared, n: u32) -> ExitCode {
+    let mut sources = Vec::with_capacity(units.len());
+    for unit in units {
+        // Read once; the warm pass and the timed loop share the text.
+        let source = match read_source(unit) {
+            Ok(s) => s.into_owned(),
+            Err(outcome) => {
+                eprint!("{}", outcome.stderr);
+                return ExitCode::from(if outcome.status == Status::IoError {
+                    EXIT_IO
+                } else {
+                    EXIT_COMPILE
+                });
+            }
+        };
+        let outcome = compile_source(unit, &source, shared);
+        eprint!("{}", outcome.stderr);
+        if outcome.status != Status::Ok {
+            return ExitCode::from(if outcome.status == Status::IoError {
+                EXIT_IO
+            } else {
+                EXIT_COMPILE
+            });
+        }
+        sources.push(source);
+    }
+    let importer = FsImporter::new(shared.load_paths.clone());
+    let mut last = String::new();
+    let start = Instant::now();
+    for _ in 0..n {
+        for (unit, source) in units.iter().zip(&sources) {
+            let opts = options_for(unit, shared, &importer, shared.unicode, silent_warn_handler());
+            match compile(source, &opts) {
+                Ok(css) => last = css,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::from(EXIT_COMPILE);
+                }
+            }
+        }
+    }
+    let elapsed = start.elapsed();
+    let per = elapsed.as_secs_f64() * 1000.0 / f64::from(n);
+    let per_sec = if per > 0.0 { 1000.0 / per } else { f64::INFINITY };
+    eprintln!("sasso: {n} compiles in {elapsed:.3?} => {per:.3} ms/compile, {per_sec:.1} compiles/sec");
+    if !shared.no_css && !last.is_empty() {
+        // Match the CLI's single trailing newline (the library API omits it;
+        // dart-sass emits nothing at all for empty output).
+        println!("{last}");
     }
     ExitCode::SUCCESS
+}
+
+/// Standard input as a unit source, read on first use and handed out again
+/// afterwards (a `-` entry and a `-:out` pair may both name it). Invalid
+/// UTF-8 becomes [`Source::InvalidUtf8`] so the unit fails like a file would
+/// (dart itself crashes on this); an I/O failure is reported here and mapped
+/// to the exit code the caller should return with.
+fn stdin_source(cache: &mut Option<Source>) -> Result<Source, ExitCode> {
+    if let Some(source) = cache {
+        return Ok(source.clone());
+    }
+    let source = match read_stdin() {
+        Ok(text) => Source::Text(text),
+        Err(e) if is_invalid_utf8(&e) => Source::InvalidUtf8,
+        Err(e) => {
+            eprintln!("error: failed to read stdin: {e}");
+            return Err(ExitCode::from(EXIT_IO));
+        }
+    };
+    *cache = Some(source.clone());
+    Ok(source)
 }
 
 fn read_stdin() -> std::io::Result<String> {
@@ -416,67 +1261,75 @@ fn is_invalid_utf8(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::InvalidData
 }
 
-/// Compile `source` and write the CSS to `output` (with `--source-map`, also a
-/// `<output>.map` sidecar and a `sourceMappingURL` footer), matching dart-sass
-/// byte-for-byte. `input_url` is the input path as given on the command line.
-fn write_output(
-    opts: &Options<'_>,
-    source: &str,
-    output: &Path,
-    input_url: &str,
-    source_map: bool,
-    style: OutputStyle,
-    source_map_urls: SourceMapUrls,
-) -> ExitCode {
-    if source_map {
-        let result = match compile_with_source_map(source, opts) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("{e}");
-                return ExitCode::from(65);
-            }
-        };
-        // The sidecar lives next to the CSS as `<output>.map`; the footer URL is
-        // its basename (dart writes e.g. `out.css.map` and footers `out.css.map`).
-        let map_path = append_ext(output, "map");
-        let map_url = path_basename(&map_path);
-        let css = append_source_map_footer(&result.css, &map_url, style);
-        // Build the map JSON in dart's field order, rewriting `file`/`sources`.
-        let file = path_basename(output);
-        let sources = adjust_sources(&result.source_map.sources, input_url, &map_path, source_map_urls);
-        let map_json = dart_map_json(
-            &file,
-            &sources,
-            result.source_map.sources_content.as_deref(),
-            &result.source_map.mappings,
-        );
-        if let Err(e) = std::fs::write(output, css.as_bytes()) {
-            eprintln!("error: cannot write {}: {e}", output.display());
-            return ExitCode::FAILURE;
-        }
-        if let Err(e) = std::fs::write(&map_path, map_json.as_bytes()) {
-            eprintln!("error: cannot write {}: {e}", map_path.display());
-            return ExitCode::FAILURE;
-        }
-    } else {
-        let mut css = match compile(source, opts) {
-            Ok(css) => css,
-            Err(e) => {
-                eprintln!("{e}");
-                return ExitCode::from(65);
-            }
-        };
-        // The library API omits the trailing newline dart-sass's CLI writes to
-        // non-empty output (empty output stays empty).
-        if !css.is_empty() {
-            css.push('\n');
-        }
-        if let Err(e) = std::fs::write(output, css.as_bytes()) {
-            eprintln!("error: cannot write {}: {e}", output.display());
-            return ExitCode::FAILURE;
+// ---------------------------------------------------------------------------
+// File output
+// ---------------------------------------------------------------------------
+
+/// Write `bytes` to `path`, creating missing parent directories like dart-sass.
+fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("error: cannot create {}: {e}", parent.display()))?;
         }
     }
-    ExitCode::SUCCESS
+    std::fs::write(path, bytes).map_err(|e| format!("error: cannot write {}: {e}", path.display()))
+}
+
+/// Write compiled CSS to `output`. With a map: either a `<output>.map` sidecar
+/// plus a `sourceMappingURL` footer, or (`--embed-source-map`) the map inlined
+/// as a `data:` URI in the footer — byte-for-byte what dart-sass writes.
+/// `input_url` is the input path as given on the command line.
+fn write_css_file(
+    output: &Path,
+    css: &str,
+    map: Option<&SourceMap>,
+    input_url: &str,
+    stdin_text: Option<&str>,
+    shared: &Shared,
+) -> Result<(), String> {
+    match map {
+        Some(map) => {
+            // The sidecar lives next to the CSS as `<output>.map`; the footer URL
+            // is its basename (dart writes e.g. `out.css.map` and footers
+            // `out.css.map`). An embedded map keeps the same relative sources.
+            let map_path = append_ext(output, "map");
+            // Both the map's `file` and the footer's URL are URLs, not paths:
+            // dart percent-encodes the basename (`out%20file%231.css`).
+            let file = encode_url_segment(&path_basename(output));
+            let sources = adjust_sources(
+                &map.sources,
+                input_url,
+                stdin_text,
+                &map_path,
+                shared.source_map_urls,
+            );
+            let map_json = dart_map_json(
+                Some(&file),
+                &sources,
+                map.sources_content.as_deref(),
+                &map.mappings,
+            );
+            if shared.embed_source_map {
+                let css = append_source_map_footer(css, &data_uri(&map_json), shared.style);
+                write_file(output, css.as_bytes())
+            } else {
+                // The map goes first (dart's order too): if it cannot be
+                // written, no CSS pointing at a missing map gets published.
+                let map_url = encode_url_segment(&path_basename(&map_path));
+                let css = append_source_map_footer(css, &map_url, shared.style);
+                write_file(&map_path, map_json.as_bytes())?;
+                write_file(output, css.as_bytes())
+            }
+        }
+        None => {
+            // dart terminates a CSS FILE with exactly one newline, an empty
+            // stylesheet included (`\n` alone); only stdout gets nothing for
+            // empty output. The library API omits the newline.
+            let css = format!("{css}\n");
+            write_file(output, css.as_bytes())
+        }
+    }
 }
 
 /// dart's `sourceMappingURL` footer. The library CSS has no trailing newline,
@@ -495,10 +1348,99 @@ fn append_source_map_footer(css: &str, url: &str, style: OutputStyle) -> String 
     out
 }
 
+/// dart's error stylesheet (`--error-css`): the ASCII-rendered diagnostic as a
+/// leading comment, then a `body::before` whose `content` shows the full
+/// diagnostic in the browser. `rendered` is the error as printed to the
+/// terminal (Unicode glyphs unless `--no-unicode`); `ascii` the same error
+/// rendered with the ASCII glyph set.
+fn error_css(rendered: &str, ascii: &str) -> String {
+    let ascii = ascii.trim_end_matches('\n');
+    let rendered = rendered.trim_end_matches('\n');
+    // `*/` inside the message would close the comment; dart swaps the slash
+    // for U+2215 DIVISION SLASH.
+    let comment = ascii.replace("*/", "*\u{2215}").replace('\n', "\n * ");
+    let mut content = String::with_capacity(rendered.len() + 32);
+    for c in rendered.chars() {
+        match c {
+            '"' => content.push_str("\\\""),
+            '\\' => content.push_str("\\\\"),
+            '\n' => content.push_str("\\a "),
+            c if !c.is_ascii() => content.push_str(&format!("\\{:x} ", c as u32)),
+            c => content.push(c),
+        }
+    }
+    format!(
+        "/* {comment} */\n\n\
+         body::before {{\n  \
+         font-family: \"Source Code Pro\", \"SF Mono\", Monaco, Inconsolata, \"Fira Mono\",\n      \
+         \"Droid Sans Mono\", monospace, monospace;\n  \
+         white-space: pre;\n  \
+         display: block;\n  \
+         padding: 1em;\n  \
+         margin-bottom: 1em;\n  \
+         border-bottom: 2px solid black;\n  \
+         content: \"{content}\";\n\
+         }}\n"
+    )
+}
+
+/// The inline form of a source map (`--embed-source-map`): dart's
+/// `Uri.dataFromString` output, i.e. `data:application/json;charset=utf-8,`
+/// followed by the JSON with every byte outside the URI "uric" set
+/// (unreserved + sub-delims + `;/?:@&=+$,`) percent-encoded as uppercase `%XX`.
+fn data_uri(json: &str) -> String {
+    format!("data:application/json;charset=utf-8,{}", uric_encode(json))
+}
+
+/// Percent-encode `s` the way dart's `Uri.dataFromString` does: every byte
+/// outside the URI "uric" set (unreserved + sub-delims + `;/?:@&=+$,`) becomes
+/// uppercase `%XX`.
+fn uric_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        let keep = b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'*'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b';'
+                    | b'/'
+                    | b'?'
+                    | b':'
+                    | b'@'
+                    | b'&'
+                    | b'='
+                    | b'+'
+                    | b'$'
+                    | b','
+            );
+        if keep {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(hex_upper(b >> 4));
+            out.push(hex_upper(b & 0xf));
+        }
+    }
+    out
+}
+
 /// Serialize the map JSON in dart-sass's exact field order:
-/// `version, sourceRoot:"", sources, names:[], mappings, file[, sourcesContent]`.
-/// Hand-built (zero-dep) with the same string escaping dart uses.
-fn dart_map_json(file: &str, sources: &[String], contents: Option<&[String]>, mappings: &str) -> String {
+/// `version, sourceRoot:"", sources, names:[], mappings[, file][, sourcesContent]`.
+/// Hand-built (zero-dep) with the same string escaping dart uses. `file` is
+/// omitted for a map embedded in stdout output, as dart does.
+fn dart_map_json(
+    file: Option<&str>,
+    sources: &[String],
+    contents: Option<&[String]>,
+    mappings: &str,
+) -> String {
     let mut s = String::from("{\"version\":3,\"sourceRoot\":\"\",\"sources\":[");
     for (i, src) in sources.iter().enumerate() {
         if i > 0 {
@@ -508,8 +1450,10 @@ fn dart_map_json(file: &str, sources: &[String], contents: Option<&[String]>, ma
     }
     s.push_str("],\"names\":[],\"mappings\":");
     json_str(mappings, &mut s);
-    s.push_str(",\"file\":");
-    json_str(file, &mut s);
+    if let Some(file) = file {
+        s.push_str(",\"file\":");
+        json_str(file, &mut s);
+    }
     if let Some(contents) = contents {
         s.push_str(",\"sourcesContent\":[");
         for (i, c) in contents.iter().enumerate() {
@@ -563,13 +1507,24 @@ fn append_ext(p: &Path, ext: &str) -> PathBuf {
 /// `relative` = the lexically-normalized path from the `.map` file's directory
 /// to the source (URL-encoded); `absolute` = a canonicalized `file://` URL.
 /// The library hands us the input path(s) as stamped during eval (the entry is
-/// `input_url`); we adjust each one the same way dart does.
-fn adjust_sources(sources: &[String], input_url: &str, map_path: &Path, mode: SourceMapUrls) -> Vec<String> {
+/// `input_url`); we adjust each one the same way dart does. A stdin entry has
+/// no path: dart records its text as a `data:;charset=utf-8,…` URI.
+fn adjust_sources(
+    sources: &[String],
+    input_url: &str,
+    stdin_text: Option<&str>,
+    map_path: &Path,
+    mode: SourceMapUrls,
+) -> Vec<String> {
     let cwd = std::env::current_dir().unwrap_or_default();
     sources
         .iter()
         .map(|src| {
             // The entry source equals `input_url`; imports carry their own paths.
+            let is_entry = src == "stdin" || src == input_url;
+            if let (true, Some(text)) = (is_entry, stdin_text) {
+                return format!("data:;charset=utf-8,{}", uric_encode(text));
+            }
             // Treat each as a filesystem path relative to cwd.
             let raw: &str = if src == "stdin" { input_url } else { src.as_str() };
             let abs = normalize_path(&cwd.join(raw));
@@ -632,7 +1587,29 @@ fn file_url(abs: &Path) -> String {
     let mut s = String::from("file://");
     for comp in abs.components() {
         match comp {
-            Component::RootDir | Component::Prefix(_) => {}
+            Component::RootDir => {}
+            // Windows prefixes, spelled as dart's `Uri.file` does: a drive is
+            // the first segment (`file:///C:/…`), a UNC share is the authority
+            // (`file://server/share/…`); verbatim (`\\?\`) forms drop the marker.
+            Component::Prefix(prefix) => {
+                use std::path::Prefix;
+                match prefix.kind() {
+                    Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                        s.push('/');
+                        s.push(letter as char);
+                        s.push(':');
+                    }
+                    Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                        s.push_str(&encode_url_segment(&server.to_string_lossy()));
+                        s.push('/');
+                        s.push_str(&encode_url_segment(&share.to_string_lossy()));
+                    }
+                    Prefix::Verbatim(rest) | Prefix::DeviceNS(rest) => {
+                        s.push('/');
+                        s.push_str(&encode_url_segment(&rest.to_string_lossy()));
+                    }
+                }
+            }
             c => {
                 s.push('/');
                 s.push_str(&encode_url_segment(&c.as_os_str().to_string_lossy()));

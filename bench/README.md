@@ -8,7 +8,7 @@ Compares SCSS compilers on this machine on two axes that matter:
    removed.
 
 Current engines: **sasso** (this repo's real CLI, in-process throughput via its
-own `--loop`/`--quiet` flags), **dart-sass** (`npx sass` + the cached binary),
+own `--loop`/`--no-css` flags), **dart-sass** (`npx sass` + the cached binary),
 and **grass** (Rust, in-process via `grass_runner`).
 
 Latest results: [`three_way.md`](./three_way.md) (sasso vs dart-sass vs grass).

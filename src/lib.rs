@@ -66,7 +66,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use arena::{set_arena_bytes, ScopedAlloc};
 pub use error::Error;
 pub use host_fn::{host_value_op, HostFunction};
-pub use importer::{CanonicalUrl, CanonicalizeContext, FsImporter, Importer, ImporterError, ImporterResult};
+pub use importer::{
+    CanonicalUrl, CanonicalizeContext, DependencySet, FsImporter, Importer, ImporterError, ImporterResult,
+};
 pub use sourcemap::SourceMap;
 
 /// Output formatting style.
@@ -126,6 +128,10 @@ pub struct Options<'a> {
     /// Diagnostic handler (dart-sass `logger`). When set, every `@warn`/`@debug`/
     /// deprecation warning is delivered here instead of printed to stderr.
     pub(crate) warn: Option<WarnHandler>,
+    /// dart-sass `quietDeps`: deprecation warnings raised inside a dependency
+    /// (a file this set marks, see [`FsImporter::dependencies`]) are dropped
+    /// before they are counted or delivered.
+    pub(crate) quiet_deps: Option<DependencySet>,
     /// Emit a `@charset "UTF-8";` (expanded) / U+FEFF BOM (compressed) prefix
     /// when the output contains non-ASCII (dart-sass `charset`, default `true`).
     /// `false` suppresses it.
@@ -143,6 +149,10 @@ pub enum WarnKind {
 
 /// A `@warn` / `@debug` / deprecation diagnostic delivered to an embedder's
 /// [`WarnHandler`] (dart-sass `logger`).
+///
+/// Produced by the compiler and read by handlers; `#[non_exhaustive]` so a
+/// future field is not a breaking change for anyone matching on it.
+#[non_exhaustive]
 pub struct WarnEvent<'a> {
     /// Warning vs debug.
     pub kind: WarnKind,
@@ -159,6 +169,14 @@ pub struct WarnEvent<'a> {
     pub url: &'a str,
     /// The 1-based line for the diagnostic's span; `0` when not available.
     pub line: usize,
+    /// The canonical URL of the stylesheet being evaluated when the diagnostic
+    /// fired, or `""` when not available. For a file the importer loaded this
+    /// is the importer's canonical URL — the resolved absolute path with
+    /// [`FsImporter`] — which is what [`DependencySet::is_dependency`] keys on.
+    /// For the entry stylesheet it is [`Options::url`] exactly as supplied
+    /// (the library never canonicalizes the entry). Unlike `url` (dart's short
+    /// display form, e.g. a load-path file's basename) it identifies the file.
+    pub path: &'a str,
 }
 
 /// An embedder's diagnostic handler (dart-sass `logger`). Receives every
@@ -176,6 +194,7 @@ impl Default for Options<'_> {
             source_map_include_sources: false,
             functions: Vec::new(),
             warn: None,
+            quiet_deps: None,
             charset: true,
         }
     }
@@ -260,6 +279,18 @@ impl<'a> Options<'a> {
     #[must_use]
     pub fn with_warn_handler(mut self, handler: WarnHandler) -> Self {
         self.warn = Some(handler);
+        self
+    }
+
+    /// Silence deprecation warnings from dependencies (dart-sass `quietDeps`):
+    /// files that `deps` — normally [`FsImporter::dependencies`] of the importer
+    /// in use — marks as reached through a load path. Applied before the
+    /// repetition cap, so silenced warnings do not surface as "N repetitive
+    /// deprecation warnings omitted" either. `@warn`/`@debug` are unaffected,
+    /// as in dart.
+    #[must_use]
+    pub fn with_quiet_deps(mut self, deps: DependencySet) -> Self {
+        self.quiet_deps = Some(deps);
         self
     }
 
@@ -369,6 +400,13 @@ fn basename(url: &str) -> &str {
 /// [`compile_inner`], then emit with the source-map collector and assemble the
 /// [`SourceMap`].
 fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult, Error> {
+    // dart's `quietDeps` is a per-compilation notion: scope the record to this
+    // compile — it starts empty, and a nested compile (a warn handler running
+    // `compile` with the same importer) hands the enclosing record back when
+    // it ends — so provenance cannot leak between compiles sharing an importer.
+    // Entered before parsing, so a compile that fails early still leaves the
+    // record in its per-compilation state.
+    let _dep_scope = options.quiet_deps.as_ref().map(|d| d.enter_compile());
     let glyphs = if options.unicode {
         diag::GlyphSet::Unicode
     } else {
@@ -411,6 +449,7 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
         url: entry_name,
         glyphs,
         warn: options.warn.as_ref(),
+        quiet_deps: options.quiet_deps.as_ref(),
         source_map: true,
     });
     let mut out = Vec::new();
@@ -431,6 +470,13 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
 /// [`compile`]; all of its allocations may be arena-resident, so its result is
 /// copied out by the wrapper before the arena is reset.
 fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
+    // dart's `quietDeps` is a per-compilation notion: scope the record to this
+    // compile — it starts empty, and a nested compile (a warn handler running
+    // `compile` with the same importer) hands the enclosing record back when
+    // it ends — so provenance cannot leak between compiles sharing an importer.
+    // Entered before parsing, so a compile that fails early still leaves the
+    // record in its per-compilation state.
+    let _dep_scope = options.quiet_deps.as_ref().map(|d| d.enter_compile());
     let glyphs_for = || {
         if options.unicode {
             diag::GlyphSet::Unicode
@@ -484,6 +530,7 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
         url: diag_url,
         glyphs,
         warn: options.warn.as_ref(),
+        quiet_deps: options.quiet_deps.as_ref(),
         source_map: false,
     });
     let mut out = Vec::new();

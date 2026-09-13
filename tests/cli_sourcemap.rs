@@ -191,9 +191,11 @@ fn json_sources(json: &str) -> Vec<String> {
 
 #[test]
 fn output_without_source_map_writes_plain_css() {
+    // Like dart-sass, file output gets a source map by default; `--no-source-map`
+    // opts out.
     let dir = scratch("plain");
     write(&dir, "in.scss", ".a {\n  color: red;\n}\n");
-    let (ok, _out, err) = run(&dir, &["in.scss", "-o", "out.css"]);
+    let (ok, _out, err) = run(&dir, &["--no-source-map", "in.scss", "-o", "out.css"]);
     assert!(ok, "compile failed: {err}");
     let css = std::fs::read_to_string(dir.join("out.css")).expect("out.css");
     assert_eq!(css, ".a {\n  color: red;\n}\n", "plain CSS, no footer");
@@ -287,7 +289,7 @@ fn embed_sources_populates_sources_content() {
 }
 
 // =====================================================================
-// (e) --source-map without -o is an error.
+// (e) --source-map to stdout is an error unless the map is embedded (dart).
 // =====================================================================
 
 #[test]
@@ -297,8 +299,8 @@ fn source_map_without_output_errors() {
     let (ok, _o, err) = run(&dir, &["--source-map", "in.scss"]);
     assert!(!ok, "expected a non-zero exit");
     assert!(
-        err.contains("--source-map requires --output"),
-        "expected the requires-output error, got: {err}"
+        err.contains("When printing to stdout, --source-map requires --embed-source-map."),
+        "expected dart's stdout/source-map error, got: {err}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -354,7 +356,16 @@ fn cli_appends_single_trailing_newline_both_styles() {
     assert_eq!(comp, ".a{color:red}\n", "compressed stdout ends with one \\n");
 
     // Compressed to a `-o` file (no source map): same single trailing newline.
-    let (ok, _o, err) = run(&dir, &["--style=compressed", "in.scss", "-o", "out.css"]);
+    let (ok, _o, err) = run(
+        &dir,
+        &[
+            "--style=compressed",
+            "--no-source-map",
+            "in.scss",
+            "-o",
+            "out.css",
+        ],
+    );
     assert!(ok, "compressed -o failed: {err}");
     let file = std::fs::read_to_string(dir.join("out.css")).expect("out.css");
     assert_eq!(file, ".a{color:red}\n", "compressed file ends with one \\n");

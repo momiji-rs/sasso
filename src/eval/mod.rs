@@ -767,6 +767,9 @@ pub(crate) struct EvalOptions<'a> {
     /// Diagnostic handler (dart-sass `logger`). When set, `@warn`/`@debug`/
     /// deprecation warnings are delivered here instead of printed to stderr.
     pub warn: Option<&'a crate::WarnHandler>,
+    /// dart-sass `quietDeps`: deprecations raised inside a file this set marks
+    /// as a dependency are dropped before they are counted or delivered.
+    pub quiet_deps: Option<&'a crate::DependencySet>,
     /// Whether this compile produces a source map. Gates the variable
     /// definition-span bookkeeping (`var_spans` et al.), which only source-map
     /// emission reads: when false the span chain stays empty and every
@@ -1668,6 +1671,15 @@ impl<'a> Evaluator<'a> {
         if !self.diag_enabled() {
             return;
         }
+        // dart's `quietDeps`: a deprecation raised inside a dependency is
+        // dropped HERE, before the per-id cap, so silenced warnings neither
+        // consume the five visible slots nor count towards the "N repetitive
+        // deprecation warnings omitted" footer.
+        if let Some(deps) = self.options.quiet_deps {
+            if deps.is_dependency(self.current_path()) {
+                return;
+            }
+        }
         // Per-location dedup: an identical (id, file, line, col) warning fires
         // only once.
         let key = (dep.id, self.current_url.clone(), pos.line, pos.col);
@@ -1706,6 +1718,7 @@ impl<'a> Evaluator<'a> {
             formatted: &formatted,
             url: &self.current_url,
             line: pos.line,
+            path: self.current_path(),
         });
     }
 
@@ -1728,6 +1741,8 @@ impl<'a> Evaluator<'a> {
             formatted: &formatted,
             url: "",
             line: 0,
+            // An aggregate over several files: no single origin (like `url`).
+            path: "",
         });
     }
 
@@ -1751,13 +1766,28 @@ impl<'a> Evaluator<'a> {
         self.member = saved_member;
     }
 
+    /// The canonical URL of the stylesheet being evaluated (the resolved path
+    /// for a filesystem file), for [`crate::WarnEvent::path`]; `""` if unknown.
+    fn current_path(&self) -> &str {
+        self.current_canonical.as_ref().map(|c| c.as_str()).unwrap_or("")
+    }
+
     /// Deliver a diagnostic to the embedder's handler (dart-sass `logger`), or —
     /// when none is set — print its `formatted` block to stderr (preserving the
     /// exact native output, since the handler-less path mirrors the old
     /// `eprintln!`s byte-for-byte).
     fn emit_diag(&self, ev: crate::WarnEvent<'_>) {
         match self.options.warn {
-            Some(handler) => handler(&ev),
+            Some(handler) => {
+                // Run the embedder's handler outside the arena scope, so
+                // whatever it retains from the event (a buffered log, a list
+                // of warnings) is allocated by the system allocator and
+                // outlives this compile's arena reset — the same reason
+                // importer calls are paused. Inside the scope a `String` the
+                // handler grows would land in the arena and dangle afterwards.
+                let _paused = crate::arena::pause();
+                handler(&ev);
+            }
             None => eprintln!("{}", ev.formatted),
         }
     }
@@ -1782,6 +1812,7 @@ impl<'a> Evaluator<'a> {
             formatted: &formatted,
             url: "",
             line: 0,
+            path: self.current_path(),
         });
         Ok(())
     }
@@ -1805,6 +1836,7 @@ impl<'a> Evaluator<'a> {
             formatted: &formatted,
             url: &url,
             line: pos.line,
+            path: self.current_path(),
         });
         Ok(())
     }
@@ -2536,6 +2568,16 @@ impl<'a> Evaluator<'a> {
                             if self.loading.iter().any(|p| p == path) {
                                 return Err(Error::unpositioned("This file is already being loaded."));
                             }
+                            // A cache hit skips the importer, which is where
+                            // dependency provenance is recorded: keep the rule
+                            // "what a dependency loads is a dependency" here too.
+                            // (Outside the arena scope, like the importer.)
+                            if let Some(deps) = self.options.quiet_deps {
+                                if deps.is_dependency(self.current_path()) {
+                                    let _paused = crate::arena::pause();
+                                    deps.insert(&e.0);
+                                }
+                            }
                             Some(e.clone())
                         }
                         None => {
@@ -2543,7 +2585,7 @@ impl<'a> Evaluator<'a> {
                             // so any state it caches (paths, sources) outlives
                             // this compile's arena reset; see the matching note
                             // in `load_module`.
-                            let saved = crate::arena::pause();
+                            let paused = crate::arena::pause();
                             // Two-phase resolution (canonicalize, then load),
                             // both inside ONE arena pause so the importer's owned
                             // allocations survive this compile's arena reset.
@@ -2554,16 +2596,10 @@ impl<'a> Evaluator<'a> {
                                         containing_url: self.current_canonical.as_ref(),
                                     };
                                     match imp.canonicalize(path, &ctx) {
-                                        Err(e) => {
-                                            crate::arena::resume(saved);
-                                            return Err(Error::unpositioned(e.message));
-                                        }
+                                        Err(e) => return Err(Error::unpositioned(e.message)),
                                         Ok(None) => None,
                                         Ok(Some(canon)) => match imp.load(&canon) {
-                                            Err(e) => {
-                                                crate::arena::resume(saved);
-                                                return Err(Error::unpositioned(e.message));
-                                            }
+                                            Err(e) => return Err(Error::unpositioned(e.message)),
                                             Ok(None) => None,
                                             // `res.source_map_url` is intentionally dropped here:
                                             // `@import` is textual, so the imported file gets NO
@@ -2578,7 +2614,7 @@ impl<'a> Evaluator<'a> {
                                 }
                                 None => None,
                             };
-                            crate::arena::resume(saved);
+                            drop(paused);
                             match resolved {
                                 Some((resolved_key, src, syntax)) => {
                                     if self.loading.iter().any(|p| p == path) {
