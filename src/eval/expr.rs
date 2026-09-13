@@ -707,8 +707,15 @@ impl<'a> Evaluator<'a> {
                         // handles into a per-dispatch table; save/restore the
                         // outer table so a nested custom-function call is safe.
                         let saved = crate::host_fn::swap_handles(Vec::new());
+                        // The host runs with the bump arena paused, like an
+                        // importer or warn handler: whatever it allocates and
+                        // keeps (a cache, a nested compile's result) must not
+                        // sit in this compile's arena, which is reset on exit.
                         let result: Result<Value, String> = crate::host_fn::serialize_args(&bound)
-                            .and_then(|b| callback(&b))
+                            .and_then(|b| {
+                                let _paused = crate::arena::pause();
+                                callback(&b)
+                            })
                             .and_then(|b| crate::host_fn::deserialize_value(&b));
                         crate::host_fn::swap_handles(saved);
                         return result.map_err(|e| Error::at(e, *pos)).map(Value::without_slash);
