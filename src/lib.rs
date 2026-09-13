@@ -143,6 +143,10 @@ pub enum WarnKind {
 
 /// A `@warn` / `@debug` / deprecation diagnostic delivered to an embedder's
 /// [`WarnHandler`] (dart-sass `logger`).
+///
+/// Produced by the compiler and read by handlers; `#[non_exhaustive]` so a
+/// future field is not a breaking change for anyone matching on it.
+#[non_exhaustive]
 pub struct WarnEvent<'a> {
     /// Warning vs debug.
     pub kind: WarnKind,
@@ -159,6 +163,15 @@ pub struct WarnEvent<'a> {
     pub url: &'a str,
     /// The 1-based line for the diagnostic's span; `0` when not available.
     pub line: usize,
+    /// The canonical URL of the stylesheet being evaluated when the diagnostic
+    /// fired, or `""` when not available. For a file the importer loaded this
+    /// is the importer's canonical URL — the resolved absolute path with
+    /// [`FsImporter`]. For the entry stylesheet it is [`Options::url`] exactly
+    /// as supplied (the library never canonicalizes the entry). Unlike `url`
+    /// (dart's short display form, e.g. a load-path file's basename) it
+    /// identifies the file, so a CLI can tell a dependency from the entry
+    /// (dart-sass `--quiet-deps`).
+    pub path: &'a str,
 }
 
 /// An embedder's diagnostic handler (dart-sass `logger`). Receives every

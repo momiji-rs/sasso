@@ -1706,6 +1706,7 @@ impl<'a> Evaluator<'a> {
             formatted: &formatted,
             url: &self.current_url,
             line: pos.line,
+            path: self.current_path(),
         });
     }
 
@@ -1728,6 +1729,8 @@ impl<'a> Evaluator<'a> {
             formatted: &formatted,
             url: "",
             line: 0,
+            // An aggregate over several files: no single origin (like `url`).
+            path: "",
         });
     }
 
@@ -1749,6 +1752,12 @@ impl<'a> Evaluator<'a> {
     fn leave_call(&mut self, saved_member: String) {
         self.call_stack.pop();
         self.member = saved_member;
+    }
+
+    /// The canonical URL of the stylesheet being evaluated (the resolved path
+    /// for a filesystem file), for [`crate::WarnEvent::path`]; `""` if unknown.
+    fn current_path(&self) -> &str {
+        self.current_canonical.as_ref().map(|c| c.as_str()).unwrap_or("")
     }
 
     /// Deliver a diagnostic to the embedder's handler (dart-sass `logger`), or —
@@ -1791,6 +1800,7 @@ impl<'a> Evaluator<'a> {
             formatted: &formatted,
             url: "",
             line: 0,
+            path: self.current_path(),
         });
         Ok(())
     }
@@ -1814,6 +1824,7 @@ impl<'a> Evaluator<'a> {
             formatted: &formatted,
             url: &url,
             line: pos.line,
+            path: self.current_path(),
         });
         Ok(())
     }

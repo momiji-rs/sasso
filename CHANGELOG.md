@@ -11,6 +11,22 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Added
+
+- **`WarnEvent::path`**: the stylesheet a `@warn`/`@debug`/deprecation came
+  from, as an identity rather than dart's short display form in `url` (a
+  load-path file's basename): for a file the importer loaded, the importer's
+  canonical URL (an absolute path with `FsImporter`); for the entry
+  stylesheet, `Options::url` exactly as supplied. Lets an embedder tell a
+  dependency from the entry, which is what `--quiet-deps` needs.
+
+### Changed
+
+- **Library:** `WarnEvent` is now `#[non_exhaustive]` and gained the `path`
+  field. Code that receives events (every handler in this repo and its
+  napi/wasm bridges) is unaffected; code that built a `WarnEvent` with a
+  struct literal or matched it exhaustively must adapt.
+
 ### Fixed
 
 - **`calc(#{-$x} …)` no longer errors** with "This expression can't be used
