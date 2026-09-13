@@ -44,10 +44,16 @@ use binop::*;
 pub(crate) use binop::eval_div;
 
 /// One cached `@import` resolution: (resolved canonical key, syntax, parsed
-/// sheet, source text), shared across repeated imports within a single
-/// compile. The source rides along so re-executions can swap it in as the
-/// current diagnostics/stamp context.
-type CachedImport = std::rc::Rc<(String, Syntax, crate::ast::Stylesheet, std::rc::Rc<str>)>;
+/// sheet, source text, the importer's `source_map_url`), shared across
+/// repeated imports within a single compile. The source rides along so
+/// re-executions can swap it in as the current diagnostics/stamp context.
+type CachedImport = std::rc::Rc<(
+    String,
+    Syntax,
+    crate::ast::Stylesheet,
+    std::rc::Rc<str>,
+    Option<String>,
+)>;
 
 /// dart `_preModuleComments`: comments registered on a module's first load,
 /// keyed by its canonical key, shared by reference down nested module
@@ -1018,10 +1024,16 @@ pub(crate) struct Evaluator<'a> {
     /// Per-location dedup: a `(id, url, line, col)` already warned about is not
     /// warned about again (dart-sass collapses identical repeated warnings).
     deprecations_seen: std::collections::HashSet<(&'static str, String, usize, usize)>,
-    /// Small interned ids for source URLs, stamped into [`SrcLines`] so the
-    /// serializer's trailing-comment rule can require same-file adjacency.
+    /// Small interned ids for source files, stamped into [`SrcLines`] so the
+    /// serializer's trailing-comment rule can require same-file adjacency and
+    /// the source map can name the file. Keyed by the file's CANONICAL URL —
+    /// the resolved path for the filesystem importer, the entry's `url` as
+    /// given — not its display URL, so two partials that share a basename stay
+    /// two sources (dart's `sources` are canonical URLs too).
     file_ids: HashMap<String, u32>,
-    /// Source-map URL OVERRIDES: a loaded file's display URL -> the URL an
+    /// Source text per canonical URL, for the map's `sourcesContent`.
+    file_texts: HashMap<String, Rc<str>>,
+    /// Source-map URL OVERRIDES: a loaded file's canonical URL -> the URL an
     /// importer asked the source map to record for it (`ImporterResult
     /// .source_map_url`). Empty for the filesystem importer / entry file, so the
     /// generated source map is byte-identical unless a custom importer sets it.
@@ -1305,6 +1317,7 @@ impl<'a> Evaluator<'a> {
         let source: Rc<str> = Rc::from(options.source);
         let file_sources: HashMap<String, Rc<str>> =
             [(url.clone(), Rc::clone(&source))].into_iter().collect();
+        let file_texts: HashMap<String, Rc<str>> = [(url.clone(), Rc::clone(&source))].into_iter().collect();
         Evaluator {
             member: "root stylesheet".to_string(),
             call_stack: Vec::new(),
@@ -1315,6 +1328,7 @@ impl<'a> Evaluator<'a> {
             deprecations_omitted: 0,
             deprecations_seen: std::collections::HashSet::new(),
             file_ids: HashMap::default(),
+            file_texts,
             file_map_urls: HashMap::default(),
             scopes: vec![new_scope()],
             // Empty (not one empty frame) when spans aren't tracked: every
@@ -1405,7 +1419,8 @@ impl<'a> Evaluator<'a> {
             return self.current_url_stamp;
         }
         let next = self.file_ids.len() as u32 + 1;
-        let id = *self.file_ids.entry(self.current_url.clone()).or_insert(next);
+        let key = self.current_path().to_string();
+        let id = *self.file_ids.entry(key).or_insert(next);
         self.current_url_stamp = id;
         id
     }
@@ -1428,46 +1443,48 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
-    /// The source-map `sources` table, ordered so that an interned file id `i`
-    /// (1-based, as stamped into [`SrcLines::file`]) lands at `sources[i - 1]`.
-    /// `entry_url` is forced to index 0 even when no node was stamped (an empty
-    /// or output-less stylesheet), matching dart-sass always listing the entry.
-    /// When `include_sources` is set, the parallel `sourcesContent` is built
-    /// from the recorded file sources (empty string for a source seen only by
-    /// URL, never by text).
+    /// The source-map `sources` table for the file ids in `order` — the ids the
+    /// mappings reference, in order of first appearance (`Mappings::source_ids`).
+    /// Only files that produced a mapping appear; a stylesheet with no output
+    /// has an empty `sources`, as in dart-sass. Each entry is the file's
+    /// canonical URL (an importer's `source_map_url` override wins). When
+    /// `include_sources` is set, the parallel `sourcesContent` is built from
+    /// the recorded file texts.
     pub(crate) fn source_table(
-        &mut self,
-        entry_url: &str,
+        &self,
+        order: &[u32],
         include_sources: bool,
     ) -> (Vec<String>, Option<Vec<String>>) {
-        // Guarantee the entry url occupies id 1 (index 0) even if nothing was
-        // stamped during evaluation.
-        if self.file_ids.is_empty() {
-            self.file_ids.insert(entry_url.to_string(), 1);
+        // Invert the id table once (ids are dense, assigned 1,2,3,…), then
+        // index it per source.
+        let mut key_of_id: Vec<&str> = vec![""; self.file_ids.len() + 1];
+        for (key, &id) in &self.file_ids {
+            if let Some(slot) = key_of_id.get_mut(id as usize) {
+                *slot = key.as_str();
+            }
         }
-        let mut by_id: Vec<(u32, &str)> = self
-            .file_ids
+        let keys: Vec<&str> = order
             .iter()
-            .map(|(url, &id)| (id, url.as_str()))
+            .map(|&id| key_of_id.get(id as usize).copied().unwrap_or(""))
             .collect();
-        by_id.sort_by_key(|&(id, _)| id);
-        // Apply any importer-supplied source-map URL override; the `content`
-        // lookup below still keys on the original url, so they stay consistent.
-        let sources: Vec<String> = by_id
+        let sources: Vec<String> = keys
             .iter()
-            .map(|&(_, url)| {
+            .map(|&key| {
                 self.file_map_urls
-                    .get(url)
+                    .get(key)
                     .cloned()
-                    .unwrap_or_else(|| url.to_string())
+                    .unwrap_or_else(|| key.to_string())
             })
             .collect();
         let content = if include_sources {
-            let srcs = self.file_sources.borrow();
             Some(
-                by_id
-                    .iter()
-                    .map(|&(_, url)| srcs.get(url).map(|s| s.to_string()).unwrap_or_default())
+                keys.iter()
+                    .map(|&key| {
+                        self.file_texts
+                            .get(key)
+                            .map(|s| s.to_string())
+                            .unwrap_or_default()
+                    })
                     .collect(),
             )
         } else {
@@ -2601,14 +2618,12 @@ impl<'a> Evaluator<'a> {
                                         Ok(Some(canon)) => match imp.load(&canon) {
                                             Err(e) => return Err(Error::unpositioned(e.message)),
                                             Ok(None) => None,
-                                            // `res.source_map_url` is intentionally dropped here:
-                                            // `@import` is textual, so the imported file gets NO
-                                            // distinct source-map entry (its tokens map under the
-                                            // importing file). Only `@use`/`@forward` (modules.rs)
-                                            // record the override.
-                                            Ok(Some(res)) => {
-                                                Some((canon.as_str().to_string(), res.contents, res.syntax))
-                                            }
+                                            Ok(Some(res)) => Some((
+                                                canon.as_str().to_string(),
+                                                res.contents,
+                                                res.syntax,
+                                                res.source_map_url,
+                                            )),
                                         },
                                     }
                                 }
@@ -2616,7 +2631,7 @@ impl<'a> Evaluator<'a> {
                             };
                             drop(paused);
                             match resolved {
-                                Some((resolved_key, src, syntax)) => {
+                                Some((resolved_key, src, syntax, source_map_url)) => {
                                     if self.loading.iter().any(|p| p == path) {
                                         return Err(Error::unpositioned(
                                             "This file is already being loaded.",
@@ -2649,6 +2664,7 @@ impl<'a> Evaluator<'a> {
                                         syntax,
                                         sheet,
                                         std::rc::Rc::<str>::from(src.as_str()),
+                                        source_map_url,
                                     ));
                                     self.import_cache.insert(cache_key, e.clone());
                                     Some(e)
@@ -2680,10 +2696,41 @@ impl<'a> Evaluator<'a> {
                                     .entry(import_diag.clone())
                                     .or_insert_with(|| Rc::clone(&entry.3));
                             }
+                            if self.options.source_map && !resolved_key.is_empty() {
+                                self.file_texts
+                                    .entry(resolved_key.to_string())
+                                    .or_insert_with(|| Rc::clone(&entry.3));
+                                // The importer's `source_map_url` names this
+                                // file in `sources[]` (dart's
+                                // `ImporterResult.sourceMapUrl`), for `@import`
+                                // as for `@use`.
+                                if let Some(smu) = &entry.4 {
+                                    self.file_map_urls
+                                        .entry(resolved_key.to_string())
+                                        .or_insert_with(|| smu.clone());
+                                }
+                            }
                             let saved_import_url = std::mem::replace(&mut self.current_url, import_diag);
                             let saved_import_source =
                                 std::mem::replace(&mut self.current_source, Rc::clone(&entry.3));
                             self.current_url_stamp = 0;
+                            // Relative URLs inside the imported sheet resolve
+                            // against ITS directory, and its canonical URL is
+                            // tracked in lockstep (so a nested relative
+                            // `@use`/`@import` resolves against ITS directory,
+                            // and its mappings — the file table is keyed by
+                            // the canonical URL — land on ITS `sources` entry).
+                            let saved_dir = if resolved_key.is_empty() {
+                                self.current_file_dir.clone()
+                            } else {
+                                std::mem::replace(&mut self.current_file_dir, dirname_of(resolved_key))
+                            };
+                            let saved_canonical = if resolved_key.is_empty() {
+                                self.current_canonical.clone()
+                            } else {
+                                self.current_canonical
+                                    .replace(CanonicalUrl::new(resolved_key.clone()))
+                            };
                             // A plain-CSS file imports as plain CSS: nesting
                             // preserved, no Sass evaluation (same as `@use`).
                             if matches!(syntax, Syntax::Css) {
@@ -2692,6 +2739,8 @@ impl<'a> Evaluator<'a> {
                                     .exec_css(&sheet.stmts, parents, sink)
                                     .map_err(|e| self.finalize_error(e));
                                 self.loading.pop();
+                                self.current_file_dir = saved_dir;
+                                self.current_canonical = saved_canonical;
                                 self.current_url = saved_import_url;
                                 self.current_source = saved_import_source;
                                 self.current_url_stamp = 0;
@@ -2756,22 +2805,6 @@ impl<'a> Evaluator<'a> {
                                 ))
                             } else {
                                 None
-                            };
-                            // Relative URLs inside the imported sheet resolve
-                            // against ITS directory.
-                            let saved_dir = if resolved_key.is_empty() {
-                                self.current_file_dir.clone()
-                            } else {
-                                std::mem::replace(&mut self.current_file_dir, dirname_of(resolved_key))
-                            };
-                            // Track the imported file's canonical URL in lockstep
-                            // (so a nested relative `@use`/`@import` inside it
-                            // resolves against ITS directory).
-                            let saved_canonical = if resolved_key.is_empty() {
-                                self.current_canonical.clone()
-                            } else {
-                                self.current_canonical
-                                    .replace(CanonicalUrl::new(resolved_key.clone()))
                             };
                             let saved_clone = if loads_modules {
                                 let n = self.copy_counter.get() + 1;

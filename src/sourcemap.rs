@@ -82,11 +82,39 @@ pub(crate) struct Segment {
 pub(crate) struct Mappings {
     /// `lines[g]` holds the segments on generated line `g`, in column order.
     lines: Vec<Vec<Segment>>,
+    /// The evaluator's file ids in the order the mappings first reference
+    /// them: `source_ids[i]` is the file behind `sources[i]`. Only files that
+    /// actually produced a mapping appear (dart-sass lists no others).
+    source_ids: Vec<u32>,
+    /// `source_slot[file_id]` is that file's `sources[]` index, or `NO_SOURCE`
+    /// until the file's first mapping (file ids are dense, assigned 1,2,3,…).
+    source_slot: Vec<u32>,
 }
+
+const NO_SOURCE: u32 = u32::MAX;
 
 impl Mappings {
     pub(crate) fn new() -> Self {
         Mappings::default()
+    }
+
+    /// The file ids behind `sources[]`, in `sources` order.
+    pub(crate) fn source_ids(&self) -> &[u32] {
+        &self.source_ids
+    }
+
+    /// The `sources[]` index for an evaluator file id, assigning the next one
+    /// on first sight. O(1): a dense slot table indexed by file id.
+    fn source_index(&mut self, file_id: u32) -> u32 {
+        let slot = file_id as usize;
+        if slot >= self.source_slot.len() {
+            self.source_slot.resize(slot + 1, NO_SOURCE);
+        }
+        if self.source_slot[slot] == NO_SOURCE {
+            self.source_slot[slot] = self.source_ids.len() as u32;
+            self.source_ids.push(file_id);
+        }
+        self.source_slot[slot]
     }
 
     /// Record a mapping at generated `(gen_line, gen_col)` back to source
@@ -244,8 +272,10 @@ impl SmCollector {
     /// `output` is the FINAL CSS string (already including any `@charset`/BOM
     /// prefix); `body_off` is the byte length of that prefix, which shifts every
     /// recorded body offset. Generated lines are counted by `\n`; the generated
-    /// column is in UTF-16 code units (not bytes). A `file_id` is mapped to its
-    /// `sources[]` index by `id - 1` (ids are assigned 1,2,3,…).
+    /// column is in UTF-16 code units (not bytes). File ids become `sources[]`
+    /// indices in order of first appearance (see [`Mappings::source_ids`]), so
+    /// a file that produced no mapping — an entry that only imports or only
+    /// declares variables — is not a source, as in dart-sass.
     pub(crate) fn finalize(mut self, output: &str, body_off: usize) -> Mappings {
         let mut m = Mappings::new();
         if self.entries.is_empty() {
@@ -278,7 +308,8 @@ impl SmCollector {
                 cur_byte += ch.len_utf8();
             }
             debug_assert_eq!(cur_byte, target, "offset landed on a char boundary");
-            m.add(gen_line, gen_col16, e.file_id - 1, e.src_line, e.src_col);
+            let src = m.source_index(e.file_id);
+            m.add(gen_line, gen_col16, src, e.src_line, e.src_col);
         }
         m
     }
@@ -290,7 +321,15 @@ impl SmCollector {
 pub struct SourceMap {
     /// Name of the generated file (the `file` field), if known.
     pub file: Option<String>,
-    /// Source URLs, in the order their ids were assigned.
+    /// Source URLs: exactly the files the mappings reference, in order of
+    /// first reference in the generated CSS (as dart-sass). A file that
+    /// produced no mapping — an entry that only imports, or only declares
+    /// variables — is not listed, so an empty stylesheet has no sources and
+    /// the entry is not necessarily `sources[0]`. Each entry is the file's
+    /// canonical URL (the entry's [`Options::url`](crate::Options::url) as
+    /// given; the resolved absolute path for a file
+    /// [`FsImporter`](crate::FsImporter) loaded), or the importer's
+    /// `source_map_url` override.
     pub sources: Vec<String>,
     /// Full source text per `sources` entry (parallel array), or `None` to omit
     /// the `sourcesContent` field entirely (controlled by

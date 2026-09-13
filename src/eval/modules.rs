@@ -941,10 +941,17 @@ impl<'a> Evaluator<'a> {
         // Register the module's source under a diagnostic display URL so a
         // snippet/frame that points into this file renders against its text.
         let diag_url = self.module_diag_url(url, &key);
-        if self.diag_enabled() {
-            self.file_sources
-                .borrow_mut()
-                .insert(diag_url.clone(), Rc::from(src.as_str()));
+        if self.diag_enabled() || self.options.source_map {
+            // One shared copy of the text for both tables.
+            let text: Rc<str> = Rc::from(src.as_str());
+            if self.diag_enabled() {
+                self.file_sources
+                    .borrow_mut()
+                    .insert(diag_url.clone(), Rc::clone(&text));
+            }
+            if self.options.source_map {
+                self.file_texts.insert(key.clone(), text);
+            }
         }
         let sheet = match parse_with_syntax(&src, syntax) {
             Ok(sheet) => sheet,
@@ -962,10 +969,10 @@ impl<'a> Evaluator<'a> {
             }
         };
         // If the importer asked for a custom source-map URL for this file, record
-        // it under the same display URL the source map keys on (`@import` is
-        // textual and has no distinct source entry, so it carries no override).
+        // it under the canonical key the source map keys on (the `@import`
+        // path in mod.rs does the same for a file it loads).
         if let Some(smu) = source_map_url {
-            self.file_map_urls.insert(diag_url.clone(), smu);
+            self.file_map_urls.insert(key.clone(), smu);
         }
         let is_css = matches!(syntax, Syntax::Css);
         // A `meta.load-css` first load also records only the copy edge (see

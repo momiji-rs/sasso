@@ -1402,3 +1402,50 @@ fn directory_mode_skips_css_whose_destination_is_itself() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn source_map_sources_name_imported_files_by_path() {
+    // dart writes each imported file's path relative to the map, so two
+    // partials sharing a basename are two sources; an entry that emits nothing
+    // of its own is not listed; a stylesheet with no output has `[]`.
+    let dir = scratch("sm_sources");
+    write(&dir, "src/sub/_p.scss", "a{b:1}\n");
+    write(&dir, "src/other/_p.scss", "c{d:2}\n");
+    write(&dir, "src/two.scss", "@import \"sub/p\";\n@import \"other/p\";\n");
+    let r = sasso(&dir, &["-q", "src/two.scss", "out/two.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        read(&dir, "out/two.css.map"),
+        "{\"version\":3,\"sourceRoot\":\"\",\"sources\":[\"../src/sub/_p.scss\",\"../src/other/_p.scss\"],\"names\":[],\"mappings\":\"AAAA;EAAE;;;ACAF;EAAE\",\"file\":\"two.css\"}"
+    );
+    let r = sasso(&dir, &["-q", "--embed-sources", "src/two.scss", "out2/two.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        read(&dir, "out2/two.css.map").ends_with(",\"sourcesContent\":[\"a{b:1}\\n\",\"c{d:2}\\n\"]}"),
+        "{}",
+        read(&dir, "out2/two.css.map")
+    );
+    write(&dir, "empty.scss", "");
+    let r = sasso(&dir, &["empty.scss", "out/e.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        read(&dir, "out/e.css.map").contains("\"sources\":[],"),
+        "{}",
+        read(&dir, "out/e.css.map")
+    );
+    assert_dart_files_match(
+        &[
+            ("src/sub/_p.scss", "a{b:1}\n"),
+            ("src/other/_p.scss", "c{d:2}\n"),
+            ("src/two.scss", "@import \"sub/p\";\n@import \"other/p\";\n"),
+        ],
+        &["-q", "--embed-sources", "src/two.scss", "out/two.css"],
+        &["out/two.css", "out/two.css.map"],
+    );
+    assert_dart_files_match(
+        &[("empty.scss", "")],
+        &["empty.scss", "out/e.css"],
+        &["out/e.css", "out/e.css.map"],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
