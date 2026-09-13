@@ -4144,6 +4144,7 @@ fn stmt_uses_content(stmt: &Stmt) -> bool {
         | Stmt::Each { body, .. }
         | Stmt::While { body, .. }
         | Stmt::Media { body, .. }
+        | Stmt::Supports { body, .. }
         | Stmt::AtRoot { body, .. }
         | Stmt::Keyframes { body, .. } => body_uses_content(body),
         Stmt::AtRule { body: Some(body), .. } => body_uses_content(body),
