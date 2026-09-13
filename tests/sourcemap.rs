@@ -724,3 +724,94 @@ fn importer_source_map_url_override_appears_in_sources() {
         r.source_map.sources
     );
 }
+
+#[test]
+fn importer_source_map_url_override_applies_to_import_too() {
+    // dart's `ImporterResult.sourceMapUrl` names the loaded file whether it
+    // was reached by `@use` or by `@import`.
+    let imp = SourceMapUrlImporter;
+    let opts = Options::default().with_importer(&imp).with_url("entry.scss");
+    let r = compile_with_source_map("@import \"mod\";\n.a { y: 2px; }\n", &opts).unwrap();
+    assert_eq!(
+        r.source_map.sources,
+        ["custom://virtual/mod.scss", "entry.scss"],
+        "the imported file is named by the importer's source_map_url"
+    );
+}
+
+/// A plain-CSS `@import` (a `.css` file reached through `@import "lib"`) is
+/// its own source, with its mappings pointing into it: dart-sass writes
+/// `sources: [main.scss, lib.css]`, mappings `AAAA;EAAI;;;ACAJ;EACE;;;ADCF;EAAI`.
+#[test]
+fn plain_css_import_is_its_own_source() {
+    let dir = std::env::temp_dir().join(format!("sasso_sm_cssimp_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("lib.css"), "q {\n  r: 1;\n}\n").unwrap();
+    let entry = dir.join("main.scss");
+    let src = "a { b: c }\n@import \"lib\";\nd { e: f }\n";
+    std::fs::write(&entry, src).unwrap();
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let opts = Options::default().with_importer(&imp).with_url(&url);
+    let r = compile_with_source_map(src, &opts).unwrap();
+    let lib = std::fs::canonicalize(dir.join("lib.css")).unwrap();
+    assert_eq!(
+        r.source_map.sources,
+        [url.clone(), lib.to_string_lossy().into_owned()],
+        "the css file is a distinct source"
+    );
+    assert_eq!(r.source_map.mappings, "AAAA;EAAI;;;ACAJ;EACE;;;ADCF;EAAI");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Sources are keyed by the file's CANONICAL URL — the resolved path for the
+/// filesystem importer — not by its display basename, so two partials that
+/// share a basename are two distinct sources, each with its own text, and the
+/// mappings point at the right one (dart-sass: `../src/sub/_p.scss`,
+/// `../src/other/_p.scss`, mappings `AAAA;EAAE;;;ACAF;EAAE`).
+#[test]
+fn imports_sharing_a_basename_are_distinct_sources() {
+    let dir = std::env::temp_dir().join(format!("sasso_sm_basename_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("src/sub")).unwrap();
+    std::fs::create_dir_all(dir.join("src/other")).unwrap();
+    std::fs::write(dir.join("src/sub/_p.scss"), "a{b:1}\n").unwrap();
+    std::fs::write(dir.join("src/other/_p.scss"), "c{d:2}\n").unwrap();
+    let entry = dir.join("src/two.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let importer = sasso::FsImporter::new(Vec::new());
+    let opts = Options::default()
+        .with_importer(&importer)
+        .with_url(&url)
+        .with_source_map_include_sources(true)
+        .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
+    let r = compile_with_source_map("@import \"sub/p\";\n@import \"other/p\";\n", &opts).expect("compile");
+    let canon = |rel: &str| {
+        std::fs::canonicalize(dir.join(rel))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    };
+    // The entry emitted nothing of its own, so — as in dart — it is not a source.
+    assert_eq!(
+        r.source_map.sources,
+        vec![canon("src/sub/_p.scss"), canon("src/other/_p.scss")]
+    );
+    assert_eq!(
+        r.source_map.sources_content,
+        Some(vec!["a{b:1}\n".to_string(), "c{d:2}\n".to_string()])
+    );
+    assert_eq!(r.source_map.mappings, "AAAA;EAAE;;;ACAF;EAAE");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A stylesheet with no output has no sources at all (dart-sass writes
+/// `"sources":[]`), rather than a forced entry.
+#[test]
+fn empty_stylesheet_has_no_sources() {
+    let r = compile_with_source_map("", &Options::default().with_url("e.scss")).expect("compile");
+    assert_eq!(r.source_map.sources, Vec::<String>::new());
+    assert_eq!(r.source_map.mappings, "");
+    let r = compile_with_source_map("// nothing\n$x: 1;\n", &Options::default().with_url("e.scss"))
+        .expect("compile");
+    assert_eq!(r.source_map.sources, Vec::<String>::new());
+}

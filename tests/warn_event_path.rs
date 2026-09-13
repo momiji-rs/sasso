@@ -58,14 +58,20 @@ fn warn_event_path_is_the_resolved_file_path() {
         .find(|(m, d, _, _)| *d && m.contains("@import"))
         .expect("entry deprecation");
     assert_eq!(entry_dep.3, url, "entry deprecation carries the entry path");
-    // The dependency's @import deprecation: display url is dart's short form,
+    // The dependency's @import deprecation: display url is the file's path,
     // path is the resolved file.
     let dep_dep = events
         .iter()
         .filter(|(m, d, _, _)| *d && m.contains("@import"))
         .nth(1)
         .expect("dependency deprecation");
-    assert_eq!(dep_dep.2, "_dep.scss", "display url stays dart's short form");
+    // The display url is dart's `prettyUri`: the path from the current directory
+    // (or absolute when that would be longer) — not a bare basename.
+    assert!(
+        std::path::Path::new(&dep_dep.2).ends_with("lp/_dep.scss") && dep_dep.2 != "_dep.scss",
+        "display url is the file's path, got {:?}",
+        dep_dep.2
+    );
     assert_eq!(dep_dep.3, dep_canon, "path is the resolved load-path file");
     // @warn from the dependency and from the entry.
     let w_dep = events
@@ -73,6 +79,8 @@ fn warn_event_path_is_the_resolved_file_path() {
         .find(|(m, ..)| m == "from dep")
         .expect("@warn from dep");
     assert_eq!(w_dep.3, dep_canon);
+    // A `@warn` event carries the same display url as its stack frame.
+    assert_eq!(w_dep.2, dep_dep.2, "@warn url is the file's display path");
     let w_entry = events
         .iter()
         .find(|(m, ..)| m == "from entry")

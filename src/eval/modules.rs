@@ -941,10 +941,17 @@ impl<'a> Evaluator<'a> {
         // Register the module's source under a diagnostic display URL so a
         // snippet/frame that points into this file renders against its text.
         let diag_url = self.module_diag_url(url, &key);
-        if self.diag_enabled() {
-            self.file_sources
-                .borrow_mut()
-                .insert(diag_url.clone(), Rc::from(src.as_str()));
+        if self.diag_enabled() || self.options.source_map {
+            // One shared copy of the text for both tables.
+            let text: Rc<str> = Rc::from(src.as_str());
+            if self.diag_enabled() {
+                self.file_sources
+                    .borrow_mut()
+                    .insert(diag_url.clone(), Rc::clone(&text));
+            }
+            if self.options.source_map {
+                self.file_texts.insert(key.clone(), text);
+            }
         }
         let sheet = match parse_with_syntax(&src, syntax) {
             Ok(sheet) => sheet,
@@ -962,10 +969,10 @@ impl<'a> Evaluator<'a> {
             }
         };
         // If the importer asked for a custom source-map URL for this file, record
-        // it under the same display URL the source map keys on (`@import` is
-        // textual and has no distinct source entry, so it carries no override).
+        // it under the canonical key the source map keys on (the `@import`
+        // path in mod.rs does the same for a file it loads).
         if let Some(smu) = source_map_url {
-            self.file_map_urls.insert(diag_url.clone(), smu);
+            self.file_map_urls.insert(key.clone(), smu);
         }
         let is_css = matches!(syntax, Syntax::Css);
         // A `meta.load-css` first load also records only the copy edge (see
@@ -1623,10 +1630,19 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// The diagnostic display URL for a `@use`/`@import`ed module: the basename
-    /// of the resolved key (dart-sass shows e.g. `_libchain.scss`), falling back
-    /// to the `@use` url spelling when the key has no useful tail.
+    /// The diagnostic display URL for a `@use`/`@import`ed module, as dart-sass
+    /// spells it in stack frames. A filesystem path — the `FsImporter`'s
+    /// canonical key is the resolved absolute path — is shown relative to the
+    /// current directory (`src/sub/_partial.scss`, whether it was reached
+    /// relatively or through a load path), unless that spelling has more
+    /// segments than the absolute path, which is then shown as is (dart's
+    /// `p.prettyUri`). Any other canonical URL (a custom importer's key) shows
+    /// its last segment, falling back to the `@use` url when the key has none.
     pub(super) fn module_diag_url(&self, url: &str, key: &str) -> String {
+        let path = std::path::Path::new(key);
+        if path.is_absolute() {
+            return pretty_path(path);
+        }
         let base = key.rsplit(['/', '\\']).next().unwrap_or(key);
         if base.is_empty() {
             url.to_string()
@@ -1735,4 +1751,35 @@ fn regroup_load_css_copy(nodes: Vec<OutNode>, prev_rule: &mut bool) -> Vec<OutNo
         }
     }
     out
+}
+
+/// dart's `p.prettyUri` for a filesystem path: the path relative to the
+/// current directory, unless that has more segments than the absolute path
+/// (a file far outside the tree), in which case the absolute path.
+fn pretty_path(abs: &std::path::Path) -> String {
+    let Ok(cwd) = std::env::current_dir() else {
+        return abs.to_string_lossy().into_owned();
+    };
+    let target: Vec<std::path::Component<'_>> = abs.components().collect();
+    let base: Vec<std::path::Component<'_>> = cwd.components().collect();
+    let common = target.iter().zip(&base).take_while(|(a, b)| a == b).count();
+    let mut rel = std::path::PathBuf::new();
+    for _ in common..base.len() {
+        rel.push("..");
+    }
+    for comp in &target[common..] {
+        rel.push(comp.as_os_str());
+    }
+    // dart's `p.split` counts a Windows drive or UNC root (`C:\`) as one
+    // segment; `components()` yields it as `Prefix` + `RootDir`, so leave the
+    // prefix out of the absolute count.
+    let target_segments = target
+        .iter()
+        .filter(|c| !matches!(c, std::path::Component::Prefix(_)))
+        .count();
+    if rel.components().count() > target_segments {
+        abs.to_string_lossy().into_owned()
+    } else {
+        rel.to_string_lossy().into_owned()
+    }
 }

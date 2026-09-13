@@ -165,7 +165,14 @@ pub struct WarnEvent<'a> {
     /// The full dart-style block sasso would otherwise print to stderr (header +
     /// snippet + stack trace), for a faithful default logger.
     pub formatted: &'a str,
-    /// The source URL for the diagnostic's span; `""` when not available.
+    /// The source URL for the diagnostic's span, as dart-sass displays it in a
+    /// stack frame: the entry's [`Options::url`] as given, or a loaded file's
+    /// path from the working directory (absolute when that would be longer;
+    /// a custom importer's non-path key shows its last segment). For an entry
+    /// compiled without [`Options::url`] it is `""` under [`compile`] and
+    /// `"stdin"` under [`compile_with_source_map`] (the source map has to name
+    /// the entry somehow, like dart's `-`); the line is still set. `""` for the
+    /// "repetitive deprecation warnings omitted" footer, which has no span.
     pub url: &'a str,
     /// The 1-based line for the diagnostic's span; `0` when not available.
     pub line: usize,
@@ -174,8 +181,9 @@ pub struct WarnEvent<'a> {
     /// is the importer's canonical URL — the resolved absolute path with
     /// [`FsImporter`] — which is what [`DependencySet::is_dependency`] keys on.
     /// For the entry stylesheet it is [`Options::url`] exactly as supplied
-    /// (the library never canonicalizes the entry). Unlike `url` (dart's short
-    /// display form, e.g. a load-path file's basename) it identifies the file.
+    /// (the library never canonicalizes the entry). Unlike `url` (dart's display
+    /// form, relative to the working directory) it is stable across working
+    /// directories and identifies the file.
     pub path: &'a str,
 }
 
@@ -434,10 +442,11 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
         }
     };
     eval::validate_declarations(&sheet)?;
-    // The entry name labels the entry source in the map (`file`/`sources[0]`).
-    // It is also the evaluator's `current_url`, so every entry-file node is
-    // stamped with a non-zero file id; its source text is kept for
-    // `sourcesContent`. The source-map path always passes the real source (so
+    // The entry name labels the entry source in the map (its `sources` entry,
+    // once a mapping references it; an import-only entry has none). It is also
+    // the evaluator's `current_url`, so every entry-file node is stamped with a
+    // non-zero file id; its source text is kept for `sourcesContent`. The
+    // source-map path always passes the real source (so
     // `sourcesContent` works even without a diagnostic URL); this only enriches
     // the *error* path with snippets — the CSS/map success path is unaffected.
     let entry_name = options.url.unwrap_or("stdin");
@@ -455,8 +464,10 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
     let mut out = Vec::new();
     ev.eval_sheet(&sheet, &mut out)?;
     let (css, body_off, collector) = emit::emit_with_map(&out, options.style, options.charset);
-    let mappings = collector.finalize(&css, body_off).encode();
-    let (sources, sources_content) = ev.source_table(entry_name, options.source_map_include_sources);
+    let mappings = collector.finalize(&css, body_off);
+    let (sources, sources_content) =
+        ev.source_table(mappings.source_ids(), options.source_map_include_sources);
+    let mappings = mappings.encode();
     let source_map = SourceMap {
         file: Some(basename(entry_name).to_string()),
         sources,

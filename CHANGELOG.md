@@ -108,6 +108,24 @@ Conformance is tracked separately as a ratchet against the official
   block.** The "does this mixin use `@content`" scan descended into `@media`,
   `@at-root`, `@keyframes` and generic at-rules but skipped `@supports`, so
   `@include` with a block hit "Mixin doesn't accept a content block." (#24).
+- **Source maps name imported files by their resolved path and list only
+  mapped files.** `sources` were keyed by a file's display url — an imported
+  partial's basename — so `../_dep.scss` stood where dart writes
+  `../lp/_dep.scss`, and two partials sharing a basename collapsed into one
+  entry with the second one's mappings pointing into the first. The file
+  table is now keyed by the canonical URL (the resolved path with
+  `FsImporter`; the entry's `url` as given), and `sources` holds exactly the
+  files the mappings reference, in order of first appearance: an entry that
+  only imports or only declares variables is not a source, and an empty
+  stylesheet has `"sources":[]`, as in dart-sass. Library API note: an
+  embedder now sees absolute paths for imported files in
+  `SourceMap::sources` (the CLI relativizes them to the map).
+- **Stack frames name a loaded file by its path from the current directory**
+  (`src/sub/_partial.scss`, `lp/_dep.scss`), as dart-sass does, instead of its
+  bare basename — so two partials that share a name are told apart in a
+  trace. A file outside the tree whose relative spelling would be longer than
+  its absolute path is shown absolute (dart's `prettyUri`); the entry stays
+  as given. `WarnEvent::url` carries the same spelling.
 - **Warn handlers may retain event data.** The library now pauses its
   bump-arena scope while calling an embedder's `WarnHandler`, so a handler
   that appends the event to a buffer no longer ends up with memory the
