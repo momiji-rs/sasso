@@ -11,6 +11,15 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Fixed
+
+- **`calc(#{-$x} …)` no longer errors** with "This expression can't be used
+  in a calculation." Interpolation is a full SassScript context even inside a
+  calculation, so the calc-only grammar restrictions (no `-$x`, no `- 1px`)
+  are now suspended for the duration of a `#{…}` — matching dart-sass, which
+  evaluates the expression and splices its text into the calc (#24, reported
+  from the Lichess stylesheets).
+
 ## [0.9.1] - 2026-09-01
 
 _C-ABI release fixes — no compiler changes. Ships musl c-api tarballs for

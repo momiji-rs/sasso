@@ -8936,3 +8936,72 @@ fn product_duplicating_original_keeps_original_position_and_break() {
         "h1 a, .h1 a {\n  q: 1;\n}\n"
     );
 }
+
+#[test]
+fn calc_interpolation_is_full_sassscript() {
+    // Inside `#{}` the calc-only grammar restrictions are lifted: dart-sass
+    // evaluates the interpolated expression as ordinary SassScript and splices
+    // the resulting text into the calculation, so a unary minus on a variable
+    // or parenthesis is fine there (momiji-rs/sasso#24, from the Lichess
+    // stylesheets).
+    let scss = concat!(
+        "$h: 20px;\n",
+        "a {\n",
+        "  b: calc(#{-$h} - 1px);\n",
+        "  c: calc(1px + #{-$h});\n",
+        "  d: calc(#{-$h - 5px} - 1px);\n",
+        "  e: calc(#{-($h)} * 2);\n",
+        "  f: calc(#{- $h});\n",
+        "  g: min(#{-$h}, 1px);\n",
+        "}\n",
+    );
+    assert_eq!(
+        ours(scss),
+        concat!(
+            "a {\n",
+            "  b: calc(-20px - 1px);\n",
+            "  c: calc(1px + -20px);\n",
+            "  d: calc(-25px - 1px);\n",
+            "  e: calc(-20px * 2);\n",
+            "  f: calc(-20px);\n",
+            "  g: min(-20px, 1px);\n",
+            "}\n",
+        )
+    );
+    assert_parity(scss);
+    // The whole SassScript grammar is available inside the interpolation:
+    // slash division, `if()`, string concatenation — none of which a bare
+    // calculation would accept.
+    let scss = concat!(
+        "$h: 20px;\n",
+        "a {\n",
+        "  b: calc(#{$h / 2} + 1px);\n",
+        "  c: calc(#{if(true, -$h, 1px)});\n",
+        "  d: calc(#{\"a\" + \"b\"});\n",
+        "  e: calc(#{-$h}#{-$h});\n",
+        "  f: calc((#{-$h}) * 2);\n",
+        "}\n",
+    );
+    assert_eq!(
+        ours(scss),
+        concat!(
+            "a {\n",
+            "  b: calc(10px + 1px);\n",
+            "  c: calc(-20px);\n",
+            "  d: calc(ab);\n",
+            "  e: calc(-20px-20px);\n",
+            "  f: calc((-20px) * 2);\n",
+            "}\n",
+        )
+    );
+    assert_parity(scss);
+    // Outside interpolation the calculation grammar still rejects `-$x` — and
+    // a calculation nested INSIDE the interpolation re-arms the restriction.
+    for bad in [
+        "$h: 20px;\na { b: calc(-$h - 1px); }\n",
+        "$h: 20px;\na { b: calc(#{calc(-$h)}); }\n",
+    ] {
+        assert!(ours_err(bad).contains("can't be used in a calculation"), "{bad}");
+        assert_error_parity(bad);
+    }
+}

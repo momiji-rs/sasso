@@ -653,7 +653,7 @@ impl Parser {
                 // Whitespace (including newlines) is permitted around the
                 // interpolated expression: `#{ x }` / `#{\n  x\n}`.
                 self.skip_ws_inline();
-                let e = self.parse_value()?;
+                let e = self.parse_interp_value()?;
                 self.skip_ws_inline();
                 if !self.sc.eat('}') {
                     return Err(Error::at("expected \"}\"", self.sc.position()));
@@ -1256,7 +1256,7 @@ impl Parser {
                     }
                     self.sc.bump();
                     self.sc.bump();
-                    let e = self.parse_value()?;
+                    let e = self.parse_interp_value()?;
                     self.skip_ws_inline();
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
@@ -1447,7 +1447,7 @@ impl Parser {
                     }
                     self.sc.bump();
                     self.sc.bump();
-                    let e = self.parse_value()?;
+                    let e = self.parse_interp_value()?;
                     self.skip_ws_inline();
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
@@ -1665,7 +1665,7 @@ impl Parser {
                     }
                     self.sc.bump();
                     self.sc.bump();
-                    let e = self.parse_value()?;
+                    let e = self.parse_interp_value()?;
                     self.skip_ws_inline();
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
@@ -1687,7 +1687,7 @@ impl Parser {
                                 }
                                 self.sc.bump();
                                 self.sc.bump();
-                                let e = self.parse_value()?;
+                                let e = self.parse_interp_value()?;
                                 self.skip_ws_inline();
                                 if !self.sc.eat('}') {
                                     return Err(Error::at("expected \"}\"", self.sc.position()));
@@ -1818,7 +1818,7 @@ impl Parser {
                     }
                     self.sc.bump();
                     self.sc.bump();
-                    let e = self.parse_value()?;
+                    let e = self.parse_interp_value()?;
                     self.skip_ws_inline();
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
@@ -2144,7 +2144,7 @@ impl Parser {
                 self.reject_plain_css_interp()?;
                 self.sc.bump();
                 self.sc.bump();
-                let e = self.parse_value()?;
+                let e = self.parse_interp_value()?;
                 self.skip_ws_inline();
                 if !self.sc.eat('}') {
                     return Err(Error::at("expected \"}\"", self.sc.position()));
@@ -2216,7 +2216,7 @@ impl Parser {
                     }
                     self.sc.bump();
                     self.sc.bump();
-                    let e = self.parse_value()?;
+                    let e = self.parse_interp_value()?;
                     self.skip_ws_inline();
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
@@ -2261,7 +2261,7 @@ impl Parser {
                     }
                     self.sc.bump();
                     self.sc.bump();
-                    let e = self.parse_value()?;
+                    let e = self.parse_interp_value()?;
                     self.skip_ws_inline();
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));

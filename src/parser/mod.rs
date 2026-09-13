@@ -688,12 +688,27 @@ impl Parser {
     fn read_interp(&mut self) -> Result<Expr, Error> {
         self.sc.bump(); // '#'
         self.sc.bump(); // '{'
-        let e = self.parse_value()?;
+        let e = self.parse_interp_value()?;
         self.skip_ws_inline();
         if !self.sc.eat('}') {
             return Err(Error::at("expected \"}\"", self.sc.position()));
         }
         Ok(e)
+    }
+
+    /// Parse the expression inside a `#{ … }` (cursor just past the `{`).
+    ///
+    /// Interpolation is a full SassScript context even when it sits inside a
+    /// calculation: dart-sass evaluates `#{-$x}` in `calc(#{-$x} - 1px)` as an
+    /// ordinary expression and splices the resulting text into the calc. So
+    /// the calc-only grammar restrictions (no `-$x`, no `- 1px`, no `/`
+    /// division) must not leak into the interpolated expression — suspend
+    /// `calc_depth` for its duration.
+    pub(super) fn parse_interp_value(&mut self) -> Result<Expr, Error> {
+        let saved = std::mem::replace(&mut self.calc_depth, 0);
+        let e = self.parse_value();
+        self.calc_depth = saved;
+        e
     }
 
     fn parse_template_mode(&mut self, stops: &[char], comments: CommentMode) -> Result<Vec<TplPiece>, Error> {
