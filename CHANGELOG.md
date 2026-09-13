@@ -23,6 +23,15 @@ Conformance is tracked separately as a ratchet against the official
   block.** The "does this mixin use `@content`" scan descended into `@media`,
   `@at-root`, `@keyframes` and generic at-rules but skipped `@supports`, so
   `@include` with a block hit "Mixin doesn't accept a content block." (#24).
+- **Warn handlers may retain event data.** The library now pauses its
+  bump-arena scope while calling an embedder's `WarnHandler`, so a handler
+  that appends the event to a buffer no longer ends up with memory the
+  arena frees at the end of the compile (which surfaced as garbled or
+  cross-contaminated warnings under parallel compiles). Importer calls were
+  already paused the same way. The pause itself is now a counter behind an
+  RAII guard rather than a zeroed scope depth: a `compile` run from inside an
+  importer or warn callback nests instead of resetting the arena under its
+  caller, and a callback that panics no longer leaves the thread paused.
 
 ## [0.9.1] - 2026-09-01
 

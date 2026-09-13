@@ -195,6 +195,11 @@ struct ThreadState {
     cursor: Cell<usize>,
     /// Scope nesting depth. `0` = inactive: allocations pass through to System.
     depth: Cell<u32>,
+    /// [`pause`] nesting count. While `> 0`, allocations pass through to
+    /// System even inside a scope, without touching `depth` — so a compile
+    /// started from within a paused callback nests as usual and cannot mistake
+    /// itself for the outermost scope and reset the arena under its caller.
+    paused: Cell<u32>,
     /// Set once if [`Self::reserve`] fails (OOM, registry full, or the arena
     /// is disabled): the alloc path then forwards straight to System without
     /// retrying the `#[cold]` reservation on every allocation.
@@ -208,6 +213,7 @@ impl ThreadState {
             end: Cell::new(0),
             cursor: Cell::new(0),
             depth: Cell::new(0),
+            paused: Cell::new(0),
             reserve_failed: Cell::new(false),
         }
     }
@@ -265,7 +271,7 @@ pub struct ScopedAlloc;
 unsafe impl GlobalAlloc for ScopedAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         TL.with(|tl| {
-            if tl.depth.get() == 0 {
+            if tl.depth.get() == 0 || tl.paused.get() > 0 {
                 // SAFETY: forwarding an unchanged layout to the system allocator.
                 return unsafe { System.alloc(layout) };
             }
@@ -316,7 +322,7 @@ unsafe impl GlobalAlloc for ScopedAlloc {
         // (4→8→16→…); this reclaims it for the common "grow the value just
         // allocated" pattern, the dominant case in the parser/evaluator.
         let resized = TL.with(|tl| {
-            if tl.depth.get() == 0 {
+            if tl.depth.get() == 0 || tl.paused.get() > 0 {
                 return false;
             }
             let base = tl.base.get();
@@ -400,20 +406,26 @@ pub(crate) fn reset() {
     });
 }
 
-/// Suspend the scope (allocations go to System) around a caller callback whose
-/// allocations may outlive the arena — e.g. an `Importer`. Returns the saved
-/// depth to restore with [`resume`].
-pub(crate) fn pause() -> u32 {
-    TL.with(|tl| {
-        let d = tl.depth.get();
-        tl.depth.set(0);
-        d
-    })
+/// Suspend arena allocation (requests go to System) around a caller callback
+/// whose allocations may outlive the arena — an `Importer`, a `WarnHandler`.
+/// The scope depth is left untouched: if the callback itself runs a `compile`,
+/// that nested scope sees a live outer scope, so on return it neither resets
+/// the arena nor frees its caller's state. Returns a guard; the pause lifts
+/// when it drops — on unwind too, so a panicking callback cannot leave the
+/// thread routing every later allocation to System.
+pub(crate) fn pause() -> Paused {
+    TL.with(|tl| tl.paused.set(tl.paused.get() + 1));
+    Paused
 }
 
-/// Restore the depth saved by [`pause`].
-pub(crate) fn resume(saved: u32) {
-    TL.with(|tl| tl.depth.set(saved));
+/// RAII token from [`pause`]: dropping it lifts one pause.
+#[must_use]
+pub(crate) struct Paused;
+
+impl Drop for Paused {
+    fn drop(&mut self) {
+        TL.with(|tl| tl.paused.set(tl.paused.get().saturating_sub(1)));
+    }
 }
 
 // =========================================================================
@@ -666,7 +678,7 @@ mod tests {
     fn pause_routes_to_system_then_resumes() {
         let l = layout(64, 8);
         let scope = Scope::enter();
-        let saved = pause(); // depth → 0
+        let paused = pause(); // routes to System, depth untouched
         let p_sys = unsafe { ScopedAlloc.alloc(l) }; // goes to System
         let in_arena = |p: *mut u8| {
             TL.with(|tl| {
@@ -676,11 +688,60 @@ mod tests {
         };
         assert!(!in_arena(p_sys), "paused scope routes to System");
         unsafe { ScopedAlloc.dealloc(p_sys, l) };
-        resume(saved); // depth restored
+        drop(paused); // pause lifted
         let p_arena = unsafe { ScopedAlloc.alloc(l) };
         assert!(in_arena(p_arena), "resumed scope bumps from the arena again");
         let _ = leave_no_reset();
         reset();
         std::mem::forget(scope);
+    }
+
+    /// A scope entered while paused (a compile run from inside an importer or
+    /// warn handler) must nest under the live outer scope: leaving it is not
+    /// "outermost", so it must not reset the arena the outer scope is using.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn nested_scope_while_paused_does_not_reset_outer_arena() {
+        let l = layout(64, 8);
+        let outer = Scope::enter();
+        let p_outer = unsafe { ScopedAlloc.alloc(l) };
+        let cursor_before = TL.with(|tl| tl.cursor.get());
+        let paused = pause();
+        let inner = Scope::enter();
+        let p_inner = unsafe { ScopedAlloc.alloc(l) }; // paused -> System
+        assert_ne!(p_inner, p_outer);
+        assert!(!leave_no_reset(), "nested scope is not the outermost");
+        reset(); // must be a no-op: depth is still 1
+        std::mem::forget(inner);
+        unsafe { ScopedAlloc.dealloc(p_inner, l) };
+        drop(paused);
+        assert_eq!(
+            TL.with(|tl| tl.cursor.get()),
+            cursor_before,
+            "outer arena state intact"
+        );
+        let p_next = unsafe { ScopedAlloc.alloc(l) };
+        assert_ne!(p_next, p_outer, "the outer block was not handed out again");
+        let _ = leave_no_reset();
+        reset();
+        std::mem::forget(outer);
+    }
+
+    /// A callback that panics must not leave the thread paused: the guard
+    /// drops during unwinding, so a later compile on this thread bumps from the
+    /// arena again instead of silently routing everything to System.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn pause_guard_lifts_on_unwind() {
+        let before = TL.with(|tl| tl.paused.get());
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(|| {
+            let _paused = pause();
+            panic!("callback panicked");
+        });
+        std::panic::set_hook(hook);
+        assert!(result.is_err());
+        assert_eq!(TL.with(|tl| tl.paused.get()), before, "unwinding drops the guard");
     }
 }

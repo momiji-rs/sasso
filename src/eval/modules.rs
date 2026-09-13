@@ -678,7 +678,7 @@ impl<'a> Evaluator<'a> {
         // compile's arena reset, so route its allocations to the system
         // allocator. The returned `String`s are then deep-copied into the arena
         // below by the parse/eval pipeline.
-        let saved = crate::arena::pause();
+        let paused = crate::arena::pause();
         // Two-phase resolution (canonicalize, then load), both inside ONE arena
         // pause so the importer's owned allocations survive this compile's arena
         // reset. `@use`/`@forward` never consider import-only files.
@@ -689,16 +689,10 @@ impl<'a> Evaluator<'a> {
                     containing_url: self.current_canonical.as_ref(),
                 };
                 match imp.canonicalize(url, &ctx) {
-                    Err(e) => {
-                        crate::arena::resume(saved);
-                        return Err(Error::at(e.message, pos));
-                    }
+                    Err(e) => return Err(Error::at(e.message, pos)),
                     Ok(None) => None,
                     Ok(Some(canon)) => match imp.load(&canon) {
-                        Err(e) => {
-                            crate::arena::resume(saved);
-                            return Err(Error::at(e.message, pos));
-                        }
+                        Err(e) => return Err(Error::at(e.message, pos)),
                         Ok(None) => None,
                         Ok(Some(res)) => Some((
                             canon.as_str().to_string(),
@@ -711,7 +705,7 @@ impl<'a> Evaluator<'a> {
             }
             None => None,
         };
-        crate::arena::resume(saved);
+        drop(paused);
         let (key, src, syntax, source_map_url) = match two_phase {
             Some(quad) => quad,
             None => {

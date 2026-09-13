@@ -1757,7 +1757,16 @@ impl<'a> Evaluator<'a> {
     /// `eprintln!`s byte-for-byte).
     fn emit_diag(&self, ev: crate::WarnEvent<'_>) {
         match self.options.warn {
-            Some(handler) => handler(&ev),
+            Some(handler) => {
+                // Run the embedder's handler outside the arena scope, so
+                // whatever it retains from the event (a buffered log, a list
+                // of warnings) is allocated by the system allocator and
+                // outlives this compile's arena reset — the same reason
+                // importer calls are paused. Inside the scope a `String` the
+                // handler grows would land in the arena and dangle afterwards.
+                let _paused = crate::arena::pause();
+                handler(&ev);
+            }
             None => eprintln!("{}", ev.formatted),
         }
     }
@@ -2543,7 +2552,7 @@ impl<'a> Evaluator<'a> {
                             // so any state it caches (paths, sources) outlives
                             // this compile's arena reset; see the matching note
                             // in `load_module`.
-                            let saved = crate::arena::pause();
+                            let paused = crate::arena::pause();
                             // Two-phase resolution (canonicalize, then load),
                             // both inside ONE arena pause so the importer's owned
                             // allocations survive this compile's arena reset.
@@ -2554,16 +2563,10 @@ impl<'a> Evaluator<'a> {
                                         containing_url: self.current_canonical.as_ref(),
                                     };
                                     match imp.canonicalize(path, &ctx) {
-                                        Err(e) => {
-                                            crate::arena::resume(saved);
-                                            return Err(Error::unpositioned(e.message));
-                                        }
+                                        Err(e) => return Err(Error::unpositioned(e.message)),
                                         Ok(None) => None,
                                         Ok(Some(canon)) => match imp.load(&canon) {
-                                            Err(e) => {
-                                                crate::arena::resume(saved);
-                                                return Err(Error::unpositioned(e.message));
-                                            }
+                                            Err(e) => return Err(Error::unpositioned(e.message)),
                                             Ok(None) => None,
                                             // `res.source_map_url` is intentionally dropped here:
                                             // `@import` is textual, so the imported file gets NO
@@ -2578,7 +2581,7 @@ impl<'a> Evaluator<'a> {
                                 }
                                 None => None,
                             };
-                            crate::arena::resume(saved);
+                            drop(paused);
                             match resolved {
                                 Some((resolved_key, src, syntax)) => {
                                     if self.loading.iter().any(|p| p == path) {
