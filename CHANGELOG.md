@@ -126,6 +126,17 @@ Conformance is tracked separately as a ratchet against the official
   trace. A file outside the tree whose relative spelling would be longer than
   its absolute path is shown absolute (dart's `prettyUri`); the entry stays
   as given. `WarnEvent::url` carries the same spelling.
+- **`--quiet-deps` no longer aborts after a compile error.** The dependency
+  record's mutex was allocated lazily on its first lock — from inside the
+  compile, so in the CLI's bump arena, which the compile resets on the way
+  out — and the error-CSS re-render (a second compile in the same process)
+  then locked freed memory: `failed to lock mutex: Invalid argument` and exit
+  code 134 instead of the error report and exit code 65. Every access to a
+  `DependencySet` now runs with the arena paused, so the mutex and the keys
+  it records live in system memory for the set's whole lifetime. Host
+  functions (`Options::with_function`) now run with the arena paused as
+  well, like importers and warn handlers already did, so anything a host
+  keeps across calls is never arena-resident.
 - **Warn handlers may retain event data.** The library now pauses its
   bump-arena scope while calling an embedder's `WarnHandler`, so a handler
   that appends the event to a buffer no longer ends up with memory the

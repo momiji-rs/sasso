@@ -1545,3 +1545,49 @@ fn stack_frames_show_loaded_files_relative_to_the_working_directory() {
     assert_dart_stderr_matches(imported, &["--no-source-map", "-I", "lp", "src/rel.scss"], true);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn quiet_deps_survives_a_compile_error_with_error_css() {
+    // `--quiet-deps` hands the compiler a `DependencySet` whose mutex used to
+    // be allocated lazily on first lock — inside the compile's bump arena, which
+    // the compile reset on the way out. The error-CSS re-render (a second
+    // compile in the same process) then locked freed memory and aborted with
+    // "failed to lock mutex" instead of reporting the error.
+    let dir = scratch("quietdeps_err");
+    write(&dir, "in.scss", BAD);
+    let r = sasso(&dir, &["--quiet-deps", "in.scss", "out.css"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert!(
+        r.stderr.starts_with("Error: Undefined variable.\n"),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("panicked"), "{}", r.stderr);
+    assert!(read(&dir, "out.css").starts_with("/* Error: Undefined variable."));
+    // The same with a recorded dependency in the set: the entry loads a
+    // load-path file, which then fails.
+    write(&dir, "lp/_dep.scss", "b { c: $y }\n");
+    write(&dir, "usedep.scss", "@use \"dep\";\n");
+    let r = sasso(&dir, &["--quiet-deps", "-I", "lp", "usedep.scss", "dep.css"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert!(
+        r.stderr.starts_with("Error: Undefined variable.\n"),
+        "{}",
+        r.stderr
+    );
+    assert!(r.stderr.contains("lp/_dep.scss 1:8  @use\n"), "{}", r.stderr);
+    assert!(read(&dir, "dep.css").starts_with("/* Error: Undefined variable."));
+    // And several units in one process, the failing one first.
+    write(&dir, "good.scss", GOOD);
+    let r = sasso(
+        &dir,
+        &["--quiet-deps", "-j", "1", "in.scss:o1.css", "good.scss:o2.css"],
+    );
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert!(!r.stderr.contains("panicked"), "{}", r.stderr);
+    assert_eq!(
+        read(&dir, "o2.css"),
+        format!("{GOOD_CSS}\n/*# sourceMappingURL=o2.css.map */\n")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

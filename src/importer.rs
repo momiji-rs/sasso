@@ -133,8 +133,39 @@ impl FsImporter {
 /// started from inside another compile (a warn handler running a nested
 /// `compile` with the same importer), hands the outer compile's record back
 /// when it finishes. A set shared by CONCURRENT compiles is not meaningful.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone)]
 pub struct DependencySet(std::sync::Arc<std::sync::Mutex<DependencyState>>);
+
+impl std::fmt::Debug for DependencySet {
+    /// Formats through [`DependencySet::lock`] (a derived impl would lock the
+    /// mutex directly, which is the one access that must not happen with the
+    /// arena active).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.lock() {
+            Some((_paused, st)) => f
+                .debug_struct("DependencySet")
+                .field("set", &st.set)
+                .field("depth", &st.depth)
+                .finish(),
+            None => f.write_str("DependencySet(<poisoned>)"),
+        }
+    }
+}
+
+impl Default for DependencySet {
+    /// An empty set. Allocated with the bump arena paused, like every other
+    /// access (see [`DependencySet::lock`]), so a set constructed from inside
+    /// a compile does not have its `Arc` reclaimed by that compile's arena
+    /// reset while the set lives on. (The library pauses the arena around
+    /// importer, warn-handler, and host-function callbacks as well, so this
+    /// guards the type on its own terms rather than relying on that.)
+    fn default() -> Self {
+        let _paused = crate::arena::pause();
+        DependencySet(std::sync::Arc::new(std::sync::Mutex::new(
+            DependencyState::default(),
+        )))
+    }
+}
 
 #[derive(Default, Debug)]
 struct DependencyState {
@@ -144,11 +175,25 @@ struct DependencyState {
 }
 
 impl DependencySet {
+    /// Lock the state with the bump arena paused. The set outlives any one
+    /// compile, so nothing it owns may live in a compile's arena — and the
+    /// std `Mutex` allocates its OS mutex lazily on FIRST lock: with the CLI's
+    /// `ScopedAlloc` installed, a first lock from inside a compile would put
+    /// that mutex in the arena, which the compile resets on the way out, and
+    /// the next lock (the error-CSS re-render, a nested compile, the drop of
+    /// the importer) would touch freed memory. Every access goes through here,
+    /// and the guard is returned so the caller's own allocations under it
+    /// (an inserted key) stay off the arena as well.
+    fn lock(&self) -> Option<(crate::arena::Paused, std::sync::MutexGuard<'_, DependencyState>)> {
+        let paused = crate::arena::pause();
+        let guard = self.0.lock().ok()?;
+        Some((paused, guard))
+    }
+
     /// Whether the file at `canonical` was reached through a load path.
     pub fn is_dependency(&self, canonical: &str) -> bool {
-        self.0
-            .lock()
-            .map(|st| st.set.contains(canonical))
+        self.lock()
+            .map(|(_paused, st)| st.set.contains(canonical))
             .unwrap_or(false)
     }
 
@@ -156,13 +201,13 @@ impl DependencySet {
     /// [`crate::Options::with_quiet_deps`]) does this itself when it starts;
     /// an embedder reading the set by hand should do it between compiles.
     pub fn clear(&self) {
-        if let Ok(mut st) = self.0.lock() {
+        if let Some((_paused, mut st)) = self.lock() {
             st.set.clear();
         }
     }
 
     pub(crate) fn insert(&self, canonical: &str) {
-        if let Ok(mut st) = self.0.lock() {
+        if let Some((_paused, mut st)) = self.lock() {
             st.set.insert(canonical.to_string());
         }
     }
@@ -172,12 +217,12 @@ impl DependencySet {
     /// ends (an outermost compile leaves its record in place, readable
     /// afterwards).
     pub(crate) fn enter_compile(&self) -> DependencyScope {
-        let saved = match self.0.lock() {
-            Ok(mut st) => {
+        let saved = match self.lock() {
+            Some((_paused, mut st)) => {
                 st.depth += 1;
                 std::mem::take(&mut st.set)
             }
-            Err(_) => std::collections::HashSet::new(),
+            None => std::collections::HashSet::new(),
         };
         DependencyScope {
             set: self.clone(),
@@ -194,7 +239,7 @@ pub(crate) struct DependencyScope {
 
 impl Drop for DependencyScope {
     fn drop(&mut self) {
-        if let Ok(mut st) = self.set.0.lock() {
+        if let Some((_paused, mut st)) = self.set.lock() {
             st.depth = st.depth.saturating_sub(1);
             if st.depth > 0 {
                 // A nested compile ends: the outer compile's record comes back.

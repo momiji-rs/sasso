@@ -151,3 +151,87 @@ fn warn_handler_may_run_a_nested_compile() {
         h.join().expect("thread panicked");
     }
 }
+
+/// A host function (`Options::with_function`) that RETAINS what it is handed —
+/// its serialized arguments and the bytes it returned — must see intact data
+/// afterwards, like a warn handler. The callback runs inside the compile's
+/// arena scope; without the library pausing the arena around it, the copies
+/// it keeps would be arena-allocated and dangle once the scope resets, showing
+/// up as garbled bytes on the next compile. Regression test for the pause
+/// around the host callback.
+#[test]
+fn host_function_may_retain_its_bytes_under_the_arena() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    // Wire format: a `u32` argument count, then each value as a tag byte and
+    // payload; a string is tag 3, a quoted flag, a `u32` length, UTF-8.
+    fn string_value(quoted: bool, text: &str) -> Vec<u8> {
+        let mut v = vec![3u8, quoted as u8];
+        v.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        v.extend_from_slice(text.as_bytes());
+        v
+    }
+    fn one_arg(value: Vec<u8>) -> Vec<u8> {
+        let mut v = 1u32.to_le_bytes().to_vec();
+        v.extend(value);
+        v
+    }
+
+    let handles: Vec<_> = (0..4)
+        .map(|t| {
+            std::thread::spawn(move || {
+                const N: usize = 40;
+                let mut src = String::from(".out {\n");
+                let mut expected_css = String::from(".out {\n");
+                let mut expected_inputs = Vec::new();
+                for i in 0..N {
+                    let text = format!("thread {t} value {i:02} {}", "y".repeat(i * 5));
+                    src.push_str(&format!("  p{i}: echo(\"{text}\");\n"));
+                    expected_css.push_str(&format!("  p{i}: {text};\n"));
+                    expected_inputs.push(one_arg(string_value(true, &text)));
+                }
+                src.push('}');
+                expected_css.push('}');
+                // Everything the callback saw and produced, kept across calls
+                // and across compiles.
+                type Retained = Vec<(Vec<u8>, Vec<u8>)>;
+                let retained: Rc<RefCell<Retained>> = Rc::new(RefCell::new(Vec::new()));
+                let sink = Rc::clone(&retained);
+                let opts = Options::default().with_function(
+                    "echo($s)",
+                    Rc::new(move |bytes: &[u8]| {
+                        // Unquote: return the same text as an unquoted string.
+                        let len = u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]) as usize;
+                        let text = std::str::from_utf8(&bytes[10..10 + len]).map_err(|e| e.to_string())?;
+                        let out = string_value(false, text);
+                        sink.borrow_mut().push((bytes.to_vec(), out.clone()));
+                        Ok(out)
+                    }),
+                );
+                for _ in 0..5 {
+                    retained.borrow_mut().clear();
+                    let css = compile(&src, &opts).expect("compile");
+                    assert_eq!(css, expected_css, "thread {t}: output intact");
+                    let seen = retained.borrow();
+                    assert_eq!(seen.len(), N);
+                    for (i, (input, output)) in seen.iter().enumerate() {
+                        assert_eq!(
+                            *input, expected_inputs[i],
+                            "thread {t}: retained input {i} intact"
+                        );
+                        let text = format!("thread {t} value {i:02} {}", "y".repeat(i * 5));
+                        assert_eq!(
+                            *output,
+                            string_value(false, &text),
+                            "thread {t}: retained output {i} intact"
+                        );
+                    }
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().expect("thread panicked");
+    }
+}
