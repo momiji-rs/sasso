@@ -1,0 +1,1404 @@
+//! End-to-end tests for the dart-sass-compatible CLI surface: the positional
+//! grammar (`<input> [output]`), `in:out` pairs (files and directories),
+//! parallel compilation, dart's defaults (source maps and an error stylesheet
+//! when writing to a file), `--embed-source-map`, `--quiet`/`--quiet-deps`,
+//! `--stop-on-error`, and dart's exit codes. Drives the REAL built binary
+//! (`env!("CARGO_BIN_EXE_sasso")`).
+//!
+//! A gated dart-sass differential (opt-in via `SASSO_PARITY=1` + a reachable
+//! `$SASS_BIN` that is the dart-sass CLI) runs the same invocation through
+//! dart-sass and compares the produced files byte-for-byte.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const BIN: &str = env!("CARGO_BIN_EXE_sasso");
+
+/// dart-sass exit codes.
+const EXIT_USAGE: i32 = 64;
+const EXIT_COMPILE: i32 = 65;
+const EXIT_IO: i32 = 66;
+
+fn scratch(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("sasso_cli_dc_{tag}_{}_{}", std::process::id(), unique()));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    dir
+}
+
+fn unique() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    N.fetch_add(1, Ordering::Relaxed)
+}
+
+struct Run {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_bin(bin: &str, cwd: &Path, args: &[&str], stdin: Option<&str>) -> Run {
+    run_bin_bytes(bin, cwd, args, stdin.map(str::as_bytes))
+}
+
+/// [`run_bin`] with raw bytes on stdin (for input that is not valid UTF-8).
+fn run_bin_bytes(bin: &str, cwd: &Path, args: &[&str], stdin: Option<&[u8]>) -> Run {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    let mut child = cmd.spawn().expect("spawn");
+    if let Some(bytes) = stdin {
+        // A child that never reads stdin (a usage error, or an invocation whose
+        // input is a file) may exit before this write lands; the resulting
+        // closed pipe is not a test failure. Any other write error is.
+        if let Err(e) = child.stdin.take().unwrap().write_all(bytes) {
+            assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "stdin write failed: {e}"
+            );
+        }
+    }
+    let out = child.wait_with_output().expect("wait");
+    Run {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+fn sasso(cwd: &Path, args: &[&str]) -> Run {
+    run_bin(BIN, cwd, args, None)
+}
+
+fn write(dir: &Path, name: &str, contents: &str) -> PathBuf {
+    let p = dir.join(name);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir -p");
+    }
+    std::fs::write(&p, contents).expect("write input");
+    p
+}
+
+fn read(dir: &Path, name: &str) -> String {
+    std::fs::read_to_string(dir.join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
+}
+
+/// The dart-sass CLI binary for the gated differential, if enabled and set to
+/// a real executable (the `npx` default of the other parity tests is not a
+/// file-writing CLI we can point at a scratch dir reliably).
+fn dart_bin() -> Option<String> {
+    if std::env::var("SASSO_PARITY").map(|v| v == "0").unwrap_or(true) {
+        return None;
+    }
+    let bin = std::env::var("SASS_BIN").ok()?;
+    if bin == "npx" || !Path::new(&bin).is_file() {
+        return None;
+    }
+    // Absolute, so a relative `SASS_BIN` still resolves once the child runs in
+    // a scratch directory.
+    Some(std::fs::canonicalize(&bin).ok()?.to_string_lossy().into_owned())
+}
+
+/// Run the same `args` through dart-sass in a sibling scratch dir seeded with
+/// the same `files`, and assert every file in `outputs` matches byte-for-byte.
+fn assert_dart_files_match(files: &[(&str, &str)], args: &[&str], outputs: &[&str]) {
+    let Some(dart) = dart_bin() else { return };
+    let ours = scratch("parity_ours");
+    let theirs = scratch("parity_theirs");
+    for (name, text) in files {
+        write(&ours, name, text);
+        write(&theirs, name, text);
+    }
+    let a = sasso(&ours, args);
+    let b = run_bin(&dart, &theirs, args, None);
+    assert_eq!(
+        a.code, b.code,
+        "exit codes differ for {args:?}\nours: {}\ndart: {}",
+        a.stderr, b.stderr
+    );
+    for out in outputs {
+        let x = std::fs::read_to_string(ours.join(out)).ok();
+        let y = std::fs::read_to_string(theirs.join(out)).ok();
+        assert_eq!(x, y, "{out} differs from dart-sass for {args:?}");
+    }
+    std::fs::remove_dir_all(&ours).ok();
+    std::fs::remove_dir_all(&theirs).ok();
+}
+
+const GOOD: &str = "$c: red;\na { color: $c; }\n";
+const GOOD_CSS: &str = "a {\n  color: red;\n}\n";
+const BAD: &str = "a { b: $x }\n";
+
+// ---------------------------------------------------------------------------
+// Positional grammar
+// ---------------------------------------------------------------------------
+
+#[test]
+fn second_positional_is_the_output_file() {
+    let dir = scratch("pos");
+    write(&dir, "in.scss", GOOD);
+    let r = sasso(&dir, &["--no-source-map", "in.scss", "out.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, "", "nothing on stdout when writing a file");
+    assert_eq!(read(&dir, "out.css"), GOOD_CSS);
+    // `--stdin [output]`
+    let r = run_bin(
+        BIN,
+        &dir,
+        &["--stdin", "--no-source-map", "from-stdin.css"],
+        Some("x { y: z }\n"),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "from-stdin.css"), "x {\n  y: z;\n}\n");
+    // A stdin entry has no path: dart records its text as a `data:` URI in the
+    // map's `sources`, both in a sidecar and inside an embedded map.
+    let r = run_bin(BIN, &dir, &["--stdin", "stdin-map.css"], Some("a{b:c}\n"));
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        read(&dir, "stdin-map.css.map"),
+        "{\"version\":3,\"sourceRoot\":\"\",\"sources\":[\"data:;charset=utf-8,a%7Bb:c%7D%0A\"],\"names\":[],\"mappings\":\"AAAA;EAAE\",\"file\":\"stdin-map.css\"}"
+    );
+    let r = run_bin(BIN, &dir, &["--stdin", "--embed-source-map"], Some("a{b:c}\n"));
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout
+            .contains("%22sources%22:%5B%22data:;charset=utf-8,a%257Bb:c%257D%250A%22%5D"),
+        "{}",
+        r.stdout
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn dash_positional_reads_stdin() {
+    let dir = scratch("dash");
+    let r = run_bin(BIN, &dir, &["--no-source-map", "-"], Some("x { y: z }\n"));
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, "x {\n  y: z;\n}\n");
+    let r = run_bin(
+        BIN,
+        &dir,
+        &["--no-source-map", "-", "a.css"],
+        Some("x { y: z }\n"),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "a.css"), "x {\n  y: z;\n}\n");
+    let r = run_bin(BIN, &dir, &["--no-source-map", "-:b.css"], Some("x { y: z }\n"));
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "b.css"), "x {\n  y: z;\n}\n");
+    // A `-` INPUT is stdin whatever the final `--[no-]stdin` value (dart).
+    let r = run_bin(
+        BIN,
+        &dir,
+        &["--no-source-map", "-", "--no-stdin", "c.css"],
+        Some("x { y: z }\n"),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "c.css"), "x {\n  y: z;\n}\n");
+    // … and `--stdin --no-stdin` is off: the positional is the input.
+    write(&dir, "in.scss", GOOD);
+    let r = run_bin(
+        BIN,
+        &dir,
+        &["--no-source-map", "--stdin", "--no-stdin", "in.scss"],
+        Some("x { y: z }\n"),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, GOOD_CSS);
+    // A `-` in the OUTPUT position is a file called `-`, as in dart; the input
+    // is left alone.
+    let r = run_bin(
+        BIN,
+        &dir,
+        &["--no-source-map", "in.scss", "-"],
+        Some("x { y: z }\n"),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "-"), GOOD_CSS);
+    assert_eq!(read(&dir, "in.scss"), GOOD);
+    // `-:out` is a pair like any other and mixes with file pairs (dart keeps
+    // `-` as a source in the same map); the same source twice is an error.
+    write(&dir, "b.scss", "p { q: 1 }\n");
+    let r = run_bin(
+        BIN,
+        &dir,
+        &["--no-source-map", "-:d.css", "b.scss:bb.css"],
+        Some("x { y: z }\n"),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "d.css"), "x {\n  y: z;\n}\n");
+    assert_eq!(read(&dir, "bb.css"), "p {\n  q: 1;\n}\n");
+    let r = run_bin(
+        BIN,
+        &dir,
+        &["--no-source-map", "-:e.css", "-:f.css"],
+        Some("x { y: z }\n"),
+    );
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(r.stderr.contains("Duplicate source \"-\"."), "{}", r.stderr);
+    assert!(!dir.join("e.css").exists() && !dir.join("f.css").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn too_many_positionals_is_a_usage_error() {
+    let dir = scratch("pos_err");
+    write(&dir, "in.scss", GOOD);
+    let r = sasso(&dir, &["in.scss", "a.css", "b.css"]);
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(
+        r.stderr.contains("Only two positional args may be passed."),
+        "{}",
+        r.stderr
+    );
+    let r = run_bin(BIN, &dir, &["--stdin", "a.css", "b.css"], Some("a{b:c}"));
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(
+        r.stderr.contains("Only one argument is allowed with --stdin."),
+        "{}",
+        r.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// `in:out` pairs and directory mode
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pairs_compile_each_input_to_its_own_output() {
+    let dir = scratch("pairs");
+    write(&dir, "a.scss", GOOD);
+    write(&dir, "b.scss", "b { w: 1px + 1px; }\n");
+    let r = sasso(&dir, &["--no-source-map", "a.scss:out/a.css", "b.scss:out/b.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, "");
+    assert_eq!(
+        read(&dir, "out/a.css"),
+        GOOD_CSS,
+        "missing output dirs are created"
+    );
+    assert_eq!(read(&dir, "out/b.css"), "b {\n  w: 2px;\n}\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn pairs_get_a_source_map_by_default() {
+    let dir = scratch("pairs_map");
+    write(&dir, "src/a.scss", GOOD);
+    let r = sasso(&dir, &["src/a.scss:out/a.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        read(&dir, "out/a.css"),
+        format!("{GOOD_CSS}\n/*# sourceMappingURL=a.css.map */\n")
+    );
+    let map = read(&dir, "out/a.css.map");
+    assert!(
+        map.starts_with("{\"version\":3,\"sourceRoot\":\"\",\"sources\":[\"../src/a.scss\"]"),
+        "{map}"
+    );
+    assert!(map.ends_with(",\"file\":\"a.css\"}"), "{map}");
+    // `--no-source-map` opts out: no footer, no sidecar.
+    let r = sasso(&dir, &["--no-source-map", "src/a.scss:out/b.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "out/b.css"), GOOD_CSS);
+    assert!(!dir.join("out/b.css.map").exists());
+    assert_dart_files_match(
+        &[("src/a.scss", GOOD)],
+        &["src/a.scss:out/a.css"],
+        &["out/a.css", "out/a.css.map"],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn directory_pair_mirrors_the_tree_and_skips_partials() {
+    let dir = scratch("dirmode");
+    write(&dir, "src/a.scss", GOOD);
+    write(&dir, "src/_partial.scss", "$p: 1px;\n");
+    write(
+        &dir,
+        "src/sub/nested.scss",
+        "@use \"../partial\";\nb { w: partial.$p; }\n",
+    );
+    write(&dir, "src/plain.sass", "c\n  d: e\n");
+    write(&dir, "src/raw.css", "f{g:h}\n");
+    write(&dir, "src/notes.txt", "ignored\n");
+    let r = sasso(&dir, &["--no-source-map", "src:out"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "out/a.css"), GOOD_CSS);
+    assert_eq!(read(&dir, "out/sub/nested.css"), "b {\n  w: 1px;\n}\n");
+    assert_eq!(
+        read(&dir, "out/plain.css"),
+        "c {\n  d: e;\n}\n",
+        ".sass compiles as indented syntax"
+    );
+    assert_eq!(
+        read(&dir, "out/raw.css"),
+        "f {\n  g: h;\n}\n",
+        ".css compiles as plain CSS"
+    );
+    assert!(!dir.join("out/_partial.css").exists(), "partials are skipped");
+    assert!(!dir.join("out/notes.css").exists() && !dir.join("out/notes.txt").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn pairs_cannot_mix_with_positionals_or_stdin() {
+    let dir = scratch("pairs_mix");
+    write(&dir, "a.scss", GOOD);
+    let r = sasso(&dir, &["a.scss:out.css", "a.scss"]);
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(
+        r.stderr
+            .contains("Positional and \":\" arguments may not both be used."),
+        "{}",
+        r.stderr
+    );
+    let r = run_bin(BIN, &dir, &["--stdin", "-:out.css"], Some("a{b:c}"));
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(
+        r.stderr.contains("--stdin may not be used with \":\" arguments."),
+        "{}",
+        r.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Source-map flags on stdout, and `--embed-source-map`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stdout_source_map_flags_need_embed_source_map() {
+    let dir = scratch("stdout_map");
+    write(&dir, "a.scss", GOOD);
+    let r = sasso(&dir, &["--source-map", "a.scss"]);
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(
+        r.stderr
+            .contains("When printing to stdout, --source-map requires --embed-source-map."),
+        "{}",
+        r.stderr
+    );
+    let r = sasso(&dir, &["--embed-sources", "a.scss"]);
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(
+        r.stderr
+            .contains("When printing to stdout, --embed-sources requires --embed-source-map."),
+        "{}",
+        r.stderr
+    );
+    let r = sasso(&dir, &["--embed-source-map", "--no-source-map", "a.scss"]);
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(
+        r.stderr
+            .contains("--embed-source-map isn't allowed with --no-source-map."),
+        "{}",
+        r.stderr
+    );
+    // dart's remaining combinations.
+    for (args, msg) in [
+        (
+            vec!["--embed-sources", "--no-source-map", "a.scss", "o.css"],
+            "--embed-sources isn't allowed with --no-source-map.",
+        ),
+        (
+            vec!["--source-map-urls=absolute", "--no-source-map", "a.scss", "o.css"],
+            "--source-map-urls isn't allowed with --no-source-map.",
+        ),
+        (
+            vec!["--source-map-urls=absolute", "a.scss"],
+            "When printing to stdout, --source-map-urls requires --embed-source-map.",
+        ),
+        (
+            vec!["--source-map-urls=relative", "--embed-source-map", "a.scss"],
+            "--source-map-urls=relative isn't allowed when printing to stdout.",
+        ),
+    ] {
+        let r = sasso(&dir, &args);
+        assert_eq!(r.code, EXIT_USAGE, "{args:?}: {}", r.stderr);
+        assert!(r.stderr.contains(msg), "{args:?}: {}", r.stderr);
+    }
+    // … while the explicit default is fine where a map is written.
+    let r = sasso(&dir, &["--source-map-urls=relative", "a.scss", "o.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn embedded_map_cannot_close_the_footer_comment() {
+    // `--embed-sources` puts the source text into the data: URI; a `*/` in it
+    // must not terminate the `/*# sourceMappingURL=… */` comment early.
+    let dir = scratch("star_footer");
+    write(&dir, "in.scss", "/* end */ a { b: c }\n");
+    let r = sasso(
+        &dir,
+        &["--embed-source-map", "--embed-sources", "in.scss", "out.css"],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let css = read(&dir, "out.css");
+    let footer = css.rsplit("/*# sourceMappingURL=").next().unwrap();
+    let uri = footer
+        .strip_suffix(" */\n")
+        .expect("footer closes once, at the very end");
+    assert!(
+        !uri.contains("*/"),
+        "the URI must not contain a comment terminator: {uri}"
+    );
+    assert!(uri.contains("%2A/"), "dart escapes `*/` as `%2A/`: {uri}");
+    assert_dart_files_match(
+        &[("in.scss", "/* end */ a { b: c }\n")],
+        &["--embed-source-map", "--embed-sources", "in.scss", "out.css"],
+        &["out.css"],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn map_is_written_before_css() {
+    // If the sidecar cannot be written, no CSS that points at it may appear.
+    let dir = scratch("map_first");
+    write(&dir, "in.scss", GOOD);
+    std::fs::create_dir_all(dir.join("out.css.map")).unwrap(); // a directory blocks the map
+    let r = sasso(&dir, &["in.scss", "out.css"]);
+    assert_eq!(r.code, EXIT_IO, "{}", r.stderr);
+    assert!(
+        !dir.join("out.css").exists(),
+        "CSS must not be published without its map"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn embed_source_map_inlines_a_data_uri() {
+    let dir = scratch("embed");
+    write(&dir, "src/a.scss", GOOD);
+    // To a file: relative sources, a `file` field, and no sidecar.
+    let r = sasso(&dir, &["--embed-source-map", "src/a.scss:out/a.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let css = read(&dir, "out/a.css");
+    let expected_prefix = format!(
+        "{GOOD_CSS}\n/*# sourceMappingURL=data:application/json;charset=utf-8,%7B%22version%22:3,%22sourceRoot%22:%22%22,%22sources%22:%5B%22../src/a.scss%22%5D,%22names%22:%5B%5D,%22mappings%22:%22"
+    );
+    assert!(css.starts_with(&expected_prefix), "{css}");
+    assert!(css.ends_with("%22,%22file%22:%22a.css%22%7D */\n"), "{css}");
+    assert!(!dir.join("out/a.css.map").exists(), "no sidecar when embedded");
+    // `--embed-sources` rides along inside the data URI.
+    let r = sasso(
+        &dir,
+        &["--embed-source-map", "--embed-sources", "src/a.scss:out/b.css"],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let css = read(&dir, "out/b.css");
+    assert!(
+        css.contains("%22sourcesContent%22:%5B%22$c:%20red;%5Cna%20%7B%20color:%20$c;%20%7D%5Cn%22%5D"),
+        "{css}"
+    );
+    // To stdout: absolute `file://` sources and no `file` field, like dart.
+    let r = sasso(&dir, &["--embed-source-map", "src/a.scss"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout.starts_with(&format!(
+            "{GOOD_CSS}\n/*# sourceMappingURL=data:application/json;charset=utf-8,"
+        )),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("%22sources%22:%5B%22file:///"), "{}", r.stdout);
+    assert!(!r.stdout.contains("%22file%22"), "{}", r.stdout);
+    assert!(r.stdout.ends_with("%7D */\n"), "{}", r.stdout);
+    assert_dart_files_match(
+        &[("src/a.scss", GOOD)],
+        &["--embed-source-map", "--embed-sources", "src/a.scss:out/a.css"],
+        &["out/a.css"],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Error handling: error CSS, exit codes, --stop-on-error
+// ---------------------------------------------------------------------------
+
+/// dart's error stylesheet for `BAD` compiled from `in.scss` (Unicode glyphs
+/// in `content`, ASCII glyphs in the comment).
+const BAD_ERROR_CSS: &str = "/* Error: Undefined variable.\n *   ,\n * 1 | a { b: $x }\n *   |        ^^\n *   '\n *   in.scss 1:8  root stylesheet */\n\nbody::before {\n  font-family: \"Source Code Pro\", \"SF Mono\", Monaco, Inconsolata, \"Fira Mono\",\n      \"Droid Sans Mono\", monospace, monospace;\n  white-space: pre;\n  display: block;\n  padding: 1em;\n  margin-bottom: 1em;\n  border-bottom: 2px solid black;\n  content: \"Error: Undefined variable.\\a   \\2577 \\a 1 \\2502  a { b: $x }\\a   \\2502         ^^\\a   \\2575 \\a   in.scss 1:8  root stylesheet\";\n}\n";
+
+#[test]
+fn error_css_is_written_for_file_output_by_default() {
+    let dir = scratch("errcss");
+    write(&dir, "in.scss", BAD);
+    let r = sasso(&dir, &["--no-source-map", "in.scss", "out.css"]);
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(
+        r.stderr.starts_with("Error: Undefined variable.\n"),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(read(&dir, "out.css"), BAD_ERROR_CSS);
+    // Non-ASCII in the message is escaped in `content` (dart: `\e9 `), and the
+    // comment keeps it raw.
+    write(&dir, "uni.scss", "a { b: $é }\n");
+    let r = sasso(
+        &dir,
+        &["--no-source-map", "--style=compressed", "uni.scss", "uni.css"],
+    );
+    assert_eq!(r.code, EXIT_COMPILE);
+    let css = read(&dir, "uni.css");
+    assert!(css.contains(" * 1 | a { b: $é }\n"), "{css}");
+    assert!(css.contains("a { b: $\\e9  }\\a "), "{css}");
+    assert!(
+        css.starts_with("/* Error:"),
+        "compressed style still writes the expanded error sheet: {css}"
+    );
+    // `--no-unicode` switches the `content` glyphs to ASCII too.
+    let r = sasso(&dir, &["--no-source-map", "--no-unicode", "in.scss", "ascii.css"]);
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(read(&dir, "ascii.css").contains("content: \"Error: Undefined variable.\\a   ,\\a 1 | a { b: $x }\\a   |        ^^\\a   '\\a   in.scss 1:8  root stylesheet\";"));
+    assert_dart_files_match(
+        &[("in.scss", BAD)],
+        &["--no-source-map", "in.scss", "out.css"],
+        &["out.css"],
+    );
+    assert_dart_files_match(
+        &[("in.scss", BAD)],
+        &["--no-source-map", "--no-unicode", "in.scss", "out.css"],
+        &["out.css"],
+    );
+    // `*/` inside the message must not close the comment (dart: U+2215).
+    write(&dir, "star.scss", "@error \"a */ b\";\n");
+    let r = sasso(&dir, &["--no-source-map", "star.scss", "star.css"]);
+    assert_eq!(r.code, EXIT_COMPILE);
+    let css = read(&dir, "star.css");
+    assert!(css.contains("/* Error: \"a *\u{2215} b\"\n"), "{css}");
+    assert!(css.contains("content: \"Error: \\\"a */ b\\\"\\a "), "{css}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn no_error_css_and_stdout_errors_write_nothing() {
+    let dir = scratch("noerrcss");
+    write(&dir, "in.scss", BAD);
+    let r = sasso(&dir, &["--no-source-map", "--no-error-css", "in.scss", "out.css"]);
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(!dir.join("out.css").exists(), "--no-error-css writes no file");
+    // To stdout the default is off …
+    let r = sasso(&dir, &["in.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert_eq!(r.stdout, "");
+    // … unless asked for explicitly.
+    let r = sasso(&dir, &["--error-css", "in.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert_eq!(r.stdout, BAD_ERROR_CSS);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn dependency_provenance_is_per_compilation() {
+    // The same file can be a dependency of one entry (reached through `-I lp`)
+    // and not of another (reached relatively), even within one process: dart
+    // decides per compilation, so with `-j 1` the second unit must not inherit
+    // the first unit's classification.
+    let dir = scratch("deps_per_unit");
+    write(&dir, "lp/_dep.scss", "@import \"x\";\n");
+    write(&dir, "lp/_x.scss", "q { r: 1; }\n");
+    write(&dir, "a.scss", "@import \"dep\";\n");
+    write(&dir, "b.scss", "@use \"lp/dep\";\n");
+    let r = sasso(
+        &dir,
+        &[
+            "-j",
+            "1",
+            "--quiet-deps",
+            "--no-source-map",
+            "-I",
+            "lp",
+            "a.scss:out/a.css",
+            "b.scss:out/b.css",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    // a: its own @import warns, the dependency's @import is silenced.
+    // b: `lp/dep` is relative, so its @import "x" warns.
+    assert_eq!(
+        r.stderr.matches("DEPRECATION WARNING [import]").count(),
+        2,
+        "{}",
+        r.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_pair_survives_a_symlink_cycle() {
+    let dir = scratch("symlink_cycle");
+    write(&dir, "src/a.scss", GOOD);
+    write(&dir, "src/sub/b.scss", "b { c: d }\n");
+    std::os::unix::fs::symlink("..", dir.join("src/sub/up")).expect("symlink");
+    let r = sasso(&dir, &["--no-source-map", "src:out"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "out/a.css"), GOOD_CSS);
+    assert_eq!(read(&dir, "out/sub/b.css"), "b {\n  c: d;\n}\n");
+    assert!(
+        !dir.join("out/sub/up").exists(),
+        "the cycle is visited once, not mirrored"
+    );
+    // Two names for one directory: the first in sorted order is mirrored, the
+    // other skipped — the same way every run, whatever `read_dir` yields.
+    std::os::unix::fs::symlink("sub", dir.join("src/zz-alias")).expect("symlink");
+    for _ in 0..2 {
+        std::fs::remove_dir_all(dir.join("out")).ok();
+        let r = sasso(&dir, &["--no-source-map", "src:out"]);
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        assert!(
+            dir.join("out/sub/b.css").exists(),
+            "`sub` sorts before `zz-alias` and wins"
+        );
+        assert!(!dir.join("out/zz-alias").exists());
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn no_css_has_no_side_effects_on_failure_either() {
+    let dir = scratch("no_css_fail");
+    write(&dir, "bad.scss", BAD);
+    write(&dir, "out.css", "old { css: yes }\n");
+    let r = sasso(&dir, &["--no-css", "bad.scss:out.css"]);
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(r.stderr.contains("Undefined variable"), "{}", r.stderr);
+    assert_eq!(
+        read(&dir, "out.css"),
+        "old { css: yes }\n",
+        "neither replaced nor removed"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn error_without_error_css_removes_a_stale_output() {
+    let dir = scratch("stale");
+    write(&dir, "bad.scss", BAD);
+    write(&dir, "out.css", "old { css: yes }\n");
+    write(&dir, "out.css.map", "old map");
+    // dart deletes the stale CSS (not the map) when error CSS is off …
+    let r = sasso(
+        &dir,
+        &["--no-error-css", "--no-source-map", "bad.scss", "out.css"],
+    );
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(
+        !dir.join("out.css").exists(),
+        "stale CSS must not survive a failed build"
+    );
+    assert!(dir.join("out.css.map").exists(), "the map is left alone");
+    // … and overwrites it with the error stylesheet when it is on.
+    write(&dir, "out.css", "old { css: yes }\n");
+    let r = sasso(&dir, &["--no-source-map", "bad.scss", "out.css"]);
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(read(&dir, "out.css").starts_with("/* Error: Undefined variable."));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn invalid_utf8_is_a_compile_error_with_error_css() {
+    let dir = scratch("utf8");
+    std::fs::write(dir.join("bad.scss"), b"a { b: c }\n\xff\xfe\n").unwrap();
+    let r = sasso(&dir, &["--no-source-map", "bad.scss", "out.css"]);
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(r.stderr.starts_with("Error: Invalid UTF-8."), "{}", r.stderr);
+    let css = read(&dir, "out.css");
+    assert!(
+        css.starts_with("/* Error: Invalid UTF-8. */\n\nbody::before {"),
+        "{css}"
+    );
+    assert!(css.contains("content: \"Error: Invalid UTF-8.\";"), "{css}");
+    // Without error CSS a stale output goes away, like any compile error.
+    let r = sasso(
+        &dir,
+        &["--no-error-css", "--no-source-map", "bad.scss", "out.css"],
+    );
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(!dir.join("out.css").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn missing_input_exits_66() {
+    let dir = scratch("missing");
+    let r = sasso(&dir, &["nope.scss"]);
+    assert_eq!(r.code, EXIT_IO);
+    assert_eq!(r.stderr, "Error reading nope.scss: Cannot open file.\n");
+    let r = sasso(&dir, &["nope.scss:out.css"]);
+    assert_eq!(r.code, EXIT_IO);
+    assert!(!dir.join("out.css").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn stop_on_error_skips_the_rest_but_default_continues() {
+    let dir = scratch("stop");
+    write(&dir, "bad.scss", BAD);
+    write(&dir, "good.scss", GOOD);
+    // Default: every pair is attempted, exit 65.
+    let r = sasso(
+        &dir,
+        &[
+            "--no-source-map",
+            "--no-error-css",
+            "bad.scss:out/bad.css",
+            "good.scss:out/good.css",
+        ],
+    );
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(!dir.join("out/bad.css").exists());
+    assert_eq!(read(&dir, "out/good.css"), GOOD_CSS);
+    // `--stop-on-error` (with one worker, so "the rest" is deterministic).
+    std::fs::remove_dir_all(dir.join("out")).ok();
+    let r = sasso(
+        &dir,
+        &[
+            "-j",
+            "1",
+            "--no-source-map",
+            "--no-error-css",
+            "--stop-on-error",
+            "bad.scss:out/bad.css",
+            "good.scss:out/good.css",
+        ],
+    );
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(
+        !dir.join("out/good.css").exists(),
+        "later units are not started after a failure"
+    );
+    assert!(r.stderr.contains("Undefined variable"), "{}", r.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Parallelism
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parallel_pairs_match_sequential_and_report_in_order() {
+    let dir = scratch("parallel");
+    let mut pairs: Vec<String> = Vec::new();
+    for i in 0..24 {
+        // Each file warns, so stderr ordering is observable too.
+        write(
+            &dir,
+            &format!("in/f{i:02}.scss"),
+            &format!("@warn \"w{i:02}\";\n$n: {i};\n.f{i:02} {{ w: $n * 1px; }}\n"),
+        );
+        pairs.push(format!("in/f{i:02}.scss:par/f{i:02}.css"));
+    }
+    // An explicit worker count: on a single-core runner the default would be
+    // 1 and `compile_all` would take its sequential path, leaving the
+    // scheduler and the ordered result buffering untested.
+    let args: Vec<&str> = ["-j", "8", "--no-source-map"]
+        .into_iter()
+        .chain(pairs.iter().map(String::as_str))
+        .collect();
+    let par = sasso(&dir, &args);
+    assert_eq!(par.code, 0, "{}", par.stderr);
+    let seq_pairs: Vec<String> = pairs.iter().map(|p| p.replace(":par/", ":seq/")).collect();
+    let mut seq_args = vec!["-j", "1", "--no-source-map"];
+    seq_args.extend(seq_pairs.iter().map(String::as_str));
+    let seq = sasso(&dir, &seq_args);
+    assert_eq!(seq.code, 0, "{}", seq.stderr);
+    for i in 0..24 {
+        assert_eq!(
+            read(&dir, &format!("par/f{i:02}.css")),
+            read(&dir, &format!("seq/f{i:02}.css"))
+        );
+        assert_eq!(
+            read(&dir, &format!("par/f{i:02}.css")),
+            format!(".f{i:02} {{\n  w: {i}px;\n}}\n")
+        );
+    }
+    // Warnings come out in command-line order regardless of which worker ran what.
+    let order: Vec<&str> = par
+        .stderr
+        .lines()
+        .filter(|l| l.starts_with("WARNING: w"))
+        .collect();
+    let expected: Vec<String> = (0..24).map(|i| format!("WARNING: w{i:02}")).collect();
+    assert_eq!(order, expected);
+    assert_eq!(par.stderr, seq.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Warnings: --quiet, --quiet-deps
+// ---------------------------------------------------------------------------
+
+#[test]
+fn quiet_silences_warnings_but_not_errors() {
+    let dir = scratch("quiet");
+    write(
+        &dir,
+        "w.scss",
+        "@warn \"loud\";\n@debug \"dbg\";\n@import \"dep\";\n",
+    );
+    write(&dir, "_dep.scss", "a { b: c }\n");
+    let r = sasso(&dir, &["w.scss"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("WARNING: loud")
+            && r.stderr.contains("dbg")
+            && r.stderr.contains("DEPRECATION WARNING [import]"),
+        "{}",
+        r.stderr
+    );
+    let r = sasso(&dir, &["-q", "w.scss"]);
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stderr, "", "--quiet drops every warning");
+    assert_eq!(r.stdout, "a {\n  b: c;\n}\n");
+    write(&dir, "bad.scss", BAD);
+    let r = sasso(&dir, &["--quiet", "bad.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(
+        r.stderr.contains("Error: Undefined variable."),
+        "errors still print under --quiet: {}",
+        r.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn quiet_deps_silences_deprecations_from_load_path_files_only() {
+    let dir = scratch("quiet_deps");
+    // Entry: an @import (deprecation) of a load-path dependency that itself
+    // has an @import (deprecation) and a @warn.
+    write(&dir, "entry.scss", "@import \"dep\";\n@warn \"from entry\";\n");
+    write(&dir, "lp/_dep.scss", "@import \"dep2\";\n@warn \"from dep\";\n");
+    write(&dir, "lp/_dep2.scss", "e { f: 2; }\n");
+    let all = sasso(&dir, &["-I", "lp", "entry.scss"]);
+    assert_eq!(all.code, 0, "{}", all.stderr);
+    assert_eq!(
+        all.stderr.matches("DEPRECATION WARNING [import]").count(),
+        2,
+        "{}",
+        all.stderr
+    );
+    let quiet_deps = sasso(&dir, &["--quiet-deps", "-I", "lp", "entry.scss"]);
+    assert_eq!(quiet_deps.code, 0, "{}", quiet_deps.stderr);
+    // The entry's own deprecation stays; the dependency's goes; @warn from
+    // both stays (dart: only COMPILER warnings from dependencies are silenced).
+    assert_eq!(
+        quiet_deps.stderr.matches("DEPRECATION WARNING [import]").count(),
+        1,
+        "{}",
+        quiet_deps.stderr
+    );
+    assert!(
+        quiet_deps.stderr.contains("entry.scss 1:9"),
+        "the remaining deprecation is the entry's: {}",
+        quiet_deps.stderr
+    );
+    assert!(
+        quiet_deps.stderr.contains("WARNING: from dep"),
+        "{}",
+        quiet_deps.stderr
+    );
+    assert!(
+        quiet_deps.stderr.contains("WARNING: from entry"),
+        "{}",
+        quiet_deps.stderr
+    );
+    // dart's rule is about how a file was RESOLVED, not where it lives: a
+    // relative `@use "lp/…"` from the entry is not a dependency even though
+    // the file sits in the load-path directory, so its deprecation prints.
+    write(&dir, "rel.scss", "@use \"lp/rel-dep\";\n");
+    write(&dir, "lp/_rel-dep.scss", "@import \"dep2\";\n");
+    let rel = sasso(&dir, &["--quiet-deps", "-I", "lp", "rel.scss"]);
+    assert_eq!(rel.code, 0, "{}", rel.stderr);
+    assert_eq!(
+        rel.stderr.matches("DEPRECATION WARNING [import]").count(),
+        1,
+        "a relatively-resolved file is not a dependency: {}",
+        rel.stderr
+    );
+    // Nor is the entry itself, even inside the load path.
+    write(&dir, "lp/main.scss", "@import \"dep2\";\n");
+    let inside = sasso(&dir, &["--quiet-deps", "-I", "lp", "lp/main.scss"]);
+    assert_eq!(inside.code, 0, "{}", inside.stderr);
+    assert_eq!(
+        inside.stderr.matches("DEPRECATION WARNING [import]").count(),
+        1,
+        "{}",
+        inside.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Misc flags
+// ---------------------------------------------------------------------------
+
+#[test]
+fn quiet_deps_leaves_no_repetition_footer() {
+    // The compiler caps repeated deprecations at five per id and reports the
+    // rest as "N repetitive deprecation warnings omitted". Under --quiet-deps
+    // a dependency's deprecations are dropped BEFORE that count (dart applies
+    // quietDeps ahead of its repetition logger), so nothing surfaces.
+    let dir = scratch("quiet_deps_footer");
+    let mut dep = String::new();
+    for i in 1..=8 {
+        dep.push_str(&format!("@import \"leaf{i}\";\n"));
+        write(
+            &dir,
+            &format!("lp/_leaf{i}.scss"),
+            &format!("l{i} {{ m: {i}; }}\n"),
+        );
+    }
+    write(&dir, "lp/_dep.scss", &dep);
+    write(&dir, "entry.scss", "@use \"dep\";\n");
+    let loud = sasso(&dir, &["--no-source-map", "-I", "lp", "entry.scss"]);
+    assert_eq!(loud.code, 0, "{}", loud.stderr);
+    assert!(
+        loud.stderr.contains("repetitive deprecation warnings omitted"),
+        "{}",
+        loud.stderr
+    );
+    let quiet = sasso(
+        &dir,
+        &["--no-source-map", "--quiet-deps", "-I", "lp", "entry.scss"],
+    );
+    assert_eq!(quiet.code, 0, "{}", quiet.stderr);
+    assert_eq!(quiet.stderr, "", "no deprecations and no footer");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn compat_flags_and_no_css() {
+    let dir = scratch("misc");
+    write(&dir, "u.scss", "a { content: \"é\" }\n");
+    let r = sasso(&dir, &["--no-color", "-c", "u.scss"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.starts_with("@charset \"UTF-8\";\n"), "{}", r.stdout);
+    let r = sasso(&dir, &["--no-charset", "u.scss"]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.starts_with("a {"),
+        "--no-charset drops the @charset: {}",
+        r.stdout
+    );
+    let r = sasso(&dir, &["--no-css", "u.scss"]);
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "", "--no-css compiles but prints nothing");
+    let r = sasso(&dir, &["--no-css", "u.scss", "u.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        !dir.join("u.css").exists() && !dir.join("u.css.map").exists(),
+        "--no-css writes no files either"
+    );
+    let r = sasso(&dir, &["--no-css", "u.scss:pair.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(!dir.join("pair.css").exists());
+    let r = sasso(&dir, &["--no-css", "--loop", "2", "u.scss"]);
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, "");
+    assert!(r.stderr.contains("2 compiles in"), "{}", r.stderr);
+    let r = sasso(&dir, &["--loop", "2", "u.scss:out.css"]);
+    assert_eq!(r.code, EXIT_USAGE, "--loop is stdout-only");
+    let r = sasso(&dir, &["--loop", "2", "--embed-source-map", "u.scss"]);
+    assert_eq!(r.code, EXIT_USAGE, "--loop has no source-map mode");
+    assert!(
+        r.stderr.contains("--loop does not generate source maps"),
+        "{}",
+        r.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn pair_with_a_second_colon_is_a_usage_error() {
+    let dir = scratch("two_colons");
+    write(&dir, "a.scss", GOOD);
+    let r = sasso(&dir, &["--no-source-map", "a.scss:out.css:wut"]);
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(
+        r.stderr
+            .contains("\"a.scss:out.css:wut\" may only contain one \":\"."),
+        "{}",
+        r.stderr
+    );
+    assert!(!dir.join("out.css:wut").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn bare_directory_positional_compiles_in_place() {
+    // dart: `sass dir` is `dir:dir`; a directory with an output, or as the
+    // output, "may not be a positional arg".
+    let dir = scratch("dir_positional");
+    write(&dir, "src/a.scss", GOOD);
+    write(&dir, "src/sub/b.scss", "b { c: d }\n");
+    write(&dir, "src/_p.scss", "$x: 1;\n");
+    let r = sasso(&dir, &["--no-source-map", "src"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, "");
+    assert_eq!(read(&dir, "src/a.css"), GOOD_CSS);
+    assert_eq!(read(&dir, "src/sub/b.css"), "b {\n  c: d;\n}\n");
+    assert!(!dir.join("src/_p.css").exists());
+    let r = sasso(&dir, &["--no-source-map", "src", "out"]);
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(
+        r.stderr
+            .contains("Directory \"src\" may not be a positional arg."),
+        "{}",
+        r.stderr
+    );
+    std::fs::create_dir_all(dir.join("od")).unwrap();
+    let r = sasso(&dir, &["--no-source-map", "src/a.scss", "od"]);
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(
+        r.stderr.contains("Directory \"od\" may not be a positional arg."),
+        "{}",
+        r.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn diagnostics_of_consecutive_units_are_separated_by_a_blank_line() {
+    let dir = scratch("separators");
+    // Two unreadable inputs: dart prints the two lines with a blank line between.
+    let r = sasso(
+        &dir,
+        &["-j", "1", "--no-source-map", "n1.scss:o1.css", "n2.scss:o2.css"],
+    );
+    assert_eq!(r.code, EXIT_IO);
+    assert_eq!(
+        r.stderr,
+        "Error reading n1.scss: Cannot open file.\n\nError reading n2.scss: Cannot open file.\n"
+    );
+    // Two compile errors: one blank line between, none trailing.
+    write(&dir, "bad1.scss", BAD);
+    write(&dir, "bad2.scss", "c { d: $y }\n");
+    let r = sasso(
+        &dir,
+        &[
+            "-j",
+            "1",
+            "--no-source-map",
+            "--no-error-css",
+            "bad1.scss:b1.css",
+            "bad2.scss:b2.css",
+        ],
+    );
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert_eq!(
+        r.stderr.matches("\n\nError: Undefined variable.").count(),
+        1,
+        "{}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.ends_with("root stylesheet\n") && !r.stderr.ends_with("\n\n"),
+        "{}",
+        r.stderr
+    );
+    // A warning block already ends in a blank line: no extra one is added.
+    write(&dir, "warn.scss", "@warn \"hi\";\nz { y: 1 }\n");
+    let r = sasso(
+        &dir,
+        &[
+            "-j",
+            "1",
+            "--no-source-map",
+            "--no-error-css",
+            "warn.scss:w.css",
+            "bad1.scss:b1.css",
+        ],
+    );
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(
+        r.stderr.contains("root stylesheet\n\nError: Undefined variable."),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("\n\n\n"), "{}", r.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn invalid_utf8_on_stdin_fails_like_a_file() {
+    // dart crashes on invalid UTF-8 from stdin (exit 255, nothing written);
+    // sasso treats it as the compile error it is, with the same error-CSS and
+    // stale-output handling a file input gets.
+    let dir = scratch("stdin_utf8");
+    let bad: &[u8] = b"a { b: c }\n\xff\xfe\n";
+    let r = run_bin_bytes(BIN, &dir, &["--no-source-map", "--stdin", "out.css"], Some(bad));
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert_eq!(r.stderr, "Error: Invalid UTF-8.\n");
+    assert!(
+        read(&dir, "out.css").starts_with("/* Error: Invalid UTF-8. */"),
+        "error stylesheet for a file target"
+    );
+    write(&dir, "stale.css", "old { css: yes }\n");
+    let r = run_bin_bytes(
+        BIN,
+        &dir,
+        &["--no-source-map", "--no-error-css", "-:stale.css"],
+        Some(bad),
+    );
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert!(
+        !dir.join("stale.css").exists(),
+        "stale CSS removed like any compile error"
+    );
+    let r = run_bin_bytes(BIN, &dir, &["--no-source-map", "-"], Some(bad));
+    assert_eq!(r.code, EXIT_COMPILE);
+    assert_eq!(r.stdout, "");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn bare_directory_is_file_output_for_flag_validation() {
+    // `sasso --source-map dir` etc. are file-output invocations (dart accepts
+    // them all); `--loop dir` is not stdout-only and is rejected.
+    let dir = scratch("dir_flags");
+    write(&dir, "src/a.scss", GOOD);
+    for args in [
+        vec!["--source-map", "src"],
+        vec!["--embed-sources", "src"],
+        vec!["--source-map-urls=absolute", "src"],
+        vec!["--embed-source-map", "src"],
+    ] {
+        std::fs::remove_file(dir.join("src/a.css")).ok();
+        std::fs::remove_file(dir.join("src/a.css.map")).ok();
+        let r = sasso(&dir, &args);
+        assert_eq!(r.code, 0, "{args:?}: {}", r.stderr);
+        assert!(read(&dir, "src/a.css").contains("sourceMappingURL="), "{args:?}");
+    }
+    let r = sasso(&dir, &["--loop", "2", "src"]);
+    assert_eq!(r.code, EXIT_USAGE, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("--loop compiles to stdout only"),
+        "{}",
+        r.stderr
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn double_dash_ends_option_parsing() {
+    // dart's argument parser honours `--`: what follows is operands, so an
+    // input or output whose name starts with `-` can be named. Pairs and the
+    // stdin `-` keep their meaning after it.
+    let dir = scratch("double_dash");
+    write(&dir, "--theme.scss", GOOD);
+    write(&dir, "-dash.scss", "q { r: 1 }\n");
+    let r = sasso(&dir, &["--no-source-map", "--", "--theme.scss"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, GOOD_CSS);
+    let r = sasso(&dir, &["--no-source-map", "--", "-dash.scss:out.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "out.css"), "q {\n  r: 1;\n}\n");
+    let r = run_bin(BIN, &dir, &["--no-source-map", "--", "-"], Some("x { y: z }\n"));
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, "x {\n  y: z;\n}\n");
+    // An option-looking token after `--` is an operand: here the output file.
+    let r = sasso(&dir, &["--no-source-map", "--", "--theme.scss", "--out.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "--out.css"), GOOD_CSS);
+    // Without `--` such a name is still an unknown option.
+    let r = sasso(&dir, &["--no-source-map", "--theme.scss"]);
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(r.stderr.contains("unknown option --theme.scss"), "{}", r.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn source_map_file_and_footer_are_url_encoded() {
+    // The map's `file` and the footer's `sourceMappingURL` are URLs: dart
+    // percent-encodes the output basename (space, `#`, `%`).
+    let dir = scratch("url_encoded_names");
+    write(&dir, "in.scss", GOOD);
+    let r = sasso(&dir, &["in.scss", "out file#1.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let css = read(&dir, "out file#1.css");
+    assert!(
+        css.ends_with("\n\n/*# sourceMappingURL=out%20file%231.css.map */\n"),
+        "{css}"
+    );
+    let map = read(&dir, "out file#1.css.map");
+    assert!(map.ends_with(",\"file\":\"out%20file%231.css\"}"), "{map}");
+    let r = sasso(&dir, &["in.scss", "out%20x.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        read(&dir, "out%20x.css").contains("sourceMappingURL=out%2520x.css.map */"),
+        "a literal % is encoded"
+    );
+    assert!(read(&dir, "out%20x.css.map").ends_with(",\"file\":\"out%2520x.css\"}"));
+    assert_dart_files_match(
+        &[("in.scss", GOOD)],
+        &["in.scss", "out file#1.css"],
+        &["out file#1.css", "out file#1.css.map"],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn empty_stylesheet_to_a_file_is_one_newline() {
+    // dart always terminates a CSS file with one newline, an empty stylesheet
+    // included; stdout gets nothing for empty output.
+    let dir = scratch("empty_file");
+    write(&dir, "empty.scss", "");
+    write(&dir, "comment.scss", "// nothing to emit\n");
+    let r = sasso(&dir, &["--no-source-map", "empty.scss", "e1.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "e1.css"), "\n");
+    let r = sasso(
+        &dir,
+        &["--no-source-map", "--style=compressed", "comment.scss:e2.css"],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "e2.css"), "\n");
+    let r = sasso(&dir, &["empty.scss", "e3.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "e3.css"), "\n\n/*# sourceMappingURL=e3.css.map */\n");
+    let r = sasso(&dir, &["--no-source-map", "empty.scss"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, "", "stdout stays empty for empty output");
+    assert_dart_files_match(
+        &[("empty.scss", "")],
+        &["--no-source-map", "empty.scss", "e1.css"],
+        &["e1.css"],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn equivalent_source_spellings_coalesce_to_the_later_destination() {
+    // dart keeps sources in a path-keyed map: `a.scss` and `./a.scss` are one
+    // source, compiled once, to the destination named last. An exact repeat
+    // is still the `Duplicate source` error.
+    let dir = scratch("coalesce");
+    write(&dir, "a.scss", GOOD);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let r = sasso(
+        &dir,
+        &[
+            "--no-source-map",
+            "a.scss:o1.css",
+            "./a.scss:o2.css",
+            "sub/../a.scss:o3.css",
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        !dir.join("o1.css").exists() && !dir.join("o2.css").exists(),
+        "earlier destinations are not written"
+    );
+    assert_eq!(read(&dir, "o3.css"), GOOD_CSS);
+    let r = sasso(&dir, &["--no-source-map", "a.scss:o4.css", "a.scss:o5.css"]);
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(r.stderr.contains("Duplicate source \"a.scss\"."), "{}", r.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn extensions_are_matched_case_sensitively_like_dart() {
+    // dart's `Syntax.forPath` and `_isEntrypoint` look at exact lowercase
+    // suffixes: `input.CSS` parses as SCSS (Sass constructs allowed), and
+    // directory mode skips `UPPER.SCSS`.
+    let dir = scratch("ext_case");
+    write(&dir, "input.CSS", GOOD);
+    let r = sasso(&dir, &["--no-source-map", "input.CSS"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, GOOD_CSS);
+    write(&dir, "input.SASS", "a\n  b: c\n");
+    let r = sasso(&dir, &["--no-source-map", "input.SASS"]);
+    assert_eq!(
+        r.code, EXIT_COMPILE,
+        "indented content parsed as SCSS fails, as in dart: {}",
+        r.stderr
+    );
+    write(&dir, "dir/UPPER.SCSS", GOOD);
+    write(&dir, "dir/Mixed.Sass", "q\n  r: 1\n");
+    write(&dir, "dir/plain.CSS", "x { y: z }\n");
+    write(&dir, "dir/ok.scss", GOOD);
+    let r = sasso(&dir, &["--no-source-map", "dir:out"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let mut produced: Vec<String> = std::fs::read_dir(dir.join("out"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    produced.sort();
+    assert_eq!(produced, vec!["ok.css".to_string()]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn directory_expanded_files_coalesce_with_explicit_pairs() {
+    // dart puts expanded files and explicit pairs in one path-keyed map: a
+    // file named both ways compiles once, to the destination named last;
+    // two spellings of one directory coalesce too; an exact repeat errors.
+    let dir = scratch("dir_coalesce");
+    write(&dir, "src/a.scss", GOOD);
+    write(&dir, "src/b.scss", "q { r: 1 }\n");
+    let r = sasso(&dir, &["--no-source-map", "src:out1", "src/a.scss:out2.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        !dir.join("out1/a.css").exists(),
+        "a goes to the later destination only"
+    );
+    assert_eq!(read(&dir, "out2.css"), GOOD_CSS);
+    assert!(dir.join("out1/b.css").exists());
+    std::fs::remove_dir_all(dir.join("out1")).ok();
+    std::fs::remove_file(dir.join("out2.css")).ok();
+    let r = sasso(&dir, &["--no-source-map", "src/a.scss:out2.css", "src:out1"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        !dir.join("out2.css").exists(),
+        "the directory expansion came later and wins"
+    );
+    assert_eq!(read(&dir, "out1/a.css"), GOOD_CSS);
+    let r = sasso(&dir, &["--no-source-map", "src:out3", "./src:out4"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(!dir.join("out3").exists() && dir.join("out4/a.css").exists());
+    let r = sasso(&dir, &["--no-source-map", "src:out5", "src:out6"]);
+    assert_eq!(r.code, EXIT_USAGE);
+    assert!(r.stderr.contains("Duplicate source \"src\"."), "{}", r.stderr);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn directory_mode_skips_css_whose_destination_is_itself() {
+    // dart: a `.css` inside an in-place directory compile (`sasso dir`, or
+    // `dir:dir`) would only be rewritten onto itself, so it is skipped; the
+    // same file compiled to ANOTHER directory is processed like any input.
+    let dir = scratch("self_css");
+    write(&dir, "src/plain.css", "p{q:2}\n");
+    write(&dir, "src/x.scss", "x { y: z }\n");
+    let r = sasso(&dir, &["--no-source-map", "src"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "src/plain.css"), "p{q:2}\n", "left untouched");
+    assert_eq!(read(&dir, "src/x.css"), "x {\n  y: z;\n}\n");
+    let r = sasso(&dir, &["--no-source-map", "src:src"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "src/plain.css"), "p{q:2}\n");
+    let r = sasso(&dir, &["--no-source-map", "src:out"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        read(&dir, "out/plain.css"),
+        "p {\n  q: 2;\n}\n",
+        "to another directory it compiles"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

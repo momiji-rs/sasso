@@ -125,7 +125,9 @@ function compileCmd(p, engine, outFile) {
     return [DART, ...loadPathArgs(p, '--load-path'),
       '--style=expanded', '--no-source-map', '--quiet', entry, outFile];
   }
-  return [SASSO, ...loadPathArgs(p, '-I'), '-s', 'expanded', '-o', outFile, entry];
+  // Same work as the dart-sass line: no source map (sasso, like dart, writes
+  // one by default for a file target), no warnings.
+  return [SASSO, ...loadPathArgs(p, '-I'), '-s', 'expanded', '--no-source-map', '--quiet', '-o', outFile, entry];
 }
 
 function runCompile(p, engine) {
@@ -226,7 +228,7 @@ function bench() {
     '--warmup', '2', '--min-runs', '10',
     '--export-json', path.join(RESULTS, '_startup.json'),
     '-n', 'dart-sass', `${JSON.stringify(DART)} --style=expanded --no-source-map --quiet ${JSON.stringify(empty)} ${JSON.stringify(path.join(OUT, 'bench-dart.css'))} 2>/dev/null`,
-    '-n', 'sasso', `${JSON.stringify(SASSO)} -s expanded -o ${JSON.stringify(path.join(OUT, 'bench-sasso.css'))} ${JSON.stringify(empty)} 2>/dev/null`,
+    '-n', 'sasso', `${JSON.stringify(SASSO)} -s expanded --no-source-map --quiet -o ${JSON.stringify(path.join(OUT, 'bench-sasso.css'))} ${JSON.stringify(empty)} 2>/dev/null`,
   ], { stdio: 'inherit' });
   for (const p of projects) {
     if (p.skip) continue;
