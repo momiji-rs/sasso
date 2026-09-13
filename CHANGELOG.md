@@ -19,6 +19,22 @@ Conformance is tracked separately as a ratchet against the official
   canonical URL (an absolute path with `FsImporter`); for the entry
   stylesheet, `Options::url` exactly as supplied. Lets an embedder tell a
   dependency from the entry, which is what `--quiet-deps` needs.
+- **`FsImporter::dependencies()`** returns a shared `DependencySet` that fills
+  in as the compile resolves imports: which files were reached through a load
+  path (or loaded relatively from one that was) — dart-sass's "dependencies".
+  Keyed by canonical URL, so it pairs with `WarnEvent::path`.
+  **`Options::with_quiet_deps(set)`** (dart-sass `quietDeps`) drops
+  deprecation warnings raised inside those files before they are counted, so
+  they neither use up the five visible repetitions nor surface as "N
+  repetitive deprecation warnings omitted". The record is per compilation:
+  a compile scoped on the set starts it empty, and a nested compile (a warn
+  handler running `compile` with the same importer) hands the enclosing
+  record back when it ends, so an importer reused sequentially or nested
+  cannot leak one compile's classification into another — concurrent
+  compiles sharing one set are not supported (`DependencySet::clear` for
+  embedders reading the set by hand). Provenance
+  also follows the evaluator's `@import` cache: a file a dependency loads is
+  a dependency even when its resolution was cached by an earlier load.
 
 ### Changed
 

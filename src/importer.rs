@@ -95,12 +95,112 @@ pub trait Importer {
 /// capability instead of touching the disk directly.
 pub struct FsImporter {
     load_paths: Vec<PathBuf>,
+    dependencies: DependencySet,
 }
 
 impl FsImporter {
     /// Create an importer that searches `load_paths` in order.
     pub fn new(load_paths: Vec<PathBuf>) -> Self {
-        FsImporter { load_paths }
+        FsImporter {
+            load_paths,
+            dependencies: DependencySet::default(),
+        }
+    }
+
+    /// The files this importer has resolved through a load path so far (see
+    /// [`DependencySet`]): a shared handle that keeps filling in as the compile
+    /// proceeds, so a diagnostic handler can consult it mid-compile. The record
+    /// is per compilation, not per importer: hand it to
+    /// [`crate::Options::with_quiet_deps`] and each compile starts it afresh.
+    pub fn dependencies(&self) -> DependencySet {
+        self.dependencies.clone()
+    }
+}
+
+/// The files a [`FsImporter`] resolved through a load path — dart-sass's
+/// "dependencies", the stylesheets `--quiet-deps` silences compiler warnings
+/// from — keyed by canonical URL (what [`crate::WarnEvent::path`] carries).
+///
+/// dart's rule is about how a file was RESOLVED, not where it lives: a file
+/// reached through a load path is a dependency, and so is anything a
+/// dependency loads relatively; a file the entry (or any non-dependency) loads
+/// relatively is not, even if it happens to sit under a load-path directory.
+/// Clones share one set. A file reached both ways within one compilation
+/// counts as a dependency (the record is a set, not a per-load trace).
+///
+/// The record is per compilation: a compile that receives the set through
+/// [`crate::Options::with_quiet_deps`] starts it empty and, if it was itself
+/// started from inside another compile (a warn handler running a nested
+/// `compile` with the same importer), hands the outer compile's record back
+/// when it finishes. A set shared by CONCURRENT compiles is not meaningful.
+#[derive(Clone, Default, Debug)]
+pub struct DependencySet(std::sync::Arc<std::sync::Mutex<DependencyState>>);
+
+#[derive(Default, Debug)]
+struct DependencyState {
+    set: std::collections::HashSet<String>,
+    /// How many compiles scoped on this set are running (nested ones count).
+    depth: usize,
+}
+
+impl DependencySet {
+    /// Whether the file at `canonical` was reached through a load path.
+    pub fn is_dependency(&self, canonical: &str) -> bool {
+        self.0
+            .lock()
+            .map(|st| st.set.contains(canonical))
+            .unwrap_or(false)
+    }
+
+    /// Forget every recorded dependency. A compile scoped on this set (see
+    /// [`crate::Options::with_quiet_deps`]) does this itself when it starts;
+    /// an embedder reading the set by hand should do it between compiles.
+    pub fn clear(&self) {
+        if let Ok(mut st) = self.0.lock() {
+            st.set.clear();
+        }
+    }
+
+    pub(crate) fn insert(&self, canonical: &str) {
+        if let Ok(mut st) = self.0.lock() {
+            st.set.insert(canonical.to_string());
+        }
+    }
+
+    /// Scope the record to the compile that is starting: it begins empty, and
+    /// the guard restores the enclosing compile's record when a NESTED compile
+    /// ends (an outermost compile leaves its record in place, readable
+    /// afterwards).
+    pub(crate) fn enter_compile(&self) -> DependencyScope {
+        let saved = match self.0.lock() {
+            Ok(mut st) => {
+                st.depth += 1;
+                std::mem::take(&mut st.set)
+            }
+            Err(_) => std::collections::HashSet::new(),
+        };
+        DependencyScope {
+            set: self.clone(),
+            saved,
+        }
+    }
+}
+
+/// Guard from [`DependencySet::enter_compile`]; see there.
+pub(crate) struct DependencyScope {
+    set: DependencySet,
+    saved: std::collections::HashSet<String>,
+}
+
+impl Drop for DependencyScope {
+    fn drop(&mut self) {
+        if let Ok(mut st) = self.set.0.lock() {
+            st.depth = st.depth.saturating_sub(1);
+            if st.depth > 0 {
+                // A nested compile ends: the outer compile's record comes back.
+                st.set = std::mem::take(&mut self.saved);
+            }
+        }
     }
 }
 
@@ -129,7 +229,7 @@ impl Importer for FsImporter {
             None => PathBuf::new(),
         };
         let bases = std::iter::once(base_dir).chain(self.load_paths.iter().cloned());
-        for base in bases {
+        for (i, base) in bases.enumerate() {
             // `@use`/`@forward` (`from_import == false`) never consider
             // `.import` files (those are an `@import`-only escape hatch).
             match resolve_in_base(&base, url, ctx.from_import) {
@@ -139,6 +239,17 @@ impl Importer for FsImporter {
                     let key = std::fs::canonicalize(&p)
                         .map(|c| c.to_string_lossy().into_owned())
                         .unwrap_or_else(|_| p.to_string_lossy().into_owned());
+                    // Base 0 is the containing file's directory; anything
+                    // else is a load path. A file found through a load path,
+                    // or relatively from a file that was, is a dependency.
+                    let via_load_path = i > 0;
+                    let from_dependency = ctx
+                        .containing_url
+                        .map(|c| self.dependencies.is_dependency(c.as_str()))
+                        .unwrap_or(false);
+                    if via_load_path || from_dependency {
+                        self.dependencies.insert(&key);
+                    }
                     return Ok(Some(CanonicalUrl::new(key)));
                 }
                 // An ambiguous match is an error in dart-sass; we preserve the

@@ -767,6 +767,9 @@ pub(crate) struct EvalOptions<'a> {
     /// Diagnostic handler (dart-sass `logger`). When set, `@warn`/`@debug`/
     /// deprecation warnings are delivered here instead of printed to stderr.
     pub warn: Option<&'a crate::WarnHandler>,
+    /// dart-sass `quietDeps`: deprecations raised inside a file this set marks
+    /// as a dependency are dropped before they are counted or delivered.
+    pub quiet_deps: Option<&'a crate::DependencySet>,
     /// Whether this compile produces a source map. Gates the variable
     /// definition-span bookkeeping (`var_spans` et al.), which only source-map
     /// emission reads: when false the span chain stays empty and every
@@ -1668,6 +1671,15 @@ impl<'a> Evaluator<'a> {
         if !self.diag_enabled() {
             return;
         }
+        // dart's `quietDeps`: a deprecation raised inside a dependency is
+        // dropped HERE, before the per-id cap, so silenced warnings neither
+        // consume the five visible slots nor count towards the "N repetitive
+        // deprecation warnings omitted" footer.
+        if let Some(deps) = self.options.quiet_deps {
+            if deps.is_dependency(self.current_path()) {
+                return;
+            }
+        }
         // Per-location dedup: an identical (id, file, line, col) warning fires
         // only once.
         let key = (dep.id, self.current_url.clone(), pos.line, pos.col);
@@ -2555,6 +2567,16 @@ impl<'a> Evaluator<'a> {
                         Some(e) => {
                             if self.loading.iter().any(|p| p == path) {
                                 return Err(Error::unpositioned("This file is already being loaded."));
+                            }
+                            // A cache hit skips the importer, which is where
+                            // dependency provenance is recorded: keep the rule
+                            // "what a dependency loads is a dependency" here too.
+                            // (Outside the arena scope, like the importer.)
+                            if let Some(deps) = self.options.quiet_deps {
+                                if deps.is_dependency(self.current_path()) {
+                                    let _paused = crate::arena::pause();
+                                    deps.insert(&e.0);
+                                }
                             }
                             Some(e.clone())
                         }
