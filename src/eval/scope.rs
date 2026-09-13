@@ -90,19 +90,41 @@ impl<'a> Evaluator<'a> {
     /// callable's lexical closure (dart `Environment.closure()` — shared
     /// frames, not snapshots).
     pub(super) fn capture_callable(&self, def: &Rc<Callable>) -> Rc<UserCallable> {
+        let env_modules = EnvModules {
+            used_modules: self.used_modules.clone(),
+            star_modules: self.star_modules.clone(),
+            used_user_modules: self.used_user_modules.clone(),
+            star_user_modules: self.star_user_modules.clone(),
+        };
+        self.capture_callable_from(def, self.current_mixin_origin(), env_modules)
+    }
+
+    /// Rebind an existing callable's variable/function/mixin scopes to the
+    /// current environment while keeping what belongs to its DEFINITION: the
+    /// file it was written in and the `@use` namespaces it closed over. A
+    /// member `@forward`ed through a textual `@import` becomes a member of the
+    /// importing scope (dart's import is textual inclusion), but its body
+    /// still maps to and diagnoses against the file that wrote it, and still
+    /// resolves `math.div` through THAT file's `@use "sass:math"`.
+    pub(super) fn recapture_callable(&self, src: &UserCallable) -> Rc<UserCallable> {
+        self.capture_callable_from(&src.def, src.origin.clone(), src.env_modules.clone())
+    }
+
+    fn capture_callable_from(
+        &self,
+        def: &Rc<Callable>,
+        origin: Option<crate::value::MixinOrigin>,
+        env_modules: EnvModules,
+    ) -> Rc<UserCallable> {
         Rc::new(UserCallable {
             def: Rc::clone(def),
+            origin,
             env: self.scopes.clone(),
             env_spans: self.var_spans.clone(),
             env_semi: self.scope_semi_global.clone(),
             env_fns: self.functions.clone(),
             env_mixins: self.mixins.clone(),
-            env_modules: EnvModules {
-                used_modules: self.used_modules.clone(),
-                star_modules: self.star_modules.clone(),
-                used_user_modules: self.used_user_modules.clone(),
-                star_user_modules: self.star_user_modules.clone(),
-            },
+            env_modules,
         })
     }
 
@@ -135,24 +157,6 @@ impl<'a> Evaluator<'a> {
             self.var_spans.push(new_span_scope());
         }
         self.scope_semi_global.push(effective);
-        self.functions.push(new_fn_scope());
-        self.mixins.push(new_fn_scope());
-    }
-
-    /// Push a pre-populated, non-semi-global scope (a mixin/function argument
-    /// frame). `spans` holds the definition span of each binding in `frame`
-    /// (source-map only); names absent from it simply have no known span.
-    pub(super) fn push_scope_frame(
-        &mut self,
-        frame: HashMap<String, Value>,
-        spans: HashMap<String, VarSpan>,
-    ) {
-        self.scopes.push(std::rc::Rc::new(std::cell::RefCell::new(frame)));
-        if self.options.source_map {
-            self.var_spans
-                .push(std::rc::Rc::new(std::cell::RefCell::new(spans)));
-        }
-        self.scope_semi_global.push(false);
         self.functions.push(new_fn_scope());
         self.mixins.push(new_fn_scope());
     }

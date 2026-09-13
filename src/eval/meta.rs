@@ -51,7 +51,7 @@ impl<'a> Evaluator<'a> {
         // The `sass:meta` introspection predicates need the evaluator's scopes /
         // definitions, which the value-only `call_module` cannot see.
         if module == "meta" {
-            if let Some(r) = self.try_meta_eval_call(member, &pos_args, &named, pos) {
+            if let Some(r) = self.try_meta_eval_call(member, &pos_args, &named, pos, length) {
                 return r;
             }
         }
@@ -69,6 +69,7 @@ impl<'a> Evaluator<'a> {
         pos_args: &[Value],
         named: &[(String, Value)],
         pos: Pos,
+        length: usize,
     ) -> Option<Result<Value, Error>> {
         match member {
             "variable-exists" => Some(self.meta_variable_exists(pos_args, named, pos, false)),
@@ -78,7 +79,7 @@ impl<'a> Evaluator<'a> {
             "content-exists" => Some(self.meta_content_exists(pos_args, pos)),
             "get-function" => Some(self.meta_get_function(pos_args, named, pos)),
             "get-mixin" => Some(self.meta_get_mixin(pos_args, named, pos)),
-            "call" => Some(self.meta_call(pos_args, named, pos)),
+            "call" => Some(self.meta_call(pos_args, named, pos, length)),
             "module-variables" => Some(self.meta_module_members(pos_args, named, pos, MemberKind::Variable)),
             "module-functions" => Some(self.meta_module_members(pos_args, named, pos, MemberKind::Function)),
             "module-mixins" => Some(self.meta_module_members(pos_args, named, pos, MemberKind::Mixin)),
@@ -404,8 +405,15 @@ impl<'a> Evaluator<'a> {
 
     /// `meta.call($function, $args...)`: invoke a function reference (or, when
     /// `$function` is a string, the named function). The trailing arguments were
-    /// already splat-expanded by `eval_call_args`.
-    fn meta_call(&mut self, pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
+    /// already splat-expanded by `eval_call_args`. `pos`/`length` span the
+    /// `meta.call(...)` expression, the call site in dart's trace.
+    fn meta_call(
+        &mut self,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+        pos: Pos,
+        length: usize,
+    ) -> Result<Value, Error> {
         // `$function` is the first positional argument, or the named `$function`.
         let (func_val, rest_pos): (Value, Vec<Value>) = if let Some(first) = pos_args.first() {
             (first.clone(), pos_args[1..].to_vec())
@@ -420,7 +428,7 @@ impl<'a> Evaluator<'a> {
 
         match func_val {
             // A first-class function reference.
-            Value::Function(f) => self.invoke_function_ref(&f, rest_pos, rest_named, pos),
+            Value::Function(f) => self.invoke_function_ref(&f, rest_pos, rest_named, pos, length),
             // The deprecated string form: look up by name.
             Value::Str(s) => {
                 let f = SassFunction {
@@ -430,7 +438,7 @@ impl<'a> Evaluator<'a> {
                         .lookup_function_norm(&normalize_arg_name(&s.text))
                         .map(|c| c as Rc<dyn std::any::Any>),
                 };
-                self.invoke_function_ref(&f, rest_pos, rest_named, pos)
+                self.invoke_function_ref(&f, rest_pos, rest_named, pos, length)
             }
             other => Err(Error::at(
                 format!("$function: {} is not a function reference.", other.to_css(false)),
@@ -440,12 +448,16 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Invoke a resolved function reference with already-evaluated arguments.
+    /// `pos`/`length` span the invoking expression (`meta.call(...)`), which
+    /// is the call site in dart's trace and the caret of an `@error` raised in
+    /// the body; a caller with no span passes a zero position.
     pub(super) fn invoke_function_ref(
         &mut self,
         f: &SassFunction,
         pos_args: Vec<Value>,
         named: Vec<(String, Value)>,
         pos: Pos,
+        length: usize,
     ) -> Result<Value, Error> {
         // A captured user `@function`: bind the evaluated args and run its
         // body in the callable's lexical closure. The payload is a
@@ -453,11 +465,24 @@ impl<'a> Evaluator<'a> {
         // borrow on `f` before running the body).
         if let Some(any) = &f.user {
             if let Ok(callable) = Rc::clone(any).downcast::<UserCallable>() {
+                // dart's trace: the `meta.call(...)` expression is a call
+                // site (a frame at `pos`, attributed to the current member),
+                // and frames inside the body name the function itself
+                // (`f()`). An internal invocation with no position (the
+                // user-overridden `calc()` hook) records no frame. The body
+                // then runs against the function's defining file.
+                let saved_member =
+                    (pos.line > 0).then(|| self.enter_call(pos, length, &format!("{}()", callable.def.name)));
+                let saved_file = self.enter_origin_file(callable.origin.as_ref());
                 let saved_scopes = std::mem::replace(&mut self.scopes, callable.env.clone());
                 let saved_var_spans = std::mem::replace(&mut self.var_spans, callable.env_spans.clone());
                 let saved_semi = std::mem::replace(&mut self.scope_semi_global, callable.env_semi.clone());
                 let saved_fns = std::mem::replace(&mut self.functions, callable.env_fns.clone());
                 let saved_mixins = std::mem::replace(&mut self.mixins, callable.env_mixins.clone());
+                // The body resolves `ns.member` against ITS definition site's
+                // `@use` namespaces, not the caller's (as the direct-call and
+                // mixin-reference paths already do).
+                let saved_env_modules = self.install_env_modules(&callable.env_modules);
                 self.push_scope(false);
                 // Like `invoke_mixin_ref`: the arguments arrive already
                 // evaluated and reordered by `meta.call`, so no per-argument
@@ -474,13 +499,19 @@ impl<'a> Evaluator<'a> {
                         let r = self.run_fn_body(&callable.def.body);
                         self.in_mixin.pop();
                         r
-                    });
+                    })
+                    .map_err(|e| self.finalize_error(e));
                 self.pop_scope();
                 self.scopes = saved_scopes;
                 self.var_spans = saved_var_spans;
                 self.scope_semi_global = saved_semi;
                 self.functions = saved_fns;
                 self.mixins = saved_mixins;
+                self.restore_env_modules(saved_env_modules);
+                self.leave_module_file(saved_file);
+                if let Some(saved_member) = saved_member {
+                    self.leave_call(saved_member);
+                }
                 return match result? {
                     Some(v) => Ok(v.without_slash()),
                     None => Err(Error::unpositioned(format!(
@@ -504,7 +535,7 @@ impl<'a> Evaluator<'a> {
         // A built-in reference. The `sass:meta` introspection functions need
         // the evaluator's scopes/definitions; everything else dispatches
         // through the value-only builtin library.
-        if let Some(r) = self.try_meta_eval_call(&f.name, &pos_args, &named, pos) {
+        if let Some(r) = self.try_meta_eval_call(&f.name, &pos_args, &named, pos, length) {
             return r;
         }
         crate::builtins::call(&f.name, &pos_args, &named, pos).map(Value::without_slash)
@@ -902,7 +933,12 @@ impl<'a> Evaluator<'a> {
         let (evaled, arg_spans) = self.eval_call_args_spanned(args)?;
         let saved_member = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.def.name)));
         let saved = self.enter_module(module);
-        let saved_file = self.enter_module_file(module);
+        // The function's own defining file beats the module handed to us (a
+        // multi-hop `@forward` can name another module).
+        let saved_file = match &func.origin {
+            Some(o) => self.enter_origin_file(Some(o)),
+            None => self.enter_module_file(module),
+        };
         let saved_scopes = std::mem::replace(&mut self.scopes, func.env.clone());
         let saved_var_spans = std::mem::replace(&mut self.var_spans, func.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());
@@ -915,7 +951,16 @@ impl<'a> Evaluator<'a> {
         self.push_scope(false);
         let result = self
             .bind_evaled_into_scope(&func.def.params, evaled, &arg_spans, &func.def.name)
-            .and_then(|()| self.run_fn_body(&func.def.body));
+            .and_then(|()| {
+                // A function body is not a mixin body: `meta.content-exists()`
+                // called from a module function (even one a mixin with a
+                // content block invokes) errors, as on the direct-call path.
+                self.in_mixin.push(false);
+                let r = self.run_fn_body(&func.def.body);
+                self.in_mixin.pop();
+                r
+            })
+            .map_err(|e| self.finalize_error(e));
         self.pop_scope();
         self.scopes = saved_scopes;
         self.var_spans = saved_var_spans;

@@ -126,6 +126,35 @@ Conformance is tracked separately as a ratchet against the official
   trace. A file outside the tree whose relative spelling would be longer than
   its absolute path is shown absolute (dart's `prettyUri`); the entry stays
   as given. `WarnEvent::url` carries the same spelling.
+- **A mixin, function, or `@content` block runs against the file that wrote
+  it**, as in dart-sass. A callable defined in a textually `@import`ed file
+  (or reached through `meta.apply`/`meta.call`) used to be evaluated as if it
+  were written in the caller's file: its output mapped to the caller's
+  `sources` entry with the callable's line numbers, its warnings and errors
+  named the caller's file and rendered the caller's source, and a `@content`
+  block passed to a `@use`d module's mixin was attributed to the module. Now
+  the body's output maps to its own file, stack frames read as dart prints
+  them — `src/_dep.scss 2:3  m()`, the block's statements under a `@content`
+  member in the includer's file with the mixin's `@content;` statement as a
+  call site, `f()` (not `call()`) inside a function invoked through
+  `meta.call`, with the `meta.call(...)` expression as a call site — and an
+  error inside the body shows the body's source. A function invoked through
+  `meta.call` also resolves `ns.member` against its own `@use` namespaces
+  now, as a direct call did. A member `@forward`ed by a file that is then
+  `@import`ed keeps its defining file too — and its own `@use` namespaces,
+  so a forwarded function using `sass:math` no longer fails with "There is
+  no module with the namespace "math"" when reached through `@import`. And an `@error` raised directly
+  in a content block carets the nearest `@include` whose mixin is running
+  (the name and arguments, as dart does — through any number of forwarded
+  content blocks), not a `@content;` statement. Module
+  callables also track whether they are a mixin now: `meta.content-exists()`
+  inside a `@use`d mixin answers for the include at hand instead of erroring,
+  and inside a module function it errors as it does in a plain one. A
+  default in a content block's `using (...)` clause evaluates where the
+  block was written (`using ($y: $caller)` sees the includer's `$caller`, as
+  in dart-sass), not in the mixin's module. On the Lichess corpus this
+  takes the source maps whose `sources` match dart-sass from 14 to 138 of
+  148. (`WarnEvent::url`/`path` follow.)
 - **`--quiet-deps` no longer aborts after a compile error.** The dependency
   record's mutex was allocated lazily on its first lock — from inside the
   compile, so in the CLI's bump arena, which the compile resets on the way

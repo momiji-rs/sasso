@@ -86,7 +86,7 @@ impl Parser {
                 };
                 self.skip_ws_inline();
                 self.sc.eat(';');
-                Ok(Stmt::Content(args))
+                Ok(Stmt::Content { args, pos })
             }
             "warn" => self.parse_message(MessageKind::Warn, pos, start_mark),
             "debug" => self.parse_message(MessageKind::Debug, pos, start_mark),
@@ -2580,16 +2580,18 @@ impl Parser {
                 ));
             }
         }
+        // Byte length of `@include name` so far, before any whitespace that
+        // separates the name from a content block (`@include m {`).
+        let name_length = self.sc.byte_len_from(start_mark);
         self.skip_ws_inline();
-        let args = if self.sc.peek() == Some('(') {
+        let (args, length) = if self.sc.peek() == Some('(') {
             self.sc.bump();
-            self.parse_args_after_paren()?
+            let args = self.parse_args_after_paren()?;
+            // Byte length of `@include name(args)` through the closing `)`.
+            (args, self.sc.byte_len_from(start_mark))
         } else {
-            Vec::new()
+            (Vec::new(), name_length)
         };
-        // Byte length of `@include name(args)` (through the closing `)` or the
-        // end of the name), excluding the content block / trailing `;`.
-        let length = self.sc.byte_len_from(start_mark);
         self.skip_ws_inline();
         // An optional `using (params)` clause names the content block's
         // parameters, bound from the `@content(args)` call.

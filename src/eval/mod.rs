@@ -134,11 +134,6 @@ pub(crate) struct VarSpan {
     pub col: u32,
 }
 
-/// A callable's argument frame: the bound values plus the definition span of
-/// each binding, which [`Evaluator::push_scope_frame`] installs as parallel
-/// scope frames.
-type ArgFrame = (HashMap<String, Value>, HashMap<String, VarSpan>);
-
 /// One frame of the variable-definition-span chain, parallel to [`Scope`]
 /// (dart's `Environment._variableNodes` is a `List<Map<String, AstNode>>`
 /// pushed and popped in lockstep with `_variables`). Shared by `Rc` so a
@@ -178,6 +173,12 @@ pub(crate) struct EnvModules {
 /// chains, not the caller's stack.
 pub(crate) struct UserCallable {
     pub def: Rc<Callable>,
+    /// The file that defined the callable. Its body runs against that file
+    /// (dart evaluates a mixin or function where it was written): output maps
+    /// to it, and diagnostics show its name and source — whether it was
+    /// reached through `@use`, a textual `@import`, or a first-class
+    /// reference. `None` when there was no file context to capture.
+    pub origin: Option<crate::value::MixinOrigin>,
     pub env: Vec<Scope>,
     /// The variable-definition-span chain captured alongside `env`, frame for
     /// frame (dart closes over `_variableNodes` with the rest of the
@@ -1051,6 +1052,15 @@ struct DiagFrame {
     /// Byte length of the call-site span, to size the snippet caret when this
     /// frame is the primary (innermost) one — used by `@error`.
     length: usize,
+    /// True for a `@content;` invocation: it appears in the trace, but a
+    /// spanless `@error` never attaches to it — dart attaches at the nearest
+    /// mixin or function call boundary, through any number of forwarded
+    /// content blocks.
+    content: bool,
+    /// The text of the file the call site is in, for the snippet when this
+    /// frame is an `@error`'s boundary. Carried rather than looked up by
+    /// `url`: display names are not unique across custom importers.
+    source: Rc<str>,
 }
 
 /// An evaluated user module: its public members plus the bindings it itself
@@ -1216,6 +1226,10 @@ struct ContentBlock {
     /// the block runs, so the content resolves against the call site, not the
     /// mixin's module.
     caller_env: Option<Box<SavedModuleEnv>>,
+    /// The file the block was written in (the `@include` site's file). The
+    /// block runs against it — dart's `@content` frame names the includer's
+    /// file, and the block's output maps there — not against the mixin's.
+    origin: Option<crate::value::MixinOrigin>,
 }
 
 /// The caller-side environment saved while a cross-module member call runs in
@@ -1511,6 +1525,8 @@ impl<'a> Evaluator<'a> {
             pos,
             member: self.member.clone(),
             length: 0,
+            content: false,
+            source: Rc::clone(&self.current_source),
         });
         frames.extend(self.call_stack.iter().rev().cloned());
         frames
@@ -1652,8 +1668,16 @@ impl<'a> Evaluator<'a> {
     /// Render `Error: <msg>` + the snippet pointing at the innermost frame +
     /// the 2-space-indented frame trace.
     fn render_error_with_frames(&self, e: &Error, frames: &[DiagFrame]) -> String {
-        let primary = &frames[0];
-        let source = self.source_for(&primary.url);
+        self.render_error_at(e, &frames[0], frames)
+    }
+
+    /// Like [`Self::render_error_with_frames`], with the snippet drawn at
+    /// `primary` rather than the innermost frame (an error in a content block
+    /// points at the `@include` that supplied it, one frame out).
+    fn render_error_at(&self, e: &Error, primary: &DiagFrame, frames: &[DiagFrame]) -> String {
+        // The frame's own text, not a display-url lookup: two custom-importer
+        // files may both display as `foo`.
+        let source = Rc::clone(&primary.source);
         // Prefer the primary frame's own span length (set for `@error`'s call
         // site); otherwise the error's recorded length.
         let length = if primary.length > 0 {
@@ -1768,11 +1792,24 @@ impl<'a> Evaluator<'a> {
     /// member, then make `new_member` the current member. Returns the previous
     /// member name, to be restored by [`Self::leave_call`].
     fn enter_call(&mut self, call_pos: Pos, call_len: usize, new_member: &str) -> String {
+        self.push_frame(call_pos, call_len, new_member, false)
+    }
+
+    /// [`Self::enter_call`] for a `@content;` invocation: the frame shows in
+    /// the trace under the `@content` member but is never an `@error`
+    /// boundary (see [`DiagFrame::content`]).
+    pub(super) fn enter_content_call(&mut self, call_pos: Pos) -> String {
+        self.push_frame(call_pos, "@content".len(), "@content", true)
+    }
+
+    fn push_frame(&mut self, call_pos: Pos, call_len: usize, new_member: &str, content: bool) -> String {
         self.call_stack.push(DiagFrame {
             url: self.current_url.clone(),
             pos: call_pos,
             member: self.member.clone(),
             length: call_len,
+            content,
+            source: Rc::clone(&self.current_source),
         });
         std::mem::replace(&mut self.member, new_member.to_string())
     }
@@ -1881,13 +1918,21 @@ impl<'a> Evaluator<'a> {
                 pos,
                 member: self.member.clone(),
                 length,
+                content: false,
+                source: Rc::clone(&self.current_source),
             }]
         } else {
             self.call_stack.iter().rev().cloned().collect()
         };
-        let mut e = Error::at(msg, frames[0].pos);
-        e.length = frames[0].length;
-        e.rendered = Some(self.render_error_with_frames(&e, &frames));
+        // dart attaches a spanless `@error` at the nearest mixin or function
+        // call boundary: a `@content;` invocation is not one, so an error in a
+        // content block — however many forwarding blocks deep — carets the
+        // `@include` whose mixin is running, while the `@content` frames stay
+        // in the trace.
+        let boundary = frames.iter().find(|f| !f.content).unwrap_or(&frames[0]);
+        let mut e = Error::at(msg, boundary.pos);
+        e.length = boundary.length;
+        e.rendered = Some(self.render_error_at(&e, boundary, &frames));
         e
     }
 
@@ -2099,12 +2144,15 @@ impl<'a> Evaluator<'a> {
                     config,
                     pos,
                 } => self.exec_forward(url, prefix.as_deref(), show, hide, config, *pos, parents, sink)?,
-                Stmt::Content(content_args) => {
+                Stmt::Content {
+                    args: content_args,
+                    pos: content_pos,
+                } => {
                     // The content block runs in the caller's context, so it is no
                     // longer "directly in a mixin" (dart-sass): a
                     // `meta.content-exists()` inside it is an error.
                     self.in_mixin.push(false);
-                    let result = self.exec_content(content_args, parents, sink);
+                    let result = self.exec_content(content_args, *content_pos, parents, sink);
                     self.in_mixin.pop();
                     result?;
                 }
@@ -2867,11 +2915,11 @@ impl<'a> Evaluator<'a> {
                             // rule and pop with it).
                             if self.scopes.len() == 1 {
                                 for (k, f) in imported_fwd.functions {
-                                    let rebound = self.capture_callable(&f.def);
+                                    let rebound = self.recapture_callable(&f);
                                     self.define_function(&k, rebound);
                                 }
                                 for (k, m) in imported_fwd.mixins {
-                                    let rebound = self.capture_callable(&m.def);
+                                    let rebound = self.recapture_callable(&m);
                                     self.define_mixin(&k, rebound);
                                 }
                                 if let Some(g) = self.scopes.first() {
@@ -2917,11 +2965,11 @@ impl<'a> Evaluator<'a> {
                                     }
                                 }
                                 for (k, f) in imported_fwd.functions {
-                                    let rebound = self.capture_callable(&f.def);
+                                    let rebound = self.recapture_callable(&f);
                                     self.define_function(&k, rebound);
                                 }
                                 for (k, m) in imported_fwd.mixins {
-                                    let rebound = self.capture_callable(&m.def);
+                                    let rebound = self.recapture_callable(&m);
                                     self.define_mixin(&k, rebound);
                                 }
                             }
@@ -3524,7 +3572,7 @@ fn validate_decl_scope(stmts: &[Stmt], ctx: ScopeCtx) -> Result<(), Error> {
             // `decl` scope is `Mixin` throughout a mixin body, so testing it
             // captures every nesting. (Inside a `@function` the earlier guard
             // already emitted "This at-rule is not allowed here.".)
-            Stmt::Content(_) if scope != DeclScope::Mixin => {
+            Stmt::Content { .. } if scope != DeclScope::Mixin => {
                 return Err(Error::unpositioned(
                     "@content is only allowed within mixin declarations.".to_string(),
                 ));
@@ -4206,7 +4254,7 @@ fn body_uses_content(body: &[Stmt]) -> bool {
 
 fn stmt_uses_content(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Content(_) => true,
+        Stmt::Content { .. } => true,
         Stmt::Rule(r) => body_uses_content(&r.body),
         Stmt::If(branches) => branches.iter().any(|b| body_uses_content(&b.body)),
         Stmt::For { body, .. }

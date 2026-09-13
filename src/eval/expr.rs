@@ -309,7 +309,7 @@ impl<'a> Evaluator<'a> {
                             user: Some(callable as Rc<dyn std::any::Any>),
                         };
                         return self
-                            .invoke_function_ref(&f, vec![arg], Vec::new(), Pos { line: 0, col: 0 })
+                            .invoke_function_ref(&f, vec![arg], Vec::new(), Pos { line: 0, col: 0 }, 0)
                             .map(Value::without_slash);
                     }
                 }
@@ -623,7 +623,7 @@ impl<'a> Evaluator<'a> {
                     for (_, v) in &mut named {
                         *v = std::mem::replace(v, Value::Null).without_slash();
                     }
-                    if let Some(r) = self.try_meta_eval_call(name, &pos_args, &named, *pos) {
+                    if let Some(r) = self.try_meta_eval_call(name, &pos_args, &named, *pos, *length) {
                         return r;
                     }
                 }
