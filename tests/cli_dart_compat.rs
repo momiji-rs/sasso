@@ -1449,3 +1449,99 @@ fn source_map_sources_name_imported_files_by_path() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The `WARNING:` blocks of a stderr transcript (each with its stack frames),
+/// leaving out deprecation warnings: dart-sass emits a file's `@import`
+/// deprecations when it parses the file, sasso when it evaluates each rule, so
+/// the two interleave differently with runtime warnings even when every frame
+/// matches.
+fn warning_blocks(stderr: &str) -> Vec<&str> {
+    stderr
+        .split("\n\n")
+        .filter(|block| block.starts_with("WARNING:"))
+        .collect()
+}
+
+/// Run the same `args` through dart-sass in a sibling scratch dir seeded with
+/// the same `files` and assert stderr matches — byte for byte, or only its
+/// `WARNING:` blocks when `warnings_only` is set.
+fn assert_dart_stderr_matches(files: &[(&str, &str)], args: &[&str], warnings_only: bool) {
+    let Some(dart) = dart_bin() else { return };
+    let ours = scratch("parity_err_ours");
+    let theirs = scratch("parity_err_theirs");
+    for (name, text) in files {
+        write(&ours, name, text);
+        write(&theirs, name, text);
+    }
+    let a = sasso(&ours, args);
+    let b = run_bin(&dart, &theirs, args, None);
+    assert_eq!(
+        a.code, b.code,
+        "exit codes differ for {args:?}\nours: {}\ndart: {}",
+        a.stderr, b.stderr
+    );
+    if warnings_only {
+        assert_eq!(
+            warning_blocks(&a.stderr),
+            warning_blocks(&b.stderr),
+            "warning frames differ from dart-sass for {args:?}"
+        );
+    } else {
+        assert_eq!(a.stderr, b.stderr, "stderr differs from dart-sass for {args:?}");
+    }
+    std::fs::remove_dir_all(&ours).ok();
+    std::fs::remove_dir_all(&theirs).ok();
+}
+
+#[test]
+fn stack_frames_show_loaded_files_relative_to_the_working_directory() {
+    // dart's frames spell a loaded file as its path from the current
+    // directory, whether it was reached relatively (`src/sub/_warnme.scss`)
+    // or through a load path (`lp/_dep.scss`, and `lp/_leaf.scss` which that
+    // file loads), while the entry stays as given. Same rule for `@use` and
+    // `@import`.
+    let used: &[(&str, &str)] = &[
+        ("src/sub/_warnme.scss", "@warn \"a\";\n"),
+        ("lp/_dep.scss", "@use \"leaf\";\n@warn \"b\";\n"),
+        ("lp/_leaf.scss", "@warn \"d\";\n"),
+        ("src/rel.scss", "@use \"sub/warnme\";\n@use \"dep\";\n"),
+    ];
+    let dir = scratch("frames_use");
+    for (name, text) in used {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "src/rel.scss"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        r.stderr,
+        "WARNING: a\n    src/sub/_warnme.scss 1:1  @use\n    src/rel.scss 1:1          root stylesheet\n\n\
+         WARNING: d\n    lp/_leaf.scss 1:1  @use\n    lp/_dep.scss 1:1   @use\n    src/rel.scss 2:1   root stylesheet\n\n\
+         WARNING: b\n    lp/_dep.scss 2:1  @use\n    src/rel.scss 2:1  root stylesheet\n\n"
+    );
+    assert_dart_stderr_matches(used, &["--no-source-map", "-I", "lp", "src/rel.scss"], false);
+    std::fs::remove_dir_all(&dir).ok();
+
+    let imported: &[(&str, &str)] = &[
+        ("src/sub/_warnme.scss", "@warn \"a\";\n"),
+        ("lp/_dep.scss", "@warn \"b\";\n@import \"leaf\";\n"),
+        ("lp/_leaf.scss", "@warn \"d\";\n"),
+        ("src/rel.scss", "@import \"sub/warnme\";\n@import \"dep\";\n"),
+    ];
+    let dir = scratch("frames_import");
+    for (name, text) in imported {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "src/rel.scss"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        warning_blocks(&r.stderr),
+        [
+            "WARNING: a\n    src/sub/_warnme.scss 1:1  @import\n    src/rel.scss 1:9          root stylesheet",
+            "WARNING: b\n    lp/_dep.scss 1:1  @import\n    src/rel.scss 2:9  root stylesheet",
+            "WARNING: d\n    lp/_leaf.scss 1:1  @import\n    lp/_dep.scss 2:9   @import\n    src/rel.scss 2:9   root stylesheet",
+        ]
+    );
+    // Deprecation warnings interleave differently (see `warning_blocks`).
+    assert_dart_stderr_matches(imported, &["--no-source-map", "-I", "lp", "src/rel.scss"], true);
+    std::fs::remove_dir_all(&dir).ok();
+}

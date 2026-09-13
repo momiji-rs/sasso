@@ -165,7 +165,14 @@ pub struct WarnEvent<'a> {
     /// The full dart-style block sasso would otherwise print to stderr (header +
     /// snippet + stack trace), for a faithful default logger.
     pub formatted: &'a str,
-    /// The source URL for the diagnostic's span; `""` when not available.
+    /// The source URL for the diagnostic's span, as dart-sass displays it in a
+    /// stack frame: the entry's [`Options::url`] as given, or a loaded file's
+    /// path from the working directory (absolute when that would be longer;
+    /// a custom importer's non-path key shows its last segment). For an entry
+    /// compiled without [`Options::url`] it is `""` under [`compile`] and
+    /// `"stdin"` under [`compile_with_source_map`] (the source map has to name
+    /// the entry somehow, like dart's `-`); the line is still set. `""` for the
+    /// "repetitive deprecation warnings omitted" footer, which has no span.
     pub url: &'a str,
     /// The 1-based line for the diagnostic's span; `0` when not available.
     pub line: usize,
@@ -174,8 +181,9 @@ pub struct WarnEvent<'a> {
     /// is the importer's canonical URL — the resolved absolute path with
     /// [`FsImporter`] — which is what [`DependencySet::is_dependency`] keys on.
     /// For the entry stylesheet it is [`Options::url`] exactly as supplied
-    /// (the library never canonicalizes the entry). Unlike `url` (dart's short
-    /// display form, e.g. a load-path file's basename) it identifies the file.
+    /// (the library never canonicalizes the entry). Unlike `url` (dart's display
+    /// form, relative to the working directory) it is stable across working
+    /// directories and identifies the file.
     pub path: &'a str,
 }
 

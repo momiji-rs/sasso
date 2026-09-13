@@ -1827,8 +1827,8 @@ impl<'a> Evaluator<'a> {
             deprecation_id: "",
             message: &msg,
             formatted: &formatted,
-            url: "",
-            line: 0,
+            url: &self.current_url,
+            line: pos.line,
             path: self.current_path(),
         });
         Ok(())

@@ -120,6 +120,12 @@ Conformance is tracked separately as a ratchet against the official
   stylesheet has `"sources":[]`, as in dart-sass. Library API note: an
   embedder now sees absolute paths for imported files in
   `SourceMap::sources` (the CLI relativizes them to the map).
+- **Stack frames name a loaded file by its path from the current directory**
+  (`src/sub/_partial.scss`, `lp/_dep.scss`), as dart-sass does, instead of its
+  bare basename — so two partials that share a name are told apart in a
+  trace. A file outside the tree whose relative spelling would be longer than
+  its absolute path is shown absolute (dart's `prettyUri`); the entry stays
+  as given. `WarnEvent::url` carries the same spelling.
 - **Warn handlers may retain event data.** The library now pauses its
   bump-arena scope while calling an embedder's `WarnHandler`, so a handler
   that appends the event to a buffer no longer ends up with memory the
