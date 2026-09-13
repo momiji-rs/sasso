@@ -19,6 +19,10 @@ Conformance is tracked separately as a ratchet against the official
   are now suspended for the duration of a `#{…}` — matching dart-sass, which
   evaluates the expression and splices its text into the calc (#24, reported
   from the Lichess stylesheets).
+- **A mixin whose `@content` sits inside `@supports` now accepts a content
+  block.** The "does this mixin use `@content`" scan descended into `@media`,
+  `@at-root`, `@keyframes` and generic at-rules but skipped `@supports`, so
+  `@include` with a block hit "Mixin doesn't accept a content block." (#24).
 
 ## [0.9.1] - 2026-09-01
 

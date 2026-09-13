@@ -9005,3 +9005,60 @@ fn calc_interpolation_is_full_sassscript() {
         assert_error_parity(bad);
     }
 }
+
+#[test]
+fn mixin_content_nested_in_supports_accepts_content_block() {
+    // The "does this mixin use @content" scan must descend into `@supports`
+    // bodies like it does for `@media` (momiji-rs/sasso#24, from the Lichess
+    // stylesheets).
+    let scss = concat!(
+        "@mixin firefox {\n",
+        "  @supports (-moz-appearance: none) {\n",
+        "    @content;\n",
+        "  }\n",
+        "}\n",
+        ".b {\n",
+        "  @include firefox {\n",
+        "    color: red;\n",
+        "  }\n",
+        "}\n",
+    );
+    assert_eq!(
+        ours(scss),
+        "@supports (-moz-appearance: none) {\n  .b {\n    color: red;\n  }\n}\n"
+    );
+    assert_parity(scss);
+    // Deeper nesting (`@media` > `@supports`) and a `using` clause through it.
+    let scss = concat!(
+        "@mixin safari($size) {\n",
+        "  @media (hover: hover) {\n",
+        "    @supports not (-webkit-touch-callout: none) {\n",
+        "      @content($size);\n",
+        "    }\n",
+        "  }\n",
+        "}\n",
+        ".c {\n",
+        "  @include safari(2px) using ($s) {\n",
+        "    padding: $s;\n",
+        "  }\n",
+        "}\n",
+    );
+    assert_eq!(
+        ours(scss),
+        concat!(
+            "@media (hover: hover) {\n",
+            "  @supports not (-webkit-touch-callout: none) {\n",
+            "    .c {\n",
+            "      padding: 2px;\n",
+            "    }\n",
+            "  }\n",
+            "}\n",
+        )
+    );
+    assert_parity(scss);
+    // A mixin with NO `@content` anywhere — `@supports` or not — still rejects
+    // a content block.
+    let bad = "@mixin m { @supports (display: grid) { x: 1; } }\na { @include m { y: 2; } }\n";
+    assert!(ours_err(bad).contains("Mixin doesn't accept a content block."));
+    assert_error_parity(bad);
+}
