@@ -387,7 +387,7 @@ fn strip_vendor_prefix(lower: &str) -> &str {
 /// `-x-url`, case-insensitively. dart-sass parses these with its special URL
 /// grammar (a plain, unquoted URL is preserved verbatim and the call is
 /// emitted as a bare `url(...)`).
-fn is_url_function(name: &str) -> bool {
+pub(crate) fn is_url_function(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     strip_vendor_prefix(&lower) == "url"
 }

@@ -199,6 +199,17 @@ fn a_double_slash_inside_a_url_is_not_a_comment() {
         ".a {\n  b: url(//y);\n}"
     );
     assert!(sass(".a\n  b: my-url(//y)\n", "a.sass").is_err());
+    // A VENDOR-PREFIXED url is a url token too — the shared value parser reads
+    // `-c-url(` as one and emits it bare — while `my-url(` above is not.
+    assert_eq!(
+        sass("a\n  b: -c-url(//cdn/x)\n  d: red\n", "a.sass").unwrap(),
+        "a {\n  b: url(//cdn/x);\n  d: red;\n}"
+    );
+    // An escaped `)` is url CONTENT and does not close the token.
+    assert_eq!(
+        sass("a\n  b: url(foo\\)//cdn)\n", "a.sass").unwrap(),
+        "a {\n  b: url(foo\\)//cdn);\n}"
+    );
     // A declaration AFTER one is still its own statement: the line scanners
     // that decide where a logical line ends must skip the url token too, or
     // `url(http://x/y)` reads as an unterminated paren and swallows the next

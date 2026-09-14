@@ -1210,20 +1210,34 @@ impl LineScanner {
 
     /// At `#{`: advance past the brace-matched closing `}` (or to end-of-line).
     #[inline]
-    /// At a `u`/`U`, whether this is the start of a `url(` FUNCTION token —
-    /// the exact name, not preceded by an identifier character, so `my-url(`
-    /// is excluded. dart scans `url(` and its contents as one token, so `//`
-    /// inside it is part of the url rather than a comment (`url(//cdn/x.png)`,
-    /// `url(http://x/y)`), while `my-url(//y)` really does start a comment.
+    /// At a `u`/`U`, whether this is the start of a `url(` FUNCTION token.
+    ///
+    /// dart scans `url(` and its contents as one token, so `//` inside it is
+    /// part of the url rather than a comment (`url(//cdn/x.png)`,
+    /// `url(http://x/y)`). A VENDOR-PREFIXED spelling counts too — the shared
+    /// value parser treats `-c-url(` as a url ([`crate::parser::is_url_function`])
+    /// and emits it as a bare `url(…)` — while `my-url(//y)` is an ordinary
+    /// function, where the `//` really does start a comment.
     fn at_url_func(&self) -> bool {
-        if self.i > 0 && is_ident_char(self.cs[self.i - 1]) {
-            return false;
-        }
         let mut it = "url(".chars();
-        (0..4).all(|k| match (self.cs.get(self.i + k), it.next()) {
+        let at_url = (0..4).all(|k| match (self.cs.get(self.i + k), it.next()) {
             (Some(c), Some(w)) => c.eq_ignore_ascii_case(&w),
             _ => false,
-        })
+        });
+        if !at_url {
+            return false;
+        }
+        // Walk back to the token's start: `url` itself starts one, otherwise
+        // the identifier ending here must be a vendor-prefixed `-x-url`.
+        let mut start = self.i;
+        while start > 0 && is_ident_char(self.cs[start - 1]) {
+            start -= 1;
+        }
+        if start == self.i {
+            return true;
+        }
+        let name: String = self.cs[start..self.i + 3].iter().collect();
+        crate::parser::is_url_function(&name)
     }
 
     /// Consume a `url(...)` token, contents included, through its closing `)`.
@@ -1243,6 +1257,15 @@ impl LineScanner {
             match self.cur() {
                 '"' | '\'' => {
                     self.skip_quoted();
+                }
+                // A CSS escape: the next character is url CONTENT, so an
+                // escaped paren does not close the token (`url(foo\)//cdn)`),
+                // as the shared value parser reads it.
+                '\\' => {
+                    self.bump();
+                    if !self.done() {
+                        self.bump();
+                    }
                 }
                 '(' => {
                     depth += 1;
@@ -1892,11 +1915,19 @@ mod line_scanner_parity {
     /// preceded by an identifier character) — the reference twin of
     /// [`LineScanner::at_url_func`].
     fn at_url_func_ref(cs: &[char], i: usize) -> bool {
-        if i > 0 && super::is_ident_char(cs[i - 1]) {
+        let want = ['u', 'r', 'l', '('];
+        if !(0..4).all(|k| cs.get(i + k).is_some_and(|c| c.eq_ignore_ascii_case(&want[k]))) {
             return false;
         }
-        let want = ['u', 'r', 'l', '('];
-        (0..4).all(|k| cs.get(i + k).is_some_and(|c| c.eq_ignore_ascii_case(&want[k])))
+        let mut start = i;
+        while start > 0 && super::is_ident_char(cs[start - 1]) {
+            start -= 1;
+        }
+        if start == i {
+            return true;
+        }
+        let name: String = cs[start..i + 3].iter().collect();
+        crate::parser::is_url_function(&name)
     }
 
     /// Skip a `url(…)` token from `i` (which must be at its `u`), returning the
@@ -1922,6 +1953,7 @@ mod line_scanner_parity {
                         i += 1;
                     }
                 }
+                '\\' => i += 2,
                 '(' => {
                     depth += 1;
                     i += 1;
