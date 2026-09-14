@@ -126,6 +126,12 @@ Conformance is tracked separately as a ratchet against the official
   trace. A file outside the tree whose relative spelling would be longer than
   its absolute path is shown absolute (dart's `prettyUri`); the entry stays
   as given. `WarnEvent::url` carries the same spelling.
+- **A loaded plain-CSS file's `@charset` is dropped**, as dart-sass drops it:
+  a `.css` file reached through `@use` or `@import` that begins with
+  `@charset "utf-8";` used to leave that line in the middle of the output
+  (the Lichess `bits.cms` and `bits.ublog.form` bundles, via a vendored
+  editor theme). The output's own `@charset "UTF-8";` is still derived from
+  its content.
 - **`@import` deprecation warnings fire when a file is parsed**, as in
   dart-sass, not when each rule is evaluated: all of a file's import
   deprecations now precede anything its body prints (its `@warn`s, the

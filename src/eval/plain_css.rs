@@ -159,6 +159,13 @@ impl<'a> Evaluator<'a> {
                     body,
                     lines,
                 } => {
+                    // dart-sass never copies a loaded file's top-level
+                    // `@charset`: the output's own is re-derived from its
+                    // content. One nested in an at-rule or a style rule is
+                    // kept verbatim, as dart keeps it.
+                    if body.is_none() && name.eq_ignore_ascii_case("charset") {
+                        continue;
+                    }
                     let prelude_s = self.eval_template(prelude)?.trim().to_string();
                     let lines = self.stamp(*lines);
                     match body {
