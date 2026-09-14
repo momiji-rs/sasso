@@ -18,9 +18,12 @@
 //! indentation kept, and a block's closing `}` rides on the last line of the
 //! block rather than on a line of its own. Every `Pos` the SCSS parser reports
 //! — diagnostics, deprecation spans, source-map entries — is therefore a
-//! position in the `.sass` file itself, as dart-sass reports them. The
-//! remaining in-line rewrites (`=name`/`+name` to `@mixin`/`@include`, a
-//! leading `\` escape) keep the statement's own column and only lengthen it.
+//! position in the `.sass` file itself, as dart-sass reports them. Nothing on
+//! a line is rewritten: the three constructs the SCSS grammar does not share —
+//! the `=name`/`+name` mixin shorthands, the legacy `\:hover` escaped-selector
+//! marker, and unquoted `@import` urls — are read by the parser itself in
+//! indented mode ([`crate::parser::parse_indented`]), because expanding or
+//! unquoting them would move every column after them.
 
 use crate::ast::Stylesheet;
 use crate::error::Error;
@@ -213,19 +216,11 @@ impl Transpiler {
         //     continuations) ---------------------------------------------
         let (mut logical, child_indent) = self.assemble_logical_line(indent)?;
 
-        // A leading `\` escapes the statement into a *style rule* and is
-        // consumed (the legacy `\:hover` form, distinguishing a pseudo-class
-        // selector from the old `:prop val` declaration syntax; SCSS keeps
-        // the backslash, the indented syntax drops it).
-        if logical.starts_with('\\') {
-            logical.remove(0);
-            self.out.push_str(&self.lines[start].indent_str);
-            self.out.push_str(&logical);
-            if !self.parse_child_into_braces(indent)? {
-                self.out.push_str(" {}\n");
-            }
-            return Ok(());
-        }
+        // (A leading `\` — the legacy `\:hover` form, which marks the line as a
+        // SELECTOR rather than the old `:prop val` declaration syntax — stays
+        // on the line for the parser to consume in indented mode, so the
+        // selector keeps its own column. Dropping it here shifted every column
+        // after it by one.)
 
         // The mixin shorthands (`=name` for `@mixin name`, `+name` for
         // `@include name`) are NOT rewritten: expanding them would shift every
@@ -237,7 +232,7 @@ impl Transpiler {
         // its line continues onto the next (deeper-indented) line(s) — the
         // newline acts as whitespace inside the prelude. The remaining
         // deeper-indented lines after the prelude completes are its body.
-        self.extend_directive_prelude(&mut logical, indent)?;
+        self.extend_directive_prelude(&mut logical, line_no)?;
 
         // (Unquoted `@import` URLs — `@import foo, sub/bar` — are accepted by
         // the SCSS parser in indented mode, so the line stays as written and
@@ -504,7 +499,7 @@ impl Transpiler {
     /// newline acts as whitespace inside a directive prelude, so a directive may
     /// span several indented lines before its body block (which is whatever
     /// deeper-indented lines remain afterwards).
-    fn extend_directive_prelude(&mut self, logical: &mut String, _indent: usize) -> Result<(), Error> {
+    fn extend_directive_prelude(&mut self, logical: &mut String, start_line: usize) -> Result<(), Error> {
         if !prelude_can_span(logical) {
             return Ok(());
         }
@@ -516,14 +511,12 @@ impl Transpiler {
                 break;
             };
             let piece = strip_silent_comment(self.lines[i].content.trim_start());
+            let (line, indent_str) = (self.lines[i].line, self.lines[i].indent_str.clone());
             self.idx = i + 1;
             if piece.is_empty() {
                 continue;
             }
-            if !logical.is_empty() && !logical.ends_with(char::is_whitespace) {
-                logical.push(' ');
-            }
-            logical.push_str(&piece);
+            join_continuation(logical, start_line, line, &indent_str, &piece);
             // Pull in any bracket continuations of this new line too (a
             // trailing comma only continues a `@use`/`@forward` member list).
             let comma_continues = matches!(directive_name(logical).as_deref(), Some("use" | "forward"));
@@ -532,9 +525,9 @@ impl Transpiler {
                     break;
                 };
                 let cont = strip_silent_comment(self.lines[j].content.trim_start());
+                let (line, indent_str) = (self.lines[j].line, self.lines[j].indent_str.clone());
                 self.idx = j + 1;
-                logical.push(' ');
-                logical.push_str(&cont);
+                join_continuation(logical, start_line, line, &indent_str, &cont);
             }
         }
         Ok(())
@@ -782,6 +775,30 @@ impl Transpiler {
     }
 }
 
+/// Append a prelude continuation line to `logical` at the position it occupies
+/// in the source: one newline per source line crossed (so a blank line between
+/// them survives), then the line's own indentation, then its text.
+///
+/// A newline is whitespace inside a directive prelude, so the grammar reads the
+/// same text either way — but joining with a SPACE would put every token of the
+/// continuation on the statement's first line, and an error in one
+/// (`@each $a in` / `  $undef`) would be reported there rather than on its own
+/// line, where dart reports it.
+fn join_continuation(logical: &mut String, start_line: usize, line: usize, indent_str: &str, piece: &str) {
+    let end_line = start_line + logical.bytes().filter(|&b| b == b'\n').count();
+    if line > end_line {
+        for _ in end_line..line {
+            logical.push('\n');
+        }
+        logical.push_str(indent_str);
+    } else if !logical.is_empty() && !logical.ends_with(char::is_whitespace) {
+        // A continuation that does not advance a line (it never should) still
+        // needs the whitespace the newline would have provided.
+        logical.push(' ');
+    }
+    logical.push_str(piece);
+}
+
 /// The lowercased directive keyword of a logical line (`@for` -> `"for"`), or
 /// `None` if the line is not an at-rule.
 ///
@@ -932,13 +949,31 @@ fn prelude_incomplete(logical: &str) -> bool {
     let Some(name) = directive_name(logical) else {
         return false;
     };
-    // The prelude text after the directive keyword.
+    // The prelude text after the directive keyword. A shorthand has no
+    // keyword to strip — everything after `=`/`+` is the prelude, so a mixin
+    // named `mixin` (`=mixin`) keeps its name rather than reading as empty.
     let t = logical.trim_start();
-    let after_at = &t[1..]; // skip '@'
-    let prelude = after_at.strip_prefix(name.as_str()).unwrap_or(after_at).trim();
+    let after_sigil = &t[1..]; // skip `@`, `=` or `+`
+    let prelude = if t.starts_with(['=', '+']) {
+        after_sigil.trim()
+    } else {
+        after_sigil
+            .strip_prefix(name.as_str())
+            .unwrap_or(after_sigil)
+            .trim()
+    };
     if ends_with_pending_operator(prelude) {
         return true;
     }
+    // A prelude that spans lines carries newlines and indentation between its
+    // tokens; the keyword tests below look for ` in `, ` from `, ` if ` with
+    // single spaces, so compare against a whitespace-normalized copy.
+    let prelude: String = if prelude.bytes().any(|b| b == b'\n') {
+        prelude.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        prelude.to_string()
+    };
+    let prelude = prelude.as_str();
     match name.as_str() {
         // `@for $i from <a> (through|to) <b>` — incomplete until both the
         // `from`/`through`/`to` keywords and operands are present.
@@ -1518,6 +1553,11 @@ fn scan_state(s: &str) -> ScanState {
                     };
                 }
             }
+            // `url(…)` is one token (dart scans it whole), so neither the
+            // `//` inside `url(http://x/y)` nor its parens are structure.
+            'u' | 'U' if sc.at_url_func() => {
+                sc.skip_url();
+            }
             '/' if sc.peek(1) == Some('/') => break,
             '/' if sc.peek(1) == Some('*') => {
                 if !sc.skip_loud_comment() {
@@ -1649,6 +1689,11 @@ fn find_top_level_semicolon(logical: &str) -> Option<usize> {
         match sc.cur() {
             '"' | '\'' => {
                 sc.skip_quoted();
+            }
+            // `url(…)` is one token (dart scans it whole), so neither the
+            // `//` inside `url(http://x/y)` nor its parens are structure.
+            'u' | 'U' if sc.at_url_func() => {
+                sc.skip_url();
             }
             '/' if sc.peek(1) == Some('/') => break,
             '/' if sc.peek(1) == Some('*') => {
@@ -1812,6 +1857,57 @@ mod line_scanner_parity {
         interp > 0
     }
 
+    /// Whether `cs[i..]` starts a `url(` FUNCTION token (the exact name, not
+    /// preceded by an identifier character) — the reference twin of
+    /// [`LineScanner::at_url_func`].
+    fn at_url_func_ref(cs: &[char], i: usize) -> bool {
+        if i > 0 && super::is_ident_char(cs[i - 1]) {
+            return false;
+        }
+        let want = ['u', 'r', 'l', '('];
+        (0..4).all(|k| cs.get(i + k).is_some_and(|c| c.eq_ignore_ascii_case(&want[k])))
+    }
+
+    /// Skip a `url(…)` token from `i` (which must be at its `u`), returning the
+    /// index just past its closing `)` — the reference twin of
+    /// [`LineScanner::skip_url`].
+    fn skip_url_ref(cs: &[char], mut i: usize) -> usize {
+        i += 4;
+        let mut depth = 1i32;
+        while i < cs.len() {
+            match cs[i] {
+                '"' | '\'' => {
+                    let q = cs[i];
+                    i += 1;
+                    while i < cs.len() {
+                        if cs[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if cs[i] == q {
+                            i += 1;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '(' => {
+                    depth += 1;
+                    i += 1;
+                }
+                ')' => {
+                    depth -= 1;
+                    i += 1;
+                    if depth == 0 {
+                        return i;
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        i
+    }
+
     fn scan_state_ref(s: &str) -> (i32, bool, bool, bool) {
         let cs: Vec<char> = s.chars().collect();
         let mut depth = 0i32;
@@ -1819,6 +1915,10 @@ mod line_scanner_parity {
         let mut i = 0;
         while i < cs.len() {
             let c = cs[i];
+            if (c == 'u' || c == 'U') && at_url_func_ref(&cs, i) {
+                i = skip_url_ref(&cs, i);
+                continue;
+            }
             match c {
                 '"' | '\'' => {
                     let q = c;

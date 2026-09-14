@@ -161,7 +161,10 @@ Conformance is tracked separately as a ratchet against the official
 - **`//` inside a `url()` is no longer a comment in the indented syntax.**
   `url(http://x/y)`, `url(//cdn/x.png)` and `@import http://x/y.css` were
   truncated at the `//` (`url(http:` — "expected \")\""), because the front-end
-  stripped silent comments before the url token was recognized. dart scans
+  stripped silent comments before the url token was recognized. The scanners
+  that decide where a logical line ENDS skip the token too, so a declaration
+  after one (`b: url(http://x/y)` then `c: red`) is still its own statement
+  rather than being joined into the value. dart scans
   `url(` and its contents as one token; only the exact `url` function
   qualifies, so `my-url(//y)` still starts a comment, as it does for dart.
 - **Compressed output no longer writes a stray `;` after a nested rule, and

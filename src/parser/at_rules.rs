@@ -2236,7 +2236,7 @@ impl Parser {
 
     /// After a lowercase `@function`/`@mixin` keyword, peek whether the name
     /// that follows begins with `--` (a plain CSS custom function/mixin).
-    fn peek_callable_name_is_custom(&self) -> bool {
+    pub(super) fn peek_callable_name_is_custom(&self) -> bool {
         let cs = self.sc.rest();
         let mut i = 0;
         while i < cs.len() && cs[i].is_whitespace() {

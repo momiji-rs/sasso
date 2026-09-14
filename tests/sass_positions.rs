@@ -199,6 +199,18 @@ fn a_double_slash_inside_a_url_is_not_a_comment() {
         ".a {\n  b: url(//y);\n}"
     );
     assert!(sass(".a\n  b: my-url(//y)\n", "a.sass").is_err());
+    // A declaration AFTER one is still its own statement: the line scanners
+    // that decide where a logical line ends must skip the url token too, or
+    // `url(http://x/y)` reads as an unterminated paren and swallows the next
+    // line (`b: url(http://x/y) c;` / `: red;`).
+    assert_eq!(
+        sass(".a\n  b: url(http://x/y)\n  c: red\n", "a.sass").unwrap(),
+        ".a {\n  b: url(http://x/y);\n  c: red;\n}"
+    );
+    assert_eq!(
+        sass(".a\n  b: url(//x/y)\n  c: red\n", "a.sass").unwrap(),
+        ".a {\n  b: url(//x/y);\n  c: red;\n}"
+    );
     // A trailing `//` is still a comment, inside and outside a string.
     assert_eq!(sass(".a\n  b: c // t\n", "a.sass").unwrap(), ".a {\n  b: c;\n}");
     assert_eq!(
@@ -234,6 +246,10 @@ fn source_maps_point_into_the_sass_file() {
         (".a\n  --v: 1px\n  b: c\n", "AAAA;EACE;EACA"),
         // A top-level multi-line comment.
         ("/* one\n   two */\n.a\n  b: c\n", "AAAA;AAAA;AAEA;EACE"),
+        // The legacy escaped-selector marker is not part of the selector:
+        // dart maps `\:hover` to the `:`, one column past the `\`.
+        (".a\n  \\:hover\n    b: c\n", "AACG;EACC"),
+        (".a\n  :hover\n    b: c\n", "AACE;EACE"),
     ];
     for (src, expected) in cases {
         assert_eq!(sass_mappings(src, "in.sass"), expected, "for {src:?}");
@@ -265,6 +281,52 @@ fn the_shorthands_still_compile_to_what_they_stand_for() {
     assert_eq!(
         sass("=a\n  @content(1)\nd\n  +a using ($v)\n    e: $v\n", "x.sass").unwrap(),
         "d {\n  e: 1;\n}"
+    );
+}
+
+#[test]
+fn the_shorthand_keeps_the_rules_the_keyword_has() {
+    // `=--name` is the plain-CSS mixin spelling dart reserves: rejected here
+    // exactly as `@mixin --name` is, pointing at the name (dart: 1:2).
+    let e = sass("=--a\n  b: c\n", "b.sass").expect_err("expected an error");
+    assert_eq!((e.line, e.col), (1, 2));
+    assert!(
+        e.message.contains("beginning with -- are forbidden"),
+        "{}",
+        e.message
+    );
+    // A mixin whose NAME is the keyword the shorthand stands for still works:
+    // the prelude is everything after the sigil, with no keyword to strip.
+    assert_eq!(
+        sass("=mixin\n  b: c\n.d\n  +mixin\n", "x.sass").unwrap(),
+        ".d {\n  b: c;\n}"
+    );
+    assert_eq!(
+        sass("=include\n  b: c\n.d\n  +include\n", "x.sass").unwrap(),
+        ".d {\n  b: c;\n}"
+    );
+}
+
+#[test]
+fn a_multi_line_directive_prelude_keeps_its_own_lines() {
+    // A prelude continuation is joined ON ITS OWN LINE, not with a space, so a
+    // diagnostic inside it points at the line it was written on, as dart does.
+    let cases = [
+        "@each $a in\n  $undef\n  .x\n    y: 1\n",
+        "$v:\n  $undef\n",
+        "@if 1 ==\n  $undef\n  .x\n    y: 1\n",
+    ];
+    for src in cases {
+        let e = sass(src, "in.sass").expect_err("expected an error");
+        assert_eq!((e.line, e.col), (2, 3), "for {src:?}");
+        assert!(e.message.contains("Undefined variable"), "{}", e.message);
+    }
+    // The prelude still reads the same text: a trailing comma does NOT
+    // continue it (`@each $a in b,` iterates the one-element list `(b,)` and
+    // the deeper lines are its body), exactly as dart-sass 1.103.1 reads it.
+    assert_eq!(
+        sass("@each $a in b,\n c\n  .#{$a}\n    d: $a\n", "in.sass").unwrap(),
+        "c .b {\n  d: b;\n}"
     );
 }
 

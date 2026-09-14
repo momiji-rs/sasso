@@ -41,6 +41,17 @@ impl Parser {
                 // the next-sibling combinator, i.e. a selector.
                 Some('=') if self.indented => {
                     self.sc.bump();
+                    self.skip_ws_inline();
+                    // `=--name` is the plain-CSS mixin spelling dart reserves,
+                    // rejected exactly as `@mixin --name` is (dart points at
+                    // the name, which is where the shorthand puts it).
+                    if self.peek_callable_name_is_custom() {
+                        return Err(Error::at(
+                            "Sass @mixin names beginning with -- are forbidden for \
+                             forward-compatibility with plain CSS mixins.",
+                            self.sc.position(),
+                        ));
+                    }
                     stmts.push(self.parse_callable_def(false)?);
                 }
                 Some('+')
@@ -54,6 +65,15 @@ impl Parser {
                     let start_mark = self.sc.mark();
                     self.sc.bump();
                     stmts.push(self.parse_include(pos, start_mark)?);
+                }
+                // The legacy escaped-selector form: a leading `\` marks the
+                // line as a SELECTOR rather than the old `:prop value`
+                // declaration syntax, and is not part of it. Consumed here so
+                // the selector keeps its own column (dart maps `\:hover` to
+                // the `:`), not upstream where dropping it shifted the line.
+                Some('\\') if self.indented => {
+                    self.sc.bump();
+                    stmts.push(self.parse_rule()?);
                 }
                 // A namespaced variable assignment `ns.$name: value`.
                 _ if self.peek_namespaced_var_decl() => stmts.push(self.parse_var_decl()?),
