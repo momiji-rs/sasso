@@ -609,6 +609,12 @@ impl<'a> Evaluator<'a> {
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.
                 let (mut pos_args, mut named, call_sep) = self.eval_call_args(args)?;
+                // Whatever this call is deprecated for, it is reported here:
+                // before every dispatch — the `sass:meta` predicates below
+                // resolve against evaluator state and return early — and after
+                // the arguments, so a call inside one of them warns first, as
+                // dart's does.
+                self.emit_call_deprecations(name, None, *pos, *length);
                 // The global (deprecated) aliases of the `sass:meta` existence
                 // predicates resolve against the evaluator state, not the
                 // value-only builtin layer. A user-defined function of the same
@@ -726,15 +732,6 @@ impl<'a> Evaluator<'a> {
                             .and_then(|b| crate::host_fn::deserialize_value(&b));
                         crate::host_fn::swap_handles(saved);
                         return result.map_err(|e| Error::at(e, *pos)).map(Value::without_slash);
-                    }
-                }
-                // A GLOBAL built-in that has a `sass:*` equivalent is
-                // deprecated: dart names the member to use instead and carets
-                // the whole call.
-                if module.is_none() {
-                    if let Some(replacement) = crate::builtins::global_builtin_replacement(name) {
-                        let dep = crate::deprecation::Deprecation::global_builtin(replacement);
-                        self.emit_deprecation(&dep, *pos, *length);
                     }
                 }
                 // A bare slash-division argument collapses to its number when

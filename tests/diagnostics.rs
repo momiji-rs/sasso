@@ -39,6 +39,10 @@ const MATCHING: &[&str] = &[
     "compile-gutter-alignment",
     // Deprecations (registry sub-step): the fully-static `@import` warning.
     "deprecation-import",
+    // The global-built-in family, and the two that ride along with it.
+    "deprecation-global-builtin",
+    "deprecation-feature-exists",
+    "deprecation-call-string",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {
@@ -563,6 +567,42 @@ fn a_global_builtin_with_a_module_form_is_deprecated() {
         "in.scss"
     )
     .is_empty());
+    // The `sass:meta` predicates resolve against evaluator state and return
+    // before the generic built-in dispatch: they are deprecated too.
+    for (src, replacement) in [
+        (
+            "$x: 1;\n.a { b: variable-exists(\"x\"); }\n",
+            "meta.variable-exists",
+        ),
+        (
+            "$x: 1;\n.a { b: global-variable-exists(\"x\"); }\n",
+            "meta.global-variable-exists",
+        ),
+        (
+            "@mixin m {}\n.a { b: mixin-exists(\"m\"); }\n",
+            "meta.mixin-exists",
+        ),
+        (
+            ".a { b: function-exists(\"percentage\"); }\n",
+            "meta.function-exists",
+        ),
+    ] {
+        let w = warnings(src, "in.scss");
+        assert!(
+            w.iter()
+                .any(|x| x.contains(&format!("Use {replacement} instead."))),
+            "{src:?}\n{w:?}"
+        );
+    }
+    // The name is matched EXACTLY: dart resolves these case-sensitively, so an
+    // upper-case spelling is plain CSS to it and carries no warning.
+    for src in [
+        ".a { b: MAP-GET((x: 1), x); }\n",
+        ".a { b: Lighten(#fff, 10%); }\n",
+        ".a { b: PERCENTAGE(0.5); }\n",
+    ] {
+        assert!(warnings(src, "in.scss").is_empty(), "{src:?}");
+    }
     // The indented syntax reports it too, at its own position.
     let seen: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
         std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -577,4 +617,43 @@ fn a_global_builtin_with_a_module_form_is_deprecated() {
     let w = seen.borrow().clone();
     assert_eq!(w.len(), 1, "{w:?}");
     assert!(w[0].contains("in.sass 2:6"), "{}", w[0]);
+}
+
+#[test]
+fn a_deprecated_function_reached_indirectly_still_warns() {
+    // dart reports the global built-in a `call()` reaches — by name or through
+    // a reference — against the INVOCATION, on top of the warnings for `call`
+    // and `get-function` themselves. Two `[global-builtin]` warnings can
+    // therefore share one span, saying different things.
+    let w = warnings(".a { b: call(get-function(\"percentage\"), 0.5); }\n", "in.scss");
+    assert_eq!(w.len(), 3, "{w:?}");
+    assert!(w[0].contains("Use meta.get-function instead."), "{}", w[0]);
+    assert!(w[1].contains("Use meta.call instead."), "{}", w[1]);
+    assert!(w[2].contains("Use math.percentage instead."), "{}", w[2]);
+    assert!(
+        w[1].contains("in.scss 1:9") && w[2].contains("in.scss 1:9"),
+        "{w:?}"
+    );
+    // The string form adds `[call-string]`, with the name it was given.
+    let w = warnings(
+        "@function foo() { @return 1; }\n.a { b: call(\"foo\"); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(w[0].contains("Use meta.call instead."), "{}", w[0]);
+    assert!(
+        w[1].starts_with("DEPRECATION WARNING [call-string]: Passing a string to call() is deprecated and will be illegal in Dart Sass 2.0.0.\n\nRecommendation: call(get-function(\"foo\"))\n"),
+        "{}",
+        w[1]
+    );
+    // `feature-exists` is deprecated whichever way it is spelled.
+    let w = warnings(".a { b: feature-exists(\"at-error\"); }\n", "in.scss");
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(w[1].starts_with("DEPRECATION WARNING [feature-exists]: The feature-exists() function is deprecated.\n\nMore info: https://sass-lang.com/d/feature-exists\n"), "{}", w[1]);
+    let w = warnings(
+        "@use \"sass:meta\";\n.a { b: meta.feature-exists(\"at-error\"); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
 }

@@ -279,8 +279,11 @@ fn plain_css_function(
 /// `unitless` at `math.is-unitless`, `comparable` at `math.compatible`, and
 /// `list-separator` at `list.separator`.
 pub(crate) fn global_builtin_replacement(name: &str) -> Option<&'static str> {
-    let lower = name.to_ascii_lowercase();
-    Some(match lower.as_str() {
+    // Matched EXACTLY: dart resolves these Sass-only globals case-sensitively,
+    // so `MAP-GET(…)` and `FLOOR(…)` are plain CSS to it — no call, and so no
+    // deprecation. (The case-insensitive globals are the ones CSS shares,
+    // `abs`/`round`/`min`/`sin`/…, none of which are deprecated.)
+    Some(match name {
         // sass:color — the getters keep their names, every legacy adjuster
         // becomes `color.adjust`.
         "red" => "color.red",

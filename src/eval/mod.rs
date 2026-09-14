@@ -1078,7 +1078,7 @@ pub(crate) struct Evaluator<'a> {
     deprecations_omitted: u32,
     /// Per-location dedup: a `(id, url, line, col)` already warned about is not
     /// warned about again (dart-sass collapses identical repeated warnings).
-    deprecations_seen: std::collections::HashSet<(&'static str, String, usize, usize)>,
+    deprecations_seen: std::collections::HashSet<(&'static str, String, String, usize, usize)>,
     /// Small interned ids for source files, stamped into [`SrcLines`] so the
     /// serializer's trailing-comment rule can require same-file adjacency and
     /// the source map can name the file. Keyed by the file's CANONICAL URL —
@@ -1792,6 +1792,22 @@ impl<'a> Evaluator<'a> {
     /// per-id cap of 5 (further occurrences are counted into the aggregate
     /// footer rendered by [`Self::emit_deprecation_footer`]). No-op when
     /// diagnostics are disabled.
+    /// Emit whatever deprecations a call to `name` carries. `module` is the
+    /// namespace it was written with, if any: a GLOBAL built-in with a `sass:*`
+    /// equivalent is deprecated for being global, while `feature-exists` is
+    /// deprecated whichever way it is spelled.
+    pub(super) fn emit_call_deprecations(&mut self, name: &str, module: Option<&str>, pos: Pos, len: usize) {
+        if module.is_none() {
+            if let Some(replacement) = crate::builtins::global_builtin_replacement(name) {
+                let dep = crate::deprecation::Deprecation::global_builtin(replacement);
+                self.emit_deprecation(&dep, pos, len);
+            }
+        }
+        if name == "feature-exists" && module.map_or(true, |m| m == "meta") {
+            self.emit_deprecation(&crate::deprecation::Deprecation::feature_exists(), pos, len);
+        }
+    }
+
     fn emit_deprecation(&mut self, dep: &crate::deprecation::Deprecation, pos: Pos, len: usize) {
         if !self.diag_enabled() {
             return;
@@ -1805,9 +1821,18 @@ impl<'a> Evaluator<'a> {
                 return;
             }
         }
-        // Per-location dedup: an identical (id, file, line, col) warning fires
-        // only once.
-        let key = (dep.id, self.current_url.clone(), pos.line, pos.col);
+        // Per-location dedup: the SAME warning at the same place fires once.
+        // The message is part of what makes it the same one: `call(
+        // get-function("percentage"))` is two different `[global-builtin]`
+        // warnings at one span — one naming `meta.call`, one `math.percentage`
+        // — and dart prints both.
+        let key = (
+            dep.id,
+            dep.message.clone(),
+            self.current_url.clone(),
+            pos.line,
+            pos.col,
+        );
         if !self.deprecations_seen.insert(key) {
             return;
         }

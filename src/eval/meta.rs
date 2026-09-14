@@ -43,6 +43,7 @@ impl<'a> Evaluator<'a> {
                 );
             }
         };
+        self.emit_call_deprecations(member, Some(ns), pos, length);
         let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
         for v in &mut pos_args {
             *v = std::mem::replace(v, Value::Null).without_slash();
@@ -428,6 +429,11 @@ impl<'a> Evaluator<'a> {
             Value::Function(f) => self.invoke_function_ref(&f, rest_pos, rest_named, pos, length),
             // The deprecated string form: look up by name.
             Value::Str(s) => {
+                self.emit_deprecation(
+                    &crate::deprecation::Deprecation::call_string(&s.text),
+                    pos,
+                    length,
+                );
                 let f = SassFunction {
                     name: s.text.to_string(),
                     css: false,
@@ -456,6 +462,13 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
         length: usize,
     ) -> Result<Value, Error> {
+        // Reaching a global built-in through a reference is still using it, and
+        // dart reports that against the INVOCATION. (A reference with no
+        // position is an internal invocation — the user-overridden `calc()`
+        // hook — which reports nothing.)
+        if f.user.is_none() && pos.line > 0 {
+            self.emit_call_deprecations(&f.name, None, pos, length);
+        }
         // A captured user `@function`: bind the evaluated args and run its
         // body in the callable's lexical closure. The payload is a
         // type-erased `Rc<UserCallable>` (cloning the `Rc` releases the
