@@ -113,7 +113,7 @@ impl<'a> Evaluator<'a> {
     fn capture_callable_from(
         &self,
         def: &Rc<Callable>,
-        origin: Option<crate::value::MixinOrigin>,
+        origin: crate::value::MixinOrigin,
         env_modules: EnvModules,
     ) -> Rc<UserCallable> {
         Rc::new(UserCallable {

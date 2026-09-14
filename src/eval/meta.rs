@@ -289,7 +289,6 @@ impl<'a> Evaluator<'a> {
                 module: None,
                 // Same-module capture: remember the defining file so a later
                 // `meta.apply` from elsewhere resolves relative loads here.
-                origin: self.current_mixin_origin(),
             })));
         }
         // A mixin exposed unprefixed via `@use … as *`. Its body runs in the
@@ -314,8 +313,6 @@ impl<'a> Evaluator<'a> {
                     name,
                     user: Some(Rc::clone(&m) as Rc<dyn std::any::Any>),
                     module: Some(Rc::clone(module) as Rc<dyn std::any::Any>),
-                    // Cross-module capture resolves via the module's own file.
-                    origin: None,
                 })));
             }
         }
@@ -380,8 +377,6 @@ impl<'a> Evaluator<'a> {
                     name: name.to_string(),
                     user: Some(Rc::clone(&m) as Rc<dyn std::any::Any>),
                     module: Some(Rc::clone(module) as Rc<dyn std::any::Any>),
-                    // Cross-module capture resolves via the module's own file.
-                    origin: None,
                 })));
             }
             return Err(Error::at(format!("Mixin not found: {name}"), pos));
@@ -392,7 +387,6 @@ impl<'a> Evaluator<'a> {
                     name: name.to_string(),
                     user: None,
                     module: None,
-                    origin: None, // a built-in reference has no user body
                 })));
             }
             return Err(Error::at(format!("Mixin not found: {name}"), pos));
@@ -473,7 +467,7 @@ impl<'a> Evaluator<'a> {
                 // then runs against the function's defining file.
                 let saved_member =
                     (pos.line > 0).then(|| self.enter_call(pos, length, &format!("{}()", callable.def.name)));
-                let saved_file = self.enter_origin_file(callable.origin.as_ref());
+                let saved_file = self.enter_origin_file(Some(&callable.origin));
                 let saved_scopes = std::mem::replace(&mut self.scopes, callable.env.clone());
                 let saved_var_spans = std::mem::replace(&mut self.var_spans, callable.env_spans.clone());
                 let saved_semi = std::mem::replace(&mut self.scope_semi_global, callable.env_semi.clone());
@@ -685,7 +679,6 @@ impl<'a> Evaluator<'a> {
                                 name: name.to_string(),
                                 user: None,
                                 module: None,
-                                origin: None, // built-in reference, no user body
                             })),
                             MemberKind::Variable => Value::Null,
                         };
@@ -731,8 +724,6 @@ impl<'a> Evaluator<'a> {
                             .mixin(&name)
                             .map(|m| Rc::clone(&m) as Rc<dyn std::any::Any>),
                         module: Some(Rc::clone(&module) as Rc<dyn std::any::Any>),
-                        // Cross-module capture resolves via the module's file.
-                        origin: None,
                     })),
                 };
                 (key, val)
@@ -935,10 +926,7 @@ impl<'a> Evaluator<'a> {
         let saved = self.enter_module(module);
         // The function's own defining file beats the module handed to us (a
         // multi-hop `@forward` can name another module).
-        let saved_file = match &func.origin {
-            Some(o) => self.enter_origin_file(Some(o)),
-            None => self.enter_module_file(module),
-        };
+        let saved_file = self.enter_origin_file(Some(&func.origin));
         let saved_scopes = std::mem::replace(&mut self.scopes, func.env.clone());
         let saved_var_spans = std::mem::replace(&mut self.var_spans, func.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());

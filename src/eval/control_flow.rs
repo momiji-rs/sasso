@@ -398,7 +398,7 @@ impl<'a> Evaluator<'a> {
         // The call frame records the CALL site (this file); the body then runs
         // against the function's defining file.
         let saved = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.def.name)));
-        let saved_file = self.enter_origin_file(func.origin.as_ref());
+        let saved_file = self.enter_origin_file(Some(&func.origin));
         let saved_scopes = std::mem::replace(&mut self.scopes, func.env.clone());
         let saved_var_spans = std::mem::replace(&mut self.var_spans, func.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());
@@ -659,12 +659,12 @@ impl<'a> Evaluator<'a> {
                 stmts,
                 params: content_params.clone(),
                 caller_env: Some(Box::new(snapshot)),
-                origin: self.current_mixin_origin(),
+                origin: Some(self.current_mixin_origin()),
             }
         });
         // The body runs against the mixin's defining file (the `@include`
         // frame, recorded by the caller, already names this file).
-        let saved_file = self.enter_origin_file(mixin.origin.as_ref());
+        let saved_file = self.enter_origin_file(Some(&mixin.origin));
         let saved_scopes = std::mem::replace(&mut self.scopes, mixin.env.clone());
         let saved_var_spans = std::mem::replace(&mut self.var_spans, mixin.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
@@ -722,17 +722,14 @@ impl<'a> Evaluator<'a> {
                 stmts,
                 params: content_params.clone(),
                 caller_env: Some(Box::new(snapshot)),
-                origin: self.current_mixin_origin(),
+                origin: Some(self.current_mixin_origin()),
             }
         });
         let saved = self.enter_module(module);
         // The mixin's own defining file beats the module handed to us: a
         // multi-hop `@forward` can name a module other than the file that
         // wrote the mixin.
-        let saved_file = match &mixin.origin {
-            Some(o) => self.enter_origin_file(Some(o)),
-            None => self.enter_module_file(module),
-        };
+        let saved_file = self.enter_origin_file(Some(&mixin.origin));
         let saved_scopes = std::mem::replace(&mut self.scopes, mixin.env.clone());
         let saved_var_spans = std::mem::replace(&mut self.var_spans, mixin.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
@@ -854,7 +851,7 @@ impl<'a> Evaluator<'a> {
                 stmts,
                 params: content_params.clone(),
                 caller_env: Some(Box::new(snapshot)),
-                origin: self.current_mixin_origin(),
+                origin: Some(self.current_mixin_origin()),
             }
         });
         // A mixin captured from another module runs in that module's
@@ -870,16 +867,8 @@ impl<'a> Evaluator<'a> {
         let saved_member_name = std::mem::replace(&mut self.member, format!("{}()", callable.def.name));
         // The body runs against the mixin's defining file (so its output and
         // diagnostics belong there, and a relative `meta.load-css` resolves
-        // against it): the callable's own capture, else the reference's
-        // `origin` snapshot, else the module it was captured from.
-        let saved_file = match (
-            callable.origin.as_ref().or(mixin.origin.as_ref()),
-            module.as_ref(),
-        ) {
-            (Some(o), _) => self.enter_origin_file(Some(o)),
-            (None, Some(m)) => self.enter_module_file(m),
-            (None, None) => None,
-        };
+        // against it): the callable's own capture, which every callable has.
+        let saved_file = self.enter_origin_file(Some(&callable.origin));
         let saved_scopes = std::mem::replace(&mut self.scopes, callable.env.clone());
         let saved_var_spans = std::mem::replace(&mut self.var_spans, callable.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, callable.env_semi.clone());

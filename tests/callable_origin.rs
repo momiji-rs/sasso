@@ -397,10 +397,11 @@ fn using_defaults_evaluate_where_the_block_was_written() {
 
 #[test]
 fn a_cross_module_capture_renders_its_own_module_source() {
-    // `meta.get-mixin($module:)` captures a mixin with NO origin snapshot: the
-    // body runs against the module's own file. Two modules can share a display
-    // name (`foo` here), so looking their source up by that name renders the
-    // snippet from whichever was registered last — B's line 2 instead of A's.
+    // A mixin captured from another module with `meta.get-mixin($module:)` and
+    // invoked through `meta.apply` runs against the file it was WRITTEN in,
+    // which it carries with it. Both modules here display as `foo`, so a
+    // snippet fetched by that display name would come from whichever was
+    // registered last — B's line 2 instead of A's.
     let imp = SameNameImporter;
     let opts = Options::default().with_importer(&imp).with_url("entry.scss");
     let src = "@use \"sass:meta\";\n@use \"a\";\n@use \"b\";\nx {\n  @include meta.apply(meta.get-mixin(\"ma\", $module: \"a\"));\n}\n";

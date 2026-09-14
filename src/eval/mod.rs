@@ -178,7 +178,11 @@ pub(crate) struct UserCallable {
     /// to it, and diagnostics show its name and source — whether it was
     /// reached through `@use`, a textual `@import`, or a first-class
     /// reference. `None` when there was no file context to capture.
-    pub origin: Option<crate::value::MixinOrigin>,
+    /// The file this callable was written in. Every capture records it (a
+    /// callable is only ever built by `capture_callable`), so the body always
+    /// has a file to run against — there is no "ask the module it came from"
+    /// fallback to get wrong.
+    pub origin: crate::value::MixinOrigin,
     pub env: Vec<Scope>,
     /// The variable-definition-span chain captured alongside `env`, frame for
     /// frame (dart closes over `_variableNodes` with the rest of the
@@ -1150,25 +1154,9 @@ struct Module {
     var_write_origins: HashMap<String, (Rc<Module>, String)>,
     fn_origins: HashMap<String, Rc<Module>>,
     mixin_origins: HashMap<String, Rc<Module>>,
-    /// The path/URL of this module's file, for diagnostic snippets pointing
-    /// into the module (empty when diagnostics are disabled / unknown).
-    diag_url: String,
-    /// The module's own source text, handed to a cross-module member
-    /// invocation directly. A display url is NOT an identity — two files a
-    /// custom importer resolves can share one, and dart's `prettyUri` is a
-    /// display name — so a lookup by that name could hand a snippet the wrong
-    /// file's text. Empty when neither diagnostics nor source maps are on.
-    source: Rc<str>,
     /// The identity of the original explicit configuration this module was
     /// first evaluated with (0 = none/implicit).
     config_origin: std::cell::Cell<usize>,
-    /// The directory of the module's resolved file (for relative URL
-    /// resolution while the module's own code runs); empty when unknown.
-    file_dir: String,
-    /// The module's canonical URL (the importer's dedup key), passed as the
-    /// importer's `containing_url` while the module's own code (incl. a
-    /// `meta.load-css` in one of its mixins) resolves relative URLs.
-    canonical: String,
     /// Whether this module's CSS has been emitted into the MAIN tree (an
     /// ordinary `@use`/`@forward` load). A module first loaded inside an
     /// `@import`/load-css clone has not — the next plain load emits it.
