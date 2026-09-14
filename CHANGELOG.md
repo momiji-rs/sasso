@@ -126,6 +126,20 @@ Conformance is tracked separately as a ratchet against the official
   trace. A file outside the tree whose relative spelling would be longer than
   its absolute path is shown absolute (dart's `prettyUri`); the entry stays
   as given. `WarnEvent::url` carries the same spelling.
+- **Source maps: every generated line of a line-spanning construct maps, a
+  comment maps from column 0, a rule maps to its selector's line, and
+  passed-through `@import`s and nested plain-CSS rules map at all.** dart-sass
+  keeps a mapping span open while it writes a construct, so each newline
+  inside a multi-line selector list, comment, at-rule prelude or re-indented
+  custom-property value adds an entry at the start of the new line that points
+  back at the construct; sasso mapped only the first line. A rule mapped to its
+  opening-brace line — a selector list written over several lines maps to its
+  first line (`node.selector.span.start`). A nested comment mapped after its
+  indentation where dart opens the span before indenting. A passed-through
+  plain-CSS `@import` (mapped to its URL token) and a nested rule of a loaded
+  `.css` file that uses CSS nesting (mapped to its selector) had no mapping.
+  Verified byte-for-byte against dart-sass 1.103.1; on the Lichess corpus,
+  bundles whose `mappings` are identical to dart's went from 2 to 148 of 148.
 - **Blank lines between top-level groups survive dropped placeholders.** An
   unextended placeholder rule with a declaration and an empty nested rule
   (`%video { width: 100%; > * {} }`) produced two invisible nodes, and

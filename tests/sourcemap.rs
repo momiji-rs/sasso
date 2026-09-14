@@ -618,9 +618,7 @@ fn dart_differential_source_positions_agree() {
     if !dart_enabled() {
         return;
     }
-    // Single-line selectors keep sasso's selector-line approximation exact
-    // (sasso maps a selector to its brace line; for single-line rules that IS
-    // the selector line). Each case exercises a different construct.
+    // Each case exercises a different construct.
     let cases = [
         ".a {\n  color: red;\n  .b { width: 10px; }\n}\n",
         "a {\n  color: red;\n}\nb {\n  width: 10px;\n}\n",
@@ -814,4 +812,115 @@ fn empty_stylesheet_has_no_sources() {
     let r = compile_with_source_map("// nothing\n$x: 1;\n", &Options::default().with_url("e.scss"))
         .expect("compile");
     assert_eq!(r.source_map.sources, Vec::<String>::new());
+}
+
+/// dart-sass keeps a source-map span open while it writes a construct, and every
+/// newline inside adds an entry at the start of the new generated line pointing
+/// at the same source position (`SourceMapBuffer.writeCharCode`: "so that
+/// source map consumers can identify the line-spanning mappings"). A rule maps
+/// to its selector's FIRST line (`node.selector.span.start`), not its brace
+/// line, and a comment's span opens before its indentation (column 0). Every
+/// `mappings` here is byte-identical to dart-sass 1.103.1's for the same input.
+#[test]
+fn line_spanning_constructs_map_every_generated_line_like_dart() {
+    let cases = [
+        // A multi-line selector list: both lines map to the selector's start.
+        ("a,\nb {\n  color: red;\n}\n", "AAAA;AAAA;EAEE"),
+        // The brace on its own line: the rule still maps to the selector line.
+        ("a,\nb\n{\n  color: red;\n}\n", "AAAA;AAAA;EAGE"),
+        // A nested multi-line comment maps from column 0, each line.
+        (
+            ".x {\n  /* one\n     two */\n  color: red;\n}\n",
+            "AAAA;AACE;AAAA;EAEA",
+        ),
+        (
+            "/* top\n   two */\n.a {\n  color: red;\n}\n",
+            "AAAA;AAAA;AAEA;EACE",
+        ),
+        // A re-indented multi-line custom property value.
+        (".x {\n  --v:\n    1px\n    2px;\n}\n", "AAAA;EACE;AAAA;AAAA"),
+        // A trailing comment maps after the joining space.
+        (".x {\n  a: 1; /* trailing */\n}\n", "AAAA;EACE"),
+        // A comment nested two levels deep.
+        (
+            "@media screen {\n  .a {\n    /* c */\n    color: red;\n  }\n}\n",
+            "AAAA;EACE;AACE;IACA",
+        ),
+        // A nested rule's multi-line selector.
+        (".p {\n  a,\n  b {\n    color: red;\n  }\n}\n", "AACE;AAAA;EAEE"),
+        // A bubbled `@media` re-emits the multi-line selector, mapped to the
+        // original rule's selector.
+        (
+            "a,\nb {\n  @media screen {\n    color: red;\n  }\n}\n",
+            "AAEE;EAFF;AAAA;IAGI",
+        ),
+    ];
+    for (src, expected) in cases {
+        let r = compile_with_source_map(src, &Options::default().with_url("in.scss")).expect("compile");
+        assert_eq!(
+            r.source_map.mappings, expected,
+            "mappings for {src:?}\ncss:\n{}",
+            r.css
+        );
+    }
+}
+
+/// A passed-through plain-CSS `@import` maps to its URL token — `url(` or the
+/// opening quote — at the start of the emitted rule (dart `visitCssImport`);
+/// nested in a rule it maps after the indentation. Byte-identical to dart-sass
+/// 1.103.1.
+#[test]
+fn css_import_passthrough_maps_to_its_url() {
+    let cases = [
+        ("@import \"k.css\";\n", "AAAQ"),
+        ("@import url(k.css);\n", "AAAQ"),
+        ("@import   \"k.css\";\n", "AAAU"),
+        ("@import \"k.css\" screen;\n", "AAAQ"),
+        ("@import \"k.css\", \"m.css\";\n", "AAAQ;AAAS"),
+        (".x {\n  @import \"k.css\";\n}\n", "AAAA;EACU"),
+        // Hoisted above the rules that preceded it, and mapped from there.
+        (
+            ".x {\n  a: 1;\n}\n@import \"k.css\";\n.y {\n  b: 2;\n}\n",
+            "AAGQ;AAHR;EACE;;;AAGF;EACE",
+        ),
+    ];
+    for (src, expected) in cases {
+        let r = compile_with_source_map(src, &Options::default().with_url("in.scss")).expect("compile");
+        assert_eq!(
+            r.source_map.mappings, expected,
+            "mappings for {src:?}\ncss:\n{}",
+            r.css
+        );
+    }
+}
+
+/// A loaded plain-CSS file that uses CSS nesting keeps its rules nested, and
+/// each nested rule maps to its selector — every line of a multi-line list —
+/// with the declarations inside mapped too (dart-sass 1.103.1:
+/// `AAAA;EACE;AAAA;IAEE;;EAEF;IACE`, sources `[nest.css]`).
+#[test]
+fn nested_plain_css_rules_map_to_their_selectors() {
+    let dir = std::env::temp_dir().join(format!("sasso_sm_cssnest_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("nest.css"),
+        ".a {\n  > .b,\n  .c {\n    x: 1;\n  }\n  &:hover {\n    y: 2;\n  }\n}\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let opts = Options::default()
+        .with_importer(&imp)
+        .with_url(&url)
+        .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
+    let r = compile_with_source_map("@import \"nest\";\n", &opts).expect("compile");
+    assert_eq!(
+        r.css,
+        ".a {\n  > .b,\n  .c {\n    x: 1;\n  }\n  &:hover {\n    y: 2;\n  }\n}"
+    );
+    assert_eq!(r.source_map.sources.len(), 1, "{:?}", r.source_map.sources);
+    assert!(r.source_map.sources[0].ends_with("nest.css"));
+    assert_eq!(r.source_map.mappings, "AAAA;EACE;AAAA;IAEE;;EAEF;IACE");
+    std::fs::remove_dir_all(&dir).ok();
 }

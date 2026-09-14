@@ -37,10 +37,12 @@ impl<'a> Evaluator<'a> {
                     if own.iter().any(|s| part_has_parent_ref(s)) {
                         let inner = self.css_body(&r.body)?;
                         if !inner.is_empty() {
+                            let lines = self.map_only_lines(r.selector_pos);
                             preserved.push(OutItem::NestedRule {
                                 selectors: own,
                                 linebreaks: own_lbs,
                                 items: inner,
+                                lines,
                             });
                         }
                     }
@@ -96,7 +98,8 @@ impl<'a> Evaluator<'a> {
                                 col: 0,
                                 start_col: (r.selector_pos.col as u32).saturating_sub(1),
                                 map_file: 0,
-                                map_line: 0,
+                                // Source-map: the selector's own line.
+                                map_line: r.selector_pos.line as u32,
                             }),
                             extend_base: usize::MAX,
                         });
@@ -115,11 +118,15 @@ impl<'a> Evaluator<'a> {
                 // dart-sass loading a `.css` stylesheet.
                 Stmt::Import { args, .. } => {
                     for arg in args {
-                        let text = match arg {
-                            ImportArg::Css { url, modifiers } => self.serialize_css_import(url, modifiers)?,
-                            ImportArg::Sass { path, .. } => format!("\"{path}\""),
+                        let (text, pos) = match arg {
+                            ImportArg::Css { url, modifiers, pos } => {
+                                (self.serialize_css_import(url, modifiers)?, *pos)
+                            }
+                            ImportArg::Sass { path, pos, .. } => (format!("\"{path}\""), *pos),
                         };
-                        sink.push_at_rule(OutNode::Raw(format!("@import {text};")));
+                        // Source-map: the rule maps to its URL token.
+                        let lines = self.map_only_lines(pos);
+                        sink.push_at_rule(OutNode::Raw(format!("@import {text};"), lines));
                     }
                 }
                 Stmt::Media { query, body, lines } => {
@@ -239,7 +246,8 @@ impl<'a> Evaluator<'a> {
                                 col: 0,
                                 start_col: (r.selector_pos.col as u32).saturating_sub(1),
                                 map_file: 0,
-                                map_line: 0,
+                                // Source-map: the selector's own line.
+                                map_line: r.selector_pos.line as u32,
                             }),
                             extend_base: usize::MAX,
                         });
@@ -357,11 +365,14 @@ impl<'a> Evaluator<'a> {
                 }
                 Stmt::Import { args, .. } => {
                     for arg in args {
-                        let text = match arg {
-                            ImportArg::Css { url, modifiers } => self.serialize_css_import(url, modifiers)?,
-                            ImportArg::Sass { path, .. } => format!("\"{path}\""),
+                        let (text, pos) = match arg {
+                            ImportArg::Css { url, modifiers, pos } => {
+                                (self.serialize_css_import(url, modifiers)?, *pos)
+                            }
+                            ImportArg::Sass { path, pos, .. } => (format!("\"{path}\""), *pos),
                         };
-                        out.push(OutNode::Raw(format!("@import {text};")));
+                        let lines = self.map_only_lines(pos);
+                        out.push(OutNode::Raw(format!("@import {text};"), lines));
                     }
                 }
                 _ => {}
@@ -528,10 +539,12 @@ impl<'a> Evaluator<'a> {
                 // An (recursively) empty nested rule is invisible (dart-sass
                 // skips childless rules when serializing).
                 if !inner.is_empty() {
+                    let lines = self.map_only_lines(r.selector_pos);
                     items.push(OutItem::NestedRule {
                         selectors,
                         linebreaks,
                         items: inner,
+                        lines,
                     });
                 }
             }
@@ -544,14 +557,17 @@ impl<'a> Evaluator<'a> {
             // verbatim, like a top-level one (see `exec_css`).
             Stmt::Import { args, .. } => {
                 for arg in args {
-                    let prelude = match arg {
-                        ImportArg::Css { url, modifiers } => self.serialize_css_import(url, modifiers)?,
-                        ImportArg::Sass { path, .. } => format!("\"{path}\""),
+                    let (prelude, pos) = match arg {
+                        ImportArg::Css { url, modifiers, pos } => {
+                            (self.serialize_css_import(url, modifiers)?, *pos)
+                        }
+                        ImportArg::Sass { path, pos, .. } => (format!("\"{path}\""), *pos),
                     };
+                    let lines = self.map_only_lines(pos);
                     items.push(OutItem::ChildlessAtRule {
                         name: "import".to_string(),
                         prelude,
-                        lines: SrcLines::default(),
+                        lines,
                     });
                 }
             }

@@ -48,6 +48,19 @@ pub(crate) struct SrcLines {
     pub map_line: u32,
 }
 
+impl SrcLines {
+    /// The 1-based source line a mapping for this construct points at:
+    /// [`Self::map_line`] when set (a rule maps its selector's first line,
+    /// which is not its brace line), else [`Self::start`].
+    pub(crate) fn mapped_line(&self) -> u32 {
+        if self.map_line != 0 {
+            self.map_line
+        } else {
+            self.start
+        }
+    }
+}
+
 /// A statement, valid at the top level or inside a rule body.
 pub(crate) enum Stmt {
     /// `$name: value [!default] [!global];`
@@ -271,10 +284,13 @@ pub(crate) enum ImportArg {
     /// A plain CSS `@import`: emitted as `@import <url> <modifiers>;`. The URL
     /// is a template (only `#{…}` interpolation resolves); the modifiers are
     /// parsed structurally so `supports(...)` and media queries re-serialize
-    /// canonically (dart-sass `tryImportModifiers`).
+    /// canonically (dart-sass `tryImportModifiers`). `pos` is the 1-based
+    /// position of the URL token (`url(` or the opening quote): a source map
+    /// maps the emitted rule there, as dart's `visitCssImport` does.
     Css {
         url: Vec<TplPiece>,
         modifiers: Vec<ImportModifier>,
+        pos: Pos,
     },
 }
 
