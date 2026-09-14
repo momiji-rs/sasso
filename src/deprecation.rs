@@ -67,7 +67,13 @@ impl Deprecation {
             id: "call-string",
             message: "Passing a string to call() is deprecated and will be illegal in Dart Sass 2.0.0."
                 .to_string(),
-            more_info: Some(format!("Recommendation: call(get-function(\"{name}\"))")),
+            // The name is a STRING in the suggested code, so it is serialized
+            // as one — dart writes `call(get-function('a\\"b'))` for a name
+            // that holds a quote.
+            more_info: Some(format!(
+                "Recommendation: call(get-function({}))",
+                crate::value::serialize_quoted(name)
+            )),
         }
     }
 

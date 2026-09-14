@@ -26,7 +26,7 @@ impl<'a> Evaluator<'a> {
             }
             // Fall back to a built-in re-exported by this module via @forward.
             // Its errors report against the call, like a direct built-in's.
-            match self.try_forwarded_builtin_call(&module, member, args, pos) {
+            match self.try_forwarded_builtin_call(&module, member, args, pos, length) {
                 Ok(Some(v)) => return Ok(v),
                 Ok(None) => {}
                 Err(e) => return Err(e.with_length_at(pos, length)),
@@ -43,8 +43,11 @@ impl<'a> Evaluator<'a> {
                 );
             }
         };
-        self.emit_call_deprecations(member, Some(ns), pos, length);
         let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
+        // Reported AFTER the arguments, so a deprecated call inside one warns
+        // first, as dart's does — and against the module's REAL name, which is
+        // not the namespace it was bound to (`@use "sass:meta" as m`).
+        self.emit_call_deprecations(member, Some(&module), pos, length);
         for v in &mut pos_args {
             *v = std::mem::replace(v, Value::Null).without_slash();
         }
@@ -466,7 +469,7 @@ impl<'a> Evaluator<'a> {
         // dart reports that against the INVOCATION. (A reference with no
         // position is an internal invocation — the user-overridden `calc()`
         // hook — which reports nothing.)
-        if f.user.is_none() && pos.line > 0 {
+        if f.user.is_none() && !f.css && pos.line > 0 {
             self.emit_call_deprecations(&f.name, None, pos, length);
         }
         // A captured user `@function`: bind the evaluated args and run its
@@ -902,6 +905,7 @@ impl<'a> Evaluator<'a> {
         member: &str,
         args: &[CallArg],
         pos: Pos,
+        length: usize,
     ) -> Result<Option<Value>, Error> {
         for fb in &module.forwarded_builtins {
             let bare = match &fb.prefix {
@@ -912,7 +916,14 @@ impl<'a> Evaluator<'a> {
                 None => member,
             };
             if fb.visible(bare) && crate::builtins::module_has_member(&fb.module, bare) {
+                // Reached through a `@forward "sass:…"`, the member is still
+                // that module's — and still deprecated if it is (`m.feature-
+                // exists(…)` after `@forward "sass:meta"`).
+                let owner = fb.module.clone();
+                let bare = bare.to_string();
                 let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
+                self.emit_call_deprecations(&bare, Some(&owner), pos, length);
+                let bare = bare.as_str();
                 for v in &mut pos_args {
                     *v = std::mem::replace(v, Value::Null).without_slash();
                 }

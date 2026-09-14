@@ -657,3 +657,65 @@ fn a_deprecated_function_reached_indirectly_still_warns() {
     assert_eq!(w.len(), 1, "{w:?}");
     assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
 }
+
+#[test]
+fn a_deprecation_follows_the_call_that_is_actually_made() {
+    // Whether a call is deprecated depends on what it RESOLVES to, not on how
+    // it is spelled. Every expectation here was measured against dart-sass
+    // 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_dep_resolve_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fwdmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| {
+        std::fs::write(&entry, src).unwrap();
+        let seen: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = std::rc::Rc::clone(&seen);
+        let opts = Options::default()
+            .with_importer(&imp)
+            .with_url(&url)
+            .with_warn_handler(std::rc::Rc::new(move |ev: &sasso::WarnEvent<'_>| {
+                sink.borrow_mut().push(ev.formatted.to_string());
+            }));
+        let _ = compile(src, &opts);
+        let out = seen.borrow().clone();
+        out
+    };
+    // A built-in module bound to an alias is still that module.
+    let w = run("@use \"sass:meta\" as m;\n.a { b: m.feature-exists(\"at-error\"); }\n");
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    // So is one reached through a `@forward`.
+    let w = run("@use \"fwdmeta\" as m;\n.a { b: m.feature-exists(\"at-error\"); }\n");
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    // A member exposed by `@use … as *` is that module's, not a global: the
+    // function's own deprecation fires, the global-built-in one does not.
+    let w = run("@use \"sass:meta\" as *;\n.a { b: feature-exists(\"at-error\"); }\n");
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    // A user `@function` wins over the global, so nothing is deprecated.
+    assert!(run("@function type-of($x) { @return 1; }\n.a { b: type-of(2); }\n").is_empty());
+    // A deprecated call INSIDE a deprecated one is reported first, as dart
+    // reports it.
+    let w = run("@use \"sass:meta\";\n.a { b: meta.feature-exists(inspect(\"at-error\")); }\n");
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(w[0].contains("Use meta.inspect instead."), "{}", w[0]);
+    assert!(w[1].contains("[feature-exists]"), "{}", w[1]);
+    // A plain-CSS reference invokes no Sass built-in.
+    assert!(run(
+        "@use \"sass:meta\";\n.a { b: meta.call(meta.get-function(\"percentage\", $css: true), 1); }\n"
+    )
+    .is_empty());
+    // `call()`'s recommendation quotes the name as Sass would write it.
+    let w = run("@function a\\\"b() { @return 1; }\n.a { b: call(\"a\\\\\\\"b\"); }\n");
+    assert!(
+        w.iter()
+            .any(|x| x.contains("Recommendation: call(get-function('a\\\\\"b'))")),
+        "{w:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

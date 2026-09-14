@@ -614,7 +614,23 @@ impl<'a> Evaluator<'a> {
                 // resolve against evaluator state and return early — and after
                 // the arguments, so a call inside one of them warns first, as
                 // dart's does.
-                self.emit_call_deprecations(name, None, *pos, *length);
+                //
+                // Two things mean no global built-in is reached: a host
+                // function of the same name overrides it, and a `@use
+                // "sass:…" as *` makes the bare name that module's MEMBER (so
+                // it is deprecated as a function, if at all, not as a global).
+                let host_override = !self.options.functions.is_empty() && {
+                    let norm = crate::host_fn::normalize_name(name);
+                    self.options.functions.iter().any(|f| f.name == norm)
+                };
+                if !host_override {
+                    let via_star = self
+                        .star_modules
+                        .iter()
+                        .find(|m| crate::builtins::module_has_member(m, name))
+                        .cloned();
+                    self.emit_call_deprecations(name, via_star.as_deref(), *pos, *length);
+                }
                 // The global (deprecated) aliases of the `sass:meta` existence
                 // predicates resolve against the evaluator state, not the
                 // value-only builtin layer. A user-defined function of the same
