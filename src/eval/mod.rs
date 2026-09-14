@@ -410,6 +410,10 @@ pub(crate) enum OutItem {
     /// flattened. Only produced in plain-CSS mode (a loaded `.css` file).
     NestedRule {
         selectors: Vec<String>,
+        /// Per selector, whether it started on its own line in the source:
+        /// dart keeps a nested plain-CSS rule's selector list as written
+        /// (`e,\n  f {`), like a top-level rule's (`OutNode::Rule`).
+        linebreaks: Vec<bool>,
         items: Vec<OutItem>,
     },
     /// A block at-rule (`@media`, `@supports`, unknown) nested inside an
@@ -549,9 +553,17 @@ impl Sink<'_> {
                 }
                 // A plain-CSS nested rule reaching an at-root sink becomes a
                 // top-level rule carrying its items.
-                OutItem::NestedRule { selectors, items } => {
-                    body.push(OutNode::plain_rule(selectors, items, SrcLines::default()))
-                }
+                OutItem::NestedRule {
+                    selectors,
+                    linebreaks,
+                    items,
+                } => body.push(OutNode::Rule {
+                    selectors: RuleSelectors::Raw(selectors),
+                    linebreaks,
+                    items,
+                    lines: SrcLines::default(),
+                    extend_base: usize::MAX,
+                }),
                 // Likewise a plain-CSS nested at-rule becomes a top-level one,
                 // its items wrapped as bare at-rule children.
                 OutItem::NestedAtRule { name, prelude, items } => body.push(OutNode::AtRule {
@@ -576,9 +588,17 @@ impl Sink<'_> {
                                 value_span,
                             },
                             OutItem::Comment(text, lines) => OutNode::Comment(text, lines),
-                            OutItem::NestedRule { selectors, items } => {
-                                OutNode::plain_rule(selectors, items, SrcLines::default())
-                            }
+                            OutItem::NestedRule {
+                                selectors,
+                                linebreaks,
+                                items,
+                            } => OutNode::Rule {
+                                selectors: RuleSelectors::Raw(selectors),
+                                linebreaks,
+                                items,
+                                lines: SrcLines::default(),
+                                extend_base: usize::MAX,
+                            },
                             OutItem::ChildlessAtRule { name, prelude, lines } => {
                                 OutNode::childless_at_rule(name, prelude, lines)
                             }
@@ -3139,14 +3159,18 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
         match n {
             OutNode::Rule {
                 selectors,
-                linebreaks: _,
+                linebreaks,
                 items,
                 lines,
                 extend_base,
             } => {
                 let selectors = selectors.into_strings();
                 if selectors.iter().any(|s| part_has_parent_ref(s)) {
-                    preserved.push(OutItem::NestedRule { selectors, items });
+                    preserved.push(OutItem::NestedRule {
+                        selectors,
+                        linebreaks,
+                        items,
+                    });
                 } else {
                     rest.push(OutNode::Rule {
                         selectors: RuleSelectors::Raw(
@@ -4603,9 +4627,13 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
             }),
             OutNode::Comment(t, lines) => items.push(OutItem::Comment(t, lines)),
             OutNode::Rule {
-                selectors, items: ri, ..
+                selectors,
+                linebreaks,
+                items: ri,
+                ..
             } => items.push(OutItem::NestedRule {
                 selectors: selectors.into_strings(),
+                linebreaks,
                 items: ri,
             }),
             OutNode::AtRule {

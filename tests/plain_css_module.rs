@@ -78,3 +78,39 @@ fn a_loaded_files_charset_is_dropped() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn nested_rules_keep_their_selector_lines() {
+    // dart keeps a plain-CSS file's selector lists as written — a complex
+    // selector that started on its own line still does, re-indented, and
+    // runs of spaces collapse — for nested rules just like top-level ones
+    // (the Lichess `recap` bundle, via the swiper stylesheet).
+    let dir = scratch("sel");
+    std::fs::write(
+        dir.join("_sel.css"),
+        "a,\nb {\n  x: 1;\n}\nc, d {\n  x: 2;\n}\n.p {\n  q: 3;\n  e,\n  f {\n    y: 1;\n  }\n  g, h {\n    y: 2;\n  }\n  i,   j,\n    k {\n    y: 3;\n  }\n}\n",
+    )
+    .unwrap();
+    let expected = "a,\nb {\n  x: 1;\n}\n\nc, d {\n  x: 2;\n}\n\n.p {\n  q: 3;\n  e,\n  f {\n    y: 1;\n  }\n  g, h {\n    y: 2;\n  }\n  i, j,\n  k {\n    y: 3;\n  }\n}";
+    assert_eq!(compile_in(&dir, "use.scss", "@use \"sel\";\n"), expected);
+    assert_eq!(compile_in(&dir, "imp.scss", "@import \"sel\";\n"), expected);
+    // A `&` part is no different: dart keeps the line it was written on
+    // (`.child,\n  & {`), whether the module stands alone or is imported
+    // under a Sass parent (its own top level joins the parent; the nested
+    // rules stay native).
+    std::fs::write(
+        dir.join("_amp.css"),
+        ".p {\n  .child,\n  & {\n    y: 1;\n  }\n  &,\n  .kid {\n    y: 2;\n  }\n  .a, &.b,\n  .c {\n    y: 3;\n  }\n}\n",
+    )
+    .unwrap();
+    let body = "\n  .child,\n  & {\n    y: 1;\n  }\n  &,\n  .kid {\n    y: 2;\n  }\n  .a, &.b,\n  .c {\n    y: 3;\n  }\n}";
+    assert_eq!(
+        compile_in(&dir, "useamp.scss", "@use \"amp\";\n"),
+        format!(".p {{{body}")
+    );
+    assert_eq!(
+        compile_in(&dir, "nestamp.scss", "x {\n  @import \"amp\";\n}\n"),
+        format!("x .p {{{body}")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -221,35 +221,7 @@ fn emit_node_expanded(
             out.push_str(indent);
             // Source-map: the selector list's first character.
             record(out, *lines, collector);
-            // A complex selector flagged with a source line break starts on its
-            // own line (aligned to the rule's indent); others are `, `-joined.
-            for (i, sel) in selectors.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                    if linebreaks.get(i).copied().unwrap_or(false) {
-                        out.push('\n');
-                        out.push_str(indent);
-                    } else {
-                        out.push(' ');
-                    }
-                }
-                // A line break INSIDE the selector (a pseudo arg's preserved
-                // source line) continues at the rule's indent, like dart's
-                // _writeIndentation after every line feed.
-                if sel.contains('\n') && !indent.is_empty() {
-                    let mut first = true;
-                    for line in sel.split('\n') {
-                        if !first {
-                            out.push('\n');
-                            out.push_str(indent);
-                        }
-                        out.push_str(line);
-                        first = false;
-                    }
-                } else {
-                    out.push_str(sel);
-                }
-            }
+            write_selector_list(out, &selectors, linebreaks, indent);
             out.push_str(" {\n");
             let mut inner = block_start(*lines);
             let mut joined = false;
@@ -424,9 +396,13 @@ fn emit_item_expanded(
             out.push_str(";\n");
             *prev = *lines;
         }
-        OutItem::NestedRule { selectors, items } => {
+        OutItem::NestedRule {
+            selectors,
+            linebreaks,
+            items,
+        } => {
             out.push_str(indent);
-            out.push_str(&selectors.join(", "));
+            write_selector_list(out, selectors, linebreaks, indent);
             out.push_str(" {\n");
             let mut inner = SrcLines::default();
             let mut joined = false;
@@ -657,7 +633,7 @@ fn compressed_nested_rule(selectors: &[String], items: &[OutItem]) -> String {
             OutItem::Comment(..) => None,
             OutItem::ChildlessAtRule { name, prelude, .. } if prelude.is_empty() => Some(format!("@{name}")),
             OutItem::ChildlessAtRule { name, prelude, .. } => Some(format!("@{name} {prelude}")),
-            OutItem::NestedRule { selectors, items } => Some(compressed_nested_rule(selectors, items)),
+            OutItem::NestedRule { selectors, items, .. } => Some(compressed_nested_rule(selectors, items)),
             OutItem::NestedAtRule { name, prelude, items } => {
                 Some(compressed_nested_at_rule(name, prelude, items))
             }
@@ -773,7 +749,7 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
                             value_span: VarSpan::default(),
                         })
                     }
-                    OutItem::NestedRule { selectors, items } => Some(Rendered {
+                    OutItem::NestedRule { selectors, items, .. } => Some(Rendered {
                         head: compressed_nested_rule(selectors, items),
                         tail: String::new(),
                         lines: None,
@@ -896,5 +872,37 @@ fn push_comment_text(out: &mut String, text: &str, indent: &str, start_col: usiz
         let ind = line.len() - line.trim_start_matches([' ', '\t']).len();
         out.push_str(indent);
         out.push_str(&line[strip.min(ind)..]);
+    }
+}
+
+/// Write a rule's selector list in expanded style: a complex selector flagged
+/// with a source line break starts on its own line (aligned to the rule's
+/// indent), the others are `, `-joined; a line break INSIDE a selector (a
+/// pseudo arg's preserved source line) continues at the rule's indent, like
+/// dart's `_writeIndentation` after every line feed.
+fn write_selector_list(out: &mut String, selectors: &[String], linebreaks: &[bool], indent: &str) {
+    for (i, sel) in selectors.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+            if linebreaks.get(i).copied().unwrap_or(false) {
+                out.push('\n');
+                out.push_str(indent);
+            } else {
+                out.push(' ');
+            }
+        }
+        if sel.contains('\n') && !indent.is_empty() {
+            let mut first = true;
+            for line in sel.split('\n') {
+                if !first {
+                    out.push('\n');
+                    out.push_str(indent);
+                }
+                out.push_str(line);
+                first = false;
+            }
+        } else {
+            out.push_str(sel);
+        }
     }
 }

@@ -33,12 +33,13 @@ impl<'a> Evaluator<'a> {
             let mut preserved: Vec<OutItem> = Vec::new();
             for stmt in stmts {
                 if let Stmt::Rule(r) = stmt {
-                    let (own, _) = self.css_selectors(&r.selector, true)?;
+                    let (own, own_lbs) = self.css_selectors(&r.selector, true)?;
                     if own.iter().any(|s| part_has_parent_ref(s)) {
                         let inner = self.css_body(&r.body)?;
                         if !inner.is_empty() {
                             preserved.push(OutItem::NestedRule {
                                 selectors: own,
+                                linebreaks: own_lbs,
                                 items: inner,
                             });
                         }
@@ -522,13 +523,14 @@ impl<'a> Evaluator<'a> {
                 });
             }
             Stmt::Rule(r) => {
-                let (selectors, _) = self.css_selectors(&r.selector, false)?;
+                let (selectors, linebreaks) = self.css_selectors(&r.selector, false)?;
                 let inner = self.css_body(&r.body)?;
                 // An (recursively) empty nested rule is invisible (dart-sass
                 // skips childless rules when serializing).
                 if !inner.is_empty() {
                     items.push(OutItem::NestedRule {
                         selectors,
+                        linebreaks,
                         items: inner,
                     });
                 }

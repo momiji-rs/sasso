@@ -132,6 +132,12 @@ Conformance is tracked separately as a ratchet against the official
   (the Lichess `bits.cms` and `bits.ublog.form` bundles, via a vendored
   editor theme). The output's own `@charset "UTF-8";` is still derived from
   its content.
+- **Nested rules in a loaded plain-CSS file keep their selector lines.** A
+  `.css` file's nested rule whose selectors were written one per line
+  (`.swiper-slide,\n  .swiper-cube-shadow {`) was emitted on one line;
+  dart-sass keeps the source line structure for nested rules as it already
+  did for top-level ones (the Lichess `recap` bundle, via the swiper
+  stylesheet).
 - **`@import` deprecation warnings fire when a file is parsed**, as in
   dart-sass, not when each rule is evaluated: all of a file's import
   deprecations now precede anything its body prints (its `@warn`s, the
