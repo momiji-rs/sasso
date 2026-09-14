@@ -1,6 +1,6 @@
 use super::*;
 
-/// The evaluator file-context fields swapped by [`Evaluator::enter_module_file`]
+/// The evaluator file-context fields swapped by [`Evaluator::enter_origin_file`]
 /// and restored by [`Evaluator::leave_module_file`]:
 /// `(current_url, current_source, current_file_dir, current_canonical)`.
 type SavedModuleFile = (String, Rc<str>, Option<String>, Option<CanonicalUrl>);
@@ -938,24 +938,19 @@ impl<'a> Evaluator<'a> {
                 pos,
             ));
         }
-        // Register the module's source under a diagnostic display URL so a
-        // snippet/frame that points into this file renders against its text.
+        // The display URL a snippet/frame shows for this file.
         let diag_url = self.module_diag_url(url, &key);
-        // One shared copy of the module's text: for the diagnostic table, the
-        // source-map table, and the module's own evaluation context (handed
-        // down directly — a display-url lookup could return the loader's text
-        // when two custom-importer files share a display name). Nothing reads
-        // it when diagnostics and source maps are both off, so skip the copy.
+        // One shared copy of the module's text: for the source-map table, for
+        // the module's own evaluation context, and — through that context —
+        // for the `MixinOrigin` every callable defined in the file captures,
+        // which is what a later cross-module invocation renders against.
+        // Nothing reads it when diagnostics and source maps are both off, so
+        // skip the copy.
         let text: Rc<str> = if self.diag_enabled() || self.options.source_map {
             Rc::from(src.as_str())
         } else {
             Rc::from("")
         };
-        if self.diag_enabled() {
-            self.file_sources
-                .borrow_mut()
-                .insert(diag_url.clone(), Rc::clone(&text));
-        }
         if self.options.source_map {
             self.file_texts.insert(key.clone(), Rc::clone(&text));
         }
@@ -1298,10 +1293,7 @@ impl<'a> Evaluator<'a> {
                 var_write_origins,
                 fn_origins,
                 mixin_origins,
-                diag_url: diag_url.to_string(),
                 config_origin: std::cell::Cell::new(self.pending_config_id),
-                file_dir: dirname_of(key).unwrap_or_default(),
-                canonical: key.to_string(),
                 emitted_main: std::cell::Cell::new(false),
                 css: Vec::new(),
                 phantom_css: self
@@ -1582,42 +1574,6 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
-    /// Swap in `module`'s source file for diagnostics during a cross-module
-    /// member invocation. Returns the previous `(url, source)` to restore.
-    pub(super) fn enter_module_file(&mut self, module: &Rc<Module>) -> Option<SavedModuleFile> {
-        self.enter_file_context(&module.diag_url, &module.file_dir, &module.canonical)
-    }
-
-    /// Swap the current diagnostic + resolution file context to the given file,
-    /// returning the displaced state for [`Self::leave_module_file`]. Shared by
-    /// [`Self::enter_module_file`] (cross-module member invocation) and the
-    /// first-class-mixin path (which restores a captured [`crate::value::MixinOrigin`]
-    /// rather than a `Module`). A relative `meta.load-css` inside the body then
-    /// resolves against this file, not the caller's.
-    pub(super) fn enter_file_context(
-        &mut self,
-        diag_url: &str,
-        file_dir: &str,
-        canonical: &str,
-    ) -> Option<SavedModuleFile> {
-        // An empty `diag_url` is a real file too: the entry of a compile
-        // without `Options::url` (its source is registered under `""`).
-        let source = self.source_for(diag_url);
-        let dir = if file_dir.is_empty() {
-            None
-        } else {
-            Some(file_dir.to_string())
-        };
-        self.current_url_stamp = 0;
-        Some((
-            std::mem::replace(&mut self.current_url, diag_url.to_string()),
-            std::mem::replace(&mut self.current_source, source),
-            std::mem::replace(&mut self.current_file_dir, dir),
-            self.current_canonical
-                .replace(CanonicalUrl::new(canonical.to_string())),
-        ))
-    }
-
     /// Enter the file a callable or content block was written in, for the
     /// duration of its body (dart evaluates a mixin, function, or `@content`
     /// block where it was written: its output maps to that file, and its
@@ -1633,9 +1589,8 @@ impl<'a> Evaluator<'a> {
         if o.diag_url == self.current_url && o.canonical == self.current_path() {
             return None;
         }
-        // Like `enter_file_context`, but the source comes from the origin
-        // itself (see `MixinOrigin::source`) rather than from a display-url
-        // lookup.
+        // The source comes from the origin ITSELF (see `MixinOrigin::source`):
+        // a display url is a name two files can share, never an identity.
         let dir = (!o.file_dir.is_empty()).then(|| o.file_dir.clone());
         self.current_url_stamp = 0;
         Some((
@@ -1648,15 +1603,15 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Snapshot the current file context as a [`crate::value::MixinOrigin`]:
-    /// the defining file of a callable being captured, of a content block at
-    /// its `@include`, or of a same-module first-class mixin (so a later
-    /// `meta.apply` from another file still resolves its relative loads
-    /// here). Always `Some`: an entry compiled without `Options::url` has an
-    /// empty display url and canonical, and a callable it defines must still
-    /// switch back to it (so its diagnostics report the entry's empty
-    /// `url`/`path`) when invoked from inside a loaded file.
-    pub(super) fn current_mixin_origin(&self) -> Option<crate::value::MixinOrigin> {
-        Some(crate::value::MixinOrigin {
+    /// the defining file of a callable being captured, or of a content block
+    /// at its `@include` (so a later `meta.apply` from another file still
+    /// resolves its relative loads here). There is always a context to
+    /// snapshot — an entry compiled without `Options::url` has an empty
+    /// display url and canonical, and a callable it defines must still switch
+    /// back to it (so its diagnostics report the entry's empty `url`/`path`)
+    /// when invoked from inside a loaded file.
+    pub(super) fn current_mixin_origin(&self) -> crate::value::MixinOrigin {
+        crate::value::MixinOrigin {
             source: Rc::clone(&self.current_source),
             diag_url: self.current_url.clone(),
             file_dir: self.current_file_dir.clone().unwrap_or_default(),
@@ -1665,10 +1620,10 @@ impl<'a> Evaluator<'a> {
                 .as_ref()
                 .map(|c| c.as_str().to_string())
                 .unwrap_or_default(),
-        })
+        }
     }
 
-    /// Restore the file swapped out by [`Self::enter_module_file`].
+    /// Restore the file swapped out by [`Self::enter_origin_file`].
     pub(super) fn leave_module_file(&mut self, saved: Option<SavedModuleFile>) {
         if let Some((url, source, dir, canonical)) = saved {
             self.current_url = url;

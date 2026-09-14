@@ -121,19 +121,13 @@ pub(crate) struct SassMixin {
     /// another `@use`d module (so its body runs in that module's environment).
     /// `None` for a same-module reference. Type-erased to break the cycle.
     pub module: Option<std::rc::Rc<dyn std::any::Any>>,
-    /// The file context the mixin was captured in, used only for a same-module
-    /// (`module: None`) first-class capture: when such a reference is applied
-    /// via `meta.apply` from another file, a relative `meta.load-css` in its
-    /// body must still resolve against the file that defined the mixin, not the
-    /// caller. (The cross-module case carries its `module` and resolves via the
-    /// module's own file context instead.) Held as plain strings to keep
-    /// `value` free of `eval`/`ast` types.
-    pub origin: Option<MixinOrigin>,
 }
 
-/// The defining-file context captured with a same-module first-class mixin —
-/// the fields [`crate::eval::Evaluator::enter_module_file`] would otherwise pull
-/// from a `Module`, so a `meta.apply`'d body resolves relative loads correctly.
+/// The file a callable was written in, captured with it. Its body runs against
+/// this file: diagnostics name it, output maps to it, and a relative
+/// `meta.load-css` inside it resolves against its directory — wherever the
+/// callable is later called from. Held as plain strings (plus the text itself)
+/// to keep `value` free of `eval`/`ast` types.
 #[derive(Clone)]
 pub(crate) struct MixinOrigin {
     /// The diagnostic display URL of the defining file (e.g. `src/_mod.scss`).
