@@ -51,7 +51,7 @@ impl<'a> Evaluator<'a> {
         }
         let resolved = match expr {
             Expr::Var { name, .. } => self.lookup_var_span(name),
-            Expr::NsVar { module, name } => self.module_var_span(module, name),
+            Expr::NsVar { module, name, .. } => self.module_var_span(module, name),
             _ => None,
         };
         match resolved {

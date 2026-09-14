@@ -146,10 +146,6 @@ fn an_unquoted_import_url_runs_to_the_comma() {
     // dart's `SassParser.importArgument` reads to the next top-level comma,
     // spaces included: `@import foo screen` is ONE url named `foo screen`
     // (dart carets all ten characters), not a url plus a media modifier.
-    // NOTE: the POSITION and the url token match dart; the missing-import
-    // MESSAGE does not ("…to import: foo screen" against dart's bare "…to
-    // import."). That wording gap is general — `.scss` has it too — and is
-    // tracked separately, so this test asserts what is actually identical.
     let dir = scratch("comma");
     let src = "@import foo screen\n";
     let entry = dir.join("e.sass");
@@ -162,10 +158,12 @@ fn an_unquoted_import_url_runs_to_the_comma() {
         .with_url(&url)
         .with_warn_handler(Rc::new(|_: &WarnEvent<'_>| {}));
     let e = compile(src, &opts).expect_err("expected an error");
-    // The whole token is the url, so that is what cannot be found. (dart also
-    // carets it at 1:9; sasso's missing-import error carries no span yet —
-    // a general gap, in `.scss` as much as here.)
-    assert!(e.message.contains("foo screen"), "{}", e.message);
+    // The whole token is the url, so that is what cannot be found: dart carets
+    // all ten characters at 1:9 and names none of them in the message.
+    assert_eq!(e.message, "Can't find stylesheet to import.");
+    assert_eq!((e.line, e.col), (1, 9));
+    let block = e.to_string();
+    assert!(block.contains("\u{2502}         ^^^^^^^^^^\n"), "{block}");
     // An escaped `url(` is still a url FUNCTION, so the import is plain CSS —
     // and the name is re-emitted in dart's canonical lowercase spelling,
     // however it was written. (A vendor-prefixed name is NOT a url token here:

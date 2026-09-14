@@ -313,7 +313,11 @@ impl<'a> Evaluator<'a> {
                 let sp = self.expression_node(def, param.default_pos);
                 (v, sp)
             } else {
-                return Err(Error::unpositioned(format!("Missing argument ${}.", param.name)));
+                // dart reports a missing argument against the INVOCATION (its
+                // primary span; the declaration is a second one sasso does not
+                // render yet). Every call path pushes that frame before
+                // binding, so it is the innermost one.
+                return Err(self.error_at_call(format!("Missing argument ${}.", param.name)));
             };
             if let Some(sc) = self.scopes.last() {
                 sc.borrow_mut().insert(param.name.clone(), val);
@@ -582,6 +586,10 @@ impl<'a> Evaluator<'a> {
         content_params: Option<Rc<ParamList>>,
         module: Option<&str>,
         pos: Pos,
+        // The whole statement's byte length — an error about the RULE (this
+        // mixin does not exist, that namespace does not exist) carets all of
+        // it, content block included, as dart's `span` does.
+        full_length: usize,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -605,23 +613,27 @@ impl<'a> Evaluator<'a> {
         if let Some(ns) = module {
             if let Some(target) = self.used_user_modules.get(ns).cloned() {
                 if is_private_member(name) {
-                    return Err(Error::unpositioned(
-                        "Private members can't be accessed from outside their modules.",
-                    ));
+                    // dart omits private members from a module's public view,
+                    // so a reference to one is simply not found. (A LITERAL
+                    // `ns.-name` never reaches here — the parser rejects it
+                    // with dart's privacy error; what does is an ESCAPED
+                    // spelling, which dart treats as an ordinary member.)
+                    return Err(Error::at("Undefined mixin.", pos).with_length(full_length));
                 }
                 let mixin = target
                     .mixin(name)
-                    .ok_or_else(|| Error::unpositioned("Undefined mixin."))?;
+                    .ok_or_else(|| Error::at("Undefined mixin.", pos).with_length(full_length))?;
                 // A forwarded mixin runs in its DEFINING module's environment.
                 let exec = target.mixin_origin(name).unwrap_or(target);
                 return self.run_module_mixin(&exec, &mixin, args, content, content_params, parents, sink);
             }
             if !self.used_modules.contains_key(ns) {
-                return Err(Error::unpositioned(format!(
-                    "There is no module with the namespace \"{ns}\"."
-                )));
+                return Err(
+                    Error::at(format!("There is no module with the namespace \"{ns}\"."), pos)
+                        .with_length(full_length),
+                );
             }
-            return Err(Error::unpositioned("Undefined mixin."));
+            return Err(Error::at("Undefined mixin.", pos).with_length(full_length));
         }
         // A bare `@include` may resolve a user module mixin exposed unprefixed
         // via `@use … as *`.
@@ -643,7 +655,7 @@ impl<'a> Evaluator<'a> {
         }
         let mixin = self
             .lookup_mixin(name)
-            .ok_or_else(|| Error::unpositioned(format!("Undefined mixin {name}.")))?;
+            .ok_or_else(|| Error::at("Undefined mixin.", pos).with_length(full_length))?;
         // dart-sass: passing a content block to a mixin that never uses
         // `@content` is an error, even when the block is empty.
         if content.is_some() && !body_uses_content(&mixin.def.body) {

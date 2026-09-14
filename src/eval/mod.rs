@@ -1863,6 +1863,37 @@ impl<'a> Evaluator<'a> {
     /// frame at `call_pos` (caret length `call_len`) attributed to the *current*
     /// member, then make `new_member` the current member. Returns the previous
     /// member name, to be restored by [`Self::leave_call`].
+    /// An error against the innermost CALL SITE — the frame a caller pushed
+    /// before it bound arguments or ran a body. Unpositioned when there is no
+    /// call in progress (a top-level statement raised it).
+    ///
+    /// The call site is in the CALLER's file, which by now may not be the
+    /// current one (a cross-file call has already switched context), so the
+    /// block is rendered here, against that frame's own text.
+    pub(super) fn error_at_call(&self, message: impl Into<String>) -> Error {
+        let Some(frame) = self.call_stack.last() else {
+            return Error::unpositioned(message);
+        };
+        let mut e = Error::at(message, frame.pos).with_length(frame.length);
+        if self.diag_enabled() {
+            // The innermost trace line names the CALLEE at the call's position
+            // (dart: `file 2:9  f()`), and reads its snippet from the caller's
+            // file; the frames under it are the stack as it stands.
+            let mut frames = Vec::with_capacity(self.call_stack.len() + 1);
+            frames.push(DiagFrame {
+                url: frame.url.clone(),
+                pos: frame.pos,
+                member: self.member.clone(),
+                length: frame.length,
+                content: false,
+                source: Rc::clone(&frame.source),
+            });
+            frames.extend(self.call_stack.iter().rev().cloned());
+            e.rendered = Some(self.render_error_at(&e, &frames[0], &frames));
+        }
+        e
+    }
+
     fn enter_call(&mut self, call_pos: Pos, call_len: usize, new_member: &str) -> String {
         self.push_frame(call_pos, call_len, new_member, false)
     }
@@ -2184,6 +2215,7 @@ impl<'a> Evaluator<'a> {
                     module,
                     pos,
                     length,
+                    full_length,
                 } => {
                     // Push a diagnostic call frame so an error/warning raised in
                     // the mixin body unwinds through this `@include` call site.
@@ -2195,11 +2227,19 @@ impl<'a> Evaluator<'a> {
                         content_params.clone(),
                         module.as_deref(),
                         *pos,
+                        *full_length,
                         parents,
                         sink,
                     );
                     self.leave_call(saved);
-                    r?;
+                    // An error the include itself reported AT this position —
+                    // a content block the mixin does not take, a
+                    // `meta.load-css` that found nothing — takes the call's
+                    // span. An error from the mixin BODY keeps its own context
+                    // (dart reports it against the failing construct), and an
+                    // argument error is already anchored to this call by
+                    // `error_at_call`.
+                    r.map_err(|e| e.with_length_at(*pos, *length))?;
                 }
                 Stmt::Use {
                     url,
@@ -2207,7 +2247,10 @@ impl<'a> Evaluator<'a> {
                     star,
                     config,
                     pos,
-                } => self.exec_use(url, namespace.as_deref(), *star, config, *pos, parents, sink)?,
+                    length,
+                } => self
+                    .exec_use(url, namespace.as_deref(), *star, config, *pos, parents, sink)
+                    .map_err(|e| e.with_length_at(*pos, *length))?,
                 Stmt::Forward {
                     url,
                     prefix,
@@ -2215,7 +2258,10 @@ impl<'a> Evaluator<'a> {
                     hide,
                     config,
                     pos,
-                } => self.exec_forward(url, prefix.as_deref(), show, hide, config, *pos, parents, sink)?,
+                    length,
+                } => self
+                    .exec_forward(url, prefix.as_deref(), show, hide, config, *pos, parents, sink)
+                    .map_err(|e| e.with_length_at(*pos, *length))?,
                 Stmt::Content {
                     args: content_args,
                     pos: content_pos,
@@ -3063,9 +3109,11 @@ impl<'a> Evaluator<'a> {
                             }
                         }
                         None => {
-                            return Err(Error::unpositioned(format!(
-                                "Can't find stylesheet to import: {path}"
-                            )));
+                            // dart names no url — the span points at it, all of
+                            // it (`@import foo screen` carets ten characters).
+                            return Err(
+                                Error::at("Can't find stylesheet to import.", *pos).with_length(*length)
+                            );
                         }
                     }
                 }

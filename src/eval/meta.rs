@@ -14,10 +14,9 @@ impl<'a> Evaluator<'a> {
         // A user module bound to this namespace.
         if let Some(module) = self.used_user_modules.get(ns).cloned() {
             if is_private_member(member) {
-                return Err(Error::at(
-                    "Private members can't be accessed from outside their modules.".to_string(),
-                    pos,
-                ));
+                // Not part of the module's public view: dart reports it missing
+                // (a literal `ns.-name` is the parser's privacy error instead).
+                return Err(Error::at("Undefined function.".to_string(), pos).with_length(length));
             }
             if let Some(func) = module.function(member) {
                 // A forwarded function executes in its DEFINING module's
@@ -26,19 +25,22 @@ impl<'a> Evaluator<'a> {
                 return self.call_user_module_function(&exec, &func, args, Some((pos, length)));
             }
             // Fall back to a built-in re-exported by this module via @forward.
-            if let Some(v) = self.try_forwarded_builtin_call(&module, member, args, pos)? {
-                return Ok(v);
+            // Its errors report against the call, like a direct built-in's.
+            match self.try_forwarded_builtin_call(&module, member, args, pos) {
+                Ok(Some(v)) => return Ok(v),
+                Ok(None) => {}
+                Err(e) => return Err(e.with_length_at(pos, length)),
             }
-            return Err(Error::at("Undefined function.".to_string(), pos));
+            return Err(Error::at("Undefined function.".to_string(), pos).with_length(length));
         }
         // A built-in module bound to this namespace.
         let module = match self.used_modules.get(ns) {
             Some(m) => m.clone(),
             None => {
-                return Err(Error::at(
-                    format!("There is no module with the namespace \"{ns}\"."),
-                    pos,
-                ));
+                return Err(
+                    Error::at(format!("There is no module with the namespace \"{ns}\"."), pos)
+                        .with_length(length),
+                );
             }
         };
         let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
@@ -56,7 +58,9 @@ impl<'a> Evaluator<'a> {
             }
         }
         // Call results are slash-free (dart `withoutSlash()` on every call).
-        crate::builtins::call_module(&module, member, &pos_args, &named, pos).map(Value::without_slash)
+        crate::builtins::call_module(&module, member, &pos_args, &named, pos)
+            .map_err(|e| e.with_length_at(pos, length))
+            .map(Value::without_slash)
     }
 
     /// Handle a `sass:meta` member that depends on the evaluator's state
@@ -71,7 +75,9 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
         length: usize,
     ) -> Option<Result<Value, Error>> {
-        match member {
+        // Whatever these report, dart carets the CALL that reported it.
+        let sized = |r: Result<Value, Error>| r.map_err(|e| e.with_length_at(pos, length));
+        let out = match member {
             "variable-exists" => Some(self.meta_variable_exists(pos_args, named, pos, false)),
             "global-variable-exists" => Some(self.meta_variable_exists(pos_args, named, pos, true)),
             "mixin-exists" => Some(self.meta_mixin_exists(pos_args, named, pos)),
@@ -86,7 +92,8 @@ impl<'a> Evaluator<'a> {
             "accepts-content" => Some(self.meta_accepts_content(pos_args, named, pos)),
             "keywords" => Some(Self::meta_keywords(pos_args, named, pos)),
             _ => None,
-        }
+        };
+        out.map(sized)
     }
 
     /// `meta.keywords($args)`: the keyword arguments captured by a `$args...`
@@ -328,10 +335,9 @@ impl<'a> Evaluator<'a> {
     fn get_function_from_module(&self, name: &str, module_name: &str, pos: Pos) -> Result<Value, Error> {
         if let Some(module) = self.used_user_modules.get(module_name) {
             if is_private_member(name) {
-                return Err(Error::at(
-                    "Private members can't be accessed from outside their modules.".to_string(),
-                    pos,
-                ));
+                // A private member is not in the module's public view, so the
+                // by-name lookup simply does not find it.
+                return Err(Error::at(format!("Function not found: \"{name}\""), pos));
             }
             if let Some(f) = module.function(name) {
                 return Ok(Value::Function(SassFunction {
@@ -367,10 +373,7 @@ impl<'a> Evaluator<'a> {
     fn get_mixin_from_module(&self, name: &str, module_name: &str, pos: Pos) -> Result<Value, Error> {
         if let Some(module) = self.used_user_modules.get(module_name) {
             if is_private_member(name) {
-                return Err(Error::at(
-                    "Private members can't be accessed from outside their modules.".to_string(),
-                    pos,
-                ));
+                return Err(Error::at(format!("Mixin not found: \"{name}\""), pos));
             }
             if let Some(m) = module.mixin(name) {
                 return Ok(Value::Mixin(Box::new(SassMixin {

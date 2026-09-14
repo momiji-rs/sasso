@@ -1383,31 +1383,43 @@ impl Parser {
         match self.sc.peek() {
             // `ns.$var`
             Some('$') => {
-                let var_pos = self.sc.position();
                 self.sc.bump();
+                // Privacy is the LITERAL spelling (`ns.$\2d x` is an ordinary
+                // member for dart), and the caret covers the whole `ns.$name`
+                // reference as written.
+                let literally_private = matches!(self.sc.peek(), Some('-') | Some('_'));
                 let name = self.read_variable_name()?;
-                if is_private_member(&name) {
+                if literally_private {
                     return Err(Error::at(
                         "Private members can't be accessed from outside their modules.",
-                        var_pos,
-                    ));
+                        name_pos,
+                    )
+                    .with_length(self.sc.byte_len_from(name_mark)));
                 }
+                let length = self.sc.byte_len_from(name_mark);
                 Ok(Some(Expr::NsVar {
                     module: ns.to_string(),
                     name,
+                    pos: name_pos,
+                    length,
                 }))
             }
             // `ns.member(...)` — the member must be an identifier immediately
             // followed by `(`.
             Some(c) if c.is_ascii_alphabetic() || c == '-' || c == '_' || c == '\\' => {
                 let member_pos = self.sc.position();
+                let member_mark = self.sc.mark();
+                // Privacy is the LITERAL spelling, and the caret covers the
+                // member as written (an escape counts its source bytes).
+                let literally_private = matches!(self.sc.peek(), Some('-') | Some('_'));
                 let member = self.read_ident_name()?;
                 if self.sc.peek() == Some('(') {
-                    if is_private_member(&member) {
+                    if literally_private {
                         return Err(Error::at(
                             "Private members can't be accessed from outside their modules.",
                             member_pos,
-                        ));
+                        )
+                        .with_length(self.sc.byte_len_from(member_mark)));
                     }
                     self.sc.bump(); // '('
                     let args = self.parse_args_after_paren()?;

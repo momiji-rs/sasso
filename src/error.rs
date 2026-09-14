@@ -63,6 +63,16 @@ impl Error {
         self
     }
 
+    /// Attach a span length to an error raised AT `pos` — a statement sizing
+    /// the caret of a failure it reported itself, without touching one that
+    /// came from somewhere else (a nested file, a member's own span).
+    pub(crate) fn with_length_at(mut self, pos: Pos, length: usize) -> Self {
+        if self.length == 0 && self.line == pos.line && self.col == pos.col {
+            self.length = length;
+        }
+        self
+    }
+
     /// Whether a primary `line`/`col` position has been recorded.
     pub(crate) fn has_position(&self) -> bool {
         self.line > 0

@@ -151,9 +151,9 @@ impl Parser {
                 })
             }
             "supports" => self.parse_supports(),
-            "use" => self.parse_use(pos),
+            "use" => self.parse_use(pos, start_mark),
             // @forward is parked for the module-system epic.
-            "forward" => self.parse_forward(pos),
+            "forward" => self.parse_forward(pos, start_mark),
             // A non-lowercase spelling of `@function`/`@mixin` (e.g. `@FUNCTION`,
             // `@Mixin`) is never a Sass definition; dart-sass parses it as a
             // plain CSS custom function/mixin (verbatim body), regardless of
@@ -211,16 +211,13 @@ impl Parser {
     /// Parse `@use "<url>" [as <namespace>|as *];`. The URL is a quoted string
     /// without interpolation; an explicit `as ns` / `as *` overrides the
     /// default namespace (the segment after the last `/`, or after `sass:`).
-    fn parse_use(&mut self, pos: Pos) -> Result<Stmt, Error> {
+    fn parse_use(&mut self, pos: Pos, start_mark: Mark) -> Result<Stmt, Error> {
         if self.block_depth > 0 {
             return Err(Error::at("This at-rule is not allowed here.", pos));
         }
-        if self.seen_non_module_stmt {
-            return Err(Error::at(
-                "@use rules must be written before any other rules.",
-                pos,
-            ));
-        }
+        // dart reads the whole rule before complaining about its placement, and
+        // carets all of it — so the check waits for the length.
+        let misplaced = self.seen_non_module_stmt;
         self.skip_ws_trivia();
         let url = self.parse_module_url(pos)?;
         self.skip_ws_trivia();
@@ -240,28 +237,32 @@ impl Parser {
         if self.try_keyword("with") {
             config = self.parse_config_clause(pos)?;
         }
+        // dart reports against everything before the `;`, including the
+        // whitespace in front of it (`@use "x" with ($a: 1)   ;`).
         self.skip_ws_trivia();
+        let length = self.sc.byte_len_from(start_mark);
         self.sc.eat(';');
+        if misplaced {
+            return Err(
+                Error::at("@use rules must be written before any other rules.", pos).with_length(length),
+            );
+        }
         Ok(Stmt::Use {
             url,
             namespace,
             star,
             config,
             pos,
+            length,
         })
     }
 
     /// Parse `@forward "<url>" [as <prefix>-*] [show ...|hide ...] [with (...)];`.
-    fn parse_forward(&mut self, pos: Pos) -> Result<Stmt, Error> {
+    fn parse_forward(&mut self, pos: Pos, start_mark: Mark) -> Result<Stmt, Error> {
         if self.block_depth > 0 {
             return Err(Error::at("This at-rule is not allowed here.", pos));
         }
-        if self.seen_non_module_stmt {
-            return Err(Error::at(
-                "@forward rules must be written before any other rules.",
-                pos,
-            ));
-        }
+        let misplaced = self.seen_non_module_stmt;
         self.skip_ws_trivia();
         let url = self.parse_module_url(pos)?;
         self.skip_ws_trivia();
@@ -289,7 +290,13 @@ impl Parser {
             config = self.parse_config_clause(pos)?;
         }
         self.skip_ws_trivia();
+        let length = self.sc.byte_len_from(start_mark);
         self.sc.eat(';');
+        if misplaced {
+            return Err(
+                Error::at("@forward rules must be written before any other rules.", pos).with_length(length),
+            );
+        }
         Ok(Stmt::Forward {
             url,
             prefix,
@@ -297,6 +304,7 @@ impl Parser {
             hide,
             config,
             pos,
+            length,
         })
     }
 
@@ -2724,12 +2732,19 @@ impl Parser {
             self.sc.bump();
             module = Some(name);
             let member_pos = self.sc.position();
+            let member_mark = self.sc.mark();
+            // Privacy is the LITERAL spelling: dart reads `ns.\2d priv` as an
+            // ordinary member (and then fails to find it); only a written
+            // `-`/`_` is private.
+            let literally_private = matches!(self.sc.peek(), Some('-') | Some('_'));
             name = self.read_ident_name()?;
-            if is_private_member(&name) {
+            if literally_private {
+                // The caret covers the member name AS WRITTEN, escapes and all.
                 return Err(Error::at(
                     "Private members can't be accessed from outside their modules.",
                     member_pos,
-                ));
+                )
+                .with_length(self.sc.byte_len_from(member_mark)));
             }
         }
         // Byte length of `@include name` so far, before any whitespace that
@@ -2744,6 +2759,11 @@ impl Parser {
         } else {
             (Vec::new(), name_length)
         };
+        // How much of the statement is WRITTEN in the source: the call, plus a
+        // `using (…)` clause if there is one. Whitespace and braces after that
+        // can be the indented front end's own (it wraps a child block to hand
+        // the parser SCSS), so they are not a source span to point at.
+        let mut source_length = length;
         self.skip_ws_inline();
         // An optional `using (params)` clause names the content block's
         // parameters, bound from the `@content(args)` call.
@@ -2758,18 +2778,38 @@ impl Parser {
             if self.sc.peek() != Some('(') {
                 return Err(Error::at("expected \"(\".", self.sc.position()));
             }
-            Some(Rc::new(self.parse_param_list()?))
+            let params = self.parse_param_list()?;
+            source_length = self.sc.byte_len_from(start_mark);
+            Some(Rc::new(params))
         } else {
             self.sc.reset(using_mark);
             None
         };
         self.skip_ws_inline();
+        // dart carets an error about the RULE (an undefined mixin) over all of
+        // it, `using` clause and content block included, and an error about the
+        // CALL (a content block the mixin does not take) over
+        // `@include name(args)` only. Neither covers the terminating `;`.
+        let full_length;
         let content = if self.sc.peek() == Some('{') {
-            Some(Rc::new(self.parse_braced_body()?))
+            let body = self.parse_braced_body()?;
+            // In the indented syntax the braces around a child block are
+            // SYNTHETIC — the front end wrote them into the reconstruction —
+            // so the text they enclose is not a source span to point at, and
+            // the span stops where the WRITTEN text does. dart spans the
+            // children; matching that needs the front end to map a
+            // reconstruction span back to source.
+            full_length = if self.indented {
+                source_length
+            } else {
+                self.sc.byte_len_from(start_mark)
+            };
+            Some(Rc::new(body))
         } else if content_params.is_some() {
             // A `using (params)` clause requires a content block to bind into.
             return Err(Error::at("expected \"{\".", self.sc.position()));
         } else {
+            full_length = self.sc.byte_len_from(start_mark);
             self.sc.eat(';');
             None
         };
@@ -2781,6 +2821,7 @@ impl Parser {
             module,
             pos,
             length,
+            full_length,
         })
     }
 }
