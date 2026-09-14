@@ -1096,3 +1096,34 @@ fn an_import_url_token_drops_its_padding_and_decodes_escapes() {
         "@import url(x.css);\n@import url(y.css);\n"
     );
 }
+
+#[test]
+fn a_backslash_before_a_newline_is_only_an_escape_inside_a_string() {
+    // dart's `escape()` fails on a newline, so a backslash "line continuation"
+    // is an error everywhere a CSS escape may appear — a value, a selector, a
+    // property name, an at-rule prelude. Only the string reader drops the pair
+    // first, which is what makes it legal inside quotes.
+    let err = |src: &str| {
+        let e = compile(src, &Options::default()).expect_err("expected a compile error");
+        (e.to_string(), e.line, e.col)
+    };
+    for (src, line, col) in [
+        (".a { b: c\\\n  d; }\n", 1, 11),
+        (".a,\\\n.b { c: d; }\n", 1, 5),
+        (".a { b\\\nc: d; }\n", 1, 8),
+        ("@media screen\\\nand (min-width: 0) { .a { b: c } }\n", 1, 15),
+        (".a { b: url(foo\\\nbar.css); }\n", 1, 17),
+    ] {
+        let (msg, l, c) = err(src);
+        assert!(msg.contains("Expected escape sequence."), "{src:?}: {msg}");
+        assert_eq!((l, c), (line, col), "for {src:?}");
+    }
+    // Inside a quoted string the pair IS a line continuation: it vanishes, and
+    // the next line's indentation stays content.
+    assert_eq!(css(".a { b: \"x\\\ny\"; }\n"), ".a {\n  b: \"xy\";\n}\n");
+    assert_eq!(css("[a=\"x\\\ny\"] { c: d; }\n"), "[a=xy] {\n  c: d;\n}\n");
+    assert_eq!(
+        css("@media (min-width: 0) and (x: \"a\\\nb\") { .a { b: c } }\n"),
+        "@media (min-width: 0) and (x: ab) {\n  .a {\n    b: c;\n  }\n}\n"
+    );
+}

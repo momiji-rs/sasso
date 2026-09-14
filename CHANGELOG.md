@@ -177,6 +177,22 @@ Conformance is tracked separately as a ratchet against the official
   closer closes: a mismatched one (`--x: (]`) is left to the parser, which
   reports dart's `expected ")".` at the closer instead of the front-end
   complaining about the line indented beneath it.
+- **A backslash before a newline is an escape only inside a string.** dart's
+  `escape()` fails on a newline, and only its string reader drops the pair
+  first — which is what makes a CSS line continuation legal inside quotes and
+  nowhere else. sasso accepted it everywhere and treated it as a line wrap, so
+  `b: c\` followed by `d` compiled as `b: c d`, `.a,\` + `.b` became a
+  selector with an escaped line break (`\a `), and a url kept reading. All of
+  them now fail where dart fails, with dart's message and column. In the
+  indented syntax the front-end had the same leniency of its own — it dropped
+  the trailing backslash and joined the next line with a space — so
+  `@import url(foo\` + `bar.css)` imported `url(foo bar.css)`; the pair now
+  reaches the parser verbatim. A continuation inside quotes still works in a
+  value and in a selector: `[a="x\` + `y"]` is `[a=xy]`.
+- **Two statements on one line are reported at the second statement.** The
+  indented syntax forbids `b: c; d: e`, and dart carets the `d` — the first
+  character after the `;` and the whitespace following it — where sasso
+  pointed at the `;` itself.
 - **An `@import`'s `url()` drops its padding and decodes its escapes.** dart
   reads the token with `_tryUrlContents`: the whitespace after the `(` and
   before the `)` is not part of the url, and a `\` escape is consumed whole

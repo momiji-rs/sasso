@@ -1459,9 +1459,8 @@ impl Parser {
         match self.sc.peek() {
             None => return Err(Error::at("Expected identifier.", self.sc.position())),
             Some('\\') => {
-                if let Some(ch) = self.consume_escape()? {
-                    lit.push(ch);
-                }
+                let ch = self.consume_escape()?;
+                lit.push(ch);
             }
             Some('#') if self.sc.peek_at(1) == Some('{') => {
                 self.sc.bump();
@@ -1503,9 +1502,8 @@ impl Parser {
                     self.sc.bump();
                 }
                 Some('\\') => {
-                    if let Some(ch) = self.consume_escape()? {
-                        lit.push(ch);
-                    }
+                    let ch = self.consume_escape()?;
+                    lit.push(ch);
                 }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     self.reject_plain_css_interp()?;

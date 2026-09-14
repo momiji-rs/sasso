@@ -1263,18 +1263,29 @@ impl Parser {
                     }
                     pieces.push(TplPiece::Interp(e));
                 }
+                // A `\` before a newline is a CSS line continuation: dart's
+                // `string()` drops the pair itself, before the escape reader —
+                // which rejects a newline — ever sees it. This is the ONLY
+                // place the continuation is legal.
+                Some('\\') if matches!(self.sc.peek_at(1), Some('\n' | '\r' | '\u{c}')) => {
+                    self.sc.bump();
+                    if self.sc.peek() == Some('\r') {
+                        self.sc.bump();
+                        self.sc.eat('\n'); // CRLF
+                    } else {
+                        self.sc.bump();
+                    }
+                }
                 Some('\\') => {
                     // Decode the escape to its code point and store it raw; the
-                    // string serializer re-escapes only what it must. A line
-                    // continuation (`\` before a CSS newline) yields no
-                    // character. `\#{...}` decodes the `#` literally, so the
-                    // sequence becomes a plain `#{` rather than interpolation.
-                    // Inside a quoted string a NUL escape becomes the Unicode
+                    // string serializer re-escapes only what it must.
+                    // `\#{...}` decodes the `#` literally, so the sequence
+                    // becomes a plain `#{` rather than interpolation. Inside a
+                    // quoted string a NUL escape becomes the Unicode
                     // replacement character (unlike an identifier, where it
                     // serializes as `\0 `).
-                    if let Some(c) = self.consume_escape()? {
-                        lit.push(if c == '\0' { '\u{FFFD}' } else { c });
-                    }
+                    let c = self.consume_escape()?;
+                    lit.push(if c == '\0' { '\u{FFFD}' } else { c });
                 }
                 // A literal newline cannot appear inside a quoted string; it must
                 // be written as a `\` line continuation or a `\a` escape. dart-sass
@@ -1456,14 +1467,13 @@ impl Parser {
                     emitted += 1;
                 }
                 Some('\\') => {
-                    if let Some(c) = self.consume_escape()? {
-                        // The escape is at "identifier start" when it is the very
-                        // first code point, or the code point right after a single
-                        // leading literal/escaped `-`.
-                        let identifier_start = emitted == 0 || (emitted == 1 && first_hyphen);
-                        push_ident_escape(&mut lit, c, identifier_start);
-                        emitted += 1;
-                    }
+                    let c = self.consume_escape()?;
+                    // The escape is at "identifier start" when it is the very
+                    // first code point, or the code point right after a single
+                    // leading literal/escaped `-`.
+                    let identifier_start = emitted == 0 || (emitted == 1 && first_hyphen);
+                    push_ident_escape(&mut lit, c, identifier_start);
+                    emitted += 1;
                 }
                 Some(c) if is_ident_char(c) => {
                     lit.push(c);
@@ -1835,9 +1845,8 @@ impl Parser {
                 // position, so a leading digit or `-` stays literal). This also
                 // makes `\#{}` a literal `#{}` rather than interpolation.
                 Some('\\') => {
-                    if let Some(c) = self.consume_escape()? {
-                        push_ident_escape(&mut lit, c, false);
-                    }
+                    let c = self.consume_escape()?;
+                    push_ident_escape(&mut lit, c, false);
                 }
                 Some('(') => {
                     depth += 1;

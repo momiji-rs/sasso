@@ -637,3 +637,61 @@ fn an_import_url_spanning_lines_keeps_its_url() {
         "@import url(http://x/y.css);"
     );
 }
+
+#[test]
+fn a_backslash_continuation_is_not_a_line_wrap() {
+    // The front-end used to drop a trailing backslash and join the next line
+    // with a space, so `b: c\` + `d` compiled as `b: c d`. dart has no such
+    // wrap: the backslash is an escape, and a newline is not something it can
+    // escape, so the pair has to reach the parser for it to say so.
+    for (src, line, col) in [
+        (".a\n  b: c\\\n  d\n", 2, 8),
+        (".a\n  b: c\\\n    d\n", 2, 8),
+        ("@each $a in 1,\\\n  2\n  .x\n    y: $a\n", 1, 16),
+        ("@import url(foo\\\nbar.css)\n", 1, 17),
+    ] {
+        let e = sass(src, "a.sass").expect_err("expected an error");
+        assert_eq!((e.line, e.col), (line, col), "for {src:?}");
+        assert!(e.message.contains("Expected escape sequence."), "{}", e.message);
+    }
+    // Inside a quoted string it stays a CSS line continuation, and the next
+    // line's indentation is part of the string.
+    assert_eq!(
+        sass(".a\n  b: \"x\\\n  y\"\n", "a.sass").expect("compile"),
+        ".a {\n  b: \"x  y\";\n}"
+    );
+}
+
+#[test]
+fn two_statements_on_one_line_point_at_the_second() {
+    // dart carets the statement that should not be there — the first character
+    // after the `;` — where sasso pointed at the `;` itself.
+    for (src, line, col) in [
+        (".a\n  b: c; d: e\n", 2, 9),
+        (".a\n  b: c;d: e\n", 2, 8),
+        (".a\n  b: c ; d: e\n", 2, 10),
+        (".a\n  b: \"x;y\"; d: e\n", 2, 13),
+        ("@import foo;bar\n", 1, 13),
+        // An escaped `;` separates statements for dart too — the escape does
+        // not hide it from the indented syntax's one-statement-per-line rule.
+        ("@import foo\\;bar\n", 1, 14),
+    ] {
+        let e = sass(src, "a.sass").expect_err("expected an error");
+        assert_eq!((e.line, e.col), (line, col), "for {src:?}");
+        assert!(
+            e.message.contains("multiple statements on one line"),
+            "{}",
+            e.message
+        );
+    }
+    // A `;` with only whitespace or a loud comment after it is still one
+    // statement.
+    assert_eq!(
+        sass(".a\n  b: c;\n", "a.sass").expect("compile"),
+        ".a {\n  b: c;\n}"
+    );
+    assert_eq!(
+        sass(".a\n  b: c;  \n", "a.sass").expect("compile"),
+        ".a {\n  b: c;\n}"
+    );
+}

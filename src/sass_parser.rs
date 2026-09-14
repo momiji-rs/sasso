@@ -482,32 +482,20 @@ impl Transpiler {
                 } else {
                     strip_silent_comment(&next_content)
                 };
-                // Backslash continuation: drop the trailing backslash and join
-                // with a single space (the line "wraps"). Inside an open
-                // quoted string the `\`+newline is a CSS line continuation:
-                // it vanishes entirely and the next line's indentation
-                // characters stay part of the string.
+                // A trailing backslash pulls the next line in, and the pair is
+                // kept VERBATIM — backslash, line break and the next line's own
+                // indentation. Inside a quoted string that is a CSS line
+                // continuation, which means the same thing written either way
+                // (both vanish, and the indentation stays content) while leaving
+                // every token on the line it was written on. ANYWHERE ELSE dart
+                // rejects it — `escape()` fails on a newline — so the pair has
+                // to reach the parser for it to say so, at the column it is
+                // written; collapsing the line into a space made `b: c\` +
+                // `d` compile as `b: c d`.
                 if logical.ends_with('\\') {
-                    if st.in_string {
-                        // A `\`+newline inside a quoted string is a CSS line
-                        // continuation, and SCSS spells it the same way — so
-                        // it is kept VERBATIM rather than collapsed. The string
-                        // means the same thing either way (both vanish, and the
-                        // next line's indentation stays content), but keeping
-                        // the line break leaves every token on the line it was
-                        // written on: an interpolation error on the
-                        // continuation reports there, as dart reports it.
-                        logical.push('\n');
-                        logical.push_str(&next_indent_str);
-                        logical.push_str(&joined);
-                        self.idx += 1;
-                        continue;
-                    }
-                    logical.pop();
-                    {
-                        logical.push(' ');
-                        logical.push_str(joined.trim_start());
-                    }
+                    logical.push('\n');
+                    logical.push_str(&next_indent_str);
+                    logical.push_str(&joined);
                 } else {
                     // Bracket / trailing-comma / interp / comment continuation:
                     // preserve the newline and the line's original indentation so
@@ -623,9 +611,13 @@ impl Transpiler {
         if let Some(semi) = find_top_level_semicolon(logical) {
             // A trailing loud comment after the `;` is tolerated and dropped
             // (`b: c; /* f */`); anything else is two statements on a line.
-            let after = trim_trailing_loud_comments(logical[semi + 1..].trim());
+            let rest = &logical[semi + 1..];
+            let after = trim_trailing_loud_comments(rest.trim());
             if !after.is_empty() {
-                let col = logical[..semi].chars().count();
+                // dart carets the SECOND statement — the first character after
+                // the `;` and the whitespace following it — not the `;` itself.
+                let skipped = rest.len() - rest.trim_start().len();
+                let col = logical[..semi + 1 + skipped].chars().count();
                 return Err(Error::at(
                     "multiple statements on one line are not supported in the indented syntax.".to_string(),
                     Pos {

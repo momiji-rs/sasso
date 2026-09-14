@@ -744,19 +744,6 @@ impl Parser {
         Ok(())
     }
 
-    /// Consume a `#{ … }` interpolation and return its expression. The caller
-    /// must have verified the cursor is at `#` with `{` next.
-    fn read_interp(&mut self) -> Result<Expr, Error> {
-        self.sc.bump(); // '#'
-        self.sc.bump(); // '{'
-        let e = self.parse_interp_value()?;
-        self.skip_ws_inline();
-        if !self.sc.eat('}') {
-            return Err(Error::at("expected \"}\"", self.sc.position()));
-        }
-        Ok(e)
-    }
-
     /// Parse the expression inside a `#{ … }` (cursor just past the `{`).
     ///
     /// Interpolation is a full SassScript context even when it sits inside a
@@ -784,7 +771,14 @@ impl Parser {
             // A CSS escape makes the next character literal identifier text:
             // an escaped stop char (`.govuk-\!-font-size-19`) is part of the
             // selector, never a boundary (dart consumes `\X` in identifiers).
+            // A NEWLINE is not a character it can escape — dart's `escape()`
+            // fails there, so `.a,\` + `.b` is an error rather than a selector
+            // containing an escaped line break.
             if c == '\\' {
+                if matches!(self.sc.peek_at(1), Some('\n' | '\r' | '\u{c}')) {
+                    self.sc.bump();
+                    return Err(Error::at("Expected escape sequence.", self.sc.position()));
+                }
                 lit.push(c);
                 self.sc.bump();
                 if let Some(n) = self.sc.bump() {
@@ -901,6 +895,20 @@ impl Parser {
                     self.sc.bump();
                     while let Some(ch) = self.sc.peek() {
                         if ch == '\\' {
+                            // A `\` before a newline is a CSS line continuation
+                            // and the pair vanishes, as in any other string;
+                            // copying it through left a raw line break in the
+                            // selector text.
+                            if matches!(self.sc.peek_at(1), Some('\n' | '\r' | '\u{c}')) {
+                                self.sc.bump();
+                                if self.sc.peek() == Some('\r') {
+                                    self.sc.bump();
+                                    self.sc.eat('\n');
+                                } else {
+                                    self.sc.bump();
+                                }
+                                continue;
+                            }
                             lit.push(ch);
                             self.sc.bump();
                             if let Some(n) = self.sc.bump() {
@@ -967,30 +975,20 @@ impl Parser {
         Ok(pieces)
     }
 
-    /// Consume a CSS escape sequence. The opening `\` must be the next
-    /// character; it is consumed here. Returns the decoded code point, or `None`
-    /// for a line continuation (`\` immediately before a newline), which yields
-    /// no character. A backslash at end-of-input decodes to U+FFFD, matching
-    /// dart-sass. Errors on an out-of-range Unicode code point.
-    fn consume_escape(&mut self) -> Result<Option<char>, Error> {
+    /// Consume a CSS escape sequence and return the code point it stands for.
+    /// The opening `\` must be the next character; it is consumed here. A
+    /// backslash at end-of-input decodes to U+FFFD, matching dart-sass; a
+    /// backslash before a NEWLINE is not an escape at all (dart's `escape()`
+    /// fails there, and only its string reader drops the pair as a CSS line
+    /// continuation before ever calling it). Errors on an out-of-range Unicode
+    /// code point.
+    fn consume_escape(&mut self) -> Result<char, Error> {
         let pos = self.sc.position();
         self.sc.bump(); // the leading backslash
         match self.sc.peek() {
-            // `\` before a CSS newline is a line continuation: the pair is
-            // dropped entirely.
-            Some('\n') => {
-                self.sc.bump();
-                Ok(None)
-            }
-            Some('\r') => {
-                self.sc.bump();
-                self.sc.eat('\n'); // CRLF
-                Ok(None)
-            }
-            Some('\u{c}') => {
-                self.sc.bump();
-                Ok(None)
-            }
+            // A line continuation is legal only inside a quoted string, and the
+            // string reader consumes it before this is reached.
+            Some('\n' | '\r' | '\u{c}') => Err(Error::at("Expected escape sequence.", self.sc.position())),
             Some(c) if c.is_ascii_hexdigit() => {
                 let mut value: u32 = 0;
                 let mut digits = 0;
@@ -1021,17 +1019,14 @@ impl Parser {
                 }
                 // Surrogate code points cannot be represented and become the
                 // replacement char; NUL is kept (it serializes as `\0 `).
-                match char::from_u32(value) {
-                    Some(ch) => Ok(Some(ch)),
-                    None => Ok(Some('\u{FFFD}')),
-                }
+                Ok(char::from_u32(value).unwrap_or('\u{FFFD}'))
             }
             // Any other character escapes to itself literally.
             Some(c) => {
                 self.sc.bump();
-                Ok(Some(c))
+                Ok(c)
             }
-            None => Ok(Some('\u{FFFD}')),
+            None => Ok('\u{FFFD}'),
         }
     }
 
