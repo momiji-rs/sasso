@@ -574,6 +574,7 @@ impl<'a> Evaluator<'a> {
     /// Execute an `@include`: bind args into a call frame, make the content
     /// block available, and run the mixin body into the current sink.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn exec_include(
         &mut self,
         name: &str,
@@ -582,6 +583,10 @@ impl<'a> Evaluator<'a> {
         content_params: Option<Rc<ParamList>>,
         module: Option<&str>,
         pos: Pos,
+        // The whole statement's byte length — an error about the RULE (this
+        // mixin does not exist, that namespace does not exist) carets all of
+        // it, content block included, as dart's `span` does.
+        full_length: usize,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -611,17 +616,18 @@ impl<'a> Evaluator<'a> {
                 }
                 let mixin = target
                     .mixin(name)
-                    .ok_or_else(|| Error::unpositioned("Undefined mixin."))?;
+                    .ok_or_else(|| Error::at("Undefined mixin.", pos).with_length(full_length))?;
                 // A forwarded mixin runs in its DEFINING module's environment.
                 let exec = target.mixin_origin(name).unwrap_or(target);
                 return self.run_module_mixin(&exec, &mixin, args, content, content_params, parents, sink);
             }
             if !self.used_modules.contains_key(ns) {
-                return Err(Error::unpositioned(format!(
-                    "There is no module with the namespace \"{ns}\"."
-                )));
+                return Err(
+                    Error::at(format!("There is no module with the namespace \"{ns}\"."), pos)
+                        .with_length(full_length),
+                );
             }
-            return Err(Error::unpositioned("Undefined mixin."));
+            return Err(Error::at("Undefined mixin.", pos).with_length(full_length));
         }
         // A bare `@include` may resolve a user module mixin exposed unprefixed
         // via `@use … as *`.
@@ -643,7 +649,7 @@ impl<'a> Evaluator<'a> {
         }
         let mixin = self
             .lookup_mixin(name)
-            .ok_or_else(|| Error::unpositioned("Undefined mixin."))?;
+            .ok_or_else(|| Error::at("Undefined mixin.", pos).with_length(full_length))?;
         // dart-sass: passing a content block to a mixin that never uses
         // `@content` is an error, even when the block is empty.
         if content.is_some() && !body_uses_content(&mixin.def.body) {

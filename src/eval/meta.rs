@@ -17,7 +17,8 @@ impl<'a> Evaluator<'a> {
                 return Err(Error::at(
                     "Private members can't be accessed from outside their modules.".to_string(),
                     pos,
-                ));
+                )
+                .with_length(length));
             }
             if let Some(func) = module.function(member) {
                 // A forwarded function executes in its DEFINING module's
@@ -35,10 +36,10 @@ impl<'a> Evaluator<'a> {
         let module = match self.used_modules.get(ns) {
             Some(m) => m.clone(),
             None => {
-                return Err(Error::at(
-                    format!("There is no module with the namespace \"{ns}\"."),
-                    pos,
-                ));
+                return Err(
+                    Error::at(format!("There is no module with the namespace \"{ns}\"."), pos)
+                        .with_length(length),
+                );
             }
         };
         let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
@@ -56,7 +57,9 @@ impl<'a> Evaluator<'a> {
             }
         }
         // Call results are slash-free (dart `withoutSlash()` on every call).
-        crate::builtins::call_module(&module, member, &pos_args, &named, pos).map(Value::without_slash)
+        crate::builtins::call_module(&module, member, &pos_args, &named, pos)
+            .map_err(|e| e.with_length_at(pos, length))
+            .map(Value::without_slash)
     }
 
     /// Handle a `sass:meta` member that depends on the evaluator's state

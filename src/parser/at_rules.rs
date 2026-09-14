@@ -237,8 +237,10 @@ impl Parser {
         if self.try_keyword("with") {
             config = self.parse_config_clause(pos)?;
         }
-        let length = self.sc.byte_len_from(start_mark);
+        // dart reports against everything before the `;`, including the
+        // whitespace in front of it (`@use "x" with ($a: 1)   ;`).
         self.skip_ws_trivia();
+        let length = self.sc.byte_len_from(start_mark);
         self.sc.eat(';');
         if misplaced {
             return Err(
@@ -287,8 +289,8 @@ impl Parser {
         if self.try_keyword("with") {
             config = self.parse_config_clause(pos)?;
         }
-        let length = self.sc.byte_len_from(start_mark);
         self.skip_ws_trivia();
+        let length = self.sc.byte_len_from(start_mark);
         self.sc.eat(';');
         if misplaced {
             return Err(
@@ -2730,14 +2732,19 @@ impl Parser {
             self.sc.bump();
             module = Some(name);
             let member_pos = self.sc.position();
+            let member_mark = self.sc.mark();
+            // Privacy is the LITERAL spelling: dart reads `ns.\2d priv` as an
+            // ordinary member (and then fails to find it); only a written
+            // `-`/`_` is private.
+            let literally_private = matches!(self.sc.peek(), Some('-') | Some('_'));
             name = self.read_ident_name()?;
-            if is_private_member(&name) {
-                // The caret covers the member name, as dart's does.
+            if literally_private {
+                // The caret covers the member name AS WRITTEN, escapes and all.
                 return Err(Error::at(
                     "Private members can't be accessed from outside their modules.",
                     member_pos,
                 )
-                .with_length(name.len()));
+                .with_length(self.sc.byte_len_from(member_mark)));
             }
         }
         // Byte length of `@include name` so far, before any whitespace that
@@ -2772,12 +2779,20 @@ impl Parser {
             None
         };
         self.skip_ws_inline();
+        // dart carets an error about the RULE (an undefined mixin) over all of
+        // it, `using` clause and content block included, and an error about the
+        // CALL (a content block the mixin does not take) over
+        // `@include name(args)` only. Neither covers the terminating `;`.
+        let full_length;
         let content = if self.sc.peek() == Some('{') {
-            Some(Rc::new(self.parse_braced_body()?))
+            let body = self.parse_braced_body()?;
+            full_length = self.sc.byte_len_from(start_mark);
+            Some(Rc::new(body))
         } else if content_params.is_some() {
             // A `using (params)` clause requires a content block to bind into.
             return Err(Error::at("expected \"{\".", self.sc.position()));
         } else {
+            full_length = self.sc.byte_len_from(start_mark);
             self.sc.eat(';');
             None
         };
@@ -2789,6 +2804,7 @@ impl Parser {
             module,
             pos,
             length,
+            full_length,
         })
     }
 }

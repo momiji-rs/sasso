@@ -1383,17 +1383,18 @@ impl Parser {
         match self.sc.peek() {
             // `ns.$var`
             Some('$') => {
-                let var_pos = self.sc.position();
                 self.sc.bump();
+                // Privacy is the LITERAL spelling (`ns.$\2d x` is an ordinary
+                // member for dart), and the caret covers the whole `ns.$name`
+                // reference as written.
+                let literally_private = matches!(self.sc.peek(), Some('-') | Some('_'));
                 let name = self.read_variable_name()?;
-                if is_private_member(&name) {
-                    // The caret covers `$name`, as it does for a private
-                    // member reached any other way.
+                if literally_private {
                     return Err(Error::at(
                         "Private members can't be accessed from outside their modules.",
-                        var_pos,
+                        name_pos,
                     )
-                    .with_length(1 + name.len()));
+                    .with_length(self.sc.byte_len_from(name_mark)));
                 }
                 let length = self.sc.byte_len_from(name_mark);
                 Ok(Some(Expr::NsVar {

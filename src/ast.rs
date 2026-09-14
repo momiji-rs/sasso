@@ -166,9 +166,16 @@ pub(crate) enum Stmt {
         /// 1-based position of the `@include` keyword (the `@`), used as the
         /// call-site span for diagnostic stack frames.
         pos: Pos,
-        /// Byte length of the include span (`@include name(args)`, excluding the
-        /// trailing `;` or content block), used to size the diagnostic caret.
+        /// Byte length of the CALL (`@include name(args)`, excluding the
+        /// trailing `;`, a `using` clause and a content block) — dart's
+        /// `spanWithoutContent`, which sizes the caret of an error about the
+        /// call itself: a content block the mixin does not take, a missing
+        /// argument.
         length: usize,
+        /// Byte length of the WHOLE statement, `using` clause and content block
+        /// included — dart's `span`, which sizes the caret of an error about
+        /// the rule: an undefined mixin, a namespace that is not there.
+        full_length: usize,
     },
     /// `@content;` or `@content(args)` — runs the `@include`'s content block,
     /// passing any arguments to its `using (params)`.

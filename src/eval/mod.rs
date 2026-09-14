@@ -2184,6 +2184,7 @@ impl<'a> Evaluator<'a> {
                     module,
                     pos,
                     length,
+                    full_length,
                 } => {
                     // Push a diagnostic call frame so an error/warning raised in
                     // the mixin body unwinds through this `@include` call site.
@@ -2195,14 +2196,16 @@ impl<'a> Evaluator<'a> {
                         content_params.clone(),
                         module.as_deref(),
                         *pos,
+                        *full_length,
                         parents,
                         sink,
                     );
                     self.leave_call(saved);
-                    // An error the include itself raises (an undefined mixin, a
-                    // namespace that is not there, a content block the mixin
-                    // does not take) belongs to the `@include` — dart spans the
-                    // whole call.
+                    // What is left unpositioned is an error about the CALL — a
+                    // content block the mixin does not take, an argument it
+                    // wants — which dart carets over `@include name(args)`,
+                    // stopping before the block. (The errors about the RULE
+                    // carry the whole statement's span already.)
                     r.map_err(|e| e.at_if_unpositioned(*pos, *length))?;
                 }
                 Stmt::Use {

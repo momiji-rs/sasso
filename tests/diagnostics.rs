@@ -119,6 +119,21 @@ fn err_block(src: &str, url: &str) -> String {
         .to_string()
 }
 
+/// The caret line of a rendered block, trimmed — so a span that is one
+/// character too long fails instead of passing a substring check.
+fn caret_line(block: &str) -> String {
+    block
+        .lines()
+        .find(|l| l.contains('^'))
+        .unwrap_or_else(|| panic!("no caret line in:\n{block}"))
+        // Drop the gutter (`  \u{2502} `) and the indentation before the run.
+        .rsplit('\u{2502}')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 #[test]
 fn a_module_diagnostic_carets_the_construct_it_is_about() {
     // dart spans the whole rule, call or reference a diagnostic is about;
@@ -149,11 +164,46 @@ fn a_module_diagnostic_carets_the_construct_it_is_about() {
             "1 \u{2502} .a { @include nope(1); }\n",
             "^^^^^^^^^^^^^^^^\n",
         ),
+        // an error about the RULE carets all of it — `using` clause and
+        // content block included (dart's `span`, not `spanWithoutContent`)
+        (
+            ".a { @include nope using ($x) { c: $x; } }\n",
+            "1 \u{2502} .a { @include nope using ($x) { c: $x; } }\n",
+            "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n",
+        ),
+        (
+            ".a { @include nope { c: d; } }\n",
+            "1 \u{2502} .a { @include nope { c: d; } }\n",
+            "^^^^^^^^^^^^^^^^^^^^^^^\n",
+        ),
+        // a module rule's span ends at the `;`, the whitespace before it
+        // included, `with` clause or not
+        (
+            "@use \"nope\" with ($x: 1)   ;\n",
+            "1 \u{2502} @use \"nope\" with ($x: 1)   ;\n",
+            "^^^^^^^^^^^^^^^^^^^^^^^^^^^\n",
+        ),
+        (
+            "@forward \"nope\" with ($x: 1)   ;\n",
+            "1 \u{2502} @forward \"nope\" with ($x: 1)   ;\n",
+            "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n",
+        ),
+        // a built-in namespace, and a namespace that is not bound at all
+        (
+            "@use \"sass:math\";\n.a { b: math.nope(1); }\n",
+            "2 \u{2502} .a { b: math.nope(1); }\n",
+            "^^^^^^^^^^^^\n",
+        ),
+        (
+            ".a { b: nope.foo(1); }\n",
+            "1 \u{2502} .a { b: nope.foo(1); }\n",
+            "^^^^^^^^^^^\n",
+        ),
     ];
     for (src, line, caret) in cases {
         let block = err_block(src, "in.scss");
         assert!(block.contains(line), "{src:?}\n{block}");
-        assert!(block.contains(caret), "{src:?}\n{block}");
+        assert_eq!(caret_line(&block), caret.trim(), "{src:?}\n{block}");
     }
     // The mixin is not named in the message — the span says which one it is.
     assert!(
@@ -175,7 +225,11 @@ fn a_namespaced_member_diagnostic_points_at_the_reference() {
     // reported against line 1 column 1 — the `@use` line, not the reference.
     let dir = std::env::temp_dir().join(format!("sasso_ns_diag_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
-    std::fs::write(dir.join("_lib.scss"), "@mixin -priv { a: b; }\n$pub: 1;\n").expect("write");
+    std::fs::write(
+        dir.join("_lib.scss"),
+        "@mixin -priv { a: b; }\n$pub: 1;\n$-pv: 1;\n@mixin -pr\\69 v { a: b; }\n",
+    )
+    .expect("write");
     let entry = dir.join("in.scss");
     let url = entry.to_string_lossy().into_owned();
     let imp = sasso::FsImporter::new(Vec::new());
@@ -187,13 +241,21 @@ fn a_namespaced_member_diagnostic_points_at_the_reference() {
     };
     let block = run("@use \"lib\";\n.a { b: lib.$nope; }\n");
     assert!(block.contains("2 \u{2502} .a { b: lib.$nope; }\n"), "{block}");
-    assert!(block.contains("^^^^^^^^^\n"), "{block}");
+    assert_eq!(caret_line(&block), "^^^^^^^^^", "{block}");
     assert!(block.contains("in.scss 2:9"), "{block}");
     // A namespaced call spans the call; a private member spans its name.
     let block = run("@use \"lib\";\n.a { b: lib.nope(1); }\n");
-    assert!(block.contains("^^^^^^^^^^^\n"), "{block}");
+    assert_eq!(caret_line(&block), "^^^^^^^^^^^", "{block}");
     let block = run("@use \"lib\";\n.a { @include lib.-priv; }\n");
-    assert!(block.contains("^^^^^\n"), "{block}");
+    assert_eq!(caret_line(&block), "^^^^^", "{block}");
     assert!(block.contains("in.scss 2:19"), "{block}");
+    // The caret covers the member AS WRITTEN, so an escape inside it counts
+    // its source bytes rather than the decoded ones.
+    let block = run("@use \"lib\";\n.a { @include lib.-pr\\69 v; }\n");
+    assert_eq!(caret_line(&block), "^^^^^^^^", "{block}");
+    // A private VARIABLE reference carets the whole `ns.$name`.
+    let block = run("@use \"lib\";\n.a { b: lib.$-pv; }\n");
+    assert_eq!(caret_line(&block), "^^^^^^^^", "{block}");
+    assert!(block.contains("in.scss 2:9"), "{block}");
     std::fs::remove_dir_all(&dir).ok();
 }
