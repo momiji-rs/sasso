@@ -1659,7 +1659,7 @@ struct ScanState {
 /// strings are skipped; a custom value's braces count as brackets.
 fn custom_value_open(s: &str) -> bool {
     let mut sc = LineScanner::new(s);
-    let mut depth = 0i32;
+    let mut brackets: Vec<char> = Vec::new();
     while !sc.done() {
         match sc.cur() {
             '"' | '\'' => {
@@ -1677,17 +1677,33 @@ fn custom_value_open(s: &str) -> bool {
             // A custom value's braces count as brackets (so an `#{` is just an
             // open brace here, not interpolation).
             '(' | '[' | '{' => {
-                depth += 1;
+                brackets.push(match sc.cur() {
+                    '(' => ')',
+                    '[' => ']',
+                    _ => '}',
+                });
                 sc.bump();
             }
             ')' | ']' | '}' => {
-                depth -= 1;
+                match brackets.last().copied() {
+                    // A closer with no opener ends the value, as it does in the
+                    // shared parser.
+                    None => return false,
+                    // A MISMATCHED closer is an error there, so the value stays
+                    // open and the next line joins it: the shared parser then
+                    // reports dart's `expected ")".` at the closer, rather than
+                    // the front-end reporting a stray indented child.
+                    Some(expected) if expected != sc.cur() => return true,
+                    Some(_) => {
+                        brackets.pop();
+                    }
+                }
                 sc.bump();
             }
             _ => sc.bump(),
         }
     }
-    depth > 0
+    !brackets.is_empty()
 }
 
 /// Whether `s` ends inside an open `#{` interpolation, scanning *inside*
@@ -2038,7 +2054,7 @@ mod line_scanner_parity {
 
     fn custom_value_open_ref(s: &str) -> bool {
         let cs: Vec<char> = s.chars().collect();
-        let mut depth = 0i32;
+        let mut brackets: Vec<char> = Vec::new();
         let mut i = 0;
         while i < cs.len() {
             match cs[i] {
@@ -2053,13 +2069,21 @@ mod line_scanner_parity {
                     }
                 }
                 '\\' => i += 1,
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth -= 1,
+                '(' => brackets.push(')'),
+                '[' => brackets.push(']'),
+                '{' => brackets.push('}'),
+                ')' | ']' | '}' => match brackets.last().copied() {
+                    None => return false,
+                    Some(expected) if expected != cs[i] => return true,
+                    Some(_) => {
+                        brackets.pop();
+                    }
+                },
                 _ => {}
             }
             i += 1;
         }
-        depth > 0
+        !brackets.is_empty()
     }
 
     fn interp_open_anywhere_ref(s: &str) -> bool {

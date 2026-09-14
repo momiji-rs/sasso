@@ -605,3 +605,35 @@ fn an_escaped_delimiter_in_a_custom_value_is_literal_text() {
         ".a {\n  --x: ab;\n}"
     );
 }
+
+#[test]
+fn a_mismatched_closer_in_a_custom_value_reaches_the_parser() {
+    // `(]` is an error in dart, reported at the `]`. The front-end decides
+    // where a custom value ENDS, and a net-depth count made `(]` look closed,
+    // so an indented line under it was reported as a stray child instead.
+    let e = sass(".a\n  --x: (]\n    b: c\n", "a.sass").expect_err("expected an error");
+    assert_eq!((e.line, e.col), (2, 9));
+    assert!(e.message.contains("expected \")\"."), "{}", e.message);
+    // The same line with nothing under it reports identically.
+    let e = sass(".a\n  --x: (]\n", "a.sass").expect_err("expected an error");
+    assert_eq!((e.line, e.col), (2, 9));
+    // A closer with NO opener ends the value where it stands, so the next line
+    // is its own statement rather than a continuation.
+    let e = sass(".a\n  --x: ]\n  b: c\n", "a.sass").expect_err("expected an error");
+    assert_eq!((e.line, e.col), (2, 8));
+    // A balanced multi-line value still joins.
+    assert_eq!(
+        sass(".a\n  --x: (1,\n    2)\n", "a.sass").expect("compile"),
+        ".a {\n  --x: (1,\n    2);\n}"
+    );
+}
+
+#[test]
+fn an_import_url_spanning_lines_keeps_its_url() {
+    // The url token's padding is not part of the url, so a `url(` opened on
+    // one line and closed on another is the same import dart emits.
+    assert_eq!(
+        sass("@import url(\n  http://x/y.css\n)\n", "a.sass").expect("compile"),
+        "@import url(http://x/y.css);"
+    );
+}
