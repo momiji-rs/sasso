@@ -867,6 +867,17 @@ fn line_spanning_constructs_map_every_generated_line_like_dart() {
             ".x {\n  @media screen,\n    print {\n    b: c;\n  }\n}\n",
             "AACE;EADF;IAGI",
         ),
+        // An interpolated at-rule NAME changes nothing: the rule carries its
+        // own span and maps exactly like the plain spelling.
+        ("@media screen {\n  a {\n    b: c;\n  }\n}\n", "AAAA;EACE;IACE"),
+        (
+            "@#{\"media\"} screen {\n  a {\n    b: c;\n  }\n}\n",
+            "AAAA;EACE;IACE",
+        ),
+        (
+            "$n: media;\n@#{$n} screen {\n  a {\n    b: c;\n  }\n}\n",
+            "AACA;EACE;IACE",
+        ),
     ];
     for (src, expected) in cases {
         let r = compile_with_source_map(src, &Options::default().with_url("in.scss")).expect("compile");
@@ -935,6 +946,24 @@ fn nested_plain_css_rules_map_to_their_selectors() {
     assert_eq!(r.source_map.sources.len(), 1, "{:?}", r.source_map.sources);
     assert!(r.source_map.sources[0].ends_with("nest.css"));
     assert_eq!(r.source_map.mappings, "AAAA;EACE;AAAA;IAEE;;EAEF;IACE");
+
+    // Compressed output maps the nested rule's CHILDREN too: dart visits them
+    // like any other rule's (`.a{.b{x:1;y:2}z:3}`, mappings
+    // `AAAA,GACE,GACE,IACA,IAEF`), and a nested block's `}` is its own
+    // separator — no `;` follows it.
+    std::fs::write(
+        dir.join("nest2.css"),
+        ".a {\n  .b {\n    x: 1;\n    y: 2;\n  }\n  z: 3;\n}\n",
+    )
+    .unwrap();
+    let opts = Options::default()
+        .with_importer(&imp)
+        .with_url(&url)
+        .with_style(OutputStyle::Compressed)
+        .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
+    let r = compile_with_source_map("@import \"nest2\";\n", &opts).expect("compile");
+    assert_eq!(r.css, ".a{.b{x:1;y:2}z:3}");
+    assert_eq!(r.source_map.mappings, "AAAA,GACE,GACE,IACA,IAEF");
     std::fs::remove_dir_all(&dir).ok();
 }
 

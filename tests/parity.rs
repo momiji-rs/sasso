@@ -9062,3 +9062,28 @@ fn mixin_content_nested_in_supports_accepts_content_block() {
     assert!(ours_err(bad).contains("Mixin doesn't accept a content block."));
     assert_error_parity(bad);
 }
+
+/// An at-rule whose NAME is interpolated carries the same source span as the
+/// plain spelling, so the serializer's trailing-comment rule applies to it: a
+/// comment that opens on the rule's `{` line joins that line, and one that
+/// opens on its `}` line joins that. sasso gave such a rule no span at all, so
+/// both comments went to a line of their own. Byte-verified against dart-sass
+/// 1.103.1.
+#[test]
+fn interpolated_at_rule_joins_a_trailing_comment_like_dart() {
+    assert_eq!(
+        ours("@#{\"media\"} screen { /* t */\n  a { b: c; }\n}\n"),
+        "@media screen { /* t */\n  a {\n    b: c;\n  }\n}\n"
+    );
+    assert_eq!(
+        ours("@#{\"font-face\"} {\n  a: b;\n} /* after */\n"),
+        "@font-face {\n  a: b;\n} /* after */\n"
+    );
+    // The same shapes written plainly, for contrast.
+    assert_eq!(
+        ours("@media screen { /* t */\n  a { b: c; }\n}\n"),
+        "@media screen { /* t */\n  a {\n    b: c;\n  }\n}\n"
+    );
+    assert_parity("@#{\"media\"} screen { /* t */\n  a { b: c; }\n}\n");
+    assert_parity("@#{\"font-face\"} {\n  a: b;\n} /* after */\n");
+}

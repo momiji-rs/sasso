@@ -188,6 +188,9 @@ pub(crate) enum Stmt {
         name: Vec<TplPiece>,
         prelude: Vec<TplPiece>,
         body: Option<Vec<Stmt>>,
+        /// Source lines, as for [`Stmt::AtRule`]: `start` = the `{` line (or
+        /// the rule's own line for the `;` form), `end` = the `}` line.
+        lines: SrcLines,
     },
     /// A plain-CSS custom `@function`/`@mixin` whose name begins with `--`.
     /// dart-sass does not treat these as Sass definitions: the whole construct

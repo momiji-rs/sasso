@@ -2252,23 +2252,25 @@ impl<'a> Evaluator<'a> {
                     self.eval_at_rule(name, prelude, body.as_deref(), lines, parents, sink)?;
                     self.last_child_invisible = false;
                 }
-                Stmt::InterpAtRule { name, prelude, body } => {
+                Stmt::InterpAtRule {
+                    name,
+                    prelude,
+                    body,
+                    lines,
+                } => {
                     // The name resolves at eval time; `@keyframes` is the one
                     // rule whose special handling happens here (frame stops).
                     let resolved = self.eval_template(name)?;
+                    // An interpolated name changes nothing about the RULE: it
+                    // carries its own span, so it maps like any other at-rule
+                    // and joins a trailing comment the same way (dart parity).
+                    let stamped = self.stamp(*lines);
                     if is_keyframes_name(&resolved) && body.is_some() {
                         if let Some(b) = body {
-                            self.eval_keyframes(&resolved, prelude, b, SrcLines::default(), sink)?;
+                            self.eval_keyframes(&resolved, prelude, b, stamped, sink)?;
                         }
                     } else {
-                        self.eval_at_rule(
-                            &resolved,
-                            prelude,
-                            body.as_deref(),
-                            SrcLines::default(),
-                            parents,
-                            sink,
-                        )?;
+                        self.eval_at_rule(&resolved, prelude, body.as_deref(), stamped, parents, sink)?;
                     }
                     self.last_child_invisible = false;
                 }

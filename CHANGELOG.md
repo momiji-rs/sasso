@@ -135,6 +135,17 @@ Conformance is tracked separately as a ratchet against the official
   sasso now matches (10 of 148 Lichess bundles had `sources` differing from
   dart's for this alone). Library note: imported files now appear as the
   absolute path they were reached by, not their realpath.
+- **Compressed output no longer writes a stray `;` after a nested rule, and
+  maps that rule's children.** A loaded `.css` file that uses CSS nesting
+  rendered its nested blocks into one pre-built string, so `.a { .b { x: 1 } z:
+  3 }` came out as `.a{.b{x:1};z:3}` — dart writes `.a{.b{x:1}z:3}`, a block's
+  `}` being its own separator (`_requiresSemicolon`) — and no declaration
+  inside the nested block carried a source-map entry. The block's items now go
+  through the mapping-aware serializer.
+- **An at-rule whose name is interpolated (`@#{"media"} screen`) carries its
+  source span**, so it maps like the plain spelling and joins a trailing
+  comment the same way (`@#{"media"} screen { /* t */` used to break the
+  comment onto its own line).
 - **Source maps: every generated line of a line-spanning construct maps, a
   comment maps from column 0, a rule maps to its selector's line, and
   passed-through `@import`s and nested plain-CSS rules map at all.** dart-sass

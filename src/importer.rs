@@ -462,8 +462,14 @@ fn resolve_in_base(base: &Path, path: &str, allow_import_only: bool) -> Resoluti
 
 /// dart `p.canonicalize`: the absolute path with `.`/`..` segments removed
 /// lexically — no `realpath`, so symlinks stay unresolved. A relative path is
-/// taken from the current directory. (dart also folds the path's CASE on
-/// case-insensitive filesystems; not done here.)
+/// taken from the current directory.
+///
+/// On Windows the result is lowercased, as dart's `Style.windows` canonicalizes
+/// each part: the filesystem is case-insensitive there, so two spellings of one
+/// path must produce ONE key or the module would be loaded twice and appear
+/// twice in a source map's `sources`. Elsewhere the path is used as written,
+/// again like dart — which case-folds for no other style, not even on a
+/// case-insensitive macOS volume.
 fn absolute_normalized(p: &Path) -> String {
     use std::path::Component;
     let abs = if p.is_absolute() {
@@ -486,7 +492,10 @@ fn absolute_normalized(p: &Path) -> String {
             c => out.push(c),
         }
     }
-    out.to_string_lossy().into_owned()
+    let out = out.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let out = out.to_lowercase();
+    out
 }
 
 /// Lexically remove `.` and `..` segments from a URL path (no filesystem
