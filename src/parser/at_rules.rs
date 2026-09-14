@@ -54,7 +54,7 @@ impl Parser {
             }
         }
         let stmt = match name.as_str() {
-            "import" => self.parse_import(pos),
+            "import" => self.parse_import(pos, start_mark),
             "if" => self.parse_if(),
             // A stray `@else` (one not consumed as part of an `@if` chain by
             // `parse_if`) is never valid on its own.
@@ -162,12 +162,17 @@ impl Parser {
     /// which is inlined) or a plain CSS `@import` (a `url(...)` URL, a `.css`/
     /// protocol URL, or a URL followed by media-query/`supports()` modifiers,
     /// which is emitted verbatim).
-    fn parse_import(&mut self, pos: Pos) -> Result<Stmt, Error> {
+    fn parse_import(&mut self, pos: Pos, start_mark: Mark) -> Result<Stmt, Error> {
         let mut args = Vec::new();
+        // Byte length of the rule from `@import` up to (not including) the
+        // `;` — trailing whitespace included, which is how dart spans a
+        // misplaced `@import "x"   ;` (verified against 1.103.1).
+        let mut length;
         loop {
             self.skip_ws_trivia();
             let arg = self.parse_import_arg(pos)?;
             args.push(arg);
+            length = self.sc.byte_len_from(start_mark);
             self.skip_ws_trivia();
             if self.sc.peek() == Some(',') {
                 // Plain CSS `@import` takes a single URL — a comma-separated
@@ -189,7 +194,7 @@ impl Parser {
             _ => return Err(Error::at("expected \";\".", self.sc.position())),
         }
         self.sc.eat(';');
-        Ok(Stmt::Import(args))
+        Ok(Stmt::Import { args, pos, length })
     }
 
     /// Parse `@use "<url>" [as <namespace>|as *];`. The URL is a quoted string

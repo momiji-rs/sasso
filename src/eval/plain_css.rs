@@ -112,7 +112,7 @@ impl<'a> Evaluator<'a> {
                 // A plain CSS file never inlines an `@import`; every entry is
                 // emitted verbatim (`@import "x";` / `@import url(x);`), matching
                 // dart-sass loading a `.css` stylesheet.
-                Stmt::Import(args) => {
+                Stmt::Import { args, .. } => {
                     for arg in args {
                         let text = match arg {
                             ImportArg::Css { url, modifiers } => self.serialize_css_import(url, modifiers)?,
@@ -347,7 +347,7 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                 }
-                Stmt::Import(args) => {
+                Stmt::Import { args, .. } => {
                     for arg in args {
                         let text = match arg {
                             ImportArg::Css { url, modifiers } => self.serialize_css_import(url, modifiers)?,
@@ -533,7 +533,7 @@ impl<'a> Evaluator<'a> {
             }
             // A nested `@import` inside a plain-CSS rule is preserved
             // verbatim, like a top-level one (see `exec_css`).
-            Stmt::Import(args) => {
+            Stmt::Import { args, .. } => {
                 for arg in args {
                     let prelude = match arg {
                         ImportArg::Css { url, modifiers } => self.serialize_css_import(url, modifiers)?,

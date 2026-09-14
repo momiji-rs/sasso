@@ -126,6 +126,24 @@ Conformance is tracked separately as a ratchet against the official
   trace. A file outside the tree whose relative spelling would be longer than
   its absolute path is shown absolute (dart's `prettyUri`); the entry stays
   as given. `WarnEvent::url` carries the same spelling.
+- **`@import` deprecation warnings fire when a file is parsed**, as in
+  dart-sass, not when each rule is evaluated: all of a file's import
+  deprecations now precede anything its body prints (its `@warn`s, the
+  warnings of the files it imports), a file the import cache already parsed
+  warns once however often it is imported, and a `@use`d module's own
+  `@import` warns under the `@use` frame before the module body runs. This
+  was the last difference in stderr ordering against dart-sass 1.103.1 on
+  the `@import` chains tested here. In the same move a misplaced `@import`
+  — in a mixin or function body, a control directive, a property set, or an
+  at-rule nested in one of those (interpolated at-rules included) — is
+  rejected as dart-sass rejects it, in loaded files as well as the entry
+  (sasso used to accept it in property sets and in loaded files), and the
+  "This at-rule is not allowed here." error now carries dart's snippet and
+  frames. A property set admits no `@import` of any kind, plain-CSS ones
+  included. And a plain-CSS entry (a `.css` input) is now evaluated as plain
+  CSS like a `.css` module: its `@import "theme";` is passed through instead
+  of being loaded as Sass (which warned and then failed with "Can't find
+  stylesheet to import").
 - **A mixin, function, or `@content` block runs against the file that wrote
   it**, as in dart-sass. A callable defined in a textually `@import`ed file
   (or reached through `meta.apply`/`meta.call`) used to be evaluated as if it
