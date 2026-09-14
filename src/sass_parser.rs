@@ -700,13 +700,23 @@ impl Transpiler {
         self.out.push_str(logical);
         // A `@function --x()`/`@mixin --x()` body is a plain-CSS custom
         // callable; flag it for the `result` child check above.
-        let css_callable = matches!(directive_name(logical).as_deref(), Some("function" | "mixin"))
-            && logical
+        // The keyword may be escaped (`@fu\6e ction`), so the name after it is
+        // found with the same decoder `directive_name` uses — a raw
+        // identifier-character strip would stop at the backslash and miss the
+        // `--`, letting a `result:` child through that dart rejects.
+        let css_callable = matches!(directive_name(logical).as_deref(), Some("function" | "mixin")) && {
+            let after_sigil: Vec<char> = logical
                 .trim_start()
                 .trim_start_matches(['@', '='])
-                .trim_start_matches(|c: char| is_ident_char(c))
+                .chars()
+                .collect();
+            let (_, end) = crate::parser::decode_ident(&after_sigil, 0);
+            after_sigil[end..]
+                .iter()
+                .collect::<String>()
                 .trim_start()
-                .starts_with("--");
+                .starts_with("--")
+        };
         let saved_callable = self.in_css_callable;
         if css_callable {
             self.in_css_callable = true;
@@ -780,7 +790,9 @@ impl Transpiler {
         // source column caps the re-indentation strip of a multi-line value
         // (dart _writeReindentedValue), so it must survive the SCSS re-parse.
         self.out.push_str(&self.lines[start].indent_str);
-        self.out.push_str(name);
+        // Everything up to the colon is emitted as written — whitespace BEFORE
+        // it included, or the value would start a column early (`--v : 1px`).
+        self.out.push_str(&raw[..colon]);
         self.out.push(':');
         self.out.push_str(value.trim_end());
         self.out.push_str(";\n");
@@ -812,6 +824,31 @@ fn join_continuation(logical: &mut String, start_line: usize, line: usize, inden
     logical.push_str(piece);
 }
 
+/// Whether an UNESCAPED identifier is a `url` function name — `url` itself or
+/// a vendor-prefixed `-x-url` — compared in place, without building a `String`
+/// (the allocation-free twin of [`crate::parser::is_url_function`], which the
+/// escaped path still uses).
+fn plain_name_is_url(cs: &[char]) -> bool {
+    fn is_url(cs: &[char]) -> bool {
+        cs.len() == 3
+            && cs[0].eq_ignore_ascii_case(&'u')
+            && cs[1].eq_ignore_ascii_case(&'r')
+            && cs[2].eq_ignore_ascii_case(&'l')
+    }
+    if is_url(cs) {
+        return true;
+    }
+    // `-x-url`: a leading `-`, at least one inner character, then a second `-`.
+    if cs.first() == Some(&'-') {
+        if let Some(rel) = cs[1..].iter().position(|&c| c == '-') {
+            if rel >= 1 {
+                return is_url(&cs[1 + rel + 1..]);
+            }
+        }
+    }
+    false
+}
+
 /// The lowercased directive keyword of a logical line (`@for` -> `"for"`), or
 /// `None` if the line is not an at-rule.
 ///
@@ -838,55 +875,12 @@ fn directive_name(logical: &str) -> Option<String> {
     // (`@im\70ort` IS `@import`), so the line analysis has to as well, or a
     // directive would be taken for an unknown at-rule.
     let cs: Vec<char> = rest.chars().collect();
-    let (name, _) = decode_ident(&cs, 0);
+    let (name, _) = crate::parser::decode_ident(&cs, 0);
     if name.is_empty() {
         None
     } else {
         Some(name.to_ascii_lowercase())
     }
-}
-
-/// Decode the CSS identifier starting at `cs[i]`, resolving `\XXXXXX` hex and
-/// `\c` literal escapes, and return it with the index just past its last
-/// character. An empty name means there was no identifier there.
-fn decode_ident(cs: &[char], mut i: usize) -> (String, usize) {
-    let mut name = String::new();
-    while let Some(&c) = cs.get(i) {
-        if c == '\\' {
-            i += 1;
-            let mut hex = String::new();
-            while hex.len() < 6 && cs.get(i).is_some_and(|c| c.is_ascii_hexdigit()) {
-                hex.push(cs[i]);
-                i += 1;
-            }
-            if hex.is_empty() {
-                match cs.get(i) {
-                    Some(&c) => {
-                        name.push(c);
-                        i += 1;
-                    }
-                    None => break,
-                }
-            } else {
-                // One whitespace character may terminate a hex escape.
-                if cs.get(i).is_some_and(|c| c.is_whitespace()) {
-                    i += 1;
-                }
-                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                    Some(c) => name.push(c),
-                    None => break,
-                }
-            }
-            continue;
-        }
-        if is_ident_char(c) {
-            name.push(c);
-            i += 1;
-            continue;
-        }
-        break;
-    }
-    (name, i)
 }
 
 /// Whether a statement's prelude may span multiple lines (the prelude is an
@@ -1307,9 +1301,28 @@ impl LineScanner {
         if self.i > 0 && (is_ident_char(self.cs[self.i - 1]) || self.cs[self.i - 1] == '\\') {
             return None;
         }
-        // Scan it forward, decoding escapes, up to the `(`.
-        let (name, k) = decode_ident(&self.cs, self.i);
-        // The `(` must follow the name directly.
+        // Walk the identifier WITHOUT allocating first: most of them are
+        // ordinary names, and one that is not followed by `(` cannot be a url
+        // however it is spelled.
+        let mut k = self.i;
+        let mut escaped = false;
+        while let Some(&c) = self.cs.get(k) {
+            if c == '\\' {
+                escaped = true;
+                break;
+            }
+            if is_ident_char(c) {
+                k += 1;
+                continue;
+            }
+            break;
+        }
+        if !escaped {
+            return (self.cs.get(k) == Some(&'(') && plain_name_is_url(&self.cs[self.i..k]))
+                .then(|| k + 1 - self.i);
+        }
+        // Only an escaped name needs decoding.
+        let (name, k) = crate::parser::decode_ident(&self.cs, self.i);
         if self.cs.get(k) != Some(&'(') {
             return None;
         }

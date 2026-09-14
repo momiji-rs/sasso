@@ -383,6 +383,49 @@ fn strip_vendor_prefix(lower: &str) -> &str {
     lower
 }
 
+/// Decode the CSS identifier starting at `cs[i]`, resolving `\XXXXXX` hex and
+/// `\c` literal escapes, and return it with the index just past its last
+/// character. An empty name means there was no identifier there.
+pub(crate) fn decode_ident(cs: &[char], mut i: usize) -> (String, usize) {
+    let mut name = String::new();
+    while let Some(&c) = cs.get(i) {
+        if c == '\\' {
+            i += 1;
+            let mut hex = String::new();
+            while hex.len() < 6 && cs.get(i).is_some_and(|c| c.is_ascii_hexdigit()) {
+                hex.push(cs[i]);
+                i += 1;
+            }
+            if hex.is_empty() {
+                match cs.get(i) {
+                    Some(&c) => {
+                        name.push(c);
+                        i += 1;
+                    }
+                    None => break,
+                }
+            } else {
+                // One whitespace character may terminate a hex escape.
+                if cs.get(i).is_some_and(|c| c.is_whitespace()) {
+                    i += 1;
+                }
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(c) => name.push(c),
+                    None => break,
+                }
+            }
+            continue;
+        }
+        if is_ident_char(c) {
+            name.push(c);
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    (name, i)
+}
+
 /// Whether `name` is a `url(` function — `url` itself or any vendor-prefixed
 /// `-x-url`, case-insensitively. dart-sass parses these with its special URL
 /// grammar (a plain, unquoted URL is preserved verbatim and the call is

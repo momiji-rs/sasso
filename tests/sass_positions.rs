@@ -164,6 +164,18 @@ fn an_unquoted_import_url_runs_to_the_comma() {
     // carets it at 1:9; sasso's missing-import error carries no span yet —
     // a general gap, in `.scss` as much as here.)
     assert!(e.message.contains("foo screen"), "{}", e.message);
+    // An escaped `url(` is still a url FUNCTION, so the import is plain CSS —
+    // and the name is re-emitted in dart's canonical lowercase spelling,
+    // however it was written. (A vendor-prefixed name is NOT a url token here:
+    // dart rejects `@import -c-url(…)`, unlike in a value position.)
+    assert_eq!(
+        sass("@import u\\72l(//cdn/x.css)\n", "d.sass").unwrap(),
+        "@import url(//cdn/x.css);"
+    );
+    assert_eq!(
+        sass("@import URL(//cdn/x.css)\n", "d.sass").unwrap(),
+        "@import url(//cdn/x.css);"
+    );
     // The at-rule KEYWORD may be escaped; the parser decodes it, so the line
     // analysis must too, or `@im\\70ort` is taken for an unknown at-rule and
     // its unquoted url is truncated at the `//`.
@@ -361,6 +373,24 @@ fn the_shorthand_keeps_the_rules_the_keyword_has() {
 }
 
 #[test]
+fn an_escaped_keyword_is_the_keyword_it_spells() {
+    // The parser decodes an escaped at-rule keyword, so the line analysis must
+    // too: `@fu\\6e ction --a()` is a plain-CSS custom function, whose
+    // `result:` may not have anything indented beneath it. Reading the name
+    // with a raw identifier scan stopped at the backslash, missed the `--`,
+    // and emitted `result: 1 { nested: 2; } ;` — invalid CSS.
+    let e =
+        sass("@fu\\6e ction --a()\n  result: 1\n    nested: 2\n", "b.sass").expect_err("expected an error");
+    assert_eq!((e.line, e.col), (3, 5));
+    assert!(
+        e.message
+            .contains("Nothing may be indented beneath a @function result"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
 fn a_multi_line_directive_prelude_keeps_its_own_lines() {
     // A prelude continuation is joined ON ITS OWN LINE, not with a space, so a
     // diagnostic inside it points at the line it was written on, as dart does.
@@ -410,6 +440,14 @@ fn a_custom_property_keeps_its_own_spacing() {
         sass(".a\n  --v:#{1 + 1}\n", "a.sass").unwrap(),
         ".a {\n  --v:2;\n}"
     );
+    // Whitespace BEFORE the colon is part of the line too: trimming it moved
+    // the value a column left (dart reports 2:10 here, not 2:9).
+    assert_eq!(
+        sass(".a\n  --v : 1px\n", "a.sass").unwrap(),
+        ".a {\n  --v: 1px;\n}"
+    );
+    let e = sass(".a\n  --v :#{$undef}\n", "f.sass").expect_err("expected an error");
+    assert_eq!((e.line, e.col), (2, 10));
 }
 
 #[test]

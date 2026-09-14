@@ -555,16 +555,15 @@ impl Parser {
         }
     }
 
-    /// Whether the cursor is at a `url(` (case-insensitive) function call.
+    /// Whether the cursor is at a `url(` function call — the name matched the
+    /// way dart matches it, case-insensitively and with CSS escapes decoded
+    /// (`u\72l(` IS `url(`). A vendor-prefixed spelling does NOT count here:
+    /// dart rejects `@import -c-url(…)` with "Expected string.", unlike in a
+    /// value position where `-c-url(` is a url token.
     fn peek_is_url_func(&self) -> bool {
         let cs = self.sc.rest();
-        if cs.len() < 4 {
-            return false;
-        }
-        cs[0].eq_ignore_ascii_case(&'u')
-            && cs[1].eq_ignore_ascii_case(&'r')
-            && cs[2].eq_ignore_ascii_case(&'l')
-            && cs[3] == '('
+        let (name, k) = crate::parser::decode_ident(cs, 0);
+        name.eq_ignore_ascii_case("url") && cs.get(k) == Some(&'(')
     }
 
     /// Capture a `url(...)` argument (parens may nest). The `url(` wrapper and
@@ -575,11 +574,13 @@ impl Parser {
     fn parse_import_url_func(&mut self) -> Result<Vec<TplPiece>, Error> {
         let mut pieces: Vec<TplPiece> = Vec::new();
         let mut lit = String::new();
-        for _ in 0..4 {
-            if let Some(c) = self.sc.bump() {
-                lit.push(c); // `url(`
-            }
+        // The name is re-emitted in dart's canonical spelling — lowercase, with
+        // any escape decoded — however it was written (`URL(`, `u\72l(`).
+        let (_, name_len) = crate::parser::decode_ident(self.sc.rest(), 0);
+        for _ in 0..=name_len {
+            self.sc.bump(); // through the `(`
         }
+        lit.push_str("url(");
         let mut depth = 1i32;
         while let Some(c) = self.sc.peek() {
             if c == '#' && self.sc.peek_at(1) == Some('{') {
