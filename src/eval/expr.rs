@@ -313,6 +313,7 @@ impl<'a> Evaluator<'a> {
                         let f = crate::value::SassFunction {
                             name: "calc".to_string(),
                             css: false,
+                            module: None,
                             user: Some(callable as Rc<dyn std::any::Any>),
                         };
                         return self
@@ -609,34 +610,40 @@ impl<'a> Evaluator<'a> {
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.
                 let (mut pos_args, mut named, call_sep) = self.eval_call_args(args)?;
+                // `_` and `-` are one character in a Sass identifier, so every
+                // built-in lookup from here down runs on the canonical spelling
+                // (`map_get(…)` IS the deprecated `map-get(…)`). The name as
+                // WRITTEN stays in `name` for the plain-CSS passthrough.
+                let canonical = if name.contains('_') {
+                    Cow::Owned(name.replace('_', "-"))
+                } else {
+                    Cow::Borrowed(name.as_str())
+                };
+                let canonical = canonical.as_ref();
                 // Whatever this call is deprecated for, it is reported here:
                 // before every dispatch — the `sass:meta` predicates below
                 // resolve against evaluator state and return early — and after
                 // the arguments, so a call inside one of them warns first, as
                 // dart's does.
                 //
-                // Two things mean no global built-in is reached: a host
-                // function of the same name overrides it, and a `@use
-                // "sass:…" as *` makes the bare name that module's MEMBER (so
-                // it is deprecated as a function, if at all, not as a global).
-                let host_override = !self.options.functions.is_empty() && {
-                    let norm = crate::host_fn::normalize_name(name);
-                    self.options.functions.iter().any(|f| f.name == norm)
-                };
-                if !host_override {
-                    let via_star = self
-                        .star_modules
-                        .iter()
-                        .find(|m| crate::builtins::module_has_member(m, name))
-                        .cloned();
-                    self.emit_call_deprecations(name, via_star.as_deref(), *pos, *length);
-                }
+                // A `@use "sass:…" as *` makes the bare name that module's
+                // MEMBER, so it is deprecated as a function, if at all, and not
+                // as a global. A host function of the same name is NOT such a
+                // case: dart's `functions` do not shadow a built-in global at
+                // all (measured against 1.103.1's JS API — the built-in runs
+                // and still warns).
+                let via_star = self
+                    .star_modules
+                    .iter()
+                    .find(|m| crate::builtins::module_has_member(m, canonical))
+                    .cloned();
+                self.emit_call_deprecations(canonical, via_star.as_deref(), *pos, *length);
                 // The global (deprecated) aliases of the `sass:meta` existence
                 // predicates resolve against the evaluator state, not the
                 // value-only builtin layer. A user-defined function of the same
                 // name still wins (checked above).
                 if matches!(
-                    name.as_str(),
+                    canonical,
                     "variable-exists"
                         | "global-variable-exists"
                         | "mixin-exists"
@@ -652,7 +659,7 @@ impl<'a> Evaluator<'a> {
                     for (_, v) in &mut named {
                         *v = std::mem::replace(v, Value::Null).without_slash();
                     }
-                    if let Some(r) = self.try_meta_eval_call(name, &pos_args, &named, *pos, *length) {
+                    if let Some(r) = self.try_meta_eval_call(canonical, &pos_args, &named, *pos, *length) {
                         return r;
                     }
                 }
@@ -693,7 +700,7 @@ impl<'a> Evaluator<'a> {
                                 *v = std::mem::replace(v, Value::Null).without_slash();
                                 let _ = n;
                             }
-                            return crate::builtins::call_module(&m, name, &pos_args, &named, *pos)
+                            return crate::builtins::call_module(&m, canonical, &pos_args, &named, *pos)
                                 .map(Value::without_slash);
                         }
                     }

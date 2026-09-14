@@ -1260,3 +1260,68 @@ fn an_unquoted_import_url_written_back_is_quoted_like_a_string() {
     // A url with neither stays as it was.
     assert_eq!(sass("@import foo.css\n"), "@import \"foo.css\";");
 }
+
+#[test]
+fn a_builtin_answers_to_its_underscore_spelling() {
+    // `_` and `-` are one character in a Sass identifier, so a global built-in
+    // is reached either way — as it already is for user members and module
+    // members. Measured against dart-sass 1.103.1.
+    assert_eq!(css("a { b: str_index(\"abc\", \"b\"); }"), "a {\n  b: 2;\n}\n");
+    assert_eq!(css("a { b: to_upper_case(\"abc\"); }"), "a {\n  b: \"ABC\";\n}\n");
+    assert_eq!(css("a { b: type_of(1); }"), "a {\n  b: number;\n}\n");
+    assert_eq!(css("a { b: map_get((x: 1), x); }"), "a {\n  b: 1;\n}\n");
+    // The stateful `sass:meta` members resolve the same way, globally and
+    // through the module.
+    assert_eq!(
+        css("$x: 1; a { b: variable_exists(\"x\"); }"),
+        "a {\n  b: true;\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:meta\"; a { b: meta.function_exists(\"rgb\"); }"),
+        "a {\n  b: true;\n}\n"
+    );
+    // A name that is no built-in keeps the spelling it was written with: it is
+    // a plain CSS function, not a Sass one.
+    assert_eq!(css("a { b: my_own_fn(1); }"), "a {\n  b: my_own_fn(1);\n}\n");
+    // A reference is stored canonically, as dart stores it.
+    assert_eq!(
+        css("@use \"sass:meta\"; a { b: meta.inspect(meta.get-function(\"map_get\")); }"),
+        "a {\n  b: get-function(\"map-get\");\n}\n"
+    );
+}
+
+#[test]
+fn a_module_member_reference_is_not_its_global_alias() {
+    // `meta.get-function($module:)` yields the MODULE's function: dart keeps
+    // the member's own name, does not compare it equal to the global alias,
+    // and dispatches it through the module. Measured against dart-sass 1.103.1.
+    assert_eq!(
+        css("@use \"sass:meta\"; @use \"sass:map\";\na { b: meta.inspect(meta.get-function(\"get\", $module: \"map\")); }"),
+        "a {\n  b: get-function(\"get\");\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:meta\"; @use \"sass:map\";\na { b: meta.get-function(\"get\", $module: \"map\") == meta.get-function(\"map-get\"); }"),
+        "a {\n  b: false;\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:meta\"; @use \"sass:map\";\na { b: meta.call(meta.get-function(\"get\", $module: \"map\"), (x: 1), x); }"),
+        "a {\n  b: 1;\n}\n"
+    );
+    // `color.scale` is not the global `scale-color`, so the reference has to
+    // carry the module to reach the right function at all.
+    assert_eq!(
+        css("@use \"sass:meta\"; @use \"sass:color\";\na { b: meta.inspect(meta.get-function(\"scale\", $module: \"color\")); }"),
+        "a {\n  b: get-function(\"scale\");\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:meta\"; @use \"sass:color\";\na { b: meta.call(meta.get-function(\"scale\", $module: \"color\"), #abcdef, $lightness: 50%); }"),
+        "a {\n  b: #d5e6f7;\n}\n"
+    );
+    // A member a `@use "sass:…" as *` exposes unprefixed is that module's too.
+    assert_eq!(
+        css(
+            "@use \"sass:map\" as *; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"get\")); }"
+        ),
+        "a {\n  b: get-function(\"get\");\n}\n"
+    );
+}

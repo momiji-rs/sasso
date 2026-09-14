@@ -719,3 +719,69 @@ fn a_deprecation_follows_the_call_that_is_actually_made() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn what_a_call_resolves_to_decides_what_is_deprecated() {
+    // The underscore spelling reaches the same built-in, so it carries the same
+    // deprecation; a reference taken from a module is not the global. Every
+    // expectation measured against dart-sass 1.103.1.
+    let w = warnings("a { b: map_get((x: 1), x); }\n", "in.scss");
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("Use map.get instead."), "{}", w[0]);
+    // The caret covers the call as written, underscore and all.
+    assert!(w[0].contains("^^^^^^^^^^^^^^^^^^"), "{}", w[0]);
+    let w = warnings(
+        "@use \"sass:meta\";\na { b: meta.feature_exists(\"at-error\"); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    let w = warnings(
+        "@use \"sass:meta\" as *;\na { b: feature_exists(\"at-error\"); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    // A reference taken THROUGH a module is that module's member: the global
+    // spelling is what is deprecated, and this is not it.
+    assert!(warnings(
+        "@use \"sass:meta\"; @use \"sass:math\";\na { b: meta.call(meta.get-function(\"percentage\", $module: \"math\"), 1); }\n",
+        "in.scss",
+    )
+    .is_empty());
+    // The function's OWN deprecation still fires for a module-derived one.
+    let w = warnings(
+        "@use \"sass:meta\";\na { b: meta.call(meta.get-function(\"feature-exists\", $module: \"meta\"), \"at-error\"); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    // Taken globally, it is deprecated for being global.
+    let w = warnings(
+        "@use \"sass:meta\";\na { b: meta.call(meta.get-function(\"percentage\"), 1); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("Use math.percentage instead."), "{}", w[0]);
+}
+
+#[test]
+fn a_host_function_does_not_exempt_a_global_builtin() {
+    // dart's `functions` do not shadow a built-in global at all: the built-in
+    // runs and still warns (measured against 1.103.1's JS API with a
+    // `type-of($v)` host function, which never runs).
+    use std::rc::Rc;
+    let cb: sasso::HostFunction = Rc::new(|_args: &[u8]| Ok(Vec::new()));
+    let seen: Rc<std::cell::RefCell<Vec<String>>> = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = Rc::clone(&seen);
+    let opts = Options::default()
+        .with_url("in.scss")
+        .with_function("type-of($v)", cb)
+        .with_warn_handler(Rc::new(move |ev: &sasso::WarnEvent<'_>| {
+            sink.borrow_mut().push(ev.formatted.to_string());
+        }));
+    let _ = compile(".a { b: type-of(1); }\n", &opts);
+    let w = seen.borrow().clone();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("Use meta.type-of instead."), "{}", w[0]);
+}

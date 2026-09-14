@@ -1797,6 +1797,15 @@ impl<'a> Evaluator<'a> {
     /// equivalent is deprecated for being global, while `feature-exists` is
     /// deprecated whichever way it is spelled.
     pub(super) fn emit_call_deprecations(&mut self, name: &str, module: Option<&str>, pos: Pos, len: usize) {
+        // Both registries are keyed by the canonical spelling: `_` and `-` are
+        // one character in a Sass identifier, and dart deprecates `map_get(…)`
+        // exactly as it deprecates `map-get(…)`.
+        let canonical = if name.contains('_') {
+            Cow::Owned(name.replace('_', "-"))
+        } else {
+            Cow::Borrowed(name)
+        };
+        let name = canonical.as_ref();
         if module.is_none() {
             if let Some(replacement) = crate::builtins::global_builtin_replacement(name) {
                 let dep = crate::deprecation::Deprecation::global_builtin(replacement);

@@ -43,6 +43,16 @@ impl<'a> Evaluator<'a> {
                 );
             }
         };
+        // `call_module` canonicalizes the member (`_` and `-` are one
+        // character in a Sass identifier); so must every lookup here, or
+        // `meta.feature_exists(…)` reaches the dispatcher unannounced and
+        // `meta.get_function(…)` never reaches the evaluator at all.
+        let canonical = if member.contains('_') {
+            Cow::Owned(member.replace('_', "-"))
+        } else {
+            Cow::Borrowed(member)
+        };
+        let member = canonical.as_ref();
         let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
         // Reported AFTER the arguments, so a deprecated call inside one warns
         // first, as dart's does — and against the module's REAL name, which is
@@ -205,6 +215,7 @@ impl<'a> Evaluator<'a> {
             return Ok(Value::Function(SassFunction {
                 name,
                 css: true,
+                module: None,
                 user: None,
             }));
         }
@@ -214,6 +225,7 @@ impl<'a> Evaluator<'a> {
             return Ok(Value::Function(SassFunction {
                 name,
                 css: false,
+                module: None,
                 user: Some(f as Rc<dyn std::any::Any>),
             }));
         }
@@ -224,15 +236,35 @@ impl<'a> Evaluator<'a> {
                     return Ok(Value::Function(SassFunction {
                         name,
                         css: false,
+                        module: None,
                         user: Some(Rc::clone(&f) as Rc<dyn std::any::Any>),
                     }));
                 }
             }
+            // A built-in module's member exposed unprefixed the same way is
+            // still that module's: dart keeps `get-function("get")` bound to
+            // `map.get` after `@use "sass:map" as *`, not to the global alias.
+            for m in &self.star_modules {
+                if crate::builtins::module_has_member(m, &name) {
+                    if let Some(module) = crate::value::BuiltinModule::from_name(m) {
+                        return Ok(Value::Function(SassFunction {
+                            name,
+                            css: false,
+                            module: Some(module),
+                            user: None,
+                        }));
+                    }
+                }
+            }
         }
         if crate::builtins::is_builtin(&name) {
+            // The reference is stored under the canonical spelling, as dart
+            // stores it: `inspect(get-function("map_get"))` is
+            // `get-function("map-get")`.
             return Ok(Value::Function(SassFunction {
-                name,
+                name: name.replace('_', "-"),
                 css: false,
+                module: None,
                 user: None,
             }));
         }
@@ -347,6 +379,7 @@ impl<'a> Evaluator<'a> {
                 return Ok(Value::Function(SassFunction {
                     name: name.to_string(),
                     css: false,
+                    module: None,
                     user: Some(Rc::clone(&f) as Rc<dyn std::any::Any>),
                 }));
             }
@@ -354,15 +387,15 @@ impl<'a> Evaluator<'a> {
         }
         if let Some(builtin) = self.used_modules.get(module_name) {
             if crate::builtins::module_has_member(builtin, name) {
-                // The captured reference dispatches through the GLOBAL alias
-                // (`color.scale` is the global `scale-color`), so a later
-                // meta.call resolves the right builtin (issue_2818).
-                let global = crate::builtins::module_member_to_global(builtin, name)
-                    .unwrap_or(name)
-                    .to_string();
+                // The reference keeps the MEMBER's name and remembers the
+                // module it came from, so invoking it dispatches through that
+                // module (`color.scale` is not the global `scale-color`, and
+                // dart neither prints nor compares them as the same function).
+                let module = crate::value::BuiltinModule::from_name(builtin);
                 return Ok(Value::Function(SassFunction {
-                    name: global,
+                    name: name.replace('_', "-"),
                     css: false,
+                    module,
                     user: None,
                 }));
             }
@@ -440,6 +473,7 @@ impl<'a> Evaluator<'a> {
                 let f = SassFunction {
                     name: s.text.to_string(),
                     css: false,
+                    module: None,
                     user: self
                         .lookup_function_norm(&normalize_arg_name(&s.text))
                         .map(|c| c as Rc<dyn std::any::Any>),
@@ -465,12 +499,14 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
         length: usize,
     ) -> Result<Value, Error> {
-        // Reaching a global built-in through a reference is still using it, and
-        // dart reports that against the INVOCATION. (A reference with no
-        // position is an internal invocation — the user-overridden `calc()`
-        // hook — which reports nothing.)
+        // Reaching a built-in through a reference is still using it, and dart
+        // reports that against the INVOCATION — as the GLOBAL it is only when
+        // the reference was taken globally, which is why the module it came
+        // from is remembered. (A reference with no position is an internal
+        // invocation — the user-overridden `calc()` hook — which reports
+        // nothing.)
         if f.user.is_none() && !f.css && pos.line > 0 {
-            self.emit_call_deprecations(&f.name, None, pos, length);
+            self.emit_call_deprecations(&f.name, f.module.map(|m| m.name()), pos, length);
         }
         // A captured user `@function`: bind the evaluated args and run its
         // body in the callable's lexical closure. The payload is a
@@ -547,11 +583,19 @@ impl<'a> Evaluator<'a> {
         }
         // A built-in reference. The `sass:meta` introspection functions need
         // the evaluator's scopes/definitions; everything else dispatches
-        // through the value-only builtin library.
-        if let Some(r) = self.try_meta_eval_call(&f.name, &pos_args, &named, pos, length) {
-            return r;
+        // through the value-only builtin library — through the MODULE when the
+        // reference was taken from one, since a member and its global alias are
+        // not always the same function (`color.scale` vs `scale-color`).
+        if f.module.map_or(true, |m| m == crate::value::BuiltinModule::Meta) {
+            if let Some(r) = self.try_meta_eval_call(&f.name, &pos_args, &named, pos, length) {
+                return r;
+            }
         }
-        crate::builtins::call(&f.name, &pos_args, &named, pos).map(Value::without_slash)
+        match f.module {
+            Some(m) => crate::builtins::call_module(m.name(), &f.name, &pos_args, &named, pos)
+                .map(Value::without_slash),
+            None => crate::builtins::call(&f.name, &pos_args, &named, pos).map(Value::without_slash),
+        }
     }
 
     /// Read the single string `$name` argument of an existence predicate,
@@ -676,6 +720,9 @@ impl<'a> Evaluator<'a> {
             // their callables are dispatched, not enumerated, so report the
             // names we know.
             if let Some(builtin) = self.used_modules.get(&ns) {
+                // The enumerated references belong to the module, not to the
+                // namespace they were reached through.
+                let owner = crate::value::BuiltinModule::from_name(builtin);
                 let names: Vec<&str> = match (builtin.as_str(), kind) {
                     ("meta", MemberKind::Function) => crate::builtins::META_FUNCTION_NAMES.to_vec(),
                     ("meta", MemberKind::Mixin) => crate::builtins::META_MIXIN_NAMES.to_vec(),
@@ -692,6 +739,7 @@ impl<'a> Evaluator<'a> {
                             MemberKind::Function => Value::Function(SassFunction {
                                 name: name.to_string(),
                                 css: false,
+                                module: owner,
                                 user: None,
                             }),
                             MemberKind::Mixin => Value::Mixin(Box::new(SassMixin {
@@ -733,6 +781,7 @@ impl<'a> Evaluator<'a> {
                     MemberKind::Function => Value::Function(SassFunction {
                         name: name.clone(),
                         css: false,
+                        module: None,
                         user: module
                             .function(&name)
                             .map(|f| Rc::clone(&f) as Rc<dyn std::any::Any>),
@@ -920,7 +969,7 @@ impl<'a> Evaluator<'a> {
                 // that module's — and still deprecated if it is (`m.feature-
                 // exists(…)` after `@forward "sass:meta"`).
                 let owner = fb.module.clone();
-                let bare = bare.to_string();
+                let bare = bare.replace('_', "-");
                 let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
                 self.emit_call_deprecations(&bare, Some(&owner), pos, length);
                 let bare = bare.as_str();

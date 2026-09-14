@@ -45,6 +45,14 @@ pub(crate) fn call(
     named: &[(String, Value)],
     pos: Pos,
 ) -> Result<Value, Error> {
+    // `_` and `-` are the same character in a Sass identifier, so a global
+    // built-in answers to either spelling (`map_get(…)` IS `map-get(…)`), like
+    // the module members `call_module` already normalizes. Only the LOOKUP is
+    // canonicalized: a name that turns out to be no builtin at all falls
+    // through to plain CSS spelled exactly as it was written.
+    let written = name;
+    let lookup = canonical_name(name);
+    let name = lookup.as_ref();
     if let Some(r) = color::try_call(name, pos_args, named, pos) {
         return r;
     }
@@ -71,7 +79,18 @@ pub(crate) fn call(
     if let Some(r) = selector::try_call(name, pos_args, named, pos) {
         return r;
     }
-    plain_css_function(name, pos_args, named, pos)
+    plain_css_function(written, pos_args, named, pos)
+}
+
+/// A name in its canonical spelling: `_` is `-` in every Sass identifier. The
+/// input is borrowed unchanged when it already holds no underscore, so the
+/// common case allocates nothing.
+fn canonical_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if name.contains('_') {
+        std::borrow::Cow::Owned(name.replace('_', "-"))
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    }
 }
 
 /// Whether `name` is a real Sass builtin function (as opposed to an unknown
@@ -96,6 +115,10 @@ pub(crate) fn call(
 ///   removes them from the builtin set), so they live in `list::NAMES` and are
 ///   deliberately absent from `map::NAMES`.
 pub(crate) fn is_builtin(name: &str) -> bool {
+    // Underscore and dash are one character in a Sass identifier, so the test
+    // runs on the canonical spelling (`str_index` is `str-index`).
+    let canonical = canonical_name(name);
+    let name = canonical.as_ref();
     // The `math` family matches `name.to_ascii_lowercase()`, so it owns these
     // names case-insensitively.
     if is_math_builtin_name(name) {
@@ -279,11 +302,14 @@ fn plain_css_function(
 /// `unitless` at `math.is-unitless`, `comparable` at `math.compatible`, and
 /// `list-separator` at `list.separator`.
 pub(crate) fn global_builtin_replacement(name: &str) -> Option<&'static str> {
-    // Matched EXACTLY: dart resolves these Sass-only globals case-sensitively,
-    // so `MAP-GET(…)` and `FLOOR(…)` are plain CSS to it — no call, and so no
-    // deprecation. (The case-insensitive globals are the ones CSS shares,
-    // `abs`/`round`/`min`/`sin`/…, none of which are deprecated.)
-    Some(match name {
+    // Matched EXACTLY apart from the underscore spelling every Sass identifier
+    // allows: dart resolves these Sass-only globals case-sensitively, so
+    // `MAP-GET(…)` and `FLOOR(…)` are plain CSS to it — no call, and so no
+    // deprecation — while `map_get(…)` is the deprecated `map-get(…)`. (The
+    // case-insensitive globals are the ones CSS shares, `abs`/`round`/`min`/
+    // `sin`/…, none of which are deprecated.)
+    let canonical = canonical_name(name);
+    Some(match canonical.as_ref() {
         // sass:color — the getters keep their names, every legacy adjuster
         // becomes `color.adjust`.
         "red" => "color.red",
@@ -536,6 +562,8 @@ pub(crate) const META_FUNCTION_NAMES: &[&str] = &[
 pub(crate) const META_MIXIN_NAMES: &[&str] = &["apply", "load-css"];
 
 pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
+    let canonical = canonical_name(member);
+    let member = canonical.as_ref();
     if module == "meta" && META_FUNCTION_NAMES.contains(&member) {
         return true;
     }
