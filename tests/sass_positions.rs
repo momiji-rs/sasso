@@ -557,3 +557,51 @@ fn compressed_output_is_unaffected_by_the_line_padding() {
     let css = compile("// c\n.a\n  b: c\n\n.d\n  e: f\n", &opts).expect("compile");
     assert_eq!(css, ".a{b:c}.d{e:f}");
 }
+
+#[test]
+fn a_brace_inside_a_string_does_not_close_an_interpolation() {
+    // The front-end scans a line to decide where a value ends. A `}` inside a
+    // STRING is value text, not the end of the interpolation around it — and
+    // the `//` that follows is inside the string too, not a comment. dart-sass
+    // reads `.a` / `  b: #{"} // not a comment"}` as one declaration whose
+    // value is `} // not a comment`.
+    assert_eq!(
+        sass(".a\n  b: #{\"} // not a comment\"}\n", "a.sass").expect("compile"),
+        ".a {\n  b: } // not a comment;\n}"
+    );
+    // The same in a custom property, whose value is captured verbatim.
+    assert_eq!(
+        sass(".a\n  --x: #{\"}\"}y\n", "a.sass").expect("compile"),
+        ".a {\n  --x: }y;\n}"
+    );
+    // (A `}` interpolated into a SELECTOR is an error in dart too — "expected
+    // selector", against the interpolated output — so there is nothing to
+    // preserve there.)
+}
+
+#[test]
+fn an_escaped_delimiter_in_a_custom_value_is_literal_text() {
+    // `\{` is an escaped brace — a complete custom-property value, not an open
+    // block. Counting it as a bracket left the value "open", so every later
+    // line was swallowed into it and the file ended mid-declaration.
+    assert_eq!(
+        sass(".a\n  --x: \\{\n.b\n  c: d\n", "a.sass").expect("compile"),
+        ".a {\n  --x: \\{;\n}\n\n.b {\n  c: d;\n}"
+    );
+    // An escaped quote does not open a string either, and an escaped `;` is
+    // part of the value rather than its terminator.
+    assert_eq!(
+        sass(".a\n  --x: \\\"\n.b\n  c: d\n", "a.sass").expect("compile"),
+        ".a {\n  --x: \\\";\n}\n\n.b {\n  c: d;\n}"
+    );
+    assert_eq!(
+        sass(".a\n  --x: a\\;b\n.b\n  c: d\n", "a.sass").expect("compile"),
+        ".a {\n  --x: a\\;b;\n}\n\n.b {\n  c: d;\n}"
+    );
+    // A hex escape is one token however long it is, and dart re-serializes it
+    // canonically: `\61 b` is the identifier `ab`.
+    assert_eq!(
+        sass(".a\n  --x: \\61 b\n", "a.sass").expect("compile"),
+        ".a {\n  --x: ab;\n}"
+    );
+}

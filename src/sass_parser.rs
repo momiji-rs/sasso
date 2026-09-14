@@ -17,8 +17,17 @@
 //! its own source line (blank lines pad the output up to it), with its source
 //! indentation kept, and a block's closing `}` rides on the last line of the
 //! block rather than on a line of its own. Every `Pos` the SCSS parser reports
-//! — diagnostics, deprecation spans, source-map entries — is therefore a
-//! position in the `.sass` file itself, as dart-sass reports them. Nothing on
+//! for a STATEMENT — diagnostics, deprecation spans, source-map entries — is
+//! therefore a position in the `.sass` file itself, as dart-sass reports them.
+//!
+//! One construct is deliberately excepted: a loud comment is SERIALIZED, not
+//! copied. dart drops blank lines between a bare `/*` and the comment's first
+//! text and renders that text on the `/*` line, so the reconstruction must do
+//! the same to emit dart's CSS — and a diagnostic inside interpolated comment
+//! text therefore reports against the rendered line rather than the `.sass`
+//! one. Matching dart's output wins over matching its span there.
+//!
+//! Nothing on
 //! a line is rewritten: the three constructs the SCSS grammar does not share —
 //! the `=name`/`+name` mixin shorthands, the legacy `\:hover` escaped-selector
 //! marker, and unquoted `@import` urls — are read by the parser itself in
@@ -1295,6 +1304,21 @@ impl LineScanner {
         let mut depth = 1;
         while self.i < self.cs.len() && depth > 0 {
             match self.cs[self.i] {
+                // A brace inside a STRING or behind an escape is not a
+                // delimiter: `#{"} // not a comment"}` closes at its last
+                // brace, and the `//` inside the string is value text. The
+                // shared expression parser reads it that way, and so does dart.
+                '"' | '\'' => {
+                    self.skip_quoted();
+                    continue;
+                }
+                '\\' => {
+                    self.bump();
+                    if !self.done() {
+                        self.bump();
+                    }
+                    continue;
+                }
                 '{' => depth += 1,
                 '}' => depth -= 1,
                 _ => {}
@@ -1641,6 +1665,15 @@ fn custom_value_open(s: &str) -> bool {
             '"' | '\'' => {
                 sc.skip_quoted();
             }
+            // An ESCAPED delimiter is literal text, not a bracket: `--x: \{`
+            // is a complete value, and counting it left the value "open" so
+            // every following line was swallowed into it.
+            '\\' => {
+                sc.bump();
+                if !sc.done() {
+                    sc.bump();
+                }
+            }
             // A custom value's braces count as brackets (so an `#{` is just an
             // open brace here, not interpolation).
             '(' | '[' | '{' => {
@@ -1958,6 +1991,34 @@ mod line_scanner_parity {
                     let mut d = 1;
                     while i < cs.len() && d > 0 {
                         match cs[i] {
+                            // A brace inside a string, or behind an escape, is
+                            // text rather than a delimiter.
+                            q @ ('"' | '\'') => {
+                                byte += cs[i].len_utf8();
+                                i += 1;
+                                while i < cs.len() && cs[i] != q {
+                                    if cs[i] == '\\' && i + 1 < cs.len() {
+                                        byte += cs[i].len_utf8();
+                                        i += 1;
+                                    }
+                                    byte += cs[i].len_utf8();
+                                    i += 1;
+                                }
+                                if i < cs.len() {
+                                    byte += cs[i].len_utf8();
+                                    i += 1;
+                                }
+                                continue;
+                            }
+                            '\\' => {
+                                byte += cs[i].len_utf8();
+                                i += 1;
+                                if i < cs.len() {
+                                    byte += cs[i].len_utf8();
+                                    i += 1;
+                                }
+                                continue;
+                            }
                             '{' => d += 1,
                             '}' => d -= 1,
                             _ => {}
@@ -1991,6 +2052,7 @@ mod line_scanner_parity {
                         i += 1;
                     }
                 }
+                '\\' => i += 1,
                 '(' | '[' | '{' => depth += 1,
                 ')' | ']' | '}' => depth -= 1,
                 _ => {}
@@ -2182,6 +2244,34 @@ mod line_scanner_parity {
                     let mut d = 1;
                     while i < cs.len() && d > 0 {
                         match cs[i] {
+                            // A brace inside a string, or behind an escape, is
+                            // text rather than a delimiter.
+                            q @ ('"' | '\'') => {
+                                byte += cs[i].len_utf8();
+                                i += 1;
+                                while i < cs.len() && cs[i] != q {
+                                    if cs[i] == '\\' && i + 1 < cs.len() {
+                                        byte += cs[i].len_utf8();
+                                        i += 1;
+                                    }
+                                    byte += cs[i].len_utf8();
+                                    i += 1;
+                                }
+                                if i < cs.len() {
+                                    byte += cs[i].len_utf8();
+                                    i += 1;
+                                }
+                                continue;
+                            }
+                            '\\' => {
+                                byte += cs[i].len_utf8();
+                                i += 1;
+                                if i < cs.len() {
+                                    byte += cs[i].len_utf8();
+                                    i += 1;
+                                }
+                                continue;
+                            }
                             '{' => d += 1,
                             '}' => d -= 1,
                             _ => {}
@@ -2285,6 +2375,34 @@ mod line_scanner_parity {
                     let mut d = 1;
                     while i < cs.len() && d > 0 {
                         match cs[i] {
+                            // A brace inside a string, or behind an escape, is
+                            // text rather than a delimiter.
+                            q @ ('"' | '\'') => {
+                                byte += cs[i].len_utf8();
+                                i += 1;
+                                while i < cs.len() && cs[i] != q {
+                                    if cs[i] == '\\' && i + 1 < cs.len() {
+                                        byte += cs[i].len_utf8();
+                                        i += 1;
+                                    }
+                                    byte += cs[i].len_utf8();
+                                    i += 1;
+                                }
+                                if i < cs.len() {
+                                    byte += cs[i].len_utf8();
+                                    i += 1;
+                                }
+                                continue;
+                            }
+                            '\\' => {
+                                byte += cs[i].len_utf8();
+                                i += 1;
+                                if i < cs.len() {
+                                    byte += cs[i].len_utf8();
+                                    i += 1;
+                                }
+                                continue;
+                            }
                             '{' => d += 1,
                             '}' => d -= 1,
                             _ => {}
@@ -2332,6 +2450,13 @@ mod line_scanner_parity {
             "unclosed interp #{1 + 2",
             "nested interp #{ #{x} }",
             "interp with brace #{ {a} }",
+            "interp with quoted brace #{ \"}\" }",
+            "interp with quoted comment #{\"} // no\"}",
+            "interp with quoted semicolon #{\"; \"}: v",
+            "interp with escaped brace #{ \\} }",
+            "custom escaped brace --x: \\{",
+            "custom escaped quote --x: \\\"",
+            "custom escaped semicolon --x: a\\;b",
             "interp in comment /* #{x} */",
             "// just a comment",
             "value // trailing comment",
