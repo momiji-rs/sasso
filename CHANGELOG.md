@@ -185,6 +185,15 @@ Conformance is tracked separately as a ratchet against the official
   `@function --f() { result: "#{$v}"; }` emitted the interpolation literally.
   The string's own text, escapes and line continuations included, still passes
   through untouched — dart does not re-serialize a verbatim value's string.
+- **A string is quoted the way dart quotes it, wherever it is written back.**
+  `meta.inspect` and `@error` wrapped the text in `"` unconditionally, so a
+  string containing a quote or a backslash came out as invalid CSS:
+  `b: meta.inspect("a\"b")` emitted `b: "a"b";` where dart emits `b: 'a"b';`,
+  and `meta.inspect("a\\b")` lost the escape. dart picks single quotes when the
+  text holds a `"` and no `'`, and escapes the chosen quote and every
+  backslash. The same wrapper produced a plain-CSS import's url in the
+  indented syntax, so `@import h\74 tps://x/y.css` emitted a url whose escape
+  no longer survived a round trip; it is now serialized as the string it is.
 - **A hex escape's terminator is one line break.** One whitespace character
   ends a hex escape, and a CRLF is one character's worth of line break where
   the text is captured VERBATIM: `--x: \61` + CRLF + `b` is `ab`, with no line

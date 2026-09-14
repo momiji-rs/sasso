@@ -516,7 +516,7 @@ impl Parser {
             // even an interpolation unresolved.
             if import_url_is_css(&[TplPiece::Lit(path.clone())]) {
                 return Ok(ImportArg::Css {
-                    url: vec![TplPiece::Lit(format!("\"{path}\""))],
+                    url: vec![TplPiece::Lit(crate::value::serialize_quoted(&path))],
                     modifiers: Vec::new(),
                     pos: url_pos,
                 });
