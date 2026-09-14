@@ -191,20 +191,30 @@ struct Parser {
     /// `CssParser`. Nesting is still parsed (CSS nesting is preserved in output);
     /// the difference is that Sass features become errors.
     plain_css: bool,
+    /// Indented-syntax mode: the input is the position-preserving SCSS
+    /// reconstruction of a `.sass` file (see `sass_parser`), and the few
+    /// grammar liberties dart's `SassParser` takes over `ScssParser` apply —
+    /// an `@import` URL may be an unquoted token.
+    indented: bool,
 }
 
 /// Parse a complete stylesheet (SCSS).
 pub(crate) fn parse(src: &str) -> Result<Stylesheet, Error> {
-    parse_inner(src, false)
+    parse_inner(src, false, false)
 }
 
 /// Parse a plain-CSS stylesheet (a loaded `.css` file): the same brace/semicolon
 /// grammar, but Sass features are rejected.
 pub(crate) fn parse_plain_css(src: &str) -> Result<Stylesheet, Error> {
-    parse_inner(src, true)
+    parse_inner(src, true, false)
 }
 
-fn parse_inner(src: &str, plain_css: bool) -> Result<Stylesheet, Error> {
+/// Parse the SCSS reconstruction of an indented-syntax (`.sass`) stylesheet.
+pub(crate) fn parse_indented(src: &str) -> Result<Stylesheet, Error> {
+    parse_inner(src, false, true)
+}
+
+fn parse_inner(src: &str, plain_css: bool, indented: bool) -> Result<Stylesheet, Error> {
     let mut p = Parser {
         sc: Scanner::new(src),
         calc_depth: 0,
@@ -214,6 +224,7 @@ fn parse_inner(src: &str, plain_css: bool) -> Result<Stylesheet, Error> {
         interp_spans: Vec::new(),
         seen_non_module_stmt: false,
         plain_css,
+        indented,
     };
     let stmts = p.parse_statements(true)?;
     Ok(Stylesheet { stmts })

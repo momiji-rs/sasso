@@ -34,6 +34,27 @@ impl Parser {
                 }
                 Some('$') => stmts.push(self.parse_var_decl()?),
                 Some('@') => stmts.push(self.parse_at_rule()?),
+                // The indented syntax's mixin shorthands, read in place so
+                // every column after the keyword stays a `.sass` column:
+                // `=name(params)` defines a mixin (dart `SassParser`'s `=`),
+                // `+name(args)` includes one. A `+` NOT followed by a name is
+                // the next-sibling combinator, i.e. a selector.
+                Some('=') if self.indented => {
+                    self.sc.bump();
+                    stmts.push(self.parse_callable_def(false)?);
+                }
+                Some('+')
+                    if self.indented
+                        && self
+                            .sc
+                            .peek_at(1)
+                            .is_some_and(|c| is_ident_char(c) || c == '#' || c == '\\') =>
+                {
+                    let pos = self.sc.position();
+                    let start_mark = self.sc.mark();
+                    self.sc.bump();
+                    stmts.push(self.parse_include(pos, start_mark)?);
+                }
                 // A namespaced variable assignment `ns.$name: value`.
                 _ if self.peek_namespaced_var_decl() => stmts.push(self.parse_var_decl()?),
                 _ => match self.classify() {

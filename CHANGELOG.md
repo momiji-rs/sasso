@@ -135,6 +135,35 @@ Conformance is tracked separately as a ratchet against the official
   sasso now matches (10 of 148 Lichess bundles had `sources` differing from
   dart's for this alone). Library note: imported files now appear as the
   absolute path they were reached by, not their realpath.
+- **Indented-syntax (`.sass`) diagnostics and source maps point at the `.sass`
+  file.** The front-end rebuilds SCSS from the indentation-structured source,
+  and it used to rebuild it compactly: statements were re-indented by nesting
+  depth, blank and comment-only lines vanished, every block's `}` took a line
+  of its own. Every line and column downstream — an error, a `@warn`, a
+  deprecation span, a source-map entry — was therefore a position in that
+  reconstruction rather than in the file the user wrote. The reconstruction is
+  now position-preserving (one output line per source line, the source
+  indentation kept, a block's `}` riding on its last line), and the two
+  constructs that cannot be rewritten without moving columns are read by the
+  parser in place instead:
+  - the mixin shorthands `=name`/`+name`, which used to be expanded to
+    `@mixin`/`@include` — eight columns wider, so `+mx(1)`'s argument mapped
+    eight columns to the right of where it is;
+  - unquoted `@import` urls, which used to be quoted (two bytes wider, moving
+    the deprecation caret). dart reads such a url to the next top-level comma,
+    spaces included, so `@import foo screen` is one url named `foo screen`;
+    a `.css`/protocol url is a plain-CSS import written back quoted.
+
+  On the shapes dart-sass 1.103.1 was measured against — errors, warnings,
+  `[import]` deprecations, and six source maps covering comments, blank lines,
+  multi-line selector lists, `@media`, custom properties and the shorthands —
+  every line, column and `mappings` string now matches it exactly.
+- **`//` inside a `url()` is no longer a comment in the indented syntax.**
+  `url(http://x/y)`, `url(//cdn/x.png)` and `@import http://x/y.css` were
+  truncated at the `//` (`url(http:` — "expected \")\""), because the front-end
+  stripped silent comments before the url token was recognized. dart scans
+  `url(` and its contents as one token; only the exact `url` function
+  qualifies, so `my-url(//y)` still starts a comment, as it does for dart.
 - **Compressed output no longer writes a stray `;` after a nested rule, and
   maps that rule's children.** A loaded `.css` file that uses CSS nesting
   rendered its nested blocks into one pre-built string, so `.a { .b { x: 1 } z:

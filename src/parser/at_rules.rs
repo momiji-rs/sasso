@@ -454,6 +454,68 @@ impl Parser {
                 pos: url_pos,
             });
         }
+        // The indented syntax allows an UNQUOTED URL (`@import foo, sub/bar`,
+        // `@import other.css`). dart `SassParser.importArgument` reads it to
+        // the next top-level comma or the end of the statement — SPACES
+        // INCLUDED, so `@import foo screen` is one url `foo screen` (dart:
+        // "Can't find stylesheet to import." pointing at all ten characters),
+        // not a url plus a modifier. Only a quoted url takes modifiers.
+        if self.indented && !matches!(self.sc.peek(), Some('"') | Some('\'')) {
+            let url_pos = self.sc.position();
+            let mut raw = String::new();
+            while let Some(c) = self.sc.peek() {
+                // `#{…}` is opaque: a comma inside it does not end the url.
+                if c == '#' && self.sc.peek_at(1) == Some('{') {
+                    let mut depth = 0usize;
+                    while let Some(c) = self.sc.peek() {
+                        raw.push(c);
+                        self.sc.bump();
+                        match c {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                if matches!(c, ',' | ';' | '\n') {
+                    break;
+                }
+                raw.push(c);
+                self.sc.bump();
+            }
+            // Trailing whitespace before the `,`/`;` is not part of the url,
+            // and the deprecation caret is sized from the trimmed token.
+            let path = raw.trim_end().to_string();
+            if path.is_empty() {
+                return Err(Error::at("expected a string after @import", self.sc.position()));
+            }
+            let url_len = path.len();
+            // A `.css`/protocol url is a plain-CSS import, emitted QUOTED with
+            // its text verbatim — dart writes `@import "#{$x}o.css";`, leaving
+            // even an interpolation unresolved.
+            if import_url_is_css(&[TplPiece::Lit(path.clone())]) {
+                return Ok(ImportArg::Css {
+                    url: vec![TplPiece::Lit(format!("\"{path}\""))],
+                    modifiers: Vec::new(),
+                    pos: url_pos,
+                });
+            }
+            // A Sass import's path is static here, as in the quoted form.
+            if path.contains("#{") {
+                return Err(Error::at("dynamic @import paths are not supported", pos));
+            }
+            return Ok(ImportArg::Sass {
+                path,
+                pos: url_pos,
+                length: url_len,
+            });
+        }
         // Quoted-string form.
         match self.sc.peek() {
             Some('"') | Some('\'') => {
@@ -2148,7 +2210,7 @@ impl Parser {
     }
 
     /// Parse a `@function name(params) { … }` or `@mixin name(params) { … }`.
-    fn parse_callable_def(&mut self, is_function: bool) -> Result<Stmt, Error> {
+    pub(super) fn parse_callable_def(&mut self, is_function: bool) -> Result<Stmt, Error> {
         self.skip_ws_inline();
         let name_pos = self.sc.position();
         let name = self.read_ident_name()?;
@@ -2594,7 +2656,7 @@ impl Parser {
     }
 
     /// Parse `@include name[(args)] [{ content }];`.
-    fn parse_include(&mut self, pos: Pos, start_mark: Mark) -> Result<Stmt, Error> {
+    pub(super) fn parse_include(&mut self, pos: Pos, start_mark: Mark) -> Result<Stmt, Error> {
         self.skip_ws_inline();
         let include_name_pos = self.sc.position();
         let mut name = self.read_ident_name()?;

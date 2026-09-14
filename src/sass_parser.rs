@@ -10,8 +10,17 @@
 //! source, recovers the block tree (handling multiline continuations, the
 //! `=`/`+` mixin shorthands, `//`/`/* */` comments and custom-property
 //! values), and reconstructs an equivalent brace/semicolon SCSS source which
-//! it hands to the SCSS parser ([`crate::parser::parse`]). The whole
+//! it hands to the SCSS parser ([`crate::parser::parse_indented`]). The whole
 //! SassScript value/prelude/selector grammar is therefore reused unchanged.
+//!
+//! The reconstruction is POSITION-PRESERVING: every statement is emitted on
+//! its own source line (blank lines pad the output up to it), with its source
+//! indentation kept, and a block's closing `}` rides on the last line of the
+//! block rather than on a line of its own. Every `Pos` the SCSS parser reports
+//! — diagnostics, deprecation spans, source-map entries — is therefore a
+//! position in the `.sass` file itself, as dart-sass reports them. The
+//! remaining in-line rewrites (`=name`/`+name` to `@mixin`/`@include`, a
+//! leading `\` escape) keep the statement's own column and only lengthen it.
 
 use crate::ast::Stylesheet;
 use crate::error::Error;
@@ -20,7 +29,7 @@ use crate::scanner::Pos;
 /// Parse indented (`.sass`) source into the shared [`Stylesheet`] AST.
 pub(crate) fn parse(src: &str) -> Result<Stylesheet, Error> {
     let scss = Transpiler::new(src).run()?;
-    crate::parser::parse(&scss)
+    crate::parser::parse_indented(&scss)
 }
 
 /// One physical source line, split into its indentation and content.
@@ -43,6 +52,10 @@ struct Transpiler {
     idx: usize,
     /// The assembled SCSS output.
     out: String,
+    /// Newlines already counted in `out[..scanned]` — the output line the end
+    /// of `out` sits on is tracked incrementally by [`Transpiler::pad_to`].
+    out_lines: usize,
+    scanned: usize,
     /// Whether the current block is the body of a plain-CSS custom
     /// `@function --x()`/`@mixin --x()` (where a literal `result` declaration
     /// may not have an indented child block).
@@ -86,8 +99,26 @@ impl Transpiler {
             lines,
             idx: 0,
             out: String::new(),
+            out_lines: 0,
+            scanned: 0,
             in_css_callable: false,
         }
+    }
+
+    /// Pad the output with blank lines until its current line is source line
+    /// `line_no` (1-based), so the statement emitted next sits on the line it
+    /// came from. Consumed source lines (silent comments, joined
+    /// continuations) leave gaps that this fills; nothing ever gets AHEAD of
+    /// its source line because every construct emits at most as many lines
+    /// as it consumed.
+    fn pad_to(&mut self, line_no: usize) {
+        self.out_lines += self.out[self.scanned..].bytes().filter(|&b| b == b'\n').count();
+        self.scanned = self.out.len();
+        while self.out_lines + 1 < line_no {
+            self.out.push('\n');
+            self.out_lines += 1;
+        }
+        self.scanned = self.out.len();
     }
 
     /// Whether the line at `i` is blank (only whitespace).
@@ -154,6 +185,7 @@ impl Transpiler {
     fn parse_statement(&mut self, indent: usize) -> Result<(), Error> {
         let start = self.idx;
         let line_no = self.lines[start].line;
+        self.pad_to(line_no);
 
         // --- comments -----------------------------------------------------
         let trimmed = self.lines[start].content.trim_start().to_string();
@@ -187,6 +219,7 @@ impl Transpiler {
         // the backslash, the indented syntax drops it).
         if logical.starts_with('\\') {
             logical.remove(0);
+            self.out.push_str(&self.lines[start].indent_str);
             self.out.push_str(&logical);
             if !self.parse_child_into_braces(indent)? {
                 self.out.push_str(" {}\n");
@@ -194,19 +227,11 @@ impl Transpiler {
             return Ok(());
         }
 
-        // Rewrite the indented-syntax mixin shorthands to their `@mixin`/
-        // `@include` equivalents *before* prelude continuation. `=name` defines
-        // a mixin, and a bare `=` continues onto the next line like the
-        // directive it stands for; `+name` (no space before the name) includes
-        // one, but a bare `+` is the next-sibling combinator *selector* (like
-        // `+ a` with a space), since `+` has a selector meaning `=` lacks.
-        if let Some(rest) = logical.strip_prefix('=') {
-            logical = format!("@mixin {}", rest.trim_start());
-        } else if matches!(logical.strip_prefix('+'), Some(r) if r.starts_with(|c: char| is_ident_char(c) || c == '#' || c == '\\'))
-        {
-            let rest = logical[1..].trim_start();
-            logical = format!("@include {rest}");
-        }
+        // The mixin shorthands (`=name` for `@mixin name`, `+name` for
+        // `@include name`) are NOT rewritten: expanding them would shift every
+        // column after the keyword, and the SCSS parser reads them directly in
+        // indented mode. The line analysis below maps them to the directives
+        // they stand for (see `directive_name`).
 
         // A directive whose prelude is grammatically incomplete at the end of
         // its line continues onto the next (deeper-indented) line(s) — the
@@ -214,12 +239,9 @@ impl Transpiler {
         // deeper-indented lines after the prelude completes are its body.
         self.extend_directive_prelude(&mut logical, indent)?;
 
-        // The indented syntax allows *unquoted* `@import` URLs (`@import foo,
-        // sub/bar`, `@import other.css`); quote each bare URL token for the
-        // SCSS grammar (which requires quoted strings or `url(…)`).
-        if directive_name(&logical).as_deref() == Some("import") {
-            logical = quote_import_urls(&logical);
-        }
+        // (Unquoted `@import` URLs — `@import foo, sub/bar` — are accepted by
+        // the SCSS parser in indented mode, so the line stays as written and
+        // the URL's diagnostic span is the bare token's.)
 
         // The statement keyword decides whether a `;` or a `{ … }` block is
         // appropriate, and handles custom props.
@@ -268,6 +290,7 @@ impl Transpiler {
                     },
                 ));
             }
+            self.out.push_str(&self.lines[start].indent_str);
             self.out.push_str(&content[..end + 2]);
             self.out.push('\n');
             self.idx = first_line_end;
@@ -356,6 +379,11 @@ impl Transpiler {
         // loses the gutter's leading space while a top-level one keeps it.
         let gutter = if indent == 0 { " * " } else { "* " };
         for (i, line) in content_lines.iter().enumerate() {
+            if i == 0 {
+                // The comment opens at its source column (the SCSS-side
+                // dedent of `min(1, comment_col)` then matches dart's).
+                self.out.push_str(&self.lines[start].indent_str);
+            }
             match line {
                 // The first-line remainder rides verbatim behind `/*`.
                 Some((col, text)) if *col == usize::MAX => {
@@ -390,7 +418,7 @@ impl Transpiler {
     /// line. Errors on tab/space indentation mixing within the continuation.
     fn assemble_logical_line(&mut self, indent: usize) -> Result<(String, usize), Error> {
         let start = self.idx;
-        let mut logical = strip_silent_comment(self.lines[start].content.trim_start());
+        let mut logical = strip_statement_comment(self.lines[start].content.trim_start());
         self.idx = start + 1;
         // A trailing `,` continues the line only in a selector context — a bare
         // declaration value (`b: c,`) does *not* wrap onto the next line in the
@@ -526,8 +554,22 @@ impl Transpiler {
         self.out.push_str(" {\n");
         self.idx = i;
         self.parse_block(child_indent, indent)?;
-        self.out.push_str("}\n");
+        // The `}` rides on the block's last output line: a `.sass` block has
+        // no closing line of its own, and dart's rule span ends with its last
+        // child. (An all-silent block leaves ` {` alone: `a { }`.)
+        if self.out.ends_with('\n') {
+            self.out.pop();
+        }
+        self.out.push_str(" }\n");
         Ok(true)
+    }
+
+    /// The indentation characters of source line `line_no` (1-based).
+    fn indent_str_for(&self, line_no: usize) -> String {
+        self.lines
+            .get(line_no.saturating_sub(1))
+            .map(|l| l.indent_str.clone())
+            .unwrap_or_default()
     }
 
     /// Emit one statement (already assembled into `logical`), attaching its
@@ -650,13 +692,16 @@ impl Transpiler {
                 }
             }
         }
+        // Keep the source indentation so every column the SCSS parser
+        // reports is the `.sass` column.
+        self.out.push_str(&self.indent_str_for(line_no));
         self.out.push_str(logical);
         // A `@function --x()`/`@mixin --x()` body is a plain-CSS custom
         // callable; flag it for the `result` child check above.
         let css_callable = matches!(directive_name(logical).as_deref(), Some("function" | "mixin"))
             && logical
                 .trim_start()
-                .trim_start_matches('@')
+                .trim_start_matches(['@', '='])
                 .trim_start_matches(|c: char| is_ident_char(c))
                 .trim_start()
                 .starts_with("--");
@@ -739,8 +784,25 @@ impl Transpiler {
 
 /// The lowercased directive keyword of a logical line (`@for` -> `"for"`), or
 /// `None` if the line is not an at-rule.
+///
+/// The indented syntax's mixin shorthands answer with the directive they stand
+/// for: `=name` is `@mixin name` and `+name` is `@include name`. They keep
+/// their own spelling in the transpiled SCSS — rewriting them would shift the
+/// columns of everything after the keyword, and a mixin's arguments must keep
+/// their `.sass` positions — so this is where the rest of the line analysis
+/// learns what they are. A bare `=` still reads as `@mixin` (it continues onto
+/// the next line like the directive it stands for); a bare `+` does NOT, since
+/// `+ a` is the next-sibling combinator, a selector.
 fn directive_name(logical: &str) -> Option<String> {
     let t = logical.trim_start();
+    if t.starts_with('=') {
+        return Some("mixin".to_string());
+    }
+    if let Some(after) = t.strip_prefix('+') {
+        return after
+            .starts_with(|c: char| is_ident_char(c) || c == '#' || c == '\\')
+            .then(|| "include".to_string());
+    }
     let rest = t.strip_prefix('@')?;
     let name: String = rest.chars().take_while(|c| is_ident_char(*c)).collect();
     if name.is_empty() {
@@ -938,13 +1000,11 @@ enum EmptyForm {
 /// (`prop: value`), in which case it is a leaf (`;`).
 fn empty_form(logical: &str) -> EmptyForm {
     let t = logical.trim_start();
-    if let Some(rest) = t.strip_prefix('@') {
-        // The directive keyword (lowercased, up to the first non-ident char).
-        let name: String = rest
-            .chars()
-            .take_while(|c| is_ident_char(*c))
-            .collect::<String>()
-            .to_ascii_lowercase();
+    // An at-rule — or a mixin shorthand, which stands for one. An `@` whose
+    // name is interpolated (`@#{$x} foo`) has no keyword and falls to the
+    // generic arm, as before.
+    if t.starts_with('@') || directive_name(t).is_some() {
+        let name = directive_name(t).unwrap_or_default();
         return match name.as_str() {
             // Block-owning directives.
             "function" | "mixin" | "if" | "else" | "each" | "for" | "while" | "media" | "supports"
@@ -1014,42 +1074,6 @@ fn continuation_pending(s: &str, comma_continues: bool) -> bool {
         return true;
     }
     comma_continues && t.ends_with(',')
-}
-
-/// Quote the bare URL tokens of an indented-syntax `@import` for the SCSS
-/// grammar: in each top-level comma part, an unquoted first token that is not
-/// a `url(…)` call and contains no interpolation gets double quotes
-/// (`@import foo, sub/bar` -> `@import "foo", "sub/bar"`); any following
-/// modifier text is kept verbatim.
-fn quote_import_urls(logical: &str) -> String {
-    let Some(rest) = logical.trim_start().strip_prefix("@import") else {
-        return logical.to_string();
-    };
-    let mut out = String::from("@import ");
-    let mut first = true;
-    for part in split_top_level_commas(rest.trim()) {
-        if !first {
-            out.push_str(", ");
-        }
-        first = false;
-        let part = part.trim();
-        let token_end = part.find(char::is_whitespace).unwrap_or(part.len());
-        let (token, modifiers) = part.split_at(token_end);
-        let bare = !token.is_empty()
-            && !token.starts_with('"')
-            && !token.starts_with('\'')
-            && !token.contains("#{")
-            && !token.to_ascii_lowercase().starts_with("url(");
-        if bare {
-            out.push('"');
-            out.push_str(token);
-            out.push('"');
-        } else {
-            out.push_str(token);
-        }
-        out.push_str(modifiers);
-    }
-    out
 }
 
 /// A single-pass cursor over a `.sass` logical line's chars.
@@ -1150,6 +1174,51 @@ impl LineScanner {
 
     /// At `#{`: advance past the brace-matched closing `}` (or to end-of-line).
     #[inline]
+    /// At a `u`/`U`, whether this is the start of a `url(` FUNCTION token —
+    /// the exact name, not preceded by an identifier character, so `my-url(`
+    /// is excluded. dart scans `url(` and its contents as one token, so `//`
+    /// inside it is part of the url rather than a comment (`url(//cdn/x.png)`,
+    /// `url(http://x/y)`), while `my-url(//y)` really does start a comment.
+    fn at_url_func(&self) -> bool {
+        if self.i > 0 && is_ident_char(self.cs[self.i - 1]) {
+            return false;
+        }
+        let mut it = "url(".chars();
+        (0..4).all(|k| match (self.cs.get(self.i + k), it.next()) {
+            (Some(c), Some(w)) => c.eq_ignore_ascii_case(&w),
+            _ => false,
+        })
+    }
+
+    /// Consume a `url(...)` token, contents included, through its closing `)`
+    /// (or to the end of the line if it never closes). Quoted contents are
+    /// skipped as strings, so `url("a)b")` ends at the right paren.
+    fn skip_url(&mut self) {
+        for _ in 0..4 {
+            self.bump(); // `url(`
+        }
+        let mut depth = 1i32;
+        while !self.done() {
+            match self.cur() {
+                '"' | '\'' => {
+                    self.skip_quoted();
+                }
+                '(' => {
+                    depth += 1;
+                    self.bump();
+                }
+                ')' => {
+                    depth -= 1;
+                    self.bump();
+                    if depth == 0 {
+                        return;
+                    }
+                }
+                _ => self.bump(),
+            }
+        }
+    }
+
     fn skip_interp(&mut self) {
         self.bump(); // '#'
         self.bump(); // '{'
@@ -1181,44 +1250,6 @@ impl LineScanner {
             false
         }
     }
-}
-
-/// Split on top-level commas (outside brackets and quoted strings).
-fn split_top_level_commas(s: &str) -> Vec<String> {
-    let mut sc = LineScanner::new(s);
-    let mut parts = Vec::new();
-    let mut cur = String::new();
-    let mut depth = 0i32;
-    while !sc.done() {
-        match sc.cur() {
-            '"' | '\'' => {
-                let start = sc.i;
-                sc.skip_quoted();
-                cur.extend(&sc.cs[start..sc.i]);
-                continue;
-            }
-            '(' | '[' => {
-                depth += 1;
-                cur.push(sc.cur());
-                sc.bump();
-            }
-            ')' | ']' => {
-                depth -= 1;
-                cur.push(sc.cur());
-                sc.bump();
-            }
-            ',' if depth == 0 => {
-                parts.push(std::mem::take(&mut cur));
-                sc.bump();
-            }
-            c => {
-                cur.push(c);
-                sc.bump();
-            }
-        }
-    }
-    parts.push(cur);
-    parts
 }
 
 /// Whether a declaration value ends mid-expression with a binary operator
@@ -1304,6 +1335,10 @@ fn strip_silent_comment(s: &str) -> String {
             '"' | '\'' => {
                 sc.skip_quoted();
             }
+            // `url(…)` is one token: `//` inside it is part of the url.
+            'u' | 'U' if sc.at_url_func() => {
+                sc.skip_url();
+            }
             // A loud comment: skip to its close (it may not close on this line,
             // in which case the rest is comment body — leave it).
             '/' if sc.peek(1) == Some('*') => {
@@ -1316,6 +1351,72 @@ fn strip_silent_comment(s: &str) -> String {
                 sc.skip_interp();
             }
             _ => sc.bump(),
+        }
+    }
+    s.trim_end().to_string()
+}
+
+/// [`strip_silent_comment`] for a STATEMENT's first line, honouring the
+/// indented syntax's unquoted `@import` urls.
+///
+/// dart's `SassParser.importArgument` reads an unquoted url with
+/// `almostAnyValue`, so it runs to the next top-level comma and swallows
+/// whatever is in the way: `@import foo // c` imports the url `foo // c`
+/// (dart carets all eight characters), and `@import http://x/y.css` is one
+/// protocol url, not `http:` followed by a comment. A QUOTED url ends at its
+/// closing quote, so the `// c` after `@import "foo" // c` is an ordinary
+/// comment, dropped as everywhere else.
+fn strip_statement_comment(s: &str) -> String {
+    if directive_name(s).as_deref() != Some("import") {
+        return strip_silent_comment(s);
+    }
+    let mut sc = LineScanner::new(s);
+    // Past `@import` itself.
+    sc.bump();
+    while !sc.done() && is_ident_char(sc.cur()) {
+        sc.bump();
+    }
+    loop {
+        while !sc.done() && sc.cur().is_whitespace() {
+            sc.bump();
+        }
+        if sc.done() {
+            break;
+        }
+        // A bare url is literal to the next top-level comma; after a quoted
+        // one, the modifier region scans for comments as usual.
+        let quoted = matches!(sc.cur(), '"' | '\'');
+        if quoted {
+            sc.skip_quoted();
+        }
+        let mut depth = 0i32;
+        while !sc.done() {
+            match sc.cur() {
+                '"' | '\'' => {
+                    sc.skip_quoted();
+                }
+                '#' if sc.peek(1) == Some('{') => sc.skip_interp(),
+                'u' | 'U' if sc.at_url_func() => sc.skip_url(),
+                '/' if quoted && sc.peek(1) == Some('*') => {
+                    sc.skip_loud_comment();
+                }
+                '/' if quoted && sc.peek(1) == Some('/') => {
+                    return s[..sc.offset()].trim_end().to_string();
+                }
+                '(' | '[' => {
+                    depth += 1;
+                    sc.bump();
+                }
+                ')' | ']' => {
+                    depth -= 1;
+                    sc.bump();
+                }
+                ',' if depth == 0 => {
+                    sc.bump();
+                    break;
+                }
+                _ => sc.bump(),
+            }
         }
     }
     s.trim_end().to_string()
@@ -1591,48 +1692,6 @@ mod line_scanner_parity {
     //! them over a broad corpus of tricky inputs (escapes, unterminated strings
     //! and comments, nested interpolation, multibyte chars). If a future change
     //! to `LineScanner` diverges from the original semantics, this fails.
-
-    fn split_top_level_commas_ref(s: &str) -> Vec<String> {
-        let cs: Vec<char> = s.chars().collect();
-        let mut parts = Vec::new();
-        let mut cur = String::new();
-        let mut depth = 0i32;
-        let mut i = 0;
-        while i < cs.len() {
-            let c = cs[i];
-            match c {
-                '"' | '\'' => {
-                    cur.push(c);
-                    i += 1;
-                    while i < cs.len() {
-                        cur.push(cs[i]);
-                        if cs[i] == '\\' && i + 1 < cs.len() {
-                            i += 1;
-                            cur.push(cs[i]);
-                        } else if cs[i] == c {
-                            break;
-                        }
-                        i += 1;
-                    }
-                }
-                '(' | '[' => {
-                    depth += 1;
-                    cur.push(c);
-                }
-                ')' | ']' => {
-                    depth -= 1;
-                    cur.push(c);
-                }
-                ',' if depth == 0 => {
-                    parts.push(std::mem::take(&mut cur));
-                }
-                _ => cur.push(c),
-            }
-            i += 1;
-        }
-        parts.push(cur);
-        parts
-    }
 
     fn strip_silent_comment_ref(s: &str) -> String {
         let cs: Vec<char> = s.chars().collect();
@@ -2026,11 +2085,6 @@ mod line_scanner_parity {
     fn line_scanner_matches_reference_implementations() {
         for s in corpus() {
             let s = s.as_str();
-            assert_eq!(
-                super::split_top_level_commas(s),
-                split_top_level_commas_ref(s),
-                "split_top_level_commas diverged on {s:?}"
-            );
             assert_eq!(
                 super::strip_silent_comment(s),
                 strip_silent_comment_ref(s),
