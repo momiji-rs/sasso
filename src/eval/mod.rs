@@ -177,11 +177,9 @@ pub(crate) struct UserCallable {
     /// (dart evaluates a mixin or function where it was written): output maps
     /// to it, and diagnostics show its name and source — whether it was
     /// reached through `@use`, a textual `@import`, or a first-class
-    /// reference. `None` when there was no file context to capture.
-    /// The file this callable was written in. Every capture records it (a
-    /// callable is only ever built by `capture_callable`), so the body always
-    /// has a file to run against — there is no "ask the module it came from"
-    /// fallback to get wrong.
+    /// reference. Always present: `capture_callable` is the only way a
+    /// callable is built, and it records the file every time, so there is no
+    /// "ask the module it came from" fallback to get wrong.
     pub origin: crate::value::MixinOrigin,
     pub env: Vec<Scope>,
     /// The variable-definition-span chain captured alongside `env`, frame for
@@ -989,7 +987,7 @@ pub(crate) struct Evaluator<'a> {
     /// site that swaps `current_file_dir` must swap this too, or a relative
     /// `@use`/`@import`/`meta.load-css` resolves against the wrong file. The four
     /// sites: entry init (`Evaluator::new`), `eval_module`, the `@import` enter,
-    /// and `enter_module_file`. (The two are kept separate rather than derived
+    /// and `enter_origin_file`. (The two are kept separate rather than derived
     /// because `current_file_dir` is also the `@import` cache key.)
     current_canonical: Option<CanonicalUrl>,
     /// Whether evaluation is inside a `@keyframes` body: frame blocks are not
