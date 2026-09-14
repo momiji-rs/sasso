@@ -352,3 +352,51 @@ fn an_escaped_member_name_is_not_private() {
     assert_eq!(caret_line(&block), "^".repeat(40), "{block}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_missing_argument_points_at_the_invocation() {
+    // dart reports a missing argument against the CALL — its primary span —
+    // whichever path made the call, and reads the snippet from the CALLER's
+    // file even though the callee's file is the current one by then.
+    let dir = std::env::temp_dir().join(format!("sasso_missing_arg_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("_lib.scss"),
+        "@function f($x) { @return $x; }\n@mixin m($x) { a: $x; }\n",
+    )
+    .expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| {
+        std::fs::write(&entry, src).unwrap();
+        compile(src, &Options::default().with_importer(&imp).with_url(&url))
+            .expect_err("expected a compile error")
+            .to_string()
+    };
+    // A function in the same file.
+    let block = run("@function f($x) { @return $x; }\n.a { b: f(); }\n");
+    assert!(block.starts_with("Error: Missing argument $x.\n"), "{block}");
+    assert!(block.contains("2 \u{2502} .a { b: f(); }\n"), "{block}");
+    assert_eq!(caret_line(&block), "^^^", "{block}");
+    // A function in ANOTHER file: the snippet is the caller's line, not the
+    // definition's.
+    let block = run("@use \"lib\";\n.a { b: lib.f(); }\n");
+    assert!(block.contains("2 \u{2502} .a { b: lib.f(); }\n"), "{block}");
+    assert_eq!(caret_line(&block), "^^^^^^^", "{block}");
+    assert!(block.contains("in.scss 2:9  f()"), "{block}");
+    // The same for a mixin.
+    let block = run("@use \"lib\";\n.a { @include lib.m; }\n");
+    assert!(block.contains("2 \u{2502} .a { @include lib.m; }\n"), "{block}");
+    assert_eq!(caret_line(&block), "^^^^^^^^^^^^^^", "{block}");
+    // And through `meta.call`, which invokes a reference.
+    let block = run(
+        "@use \"sass:meta\";\n@function f($x) { @return $x; }\n.a { b: meta.call(meta.get-function(\"f\")); }\n",
+    );
+    assert_eq!(caret_line(&block), "^".repeat(33), "{block}");
+    // A built-in re-exported through `@forward` reports like a direct one.
+    std::fs::write(dir.join("_fwd.scss"), "@forward \"sass:math\";\n").expect("write");
+    let block = run("@use \"fwd\";\n.a { b: fwd.div(1); }\n");
+    assert_eq!(caret_line(&block), "^^^^^^^^^^", "{block}");
+    std::fs::remove_dir_all(&dir).ok();
+}

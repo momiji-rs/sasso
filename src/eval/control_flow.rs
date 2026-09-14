@@ -313,7 +313,11 @@ impl<'a> Evaluator<'a> {
                 let sp = self.expression_node(def, param.default_pos);
                 (v, sp)
             } else {
-                return Err(Error::unpositioned(format!("Missing argument ${}.", param.name)));
+                // dart reports a missing argument against the INVOCATION (its
+                // primary span; the declaration is a second one sasso does not
+                // render yet). Every call path pushes that frame before
+                // binding, so it is the innermost one.
+                return Err(self.error_at_call(format!("Missing argument ${}.", param.name)));
             };
             if let Some(sc) = self.scopes.last() {
                 sc.borrow_mut().insert(param.name.clone(), val);

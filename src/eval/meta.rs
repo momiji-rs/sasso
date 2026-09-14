@@ -25,8 +25,11 @@ impl<'a> Evaluator<'a> {
                 return self.call_user_module_function(&exec, &func, args, Some((pos, length)));
             }
             // Fall back to a built-in re-exported by this module via @forward.
-            if let Some(v) = self.try_forwarded_builtin_call(&module, member, args, pos)? {
-                return Ok(v);
+            // Its errors report against the call, like a direct built-in's.
+            match self.try_forwarded_builtin_call(&module, member, args, pos) {
+                Ok(Some(v)) => return Ok(v),
+                Ok(None) => {}
+                Err(e) => return Err(e.with_length_at(pos, length)),
             }
             return Err(Error::at("Undefined function.".to_string(), pos).with_length(length));
         }

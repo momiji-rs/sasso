@@ -1863,6 +1863,37 @@ impl<'a> Evaluator<'a> {
     /// frame at `call_pos` (caret length `call_len`) attributed to the *current*
     /// member, then make `new_member` the current member. Returns the previous
     /// member name, to be restored by [`Self::leave_call`].
+    /// An error against the innermost CALL SITE — the frame a caller pushed
+    /// before it bound arguments or ran a body. Unpositioned when there is no
+    /// call in progress (a top-level statement raised it).
+    ///
+    /// The call site is in the CALLER's file, which by now may not be the
+    /// current one (a cross-file call has already switched context), so the
+    /// block is rendered here, against that frame's own text.
+    pub(super) fn error_at_call(&self, message: impl Into<String>) -> Error {
+        let Some(frame) = self.call_stack.last() else {
+            return Error::unpositioned(message);
+        };
+        let mut e = Error::at(message, frame.pos).with_length(frame.length);
+        if self.diag_enabled() {
+            // The innermost trace line names the CALLEE at the call's position
+            // (dart: `file 2:9  f()`), and reads its snippet from the caller's
+            // file; the frames under it are the stack as it stands.
+            let mut frames = Vec::with_capacity(self.call_stack.len() + 1);
+            frames.push(DiagFrame {
+                url: frame.url.clone(),
+                pos: frame.pos,
+                member: self.member.clone(),
+                length: frame.length,
+                content: false,
+                source: Rc::clone(&frame.source),
+            });
+            frames.extend(self.call_stack.iter().rev().cloned());
+            e.rendered = Some(self.render_error_at(&e, &frames[0], &frames));
+        }
+        e
+    }
+
     fn enter_call(&mut self, call_pos: Pos, call_len: usize, new_member: &str) -> String {
         self.push_frame(call_pos, call_len, new_member, false)
     }
@@ -2201,14 +2232,14 @@ impl<'a> Evaluator<'a> {
                         sink,
                     );
                     self.leave_call(saved);
-                    // What is left is an error about the CALL — a content block
-                    // the mixin does not take, an argument it wants, a
-                    // `meta.load-css` that found nothing — which dart carets
-                    // over `@include name(args)`, stopping before the block.
-                    // (The errors about the RULE carry the whole statement's
-                    // span already.) Some arrive positioned at the call but
-                    // with no length, some with no position at all.
-                    r.map_err(|e| e.at_if_unpositioned(*pos, *length).with_length_at(*pos, *length))?;
+                    // An error the include itself reported AT this position —
+                    // a content block the mixin does not take, a
+                    // `meta.load-css` that found nothing — takes the call's
+                    // span. An error from the mixin BODY keeps its own context
+                    // (dart reports it against the failing construct), and an
+                    // argument error is already anchored to this call by
+                    // `error_at_call`.
+                    r.map_err(|e| e.with_length_at(*pos, *length))?;
                 }
                 Stmt::Use {
                     url,
