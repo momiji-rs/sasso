@@ -1152,3 +1152,33 @@ fn an_import_url_that_is_not_a_url_token_is_a_function_call() {
     // dropped, escapes decoded).
     assert_eq!(css("@import url(  x.css  );\n"), "@import url(x.css);\n");
 }
+
+#[test]
+fn interpolation_resolves_inside_a_quoted_verbatim_value() {
+    // A verbatim value's TEXT is copied, but `#{…}` is not part of that text —
+    // dart resolves it inside a quoted string as well as outside one. The
+    // custom-property reader already did; the `@supports` and plain-CSS custom
+    // callable readers copied the string whole.
+    assert_eq!(
+        css("$v: x;\n@supports (--a: \"#{$v}\") { .a { b: c } }\n"),
+        "@supports (--a: \"x\") {\n  .a {\n    b: c;\n  }\n}\n"
+    );
+    assert_eq!(
+        css("$v: x;\n@function --f() { result: \"#{$v}\"; }\n"),
+        "@function --f() {\n  result: \"x\";\n}\n"
+    );
+    assert_eq!(
+        css("$v: x;\n.a { --x: \"#{$v}\"; }\n"),
+        ".a {\n  --x: \"x\";\n}\n"
+    );
+    // The string's own escapes stay verbatim, line continuation included — a
+    // verbatim value is not re-serialized the way a SassScript string is.
+    assert_eq!(
+        css(".a { --x: \"a\\\nb\"; }\n"),
+        ".a {\n  --x: \"a\\\n  b\";\n}\n"
+    );
+    assert_eq!(
+        css("@supports (--a: \"x\\\ny\") { .a { b: c } }\n"),
+        "@supports (--a: \"x\\ y\") {\n  .a {\n    b: c;\n  }\n}\n"
+    );
+}

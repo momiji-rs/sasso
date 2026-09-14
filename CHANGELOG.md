@@ -177,6 +177,14 @@ Conformance is tracked separately as a ratchet against the official
   closer closes: a mismatched one (`--x: (]`) is left to the parser, which
   reports dart's `expected ")".` at the closer instead of the front-end
   complaining about the line indented beneath it.
+- **Interpolation resolves inside a quoted string in every verbatim value.** A
+  custom-property value, a `@supports` declaration and the body of a plain-CSS
+  custom `@function` all copy their text verbatim, but `#{…}` is not part of
+  that text. The custom-property reader resolved it inside quotes; the other
+  two copied the string whole, so `@supports (--a: "#{$v}")` and
+  `@function --f() { result: "#{$v}"; }` emitted the interpolation literally.
+  The string's own text, escapes and line continuations included, still passes
+  through untouched — dart does not re-serialize a verbatim value's string.
 - **A backslash before a newline is an escape only inside a string.** dart's
   `escape()` fails on a newline, and only its string reader drops the pair
   first — which is what makes a CSS line continuation legal inside quotes and

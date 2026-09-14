@@ -1134,17 +1134,39 @@ impl Parser {
                 '"' | '\'' => {
                     lit.push(c);
                     self.sc.bump();
-                    while let Some(ch) = self.sc.peek() {
-                        lit.push(ch);
-                        self.sc.bump();
-                        if ch == '\\' {
-                            if let Some(n) = self.sc.bump() {
-                                lit.push(n);
+                    loop {
+                        match self.sc.peek() {
+                            None => break,
+                            Some('\\') => {
+                                lit.push('\\');
+                                self.sc.bump();
+                                if let Some(n) = self.sc.bump() {
+                                    lit.push(n);
+                                }
                             }
-                            continue;
-                        }
-                        if ch == c {
-                            break;
+                            // Interpolation resolves inside a quoted string as
+                            // well as outside it — the string's TEXT is
+                            // verbatim, `#{…}` is not part of it.
+                            Some('#') if self.sc.peek_at(1) == Some('{') => {
+                                if !lit.is_empty() {
+                                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                                }
+                                self.sc.bump();
+                                self.sc.bump();
+                                let e = self.parse_value()?;
+                                self.skip_ws_inline();
+                                if !self.sc.eat('}') {
+                                    return Err(Error::at("expected \"}\"", self.sc.position()));
+                                }
+                                pieces.push(TplPiece::Interp(e));
+                            }
+                            Some(ch) => {
+                                lit.push(ch);
+                                self.sc.bump();
+                                if ch == c {
+                                    break;
+                                }
+                            }
                         }
                     }
                     prev_newline = false;
@@ -2350,18 +2372,39 @@ impl Parser {
                 Some(q @ ('"' | '\'')) => {
                     lit.push(q);
                     self.sc.bump();
-                    while let Some(ch) = self.sc.peek() {
-                        lit.push(ch);
-                        self.sc.bump();
-                        if ch == '\\' {
-                            if let Some(esc) = self.sc.peek() {
-                                lit.push(esc);
+                    loop {
+                        match self.sc.peek() {
+                            None => break,
+                            Some('\\') => {
+                                lit.push('\\');
                                 self.sc.bump();
+                                if let Some(esc) = self.sc.bump() {
+                                    lit.push(esc);
+                                }
                             }
-                            continue;
-                        }
-                        if ch == q {
-                            break;
+                            // Interpolation resolves inside the string too, as
+                            // the documented behaviour of this reader says and
+                            // as the custom-property reader already did.
+                            Some('#') if self.sc.peek_at(1) == Some('{') => {
+                                if !lit.is_empty() {
+                                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                                }
+                                self.sc.bump();
+                                self.sc.bump();
+                                let e = self.parse_value()?;
+                                self.skip_ws_inline();
+                                if !self.sc.eat('}') {
+                                    return Err(Error::at("expected \"}\"", self.sc.position()));
+                                }
+                                pieces.push(TplPiece::Interp(e));
+                            }
+                            Some(ch) => {
+                                lit.push(ch);
+                                self.sc.bump();
+                                if ch == q {
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
