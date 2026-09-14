@@ -185,6 +185,10 @@ Conformance is tracked separately as a ratchet against the official
   `@function --f() { result: "#{$v}"; }` emitted the interpolation literally.
   The string's own text, escapes and line continuations included, still passes
   through untouched — dart does not re-serialize a verbatim value's string.
+- **A form feed is a newline to the escape reader.** dart counts U+000C as a
+  newline, so a backslash cannot escape it; the identifier and verbatim-value
+  readers accepted the pair and serialized it, where the ordinary value reader
+  (and dart) report `Expected escape sequence.`
 - **A backslash before a newline is an escape only inside a string.** dart's
   `escape()` fails on a newline, and only its string reader drops the pair
   first — which is what makes a CSS line continuation legal inside quotes and

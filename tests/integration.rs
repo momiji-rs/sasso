@@ -1182,3 +1182,19 @@ fn interpolation_resolves_inside_a_quoted_verbatim_value() {
         "@supports (--a: \"x\\ y\") {\n  .a {\n    b: c;\n  }\n}\n"
     );
 }
+#[test]
+fn a_form_feed_is_a_newline_to_the_escape_reader() {
+    // dart's `isNewline` counts U+000C, so a backslash cannot escape it — in a
+    // verbatim value as in an ordinary one.
+    let err = |src: &str| {
+        let e = compile(src, &Options::default()).expect_err("expected a compile error");
+        (e.to_string(), e.line, e.col)
+    };
+    let (msg, line, col) = err(".a { --x: c\\\u{c}d; }\n");
+    assert!(msg.contains("Expected escape sequence."), "{msg}");
+    assert_eq!((line, col), (1, 13));
+    let (msg, _, _) = err(".a { b: c\\\u{c}d; }\n");
+    assert!(msg.contains("Expected escape sequence."), "{msg}");
+    // Inside a string it is a line continuation, and the pair vanishes.
+    assert_eq!(css(".a { b: \"c\\\u{c}d\"; }\n"), ".a {\n  b: \"cd\";\n}\n");
+}

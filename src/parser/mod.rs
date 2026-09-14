@@ -1081,7 +1081,9 @@ impl Parser {
     fn read_escape_char(&mut self) -> Result<char, Error> {
         self.sc.bump(); // the backslash
         let first = match self.sc.peek() {
-            None | Some('\n') | Some('\r') => {
+            // A form feed is a newline to dart (`isNewline`), so it is not a
+            // character an escape can stand for either.
+            None | Some('\n') | Some('\r') | Some('\u{c}') => {
                 return Err(Error::at("Expected escape sequence.", self.sc.position()))
             }
             Some(c) => c,
