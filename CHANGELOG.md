@@ -189,6 +189,13 @@ Conformance is tracked separately as a ratchet against the official
   newline, so a backslash cannot escape it; the identifier and verbatim-value
   readers accepted the pair and serialized it, where the ordinary value reader
   (and dart) report `Expected escape sequence.`
+- **A `.sass` custom-property value continues past a trailing backslash.** The
+  front-end decides where such a value ends, and it ended one at the line break
+  even when the last character was an unpaired `\`. A string continuation
+  (`--x: "a\` then an indented `b"`) was rejected as a stray indented child,
+  and `--x: c\` reported that same front-end message instead of dart's
+  `Expected escape sequence.` at the backslash. An even number of trailing
+  backslashes still ends the value: the last one is escaped, not an escape.
 - **A backslash before a newline is an escape only inside a string.** dart's
   `escape()` fails on a newline, and only its string reader drops the pair
   first — which is what makes a CSS line continuation legal inside quotes and

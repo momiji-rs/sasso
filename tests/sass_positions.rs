@@ -695,3 +695,28 @@ fn two_statements_on_one_line_point_at_the_second() {
         ".a {\n  b: c;\n}"
     );
 }
+
+#[test]
+fn a_custom_value_continues_past_a_trailing_backslash() {
+    // The front-end decides where a custom-property value ends. A line ending
+    // in an unpaired backslash always continues: inside a string that is a
+    // legal CSS line continuation, and anywhere else it is the error dart
+    // reports for one — either way the pair belongs to the parser, not to a
+    // front-end that cut the value off at the line break.
+    assert_eq!(
+        sass(".a\n  --x: \"a\\\n    b\"\n", "a.sass").expect("compile"),
+        ".a {\n  --x: \"a\\\n    b\";\n}"
+    );
+    let e = sass(".a\n  --x: c\\\n    d\n", "a.sass").expect_err("expected an error");
+    assert_eq!((e.line, e.col), (2, 10));
+    assert!(e.message.contains("Expected escape sequence."), "{}", e.message);
+    // An EVEN number of backslashes is a complete value: the last one is
+    // escaped, not an escape.
+    let e = sass(".a\n  --x: c\\\\\n    d\n", "a.sass").expect_err("expected an error");
+    assert!(
+        e.message
+            .contains("Nothing may be indented beneath a custom property"),
+        "{}",
+        e.message
+    );
+}

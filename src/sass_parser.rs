@@ -845,6 +845,12 @@ fn join_continuation(logical: &mut String, start_line: usize, line: usize, inden
     logical.push_str(piece);
 }
 
+/// The number of backslashes a line ends with: an odd count means the last one
+/// escapes whatever comes next, which is the line break.
+fn trailing_backslashes(s: &str) -> usize {
+    s.chars().rev().take_while(|&c| c == '\\').count()
+}
+
 /// Whether an UNESCAPED identifier is a `url` function name — `url` itself or
 /// a vendor-prefixed `-x-url` — compared in place, without building a `String`
 /// (the allocation-free twin of [`crate::parser::is_url_function`], which the
@@ -1650,6 +1656,14 @@ struct ScanState {
 /// `#{` interpolation (so the next line continues it verbatim). Quoted
 /// strings are skipped; a custom value's braces count as brackets.
 fn custom_value_open(s: &str) -> bool {
+    // A line ending in an UNPAIRED backslash always continues: the escape
+    // needs the next character, whether that makes a string continuation
+    // (`--x: "a\` — legal, the pair vanishes) or the error dart reports for
+    // one anywhere else (`--x: c\`). Either way the pair has to reach the
+    // parser rather than being cut off at the line end.
+    if trailing_backslashes(s) % 2 == 1 {
+        return true;
+    }
     let mut sc = LineScanner::new(s);
     let mut brackets: Vec<char> = Vec::new();
     while !sc.done() {
@@ -2046,6 +2060,9 @@ mod line_scanner_parity {
 
     fn custom_value_open_ref(s: &str) -> bool {
         let cs: Vec<char> = s.chars().collect();
+        if cs.iter().rev().take_while(|&&c| c == '\\').count() % 2 == 1 {
+            return true;
+        }
         let mut brackets: Vec<char> = Vec::new();
         let mut i = 0;
         while i < cs.len() {
