@@ -14,11 +14,9 @@ impl<'a> Evaluator<'a> {
         // A user module bound to this namespace.
         if let Some(module) = self.used_user_modules.get(ns).cloned() {
             if is_private_member(member) {
-                return Err(Error::at(
-                    "Private members can't be accessed from outside their modules.".to_string(),
-                    pos,
-                )
-                .with_length(length));
+                // Not part of the module's public view: dart reports it missing
+                // (a literal `ns.-name` is the parser's privacy error instead).
+                return Err(Error::at("Undefined function.".to_string(), pos).with_length(length));
             }
             if let Some(func) = module.function(member) {
                 // A forwarded function executes in its DEFINING module's
@@ -74,7 +72,9 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
         length: usize,
     ) -> Option<Result<Value, Error>> {
-        match member {
+        // Whatever these report, dart carets the CALL that reported it.
+        let sized = |r: Result<Value, Error>| r.map_err(|e| e.with_length_at(pos, length));
+        let out = match member {
             "variable-exists" => Some(self.meta_variable_exists(pos_args, named, pos, false)),
             "global-variable-exists" => Some(self.meta_variable_exists(pos_args, named, pos, true)),
             "mixin-exists" => Some(self.meta_mixin_exists(pos_args, named, pos)),
@@ -89,7 +89,8 @@ impl<'a> Evaluator<'a> {
             "accepts-content" => Some(self.meta_accepts_content(pos_args, named, pos)),
             "keywords" => Some(Self::meta_keywords(pos_args, named, pos)),
             _ => None,
-        }
+        };
+        out.map(sized)
     }
 
     /// `meta.keywords($args)`: the keyword arguments captured by a `$args...`
@@ -331,10 +332,9 @@ impl<'a> Evaluator<'a> {
     fn get_function_from_module(&self, name: &str, module_name: &str, pos: Pos) -> Result<Value, Error> {
         if let Some(module) = self.used_user_modules.get(module_name) {
             if is_private_member(name) {
-                return Err(Error::at(
-                    "Private members can't be accessed from outside their modules.".to_string(),
-                    pos,
-                ));
+                // A private member is not in the module's public view, so the
+                // by-name lookup simply does not find it.
+                return Err(Error::at(format!("Function not found: \"{name}\""), pos));
             }
             if let Some(f) = module.function(name) {
                 return Ok(Value::Function(SassFunction {
@@ -370,10 +370,7 @@ impl<'a> Evaluator<'a> {
     fn get_mixin_from_module(&self, name: &str, module_name: &str, pos: Pos) -> Result<Value, Error> {
         if let Some(module) = self.used_user_modules.get(module_name) {
             if is_private_member(name) {
-                return Err(Error::at(
-                    "Private members can't be accessed from outside their modules.".to_string(),
-                    pos,
-                ));
+                return Err(Error::at(format!("Mixin not found: \"{name}\""), pos));
             }
             if let Some(m) = module.mixin(name) {
                 return Ok(Value::Mixin(Box::new(SassMixin {

@@ -2786,7 +2786,17 @@ impl Parser {
         let full_length;
         let content = if self.sc.peek() == Some('{') {
             let body = self.parse_braced_body()?;
-            full_length = self.sc.byte_len_from(start_mark);
+            // In the indented syntax the braces around a child block are
+            // SYNTHETIC — the front end wrote them into the reconstruction —
+            // so the text they enclose is not a source span to point at. dart
+            // spans the children there; matching that needs the front end to
+            // map a reconstruction span back, so the call's own span is used
+            // until it can.
+            full_length = if self.indented {
+                length
+            } else {
+                self.sc.byte_len_from(start_mark)
+            };
             Some(Rc::new(body))
         } else if content_params.is_some() {
             // A `using (params)` clause requires a content block to bind into.

@@ -288,11 +288,6 @@ fn is_sass_only_function(name: &str) -> bool {
 }
 
 /// Whether a module member name is private (dart-sass: begins with `-` or
-/// `_`). Private members can't be accessed across module boundaries.
-fn is_private_member(name: &str) -> bool {
-    name.starts_with('-') || name.starts_with('_')
-}
-
 /// Whether a top-level statement may legally appear *before* a `@use` rule.
 /// dart-sass permits variable declarations, loud comments, `@charset`, `@use`,
 /// and `@forward`; everything else means a following `@use` is too late.

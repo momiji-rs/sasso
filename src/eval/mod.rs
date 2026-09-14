@@ -2201,12 +2201,14 @@ impl<'a> Evaluator<'a> {
                         sink,
                     );
                     self.leave_call(saved);
-                    // What is left unpositioned is an error about the CALL — a
-                    // content block the mixin does not take, an argument it
-                    // wants — which dart carets over `@include name(args)`,
-                    // stopping before the block. (The errors about the RULE
-                    // carry the whole statement's span already.)
-                    r.map_err(|e| e.at_if_unpositioned(*pos, *length))?;
+                    // What is left is an error about the CALL — a content block
+                    // the mixin does not take, an argument it wants, a
+                    // `meta.load-css` that found nothing — which dart carets
+                    // over `@include name(args)`, stopping before the block.
+                    // (The errors about the RULE carry the whole statement's
+                    // span already.) Some arrive positioned at the call but
+                    // with no length, some with no position at all.
+                    r.map_err(|e| e.at_if_unpositioned(*pos, *length).with_length_at(*pos, *length))?;
                 }
                 Stmt::Use {
                     url,

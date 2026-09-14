@@ -1709,10 +1709,9 @@ impl<'a> Evaluator<'a> {
     pub(super) fn eval_module_var(&self, ns: &str, name: &str, pos: Pos) -> Result<Value, Error> {
         if let Some(module) = self.used_user_modules.get(ns) {
             if is_private_member(name) {
-                return Err(Error::at(
-                    "Private members can't be accessed from outside their modules.".to_string(),
-                    pos,
-                ));
+                // Not part of the module's public view: dart reports it missing
+                // (a literal `ns.-name` is the parser's privacy error instead).
+                return Err(Error::at("Undefined variable.".to_string(), pos));
             }
             return match module.var(name) {
                 Some(v) => Ok(v.without_slash()),

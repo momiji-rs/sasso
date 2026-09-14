@@ -395,7 +395,7 @@ pub fn render_snippet(source: &str, span: Span, frames: &[Frame<'_>], glyphs: Gl
     // Walk the byte length across lines to find the end line/col. dart-sass
     // counts the terminator between lines as one byte; we mirror that so a
     // span that crosses a newline lands on the right line.
-    let (end_idx, end_col0) = resolve_end(&lines, start_idx, start_col0, span.length);
+    let (end_idx, end_col0) = resolve_end(source, &lines, start_idx, start_col0, span.length);
 
     // Gutter width is sized to the widest line number we will print.
     let max_line_no = end_idx + 1;
@@ -425,11 +425,31 @@ pub fn render_snippet(source: &str, span: Span, frames: &[Frame<'_>], glyphs: Gl
     out
 }
 
+/// The byte width of the terminator after `lines[idx]` — 1 for `\n` or a lone
+/// `\r`, 2 for a `\r\n`. The lines are slices of `source`, so the gap between
+/// one line's end and the next line's start IS the terminator.
+fn terminator_len(source: &str, lines: &[&str], idx: usize) -> usize {
+    let base = source.as_ptr() as usize;
+    match (lines.get(idx), lines.get(idx + 1)) {
+        (Some(cur), Some(next)) => {
+            let cur_end = cur.as_ptr() as usize - base + cur.len();
+            (next.as_ptr() as usize - base).saturating_sub(cur_end).max(1)
+        }
+        _ => 1,
+    }
+}
+
 /// Resolve the (0-based line, 0-based col) just past the end of a byte span,
 /// starting from `(start_idx, start_col0)`. Tabs and multibyte characters are
 /// handled by walking characters and decrementing the remaining byte budget by
 /// each character's UTF-8 length; the inter-line terminator costs one byte.
-fn resolve_end(lines: &[&str], start_idx: usize, start_col0: usize, length: usize) -> (usize, usize) {
+fn resolve_end(
+    source: &str,
+    lines: &[&str],
+    start_idx: usize,
+    start_col0: usize,
+    length: usize,
+) -> (usize, usize) {
     let mut idx = start_idx;
     let mut col = start_col0;
     let mut remaining = length;
@@ -451,8 +471,9 @@ fn resolve_end(lines: &[&str], start_idx: usize, start_col0: usize, length: usiz
         if remaining == 0 || idx + 1 >= lines.len() {
             return (idx, col + consumed_cols);
         }
-        // Spend the newline byte and move on.
-        remaining = remaining.saturating_sub(1);
+        // Spend the terminator and move on — TWO bytes for a CRLF, which the
+        // line list has already stripped.
+        remaining = remaining.saturating_sub(terminator_len(source, lines, idx));
         idx += 1;
         col = 0;
         if remaining == 0 {

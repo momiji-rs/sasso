@@ -610,9 +610,12 @@ impl<'a> Evaluator<'a> {
         if let Some(ns) = module {
             if let Some(target) = self.used_user_modules.get(ns).cloned() {
                 if is_private_member(name) {
-                    return Err(Error::unpositioned(
-                        "Private members can't be accessed from outside their modules.",
-                    ));
+                    // dart omits private members from a module's public view,
+                    // so a reference to one is simply not found. (A LITERAL
+                    // `ns.-name` never reaches here — the parser rejects it
+                    // with dart's privacy error; what does is an ESCAPED
+                    // spelling, which dart treats as an ordinary member.)
+                    return Err(Error::at("Undefined mixin.", pos).with_length(full_length));
                 }
                 let mixin = target
                     .mixin(name)
