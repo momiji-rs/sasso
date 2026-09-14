@@ -834,12 +834,59 @@ fn directive_name(logical: &str) -> Option<String> {
             .then(|| "include".to_string());
     }
     let rest = t.strip_prefix('@')?;
-    let name: String = rest.chars().take_while(|c| is_ident_char(*c)).collect();
+    // The keyword may be spelled with CSS escapes — the parser decodes them
+    // (`@im\70ort` IS `@import`), so the line analysis has to as well, or a
+    // directive would be taken for an unknown at-rule.
+    let cs: Vec<char> = rest.chars().collect();
+    let (name, _) = decode_ident(&cs, 0);
     if name.is_empty() {
         None
     } else {
         Some(name.to_ascii_lowercase())
     }
+}
+
+/// Decode the CSS identifier starting at `cs[i]`, resolving `\XXXXXX` hex and
+/// `\c` literal escapes, and return it with the index just past its last
+/// character. An empty name means there was no identifier there.
+fn decode_ident(cs: &[char], mut i: usize) -> (String, usize) {
+    let mut name = String::new();
+    while let Some(&c) = cs.get(i) {
+        if c == '\\' {
+            i += 1;
+            let mut hex = String::new();
+            while hex.len() < 6 && cs.get(i).is_some_and(|c| c.is_ascii_hexdigit()) {
+                hex.push(cs[i]);
+                i += 1;
+            }
+            if hex.is_empty() {
+                match cs.get(i) {
+                    Some(&c) => {
+                        name.push(c);
+                        i += 1;
+                    }
+                    None => break,
+                }
+            } else {
+                // One whitespace character may terminate a hex escape.
+                if cs.get(i).is_some_and(|c| c.is_whitespace()) {
+                    i += 1;
+                }
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(c) => name.push(c),
+                    None => break,
+                }
+            }
+            continue;
+        }
+        if is_ident_char(c) {
+            name.push(c);
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    (name, i)
 }
 
 /// Whether a statement's prelude may span multiple lines (the prelude is an
@@ -1261,37 +1308,7 @@ impl LineScanner {
             return None;
         }
         // Scan it forward, decoding escapes, up to the `(`.
-        let mut name = String::new();
-        let mut k = self.i;
-        while let Some(&c) = self.cs.get(k) {
-            if c == '\\' {
-                k += 1;
-                let mut hex = String::new();
-                while hex.len() < 6 && self.cs.get(k).is_some_and(|c| c.is_ascii_hexdigit()) {
-                    hex.push(self.cs[k]);
-                    k += 1;
-                }
-                if hex.is_empty() {
-                    if let Some(&c) = self.cs.get(k) {
-                        name.push(c);
-                        k += 1;
-                    }
-                } else {
-                    // One whitespace character may terminate a hex escape.
-                    if self.cs.get(k).is_some_and(|c| c.is_whitespace()) {
-                        k += 1;
-                    }
-                    name.push(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)?);
-                }
-                continue;
-            }
-            if is_ident_char(c) {
-                name.push(c);
-                k += 1;
-                continue;
-            }
-            break;
-        }
+        let (name, k) = decode_ident(&self.cs, self.i);
         // The `(` must follow the name directly.
         if self.cs.get(k) != Some(&'(') {
             return None;
@@ -1972,7 +1989,7 @@ mod line_scanner_parity {
 
     /// Whether `cs[i..]` starts a `url(` FUNCTION token (the exact name, not
     /// preceded by an identifier character) — the reference twin of
-    /// [`LineScanner::at_url_func`].
+    /// [`LineScanner::url_func_open`].
     fn at_url_func_ref(cs: &[char], i: usize) -> bool {
         let want = ['u', 'r', 'l', '('];
         if !(0..4).all(|k| cs.get(i + k).is_some_and(|c| c.eq_ignore_ascii_case(&want[k]))) {

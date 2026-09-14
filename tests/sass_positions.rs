@@ -164,6 +164,13 @@ fn an_unquoted_import_url_runs_to_the_comma() {
     // carets it at 1:9; sasso's missing-import error carries no span yet —
     // a general gap, in `.scss` as much as here.)
     assert!(e.message.contains("foo screen"), "{}", e.message);
+    // The at-rule KEYWORD may be escaped; the parser decodes it, so the line
+    // analysis must too, or `@im\\70ort` is taken for an unknown at-rule and
+    // its unquoted url is truncated at the `//`.
+    assert_eq!(
+        sass("@im\\70ort http://x/y.css\n", "d.sass").unwrap(),
+        "@import \"http://x/y.css\";"
+    );
     // An explicit `;` ends the url, so a trailing silent comment after it is
     // a comment — dart imports `foo` from `@import foo; // t`.
     std::fs::write(&entry, "@import foo; // t\n").unwrap();
