@@ -1127,3 +1127,28 @@ fn a_backslash_before_a_newline_is_only_an_escape_inside_a_string() {
         "@media (min-width: 0) and (x: ab) {\n  .a {\n    b: c;\n  }\n}\n"
     );
 }
+
+#[test]
+fn an_import_url_that_is_not_a_url_token_is_a_function_call() {
+    // dart `dynamicUrl`: when `url(…)` does not read as a plain url token, the
+    // call is an ordinary function whose arguments EVALUATE. sasso emitted the
+    // SassScript verbatim, so a variable reached the CSS.
+    assert_eq!(css("@import url(foo + bar);\n"), "@import url(foobar);\n");
+    assert_eq!(
+        css("$v: x;\n@import url($v + \".css\");\n"),
+        "@import url(x.css);\n"
+    );
+    // A quoted argument is a function call too, so it keeps its own text.
+    assert_eq!(
+        css("@import url(\"  x.css  \");\n"),
+        "@import url(\"  x.css  \");\n"
+    );
+    // Interpolation inside that string still resolves.
+    assert_eq!(
+        css("$p: http;\n@import url(\"#{$p}://x/y.css\");\n"),
+        "@import url(\"http://x/y.css\");\n"
+    );
+    // A plain url token still takes the token path (no evaluation, padding
+    // dropped, escapes decoded).
+    assert_eq!(css("@import url(  x.css  );\n"), "@import url(x.css);\n");
+}

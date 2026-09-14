@@ -1807,7 +1807,7 @@ impl Parser {
     /// (without committing the cursor — the caller resets) when a top-level
     /// `$variable` appears, signalling that the call must instead be parsed as
     /// an ordinary function so its arguments evaluate.
-    fn try_plain_url_contents(&mut self) -> Result<Option<Vec<TplPiece>>, Error> {
+    pub(super) fn try_plain_url_contents(&mut self) -> Result<Option<Vec<TplPiece>>, Error> {
         let mut pieces: Vec<TplPiece> = Vec::new();
         let mut lit = String::from("url(");
         let mut depth = 1i32;

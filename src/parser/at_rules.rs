@@ -445,7 +445,7 @@ impl Parser {
         // `url(...)` form — always a plain CSS import.
         if self.peek_is_url_func() {
             let url_pos = self.sc.position();
-            let url = self.parse_import_url_func()?;
+            let url = self.parse_import_url()?;
             self.skip_ws_trivia();
             let modifiers = self.parse_import_modifiers()?;
             return Ok(ImportArg::Css {
@@ -582,135 +582,39 @@ impl Parser {
         name.eq_ignore_ascii_case("url") && cs.get(k) == Some(&'(')
     }
 
-    /// Capture a `url(...)` argument (parens may nest). The `url(` wrapper and
-    /// the URL text are literal, but `#{…}` interpolation — at the top level or
-    /// inside a quoted string — is expanded (dart-sass resolves
-    /// `@import url("#{$p}://…")`). A URL with no interpolation yields a single
-    /// literal piece, byte-identical to the verbatim source.
-    fn parse_import_url_func(&mut self) -> Result<Vec<TplPiece>, Error> {
-        let mut pieces: Vec<TplPiece> = Vec::new();
-        let mut lit = String::new();
-        // The name is re-emitted in dart's canonical spelling — lowercase, with
-        // any escape decoded — however it was written (`URL(`, `u\72l(`).
+    /// Read the `url(...)` argument of an `@import`, mirroring dart-sass
+    /// `dynamicUrl`: the contents are tried as a plain URL token first — the
+    /// same trial a url in a value position uses, so whitespace padding is
+    /// dropped, escapes decode canonically and `#{…}` resolves — and when that
+    /// fails (a quoted string, a `$variable`, whitespace in the MIDDLE of the
+    /// token) the call is parsed as an ordinary function whose arguments
+    /// evaluate, so `@import url($base + "x.css")` imports the computed url
+    /// rather than emitting the SassScript verbatim.
+    fn parse_import_url(&mut self) -> Result<Vec<TplPiece>, Error> {
+        let url_pos = self.sc.position();
+        let name_mark = self.sc.mark();
+        // The name is whatever spells `url` (`URL(`, `u\72l(`); step past it
+        // and the `(`.
         let (_, name_len) = crate::parser::decode_ident(self.sc.rest(), 0);
         for _ in 0..=name_len {
-            self.sc.bump(); // through the `(`
-        }
-        lit.push_str("url(");
-        // dart `_tryUrlContents` skips the whitespace after the `(` outright.
-        while matches!(self.sc.peek(), Some(c) if c.is_whitespace()) {
             self.sc.bump();
         }
-        let mut depth = 1i32;
-        while let Some(c) = self.sc.peek() {
-            if c == '#' && self.sc.peek_at(1) == Some('{') {
-                if self.plain_css {
-                    return Err(Error::at(
-                        "Interpolation isn't allowed in plain CSS.",
-                        self.sc.position(),
-                    ));
-                }
-                if !lit.is_empty() {
-                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
-                }
-                pieces.push(TplPiece::Interp(self.read_interp()?));
-                continue;
-            }
-            match c {
-                // A CSS escape hides the character after it: an escaped paren
-                // is url CONTENT and does not close the token
-                // (`url(foo\)//cdn/x.css)`), as the shared value parser reads
-                // it. Without this the url ended at the escaped `)` and the
-                // rest of it was swallowed as a comment.
-                '\\' => {
-                    // dart writes `escape()` — the escape is consumed whole and
-                    // re-serialized canonically, so `\\61 b` is `ab` and `\\9 `
-                    // keeps its hex form. The value reader already does this.
-                    let ch = self.read_escape_char()?;
-                    push_ident_escape(&mut lit, ch, false);
-                }
-                c if c.is_whitespace() => {
-                    // Whitespace is part of a url token only when it sits right
-                    // before the `)`, where dart drops it; anywhere else dart
-                    // abandons the token, which sasso does not model — keep the
-                    // text as written there.
-                    let mut n = 0;
-                    while matches!(self.sc.peek_at(n), Some(c) if c.is_whitespace()) {
-                        n += 1;
-                    }
-                    if self.sc.peek_at(n) == Some(')') {
-                        for _ in 0..n {
-                            self.sc.bump();
-                        }
-                    } else {
-                        lit.push(c);
-                        self.sc.bump();
-                    }
-                }
-                '"' | '\'' => {
-                    let q = c;
-                    lit.push(c);
-                    self.sc.bump();
-                    while let Some(ch) = self.sc.peek() {
-                        if ch == '\\' {
-                            lit.push(ch);
-                            self.sc.bump();
-                            if let Some(n) = self.sc.bump() {
-                                lit.push(n);
-                            }
-                            continue;
-                        }
-                        // A raw newline terminates the string with dart's
-                        // `Expected ".` (issue_1096 CRLF url strings).
-                        if ch == '\n' || ch == '\r' {
-                            return Err(Error::at(format!("Expected {q}."), self.sc.position()));
-                        }
-                        if ch == '#' && self.sc.peek_at(1) == Some('{') {
-                            if self.plain_css {
-                                return Err(Error::at(
-                                    "Interpolation isn't allowed in plain CSS.",
-                                    self.sc.position(),
-                                ));
-                            }
-                            if !lit.is_empty() {
-                                pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
-                            }
-                            pieces.push(TplPiece::Interp(self.read_interp()?));
-                            continue;
-                        }
-                        lit.push(ch);
-                        self.sc.bump();
-                        if ch == q {
-                            break;
-                        }
-                    }
-                }
-                '(' => {
-                    depth += 1;
-                    lit.push(c);
-                    self.sc.bump();
-                }
-                ')' => {
-                    depth -= 1;
-                    lit.push(c);
-                    self.sc.bump();
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {
-                    lit.push(c);
-                    self.sc.bump();
-                }
-            }
+        if let Some(pieces) = self.try_plain_url_contents()? {
+            return Ok(pieces);
         }
-        if depth != 0 {
-            return Err(Error::at("expected \")\"", self.sc.position()));
+        self.sc.reset(name_mark);
+        for _ in 0..=name_len {
+            self.sc.bump();
         }
-        if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
-        }
-        Ok(pieces)
+        let args = self.parse_args_after_paren()?;
+        Ok(vec![TplPiece::Interp(Expr::Func {
+            // dart writes the canonical spelling, not the one in the source.
+            name: "url".to_string(),
+            args,
+            pos: url_pos,
+            length: self.sc.byte_len_from(name_mark),
+            module: None,
+        })])
     }
 
     /// Parse the optional modifiers that follow an `@import` URL, mirroring

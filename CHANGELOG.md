@@ -201,8 +201,13 @@ Conformance is tracked separately as a ratchet against the official
   another, which the indented syntax invites — emitted the padding, and
   `url(\61 b.css)` stayed escaped where dart prints `url(ab.css)`. The
   declaration-value reader already followed both rules; the import reader now
-  does too. A quoted url keeps its spaces, being a string rather than a url
-  token.
+  does too — it runs the same trial, and falls back the same way when the
+  contents are not a url token at all. dart parses `url(…)` as an ordinary
+  FUNCTION CALL then, so its arguments evaluate: `@import url(foo + bar)` is
+  `url(foobar)` and `@import url($base + ".css")` imports the computed url,
+  where sasso emitted the SassScript verbatim — a `$variable` reaching the
+  CSS. A quoted url is such a function call too, which is why it keeps its
+  own spacing.
 - **`//` inside a `url()` is no longer a comment in the indented syntax.**
   `url(http://x/y)`, `url(//cdn/x.png)` and `@import http://x/y.css` were
   truncated at the `//` (`url(http:` — "expected \")\""), because the front-end
