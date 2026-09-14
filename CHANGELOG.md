@@ -135,6 +135,118 @@ Conformance is tracked separately as a ratchet against the official
   sasso now matches (10 of 148 Lichess bundles had `sources` differing from
   dart's for this alone). Library note: imported files now appear as the
   absolute path they were reached by, not their realpath.
+- **Indented-syntax (`.sass`) diagnostics and source maps point at the `.sass`
+  file.** The front-end rebuilds SCSS from the indentation-structured source,
+  and it used to rebuild it compactly: statements were re-indented by nesting
+  depth, blank and comment-only lines vanished, every block's `}` took a line
+  of its own. Every line and column downstream — an error, a `@warn`, a
+  deprecation span, a source-map entry — was therefore a position in that
+  reconstruction rather than in the file the user wrote. The reconstruction is
+  now position-preserving (one output line per source line, the source
+  indentation kept, a block's `}` riding on its last line), and the two
+  constructs that cannot be rewritten without moving columns are read by the
+  parser in place instead:
+  - the mixin shorthands `=name`/`+name`, which used to be expanded to
+    `@mixin`/`@include` — eight columns wider, so `+mx(1)`'s argument mapped
+    eight columns to the right of where it is;
+  - unquoted `@import` urls, which used to be quoted (two bytes wider, moving
+    the deprecation caret). dart reads such a url to the next top-level comma,
+    spaces included, so `@import foo screen` is one url named `foo screen`;
+    a `.css`/protocol url is a plain-CSS import written back quoted.
+
+  On the shapes dart-sass 1.103.1 was measured against — errors, warnings,
+  `[import]` deprecations, and six source maps covering comments, blank lines,
+  multi-line selector lists, `@media`, custom properties and the shorthands —
+  every line, column and `mappings` string now matches it exactly.
+- **An escape is one token in a custom-property value, and a `}` inside a
+  string does not close an interpolation.** dart-sass captures a custom
+  property's value with `_interpolatedDeclarationValue`, which consumes a `\`
+  escape whole and writes it back canonically; sasso weighed the escaped
+  character itself, so an escaped delimiter changed what the value meant.
+  `--x: \{` left a brace open and swallowed every line after it (`unexpected
+  end of input, expected "}"`), `--x: \"` opened a string, and `a\;b` ended the
+  declaration early. An escape now round-trips the way dart spells it (`\7b`
+  and `\{` both print `\{`, `\61 b` prints `ab`, an invalid code point becomes
+  U+FFFD), each closer is matched against the bracket it opened (`--x: (]` is
+  `expected ")".`), and a closer with no opener ends the value (`--x: ];` is
+  `expected ";".`). The `@supports` reader and the body of a plain-CSS custom
+  `@function`/`@mixin` capture values the same way and follow the same rules.
+  In the indented syntax the line scanners that decide where a value ends now
+  read a string inside `#{ … }` as text, so `b: #{"} // not a comment"}` is one
+  declaration rather than a parse error, and they track which bracket each
+  closer closes: a mismatched one (`--x: (]`) is left to the parser, which
+  reports dart's `expected ")".` at the closer instead of the front-end
+  complaining about the line indented beneath it.
+- **Interpolation resolves inside a quoted string in every verbatim value.** A
+  custom-property value, a `@supports` declaration and the body of a plain-CSS
+  custom `@function` all copy their text verbatim, but `#{…}` is not part of
+  that text. The custom-property reader resolved it inside quotes; the other
+  two copied the string whole, so `@supports (--a: "#{$v}")` and
+  `@function --f() { result: "#{$v}"; }` emitted the interpolation literally.
+  The string's own text, escapes and line continuations included, still passes
+  through untouched — dart does not re-serialize a verbatim value's string.
+- **A hex escape's terminator is one line break.** One whitespace character
+  ends a hex escape, and a CRLF is one character's worth of line break where
+  the text is captured VERBATIM: `--x: \61` + CRLF + `b` is `ab`, with no line
+  break left in the value. Where the text is SassScript only the `\r` is
+  consumed, so the `\n` still separates two identifiers (`b: \61` + CRLF + `b`
+  is `a b`). The two readers had it backwards from each other. A vertical tab
+  never terminates an escape — dart's whitespace set is space, tab and the
+  three CSS newlines — which the indented front-end's own decoder now matches.
+- **A form feed is a newline to the escape reader.** dart counts U+000C as a
+  newline, so a backslash cannot escape it; the identifier and verbatim-value
+  readers accepted the pair and serialized it, where the ordinary value reader
+  (and dart) report `Expected escape sequence.`
+- **A `.sass` custom-property value continues past a trailing backslash.** The
+  front-end decides where such a value ends, and it ended one at the line break
+  even when the last character was an unpaired `\`. A string continuation
+  (`--x: "a\` then an indented `b"`) was rejected as a stray indented child,
+  and `--x: c\` reported that same front-end message instead of dart's
+  `Expected escape sequence.` at the backslash. An even number of trailing
+  backslashes still ends the value: the last one is escaped, not an escape.
+- **A backslash before a newline is an escape only inside a string.** dart's
+  `escape()` fails on a newline, and only its string reader drops the pair
+  first — which is what makes a CSS line continuation legal inside quotes and
+  nowhere else. sasso accepted it everywhere and treated it as a line wrap, so
+  `b: c\` followed by `d` compiled as `b: c d`, `.a,\` + `.b` became a
+  selector with an escaped line break (`\a `), and a url kept reading. All of
+  them now fail where dart fails, with dart's message and column. In the
+  indented syntax the front-end had the same leniency of its own — it dropped
+  the trailing backslash and joined the next line with a space — so
+  `@import url(foo\` + `bar.css)` imported `url(foo bar.css)`; the pair now
+  reaches the parser verbatim. A continuation inside quotes still works in a
+  value and in a selector: `[a="x\` + `y"]` is `[a=xy]`.
+- **Two statements on one line are reported at the second statement.** The
+  indented syntax forbids `b: c; d: e`, and dart carets the `d` — the first
+  character after the `;` and the whitespace following it — where sasso
+  pointed at the `;` itself. The position is counted from the last line break
+  inside the statement, so a `;` below a bracket continuation is reported on
+  the source line it is written on rather than on the line the statement
+  started on.
+- **An `@import`'s `url()` drops its padding and decodes its escapes.** dart
+  reads the token with `_tryUrlContents`: the whitespace after the `(` and
+  before the `)` is not part of the url, and a `\` escape is consumed whole
+  and written back canonically. sasso kept the text exactly as written, so
+  `@import url(  x.css  )` — and a `url(` opened on one line and closed on
+  another, which the indented syntax invites — emitted the padding, and
+  `url(\61 b.css)` stayed escaped where dart prints `url(ab.css)`. The
+  declaration-value reader already followed both rules; the import reader now
+  does too — it runs the same trial, and falls back the same way when the
+  contents are not a url token at all. dart parses `url(…)` as an ordinary
+  FUNCTION CALL then, so its arguments evaluate: `@import url(foo + bar)` is
+  `url(foobar)` and `@import url($base + ".css")` imports the computed url,
+  where sasso emitted the SassScript verbatim — a `$variable` reaching the
+  CSS. A quoted url is such a function call too, which is why it keeps its
+  own spacing.
+- **`//` inside a `url()` is no longer a comment in the indented syntax.**
+  `url(http://x/y)`, `url(//cdn/x.png)` and `@import http://x/y.css` were
+  truncated at the `//` (`url(http:` — "expected \")\""), because the front-end
+  stripped silent comments before the url token was recognized. The scanners
+  that decide where a logical line ENDS skip the token too, so a declaration
+  after one (`b: url(http://x/y)` then `c: red`) is still its own statement
+  rather than being joined into the value. dart scans
+  `url(` and its contents as one token; only the exact `url` function
+  qualifies, so `my-url(//y)` still starts a comment, as it does for dart.
 - **Compressed output no longer writes a stray `;` after a nested rule, and
   maps that rule's children.** A loaded `.css` file that uses CSS nesting
   rendered its nested blocks into one pre-built string, so `.a { .b { x: 1 } z:

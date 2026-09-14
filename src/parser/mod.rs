@@ -191,20 +191,30 @@ struct Parser {
     /// `CssParser`. Nesting is still parsed (CSS nesting is preserved in output);
     /// the difference is that Sass features become errors.
     plain_css: bool,
+    /// Indented-syntax mode: the input is the position-preserving SCSS
+    /// reconstruction of a `.sass` file (see `sass_parser`), and the few
+    /// grammar liberties dart's `SassParser` takes over `ScssParser` apply —
+    /// an `@import` URL may be an unquoted token.
+    indented: bool,
 }
 
 /// Parse a complete stylesheet (SCSS).
 pub(crate) fn parse(src: &str) -> Result<Stylesheet, Error> {
-    parse_inner(src, false)
+    parse_inner(src, false, false)
 }
 
 /// Parse a plain-CSS stylesheet (a loaded `.css` file): the same brace/semicolon
 /// grammar, but Sass features are rejected.
 pub(crate) fn parse_plain_css(src: &str) -> Result<Stylesheet, Error> {
-    parse_inner(src, true)
+    parse_inner(src, true, false)
 }
 
-fn parse_inner(src: &str, plain_css: bool) -> Result<Stylesheet, Error> {
+/// Parse the SCSS reconstruction of an indented-syntax (`.sass`) stylesheet.
+pub(crate) fn parse_indented(src: &str) -> Result<Stylesheet, Error> {
+    parse_inner(src, false, true)
+}
+
+fn parse_inner(src: &str, plain_css: bool, indented: bool) -> Result<Stylesheet, Error> {
     let mut p = Parser {
         sc: Scanner::new(src),
         calc_depth: 0,
@@ -214,6 +224,7 @@ fn parse_inner(src: &str, plain_css: bool) -> Result<Stylesheet, Error> {
         interp_spans: Vec::new(),
         seen_non_module_stmt: false,
         plain_css,
+        indented,
     };
     let stmts = p.parse_statements(true)?;
     Ok(Stylesheet { stmts })
@@ -372,11 +383,67 @@ fn strip_vendor_prefix(lower: &str) -> &str {
     lower
 }
 
+/// Decode the CSS identifier starting at `cs[i]`, resolving `\XXXXXX` hex and
+/// `\c` literal escapes, and return it with the index just past its last
+/// character. An empty name means there was no identifier there.
+pub(crate) fn decode_ident(cs: &[char], mut i: usize) -> (String, usize) {
+    let mut name = String::new();
+    while let Some(&c) = cs.get(i) {
+        if c == '\\' {
+            i += 1;
+            let mut hex = String::new();
+            while hex.len() < 6 && cs.get(i).is_some_and(|c| c.is_ascii_hexdigit()) {
+                hex.push(cs[i]);
+                i += 1;
+            }
+            if hex.is_empty() {
+                match cs.get(i) {
+                    Some(&c) => {
+                        name.push(c);
+                        i += 1;
+                    }
+                    None => break,
+                }
+            } else {
+                // One whitespace character may terminate a hex escape — dart's
+                // `isWhitespace`, which is space, tab and the three CSS
+                // newlines, NOT every Unicode space (a vertical tab ends the
+                // identifier instead, as the parser reads it).
+                if matches!(cs.get(i), Some(' ' | '\t' | '\n' | '\r' | '\u{c}')) {
+                    i += 1;
+                    if cs.get(i - 1) == Some(&'\r') && cs.get(i) == Some(&'\n') {
+                        i += 1;
+                    }
+                }
+                // A surrogate or out-of-range code point becomes the
+                // replacement character, as `read_escape_char` resolves it —
+                // stopping here instead would report the name's PREFIX
+                // (`@import\D800` as `import`), and the line analysis would
+                // then apply `@import`'s rules to a generic at-rule.
+                let value = u32::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
+                name.push(if (0xD800..=0xDFFF).contains(&value) || value > 0x10FFFF {
+                    '\u{FFFD}'
+                } else {
+                    char::from_u32(value).unwrap_or('\u{FFFD}')
+                });
+            }
+            continue;
+        }
+        if is_ident_char(c) {
+            name.push(c);
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    (name, i)
+}
+
 /// Whether `name` is a `url(` function — `url` itself or any vendor-prefixed
 /// `-x-url`, case-insensitively. dart-sass parses these with its special URL
 /// grammar (a plain, unquoted URL is preserved verbatim and the call is
 /// emitted as a bare `url(...)`).
-fn is_url_function(name: &str) -> bool {
+pub(crate) fn is_url_function(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     strip_vendor_prefix(&lower) == "url"
 }
@@ -683,19 +750,6 @@ impl Parser {
         Ok(())
     }
 
-    /// Consume a `#{ … }` interpolation and return its expression. The caller
-    /// must have verified the cursor is at `#` with `{` next.
-    fn read_interp(&mut self) -> Result<Expr, Error> {
-        self.sc.bump(); // '#'
-        self.sc.bump(); // '{'
-        let e = self.parse_interp_value()?;
-        self.skip_ws_inline();
-        if !self.sc.eat('}') {
-            return Err(Error::at("expected \"}\"", self.sc.position()));
-        }
-        Ok(e)
-    }
-
     /// Parse the expression inside a `#{ … }` (cursor just past the `{`).
     ///
     /// Interpolation is a full SassScript context even when it sits inside a
@@ -723,7 +777,14 @@ impl Parser {
             // A CSS escape makes the next character literal identifier text:
             // an escaped stop char (`.govuk-\!-font-size-19`) is part of the
             // selector, never a boundary (dart consumes `\X` in identifiers).
+            // A NEWLINE is not a character it can escape — dart's `escape()`
+            // fails there, so `.a,\` + `.b` is an error rather than a selector
+            // containing an escaped line break.
             if c == '\\' {
+                if matches!(self.sc.peek_at(1), Some('\n' | '\r' | '\u{c}')) {
+                    self.sc.bump();
+                    return Err(Error::at("Expected escape sequence.", self.sc.position()));
+                }
                 lit.push(c);
                 self.sc.bump();
                 if let Some(n) = self.sc.bump() {
@@ -840,6 +901,20 @@ impl Parser {
                     self.sc.bump();
                     while let Some(ch) = self.sc.peek() {
                         if ch == '\\' {
+                            // A `\` before a newline is a CSS line continuation
+                            // and the pair vanishes, as in any other string;
+                            // copying it through left a raw line break in the
+                            // selector text.
+                            if matches!(self.sc.peek_at(1), Some('\n' | '\r' | '\u{c}')) {
+                                self.sc.bump();
+                                if self.sc.peek() == Some('\r') {
+                                    self.sc.bump();
+                                    self.sc.eat('\n');
+                                } else {
+                                    self.sc.bump();
+                                }
+                                continue;
+                            }
                             lit.push(ch);
                             self.sc.bump();
                             if let Some(n) = self.sc.bump() {
@@ -906,30 +981,20 @@ impl Parser {
         Ok(pieces)
     }
 
-    /// Consume a CSS escape sequence. The opening `\` must be the next
-    /// character; it is consumed here. Returns the decoded code point, or `None`
-    /// for a line continuation (`\` immediately before a newline), which yields
-    /// no character. A backslash at end-of-input decodes to U+FFFD, matching
-    /// dart-sass. Errors on an out-of-range Unicode code point.
-    fn consume_escape(&mut self) -> Result<Option<char>, Error> {
+    /// Consume a CSS escape sequence and return the code point it stands for.
+    /// The opening `\` must be the next character; it is consumed here. A
+    /// backslash at end-of-input decodes to U+FFFD, matching dart-sass; a
+    /// backslash before a NEWLINE is not an escape at all (dart's `escape()`
+    /// fails there, and only its string reader drops the pair as a CSS line
+    /// continuation before ever calling it). Errors on an out-of-range Unicode
+    /// code point.
+    fn consume_escape(&mut self) -> Result<char, Error> {
         let pos = self.sc.position();
         self.sc.bump(); // the leading backslash
         match self.sc.peek() {
-            // `\` before a CSS newline is a line continuation: the pair is
-            // dropped entirely.
-            Some('\n') => {
-                self.sc.bump();
-                Ok(None)
-            }
-            Some('\r') => {
-                self.sc.bump();
-                self.sc.eat('\n'); // CRLF
-                Ok(None)
-            }
-            Some('\u{c}') => {
-                self.sc.bump();
-                Ok(None)
-            }
+            // A line continuation is legal only inside a quoted string, and the
+            // string reader consumes it before this is reached.
+            Some('\n' | '\r' | '\u{c}') => Err(Error::at("Expected escape sequence.", self.sc.position())),
             Some(c) if c.is_ascii_hexdigit() => {
                 let mut value: u32 = 0;
                 let mut digits = 0;
@@ -944,33 +1009,25 @@ impl Parser {
                     }
                 }
                 // A single trailing whitespace character terminates the escape
-                // and is consumed.
-                match self.sc.peek() {
-                    Some(' ' | '\t' | '\n' | '\u{c}') => {
-                        self.sc.bump();
-                    }
-                    Some('\r') => {
-                        self.sc.bump();
-                        self.sc.eat('\n');
-                    }
-                    _ => {}
+                // and is consumed — one CHARACTER, so the `\n` of a CRLF is
+                // left behind and still separates tokens: dart reads
+                // `b: \61` + CRLF + `b` as the two identifiers `a b`.
+                if matches!(self.sc.peek(), Some(' ' | '\t' | '\n' | '\r' | '\u{c}')) {
+                    self.sc.bump();
                 }
                 if value > 0x10_FFFF {
                     return Err(Error::at("Invalid Unicode code point.", pos));
                 }
                 // Surrogate code points cannot be represented and become the
                 // replacement char; NUL is kept (it serializes as `\0 `).
-                match char::from_u32(value) {
-                    Some(ch) => Ok(Some(ch)),
-                    None => Ok(Some('\u{FFFD}')),
-                }
+                Ok(char::from_u32(value).unwrap_or('\u{FFFD}'))
             }
             // Any other character escapes to itself literally.
             Some(c) => {
                 self.sc.bump();
-                Ok(Some(c))
+                Ok(c)
             }
-            None => Ok(Some('\u{FFFD}')),
+            None => Ok('\u{FFFD}'),
         }
     }
 
@@ -1025,7 +1082,9 @@ impl Parser {
     fn read_escape_char(&mut self) -> Result<char, Error> {
         self.sc.bump(); // the backslash
         let first = match self.sc.peek() {
-            None | Some('\n') | Some('\r') => {
+            // A form feed is a newline to dart (`isNewline`), so it is not a
+            // character an escape can stand for either.
+            None | Some('\n') | Some('\r') | Some('\u{c}') => {
                 return Err(Error::at("Expected escape sequence.", self.sc.position()))
             }
             Some(c) => c,
@@ -1041,9 +1100,15 @@ impl Parser {
                     _ => break,
                 }
             }
-            // One optional whitespace terminator (dart `scanCharIf`).
+            // One optional whitespace terminator. A CRLF counts as ONE line
+            // break here — `--x: \61` + CRLF + `b` is `ab` in dart, with no
+            // line break left in the value.
             if matches!(self.sc.peek(), Some(' ' | '\t' | '\n' | '\r' | '\u{c}')) {
+                let cr = self.sc.peek() == Some('\r');
                 self.sc.bump();
+                if cr {
+                    self.sc.eat('\n');
+                }
             }
             // NUL is KEPT (it re-serializes as `\0 `, dart's consume_escape);
             // surrogates and out-of-range code points become the replacement

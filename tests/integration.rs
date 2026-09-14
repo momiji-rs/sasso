@@ -976,3 +976,241 @@ fn rgba_hsla_special_value_passthrough_keeps_name() {
         ".a {\n  color: rgb(none none none);\n}\n"
     );
 }
+
+#[test]
+fn a_custom_property_value_reads_an_escape_as_one_token() {
+    // dart-sass captures a custom-property value with
+    // `_interpolatedDeclarationValue`, which consumes a `\` escape whole and
+    // re-serializes it canonically (`escape(identifierStart: true)`). An
+    // escaped delimiter is therefore literal text: it neither opens a bracket
+    // nor a string, and it never terminates the declaration.
+    assert_eq!(
+        css(".a { --x: \\{; }\n.b { c: d; }\n"),
+        ".a {\n  --x: \\{;\n}\n\n.b {\n  c: d;\n}\n"
+    );
+    assert_eq!(css(".a { --x: \\\"; }\n"), ".a {\n  --x: \\\";\n}\n");
+    assert_eq!(css(".a { --x: a\\;b; }\n"), ".a {\n  --x: a\\;b;\n}\n");
+    // Canonical re-serialization: a name-start char loses the escape, a digit
+    // and a control character keep the hex form, `-` and `{` take the short
+    // form, and an invalid code point becomes U+FFFD.
+    assert_eq!(css(".a { --x: \\61 b; }\n"), ".a {\n  --x: ab;\n}\n");
+    assert_eq!(css(".a { --x: \\7b; }\n"), ".a {\n  --x: \\{;\n}\n");
+    assert_eq!(css(".a { --x: \\30 z; }\n"), ".a {\n  --x: \\30 z;\n}\n");
+    assert_eq!(css(".a { --x: \\9 z; }\n"), ".a {\n  --x: \\9 z;\n}\n");
+    assert_eq!(css(".a { --x: \\2d z; }\n"), ".a {\n  --x: \\-z;\n}\n");
+    assert_eq!(
+        css(".a { --x: \\d800 z; }\n"),
+        "@charset \"UTF-8\";\n.a {\n  --x: \u{fffd}z;\n}\n"
+    );
+    // The same reader serves a `@supports` custom declaration and the body of
+    // a plain-CSS custom `@function`.
+    assert_eq!(
+        css("@supports (--x: \\61 b) { a { b: c } }\n"),
+        "@supports (--x: ab) {\n  a {\n    b: c;\n  }\n}\n"
+    );
+    assert_eq!(
+        css("@function --f() { result: \\{; }\n"),
+        "@function --f() {\n  result: \\{;\n}\n"
+    );
+}
+
+#[test]
+fn a_custom_property_value_matches_its_brackets() {
+    // dart-sass matches each closer against the bracket it opened, so `(]` is
+    // an error rather than a pair that cancels out; a closer with no opener
+    // ends the value, and the declaration then wants its `;`.
+    let err = |src: &str| {
+        let e = compile(src, &Options::default()).expect_err("expected a compile error");
+        (e.to_string(), e.line, e.col)
+    };
+    let (msg, line, col) = err(".a { --x: (] ; }\n");
+    assert!(msg.contains("expected \")\"."), "{msg}");
+    assert_eq!((line, col), (1, 12));
+    let (msg, line, col) = err(".a { --x: ]; }\n");
+    assert!(msg.contains("expected \";\"."), "{msg}");
+    assert_eq!((line, col), (1, 11));
+    // An escape after the backslash is required, as in an identifier.
+    let (msg, line, col) = err(".a { --x: a\\\n b; }\n");
+    assert!(msg.contains("Expected escape sequence."), "{msg}");
+    assert_eq!((line, col), (1, 13));
+}
+
+#[test]
+fn a_plain_css_custom_at_rule_body_matches_its_brackets() {
+    // The body of a plain-CSS custom `@function`/`@mixin` captures each value
+    // the way a custom property does, so a mismatched closer is an error, an
+    // unclosed opener names the bracket it wanted, and a closer with no opener
+    // ends the value (the body then wants its `;`).
+    let err = |src: &str| {
+        let e = compile(src, &Options::default()).expect_err("expected a compile error");
+        (e.to_string(), e.line, e.col)
+    };
+    let (msg, line, col) = err("@function --f() { result: (]; }\n");
+    assert!(msg.contains("expected \")\"."), "{msg}");
+    assert_eq!((line, col), (1, 28));
+    let (msg, line, col) = err("@function --f() { result: (; }\n");
+    assert!(msg.contains("expected \")\"."), "{msg}");
+    assert_eq!((line, col), (1, 30));
+    let (msg, line, col) = err("@function --f() { result: ]; }\n");
+    assert!(msg.contains("expected \";\"."), "{msg}");
+    assert_eq!((line, col), (1, 27));
+    // A balanced value still captures whole, `;` and all.
+    assert_eq!(
+        css("@function --f() { result: (a; b); other: c; }\n"),
+        "@function --f() {\n  result: (a; b);\n  other: c;\n}\n"
+    );
+}
+
+#[test]
+fn an_import_url_token_drops_its_padding_and_decodes_escapes() {
+    // dart reads `url(…)` in an `@import` with `_tryUrlContents`: the
+    // whitespace after the `(` and before the `)` is not part of the token,
+    // and a `\` escape is consumed whole and written back canonically
+    // (`escape()`, so a name character loses its backslash). The value reader
+    // already did both; the import reader kept the text verbatim.
+    assert_eq!(css("@import url(  x.css  );\n"), "@import url(x.css);\n");
+    assert_eq!(
+        css("@import url(\n  http://x/y.css\n);\n"),
+        "@import url(http://x/y.css);\n"
+    );
+    assert_eq!(css("@import url(\\61 b.css);\n"), "@import url(ab.css);\n");
+    assert_eq!(css("@import url(\\2d x.css);\n"), "@import url(-x.css);\n");
+    assert_eq!(css("@import url(\\30 x.css);\n"), "@import url(0x.css);\n");
+    // A control character keeps its hex form, and an escaped space keeps its
+    // backslash — neither is a name character.
+    assert_eq!(css("@import url(\\9 x.css);\n"), "@import url(\\9 x.css);\n");
+    assert_eq!(css("@import url(\\ x.css);\n"), "@import url(\\ x.css);\n");
+    // An escaped paren is still url content, and a quoted url keeps its
+    // padding (it is a string, not a url token).
+    assert_eq!(
+        css("@import url(foo\\)bar.css);\n"),
+        "@import url(foo\\)bar.css);\n"
+    );
+    assert_eq!(
+        css("@import url(\"  x.css  \");\n"),
+        "@import url(\"  x.css  \");\n"
+    );
+    // Several imports on one line keep their own padding rules.
+    assert_eq!(
+        css("@import url(x.css ), url(y.css);\n"),
+        "@import url(x.css);\n@import url(y.css);\n"
+    );
+}
+
+#[test]
+fn a_backslash_before_a_newline_is_only_an_escape_inside_a_string() {
+    // dart's `escape()` fails on a newline, so a backslash "line continuation"
+    // is an error everywhere a CSS escape may appear — a value, a selector, a
+    // property name, an at-rule prelude. Only the string reader drops the pair
+    // first, which is what makes it legal inside quotes.
+    let err = |src: &str| {
+        let e = compile(src, &Options::default()).expect_err("expected a compile error");
+        (e.to_string(), e.line, e.col)
+    };
+    for (src, line, col) in [
+        (".a { b: c\\\n  d; }\n", 1, 11),
+        (".a,\\\n.b { c: d; }\n", 1, 5),
+        (".a { b\\\nc: d; }\n", 1, 8),
+        ("@media screen\\\nand (min-width: 0) { .a { b: c } }\n", 1, 15),
+        (".a { b: url(foo\\\nbar.css); }\n", 1, 17),
+    ] {
+        let (msg, l, c) = err(src);
+        assert!(msg.contains("Expected escape sequence."), "{src:?}: {msg}");
+        assert_eq!((l, c), (line, col), "for {src:?}");
+    }
+    // Inside a quoted string the pair IS a line continuation: it vanishes, and
+    // the next line's indentation stays content.
+    assert_eq!(css(".a { b: \"x\\\ny\"; }\n"), ".a {\n  b: \"xy\";\n}\n");
+    assert_eq!(css("[a=\"x\\\ny\"] { c: d; }\n"), "[a=xy] {\n  c: d;\n}\n");
+    assert_eq!(
+        css("@media (min-width: 0) and (x: \"a\\\nb\") { .a { b: c } }\n"),
+        "@media (min-width: 0) and (x: ab) {\n  .a {\n    b: c;\n  }\n}\n"
+    );
+}
+
+#[test]
+fn an_import_url_that_is_not_a_url_token_is_a_function_call() {
+    // dart `dynamicUrl`: when `url(…)` does not read as a plain url token, the
+    // call is an ordinary function whose arguments EVALUATE. sasso emitted the
+    // SassScript verbatim, so a variable reached the CSS.
+    assert_eq!(css("@import url(foo + bar);\n"), "@import url(foobar);\n");
+    assert_eq!(
+        css("$v: x;\n@import url($v + \".css\");\n"),
+        "@import url(x.css);\n"
+    );
+    // A quoted argument is a function call too, so it keeps its own text.
+    assert_eq!(
+        css("@import url(\"  x.css  \");\n"),
+        "@import url(\"  x.css  \");\n"
+    );
+    // Interpolation inside that string still resolves.
+    assert_eq!(
+        css("$p: http;\n@import url(\"#{$p}://x/y.css\");\n"),
+        "@import url(\"http://x/y.css\");\n"
+    );
+    // A plain url token still takes the token path (no evaluation, padding
+    // dropped, escapes decoded).
+    assert_eq!(css("@import url(  x.css  );\n"), "@import url(x.css);\n");
+}
+
+#[test]
+fn interpolation_resolves_inside_a_quoted_verbatim_value() {
+    // A verbatim value's TEXT is copied, but `#{…}` is not part of that text —
+    // dart resolves it inside a quoted string as well as outside one. The
+    // custom-property reader already did; the `@supports` and plain-CSS custom
+    // callable readers copied the string whole.
+    assert_eq!(
+        css("$v: x;\n@supports (--a: \"#{$v}\") { .a { b: c } }\n"),
+        "@supports (--a: \"x\") {\n  .a {\n    b: c;\n  }\n}\n"
+    );
+    assert_eq!(
+        css("$v: x;\n@function --f() { result: \"#{$v}\"; }\n"),
+        "@function --f() {\n  result: \"x\";\n}\n"
+    );
+    assert_eq!(
+        css("$v: x;\n.a { --x: \"#{$v}\"; }\n"),
+        ".a {\n  --x: \"x\";\n}\n"
+    );
+    // The string's own escapes stay verbatim, line continuation included — a
+    // verbatim value is not re-serialized the way a SassScript string is.
+    assert_eq!(
+        css(".a { --x: \"a\\\nb\"; }\n"),
+        ".a {\n  --x: \"a\\\n  b\";\n}\n"
+    );
+    assert_eq!(
+        css("@supports (--a: \"x\\\ny\") { .a { b: c } }\n"),
+        "@supports (--a: \"x\\ y\") {\n  .a {\n    b: c;\n  }\n}\n"
+    );
+}
+#[test]
+fn a_form_feed_is_a_newline_to_the_escape_reader() {
+    // dart's `isNewline` counts U+000C, so a backslash cannot escape it — in a
+    // verbatim value as in an ordinary one.
+    let err = |src: &str| {
+        let e = compile(src, &Options::default()).expect_err("expected a compile error");
+        (e.to_string(), e.line, e.col)
+    };
+    let (msg, line, col) = err(".a { --x: c\\\u{c}d; }\n");
+    assert!(msg.contains("Expected escape sequence."), "{msg}");
+    assert_eq!((line, col), (1, 13));
+    let (msg, _, _) = err(".a { b: c\\\u{c}d; }\n");
+    assert!(msg.contains("Expected escape sequence."), "{msg}");
+    // Inside a string it is a line continuation, and the pair vanishes.
+    assert_eq!(css(".a { b: \"c\\\u{c}d\"; }\n"), ".a {\n  b: \"cd\";\n}\n");
+}
+
+#[test]
+fn a_hex_escape_terminator_is_one_line_break() {
+    // One whitespace character terminates a hex escape. dart takes a CRLF
+    // whole where the text is captured VERBATIM — `--x: \61` + CRLF + `b` is
+    // `ab`, with no line break left in the value — and only the `\r` where the
+    // text is parsed as SassScript, so the `\n` still separates two
+    // identifiers.
+    assert_eq!(css(".a { --x: \\61\r\nb; }\n"), ".a {\n  --x: ab;\n}\n");
+    assert_eq!(css(".a { b: \\61\r\nb; }\n"), ".a {\n  b: a b;\n}\n");
+    // A lone LF or CR terminates the escape in both.
+    assert_eq!(css(".a { --x: \\61\nb; }\n"), ".a {\n  --x: ab;\n}\n");
+    assert_eq!(css(".a { --x: \\61\rb; }\n"), ".a {\n  --x: ab;\n}\n");
+    assert_eq!(css(".a { b: \\61\nb; }\n"), ".a {\n  b: ab;\n}\n");
+    assert_eq!(css(".a { b: \\61\rb; }\n"), ".a {\n  b: ab;\n}\n");
+}

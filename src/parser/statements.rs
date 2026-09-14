@@ -34,6 +34,47 @@ impl Parser {
                 }
                 Some('$') => stmts.push(self.parse_var_decl()?),
                 Some('@') => stmts.push(self.parse_at_rule()?),
+                // The indented syntax's mixin shorthands, read in place so
+                // every column after the keyword stays a `.sass` column:
+                // `=name(params)` defines a mixin (dart `SassParser`'s `=`),
+                // `+name(args)` includes one. A `+` NOT followed by a name is
+                // the next-sibling combinator, i.e. a selector.
+                Some('=') if self.indented => {
+                    self.sc.bump();
+                    self.skip_ws_inline();
+                    // `=--name` is the plain-CSS mixin spelling dart reserves,
+                    // rejected exactly as `@mixin --name` is (dart points at
+                    // the name, which is where the shorthand puts it).
+                    if self.peek_callable_name_is_custom() {
+                        return Err(Error::at(
+                            "Sass @mixin names beginning with -- are forbidden for \
+                             forward-compatibility with plain CSS mixins.",
+                            self.sc.position(),
+                        ));
+                    }
+                    stmts.push(self.parse_callable_def(false)?);
+                }
+                Some('+')
+                    if self.indented
+                        && self
+                            .sc
+                            .peek_at(1)
+                            .is_some_and(|c| is_ident_char(c) || c == '#' || c == '\\') =>
+                {
+                    let pos = self.sc.position();
+                    let start_mark = self.sc.mark();
+                    self.sc.bump();
+                    stmts.push(self.parse_include(pos, start_mark)?);
+                }
+                // The legacy escaped-selector form: a leading `\` marks the
+                // line as a SELECTOR rather than the old `:prop value`
+                // declaration syntax, and is not part of it. Consumed here so
+                // the selector keeps its own column (dart maps `\:hover` to
+                // the `:`), not upstream where dropping it shifted the line.
+                Some('\\') if self.indented => {
+                    self.sc.bump();
+                    stmts.push(self.parse_rule()?);
+                }
                 // A namespaced variable assignment `ns.$name: value`.
                 _ if self.peek_namespaced_var_decl() => stmts.push(self.parse_var_decl()?),
                 _ => match self.classify() {
@@ -290,6 +331,12 @@ impl Parser {
             let value_pos = self.sc.position();
             let value = self.parse_custom_property_value()?;
             let end_line = self.sc.position().line as u32;
+            // The value reader stops at `;`, `}`, the end of the file — or at a
+            // closer with no opener, which dart reports as a missing separator
+            // (`--x: ];` fails at the `]`, not at the end of the file).
+            if !matches!(self.sc.peek(), None | Some(';') | Some('}')) {
+                return Err(Error::at("expected \";\".", self.sc.position()));
+            }
             self.sc.eat(';');
             return Ok(Stmt::CustomDecl(CustomDecl {
                 property,

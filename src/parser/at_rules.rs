@@ -445,13 +445,91 @@ impl Parser {
         // `url(...)` form — always a plain CSS import.
         if self.peek_is_url_func() {
             let url_pos = self.sc.position();
-            let url = self.parse_import_url_func()?;
+            let url = self.parse_import_url()?;
             self.skip_ws_trivia();
             let modifiers = self.parse_import_modifiers()?;
             return Ok(ImportArg::Css {
                 url,
                 modifiers,
                 pos: url_pos,
+            });
+        }
+        // The indented syntax allows an UNQUOTED URL (`@import foo, sub/bar`,
+        // `@import other.css`). dart `SassParser.importArgument` reads it to
+        // the next top-level comma or the end of the statement — SPACES
+        // INCLUDED, so `@import foo screen` is one url `foo screen` (dart:
+        // "Can't find stylesheet to import." pointing at all ten characters),
+        // not a url plus a modifier. Only a quoted url takes modifiers.
+        if self.indented && !matches!(self.sc.peek(), Some('"') | Some('\'')) {
+            let url_pos = self.sc.position();
+            let mut raw = String::new();
+            let mut has_interp = false;
+            while let Some(c) = self.sc.peek() {
+                // A CSS escape hides the character after it, so `\#{` is the
+                // literal text `#{` — a STATIC path, as the quoted form reads
+                // it — and an escaped comma is url text rather than a
+                // separator.
+                if c == '\\' {
+                    raw.push(c);
+                    self.sc.bump();
+                    if let Some(n) = self.sc.peek() {
+                        raw.push(n);
+                        self.sc.bump();
+                    }
+                    continue;
+                }
+                // `#{…}` is opaque: a comma inside it does not end the url.
+                if c == '#' && self.sc.peek_at(1) == Some('{') {
+                    has_interp = true;
+                    let mut depth = 0usize;
+                    while let Some(c) = self.sc.peek() {
+                        raw.push(c);
+                        self.sc.bump();
+                        match c {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                if matches!(c, ',' | ';' | '\n') {
+                    break;
+                }
+                raw.push(c);
+                self.sc.bump();
+            }
+            // Trailing whitespace before the `,`/`;` is not part of the url,
+            // and the deprecation caret is sized from the trimmed token.
+            let path = raw.trim_end().to_string();
+            if path.is_empty() {
+                return Err(Error::at("expected a string after @import", self.sc.position()));
+            }
+            let url_len = path.len();
+            // A `.css`/protocol url is a plain-CSS import, emitted QUOTED with
+            // its text verbatim — dart writes `@import "#{$x}o.css";`, leaving
+            // even an interpolation unresolved.
+            if import_url_is_css(&[TplPiece::Lit(path.clone())]) {
+                return Ok(ImportArg::Css {
+                    url: vec![TplPiece::Lit(format!("\"{path}\""))],
+                    modifiers: Vec::new(),
+                    pos: url_pos,
+                });
+            }
+            // A Sass import's path is static here, as in the quoted form —
+            // an ESCAPED `\#{` is literal text and does not make it dynamic.
+            if has_interp {
+                return Err(Error::at("dynamic @import paths are not supported", pos));
+            }
+            return Ok(ImportArg::Sass {
+                path,
+                pos: url_pos,
+                length: url_len,
             });
         }
         // Quoted-string form.
@@ -493,111 +571,50 @@ impl Parser {
         }
     }
 
-    /// Whether the cursor is at a `url(` (case-insensitive) function call.
+    /// Whether the cursor is at a `url(` function call — the name matched the
+    /// way dart matches it, case-insensitively and with CSS escapes decoded
+    /// (`u\72l(` IS `url(`). A vendor-prefixed spelling does NOT count here:
+    /// dart rejects `@import -c-url(…)` with "Expected string.", unlike in a
+    /// value position where `-c-url(` is a url token.
     fn peek_is_url_func(&self) -> bool {
         let cs = self.sc.rest();
-        if cs.len() < 4 {
-            return false;
-        }
-        cs[0].eq_ignore_ascii_case(&'u')
-            && cs[1].eq_ignore_ascii_case(&'r')
-            && cs[2].eq_ignore_ascii_case(&'l')
-            && cs[3] == '('
+        let (name, k) = crate::parser::decode_ident(cs, 0);
+        name.eq_ignore_ascii_case("url") && cs.get(k) == Some(&'(')
     }
 
-    /// Capture a `url(...)` argument (parens may nest). The `url(` wrapper and
-    /// the URL text are literal, but `#{…}` interpolation — at the top level or
-    /// inside a quoted string — is expanded (dart-sass resolves
-    /// `@import url("#{$p}://…")`). A URL with no interpolation yields a single
-    /// literal piece, byte-identical to the verbatim source.
-    fn parse_import_url_func(&mut self) -> Result<Vec<TplPiece>, Error> {
-        let mut pieces: Vec<TplPiece> = Vec::new();
-        let mut lit = String::new();
-        for _ in 0..4 {
-            if let Some(c) = self.sc.bump() {
-                lit.push(c); // `url(`
-            }
+    /// Read the `url(...)` argument of an `@import`, mirroring dart-sass
+    /// `dynamicUrl`: the contents are tried as a plain URL token first — the
+    /// same trial a url in a value position uses, so whitespace padding is
+    /// dropped, escapes decode canonically and `#{…}` resolves — and when that
+    /// fails (a quoted string, a `$variable`, whitespace in the MIDDLE of the
+    /// token) the call is parsed as an ordinary function whose arguments
+    /// evaluate, so `@import url($base + "x.css")` imports the computed url
+    /// rather than emitting the SassScript verbatim.
+    fn parse_import_url(&mut self) -> Result<Vec<TplPiece>, Error> {
+        let url_pos = self.sc.position();
+        let name_mark = self.sc.mark();
+        // The name is whatever spells `url` (`URL(`, `u\72l(`); step past it
+        // and the `(`.
+        let (_, name_len) = crate::parser::decode_ident(self.sc.rest(), 0);
+        for _ in 0..=name_len {
+            self.sc.bump();
         }
-        let mut depth = 1i32;
-        while let Some(c) = self.sc.peek() {
-            if c == '#' && self.sc.peek_at(1) == Some('{') {
-                if self.plain_css {
-                    return Err(Error::at(
-                        "Interpolation isn't allowed in plain CSS.",
-                        self.sc.position(),
-                    ));
-                }
-                if !lit.is_empty() {
-                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
-                }
-                pieces.push(TplPiece::Interp(self.read_interp()?));
-                continue;
-            }
-            match c {
-                '"' | '\'' => {
-                    let q = c;
-                    lit.push(c);
-                    self.sc.bump();
-                    while let Some(ch) = self.sc.peek() {
-                        if ch == '\\' {
-                            lit.push(ch);
-                            self.sc.bump();
-                            if let Some(n) = self.sc.bump() {
-                                lit.push(n);
-                            }
-                            continue;
-                        }
-                        // A raw newline terminates the string with dart's
-                        // `Expected ".` (issue_1096 CRLF url strings).
-                        if ch == '\n' || ch == '\r' {
-                            return Err(Error::at(format!("Expected {q}."), self.sc.position()));
-                        }
-                        if ch == '#' && self.sc.peek_at(1) == Some('{') {
-                            if self.plain_css {
-                                return Err(Error::at(
-                                    "Interpolation isn't allowed in plain CSS.",
-                                    self.sc.position(),
-                                ));
-                            }
-                            if !lit.is_empty() {
-                                pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
-                            }
-                            pieces.push(TplPiece::Interp(self.read_interp()?));
-                            continue;
-                        }
-                        lit.push(ch);
-                        self.sc.bump();
-                        if ch == q {
-                            break;
-                        }
-                    }
-                }
-                '(' => {
-                    depth += 1;
-                    lit.push(c);
-                    self.sc.bump();
-                }
-                ')' => {
-                    depth -= 1;
-                    lit.push(c);
-                    self.sc.bump();
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {
-                    lit.push(c);
-                    self.sc.bump();
-                }
-            }
+        if let Some(pieces) = self.try_plain_url_contents()? {
+            return Ok(pieces);
         }
-        if depth != 0 {
-            return Err(Error::at("expected \")\"", self.sc.position()));
+        self.sc.reset(name_mark);
+        for _ in 0..=name_len {
+            self.sc.bump();
         }
-        if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
-        }
-        Ok(pieces)
+        let args = self.parse_args_after_paren()?;
+        Ok(vec![TplPiece::Interp(Expr::Func {
+            // dart writes the canonical spelling, not the one in the source.
+            name: "url".to_string(),
+            args,
+            pos: url_pos,
+            length: self.sc.byte_len_from(name_mark),
+            module: None,
+        })])
     }
 
     /// Parse the optional modifiers that follow an `@import` URL, mirroring
@@ -1107,28 +1124,49 @@ impl Parser {
         while let Some(c) = self.sc.peek() {
             match c {
                 '\\' => {
-                    lit.push(c);
-                    self.sc.bump();
-                    if let Some(n) = self.sc.bump() {
-                        lit.push(n);
-                    }
+                    // A hex escape is more than two characters, and dart
+                    // re-serializes it canonically (`\\61 b` prints as `ab`).
+                    let ch = self.read_escape_char()?;
+                    push_ident_escape(&mut lit, ch, true);
                     prev_newline = false;
                     wrote_anything = true;
                 }
                 '"' | '\'' => {
                     lit.push(c);
                     self.sc.bump();
-                    while let Some(ch) = self.sc.peek() {
-                        lit.push(ch);
-                        self.sc.bump();
-                        if ch == '\\' {
-                            if let Some(n) = self.sc.bump() {
-                                lit.push(n);
+                    loop {
+                        match self.sc.peek() {
+                            None => break,
+                            Some('\\') => {
+                                lit.push('\\');
+                                self.sc.bump();
+                                if let Some(n) = self.sc.bump() {
+                                    lit.push(n);
+                                }
                             }
-                            continue;
-                        }
-                        if ch == c {
-                            break;
+                            // Interpolation resolves inside a quoted string as
+                            // well as outside it — the string's TEXT is
+                            // verbatim, `#{…}` is not part of it.
+                            Some('#') if self.sc.peek_at(1) == Some('{') => {
+                                if !lit.is_empty() {
+                                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                                }
+                                self.sc.bump();
+                                self.sc.bump();
+                                let e = self.parse_value()?;
+                                self.skip_ws_inline();
+                                if !self.sc.eat('}') {
+                                    return Err(Error::at("expected \"}\"", self.sc.position()));
+                                }
+                                pieces.push(TplPiece::Interp(e));
+                            }
+                            Some(ch) => {
+                                lit.push(ch);
+                                self.sc.bump();
+                                if ch == c {
+                                    break;
+                                }
+                            }
                         }
                     }
                     prev_newline = false;
@@ -1347,9 +1385,8 @@ impl Parser {
         match self.sc.peek() {
             None => return Err(Error::at("Expected identifier.", self.sc.position())),
             Some('\\') => {
-                if let Some(ch) = self.consume_escape()? {
-                    lit.push(ch);
-                }
+                let ch = self.consume_escape()?;
+                lit.push(ch);
             }
             Some('#') if self.sc.peek_at(1) == Some('{') => {
                 self.sc.bump();
@@ -1391,9 +1428,8 @@ impl Parser {
                     self.sc.bump();
                 }
                 Some('\\') => {
-                    if let Some(ch) = self.consume_escape()? {
-                        lit.push(ch);
-                    }
+                    let ch = self.consume_escape()?;
+                    lit.push(ch);
                 }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     self.reject_plain_css_interp()?;
@@ -2148,7 +2184,7 @@ impl Parser {
     }
 
     /// Parse a `@function name(params) { … }` or `@mixin name(params) { … }`.
-    fn parse_callable_def(&mut self, is_function: bool) -> Result<Stmt, Error> {
+    pub(super) fn parse_callable_def(&mut self, is_function: bool) -> Result<Stmt, Error> {
         self.skip_ws_inline();
         let name_pos = self.sc.position();
         let name = self.read_ident_name()?;
@@ -2174,7 +2210,7 @@ impl Parser {
 
     /// After a lowercase `@function`/`@mixin` keyword, peek whether the name
     /// that follows begins with `--` (a plain CSS custom function/mixin).
-    fn peek_callable_name_is_custom(&self) -> bool {
+    pub(super) fn peek_callable_name_is_custom(&self) -> bool {
         let cs = self.sc.rest();
         let mut i = 0;
         while i < cs.len() && cs[i].is_whitespace() {
@@ -2281,6 +2317,13 @@ impl Parser {
                 });
             } else {
                 let raw = self.parse_css_custom_value()?;
+                // The reader consumes its `;` and stops at `}` or at the end of
+                // the file — except at a closer with no opener, which dart
+                // reports as a missing separator rather than as a bad property
+                // name (`result: ];` fails at the `]`).
+                if matches!(self.sc.peek(), Some(')' | ']')) {
+                    return Err(Error::at("expected \";\".", self.sc.position()));
+                }
                 items.push(CssCustomItem {
                     property,
                     value: CssCustomValue::Raw(raw),
@@ -2293,21 +2336,26 @@ impl Parser {
     /// Capture a verbatim CSS custom declaration value after the `:`, up to the
     /// terminating top-level `;` or `}`. Whitespace runs collapse to a single
     /// space (matching dart-sass serialization); `#{...}` interpolation is
-    /// resolved; nested `()`/`[]`/`{}` are balanced so a braced value such as
-    /// `{b: c}` is captured whole. The terminating `;` is consumed; a `}` is
-    /// left for the body loop.
+    /// resolved; each closer is matched against the bracket it opened, so a
+    /// braced value such as `{b: c}` is captured whole and `(]` is an error.
+    /// The terminating `;` is consumed; a `}` is left for the body loop.
     fn parse_css_custom_value(&mut self) -> Result<Vec<TplPiece>, Error> {
         let mut pieces: Vec<TplPiece> = Vec::new();
         let mut lit = String::new();
-        let mut depth = 0i32;
+        let mut brackets: Vec<char> = Vec::new();
         loop {
             match self.sc.peek() {
                 None => break,
-                Some(';') if depth == 0 => {
+                Some(';') if brackets.is_empty() => {
                     self.sc.bump();
                     break;
                 }
-                Some('}') if depth == 0 => break,
+                // An escape is one token, so an escaped delimiter is literal
+                // text rather than a bracket (dart re-serializes it canonically).
+                Some('\\') => {
+                    let c = self.read_escape_char()?;
+                    push_ident_escape(&mut lit, c, true);
+                }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     if !lit.is_empty() {
                         pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
@@ -2324,18 +2372,39 @@ impl Parser {
                 Some(q @ ('"' | '\'')) => {
                     lit.push(q);
                     self.sc.bump();
-                    while let Some(ch) = self.sc.peek() {
-                        lit.push(ch);
-                        self.sc.bump();
-                        if ch == '\\' {
-                            if let Some(esc) = self.sc.peek() {
-                                lit.push(esc);
+                    loop {
+                        match self.sc.peek() {
+                            None => break,
+                            Some('\\') => {
+                                lit.push('\\');
                                 self.sc.bump();
+                                if let Some(esc) = self.sc.bump() {
+                                    lit.push(esc);
+                                }
                             }
-                            continue;
-                        }
-                        if ch == q {
-                            break;
+                            // Interpolation resolves inside the string too, as
+                            // the documented behaviour of this reader says and
+                            // as the custom-property reader already did.
+                            Some('#') if self.sc.peek_at(1) == Some('{') => {
+                                if !lit.is_empty() {
+                                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                                }
+                                self.sc.bump();
+                                self.sc.bump();
+                                let e = self.parse_value()?;
+                                self.skip_ws_inline();
+                                if !self.sc.eat('}') {
+                                    return Err(Error::at("expected \"}\"", self.sc.position()));
+                                }
+                                pieces.push(TplPiece::Interp(e));
+                            }
+                            Some(ch) => {
+                                lit.push(ch);
+                                self.sc.bump();
+                                if ch == q {
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -2346,12 +2415,26 @@ impl Parser {
                     lit.push(' ');
                 }
                 Some(c @ ('(' | '[' | '{')) => {
-                    depth += 1;
+                    brackets.push(match c {
+                        '(' => ')',
+                        '[' => ']',
+                        _ => '}',
+                    });
                     lit.push(c);
                     self.sc.bump();
                 }
                 Some(c @ (')' | ']' | '}')) => {
-                    depth -= 1;
+                    // A closer with no opener ENDS the value (the caller then
+                    // wants its `;`); a closer that does not match the bracket
+                    // it would close is an error, as in every other verbatim
+                    // value reader.
+                    let Some(expected) = brackets.last().copied() else {
+                        break;
+                    };
+                    if c != expected {
+                        return Err(Error::at(format!("expected \"{expected}\"."), self.sc.position()));
+                    }
+                    brackets.pop();
                     lit.push(c);
                     self.sc.bump();
                 }
@@ -2360,6 +2443,9 @@ impl Parser {
                     self.sc.bump();
                 }
             }
+        }
+        if let Some(expected) = brackets.last() {
+            return Err(Error::at(format!("expected \"{expected}\"."), self.sc.position()));
         }
         if !lit.is_empty() {
             pieces.push(TplPiece::Lit(lit));
@@ -2378,7 +2464,10 @@ impl Parser {
     pub(super) fn parse_custom_property_value(&mut self) -> Result<Vec<TplPiece>, Error> {
         let mut pieces: Vec<TplPiece> = Vec::new();
         let mut lit = String::new();
-        let mut depth = 0i32;
+        // dart-sass matches each closer against the bracket it opened, so `(]`
+        // is an error rather than a pair that cancels out, and a closer with no
+        // opener ENDS the value (the caller then expects its `;`).
+        let mut brackets: Vec<char> = Vec::new();
         // dart-sass `_interpolatedDeclarationValue` writes whitespace lazily:
         // a run of spaces/tabs collapses to its *last* character (a tab survives
         // a tab-only run), while a run containing a newline emits one `\n` plus
@@ -2391,8 +2480,17 @@ impl Parser {
         loop {
             match self.sc.peek() {
                 None => break,
-                Some(';') if depth == 0 => break,
-                Some('}') if depth == 0 => break,
+                Some(';') if brackets.is_empty() => break,
+                // An escape is one token: the delimiter behind it is literal
+                // text, so `--x: \\{` is a complete value rather than an open
+                // brace that swallows everything after it. dart re-serializes
+                // the escape canonically (`\\7b` and `\\{` both print as `\\{`,
+                // `\\61 b` as `ab`), passing `identifierStart: true`.
+                Some('\\') => {
+                    let c = self.read_escape_char()?;
+                    push_ident_escape(&mut lit, c, true);
+                    wrote_newline = false;
+                }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     self.reject_plain_css_interp()?;
                     if !lit.is_empty() {
@@ -2470,13 +2568,23 @@ impl Parser {
                     self.sc.bump();
                 }
                 Some(c @ ('(' | '[' | '{')) => {
-                    depth += 1;
+                    brackets.push(match c {
+                        '(' => ')',
+                        '[' => ']',
+                        _ => '}',
+                    });
                     lit.push(c);
                     self.sc.bump();
                     wrote_newline = false;
                 }
                 Some(c @ (')' | ']' | '}')) => {
-                    depth -= 1;
+                    let Some(expected) = brackets.last().copied() else {
+                        break;
+                    };
+                    if c != expected {
+                        return Err(Error::at(format!("expected \"{expected}\"."), self.sc.position()));
+                    }
+                    brackets.pop();
                     lit.push(c);
                     self.sc.bump();
                     wrote_newline = false;
@@ -2487,6 +2595,9 @@ impl Parser {
                     wrote_newline = false;
                 }
             }
+        }
+        if let Some(expected) = brackets.last() {
+            return Err(Error::at(format!("expected \"{expected}\"."), self.sc.position()));
         }
         if !lit.is_empty() {
             pieces.push(TplPiece::Lit(lit));
@@ -2594,7 +2705,7 @@ impl Parser {
     }
 
     /// Parse `@include name[(args)] [{ content }];`.
-    fn parse_include(&mut self, pos: Pos, start_mark: Mark) -> Result<Stmt, Error> {
+    pub(super) fn parse_include(&mut self, pos: Pos, start_mark: Mark) -> Result<Stmt, Error> {
         self.skip_ws_inline();
         let include_name_pos = self.sc.position();
         let mut name = self.read_ident_name()?;
