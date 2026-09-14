@@ -219,7 +219,10 @@ Conformance is tracked separately as a ratchet against the official
 - **Two statements on one line are reported at the second statement.** The
   indented syntax forbids `b: c; d: e`, and dart carets the `d` — the first
   character after the `;` and the whitespace following it — where sasso
-  pointed at the `;` itself.
+  pointed at the `;` itself. The position is counted from the last line break
+  inside the statement, so a `;` below a bracket continuation is reported on
+  the source line it is written on rather than on the line the statement
+  started on.
 - **An `@import`'s `url()` drops its padding and decodes its escapes.** dart
   reads the token with `_tryUrlContents`: the whitespace after the `(` and
   before the `)` is not part of the url, and a `\` escape is consumed whole

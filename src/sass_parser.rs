@@ -616,14 +616,22 @@ impl Transpiler {
             if !after.is_empty() {
                 // dart carets the SECOND statement — the first character after
                 // the `;` and the whitespace following it — not the `;` itself.
+                // A logical line can span several source lines (a bracket
+                // continuation keeps its line breaks), so the position is
+                // counted from the last one, whose own indentation is already
+                // part of `logical`.
                 let skipped = rest.len() - rest.trim_start().len();
-                let col = logical[..semi + 1 + skipped].chars().count();
+                let prefix = &logical[..semi + 1 + skipped];
+                let (line, col) = match prefix.rfind('\n') {
+                    Some(nl) => (
+                        line_no + prefix.matches('\n').count(),
+                        prefix[nl + 1..].chars().count() + 1,
+                    ),
+                    None => (line_no, indent + prefix.chars().count() + 1),
+                };
                 return Err(Error::at(
                     "multiple statements on one line are not supported in the indented syntax.".to_string(),
-                    Pos {
-                        line: line_no,
-                        col: indent + col + 1,
-                    },
+                    Pos { line, col },
                 ));
             }
             // Drop the harmless trailing `;` (the transform re-adds the right

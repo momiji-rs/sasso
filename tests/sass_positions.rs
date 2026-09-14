@@ -720,3 +720,21 @@ fn a_custom_value_continues_past_a_trailing_backslash() {
         e.message
     );
 }
+
+#[test]
+fn a_second_statement_after_a_continuation_reports_its_own_line() {
+    // A logical line can span several source lines — a bracket continuation
+    // keeps its line breaks — so the `;` that splits it can be far below the
+    // line the statement started on. It used to report the statement's first
+    // line with a column counting every character before the `;`.
+    let e = sass(".a\n  b: (\n    c\n  ); d: e\n", "a.sass").expect_err("expected an error");
+    assert_eq!((e.line, e.col), (4, 6));
+    assert!(
+        e.message.contains("multiple statements on one line"),
+        "{}",
+        e.message
+    );
+    // A statement that occupies one line is unchanged.
+    let e = sass(".a\n  b: c; d: e\n", "a.sass").expect_err("expected an error");
+    assert_eq!((e.line, e.col), (2, 9));
+}
