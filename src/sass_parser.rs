@@ -479,11 +479,23 @@ impl Transpiler {
                 // it vanishes entirely and the next line's indentation
                 // characters stay part of the string.
                 if logical.ends_with('\\') {
-                    logical.pop();
                     if st.in_string {
+                        // A `\`+newline inside a quoted string is a CSS line
+                        // continuation, and SCSS spells it the same way — so
+                        // it is kept VERBATIM rather than collapsed. The string
+                        // means the same thing either way (both vanish, and the
+                        // next line's indentation stays content), but keeping
+                        // the line break leaves every token on the line it was
+                        // written on: an interpolation error on the
+                        // continuation reports there, as dart reports it.
+                        logical.push('\n');
                         logical.push_str(&next_indent_str);
                         logical.push_str(&joined);
-                    } else {
+                        self.idx += 1;
+                        continue;
+                    }
+                    logical.pop();
+                    {
                         logical.push(' ');
                         logical.push_str(joined.trim_start());
                     }

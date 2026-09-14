@@ -146,8 +146,10 @@ fn an_unquoted_import_url_runs_to_the_comma() {
     // dart's `SassParser.importArgument` reads to the next top-level comma,
     // spaces included: `@import foo screen` is ONE url named `foo screen`
     // (dart carets all ten characters), not a url plus a media modifier.
-    // (sasso's message still names the url where dart's is bare — a general
-    // gap in the missing-import diagnostic, not an indented-syntax one.)
+    // NOTE: the POSITION and the url token match dart; the missing-import
+    // MESSAGE does not ("…to import: foo screen" against dart's bare "…to
+    // import."). That wording gap is general — `.scss` has it too — and is
+    // tracked separately, so this test asserts what is actually identical.
     let dir = scratch("comma");
     let src = "@import foo screen\n";
     let entry = dir.join("e.sass");
@@ -304,6 +306,15 @@ fn a_double_slash_inside_a_url_is_not_a_comment() {
         sass("a\n  b: url(\n    http://x/y)\n  d: red\n", "a.sass").unwrap(),
         "a {\n  b: url(http://x/y);\n  d: red;\n}"
     );
+    // A `\\`+newline inside a quoted string is a CSS line continuation, which
+    // SCSS spells the same way — so it is kept rather than collapsed, and a
+    // diagnostic on the continuation line reports THERE (dart: 3:5).
+    assert_eq!(
+        sass(".a\n  b: \"foo\\\n  bar\"\n", "b.sass").unwrap(),
+        ".a {\n  b: \"foo  bar\";\n}"
+    );
+    let e = sass(".a\n  b: \"foo\\\n  #{$undef}\"\n", "b.sass").expect_err("expected an error");
+    assert_eq!((e.line, e.col), (3, 5));
     // A trailing `//` is still a comment, inside and outside a string.
     assert_eq!(sass(".a\n  b: c // t\n", "a.sass").unwrap(), ".a {\n  b: c;\n}");
     assert_eq!(
