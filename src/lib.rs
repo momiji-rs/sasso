@@ -439,11 +439,16 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
         Err(mut e) => {
             if let Some(url) = options.url {
                 if e.rendered.is_none() && e.has_position() {
-                    let span = diag::Span {
-                        line: e.line,
-                        col: e.col,
-                        length: e.length,
-                    };
+                    let span = diag::trim_empty_span_to_content(
+                        source,
+                        diag::Span {
+                            line: e.line,
+                            col: e.col,
+                            length: e.length,
+                        },
+                    );
+                    e.line = span.line;
+                    e.col = span.col;
                     e.rendered = Some(diag::render_error(&e.message, source, url, span, glyphs));
                 }
             }
@@ -525,11 +530,16 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
         Err(mut e) => {
             if let Some(url) = options.url {
                 if e.rendered.is_none() && e.has_position() {
-                    let span = diag::Span {
-                        line: e.line,
-                        col: e.col,
-                        length: e.length,
-                    };
+                    let span = diag::trim_empty_span_to_content(
+                        source,
+                        diag::Span {
+                            line: e.line,
+                            col: e.col,
+                            length: e.length,
+                        },
+                    );
+                    e.line = span.line;
+                    e.col = span.col;
                     e.rendered = Some(diag::render_error(&e.message, source, url, span, glyphs_for()));
                 }
             }

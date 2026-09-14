@@ -385,6 +385,41 @@ pub fn render_interp_error_snippet(
     out
 }
 
+/// Where dart-sass reports an EMPTY span that sits in a file's trailing
+/// whitespace: at the end of the last line with content, not on the blank line
+/// after it. dart's scanner never advances into that whitespace, so its
+/// "expected …" at the end of a file points at the last thing the file says;
+/// sasso's parsers do advance, so the position is walked back here — for the
+/// snippet and for the frame line alike.
+#[must_use]
+pub fn trim_empty_span_to_content(source: &str, span: Span) -> Span {
+    if span.length > 0 {
+        return span;
+    }
+    let lines = split_lines(source);
+    let base = source.as_ptr() as usize;
+    let idx = span.line.saturating_sub(1).min(lines.len().saturating_sub(1));
+    let line = lines[idx];
+    let col0 = span.col.saturating_sub(1);
+    // The byte offset of the span, and the text from there to the end.
+    let line_start = line.as_ptr() as usize - base;
+    let offset = line_start + line.char_indices().nth(col0).map_or(line.len(), |(b, _)| b);
+    if offset > source.len() || !source[offset..].trim().is_empty() {
+        return span;
+    }
+    // Land at the END of the last line that has content — trailing spaces on
+    // that line included, which is where dart's scanner stopped (`.a { b: c; `
+    // reports past the space, not after the `;`).
+    let Some((i, l)) = lines.iter().enumerate().rev().find(|(_, l)| !l.trim().is_empty()) else {
+        return span;
+    };
+    Span {
+        line: i + 1,
+        col: l.chars().count() + 1,
+        length: 0,
+    }
+}
+
 pub fn render_snippet(source: &str, span: Span, frames: &[Frame<'_>], glyphs: GlyphSet) -> String {
     let lines = split_lines(source);
 
@@ -552,63 +587,83 @@ fn render_multi_line(
 ) {
     let v = glyphs.vertical();
     let h = glyphs.horizontal();
+    let first = lines.get(start_idx).copied().unwrap_or("");
+    let last = lines.get(end_idx).copied().unwrap_or("");
+    // dart-sass (source_span) writes the arm glyph in the GUTTER when the span
+    // begins at its line's first non-whitespace character, and likewise when it
+    // ends at its line's last; it draws an `┌─…─^` / `└─…─^` arrow row only for
+    // an end that starts or stops mid-line. The two ends are decided
+    // separately: `.a { @include m {` … `  }` opens with an arrow and closes in
+    // the gutter.
+    let start_at_edge = first.chars().take(start_col0).all(char::is_whitespace);
+    let end_at_edge = last.chars().skip(end_col0).all(char::is_whitespace);
 
     // Top gutter glyph.
     out.push_str(&blank_gutter(width));
     out.push_str(glyphs.top());
 
-    // First source line. The arm column (where the `┌`/`│`/`└` go on later
-    // rows) is a blank slot here, so the layout after the gutter `│` is:
-    // `<space><arm-slot><space><content>` → three spaces before the content.
-    let first = lines.get(start_idx).copied().unwrap_or("");
+    // First source line: the arm slot holds `┌` when the span starts the line,
+    // and is blank when an arrow row follows. The layout after the gutter `│`
+    // is `<space><arm-slot><space><content>`.
     out.push('\n');
     out.push_str(&numbered_gutter(start_idx + 1, width));
     out.push_str(v);
     out.push(' ');
-    out.push(' '); // empty arm slot for the opening source row
+    if start_at_edge {
+        out.push_str(glyphs.top_left());
+    } else {
+        out.push(' ');
+    }
     out.push(' ');
     out.push_str(&expand_tabs(first));
 
     // Opening arm: `┌─…─^` whose caret sits under the span start. The `┌`
     // occupies the arm slot; the content baseline is two columns to its right,
     // so the caret offset is the span-start display column + 1.
-    out.push('\n');
-    out.push_str(&blank_gutter(width));
-    out.push_str(v);
-    out.push(' ');
-    out.push_str(glyphs.top_left());
-    let lead = display_width_of_prefix(first, start_col0) + 1;
-    for _ in 0..lead {
-        out.push_str(h);
+    if !start_at_edge {
+        out.push('\n');
+        out.push_str(&blank_gutter(width));
+        out.push_str(v);
+        out.push(' ');
+        out.push_str(glyphs.top_left());
+        let lead = display_width_of_prefix(first, start_col0) + 1;
+        for _ in 0..lead {
+            out.push_str(h);
+        }
+        out.push(CARET);
     }
-    out.push(CARET);
 
-    // Intermediate + final source lines, each carrying a `│` arm:
-    // `<space>│<space><content>`.
+    // Intermediate + final source lines, each carrying a `│` arm — except the
+    // last, which carries `└` when the span ends the line.
     for li in (start_idx + 1)..=end_idx {
         let text = lines.get(li).copied().unwrap_or("");
         out.push('\n');
         out.push_str(&numbered_gutter(li + 1, width));
         out.push_str(v);
         out.push(' ');
-        out.push_str(v);
+        if li == end_idx && end_at_edge {
+            out.push_str(glyphs.bottom_left());
+        } else {
+            out.push_str(v);
+        }
         out.push(' ');
         out.push_str(&expand_tabs(text));
     }
 
     // Closing arm: `└─…─^` whose caret sits under the last spanned character
     // (one column left of the span end), with the same +1 arm offset.
-    let last = lines.get(end_idx).copied().unwrap_or("");
-    out.push('\n');
-    out.push_str(&blank_gutter(width));
-    out.push_str(v);
-    out.push(' ');
-    out.push_str(glyphs.bottom_left());
-    let tail = display_width_of_prefix(last, end_col0);
-    for _ in 0..tail {
-        out.push_str(h);
+    if !end_at_edge {
+        out.push('\n');
+        out.push_str(&blank_gutter(width));
+        out.push_str(v);
+        out.push(' ');
+        out.push_str(glyphs.bottom_left());
+        let tail = display_width_of_prefix(last, end_col0);
+        for _ in 0..tail {
+            out.push_str(h);
+        }
+        out.push(CARET);
     }
-    out.push(CARET);
 }
 
 /// Convenience: render a full diagnostic (`Error:` header + snippet) for the

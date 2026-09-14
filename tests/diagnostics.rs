@@ -280,7 +280,7 @@ fn a_span_that_crosses_lines_ends_where_dart_ends_it() {
         ".a {\r\n  @include nope {\r\n    c: d;\r\n  }\r\n}\r\n",
         "in.scss",
     );
-    assert!(block.contains("4 \u{2502} \u{2502}   }\n"), "{block}");
+    assert!(block.contains("4 \u{2502} \u{2514}   }\n"), "{block}");
     assert!(!block.contains("5 \u{2502}"), "{block}");
     // The same file with LF terminators ends in the same place.
     let lf = err_block(".a {\n  @include nope {\n    c: d;\n  }\n}\n", "in.scss");
@@ -399,4 +399,80 @@ fn a_missing_argument_points_at_the_invocation() {
     let block = run("@use \"fwd\";\n.a { b: fwd.div(1); }\n");
     assert_eq!(caret_line(&block), "^^^^^^^^^^", "{block}");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_multi_line_span_uses_the_gutter_at_a_line_edge() {
+    // dart (source_span) writes the arm glyph in the GUTTER when the span
+    // begins at its line's first non-whitespace character, and likewise when it
+    // ends at its line's last; it draws an arrow row only for an end that
+    // starts or stops mid-line. The two ends are decided separately.
+    let both = err_block(".a {\n  @include nope {\n    c: d;\n  }\n}\n", "in.scss");
+    assert!(
+        both.contains(
+            "2 \u{2502} \u{250c}   @include nope {\n3 \u{2502} \u{2502}     c: d;\n4 \u{2502} \u{2514}   }\n"
+        ),
+        "{both}"
+    );
+    assert!(!both.contains('^'), "{both}");
+    // Starts mid-line, ends at the line's last character: an opening arrow row
+    // and a closing gutter glyph.
+    let open = err_block(".a { @include nope {\n    c: d;\n  }\n}\n", "in.scss");
+    assert!(
+        open.contains("\u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n"),
+        "{open}"
+    );
+    assert!(open.contains("3 \u{2502} \u{2514}   }\n"), "{open}");
+    // Starts at the line's first character, ends mid-line: the mirror image.
+    let close = err_block(".a {\n  @include nope {\n    c: d;\n  } x: y;\n}\n", "in.scss");
+    assert!(
+        close.contains("2 \u{2502} \u{250c}   @include nope {\n"),
+        "{close}"
+    );
+    assert!(
+        close.contains("\u{2502} \u{2514}\u{2500}\u{2500}\u{2500}^\n"),
+        "{close}"
+    );
+}
+
+#[test]
+fn an_error_at_the_end_of_a_file_points_at_the_last_line_with_content() {
+    // dart's scanner never advances into a file's trailing whitespace, so an
+    // "expected …" at the end of one points at the end of the last line that
+    // says something — trailing spaces on that line included.
+    for (src, line, caret_col) in [
+        (".a { b: c\n", 1, 10),
+        (".a {\n", 1, 5),
+        ("@media screen {\n  .a { b: c }\n", 2, 14),
+        (".a { b: c; \n\n\n", 1, 12),
+    ] {
+        let block = err_block(src, "in.scss");
+        assert!(block.starts_with("Error: expected \"}\".\n"), "{src:?}\n{block}");
+        assert!(
+            block.contains(&format!("in.scss {line}:{caret_col}")),
+            "{src:?}\n{block}"
+        );
+        // The snippet shows that line, not the blank one after it.
+        assert!(block.contains(&format!("{line} \u{2502} ")), "{src:?}\n{block}");
+    }
+}
+
+#[test]
+fn a_value_that_cannot_start_reports_what_was_expected() {
+    // dart names what it WANTED — an expression — whatever it found there: a
+    // character that cannot start one, or the end of the file.
+    for src in [
+        ".a { b: ; }\n",
+        ".a { b: 1 + ; }\n",
+        ".a { b: ) }\n",
+        "@if  { a: b; }\n",
+        ".a { b: \n",
+        ".a { b: 1 +\n",
+    ] {
+        let block = err_block(src, "in.scss");
+        assert!(
+            block.starts_with("Error: Expected expression.\n"),
+            "{src:?}\n{block}"
+        );
+    }
 }
