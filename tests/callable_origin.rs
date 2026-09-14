@@ -25,10 +25,7 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 fn canon(dir: &std::path::Path, rel: &str) -> String {
-    std::fs::canonicalize(dir.join(rel))
-        .unwrap()
-        .to_string_lossy()
-        .into_owned()
+    dir.join(rel).to_string_lossy().into_owned()
 }
 
 #[test]

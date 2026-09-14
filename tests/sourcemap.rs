@@ -752,7 +752,7 @@ fn plain_css_import_is_its_own_source() {
     let imp = sasso::FsImporter::new(Vec::new());
     let opts = Options::default().with_importer(&imp).with_url(&url);
     let r = compile_with_source_map(src, &opts).unwrap();
-    let lib = std::fs::canonicalize(dir.join("lib.css")).unwrap();
+    let lib = dir.join("lib.css");
     assert_eq!(
         r.source_map.sources,
         [url.clone(), lib.to_string_lossy().into_owned()],
@@ -762,7 +762,7 @@ fn plain_css_import_is_its_own_source() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Sources are keyed by the file's CANONICAL URL — the resolved path for the
+/// Sources are keyed by the file's CANONICAL URL — the absolute path for the
 /// filesystem importer — not by its display basename, so two partials that
 /// share a basename are two distinct sources, each with its own text, and the
 /// mappings point at the right one (dart-sass: `../src/sub/_p.scss`,
@@ -783,12 +783,7 @@ fn imports_sharing_a_basename_are_distinct_sources() {
         .with_source_map_include_sources(true)
         .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
     let r = compile_with_source_map("@import \"sub/p\";\n@import \"other/p\";\n", &opts).expect("compile");
-    let canon = |rel: &str| {
-        std::fs::canonicalize(dir.join(rel))
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
-    };
+    let canon = |rel: &str| dir.join(rel).to_string_lossy().into_owned();
     // The entry emitted nothing of its own, so — as in dart — it is not a source.
     assert_eq!(
         r.source_map.sources,
@@ -922,5 +917,34 @@ fn nested_plain_css_rules_map_to_their_selectors() {
     assert_eq!(r.source_map.sources.len(), 1, "{:?}", r.source_map.sources);
     assert!(r.source_map.sources[0].ends_with("nest.css"));
     assert_eq!(r.source_map.mappings, "AAAA;EACE;AAAA;IAEE;;EAEF;IACE");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The filesystem importer's canonical URL is the absolute, lexically
+/// normalized path — dart `p.canonicalize` — with symlinks left unresolved, so
+/// a file reached through a linked directory (a pnpm `node_modules/<pkg>`
+/// link) is named by the link path in `sources`, as dart-sass 1.103.1 names it
+/// (`../link/_lib.scss`, never the `real/` target).
+#[cfg(unix)]
+#[test]
+fn sources_keep_a_symlinked_load_path_unresolved() {
+    let dir = std::env::temp_dir().join(format!("sasso_sm_symlink_{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(dir.join("real")).expect("mkdir");
+    std::fs::write(dir.join("real/_lib.scss"), "l {\n  m: 1;\n}\n").unwrap();
+    std::os::unix::fs::symlink("real", dir.join("link")).expect("symlink");
+    let entry = dir.join("sym.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(vec![dir.join("link")]);
+    let opts = Options::default()
+        .with_importer(&imp)
+        .with_url(&url)
+        .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
+    let r = compile_with_source_map("@import \"lib\";\n", &opts).expect("compile");
+    assert_eq!(
+        r.source_map.sources,
+        vec![dir.join("link/_lib.scss").to_string_lossy().into_owned()]
+    );
+    assert_eq!(r.source_map.mappings, "AAAA;EACE");
     std::fs::remove_dir_all(&dir).ok();
 }

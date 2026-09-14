@@ -126,6 +126,15 @@ Conformance is tracked separately as a ratchet against the official
   trace. A file outside the tree whose relative spelling would be longer than
   its absolute path is shown absolute (dart's `prettyUri`); the entry stays
   as given. `WarnEvent::url` carries the same spelling.
+- **`FsImporter` canonical URLs leave symlinks unresolved, as dart-sass
+  does.** The canonical URL was the file's `realpath`, so a stylesheet reached
+  through a symlinked directory — a pnpm `node_modules/<pkg>` link — was named
+  by its `.pnpm` store path in a source map's `sources`, in `WarnEvent::path`
+  and in `DependencySet`, and two links to one file were one module. dart's
+  `p.canonicalize` is the absolute, lexically normalized path with links kept;
+  sasso now matches (10 of 148 Lichess bundles had `sources` differing from
+  dart's for this alone). Library note: imported files now appear as the
+  absolute path they were reached by, not their realpath.
 - **Source maps: every generated line of a line-spanning construct maps, a
   comment maps from column 0, a rule maps to its selector's line, and
   passed-through `@import`s and nested plain-CSS rules map at all.** dart-sass

@@ -279,11 +279,13 @@ impl Importer for FsImporter {
             // `.import` files (those are an `@import`-only escape hatch).
             match resolve_in_base(&base, url, ctx.from_import) {
                 Resolution::Found(p) => {
-                    // The canonical key is the resolved absolute path so the
-                    // same file loaded via different URLs is cached once.
-                    let key = std::fs::canonicalize(&p)
-                        .map(|c| c.to_string_lossy().into_owned())
-                        .unwrap_or_else(|_| p.to_string_lossy().into_owned());
+                    // The canonical key is the absolute, lexically normalized
+                    // path (dart `p.canonicalize`), so the same file loaded via
+                    // different URLs is cached once. Symlinks are NOT resolved,
+                    // as in dart-sass: a file reached through two links is two
+                    // modules, and a source map names the link path (a pnpm
+                    // `node_modules/<pkg>` path, not its `.pnpm` target).
+                    let key = absolute_normalized(&p);
                     // Base 0 is the containing file's directory; anything
                     // else is a load path. A file found through a load path,
                     // or relatively from a file that was, is a dependency.
@@ -456,6 +458,35 @@ fn resolve_in_base(base: &Path, path: &str, allow_import_only: bool) -> Resoluti
     }
 
     Resolution::NotFound
+}
+
+/// dart `p.canonicalize`: the absolute path with `.`/`..` segments removed
+/// lexically — no `realpath`, so symlinks stay unresolved. A relative path is
+/// taken from the current directory. (dart also folds the path's CASE on
+/// case-insensitive filesystems; not done here.)
+fn absolute_normalized(p: &Path) -> String {
+    use std::path::Component;
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    };
+    let mut out = PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // `/..` at the root stays at the root, like `p.normalize`.
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.to_string_lossy().into_owned()
 }
 
 /// Lexically remove `.` and `..` segments from a URL path (no filesystem

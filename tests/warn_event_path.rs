@@ -50,7 +50,7 @@ fn warn_event_path_is_the_resolved_file_path() {
     compile(&src, &opts).expect("compile");
     let events = seen.borrow();
 
-    let dep_canon = std::fs::canonicalize(dir.join("lp/_dep.scss")).unwrap();
+    let dep_canon = dir.join("lp/_dep.scss");
     let dep_canon = dep_canon.to_string_lossy();
     // The entry's own @import deprecation: path is the entry (as given).
     let entry_dep = events
@@ -114,12 +114,7 @@ fn fs_importer_tracks_load_path_dependencies() {
         .with_warn_handler(Rc::new(|_: &WarnEvent<'_>| {}));
     compile(&std::fs::read_to_string(&entry).unwrap(), &opts).expect("compile");
 
-    let canon = |rel: &str| {
-        std::fs::canonicalize(dir.join(rel))
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
-    };
+    let canon = |rel: &str| dir.join(rel).to_string_lossy().into_owned();
     assert!(
         !deps.is_dependency(&canon("lp/_rel.scss")),
         "resolved relative to the entry"
@@ -158,10 +153,7 @@ fn quiet_deps_record_is_per_compilation_even_with_a_reused_importer() {
             sink.borrow_mut().push(ev.path.to_string());
         }
     });
-    let dep_canon = std::fs::canonicalize(dir.join("lp/_dep.scss"))
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+    let dep_canon = dir.join("lp/_dep.scss").to_string_lossy().into_owned();
 
     let url_a = a.to_string_lossy().into_owned();
     let opts_a = Options::default()
@@ -222,12 +214,7 @@ fn dependency_provenance_survives_the_import_cache() {
         .with_quiet_deps(deps.clone())
         .with_warn_handler(Rc::new(|_: &WarnEvent<'_>| {}));
     compile(&std::fs::read_to_string(&entry).unwrap(), &opts).expect("compile");
-    let canon = |rel: &str| {
-        std::fs::canonicalize(dir.join(rel))
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
-    };
+    let canon = |rel: &str| dir.join(rel).to_string_lossy().into_owned();
     assert!(!deps.is_dependency(&canon("lp/_a.scss")));
     assert!(deps.is_dependency(&canon("lp/_b.scss")));
     assert!(
@@ -283,12 +270,7 @@ fn quiet_deps_record_is_reentrant_across_a_nested_compile() {
         .with_warn_handler(handler);
     compile(&std::fs::read_to_string(&outer_entry).unwrap(), &opts).expect("outer compile");
 
-    let canon = |rel: &str| {
-        std::fs::canonicalize(dir.join(rel))
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
-    };
+    let canon = |rel: &str| dir.join(rel).to_string_lossy().into_owned();
     // Only the outer entry's own @import reached the handler: dep's @import
     // (fired AFTER the nested compile returned) was still silenced.
     assert_eq!(*outer_deprecations.borrow(), vec![url.clone()]);
@@ -320,10 +302,7 @@ fn quiet_deps_record_is_scoped_even_when_the_compile_fails_early() {
         .with_quiet_deps(deps.clone())
         .with_warn_handler(Rc::clone(&silent));
     compile("@import \"dep\";\n", &opts).expect("compile ok");
-    let dep_canon = std::fs::canonicalize(dir.join("lp/_dep.scss"))
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+    let dep_canon = dir.join("lp/_dep.scss").to_string_lossy().into_owned();
     assert!(deps.is_dependency(&dep_canon));
     let opts = Options::default()
         .with_importer(&importer)
