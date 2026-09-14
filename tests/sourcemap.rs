@@ -218,6 +218,17 @@ use sasso::{
     ImporterResult, Options, OutputStyle, Syntax,
 };
 
+/// The canonical url `FsImporter` keys a resolved file by: the absolute path
+/// as it was reached, with the ASCII case folding `absolute_normalized` applies
+/// on Windows (dart's `Style.windows` canonicalizes each part, and that
+/// filesystem is case-insensitive).
+fn canon_key(p: std::path::PathBuf) -> String {
+    let s = p.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let s = s.to_lowercase();
+    s
+}
+
 /// Compile `src` with a source map and return `(css, decoded_mappings, raw_json)`.
 fn sasso_map(src: &str, options: &Options<'_>) -> (String, Vec<Mapping>, String) {
     let r = compile_with_source_map(src, options).expect("compile_with_source_map failed");
@@ -752,10 +763,10 @@ fn plain_css_import_is_its_own_source() {
     let imp = sasso::FsImporter::new(Vec::new());
     let opts = Options::default().with_importer(&imp).with_url(&url);
     let r = compile_with_source_map(src, &opts).unwrap();
-    let lib = dir.join("lib.css");
+    let lib = canon_key(dir.join("lib.css"));
     assert_eq!(
         r.source_map.sources,
-        [url.clone(), lib.to_string_lossy().into_owned()],
+        [url.clone(), lib],
         "the css file is a distinct source"
     );
     assert_eq!(r.source_map.mappings, "AAAA;EAAI;;;ACAJ;EACE;;;ADCF;EAAI");
@@ -783,7 +794,7 @@ fn imports_sharing_a_basename_are_distinct_sources() {
         .with_source_map_include_sources(true)
         .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
     let r = compile_with_source_map("@import \"sub/p\";\n@import \"other/p\";\n", &opts).expect("compile");
-    let canon = |rel: &str| dir.join(rel).to_string_lossy().into_owned();
+    let canon = |rel: &str| canon_key(dir.join(rel));
     // The entry emitted nothing of its own, so — as in dart — it is not a source.
     assert_eq!(
         r.source_map.sources,
@@ -964,6 +975,54 @@ fn nested_plain_css_rules_map_to_their_selectors() {
     let r = compile_with_source_map("@import \"nest2\";\n", &opts).expect("compile");
     assert_eq!(r.css, ".a{.b{x:1;y:2}z:3}");
     assert_eq!(r.source_map.mappings, "AAAA,GACE,GACE,IACA,IAEF");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A block at-rule nested inside an ALREADY-NESTED plain-CSS rule stays where
+/// it is (dart `_hasCssNesting`: once the user opts into CSS nesting, at-rules
+/// are not bubbled), and it maps to its `@` keyword like any other at-rule —
+/// in compressed output too, where its children are serialized through the
+/// same mapping-aware path. Both `mappings` below are dart-sass 1.103.1's.
+#[test]
+fn nested_plain_css_at_rules_map_to_their_keyword() {
+    let dir = std::env::temp_dir().join(format!("sasso_sm_cssnestat_{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let entry = dir.join("main.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let check = |css_src: &str, name: &str, css: &str, expanded: &str, compressed: &str| {
+        std::fs::write(dir.join(format!("{name}.css")), css_src).unwrap();
+        let src = format!("@import \"{name}\";\n");
+        let opts = Options::default()
+            .with_importer(&imp)
+            .with_url(&url)
+            .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
+        let r = compile_with_source_map(&src, &opts).expect("compile");
+        assert_eq!(r.css, css, "expanded css for {name}");
+        assert_eq!(r.source_map.mappings, expanded, "expanded mappings for {name}");
+        let opts = opts.with_style(OutputStyle::Compressed);
+        let r = compile_with_source_map(&src, &opts).expect("compile");
+        assert_eq!(
+            r.source_map.mappings, compressed,
+            "compressed mappings for {name}"
+        );
+    };
+    check(
+        ".a {\n  .b {\n    @media screen {\n      x: 1;\n    }\n    y: 2;\n  }\n}\n",
+        "nest3",
+        ".a {\n  .b {\n    @media screen {\n      x: 1;\n    }\n    y: 2;\n  }\n}",
+        "AAAA;EACE;IACE;MACE;;IAEF",
+        "AAAA,GACE,GACE,cACE,IAEF",
+    );
+    // A prelude written over several lines maps from its `@` line.
+    check(
+        ".a {\n  .b {\n    @media screen,\n    print {\n      x: 1;\n    }\n  }\n}\n",
+        "nest4",
+        ".a {\n  .b {\n    @media screen, print {\n      x: 1;\n    }\n  }\n}",
+        "AAAA;EACE;IACE;MAEE",
+        "AAAA,GACE,GACE,oBAEE",
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

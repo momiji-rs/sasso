@@ -571,30 +571,35 @@ impl<'a> Evaluator<'a> {
                     });
                 }
             }
-            Stmt::Media {
-                query,
-                body,
-                lines: _,
-            } => {
+            Stmt::Media { query, body, lines } => {
                 let queries = self.resolve_media_queries(query)?;
                 let prelude = serialize_media_queries(&queries, self.compressed());
                 let inner = self.css_body(body)?;
                 if !inner.is_empty() {
+                    let lines = self.stamp(*lines);
                     items.push(OutItem::NestedAtRule {
                         name: "media".to_string(),
                         prelude,
                         items: inner,
+                        lines,
                     });
                 }
             }
-            Stmt::Supports { condition, body, .. } => {
+            Stmt::Supports {
+                condition,
+                body,
+                lines,
+                ..
+            } => {
                 let prelude = self.serialize_supports_condition(condition)?;
                 let inner = self.css_body(body)?;
                 if !inner.is_empty() {
+                    let lines = self.stamp(*lines);
                     items.push(OutItem::NestedAtRule {
                         name: "supports".to_string(),
                         prelude,
                         items: inner,
+                        lines,
                     });
                 }
             }
@@ -617,10 +622,12 @@ impl<'a> Evaluator<'a> {
                     Some(b) => {
                         let inner = self.css_body(b)?;
                         if !inner.is_empty() {
+                            let lines = self.stamp(*lines);
                             items.push(OutItem::NestedAtRule {
                                 name: name.clone(),
                                 prelude: prelude_s,
                                 items: inner,
+                                lines,
                             });
                         }
                     }

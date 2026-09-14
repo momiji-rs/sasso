@@ -440,6 +440,9 @@ pub(crate) enum OutItem {
         name: String,
         prelude: String,
         items: Vec<OutItem>,
+        /// Source lines of the at-rule, as for [`OutNode::AtRule`]: its `@`
+        /// keyword's line and column drive the source-map entry.
+        lines: SrcLines,
     },
 }
 
@@ -583,7 +586,12 @@ impl Sink<'_> {
                 }),
                 // Likewise a plain-CSS nested at-rule becomes a top-level one,
                 // its items wrapped as bare at-rule children.
-                OutItem::NestedAtRule { name, prelude, items } => body.push(OutNode::AtRule {
+                OutItem::NestedAtRule {
+                    name,
+                    prelude,
+                    items,
+                    lines,
+                } => body.push(OutNode::AtRule {
                     name,
                     prelude,
                     body: items
@@ -620,17 +628,22 @@ impl Sink<'_> {
                             OutItem::ChildlessAtRule { name, prelude, lines } => {
                                 OutNode::childless_at_rule(name, prelude, lines)
                             }
-                            OutItem::NestedAtRule { name, prelude, items } => OutNode::AtRule {
+                            OutItem::NestedAtRule {
+                                name,
+                                prelude,
+                                items,
+                                lines,
+                            } => OutNode::AtRule {
                                 name,
                                 prelude,
                                 body: vec![OutNode::plain_rule(Vec::new(), items, SrcLines::default())],
                                 has_block: true,
-                                lines: SrcLines::default(),
+                                lines,
                             },
                         })
                         .collect(),
                     has_block: true,
-                    lines: SrcLines::default(),
+                    lines,
                 }),
             },
             Sink::Top(_) => {}
@@ -4690,6 +4703,7 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
                         name,
                         prelude,
                         items: at_body_to_items(body),
+                        lines,
                     });
                 } else {
                     items.push(OutItem::ChildlessAtRule { name, prelude, lines });

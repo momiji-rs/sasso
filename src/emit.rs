@@ -459,14 +459,24 @@ fn emit_item_expanded(
             close_block(out, indent, items.len(), joined);
             *prev = SrcLines::default();
         }
-        OutItem::NestedAtRule { name, prelude, items } => {
+        OutItem::NestedAtRule {
+            name,
+            prelude,
+            items,
+            lines,
+        } => {
             out.push_str(indent);
+            // Source-map: the at-rule's `@` keyword, spanning the header (so a
+            // prelude written over several lines maps each of its lines).
+            let mapped = record(out, *lines, collector);
+            let from = out.len();
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
                 out.push(' ');
                 out.push_str(prelude);
             }
+            continue_span(out, from, mapped, collector);
             out.push_str(" {\n");
             let mut inner = SrcLines::default();
             let mut joined = false;
@@ -770,7 +780,14 @@ fn write_item_compressed(out: &mut String, item: &OutItem, collector: &mut Optio
             out.push('}');
             false
         }
-        OutItem::NestedAtRule { name, prelude, items } => {
+        OutItem::NestedAtRule {
+            name,
+            prelude,
+            items,
+            lines,
+        } => {
+            // Source-map: the at-rule's `@` keyword.
+            record(out, *lines, collector);
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {

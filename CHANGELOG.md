@@ -141,7 +141,10 @@ Conformance is tracked separately as a ratchet against the official
   3 }` came out as `.a{.b{x:1};z:3}` — dart writes `.a{.b{x:1}z:3}`, a block's
   `}` being its own separator (`_requiresSemicolon`) — and no declaration
   inside the nested block carried a source-map entry. The block's items now go
-  through the mapping-aware serializer.
+  through the mapping-aware serializer. A block at-rule nested inside such a
+  rule — which dart keeps in place rather than bubbling, once CSS nesting is in
+  play — carries its own position too, so it maps to its `@` keyword in both
+  output styles.
 - **An at-rule whose name is interpolated (`@#{"media"} screen`) carries its
   source span**, so it maps like the plain spelling and joins a trailing
   comment the same way (`@#{"media"} screen { /* t */` used to break the
