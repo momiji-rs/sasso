@@ -976,3 +976,61 @@ fn rgba_hsla_special_value_passthrough_keeps_name() {
         ".a {\n  color: rgb(none none none);\n}\n"
     );
 }
+
+#[test]
+fn a_custom_property_value_reads_an_escape_as_one_token() {
+    // dart-sass captures a custom-property value with
+    // `_interpolatedDeclarationValue`, which consumes a `\` escape whole and
+    // re-serializes it canonically (`escape(identifierStart: true)`). An
+    // escaped delimiter is therefore literal text: it neither opens a bracket
+    // nor a string, and it never terminates the declaration.
+    assert_eq!(
+        css(".a { --x: \\{; }\n.b { c: d; }\n"),
+        ".a {\n  --x: \\{;\n}\n\n.b {\n  c: d;\n}\n"
+    );
+    assert_eq!(css(".a { --x: \\\"; }\n"), ".a {\n  --x: \\\";\n}\n");
+    assert_eq!(css(".a { --x: a\\;b; }\n"), ".a {\n  --x: a\\;b;\n}\n");
+    // Canonical re-serialization: a name-start char loses the escape, a digit
+    // and a control character keep the hex form, `-` and `{` take the short
+    // form, and an invalid code point becomes U+FFFD.
+    assert_eq!(css(".a { --x: \\61 b; }\n"), ".a {\n  --x: ab;\n}\n");
+    assert_eq!(css(".a { --x: \\7b; }\n"), ".a {\n  --x: \\{;\n}\n");
+    assert_eq!(css(".a { --x: \\30 z; }\n"), ".a {\n  --x: \\30 z;\n}\n");
+    assert_eq!(css(".a { --x: \\9 z; }\n"), ".a {\n  --x: \\9 z;\n}\n");
+    assert_eq!(css(".a { --x: \\2d z; }\n"), ".a {\n  --x: \\-z;\n}\n");
+    assert_eq!(
+        css(".a { --x: \\d800 z; }\n"),
+        "@charset \"UTF-8\";\n.a {\n  --x: \u{fffd}z;\n}\n"
+    );
+    // The same reader serves a `@supports` custom declaration and the body of
+    // a plain-CSS custom `@function`.
+    assert_eq!(
+        css("@supports (--x: \\61 b) { a { b: c } }\n"),
+        "@supports (--x: ab) {\n  a {\n    b: c;\n  }\n}\n"
+    );
+    assert_eq!(
+        css("@function --f() { result: \\{; }\n"),
+        "@function --f() {\n  result: \\{;\n}\n"
+    );
+}
+
+#[test]
+fn a_custom_property_value_matches_its_brackets() {
+    // dart-sass matches each closer against the bracket it opened, so `(]` is
+    // an error rather than a pair that cancels out; a closer with no opener
+    // ends the value, and the declaration then wants its `;`.
+    let err = |src: &str| {
+        let e = compile(src, &Options::default()).expect_err("expected a compile error");
+        (e.to_string(), e.line, e.col)
+    };
+    let (msg, line, col) = err(".a { --x: (] ; }\n");
+    assert!(msg.contains("expected \")\"."), "{msg}");
+    assert_eq!((line, col), (1, 12));
+    let (msg, line, col) = err(".a { --x: ]; }\n");
+    assert!(msg.contains("expected \";\"."), "{msg}");
+    assert_eq!((line, col), (1, 11));
+    // An escape after the backslash is required, as in an identifier.
+    let (msg, line, col) = err(".a { --x: a\\\n b; }\n");
+    assert!(msg.contains("Expected escape sequence."), "{msg}");
+    assert_eq!((line, col), (1, 13));
+}

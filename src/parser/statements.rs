@@ -331,6 +331,12 @@ impl Parser {
             let value_pos = self.sc.position();
             let value = self.parse_custom_property_value()?;
             let end_line = self.sc.position().line as u32;
+            // The value reader stops at `;`, `}`, the end of the file — or at a
+            // closer with no opener, which dart reports as a missing separator
+            // (`--x: ];` fails at the `]`, not at the end of the file).
+            if !matches!(self.sc.peek(), None | Some(';') | Some('}')) {
+                return Err(Error::at("expected \";\".", self.sc.position()));
+            }
             self.sc.eat(';');
             return Ok(Stmt::CustomDecl(CustomDecl {
                 property,

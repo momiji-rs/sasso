@@ -158,6 +158,21 @@ Conformance is tracked separately as a ratchet against the official
   `[import]` deprecations, and six source maps covering comments, blank lines,
   multi-line selector lists, `@media`, custom properties and the shorthands —
   every line, column and `mappings` string now matches it exactly.
+- **An escape is one token in a custom-property value, and a `}` inside a
+  string does not close an interpolation.** dart-sass captures a custom
+  property's value with `_interpolatedDeclarationValue`, which consumes a `\`
+  escape whole and writes it back canonically; sasso weighed the escaped
+  character itself, so an escaped delimiter changed what the value meant.
+  `--x: \{` left a brace open and swallowed every line after it (`unexpected
+  end of input, expected "}"`), `--x: \"` opened a string, and `a\;b` ended the
+  declaration early. An escape now round-trips the way dart spells it (`\7b`
+  and `\{` both print `\{`, `\61 b` prints `ab`, an invalid code point becomes
+  U+FFFD), each closer is matched against the bracket it opened (`--x: (]` is
+  `expected ")".`), and a closer with no opener ends the value (`--x: ];` is
+  `expected ";".`). The same reader serves a `@supports` declaration and a
+  plain-CSS custom `@function` body. In the indented syntax the line scanners
+  that decide where a value ends now read a string inside `#{ … }` as text, so
+  `b: #{"} // not a comment"}` is one declaration rather than a parse error.
 - **`//` inside a `url()` is no longer a comment in the indented syntax.**
   `url(http://x/y)`, `url(//cdn/x.png)` and `@import http://x/y.css` were
   truncated at the `//` (`url(http:` — "expected \")\""), because the front-end

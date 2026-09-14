@@ -1198,11 +1198,10 @@ impl Parser {
         while let Some(c) = self.sc.peek() {
             match c {
                 '\\' => {
-                    lit.push(c);
-                    self.sc.bump();
-                    if let Some(n) = self.sc.bump() {
-                        lit.push(n);
-                    }
+                    // A hex escape is more than two characters, and dart
+                    // re-serializes it canonically (`\\61 b` prints as `ab`).
+                    let ch = self.read_escape_char()?;
+                    push_ident_escape(&mut lit, ch, true);
                     prev_newline = false;
                     wrote_anything = true;
                 }
@@ -2399,6 +2398,12 @@ impl Parser {
                     break;
                 }
                 Some('}') if depth == 0 => break,
+                // An escape is one token, so an escaped delimiter is literal
+                // text rather than a bracket (dart re-serializes it canonically).
+                Some('\\') => {
+                    let c = self.read_escape_char()?;
+                    push_ident_escape(&mut lit, c, true);
+                }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     if !lit.is_empty() {
                         pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
@@ -2469,7 +2474,10 @@ impl Parser {
     pub(super) fn parse_custom_property_value(&mut self) -> Result<Vec<TplPiece>, Error> {
         let mut pieces: Vec<TplPiece> = Vec::new();
         let mut lit = String::new();
-        let mut depth = 0i32;
+        // dart-sass matches each closer against the bracket it opened, so `(]`
+        // is an error rather than a pair that cancels out, and a closer with no
+        // opener ENDS the value (the caller then expects its `;`).
+        let mut brackets: Vec<char> = Vec::new();
         // dart-sass `_interpolatedDeclarationValue` writes whitespace lazily:
         // a run of spaces/tabs collapses to its *last* character (a tab survives
         // a tab-only run), while a run containing a newline emits one `\n` plus
@@ -2482,8 +2490,17 @@ impl Parser {
         loop {
             match self.sc.peek() {
                 None => break,
-                Some(';') if depth == 0 => break,
-                Some('}') if depth == 0 => break,
+                Some(';') if brackets.is_empty() => break,
+                // An escape is one token: the delimiter behind it is literal
+                // text, so `--x: \\{` is a complete value rather than an open
+                // brace that swallows everything after it. dart re-serializes
+                // the escape canonically (`\\7b` and `\\{` both print as `\\{`,
+                // `\\61 b` as `ab`), passing `identifierStart: true`.
+                Some('\\') => {
+                    let c = self.read_escape_char()?;
+                    push_ident_escape(&mut lit, c, true);
+                    wrote_newline = false;
+                }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     self.reject_plain_css_interp()?;
                     if !lit.is_empty() {
@@ -2561,13 +2578,23 @@ impl Parser {
                     self.sc.bump();
                 }
                 Some(c @ ('(' | '[' | '{')) => {
-                    depth += 1;
+                    brackets.push(match c {
+                        '(' => ')',
+                        '[' => ']',
+                        _ => '}',
+                    });
                     lit.push(c);
                     self.sc.bump();
                     wrote_newline = false;
                 }
                 Some(c @ (')' | ']' | '}')) => {
-                    depth -= 1;
+                    let Some(expected) = brackets.last().copied() else {
+                        break;
+                    };
+                    if c != expected {
+                        return Err(Error::at(format!("expected \"{expected}\"."), self.sc.position()));
+                    }
+                    brackets.pop();
                     lit.push(c);
                     self.sc.bump();
                     wrote_newline = false;
@@ -2578,6 +2605,9 @@ impl Parser {
                     wrote_newline = false;
                 }
             }
+        }
+        if let Some(expected) = brackets.last() {
+            return Err(Error::at(format!("expected \"{expected}\"."), self.sc.position()));
         }
         if !lit.is_empty() {
             pieces.push(TplPiece::Lit(lit));
