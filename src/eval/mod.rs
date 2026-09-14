@@ -777,6 +777,10 @@ pub(crate) struct EvalOptions<'a> {
     /// dart-sass `quietDeps`: deprecations raised inside a file this set marks
     /// as a dependency are dropped before they are counted or delivered.
     pub quiet_deps: Option<&'a crate::DependencySet>,
+    /// The entry was parsed as plain CSS (`Syntax::Css`): it is emitted as
+    /// plain CSS — nesting preserved, `@import "theme"` passed through, no
+    /// Sass evaluation — like a `.css` file reached through `@use`.
+    pub plain_css: bool,
     /// Whether this compile produces a source map. Gates the variable
     /// definition-span bookkeeping (`var_spans` et al.), which only source-map
     /// emission reads: when false the span chain stays empty and every
@@ -1439,10 +1443,39 @@ impl<'a> Evaluator<'a> {
         id
     }
 
+    /// Emit the `[import]` deprecation for every Sass `@import` rule in a
+    /// just-parsed stylesheet, in source order — dart-sass warns while PARSING
+    /// a file, so a file's import deprecations all precede anything its body
+    /// prints, and a file parsed once (the import cache) warns once however
+    /// often it is imported. Plain-CSS imports (`.css`, `url(...)`, media
+    /// queries) are not deprecated. Called with the file's context current
+    /// (its url, source, and loader frames), before its statements run.
+    pub(crate) fn warn_import_rules(&mut self, stmts: &[Stmt]) {
+        if !self.diag_enabled() {
+            return;
+        }
+        let mut rules = Vec::new();
+        collect_import_rules(stmts, &mut rules);
+        for (pos, length) in rules {
+            self.emit_deprecation(&crate::deprecation::Deprecation::import(), pos, length);
+        }
+    }
+
     pub(crate) fn eval_sheet(&mut self, sheet: &Stylesheet, out: &mut Vec<OutNode>) -> Result<(), Error> {
+        let plain_css = self.options.plain_css;
+        if !plain_css {
+            self.warn_import_rules(&sheet.stmts);
+        }
         {
             let mut sink = Sink::Top(out);
-            let r = self.exec(&sheet.stmts, &[], &mut sink);
+            // A plain-CSS entry (`.css`) is emitted as plain CSS, like a `.css`
+            // module: its `@import "theme";` is a CSS import to pass through,
+            // not a Sass file to load (dart-sass evaluates it the same way).
+            let r = if plain_css {
+                self.exec_css(&sheet.stmts, &[], &mut sink)
+            } else {
+                self.exec(&sheet.stmts, &[], &mut sink)
+            };
             // At the outermost boundary, finalize any error into a rendered
             // diagnostic block (header + snippet + frames) if we have a span.
             if let Err(e) = r {
@@ -2156,7 +2189,7 @@ impl<'a> Evaluator<'a> {
                     self.in_mixin.pop();
                     result?;
                 }
-                Stmt::Import(args) => self.eval_imports(args, parents, sink)?,
+                Stmt::Import { args, .. } => self.eval_imports(args, parents, sink)?,
                 Stmt::AtRule {
                     name,
                     prelude,
@@ -2618,9 +2651,8 @@ impl<'a> Evaluator<'a> {
                         sink.push_at_rule(OutNode::Raw(format!("@import \"{path}\";")));
                         continue;
                     }
-                    // Every Sass `@import` of a non-CSS file fires the `[import]`
-                    // deprecation, pointing at the quoted URL token.
-                    self.emit_deprecation(&crate::deprecation::Deprecation::import(), *pos, *length);
+                    // (The `[import]` deprecation for this rule was emitted
+                    // when its file was parsed: `warn_import_rules`.)
                     let base = self.current_file_dir.clone();
                     // Per-compile import cache (dart-sass ImportCache): the
                     // same URL imported from the same base directory shares
@@ -2685,14 +2717,25 @@ impl<'a> Evaluator<'a> {
                                             "This file is already being loaded.",
                                         ));
                                     }
-                                    let sheet = match parse_with_syntax(&src, syntax) {
+                                    // A loaded sheet is validated like the
+                                    // entry (a misplaced `@import` in a mixin
+                                    // body is dart's "This at-rule is not
+                                    // allowed here."); plain CSS has nothing
+                                    // to validate.
+                                    let parsed = parse_with_syntax(&src, syntax).and_then(|sheet| {
+                                        if !matches!(syntax, Syntax::Css) {
+                                            validate_declarations(&sheet)?;
+                                        }
+                                        Ok(sheet)
+                                    });
+                                    let sheet = match parsed {
                                         Ok(sheet) => sheet,
                                         Err(err) => {
-                                            // A parse error names the IMPORTED
-                                            // file: render eagerly under its
-                                            // url/source with an `@import`
-                                            // frame at the URL token (dart:
-                                            // `_mod.scss 3:19  @import`).
+                                            // A parse or validation error names
+                                            // the IMPORTED file: render eagerly
+                                            // under its url/source with an
+                                            // `@import` frame at the URL token
+                                            // (dart: `_mod.scss 3:19  @import`).
                                             let diag = self.module_diag_url(path, &resolved_key);
                                             let saved_member = self.enter_call(*pos, *length, "@import");
                                             let saved_url = std::mem::replace(&mut self.current_url, diag);
@@ -2880,6 +2923,11 @@ impl<'a> Evaluator<'a> {
                             if has_top_decl(&sheet.stmts) {
                                 return Err(Error::unpositioned("expected \"{\"."));
                             }
+                            // The imported file's own `@import` deprecations
+                            // fire now, as if at its parse (the per-location
+                            // dedup makes a re-import of a cached file quiet,
+                            // like dart's once-parsed stylesheet).
+                            self.warn_import_rules(&sheet.stmts);
                             // Render any error before the context restores
                             // below strip its attribution (the `@import`
                             // frame from above is still on the stack).
@@ -3545,8 +3593,15 @@ fn validate_decl_scope(stmts: &[Stmt], ctx: ScopeCtx) -> Result<(), Error> {
                 | Stmt::While { .. }
                 | Stmt::FunctionDef(_)
                 | Stmt::MixinDef(_) => {}
+                // An `@import` is rejected with its span (dart underlines the
+                // rule); the generic arm below would lose it.
+                Stmt::Import { pos, length, .. } => {
+                    let mut e = Error::at("This at-rule is not allowed here.", *pos);
+                    e.length = *length;
+                    return Err(e);
+                }
                 // Anything else (@extend, @content, @include, @media, @at-root,
-                // @use, @import, @charset, generic at-rules, …) is rejected.
+                // @use, @charset, generic at-rules, …) is rejected.
                 _ => {
                     return Err(Error::unpositioned(
                         "This at-rule is not allowed here.".to_string(),
@@ -3627,6 +3682,7 @@ fn validate_decl_scope(stmts: &[Stmt], ctx: ScopeCtx) -> Result<(), Error> {
             // Plain at-rules / `@media` / `@supports` / `@keyframes` preserve
             // both the declaration scope and the style-rule context.
             Stmt::AtRule { body: Some(body), .. }
+            | Stmt::InterpAtRule { body: Some(body), .. }
             | Stmt::Media { body, .. }
             | Stmt::Supports { body, .. }
             | Stmt::Keyframes { body, .. } => validate_decl_scope(body, ctx)?,
@@ -3647,13 +3703,28 @@ fn validate_decl_scope(stmts: &[Stmt], ctx: ScopeCtx) -> Result<(), Error> {
             // A Sass `@import` (one that inlines a partial) is forbidden inside
             // a control directive or a function/mixin body; a plain-CSS
             // `@import` is always allowed (passed through verbatim).
-            Stmt::Import(args)
+            Stmt::Import { args, pos, length }
                 if scope != DeclScope::Allowed
                     && args.iter().any(|a| matches!(a, ImportArg::Sass { .. })) =>
             {
-                return Err(Error::unpositioned(
-                    "This at-rule is not allowed here.".to_string(),
-                ));
+                // Positioned at the rule, so the error renders dart's snippet
+                // (`@import "x"` underlined) and its frames — for a loaded file,
+                // the loader chain.
+                let mut e = Error::at("This at-rule is not allowed here.", *pos);
+                e.length = *length;
+                return Err(e);
+            }
+            // A property set's body is a declaration block: dart parses its
+            // children as declarations and a short list of at-rules that
+            // excludes `@import` of ANY kind (plain-CSS ones included, unlike
+            // a control directive's body) and `@function`/`@mixin`.
+            Stmt::PropertySet(ps) => {
+                if let Some((pos, length)) = first_import_rule(&ps.body) {
+                    let mut e = Error::at("This at-rule is not allowed here.", pos);
+                    e.length = length;
+                    return Err(e);
+                }
+                validate_decl_scope(&ps.body, ctx.with(enter_control(scope)))?;
             }
             _ => {}
         }
@@ -3675,6 +3746,26 @@ fn is_empty_parens_selector(selector: &[TplPiece]) -> bool {
 /// Entering a control directive: a `@function`/`@mixin` body keeps its own
 /// scope (declarations inside still get the function/mixin message); otherwise
 /// control flow establishes the `Control` scope.
+/// The first `@import` rule (of any kind) in a property set's body, looking
+/// through control directives and nested property sets.
+fn first_import_rule(stmts: &[Stmt]) -> Option<(Pos, usize)> {
+    for stmt in stmts {
+        let found = match stmt {
+            Stmt::Import { pos, length, .. } => Some((*pos, *length)),
+            Stmt::If(branches) => branches.iter().find_map(|b| first_import_rule(&b.body)),
+            Stmt::For { body, .. } | Stmt::Each { body, .. } | Stmt::While { body, .. } => {
+                first_import_rule(body)
+            }
+            Stmt::PropertySet(ps) => first_import_rule(&ps.body),
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
 fn enter_control(scope: DeclScope) -> DeclScope {
     match scope {
         DeclScope::Function | DeclScope::Mixin => scope,
@@ -3691,6 +3782,48 @@ fn decl_error(scope: DeclScope, kind: &str) -> Option<String> {
         )),
         DeclScope::Function => Some("This at-rule is not allowed here.".to_string()),
         DeclScope::Mixin => Some(format!("Mixins may not contain {kind} declarations.")),
+    }
+}
+
+/// Every Sass (non-CSS) `@import` rule in `stmts`, in source order, as the
+/// span of its URL token — recursing into the blocks an `@import` may appear
+/// in (style rules, at-rules, control flow, content blocks). Mixin and
+/// function bodies and property sets are not walked: `validate_declarations`
+/// rejects an `@import` there, for the entry and for every loaded sheet.
+fn collect_import_rules(stmts: &[Stmt], out: &mut Vec<(Pos, usize)>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Import { args, .. } => {
+                for arg in args {
+                    if let ImportArg::Sass { path, pos, length } = arg {
+                        if !is_css_import(path) {
+                            out.push((*pos, *length));
+                        }
+                    }
+                }
+            }
+            Stmt::Rule(rule) => collect_import_rules(&rule.body, out),
+            Stmt::If(branches) => {
+                for b in branches {
+                    collect_import_rules(&b.body, out);
+                }
+            }
+            Stmt::For { body, .. }
+            | Stmt::Each { body, .. }
+            | Stmt::While { body, .. }
+            | Stmt::Media { body, .. }
+            | Stmt::Supports { body, .. }
+            | Stmt::AtRoot { body, .. }
+            | Stmt::Keyframes { body, .. } => collect_import_rules(body, out),
+            Stmt::AtRule { body: Some(body), .. } | Stmt::InterpAtRule { body: Some(body), .. } => {
+                collect_import_rules(body, out)
+            }
+            Stmt::Include {
+                content: Some(content),
+                ..
+            } => collect_import_rules(content, out),
+            _ => {}
+        }
     }
 }
 

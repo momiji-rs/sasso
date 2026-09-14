@@ -420,11 +420,20 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
     } else {
         diag::GlyphSet::Ascii
     };
+    // Reject `@function`/`@mixin` declarations in control directives or
+    // function/mixin bodies, and a misplaced `@import` (a compile-time
+    // restriction, checked before eval and rendered like a parse error).
     let sheet = match options.syntax {
         Syntax::Scss => parser::parse(source),
         Syntax::Css => parser::parse_plain_css(source),
         Syntax::Sass => sass_parser::parse(source),
-    };
+    }
+    .and_then(|sheet| {
+        if !matches!(options.syntax, Syntax::Css) {
+            eval::validate_declarations(&sheet)?;
+        }
+        Ok(sheet)
+    });
     let sheet = match sheet {
         Ok(s) => s,
         Err(mut e) => {
@@ -441,7 +450,6 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
             return Err(e);
         }
     };
-    eval::validate_declarations(&sheet)?;
     // The entry name labels the entry source in the map (its `sources` entry,
     // once a mapping references it; an import-only entry has none). It is also
     // the evaluator's `current_url`, so every entry-file node is stamped with a
@@ -459,6 +467,7 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
         glyphs,
         warn: options.warn.as_ref(),
         quiet_deps: options.quiet_deps.as_ref(),
+        plain_css: matches!(options.syntax, Syntax::Css),
         source_map: true,
     });
     let mut out = Vec::new();
@@ -495,11 +504,20 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
             diag::GlyphSet::Ascii
         }
     };
+    // Reject `@function`/`@mixin` declarations in control directives or
+    // function/mixin bodies, and a misplaced `@import` (a compile-time
+    // restriction, checked before eval and rendered like a parse error).
     let sheet = match options.syntax {
         Syntax::Scss => parser::parse(source),
         Syntax::Css => parser::parse_plain_css(source),
         Syntax::Sass => sass_parser::parse(source),
-    };
+    }
+    .and_then(|sheet| {
+        if !matches!(options.syntax, Syntax::Css) {
+            eval::validate_declarations(&sheet)?;
+        }
+        Ok(sheet)
+    });
     // A parse error never reached the evaluator, so render its snippet here
     // (single `root stylesheet` frame) when a diagnostic URL is configured.
     let sheet = match sheet {
@@ -518,9 +536,6 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
             return Err(e);
         }
     };
-    // Reject `@function`/`@mixin` declarations in control directives or
-    // function/mixin bodies (a compile-time restriction, checked before eval).
-    eval::validate_declarations(&sheet)?;
     // Diagnostics are enabled only when the caller supplies a display URL; then
     // the evaluator renders byte-exact `Error:`/`WARNING:` blocks against the
     // source. Without a URL it falls back to the legacy one-liner.
@@ -542,6 +557,7 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
         glyphs,
         warn: options.warn.as_ref(),
         quiet_deps: options.quiet_deps.as_ref(),
+        plain_css: matches!(options.syntax, Syntax::Css),
         source_map: false,
     });
     let mut out = Vec::new();

@@ -68,7 +68,14 @@ pub(crate) enum Stmt {
     CustomDecl(CustomDecl),
     /// `@import "a", "b";` — each entry is either a Sass path to inline or a
     /// plain CSS import emitted verbatim.
-    Import(Vec<ImportArg>),
+    /// `@import <args>;` — `pos`/`length` span the rule up to its `;`
+    /// (`@import "x"`, trailing whitespace included), the caret dart uses when
+    /// the rule is misplaced.
+    Import {
+        args: Vec<ImportArg>,
+        pos: Pos,
+        length: usize,
+    },
     /// `@use "<url>" [as <namespace>|as *] [with (...)];`. Built-in `sass:*`
     /// modules and user stylesheets are both supported: the namespace defaults
     /// to the final URL segment (or the part after `sass:`), `as ns` overrides

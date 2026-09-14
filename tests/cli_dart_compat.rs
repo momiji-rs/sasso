@@ -1451,10 +1451,8 @@ fn source_map_sources_name_imported_files_by_path() {
 }
 
 /// The `WARNING:` blocks of a stderr transcript (each with its stack frames),
-/// leaving out deprecation warnings: dart-sass emits a file's `@import`
-/// deprecations when it parses the file, sasso when it evaluates each rule, so
-/// the two interleave differently with runtime warnings even when every frame
-/// matches.
+/// leaving out deprecation warnings — for assertions that are about the
+/// frames of runtime warnings only.
 fn warning_blocks(stderr: &str) -> Vec<&str> {
     stderr
         .split("\n\n")
@@ -1476,8 +1474,6 @@ fn error_block(stderr: &str) -> &str {
 enum Compare {
     /// Byte for byte.
     Full,
-    /// Only the `WARNING:` blocks (see [`warning_blocks`]).
-    Warnings,
     /// Only the final `Error:` block (see [`error_block`]).
     Error,
 }
@@ -1501,11 +1497,6 @@ fn assert_dart_stderr_matches(files: &[(&str, &str)], args: &[&str], what: Compa
     );
     match what {
         Compare::Full => assert_eq!(a.stderr, b.stderr, "stderr differs from dart-sass for {args:?}"),
-        Compare::Warnings => assert_eq!(
-            warning_blocks(&a.stderr),
-            warning_blocks(&b.stderr),
-            "warning frames differ from dart-sass for {args:?}"
-        ),
         Compare::Error => assert_eq!(
             error_block(&a.stderr),
             error_block(&b.stderr),
@@ -1568,11 +1559,10 @@ fn stack_frames_show_loaded_files_relative_to_the_working_directory() {
             "WARNING: d\n    lp/_leaf.scss 1:1  @import\n    lp/_dep.scss 2:9   @import\n    src/rel.scss 2:9   root stylesheet",
         ]
     );
-    // Deprecation warnings interleave differently (see `warning_blocks`).
     assert_dart_stderr_matches(
         imported,
         &["--no-source-map", "-I", "lp", "src/rel.scss"],
-        Compare::Warnings,
+        Compare::Full,
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1660,8 +1650,7 @@ fn callables_and_content_blocks_run_against_their_defining_file() {
     std::fs::remove_dir_all(&dir).ok();
 
     // The same through a textual `@import`: a mixin the import defined is
-    // still evaluated in ITS file (the deprecation warnings interleave
-    // differently, see `warning_blocks`).
+    // still evaluated in ITS file.
     let imported: &[(&str, &str)] = &[
         ("src/_dep.scss", ORIGIN_DEP),
         (
@@ -1686,7 +1675,7 @@ fn callables_and_content_blocks_run_against_their_defining_file() {
         read(&dir, "imp.css.map"),
         "{\"version\":3,\"sourceRoot\":\"\",\"sources\":[\"src/imp.scss\",\"src/_dep.scss\"],\"names\":[],\"mappings\":\"AACA;ECAE;EDGE;ECDF\",\"file\":\"imp.css\"}"
     );
-    assert_dart_stderr_matches(imported, &["src/imp.scss", "imp.css"], Compare::Warnings);
+    assert_dart_stderr_matches(imported, &["src/imp.scss", "imp.css"], Compare::Full);
     assert_dart_files_match(
         imported,
         &["src/imp.scss", "imp.css"],
@@ -1851,11 +1840,230 @@ fn members_forwarded_through_an_import_keep_their_defining_file() {
         read(&dir, "impfwd.css.map"),
         "{\"version\":3,\"sourceRoot\":\"\",\"sources\":[\"src/impfwd.scss\",\"src/_dep.scss\"],\"names\":[],\"mappings\":\"AACA;ECCE;EDCA\",\"file\":\"impfwd.css\"}"
     );
-    assert_dart_stderr_matches(files, &["src/impfwd.scss", "impfwd.css"], Compare::Warnings);
+    assert_dart_stderr_matches(files, &["src/impfwd.scss", "impfwd.css"], Compare::Full);
     assert_dart_files_match(
         files,
         &["src/impfwd.scss", "impfwd.css"],
         &["impfwd.css", "impfwd.css.map"],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn import_deprecations_fire_when_a_file_is_parsed() {
+    // dart-sass warns about `@import` while PARSING a file, so all of a file's
+    // import deprecations come before anything its body prints — the entry's
+    // three (one nested in a style rule) before `WARNING: top`, `_dep.scss`'s
+    // one right after its `@import` frame is entered and before `dep top` —
+    // and a file the import cache already parsed warns once, however often it
+    // is imported (`_dep.scss` twice here). `--quiet-deps` drops the
+    // dependency's but keeps the entry's. A `@use`d module's own `@import`
+    // warns under the `@use` frame, before the module body runs.
+    let files: &[(&str, &str)] = &[
+        ("lp/_leaf.scss", "@warn \"leaf\";\nl { m: 1 }\n"),
+        ("lp/_dep.scss", "@warn \"dep top\";\n@import \"leaf\";\n@warn \"dep bottom\";\n"),
+        ("lp/_x.scss", "x { y: 1 }\n"),
+        ("lp/_mod.scss", "@warn \"mod top\";\n@import \"x\";\n@warn \"mod bottom\";\nm { n: 1 }\n"),
+        ("src/main.scss", "@warn \"top\";\n@import \"dep\";\n@warn \"middle\";\na {\n  b {\n    @import \"x\";\n  }\n}\n@import \"dep\";\n@warn \"end\";\n"),
+        ("src/usemod.scss", "@use \"mod\";\n@warn \"entry\";\n@import \"dep\";\n"),
+    ];
+    let dir = scratch("import_dep_parse");
+    for (name, text) in files {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "src/main.scss"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stderr, "DEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n\n  ╷\n2 │ @import \"dep\";\n  │         ^^^^^\n  ╵\n    src/main.scss 2:9  root stylesheet\n\nDEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n\n  ╷\n6 │     @import \"x\";\n  │             ^^^\n  ╵\n    src/main.scss 6:13  root stylesheet\n\nDEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n\n  ╷\n9 │ @import \"dep\";\n  │         ^^^^^\n  ╵\n    src/main.scss 9:9  root stylesheet\n\nWARNING: top\n    src/main.scss 1:1  root stylesheet\n\nDEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n\n  ╷\n2 │ @import \"leaf\";\n  │         ^^^^^^\n  ╵\n    lp/_dep.scss 2:9   @import\n    src/main.scss 2:9  root stylesheet\n\nWARNING: dep top\n    lp/_dep.scss 1:1   @import\n    src/main.scss 2:9  root stylesheet\n\nWARNING: leaf\n    lp/_leaf.scss 1:1  @import\n    lp/_dep.scss 2:9   @import\n    src/main.scss 2:9  root stylesheet\n\nWARNING: dep bottom\n    lp/_dep.scss 3:1   @import\n    src/main.scss 2:9  root stylesheet\n\nWARNING: middle\n    src/main.scss 3:1  root stylesheet\n\nWARNING: dep top\n    lp/_dep.scss 1:1   @import\n    src/main.scss 9:9  root stylesheet\n\nWARNING: leaf\n    lp/_leaf.scss 1:1  @import\n    lp/_dep.scss 2:9   @import\n    src/main.scss 9:9  root stylesheet\n\nWARNING: dep bottom\n    lp/_dep.scss 3:1   @import\n    src/main.scss 9:9  root stylesheet\n\nWARNING: end\n    src/main.scss 10:1  root stylesheet\n\n");
+    assert_eq!(
+        r.stdout,
+        "l {\n  m: 1;\n}\n\na b x {\n  y: 1;\n}\n\nl {\n  m: 1;\n}\n"
+    );
+    let r = sasso(
+        &dir,
+        &["--no-source-map", "-I", "lp", "--quiet-deps", "src/main.scss"],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stderr, "DEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n\n  ╷\n2 │ @import \"dep\";\n  │         ^^^^^\n  ╵\n    src/main.scss 2:9  root stylesheet\n\nDEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n\n  ╷\n6 │     @import \"x\";\n  │             ^^^\n  ╵\n    src/main.scss 6:13  root stylesheet\n\nDEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n\n  ╷\n9 │ @import \"dep\";\n  │         ^^^^^\n  ╵\n    src/main.scss 9:9  root stylesheet\n\nWARNING: top\n    src/main.scss 1:1  root stylesheet\n\nWARNING: dep top\n    lp/_dep.scss 1:1   @import\n    src/main.scss 2:9  root stylesheet\n\nWARNING: leaf\n    lp/_leaf.scss 1:1  @import\n    lp/_dep.scss 2:9   @import\n    src/main.scss 2:9  root stylesheet\n\nWARNING: dep bottom\n    lp/_dep.scss 3:1   @import\n    src/main.scss 2:9  root stylesheet\n\nWARNING: middle\n    src/main.scss 3:1  root stylesheet\n\nWARNING: dep top\n    lp/_dep.scss 1:1   @import\n    src/main.scss 9:9  root stylesheet\n\nWARNING: leaf\n    lp/_leaf.scss 1:1  @import\n    lp/_dep.scss 2:9   @import\n    src/main.scss 9:9  root stylesheet\n\nWARNING: dep bottom\n    lp/_dep.scss 3:1   @import\n    src/main.scss 9:9  root stylesheet\n\nWARNING: end\n    src/main.scss 10:1  root stylesheet\n\n");
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "src/usemod.scss"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stderr, "DEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n\n  ╷\n3 │ @import \"dep\";\n  │         ^^^^^\n  ╵\n    src/usemod.scss 3:9  root stylesheet\n\nDEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n\n  ╷\n2 │ @import \"x\";\n  │         ^^^\n  ╵\n    lp/_mod.scss 2:9     @use\n    src/usemod.scss 1:1  root stylesheet\n\nWARNING: mod top\n    lp/_mod.scss 1:1     @use\n    src/usemod.scss 1:1  root stylesheet\n\nWARNING: mod bottom\n    lp/_mod.scss 3:1     @use\n    src/usemod.scss 1:1  root stylesheet\n\nWARNING: entry\n    src/usemod.scss 2:1  root stylesheet\n\nDEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n\n  ╷\n2 │ @import \"leaf\";\n  │         ^^^^^^\n  ╵\n    lp/_dep.scss 2:9     @import\n    src/usemod.scss 3:9  root stylesheet\n\nWARNING: dep top\n    lp/_dep.scss 1:1     @import\n    src/usemod.scss 3:9  root stylesheet\n\nWARNING: leaf\n    lp/_leaf.scss 1:1    @import\n    lp/_dep.scss 2:9     @import\n    src/usemod.scss 3:9  root stylesheet\n\nWARNING: dep bottom\n    lp/_dep.scss 3:1     @import\n    src/usemod.scss 3:9  root stylesheet\n\n");
+    assert_eq!(
+        r.stdout,
+        "x {\n  y: 1;\n}\n\nm {\n  n: 1;\n}\n\nl {\n  m: 1;\n}\n"
+    );
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "src/main.scss"],
+        Compare::Full,
+    );
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "--quiet-deps", "src/main.scss"],
+        Compare::Full,
+    );
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "src/usemod.scss"],
+        Compare::Full,
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn misplaced_import_is_rejected_like_dart() {
+    // dart's parser rejects an `@import` inside a mixin body or a property
+    // set — in the entry and in every loaded file — with "This at-rule is not
+    // allowed here.", a snippet underlining the rule, and the loader chain
+    // as frames (`lp/_hasmixin.scss 2:3  @use`). sasso used to accept it in
+    // property sets and in loaded files' mixins, and reported the entry case
+    // without position or frames.
+    let files: &[(&str, &str)] = &[
+        ("lp/_x.scss", "x { y: 1 }\n"),
+        ("lp/_hasmixin.scss", "@mixin m {\n  @import \"x\";\n}\n"),
+        (
+            "propset.scss",
+            "a {\n  font: {\n    family: serif;\n    @import \"x\";\n  }\n}\n",
+        ),
+        ("mixinimp.scss", "@mixin m {\n  @import \"x\";\n}\n"),
+        (
+            "usemixin.scss",
+            "@use \"hasmixin\";\na {\n  @include hasmixin.m;\n}\n",
+        ),
+        ("impmixin.scss", "@import \"hasmixin\";\na {\n  @include m;\n}\n"),
+    ];
+    let dir = scratch("misplaced_import");
+    for (name, text) in files {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "propset.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(r.stderr, "Error: This at-rule is not allowed here.\n  ╷\n4 │     @import \"x\";\n  │     ^^^^^^^^^^^\n  ╵\n  propset.scss 4:5  root stylesheet\n");
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "propset.scss"],
+        Compare::Full,
+    );
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "mixinimp.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(r.stderr, "Error: This at-rule is not allowed here.\n  ╷\n2 │   @import \"x\";\n  │   ^^^^^^^^^^^\n  ╵\n  mixinimp.scss 2:3  root stylesheet\n");
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "mixinimp.scss"],
+        Compare::Full,
+    );
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "usemixin.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(r.stderr, "Error: This at-rule is not allowed here.\n  ╷\n2 │   @import \"x\";\n  │   ^^^^^^^^^^^\n  ╵\n  lp/_hasmixin.scss 2:3  @use\n  usemixin.scss 1:1      root stylesheet\n");
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "usemixin.scss"],
+        Compare::Full,
+    );
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "impmixin.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(r.stderr, "DEPRECATION WARNING [import]: Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n\n  ╷\n1 │ @import \"hasmixin\";\n  │         ^^^^^^^^^^\n  ╵\n    impmixin.scss 1:9  root stylesheet\n\nError: This at-rule is not allowed here.\n  ╷\n2 │   @import \"x\";\n  │   ^^^^^^^^^^^\n  ╵\n  lp/_hasmixin.scss 2:3  @import\n  impmixin.scss 1:9      root stylesheet\n");
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "impmixin.scss"],
+        Compare::Full,
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn misplaced_import_in_a_function_or_interpolated_at_rule() {
+    // Two more places dart's parser rejects an `@import`: a `@function` body
+    // (the error keeps its snippet and frame, like the mixin case) and the
+    // body of an interpolated at-rule (`@#{"media"} screen { … }`) inside a
+    // mixin, which the static check walks like a plain at-rule.
+    let files: &[(&str, &str)] = &[
+        ("lp/_x.scss", "x { y: 1 }\n"),
+        (
+            "infn.scss",
+            "@function f() {\n  @import \"x\";\n  @return 1;\n}\na { b: f(); }\n",
+        ),
+        (
+            "interp.scss",
+            "@mixin m {\n  @#{\"media\"} screen {\n    @import \"x\";\n  }\n}\na {\n  @include m;\n}\n",
+        ),
+    ];
+    let dir = scratch("misplaced_import2");
+    for (name, text) in files {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "infn.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(r.stderr, "Error: This at-rule is not allowed here.\n  ╷\n2 │   @import \"x\";\n  │   ^^^^^^^^^^^\n  ╵\n  infn.scss 2:3  root stylesheet\n");
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "infn.scss"],
+        Compare::Full,
+    );
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "interp.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(r.stderr, "Error: This at-rule is not allowed here.\n  ╷\n3 │     @import \"x\";\n  │     ^^^^^^^^^^^\n  ╵\n  interp.scss 3:5  root stylesheet\n");
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "interp.scss"],
+        Compare::Full,
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn plain_css_entry_passes_its_imports_through() {
+    // A `.css` entry is plain CSS: `@import "theme";` is a CSS import to emit
+    // verbatim, not a Sass file to load (dart), and it carries no `[import]`
+    // deprecation. (sasso used to run the Sass evaluator over it, warn, and
+    // fail with "Can't find stylesheet to import".) A property set, on the
+    // other hand, admits no `@import` of any kind — plain-CSS ones included,
+    // even under a control directive.
+    let files: &[(&str, &str)] = &[
+        ("lp/_x.scss", "x { y: 1 }\n"),
+        (
+            "entry.css",
+            "@import \"theme\";\n@import url(other.css);\na { b: c }\n",
+        ),
+        (
+            "propcss.scss",
+            "a {\n  font: {\n    family: serif;\n    @import url(x.css);\n  }\n}\n",
+        ),
+        (
+            "propcss2.scss",
+            "a {\n  font: {\n    @if true {\n      @import \"x.css\";\n    }\n  }\n}\n",
+        ),
+    ];
+    let dir = scratch("plain_css_entry");
+    for (name, text) in files {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "entry.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stderr, "");
+    assert_eq!(
+        r.stdout,
+        "@import \"theme\";\n@import url(other.css);\na {\n  b: c;\n}\n"
+    );
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "entry.css"],
+        Compare::Full,
+    );
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "propcss.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(r.stderr, "Error: This at-rule is not allowed here.\n  ╷\n4 │     @import url(x.css);\n  │     ^^^^^^^^^^^^^^^^^^\n  ╵\n  propcss.scss 4:5  root stylesheet\n");
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "propcss.scss"],
+        Compare::Full,
+    );
+    let r = sasso(&dir, &["--no-source-map", "-I", "lp", "propcss2.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(r.stderr, "Error: This at-rule is not allowed here.\n  ╷\n4 │       @import \"x.css\";\n  │       ^^^^^^^^^^^^^^^\n  ╵\n  propcss2.scss 4:7  root stylesheet\n");
+    assert_dart_stderr_matches(
+        files,
+        &["--no-source-map", "-I", "lp", "propcss2.scss"],
+        Compare::Full,
     );
     std::fs::remove_dir_all(&dir).ok();
 }

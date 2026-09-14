@@ -959,12 +959,21 @@ impl<'a> Evaluator<'a> {
         if self.options.source_map {
             self.file_texts.insert(key.clone(), Rc::clone(&text));
         }
-        let sheet = match parse_with_syntax(&src, syntax) {
+        // A loaded sheet is validated like the entry (a misplaced `@import`
+        // in a mixin body is dart's "This at-rule is not allowed here.");
+        // plain CSS has nothing to validate.
+        let parsed = parse_with_syntax(&src, syntax).and_then(|sheet| {
+            if !matches!(syntax, Syntax::Css) {
+                super::validate_declarations(&sheet)?;
+            }
+            Ok(sheet)
+        });
+        let sheet = match parsed {
             Ok(sheet) => sheet,
             Err(e) => {
-                // A parse error names the LOADED file: render eagerly under
-                // its url/source (the caller's `@use`/`@forward` frame is
-                // already on the stack), like dart's
+                // A parse or validation error names the LOADED file: render
+                // eagerly under its url/source (the caller's `@use`/`@forward`
+                // frame is already on the stack), like dart's
                 // `_mod.scss 3:19  @use` + loader chain.
                 let saved_url = std::mem::replace(&mut self.current_url, diag_url.clone());
                 let saved_source = std::mem::replace(&mut self.current_source, Rc::clone(&text));
@@ -1151,10 +1160,12 @@ impl<'a> Evaluator<'a> {
         }
 
         // A plain-CSS module preserves its nesting (no Sass flattening, `&` kept
-        // literal); a Sass module runs the normal evaluator.
+        // literal); a Sass module runs the normal evaluator — after its own
+        // `@import` deprecations, which dart emits at parse time.
         let result = if css {
             self.exec_css(&sheet.stmts, &[], sink)
         } else {
+            self.warn_import_rules(&sheet.stmts);
             self.exec(&sheet.stmts, &[], sink)
         };
         // Render a body error NOW, while the module's url/source and the
