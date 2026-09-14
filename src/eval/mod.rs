@@ -1651,6 +1651,18 @@ impl<'a> Evaluator<'a> {
         if e.rendered.is_some() || !self.diag_enabled() || !e.has_position() {
             return e;
         }
+        // An empty span sitting in the file's trailing whitespace belongs at the
+        // end of the last line with content, where dart reports it.
+        let trimmed = crate::diag::trim_empty_span_to_content(
+            &self.current_source,
+            crate::diag::Span {
+                line: e.line,
+                col: e.col,
+                length: e.length,
+            },
+        );
+        e.line = trimmed.line;
+        e.col = trimmed.col;
         let frames = self.frames_for(Pos {
             line: e.line,
             col: e.col,

@@ -780,11 +780,9 @@ impl Parser {
                 self.sc.bump();
                 Ok(Expr::Ident(vec![TplPiece::Lit("%".to_string())]))
             }
-            Some(c) => Err(Error::at(
-                format!("unexpected character {c:?} in value"),
-                self.sc.position(),
-            )),
-            None => Err(Error::at("unexpected end of input in value", self.sc.position())),
+            // dart names what it WANTED here, whatever it found — a character
+            // that cannot start one, or the end of the file.
+            Some(_) | None => Err(Error::at("Expected expression.", self.sc.position())),
         }
     }
 

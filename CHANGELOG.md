@@ -185,6 +185,33 @@ Conformance is tracked separately as a ratchet against the official
   `@function --f() { result: "#{$v}"; }` emitted the interpolation literally.
   The string's own text, escapes and line continuations included, still passes
   through untouched — dart does not re-serialize a verbatim value's string.
+- **A span that crosses lines is drawn the way dart draws it.** dart puts the
+  arm glyph in the GUTTER beside the source when the span begins at its line's
+  first non-whitespace character, and likewise when it ends at its line's last;
+  it draws an `┌─…─^` / `└─…─^` arrow row only for an end that starts or stops
+  mid-line. sasso always drew the arrow rows, so every multi-line diagnostic
+  differed from dart:
+
+  ```
+  2 │ ┌   @include nope {        2 │     @include nope {
+  3 │ │     c: d;                  │ ┌───^
+  4 │ └   }                      3 │ │     c: d;
+                                 4 │ │   }
+                                   │ └───^
+  ```
+
+  The two ends are decided separately, so `.a { @include m {` … `  }` opens
+  with an arrow row and closes in the gutter.
+- **An error at the end of a file points at the last line with content.** dart's
+  scanner never advances into a file's trailing whitespace, so `.a { b: c` (no
+  closing brace) reports at the end of that line; sasso reported on the blank
+  line after it, drawing an empty snippet. The position now walks back to the
+  end of the last line that says something, trailing spaces on that line
+  included — in the frame trace as well as the snippet.
+- **Two parser messages name what was expected, as dart's do**: a file that ends
+  inside a block is `expected "}".` rather than `unexpected end of input,
+  expected "}"`, and anything that cannot begin a value — a stray `;`, a `)`, an
+  empty `@if` condition, the end of the file — is `Expected expression.`
 - **A module diagnostic carets the construct it is about.** dart underlines the
   whole rule, call or reference a diagnostic belongs to; sasso drew a single
   caret, or — for an `@include` — reported the error with no snippet at all:

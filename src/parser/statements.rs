@@ -15,10 +15,9 @@ impl Parser {
                     if top {
                         break;
                     }
-                    return Err(Error::at(
-                        "unexpected end of input, expected \"}\"",
-                        self.sc.position(),
-                    ));
+                    // dart names what it wanted, not what it found: a file
+                    // that ends inside a block is `expected "}".`
+                    return Err(Error::at("expected \"}\".", self.sc.position()));
                 }
                 Some('}') => {
                     if top {
