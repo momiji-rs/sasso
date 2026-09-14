@@ -122,7 +122,7 @@ impl<'a> Evaluator<'a> {
                             ImportArg::Css { url, modifiers, pos } => {
                                 (self.serialize_css_import(url, modifiers)?, *pos)
                             }
-                            ImportArg::Sass { path, pos, .. } => (format!("\"{path}\""), *pos),
+                            ImportArg::Sass { path, pos, .. } => (crate::value::serialize_quoted(path), *pos),
                         };
                         // Source-map: the rule maps to its URL token.
                         let lines = self.map_only_lines(pos);
@@ -369,7 +369,7 @@ impl<'a> Evaluator<'a> {
                             ImportArg::Css { url, modifiers, pos } => {
                                 (self.serialize_css_import(url, modifiers)?, *pos)
                             }
-                            ImportArg::Sass { path, pos, .. } => (format!("\"{path}\""), *pos),
+                            ImportArg::Sass { path, pos, .. } => (crate::value::serialize_quoted(path), *pos),
                         };
                         let lines = self.map_only_lines(pos);
                         out.push(OutNode::Raw(format!("@import {text};"), lines));
@@ -561,7 +561,7 @@ impl<'a> Evaluator<'a> {
                         ImportArg::Css { url, modifiers, pos } => {
                             (self.serialize_css_import(url, modifiers)?, *pos)
                         }
-                        ImportArg::Sass { path, pos, .. } => (format!("\"{path}\""), *pos),
+                        ImportArg::Sass { path, pos, .. } => (crate::value::serialize_quoted(path), *pos),
                     };
                     let lines = self.map_only_lines(pos);
                     items.push(OutItem::ChildlessAtRule {

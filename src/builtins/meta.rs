@@ -331,7 +331,10 @@ pub(crate) fn inspect_value(v: &Value) -> String {
         Value::Null => "null".to_string(),
         Value::Str(s) => {
             if s.quoted {
-                format!("\"{}\"", s.text)
+                // dart `_visitQuotedString`: single quotes when the text has a
+                // `"` and no `'`, and the quote and backslash escaped — a naive
+                // `"{text}"` turns `a"b` into INVALID CSS.
+                crate::value::serialize_quoted(&s.text)
             } else {
                 s.text.to_string()
             }

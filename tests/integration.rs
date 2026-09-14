@@ -1214,3 +1214,49 @@ fn a_hex_escape_terminator_is_one_line_break() {
     assert_eq!(css(".a { b: \\61\nb; }\n"), ".a {\n  b: ab;\n}\n");
     assert_eq!(css(".a { b: \\61\rb; }\n"), ".a {\n  b: ab;\n}\n");
 }
+
+#[test]
+fn a_quoted_string_is_serialized_with_the_quote_it_needs() {
+    // dart `_visitQuotedString`: single quotes when the text contains a `"`
+    // and no `'`, and the chosen quote and every backslash escaped. `inspect`
+    // wrapped the text in `"` unconditionally, so a string containing a quote
+    // or a backslash came out as INVALID CSS (`b: "a"b";`).
+    assert_eq!(
+        css("@use \"sass:meta\";\n.a { b: meta.inspect(\"a\\\"b\"); }\n"),
+        ".a {\n  b: 'a\"b';\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:meta\";\n.a { b: meta.inspect(\"a\\\\b\"); }\n"),
+        ".a {\n  b: \"a\\\\b\";\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:meta\";\n.a { b: meta.inspect(\"it \\\"broke\\\"\"); }\n"),
+        ".a {\n  b: 'it \"broke\"';\n}\n"
+    );
+    // Inside a collection, and for a string that needs both quote kinds.
+    assert_eq!(
+        css("@use \"sass:meta\";\n.a { b: meta.inspect((x: \"a\\\"b\")); }\n"),
+        ".a {\n  b: (x: 'a\"b');\n}\n"
+    );
+    // `@error` renders its value through the same serializer.
+    let e = compile("@error \"a\\\"b\";\n", &Options::default()).expect_err("an @error");
+    assert!(e.to_string().contains("'a\"b'"), "{e}");
+    let e = compile("@error 'it \"broke\"';\n", &Options::default()).expect_err("an @error");
+    assert!(e.to_string().contains("'it \"broke\"'"), "{e}");
+}
+
+#[test]
+fn an_unquoted_import_url_written_back_is_quoted_like_a_string() {
+    // The indented syntax writes a plain-CSS import's bare url back QUOTED.
+    // The url is text, so its backslashes are escaped and a url containing a
+    // `"` takes single quotes — dart serializes it as any other string.
+    let sass = |src: &str| compile(src, &Options::default().with_syntax(Syntax::Sass)).expect("compile");
+    assert_eq!(
+        sass("@import h\\74 tps://x/y.css\n"),
+        "@import \"h\\\\74 tps://x/y.css\";"
+    );
+    assert_eq!(sass("@import foo\\\"bar.css\n"), "@import 'foo\\\\\"bar.css';");
+    assert_eq!(sass("@import \\\\x.css\n"), "@import \"\\\\\\\\x.css\";");
+    // A url with neither stays as it was.
+    assert_eq!(sass("@import foo.css\n"), "@import \"foo.css\";");
+}
