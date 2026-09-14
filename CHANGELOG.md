@@ -126,6 +126,13 @@ Conformance is tracked separately as a ratchet against the official
   trace. A file outside the tree whose relative spelling would be longer than
   its absolute path is shown absolute (dart's `prettyUri`); the entry stays
   as given. `WarnEvent::url` carries the same spelling.
+- **Blank lines between top-level groups survive dropped placeholders.** An
+  unextended placeholder rule with a declaration and an empty nested rule
+  (`%video { width: 100%; > * {} }`) produced two invisible nodes, and
+  dropping each removed one blank-line separator: the separator after the
+  previous group as well as the placeholder's own. The next comment or rule
+  then packed tight where dart-sass keeps the blank line. On the Lichess corpus this was the difference in the
+  blank-line placement of 123 of 148 bundles.
 - **A loaded plain-CSS file's `@charset` is dropped**, as dart-sass drops it:
   a `.css` file reached through `@use` or `@import` that begins with
   `@charset "utf-8";` used to leave that line in the middle of the output

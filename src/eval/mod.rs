@@ -323,6 +323,16 @@ pub(crate) enum OutNode {
 }
 
 impl OutNode {
+    /// A control-only marker that never serializes: `GroupEnd`, `MediaHoist`,
+    /// `AtRootHoist` and `AtRootPackTight`. Such markers may sit between two
+    /// nodes without separating them for blank-line purposes.
+    pub(crate) fn is_inert_marker(&self) -> bool {
+        matches!(
+            self,
+            OutNode::GroupEnd | OutNode::MediaHoist | OutNode::AtRootHoist { .. } | OutNode::AtRootPackTight
+        )
+    }
+
     /// A non-evaluated style rule — a plain-CSS passthrough, an `@at-root`
     /// graft, a reparent shell, etc. It carries no per-complex line breaks and
     /// `extend_base` `usize::MAX`, so the `@extend` pass always applies the
@@ -5441,15 +5451,33 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, plan: &crate::selector::ExtendPlan, s
         };
         if drop {
             nodes.remove(i);
-            // Removing a rule can leave a dangling Blank separator; drop a
-            // leading Blank so adjacent groups don't collapse to a blank line.
-            if i < nodes.len() && matches!(nodes[i], OutNode::Blank) {
-                nodes.remove(i);
-            } else if i > 0 && matches!(nodes[i - 1], OutNode::Blank) {
-                // Removing the PRECEDING blank shifts the yet-unexamined
-                // successor down to `i - 1`; step back so it isn't skipped.
-                nodes.remove(i - 1);
-                i -= 1;
+            // A dropped rule takes its OWN group separator with it — the Blank
+            // that follows it (pushed when the next group arrived because this
+            // rule had ended a group) — never the Blank before it, which
+            // belongs to the previous group and still separates that group
+            // from whatever visible node comes next (dart: `previous` is the
+            // last VISIBLE node, and its `isGroupEnd` decides the blank line).
+            // Two dropped rules from one statement (`%p { a: 1; > * {} }`)
+            // used to eat both blanks, one each. Only at the very end, with
+            // nothing following, is the preceding Blank the dangling one.
+            // Inert eval-time markers may trail the dropped rule; look past
+            // them for what actually follows.
+            match nodes[i..].iter().position(|n| !n.is_inert_marker()) {
+                Some(k) if matches!(nodes[i + k], OutNode::Blank) => {
+                    nodes.remove(i + k);
+                }
+                Some(_) => {}
+                None => {
+                    // The preceding node may be an earlier dropped rule's
+                    // `GroupEnd`; look back past inert markers too.
+                    if let Some(j) = nodes[..i].iter().rposition(|n| !n.is_inert_marker()) {
+                        if matches!(nodes[j], OutNode::Blank) {
+                            // Removing a PRECEDING node shifts `i` back with it.
+                            nodes.remove(j);
+                            i -= 1;
+                        }
+                    }
+                }
             }
         } else {
             i += 1;
