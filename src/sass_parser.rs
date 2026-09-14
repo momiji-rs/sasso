@@ -1512,9 +1512,13 @@ fn strip_statement_comment(s: &str) -> String {
         return strip_silent_comment(s);
     }
     let mut sc = LineScanner::new(s);
-    // Past `@import` itself.
+    // Past `@import` itself — through the DECODED keyword, since it may be
+    // escaped (`@im\70ort`). Advancing over raw identifier characters left the
+    // cursor inside the escape, so the first argument was not seen as quoted
+    // and a trailing comment was kept on the line.
     sc.bump();
-    while !sc.done() && is_ident_char(sc.cur()) {
+    let (_, end) = crate::parser::decode_ident(&sc.cs, sc.i);
+    while sc.i < end {
         sc.bump();
     }
     loop {

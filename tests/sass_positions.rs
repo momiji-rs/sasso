@@ -193,6 +193,11 @@ fn an_unquoted_import_url_runs_to_the_comma() {
         sass("@im\\70ort http://x/y.css\n", "d.sass").unwrap(),
         "@import \"http://x/y.css\";"
     );
+    // The keyword's escapes are decoded before the arguments are scanned, so a
+    // quoted url is still seen as quoted and its trailing comment is dropped.
+    std::fs::write(&entry, "@im\\70ort \"foo\" // c\n.a\n  b: c\n").unwrap();
+    let css = compile("@im\\70ort \"foo\" // c\n.a\n  b: c\n", &opts).expect("compile");
+    assert_eq!(css, "l {\n  m: 1;\n}\n\n.a {\n  b: c;\n}");
     // An explicit `;` ends the url, so a trailing silent comment after it is
     // a comment — dart imports `foo` from `@import foo; // t`.
     std::fs::write(&entry, "@import foo; // t\n").unwrap();
