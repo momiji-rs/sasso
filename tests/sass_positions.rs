@@ -176,6 +176,16 @@ fn an_unquoted_import_url_runs_to_the_comma() {
         sass("@import URL(//cdn/x.css)\n", "d.sass").unwrap(),
         "@import url(//cdn/x.css);"
     );
+    // An escaped `)` inside an import's url is CONTENT, not the delimiter —
+    // the url used to end there and lose its tail to comment stripping.
+    assert_eq!(
+        sass("@import url(foo\\)//cdn/x.css)\n", "d.sass").unwrap(),
+        "@import url(foo\\)//cdn/x.css);"
+    );
+    assert_eq!(
+        sass("@import u\\72l(foo\\)//cdn/x.css)\n", "d.sass").unwrap(),
+        "@import url(foo\\)//cdn/x.css);"
+    );
     // The at-rule KEYWORD may be escaped; the parser decodes it, so the line
     // analysis must too, or `@im\\70ort` is taken for an unknown at-rule and
     // its unquoted url is truncated at the `//`.
@@ -387,6 +397,18 @@ fn an_escaped_keyword_is_the_keyword_it_spells() {
             .contains("Nothing may be indented beneath a @function result"),
         "{}",
         e.message
+    );
+}
+
+#[test]
+fn an_invalid_escape_resolves_like_the_parser_resolves_it() {
+    // A surrogate escape becomes U+FFFD, so `@import\\D800` is NOT `@import`:
+    // it is a generic at-rule, which may own a block. Stopping the decode at
+    // the invalid code point reported the name's prefix and applied
+    // `@import`'s "nothing may be indented" rule to it.
+    assert_eq!(
+        sass("@import\\D800 foo\n  a: b\n", "f.sass").unwrap(),
+        "@charset \"UTF-8\";\n@import\u{FFFD}foo {\n  a: b;\n}"
     );
 }
 

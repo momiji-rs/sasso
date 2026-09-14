@@ -409,10 +409,17 @@ pub(crate) fn decode_ident(cs: &[char], mut i: usize) -> (String, usize) {
                 if cs.get(i).is_some_and(|c| c.is_whitespace()) {
                     i += 1;
                 }
-                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                    Some(c) => name.push(c),
-                    None => break,
-                }
+                // A surrogate or out-of-range code point becomes the
+                // replacement character, as `read_escape_char` resolves it —
+                // stopping here instead would report the name's PREFIX
+                // (`@import\D800` as `import`), and the line analysis would
+                // then apply `@import`'s rules to a generic at-rule.
+                let value = u32::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
+                name.push(if (0xD800..=0xDFFF).contains(&value) || value > 0x10FFFF {
+                    '\u{FFFD}'
+                } else {
+                    char::from_u32(value).unwrap_or('\u{FFFD}')
+                });
             }
             continue;
         }

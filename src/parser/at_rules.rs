@@ -597,6 +597,18 @@ impl Parser {
                 continue;
             }
             match c {
+                // A CSS escape hides the character after it: an escaped paren
+                // is url CONTENT and does not close the token
+                // (`url(foo\)//cdn/x.css)`), as the shared value parser reads
+                // it. Without this the url ended at the escaped `)` and the
+                // rest of it was swallowed as a comment.
+                '\\' => {
+                    lit.push(c);
+                    self.sc.bump();
+                    if let Some(n) = self.sc.bump() {
+                        lit.push(n);
+                    }
+                }
                 '"' | '\'' => {
                     let q = c;
                     lit.push(c);
