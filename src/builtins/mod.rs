@@ -268,6 +268,97 @@ fn plain_css_function(
 
 // ---- built-in module system (`@use "sass:<mod>"`) ----------------------
 
+/// The `sass:*` member dart names when a GLOBAL built-in with a module
+/// equivalent is called — the `global-builtin` deprecation's `Use … instead.`
+/// line. `None` for a global dart keeps: a CSS function it shares a name with
+/// (`abs`, `round`, `min`, `sqrt`, …), `if()` (which has its own deprecation),
+/// and `ie-hex-str`, which has no module form.
+///
+/// Every entry was measured against dart-sass 1.103.1 — the mapping is not
+/// mechanical: the legacy colour adjusters all point at `color.adjust`,
+/// `unitless` at `math.is-unitless`, `comparable` at `math.compatible`, and
+/// `list-separator` at `list.separator`.
+pub(crate) fn global_builtin_replacement(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    Some(match lower.as_str() {
+        // sass:color — the getters keep their names, every legacy adjuster
+        // becomes `color.adjust`.
+        "red" => "color.red",
+        "green" => "color.green",
+        "blue" => "color.blue",
+        "hue" => "color.hue",
+        "saturation" => "color.saturation",
+        "lightness" => "color.lightness",
+        "alpha" => "color.alpha",
+        "opacity" => "color.opacity",
+        "mix" => "color.mix",
+        "invert" => "color.invert",
+        "grayscale" => "color.grayscale",
+        "complement" => "color.complement",
+        "change-color" => "color.change",
+        "scale-color" => "color.scale",
+        "adjust-color" | "adjust-hue" | "lighten" | "darken" | "saturate" | "desaturate" | "opacify"
+        | "fade-in" | "transparentize" | "fade-out" => "color.adjust",
+        // sass:math — only the members CSS has no function for.
+        "percentage" => "math.percentage",
+        "floor" => "math.floor",
+        "ceil" => "math.ceil",
+        "random" => "math.random",
+        "unit" => "math.unit",
+        "unitless" => "math.is-unitless",
+        "comparable" => "math.compatible",
+        // sass:list
+        "length" => "list.length",
+        "nth" => "list.nth",
+        "set-nth" => "list.set-nth",
+        "join" => "list.join",
+        "append" => "list.append",
+        "zip" => "list.zip",
+        "index" => "list.index",
+        "list-separator" => "list.separator",
+        "is-bracketed" => "list.is-bracketed",
+        // sass:map
+        "map-get" => "map.get",
+        "map-merge" => "map.merge",
+        "map-remove" => "map.remove",
+        "map-keys" => "map.keys",
+        "map-values" => "map.values",
+        "map-has-key" => "map.has-key",
+        // sass:string
+        "quote" => "string.quote",
+        "unquote" => "string.unquote",
+        "to-upper-case" => "string.to-upper-case",
+        "to-lower-case" => "string.to-lower-case",
+        "str-length" => "string.length",
+        "str-index" => "string.index",
+        "str-insert" => "string.insert",
+        "str-slice" => "string.slice",
+        "unique-id" => "string.unique-id",
+        // sass:meta
+        "type-of" => "meta.type-of",
+        "inspect" => "meta.inspect",
+        "keywords" => "meta.keywords",
+        "call" => "meta.call",
+        "get-function" => "meta.get-function",
+        "function-exists" => "meta.function-exists",
+        "feature-exists" => "meta.feature-exists",
+        "variable-exists" => "meta.variable-exists",
+        "global-variable-exists" => "meta.global-variable-exists",
+        "mixin-exists" => "meta.mixin-exists",
+        "content-exists" => "meta.content-exists",
+        // sass:selector
+        "selector-parse" => "selector.parse",
+        "selector-append" => "selector.append",
+        "selector-nest" => "selector.nest",
+        "selector-unify" => "selector.unify",
+        "selector-replace" => "selector.replace",
+        "selector-extend" => "selector.extend",
+        "is-superselector" => "selector.is-superselector",
+        "simple-selectors" => "selector.simple-selectors",
+        _ => return None,
+    })
+}
+
 /// Whether `module` names a built-in `sass:*` module this build supports.
 pub(crate) fn is_module(module: &str) -> bool {
     matches!(

@@ -476,3 +476,105 @@ fn a_value_that_cannot_start_reports_what_was_expected() {
         );
     }
 }
+
+/// Every `formatted` warning a compile of `src` produces.
+fn warnings(src: &str, url: &str) -> Vec<String> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&seen);
+    let opts =
+        Options::default()
+            .with_url(url)
+            .with_warn_handler(Rc::new(move |ev: &sasso::WarnEvent<'_>| {
+                sink.borrow_mut().push(ev.formatted.to_string());
+            }));
+    let _ = compile(src, &opts);
+    let out = seen.borrow().clone();
+    out
+}
+
+#[test]
+fn a_global_builtin_with_a_module_form_is_deprecated() {
+    // dart names the member to use and carets the whole call. The mapping is
+    // not mechanical — every entry below was measured against dart-sass
+    // 1.103.1 — so the table is checked, not just the machinery.
+    for (src, replacement, caret) in [
+        (".a { b: map-get((x: 1), x); }\n", "map.get", "^^^^^^^^^^^^^^^^^^"),
+        (".a { b: nth(1 2 3, 1); }\n", "list.nth", "^^^^^^^^^^^^^"),
+        (
+            ".a { b: percentage(0.5); }\n",
+            "math.percentage",
+            "^^^^^^^^^^^^^^^",
+        ),
+        (
+            ".a { b: lighten(#fff, 10%); }\n",
+            "color.adjust",
+            "^^^^^^^^^^^^^^^^^^",
+        ),
+        (".a { b: unitless(1); }\n", "math.is-unitless", "^^^^^^^^^^^"),
+        (
+            ".a { b: comparable(1px, 2px); }\n",
+            "math.compatible",
+            "^^^^^^^^^^^^^^^^^^^^",
+        ),
+        (
+            ".a { b: list-separator(1 2); }\n",
+            "list.separator",
+            "^^^^^^^^^^^^^^^^^^^",
+        ),
+        (
+            ".a { b: str-length(\"abc\"); }\n",
+            "string.length",
+            "^^^^^^^^^^^^^^^^^",
+        ),
+        (".a { b: type-of(1); }\n", "meta.type-of", "^^^^^^^^^^"),
+        (
+            ".a { b: selector-parse(\"a\"); }\n",
+            "selector.parse",
+            "^^^^^^^^^^^^^^^^^^",
+        ),
+    ] {
+        let w = warnings(src, "in.scss");
+        assert_eq!(w.len(), 1, "{src:?} -> {w:?}");
+        assert!(
+            w[0].starts_with(&format!(
+                "DEPRECATION WARNING [global-builtin]: Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.\nUse {replacement} instead.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n"
+            )),
+            "{src:?}\n{}",
+            w[0]
+        );
+        assert!(w[0].contains(caret), "{src:?}\n{}", w[0]);
+    }
+    // A global dart KEEPS is not deprecated: a CSS function it shares a name
+    // with, or one with no module form.
+    for src in [
+        ".a { b: abs(-1); }\n",
+        ".a { b: round(1.5); }\n",
+        ".a { b: min(1, 2); }\n",
+        ".a { b: rgba(0, 0, 0, 0.5); }\n",
+        ".a { b: ie-hex-str(#fff); }\n",
+    ] {
+        assert!(warnings(src, "in.scss").is_empty(), "{src:?}");
+    }
+    // The module form itself is never deprecated.
+    assert!(warnings(
+        "@use \"sass:math\";\n.a { b: math.percentage(0.5); }\n",
+        "in.scss"
+    )
+    .is_empty());
+    // The indented syntax reports it too, at its own position.
+    let seen: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = std::rc::Rc::clone(&seen);
+    let opts = Options::default()
+        .with_syntax(sasso::Syntax::Sass)
+        .with_url("in.sass")
+        .with_warn_handler(std::rc::Rc::new(move |ev: &sasso::WarnEvent<'_>| {
+            sink.borrow_mut().push(ev.formatted.to_string());
+        }));
+    let _ = compile(".a\n  b: nth(1 2, 1)\n", &opts);
+    let w = seen.borrow().clone();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("in.sass 2:6"), "{}", w[0]);
+}

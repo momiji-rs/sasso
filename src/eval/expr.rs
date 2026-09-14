@@ -728,6 +728,15 @@ impl<'a> Evaluator<'a> {
                         return result.map_err(|e| Error::at(e, *pos)).map(Value::without_slash);
                     }
                 }
+                // A GLOBAL built-in that has a `sass:*` equivalent is
+                // deprecated: dart names the member to use instead and carets
+                // the whole call.
+                if module.is_none() {
+                    if let Some(replacement) = crate::builtins::global_builtin_replacement(name) {
+                        let dep = crate::deprecation::Deprecation::global_builtin(replacement);
+                        self.emit_deprecation(&dep, *pos, *length);
+                    }
+                }
                 // A bare slash-division argument collapses to its number when
                 // passed to a real Sass function (dart-sass `withoutSlash`);
                 // plain CSS functions (`foo(1/2)`) keep the slash verbatim.

@@ -185,6 +185,19 @@ Conformance is tracked separately as a ratchet against the official
   `@function --f() { result: "#{$v}"; }` emitted the interpolation literally.
   The string's own text, escapes and line continuations included, still passes
   through untouched — dart does not re-serialize a verbatim value's string.
+- **The `[global-builtin]` deprecation.** dart warns at every call to a global
+  built-in that has a `sass:*` equivalent — `map-get`, `nth`, `percentage`,
+  `str-length`, `lighten`, `type-of`, `selector-parse` and some seventy more —
+  naming the member to use instead and underlining the whole call. sasso
+  emitted nothing, so a build that dart floods with migration warnings was
+  silent. The mapping is not mechanical and every entry was measured against
+  dart-sass 1.103.1: the legacy colour adjusters all point at `color.adjust`,
+  `unitless` at `math.is-unitless`, `comparable` at `math.compatible`,
+  `list-separator` at `list.separator`. A global dart KEEPS is left alone — a
+  CSS function it shares a name with (`abs`, `round`, `min`, `sqrt`, …),
+  `ie-hex-str`, and `if()`, which has a deprecation of its own. The per-id cap
+  of five and the "N repetitive deprecation warnings omitted" footer apply as
+  they do to `[import]`.
 - **A span that crosses lines is drawn the way dart draws it.** dart puts the
   arm glyph in the GUTTER beside the source when the span begins at its line's
   first non-whitespace character, and likewise when it ends at its line's last;

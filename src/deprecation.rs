@@ -34,6 +34,20 @@ impl Deprecation {
         }
     }
 
+    /// The `global-builtin` deprecation: a global function that has a
+    /// `sass:*` module equivalent. `replacement` is the member dart names
+    /// (`map.get`, `color.adjust`, `math.is-unitless`), and the info line is
+    /// the migrator's — dart prints the `@import` URL here, not one of its own.
+    pub(crate) fn global_builtin(replacement: &str) -> Self {
+        Deprecation {
+            id: "global-builtin",
+            message: format!(
+                "Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.\nUse {replacement} instead."
+            ),
+            more_info: Some("More info and automated migrator: https://sass-lang.com/d/import".to_string()),
+        }
+    }
+
     /// Render the header block: `DEPRECATION WARNING [id]: <message>` followed
     /// by a blank line and the `More info` line (when present), then a blank
     /// line and the top snippet-gutter is left to the caller. Returns the lines
