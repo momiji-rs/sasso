@@ -211,6 +211,21 @@ fn a_double_slash_inside_a_url_is_not_a_comment() {
         sass(".a\n  b: url(//x/y)\n  c: red\n", "a.sass").unwrap(),
         ".a {\n  b: url(//x/y);\n  c: red;\n}"
     );
+    // A `url(` may be left OPEN at the end of its line — the indented syntax
+    // continues it — and its contents stay verbatim across the join, so the
+    // `//` in a protocol url is still not a comment (four sass-spec cases).
+    assert_eq!(
+        sass("a\n  b: url(\n    c)\n", "a.sass").unwrap(),
+        "a {\n  b: url(c);\n}"
+    );
+    assert_eq!(
+        sass("a\n  b: url(c\n    )\n", "a.sass").unwrap(),
+        "a {\n  b: url(c);\n}"
+    );
+    assert_eq!(
+        sass("a\n  b: url(\n    http://x/y)\n  d: red\n", "a.sass").unwrap(),
+        "a {\n  b: url(http://x/y);\n  d: red;\n}"
+    );
     // A trailing `//` is still a comment, inside and outside a string.
     assert_eq!(sass(".a\n  b: c // t\n", "a.sass").unwrap(), ".a {\n  b: c;\n}");
     assert_eq!(

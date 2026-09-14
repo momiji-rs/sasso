@@ -446,9 +446,10 @@ impl Transpiler {
                 let next_content = self.lines[self.idx].content.clone();
                 let next_indent_str = self.lines[self.idx].indent_str.clone();
                 let st = scan_state(&logical);
-                // Inside an open interpolation or loud comment, the next line's
-                // text is captured verbatim (a `//` there is not a comment).
-                let verbatim = st.in_interp || st.in_loud_comment || st.in_string;
+                // Inside an open interpolation, loud comment, string or
+                // `url(…)`, the next line's text is captured verbatim (a `//`
+                // there is not a comment).
+                let verbatim = st.in_interp || st.in_loud_comment || st.in_string || st.in_url;
                 if next_content.trim().is_empty() {
                     if st.bracket_depth > 0 || verbatim {
                         // A blank line inside brackets/interp/comment joins as a
@@ -1225,10 +1226,15 @@ impl LineScanner {
         })
     }
 
-    /// Consume a `url(...)` token, contents included, through its closing `)`
-    /// (or to the end of the line if it never closes). Quoted contents are
-    /// skipped as strings, so `url("a)b")` ends at the right paren.
-    fn skip_url(&mut self) {
+    /// Consume a `url(...)` token, contents included, through its closing `)`.
+    /// Quoted contents are skipped as strings, so `url("a)b")` ends at the
+    /// right paren.
+    ///
+    /// Returns whether the token CLOSED on this line. An unclosed one — the
+    /// indented syntax allows `b: url(` to continue onto the next line — leaves
+    /// its open paren unaccounted for, so a caller that tracks bracket depth
+    /// must count it, or the logical line would end here.
+    fn skip_url(&mut self) -> bool {
         for _ in 0..4 {
             self.bump(); // `url(`
         }
@@ -1246,12 +1252,13 @@ impl LineScanner {
                     depth -= 1;
                     self.bump();
                     if depth == 0 {
-                        return;
+                        return true;
                     }
                 }
                 _ => self.bump(),
             }
         }
+        false
     }
 
     fn skip_interp(&mut self) {
@@ -1372,7 +1379,7 @@ fn strip_silent_comment(s: &str) -> String {
             }
             // `url(…)` is one token: `//` inside it is part of the url.
             'u' | 'U' if sc.at_url_func() => {
-                sc.skip_url();
+                let _closed = sc.skip_url();
             }
             // A loud comment: skip to its close (it may not close on this line,
             // in which case the rest is comment body — leave it).
@@ -1431,7 +1438,9 @@ fn strip_statement_comment(s: &str) -> String {
                     sc.skip_quoted();
                 }
                 '#' if sc.peek(1) == Some('{') => sc.skip_interp(),
-                'u' | 'U' if sc.at_url_func() => sc.skip_url(),
+                'u' | 'U' if sc.at_url_func() => {
+                    let _closed = sc.skip_url();
+                }
                 '/' if quoted && sc.peek(1) == Some('*') => {
                     sc.skip_loud_comment();
                 }
@@ -1472,6 +1481,10 @@ struct ScanState {
     in_loud_comment: bool,
     /// The line ends inside an unterminated quoted string.
     in_string: bool,
+    /// The line ends inside an unterminated `url(…)` token. Its contents are
+    /// not Sass: the continuation line joins VERBATIM, so a `//` in
+    /// `url(` + `  http://x/y)` is part of the url, not a comment.
+    in_url: bool,
 }
 
 /// Scan `s` once, tracking strings, `//`/`/* */` comments and `#{…}`
@@ -1550,13 +1563,27 @@ fn scan_state(s: &str) -> ScanState {
                         in_interp: interp_depth > 0,
                         in_loud_comment: false,
                         in_string: true,
+                        in_url: false,
                     };
                 }
             }
             // `url(…)` is one token (dart scans it whole), so neither the
-            // `//` inside `url(http://x/y)` nor its parens are structure.
+            // `//` inside `url(http://x/y)` nor its parens are structure —
+            // unless the token never closes on this line (`b: url(` +
+            // `    c)`), whose open paren still continues the logical line.
             'u' | 'U' if sc.at_url_func() => {
-                sc.skip_url();
+                if !sc.skip_url() {
+                    // Unclosed on this line: its `(` is still open, and its
+                    // contents continue verbatim onto the next line.
+                    depth += 1;
+                    return ScanState {
+                        bracket_depth: depth,
+                        in_interp: interp_depth > 0,
+                        in_loud_comment: false,
+                        in_string: false,
+                        in_url: true,
+                    };
+                }
             }
             '/' if sc.peek(1) == Some('/') => break,
             '/' if sc.peek(1) == Some('*') => {
@@ -1567,6 +1594,7 @@ fn scan_state(s: &str) -> ScanState {
                         in_interp: interp_depth > 0,
                         in_loud_comment: true,
                         in_string: false,
+                        in_url: false,
                     };
                 }
             }
@@ -1600,6 +1628,7 @@ fn scan_state(s: &str) -> ScanState {
         in_interp: interp_depth > 0,
         in_loud_comment: false,
         in_string: false,
+        in_url: false,
     }
 }
 
@@ -1691,9 +1720,11 @@ fn find_top_level_semicolon(logical: &str) -> Option<usize> {
                 sc.skip_quoted();
             }
             // `url(…)` is one token (dart scans it whole), so neither the
-            // `//` inside `url(http://x/y)` nor its parens are structure.
+            // `//` inside `url(http://x/y)` nor its parens are structure. An
+            // unclosed one runs to the end of the line, which is where this
+            // scan would stop anyway.
             'u' | 'U' if sc.at_url_func() => {
-                sc.skip_url();
+                let _closed = sc.skip_url();
             }
             '/' if sc.peek(1) == Some('/') => break,
             '/' if sc.peek(1) == Some('*') => {
@@ -1871,7 +1902,7 @@ mod line_scanner_parity {
     /// Skip a `url(…)` token from `i` (which must be at its `u`), returning the
     /// index just past its closing `)` — the reference twin of
     /// [`LineScanner::skip_url`].
-    fn skip_url_ref(cs: &[char], mut i: usize) -> usize {
+    fn skip_url_ref(cs: &[char], mut i: usize) -> (usize, bool) {
         i += 4;
         let mut depth = 1i32;
         while i < cs.len() {
@@ -1899,13 +1930,13 @@ mod line_scanner_parity {
                     depth -= 1;
                     i += 1;
                     if depth == 0 {
-                        return i;
+                        return (i, true);
                     }
                 }
                 _ => i += 1,
             }
         }
-        i
+        (i, false)
     }
 
     fn scan_state_ref(s: &str) -> (i32, bool, bool, bool) {
@@ -1916,7 +1947,11 @@ mod line_scanner_parity {
         while i < cs.len() {
             let c = cs[i];
             if (c == 'u' || c == 'U') && at_url_func_ref(&cs, i) {
-                i = skip_url_ref(&cs, i);
+                let (next, closed) = skip_url_ref(&cs, i);
+                i = next;
+                if !closed {
+                    depth += 1;
+                }
                 continue;
             }
             match c {
