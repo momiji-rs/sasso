@@ -1387,14 +1387,20 @@ impl Parser {
                 self.sc.bump();
                 let name = self.read_variable_name()?;
                 if is_private_member(&name) {
+                    // The caret covers `$name`, as it does for a private
+                    // member reached any other way.
                     return Err(Error::at(
                         "Private members can't be accessed from outside their modules.",
                         var_pos,
-                    ));
+                    )
+                    .with_length(1 + name.len()));
                 }
+                let length = self.sc.byte_len_from(name_mark);
                 Ok(Some(Expr::NsVar {
                     module: ns.to_string(),
                     name,
+                    pos: name_pos,
+                    length,
                 }))
             }
             // `ns.member(...)` — the member must be an identifier immediately

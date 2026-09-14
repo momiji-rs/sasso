@@ -63,6 +63,29 @@ impl Error {
         self
     }
 
+    /// Anchor an error that carries no position yet to `pos`, spanning
+    /// `length` bytes. Used where a statement knows the span an error raised
+    /// inside it belongs to — dart reports `Undefined mixin.` against the whole
+    /// `@include`, not against nothing.
+    pub(crate) fn at_if_unpositioned(mut self, pos: Pos, length: usize) -> Self {
+        if !self.has_position() {
+            self.line = pos.line;
+            self.col = pos.col;
+            self.length = length;
+        }
+        self
+    }
+
+    /// Attach a span length to an error raised AT `pos` — a statement sizing
+    /// the caret of a failure it reported itself, without touching one that
+    /// came from somewhere else (a nested file, a member's own span).
+    pub(crate) fn with_length_at(mut self, pos: Pos, length: usize) -> Self {
+        if self.length == 0 && self.line == pos.line && self.col == pos.col {
+            self.length = length;
+        }
+        self
+    }
+
     /// Whether a primary `line`/`col` position has been recorded.
     pub(crate) fn has_position(&self) -> bool {
         self.line > 0

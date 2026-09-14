@@ -143,7 +143,14 @@ impl<'a> Evaluator<'a> {
                     Err(Error::at("Undefined variable.", *pos).with_length(1 + name.len()))
                 }
             },
-            Expr::NsVar { module, name } => self.eval_module_var(module, name, Pos { line: 1, col: 1 }),
+            Expr::NsVar {
+                module,
+                name,
+                pos,
+                length,
+            } => self
+                .eval_module_var(module, name, *pos)
+                .map_err(|e| e.with_length(*length)),
             // A string expression (quoted/unquoted/lone-interpolation) resolves
             // its interpolation in a context where the `@supports`-declaration
             // no-simplify flag is OFF, so `(a: #{calc(1 + 2)})` -> `(a: 3)`

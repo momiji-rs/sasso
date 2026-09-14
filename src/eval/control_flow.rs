@@ -643,7 +643,7 @@ impl<'a> Evaluator<'a> {
         }
         let mixin = self
             .lookup_mixin(name)
-            .ok_or_else(|| Error::unpositioned(format!("Undefined mixin {name}.")))?;
+            .ok_or_else(|| Error::unpositioned("Undefined mixin."))?;
         // dart-sass: passing a content block to a mixin that never uses
         // `@content` is an error, even when the block is empty.
         if content.is_some() && !body_uses_content(&mixin.def.body) {

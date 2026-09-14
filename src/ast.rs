@@ -100,6 +100,9 @@ pub(crate) enum Stmt {
         star: bool,
         config: Vec<ConfigEntry>,
         pos: Pos,
+        /// Byte length of the rule (`@use "x" as y`, excluding the `;`) — the
+        /// span dart reports a load failure or a misplaced rule against.
+        length: usize,
     },
     /// `@forward "<url>" [as <prefix>-*] [show ...|hide ...] [with (...)];` —
     /// re-export another module's members from the current module.
@@ -109,6 +112,8 @@ pub(crate) enum Stmt {
         show: Option<Vec<ForwardMember>>,
         hide: Option<Vec<ForwardMember>>,
         config: Vec<ConfigEntry>,
+        /// Byte length of the rule, as for [`Stmt::Use`].
+        length: usize,
         pos: Pos,
     },
     /// `/* ... */` loud comment (inner text, without the delimiters). The body
@@ -478,7 +483,14 @@ pub(crate) enum Expr {
     Var { name: String, pos: Pos },
     /// `ns.$name` — a module variable reference (e.g. `math.$pi`). Resolved by
     /// the evaluator against the used module bound to `module`.
-    NsVar { module: String, name: String },
+    NsVar {
+        module: String,
+        name: String,
+        /// The `ns` identifier's position, and the byte length of the whole
+        /// `ns.$name` reference — the span dart reports against.
+        pos: Pos,
+        length: usize,
+    },
     /// The parent selector `&` used in value position. Resolves to the current
     /// resolved selector as a comma-separated list of space-separated
     /// compound-selector strings, or `null` at the document root.

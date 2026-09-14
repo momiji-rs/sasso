@@ -2199,7 +2199,11 @@ impl<'a> Evaluator<'a> {
                         sink,
                     );
                     self.leave_call(saved);
-                    r?;
+                    // An error the include itself raises (an undefined mixin, a
+                    // namespace that is not there, a content block the mixin
+                    // does not take) belongs to the `@include` — dart spans the
+                    // whole call.
+                    r.map_err(|e| e.at_if_unpositioned(*pos, *length))?;
                 }
                 Stmt::Use {
                     url,
@@ -2207,7 +2211,10 @@ impl<'a> Evaluator<'a> {
                     star,
                     config,
                     pos,
-                } => self.exec_use(url, namespace.as_deref(), *star, config, *pos, parents, sink)?,
+                    length,
+                } => self
+                    .exec_use(url, namespace.as_deref(), *star, config, *pos, parents, sink)
+                    .map_err(|e| e.with_length_at(*pos, *length))?,
                 Stmt::Forward {
                     url,
                     prefix,
@@ -2215,7 +2222,10 @@ impl<'a> Evaluator<'a> {
                     hide,
                     config,
                     pos,
-                } => self.exec_forward(url, prefix.as_deref(), show, hide, config, *pos, parents, sink)?,
+                    length,
+                } => self
+                    .exec_forward(url, prefix.as_deref(), show, hide, config, *pos, parents, sink)
+                    .map_err(|e| e.with_length_at(*pos, *length))?,
                 Stmt::Content {
                     args: content_args,
                     pos: content_pos,
@@ -3063,9 +3073,11 @@ impl<'a> Evaluator<'a> {
                             }
                         }
                         None => {
-                            return Err(Error::unpositioned(format!(
-                                "Can't find stylesheet to import: {path}"
-                            )));
+                            // dart names no url — the span points at it, all of
+                            // it (`@import foo screen` carets ten characters).
+                            return Err(
+                                Error::at("Can't find stylesheet to import.", *pos).with_length(*length)
+                            );
                         }
                     }
                 }

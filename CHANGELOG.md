@@ -185,6 +185,26 @@ Conformance is tracked separately as a ratchet against the official
   `@function --f() { result: "#{$v}"; }` emitted the interpolation literally.
   The string's own text, escapes and line continuations included, still passes
   through untouched — dart does not re-serialize a verbatim value's string.
+- **A module diagnostic carets the construct it is about.** dart underlines the
+  whole rule, call or reference a diagnostic belongs to; sasso drew a single
+  caret, or — for an `@include` — reported the error with no snippet at all:
+
+  | | dart | sasso |
+  |---|---|---|
+  | `@use "nope"` (missing) | the whole rule | one caret |
+  | `@use` after other rules | the whole rule | one caret |
+  | `@include nope` | the whole call | no position |
+  | `@include ns.nope` | the whole call | no position |
+  | `ns.nope(1)` | the whole call | one caret |
+  | `ns.$nope` | the reference | line 1, column 1 |
+  | `@include ns.-private` | the member name | one caret |
+
+  A namespaced variable reference carried no position at all, so its error
+  landed on the file's first line rather than on the reference. The messages
+  match dart now too: `Undefined mixin.` rather than `Undefined mixin nope.`,
+  and `Can't find stylesheet to import.` without the url the span already
+  points at. (A `Missing argument`/content-block error still shows only its
+  primary span; dart adds a second one for the declaration.)
 - **A string is quoted the way dart quotes it, wherever it is written back.**
   `meta.inspect` and `@error` wrapped the text in `"` unconditionally, so a
   string containing a quote or a backslash came out as invalid CSS:

@@ -29,7 +29,7 @@ impl<'a> Evaluator<'a> {
             if let Some(v) = self.try_forwarded_builtin_call(&module, member, args, pos)? {
                 return Ok(v);
             }
-            return Err(Error::at("Undefined function.".to_string(), pos));
+            return Err(Error::at("Undefined function.".to_string(), pos).with_length(length));
         }
         // A built-in module bound to this namespace.
         let module = match self.used_modules.get(ns) {
