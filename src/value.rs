@@ -136,13 +136,17 @@ pub(crate) struct SassMixin {
 /// from a `Module`, so a `meta.apply`'d body resolves relative loads correctly.
 #[derive(Clone)]
 pub(crate) struct MixinOrigin {
-    /// The diagnostic display URL of the defining file (e.g. `_mod.scss`).
+    /// The diagnostic display URL of the defining file (e.g. `src/_mod.scss`).
     pub diag_url: String,
     /// The defining file's directory (the legacy `@import` resolution base);
     /// empty when there is none.
     pub file_dir: String,
     /// The defining file's canonical URL (the importer resolution base).
     pub canonical: String,
+    /// The defining file's text, for snippets. Carried here rather than looked
+    /// up by `diag_url`: display names are not unique across custom importers
+    /// (two canonical URLs may share a last segment), the canonical URL is.
+    pub source: Rc<str>,
 }
 
 impl std::fmt::Debug for SassMixin {

@@ -1462,10 +1462,29 @@ fn warning_blocks(stderr: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The `Error:` block of a stderr transcript: from the last `Error:` header
+/// to the end (what a failing compile prints after any warnings).
+fn error_block(stderr: &str) -> &str {
+    match stderr.rfind("\nError: ") {
+        Some(i) => &stderr[i + 1..],
+        None => stderr,
+    }
+}
+
+/// What part of stderr to compare with dart-sass.
+#[derive(Clone, Copy)]
+enum Compare {
+    /// Byte for byte.
+    Full,
+    /// Only the `WARNING:` blocks (see [`warning_blocks`]).
+    Warnings,
+    /// Only the final `Error:` block (see [`error_block`]).
+    Error,
+}
+
 /// Run the same `args` through dart-sass in a sibling scratch dir seeded with
-/// the same `files` and assert stderr matches — byte for byte, or only its
-/// `WARNING:` blocks when `warnings_only` is set.
-fn assert_dart_stderr_matches(files: &[(&str, &str)], args: &[&str], warnings_only: bool) {
+/// the same `files` and assert stderr matches, as far as `what` says.
+fn assert_dart_stderr_matches(files: &[(&str, &str)], args: &[&str], what: Compare) {
     let Some(dart) = dart_bin() else { return };
     let ours = scratch("parity_err_ours");
     let theirs = scratch("parity_err_theirs");
@@ -1480,14 +1499,18 @@ fn assert_dart_stderr_matches(files: &[(&str, &str)], args: &[&str], warnings_on
         "exit codes differ for {args:?}\nours: {}\ndart: {}",
         a.stderr, b.stderr
     );
-    if warnings_only {
-        assert_eq!(
+    match what {
+        Compare::Full => assert_eq!(a.stderr, b.stderr, "stderr differs from dart-sass for {args:?}"),
+        Compare::Warnings => assert_eq!(
             warning_blocks(&a.stderr),
             warning_blocks(&b.stderr),
             "warning frames differ from dart-sass for {args:?}"
-        );
-    } else {
-        assert_eq!(a.stderr, b.stderr, "stderr differs from dart-sass for {args:?}");
+        ),
+        Compare::Error => assert_eq!(
+            error_block(&a.stderr),
+            error_block(&b.stderr),
+            "error block differs from dart-sass for {args:?}"
+        ),
     }
     std::fs::remove_dir_all(&ours).ok();
     std::fs::remove_dir_all(&theirs).ok();
@@ -1518,7 +1541,11 @@ fn stack_frames_show_loaded_files_relative_to_the_working_directory() {
          WARNING: d\n    lp/_leaf.scss 1:1  @use\n    lp/_dep.scss 1:1   @use\n    src/rel.scss 2:1   root stylesheet\n\n\
          WARNING: b\n    lp/_dep.scss 2:1  @use\n    src/rel.scss 2:1  root stylesheet\n\n"
     );
-    assert_dart_stderr_matches(used, &["--no-source-map", "-I", "lp", "src/rel.scss"], false);
+    assert_dart_stderr_matches(
+        used,
+        &["--no-source-map", "-I", "lp", "src/rel.scss"],
+        Compare::Full,
+    );
     std::fs::remove_dir_all(&dir).ok();
 
     let imported: &[(&str, &str)] = &[
@@ -1542,7 +1569,11 @@ fn stack_frames_show_loaded_files_relative_to_the_working_directory() {
         ]
     );
     // Deprecation warnings interleave differently (see `warning_blocks`).
-    assert_dart_stderr_matches(imported, &["--no-source-map", "-I", "lp", "src/rel.scss"], true);
+    assert_dart_stderr_matches(
+        imported,
+        &["--no-source-map", "-I", "lp", "src/rel.scss"],
+        Compare::Warnings,
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1588,6 +1619,243 @@ fn quiet_deps_survives_a_compile_error_with_error_css() {
     assert_eq!(
         read(&dir, "o2.css"),
         format!("{GOOD_CSS}\n/*# sourceMappingURL=o2.css.map */\n")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+const ORIGIN_DEP: &str = "@mixin m {\n  x: 1;\n  @content;\n  z: 3;\n}\n@function f($v) {\n  @warn \"in f\";\n  @return $v + 1;\n}\n@mixin undef {\n  q: $nope;\n}\n";
+
+#[test]
+fn callables_and_content_blocks_run_against_their_defining_file() {
+    // dart evaluates a mixin, function, or `@content` block where it was
+    // written: the frames name that file (with dart's `@content` member for
+    // the block and the `@content;` statement as a call site in the mixin),
+    // the source map points into it, and an error inside it renders its
+    // source. `@use` here, so stderr has no deprecations and compares whole.
+    let used: &[(&str, &str)] = &[
+        ("src/_dep.scss", ORIGIN_DEP),
+        ("src/use.scss", "@use \"dep\";\n@mixin e {\n  @warn \"in e\";\n  y: 2;\n}\na {\n  @include dep.m {\n    @warn \"in content\";\n    y: dep.f(1);\n  }\n}\n"),
+    ];
+    let dir = scratch("origin_use");
+    for (name, text) in used {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["src/use.scss", "use.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        r.stderr,
+        "WARNING: in content\n    src/use.scss 8:5   @content\n    src/_dep.scss 3:3  m()\n    src/use.scss 7:3   root stylesheet\n\n\
+         WARNING: in f\n    src/_dep.scss 7:3  f()\n    src/use.scss 9:8   @content\n    src/_dep.scss 3:3  m()\n    src/use.scss 7:3   root stylesheet\n\n"
+    );
+    assert_eq!(
+        read(&dir, "use.css"),
+        "a {\n  x: 1;\n  y: 2;\n  z: 3;\n}\n\n/*# sourceMappingURL=use.css.map */\n"
+    );
+    assert_eq!(
+        read(&dir, "use.css.map"),
+        "{\"version\":3,\"sourceRoot\":\"\",\"sources\":[\"src/use.scss\",\"src/_dep.scss\"],\"names\":[],\"mappings\":\"AAKA;ECJE;EDOE;ECLF\",\"file\":\"use.css\"}"
+    );
+    assert_dart_stderr_matches(used, &["src/use.scss", "use.css"], Compare::Full);
+    assert_dart_files_match(used, &["src/use.scss", "use.css"], &["use.css", "use.css.map"]);
+    std::fs::remove_dir_all(&dir).ok();
+
+    // The same through a textual `@import`: a mixin the import defined is
+    // still evaluated in ITS file (the deprecation warnings interleave
+    // differently, see `warning_blocks`).
+    let imported: &[(&str, &str)] = &[
+        ("src/_dep.scss", ORIGIN_DEP),
+        (
+            "src/imp.scss",
+            "@import \"dep\";\na {\n  @include m {\n    @warn \"in content\";\n    y: f(1);\n  }\n}\n",
+        ),
+    ];
+    let dir = scratch("origin_import");
+    for (name, text) in imported {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["src/imp.scss", "imp.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        warning_blocks(&r.stderr),
+        [
+            "WARNING: in content\n    src/imp.scss 4:5   @content\n    src/_dep.scss 3:3  m()\n    src/imp.scss 3:3   root stylesheet",
+            "WARNING: in f\n    src/_dep.scss 7:3  f()\n    src/imp.scss 5:8   @content\n    src/_dep.scss 3:3  m()\n    src/imp.scss 3:3   root stylesheet",
+        ]
+    );
+    assert_eq!(
+        read(&dir, "imp.css.map"),
+        "{\"version\":3,\"sourceRoot\":\"\",\"sources\":[\"src/imp.scss\",\"src/_dep.scss\"],\"names\":[],\"mappings\":\"AACA;ECAE;EDGE;ECDF\",\"file\":\"imp.css\"}"
+    );
+    assert_dart_stderr_matches(imported, &["src/imp.scss", "imp.css"], Compare::Warnings);
+    assert_dart_files_match(
+        imported,
+        &["src/imp.scss", "imp.css"],
+        &["imp.css", "imp.css.map"],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    // An error inside an imported mixin: the snippet is the mixin's file.
+    let failing: &[(&str, &str)] = &[
+        ("src/_dep.scss", ORIGIN_DEP),
+        ("src/undef.scss", "@import \"dep\";\na {\n  @include undef;\n}\n"),
+    ];
+    let dir = scratch("origin_error");
+    for (name, text) in failing {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["--no-source-map", "src/undef.scss", "undef.css"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(
+        error_block(&r.stderr),
+        "Error: Undefined variable.\n   ╷\n11 │   q: $nope;\n   │      ^^^^^\n   ╵\n  src/_dep.scss 11:6  undef()\n  src/undef.scss 3:3  root stylesheet\n"
+    );
+    assert!(read(&dir, "undef.css").contains(" *   src/_dep.scss 11:6  undef()\n"));
+    assert_dart_stderr_matches(
+        failing,
+        &["--no-source-map", "src/undef.scss", "undef.css"],
+        Compare::Error,
+    );
+    assert_dart_files_match(
+        failing,
+        &["--no-source-map", "src/undef.scss", "undef.css"],
+        &["undef.css"],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn first_class_callables_are_traced_like_direct_ones() {
+    // `meta.apply` and `meta.call`: frames inside the body name the callable
+    // (`m()`, `f()`), the `meta.call(...)` expression is a call site, and the
+    // content block goes back to the includer's file — as dart prints them.
+    let files: &[(&str, &str)] = &[
+        ("src/_dep.scss", ORIGIN_DEP),
+        ("src/apply.scss", "@use \"sass:meta\";\n@use \"dep\";\na {\n  @include meta.apply(meta.get-mixin(\"m\", \"dep\")) {\n    @warn \"apply content\";\n    y: 2;\n  }\n  b: meta.call(meta.get-function(\"f\", $module: \"dep\"), 1);\n}\n"),
+    ];
+    let dir = scratch("origin_apply");
+    for (name, text) in files {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["src/apply.scss", "apply.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        r.stderr,
+        "WARNING: apply content\n    src/apply.scss 5:5  @content\n    src/_dep.scss 3:3   m()\n    src/apply.scss 4:3  root stylesheet\n\n\
+         WARNING: in f\n    src/_dep.scss 7:3   f()\n    src/apply.scss 8:6  root stylesheet\n\n"
+    );
+    assert_eq!(
+        read(&dir, "apply.css.map"),
+        "{\"version\":3,\"sourceRoot\":\"\",\"sources\":[\"src/apply.scss\",\"src/_dep.scss\"],\"names\":[],\"mappings\":\"AAEA;ECDE;EDIE;ECFF;EDIA\",\"file\":\"apply.css\"}"
+    );
+    assert_dart_stderr_matches(files, &["src/apply.scss", "apply.css"], Compare::Full);
+    assert_dart_files_match(
+        files,
+        &["src/apply.scss", "apply.css"],
+        &["apply.css", "apply.css.map"],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn error_inside_a_meta_call_highlights_the_call_expression() {
+    // An `@error` attaches at the nearest call boundary; for a function
+    // invoked through `meta.call` that is the whole `meta.call(...)`
+    // expression, as dart highlights it.
+    let files: &[(&str, &str)] = &[(
+        "call.scss",
+        "@use \"sass:meta\";\n@function f($v) {\n  @error \"boom\";\n}\na {\n  b: meta.call(meta.get-function(\"f\"), 1);\n}\n",
+    )];
+    let dir = scratch("origin_call_error");
+    write(&dir, "call.scss", files[0].1);
+    let r = sasso(&dir, &["--no-source-map", "call.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(
+        r.stderr,
+        "Error: \"boom\"\n  ╷\n6 │   b: meta.call(meta.get-function(\"f\"), 1);\n  │      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  ╵\n  call.scss 6:6  root stylesheet\n"
+    );
+    assert_dart_stderr_matches(files, &["--no-source-map", "call.scss"], Compare::Full);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn error_in_a_content_block_points_at_the_include() {
+    // dart runs a content block as a callable invoked from the `@include`
+    // that supplied it: an `@error` raised directly in the block carets that
+    // `@include` (the name and arguments only — not the block), while the
+    // trace still lists the mixin's `@content;` statement as the `m()` frame.
+    // Here the mixin lives in another file; the snippet is the includer's.
+    let files: &[(&str, &str)] = &[
+        ("src/_cm.scss", "@mixin m {\n  x: 1;\n  @content;\n}\n"),
+        (
+            "src/cerr.scss",
+            "@use \"cm\";\na {\n  @include cm.m {\n    @error \"cross\";\n  }\n}\n",
+        ),
+    ];
+    let dir = scratch("origin_content_error");
+    for (name, text) in files {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["--no-source-map", "src/cerr.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(
+        r.stderr,
+        "Error: \"cross\"\n  ╷\n3 │   @include cm.m {\n  │   ^^^^^^^^^^^^^\n  ╵\n  src/_cm.scss 3:3   m()\n  src/cerr.scss 3:3  root stylesheet\n"
+    );
+    assert_dart_stderr_matches(files, &["--no-source-map", "src/cerr.scss"], Compare::Full);
+    std::fs::remove_dir_all(&dir).ok();
+
+    // Forwarded through a second mixin (`@include inner { @content; }`): the
+    // boundary is the innermost `@include` whose mixin is running — `@include
+    // inner` — and both `@content` invocations stay in the trace.
+    let files: &[(&str, &str)] = &[(
+        "err.scss",
+        "@mixin inner {\n  i: 1;\n  @content;\n}\n@mixin outer {\n  o: 1;\n  @include inner {\n    @content;\n  }\n}\na {\n  @include outer {\n    @error \"deep\";\n  }\n}\n",
+    )];
+    let dir = scratch("origin_content_forward");
+    write(&dir, "err.scss", files[0].1);
+    let r = sasso(&dir, &["--no-source-map", "err.scss"]);
+    assert_eq!(r.code, EXIT_COMPILE, "{}", r.stderr);
+    assert_eq!(
+        r.stderr,
+        "Error: \"deep\"\n  ╷\n7 │   @include inner {\n  │   ^^^^^^^^^^^^^^\n  ╵\n  err.scss 8:5   @content\n  err.scss 3:3   inner()\n  err.scss 7:3   outer()\n  err.scss 12:3  root stylesheet\n"
+    );
+    assert_dart_stderr_matches(files, &["--no-source-map", "err.scss"], Compare::Full);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn members_forwarded_through_an_import_keep_their_defining_file() {
+    // `@import "fwd"` where _fwd.scss `@forward`s _dep.scss: the members
+    // become the importer's, but their bodies still belong to _dep.scss —
+    // frames name it and the map points into it (dart: sources
+    // [impfwd.scss, _dep.scss], mappings `AACA;ECCE;EDCA`).
+    let files: &[(&str, &str)] = &[
+        ("src/_dep.scss", "@mixin m {\n  @warn \"in m\";\n  x: 1;\n}\n@function f($v) {\n  @warn \"in f\";\n  @return $v;\n}\n"),
+        ("src/_fwd.scss", "@forward \"dep\";\n"),
+        ("src/impfwd.scss", "@import \"fwd\";\na {\n  @include m;\n  b: f(1);\n}\n"),
+    ];
+    let dir = scratch("origin_import_forward");
+    for (name, text) in files {
+        write(&dir, name, text);
+    }
+    let r = sasso(&dir, &["src/impfwd.scss", "impfwd.css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        warning_blocks(&r.stderr),
+        [
+            "WARNING: in m\n    src/_dep.scss 2:3    m()\n    src/impfwd.scss 3:3  root stylesheet",
+            "WARNING: in f\n    src/_dep.scss 6:3    f()\n    src/impfwd.scss 4:6  root stylesheet",
+        ]
+    );
+    assert_eq!(
+        read(&dir, "impfwd.css.map"),
+        "{\"version\":3,\"sourceRoot\":\"\",\"sources\":[\"src/impfwd.scss\",\"src/_dep.scss\"],\"names\":[],\"mappings\":\"AACA;ECCE;EDCA\",\"file\":\"impfwd.css\"}"
+    );
+    assert_dart_stderr_matches(files, &["src/impfwd.scss", "impfwd.css"], Compare::Warnings);
+    assert_dart_files_match(
+        files,
+        &["src/impfwd.scss", "impfwd.css"],
+        &["impfwd.css", "impfwd.css.map"],
     );
     std::fs::remove_dir_all(&dir).ok();
 }

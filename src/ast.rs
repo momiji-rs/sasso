@@ -147,7 +147,7 @@ pub(crate) enum Stmt {
     },
     /// `@content;` or `@content(args)` — runs the `@include`'s content block,
     /// passing any arguments to its `using (params)`.
-    Content(Vec<CallArg>),
+    Content { args: Vec<CallArg>, pos: Pos },
     /// A generic at-rule: `@name <prelude> { body }` or `@name <prelude>;`.
     /// `body == None` is the statement (`;`) form. Used for `@font-face`,
     /// `@page`, `@charset`, `@supports`, vendor `@foo`, and unknown

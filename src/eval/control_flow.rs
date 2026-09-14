@@ -274,16 +274,6 @@ impl<'a> Evaluator<'a> {
         ))
     }
 
-    /// Evaluate call arguments and bind them to a parameter list, returning the
-    /// call frame: positional args fill params in order, then keyword args by
-    /// name, then declared defaults; extra positionals collect into a
-    /// `$rest...` parameter or are an error. The parallel definition-span frame
-    /// comes along for the source map.
-    fn bind_args(&mut self, params: &ParamList, args: &[CallArg], name: &str) -> Result<ArgFrame, Error> {
-        let (evaled, spans) = self.eval_call_args_spanned(args)?;
-        self.bind_evaled(params, evaled, &spans, name)
-    }
-
     /// Bind evaluated arguments into the CURRENT (freshly pushed) scope.
     /// Parameter defaults evaluate inside the callee environment with the
     /// already-bound parameters visible (`@mixin m($a, $b: $a)`), matching
@@ -393,112 +383,6 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
-    /// Bind already-evaluated `(positional, keyword)` arguments into a call
-    /// frame. Used by `meta.call`, which has only evaluated values to pass on.
-    ///
-    /// Returns the value frame plus the parallel definition-span frame that
-    /// [`Self::push_scope_frame`] installs alongside it (source-map only).
-    fn bind_evaled(
-        &mut self,
-        params: &ParamList,
-        evaled: EvaledArgs,
-        spans: &ArgSpans,
-        name: &str,
-    ) -> Result<ArgFrame, Error> {
-        let (positional, keyword_vec, rest_sep) = evaled;
-        let mut keyword: HashMap<String, Value> = HashMap::default();
-        // Track the order and source spelling of keyword names so an
-        // "unknown parameter" error can list them as the caller wrote them.
-        let mut keyword_order: Vec<(String, String)> = Vec::new();
-        for (n, v) in keyword_vec {
-            let norm = normalize_arg_name(&n).into_owned();
-            if !keyword.contains_key(&norm) {
-                keyword_order.push((norm.clone(), n));
-            }
-            keyword.insert(norm, v);
-        }
-        let mut frame = HashMap::default();
-        let mut span_frame: HashMap<String, VarSpan> = HashMap::default();
-        let mut pos_iter = positional.into_iter().enumerate();
-        for param in &params.params {
-            let (val, span) = if let Some((i, v)) = pos_iter.next() {
-                (v, spans.positional(i))
-            } else if let Some(v) = keyword.remove(normalize_arg_name(&param.name).as_ref()) {
-                (v, spans.named(&param.name))
-            } else if let Some(def) = &param.default {
-                let v = self.eval_expr(def)?;
-                let sp = self.expression_node(def, param.default_pos);
-                (v, sp)
-            } else {
-                return Err(Error::unpositioned(format!("Missing argument ${}.", param.name)));
-            };
-            frame.insert(param.name.clone(), val);
-            if self.options.source_map {
-                span_frame.insert(param.name.clone(), span);
-            }
-        }
-        if let Some(rest) = &params.rest {
-            let remaining: Vec<Value> = pos_iter.map(|(_, v)| v).collect();
-            // Any keyword args left after binding the declared params become the
-            // arglist's keywords, in caller order and keyed by their
-            // hyphen-normalized name (what `meta.keywords` reports).
-            let kw: Vec<(Value, Value)> = keyword_order
-                .iter()
-                .filter_map(|(norm, _)| {
-                    keyword.remove(norm).map(|v| {
-                        (
-                            Value::Str(SassStr {
-                                text: norm.clone().into(),
-                                quoted: false,
-                            }),
-                            v,
-                        )
-                    })
-                })
-                .collect();
-            frame.insert(
-                rest.clone(),
-                Value::List(List {
-                    items: remaining.into(),
-                    sep: rest_sep,
-                    bracketed: false,
-                    keywords: Some(kw),
-                }),
-            );
-            // As in `bind_evaled_into_scope`: a `$rest...` arglist has no value
-            // position to point at, so it gets the "unknown" span.
-            span_frame.insert(rest.clone(), VarSpan::default());
-        } else if pos_iter.next().is_some() {
-            return Err(Error::unpositioned(format!(
-                "{name} was passed too many arguments."
-            )));
-        }
-        // Reject keyword arguments that name no declared parameter. A `...`
-        // rest parameter would absorb them into an arglist (whose keywords
-        // are not yet modelled), so only validate when there is no rest.
-        if params.rest.is_none() && !keyword.is_empty() {
-            let leftover: Vec<&str> = keyword_order
-                .iter()
-                .filter(|(norm, _)| keyword.contains_key(norm))
-                .map(|(_, orig)| orig.as_str())
-                .collect();
-            if let Some((last, init)) = leftover.split_last() {
-                let msg = if init.is_empty() {
-                    format!("No parameter named ${last}.")
-                } else {
-                    let head = init
-                        .iter()
-                        .map(|n| format!("${n}"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("No parameters named {head} or ${last}.")
-                };
-                return Err(Error::unpositioned(msg));
-            }
-        }
-        Ok((frame, span_frame))
-    }
-
     /// Call a user-defined `@function`, returning its `@return` value. `call`,
     /// when present, is the (name-start position, byte length) of the call
     /// expression, recorded as a diagnostic stack frame around the body.
@@ -511,7 +395,10 @@ impl<'a> Evaluator<'a> {
         // Arguments evaluate in the CALLER's environment; the body (and the
         // parameter defaults) run against the callable's LEXICAL closure.
         let (evaled, arg_spans) = self.eval_call_args_spanned(args)?;
+        // The call frame records the CALL site (this file); the body then runs
+        // against the function's defining file.
         let saved = call.map(|(pos, len)| self.enter_call(pos, len, &format!("{}()", func.def.name)));
+        let saved_file = self.enter_origin_file(func.origin.as_ref());
         let saved_scopes = std::mem::replace(&mut self.scopes, func.env.clone());
         let saved_var_spans = std::mem::replace(&mut self.var_spans, func.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, func.env_semi.clone());
@@ -528,7 +415,9 @@ impl<'a> Evaluator<'a> {
                 let r = self.run_fn_body(&func.def.body);
                 self.in_mixin.pop();
                 r
-            });
+            })
+            // Render a positioned error while its file is still current.
+            .map_err(|e| self.finalize_error(e));
         self.pop_scope();
         self.scopes = saved_scopes;
         self.var_spans = saved_var_spans;
@@ -536,6 +425,7 @@ impl<'a> Evaluator<'a> {
         self.functions = saved_fns;
         self.mixins = saved_mixins;
         self.restore_env_modules(saved_env_modules);
+        self.leave_module_file(saved_file);
         if let Some(saved) = saved {
             self.leave_call(saved);
         }
@@ -769,8 +659,12 @@ impl<'a> Evaluator<'a> {
                 stmts,
                 params: content_params.clone(),
                 caller_env: Some(Box::new(snapshot)),
+                origin: self.current_mixin_origin(),
             }
         });
+        // The body runs against the mixin's defining file (the `@include`
+        // frame, recorded by the caller, already names this file).
+        let saved_file = self.enter_origin_file(mixin.origin.as_ref());
         let saved_scopes = std::mem::replace(&mut self.scopes, mixin.env.clone());
         let saved_var_spans = std::mem::replace(&mut self.var_spans, mixin.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
@@ -787,7 +681,8 @@ impl<'a> Evaluator<'a> {
                 self.in_mixin.pop();
                 self.content_stack.pop();
                 r
-            });
+            })
+            .map_err(|e| self.finalize_error(e));
         self.pop_scope();
         self.scopes = saved_scopes;
         self.var_spans = saved_var_spans;
@@ -795,6 +690,7 @@ impl<'a> Evaluator<'a> {
         self.functions = saved_fns;
         self.mixins = saved_mixins;
         self.restore_env_modules(saved_env_modules);
+        self.leave_module_file(saved_file);
         result
     }
 
@@ -826,10 +722,17 @@ impl<'a> Evaluator<'a> {
                 stmts,
                 params: content_params.clone(),
                 caller_env: Some(Box::new(snapshot)),
+                origin: self.current_mixin_origin(),
             }
         });
         let saved = self.enter_module(module);
-        let saved_file = self.enter_module_file(module);
+        // The mixin's own defining file beats the module handed to us: a
+        // multi-hop `@forward` can name a module other than the file that
+        // wrote the mixin.
+        let saved_file = match &mixin.origin {
+            Some(o) => self.enter_origin_file(Some(o)),
+            None => self.enter_module_file(module),
+        };
         let saved_scopes = std::mem::replace(&mut self.scopes, mixin.env.clone());
         let saved_var_spans = std::mem::replace(&mut self.var_spans, mixin.env_spans.clone());
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, mixin.env_semi.clone());
@@ -841,10 +744,15 @@ impl<'a> Evaluator<'a> {
             .bind_evaled_into_scope(&mixin.def.params, evaled, &arg_spans, &mixin.def.name)
             .and_then(|()| {
                 self.content_stack.push(content_block);
+                // A mixin body: `meta.content-exists()` is allowed and answers
+                // for THIS include (as on the direct include path).
+                self.in_mixin.push(true);
                 let r = self.exec(&mixin.def.body, parents, sink);
+                self.in_mixin.pop();
                 self.content_stack.pop();
                 r
-            });
+            })
+            .map_err(|e| self.finalize_error(e));
         self.pop_scope();
         self.scopes = saved_scopes;
         self.var_spans = saved_var_spans;
@@ -946,6 +854,7 @@ impl<'a> Evaluator<'a> {
                 stmts,
                 params: content_params.clone(),
                 caller_env: Some(Box::new(snapshot)),
+                origin: self.current_mixin_origin(),
             }
         });
         // A mixin captured from another module runs in that module's
@@ -956,14 +865,19 @@ impl<'a> Evaluator<'a> {
             .as_ref()
             .and_then(|m| Rc::clone(m).downcast::<Module>().ok());
         let saved = module.as_ref().map(|m| self.enter_module(m));
-        // Restore the mixin's defining-FILE context for the body (mirroring
-        // `run_module_mixin`), so a relative `meta.load-css` resolves against
-        // the file that defined the mixin, not the caller. A cross-module
-        // capture carries its `Module`; a same-module first-class capture has
-        // no `Module` in hand, so it carries a lightweight `origin` snapshot.
-        let saved_file = match (module.as_ref(), &mixin.origin) {
-            (Some(m), _) => Some(self.enter_module_file(m)),
-            (None, Some(o)) => Some(self.enter_file_context(&o.diag_url, &o.file_dir, &o.canonical)),
+        // Frames inside the body name the mixin itself (`m()`), not the
+        // `meta.apply` that invoked it.
+        let saved_member_name = std::mem::replace(&mut self.member, format!("{}()", callable.def.name));
+        // The body runs against the mixin's defining file (so its output and
+        // diagnostics belong there, and a relative `meta.load-css` resolves
+        // against it): the callable's own capture, else the reference's
+        // `origin` snapshot, else the module it was captured from.
+        let saved_file = match (
+            callable.origin.as_ref().or(mixin.origin.as_ref()),
+            module.as_ref(),
+        ) {
+            (Some(o), _) => self.enter_origin_file(Some(o)),
+            (None, Some(m)) => self.enter_module_file(m),
             (None, None) => None,
         };
         let saved_scopes = std::mem::replace(&mut self.scopes, callable.env.clone());
@@ -992,7 +906,8 @@ impl<'a> Evaluator<'a> {
                 self.in_mixin.pop();
                 self.content_stack.pop();
                 r
-            });
+            })
+            .map_err(|e| self.finalize_error(e));
         self.pop_scope();
         self.scopes = saved_scopes;
         self.var_spans = saved_var_spans;
@@ -1000,9 +915,8 @@ impl<'a> Evaluator<'a> {
         self.functions = saved_fns;
         self.mixins = saved_mixins;
         self.restore_env_modules(saved_env_modules);
-        if let Some(saved_file) = saved_file {
-            self.leave_module_file(saved_file);
-        }
+        self.leave_module_file(saved_file);
+        self.member = saved_member_name;
         if let Some(saved) = saved {
             self.leave_module(saved);
         }
@@ -1016,22 +930,27 @@ impl<'a> Evaluator<'a> {
     pub(super) fn exec_content(
         &mut self,
         args: &[CallArg],
+        pos: Pos,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
-        let (stmts, params, caller_env) = match self.content_stack.last() {
+        let (stmts, params, caller_env, origin) = match self.content_stack.last() {
             Some(Some(block)) => (
                 Rc::clone(&block.stmts),
                 block.params.clone(),
                 block.caller_env.as_ref().map(|e| (**e).clone()),
+                block.origin.clone(),
             ),
             _ => return Ok(()),
         };
         // `@content(args)` evaluates its arguments at the call site (the mixin
-        // body), then binds them to the content block's `using (params)`, which
-        // become visible inside the block.
-        let frame = match &params {
-            Some(p) => Some(self.bind_args(p, args, "@content")?),
+        // body); they are bound to the block's `using (params)` below, once the
+        // block's own environment is in place, so a parameter DEFAULT evaluates
+        // where the block was written (dart: a content block is a callable
+        // closing over its `@include`; `using ($y: $caller)` sees the
+        // includer's `$caller`, not the mixin module's variables).
+        let evaled = match &params {
+            Some(_) => Some(self.eval_call_args_spanned(args)?),
             None => {
                 // A content block with no `using (params)` accepts no
                 // arguments; passing any is an error (dart-sass).
@@ -1045,19 +964,27 @@ impl<'a> Evaluator<'a> {
                 None
             }
         };
+        // dart's trace: the `@content;` statement is a call site in the mixin
+        // body (a frame in the mixin's file, attributed to the mixin), and the
+        // block's own statements belong to the `@content` member, back in the
+        // file that wrote the block — where its output maps to as well.
+        let saved_member = self.enter_content_call(pos);
+        let saved_file = self.enter_origin_file(origin.as_ref());
         let restore = caller_env.map(|env| self.install_env(env));
         // A content block is a user-defined callable in dart: its body always
         // runs in a fresh child scope, so a `$var:` first declared inside it
-        // stays local to the block (and a `using` frame binds there).
-        match frame {
-            Some((frame, spans)) => self.push_scope_frame(frame, spans),
-            None => self.push_scope(false),
-        }
+        // stays local to the block (and the `using` parameters bind there).
+        self.push_scope(false);
         // The block runs in its DEFINITION environment's content context: a
         // `@content` inside it forwards to the block one level up, not to
         // itself (a recursive mixin chaining `@content` must terminate).
         let running = self.content_stack.pop();
-        let result = self.exec(&stmts, parents, sink);
+        let result = match (&params, evaled) {
+            (Some(p), Some((evaled, spans))) => self.bind_evaled_into_scope(p, evaled, &spans, "@content"),
+            _ => Ok(()),
+        }
+        .and_then(|()| self.exec(&stmts, parents, sink))
+        .map_err(|e| self.finalize_error(e));
         if let Some(top) = running {
             self.content_stack.push(top);
         }
@@ -1065,6 +992,8 @@ impl<'a> Evaluator<'a> {
         if let Some(restore) = restore {
             self.leave_module(restore);
         }
+        self.leave_module_file(saved_file);
+        self.leave_call(saved_member);
         result
     }
 
