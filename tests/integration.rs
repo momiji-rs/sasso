@@ -1034,3 +1034,65 @@ fn a_custom_property_value_matches_its_brackets() {
     assert!(msg.contains("Expected escape sequence."), "{msg}");
     assert_eq!((line, col), (1, 13));
 }
+
+#[test]
+fn a_plain_css_custom_at_rule_body_matches_its_brackets() {
+    // The body of a plain-CSS custom `@function`/`@mixin` captures each value
+    // the way a custom property does, so a mismatched closer is an error, an
+    // unclosed opener names the bracket it wanted, and a closer with no opener
+    // ends the value (the body then wants its `;`).
+    let err = |src: &str| {
+        let e = compile(src, &Options::default()).expect_err("expected a compile error");
+        (e.to_string(), e.line, e.col)
+    };
+    let (msg, line, col) = err("@function --f() { result: (]; }\n");
+    assert!(msg.contains("expected \")\"."), "{msg}");
+    assert_eq!((line, col), (1, 28));
+    let (msg, line, col) = err("@function --f() { result: (; }\n");
+    assert!(msg.contains("expected \")\"."), "{msg}");
+    assert_eq!((line, col), (1, 30));
+    let (msg, line, col) = err("@function --f() { result: ]; }\n");
+    assert!(msg.contains("expected \";\"."), "{msg}");
+    assert_eq!((line, col), (1, 27));
+    // A balanced value still captures whole, `;` and all.
+    assert_eq!(
+        css("@function --f() { result: (a; b); other: c; }\n"),
+        "@function --f() {\n  result: (a; b);\n  other: c;\n}\n"
+    );
+}
+
+#[test]
+fn an_import_url_token_drops_its_padding_and_decodes_escapes() {
+    // dart reads `url(…)` in an `@import` with `_tryUrlContents`: the
+    // whitespace after the `(` and before the `)` is not part of the token,
+    // and a `\` escape is consumed whole and written back canonically
+    // (`escape()`, so a name character loses its backslash). The value reader
+    // already did both; the import reader kept the text verbatim.
+    assert_eq!(css("@import url(  x.css  );\n"), "@import url(x.css);\n");
+    assert_eq!(
+        css("@import url(\n  http://x/y.css\n);\n"),
+        "@import url(http://x/y.css);\n"
+    );
+    assert_eq!(css("@import url(\\61 b.css);\n"), "@import url(ab.css);\n");
+    assert_eq!(css("@import url(\\2d x.css);\n"), "@import url(-x.css);\n");
+    assert_eq!(css("@import url(\\30 x.css);\n"), "@import url(0x.css);\n");
+    // A control character keeps its hex form, and an escaped space keeps its
+    // backslash — neither is a name character.
+    assert_eq!(css("@import url(\\9 x.css);\n"), "@import url(\\9 x.css);\n");
+    assert_eq!(css("@import url(\\ x.css);\n"), "@import url(\\ x.css);\n");
+    // An escaped paren is still url content, and a quoted url keeps its
+    // padding (it is a string, not a url token).
+    assert_eq!(
+        css("@import url(foo\\)bar.css);\n"),
+        "@import url(foo\\)bar.css);\n"
+    );
+    assert_eq!(
+        css("@import url(\"  x.css  \");\n"),
+        "@import url(\"  x.css  \");\n"
+    );
+    // Several imports on one line keep their own padding rules.
+    assert_eq!(
+        css("@import url(x.css ), url(y.css);\n"),
+        "@import url(x.css);\n@import url(y.css);\n"
+    );
+}

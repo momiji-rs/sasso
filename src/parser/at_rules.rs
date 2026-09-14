@@ -597,6 +597,10 @@ impl Parser {
             self.sc.bump(); // through the `(`
         }
         lit.push_str("url(");
+        // dart `_tryUrlContents` skips the whitespace after the `(` outright.
+        while matches!(self.sc.peek(), Some(c) if c.is_whitespace()) {
+            self.sc.bump();
+        }
         let mut depth = 1i32;
         while let Some(c) = self.sc.peek() {
             if c == '#' && self.sc.peek_at(1) == Some('{') {
@@ -619,10 +623,28 @@ impl Parser {
                 // it. Without this the url ended at the escaped `)` and the
                 // rest of it was swallowed as a comment.
                 '\\' => {
-                    lit.push(c);
-                    self.sc.bump();
-                    if let Some(n) = self.sc.bump() {
-                        lit.push(n);
+                    // dart writes `escape()` — the escape is consumed whole and
+                    // re-serialized canonically, so `\\61 b` is `ab` and `\\9 `
+                    // keeps its hex form. The value reader already does this.
+                    let ch = self.read_escape_char()?;
+                    push_ident_escape(&mut lit, ch, false);
+                }
+                c if c.is_whitespace() => {
+                    // Whitespace is part of a url token only when it sits right
+                    // before the `)`, where dart drops it; anywhere else dart
+                    // abandons the token, which sasso does not model — keep the
+                    // text as written there.
+                    let mut n = 0;
+                    while matches!(self.sc.peek_at(n), Some(c) if c.is_whitespace()) {
+                        n += 1;
+                    }
+                    if self.sc.peek_at(n) == Some(')') {
+                        for _ in 0..n {
+                            self.sc.bump();
+                        }
+                    } else {
+                        lit.push(c);
+                        self.sc.bump();
                     }
                 }
                 '"' | '\'' => {
@@ -2371,6 +2393,13 @@ impl Parser {
                 });
             } else {
                 let raw = self.parse_css_custom_value()?;
+                // The reader consumes its `;` and stops at `}` or at the end of
+                // the file — except at a closer with no opener, which dart
+                // reports as a missing separator rather than as a bad property
+                // name (`result: ];` fails at the `]`).
+                if matches!(self.sc.peek(), Some(')' | ']')) {
+                    return Err(Error::at("expected \";\".", self.sc.position()));
+                }
                 items.push(CssCustomItem {
                     property,
                     value: CssCustomValue::Raw(raw),
@@ -2383,21 +2412,20 @@ impl Parser {
     /// Capture a verbatim CSS custom declaration value after the `:`, up to the
     /// terminating top-level `;` or `}`. Whitespace runs collapse to a single
     /// space (matching dart-sass serialization); `#{...}` interpolation is
-    /// resolved; nested `()`/`[]`/`{}` are balanced so a braced value such as
-    /// `{b: c}` is captured whole. The terminating `;` is consumed; a `}` is
-    /// left for the body loop.
+    /// resolved; each closer is matched against the bracket it opened, so a
+    /// braced value such as `{b: c}` is captured whole and `(]` is an error.
+    /// The terminating `;` is consumed; a `}` is left for the body loop.
     fn parse_css_custom_value(&mut self) -> Result<Vec<TplPiece>, Error> {
         let mut pieces: Vec<TplPiece> = Vec::new();
         let mut lit = String::new();
-        let mut depth = 0i32;
+        let mut brackets: Vec<char> = Vec::new();
         loop {
             match self.sc.peek() {
                 None => break,
-                Some(';') if depth == 0 => {
+                Some(';') if brackets.is_empty() => {
                     self.sc.bump();
                     break;
                 }
-                Some('}') if depth == 0 => break,
                 // An escape is one token, so an escaped delimiter is literal
                 // text rather than a bracket (dart re-serializes it canonically).
                 Some('\\') => {
@@ -2442,12 +2470,26 @@ impl Parser {
                     lit.push(' ');
                 }
                 Some(c @ ('(' | '[' | '{')) => {
-                    depth += 1;
+                    brackets.push(match c {
+                        '(' => ')',
+                        '[' => ']',
+                        _ => '}',
+                    });
                     lit.push(c);
                     self.sc.bump();
                 }
                 Some(c @ (')' | ']' | '}')) => {
-                    depth -= 1;
+                    // A closer with no opener ENDS the value (the caller then
+                    // wants its `;`); a closer that does not match the bracket
+                    // it would close is an error, as in every other verbatim
+                    // value reader.
+                    let Some(expected) = brackets.last().copied() else {
+                        break;
+                    };
+                    if c != expected {
+                        return Err(Error::at(format!("expected \"{expected}\"."), self.sc.position()));
+                    }
+                    brackets.pop();
                     lit.push(c);
                     self.sc.bump();
                 }
@@ -2456,6 +2498,9 @@ impl Parser {
                     self.sc.bump();
                 }
             }
+        }
+        if let Some(expected) = brackets.last() {
+            return Err(Error::at(format!("expected \"{expected}\"."), self.sc.position()));
         }
         if !lit.is_empty() {
             pieces.push(TplPiece::Lit(lit));

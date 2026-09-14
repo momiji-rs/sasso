@@ -169,10 +169,24 @@ Conformance is tracked separately as a ratchet against the official
   and `\{` both print `\{`, `\61 b` prints `ab`, an invalid code point becomes
   U+FFFD), each closer is matched against the bracket it opened (`--x: (]` is
   `expected ")".`), and a closer with no opener ends the value (`--x: ];` is
-  `expected ";".`). The same reader serves a `@supports` declaration and a
-  plain-CSS custom `@function` body. In the indented syntax the line scanners
-  that decide where a value ends now read a string inside `#{ … }` as text, so
-  `b: #{"} // not a comment"}` is one declaration rather than a parse error.
+  `expected ";".`). The `@supports` reader and the body of a plain-CSS custom
+  `@function`/`@mixin` capture values the same way and follow the same rules.
+  In the indented syntax the line scanners that decide where a value ends now
+  read a string inside `#{ … }` as text, so `b: #{"} // not a comment"}` is one
+  declaration rather than a parse error, and they track which bracket each
+  closer closes: a mismatched one (`--x: (]`) is left to the parser, which
+  reports dart's `expected ")".` at the closer instead of the front-end
+  complaining about the line indented beneath it.
+- **An `@import`'s `url()` drops its padding and decodes its escapes.** dart
+  reads the token with `_tryUrlContents`: the whitespace after the `(` and
+  before the `)` is not part of the url, and a `\` escape is consumed whole
+  and written back canonically. sasso kept the text exactly as written, so
+  `@import url(  x.css  )` — and a `url(` opened on one line and closed on
+  another, which the indented syntax invites — emitted the padding, and
+  `url(\61 b.css)` stayed escaped where dart prints `url(ab.css)`. The
+  declaration-value reader already followed both rules; the import reader now
+  does too. A quoted url keeps its spaces, being a string rather than a url
+  token.
 - **`//` inside a `url()` is no longer a comment in the indented syntax.**
   `url(http://x/y)`, `url(//cdn/x.png)` and `@import http://x/y.css` were
   truncated at the `//` (`url(http:` — "expected \")\""), because the front-end
