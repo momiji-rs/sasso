@@ -463,9 +463,24 @@ impl Parser {
         if self.indented && !matches!(self.sc.peek(), Some('"') | Some('\'')) {
             let url_pos = self.sc.position();
             let mut raw = String::new();
+            let mut has_interp = false;
             while let Some(c) = self.sc.peek() {
+                // A CSS escape hides the character after it, so `\#{` is the
+                // literal text `#{` — a STATIC path, as the quoted form reads
+                // it — and an escaped comma is url text rather than a
+                // separator.
+                if c == '\\' {
+                    raw.push(c);
+                    self.sc.bump();
+                    if let Some(n) = self.sc.peek() {
+                        raw.push(n);
+                        self.sc.bump();
+                    }
+                    continue;
+                }
                 // `#{…}` is opaque: a comma inside it does not end the url.
                 if c == '#' && self.sc.peek_at(1) == Some('{') {
+                    has_interp = true;
                     let mut depth = 0usize;
                     while let Some(c) = self.sc.peek() {
                         raw.push(c);
@@ -506,8 +521,9 @@ impl Parser {
                     pos: url_pos,
                 });
             }
-            // A Sass import's path is static here, as in the quoted form.
-            if path.contains("#{") {
+            // A Sass import's path is static here, as in the quoted form —
+            // an ESCAPED `\#{` is literal text and does not make it dynamic.
+            if has_interp {
                 return Err(Error::at("dynamic @import paths are not supported", pos));
             }
             return Ok(ImportArg::Sass {

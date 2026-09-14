@@ -355,6 +355,14 @@ impl Transpiler {
                 break;
             }
         }
+        // dart drops blank lines between a BARE `/*` and the comment's first
+        // text (`/*` + blank + `  a` renders as `/* a */`), while a blank
+        // BETWEEN two body lines is kept. Without this the renderer's first
+        // entry was a blank, so the `/*` opener was never emitted at all and
+        // the reconstruction was not valid SCSS.
+        while matches!(content_lines.first(), Some(None)) {
+            content_lines.remove(0);
+        }
         if content_lines.is_empty() {
             content_lines.push(Some((3, String::new())));
         }

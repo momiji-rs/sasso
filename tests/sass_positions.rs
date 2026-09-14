@@ -186,6 +186,19 @@ fn an_unquoted_import_url_runs_to_the_comma() {
         sass("@import u\\72l(foo\\)//cdn/x.css)\n", "d.sass").unwrap(),
         "@import url(foo\\)//cdn/x.css);"
     );
+    // An ESCAPED `\\#{` is literal text, so the path is STATIC: dart reads the
+    // whole `foo\\#{bar}.scss` as one url — its deprecation carets all fifteen
+    // characters, and it then reports the url as not found. sasso used to
+    // reject the line as a dynamic path instead.
+    let src2 = "@import foo\\#{bar}.scss\n";
+    std::fs::write(&entry, src2).unwrap();
+    let e = compile(src2, &opts).expect_err("expected an error");
+    assert!(
+        e.message.contains("Can't find stylesheet to import"),
+        "{}",
+        e.message
+    );
+    assert!(!e.message.contains("dynamic"), "{}", e.message);
     // The at-rule KEYWORD may be escaped; the parser decodes it, so the line
     // analysis must too, or `@im\\70ort` is taken for an unknown at-rule and
     // its unquoted url is truncated at the `//`.
@@ -403,6 +416,24 @@ fn an_escaped_keyword_is_the_keyword_it_spells() {
         "{}",
         e.message
     );
+}
+
+#[test]
+fn a_comment_opening_on_a_bare_line_still_opens() {
+    // dart drops blank lines between a BARE `/*` and the comment's first text,
+    // while a blank BETWEEN two body lines is kept. The renderer's first entry
+    // used to be that blank, so the `/*` was never emitted and the whole
+    // reconstruction stopped being valid SCSS.
+    assert_eq!(sass("/*\n\n  a\n", "c.sass").unwrap(), "/* a */");
+    assert_eq!(sass("/*\n\n\n  a\n", "c.sass").unwrap(), "/* a */");
+    assert_eq!(sass("/*\n\n  a\n  b\n", "c.sass").unwrap(), "/* a\n * b */");
+    assert_eq!(
+        sass("/*\n\n  a\n  */\n.z\n  y: 1\n", "c.sass").unwrap(),
+        "/* a\n * */\n.z {\n  y: 1;\n}"
+    );
+    // A blank AFTER content is still part of the comment.
+    assert_eq!(sass("/*\n  a\n\n  b\n", "c.sass").unwrap(), "/* a\n *\n * b */");
+    assert_eq!(sass("/* x\n\n  a\n", "c.sass").unwrap(), "/* x\n *\n * a */");
 }
 
 #[test]
