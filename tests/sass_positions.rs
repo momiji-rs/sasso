@@ -205,6 +205,12 @@ fn a_double_slash_inside_a_url_is_not_a_comment() {
         sass("a\n  b: -c-url(//cdn/x)\n  d: red\n", "a.sass").unwrap(),
         "a {\n  b: url(//cdn/x);\n  d: red;\n}"
     );
+    // The name is matched the way the value parser matches it, escapes and
+    // all: `u\\72l(` is `url(`, so its `//` is url text too.
+    assert_eq!(
+        sass("a\n  b: u\\72l(//cdn/x)\n  c: red\n", "a.sass").unwrap(),
+        "a {\n  b: url(//cdn/x);\n  c: red;\n}"
+    );
     // An escaped `)` is url CONTENT and does not close the token.
     assert_eq!(
         sass("a\n  b: url(foo\\)//cdn)\n", "a.sass").unwrap(),
@@ -353,6 +359,35 @@ fn a_multi_line_directive_prelude_keeps_its_own_lines() {
     assert_eq!(
         sass("@each $a in b,\n c\n  .#{$a}\n    d: $a\n", "in.sass").unwrap(),
         "c .b {\n  d: b;\n}"
+    );
+}
+
+#[test]
+fn a_custom_property_keeps_its_own_spacing() {
+    // A custom property's value is emitted verbatim, so the whitespace after
+    // the colon is part of it: dart writes `--v:1px` with no space, and
+    // collapses a run of them to one. The front-end used to normalize every
+    // spelling to `: `, which changed the CSS.
+    assert_eq!(sass(".a\n  --v:1px\n", "a.sass").unwrap(), ".a {\n  --v:1px;\n}");
+    assert_eq!(
+        sass(".a\n  --v: 1px\n", "a.sass").unwrap(),
+        ".a {\n  --v: 1px;\n}"
+    );
+    assert_eq!(
+        sass(".a\n  --v:  1px\n", "a.sass").unwrap(),
+        ".a {\n  --v: 1px;\n}"
+    );
+    assert_eq!(
+        sass(".a\n  --v:   1px\n", "a.sass").unwrap(),
+        ".a {\n  --v: 1px;\n}"
+    );
+    assert_eq!(
+        sass(".a\n  --v:1px 2px\n", "a.sass").unwrap(),
+        ".a {\n  --v:1px 2px;\n}"
+    );
+    assert_eq!(
+        sass(".a\n  --v:#{1 + 1}\n", "a.sass").unwrap(),
+        ".a {\n  --v:2;\n}"
     );
 }
 

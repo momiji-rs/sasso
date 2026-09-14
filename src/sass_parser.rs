@@ -741,7 +741,11 @@ impl Transpiler {
             return Ok(None);
         }
         self.idx = start + 1;
-        let mut value = raw[colon + 1..].trim_start().to_string();
+        // The text after the colon is kept VERBATIM, leading whitespace and
+        // all: a custom property's value is not re-serialized, so `--v:1px`
+        // must stay `--v:1px` (dart emits no space there, while it collapses a
+        // run of them to one — the rule the shared parser already applies).
+        let mut value = raw[colon + 1..].to_string();
         // Only an *open* bracket (`(`/`[`/`{`) or `#{` interpolation continues
         // the value onto following lines (verbatim, preserving each line's
         // source indentation); otherwise nothing may be indented beneath a
@@ -769,7 +773,7 @@ impl Transpiler {
         // (dart _writeReindentedValue), so it must survive the SCSS re-parse.
         self.out.push_str(&self.lines[start].indent_str);
         self.out.push_str(name);
-        self.out.push_str(": ");
+        self.out.push(':');
         self.out.push_str(value.trim_end());
         self.out.push_str(";\n");
         Ok(Some(()))
@@ -1210,34 +1214,80 @@ impl LineScanner {
 
     /// At `#{`: advance past the brace-matched closing `}` (or to end-of-line).
     #[inline]
-    /// At a `u`/`U`, whether this is the start of a `url(` FUNCTION token.
+    fn skip_interp(&mut self) {
+        self.bump(); // '#'
+        self.bump(); // '{'
+        let mut depth = 1;
+        while self.i < self.cs.len() && depth > 0 {
+            match self.cs[self.i] {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+            self.bump();
+        }
+    }
+
+    /// Whether a `url(` FUNCTION token's identifier covers the cursor, and if
+    /// so how many characters from the cursor through its `(`.
     ///
     /// dart scans `url(` and its contents as one token, so `//` inside it is
     /// part of the url rather than a comment (`url(//cdn/x.png)`,
-    /// `url(http://x/y)`). A VENDOR-PREFIXED spelling counts too — the shared
-    /// value parser treats `-c-url(` as a url ([`crate::parser::is_url_function`])
-    /// and emits it as a bare `url(…)` — while `my-url(//y)` is an ordinary
-    /// function, where the `//` really does start a comment.
-    fn at_url_func(&self) -> bool {
-        let mut it = "url(".chars();
-        let at_url = (0..4).all(|k| match (self.cs.get(self.i + k), it.next()) {
-            (Some(c), Some(w)) => c.eq_ignore_ascii_case(&w),
-            _ => false,
-        });
-        if !at_url {
-            return false;
+    /// `url(http://x/y)`). The name is matched the way the shared value parser
+    /// matches it ([`crate::parser::is_url_function`]): `url` itself, a
+    /// VENDOR-PREFIXED `-c-url`, and either spelled with CSS escapes
+    /// (`u\72l(`) — but not `my-url(`, an ordinary function where the `//`
+    /// really does start a comment.
+    ///
+    /// Cheap to call on every character: only a `u`/`U` or a `\` can be part
+    /// of such a name at a position this scanner stops on.
+    fn url_func_open(&self) -> Option<usize> {
+        if !matches!(self.cs.get(self.i), Some('u' | 'U' | '\\')) {
+            return None;
         }
-        // Walk back to the token's start: `url` itself starts one, otherwise
-        // the identifier ending here must be a vendor-prefixed `-x-url`.
+        // Walk back to the identifier's start (it may be a vendor prefix, or
+        // an escape that decoded to the character under the cursor).
         let mut start = self.i;
-        while start > 0 && is_ident_char(self.cs[start - 1]) {
+        while start > 0 && (is_ident_char(self.cs[start - 1]) || self.cs[start - 1] == '\\') {
             start -= 1;
         }
-        if start == self.i {
-            return true;
+        // Scan it forward, decoding escapes, up to the `(`.
+        let mut name = String::new();
+        let mut k = start;
+        while let Some(&c) = self.cs.get(k) {
+            if c == '\\' {
+                k += 1;
+                let mut hex = String::new();
+                while hex.len() < 6 && self.cs.get(k).is_some_and(|c| c.is_ascii_hexdigit()) {
+                    hex.push(self.cs[k]);
+                    k += 1;
+                }
+                if hex.is_empty() {
+                    if let Some(&c) = self.cs.get(k) {
+                        name.push(c);
+                        k += 1;
+                    }
+                } else {
+                    // One whitespace character may terminate a hex escape.
+                    if self.cs.get(k).is_some_and(|c| c.is_whitespace()) {
+                        k += 1;
+                    }
+                    name.push(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)?);
+                }
+                continue;
+            }
+            if is_ident_char(c) {
+                name.push(c);
+                k += 1;
+                continue;
+            }
+            break;
         }
-        let name: String = self.cs[start..self.i + 3].iter().collect();
-        crate::parser::is_url_function(&name)
+        // The `(` must follow the name, at or after the cursor.
+        if self.cs.get(k) != Some(&'(') || k < self.i {
+            return None;
+        }
+        crate::parser::is_url_function(&name).then(|| k + 1 - self.i)
     }
 
     /// Consume a `url(...)` token, contents included, through its closing `)`.
@@ -1248,9 +1298,9 @@ impl LineScanner {
     /// indented syntax allows `b: url(` to continue onto the next line — leaves
     /// its open paren unaccounted for, so a caller that tracks bracket depth
     /// must count it, or the logical line would end here.
-    fn skip_url(&mut self) -> bool {
-        for _ in 0..4 {
-            self.bump(); // `url(`
+    fn skip_url(&mut self, open: usize) -> bool {
+        for _ in 0..open {
+            self.bump(); // through the `(`
         }
         let mut depth = 1i32;
         while !self.done() {
@@ -1282,20 +1332,6 @@ impl LineScanner {
             }
         }
         false
-    }
-
-    fn skip_interp(&mut self) {
-        self.bump(); // '#'
-        self.bump(); // '{'
-        let mut depth = 1;
-        while self.i < self.cs.len() && depth > 0 {
-            match self.cs[self.i] {
-                '{' => depth += 1,
-                '}' => depth -= 1,
-                _ => {}
-            }
-            self.bump();
-        }
     }
 
     /// At `/*`: advance past the closing `*/` (or to end-of-line). Returns
@@ -1401,8 +1437,9 @@ fn strip_silent_comment(s: &str) -> String {
                 sc.skip_quoted();
             }
             // `url(…)` is one token: `//` inside it is part of the url.
-            'u' | 'U' if sc.at_url_func() => {
-                let _closed = sc.skip_url();
+            'u' | 'U' | '\\' if sc.url_func_open().is_some() => {
+                let open = sc.url_func_open().expect("just matched");
+                let _closed = sc.skip_url(open);
             }
             // A loud comment: skip to its close (it may not close on this line,
             // in which case the rest is comment body — leave it).
@@ -1461,8 +1498,9 @@ fn strip_statement_comment(s: &str) -> String {
                     sc.skip_quoted();
                 }
                 '#' if sc.peek(1) == Some('{') => sc.skip_interp(),
-                'u' | 'U' if sc.at_url_func() => {
-                    let _closed = sc.skip_url();
+                'u' | 'U' | '\\' if sc.url_func_open().is_some() => {
+                    let open = sc.url_func_open().expect("just matched");
+                    let _closed = sc.skip_url(open);
                 }
                 '/' if quoted && sc.peek(1) == Some('*') => {
                     sc.skip_loud_comment();
@@ -1594,8 +1632,9 @@ fn scan_state(s: &str) -> ScanState {
             // `//` inside `url(http://x/y)` nor its parens are structure —
             // unless the token never closes on this line (`b: url(` +
             // `    c)`), whose open paren still continues the logical line.
-            'u' | 'U' if sc.at_url_func() => {
-                if !sc.skip_url() {
+            'u' | 'U' | '\\' if sc.url_func_open().is_some() => {
+                let open = sc.url_func_open().expect("just matched");
+                if !sc.skip_url(open) {
                     // Unclosed on this line: its `(` is still open, and its
                     // contents continue verbatim onto the next line.
                     depth += 1;
@@ -1746,8 +1785,9 @@ fn find_top_level_semicolon(logical: &str) -> Option<usize> {
             // `//` inside `url(http://x/y)` nor its parens are structure. An
             // unclosed one runs to the end of the line, which is where this
             // scan would stop anyway.
-            'u' | 'U' if sc.at_url_func() => {
-                let _closed = sc.skip_url();
+            'u' | 'U' | '\\' if sc.url_func_open().is_some() => {
+                let open = sc.url_func_open().expect("just matched");
+                let _closed = sc.skip_url(open);
             }
             '/' if sc.peek(1) == Some('/') => break,
             '/' if sc.peek(1) == Some('*') => {
