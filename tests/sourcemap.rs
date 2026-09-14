@@ -218,6 +218,17 @@ use sasso::{
     ImporterResult, Options, OutputStyle, Syntax,
 };
 
+/// The canonical url `FsImporter` keys a resolved file by: the absolute path
+/// as it was reached, with the ASCII case folding `absolute_normalized` applies
+/// on Windows (dart's `Style.windows` canonicalizes each part, and that
+/// filesystem is case-insensitive).
+fn canon_key(p: std::path::PathBuf) -> String {
+    let s = p.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let s = s.to_lowercase();
+    s
+}
+
 /// Compile `src` with a source map and return `(css, decoded_mappings, raw_json)`.
 fn sasso_map(src: &str, options: &Options<'_>) -> (String, Vec<Mapping>, String) {
     let r = compile_with_source_map(src, options).expect("compile_with_source_map failed");
@@ -618,9 +629,7 @@ fn dart_differential_source_positions_agree() {
     if !dart_enabled() {
         return;
     }
-    // Single-line selectors keep sasso's selector-line approximation exact
-    // (sasso maps a selector to its brace line; for single-line rules that IS
-    // the selector line). Each case exercises a different construct.
+    // Each case exercises a different construct.
     let cases = [
         ".a {\n  color: red;\n  .b { width: 10px; }\n}\n",
         "a {\n  color: red;\n}\nb {\n  width: 10px;\n}\n",
@@ -754,17 +763,17 @@ fn plain_css_import_is_its_own_source() {
     let imp = sasso::FsImporter::new(Vec::new());
     let opts = Options::default().with_importer(&imp).with_url(&url);
     let r = compile_with_source_map(src, &opts).unwrap();
-    let lib = std::fs::canonicalize(dir.join("lib.css")).unwrap();
+    let lib = canon_key(dir.join("lib.css"));
     assert_eq!(
         r.source_map.sources,
-        [url.clone(), lib.to_string_lossy().into_owned()],
+        [url.clone(), lib],
         "the css file is a distinct source"
     );
     assert_eq!(r.source_map.mappings, "AAAA;EAAI;;;ACAJ;EACE;;;ADCF;EAAI");
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Sources are keyed by the file's CANONICAL URL — the resolved path for the
+/// Sources are keyed by the file's CANONICAL URL — the absolute path for the
 /// filesystem importer — not by its display basename, so two partials that
 /// share a basename are two distinct sources, each with its own text, and the
 /// mappings point at the right one (dart-sass: `../src/sub/_p.scss`,
@@ -785,12 +794,7 @@ fn imports_sharing_a_basename_are_distinct_sources() {
         .with_source_map_include_sources(true)
         .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
     let r = compile_with_source_map("@import \"sub/p\";\n@import \"other/p\";\n", &opts).expect("compile");
-    let canon = |rel: &str| {
-        std::fs::canonicalize(dir.join(rel))
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
-    };
+    let canon = |rel: &str| canon_key(dir.join(rel));
     // The entry emitted nothing of its own, so — as in dart — it is not a source.
     assert_eq!(
         r.source_map.sources,
@@ -814,4 +818,239 @@ fn empty_stylesheet_has_no_sources() {
     let r = compile_with_source_map("// nothing\n$x: 1;\n", &Options::default().with_url("e.scss"))
         .expect("compile");
     assert_eq!(r.source_map.sources, Vec::<String>::new());
+}
+
+/// dart-sass keeps a source-map span open while it writes a construct, and every
+/// newline inside adds an entry at the start of the new generated line pointing
+/// at the same source position (`SourceMapBuffer.writeCharCode`: "so that
+/// source map consumers can identify the line-spanning mappings"). A rule maps
+/// to its selector's FIRST line (`node.selector.span.start`), not its brace
+/// line, and a comment's span opens before its indentation (column 0). Every
+/// `mappings` here is byte-identical to dart-sass 1.103.1's for the same input.
+#[test]
+fn line_spanning_constructs_map_every_generated_line_like_dart() {
+    let cases = [
+        // A multi-line selector list: both lines map to the selector's start.
+        ("a,\nb {\n  color: red;\n}\n", "AAAA;AAAA;EAEE"),
+        // The brace on its own line: the rule still maps to the selector line.
+        ("a,\nb\n{\n  color: red;\n}\n", "AAAA;AAAA;EAGE"),
+        // A nested multi-line comment maps from column 0, each line.
+        (
+            ".x {\n  /* one\n     two */\n  color: red;\n}\n",
+            "AAAA;AACE;AAAA;EAEA",
+        ),
+        (
+            "/* top\n   two */\n.a {\n  color: red;\n}\n",
+            "AAAA;AAAA;AAEA;EACE",
+        ),
+        // A re-indented multi-line custom property value.
+        (".x {\n  --v:\n    1px\n    2px;\n}\n", "AAAA;EACE;AAAA;AAAA"),
+        // A trailing comment maps after the joining space.
+        (".x {\n  a: 1; /* trailing */\n}\n", "AAAA;EACE"),
+        // A comment nested two levels deep.
+        (
+            "@media screen {\n  .a {\n    /* c */\n    color: red;\n  }\n}\n",
+            "AAAA;EACE;AACE;IACA",
+        ),
+        // A nested rule's multi-line selector.
+        (".p {\n  a,\n  b {\n    color: red;\n  }\n}\n", "AACE;AAAA;EAEE"),
+        // A bubbled `@media` re-emits the multi-line selector, mapped to the
+        // original rule's selector.
+        (
+            "a,\nb {\n  @media screen {\n    color: red;\n  }\n}\n",
+            "AAEE;EAFF;AAAA;IAGI",
+        ),
+        // A block at-rule whose prelude spans lines maps to its `@` line, not
+        // its brace line — also when bubbled out of a rule.
+        (
+            "@media screen,\n  print {\n  a {\n    b: c;\n  }\n}\n",
+            "AAAA;EAEE;IACE",
+        ),
+        (
+            "@media screen,\n  print\n{\n  a {\n    b: c;\n  }\n}\n",
+            "AAAA;EAGE;IACE",
+        ),
+        (
+            "@supports (display: grid) and\n  (gap: 1px) {\n  a {\n    b: c;\n  }\n}\n",
+            "AAAA;EAEE;IACE",
+        ),
+        (
+            ".x {\n  @media screen,\n    print {\n    b: c;\n  }\n}\n",
+            "AACE;EADF;IAGI",
+        ),
+        // An interpolated at-rule NAME changes nothing: the rule carries its
+        // own span and maps exactly like the plain spelling.
+        ("@media screen {\n  a {\n    b: c;\n  }\n}\n", "AAAA;EACE;IACE"),
+        (
+            "@#{\"media\"} screen {\n  a {\n    b: c;\n  }\n}\n",
+            "AAAA;EACE;IACE",
+        ),
+        (
+            "$n: media;\n@#{$n} screen {\n  a {\n    b: c;\n  }\n}\n",
+            "AACA;EACE;IACE",
+        ),
+    ];
+    for (src, expected) in cases {
+        let r = compile_with_source_map(src, &Options::default().with_url("in.scss")).expect("compile");
+        assert_eq!(
+            r.source_map.mappings, expected,
+            "mappings for {src:?}\ncss:\n{}",
+            r.css
+        );
+    }
+}
+
+/// A passed-through plain-CSS `@import` maps to its URL token — `url(` or the
+/// opening quote — at the start of the emitted rule (dart `visitCssImport`);
+/// nested in a rule it maps after the indentation. Byte-identical to dart-sass
+/// 1.103.1.
+#[test]
+fn css_import_passthrough_maps_to_its_url() {
+    let cases = [
+        ("@import \"k.css\";\n", "AAAQ"),
+        ("@import url(k.css);\n", "AAAQ"),
+        ("@import   \"k.css\";\n", "AAAU"),
+        ("@import \"k.css\" screen;\n", "AAAQ"),
+        ("@import \"k.css\", \"m.css\";\n", "AAAQ;AAAS"),
+        (".x {\n  @import \"k.css\";\n}\n", "AAAA;EACU"),
+        // Hoisted above the rules that preceded it, and mapped from there.
+        (
+            ".x {\n  a: 1;\n}\n@import \"k.css\";\n.y {\n  b: 2;\n}\n",
+            "AAGQ;AAHR;EACE;;;AAGF;EACE",
+        ),
+    ];
+    for (src, expected) in cases {
+        let r = compile_with_source_map(src, &Options::default().with_url("in.scss")).expect("compile");
+        assert_eq!(
+            r.source_map.mappings, expected,
+            "mappings for {src:?}\ncss:\n{}",
+            r.css
+        );
+    }
+}
+
+/// A loaded plain-CSS file that uses CSS nesting keeps its rules nested, and
+/// each nested rule maps to its selector — every line of a multi-line list —
+/// with the declarations inside mapped too (dart-sass 1.103.1:
+/// `AAAA;EACE;AAAA;IAEE;;EAEF;IACE`, sources `[nest.css]`).
+#[test]
+fn nested_plain_css_rules_map_to_their_selectors() {
+    let dir = std::env::temp_dir().join(format!("sasso_sm_cssnest_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("nest.css"),
+        ".a {\n  > .b,\n  .c {\n    x: 1;\n  }\n  &:hover {\n    y: 2;\n  }\n}\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let opts = Options::default()
+        .with_importer(&imp)
+        .with_url(&url)
+        .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
+    let r = compile_with_source_map("@import \"nest\";\n", &opts).expect("compile");
+    assert_eq!(
+        r.css,
+        ".a {\n  > .b,\n  .c {\n    x: 1;\n  }\n  &:hover {\n    y: 2;\n  }\n}"
+    );
+    assert_eq!(r.source_map.sources.len(), 1, "{:?}", r.source_map.sources);
+    assert!(r.source_map.sources[0].ends_with("nest.css"));
+    assert_eq!(r.source_map.mappings, "AAAA;EACE;AAAA;IAEE;;EAEF;IACE");
+
+    // Compressed output maps the nested rule's CHILDREN too: dart visits them
+    // like any other rule's (`.a{.b{x:1;y:2}z:3}`, mappings
+    // `AAAA,GACE,GACE,IACA,IAEF`), and a nested block's `}` is its own
+    // separator — no `;` follows it.
+    std::fs::write(
+        dir.join("nest2.css"),
+        ".a {\n  .b {\n    x: 1;\n    y: 2;\n  }\n  z: 3;\n}\n",
+    )
+    .unwrap();
+    let opts = Options::default()
+        .with_importer(&imp)
+        .with_url(&url)
+        .with_style(OutputStyle::Compressed)
+        .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
+    let r = compile_with_source_map("@import \"nest2\";\n", &opts).expect("compile");
+    assert_eq!(r.css, ".a{.b{x:1;y:2}z:3}");
+    assert_eq!(r.source_map.mappings, "AAAA,GACE,GACE,IACA,IAEF");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A block at-rule nested inside an ALREADY-NESTED plain-CSS rule stays where
+/// it is (dart `_hasCssNesting`: once the user opts into CSS nesting, at-rules
+/// are not bubbled), and it maps to its `@` keyword like any other at-rule —
+/// in compressed output too, where its children are serialized through the
+/// same mapping-aware path. Both `mappings` below are dart-sass 1.103.1's.
+#[test]
+fn nested_plain_css_at_rules_map_to_their_keyword() {
+    let dir = std::env::temp_dir().join(format!("sasso_sm_cssnestat_{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let entry = dir.join("main.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let check = |css_src: &str, name: &str, css: &str, expanded: &str, compressed: &str| {
+        std::fs::write(dir.join(format!("{name}.css")), css_src).unwrap();
+        let src = format!("@import \"{name}\";\n");
+        let opts = Options::default()
+            .with_importer(&imp)
+            .with_url(&url)
+            .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
+        let r = compile_with_source_map(&src, &opts).expect("compile");
+        assert_eq!(r.css, css, "expanded css for {name}");
+        assert_eq!(r.source_map.mappings, expanded, "expanded mappings for {name}");
+        let opts = opts.with_style(OutputStyle::Compressed);
+        let r = compile_with_source_map(&src, &opts).expect("compile");
+        assert_eq!(
+            r.source_map.mappings, compressed,
+            "compressed mappings for {name}"
+        );
+    };
+    check(
+        ".a {\n  .b {\n    @media screen {\n      x: 1;\n    }\n    y: 2;\n  }\n}\n",
+        "nest3",
+        ".a {\n  .b {\n    @media screen {\n      x: 1;\n    }\n    y: 2;\n  }\n}",
+        "AAAA;EACE;IACE;MACE;;IAEF",
+        "AAAA,GACE,GACE,cACE,IAEF",
+    );
+    // A prelude written over several lines maps from its `@` line.
+    check(
+        ".a {\n  .b {\n    @media screen,\n    print {\n      x: 1;\n    }\n  }\n}\n",
+        "nest4",
+        ".a {\n  .b {\n    @media screen, print {\n      x: 1;\n    }\n  }\n}",
+        "AAAA;EACE;IACE;MAEE",
+        "AAAA,GACE,GACE,oBAEE",
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The filesystem importer's canonical URL is the absolute, lexically
+/// normalized path — dart `p.canonicalize` — with symlinks left unresolved, so
+/// a file reached through a linked directory (a pnpm `node_modules/<pkg>`
+/// link) is named by the link path in `sources`, as dart-sass 1.103.1 names it
+/// (`../link/_lib.scss`, never the `real/` target).
+#[cfg(unix)]
+#[test]
+fn sources_keep_a_symlinked_load_path_unresolved() {
+    let dir = std::env::temp_dir().join(format!("sasso_sm_symlink_{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(dir.join("real")).expect("mkdir");
+    std::fs::write(dir.join("real/_lib.scss"), "l {\n  m: 1;\n}\n").unwrap();
+    std::os::unix::fs::symlink("real", dir.join("link")).expect("symlink");
+    let entry = dir.join("sym.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(vec![dir.join("link")]);
+    let opts = Options::default()
+        .with_importer(&imp)
+        .with_url(&url)
+        .with_warn_handler(std::rc::Rc::new(|_: &sasso::WarnEvent<'_>| {}));
+    let r = compile_with_source_map("@import \"lib\";\n", &opts).expect("compile");
+    assert_eq!(
+        r.source_map.sources,
+        vec![dir.join("link/_lib.scss").to_string_lossy().into_owned()]
+    );
+    assert_eq!(r.source_map.mappings, "AAAA;EACE");
+    std::fs::remove_dir_all(&dir).ok();
 }

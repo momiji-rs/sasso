@@ -71,8 +71,9 @@ fn emit_inner(
 }
 
 /// Record a mapped token at the current end of `out` if collecting. Reads only
-/// `out.len()` and the SrcLines — never mutates the output.
-fn record(out: &str, lines: SrcLines, collector: &mut Option<SmCollector>) {
+/// `out.len()` and the SrcLines — never mutates the output. Returns whether a
+/// source position was known (so the caller may [`continue_span`] over it).
+fn record(out: &str, lines: SrcLines, collector: &mut Option<SmCollector>) -> bool {
     if let Some(c) = collector {
         // A bubbled-selector wrapper carries its mapping in the source-map-only
         // override fields (so `file`/`start` stay 0 and the trailing-comment
@@ -82,26 +83,40 @@ fn record(out: &str, lines: SrcLines, collector: &mut Option<SmCollector>) {
         } else {
             lines.file
         };
-        let line = if lines.map_line != 0 {
-            lines.map_line
-        } else {
-            lines.start
-        };
+        let line = lines.mapped_line();
         // `line` is the 1-based source line; 0 means "unknown" — skip it.
-        if line == 0 {
-            return;
+        if line == 0 || file == 0 {
+            return false;
         }
         c.record(out, file, line - 1, lines.start_col);
+        return true;
+    }
+    false
+}
+
+/// dart keeps a span OPEN while it writes a construct's text: a newline inside
+/// it maps the new generated line back to the same source position (see
+/// [`SmCollector::span_newlines`]). Call after appending the span's text that
+/// began at body offset `from`; `mapped` is what [`record`]/[`record_span`]
+/// returned for it, so an unmapped construct adds nothing.
+fn continue_span(out: &str, from: usize, mapped: bool, collector: &mut Option<SmCollector>) {
+    if let (true, Some(c)) = (mapped, collector) {
+        c.span_newlines(out, from);
     }
 }
 
 /// Record a mapped token from an already-0-based [`VarSpan`] (a declaration
 /// VALUE's span, resolved at eval time). `file == 0` means "unknown" and is
 /// skipped. Like [`record`], reads the output but never mutates it.
-fn record_span(out: &str, span: VarSpan, collector: &mut Option<SmCollector>) {
+fn record_span(out: &str, span: VarSpan, collector: &mut Option<SmCollector>) -> bool {
     if let Some(c) = collector {
+        if span.file == 0 {
+            return false;
+        }
         c.record(out, span.file, span.line, span.col);
+        return true;
     }
+    false
 }
 
 fn emit_expanded(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> String {
@@ -152,10 +167,13 @@ fn push_trailing_comment(out: &mut String, text: &str, lines: SrcLines, collecto
     }
     out.push(' ');
     // Source-map: the joined comment's `/*`.
-    record(out, lines, collector);
+    let mapped = record(out, lines, collector);
+    let from = out.len();
     out.push_str("/*");
     push_comment_text(out, text, "", lines.start_col as usize);
-    out.push_str("*/\n");
+    out.push_str("*/");
+    continue_span(out, from, mapped, collector);
+    out.push('\n');
 }
 
 /// Close an expanded block opened with `" {\n"`. When its only child was a
@@ -219,9 +237,13 @@ fn emit_node_expanded(
             // `Raw` selectors borrow directly.
             let selectors = selectors.to_strings();
             out.push_str(indent);
-            // Source-map: the selector list's first character.
-            record(out, *lines, collector);
+            // Source-map: the selector list's first character; a selector
+            // list written over several lines maps each line (dart
+            // `_for(node.selector, …)` spans the whole list).
+            let mapped = record(out, *lines, collector);
+            let from = out.len();
             write_selector_list(out, &selectors, linebreaks, indent);
+            continue_span(out, from, mapped, collector);
             out.push_str(" {\n");
             let mut inner = block_start(*lines);
             let mut joined = false;
@@ -238,16 +260,25 @@ fn emit_node_expanded(
                 *prev = *lines;
                 return true;
             }
+            // Source-map: dart opens the comment's span BEFORE writing its
+            // indentation (`visitCssComment` indents inside `_for(node, …)`),
+            // so a nested comment maps from column 0 of its line; each further
+            // line of a multi-line comment maps there too.
+            let mapped = record(out, *lines, collector);
+            let from = out.len();
             out.push_str(indent);
-            // Source-map: the comment's `/*`.
-            record(out, *lines, collector);
             out.push_str("/*");
             push_comment_text(out, text, indent, lines.start_col as usize);
-            out.push_str("*/\n");
+            out.push_str("*/");
+            continue_span(out, from, mapped, collector);
+            out.push('\n');
             *prev = *lines;
         }
-        OutNode::Raw(s) => {
+        OutNode::Raw(s, lines) => {
             out.push_str(indent);
+            // Source-map: a passed-through `@import` maps to its URL token
+            // (dart `visitCssImport`); other raw lines carry no position.
+            record(out, *lines, collector);
             out.push_str(s);
             out.push('\n');
             *prev = SrcLines::default();
@@ -296,14 +327,18 @@ fn emit_node_expanded(
             lines,
         } => {
             out.push_str(indent);
-            // Source-map: the at-rule's `@` keyword.
-            record(out, *lines, collector);
+            // Source-map: the at-rule's `@` keyword; the span covers the
+            // whole header (dart `_for(node, …)`), so a multi-line prelude
+            // maps each of its lines.
+            let mapped = record(out, *lines, collector);
+            let from = out.len();
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
                 out.push(' ');
                 out.push_str(prelude);
             }
+            continue_span(out, from, mapped, collector);
             *prev = *lines;
             if !has_block {
                 out.push_str(";\n");
@@ -375,24 +410,30 @@ fn emit_item_expanded(
                 *prev = *lines;
                 return true;
             }
+            // Source-map: column 0 of the line, before the indentation (see
+            // the `OutNode::Comment` arm), then every further line.
+            let mapped = record(out, *lines, collector);
+            let from = out.len();
             out.push_str(indent);
-            // Source-map: the comment's `/*`.
-            record(out, *lines, collector);
             out.push_str("/*");
             push_comment_text(out, text, indent, lines.start_col as usize);
-            out.push_str("*/\n");
+            out.push_str("*/");
+            continue_span(out, from, mapped, collector);
+            out.push('\n');
             *prev = *lines;
         }
         OutItem::ChildlessAtRule { name, prelude, lines } => {
             out.push_str(indent);
-            // Source-map: the at-rule's `@` keyword.
-            record(out, *lines, collector);
+            // Source-map: the at-rule's `@` keyword, spanning the header.
+            let mapped = record(out, *lines, collector);
+            let from = out.len();
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
                 out.push(' ');
                 out.push_str(prelude);
             }
+            continue_span(out, from, mapped, collector);
             out.push_str(";\n");
             *prev = *lines;
         }
@@ -400,9 +441,15 @@ fn emit_item_expanded(
             selectors,
             linebreaks,
             items,
+            lines,
         } => {
             out.push_str(indent);
+            // Source-map: the selector list's first character, and each
+            // further line of a multi-line list.
+            let mapped = record(out, *lines, collector);
+            let from = out.len();
             write_selector_list(out, selectors, linebreaks, indent);
+            continue_span(out, from, mapped, collector);
             out.push_str(" {\n");
             let mut inner = SrcLines::default();
             let mut joined = false;
@@ -412,14 +459,24 @@ fn emit_item_expanded(
             close_block(out, indent, items.len(), joined);
             *prev = SrcLines::default();
         }
-        OutItem::NestedAtRule { name, prelude, items } => {
+        OutItem::NestedAtRule {
+            name,
+            prelude,
+            items,
+            lines,
+        } => {
             out.push_str(indent);
+            // Source-map: the at-rule's `@` keyword, spanning the header (so a
+            // prelude written over several lines maps each of its lines).
+            let mapped = record(out, *lines, collector);
+            let from = out.len();
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
                 out.push(' ');
                 out.push_str(prelude);
             }
+            continue_span(out, from, mapped, collector);
             out.push_str(" {\n");
             let mut inner = SrcLines::default();
             let mut joined = false;
@@ -455,8 +512,10 @@ fn emit_decl_value_expanded(
         out.push(':');
         // dart wraps a custom property's value in `_for(node.value, …)`
         // (serialize.dart:379): the span opens at the value's own text, which
-        // begins immediately after the colon.
-        record_span(out, value_span, collector);
+        // begins immediately after the colon, and stays open over a
+        // re-indented multi-line value, mapping each of its lines.
+        let mapped = record_span(out, value_span, collector);
+        let from = out.len();
         match minimum_indentation(value) {
             MinIndent::SingleLine => out.push_str(value),
             MinIndent::Trailing => {
@@ -465,6 +524,7 @@ fn emit_decl_value_expanded(
             }
             MinIndent::Min(m) => write_with_indent(out, value, m.min(name_col), indent),
         }
+        continue_span(out, from, mapped, collector);
         return;
     }
     out.push_str(": ");
@@ -613,35 +673,6 @@ fn emit_compressed_body(out: &mut String, nodes: &[OutNode], collector: &mut Opt
     }
 }
 
-/// Serialize a plain-CSS nested rule for compressed output (a rare, untested
-/// path — plain CSS is normally emitted expanded).
-fn compressed_nested_rule(selectors: &[String], items: &[OutItem]) -> String {
-    let inner: Vec<String> = items
-        .iter()
-        .filter_map(|it| match it {
-            OutItem::Decl {
-                prop,
-                value,
-                important,
-                custom,
-                ..
-            } => {
-                let imp = if *important && !*custom { "!important" } else { "" };
-                let value = fold_value_compressed(value, *custom);
-                Some(format!("{prop}:{value}{imp}"))
-            }
-            OutItem::Comment(..) => None,
-            OutItem::ChildlessAtRule { name, prelude, .. } if prelude.is_empty() => Some(format!("@{name}")),
-            OutItem::ChildlessAtRule { name, prelude, .. } => Some(format!("@{name} {prelude}")),
-            OutItem::NestedRule { selectors, items, .. } => Some(compressed_nested_rule(selectors, items)),
-            OutItem::NestedAtRule { name, prelude, items } => {
-                Some(compressed_nested_at_rule(name, prelude, items))
-            }
-        })
-        .collect();
-    format!("{}{{{}}}", selectors.join(","), inner.join(";"))
-}
-
 /// dart `_writeFoldedValue` (compressed custom properties): each newline
 /// becomes a single space and the whitespace run following it is dropped.
 /// Non-custom values pass through untouched.
@@ -672,17 +703,104 @@ fn compressed_at_rule_omits_space(name: &str, prelude: &str) -> bool {
     matches!(name, "media" | "supports") && prelude.starts_with('(')
 }
 
-/// Serialize a plain-CSS nested at-rule for compressed output (rare path; see
-/// [`compressed_nested_rule`]).
-fn compressed_nested_at_rule(name: &str, prelude: &str, items: &[OutItem]) -> String {
-    let body = compressed_nested_rule(&[], items);
-    // `compressed_nested_rule` with no selectors renders `{...}`; reuse its body.
-    if prelude.is_empty() {
-        format!("@{name}{body}")
-    } else if compressed_at_rule_omits_space(name, prelude) {
-        format!("@{name}{prelude}{body}")
-    } else {
-        format!("@{name} {prelude}{body}")
+/// Write a rule block's items for compressed output, recording each item's
+/// source-map entry.
+///
+/// dart `_visitChildren` separates two children with `;` only when the first
+/// `_requiresSemicolon` — a childless node (a declaration, an `@import`). A
+/// nested rule or at-rule ends in `}`, which is its own separator, so no `;`
+/// follows it.
+fn write_items_compressed(out: &mut String, items: &[OutItem], collector: &mut Option<SmCollector>) {
+    let mut pending_semicolon = false;
+    for item in items {
+        // Loud comments are dropped in compressed output; they neither emit
+        // nor disturb the separator state.
+        if matches!(item, OutItem::Comment(..)) {
+            continue;
+        }
+        if pending_semicolon {
+            out.push(';');
+        }
+        pending_semicolon = write_item_compressed(out, item, collector);
+    }
+}
+
+/// Write one rule-block item for compressed output. Returns whether a `;` must
+/// separate it from whatever follows (see [`write_items_compressed`]).
+fn write_item_compressed(out: &mut String, item: &OutItem, collector: &mut Option<SmCollector>) -> bool {
+    match item {
+        OutItem::Decl {
+            prop,
+            value,
+            important,
+            custom,
+            lines,
+            value_span,
+        } => {
+            // A custom property emits its value verbatim (its leading
+            // whitespace is part of `value`) and never gains an `!important`.
+            let imp = if *important && !*custom { "!important" } else { "" };
+            // Source-map: the declaration property name.
+            record(out, *lines, collector);
+            out.push_str(prop);
+            out.push(':');
+            // Source-map: the value, which for a bare `$name` points at the
+            // variable's definition rather than at this line.
+            record_span(out, *value_span, collector);
+            out.push_str(&fold_value_compressed(value, *custom));
+            out.push_str(imp);
+            true
+        }
+        OutItem::Comment(..) => false,
+        OutItem::ChildlessAtRule { name, prelude, lines } => {
+            // Source-map: the at-rule's `@` keyword.
+            record(out, *lines, collector);
+            out.push('@');
+            out.push_str(name);
+            if !prelude.is_empty() {
+                out.push(' ');
+                out.push_str(prelude);
+            }
+            true
+        }
+        // A plain-CSS nested rule (a loaded `.css` file that uses CSS nesting):
+        // dart visits its children like any other rule's, so they carry their
+        // own mappings.
+        OutItem::NestedRule {
+            selectors,
+            items,
+            lines,
+            ..
+        } => {
+            // Source-map: the nested selector list's first character.
+            record(out, *lines, collector);
+            out.push_str(&selectors.join(","));
+            out.push('{');
+            write_items_compressed(out, items, collector);
+            out.push('}');
+            false
+        }
+        OutItem::NestedAtRule {
+            name,
+            prelude,
+            items,
+            lines,
+        } => {
+            // Source-map: the at-rule's `@` keyword.
+            record(out, *lines, collector);
+            out.push('@');
+            out.push_str(name);
+            if !prelude.is_empty() {
+                if !compressed_at_rule_omits_space(name, prelude) {
+                    out.push(' ');
+                }
+                out.push_str(prelude);
+            }
+            out.push('{');
+            write_items_compressed(out, items, collector);
+            out.push('}');
+            false
+        }
     }
 }
 
@@ -700,96 +818,26 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             lines,
             ..
         } => {
-            // Pre-render each visible item, keeping its source lines for the
-            // source map (`None` = no usable mapping, e.g. a plain-CSS nested
-            // rule whose leading token is a selector we don't map here). A
-            // declaration is split into `head` (`prop:`) and `tail` (the value
-            // plus any `!important`) so the value's own mapping can be recorded
-            // between them, matching dart's `forSpan` around the value alone.
-            struct Rendered {
-                head: String,
-                tail: String,
-                lines: Option<SrcLines>,
-                value_span: VarSpan,
-            }
-            let decls: Vec<Rendered> = items
-                .iter()
-                .filter_map(|it| match it {
-                    OutItem::Decl {
-                        prop,
-                        value,
-                        important,
-                        custom,
-                        lines,
-                        value_span,
-                    } => {
-                        // A custom property emits its value verbatim (its
-                        // leading whitespace is part of `value`) and never gains
-                        // an `!important` flag.
-                        let imp = if *important && !*custom { "!important" } else { "" };
-                        let value = fold_value_compressed(value, *custom);
-                        Some(Rendered {
-                            head: format!("{prop}:"),
-                            tail: format!("{value}{imp}"),
-                            lines: Some(*lines),
-                            value_span: *value_span,
-                        })
-                    }
-                    OutItem::Comment(..) => None,
-                    OutItem::ChildlessAtRule { name, prelude, lines } => {
-                        let s = if prelude.is_empty() {
-                            format!("@{name}")
-                        } else {
-                            format!("@{name} {prelude}")
-                        };
-                        Some(Rendered {
-                            head: s,
-                            tail: String::new(),
-                            lines: Some(*lines),
-                            value_span: VarSpan::default(),
-                        })
-                    }
-                    OutItem::NestedRule { selectors, items, .. } => Some(Rendered {
-                        head: compressed_nested_rule(selectors, items),
-                        tail: String::new(),
-                        lines: None,
-                        value_span: VarSpan::default(),
-                    }),
-                    OutItem::NestedAtRule { name, prelude, items } => Some(Rendered {
-                        head: compressed_nested_at_rule(name, prelude, items),
-                        tail: String::new(),
-                        lines: None,
-                        value_span: VarSpan::default(),
-                    }),
-                })
-                .collect();
-            if decls.is_empty() {
+            // A rule whose every item is a comment produces nothing in
+            // compressed output, so it is not emitted at all.
+            if items.iter().all(|it| matches!(it, OutItem::Comment(..))) {
                 return;
             }
             // Source-map: the selector list's first character.
             record(out, *lines, collector);
             out.push_str(&selectors.to_strings().join(","));
             out.push('{');
-            for (i, d) in decls.iter().enumerate() {
-                if i > 0 {
-                    out.push(';');
-                }
-                if let Some(l) = d.lines {
-                    // Source-map: the item's leading token (property name / `@`).
-                    record(out, l, collector);
-                }
-                out.push_str(&d.head);
-                // Source-map: the value, which for a bare `$name` points at the
-                // variable's definition rather than at this line.
-                record_span(out, d.value_span, collector);
-                out.push_str(&d.tail);
-            }
+            write_items_compressed(out, items, collector);
             out.push('}');
         }
         // Loud comments are dropped in compressed output (the slice does
         // not yet special-case `/*!` important comments).
         OutNode::Comment(..) => {}
-        OutNode::Raw(s) => out.push_str(s),
+        OutNode::Raw(s, lines) => {
+            // Source-map: a passed-through `@import` maps to its URL token.
+            record(out, *lines, collector);
+            out.push_str(s);
+        }
         OutNode::Blank => {}
         // Control-only hoist markers never reach the output.
         OutNode::GroupEnd | OutNode::MediaHoist | OutNode::AtRootHoist { .. } | OutNode::AtRootPackTight => {}

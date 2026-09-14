@@ -73,11 +73,11 @@ impl<'a> Evaluator<'a> {
             match &item.value {
                 CssCustomValue::Raw(tpl) => {
                     let raw = self.eval_template(tpl)?;
-                    out_body.push(OutNode::Raw(format!("{prop}:{raw};")));
+                    out_body.push(OutNode::Raw(format!("{prop}:{raw};"), SrcLines::default()));
                 }
                 CssCustomValue::Script(expr) => {
                     let value = self.eval_expr(expr)?.to_css(self.compressed());
-                    out_body.push(OutNode::Raw(format!("{prop}: {value};")));
+                    out_body.push(OutNode::Raw(format!("{prop}: {value};"), SrcLines::default()));
                 }
                 // A nested property set on an interpolated property: each
                 // child emits as `property-suffix: value`.
@@ -85,7 +85,10 @@ impl<'a> Evaluator<'a> {
                     for (suffix, expr) in children {
                         let sfx = self.eval_template(suffix)?;
                         let value = self.eval_expr(expr)?.to_css(self.compressed());
-                        out_body.push(OutNode::Raw(format!("{prop}-{sfx}: {value};")));
+                        out_body.push(OutNode::Raw(
+                            format!("{prop}-{sfx}: {value};"),
+                            SrcLines::default(),
+                        ));
                     }
                 }
             }
@@ -141,7 +144,7 @@ impl<'a> Evaluator<'a> {
                     // back to the ORIGINAL rule's span (dart parity). No CSS effect.
                     lines: SrcLines {
                         map_file: self.cur_rule_lines.file,
-                        map_line: self.cur_rule_lines.start,
+                        map_line: self.cur_rule_lines.mapped_line(),
                         start_col: self.cur_rule_lines.start_col,
                         ..SrcLines::default()
                     },
@@ -209,6 +212,7 @@ impl<'a> Evaluator<'a> {
                 name: "media".to_string(),
                 prelude,
                 items: at_body_to_items(out_body),
+                lines,
             });
             return Ok(());
         }

@@ -5,6 +5,23 @@
 
 use super::*;
 
+/// Source-map: stamp the `@` keyword's position onto the lines-carrying
+/// at-rule variants — its 0-based column, and its line, which is not the brace
+/// line when the prelude spans several lines (dart maps the rule's span
+/// start). Purely additive: `start_col`/`map_line` are read only by source-map
+/// generation, never by the serializer.
+fn stamp_at_keyword(stmt: &mut Stmt, pos: Pos) {
+    if let Stmt::AtRule { lines, .. }
+    | Stmt::InterpAtRule { lines, .. }
+    | Stmt::Media { lines, .. }
+    | Stmt::Supports { lines, .. }
+    | Stmt::Keyframes { lines, .. } = stmt
+    {
+        lines.start_col = (pos.col as u32).saturating_sub(1);
+        lines.map_line = pos.line as u32;
+    }
+}
+
 impl Parser {
     pub(super) fn parse_at_rule(&mut self) -> Result<Stmt, Error> {
         let pos = self.sc.position();
@@ -15,11 +32,15 @@ impl Parser {
                         // An interpolated NAME makes this a generic (unknown) at-rule with no
                         // Sass parse-time behavior (`@#{"media"} …`).
         if self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{') {
-            return self.parse_interp_at_rule(Vec::new());
+            let mut stmt = self.parse_interp_at_rule(Vec::new())?;
+            stamp_at_keyword(&mut stmt, pos);
+            return Ok(stmt);
         }
         let name = self.read_ident_name()?;
         if self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{') {
-            return self.parse_interp_at_rule(vec![TplPiece::Lit(name)]);
+            let mut stmt = self.parse_interp_at_rule(vec![TplPiece::Lit(name)])?;
+            stamp_at_keyword(&mut stmt, pos);
+            return Ok(stmt);
         }
         // In plain CSS the Sass control/definition at-rules are rejected; only
         // genuine CSS at-rules (`@media`, `@supports`, `@font-face`,
@@ -142,18 +163,8 @@ impl Parser {
             }
             _ => self.parse_generic_at_rule(name),
         };
-        // Source-map: stamp the `@` keyword's 0-based column onto the lines-
-        // carrying at-rule variants. Purely additive — `start_col` is read only
-        // by source-map generation, never by the serializer.
         let mut stmt = stmt?;
-        let at_col = (pos.col as u32).saturating_sub(1);
-        if let Stmt::AtRule { lines, .. }
-        | Stmt::Media { lines, .. }
-        | Stmt::Supports { lines, .. }
-        | Stmt::Keyframes { lines, .. } = &mut stmt
-        {
-            lines.start_col = at_col;
-        }
+        stamp_at_keyword(&mut stmt, pos);
         Ok(stmt)
     }
 
@@ -433,10 +444,15 @@ impl Parser {
     fn parse_import_arg(&mut self, pos: Pos) -> Result<ImportArg, Error> {
         // `url(...)` form — always a plain CSS import.
         if self.peek_is_url_func() {
+            let url_pos = self.sc.position();
             let url = self.parse_import_url_func()?;
             self.skip_ws_trivia();
             let modifiers = self.parse_import_modifiers()?;
-            return Ok(ImportArg::Css { url, modifiers });
+            return Ok(ImportArg::Css {
+                url,
+                modifiers,
+                pos: url_pos,
+            });
         }
         // Quoted-string form.
         match self.sc.peek() {
@@ -469,6 +485,7 @@ impl Parser {
                     Ok(ImportArg::Css {
                         url: vec![TplPiece::Lit(raw_url)],
                         modifiers,
+                        pos: url_pos,
                     })
                 }
             }
@@ -1553,13 +1570,32 @@ impl Parser {
         self.skip_ws_inline();
         let prelude = trim_prelude(self.parse_template_mode(&['{', ';', '}'], CommentMode::UnknownPrelude)?);
         self.skip_ws_inline();
-        let body = if self.sc.peek() == Some('{') {
-            Some(self.parse_braced_body()?)
+        let (body, lines) = if self.sc.peek() == Some('{') {
+            let (body, lines) = self.parse_braced_body_lines()?;
+            (Some(body), lines)
         } else {
             self.sc.eat(';');
-            None
+            // The `;` form: the statement starts and ends on the `;` line.
+            let line = self.sc.position().line as u32;
+            (
+                None,
+                SrcLines {
+                    file: 0,
+                    start: line,
+                    end: line,
+                    col: 0,
+                    start_col: 0,
+                    map_file: 0,
+                    map_line: 0,
+                },
+            )
         };
-        Ok(Stmt::InterpAtRule { name, prelude, body })
+        Ok(Stmt::InterpAtRule {
+            name,
+            prelude,
+            body,
+            lines,
+        })
     }
 
     fn parse_generic_at_rule(&mut self, name: String) -> Result<Stmt, Error> {

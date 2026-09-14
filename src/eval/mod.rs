@@ -255,8 +255,11 @@ pub(crate) enum OutNode {
         extend_base: usize,
     },
     Comment(String, SrcLines),
-    /// A verbatim line (e.g. a passed-through CSS `@import`).
-    Raw(String),
+    /// A verbatim line (e.g. a passed-through CSS `@import`). The `SrcLines`
+    /// carry a source-map position in the map-override fields only — a
+    /// passed-through `@import` maps to its URL token, as in dart's
+    /// `visitCssImport` — and take no part in the trailing-comment rule.
+    Raw(String, SrcLines),
     /// A blank-line separator between top-level groups (expanded only).
     Blank,
     /// An at-rule: `@name prelude { body }` (when `has_block`) or
@@ -425,6 +428,9 @@ pub(crate) enum OutItem {
         /// (`e,\n  f {`), like a top-level rule's (`OutNode::Rule`).
         linebreaks: Vec<bool>,
         items: Vec<OutItem>,
+        /// Source-map position of the selector's first character (dart maps
+        /// `node.selector.span.start`), in the map-override fields only.
+        lines: SrcLines,
     },
     /// A block at-rule (`@media`, `@supports`, unknown) nested inside an
     /// already-nested plain-CSS rule, kept in place instead of bubbled —
@@ -434,6 +440,9 @@ pub(crate) enum OutItem {
         name: String,
         prelude: String,
         items: Vec<OutItem>,
+        /// Source lines of the at-rule, as for [`OutNode::AtRule`]: its `@`
+        /// keyword's line and column drive the source-map entry.
+        lines: SrcLines,
     },
 }
 
@@ -567,16 +576,22 @@ impl Sink<'_> {
                     selectors,
                     linebreaks,
                     items,
+                    lines,
                 } => body.push(OutNode::Rule {
                     selectors: RuleSelectors::Raw(selectors),
                     linebreaks,
                     items,
-                    lines: SrcLines::default(),
+                    lines,
                     extend_base: usize::MAX,
                 }),
                 // Likewise a plain-CSS nested at-rule becomes a top-level one,
                 // its items wrapped as bare at-rule children.
-                OutItem::NestedAtRule { name, prelude, items } => body.push(OutNode::AtRule {
+                OutItem::NestedAtRule {
+                    name,
+                    prelude,
+                    items,
+                    lines,
+                } => body.push(OutNode::AtRule {
                     name,
                     prelude,
                     body: items
@@ -602,27 +617,33 @@ impl Sink<'_> {
                                 selectors,
                                 linebreaks,
                                 items,
+                                lines,
                             } => OutNode::Rule {
                                 selectors: RuleSelectors::Raw(selectors),
                                 linebreaks,
                                 items,
-                                lines: SrcLines::default(),
+                                lines,
                                 extend_base: usize::MAX,
                             },
                             OutItem::ChildlessAtRule { name, prelude, lines } => {
                                 OutNode::childless_at_rule(name, prelude, lines)
                             }
-                            OutItem::NestedAtRule { name, prelude, items } => OutNode::AtRule {
+                            OutItem::NestedAtRule {
+                                name,
+                                prelude,
+                                items,
+                                lines,
+                            } => OutNode::AtRule {
                                 name,
                                 prelude,
                                 body: vec![OutNode::plain_rule(Vec::new(), items, SrcLines::default())],
                                 has_block: true,
-                                lines: SrcLines::default(),
+                                lines,
                             },
                         })
                         .collect(),
                     has_block: true,
-                    lines: SrcLines::default(),
+                    lines,
                 }),
             },
             Sink::Top(_) => {}
@@ -1458,6 +1479,20 @@ impl<'a> Evaluator<'a> {
         lines
     }
 
+    /// Source-map-only position for a construct that takes no part in the
+    /// trailing-comment rule: `file`/`start`/`end` stay 0 and only the map
+    /// override fields are set. A passed-through plain-CSS `@import` maps to
+    /// its URL token (dart `visitCssImport` spans `node.url`); a nested
+    /// plain-CSS rule maps to its selector's first character.
+    fn map_only_lines(&mut self, pos: Pos) -> SrcLines {
+        SrcLines {
+            map_file: self.intern_current_file(),
+            map_line: pos.line as u32,
+            start_col: (pos.col as u32).saturating_sub(1),
+            ..SrcLines::default()
+        }
+    }
+
     /// The interned diagnostic/source-map file id of the file being evaluated,
     /// assigning one on first use. Interned once per file entry (every
     /// `current_url` assignment resets `current_url_stamp`), so the steady-state
@@ -2230,23 +2265,25 @@ impl<'a> Evaluator<'a> {
                     self.eval_at_rule(name, prelude, body.as_deref(), lines, parents, sink)?;
                     self.last_child_invisible = false;
                 }
-                Stmt::InterpAtRule { name, prelude, body } => {
+                Stmt::InterpAtRule {
+                    name,
+                    prelude,
+                    body,
+                    lines,
+                } => {
                     // The name resolves at eval time; `@keyframes` is the one
                     // rule whose special handling happens here (frame stops).
                     let resolved = self.eval_template(name)?;
+                    // An interpolated name changes nothing about the RULE: it
+                    // carries its own span, so it maps like any other at-rule
+                    // and joins a trailing comment the same way (dart parity).
+                    let stamped = self.stamp(*lines);
                     if is_keyframes_name(&resolved) && body.is_some() {
                         if let Some(b) = body {
-                            self.eval_keyframes(&resolved, prelude, b, SrcLines::default(), sink)?;
+                            self.eval_keyframes(&resolved, prelude, b, stamped, sink)?;
                         }
                     } else {
-                        self.eval_at_rule(
-                            &resolved,
-                            prelude,
-                            body.as_deref(),
-                            SrcLines::default(),
-                            parents,
-                            sink,
-                        )?;
+                        self.eval_at_rule(&resolved, prelude, body.as_deref(), stamped, parents, sink)?;
                     }
                     self.last_child_invisible = false;
                 }
@@ -2426,11 +2463,13 @@ impl<'a> Evaluator<'a> {
             start: rule.brace_line,
             end: rule.end_line,
             col: 0,
-            // Source-map: the selector's 0-based start column (its first
-            // character), mapped on the rule's first output line.
+            // Source-map: the selector's first character — its own line and
+            // 0-based column, which differ from the brace line when the
+            // selector list spans several lines (dart maps
+            // `node.selector.span.start`).
             start_col: (rule.selector_pos.col as u32).saturating_sub(1),
             map_file: 0,
-            map_line: 0,
+            map_line: rule.selector_pos.line as u32,
         });
         // A `@media`/`@at-root` nested in this rule's body bubbles a copy of the
         // selector out; that copy maps back to THIS selector's source position
@@ -2660,8 +2699,10 @@ impl<'a> Evaluator<'a> {
         let importer = self.options.importer;
         for arg in args {
             match arg {
-                ImportArg::Css { url, modifiers } => {
+                ImportArg::Css { url, modifiers, pos } => {
                     let text = self.serialize_css_import(url, modifiers)?;
+                    // Source-map: the rule maps to its URL token.
+                    let lines = self.map_only_lines(*pos);
                     // Inside a style rule the plain-CSS @import stays in the
                     // rule's block (dart keeps it nested:
                     // `foo { @import url(...); }`); at the top level it is a
@@ -2670,15 +2711,16 @@ impl<'a> Evaluator<'a> {
                         sink.push_item(OutItem::ChildlessAtRule {
                             name: "import".to_string(),
                             prelude: text,
-                            lines: SrcLines::default(),
+                            lines,
                         });
                     } else {
-                        sink.push_at_rule(OutNode::Raw(format!("@import {text};")));
+                        sink.push_at_rule(OutNode::Raw(format!("@import {text};"), lines));
                     }
                 }
                 ImportArg::Sass { path, pos, length } => {
                     if is_css_import(path) {
-                        sink.push_at_rule(OutNode::Raw(format!("@import \"{path}\";")));
+                        let lines = self.map_only_lines(*pos);
+                        sink.push_at_rule(OutNode::Raw(format!("@import \"{path}\";"), lines));
                         continue;
                     }
                     // (The `[import]` deprecation for this rule was emitted
@@ -3180,6 +3222,7 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
                         selectors,
                         linebreaks,
                         items,
+                        lines,
                     });
                 } else {
                     rest.push(OutNode::Rule {
@@ -3879,7 +3922,7 @@ fn is_css_import(arg: &str) -> bool {
 /// import or no rules precede any import.
 fn hoist_css_imports(out: &mut Vec<OutNode>) {
     fn is_import(n: &OutNode) -> bool {
-        matches!(n, OutNode::Raw(s) if s.starts_with("@import"))
+        matches!(n, OutNode::Raw(s, _) if s.starts_with("@import"))
     }
     // Hoisting only kicks in when a CSS `@import` follows a *style-producing*
     // node (a rule/at-rule/declaration). Imports interleaved only with comments
@@ -4166,7 +4209,7 @@ fn push_group(out: &mut Vec<OutNode>, mut group: Vec<OutNode>) {
         // module wrapper's last child can be) pack tight; only a group-end marker
         // forces the separator.
         Some(
-            OutNode::Raw(_) | OutNode::MediaHoist | OutNode::AtRootHoist { .. } | OutNode::AtRootPackTight,
+            OutNode::Raw(..) | OutNode::MediaHoist | OutNode::AtRootHoist { .. } | OutNode::AtRootPackTight,
         ) => true,
         _ => false,
     };
@@ -4640,11 +4683,13 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
                 selectors,
                 linebreaks,
                 items: ri,
+                lines,
                 ..
             } => items.push(OutItem::NestedRule {
                 selectors: selectors.into_strings(),
                 linebreaks,
                 items: ri,
+                lines,
             }),
             OutNode::AtRule {
                 name,
@@ -4658,6 +4703,7 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
                         name,
                         prelude,
                         items: at_body_to_items(body),
+                        lines,
                     });
                 } else {
                     items.push(OutItem::ChildlessAtRule { name, prelude, lines });
@@ -4666,7 +4712,7 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
             OutNode::ModuleScope { nodes, .. } => items.extend(at_body_to_items(nodes)),
             // Raw passthroughs, blanks, and the control-only hoist markers carry
             // no rule-block item.
-            OutNode::Raw(_)
+            OutNode::Raw(..)
             | OutNode::Blank
             | OutNode::GroupEnd
             | OutNode::MediaHoist

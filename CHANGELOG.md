@@ -126,6 +126,44 @@ Conformance is tracked separately as a ratchet against the official
   trace. A file outside the tree whose relative spelling would be longer than
   its absolute path is shown absolute (dart's `prettyUri`); the entry stays
   as given. `WarnEvent::url` carries the same spelling.
+- **`FsImporter` canonical URLs leave symlinks unresolved, as dart-sass
+  does.** The canonical URL was the file's `realpath`, so a stylesheet reached
+  through a symlinked directory — a pnpm `node_modules/<pkg>` link — was named
+  by its `.pnpm` store path in a source map's `sources`, in `WarnEvent::path`
+  and in `DependencySet`, and two links to one file were one module. dart's
+  `p.canonicalize` is the absolute, lexically normalized path with links kept;
+  sasso now matches (10 of 148 Lichess bundles had `sources` differing from
+  dart's for this alone). Library note: imported files now appear as the
+  absolute path they were reached by, not their realpath.
+- **Compressed output no longer writes a stray `;` after a nested rule, and
+  maps that rule's children.** A loaded `.css` file that uses CSS nesting
+  rendered its nested blocks into one pre-built string, so `.a { .b { x: 1 } z:
+  3 }` came out as `.a{.b{x:1};z:3}` — dart writes `.a{.b{x:1}z:3}`, a block's
+  `}` being its own separator (`_requiresSemicolon`) — and no declaration
+  inside the nested block carried a source-map entry. The block's items now go
+  through the mapping-aware serializer. A block at-rule nested inside such a
+  rule — which dart keeps in place rather than bubbling, once CSS nesting is in
+  play — carries its own position too, so it maps to its `@` keyword in both
+  output styles.
+- **An at-rule whose name is interpolated (`@#{"media"} screen`) carries its
+  source span**, so it maps like the plain spelling and joins a trailing
+  comment the same way (`@#{"media"} screen { /* t */` used to break the
+  comment onto its own line).
+- **Source maps: every generated line of a line-spanning construct maps, a
+  comment maps from column 0, a rule maps to its selector's line, and
+  passed-through `@import`s and nested plain-CSS rules map at all.** dart-sass
+  keeps a mapping span open while it writes a construct, so each newline
+  inside a multi-line selector list, comment, at-rule prelude or re-indented
+  custom-property value adds an entry at the start of the new line that points
+  back at the construct; sasso mapped only the first line. A rule mapped to its
+  opening-brace line — a selector list written over several lines maps to its
+  first line (`node.selector.span.start`) — and so did a block at-rule whose
+  prelude spans lines, which maps to its `@` line. A nested comment mapped after its
+  indentation where dart opens the span before indenting. A passed-through
+  plain-CSS `@import` (mapped to its URL token) and a nested rule of a loaded
+  `.css` file that uses CSS nesting (mapped to its selector) had no mapping.
+  Verified byte-for-byte against dart-sass 1.103.1; on the Lichess corpus,
+  bundles whose `mappings` are identical to dart's went from 2 to 148 of 148.
 - **Blank lines between top-level groups survive dropped placeholders.** An
   unextended placeholder rule with a declaration and an empty nested rule
   (`%video { width: 100%; > * {} }`) produced two invisible nodes, and

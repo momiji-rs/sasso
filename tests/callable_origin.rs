@@ -24,11 +24,19 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+/// The canonical url `FsImporter` keys a resolved file by: the absolute path
+/// as it was reached, with the ASCII case folding `absolute_normalized` applies
+/// on Windows (dart's `Style.windows` canonicalizes each part, and that
+/// filesystem is case-insensitive).
+fn canon_key(p: std::path::PathBuf) -> String {
+    let s = p.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let s = s.to_lowercase();
+    s
+}
+
 fn canon(dir: &std::path::Path, rel: &str) -> String {
-    std::fs::canonicalize(dir.join(rel))
-        .unwrap()
-        .to_string_lossy()
-        .into_owned()
+    canon_key(dir.join(rel))
 }
 
 #[test]

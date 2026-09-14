@@ -254,6 +254,37 @@ impl SmCollector {
         });
     }
 
+    /// dart `SourceMapBuffer.writeCharCode` (util/source_map_buffer.dart):
+    /// while a span is open, every newline written adds an entry at the start
+    /// of the new generated line that points at the LAST entry's source — "so
+    /// that source map consumers can identify the line-spanning mappings". A
+    /// multi-line selector list, a multi-line comment or a re-indented custom
+    /// property value thus maps every one of its output lines back to the
+    /// construct's start. `from` is the body offset where the span's text
+    /// began (just after its [`SmCollector::record`]); the caller has already
+    /// appended the whole span. No-op with nothing recorded yet.
+    pub(crate) fn span_newlines(&mut self, body: &str, from: usize) {
+        let Some(last) = self.entries.last().copied() else {
+            return;
+        };
+        let mut added = false;
+        for (i, b) in body[from..].bytes().enumerate() {
+            if b == b'\n' {
+                self.entries.push(RawEntry {
+                    byte_off: (from + i + 1) as u32,
+                    ..last
+                });
+                added = true;
+            }
+        }
+        if added {
+            // The redundancy rule now compares against the continuation
+            // entry: the same source line on the new generated line.
+            let gen_line = self.gen_line_at(body);
+            self.last = Some((last.src_line, gen_line));
+        }
+    }
+
     /// The generated line the end of `body` falls on. Compressed output is a
     /// single line; expanded output advances by the newlines appended since the
     /// last call (the serializer only ever appends, so the walk is monotonic).
