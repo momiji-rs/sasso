@@ -77,6 +77,15 @@ fn closed_blocks_and_comments_do_not_shift_later_lines() {
         ("/* one\n   two\n   three */\n.d\n  color: $u\n", (5, 10)),
         // The simplest shape of all.
         (".a\n  color: red\n.d\n  color: $u\n", (4, 10)),
+        // A silent comment emits nothing, but still occupies its line —
+        // including when it is a block's only child, or its last.
+        ("a\n  // c\n.b\n  x: $u\n", (4, 6)),
+        ("a\n  // c\n\n.b\n  x: $u\n", (5, 6)),
+        ("a\n  b: c\n  // x\n.d\n  y: $u\n", (5, 6)),
+        ("a\n  // x\n  b: c\n.d\n  y: $u\n", (5, 6)),
+        ("a\n  // x\n  // y\n.d\n  z: $u\n", (5, 6)),
+        ("a\n  b: c\n    // deep\n.d\n  y: $u\n", (5, 6)),
+        ("// top\na\n  b: c\n.d\n  y: $u\n", (5, 6)),
     ];
     for (src, (line, col)) in cases {
         let e = sass(src, "in.sass").expect_err("expected an error");
@@ -155,6 +164,11 @@ fn an_unquoted_import_url_runs_to_the_comma() {
     // carets it at 1:9; sasso's missing-import error carries no span yet —
     // a general gap, in `.scss` as much as here.)
     assert!(e.message.contains("foo screen"), "{}", e.message);
+    // An explicit `;` ends the url, so a trailing silent comment after it is
+    // a comment — dart imports `foo` from `@import foo; // t`.
+    std::fs::write(&entry, "@import foo; // t\n").unwrap();
+    let css = compile("@import foo; // t\n", &opts).expect("compile");
+    assert_eq!(css, "l {\n  m: 1;\n}");
     // Two comma-separated urls are two imports.
     std::fs::write(dir.join("_bar.sass"), "n\n  o: 2\n").unwrap();
     let src = "@import foo, bar\n";
