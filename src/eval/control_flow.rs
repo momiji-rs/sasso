@@ -574,7 +574,6 @@ impl<'a> Evaluator<'a> {
     /// Execute an `@include`: bind args into a call frame, make the content
     /// block available, and run the mixin body into the current sink.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn exec_include(
         &mut self,
         name: &str,

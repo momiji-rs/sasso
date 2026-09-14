@@ -2759,6 +2759,11 @@ impl Parser {
         } else {
             (Vec::new(), name_length)
         };
+        // How much of the statement is WRITTEN in the source: the call, plus a
+        // `using (…)` clause if there is one. Whitespace and braces after that
+        // can be the indented front end's own (it wraps a child block to hand
+        // the parser SCSS), so they are not a source span to point at.
+        let mut source_length = length;
         self.skip_ws_inline();
         // An optional `using (params)` clause names the content block's
         // parameters, bound from the `@content(args)` call.
@@ -2773,7 +2778,9 @@ impl Parser {
             if self.sc.peek() != Some('(') {
                 return Err(Error::at("expected \"(\".", self.sc.position()));
             }
-            Some(Rc::new(self.parse_param_list()?))
+            let params = self.parse_param_list()?;
+            source_length = self.sc.byte_len_from(start_mark);
+            Some(Rc::new(params))
         } else {
             self.sc.reset(using_mark);
             None
@@ -2788,12 +2795,12 @@ impl Parser {
             let body = self.parse_braced_body()?;
             // In the indented syntax the braces around a child block are
             // SYNTHETIC — the front end wrote them into the reconstruction —
-            // so the text they enclose is not a source span to point at. dart
-            // spans the children there; matching that needs the front end to
-            // map a reconstruction span back, so the call's own span is used
-            // until it can.
+            // so the text they enclose is not a source span to point at, and
+            // the span stops where the WRITTEN text does. dart spans the
+            // children; matching that needs the front end to map a
+            // reconstruction span back to source.
             full_length = if self.indented {
-                length
+                source_length
             } else {
                 self.sc.byte_len_from(start_mark)
             };
