@@ -405,9 +405,15 @@ pub(crate) fn decode_ident(cs: &[char], mut i: usize) -> (String, usize) {
                     None => break,
                 }
             } else {
-                // One whitespace character may terminate a hex escape.
-                if cs.get(i).is_some_and(|c| c.is_whitespace()) {
+                // One whitespace character may terminate a hex escape — dart's
+                // `isWhitespace`, which is space, tab and the three CSS
+                // newlines, NOT every Unicode space (a vertical tab ends the
+                // identifier instead, as the parser reads it).
+                if matches!(cs.get(i), Some(' ' | '\t' | '\n' | '\r' | '\u{c}')) {
                     i += 1;
+                    if cs.get(i - 1) == Some(&'\r') && cs.get(i) == Some(&'\n') {
+                        i += 1;
+                    }
                 }
                 // A surrogate or out-of-range code point becomes the
                 // replacement character, as `read_escape_char` resolves it —
@@ -1003,16 +1009,11 @@ impl Parser {
                     }
                 }
                 // A single trailing whitespace character terminates the escape
-                // and is consumed.
-                match self.sc.peek() {
-                    Some(' ' | '\t' | '\n' | '\u{c}') => {
-                        self.sc.bump();
-                    }
-                    Some('\r') => {
-                        self.sc.bump();
-                        self.sc.eat('\n');
-                    }
-                    _ => {}
+                // and is consumed — one CHARACTER, so the `\n` of a CRLF is
+                // left behind and still separates tokens: dart reads
+                // `b: \61` + CRLF + `b` as the two identifiers `a b`.
+                if matches!(self.sc.peek(), Some(' ' | '\t' | '\n' | '\r' | '\u{c}')) {
+                    self.sc.bump();
                 }
                 if value > 0x10_FFFF {
                     return Err(Error::at("Invalid Unicode code point.", pos));
@@ -1099,9 +1100,15 @@ impl Parser {
                     _ => break,
                 }
             }
-            // One optional whitespace terminator (dart `scanCharIf`).
+            // One optional whitespace terminator. A CRLF counts as ONE line
+            // break here — `--x: \61` + CRLF + `b` is `ab` in dart, with no
+            // line break left in the value.
             if matches!(self.sc.peek(), Some(' ' | '\t' | '\n' | '\r' | '\u{c}')) {
+                let cr = self.sc.peek() == Some('\r');
                 self.sc.bump();
+                if cr {
+                    self.sc.eat('\n');
+                }
             }
             // NUL is KEPT (it re-serializes as `\0 `, dart's consume_escape);
             // surrogates and out-of-range code points become the replacement

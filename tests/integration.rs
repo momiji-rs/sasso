@@ -1198,3 +1198,19 @@ fn a_form_feed_is_a_newline_to_the_escape_reader() {
     // Inside a string it is a line continuation, and the pair vanishes.
     assert_eq!(css(".a { b: \"c\\\u{c}d\"; }\n"), ".a {\n  b: \"cd\";\n}\n");
 }
+
+#[test]
+fn a_hex_escape_terminator_is_one_line_break() {
+    // One whitespace character terminates a hex escape. dart takes a CRLF
+    // whole where the text is captured VERBATIM — `--x: \61` + CRLF + `b` is
+    // `ab`, with no line break left in the value — and only the `\r` where the
+    // text is parsed as SassScript, so the `\n` still separates two
+    // identifiers.
+    assert_eq!(css(".a { --x: \\61\r\nb; }\n"), ".a {\n  --x: ab;\n}\n");
+    assert_eq!(css(".a { b: \\61\r\nb; }\n"), ".a {\n  b: a b;\n}\n");
+    // A lone LF or CR terminates the escape in both.
+    assert_eq!(css(".a { --x: \\61\nb; }\n"), ".a {\n  --x: ab;\n}\n");
+    assert_eq!(css(".a { --x: \\61\rb; }\n"), ".a {\n  --x: ab;\n}\n");
+    assert_eq!(css(".a { b: \\61\nb; }\n"), ".a {\n  b: ab;\n}\n");
+    assert_eq!(css(".a { b: \\61\rb; }\n"), ".a {\n  b: ab;\n}\n");
+}

@@ -185,6 +185,14 @@ Conformance is tracked separately as a ratchet against the official
   `@function --f() { result: "#{$v}"; }` emitted the interpolation literally.
   The string's own text, escapes and line continuations included, still passes
   through untouched — dart does not re-serialize a verbatim value's string.
+- **A hex escape's terminator is one line break.** One whitespace character
+  ends a hex escape, and a CRLF is one character's worth of line break where
+  the text is captured VERBATIM: `--x: \61` + CRLF + `b` is `ab`, with no line
+  break left in the value. Where the text is SassScript only the `\r` is
+  consumed, so the `\n` still separates two identifiers (`b: \61` + CRLF + `b`
+  is `a b`). The two readers had it backwards from each other. A vertical tab
+  never terminates an escape — dart's whitespace set is space, tab and the
+  three CSS newlines — which the indented front-end's own decoder now matches.
 - **A form feed is a newline to the escape reader.** dart counts U+000C as a
   newline, so a backslash cannot escape it; the identifier and verbatim-value
   readers accepted the pair and serialized it, where the ordinary value reader
