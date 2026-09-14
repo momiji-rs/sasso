@@ -1068,9 +1068,6 @@ pub(crate) struct Evaluator<'a> {
     /// The source text of [`Self::current_url`], for rendering snippets that
     /// point into the currently-executing file.
     current_source: Rc<str>,
-    /// Sources of every file seen so far, keyed by URL, so a stack trace can
-    /// render a snippet that points into a file other than the current one.
-    file_sources: Rc<RefCell<HashMap<String, Rc<str>>>>,
     /// Per-id count of deprecation warnings already *printed* (capped at 5 each,
     /// dart-sass). Keyed by the deprecation `[id]`.
     deprecations_shown: HashMap<&'static str, u32>,
@@ -1156,6 +1153,12 @@ struct Module {
     /// The path/URL of this module's file, for diagnostic snippets pointing
     /// into the module (empty when diagnostics are disabled / unknown).
     diag_url: String,
+    /// The module's own source text, handed to a cross-module member
+    /// invocation directly. A display url is NOT an identity — two files a
+    /// custom importer resolves can share one, and dart's `prettyUri` is a
+    /// display name — so a lookup by that name could hand a snippet the wrong
+    /// file's text. Empty when neither diagnostics nor source maps are on.
+    source: Rc<str>,
     /// The identity of the original explicit configuration this module was
     /// first evaluated with (0 = none/implicit).
     config_origin: std::cell::Cell<usize>,
@@ -1384,15 +1387,12 @@ impl<'a> Evaluator<'a> {
         let entry_canonical = CanonicalUrl::new(options.url);
         let entry_dir = dirname_of(options.url).unwrap_or_default();
         let source: Rc<str> = Rc::from(options.source);
-        let file_sources: HashMap<String, Rc<str>> =
-            [(url.clone(), Rc::clone(&source))].into_iter().collect();
         let file_texts: HashMap<String, Rc<str>> = [(url.clone(), Rc::clone(&source))].into_iter().collect();
         Evaluator {
             member: "root stylesheet".to_string(),
             call_stack: Vec::new(),
             current_url: url,
             current_source: source,
-            file_sources: Rc::new(RefCell::new(file_sources)),
             deprecations_shown: HashMap::default(),
             deprecations_omitted: 0,
             deprecations_seen: std::collections::HashSet::new(),
@@ -1657,18 +1657,6 @@ impl<'a> Evaluator<'a> {
         out
     }
 
-    /// Look up the source text for `url`, defaulting to the current file's.
-    fn source_for(&self, url: &str) -> Rc<str> {
-        if url == self.current_url {
-            return Rc::clone(&self.current_source);
-        }
-        self.file_sources
-            .borrow()
-            .get(url)
-            .map(Rc::clone)
-            .unwrap_or_else(|| Rc::clone(&self.current_source))
-    }
-
     /// Convert an `Error` into a fully-rendered diagnostic block (header +
     /// snippet + 2-space frame trace), if diagnostics are enabled and the error
     /// carries a position. Idempotent: an already-rendered error is returned
@@ -1712,7 +1700,7 @@ impl<'a> Evaluator<'a> {
                     };
                     let mut e = Error::at(MSG, pos);
                     if self.diag_enabled() {
-                        let source = self.source_for(&self.current_url.clone());
+                        let source = Rc::clone(&self.current_source);
                         let frames = self.frames_for(pos);
                         let mut rendered = format!("Error: {MSG}\n");
                         rendered.push_str(&crate::diag::render_interp_error_snippet(
@@ -1838,7 +1826,7 @@ impl<'a> Evaluator<'a> {
             col: pos.col,
             length: len,
         };
-        let source = self.source_for(&self.current_url.clone());
+        let source = Rc::clone(&self.current_source);
         let mut block = dep.render_header();
         block.push_str(&crate::diag::render_snippet(
             &source,
@@ -2853,12 +2841,6 @@ impl<'a> Evaluator<'a> {
                             } else {
                                 self.module_diag_url(path, resolved_key)
                             };
-                            if self.diag_enabled() && !resolved_key.is_empty() {
-                                self.file_sources
-                                    .borrow_mut()
-                                    .entry(import_diag.clone())
-                                    .or_insert_with(|| Rc::clone(&entry.3));
-                            }
                             if self.options.source_map && !resolved_key.is_empty() {
                                 self.file_texts
                                     .entry(resolved_key.to_string())

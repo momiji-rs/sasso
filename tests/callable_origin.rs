@@ -394,3 +394,18 @@ fn using_defaults_evaluate_where_the_block_was_written() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_cross_module_capture_renders_its_own_module_source() {
+    // `meta.get-mixin($module:)` captures a mixin with NO origin snapshot: the
+    // body runs against the module's own file. Two modules can share a display
+    // name (`foo` here), so looking their source up by that name renders the
+    // snippet from whichever was registered last — B's line 2 instead of A's.
+    let imp = SameNameImporter;
+    let opts = Options::default().with_importer(&imp).with_url("entry.scss");
+    let src = "@use \"sass:meta\";\n@use \"a\";\n@use \"b\";\nx {\n  @include meta.apply(meta.get-mixin(\"ma\", $module: \"a\"));\n}\n";
+    let err = compile(src, &opts).expect_err("undefined variable").to_string();
+    assert!(err.contains("2 │   p: $nope;\n"), "{err}");
+    assert!(!err.contains("@mixin mb"), "{err}");
+    assert!(err.contains("foo 2:6"), "{err}");
+}

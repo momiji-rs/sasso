@@ -938,24 +938,18 @@ impl<'a> Evaluator<'a> {
                 pos,
             ));
         }
-        // Register the module's source under a diagnostic display URL so a
-        // snippet/frame that points into this file renders against its text.
+        // The display URL a snippet/frame shows for this file.
         let diag_url = self.module_diag_url(url, &key);
-        // One shared copy of the module's text: for the diagnostic table, the
-        // source-map table, and the module's own evaluation context (handed
-        // down directly — a display-url lookup could return the loader's text
-        // when two custom-importer files share a display name). Nothing reads
-        // it when diagnostics and source maps are both off, so skip the copy.
+        // One shared copy of the module's text: for the source-map table, for
+        // the module's own evaluation context, and for the `Module` itself, so
+        // a cross-module member invocation renders against the file it was
+        // written in. Nothing reads it when diagnostics and source maps are
+        // both off, so skip the copy.
         let text: Rc<str> = if self.diag_enabled() || self.options.source_map {
             Rc::from(src.as_str())
         } else {
             Rc::from("")
         };
-        if self.diag_enabled() {
-            self.file_sources
-                .borrow_mut()
-                .insert(diag_url.clone(), Rc::clone(&text));
-        }
         if self.options.source_map {
             self.file_texts.insert(key.clone(), Rc::clone(&text));
         }
@@ -1109,6 +1103,7 @@ impl<'a> Evaluator<'a> {
         // Track the module's canonical URL in lockstep with its directory, so a
         // relative `@use`/`@import` inside the module resolves against IT.
         let saved_canonical = self.current_canonical.replace(CanonicalUrl::new(key));
+        let module_text = Rc::clone(&module_source);
         let saved_url = std::mem::replace(&mut self.current_url, diag_url.to_string());
         self.current_url_stamp = 0;
         let saved_source = std::mem::replace(&mut self.current_source, module_source);
@@ -1299,6 +1294,7 @@ impl<'a> Evaluator<'a> {
                 fn_origins,
                 mixin_origins,
                 diag_url: diag_url.to_string(),
+                source: module_text,
                 config_origin: std::cell::Cell::new(self.pending_config_id),
                 file_dir: dirname_of(key).unwrap_or_default(),
                 canonical: key.to_string(),
@@ -1585,7 +1581,12 @@ impl<'a> Evaluator<'a> {
     /// Swap in `module`'s source file for diagnostics during a cross-module
     /// member invocation. Returns the previous `(url, source)` to restore.
     pub(super) fn enter_module_file(&mut self, module: &Rc<Module>) -> Option<SavedModuleFile> {
-        self.enter_file_context(&module.diag_url, &module.file_dir, &module.canonical)
+        self.enter_file_context(
+            &module.diag_url,
+            &module.file_dir,
+            &module.canonical,
+            Rc::clone(&module.source),
+        )
     }
 
     /// Swap the current diagnostic + resolution file context to the given file,
@@ -1599,10 +1600,8 @@ impl<'a> Evaluator<'a> {
         diag_url: &str,
         file_dir: &str,
         canonical: &str,
+        source: Rc<str>,
     ) -> Option<SavedModuleFile> {
-        // An empty `diag_url` is a real file too: the entry of a compile
-        // without `Options::url` (its source is registered under `""`).
-        let source = self.source_for(diag_url);
         let dir = if file_dir.is_empty() {
             None
         } else {
