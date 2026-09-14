@@ -142,9 +142,11 @@ impl Parser {
             }
             _ => self.parse_generic_at_rule(name),
         };
-        // Source-map: stamp the `@` keyword's 0-based column onto the lines-
-        // carrying at-rule variants. Purely additive — `start_col` is read only
-        // by source-map generation, never by the serializer.
+        // Source-map: stamp the `@` keyword's position onto the lines-carrying
+        // at-rule variants — its 0-based column, and its line when that is not
+        // the brace line (a prelude written over several lines; dart maps the
+        // rule's span start). Purely additive: `start_col`/`map_line` are read
+        // only by source-map generation, never by the serializer.
         let mut stmt = stmt?;
         let at_col = (pos.col as u32).saturating_sub(1);
         if let Stmt::AtRule { lines, .. }
@@ -153,6 +155,7 @@ impl Parser {
         | Stmt::Keyframes { lines, .. } = &mut stmt
         {
             lines.start_col = at_col;
+            lines.map_line = pos.line as u32;
         }
         Ok(stmt)
     }

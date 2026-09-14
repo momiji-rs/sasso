@@ -849,6 +849,24 @@ fn line_spanning_constructs_map_every_generated_line_like_dart() {
             "a,\nb {\n  @media screen {\n    color: red;\n  }\n}\n",
             "AAEE;EAFF;AAAA;IAGI",
         ),
+        // A block at-rule whose prelude spans lines maps to its `@` line, not
+        // its brace line — also when bubbled out of a rule.
+        (
+            "@media screen,\n  print {\n  a {\n    b: c;\n  }\n}\n",
+            "AAAA;EAEE;IACE",
+        ),
+        (
+            "@media screen,\n  print\n{\n  a {\n    b: c;\n  }\n}\n",
+            "AAAA;EAGE;IACE",
+        ),
+        (
+            "@supports (display: grid) and\n  (gap: 1px) {\n  a {\n    b: c;\n  }\n}\n",
+            "AAAA;EAEE;IACE",
+        ),
+        (
+            ".x {\n  @media screen,\n    print {\n    b: c;\n  }\n}\n",
+            "AACE;EADF;IAGI",
+        ),
     ];
     for (src, expected) in cases {
         let r = compile_with_source_map(src, &Options::default().with_url("in.scss")).expect("compile");

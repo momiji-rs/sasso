@@ -143,7 +143,8 @@ Conformance is tracked separately as a ratchet against the official
   custom-property value adds an entry at the start of the new line that points
   back at the construct; sasso mapped only the first line. A rule mapped to its
   opening-brace line — a selector list written over several lines maps to its
-  first line (`node.selector.span.start`). A nested comment mapped after its
+  first line (`node.selector.span.start`) — and so did a block at-rule whose
+  prelude spans lines, which maps to its `@` line. A nested comment mapped after its
   indentation where dart opens the span before indenting. A passed-through
   plain-CSS `@import` (mapped to its URL token) and a nested rule of a loaded
   `.css` file that uses CSS nesting (mapped to its selector) had no mapping.
