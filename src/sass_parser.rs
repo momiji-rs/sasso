@@ -1016,13 +1016,19 @@ fn prelude_incomplete(logical: &str) -> bool {
     // named `mixin` (`=mixin`) keeps its name rather than reading as empty.
     let t = logical.trim_start();
     let after_sigil = &t[1..]; // skip `@`, `=` or `+`
+    let owned;
     let prelude = if t.starts_with(['=', '+']) {
         after_sigil.trim()
     } else {
-        after_sigil
-            .strip_prefix(name.as_str())
-            .unwrap_or(after_sigil)
-            .trim()
+        // The keyword may be ESCAPED, in which case the raw spelling does not
+        // start with the decoded name — `@us\65` would leave `us\65` as the
+        // prelude, so `@use` spanning lines (`@use` + an indented url, which
+        // dart accepts) looked complete and the url was rejected as an
+        // indented child. Take the text after the decoded identifier instead.
+        let cs: Vec<char> = after_sigil.chars().collect();
+        let (_, end) = crate::parser::decode_ident(&cs, 0);
+        owned = cs[end..].iter().collect::<String>();
+        owned.trim()
     };
     if ends_with_pending_operator(prelude) {
         return true;

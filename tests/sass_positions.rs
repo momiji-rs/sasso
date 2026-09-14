@@ -437,6 +437,34 @@ fn a_comment_opening_on_a_bare_line_still_opens() {
 }
 
 #[test]
+fn an_escaped_keyword_still_spans_its_prelude() {
+    // `@use` may put its url on the next indented line, and dart accepts that.
+    // The prelude was derived by stripping the DECODED name from the RAW
+    // spelling, so an escaped keyword left `us\\65` as the prelude, the
+    // directive looked complete, and the url was rejected as an indented
+    // child. (`@import` is the opposite case — dart rejects a continuation
+    // there — which is why only `@use` shows the bug.)
+    let dir = scratch("usecont");
+    let entry = dir.join("c.sass");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let opts = Options::default()
+        .with_syntax(Syntax::Sass)
+        .with_importer(&imp)
+        .with_url(&url)
+        .with_warn_handler(Rc::new(|_: &WarnEvent<'_>| {}));
+    for src in ["@use\n  \"foo\"\n", "@us\\65\n  \"foo\"\n", "@use \"foo\"\n"] {
+        std::fs::write(&entry, src).unwrap();
+        assert_eq!(
+            compile(src, &opts).expect("compile"),
+            "l {\n  m: 1;\n}",
+            "for {src:?}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn an_invalid_escape_resolves_like_the_parser_resolves_it() {
     // A surrogate escape becomes U+FFFD, so `@import\\D800` is NOT `@import`:
     // it is a generic at-rule, which may own a block. Stopping the decode at
