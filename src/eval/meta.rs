@@ -264,10 +264,26 @@ impl<'a> Evaluator<'a> {
                 user: None,
             }));
         }
+        match self.resolve_function_name(&name, pos)? {
+            Some(f) => Ok(Value::Function(f)),
+            None => Err(Error::at(
+                format!("Function not found: {}", crate::value::serialize_quoted(&name)),
+                pos,
+            )),
+        }
+    }
+
+    /// The function a bare NAME resolves to: a user `@function` first, then a
+    /// member a `@use … as *` exposes (from a user module or a built-in one),
+    /// then the global. `None` when nothing owns it — `get-function` reports
+    /// that as an error, while `call("name")` lets the plain-CSS dispatcher
+    /// have it.
+    pub(super) fn resolve_function_name(&self, name: &str, pos: Pos) -> Result<Option<SassFunction>, Error> {
+        let name = name.to_string();
         // A user `@function` of that name (dash/underscore-insensitive) wins.
         let key = normalize_arg_name(&name);
         if let Some(f) = self.lookup_function_norm(&key) {
-            return Ok(Value::Function(SassFunction {
+            return Ok(Some(SassFunction {
                 name,
                 css: false,
                 module: None,
@@ -293,7 +309,7 @@ impl<'a> Evaluator<'a> {
                 ));
             }
             if let Some(f) = star_user.into_iter().next() {
-                return Ok(Value::Function(SassFunction {
+                return Ok(Some(SassFunction {
                     name,
                     css: false,
                     module: None,
@@ -302,7 +318,7 @@ impl<'a> Evaluator<'a> {
             }
             if let Some((owner, bare)) = star_builtin.into_iter().next() {
                 if let Some(module) = crate::value::BuiltinModule::from_name(&owner) {
-                    return Ok(Value::Function(SassFunction {
+                    return Ok(Some(SassFunction {
                         name: bare,
                         css: false,
                         module: Some(module),
@@ -318,17 +334,14 @@ impl<'a> Evaluator<'a> {
         if crate::builtins::is_builtin(&canonical)
             || crate::builtins::EVAL_GLOBAL_NAMES.contains(&canonical.as_str())
         {
-            return Ok(Value::Function(SassFunction {
+            return Ok(Some(SassFunction {
                 name: canonical,
                 css: false,
                 module: None,
                 user: None,
             }));
         }
-        Err(Error::at(
-            format!("Function not found: {}", crate::value::serialize_quoted(&name)),
-            pos,
-        ))
+        Ok(None)
     }
 
     /// `meta.get-mixin($name, $module: null)`: capture a reference to the named
@@ -597,14 +610,16 @@ impl<'a> Evaluator<'a> {
                     pos,
                     length,
                 );
-                let f = SassFunction {
+                // The NAME resolves exactly as it would have if it were
+                // written: a user `@function`, a member a `@use … as *`
+                // exposes, then the global. An unknown one is left alone for
+                // the plain-CSS dispatcher.
+                let f = self.resolve_function_name(&s.text, pos)?.unwrap_or(SassFunction {
                     name: s.text.to_string(),
                     css: false,
                     module: None,
-                    user: self
-                        .lookup_function_norm(&normalize_arg_name(&s.text))
-                        .map(|c| c as Rc<dyn std::any::Any>),
-                };
+                    user: None,
+                });
                 self.invoke_function_ref(&f, rest_pos, rest_named, pos, length)
             }
             other => Err(Error::at(
@@ -1078,6 +1093,11 @@ impl<'a> Evaluator<'a> {
     /// `sass:list`'s `index` next to `sass:string`'s is two members and an
     /// error.
     pub(super) fn star_builtin_hits(&self, name: &str, kind: MemberKind) -> Vec<(String, String)> {
+        // The common case is no `@use … as *` at all; every call, variable and
+        // include asks this, so answer it before allocating anything.
+        if self.star_modules.is_empty() && self.star_user_modules.is_empty() {
+            return Vec::new();
+        }
         let name = name.replace('_', "-");
         let mut hits: Vec<(String, String)> = Vec::new();
         for m in &self.star_modules {

@@ -1870,13 +1870,15 @@ impl<'a> Evaluator<'a> {
             }
         }
         // Per-location dedup: the SAME warning at the same place fires once.
-        // The message is part of what makes it the same one: `call(
-        // get-function("percentage"))` is two different `[global-builtin]`
-        // warnings at one span — one naming `meta.call`, one `math.percentage`
-        // — and dart prints both.
+        // What makes it the same one is everything it SAYS, not just its id:
+        // `call(get-function("percentage"))` is two different
+        // `[global-builtin]` warnings at one span (one naming `meta.call`, one
+        // `math.percentage`), and `[call-string]` has a static message whose
+        // `Recommendation:` line carries the name — so one `call($n)` invoked
+        // with two names is two warnings. dart prints both, in both cases.
         let key = (
             dep.id,
-            dep.message.clone(),
+            dep.render_header(),
             self.current_url.clone(),
             pos.line,
             pos.col,

@@ -1329,3 +1329,86 @@ fn a_builtin_mixin_answers_to_its_underscore_spelling() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn call_by_name_resolves_what_the_name_would_have() {
+    // `call("name")` looks the name up exactly as writing it would: a user
+    // `@function`, then a member a `@use … as *` exposes (user or built-in),
+    // then the global — ambiguity included. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_call_name_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fmap.scss"), "@forward \"sass:map\";\n").expect("write");
+    std::fs::write(dir.join("_own.scss"), "@function own($x) { @return OWN; }\n").expect("write");
+    std::fs::write(
+        dir.join("_uindex.scss"),
+        "@function index($a, $b) { @return USER; }\n",
+    )
+    .expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    for (src, want) in [
+        (
+            "@use \"sass:map\" as *; @use \"sass:meta\";\na { b: meta.call(\"get\", (x: 1), x); }",
+            "1",
+        ),
+        (
+            "@use \"fmap\" as *; @use \"sass:meta\";\na { b: meta.call(\"get\", (x: 1), x); }",
+            "1",
+        ),
+        (
+            "@use \"own\" as *; @use \"sass:meta\";\na { b: meta.call(\"own\", 1); }",
+            "OWN",
+        ),
+        (
+            "@use \"sass:string\" as *; @use \"sass:meta\";\na { b: meta.call(\"index\", \"abc\", \"b\"); }",
+            "2",
+        ),
+    ] {
+        assert_eq!(
+            run(src).as_deref(),
+            Ok(format!("a {{\n  b: {want};\n}}").as_str()),
+            "{src}"
+        );
+    }
+    // Two starred sources for the name is the same error it would be written.
+    assert!(run(
+        "@use \"uindex\" as *; @use \"sass:string\" as *; @use \"sass:meta\";\na { b: meta.call(\"index\", \"abc\", \"b\"); }"
+    )
+    .unwrap_err()
+    .contains("This function is available from multiple global modules."));
+    // A name nothing owns is still left to the plain-CSS dispatcher.
+    assert_eq!(
+        run("@use \"sass:meta\"; a { b: meta.call(\"nope\", 1); }").as_deref(),
+        Ok("a {\n  b: nope(1);\n}")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn one_span_can_carry_two_call_string_recommendations() {
+    // The dedup identity is everything the warning SAYS: `[call-string]`'s
+    // message is static and its `Recommendation:` carries the name, so one
+    // `call($n)` invoked with two names warns twice. dart prints both.
+    let w = warnings(
+        "@use \"sass:meta\";\n@function pick($n) { @return meta.call($n, 1); }\n@function a($x) { @return A; }\n@function b($x) { @return B; }\n.x { p: pick(\"a\"); q: pick(\"b\"); }\n",
+        "in.scss",
+    );
+    let recs: Vec<&String> = w.iter().filter(|x| x.contains("[call-string]")).collect();
+    assert_eq!(recs.len(), 2, "{w:?}");
+    assert!(
+        recs[0].contains("Recommendation: call(get-function(\"a\"))"),
+        "{}",
+        recs[0]
+    );
+    assert!(
+        recs[1].contains("Recommendation: call(get-function(\"b\"))"),
+        "{}",
+        recs[1]
+    );
+}
