@@ -499,7 +499,11 @@ pub fn render_snippet(source: &str, span: Span, frames: &[Frame<'_>], glyphs: Gl
 pub struct Secondary<'a> {
     /// The file the span is in, as the location line spells it.
     pub url: &'a str,
-    /// That file's text.
+    /// That file's text. It is also half the identity of the block this span
+    /// is drawn in: a display url is a NAME two files can share (see
+    /// `MixinOrigin::source`), the canonical url is the identity — so spans
+    /// join one block only when their TEXT matches too, or one of them would
+    /// be rendered against the other's lines.
     pub source: &'a str,
     pub span: Span,
     /// The words after the underline (`declaration`, `includes mixin`, …).
@@ -553,7 +557,13 @@ pub fn render_labelled_snippet(
             label: sec.label,
             primary: false,
         };
-        match groups.iter_mut().find(|(u, _, _)| *u == sec.url) {
+        // The TEXT is part of the key: a display url is a name two files can
+        // share, so matching on it alone would draw one file's span against
+        // the other's lines.
+        match groups
+            .iter_mut()
+            .find(|(u, s, _)| *u == sec.url && *s == sec.source)
+        {
             Some((_, _, entries)) => entries.push(entry),
             None => groups.push((sec.url, sec.source, vec![entry])),
         }
