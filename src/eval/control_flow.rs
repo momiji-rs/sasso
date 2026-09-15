@@ -598,6 +598,9 @@ impl<'a> Evaluator<'a> {
         content_params: Option<Rc<ParamList>>,
         module: Option<&str>,
         pos: Pos,
+        // The CALL's byte length, content block excluded — dart's
+        // `spanWithoutContent`, which sizes an error about the call itself.
+        length: usize,
         // The whole statement's byte length — an error about the RULE (this
         // mixin does not exist, that namespace does not exist) carets all of
         // it, content block included, as dart's `span` does.
@@ -650,7 +653,17 @@ impl<'a> Evaluator<'a> {
                     .ok_or_else(|| Error::at("Undefined mixin.", pos).with_length(full_length))?;
                 // A forwarded mixin runs in its DEFINING module's environment.
                 let exec = target.mixin_origin(name).unwrap_or(target);
-                return self.run_module_mixin(&exec, &mixin, args, content, content_params, parents, sink);
+                return self.run_module_mixin(
+                    &exec,
+                    &mixin,
+                    args,
+                    content,
+                    content_params,
+                    pos,
+                    length,
+                    parents,
+                    sink,
+                );
             }
             if !self.used_modules.contains_key(ns) {
                 return Err(
@@ -681,7 +694,17 @@ impl<'a> Evaluator<'a> {
                 );
             }
             if let Some((m, mx)) = hits.into_iter().next() {
-                return self.run_module_mixin(&m, &mx, args, content, content_params, parents, sink);
+                return self.run_module_mixin(
+                    &m,
+                    &mx,
+                    args,
+                    content,
+                    content_params,
+                    pos,
+                    length,
+                    parents,
+                    sink,
+                );
             }
             if let Some((owner, bare)) = builtin_hits.into_iter().next() {
                 if owner == "meta" && bare == "apply" {
@@ -698,7 +721,14 @@ impl<'a> Evaluator<'a> {
         // dart-sass: passing a content block to a mixin that never uses
         // `@content` is an error, even when the block is empty.
         if content.is_some() && !body_uses_content(&mixin.def.body) {
-            return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+            // Raised BEFORE the mixin is entered, so its own frame is not on
+            // the stack — dart shows only the caller's.
+            return Err(self.error_with_declaration_at(
+                "Mixin doesn't accept a content block.",
+                pos,
+                length,
+                &declared(&mixin),
+            ));
         }
         // Arguments evaluate in the caller's environment; the body runs in
         // the mixin's lexical closure. The content block captures the CALL
@@ -756,11 +786,20 @@ impl<'a> Evaluator<'a> {
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
+        pos: Pos,
+        length: usize,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         if content.is_some() && !body_uses_content(&mixin.def.body) {
-            return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+            // Raised BEFORE the mixin is entered, so its own frame is not on
+            // the stack — dart shows only the caller's.
+            return Err(self.error_with_declaration_at(
+                "Mixin doesn't accept a content block.",
+                pos,
+                length,
+                &declared(mixin),
+            ));
         }
         // Evaluate the arguments at the call site (so they resolve in the
         // caller's scope), then enter the module's environment and the

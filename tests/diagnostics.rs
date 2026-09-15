@@ -1754,3 +1754,70 @@ fn the_legacy_if_suggests_the_modern_syntax() {
         assert_eq!(found.len(), 1, "{src}: {found:?}");
     }
 }
+
+#[test]
+fn an_argument_error_shows_the_declaration_it_failed_against() {
+    // dart points at TWO places for the argument-binding family: where the
+    // call is, and the parameter list it was measured against. Every block
+    // below was measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_decl_span_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_lib.scss"), "@mixin m($x) { a: $x; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> String {
+        std::fs::write(&entry, src).unwrap();
+        compile(src, &Options::default().with_importer(&imp).with_url(&url))
+            .expect_err("expected a compile error")
+            .to_string()
+    };
+    // The arity message counts what was declared against what was passed, and
+    // agrees with itself about the verb.
+    for (src, message) in [
+        (
+            "@function f() { @return 1; }\n.a { b: f(1); }\n",
+            "Only 0 arguments allowed, but 1 was passed.",
+        ),
+        (
+            "@function f($x) { @return 1; }\n.a { b: f(1, 2); }\n",
+            "Only 1 argument allowed, but 2 were passed.",
+        ),
+        (
+            "@function f($x, $y) { @return 1; }\n.a { b: f(1, 2, 3); }\n",
+            "Only 2 arguments allowed, but 3 were passed.",
+        ),
+    ] {
+        let block = run(src);
+        assert!(block.starts_with(&format!("Error: {message}\n")), "{block}");
+        assert!(block.contains(" declaration\n"), "{block}");
+        assert!(caret_line(&block).ends_with(" invocation"), "{block}");
+    }
+    // `No parameter named` carries it too.
+    let block = run("@function f($x) { @return 1; }\n.a { b: f(1, $z: 2); }\n");
+    assert!(block.starts_with("Error: No parameter named $z.\n"), "{block}");
+    assert!(
+        block.contains("\u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration"),
+        "{block}"
+    );
+    // A content block a mixin does not take: the call is the primary span,
+    // the mixin NAME the secondary — and the trace starts at the caller,
+    // because the mixin is never entered.
+    let block = run("@mixin m { a: 1; }\n.a { @include m { b: 2; } }\n");
+    assert!(
+        block.starts_with("Error: Mixin doesn't accept a content block.\n"),
+        "{block}"
+    );
+    assert!(block.contains("\u{2501} declaration"), "{block}");
+    assert_eq!(caret_line(&block), "^^^^^^^^^^ invocation", "{block}");
+    assert!(!block.contains("m()"), "{block}");
+    // A declaration in ANOTHER file gets its own block, headed by its url.
+    let block = run("@use \"lib\";\n.a { @include lib.m; }\n");
+    assert!(block.contains("\u{250c}\u{2500}\u{2500}> "), "{block}");
+    assert!(block.contains("_lib.scss"), "{block}");
+    assert!(
+        block.contains("\u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration"),
+        "{block}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

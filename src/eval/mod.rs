@@ -2021,6 +2021,88 @@ impl<'a> Evaluator<'a> {
     /// The call site is in the CALLER's file, which by now may not be the
     /// current one (a cross-file call has already switched context), so the
     /// block is rendered here, against that frame's own text.
+    /// An error about a construct that has a `declaration` to point back at,
+    /// reported at `pos` with the frames as they stand — for a failure that
+    /// happens BEFORE the callable is entered, so its own frame is not on the
+    /// stack (dart shows only the caller's).
+    pub(super) fn error_with_declaration_at(
+        &self,
+        message: impl Into<String>,
+        pos: Pos,
+        length: usize,
+        decl: &Declared<'_>,
+    ) -> Error {
+        let message = message.into();
+        // The stack AS IT STANDS, without the synthetic frame naming the
+        // member being entered: this error happens before the callable runs,
+        // so dart's trace starts at the caller.
+        let frames: Vec<DiagFrame> = self.call_stack.iter().rev().cloned().collect();
+        let frames = if frames.is_empty() {
+            self.frames_for(pos)
+        } else {
+            frames
+        };
+        match self.declaration_block(&message, pos, length, decl, &frames) {
+            Some(rendered) => {
+                let mut e = Error::at(message, pos).with_length(length);
+                e.rendered = Some(rendered);
+                e
+            }
+            None => Error::at(message, pos).with_length(length),
+        }
+    }
+
+    /// The rendered two-span block, or `None` when this diagnostic cannot have
+    /// one: diagnostics off, no declaration position, or a declaration that
+    /// spans more than one line (dart draws arm glyphs and re-indents the whole
+    /// block for that, which this renderer cannot do yet).
+    fn declaration_block(
+        &self,
+        message: &str,
+        pos: Pos,
+        length: usize,
+        decl: &Declared<'_>,
+        frames: &[DiagFrame],
+    ) -> Option<String> {
+        if !self.diag_enabled() || !decl.pos.is_known() || frames.is_empty() {
+            return None;
+        }
+        let (decl_url, decl_source) = match decl.origin {
+            Some(o) => (o.diag_url.clone(), Rc::clone(&o.source)),
+            None => (frames[0].url.clone(), Rc::clone(&frames[0].source)),
+        };
+        let decl_span = crate::diag::Span {
+            line: decl.pos.line,
+            col: decl.pos.col,
+            length: decl.length,
+        };
+        if crate::diag::span_crosses_lines(&decl_source, decl_span) {
+            return None;
+        }
+        let mut rendered = format!("Error: {message}\n");
+        rendered.push_str(&crate::diag::render_labelled_snippet(
+            &frames[0].url,
+            &frames[0].source,
+            crate::diag::Span {
+                line: pos.line,
+                col: pos.col,
+                length,
+            },
+            "invocation",
+            &[crate::diag::Secondary {
+                url: &decl_url,
+                source: &decl_source,
+                span: decl_span,
+                label: "declaration",
+            }],
+            &[],
+            self.options.glyphs,
+        ));
+        rendered.push('\n');
+        rendered.push_str(&Self::render_frame_block(frames, 2));
+        Some(rendered)
+    }
+
     /// [`Self::error_at_call`] with dart's SECOND span: the `declaration` the
     /// failure is measured against, in the file it was written in.
     ///
@@ -2444,6 +2526,7 @@ impl<'a> Evaluator<'a> {
                         content_params.clone(),
                         module.as_deref(),
                         *pos,
+                        *length,
                         *full_length,
                         parents,
                         sink,
