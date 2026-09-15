@@ -60,7 +60,7 @@
 pub enum GlyphSet {
     /// Box-drawing glyphs: `╷ │ ╵ ┌ └ ─` and the ASCII caret `^`.
     Unicode,
-    /// Pure-ASCII fallback: `, | ' , ' -` and the caret `^`.
+    /// Pure-ASCII fallback: `, | ' , ' / \ -` and the caret `^`.
     Ascii,
 }
 
@@ -112,6 +112,26 @@ impl GlyphSet {
         match self {
             GlyphSet::Unicode => '\u{2501}',
             GlyphSet::Ascii => '=',
+        }
+    }
+
+    /// The arm a multi-line span draws IN THE GUTTER when it starts at its
+    /// line's first non-whitespace character (`┌` / `/`). dart's ASCII set
+    /// spells this differently from the `,` that opens an arrow row, so the
+    /// two corners cannot share a glyph.
+    const fn arm_start(self) -> &'static str {
+        match self {
+            GlyphSet::Unicode => "\u{250c}",
+            GlyphSet::Ascii => "/",
+        }
+    }
+
+    /// The same for a span that ENDS at its line's last non-whitespace
+    /// character (`└` / `\`).
+    const fn arm_end(self) -> &'static str {
+        match self {
+            GlyphSet::Unicode => "\u{2514}",
+            GlyphSet::Ascii => "\\",
         }
     }
 
@@ -473,13 +493,9 @@ pub fn render_snippet(source: &str, span: Span, frames: &[Frame<'_>], glyphs: Gl
 /// One span drawn alongside the primary one, with the label dart-sass writes
 /// after its underline.
 ///
-/// (Unused until the diagnostics that need it are wired to it, one commit
-/// along — the same way the rest of this module was built.)
-///
 /// A secondary span can live in ANOTHER FILE — the `@mixin` a `Missing
 /// argument` points back to, or `sass:color` for a built-in — so it carries
 /// its own url and source text.
-#[allow(dead_code)]
 pub struct Secondary<'a> {
     /// The file the span is in, as the location line spells it.
     pub url: &'a str,
@@ -491,7 +507,7 @@ pub struct Secondary<'a> {
 }
 
 /// Render a snippet with LABELLED spans: the primary one underlined with
-/// carets, each secondary with `=`, every underline followed by its label.
+/// carets, each secondary with `━`, every underline followed by its label.
 ///
 /// dart draws this whenever a diagnostic has something to point at besides the
 /// place it failed — the parameter list behind `Missing argument $x.`, the
@@ -499,12 +515,19 @@ pub struct Secondary<'a> {
 ///
 /// * spans in one file share a block; each printed line is followed by one
 ///   underline row per span on it, the primary first;
+/// * a span that CROSSES LINES draws an arm down the left of every line it
+///   covers, and the row that closes the arm carries the label;
+/// * one such span anywhere indents EVERY block by the arm column, blank arm
+///   included — dart sizes that column once for the whole diagnostic;
 /// * lines that are not adjacent are ELIDED with a `... |` row — dart never
 ///   prints the lines in between — and the gutter then widens to at least
 ///   three columns with the numbers LEFT-aligned in it;
 /// * spans in different files get one block each, introduced by `,--> <url>`
 ///   and closed by the usual bottom glyph, the primary's file first.
-#[allow(dead_code)]
+///
+/// Two spans in one file whose lines OVERLAP are the one shape this cannot
+/// draw: dart nests a second arm column for them. Callers keep them apart —
+/// see `Evaluator::spans_share_a_block`.
 pub fn render_labelled_snippet(
     url: &str,
     source: &str,
@@ -537,6 +560,11 @@ pub fn render_labelled_snippet(
     }
 
     let multi_file = groups.len() > 1;
+    // The arm column is sized ONCE for the whole diagnostic: a span crossing
+    // lines in any block indents them all.
+    let arm = groups
+        .iter()
+        .any(|(_, s, entries)| entries.iter().any(|e| span_crosses_lines(s, e.span)));
     let mut out = String::new();
     for (i, (group_url, group_source, entries)) in groups.iter_mut().enumerate() {
         if i > 0 {
@@ -548,6 +576,7 @@ pub fn render_labelled_snippet(
             multi_file.then_some(*group_url),
             group_source,
             entries,
+            arm,
             glyphs,
         );
     }
@@ -559,26 +588,62 @@ pub fn render_labelled_snippet(
 }
 
 /// One labelled span inside a file's block.
-#[allow(dead_code)]
 struct Entry<'a> {
     span: Span,
     label: &'a str,
     primary: bool,
 }
 
-#[allow(dead_code)]
-fn render_group(out: &mut String, url: Option<&str>, source: &str, entries: &[Entry<'_>], glyphs: GlyphSet) {
+/// An [`Entry`] resolved to the lines and columns it actually covers.
+struct Placed<'a> {
+    label: &'a str,
+    primary: bool,
+    start_idx: usize,
+    start_col0: usize,
+    end_idx: usize,
+    end_col0: usize,
+}
+
+impl Placed<'_> {
+    fn crosses_lines(&self) -> bool {
+        self.start_idx != self.end_idx
+    }
+}
+
+fn render_group(
+    out: &mut String,
+    url: Option<&str>,
+    source: &str,
+    entries: &[Entry<'_>],
+    arm: bool,
+    glyphs: GlyphSet,
+) {
     let lines = split_lines(source);
     let v = glyphs.vertical();
-    let line_nos: Vec<usize> = entries
+    let h = glyphs.horizontal();
+    let last_line = lines.len().saturating_sub(1);
+    let placed: Vec<Placed<'_>> = entries
         .iter()
-        .map(|e| e.span.line.saturating_sub(1).min(lines.len().saturating_sub(1)))
+        .map(|e| {
+            let start_idx = e.span.line.saturating_sub(1).min(last_line);
+            let start_col0 = e.span.col.saturating_sub(1);
+            let (end_idx, end_col0) = resolve_end(source, &lines, start_idx, start_col0, e.span.length);
+            Placed {
+                label: e.label,
+                primary: e.primary,
+                start_idx,
+                start_col0,
+                end_idx,
+                end_col0,
+            }
+        })
         .collect();
-    let max_line_no = line_nos.iter().copied().max().unwrap_or(0) + 1;
+
+    let max_line_no = placed.iter().map(|p| p.end_idx).max().unwrap_or(0) + 1;
     // A gap between printed lines is elided, never filled in — and the `...`
     // row is three columns wide, which widens the gutter and left-aligns the
     // numbers in it.
-    let elides = line_nos.windows(2).any(|w| w[1] > w[0] + 1);
+    let elides = placed.windows(2).any(|w| w[1].start_idx > w[0].end_idx + 1);
     let width = if elides {
         digit_count(max_line_no).max(3)
     } else {
@@ -594,57 +659,95 @@ fn render_group(out: &mut String, url: Option<&str>, source: &str, entries: &[En
         glyphs.top()
     });
     if let Some(u) = url {
-        out.push_str(glyphs.horizontal());
-        out.push_str(glyphs.horizontal());
+        out.push_str(h);
+        out.push_str(h);
         out.push('>');
         out.push(' ');
         out.push_str(u);
     }
 
-    let mut prev: Option<usize> = None;
-    let mut idx = 0usize;
-    while idx < entries.len() {
-        let line_idx = line_nos[idx];
-        if let Some(p) = prev {
-            if line_idx > p + 1 {
+    let mut printed: Option<usize> = None;
+    for p in &placed {
+        if let Some(prev) = printed {
+            if p.start_idx > prev + 1 {
                 out.push('\n');
                 out.push_str(&elision_gutter(width));
                 out.push_str(v);
             }
         }
-        // The source line, once, however many spans point into it.
-        if prev != Some(line_idx) {
-            let line = lines.get(line_idx).copied().unwrap_or("");
-            out.push('\n');
-            out.push_str(&aligned_gutter(line_idx + 1, width, elides));
-            out.push_str(v);
-            out.push(' ');
-            out.push_str(&expand_tabs(line));
-        }
-        // Then one underline row per span on it.
-        while idx < entries.len() && line_nos[idx] == line_idx {
-            let e = &entries[idx];
-            let line = lines.get(line_idx).copied().unwrap_or("");
-            let start_col0 = e.span.col.saturating_sub(1);
-            let (_, end_col0) = resolve_end(source, &lines, line_idx, start_col0, e.span.length);
+        if !p.crosses_lines() {
+            // The source line, once, however many spans point into it.
+            if printed != Some(p.start_idx) {
+                push_source_line(
+                    out,
+                    &lines,
+                    p.start_idx,
+                    width,
+                    elides,
+                    arm.then_some(" "),
+                    glyphs,
+                );
+            }
+            let line = lines.get(p.start_idx).copied().unwrap_or("");
             out.push('\n');
             out.push_str(&blank_gutter(width));
             out.push_str(v);
             out.push(' ');
-            for _ in 0..display_width_of_prefix(line, start_col0) {
+            push_arm(out, arm.then_some(" "));
+            for _ in 0..display_width_of_prefix(line, p.start_col0) {
                 out.push(' ');
             }
-            let mark = if e.primary { CARET } else { glyphs.secondary() };
-            for _ in 0..display_width_of_prefix_range(line, start_col0, end_col0) {
+            let mark = if p.primary { CARET } else { glyphs.secondary() };
+            for _ in 0..display_width_of_prefix_range(line, p.start_col0, p.end_col0) {
                 out.push(mark);
             }
-            if !e.label.is_empty() {
-                out.push(' ');
-                out.push_str(e.label);
-            }
-            idx += 1;
+            push_label(out, p.label);
+            printed = Some(p.start_idx);
+            continue;
         }
-        prev = Some(line_idx);
+
+        // A span that crosses lines: an arm down the left of every line it
+        // covers. The arm begins in the gutter when the span starts its line,
+        // and behind a `,-…-^` arrow row when it starts mid-line.
+        let first = lines.get(p.start_idx).copied().unwrap_or("");
+        let start_at_edge = first.chars().take(p.start_col0).all(char::is_whitespace);
+        let slot = if start_at_edge { glyphs.arm_start() } else { " " };
+        push_source_line(out, &lines, p.start_idx, width, elides, Some(slot), glyphs);
+        if !start_at_edge {
+            out.push('\n');
+            out.push_str(&blank_gutter(width));
+            out.push_str(v);
+            out.push(' ');
+            out.push_str(glyphs.top_left());
+            for _ in 0..display_width_of_prefix(first, p.start_col0) + 1 {
+                out.push_str(h);
+            }
+            out.push(CARET);
+        }
+        for li in (p.start_idx + 1)..=p.end_idx {
+            push_source_line(out, &lines, li, width, elides, Some(v), glyphs);
+        }
+        // The closing row carries the label. It points at the last spanned
+        // character — unless the span runs to the end of its line, where dart
+        // has nothing to point at and draws a flat three-rule arm instead.
+        let last = lines.get(p.end_idx).copied().unwrap_or("");
+        out.push('\n');
+        out.push_str(&blank_gutter(width));
+        out.push_str(v);
+        out.push(' ');
+        out.push_str(glyphs.bottom_left());
+        if last.chars().skip(p.end_col0).all(char::is_whitespace) {
+            for _ in 0..3 {
+                out.push_str(h);
+            }
+        } else {
+            for _ in 0..display_width_of_prefix(last, p.end_col0) {
+                out.push_str(h);
+            }
+            out.push(CARET);
+        }
+        push_label(out, p.label);
+        printed = Some(p.end_idx);
     }
 
     out.push('\n');
@@ -652,9 +755,44 @@ fn render_group(out: &mut String, url: Option<&str>, source: &str, entries: &[En
     out.push_str(glyphs.bottom());
 }
 
+/// Write one numbered source line of a labelled block: gutter, `│`, the arm
+/// column when the diagnostic has one (`Some(slot)`), then the text.
+fn push_source_line(
+    out: &mut String,
+    lines: &[&str],
+    idx: usize,
+    width: usize,
+    elides: bool,
+    slot: Option<&str>,
+    glyphs: GlyphSet,
+) {
+    out.push('\n');
+    out.push_str(&aligned_gutter(idx + 1, width, elides));
+    out.push_str(glyphs.vertical());
+    out.push(' ');
+    push_arm(out, slot);
+    out.push_str(&expand_tabs(lines.get(idx).copied().unwrap_or("")));
+}
+
+/// The arm column: one glyph and a space, or nothing when the diagnostic has
+/// no multi-line span to draw an arm for.
+fn push_arm(out: &mut String, slot: Option<&str>) {
+    if let Some(slot) = slot {
+        out.push_str(slot);
+        out.push(' ');
+    }
+}
+
+/// The words dart writes after an underline, when there are any.
+fn push_label(out: &mut String, label: &str) {
+    if !label.is_empty() {
+        out.push(' ');
+        out.push_str(label);
+    }
+}
+
 /// The gutter for a numbered source line: right-aligned normally, LEFT-aligned
 /// once an elision row is in play (dart pads them all to the `...` column).
-#[allow(dead_code)]
 fn aligned_gutter(line_no: usize, width: usize, elides: bool) -> String {
     if !elides {
         return numbered_gutter(line_no, width);
@@ -668,7 +806,6 @@ fn aligned_gutter(line_no: usize, width: usize, elides: bool) -> String {
 }
 
 /// The `... ` gutter of an elision row.
-#[allow(dead_code)]
 fn elision_gutter(width: usize) -> String {
     let mut s = String::from("...");
     while s.len() < width {
@@ -676,6 +813,15 @@ fn elision_gutter(width: usize) -> String {
     }
     s.push(' ');
     s
+}
+
+/// The 1-based line range a span covers, both ends inclusive.
+#[must_use]
+pub fn span_line_range(source: &str, span: Span) -> (usize, usize) {
+    let lines = split_lines(source);
+    let start_idx = span.line.saturating_sub(1).min(lines.len().saturating_sub(1));
+    let (end_idx, _) = resolve_end(source, &lines, start_idx, span.col.saturating_sub(1), span.length);
+    (start_idx + 1, end_idx + 1)
 }
 
 /// Whether a span reaches past the end of the line it starts on.
@@ -837,7 +983,7 @@ fn render_multi_line(
     out.push_str(v);
     out.push(' ');
     if start_at_edge {
-        out.push_str(glyphs.top_left());
+        out.push_str(glyphs.arm_start());
     } else {
         out.push(' ');
     }
@@ -869,7 +1015,7 @@ fn render_multi_line(
         out.push_str(v);
         out.push(' ');
         if li == end_idx && end_at_edge {
-            out.push_str(glyphs.bottom_left());
+            out.push_str(glyphs.arm_end());
         } else {
             out.push_str(v);
         }

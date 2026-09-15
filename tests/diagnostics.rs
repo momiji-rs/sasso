@@ -1821,3 +1821,77 @@ fn an_argument_error_shows_the_declaration_it_failed_against() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Everything up to and including the block's closing gutter glyph — the part
+/// that does not name a temporary directory.
+fn snippet(block: &str) -> String {
+    let lines: Vec<&str> = block.lines().collect();
+    let end = lines
+        .iter()
+        .rposition(|l| l.trim() == "\u{2575}")
+        .unwrap_or_else(|| panic!("no closing glyph in:\n{block}"));
+    lines[..=end].join("\n")
+}
+
+#[test]
+fn a_span_that_crosses_lines_draws_an_arm_down_to_its_label() {
+    // dart draws an arm beside every line a span covers and hangs the label on
+    // the row that closes it — and one such span anywhere indents EVERY line of
+    // the diagnostic by the arm column, blank arm included. Each block below is
+    // dart-sass 1.103.1's, byte for byte.
+    let run = |src: &str| -> String {
+        snippet(
+            &compile(src, &Options::default().with_url("t.scss"))
+                .expect_err("expected a compile error")
+                .to_string(),
+        )
+    };
+    // A call that starts mid-line opens with an arrow row; the closing row
+    // points at the last spanned character.
+    assert_eq!(
+        run("@mixin m($x) { a: $x; }\n.a { @include m(\n); }\n"),
+        "Error: Missing argument $x.\n  \u{2577}\n\
+         1 \u{2502}   @mixin m($x) { a: $x; }\n  \u{2502}          \u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration\n\
+         2 \u{2502}   .a { @include m(\n  \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         3 \u{2502} \u{2502} ); }\n  \u{2502} \u{2514}\u{2500}^ invocation\n  \u{2575}"
+    );
+    // A call that starts its line puts the arm in the gutter instead; one that
+    // also ENDS its line has nothing to point at, so dart draws a flat arm.
+    assert_eq!(
+        run("@mixin m($x) { a: $x; }\n@include m(\n)\n;\n"),
+        "Error: Missing argument $x.\n  \u{2577}\n\
+         1 \u{2502}   @mixin m($x) { a: $x; }\n  \u{2502}          \u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration\n\
+         2 \u{2502} \u{250c} @include m(\n\
+         3 \u{2502} \u{2502} )\n  \u{2502} \u{2514}\u{2500}\u{2500}\u{2500} invocation\n  \u{2575}"
+    );
+    // The DECLARATION crossing lines is the same shape — it just comes first.
+    assert_eq!(
+        run("@mixin m(\n  $x: 1\n) { a: $x; }\n.a { @include m(1, 2); }\n"),
+        "Error: Only 1 argument allowed, but 2 were passed.\n  \u{2577}\n\
+         1 \u{2502}   @mixin m(\n  \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         2 \u{2502} \u{2502}   $x: 1\n\
+         3 \u{2502} \u{2502} ) { a: $x; }\n  \u{2502} \u{2514}\u{2500}^ declaration\n\
+         4 \u{2502}   .a { @include m(1, 2); }\n  \u{2502}        ^^^^^^^^^^^^^^^^ invocation\n  \u{2575}"
+    );
+    // Both crossing lines: two arms, one after the other.
+    assert_eq!(
+        run("@mixin m(\n  $x: 1\n) { a: $x; }\n.a { @include m(\n  1, 2\n); }\n"),
+        "Error: Only 1 argument allowed, but 2 were passed.\n  \u{2577}\n\
+         1 \u{2502}   @mixin m(\n  \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         2 \u{2502} \u{2502}   $x: 1\n\
+         3 \u{2502} \u{2502} ) { a: $x; }\n  \u{2502} \u{2514}\u{2500}^ declaration\n\
+         4 \u{2502}   .a { @include m(\n  \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         5 \u{2502} \u{2502}   1, 2\n\
+         6 \u{2502} \u{2502} ); }\n  \u{2502} \u{2514}\u{2500}^ invocation\n  \u{2575}"
+    );
+    // An elision and an arm at once: the gutter widens and left-aligns, and the
+    // `...` row carries no arm.
+    assert_eq!(
+        run("@mixin m($x) { a: $x; }\n// pad\n// pad\n.a { @include m(\n); }\n"),
+        "Error: Missing argument $x.\n    \u{2577}\n\
+         1   \u{2502}   @mixin m($x) { a: $x; }\n    \u{2502}          \u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration\n\
+         ... \u{2502}\n\
+         4   \u{2502}   .a { @include m(\n    \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         5   \u{2502} \u{2502} ); }\n    \u{2502} \u{2514}\u{2500}^ invocation\n    \u{2575}"
+    );
+}

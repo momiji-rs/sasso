@@ -2053,9 +2053,8 @@ impl<'a> Evaluator<'a> {
     }
 
     /// The rendered two-span block, or `None` when this diagnostic cannot have
-    /// one: diagnostics off, no declaration position, or a declaration that
-    /// spans more than one line (dart draws arm glyphs and re-indents the whole
-    /// block for that, which this renderer cannot do yet).
+    /// one: diagnostics off, no declaration position, or two spans the renderer
+    /// cannot keep apart (see [`Self::spans_share_a_block`]).
     fn declaration_block(
         &self,
         message: &str,
@@ -2076,18 +2075,22 @@ impl<'a> Evaluator<'a> {
             col: decl.pos.col,
             length: decl.length,
         };
-        if crate::diag::span_crosses_lines(&decl_source, decl_span) {
+        let call_span = crate::diag::Span {
+            line: pos.line,
+            col: pos.col,
+            length,
+        };
+        if !Self::spans_share_a_block(
+            (&frames[0].url, &frames[0].source, call_span),
+            (&decl_url, &decl_source, decl_span),
+        ) {
             return None;
         }
         let mut rendered = format!("Error: {message}\n");
         rendered.push_str(&crate::diag::render_labelled_snippet(
             &frames[0].url,
             &frames[0].source,
-            crate::diag::Span {
-                line: pos.line,
-                col: pos.col,
-                length,
-            },
+            call_span,
             "invocation",
             &[crate::diag::Secondary {
                 url: &decl_url,
@@ -2106,9 +2109,8 @@ impl<'a> Evaluator<'a> {
     /// [`Self::error_at_call`] with dart's SECOND span: the `declaration` the
     /// failure is measured against, in the file it was written in.
     ///
-    /// Falls back to the plain single-span block when the declaration spans
-    /// more than one line — dart draws arm glyphs and re-indents the whole
-    /// block for that, which this renderer cannot do yet.
+    /// Falls back to the plain single-span block for the one pair of spans the
+    /// renderer cannot keep apart (see [`Self::spans_share_a_block`]).
     pub(super) fn error_at_call_with_declaration(
         &self,
         message: impl Into<String>,
@@ -2130,7 +2132,15 @@ impl<'a> Evaluator<'a> {
             col: decl.pos.col,
             length: decl.length,
         };
-        if crate::diag::span_crosses_lines(&decl_source, decl_span) {
+        let call_span = crate::diag::Span {
+            line: frame.pos.line,
+            col: frame.pos.col,
+            length: frame.length,
+        };
+        if !Self::spans_share_a_block(
+            (&frame.url, &frame.source, call_span),
+            (&decl_url, &decl_source, decl_span),
+        ) {
             return self.error_at_call(message);
         }
         let mut e = Error::at(message.clone(), frame.pos).with_length(frame.length);
@@ -2148,11 +2158,7 @@ impl<'a> Evaluator<'a> {
         rendered.push_str(&crate::diag::render_labelled_snippet(
             &frame.url,
             &frame.source,
-            crate::diag::Span {
-                line: frame.pos.line,
-                col: frame.pos.col,
-                length: frame.length,
-            },
+            call_span,
             "invocation",
             &[crate::diag::Secondary {
                 url: &decl_url,
@@ -2167,6 +2173,24 @@ impl<'a> Evaluator<'a> {
         rendered.push_str(&Self::render_frame_block(&frames, 2));
         e.rendered = Some(rendered);
         e
+    }
+
+    /// Whether the call and the declaration can be drawn in one rendered
+    /// block. They can, unless they sit in the SAME file with OVERLAPPING
+    /// lines: dart nests a second arm column for that one shape, which the
+    /// renderer cannot draw. A file is identified by its text as well as its
+    /// display url — two custom-importer files can share a display name.
+    fn spans_share_a_block(
+        call: (&str, &str, crate::diag::Span),
+        decl: (&str, &str, crate::diag::Span),
+    ) -> bool {
+        let ((call_url, call_source, call_span), (decl_url, decl_source, decl_span)) = (call, decl);
+        if call_url != decl_url || call_source != decl_source {
+            return true;
+        }
+        let (call_first, call_last) = crate::diag::span_line_range(call_source, call_span);
+        let (decl_first, decl_last) = crate::diag::span_line_range(decl_source, decl_span);
+        call_last < decl_first || decl_last < call_first
     }
 
     pub(super) fn error_at_call(&self, message: impl Into<String>) -> Error {
