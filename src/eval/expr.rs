@@ -424,7 +424,9 @@ impl<'a> Evaluator<'a> {
                 if self.in_supports_declaration && is_supports_calc_function(name) && !has_user_fn {
                     return self.eval_supports_calc_func(name, args, *pos);
                 }
-                // if() is lazy: only the selected branch is evaluated.
+                // if() is lazy: only the selected branch is evaluated. (Its
+                // `[if-function]` deprecation is raised when the FILE is
+                // parsed, not here — see `warn_import_rules`.)
                 if name == "if" {
                     return self.eval_if_function(args, *pos);
                 }
