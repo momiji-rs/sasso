@@ -325,6 +325,55 @@ fn compressed_output() {
 /// string below was produced by dart-sass 1.101.0 (`--style=compressed`).
 /// This is the offline regression gate for the color-serialization fix; the
 /// live cross-check lives in tests/parity.rs (compressed parity battery).
+/// A private-use character is escaped in expanded output and written RAW when
+/// compressing — dart trades the escape for the character once bytes are what
+/// matter. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_writes_private_use_characters_raw() {
+    let expanded = |scss: &str| compile(scss, &Options::default()).expect("compile");
+    // U+E028 is private use: escaped when expanded, raw when compressed — and
+    // the raw character makes the output non-ASCII, which brings the BOM that
+    // compressed style writes in place of `@charset`.
+    assert_eq!(
+        expanded(".a::before { content: \"\\e028\"; }"),
+        ".a::before {\n  content: \"\\e028\";\n}"
+    );
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\e028\"; }"),
+        "\u{feff}.a::before{content:\"\u{e028}\"}"
+    );
+    // Written raw in the source, it comes out the same way round.
+    assert_eq!(
+        expanded(".a::before { content: \"\u{e028}\"; }"),
+        ".a::before {\n  content: \"\\e028\";\n}"
+    );
+    assert_eq!(
+        css_compressed(".a::before { content: \"\u{e028}\"; }"),
+        "\u{feff}.a::before{content:\"\u{e028}\"}"
+    );
+    // The supplementary private-use planes too, and the edges of the BMP range.
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\f8ff\"; }"),
+        "\u{feff}.a::before{content:\"\u{f8ff}\"}"
+    );
+    // A character that is NOT private use is raw in both styles already, and a
+    // control character stays escaped in both.
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\4e2d\"; }"),
+        "\u{feff}.a::before{content:\"\u{4e2d}\"}"
+    );
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\1\"; }"),
+        ".a::before{content:\"\\1\"}"
+    );
+    // `inspect` and error messages keep the escape whatever the style, because
+    // they are not CSS output.
+    assert_eq!(
+        css_compressed(".a { b: inspect(\"\\e028\"); }"),
+        ".a{b:\"\\e028\"}"
+    );
+}
+
 /// Compressed style drops the whitespace AROUND A COMBINATOR and the space
 /// after a SELECTOR LIST's comma — and nothing else. Every expectation below
 /// was measured against dart-sass 1.103.1 (`--style=compressed`).

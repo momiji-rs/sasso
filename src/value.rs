@@ -521,23 +521,45 @@ pub(crate) fn is_private_use(cp: u32) -> bool {
 /// private-use characters. Double quotes are preferred; a string that contains
 /// `"` but no `'` is wrapped in `'`.
 pub(crate) fn serialize_quoted(text: &str) -> String {
+    serialize_quoted_styled(text, false)
+}
+
+/// [`serialize_quoted`] for CSS OUTPUT, which depends on the style: dart
+/// escapes a private-use character in expanded output — they are not rendered
+/// consistently, so the escape is the safer spelling — but writes it raw when
+/// compressing, where the escape costs more bytes than the character. (The
+/// output then holds non-ASCII text, and picks up the `@charset`/BOM that
+/// comes with it.) Everything else escapes the same either way.
+pub(crate) fn serialize_quoted_styled(text: &str, compressed: bool) -> String {
     let has_double = text.contains('"');
     let has_single = text.contains('\'');
     // Use single quotes only when the text has a `"` and no `'`.
     let quote = if has_double && !has_single { '\'' } else { '"' };
-    serialize_quoted_with(text, quote)
+    serialize_quoted_with_styled(text, quote, compressed)
 }
 
 /// The same, with the quote character already chosen — for a string whose
 /// quote depends on more than this fragment (an interpolated one, whose pieces
 /// are escaped separately but must share one quote).
 pub(crate) fn serialize_quoted_with(text: &str, quote: char) -> String {
+    serialize_quoted_with_styled(text, quote, false)
+}
+
+/// [`serialize_quoted_with`] for CSS output — see [`serialize_quoted_styled`]
+/// for what the style changes.
+pub(crate) fn serialize_quoted_with_styled(text: &str, quote: char, compressed: bool) -> String {
+    // A private-use character is escaped only when NOT compressing.
+    let escapes_private_use = !compressed;
     // Fast path: when no character needs escaping, the body is `text` verbatim
     // between the quotes — skip the `Vec<char>` and the per-char loop. The
     // predicate mirrors the loop's two escape branches exactly.
     let needs_escape = text.chars().any(|c| {
         let cp = c as u32;
-        c == quote || c == '\\' || (cp <= 0x1F && c != '\t') || cp == 0x7F || is_private_use(cp)
+        c == quote
+            || c == '\\'
+            || (cp <= 0x1F && c != '\t')
+            || cp == 0x7F
+            || (escapes_private_use && is_private_use(cp))
     });
     if !needs_escape {
         let mut out = String::with_capacity(text.len() + 2);
@@ -554,7 +576,7 @@ pub(crate) fn serialize_quoted_with(text: &str, quote: char) -> String {
         if c == quote || c == '\\' {
             out.push('\\');
             out.push(c);
-        } else if (cp <= 0x1F && c != '\t') || cp == 0x7F || is_private_use(cp) {
+        } else if (cp <= 0x1F && c != '\t') || cp == 0x7F || (escapes_private_use && is_private_use(cp)) {
             // A control character, DEL, or a private-use character: `\<hex>`
             // with a trailing space only when the next character would otherwise
             // extend the escape (a hex digit, space, or tab).
@@ -900,7 +922,7 @@ impl Value {
             Value::Color(c) => c.to_css(compressed),
             Value::Str(s) => {
                 if s.quoted {
-                    serialize_quoted(&s.text)
+                    serialize_quoted_styled(&s.text, compressed)
                 } else {
                     serialize_unquoted(&s.text)
                 }
