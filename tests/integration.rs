@@ -594,6 +594,31 @@ fn compressed_keeps_a_semicolon_that_belongs_to_a_value() {
     );
 }
 
+/// An at-rule whose NAME is interpolated is generic in dart — it never reaches
+/// the serializer's `@import` path — so it keeps the gap a real CSS `@import`
+/// loses. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_interpolated_at_rule_names_keep_their_gap() {
+    assert_eq!(
+        css_compressed("@#{\"import\"} \"x.css\";\n.a { b: 1; }"),
+        "@import \"x.css\";.a{b:1}"
+    );
+    // Written literally, the same rule loses it.
+    assert_eq!(
+        css_compressed("@import \"x.css\";\n.a { b: 1; }"),
+        "@import\"x.css\";.a{b:1}"
+    );
+    // And inside a style rule, where the import is an item rather than a node.
+    assert_eq!(
+        css_compressed(".a { @import url(x.css); }"),
+        ".a{@import\"x.css\"}"
+    );
+    assert_eq!(
+        css_compressed(".a { @#{\"import\"} \"x.css\"; }"),
+        ".a{@import \"x.css\"}"
+    );
+}
+
 /// dart writes a statement's `;` as a SEPARATOR, so compressed output never
 /// ends with one — at the end of the stylesheet or before a `}`. Measured
 /// against dart-sass 1.103.1.

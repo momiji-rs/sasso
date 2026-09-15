@@ -422,7 +422,9 @@ fn emit_item_expanded(
             out.push('\n');
             *prev = *lines;
         }
-        OutItem::ChildlessAtRule { name, prelude, lines } => {
+        OutItem::ChildlessAtRule {
+            name, prelude, lines, ..
+        } => {
             out.push_str(indent);
             // Source-map: the at-rule's `@` keyword, spanning the header.
             let mapped = record(out, *lines, collector);
@@ -646,23 +648,6 @@ fn write_with_indent(out: &mut String, text: &str, min_indent: usize, indent: &s
     }
 }
 
-/// Whether this node's compressed output ends with a `;` the node itself wrote
-/// — true for a verbatim line, and for a wrapper whose last VISIBLE child is
-/// one.
-fn ends_with_own_semicolon(node: &OutNode) -> bool {
-    match node {
-        OutNode::Raw(s, _) => s.ends_with(';'),
-        // A childless at-rule (`@namespace "x";`) writes its own terminator.
-        OutNode::AtRule { has_block, .. } => !has_block,
-        OutNode::ModuleScope { nodes, .. } => nodes
-            .iter()
-            .rev()
-            .find(|n| !matches!(n, OutNode::Blank))
-            .is_some_and(ends_with_own_semicolon),
-        _ => false,
-    }
-}
-
 fn emit_compressed(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> String {
     let mut out = String::new();
     let mut last: Option<&OutNode> = None;
@@ -678,12 +663,34 @@ fn emit_compressed(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> St
 }
 
 /// dart writes a statement's `;` as a SEPARATOR, so compressed output never
-/// ends with one — not at the end of the stylesheet and not before a `}`. Most
-/// nodes are separated that way here too; a verbatim line (a passed-through
-/// `@import`) carries its own `;`, which is one too many when it comes last.
+/// ends with one — not at the end of the stylesheet and not before a `}`. Every
+/// node here is separated that way except a verbatim line (a passed-through
+/// `@import`), which carries its own `;`; that one is dropped when the line
+/// comes last.
+///
+/// The test is which NODE wrote the final byte, never the byte itself: a
+/// declaration's value is verbatim text and can end in a `;` of its own
+/// (`--x: #{";"}`), which dart keeps.
 fn drop_trailing_semicolon(out: &mut String, last: Option<&OutNode>) {
     if last.is_some_and(ends_with_own_semicolon) && out.ends_with(';') {
         out.pop();
+    }
+}
+
+/// Whether this node's compressed output ends with a `;` the node itself wrote
+/// — true for a verbatim line, and for a wrapper whose last VISIBLE child is
+/// one.
+fn ends_with_own_semicolon(node: &OutNode) -> bool {
+    match node {
+        OutNode::Raw(s, _) => s.ends_with(';'),
+        // A childless at-rule (`@namespace "x";`) writes its own terminator.
+        OutNode::AtRule { has_block, .. } => !has_block,
+        OutNode::ModuleScope { nodes, .. } => nodes
+            .iter()
+            .rev()
+            .find(|n| !matches!(n, OutNode::Blank))
+            .is_some_and(ends_with_own_semicolon),
+        _ => false,
     }
 }
 
@@ -750,10 +757,7 @@ fn fold_value_compressed<'v>(value: &'v str, custom: bool) -> std::borrow::Cow<'
 /// (`visitCssMediaRule`) and `@supports` (`visitCssSupportsRule`). Every other
 /// at-rule keeps the space even before `(` — e.g. `@container (min-width:1px)`.
 fn compressed_at_rule_omits_space(name: &str, prelude: &str) -> bool {
-    // `@import` writes no space at all when compressing (dart's
-    // `_writeOptionalSpace` before `_writeImportUrl`); `@media`/`@supports`
-    // drop theirs only before a `(`, where nothing can run together.
-    name == "import" || (matches!(name, "media" | "supports") && prelude.starts_with('('))
+    matches!(name, "media" | "supports") && prelude.starts_with('(')
 }
 
 /// Write a rule block's items for compressed output, recording each item's
@@ -836,13 +840,22 @@ fn write_item_compressed(out: &mut String, item: &OutItem, collector: &mut Optio
             true
         }
         OutItem::Comment(..) => false,
-        OutItem::ChildlessAtRule { name, prelude, lines } => {
+        OutItem::ChildlessAtRule {
+            name,
+            prelude,
+            css_import,
+            lines,
+        } => {
             // Source-map: the at-rule's `@` keyword.
             record(out, *lines, collector);
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
-                if !compressed_at_rule_omits_space(name, prelude) {
+                // A CSS `@import` writes no space before its url when
+                // compressing. That belongs to the IMPORT, not to the name: an
+                // at-rule whose name is interpolated (`@#{"import"} "x"`) is
+                // generic in dart and keeps its gap.
+                if !*css_import && !compressed_at_rule_omits_space(name, prelude) {
                     out.push(' ');
                 }
                 out.push_str(prelude);

@@ -427,6 +427,12 @@ pub(crate) enum OutItem {
     ChildlessAtRule {
         name: String,
         prelude: String,
+        /// Whether this is a plain-CSS `@import` written as one — dart's
+        /// `CssImport`, which compressed output spells `@import"x.css"` with no
+        /// gap. An at-rule that merely RESOLVES to that name (`@#{"import"}`)
+        /// is generic in dart and keeps its gap, so this cannot be recovered
+        /// from `name`.
+        css_import: bool,
         /// Source lines (only `file` and `end` are meaningful) for the
         /// serializer's trailing-comment rule; default = disabled.
         lines: SrcLines,
@@ -528,7 +534,12 @@ impl Sink<'_> {
     /// top level or inside an at-rule body it is a bubbled-out `OutNode`.
     fn push_childless_at_rule(&mut self, name: String, prelude: String, lines: SrcLines) {
         match self {
-            Sink::Rule { items, .. } => items.push(OutItem::ChildlessAtRule { name, prelude, lines }),
+            Sink::Rule { items, .. } => items.push(OutItem::ChildlessAtRule {
+                name,
+                prelude,
+                css_import: false,
+                lines,
+            }),
             _ => self.push_at_rule(OutNode::childless_at_rule(name, prelude, lines)),
         }
     }
@@ -579,9 +590,9 @@ impl Sink<'_> {
                     value_span,
                 }),
                 OutItem::Comment(text, lines) => body.push(OutNode::Comment(text, lines)),
-                OutItem::ChildlessAtRule { name, prelude, lines } => {
-                    body.push(OutNode::childless_at_rule(name, prelude, lines))
-                }
+                OutItem::ChildlessAtRule {
+                    name, prelude, lines, ..
+                } => body.push(OutNode::childless_at_rule(name, prelude, lines)),
                 // A plain-CSS nested rule reaching an at-root sink becomes a
                 // top-level rule carrying its items.
                 OutItem::NestedRule {
@@ -637,9 +648,9 @@ impl Sink<'_> {
                                 lines,
                                 extend_base: usize::MAX,
                             },
-                            OutItem::ChildlessAtRule { name, prelude, lines } => {
-                                OutNode::childless_at_rule(name, prelude, lines)
-                            }
+                            OutItem::ChildlessAtRule {
+                                name, prelude, lines, ..
+                            } => OutNode::childless_at_rule(name, prelude, lines),
                             OutItem::NestedAtRule {
                                 name,
                                 prelude,
@@ -3080,6 +3091,7 @@ impl<'a> Evaluator<'a> {
                         sink.push_item(OutItem::ChildlessAtRule {
                             name: "import".to_string(),
                             prelude: text,
+                            css_import: true,
                             lines,
                         });
                     } else {
@@ -5036,7 +5048,12 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
                         lines,
                     });
                 } else {
-                    items.push(OutItem::ChildlessAtRule { name, prelude, lines });
+                    items.push(OutItem::ChildlessAtRule {
+                        name,
+                        prelude,
+                        css_import: false,
+                        lines,
+                    });
                 }
             }
             OutNode::ModuleScope { nodes, .. } => items.extend(at_body_to_items(nodes)),

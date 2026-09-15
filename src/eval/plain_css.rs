@@ -571,6 +571,7 @@ impl<'a> Evaluator<'a> {
                     };
                     let lines = self.map_only_lines(pos);
                     items.push(OutItem::ChildlessAtRule {
+                        css_import: false,
                         name: "import".to_string(),
                         prelude,
                         lines,
@@ -620,6 +621,7 @@ impl<'a> Evaluator<'a> {
                     None => {
                         let lines = self.stamp(*lines);
                         items.push(OutItem::ChildlessAtRule {
+                            css_import: false,
                             name: name.clone(),
                             prelude: prelude_s,
                             lines,
