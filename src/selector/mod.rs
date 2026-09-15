@@ -234,7 +234,7 @@ fn compress_pseudo_arg(out: &mut String, name: &str, inner: &[char]) {
     }
     let is_selector_pseudo = matches!(
         unv,
-        "not" | "is" | "where" | "has" | "matches" | "any" | "host" | "host-context" | "current"
+        "not" | "is" | "where" | "has" | "matches" | "any" | "host" | "host-context" | "current" | "slotted"
     ) || unv.ends_with("-any");
     if is_selector_pseudo {
         let arg: String = inner.iter().collect();

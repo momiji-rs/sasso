@@ -441,6 +441,22 @@ fn compressed_selectors_keep_an_escapes_terminator() {
     assert_eq!(sel(".\\31 a .b"), ".\\31 a .b{a:1}");
 }
 
+/// `::slotted()` takes a selector list like `:not()` and friends — and the
+/// dispatch is CASE-SENSITIVE, which is dart's own behaviour: `:NOT(.a, .b)`
+/// keeps its comma space. Both measured against dart-sass 1.103.1.
+#[test]
+fn compressed_selector_pseudo_dispatch_matches_dart() {
+    let sel = |scss: &str| css_compressed(&format!("{scss}{{a:1}}"));
+    assert_eq!(sel("::slotted(.b, .c)"), "::slotted(.b,.c){a:1}");
+    assert_eq!(sel(".x:-moz-any(.b, .c)"), ".x:-moz-any(.b,.c){a:1}");
+    // dart compares the unvendored name verbatim, so an upper-case spelling is
+    // opaque to it and keeps the space. Mirrored, not tidied.
+    assert_eq!(sel(".x:NOT(.b, .c)"), ".x:NOT(.b, .c){a:1}");
+    assert_eq!(sel(".x:Where(.b, .c)"), ".x:Where(.b, .c){a:1}");
+    // An opaque argument keeps its space whatever the case.
+    assert_eq!(sel(".x:LANG(en, fr)"), ".x:LANG(en, fr){a:1}");
+}
+
 /// A private-use character is escaped in expanded output and written RAW when
 /// compressing — dart trades the escape for the character once bytes are what
 /// matter. Measured against dart-sass 1.103.1.
