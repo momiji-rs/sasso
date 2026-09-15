@@ -325,6 +325,48 @@ fn compressed_output() {
 /// string below was produced by dart-sass 1.101.0 (`--style=compressed`).
 /// This is the offline regression gate for the color-serialization fix; the
 /// live cross-check lives in tests/parity.rs (compressed parity battery).
+/// Compressed style drops the whitespace AROUND A COMBINATOR and the space
+/// after a SELECTOR LIST's comma — and nothing else. Every expectation below
+/// was measured against dart-sass 1.103.1 (`--style=compressed`).
+#[test]
+fn compressed_selectors_lose_only_structural_whitespace() {
+    let sel = |scss: &str| css_compressed(&format!("{scss}{{a:1}}"));
+    // The three combinators, on both sides.
+    assert_eq!(sel(".a > .b"), ".a>.b{a:1}");
+    assert_eq!(sel(".a + .b"), ".a+.b{a:1}");
+    assert_eq!(sel(".a ~ .b"), ".a~.b{a:1}");
+    assert_eq!(sel(".a .b > .c + .d ~ .e"), ".a .b>.c+.d~.e{a:1}");
+    assert_eq!(sel("* > *"), "*>*{a:1}");
+    // A descendant combinator IS a space; it stays.
+    assert_eq!(sel(".a .b"), ".a .b{a:1}");
+    // A combinator that opens a relative selector loses its trailing space.
+    assert_eq!(sel(":has(+ .b)"), ":has(+.b){a:1}");
+    assert_eq!(sel(":has(> .a, + .b)"), ":has(>.a,+.b){a:1}");
+    // A SELECTOR-list comma loses its space; an opaque argument keeps it.
+    assert_eq!(sel(":not(.b, .c)"), ":not(.b,.c){a:1}");
+    assert_eq!(sel(":where(.a, .b) .c"), ":where(.a,.b) .c{a:1}");
+    assert_eq!(sel(":is(:not(.a, .b), .c) > .d"), ":is(:not(.a,.b),.c)>.d{a:1}");
+    assert_eq!(sel(":host-context(.a, .b)"), ":host-context(.a,.b){a:1}");
+    assert_eq!(sel(":lang(en, fr)"), ":lang(en, fr){a:1}");
+    // `:nth-child()` carries an An+B, and only its `of` tail is a list.
+    assert_eq!(sel(":nth-child(2n + 1)"), ":nth-child(2n+1){a:1}");
+    assert_eq!(
+        sel(":nth-child(2n + 1 of .a, .b)"),
+        ":nth-child(2n+1 of .a,.b){a:1}"
+    );
+    // Quoted and escaped text is not selector structure.
+    assert_eq!(sel("[a=\"x > y\"]"), "[a=\"x > y\"]{a:1}");
+    assert_eq!(sel(":not([a=\"x, y\"], .b)"), ":not([a=\"x, y\"],.b){a:1}");
+    assert_eq!(sel(".a\\+b"), ".a\\+b{a:1}");
+    assert_eq!(sel(".a\\:b > .c"), ".a\\:b>.c{a:1}");
+    // A nested rule and an `@extend` rewrite go through the same writer.
+    assert_eq!(css_compressed(".a { > .b { c: 1; } }"), ".a>.b{c:1}");
+    assert_eq!(
+        css_compressed("%p { a: 1; }\n.x > .y { @extend %p; }"),
+        ".x>.y{a:1}"
+    );
+}
+
 #[test]
 fn compressed_color_picks_shortest_form() {
     let case = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));

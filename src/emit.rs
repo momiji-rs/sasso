@@ -774,7 +774,7 @@ fn write_item_compressed(out: &mut String, item: &OutItem, collector: &mut Optio
         } => {
             // Source-map: the nested selector list's first character.
             record(out, *lines, collector);
-            out.push_str(&selectors.join(","));
+            write_selectors_compressed(out, selectors);
             out.push('{');
             write_items_compressed(out, items, collector);
             out.push('}');
@@ -804,6 +804,18 @@ fn write_item_compressed(out: &mut String, item: &OutItem, collector: &mut Optio
     }
 }
 
+/// Write a selector list for compressed output: a bare comma between the
+/// complexes, each one written the way dart compresses a selector (no space
+/// around a combinator, none after a selector-list comma).
+fn write_selectors_compressed(out: &mut String, selectors: &[String]) {
+    for (i, sel) in selectors.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&crate::selector::compress_selector(sel));
+    }
+}
+
 fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option<SmCollector>) {
     match node {
         OutNode::ModuleScope { nodes, .. } => {
@@ -825,7 +837,7 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             }
             // Source-map: the selector list's first character.
             record(out, *lines, collector);
-            out.push_str(&selectors.to_strings().join(","));
+            write_selectors_compressed(out, &selectors.to_strings());
             out.push('{');
             write_items_compressed(out, items, collector);
             out.push('}');

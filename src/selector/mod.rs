@@ -109,6 +109,155 @@ impl Simple {
     }
 }
 
+/// A resolved selector as dart-sass writes it in COMPRESSED style.
+///
+/// Two kinds of whitespace go, and no others:
+///
+/// * the space on either side of a COMBINATOR — `.a > .b` is `.a>.b`, and a
+///   combinator that opens a relative selector loses its trailing space too
+///   (`:has(+ .b)` is `:has(+.b)`);
+/// * the space after the comma of a SELECTOR LIST — the list a `:not()`,
+///   `:is()`, `:where()`, `:has()` … carries, or the `of` tail of an
+///   `:nth-child()`.
+///
+/// Every other space is structure (`.a .b` IS the descendant combinator) and
+/// every other comma is opaque: `:lang(en, fr)` keeps its space, because its
+/// argument is an identifier list and not a selector list. Attribute values and
+/// quoted strings are copied through untouched.
+///
+/// The top-level list's own commas never reach here — emit joins the complexes
+/// with `,` itself.
+pub(crate) fn compress_selector(sel: &str) -> std::borrow::Cow<'_, str> {
+    // Nothing to do unless the selector has a combinator or a pseudo argument.
+    if !sel.bytes().any(|b| matches!(b, b'>' | b'+' | b'~' | b'(')) {
+        return std::borrow::Cow::Borrowed(sel);
+    }
+    let chars: Vec<char> = sel.chars().collect();
+    let mut out = String::with_capacity(sel.len());
+    compress_into(&mut out, &chars);
+    std::borrow::Cow::Owned(out)
+}
+
+/// Append `chars` — one complex selector, or one component of a selector list
+/// argument — to `out` in compressed form.
+fn compress_into(out: &mut String, chars: &[char]) {
+    let mut i = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                out.push(chars[i]);
+                if let Some(c) = chars.get(i + 1) {
+                    out.push(*c);
+                }
+                i += 2;
+            }
+            '"' | '\'' => {
+                let end = skip_quoted(chars, i);
+                out.extend(&chars[i..end.min(chars.len())]);
+                i = end;
+            }
+            '[' => {
+                // An attribute selector: its insides are not selector structure.
+                let end = skip_attribute(chars, i);
+                out.extend(&chars[i..end.min(chars.len())]);
+                i = end;
+            }
+            ' ' | '\t' | '\n' | '\r' => {
+                let mut j = i;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                // A run of whitespace IS the descendant combinator — unless
+                // what follows is a combinator of its own, which eats it.
+                if !matches!(chars.get(j), Some('>' | '+' | '~')) && j < chars.len() {
+                    out.push(' ');
+                }
+                i = j;
+            }
+            '>' | '+' | '~' => {
+                out.push(chars[i]);
+                i += 1;
+                while i < chars.len() && chars[i].is_whitespace() {
+                    i += 1;
+                }
+            }
+            ':' => {
+                let name_start = i + 1 + usize::from(chars.get(i + 1) == Some(&':'));
+                let mut j = name_start;
+                while j < chars.len()
+                    && (chars[j].is_ascii_alphanumeric()
+                        || chars[j] == '-'
+                        || chars[j] == '_'
+                        || (chars[j] as u32) >= 0x80)
+                {
+                    j += 1;
+                }
+                if chars.get(j) != Some(&'(') {
+                    out.extend(&chars[i..j]);
+                    i = j;
+                    continue;
+                }
+                let close = matching_paren(chars, j);
+                let name: String = chars[name_start..j].iter().collect();
+                out.extend(&chars[i..=j]);
+                compress_pseudo_arg(out, &name, &chars[j + 1..close.min(chars.len())]);
+                if close < chars.len() {
+                    out.push(')');
+                    i = close + 1;
+                } else {
+                    i = chars.len();
+                }
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Append one pseudo's argument, compressed according to what that pseudo
+/// takes: a selector list, an An+B (with an optional `of` list), or an opaque
+/// run copied verbatim.
+fn compress_pseudo_arg(out: &mut String, name: &str, inner: &[char]) {
+    let unv = unvendor(name);
+    if unv == "nth-child" || unv == "nth-last-child" {
+        // The An+B itself is already normalised; only the `of` tail is a
+        // selector list.
+        let arg: String = inner.iter().collect();
+        match arg.find(" of ") {
+            Some(at) => {
+                out.push_str(&arg[..at + 4]);
+                compress_selector_list(out, &arg[at + 4..]);
+            }
+            None => out.push_str(&arg),
+        }
+        return;
+    }
+    let is_selector_pseudo = matches!(
+        unv,
+        "not" | "is" | "where" | "has" | "matches" | "any" | "host" | "host-context" | "current"
+    ) || unv.ends_with("-any");
+    if is_selector_pseudo {
+        let arg: String = inner.iter().collect();
+        compress_selector_list(out, &arg);
+    } else {
+        out.extend(inner);
+    }
+}
+
+/// Append a selector-list argument: each component compressed, joined by a bare
+/// comma.
+fn compress_selector_list(out: &mut String, arg: &str) {
+    for (i, part) in parse::split_top(arg, ',').iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let cs: Vec<char> = part.trim().chars().collect();
+        compress_into(out, &cs);
+    }
+}
+
 /// Validate the arguments of every grammar-typed pseudo in a resolved selector
 /// string the way dart-sass does, returning the exact dart error message on a
 /// malformed one. Two pseudo families carry a strict grammar. The An+B pseudos
