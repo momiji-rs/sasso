@@ -325,31 +325,51 @@ fn compressed_output() {
 /// string below was produced by dart-sass 1.101.0 (`--style=compressed`).
 /// This is the offline regression gate for the color-serialization fix; the
 /// live cross-check lives in tests/parity.rs (compressed parity battery).
-/// A preserved CSS calculation — one that keeps a `var()` or `env()` and so
-/// cannot fold to a number — separates its arguments with a bare comma when
-/// compressing, like any other value. Measured against dart-sass 1.103.1.
 #[test]
-fn compressed_preserved_calculations_drop_the_argument_space() {
-    let v = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
-    assert_eq!(v("clamp(0.5px, var(--y), 2px)"), "a{x:clamp(.5px,var(--y),2px)}");
+fn compressed_color_picks_shortest_form() {
+    let case = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
+
+    // --- fractional triples: percentages, with hsl only when it wins by more
+    // --- than the two-character handicap dart gives it -----------------------
+    assert_eq!(case("darken(#336699,10%)"), "a{x:rgb(15%,30%,45%)}");
+    assert_eq!(case("lighten(#336699,10%)"), "a{x:rgb(25%,50%,75%)}");
+    assert_eq!(case("saturate(#336699,10%)"), "a{x:rgb(16%,40%,64%)}");
+    assert_eq!(case("grayscale(#ff6600)"), "a{x:hsl(0,0%,50%)}");
     assert_eq!(
-        v("clamp(1px, env(safe-area), 2px)"),
-        "a{x:clamp(1px,env(safe-area),2px)}"
+        css_compressed("@use 'sass:color';a{x:color.mix(#ff6600,#fff,30%)}"),
+        "a{x:rgb(100%,82%,70%)}"
     );
-    assert_eq!(v("min(1px, var(--y))"), "a{x:min(1px,var(--y))}");
-    assert_eq!(v("mod(var(--y), 2px)"), "a{x:mod(var(--y),2px)}");
-    assert_eq!(v("pow(var(--y), 2)"), "a{x:pow(var(--y),2)}");
-    assert_eq!(v("calc-size(auto, var(--y))"), "a{x:calc-size(auto,var(--y))}");
     assert_eq!(
-        v("calc(1px + clamp(1px, var(--y), 2px))"),
-        "a{x:calc(1px + clamp(1px,var(--y),2px))}"
+        css_compressed("@use 'sass:color';a{x:color.adjust(#336699,$lightness:-10%)}"),
+        "a{x:rgb(15%,30%,45%)}"
     );
-    // A `@supports` declaration is not a value: dart writes it verbatim, space
-    // and all, in both styles.
-    assert_eq!(
-        css_compressed("@supports (width: clamp(1px, var(--y), 2px)) { .a { b: 1; } }"),
-        "@supports(width: clamp(1px, var(--y), 2px)){.a{b:1}}"
-    );
+    // Non-opaque: rgba() vs hsla(); the percentage rgba form wins.
+    assert_eq!(case("rgba(darken(#336699,10%),.5)"), "a{x:rgba(15%,30%,45%,.5)}");
+
+    // --- results whose rgb form is shorter (or equal) -> stays rgb/hex ------
+    // The percentage form wins under dart's two-character hsl handicap.
+    assert_eq!(case("saturate(#888,20%)"), "a{x:rgb(62.6666666667%,44%,44%)}");
+    // A hue rotation that lands on integers collapses to hex.
+    assert_eq!(case("adjust-hue(#336699,90deg)"), "a{x:#939}");
+
+    // --- hsl-space literals also pick the shortest form --------------------
+    // Integer-rgb-equivalent hsl collapses to hex.
+    assert_eq!(case("hsl(210,50%,40%)"), "a{x:#369}");
+    // A fractional-rgb hsl literal serializes through rgb like every legacy
+    // color (dart `_writeLegacyColor`): the percent rgb form wins under the
+    // two-character hsl handicap.
+    assert_eq!(case("hsl(210,50%,30%)"), "a{x:rgb(15%,30%,45%)}");
+    assert_eq!(case("hsl(30,100%,50%)"), "a{x:rgb(100%,50%,0%)}");
+    // A powerless (zero-saturation) hue collapses to the rgb round-trip's 0:
+    // compressed serialization derives the hsl candidate from the rgb triple,
+    // so the authored hue does not participate.
+    assert_eq!(case("hsl(30,0%,50%)"), "a{x:hsl(0,0%,50%)}");
+
+    // --- regression guards: unchanged cases -------------------------------
+    assert_eq!(case("#336699"), "a{x:#369}");
+    assert_eq!(case("red"), "a{x:red}");
+    assert_eq!(case("rgba(0,0,0,.5)"), "a{x:rgba(0,0,0,.5)}");
+    assert_eq!(case("hsl(0,0%,50%)"), "a{x:hsl(0,0%,50%)}");
 }
 
 /// Compressed style drops a leading zero from a POSITIVE number only — dart
@@ -646,51 +666,31 @@ fn compressed_selectors_lose_only_structural_whitespace() {
     );
 }
 
+/// A preserved CSS calculation — one that keeps a `var()` or `env()` and so
+/// cannot fold to a number — separates its arguments with a bare comma when
+/// compressing, like any other value. Measured against dart-sass 1.103.1.
 #[test]
-fn compressed_color_picks_shortest_form() {
-    let case = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
-
-    // --- fractional triples: percentages, with hsl only when it wins by more
-    // --- than the two-character handicap dart gives it -----------------------
-    assert_eq!(case("darken(#336699,10%)"), "a{x:rgb(15%,30%,45%)}");
-    assert_eq!(case("lighten(#336699,10%)"), "a{x:rgb(25%,50%,75%)}");
-    assert_eq!(case("saturate(#336699,10%)"), "a{x:rgb(16%,40%,64%)}");
-    assert_eq!(case("grayscale(#ff6600)"), "a{x:hsl(0,0%,50%)}");
+fn compressed_preserved_calculations_drop_the_argument_space() {
+    let v = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
+    assert_eq!(v("clamp(0.5px, var(--y), 2px)"), "a{x:clamp(.5px,var(--y),2px)}");
     assert_eq!(
-        css_compressed("@use 'sass:color';a{x:color.mix(#ff6600,#fff,30%)}"),
-        "a{x:rgb(100%,82%,70%)}"
+        v("clamp(1px, env(safe-area), 2px)"),
+        "a{x:clamp(1px,env(safe-area),2px)}"
     );
+    assert_eq!(v("min(1px, var(--y))"), "a{x:min(1px,var(--y))}");
+    assert_eq!(v("mod(var(--y), 2px)"), "a{x:mod(var(--y),2px)}");
+    assert_eq!(v("pow(var(--y), 2)"), "a{x:pow(var(--y),2)}");
+    assert_eq!(v("calc-size(auto, var(--y))"), "a{x:calc-size(auto,var(--y))}");
     assert_eq!(
-        css_compressed("@use 'sass:color';a{x:color.adjust(#336699,$lightness:-10%)}"),
-        "a{x:rgb(15%,30%,45%)}"
+        v("calc(1px + clamp(1px, var(--y), 2px))"),
+        "a{x:calc(1px + clamp(1px,var(--y),2px))}"
     );
-    // Non-opaque: rgba() vs hsla(); the percentage rgba form wins.
-    assert_eq!(case("rgba(darken(#336699,10%),.5)"), "a{x:rgba(15%,30%,45%,.5)}");
-
-    // --- results whose rgb form is shorter (or equal) -> stays rgb/hex ------
-    // The percentage form wins under dart's two-character hsl handicap.
-    assert_eq!(case("saturate(#888,20%)"), "a{x:rgb(62.6666666667%,44%,44%)}");
-    // A hue rotation that lands on integers collapses to hex.
-    assert_eq!(case("adjust-hue(#336699,90deg)"), "a{x:#939}");
-
-    // --- hsl-space literals also pick the shortest form --------------------
-    // Integer-rgb-equivalent hsl collapses to hex.
-    assert_eq!(case("hsl(210,50%,40%)"), "a{x:#369}");
-    // A fractional-rgb hsl literal serializes through rgb like every legacy
-    // color (dart `_writeLegacyColor`): the percent rgb form wins under the
-    // two-character hsl handicap.
-    assert_eq!(case("hsl(210,50%,30%)"), "a{x:rgb(15%,30%,45%)}");
-    assert_eq!(case("hsl(30,100%,50%)"), "a{x:rgb(100%,50%,0%)}");
-    // A powerless (zero-saturation) hue collapses to the rgb round-trip's 0:
-    // compressed serialization derives the hsl candidate from the rgb triple,
-    // so the authored hue does not participate.
-    assert_eq!(case("hsl(30,0%,50%)"), "a{x:hsl(0,0%,50%)}");
-
-    // --- regression guards: unchanged cases -------------------------------
-    assert_eq!(case("#336699"), "a{x:#369}");
-    assert_eq!(case("red"), "a{x:red}");
-    assert_eq!(case("rgba(0,0,0,.5)"), "a{x:rgba(0,0,0,.5)}");
-    assert_eq!(case("hsl(0,0%,50%)"), "a{x:hsl(0,0%,50%)}");
+    // A `@supports` declaration is not a value: dart writes it verbatim, space
+    // and all, in both styles.
+    assert_eq!(
+        css_compressed("@supports (width: clamp(1px, var(--y), 2px)) { .a { b: 1; } }"),
+        "@supports(width: clamp(1px, var(--y), 2px)){.a{b:1}}"
+    );
 }
 
 #[test]
