@@ -1559,6 +1559,31 @@ fn a_legacy_color_function_suggests_its_replacement() {
     // this from INSIDE the function, after they are validated.
     assert!(sug("a { b: lighten(3, 10%); }\n").is_empty());
     assert!(sug("a { b: lighten(#abcdef, 150%); }\n").is_empty());
+    // A first-class reference reaches the same function, so it carries the
+    // same deprecation — computed suggestion and all — reported against the
+    // INVOCATION.
+    let w = one("@use \"sass:meta\";\na { b: meta.call(meta.get-function(\"lighten\"), #abcdef, 10%); }\n");
+    assert!(w.contains("lighten() is deprecated. Suggestions:"), "{w}");
+    assert!(w.contains("color.scale($color, $lightness: 51%)"), "{w}");
+    let w = one("a { b: call(\"darken\", #abcdef, 10%); }\n");
+    assert!(
+        w.contains("color.scale($color, $lightness: -12.4390243902%)"),
+        "{w}"
+    );
+    // Taken from the MODULE it names itself that way — and `color.whiteness`
+    // is reachable only that way.
+    let w = one(
+        "@use \"sass:meta\"; @use \"sass:color\";\na { b: meta.call(meta.get-function(\"whiteness\", $module: \"color\"), #abcdef); }\n",
+    );
+    assert!(w.contains("color.whiteness() is deprecated."), "{w}");
+    assert!(
+        w.contains("color.channel($color, \"whiteness\", $space: hwb)"),
+        "{w}"
+    );
+    // An `hsl()` colour keeps its channels, and the scale percentage divides
+    // by the room left in one — so it is read from the colour, not re-derived.
+    let w = one("a { b: saturate(hsl(20, 99.9999%, 50%), 0.00001%); }\n");
+    assert!(w.contains("$saturation: 9.9999999997%"), "{w}");
     // And the suggestion follows the VALUE, so one call site can warn twice.
     let w = sug(
         "@mixin m($c) { b: lighten($c, 10%); }\na { @include m(#abcdef); }\nd { @include m(#123456); }\n",

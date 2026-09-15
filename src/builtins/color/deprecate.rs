@@ -47,8 +47,8 @@ pub(crate) fn suggestions(name: &str, pos_args: &[Value], named: &[(String, Valu
     // is the unitless 0-1 value it is passed as.
     let (current, limit, unit) = match channel {
         "alpha" => (color.a, 1.0, ""),
-        "saturation" => (color.to_hsl().1 * 100.0, 100.0, "%"),
-        _ => (color.to_hsl().2 * 100.0, 100.0, "%"),
+        "saturation" => (hsl_channel(color, 1), 100.0, "%"),
+        _ => (hsl_channel(color, 2), 100.0, "%"),
     };
     let signed = sign * amount.value;
     let mut out = Vec::with_capacity(2);
@@ -64,6 +64,26 @@ pub(crate) fn suggestions(name: &str, pos_args: &[Value], named: &[(String, Valu
     }
     out.push(adjust_line(channel, signed, unit));
     Some(out)
+}
+
+/// The colour's saturation (`i == 1`) or lightness (`i == 2`), as a
+/// percentage.
+///
+/// An `hsl()` colour KEEPS its channels, and dart's suggestion is derived from
+/// those, not from a round trip through rgb. The difference is normally
+/// invisible, but the scale percentage divides by the room left in the channel
+/// — so against a colour at 99.9999% saturation it is the difference between
+/// dart's `9.9999999997%` and a re-derived `9.9999999982%`. The same reading
+/// the `saturation`/`lightness` getters already prefer.
+fn hsl_channel(color: &crate::value::Color, i: usize) -> f64 {
+    if let Some(m) = &color.modern {
+        if m.space == crate::value::ColorSpace::Hsl {
+            return m.channels[i].unwrap_or(0.0);
+        }
+    }
+    let hsl = color.to_hsl();
+    let channel = if i == 1 { hsl.1 } else { hsl.2 };
+    channel * 100.0
 }
 
 /// `color.adjust($color, $<channel>: <amount>)`.
