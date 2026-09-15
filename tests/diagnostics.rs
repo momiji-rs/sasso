@@ -1939,3 +1939,34 @@ fn a_first_class_mixin_reference_carries_the_declaration_too() {
         assert!(caret_line(&block).ends_with(" invocation"), "{block}");
     }
 }
+
+#[test]
+fn two_spans_on_one_line_stack_their_rows() {
+    // A stylesheet written on ONE line puts the call and the declaration it was
+    // measured against on that same line. dart prints the line once and stacks
+    // the underlines, the primary first — wherever the two sit relative to each
+    // other. Both blocks are dart-sass 1.103.1's.
+    let run = |src: &str| -> String {
+        snippet(
+            &compile(src, &Options::default().with_url("t.scss"))
+                .expect_err("expected a compile error")
+                .to_string(),
+        )
+    };
+    assert_eq!(
+        run("@function f($x) { @return 1; } .a { b: f(1, 2); }\n"),
+        "Error: Only 1 argument allowed, but 2 were passed.\n  \u{2577}\n1 \u{2502} \
+         @function f($x) { @return 1; } .a { b: f(1, 2); }\n  \u{2502}                                        \
+         ^^^^^^^ invocation\n  \u{2502}           \
+         \u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration\n  \u{2575}"
+    );
+    // The declaration can come AFTER the call on that line; the primary row is
+    // still written first.
+    assert_eq!(
+        run("@mixin caller { @include m; } @mixin m($x) { a: $x; } .a { @include caller; }\n"),
+        "Error: Missing argument $x.\n  \u{2577}\n1 \u{2502} \
+         @mixin caller { @include m; } @mixin m($x) { a: $x; } .a { @include caller; }\n  \u{2502}                 \
+         ^^^^^^^^^^ invocation\n  \u{2502}                                      \
+         \u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration\n  \u{2575}"
+    );
+}

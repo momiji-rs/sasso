@@ -2177,9 +2177,13 @@ impl<'a> Evaluator<'a> {
 
     /// Whether the call and the declaration can be drawn in one rendered
     /// block. They can, unless they sit in the SAME file with OVERLAPPING
-    /// lines: dart nests a second arm column for that one shape, which the
-    /// renderer cannot draw. A file is identified by its text as well as its
-    /// display url — two custom-importer files can share a display name.
+    /// lines AND one of them draws an ARM: dart nests a second arm column and
+    /// crosses the two for that shape, which the renderer cannot do. Two spans
+    /// that stay within their lines just stack their underline rows, even on
+    /// one line — `@mixin m($x) { … } .a { @include m; }` is one row under the
+    /// call and one under the declaration. A file is identified by its text as
+    /// well as its display url: two custom-importer files can share a display
+    /// name.
     fn spans_share_a_block(
         call: (&str, &str, crate::diag::Span),
         decl: (&str, &str, crate::diag::Span),
@@ -2190,7 +2194,9 @@ impl<'a> Evaluator<'a> {
         }
         let (call_first, call_last) = crate::diag::span_line_range(call_source, call_span);
         let (decl_first, decl_last) = crate::diag::span_line_range(decl_source, decl_span);
-        call_last < decl_first || decl_last < call_first
+        let overlapping = call_first <= decl_last && decl_first <= call_last;
+        let has_arm = call_first != call_last || decl_first != decl_last;
+        !(overlapping && has_arm)
     }
 
     pub(super) fn error_at_call(&self, message: impl Into<String>) -> Error {
