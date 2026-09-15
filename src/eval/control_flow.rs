@@ -600,11 +600,12 @@ impl<'a> Evaluator<'a> {
         // module path.
         if let Some(ns) = module {
             if self.used_modules.get(ns).map(String::as_str) == Some("meta") {
-                if name == "apply" {
-                    return self.exec_apply(args, content, content_params, pos, parents, sink);
-                }
-                if name == "load-css" {
-                    return self.exec_load_css(args, content, pos, parents, sink);
+                // `_` and `-` are one character in a Sass identifier, so
+                // `meta.load_css(…)` is `meta.load-css(…)`.
+                match normalize_arg_name(name).as_ref() {
+                    "apply" => return self.exec_apply(args, content, content_params, pos, parents, sink),
+                    "load-css" => return self.exec_load_css(args, content, pos, parents, sink),
+                    _ => {}
                 }
             }
         }

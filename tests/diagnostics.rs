@@ -1283,3 +1283,49 @@ fn a_mixin_reached_through_a_reference_reports_where_it_was_included() {
     assert_eq!(caret_line(&ambiguous).len(), 25, "{ambiguous}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_builtin_mixin_answers_to_its_underscore_spelling() {
+    // `_` and `-` are one character in a Sass identifier, for `sass:meta`'s
+    // mixins as for everything else — by call, by reference, and by existence
+    // query. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_mixin_under_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    std::fs::write(dir.join("real.css"), "x { loaded: 1; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // Every route to the mixin takes either spelling.
+    for src in [
+        "@use \"sass:meta\"; a { @include meta.load_css(\"real\"); }",
+        "@use \"sass:meta\"; a { @include meta.load-css(\"real\"); }",
+        "@use \"sass:meta\" as m; a { @include m.load_css(\"real\"); }",
+        "@use \"sass:meta\" as *; a { @include load_css(\"real\"); }",
+        "@use \"fmeta\" as f; a { @include f.load_css(\"real\"); }",
+    ] {
+        assert_eq!(run(src).as_deref(), Ok("a x {\n  loaded: 1;\n}"), "{src}");
+    }
+    // A reference is stored canonically, so it inspects and compares as one.
+    assert_eq!(
+        run("@use \"sass:meta\";\na { b: meta.inspect(meta.get-mixin(\"load_css\", $module: \"meta\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-mixin(\"load-css\");\n}")
+    );
+    assert_eq!(
+        run("@use \"sass:meta\";\na { b: meta.get-mixin(\"load_css\", $module: \"meta\") == meta.get-mixin(\"load-css\", $module: \"meta\"); }")
+            .as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    // And the existence query agrees with both.
+    assert_eq!(
+        run("@use \"sass:meta\";\na { b: meta.mixin-exists(\"load_css\", $module: \"meta\"); }").as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

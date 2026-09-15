@@ -545,7 +545,10 @@ impl<'a> Evaluator<'a> {
             // "sass:meta" as m` makes `$module: "m"` the `meta` module.
             if is_builtin_mixin(builtin, name) {
                 return Ok(Value::Mixin(Box::new(SassMixin {
-                    name: name.to_string(),
+                    // Canonical, as dart stores it: `get-mixin("load_css")`
+                    // inspects as `get-mixin("load-css")` and compares equal
+                    // to one taken under that spelling.
+                    name: name.replace('_', "-"),
                     user: None,
                     module: None,
                 })));
@@ -808,7 +811,7 @@ impl<'a> Evaluator<'a> {
         if let Some(builtin) = self.used_modules.get(ns).cloned() {
             return Ok(match kind {
                 MemberKind::Function => crate::builtins::module_has_member(&builtin, name),
-                MemberKind::Mixin => builtin == "meta" && matches!(name, "load-css" | "apply"),
+                MemberKind::Mixin => is_builtin_mixin(&builtin, name),
                 MemberKind::Variable => crate::builtins::module_var(&builtin, name, pos).is_ok(),
             });
         }
