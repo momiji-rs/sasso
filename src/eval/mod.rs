@@ -1856,6 +1856,48 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// Emit the `[color-functions]` deprecation for a call that has just
+    /// SUCCEEDED. dart raises it from inside the function, after its arguments
+    /// are validated and from their VALUES, so it belongs after the dispatch:
+    /// `lighten(3, 10%)` errors and warns about nothing, and one `lighten($c,
+    /// 10%)` in a mixin included with two colours warns twice, with a different
+    /// suggestion each time.
+    pub(super) fn emit_color_function_deprecation(
+        &mut self,
+        name: &str,
+        module: Option<&str>,
+        pos: Pos,
+        len: usize,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+    ) {
+        // Only `sass:color` has these members; every other module's call is
+        // someone else's business.
+        if module.is_some_and(|m| m != "color") {
+            return;
+        }
+        // And a bare name that is no global built-in dispatched as a plain CSS
+        // function, not as the member it shares a name with: `whiteness` and
+        // `blackness` live ONLY on `sass:color`, so `whiteness(#abc)` is
+        // nobody's call and deprecates nothing.
+        if module.is_none() && !crate::builtins::is_builtin(name) {
+            return;
+        }
+        let Some(suggestions) = crate::builtins::color_function_suggestions(name, pos_args, named) else {
+            return;
+        };
+        // dart names the function the way the call REACHED it: `color.red()`
+        // through the module (under any namespace, star or forward), `red()`
+        // as the global.
+        let qualified = if module.is_some() {
+            format!("color.{name}")
+        } else {
+            name.to_string()
+        };
+        let dep = crate::deprecation::Deprecation::color_functions(&qualified, &suggestions);
+        self.emit_deprecation(&dep, pos, len);
+    }
+
     fn emit_deprecation(&mut self, dep: &crate::deprecation::Deprecation, pos: Pos, len: usize) {
         if !self.diag_enabled() {
             return;

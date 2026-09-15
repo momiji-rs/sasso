@@ -8,6 +8,7 @@
 //! pure organizational split: every `color::…` path external callers use is
 //! preserved via the re-exports at the bottom of this file.
 
+pub(crate) mod deprecate;
 mod legacy;
 mod math;
 mod modern;

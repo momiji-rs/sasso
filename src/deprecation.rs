@@ -77,6 +77,28 @@ impl Deprecation {
         }
     }
 
+    /// The `color-functions` deprecation: a legacy `sass:color` member that
+    /// Color 4 replaced. `qualified` is the name dart prints — `red()` for the
+    /// global spelling, `color.red()` for one reached through the module — and
+    /// `suggestions` is the replacement code, one line each, computed from the
+    /// call's own arguments. dart labels one "Suggestion" and several
+    /// "Suggestions".
+    pub(crate) fn color_functions(qualified: &str, suggestions: &[String]) -> Self {
+        let label = if suggestions.len() == 1 {
+            "Suggestion"
+        } else {
+            "Suggestions"
+        };
+        Deprecation {
+            id: "color-functions",
+            message: format!(
+                "{qualified}() is deprecated. {label}:\n\n{}",
+                suggestions.join("\n")
+            ),
+            more_info: Some("More info: https://sass-lang.com/d/color-functions".to_string()),
+        }
+    }
+
     /// Render the header block: `DEPRECATION WARNING [id]: <message>` followed
     /// by a blank line and the `More info` line (when present), then a blank
     /// line and the top snippet-gutter is left to the caller. Returns the lines
