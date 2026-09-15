@@ -538,6 +538,34 @@ fn compressed_css_import_loses_its_prelude_space() {
     );
 }
 
+/// A `@supports` DECLARATION is not a value: dart writes its calculations
+/// verbatim, spaces and all, in both styles — `calc-size` included. Measured
+/// against dart-sass 1.103.1.
+#[test]
+fn compressed_supports_declarations_keep_their_calculation_spaces() {
+    for (scss, want) in [
+        (
+            "@supports (width: calc-size(auto, var(--y))) { .a { b: 1; } }",
+            "@supports(width: calc-size(auto, var(--y))){.a{b:1}}",
+        ),
+        (
+            "@supports (width: clamp(1px, var(--y), 2px)) { .a { b: 1; } }",
+            "@supports(width: clamp(1px, var(--y), 2px)){.a{b:1}}",
+        ),
+        (
+            "@supports (width: min(1px, var(--y))) { .a { b: 1; } }",
+            "@supports(width: min(1px, var(--y))){.a{b:1}}",
+        ),
+    ] {
+        assert_eq!(css_compressed(scss), want, "{scss}");
+    }
+    // The same calculations as VALUES do lose the space.
+    assert_eq!(
+        css_compressed(".a { b: calc-size(auto, var(--y)); }"),
+        ".a{b:calc-size(auto,var(--y))}"
+    );
+}
+
 /// dart writes a statement's `;` as a SEPARATOR, so compressed output never
 /// ends with one — at the end of the stylesheet or before a `}`. Measured
 /// against dart-sass 1.103.1.

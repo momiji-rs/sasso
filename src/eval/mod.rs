@@ -4710,6 +4710,7 @@ fn is_supports_calc_function(name: &str) -> bool {
             | "pow"
             | "log"
             | "hypot"
+            | "calc-size"
     )
 }
 
