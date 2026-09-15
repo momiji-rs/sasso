@@ -145,11 +145,9 @@ fn compress_into(out: &mut String, chars: &[char]) {
     while i < chars.len() {
         match chars[i] {
             '\\' => {
-                out.push(chars[i]);
-                if let Some(c) = chars.get(i + 1) {
-                    out.push(*c);
-                }
-                i += 2;
+                let end = escape_end(chars, i);
+                out.extend(&chars[i..end]);
+                i = end;
             }
             '"' | '\'' => {
                 let end = skip_quoted(chars, i);
@@ -246,6 +244,29 @@ fn compress_pseudo_arg(out: &mut String, name: &str, inner: &[char]) {
     }
 }
 
+/// The index just past the CSS escape starting at `start` (which holds a `\`):
+/// up to six hex digits and the single whitespace character that terminates
+/// them, or the one character that follows a non-hex escape. The terminator is
+/// part of the TOKEN — `.\31  .b` is the class `1` and then a descendant
+/// combinator, and losing either space changes which.
+fn escape_end(chars: &[char], start: usize) -> usize {
+    let mut i = start + 1;
+    if !chars.get(i).is_some_and(char::is_ascii_hexdigit) {
+        // `\,`, `\ `, `\+` … — exactly one character, whatever it is.
+        return (i + 1).min(chars.len());
+    }
+    let hex_start = i;
+    while i < chars.len() && i - hex_start < 6 && chars[i].is_ascii_hexdigit() {
+        i += 1;
+    }
+    // One whitespace character closes the run (and CRLF counts as one).
+    match chars.get(i) {
+        Some('\r') if chars.get(i + 1) == Some(&'\n') => i + 2,
+        Some(c) if c.is_whitespace() => i + 1,
+        _ => i,
+    }
+}
+
 /// Append a selector-list argument: each component compressed, joined by a bare
 /// comma.
 fn compress_selector_list(out: &mut String, arg: &str) {
@@ -253,7 +274,7 @@ fn compress_selector_list(out: &mut String, arg: &str) {
         if i > 0 {
             out.push(',');
         }
-        let cs: Vec<char> = part.trim().chars().collect();
+        let cs: Vec<char> = part.trim_start().chars().collect();
         compress_into(out, &cs);
     }
 }
@@ -5145,4 +5166,43 @@ pub(crate) fn source_specificity_map(extensions: &[Extension]) -> FxHashMap<Simp
         }
     }
     map
+}
+
+#[cfg(test)]
+mod compress_tests {
+    use super::{compress_selector, escape_end};
+
+    #[test]
+    fn an_escape_is_one_token() {
+        // `\` plus up to six hex digits plus the one whitespace that closes
+        // them; anything else is `\` plus exactly one character.
+        let chars = |s: &str| s.chars().collect::<Vec<char>>();
+        assert_eq!(escape_end(&chars(r"\31 a"), 0), 4); // digits + terminator
+        assert_eq!(escape_end(&chars(r"\31a"), 0), 4); // three hex digits
+        assert_eq!(escape_end(&chars(r"\100000 x"), 0), 8); // six, then the space
+        assert_eq!(escape_end(&chars(r"\1000000"), 0), 7); // seven digits: six taken
+        assert_eq!(escape_end(&chars(r"\,b"), 0), 2); // not hex: one character
+        assert_eq!(escape_end(&chars(r"\ b"), 0), 2); // an escaped space
+        assert_eq!(escape_end(&chars(r"\"), 0), 1); // nothing follows
+        assert_eq!(escape_end(&chars("\\31\r\nx"), 0), 5); // CRLF is one terminator
+    }
+
+    #[test]
+    fn only_structural_whitespace_goes() {
+        let c = |s: &str| compress_selector(s).into_owned();
+        assert_eq!(c(".a > .b"), ".a>.b");
+        assert_eq!(c(".a  >  .b"), ".a>.b");
+        assert_eq!(c(".a .b"), ".a .b");
+        assert_eq!(c(":has(+ .b)"), ":has(+.b)");
+        assert_eq!(c(":not(.b, .c)"), ":not(.b,.c)");
+        assert_eq!(c(":lang(en, fr)"), ":lang(en, fr)");
+        assert_eq!(c(r".\31  > .b"), r".\31 >.b");
+        assert_eq!(c(r":not(.\31 , .b)"), r":not(.\31 ,.b)");
+        assert_eq!(c(r#"[a="x > y"]"#), r#"[a="x > y"]"#);
+        // A selector with nothing to compress is borrowed, not rebuilt.
+        assert!(matches!(
+            compress_selector(".a .b"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
 }

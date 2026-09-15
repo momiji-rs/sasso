@@ -417,6 +417,30 @@ fn compressed_keeps_loud_comments() {
     );
 }
 
+/// A CSS escape is a TOKEN, and the whitespace that terminates a numeric one
+/// belongs to it: `.\31  .b` is the class `1` and then a descendant combinator,
+/// so compressing either space away changes which selector it is. Measured
+/// against dart-sass 1.103.1.
+#[test]
+fn compressed_selectors_keep_an_escapes_terminator() {
+    let sel = |scss: &str| css_compressed(&format!("{scss}{{a:1}}"));
+    // The terminator survives; the structural space beside it is what goes.
+    assert_eq!(sel(".\\31  > .b"), ".\\31 >.b{a:1}");
+    assert_eq!(sel(".\\31  .b"), ".\\31  .b{a:1}");
+    assert_eq!(sel(".\\31 .b"), ".\\31 .b{a:1}");
+    assert_eq!(sel(".\\31 "), ".\\31 {a:1}");
+    // Including at the end of a selector-list component, where trimming the
+    // part would have eaten it.
+    assert_eq!(sel(":not(.\\31 , .b)"), ":not(.\\31 ,.b){a:1}");
+    assert_eq!(sel(":not(.a, .\\31 )"), ":not(.a,.\\31 ){a:1}");
+    assert_eq!(sel(":is(.\\31 , .b) > .c"), ":is(.\\31 ,.b)>.c{a:1}");
+    // A non-hex escape is one character and carries no terminator.
+    assert_eq!(sel(".a\\ b > .c"), ".a\\ b>.c{a:1}");
+    assert_eq!(sel(".a\\9 b .c"), ".a\\9 b .c{a:1}");
+    // A hex digit after the terminator still belongs to the next token.
+    assert_eq!(sel(".\\31 a .b"), ".\\31 a .b{a:1}");
+}
+
 /// A private-use character is escaped in expanded output and written RAW when
 /// compressing — dart trades the escape for the character once bytes are what
 /// matter. Measured against dart-sass 1.103.1.
