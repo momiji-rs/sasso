@@ -1970,3 +1970,39 @@ fn two_spans_on_one_line_stack_their_rows() {
          \u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration\n  \u{2575}"
     );
 }
+
+#[test]
+fn a_span_inside_an_arms_range_writes_its_row_under_its_own_line() {
+    // A span that stays within its line can sit INSIDE the lines another span's
+    // arm covers. dart writes its row under its own line — before the arm's own
+    // rows — with the arm running down the column beside it. Both blocks are
+    // dart-sass 1.103.1's.
+    let run = |src: &str| -> String {
+        snippet(
+            &compile(src, &Options::default().with_url("t.scss"))
+                .expect_err("expected a compile error")
+                .to_string(),
+        )
+    };
+    // The call on the arm's LAST line: its row comes first, then the row that
+    // closes the arm and carries `declaration`.
+    assert_eq!(
+        run("@mixin m(\n  $x: 1\n) { a: $x; } .b { @include m { c: 1; } }\n"),
+        "Error: Mixin doesn't accept a content block.\n  \u{2577}\n\
+         1 \u{2502}   @mixin m(\n  \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         2 \u{2502} \u{2502}   $x: 1\n\
+         3 \u{2502} \u{2502} ) { a: $x; } .b { @include m { c: 1; } }\n  \u{2502} \u{2502}                   \
+         ^^^^^^^^^^ invocation\n  \u{2502} \u{2514}\u{2500}^ declaration\n  \u{2575}"
+    );
+    // On the arm's FIRST line the arm has not reached in yet — the `,-…-^` row
+    // comes after this one — so the column beside it is still blank.
+    assert_eq!(
+        run("@mixin caller { @include m { c: 1; } } @mixin m(\n  $x: 1\n) { a: $x; }\n.b { @include caller; }\n"),
+        "Error: Mixin doesn't accept a content block.\n  \u{2577}\n\
+         1 \u{2502}   @mixin caller { @include m { c: 1; } } @mixin m(\n  \u{2502}                   \
+         ^^^^^^^^^^ invocation\n  \u{2502} \u{250c}\
+         \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         2 \u{2502} \u{2502}   $x: 1\n\
+         3 \u{2502} \u{2502} ) { a: $x; }\n  \u{2502} \u{2514}\u{2500}^ declaration\n  \u{2575}"
+    );
+}

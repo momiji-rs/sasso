@@ -525,9 +525,11 @@ pub struct Secondary<'a> {
 /// * spans in different files get one block each, introduced by `,--> <url>`
 ///   and closed by the usual bottom glyph, the primary's file first.
 ///
-/// Two spans in one file whose lines OVERLAP are the one shape this cannot
-/// draw: dart nests a second arm column for them. Callers keep them apart —
-/// see `Evaluator::spans_share_a_block`.
+/// A span that stays within its line can sit INSIDE an arm's range — its row
+/// is written under its own line, before the arm's, and carries the arm in the
+/// column. Two spans that BOTH cross lines and overlap are the one shape this
+/// cannot draw: dart nests a second arm column and crosses them with `+`.
+/// Callers keep that pair apart — see `Evaluator::spans_share_a_block`.
 pub fn render_labelled_snippet(
     url: &str,
     source: &str,
@@ -608,6 +610,9 @@ struct Placed<'a> {
     start_col0: usize,
     end_idx: usize,
     end_col0: usize,
+    /// Whether the span starts at its line's first non-whitespace character,
+    /// which decides whether an arm opens in the gutter or behind an arrow row.
+    starts_at_edge: bool,
 }
 
 impl Placed<'_> {
@@ -634,6 +639,7 @@ fn render_group(
             let start_idx = e.span.line.saturating_sub(1).min(last_line);
             let start_col0 = e.span.col.saturating_sub(1);
             let (end_idx, end_col0) = resolve_end(source, &lines, start_idx, start_col0, e.span.length);
+            let first = lines.get(start_idx).copied().unwrap_or("");
             Placed {
                 label: e.label,
                 primary: e.primary,
@@ -641,15 +647,27 @@ fn render_group(
                 start_col0,
                 end_idx,
                 end_col0,
+                starts_at_edge: first.chars().take(start_col0).all(char::is_whitespace),
             }
         })
         .collect();
 
-    let max_line_no = placed.iter().map(|p| p.end_idx).max().unwrap_or(0) + 1;
+    // Every line any span touches, each printed once, in order.
+    let mut line_nos: Vec<usize> = Vec::with_capacity(placed.len());
+    for p in &placed {
+        for li in p.start_idx..=p.end_idx {
+            if !line_nos.contains(&li) {
+                line_nos.push(li);
+            }
+        }
+    }
+    line_nos.sort_unstable();
+
+    let max_line_no = line_nos.last().copied().unwrap_or(0) + 1;
     // A gap between printed lines is elided, never filled in — and the `...`
     // row is three columns wide, which widens the gutter and left-aligns the
     // numbers in it.
-    let elides = placed.windows(2).any(|w| w[1].start_idx > w[0].end_idx + 1);
+    let elides = line_nos.windows(2).any(|w| w[1] > w[0] + 1);
     let width = if elides {
         digit_count(max_line_no).max(3)
     } else {
@@ -672,34 +690,55 @@ fn render_group(
         out.push_str(u);
     }
 
-    let mut printed: Option<usize> = None;
-    for p in &placed {
-        if let Some(prev) = printed {
-            if p.start_idx > prev + 1 {
+    let mut prev: Option<usize> = None;
+    for &li in &line_nos {
+        if let Some(p) = prev {
+            if li > p + 1 {
                 out.push('\n');
                 out.push_str(&elision_gutter(width));
                 out.push_str(v);
             }
         }
-        if !p.crosses_lines() {
-            // The source line, once, however many spans point into it.
-            if printed != Some(p.start_idx) {
-                push_source_line(
-                    out,
-                    &lines,
-                    p.start_idx,
-                    width,
-                    elides,
-                    arm.then_some(" "),
-                    glyphs,
-                );
+        prev = Some(li);
+        // Spans that cross lines never overlap each other here (the caller
+        // keeps that pair apart), so at most one arm reaches this line, and
+        // every row on it — the source line and the underlines under it —
+        // carries that arm in the column.
+        let armed = placed
+            .iter()
+            .find(|p| p.crosses_lines() && p.start_idx <= li && li <= p.end_idx);
+        let slot = match armed {
+            // The arm opens IN THE GUTTER on the line it starts, when the span
+            // starts that line; otherwise the `,-…-^` row below reaches in for
+            // it and the column stays blank until then.
+            Some(a) if a.start_idx == li => {
+                if a.starts_at_edge {
+                    glyphs.arm_start()
+                } else {
+                    " "
+                }
             }
-            let line = lines.get(p.start_idx).copied().unwrap_or("");
+            Some(_) => v,
+            None => " ",
+        };
+        push_source_line(out, &lines, li, width, elides, arm.then_some(slot), glyphs);
+        // The underline rows of the spans that stay WITHIN this line, in the
+        // order the entries were sorted into: the primary first.
+        for p in placed.iter().filter(|p| !p.crosses_lines() && p.start_idx == li) {
+            let line = lines.get(li).copied().unwrap_or("");
             out.push('\n');
             out.push_str(&blank_gutter(width));
             out.push_str(v);
             out.push(' ');
-            push_arm(out, arm.then_some(" "));
+            // The arm is only OPEN below this row once it has reached in:
+            // on the line where it starts mid-line, the `,-…-^` row comes
+            // after this one, so the column is still blank here.
+            let row_slot = match armed {
+                Some(a) if a.start_idx == li && !a.starts_at_edge => " ",
+                Some(_) => v,
+                None => " ",
+            };
+            push_arm(out, arm.then_some(row_slot));
             for _ in 0..display_width_of_prefix(line, p.start_col0) {
                 out.push(' ');
             }
@@ -708,52 +747,45 @@ fn render_group(
                 out.push(mark);
             }
             push_label(out, p.label);
-            printed = Some(p.start_idx);
-            continue;
         }
-
-        // A span that crosses lines: an arm down the left of every line it
-        // covers. The arm begins in the gutter when the span starts its line,
-        // and behind a `,-…-^` arrow row when it starts mid-line.
-        let first = lines.get(p.start_idx).copied().unwrap_or("");
-        let start_at_edge = first.chars().take(p.start_col0).all(char::is_whitespace);
-        let slot = if start_at_edge { glyphs.arm_start() } else { " " };
-        push_source_line(out, &lines, p.start_idx, width, elides, Some(slot), glyphs);
-        if !start_at_edge {
+        let Some(a) = armed else { continue };
+        // Then the arm's own rows: the `,-…-^` that reaches in to a span
+        // starting mid-line, and the row that closes the arm and carries the
+        // label.
+        if a.start_idx == li && !a.starts_at_edge {
+            let first = lines.get(li).copied().unwrap_or("");
             out.push('\n');
             out.push_str(&blank_gutter(width));
             out.push_str(v);
             out.push(' ');
             out.push_str(glyphs.top_left());
-            for _ in 0..display_width_of_prefix(first, p.start_col0) + 1 {
+            for _ in 0..display_width_of_prefix(first, a.start_col0) + 1 {
                 out.push_str(h);
             }
             out.push(CARET);
         }
-        for li in (p.start_idx + 1)..=p.end_idx {
-            push_source_line(out, &lines, li, width, elides, Some(v), glyphs);
-        }
-        // The closing row carries the label. It points at the last spanned
-        // character — unless the span runs to the end of its line, where dart
-        // has nothing to point at and draws a flat three-rule arm instead.
-        let last = lines.get(p.end_idx).copied().unwrap_or("");
-        out.push('\n');
-        out.push_str(&blank_gutter(width));
-        out.push_str(v);
-        out.push(' ');
-        out.push_str(glyphs.bottom_left());
-        if last.chars().skip(p.end_col0).all(char::is_whitespace) {
-            for _ in 0..3 {
-                out.push_str(h);
+        if a.end_idx == li {
+            // The closing row points at the last spanned character — unless the
+            // span runs to the end of its line, where dart has nothing to point
+            // at and draws a flat three-rule arm instead.
+            let last = lines.get(li).copied().unwrap_or("");
+            out.push('\n');
+            out.push_str(&blank_gutter(width));
+            out.push_str(v);
+            out.push(' ');
+            out.push_str(glyphs.bottom_left());
+            if last.chars().skip(a.end_col0).all(char::is_whitespace) {
+                for _ in 0..3 {
+                    out.push_str(h);
+                }
+            } else {
+                for _ in 0..display_width_of_prefix(last, a.end_col0) {
+                    out.push_str(h);
+                }
+                out.push(CARET);
             }
-        } else {
-            for _ in 0..display_width_of_prefix(last, p.end_col0) {
-                out.push_str(h);
-            }
-            out.push(CARET);
+            push_label(out, a.label);
         }
-        push_label(out, p.label);
-        printed = Some(p.end_idx);
     }
 
     out.push('\n');
