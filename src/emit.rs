@@ -651,7 +651,18 @@ fn emit_compressed(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> St
     for node in nodes {
         emit_node_compressed(&mut out, node, collector);
     }
+    drop_trailing_semicolon(&mut out);
     out
+}
+
+/// dart writes a statement's `;` as a SEPARATOR, so compressed output never
+/// ends with one — not at the end of the stylesheet and not before a `}`. Most
+/// nodes are separated that way here too; a verbatim line (a passed-through
+/// `@import`) carries its own `;`, which is one too many when it comes last.
+fn drop_trailing_semicolon(out: &mut String) {
+    if out.ends_with(';') {
+        out.pop();
+    }
 }
 
 /// Render `nodes` joined for compressed output. A declaration is terminated by
@@ -682,6 +693,7 @@ fn emit_compressed_body(out: &mut String, nodes: &[OutNode], collector: &mut Opt
         emit_node_compressed(out, node, collector);
         prev_was_decl = matches!(node, OutNode::AtDecl { .. });
     }
+    drop_trailing_semicolon(out);
 }
 
 /// dart `_writeFoldedValue` (compressed custom properties): each newline
@@ -711,7 +723,10 @@ fn fold_value_compressed<'v>(value: &'v str, custom: bool) -> std::borrow::Cow<'
 /// (`visitCssMediaRule`) and `@supports` (`visitCssSupportsRule`). Every other
 /// at-rule keeps the space even before `(` — e.g. `@container (min-width:1px)`.
 fn compressed_at_rule_omits_space(name: &str, prelude: &str) -> bool {
-    matches!(name, "media" | "supports") && prelude.starts_with('(')
+    // `@import` writes no space at all when compressing (dart's
+    // `_writeOptionalSpace` before `_writeImportUrl`); `@media`/`@supports`
+    // drop theirs only before a `(`, where nothing can run together.
+    name == "import" || (matches!(name, "media" | "supports") && prelude.starts_with('('))
 }
 
 /// Write a rule block's items for compressed output, recording each item's
@@ -800,7 +815,9 @@ fn write_item_compressed(out: &mut String, item: &OutItem, collector: &mut Optio
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
-                out.push(' ');
+                if !compressed_at_rule_omits_space(name, prelude) {
+                    out.push(' ');
+                }
                 out.push_str(prelude);
             }
             true

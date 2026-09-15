@@ -589,18 +589,25 @@ impl<'a> Evaluator<'a> {
         url: &[TplPiece],
         modifiers: &[ImportModifier],
     ) -> Result<String, Error> {
-        let mut out = self.eval_template(url)?;
+        let url_text = self.eval_template(url)?;
+        let mut out = self.import_url_css(&url_text);
+        // Compressed output drops the ONE separator between the url and the
+        // modifiers (dart's `_writeOptionalSpace`); the modifiers keep the
+        // spaces they hold between themselves.
+        let mut first = true;
         for m in modifiers {
+            let sep = if first && self.compressed() { "" } else { " " };
+            first = false;
             match m {
                 ImportModifier::Raw(tpl) => {
-                    out.push(' ');
+                    out.push_str(sep);
                     out.push_str(&self.eval_template(tpl)?);
                 }
                 ImportModifier::Supports {
                     condition,
                     declaration,
                 } => {
-                    out.push(' ');
+                    out.push_str(sep);
                     // The condition is an *expression* part of the modifiers
                     // interpolation in dart-sass (a `SupportsExpression` whose
                     // value is an unquoted string), so its serialized text gets
@@ -614,13 +621,41 @@ impl<'a> Evaluator<'a> {
                     }
                 }
                 ImportModifier::Media { list, comma_before } => {
-                    out.push_str(if *comma_before { ", " } else { " " });
+                    out.push_str(if *comma_before { ", " } else { sep });
                     let queries = self.resolve_media_queries(list)?;
                     out.push_str(&serialize_media_queries(&queries, self.compressed()));
                 }
             }
         }
         Ok(out)
+    }
+
+    /// The space between an at-rule's name and its prelude, which compressed
+    /// output does not write for a CSS `@import`.
+    pub(super) fn at_rule_gap(&self) -> &'static str {
+        if self.compressed() {
+            ""
+        } else {
+            " "
+        }
+    }
+
+    /// dart-sass `_writeImportUrl`: compressed output unwraps a `url(…)` to
+    /// save the four bytes of the wrapper, quoting the contents unless they
+    /// already carry a quote. Any other url — a quoted string already — is
+    /// written exactly as it was spelled, in either style.
+    pub(super) fn import_url_css(&self, url: &str) -> String {
+        if !self.compressed() || !url.starts_with('u') {
+            return url.to_string();
+        }
+        let Some(inner) = url.strip_prefix("url(").and_then(|u| u.strip_suffix(')')) else {
+            return url.to_string();
+        };
+        if inner.starts_with('"') || inner.starts_with('\'') {
+            inner.to_string()
+        } else {
+            crate::value::serialize_quoted_styled(inner, true)
+        }
     }
 
     /// dart-sass `_parenthesize`: wrap a sub-condition in parentheses when it is

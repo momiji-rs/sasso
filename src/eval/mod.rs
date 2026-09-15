@@ -3083,13 +3083,19 @@ impl<'a> Evaluator<'a> {
                             lines,
                         });
                     } else {
-                        sink.push_at_rule(OutNode::Raw(format!("@import {text};"), lines));
+                        sink.push_at_rule(OutNode::Raw(
+                            format!("@import{}{text};", self.at_rule_gap()),
+                            lines,
+                        ));
                     }
                 }
                 ImportArg::Sass { path, pos, length } => {
                     if is_css_import(path) {
                         let lines = self.map_only_lines(*pos);
-                        sink.push_at_rule(OutNode::Raw(format!("@import \"{path}\";"), lines));
+                        sink.push_at_rule(OutNode::Raw(
+                            format!("@import{}\"{path}\";", self.at_rule_gap()),
+                            lines,
+                        ));
                         continue;
                     }
                     // (The `[import]` deprecation for this rule was emitted

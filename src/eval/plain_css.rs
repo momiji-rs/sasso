@@ -126,7 +126,10 @@ impl<'a> Evaluator<'a> {
                         };
                         // Source-map: the rule maps to its URL token.
                         let lines = self.map_only_lines(pos);
-                        sink.push_at_rule(OutNode::Raw(format!("@import {text};"), lines));
+                        sink.push_at_rule(OutNode::Raw(
+                            format!("@import{}{text};", self.at_rule_gap()),
+                            lines,
+                        ));
                     }
                 }
                 Stmt::Media { query, body, lines } => {
@@ -372,7 +375,10 @@ impl<'a> Evaluator<'a> {
                             ImportArg::Sass { path, pos, .. } => (crate::value::serialize_quoted(path), *pos),
                         };
                         let lines = self.map_only_lines(pos);
-                        out.push(OutNode::Raw(format!("@import {text};"), lines));
+                        out.push(OutNode::Raw(
+                            format!("@import{}{text};", self.at_rule_gap()),
+                            lines,
+                        ));
                     }
                 }
                 _ => {}

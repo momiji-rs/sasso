@@ -457,6 +457,77 @@ fn compressed_selector_pseudo_dispatch_matches_dart() {
     assert_eq!(sel(".x:LANG(en, fr)"), ".x:LANG(en, fr){a:1}");
 }
 
+/// The CSS `@import` writes no space before its url when compressing, and a
+/// `url(…)` wrapper is unwrapped to save its four bytes. The modifiers keep the
+/// spaces they hold between themselves. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_css_import_loses_its_prelude_space() {
+    assert_eq!(
+        css_compressed("@import \"x.css\";\n.a { b: 1; }"),
+        "@import\"x.css\";.a{b:1}"
+    );
+    assert_eq!(
+        css_compressed("@import url(x.css);\n.a { b: 1; }"),
+        "@import\"x.css\";.a{b:1}"
+    );
+    assert_eq!(
+        css_compressed("@import url(\"x.css\");\n.a { b: 1; }"),
+        "@import\"x.css\";.a{b:1}"
+    );
+    // A plain quoted url is written exactly as it was spelled.
+    assert_eq!(
+        css_compressed("@import 'x.css';\n.a { b: 1; }"),
+        "@import'x.css';.a{b:1}"
+    );
+    // Only the ONE separator before the modifiers goes.
+    assert_eq!(
+        css_compressed("@import \"x.css\" screen, print;\n.a { b: 1; }"),
+        "@import\"x.css\"screen, print;.a{b:1}"
+    );
+    assert_eq!(
+        css_compressed("@import \"x.css\" layer(a) supports(display: grid) screen;\n.a { b: 1; }"),
+        "@import\"x.css\"layer(a) supports(display: grid) screen;.a{b:1}"
+    );
+    // Nested in a rule and in an at-rule body.
+    assert_eq!(
+        css_compressed(".a { @import url(x.css); }"),
+        ".a{@import\"x.css\"}"
+    );
+    assert_eq!(
+        css_compressed("@media screen { @import \"x.css\"; }"),
+        "@media screen{@import\"x.css\"}"
+    );
+    // Expanded output is untouched: the source form survives.
+    let expanded = |scss: &str| compile(scss, &Options::default()).expect("compile");
+    assert_eq!(
+        expanded("@import url(x.css);\n.a { b: 1; }"),
+        "@import url(x.css);\n.a {\n  b: 1;\n}"
+    );
+}
+
+/// dart writes a statement's `;` as a SEPARATOR, so compressed output never
+/// ends with one — at the end of the stylesheet or before a `}`. Measured
+/// against dart-sass 1.103.1.
+#[test]
+fn compressed_output_never_ends_with_a_semicolon() {
+    assert_eq!(css_compressed("@import \"x.css\";"), "@import\"x.css\"");
+    assert_eq!(
+        css_compressed("@import \"x.css\" screen;"),
+        "@import\"x.css\"screen"
+    );
+    assert_eq!(css_compressed("@namespace \"x\";"), "@namespace \"x\"");
+    assert_eq!(css_compressed("@unknown foo;"), "@unknown foo");
+    assert_eq!(
+        css_compressed("@media a { @unknown foo; }"),
+        "@media a{@unknown foo}"
+    );
+    assert_eq!(css_compressed(".a { b: 1; }"), ".a{b:1}");
+    assert_eq!(
+        css_compressed("@font-face { src: url(x); }"),
+        "@font-face{src:url(x)}"
+    );
+}
+
 /// A private-use character is escaped in expanded output and written RAW when
 /// compressing — dart trades the escape for the character once bytes are what
 /// matter. Measured against dart-sass 1.103.1.
