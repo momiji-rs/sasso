@@ -1127,3 +1127,69 @@ fn every_kind_of_starred_member_competes_for_the_bare_name() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_modules_own_member_shadows_the_builtin_it_forwards() {
+    // A module that defines a member AND forwards a built-in exporting that
+    // name exposes ONE member — its own — namespaced and starred alike; it is
+    // not two members competing for the name. And a starred user mixin beside a
+    // starred built-in one IS two. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_own_shadow_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("_ownfn.scss"),
+        "@forward \"sass:string\";\n@function index($a, $b) { @return OWN; }\n",
+    )
+    .expect("write");
+    std::fs::write(dir.join("_ownvar.scss"), "@forward \"sass:math\";\n$pi: OWNPI;\n").expect("write");
+    std::fs::write(
+        dir.join("_ownmix.scss"),
+        "@forward \"sass:meta\";\n@mixin load-css($x) { own: 1; }\n",
+    )
+    .expect("write");
+    std::fs::write(dir.join("_umix.scss"), "@mixin load-css($x) { u: 1; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    for (src, want) in [
+        ("@use \"ownfn\" as f; a { b: f.index(\"abc\", \"b\"); }", "OWN"),
+        ("@use \"ownfn\" as *; a { b: index(\"abc\", \"b\"); }", "OWN"),
+        ("@use \"ownvar\" as f; a { b: f.$pi; }", "OWNPI"),
+        ("@use \"ownvar\" as *; a { b: $pi; }", "OWNPI"),
+    ] {
+        assert_eq!(
+            run(src).as_deref(),
+            Ok(format!("a {{\n  b: {want};\n}}").as_str()),
+            "{src}"
+        );
+    }
+    for src in [
+        "@use \"ownmix\" as f; a { @include f.load-css(\"x\"); }",
+        "@use \"ownmix\" as *; a { @include load-css(\"x\"); }",
+    ] {
+        assert_eq!(run(src).as_deref(), Ok("a {\n  own: 1;\n}"), "{src}");
+    }
+    // Introspection agrees: one member, and it is the module's own.
+    assert_eq!(
+        run("@use \"ownfn\" as *; @use \"sass:meta\";\na { b: meta.function-exists(\"index\"); }").as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    // Two starred sources for one mixin name ARE two members, whichever asks.
+    assert!(
+        run("@use \"umix\" as *; @use \"sass:meta\" as *;\na { b: inspect(get-mixin(\"load-css\")); }")
+            .unwrap_err()
+            .contains("This mixin is available from multiple global modules.")
+    );
+    // One star and one namespace is one member, so it resolves.
+    assert_eq!(
+        run("@use \"umix\" as *; @use \"sass:meta\" as m;\na { b: m.inspect(m.get-mixin(\"load-css\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-mixin(\"load-css\");\n}")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

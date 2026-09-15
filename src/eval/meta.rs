@@ -383,25 +383,6 @@ impl<'a> Evaluator<'a> {
                 return self.get_mixin_from_module(&name, &module_name, pos);
             }
         }
-        // A built-in mixin exposed unprefixed by a `@use "sass:meta" as *` (or
-        // by a starred user module that forwards it) is reachable by reference
-        // the same way its call is.
-        if self.lookup_mixin_norm(&normalize_arg_name(&name)).is_none() {
-            let hits = self.star_builtin_hits(&name, MemberKind::Mixin);
-            if hits.len() > 1 {
-                return Err(Error::at(
-                    "This mixin is available from multiple global modules.",
-                    pos,
-                ));
-            }
-            if let Some((_, bare)) = hits.into_iter().next() {
-                return Ok(Value::Mixin(Box::new(SassMixin {
-                    name: bare,
-                    user: None,
-                    module: None,
-                })));
-            }
-        }
         // A user `@mixin` of that name (dash/underscore-insensitive) wins.
         let key = normalize_arg_name(&name);
         if let Some(m) = self.lookup_mixin_norm(&key) {
@@ -414,14 +395,21 @@ impl<'a> Evaluator<'a> {
             })));
         }
         // A mixin exposed unprefixed via `@use … as *`. Its body runs in the
-        // owning module's environment, so capture that module too.
-        if !self.star_user_modules.is_empty() && !is_private_member(&name) {
-            let hits: Vec<&Rc<Module>> = self
-                .star_user_modules
-                .iter()
-                .filter(|m| m.mixin(&name).is_some())
-                .collect();
-            if hits.len() > 1 {
+        // owning module's environment, so capture that module too. A BUILT-IN
+        // mixin exposed the same way (`load-css` from a starred `sass:meta`,
+        // or from a starred module that forwards it) competes for the same bare
+        // name, so one check covers both.
+        let builtin_hits = self.star_builtin_hits(&name, MemberKind::Mixin);
+        {
+            let hits: Vec<&Rc<Module>> = if is_private_member(&name) {
+                Vec::new()
+            } else {
+                self.star_user_modules
+                    .iter()
+                    .filter(|m| m.mixin(&name).is_some())
+                    .collect()
+            };
+            if hits.len() + builtin_hits.len() > 1 {
                 return Err(Error::at(
                     "This mixin is available from multiple global modules.",
                     pos,
@@ -438,6 +426,13 @@ impl<'a> Evaluator<'a> {
                     name,
                     user: Some(Rc::clone(&m) as Rc<dyn std::any::Any>),
                     module: Some(Rc::clone(module) as Rc<dyn std::any::Any>),
+                })));
+            }
+            if let Some((_, bare)) = builtin_hits.into_iter().next() {
+                return Ok(Value::Mixin(Box::new(SassMixin {
+                    name: bare,
+                    user: None,
+                    module: None,
                 })));
             }
         }
@@ -1092,6 +1087,18 @@ impl<'a> Evaluator<'a> {
             }
         }
         for m in &self.star_user_modules {
+            // A module's OWN member shadows the built-in it forwards under the
+            // same name — `@forward "sass:string"` beside `@function index` is
+            // that module's `index`, namespaced and starred alike — so the
+            // forwarded one is not a second member competing for the name.
+            let own = match kind {
+                MemberKind::Function => m.function(&name).is_some(),
+                MemberKind::Variable => m.var(&name).is_some(),
+                MemberKind::Mixin => m.mixin(&name).is_some(),
+            };
+            if own {
+                continue;
+            }
             let found = match kind {
                 MemberKind::Function => resolve_forwarded_builtin(m, &name),
                 MemberKind::Variable => resolve_forwarded_builtin_var(m, &name),
