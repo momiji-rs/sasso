@@ -1335,9 +1335,13 @@ impl<'a> Evaluator<'a> {
             }
             self.forwarded.builtins.push(ForwardedBuiltin {
                 module: m.to_string(),
-                prefix: prefix.map(str::to_string),
-                show: member_set(show, false),
-                hide: member_set(hide, false),
+                // The prefix is stored canonically, like the `show`/`hide`
+                // names: `@forward "sass:map" as p_*` answers to `p-get`.
+                filters: vec![ForwardFilter {
+                    prefix: prefix.map(|p| p.replace('_', "-")).unwrap_or_default(),
+                    show: member_set(show, false),
+                    hide: member_set(hide, false),
+                }],
             });
             return Ok(());
         }
@@ -1570,6 +1574,27 @@ impl<'a> Evaluator<'a> {
                 self.forwarded.mixin_origins.insert(key.clone(), origin);
                 self.forwarded.mixin_src.insert(key, m_src);
             }
+        }
+        // A built-in this module re-exports is re-exported again: its members
+        // are as public here as the module's own. Each inner filter is re-based
+        // under this forward's prefix and this forward's own `show`/`hide` is
+        // appended, so a member has to survive every rule it passed through.
+        let outer_prefix = pfx.replace('_', "-");
+        for fb in &module.forwarded_builtins {
+            let mut filters = fb.filters.clone();
+            for f in &mut filters {
+                f.prefix.insert_str(0, &outer_prefix);
+            }
+            let exported = filters.last().map_or(outer_prefix.clone(), |f| f.prefix.clone());
+            filters.push(ForwardFilter {
+                prefix: exported,
+                show: show_names.clone(),
+                hide: hide_names.clone(),
+            });
+            self.forwarded.builtins.push(ForwardedBuiltin {
+                module: fb.module.clone(),
+                filters,
+            });
         }
         Ok(())
     }

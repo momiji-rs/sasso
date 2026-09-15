@@ -855,3 +855,75 @@ fn a_forwarded_builtin_is_reachable_by_call_and_by_reference() {
     .contains("Function not found: \"get\""));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_forward_carries_a_builtin_through_every_rule_it_passes() {
+    // A `@forward "sass:…"` survives being forwarded again, its `show`/`hide`
+    // match the name AS THAT RULE EXPORTS IT, and the members it exposes answer
+    // to calls, references and existence queries alike. Every expectation
+    // measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_fwd_chain_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_inner.scss"), "@forward \"sass:map\";\n").expect("write");
+    std::fs::write(dir.join("_outer.scss"), "@forward \"inner\";\n").expect("write");
+    std::fs::write(dir.join("_outerq.scss"), "@forward \"inner\" as q-*;\n").expect("write");
+    std::fs::write(dir.join("_fmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    std::fs::write(
+        dir.join("_hidepre.scss"),
+        "@forward \"sass:map\" as p-* hide p-get;\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.join("_hidebare.scss"),
+        "@forward \"sass:map\" as p-* hide get;\n",
+    )
+    .expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // A built-in forwarded through another module is still public, prefix and
+    // all, by call and by reference.
+    assert_eq!(
+        run("@use \"outer\" as o; a { b: o.get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert_eq!(
+        run("@use \"outerq\" as o; a { b: o.q-get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert_eq!(
+        run("@use \"outer\" as o; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"get\", $module: \"o\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-function(\"get\");\n}")
+    );
+    // `show`/`hide` name the member as the rule that wrote them exports it.
+    assert!(run("@use \"hidepre\" as p; a { b: p.p-get((x: 1), x); }")
+        .unwrap_err()
+        .contains("Undefined function."));
+    assert_eq!(
+        run("@use \"hidebare\" as p; a { b: p.p-get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    // A forwarded `sass:meta` member that resolves against the evaluator still
+    // reaches the evaluator.
+    assert_eq!(
+        run("$x: 1;\n@use \"fmeta\" as f; a { b: f.variable-exists(\"x\"); }").as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    assert_eq!(
+        run("@use \"fmeta\" as f; a { b: f.call(f.get-function(\"rgb\"), 1, 2, 3); }").as_deref(),
+        Ok("a {\n  b: rgb(1, 2, 3);\n}")
+    );
+    // Existence queries see exactly what the call and reference paths see.
+    assert_eq!(
+        run("@use \"inner\" as f; @use \"sass:meta\";\na { b: meta.function-exists(\"get\", $module: \"f\"); }")
+            .as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

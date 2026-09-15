@@ -1359,3 +1359,43 @@ fn every_global_is_referenceable_by_name() {
     .to_string();
     assert!(err.contains("Function not found: 'a\"b'"), "{err}");
 }
+
+#[test]
+fn a_starred_builtin_member_shadows_the_global_of_that_name() {
+    // `@use "sass:…" as *` exposes the module's members unprefixed, and they
+    // WIN over the global of the same name: `index` is `string.index` after
+    // `@use "sass:string" as *`, not the list one. Measured against dart-sass
+    // 1.103.1.
+    assert_eq!(
+        css("@use \"sass:string\" as *; a { b: index(\"abc\", \"b\"); }"),
+        "a {\n  b: 2;\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:list\" as *; a { b: index(\"abc\" \"b\", \"b\"); }"),
+        "a {\n  b: 2;\n}\n"
+    );
+    assert!(compile(
+        "@use \"sass:string\" as *; a { b: index(\"abc\" \"b\", \"b\"); }",
+        &Options::default()
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("is not a string."));
+    // Exposure from two starred modules is ambiguous, however it is reached.
+    for src in [
+        "@use \"sass:list\" as *; @use \"sass:string\" as *; a { b: index(\"abc\", \"b\"); }",
+        "@use \"sass:list\" as *; @use \"sass:string\" as *; @use \"sass:meta\";\na { b: meta.get-function(\"index\"); }",
+        "@use \"sass:list\" as *; @use \"sass:string\" as *; @use \"sass:meta\";\na { b: meta.function-exists(\"index\"); }",
+    ] {
+        let err = compile(src, &Options::default()).unwrap_err().to_string();
+        assert!(
+            err.contains("This function is available from multiple global modules."),
+            "{src}: {err}"
+        );
+    }
+    // A module that does not have the member leaves the global alone.
+    assert_eq!(
+        css("@use \"sass:map\" as *; @use \"sass:meta\";\na { b: meta.function-exists(\"get\"); }"),
+        "a {\n  b: true;\n}\n"
+    );
+}

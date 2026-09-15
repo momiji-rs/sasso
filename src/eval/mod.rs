@@ -1322,28 +1322,48 @@ struct Forwarded {
     mixin_src: HashMap<String, *const Module>,
 }
 
-/// A built-in module re-exported via `@forward "sass:x" [as p-*] [show|hide ...]`.
+/// A built-in module re-exported via `@forward "sass:x" [as p-*] [show|hide ...]`,
+/// possibly through further `@forward`s of the module that wrote that rule.
 #[derive(Clone)]
 struct ForwardedBuiltin {
     module: String,
-    prefix: Option<String>,
-    /// `show` allow-list of member names; `None` when no `show` clause.
+    /// One entry per `@forward` the member passed through, innermost first.
+    filters: Vec<ForwardFilter>,
+}
+
+/// The `show`/`hide` clause of one `@forward` in a chain, together with the
+/// prefix the member is exported under at that point. dart matches `show`/`hide`
+/// against the member's name AS THAT RULE EXPORTS IT — `@forward "sass:map" as
+/// p-* hide p-get` hides `p-get`, not `get` — which is what the prefix is for.
+#[derive(Clone)]
+struct ForwardFilter {
+    /// The accumulated prefix at this level, canonical and possibly empty.
+    prefix: String,
+    /// `show` allow-list of exported member names; `None` when no `show` clause.
     show: Option<std::collections::HashSet<String>>,
-    /// `hide` deny-list of member names.
+    /// `hide` deny-list of exported member names.
     hide: Option<std::collections::HashSet<String>>,
 }
 
 impl ForwardedBuiltin {
+    /// The full prefix the member is exported under.
+    fn prefix(&self) -> &str {
+        self.filters.last().map_or("", |f| f.prefix.as_str())
+    }
+
     /// Whether a re-exported built-in member (given by its bare, un-prefixed
-    /// name) is visible through this forward.
+    /// name) survives every `@forward` it passed through.
     fn visible(&self, bare: &str) -> bool {
-        if let Some(show) = &self.show {
-            return show.contains(bare);
-        }
-        if let Some(hide) = &self.hide {
-            return !hide.contains(bare);
-        }
-        true
+        self.filters.iter().all(|f| {
+            let exported = format!("{}{bare}", f.prefix);
+            if let Some(show) = &f.show {
+                return show.contains(&exported);
+            }
+            if let Some(hide) = &f.hide {
+                return !hide.contains(&exported);
+            }
+            true
+        })
     }
 }
 

@@ -676,23 +676,35 @@ impl<'a> Evaluator<'a> {
                         quoted: false,
                     }));
                 }
-                // A member exposed unprefixed via `@use "sass:<mod>" as *`: when
-                // the bare name is not already a global builtin, route it to the
-                // first star module that owns it (e.g. `div` -> `math.div`,
-                // `set` -> `map.set`). Global builtins keep their own behaviour.
-                if !crate::builtins::is_builtin(name) {
-                    for m in self.star_modules.clone() {
-                        if crate::builtins::module_has_member(&m, name) {
-                            for v in &mut pos_args {
-                                *v = std::mem::replace(v, Value::Null).without_slash();
-                            }
-                            for (n, v) in &mut named {
-                                *v = std::mem::replace(v, Value::Null).without_slash();
-                                let _ = n;
-                            }
-                            return crate::builtins::call_module(&m, canonical, &pos_args, &named, *pos)
-                                .map(Value::without_slash);
+                // A member exposed unprefixed via `@use "sass:<mod>" as *` is
+                // that module's, and it SHADOWS the global of the same name:
+                // after `@use "sass:string" as *`, `index("abc", "b")` is
+                // `string.index` (2), not the list one. Exposure from more than
+                // one starred module is ambiguous, exactly as it is for user
+                // modules above.
+                {
+                    let owners: Vec<String> = self
+                        .star_modules
+                        .iter()
+                        .filter(|m| crate::builtins::module_has_member(m, canonical))
+                        .cloned()
+                        .collect();
+                    if owners.len() > 1 {
+                        return Err(Error::at(
+                            "This function is available from multiple global modules.".to_string(),
+                            *pos,
+                        ));
+                    }
+                    if let Some(m) = owners.into_iter().next() {
+                        for v in &mut pos_args {
+                            *v = std::mem::replace(v, Value::Null).without_slash();
                         }
+                        for (n, v) in &mut named {
+                            *v = std::mem::replace(v, Value::Null).without_slash();
+                            let _ = n;
+                        }
+                        return crate::builtins::call_module(&m, canonical, &pos_args, &named, *pos)
+                            .map(Value::without_slash);
                     }
                 }
                 // Host-defined custom functions (dart-sass `functions`): they
