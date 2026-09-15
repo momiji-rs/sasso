@@ -785,3 +785,73 @@ fn a_host_function_does_not_exempt_a_global_builtin() {
     assert_eq!(w.len(), 1, "{w:?}");
     assert!(w[0].contains("Use meta.type-of instead."), "{}", w[0]);
 }
+
+#[test]
+fn a_forwarded_builtin_is_reachable_by_call_and_by_reference() {
+    // A `@forward "sass:…"` re-exports a built-in module under the forward's
+    // own name, and `_`/`-` are interchangeable in BOTH the member and the
+    // prefix. Every expectation measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_fwd_builtin_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_plain.scss"), "@forward \"sass:map\";\n").expect("write");
+    std::fs::write(dir.join("_pref.scss"), "@forward \"sass:map\" as p-*;\n").expect("write");
+    std::fs::write(dir.join("_upref.scss"), "@forward \"sass:map\" as p_*;\n").expect("write");
+    std::fs::write(
+        dir.join("_shown.scss"),
+        "@forward \"sass:string\" show to_upper_case;\n",
+    )
+    .expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // The prefix and the member are both read canonically.
+    for src in [
+        "@use \"pref\" as p; a { b: p.p-get((x: 1), x); }",
+        "@use \"pref\" as p; a { b: p.p_get((x: 1), x); }",
+        "@use \"upref\" as p; a { b: p.p-get((x: 1), x); }",
+        "@use \"upref\" as p; a { b: p.p_get((x: 1), x); }",
+    ] {
+        assert_eq!(run(src).as_deref(), Ok("a {\n  b: 1;\n}"), "{src}");
+    }
+    // A `show` list written with underscores accepts either spelling.
+    for src in [
+        "@use \"shown\" as s; a { b: s.to-upper-case(\"a\"); }",
+        "@use \"shown\" as s; a { b: s.to_upper_case(\"a\"); }",
+    ] {
+        assert_eq!(run(src).as_deref(), Ok("a {\n  b: \"A\";\n}"), "{src}");
+    }
+    // `get-function($module:)` reaches a forwarded built-in, under the name the
+    // forward gives it, and inspects as the MEMBER it is.
+    assert_eq!(
+        run("@use \"plain\" as f; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"get\", $module: \"f\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-function(\"get\");\n}")
+    );
+    assert_eq!(
+        run("@use \"plain\" as f; @use \"sass:meta\";\na { b: meta.call(meta.get-function(\"get\", $module: \"f\"), (x: 1), x); }")
+            .as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert_eq!(
+        run("@use \"pref\" as p; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"p-get\", $module: \"p\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-function(\"get\");\n}")
+    );
+    // The global alias is not a member of the module, prefixed or not.
+    assert!(run(
+        "@use \"plain\" as f; @use \"sass:meta\";\na { b: meta.get-function(\"map-get\", $module: \"f\"); }"
+    )
+    .unwrap_err()
+    .contains("Function not found: \"map-get\""));
+    assert!(run(
+        "@use \"pref\" as p; @use \"sass:meta\";\na { b: meta.get-function(\"get\", $module: \"p\"); }"
+    )
+    .unwrap_err()
+    .contains("Function not found: \"get\""));
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -1,5 +1,30 @@
 use super::*;
 
+/// Resolve `member` against the built-in modules a user module re-exports with
+/// `@forward "sass:…"`, returning the owning module and the member's bare name.
+///
+/// Both the member and the forward's prefix are read in their canonical
+/// spelling first: `_` and `-` are one character in a Sass identifier, so
+/// `@forward "sass:map" as p-*` answers to `p_get` and `as p_*` answers to
+/// `p-get`. (The `show`/`hide` sets are canonicalized when the forward is
+/// recorded, so `visible` is asked with the canonical bare name.)
+fn resolve_forwarded_builtin(module: &Module, member: &str) -> Option<(String, String)> {
+    let member = member.replace('_', "-");
+    for fb in &module.forwarded_builtins {
+        let bare = match &fb.prefix {
+            Some(p) => match member.strip_prefix(p.replace('_', "-").as_str()) {
+                Some(rest) => rest,
+                None => continue,
+            },
+            None => member.as_str(),
+        };
+        if fb.visible(bare) && crate::builtins::module_has_member(&fb.module, bare) {
+            return Some((fb.module.clone(), bare.to_string()));
+        }
+    }
+    None
+}
+
 impl<'a> Evaluator<'a> {
     /// Dispatch a namespaced call `ns.member(args)`. Resolves a user module
     /// first, then a built-in module bound to `ns`.
@@ -248,7 +273,7 @@ impl<'a> Evaluator<'a> {
                 if crate::builtins::module_has_member(m, &name) {
                     if let Some(module) = crate::value::BuiltinModule::from_name(m) {
                         return Ok(Value::Function(SassFunction {
-                            name,
+                            name: name.replace('_', "-"),
                             css: false,
                             module: Some(module),
                             user: None,
@@ -257,18 +282,24 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
-        if crate::builtins::is_builtin(&name) {
-            // The reference is stored under the canonical spelling, as dart
-            // stores it: `inspect(get-function("map_get"))` is
-            // `get-function("map-get")`.
+        // The canonical spelling is what a reference is stored under, as dart
+        // stores it: `inspect(get-function("map_get"))` is
+        // `get-function("map-get")`.
+        let canonical = name.replace('_', "-");
+        if crate::builtins::is_builtin(&canonical)
+            || crate::builtins::EVAL_GLOBAL_NAMES.contains(&canonical.as_str())
+        {
             return Ok(Value::Function(SassFunction {
-                name: name.replace('_', "-"),
+                name: canonical,
                 css: false,
                 module: None,
                 user: None,
             }));
         }
-        Err(Error::at(format!("Function not found: {name}"), pos))
+        Err(Error::at(
+            format!("Function not found: {}", crate::value::serialize_quoted(&name)),
+            pos,
+        ))
     }
 
     /// `meta.get-mixin($name, $module: null)`: capture a reference to the named
@@ -349,9 +380,12 @@ impl<'a> Evaluator<'a> {
                 ));
             }
             if let Some(module) = hits.into_iter().next() {
-                let m = module
-                    .mixin(&name)
-                    .ok_or_else(|| Error::at(format!("Mixin not found: {name}"), pos))?;
+                let m = module.mixin(&name).ok_or_else(|| {
+                    Error::at(
+                        format!("Mixin not found: {}", crate::value::serialize_quoted(&name)),
+                        pos,
+                    )
+                })?;
                 return Ok(Value::Mixin(Box::new(SassMixin {
                     name,
                     user: Some(Rc::clone(&m) as Rc<dyn std::any::Any>),
@@ -359,7 +393,10 @@ impl<'a> Evaluator<'a> {
                 })));
             }
         }
-        Err(Error::at(format!("Mixin not found: {name}"), pos))
+        Err(Error::at(
+            format!("Mixin not found: {}", crate::value::serialize_quoted(&name)),
+            pos,
+        ))
     }
 
     /// Resolve a `$module`-qualified mixin reference for `meta.get-mixin`. The
@@ -373,7 +410,10 @@ impl<'a> Evaluator<'a> {
             if is_private_member(name) {
                 // A private member is not in the module's public view, so the
                 // by-name lookup simply does not find it.
-                return Err(Error::at(format!("Function not found: \"{name}\""), pos));
+                return Err(Error::at(
+                    format!("Function not found: {}", crate::value::serialize_quoted(name)),
+                    pos,
+                ));
             }
             if let Some(f) = module.function(name) {
                 return Ok(Value::Function(SassFunction {
@@ -383,7 +423,25 @@ impl<'a> Evaluator<'a> {
                     user: Some(Rc::clone(&f) as Rc<dyn std::any::Any>),
                 }));
             }
-            return Err(Error::at(format!("Function not found: {name}"), pos));
+            // A built-in this module re-exports with `@forward "sass:…"` is
+            // reachable by reference exactly as it is by call, under the name
+            // the forward gives it. The reference itself is the MEMBER's
+            // (`@forward "sass:map" as p-*` answers to `p-get` and inspects as
+            // `get-function("get")`).
+            if let Some((owner, bare)) = resolve_forwarded_builtin(module, name) {
+                if let Some(owner) = crate::value::BuiltinModule::from_name(&owner) {
+                    return Ok(Value::Function(SassFunction {
+                        name: bare,
+                        css: false,
+                        module: Some(owner),
+                        user: None,
+                    }));
+                }
+            }
+            return Err(Error::at(
+                format!("Function not found: {}", crate::value::serialize_quoted(name)),
+                pos,
+            ));
         }
         if let Some(builtin) = self.used_modules.get(module_name) {
             if crate::builtins::module_has_member(builtin, name) {
@@ -399,7 +457,10 @@ impl<'a> Evaluator<'a> {
                     user: None,
                 }));
             }
-            return Err(Error::at(format!("Function not found: {name}"), pos));
+            return Err(Error::at(
+                format!("Function not found: {}", crate::value::serialize_quoted(name)),
+                pos,
+            ));
         }
         Err(Error::at(
             format!("There is no module with the namespace \"{module_name}\"."),
@@ -410,7 +471,10 @@ impl<'a> Evaluator<'a> {
     fn get_mixin_from_module(&self, name: &str, module_name: &str, pos: Pos) -> Result<Value, Error> {
         if let Some(module) = self.used_user_modules.get(module_name) {
             if is_private_member(name) {
-                return Err(Error::at(format!("Mixin not found: \"{name}\""), pos));
+                return Err(Error::at(
+                    format!("Mixin not found: {}", crate::value::serialize_quoted(name)),
+                    pos,
+                ));
             }
             if let Some(m) = module.mixin(name) {
                 return Ok(Value::Mixin(Box::new(SassMixin {
@@ -419,7 +483,10 @@ impl<'a> Evaluator<'a> {
                     module: Some(Rc::clone(module) as Rc<dyn std::any::Any>),
                 })));
             }
-            return Err(Error::at(format!("Mixin not found: {name}"), pos));
+            return Err(Error::at(
+                format!("Mixin not found: {}", crate::value::serialize_quoted(name)),
+                pos,
+            ));
         }
         if self.used_modules.contains_key(module_name) {
             if is_builtin_mixin(module_name, name) {
@@ -429,7 +496,10 @@ impl<'a> Evaluator<'a> {
                     module: None,
                 })));
             }
-            return Err(Error::at(format!("Mixin not found: {name}"), pos));
+            return Err(Error::at(
+                format!("Mixin not found: {}", crate::value::serialize_quoted(name)),
+                pos,
+            ));
         }
         Err(Error::at(
             format!("There is no module with the namespace \"{module_name}\"."),
@@ -956,35 +1026,23 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
         length: usize,
     ) -> Result<Option<Value>, Error> {
-        for fb in &module.forwarded_builtins {
-            let bare = match &fb.prefix {
-                Some(p) => match member.strip_prefix(p.as_str()) {
-                    Some(rest) => rest,
-                    None => continue,
-                },
-                None => member,
-            };
-            if fb.visible(bare) && crate::builtins::module_has_member(&fb.module, bare) {
-                // Reached through a `@forward "sass:…"`, the member is still
-                // that module's — and still deprecated if it is (`m.feature-
-                // exists(…)` after `@forward "sass:meta"`).
-                let owner = fb.module.clone();
-                let bare = bare.replace('_', "-");
-                let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
-                self.emit_call_deprecations(&bare, Some(&owner), pos, length);
-                let bare = bare.as_str();
-                for v in &mut pos_args {
-                    *v = std::mem::replace(v, Value::Null).without_slash();
-                }
-                for (_, v) in &mut named {
-                    *v = std::mem::replace(v, Value::Null).without_slash();
-                }
-                return Ok(Some(
-                    crate::builtins::call_module(&fb.module, bare, &pos_args, &named, pos)?.without_slash(),
-                ));
-            }
+        let Some((owner, bare)) = resolve_forwarded_builtin(module, member) else {
+            return Ok(None);
+        };
+        // Reached through a `@forward "sass:…"`, the member is still that
+        // module's — and still deprecated if it is (`m.feature-exists(…)`
+        // after `@forward "sass:meta"`).
+        let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
+        self.emit_call_deprecations(&bare, Some(&owner), pos, length);
+        for v in &mut pos_args {
+            *v = std::mem::replace(v, Value::Null).without_slash();
         }
-        Ok(None)
+        for (_, v) in &mut named {
+            *v = std::mem::replace(v, Value::Null).without_slash();
+        }
+        Ok(Some(
+            crate::builtins::call_module(&owner, &bare, &pos_args, &named, pos)?.without_slash(),
+        ))
     }
 
     /// Call a user module's function in the module's own environment: bind the

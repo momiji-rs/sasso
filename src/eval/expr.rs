@@ -642,17 +642,7 @@ impl<'a> Evaluator<'a> {
                 // predicates resolve against the evaluator state, not the
                 // value-only builtin layer. A user-defined function of the same
                 // name still wins (checked above).
-                if matches!(
-                    canonical,
-                    "variable-exists"
-                        | "global-variable-exists"
-                        | "mixin-exists"
-                        | "function-exists"
-                        | "content-exists"
-                        | "get-function"
-                        | "call"
-                        | "keywords"
-                ) {
+                if crate::builtins::EVAL_GLOBAL_NAMES.contains(&canonical) {
                     for v in &mut pos_args {
                         *v = std::mem::replace(v, Value::Null).without_slash();
                     }

@@ -1325,3 +1325,37 @@ fn a_module_member_reference_is_not_its_global_alias() {
         "a {\n  b: get-function(\"get\");\n}\n"
     );
 }
+
+#[test]
+fn every_global_is_referenceable_by_name() {
+    // The `sass:meta` predicates that resolve against evaluator state are
+    // globals like any other: `get-function` finds them, and invoking the
+    // reference runs them. Measured against dart-sass 1.103.1.
+    assert_eq!(
+        css(
+            "$x: 1;\n@use \"sass:meta\";\na { b: meta.call(meta.get-function(\"variable-exists\"), \"x\"); }"
+        ),
+        "a {\n  b: true;\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:meta\";\na { b: meta.call(meta.get-function(\"call\"), meta.get-function(\"rgb\"), 1, 2, 3); }"),
+        "a {\n  b: rgb(1, 2, 3);\n}\n"
+    );
+    for name in ["keywords", "content-exists", "get-function", "mixin-exists"] {
+        assert_eq!(
+            css(&format!(
+                "@use \"sass:meta\";\na {{ b: meta.inspect(meta.get-function(\"{name}\")); }}"
+            )),
+            format!("a {{\n  b: get-function(\"{name}\");\n}}\n")
+        );
+    }
+    // A name that is no function at all is reported as the string it was asked
+    // for, quoting and all.
+    let err = compile(
+        "@use \"sass:meta\"; a { b: meta.get-function(\"a\\\"b\"); }",
+        &Options::default(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("Function not found: 'a\"b'"), "{err}");
+}

@@ -561,6 +561,24 @@ pub(crate) const META_FUNCTION_NAMES: &[&str] = &[
 /// The `sass:meta` module's mixin members.
 pub(crate) const META_MIXIN_NAMES: &[&str] = &["apply", "load-css"];
 
+/// The `sass:meta` members that are ALSO global functions and are owned by the
+/// evaluator rather than by this value-only layer: each resolves against the
+/// evaluator's scopes, definitions or call state, so none of them appears in a
+/// family `NAMES` table and [`is_builtin`] does not know them. dart exposes
+/// them like any other global — callable, referenceable through
+/// `get-function`, and deprecated for being global — so the places that need
+/// the full global picture consult this list alongside `is_builtin`.
+pub(crate) const EVAL_GLOBAL_NAMES: &[&str] = &[
+    "call",
+    "content-exists",
+    "function-exists",
+    "get-function",
+    "global-variable-exists",
+    "keywords",
+    "mixin-exists",
+    "variable-exists",
+];
+
 pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
     let canonical = canonical_name(member);
     let member = canonical.as_ref();
