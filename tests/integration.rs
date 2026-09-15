@@ -619,6 +619,18 @@ fn compressed_interpolated_at_rule_names_keep_their_gap() {
     );
 }
 
+/// `::cue` and `::cue-region` take a selector list by the grammar, but dart's
+/// serializer does not treat them as one — their commas keep the space, and so
+/// does `::part`'s. Recorded so the compressor's table is not "fixed" into a
+/// divergence. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_leaves_the_pseudo_elements_dart_leaves() {
+    let sel = |scss: &str| css_compressed(&format!("{scss}{{a:1}}"));
+    assert_eq!(sel("::cue(.b, .c)"), "::cue(.b, .c){a:1}");
+    assert_eq!(sel("::cue-region(.b, .c)"), "::cue-region(.b, .c){a:1}");
+    assert_eq!(sel("::part(b, c)"), "::part(b, c){a:1}");
+}
+
 /// dart writes a statement's `;` as a SEPARATOR, so compressed output never
 /// ends with one — at the end of the stylesheet or before a `}`. Measured
 /// against dart-sass 1.103.1.
