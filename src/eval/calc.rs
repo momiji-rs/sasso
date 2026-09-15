@@ -69,9 +69,20 @@ impl<'a> Evaluator<'a> {
         let lname = name.to_ascii_lowercase();
         let parts: Vec<String> = nodes.iter().map(|n| n.to_calc_css(self.compressed())).collect();
         Ok(Some(Value::Str(SassStr {
-            text: format!("{lname}({})", parts.join(", ")).into(),
+            text: format!("{lname}({})", parts.join(self.calc_arg_sep())).into(),
             quoted: false,
         })))
+    }
+
+    /// What separates a preserved calculation's arguments: compressed output
+    /// takes the space out, exactly as `CalcNode::Func` does for the calls that
+    /// reach emit as a typed node rather than as text.
+    fn calc_arg_sep(&self) -> &'static str {
+        if self.compressed() {
+            ","
+        } else {
+            ", "
+        }
     }
 
     /// Evaluate a three-argument `clamp(min, value, max)` calculation. Each
@@ -111,7 +122,7 @@ impl<'a> Evaluator<'a> {
         }
         let parts: Vec<String> = nodes.iter().map(|n| n.to_calc_css(self.compressed())).collect();
         Ok(Value::Str(SassStr {
-            text: format!("clamp({})", parts.join(", ")).into(),
+            text: format!("clamp({})", parts.join(self.calc_arg_sep())).into(),
             quoted: false,
         }))
     }
@@ -136,7 +147,7 @@ impl<'a> Evaluator<'a> {
             parts.push(self.eval_calc(&a.value)?.to_calc_css(self.compressed()));
         }
         Ok(Value::Str(SassStr {
-            text: format!("calc-size({})", parts.join(", ")).into(),
+            text: format!("calc-size({})", parts.join(self.calc_arg_sep())).into(),
             quoted: false,
         }))
     }

@@ -325,6 +325,33 @@ fn compressed_output() {
 /// string below was produced by dart-sass 1.101.0 (`--style=compressed`).
 /// This is the offline regression gate for the color-serialization fix; the
 /// live cross-check lives in tests/parity.rs (compressed parity battery).
+/// A preserved CSS calculation — one that keeps a `var()` or `env()` and so
+/// cannot fold to a number — separates its arguments with a bare comma when
+/// compressing, like any other value. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_preserved_calculations_drop_the_argument_space() {
+    let v = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
+    assert_eq!(v("clamp(0.5px, var(--y), 2px)"), "a{x:clamp(.5px,var(--y),2px)}");
+    assert_eq!(
+        v("clamp(1px, env(safe-area), 2px)"),
+        "a{x:clamp(1px,env(safe-area),2px)}"
+    );
+    assert_eq!(v("min(1px, var(--y))"), "a{x:min(1px,var(--y))}");
+    assert_eq!(v("mod(var(--y), 2px)"), "a{x:mod(var(--y),2px)}");
+    assert_eq!(v("pow(var(--y), 2)"), "a{x:pow(var(--y),2)}");
+    assert_eq!(v("calc-size(auto, var(--y))"), "a{x:calc-size(auto,var(--y))}");
+    assert_eq!(
+        v("calc(1px + clamp(1px, var(--y), 2px))"),
+        "a{x:calc(1px + clamp(1px,var(--y),2px))}"
+    );
+    // A `@supports` declaration is not a value: dart writes it verbatim, space
+    // and all, in both styles.
+    assert_eq!(
+        css_compressed("@supports (width: clamp(1px, var(--y), 2px)) { .a { b: 1; } }"),
+        "@supports(width: clamp(1px, var(--y), 2px)){.a{b:1}}"
+    );
+}
+
 /// Compressed style drops a leading zero from a POSITIVE number only — dart
 /// looks for a literal `0.` prefix on the rendered string, which a minus sign
 /// has already pushed out of the way. Measured against dart-sass 1.103.1.
