@@ -525,6 +525,13 @@ pub(crate) fn serialize_quoted(text: &str) -> String {
     let has_single = text.contains('\'');
     // Use single quotes only when the text has a `"` and no `'`.
     let quote = if has_double && !has_single { '\'' } else { '"' };
+    serialize_quoted_with(text, quote)
+}
+
+/// The same, with the quote character already chosen — for a string whose
+/// quote depends on more than this fragment (an interpolated one, whose pieces
+/// are escaped separately but must share one quote).
+pub(crate) fn serialize_quoted_with(text: &str, quote: char) -> String {
     // Fast path: when no character needs escaping, the body is `text` verbatim
     // between the quotes — skip the `Vec<char>` and the per-char loop. The
     // predicate mirrors the loop's two escape branches exactly.

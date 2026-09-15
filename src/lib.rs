@@ -35,6 +35,7 @@
 mod arena;
 
 mod ast;
+mod ast_writer;
 mod builtins;
 mod deprecation;
 mod diag;

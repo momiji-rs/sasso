@@ -47,6 +47,8 @@ const MATCHING: &[&str] = &[
     // call's own arguments.
     "deprecation-color-functions",
     "deprecation-darken",
+    // The legacy `if()`, whose suggestion is the arguments written back out.
+    "deprecation-if-function",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {
@@ -1591,4 +1593,149 @@ fn a_legacy_color_function_suggests_its_replacement() {
     assert_eq!(w.len(), 2, "{w:?}");
     assert!(w[0].contains("$lightness: 51%"), "{}", w[0]);
     assert!(w[1].contains("$lightness: 12.5615763547%"), "{}", w[1]);
+}
+
+#[test]
+fn the_legacy_if_suggests_the_modern_syntax() {
+    // dart raises `[if-function]` when the file is PARSED: for an `if()` nobody
+    // runs, once however many times it does run, innermost first, and with no
+    // call stack. The suggestion is the three arguments written back out — the
+    // AST, not the source text. Measured against dart-sass 1.103.1.
+    let sug = |src: &str| -> Vec<String> { warnings(src, "in.scss") };
+    let one = |src: &str| -> String {
+        let w = sug(src);
+        assert_eq!(w.len(), 1, "{src}: {w:?}");
+        w.into_iter().next().unwrap()
+    };
+    assert!(one("a { b: if(true, 1, 2); }\n").contains("Suggestion: if(sass(true): 1; else: 2)"));
+    // The AST is written back out, so the text is normalized, not copied.
+    for (src, want) in [
+        ("a { b: if(true,1+2,3); }\n", "if(sass(true): 1 + 2; else: 3)"),
+        ("a { b: if( true , 1 , 2 ); }\n", "if(sass(true): 1; else: 2)"),
+        ("a { b: if(true, 1e3, 2); }\n", "if(sass(true): 1000; else: 2)"),
+        (
+            "a { b: if(true, 1px*2, 3); }\n",
+            "if(sass(true): 1px * 2; else: 3)",
+        ),
+        (
+            "a { b: if(true, #ABCDEF, 3); }\n",
+            "if(sass(true): #ABCDEF; else: 3)",
+        ),
+        (
+            "a { b: if(true, \"a\\41 b\", 3); }\n",
+            "if(sass(true): \"aAb\"; else: 3)",
+        ),
+        (
+            "a { b: if(true, 'he said \"hi\"', 3); }\n",
+            "if(sass(true): 'he said \"hi\"'; else: 3)",
+        ),
+        (
+            "$v: 1;\na { b: if(true, \"x#{$v}y\", 3); }\n",
+            "if(sass(true): \"x#{$v}y\"; else: 3)",
+        ),
+        ("a { b: if(true, (1 2), 3); }\n", "if(sass(true): (1 2); else: 3)"),
+        (
+            "a { b: if(true, (a: 1), 2); }\n",
+            "if(sass(true): (a: 1); else: 2)",
+        ),
+        ("a { b: if(true, [], 2); }\n", "if(sass(true): []; else: 2)"),
+        ("a { b: if(true, (), 2); }\n", "if(sass(true): (); else: 2)"),
+        // A one-element comma list needs the parens that make it a list, and
+        // the trailing comma with them — but inside brackets it needs neither.
+        ("a { b: if(true, (1,), 2); }\n", "if(sass(true): ((1,)); else: 2)"),
+        ("a { b: if(true, [1,], 2); }\n", "if(sass(true): [1]; else: 2)"),
+        (
+            "a { b: if(true, (1, 2), 3); }\n",
+            "if(sass(true): (1, 2); else: 3)",
+        ),
+        ("a { b: if(not true, 1, 2); }\n", "if(sass(not true): 1; else: 2)"),
+        (
+            "$v: 1;\na { b: if($v > 1, 1, 2); }\n",
+            "if(sass($v > 1): 1; else: 2)",
+        ),
+        // A `null` branch is dropped, and a null THEN flips the condition.
+        ("a { b: if(true, 1, null); }\n", "if(sass(true): 1)"),
+        ("$v: 1;\na { b: if($v, null, 2); }\n", "if(not sass($v): 2)"),
+        ("a { b: if(true, null, null); }\n", "if(sass(true): null)"),
+    ] {
+        let w = one(src);
+        assert!(w.contains(&format!("Suggestion: {want}")), "{src}: {w}");
+    }
+    // No suggestion for a shape the rewrite cannot express — the deprecation
+    // still fires.
+    for src in [
+        "a { b: if($condition: true, $if-true: 1, $if-false: 2); }\n",
+        "$a: (true, 1, 2);\na { b: if($a...); }\n",
+    ] {
+        let w = one(src);
+        assert!(w.contains("[if-function]"), "{src}: {w}");
+        assert!(!w.contains("Suggestion:"), "{src}: {w}");
+    }
+    // Innermost first, because dart builds the expression bottom up.
+    let w = sug("a { b: if(true, if(false, 1, 2), 3); }\n");
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(w[0].contains("if(sass(false): 1; else: 2)"), "{}", w[0]);
+    assert!(
+        w[1].contains("if(sass(true): if(false, 1, 2); else: 3)"),
+        "{}",
+        w[1]
+    );
+    // PARSE time: it fires for code that never runs, and once for code that
+    // runs repeatedly.
+    assert_eq!(sug("@mixin m { z: if(true, 1, 2); }\na { q: 1; }\n").len(), 1);
+    assert_eq!(
+        sug("@if false { a { z: if(true, 1, 2); } }\nb { q: 1; }\n").len(),
+        1
+    );
+    assert_eq!(
+        sug("@mixin m($x) { z: if($x, 1, 2); }\na { @include m(true); }\nb { @include m(false); }\n").len(),
+        1
+    );
+    assert_eq!(
+        sug("@for $i from 1 through 3 { a#{$i} { z: if(true, 1, 2); } }\n").len(),
+        1
+    );
+    // And it has no call stack: the frame is the file, not the mixin.
+    let w = one("@mixin m($x) { z: if($x, 1, 2); }\na { @include m(true); }\n");
+    assert_eq!(w.matches("root stylesheet").count(), 1, "{w}");
+    assert!(!w.contains("m()"), "{w}");
+    // An interpolated string escapes its literal text like any other, so a
+    // newline in the source is `\a` in the suggestion rather than a newline in
+    // the middle of the diagnostic.
+    assert!(one("$x: 1;\na { b: if(true, \"a\\a #{$x}\", 3); }\n")
+        .contains("Suggestion: if(sass(true): \"a\\a#{$x}\"; else: 3)"));
+    // The single-`=` filter operator is written with spaces, as dart writes it.
+    assert!(one("a { b: if(true, alpha(opacity=80), 3); }\n")
+        .contains("Suggestion: if(sass(true): alpha(opacity = 80); else: 3)"));
+    // A user `@function if` does not take the form over, in dart or here.
+    assert_eq!(
+        sug("@function if($c, $t, $f) { @return 9; }\na { b: if(true, 1, 2); }\n").len(),
+        1
+    );
+    // It is found wherever an expression can be written.
+    for src in [
+        "a { z: #{if(true, 1, 2)}; }\n",
+        "a#{if(true, x, y)} { q: 1; }\n",
+        "@media (min-width: if(true, 1px, 2px)) { a { q: 1; } }\n",
+        "@supports (a: if(true, 1, 2)) { b { q: 1; } }\n",
+        "@each $i in if(true, 1 2, 3) { a { q: $i; } }\n",
+        "@mixin m($p: if(true, 1, 2)) { q: $p; }\na { @include m; }\n",
+        "@warn if(true, \"w\", \"v\");\na { q: 1; }\n",
+        "/* c #{if(true, 1, 2)} */\n",
+        "@import url(if(true, a, b));\n",
+        "@mixin m { @content(if(true, 1, 2)); }\na { @include m using ($x) { q: $x; } }\n",
+        "%p { q: 1; }\na { @extend #{if(true, \"%p\", \"%p\")}; }\n",
+        // A custom at-rule's INTERPOLATED property and its value are
+        // SassScript; a literal property's value is verbatim text here (dart
+        // parses that one as SassScript too — a separate gap, in the CSS).
+        "@function --foo() { #{if(true, x, y)}: 1; }\n",
+        "@keyframes #{if(true, fade, none)} { from { o: 0; } }\n",
+    ] {
+        // `@warn` adds its own output; this is about the deprecation.
+        let found: Vec<String> = sug(src)
+            .into_iter()
+            .filter(|w| w.contains("[if-function]"))
+            .collect();
+        assert_eq!(found.len(), 1, "{src}: {found:?}");
+    }
 }

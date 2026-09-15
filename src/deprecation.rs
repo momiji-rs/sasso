@@ -99,6 +99,24 @@ impl Deprecation {
         }
     }
 
+    /// The `if-function` deprecation: the legacy `if($c, $t, $f)` in favour of
+    /// the modern CSS `if()`. `suggestion` is the rewritten call, present only
+    /// when the arguments are the three positional ones the rewrite needs —
+    /// dart omits the line entirely for a named, splatted or wrong-arity call
+    /// and still deprecates it.
+    pub(crate) fn if_function(suggestion: Option<&str>) -> Self {
+        let mut message = "The Sass if() syntax is deprecated in favor of the modern CSS syntax.".to_string();
+        if let Some(s) = suggestion {
+            message.push_str("\n\nSuggestion: ");
+            message.push_str(s);
+        }
+        Deprecation {
+            id: "if-function",
+            message,
+            more_info: Some("More info: https://sass-lang.com/d/if-function".to_string()),
+        }
+    }
+
     /// Render the header block: `DEPRECATION WARNING [id]: <message>` followed
     /// by a blank line and the `More info` line (when present), then a blank
     /// line and the top snippet-gutter is left to the caller. Returns the lines

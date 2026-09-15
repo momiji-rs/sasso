@@ -1544,10 +1544,22 @@ impl<'a> Evaluator<'a> {
         if !self.diag_enabled() {
             return;
         }
-        let mut rules = Vec::new();
-        collect_import_rules(stmts, &mut rules);
-        for (pos, length) in rules {
-            self.emit_deprecation(&crate::deprecation::Deprecation::import(), pos, length);
+        for d in crate::ast_writer::collect_parse_time_deprecations(stmts) {
+            let (dep, pos, length) = match &d {
+                crate::ast_writer::ParseTimeDeprecation::Import { pos, length } => {
+                    (crate::deprecation::Deprecation::import(), *pos, *length)
+                }
+                crate::ast_writer::ParseTimeDeprecation::LegacyIf {
+                    pos,
+                    length,
+                    suggestion,
+                } => (
+                    crate::deprecation::Deprecation::if_function(suggestion.as_deref()),
+                    *pos,
+                    *length,
+                ),
+            };
+            self.emit_deprecation(&dep, pos, length);
         }
     }
 
@@ -1898,7 +1910,7 @@ impl<'a> Evaluator<'a> {
         self.emit_deprecation(&dep, pos, len);
     }
 
-    fn emit_deprecation(&mut self, dep: &crate::deprecation::Deprecation, pos: Pos, len: usize) {
+    pub(super) fn emit_deprecation(&mut self, dep: &crate::deprecation::Deprecation, pos: Pos, len: usize) {
         if !self.diag_enabled() {
             return;
         }
@@ -4007,49 +4019,7 @@ fn decl_error(scope: DeclScope, kind: &str) -> Option<String> {
     }
 }
 
-/// Every Sass (non-CSS) `@import` rule in `stmts`, in source order, as the
-/// span of its URL token — recursing into the blocks an `@import` may appear
-/// in (style rules, at-rules, control flow, content blocks). Mixin and
-/// function bodies and property sets are not walked: `validate_declarations`
-/// rejects an `@import` there, for the entry and for every loaded sheet.
-fn collect_import_rules(stmts: &[Stmt], out: &mut Vec<(Pos, usize)>) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Import { args, .. } => {
-                for arg in args {
-                    if let ImportArg::Sass { path, pos, length } = arg {
-                        if !is_css_import(path) {
-                            out.push((*pos, *length));
-                        }
-                    }
-                }
-            }
-            Stmt::Rule(rule) => collect_import_rules(&rule.body, out),
-            Stmt::If(branches) => {
-                for b in branches {
-                    collect_import_rules(&b.body, out);
-                }
-            }
-            Stmt::For { body, .. }
-            | Stmt::Each { body, .. }
-            | Stmt::While { body, .. }
-            | Stmt::Media { body, .. }
-            | Stmt::Supports { body, .. }
-            | Stmt::AtRoot { body, .. }
-            | Stmt::Keyframes { body, .. } => collect_import_rules(body, out),
-            Stmt::AtRule { body: Some(body), .. } | Stmt::InterpAtRule { body: Some(body), .. } => {
-                collect_import_rules(body, out)
-            }
-            Stmt::Include {
-                content: Some(content),
-                ..
-            } => collect_import_rules(content, out),
-            _ => {}
-        }
-    }
-}
-
-fn is_css_import(arg: &str) -> bool {
+pub(crate) fn is_css_import(arg: &str) -> bool {
     arg.ends_with(".css")
         || arg.starts_with("http://")
         || arg.starts_with("https://")
