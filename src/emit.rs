@@ -660,9 +660,20 @@ fn emit_compressed(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> St
 fn emit_compressed_body(out: &mut String, nodes: &[OutNode], collector: &mut Option<SmCollector>) {
     let mut prev_was_decl = false;
     for node in nodes {
-        // Comments and blanks produce no compressed output; don't let them
-        // reset the separator state.
-        if matches!(node, OutNode::Comment(..) | OutNode::Blank) {
+        // A blank, and a comment that is not LOUD, produce no compressed
+        // output; don't let them reset the separator state. A loud comment is
+        // written, takes the pending separator, and needs none of its own.
+        if let OutNode::Comment(text, lines) = node {
+            if is_loud_comment(text) {
+                if prev_was_decl {
+                    out.push(';');
+                    prev_was_decl = false;
+                }
+                write_comment_compressed(out, text, *lines, collector);
+            }
+            continue;
+        }
+        if matches!(node, OutNode::Blank) {
             continue;
         }
         if prev_was_decl {
@@ -713,9 +724,18 @@ fn compressed_at_rule_omits_space(name: &str, prelude: &str) -> bool {
 fn write_items_compressed(out: &mut String, items: &[OutItem], collector: &mut Option<SmCollector>) {
     let mut pending_semicolon = false;
     for item in items {
-        // Loud comments are dropped in compressed output; they neither emit
-        // nor disturb the separator state.
-        if matches!(item, OutItem::Comment(..)) {
+        if let OutItem::Comment(text, lines) = item {
+            // A comment is dropped when compressing unless it is LOUD, which
+            // is how a stylesheet keeps its licence header. It takes the
+            // pending separator (`b:1;/*! c */`) but needs none of its own.
+            if !is_loud_comment(text) {
+                continue;
+            }
+            if pending_semicolon {
+                out.push(';');
+                pending_semicolon = false;
+            }
+            write_comment_compressed(out, text, *lines, collector);
             continue;
         }
         if pending_semicolon {
@@ -723,6 +743,28 @@ fn write_items_compressed(out: &mut String, items: &[OutItem], collector: &mut O
         }
         pending_semicolon = write_item_compressed(out, item, collector);
     }
+}
+
+/// Whether a comment survives compressed output: dart keeps the ones that open
+/// `/*!`, the convention for "this is a licence, do not strip me".
+fn is_loud_comment(text: &str) -> bool {
+    text.starts_with('!')
+}
+
+/// Write a loud comment for compressed output — verbatim, newlines and all,
+/// with no separator of its own.
+fn write_comment_compressed(
+    out: &mut String,
+    text: &str,
+    lines: SrcLines,
+    collector: &mut Option<SmCollector>,
+) {
+    let mapped = record(out, lines, collector);
+    let from = out.len();
+    out.push_str("/*");
+    out.push_str(text);
+    out.push_str("*/");
+    continue_span(out, from, mapped, collector);
 }
 
 /// Write one rule-block item for compressed output. Returns whether a `;` must
@@ -830,9 +872,13 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             lines,
             ..
         } => {
-            // A rule whose every item is a comment produces nothing in
-            // compressed output, so it is not emitted at all.
-            if items.iter().all(|it| matches!(it, OutItem::Comment(..))) {
+            // A rule whose every item is a DROPPED comment produces nothing
+            // in compressed output, so it is not emitted at all — but a loud
+            // comment is output, and keeps its rule alive around it.
+            if items
+                .iter()
+                .all(|it| matches!(it, OutItem::Comment(text, _) if !is_loud_comment(text)))
+            {
                 return;
             }
             // Source-map: the selector list's first character.
@@ -842,9 +888,11 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             write_items_compressed(out, items, collector);
             out.push('}');
         }
-        // Loud comments are dropped in compressed output (the slice does
-        // not yet special-case `/*!` important comments).
-        OutNode::Comment(..) => {}
+        OutNode::Comment(text, lines) => {
+            if is_loud_comment(text) {
+                write_comment_compressed(out, text, *lines, collector);
+            }
+        }
         OutNode::Raw(s, lines) => {
             // Source-map: a passed-through `@import` maps to its URL token.
             record(out, *lines, collector);

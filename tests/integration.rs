@@ -325,6 +325,53 @@ fn compressed_output() {
 /// string below was produced by dart-sass 1.101.0 (`--style=compressed`).
 /// This is the offline regression gate for the color-serialization fix; the
 /// live cross-check lives in tests/parity.rs (compressed parity battery).
+/// Compressed style drops comments — except the LOUD ones, which open `/*!`
+/// and are how a stylesheet keeps its licence header. Measured against
+/// dart-sass 1.103.1.
+#[test]
+fn compressed_keeps_loud_comments() {
+    // Written verbatim, newlines and all, with no separator of its own.
+    assert_eq!(css_compressed("/*! head */\n.a { b: 1; }"), "/*! head */.a{b:1}");
+    assert_eq!(
+        css_compressed("/*!\n * line\n */\n.a { b: 1; }"),
+        "/*!\n * line\n */.a{b:1}"
+    );
+    assert_eq!(
+        css_compressed("/*! one */\n/*! two */\n.a { b: 1; }"),
+        "/*! one *//*! two */.a{b:1}"
+    );
+    assert_eq!(css_compressed(".a { b: 1; }\n/*! tail */"), ".a{b:1}/*! tail */");
+    assert_eq!(
+        css_compressed(".a { b: 1; }\n/*! mid */\n.c { d: 1; }"),
+        ".a{b:1}/*! mid */.c{d:1}"
+    );
+    // Inside a rule it takes the pending `;` and needs none of its own.
+    assert_eq!(
+        css_compressed(".a { b: 1; /*! c */ d: 2; }"),
+        ".a{b:1;/*! c */d:2}"
+    );
+    assert_eq!(css_compressed(".a { /*! c */ b: 1; }"), ".a{/*! c */b:1}");
+    assert_eq!(css_compressed(".a { b: 1; /*! c */ }"), ".a{b:1;/*! c */}");
+    // A rule that holds nothing else is still emitted around it — but one
+    // holding only a QUIET comment is not.
+    assert_eq!(css_compressed(".a { /*! c */ }"), ".a{/*! c */}");
+    assert_eq!(css_compressed(".a { /* c */ }"), "");
+    assert_eq!(
+        css_compressed(".a { /*! c */ .b { d: 1; } }"),
+        ".a{/*! c */}.a .b{d:1}"
+    );
+    // And inside an at-rule body.
+    assert_eq!(
+        css_compressed("@media (a: 1) { /*! c */ .a { b: 1; } }"),
+        "@media(a: 1){/*! c */.a{b:1}}"
+    );
+    // Interpolation resolves first, as in expanded output.
+    assert_eq!(
+        css_compressed("$x: 1;\n/*! v#{$x} */\n.a { b: 1; }"),
+        "/*! v1 */.a{b:1}"
+    );
+}
+
 /// A private-use character is escaped in expanded output and written RAW when
 /// compressing — dart trades the escape for the character once bytes are what
 /// matter. Measured against dart-sass 1.103.1.
