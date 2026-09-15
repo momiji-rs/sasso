@@ -642,12 +642,23 @@ impl<'a> Evaluator<'a> {
                 // case: dart's `functions` do not shadow a built-in global at
                 // all (measured against 1.103.1's JS API — the built-in runs
                 // and still warns).
-                self.emit_call_deprecations(
-                    canonical,
-                    via_star.as_ref().map(|(owner, _)| owner.as_str()),
-                    *pos,
-                    *length,
-                );
+                // The proprietary Microsoft `alpha()` filter overload (below)
+                // is not a call to the global `alpha()` at all — dart passes it
+                // through as a CSS function and deprecates nothing.
+                let ms_alpha_filter = canonical == "alpha"
+                    && named.is_empty()
+                    && !pos_args.is_empty()
+                    && pos_args
+                        .iter()
+                        .all(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.contains('=')));
+                if !ms_alpha_filter {
+                    self.emit_call_deprecations(
+                        canonical,
+                        via_star.as_ref().map(|(owner, _)| owner.as_str()),
+                        *pos,
+                        *length,
+                    );
+                }
                 // The global (deprecated) aliases of the `sass:meta` existence
                 // predicates resolve against the evaluator state, not the
                 // value-only builtin layer. A user-defined function of the same
@@ -669,13 +680,7 @@ impl<'a> Evaluator<'a> {
                 // hack, produced by the single-`=` operator), dart-sass passes
                 // the call through verbatim as a CSS function instead of
                 // treating the argument as a color.
-                if name == "alpha"
-                    && named.is_empty()
-                    && !pos_args.is_empty()
-                    && pos_args
-                        .iter()
-                        .all(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.contains('=')))
-                {
+                if ms_alpha_filter {
                     let inner = pos_args
                         .iter()
                         .map(|v| v.to_css(false))

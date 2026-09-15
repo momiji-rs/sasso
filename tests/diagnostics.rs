@@ -1691,6 +1691,14 @@ fn the_legacy_if_suggests_the_modern_syntax() {
     let w = one("@mixin m($x) { z: if($x, 1, 2); }\na { @include m(true); }\n");
     assert_eq!(w.matches("root stylesheet").count(), 1, "{w}");
     assert!(!w.contains("m()"), "{w}");
+    // An interpolated string escapes its literal text like any other, so a
+    // newline in the source is `\a` in the suggestion rather than a newline in
+    // the middle of the diagnostic.
+    assert!(one("$x: 1;\na { b: if(true, \"a\\a #{$x}\", 3); }\n")
+        .contains("Suggestion: if(sass(true): \"a\\a#{$x}\"; else: 3)"));
+    // The single-`=` filter operator is written with spaces, as dart writes it.
+    assert!(one("a { b: if(true, alpha(opacity=80), 3); }\n")
+        .contains("Suggestion: if(sass(true): alpha(opacity = 80); else: 3)"));
     // A user `@function if` does not take the form over, in dart or here.
     assert_eq!(
         sug("@function if($c, $t, $f) { @return 9; }\na { b: if(true, 1, 2); }\n").len(),
@@ -1706,6 +1714,14 @@ fn the_legacy_if_suggests_the_modern_syntax() {
         "@mixin m($p: if(true, 1, 2)) { q: $p; }\na { @include m; }\n",
         "@warn if(true, \"w\", \"v\");\na { q: 1; }\n",
         "/* c #{if(true, 1, 2)} */\n",
+        "@import url(if(true, a, b));\n",
+        "@mixin m { @content(if(true, 1, 2)); }\na { @include m using ($x) { q: $x; } }\n",
+        "%p { q: 1; }\na { @extend #{if(true, \"%p\", \"%p\")}; }\n",
+        // A custom at-rule's INTERPOLATED property and its value are
+        // SassScript; a literal property's value is verbatim text here (dart
+        // parses that one as SassScript too — a separate gap, in the CSS).
+        "@function --foo() { #{if(true, x, y)}: 1; }\n",
+        "@keyframes #{if(true, fade, none)} { from { o: 0; } }\n",
     ] {
         // `@warn` adds its own output; this is about the deprecation.
         let found: Vec<String> = sug(src)

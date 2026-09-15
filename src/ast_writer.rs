@@ -9,8 +9,9 @@
 //! measured against dart-sass 1.103.1 (scratch `dartref/if3..if7.sh`).
 
 use crate::ast::{
-    BinOp, CallArg, Expr, IfClause, IfCond, ImportArg, MediaFeature, MediaInParens, MediaQuery,
-    MediaQueryList, ParamList, Stmt, SupportsCondition, SupportsValue, TplPiece, UnOp,
+    BinOp, CallArg, CssCustomValue, Expr, IfClause, IfCond, ImportArg, ImportModifier, MediaFeature,
+    MediaInParens, MediaQuery, MediaQueryList, ParamList, Stmt, SupportsCondition, SupportsValue, TplPiece,
+    UnOp,
 };
 use crate::scanner::Pos;
 use crate::value::{ListSep, Number, Value};
@@ -200,13 +201,12 @@ fn write_quoted(out: &mut String, pieces: &[TplPiece]) {
     out.push(quote);
     for p in pieces {
         match p {
+            // Escaped exactly as a quote-less string would be — a literal
+            // newline in the source is `\a` in the suggestion, not a newline
+            // in the middle of the diagnostic.
             TplPiece::Lit(s) => {
-                for c in s.chars() {
-                    if c == quote || c == '\\' {
-                        out.push('\\');
-                    }
-                    out.push(c);
-                }
+                let quoted = crate::value::serialize_quoted_with(s, quote);
+                out.push_str(&quoted[1..quoted.len() - 1]);
             }
             TplPiece::Interp(e) => {
                 out.push_str("#{");
@@ -398,17 +398,33 @@ fn walk_stmt(stmt: &Stmt, out: &mut Found) {
         }
         Stmt::Import { args, .. } => {
             for arg in args {
-                if let ImportArg::Sass { path, pos, length } = arg {
-                    if !crate::eval::is_css_import(path) {
-                        out.push(ParseTimeDeprecation::Import {
-                            pos: *pos,
-                            length: *length,
-                        });
+                match arg {
+                    ImportArg::Sass { path, pos, length } => {
+                        if !crate::eval::is_css_import(path) {
+                            out.push(ParseTimeDeprecation::Import {
+                                pos: *pos,
+                                length: *length,
+                            });
+                        }
+                    }
+                    // A plain-CSS import still holds parsed expressions: its
+                    // url's interpolations (`@import url(if(…))`) and its
+                    // `supports()`/media modifiers.
+                    ImportArg::Css { url, modifiers, .. } => {
+                        walk_template(url, out);
+                        for m in modifiers {
+                            match m {
+                                ImportModifier::Raw(pieces) => walk_template(pieces, out),
+                                ImportModifier::Supports { condition, .. } => walk_supports(condition, out),
+                                ImportModifier::Media { list, .. } => walk_media(list, out),
+                            }
+                        }
                     }
                 }
             }
         }
-        Stmt::Content { .. } | Stmt::Extend { .. } => {}
+        Stmt::Content { args, .. } => walk_args(args, out),
+        Stmt::Extend { selector, .. } => walk_template(selector, out),
         Stmt::Use { config, .. } | Stmt::Forward { config, .. } => {
             for entry in config {
                 walk_expr(&entry.value, out);
@@ -470,7 +486,22 @@ fn walk_stmt(stmt: &Stmt, out: &mut Found) {
                 walk_stmts(b, out);
             }
         }
-        Stmt::CssCustomAtRule { prelude, .. } => walk_template(prelude, out),
+        Stmt::CssCustomAtRule { prelude, body, .. } => {
+            walk_template(prelude, out);
+            for item in body {
+                walk_template(&item.property, out);
+                match &item.value {
+                    CssCustomValue::Raw(pieces) => walk_template(pieces, out),
+                    CssCustomValue::Script(e) => walk_expr(e, out),
+                    CssCustomValue::Set(children) => {
+                        for (suffix, value) in children {
+                            walk_template(suffix, out);
+                            walk_expr(value, out);
+                        }
+                    }
+                }
+            }
+        }
         Stmt::Media { query, body, .. } => {
             walk_media(query, out);
             walk_stmts(body, out);
@@ -479,7 +510,10 @@ fn walk_stmt(stmt: &Stmt, out: &mut Found) {
             walk_supports(condition, out);
             walk_stmts(body, out);
         }
-        Stmt::Keyframes { body, .. } => walk_stmts(body, out),
+        Stmt::Keyframes { prelude, body, .. } => {
+            walk_template(prelude, out);
+            walk_stmts(body, out);
+        }
         Stmt::AtRoot { query, body } => {
             if let Some(q) = query {
                 walk_template(q, out);
