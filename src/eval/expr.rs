@@ -133,10 +133,18 @@ impl<'a> Evaluator<'a> {
                         return Ok(v.without_slash());
                     }
                     // A built-in module variable exposed unprefixed via
-                    // `@use "sass:…" as *` (e.g. `$pi` from `sass:math`).
+                    // `@use "sass:…" as *` (e.g. `$pi` from `sass:math`), or
+                    // through a starred user module that forwards one.
                     for m in &self.star_modules {
                         if let Ok(v) = crate::builtins::module_var(m, name, *pos) {
                             return Ok(v);
+                        }
+                    }
+                    for m in &self.star_user_modules {
+                        if let Some((owner, bare)) = super::meta::resolve_forwarded_builtin_var(m, name) {
+                            if let Ok(v) = crate::builtins::module_var(&owner, &bare, *pos) {
+                                return Ok(v);
+                            }
                         }
                     }
                     // The caret covers `$name` (the `$` plus the identifier).
@@ -632,12 +640,16 @@ impl<'a> Evaluator<'a> {
                 // case: dart's `functions` do not shadow a built-in global at
                 // all (measured against 1.103.1's JS API — the built-in runs
                 // and still warns).
-                let via_star = self
-                    .star_modules
-                    .iter()
-                    .find(|m| crate::builtins::module_has_member(m, canonical))
-                    .cloned();
-                self.emit_call_deprecations(canonical, via_star.as_deref(), *pos, *length);
+                // Resolved BEFORE the deprecation, and propagated: exposure
+                // from two starred modules is an error dart raises without
+                // warning about anything.
+                let via_star = self.star_builtin_member(canonical, *pos)?;
+                self.emit_call_deprecations(
+                    canonical,
+                    via_star.as_ref().map(|(owner, _)| owner.as_str()),
+                    *pos,
+                    *length,
+                );
                 // The global (deprecated) aliases of the `sass:meta` existence
                 // predicates resolve against the evaluator state, not the
                 // value-only builtin layer. A user-defined function of the same
@@ -682,30 +694,16 @@ impl<'a> Evaluator<'a> {
                 // `string.index` (2), not the list one. Exposure from more than
                 // one starred module is ambiguous, exactly as it is for user
                 // modules above.
-                {
-                    let owners: Vec<String> = self
-                        .star_modules
-                        .iter()
-                        .filter(|m| crate::builtins::module_has_member(m, canonical))
-                        .cloned()
-                        .collect();
-                    if owners.len() > 1 {
-                        return Err(Error::at(
-                            "This function is available from multiple global modules.".to_string(),
-                            *pos,
-                        ));
+                if let Some((owner, bare)) = via_star {
+                    for v in &mut pos_args {
+                        *v = std::mem::replace(v, Value::Null).without_slash();
                     }
-                    if let Some(m) = owners.into_iter().next() {
-                        for v in &mut pos_args {
-                            *v = std::mem::replace(v, Value::Null).without_slash();
-                        }
-                        for (n, v) in &mut named {
-                            *v = std::mem::replace(v, Value::Null).without_slash();
-                            let _ = n;
-                        }
-                        return crate::builtins::call_module(&m, canonical, &pos_args, &named, *pos)
-                            .map(Value::without_slash);
+                    for (n, v) in &mut named {
+                        *v = std::mem::replace(v, Value::Null).without_slash();
+                        let _ = n;
                     }
+                    return crate::builtins::call_module(&owner, &bare, &pos_args, &named, *pos)
+                        .map(Value::without_slash);
                 }
                 // Host-defined custom functions (dart-sass `functions`): they
                 // override built-in globals but lose to user `@function`s and

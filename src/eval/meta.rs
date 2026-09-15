@@ -8,13 +8,37 @@ use super::*;
 /// `@forward "sass:map" as p-*` answers to `p_get` and `as p_*` answers to
 /// `p-get`. (The `show`/`hide` sets are canonicalized when the forward is
 /// recorded, so `visible` is asked with the canonical bare name.)
-fn resolve_forwarded_builtin(module: &Module, member: &str) -> Option<(String, String)> {
+pub(super) fn resolve_forwarded_builtin(module: &Module, member: &str) -> Option<(String, String)> {
+    resolve_forwarded(module, member, ForwardKind::Name, |m, b| {
+        crate::builtins::module_has_member(m, b)
+    })
+}
+
+/// The same, for a `$variable` a `@forward "sass:…"` re-exports (`$pi` from
+/// `sass:math`).
+pub(super) fn resolve_forwarded_builtin_var(module: &Module, member: &str) -> Option<(String, String)> {
+    resolve_forwarded(module, member, ForwardKind::Var, |m, b| {
+        crate::builtins::module_var(m, b, Pos::NONE).is_ok()
+    })
+}
+
+/// The same, for a built-in mixin (`load-css`/`apply` from `sass:meta`).
+pub(super) fn resolve_forwarded_builtin_mixin(module: &Module, member: &str) -> Option<(String, String)> {
+    resolve_forwarded(module, member, ForwardKind::Name, is_builtin_mixin)
+}
+
+fn resolve_forwarded(
+    module: &Module,
+    member: &str,
+    kind: ForwardKind,
+    owns: impl Fn(&str, &str) -> bool,
+) -> Option<(String, String)> {
     let member = member.replace('_', "-");
     for fb in &module.forwarded_builtins {
         let Some(bare) = member.strip_prefix(fb.prefix()) else {
             continue;
         };
-        if fb.visible(bare) && crate::builtins::module_has_member(&fb.module, bare) {
+        if fb.visible(bare, kind) && owns(&fb.module, bare) {
             return Some((fb.module.clone(), bare.to_string()));
         }
     }
@@ -265,13 +289,15 @@ impl<'a> Evaluator<'a> {
             // A built-in module's member exposed unprefixed the same way is
             // still that module's: dart keeps `get-function("get")` bound to
             // `map.get` after `@use "sass:map" as *`, not to the global alias.
-            if let Some(module) = self.star_builtin_owner(&name, pos)? {
-                return Ok(Value::Function(SassFunction {
-                    name: name.replace('_', "-"),
-                    css: false,
-                    module: Some(module),
-                    user: None,
-                }));
+            if let Some((owner, bare)) = self.star_builtin_member(&name, pos)? {
+                if let Some(module) = crate::value::BuiltinModule::from_name(&owner) {
+                    return Ok(Value::Function(SassFunction {
+                        name: bare,
+                        css: false,
+                        module: Some(module),
+                        user: None,
+                    }));
+                }
             }
         }
         // The canonical spelling is what a reference is stored under, as dart
@@ -648,15 +674,25 @@ impl<'a> Evaluator<'a> {
         // through the value-only builtin library — through the MODULE when the
         // reference was taken from one, since a member and its global alias are
         // not always the same function (`color.scale` vs `scale-color`).
+        //
+        // The name is looked up canonically (`call("variable_exists", …)` comes
+        // straight from a string and has never been through `get-function`),
+        // while `f.name` keeps the spelling a plain-CSS reference serializes.
+        let canonical = if f.name.contains('_') {
+            Cow::Owned(f.name.replace('_', "-"))
+        } else {
+            Cow::Borrowed(f.name.as_str())
+        };
+        let canonical = canonical.as_ref();
         if f.module.map_or(true, |m| m == crate::value::BuiltinModule::Meta) {
-            if let Some(r) = self.try_meta_eval_call(&f.name, &pos_args, &named, pos, length) {
+            if let Some(r) = self.try_meta_eval_call(canonical, &pos_args, &named, pos, length) {
                 return r;
             }
         }
         match f.module {
-            Some(m) => crate::builtins::call_module(m.name(), &f.name, &pos_args, &named, pos)
+            Some(m) => crate::builtins::call_module(m.name(), canonical, &pos_args, &named, pos)
                 .map(Value::without_slash),
-            None => crate::builtins::call(&f.name, &pos_args, &named, pos).map(Value::without_slash),
+            None => crate::builtins::call(canonical, &pos_args, &named, pos).map(Value::without_slash),
         }
     }
 
@@ -721,13 +757,16 @@ impl<'a> Evaluator<'a> {
     /// given kind (function/mixin/variable). An unknown namespace is an error.
     fn module_member_exists(&self, ns: &str, name: &str, kind: MemberKind, pos: Pos) -> Result<bool, Error> {
         if let Some(m) = self.used_user_modules.get(ns) {
+            // A built-in the module re-exports brings its own members along.
+            let forwarded = || resolve_forwarded_builtin(m, name);
             return Ok(match kind {
-                // A built-in the module re-exports is one of its functions.
-                MemberKind::Function => {
-                    m.function(name).is_some() || resolve_forwarded_builtin(m, name).is_some()
+                MemberKind::Function => m.function(name).is_some() || forwarded().is_some(),
+                MemberKind::Mixin => {
+                    m.mixin(name).is_some() || resolve_forwarded_builtin_mixin(m, name).is_some()
                 }
-                MemberKind::Mixin => m.mixin(name).is_some(),
-                MemberKind::Variable => m.var(name).is_some(),
+                MemberKind::Variable => {
+                    m.var(name).is_some() || resolve_forwarded_builtin_var(m, name).is_some()
+                }
             });
         }
         if let Some(builtin) = self.used_modules.get(ns).cloned() {
@@ -976,9 +1015,10 @@ impl<'a> Evaluator<'a> {
         if count >= 1 {
             return Ok(Value::Bool(true));
         }
-        // A BUILT-IN module `@use`d as `*` exposes its members the same way,
-        // and `map.get` is no global: only this lookup finds it.
-        if self.star_builtin_owner(&name, pos)?.is_some() {
+        // A BUILT-IN module `@use`d as `*` — directly, or through a user module
+        // that forwards one — exposes its members the same way, and `map.get`
+        // is no global: only this lookup finds it.
+        if self.star_builtin_member(&name, pos)?.is_some() {
             return Ok(Value::Bool(true));
         }
         Ok(Value::Bool(
@@ -987,22 +1027,39 @@ impl<'a> Evaluator<'a> {
         ))
     }
 
-    /// The built-in module a bare `name` comes from when a `@use "sass:…" as *`
-    /// exposes it, or `None` when none does. Exposure from more than one is an
-    /// error, as it is for user modules.
-    fn star_builtin_owner(&self, name: &str, pos: Pos) -> Result<Option<crate::value::BuiltinModule>, Error> {
-        let mut found = None;
-        for m in &self.star_modules {
-            if !crate::builtins::module_has_member(m, name) {
-                continue;
-            }
+    /// The built-in module and bare member a `name` written unprefixed resolves
+    /// to through a `@use … as *`: a built-in module starred directly, or a
+    /// user module starred that re-exports one with `@forward "sass:…"` (under
+    /// whatever name that forward gives it). `None` when none does; exposure
+    /// from more than one is an error, as it is for user members.
+    pub(super) fn star_builtin_member(
+        &self,
+        name: &str,
+        pos: Pos,
+    ) -> Result<Option<(String, String)>, Error> {
+        // The member is named canonically, as every built-in lookup is and as
+        // a captured reference is stored.
+        let name = &name.replace('_', "-");
+        let mut found: Option<(String, String)> = None;
+        let mut take = |hit: (String, String)| -> Result<(), Error> {
             if found.is_some() {
                 return Err(Error::at(
                     "This function is available from multiple global modules.",
                     pos,
                 ));
             }
-            found = crate::value::BuiltinModule::from_name(m);
+            found = Some(hit);
+            Ok(())
+        };
+        for m in &self.star_modules {
+            if crate::builtins::module_has_member(m, name) {
+                take((m.clone(), name.to_string()))?;
+            }
+        }
+        for m in &self.star_user_modules {
+            if let Some(hit) = resolve_forwarded_builtin(m, name) {
+                take(hit)?;
+            }
         }
         Ok(found)
     }

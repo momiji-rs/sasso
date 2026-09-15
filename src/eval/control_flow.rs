@@ -620,6 +620,18 @@ impl<'a> Evaluator<'a> {
                     // spelling, which dart treats as an ordinary member.)
                     return Err(Error::at("Undefined mixin.", pos).with_length(full_length));
                 }
+                // A built-in this module re-exports brings its mixins along
+                // (`@forward "sass:meta"` re-exports `load-css`/`apply`).
+                if target.mixin(name).is_none() {
+                    if let Some((owner, bare)) = super::meta::resolve_forwarded_builtin_mixin(&target, name) {
+                        if owner == "meta" && bare == "apply" {
+                            return self.exec_apply(args, content, content_params, parents, sink);
+                        }
+                        if owner == "meta" && bare == "load-css" {
+                            return self.exec_load_css(args, content, pos, parents, sink);
+                        }
+                    }
+                }
                 let mixin = target
                     .mixin(name)
                     .ok_or_else(|| Error::at("Undefined mixin.", pos).with_length(full_length))?;

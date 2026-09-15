@@ -1339,10 +1339,23 @@ struct ForwardedBuiltin {
 struct ForwardFilter {
     /// The accumulated prefix at this level, canonical and possibly empty.
     prefix: String,
-    /// `show` allow-list of exported member names; `None` when no `show` clause.
+    /// Whether the rule had a `show` clause at all: one that names only
+    /// variables still hides every function and mixin.
+    has_show: bool,
+    /// `show`/`hide` lists of exported function and mixin names.
     show: Option<std::collections::HashSet<String>>,
-    /// `hide` deny-list of exported member names.
     hide: Option<std::collections::HashSet<String>>,
+    /// The same, for the `$variable` entries of those clauses.
+    show_vars: Option<std::collections::HashSet<String>>,
+    hide_vars: Option<std::collections::HashSet<String>>,
+}
+
+/// Which kind of member a forwarded-built-in lookup is for: `show`/`hide`
+/// name variables separately from functions and mixins.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ForwardKind {
+    Name,
+    Var,
 }
 
 impl ForwardedBuiltin {
@@ -1353,16 +1366,18 @@ impl ForwardedBuiltin {
 
     /// Whether a re-exported built-in member (given by its bare, un-prefixed
     /// name) survives every `@forward` it passed through.
-    fn visible(&self, bare: &str) -> bool {
+    fn visible(&self, bare: &str, kind: ForwardKind) -> bool {
         self.filters.iter().all(|f| {
             let exported = format!("{}{bare}", f.prefix);
-            if let Some(show) = &f.show {
-                return show.contains(&exported);
+            let (show, hide) = match kind {
+                ForwardKind::Name => (&f.show, &f.hide),
+                ForwardKind::Var => (&f.show_vars, &f.hide_vars),
+            };
+            if f.has_show {
+                show.as_ref().is_some_and(|s| s.contains(&exported))
+            } else {
+                !hide.as_ref().is_some_and(|h| h.contains(&exported))
             }
-            if let Some(hide) = &f.hide {
-                return !hide.contains(&exported);
-            }
-            true
         })
     }
 }

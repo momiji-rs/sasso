@@ -1339,8 +1339,11 @@ impl<'a> Evaluator<'a> {
                 // names: `@forward "sass:map" as p_*` answers to `p-get`.
                 filters: vec![ForwardFilter {
                     prefix: prefix.map(|p| p.replace('_', "-")).unwrap_or_default(),
+                    has_show: show.is_some(),
                     show: member_set(show, false),
                     hide: member_set(hide, false),
+                    show_vars: member_set(show, true),
+                    hide_vars: member_set(hide, true),
                 }],
             });
             return Ok(());
@@ -1582,14 +1585,16 @@ impl<'a> Evaluator<'a> {
         let outer_prefix = pfx.replace('_', "-");
         for fb in &module.forwarded_builtins {
             let mut filters = fb.filters.clone();
-            for f in &mut filters {
-                f.prefix.insert_str(0, &outer_prefix);
-            }
-            let exported = filters.last().map_or(outer_prefix.clone(), |f| f.prefix.clone());
+            // Each existing filter keeps the prefix it was DECLARED under — an
+            // inner `show p-get` names `p-get`, whatever the outer rule renames
+            // it to. Only the filter this `@forward` adds sees the full name.
             filters.push(ForwardFilter {
-                prefix: exported,
+                prefix: format!("{outer_prefix}{}", fb.prefix()),
+                has_show,
                 show: show_names.clone(),
                 hide: hide_names.clone(),
+                show_vars: show_vars.clone(),
+                hide_vars: hide_vars.clone(),
             });
             self.forwarded.builtins.push(ForwardedBuiltin {
                 module: fb.module.clone(),
@@ -1738,10 +1743,15 @@ impl<'a> Evaluator<'a> {
                 // (a literal `ns.-name` is the parser's privacy error instead).
                 return Err(Error::at("Undefined variable.".to_string(), pos));
             }
-            return match module.var(name) {
-                Some(v) => Ok(v.without_slash()),
-                None => Err(Error::at("Undefined variable.".to_string(), pos)),
-            };
+            if let Some(v) = module.var(name) {
+                return Ok(v.without_slash());
+            }
+            // A built-in this module re-exports brings its variables along
+            // (`@forward "sass:math"` re-exports `$pi`).
+            if let Some((owner, bare)) = super::meta::resolve_forwarded_builtin_var(module, name) {
+                return crate::builtins::module_var(&owner, &bare, pos);
+            }
+            return Err(Error::at("Undefined variable.".to_string(), pos));
         }
         match self.used_modules.get(ns) {
             Some(module) => crate::builtins::module_var(module, name, pos),

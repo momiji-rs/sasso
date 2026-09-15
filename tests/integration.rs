@@ -1399,3 +1399,28 @@ fn a_starred_builtin_member_shadows_the_global_of_that_name() {
         "a {\n  b: true;\n}\n"
     );
 }
+
+#[test]
+fn a_reference_invoked_by_name_is_looked_up_canonically() {
+    // `call("string")` never goes through `get-function`, so the name arrives
+    // exactly as written — and `_` is `-` in a Sass identifier, including for
+    // the `sass:meta` members the evaluator owns. Measured against dart-sass
+    // 1.103.1.
+    assert_eq!(
+        css("$x: 1; a { b: call(\"variable_exists\", \"x\"); }"),
+        "a {\n  b: true;\n}\n"
+    );
+    assert_eq!(
+        css("a { b: call(\"str_index\", \"abc\", \"b\"); }"),
+        "a {\n  b: 2;\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:meta\"; $x: 1; a { b: meta.call(\"variable_exists\", \"x\"); }"),
+        "a {\n  b: true;\n}\n"
+    );
+    // A starred module's member is still stored canonically.
+    assert_eq!(
+        css("@use \"sass:string\" as *; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"to_upper_case\")); }"),
+        "a {\n  b: get-function(\"to-upper-case\");\n}\n"
+    );
+}

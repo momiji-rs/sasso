@@ -927,3 +927,95 @@ fn a_forward_carries_a_builtin_through_every_rule_it_passes() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_forwarded_builtin_brings_its_whole_public_face() {
+    // A `@forward "sass:…"` re-exports variables and mixins, not only
+    // functions; an inner `show`/`hide` names the member in ITS OWN namespace
+    // whatever an outer rule renames it to; and a starred user module exposes
+    // what it forwards. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_fwd_face_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fmath.scss"), "@forward \"sass:math\";\n").expect("write");
+    std::fs::write(dir.join("_fmap.scss"), "@forward \"sass:map\";\n").expect("write");
+    std::fs::write(
+        dir.join("_ishow.scss"),
+        "@forward \"sass:map\" as p-* show p-get;\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.join("_ihide.scss"),
+        "@forward \"sass:map\" as p-* hide p-get;\n",
+    )
+    .expect("write");
+    std::fs::write(dir.join("_oshow.scss"), "@forward \"ishow\" as q-*;\n").expect("write");
+    std::fs::write(dir.join("_ohide.scss"), "@forward \"ihide\" as q-*;\n").expect("write");
+    std::fs::write(dir.join("_novar.scss"), "@forward \"sass:math\" hide $pi;\n").expect("write");
+    std::fs::write(dir.join("_onlyvar.scss"), "@forward \"sass:math\" show $pi;\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // Variables travel with the forward, namespaced and starred alike, and a
+    // `hide $pi` stops them.
+    assert_eq!(
+        run("@use \"fmath\" as f; a { b: f.$pi; }").as_deref(),
+        Ok("a {\n  b: 3.1415926536;\n}")
+    );
+    assert_eq!(
+        run("@use \"fmath\" as *; a { b: $pi; }").as_deref(),
+        Ok("a {\n  b: 3.1415926536;\n}")
+    );
+    assert!(run("@use \"novar\" as f; a { b: f.$pi; }")
+        .unwrap_err()
+        .contains("Undefined variable."));
+    assert_eq!(
+        run("@use \"novar\" as f; a { b: f.floor(1.5); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    // A `show` that names only variables hides every function.
+    assert_eq!(
+        run("@use \"onlyvar\" as f; a { b: f.$pi; }").as_deref(),
+        Ok("a {\n  b: 3.1415926536;\n}")
+    );
+    assert!(run("@use \"onlyvar\" as f; a { b: f.floor(1.5); }")
+        .unwrap_err()
+        .contains("Undefined function."));
+    // So do mixins: `@forward "sass:meta"` re-exports `load-css`, which then
+    // fails on the STYLESHEET, not on the mixin name.
+    std::fs::write(dir.join("_fmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    assert!(
+        run("@use \"fmeta\" as f; a { @include f.load-css(\"nope.css\"); }")
+            .unwrap_err()
+            .contains("Can't find stylesheet to import.")
+    );
+    // An inner `show`/`hide` keeps naming the member as the INNER rule exports
+    // it, even after an outer rule renames it again.
+    assert_eq!(
+        run("@use \"oshow\" as o; a { b: o.q-p-get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert!(run("@use \"ohide\" as o; a { b: o.q-p-get((x: 1), x); }")
+        .unwrap_err()
+        .contains("Undefined function."));
+    // A starred user module exposes what it forwards, to calls and to
+    // introspection alike.
+    assert_eq!(
+        run("@use \"fmap\" as *; a { b: get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert_eq!(
+        run("@use \"fmap\" as *; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"get\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-function(\"get\");\n}")
+    );
+    assert_eq!(
+        run("@use \"fmap\" as *; @use \"sass:meta\";\na { b: meta.function-exists(\"get\"); }").as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
