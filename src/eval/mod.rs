@@ -1078,6 +1078,10 @@ pub(crate) struct Evaluator<'a> {
     deprecations_omitted: u32,
     /// Per-location dedup: a `(id, url, line, col)` already warned about is not
     /// warned about again (dart-sass collapses identical repeated warnings).
+    /// Keyed `(id, message, url, line, col)`. The MESSAGE is part of the
+    /// identity because one span can carry two different warnings of the same
+    /// id: `call(get-function("percentage"))` is `[global-builtin]` twice, once
+    /// naming `meta.call` and once `math.percentage`, and dart prints both.
     deprecations_seen: std::collections::HashSet<(&'static str, String, String, usize, usize)>,
     /// Small interned ids for source files, stamped into [`SrcLines`] so the
     /// serializer's trailing-comment rule can require same-file adjacency and

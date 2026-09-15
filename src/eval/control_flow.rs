@@ -649,20 +649,31 @@ impl<'a> Evaluator<'a> {
         }
         // A bare `@include` may resolve a user module mixin exposed unprefixed
         // via `@use … as *`.
-        if self.lookup_mixin(name).is_none() && !self.star_user_modules.is_empty() && !is_private_member(name)
-        {
+        if self.lookup_mixin(name).is_none() && !is_private_member(name) {
             let hits: Vec<(Rc<Module>, Rc<UserCallable>)> = self
                 .star_user_modules
                 .iter()
                 .filter_map(|m| m.mixin(name).map(|mx| (Rc::clone(m), mx)))
                 .collect();
-            if hits.len() > 1 {
+            // A built-in mixin exposed unprefixed the same way (`load-css` and
+            // `apply` from `sass:meta`, directly or through a user module that
+            // forwards it) competes for the same bare name.
+            let builtin_hits = self.star_builtin_hits(name, MemberKind::Mixin);
+            if hits.len() + builtin_hits.len() > 1 {
                 return Err(Error::unpositioned(
                     "This mixin is available from multiple global modules.",
                 ));
             }
             if let Some((m, mx)) = hits.into_iter().next() {
                 return self.run_module_mixin(&m, &mx, args, content, content_params, parents, sink);
+            }
+            if let Some((owner, bare)) = builtin_hits.into_iter().next() {
+                if owner == "meta" && bare == "apply" {
+                    return self.exec_apply(args, content, content_params, parents, sink);
+                }
+                if owner == "meta" && bare == "load-css" {
+                    return self.exec_load_css(args, content, pos, parents, sink);
+                }
             }
         }
         let mixin = self

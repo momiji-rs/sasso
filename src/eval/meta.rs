@@ -276,20 +276,31 @@ impl<'a> Evaluator<'a> {
         }
         // A function exposed unprefixed via `@use … as *` (or forwarded into one).
         if !is_private_member(&name) {
-            for m in &self.star_user_modules {
-                if let Some(f) = m.function(&name) {
-                    return Ok(Value::Function(SassFunction {
-                        name,
-                        css: false,
-                        module: None,
-                        user: Some(Rc::clone(&f) as Rc<dyn std::any::Any>),
-                    }));
-                }
-            }
             // A built-in module's member exposed unprefixed the same way is
             // still that module's: dart keeps `get-function("get")` bound to
             // `map.get` after `@use "sass:map" as *`, not to the global alias.
-            if let Some((owner, bare)) = self.star_builtin_member(&name, pos)? {
+            // Both kinds compete for the bare name, so one check covers them.
+            let star_user: Vec<Rc<UserCallable>> = self
+                .star_user_modules
+                .iter()
+                .filter_map(|m| m.function(&name))
+                .collect();
+            let star_builtin = self.star_builtin_hits(&name, MemberKind::Function);
+            if star_user.len() + star_builtin.len() > 1 {
+                return Err(Error::at(
+                    "This function is available from multiple global modules.",
+                    pos,
+                ));
+            }
+            if let Some(f) = star_user.into_iter().next() {
+                return Ok(Value::Function(SassFunction {
+                    name,
+                    css: false,
+                    module: None,
+                    user: Some(f as Rc<dyn std::any::Any>),
+                }));
+            }
+            if let Some((owner, bare)) = star_builtin.into_iter().next() {
                 if let Some(module) = crate::value::BuiltinModule::from_name(&owner) {
                     return Ok(Value::Function(SassFunction {
                         name: bare,
@@ -370,6 +381,25 @@ impl<'a> Evaluator<'a> {
                     }
                 };
                 return self.get_mixin_from_module(&name, &module_name, pos);
+            }
+        }
+        // A built-in mixin exposed unprefixed by a `@use "sass:meta" as *` (or
+        // by a starred user module that forwards it) is reachable by reference
+        // the same way its call is.
+        if self.lookup_mixin_norm(&normalize_arg_name(&name)).is_none() {
+            let hits = self.star_builtin_hits(&name, MemberKind::Mixin);
+            if hits.len() > 1 {
+                return Err(Error::at(
+                    "This mixin is available from multiple global modules.",
+                    pos,
+                ));
+            }
+            if let Some((_, bare)) = hits.into_iter().next() {
+                return Ok(Value::Mixin(Box::new(SassMixin {
+                    name: bare,
+                    user: None,
+                    module: None,
+                })));
             }
         }
         // A user `@mixin` of that name (dash/underscore-insensitive) wins.
@@ -499,6 +529,15 @@ impl<'a> Evaluator<'a> {
                     name: name.to_string(),
                     user: Some(Rc::clone(&m) as Rc<dyn std::any::Any>),
                     module: Some(Rc::clone(module) as Rc<dyn std::any::Any>),
+                })));
+            }
+            // A built-in mixin this module re-exports is part of its public
+            // API too (`@forward "sass:meta"` brings `load-css`/`apply`).
+            if let Some((_, bare)) = resolve_forwarded_builtin_mixin(module, name) {
+                return Ok(Value::Mixin(Box::new(SassMixin {
+                    name: bare,
+                    user: None,
+                    module: None,
                 })));
             }
             return Err(Error::at(
@@ -858,8 +897,10 @@ impl<'a> Evaluator<'a> {
                     .collect();
                 return Ok(Value::Map(Map::new(entries)));
             }
+            // dart drops the article in the `module-*` functions ONLY: every
+            // other namespace error says "with the namespace".
             return Err(Error::at(
-                format!("There is no module with the namespace \"{ns}\"."),
+                format!("There is no module with namespace \"{ns}\"."),
                 pos,
             ));
         };
@@ -938,8 +979,10 @@ impl<'a> Evaluator<'a> {
             return Ok(Value::Bool(true));
         }
         // A variable exposed unprefixed via `@use … as *` (or forwarded into
-        // one). Exposure from more than one star module is ambiguous.
-        let count = self.star_member_count(&name, MemberKind::Variable);
+        // one) — from a user module or a built-in one. Exposure of two
+        // DIFFERENT variables under the name is ambiguous.
+        let count = self.star_member_count(&name, MemberKind::Variable)
+            + self.star_builtin_hits(&name, MemberKind::Variable).len();
         if count > 1 {
             return Err(Error::at(
                 "This variable is available from multiple global modules.",
@@ -970,7 +1013,8 @@ impl<'a> Evaluator<'a> {
         if local {
             return Ok(Value::Bool(true));
         }
-        let count = self.star_member_count(&name, MemberKind::Mixin);
+        let count = self.star_member_count(&name, MemberKind::Mixin)
+            + self.star_builtin_hits(&name, MemberKind::Mixin).len();
         if count > 1 {
             return Err(Error::at(
                 "This mixin is available from multiple global modules.",
@@ -1003,9 +1047,11 @@ impl<'a> Evaluator<'a> {
             return Ok(Value::Bool(true));
         }
         // A function exposed unprefixed via `@use … as *` (or forwarded into a
-        // module that is itself `@use`d as `*`). Exposure from more than one
-        // star module is ambiguous.
-        let count = self.star_member_count(&name, MemberKind::Function);
+        // module that is itself `@use`d as `*`), and a BUILT-IN module's member
+        // exposed the same way — `map.get` is no global, so only that lookup
+        // finds it. They compete for one name, so one count covers both.
+        let count = self.star_member_count(&name, MemberKind::Function)
+            + self.star_builtin_hits(&name, MemberKind::Function).len();
         if count > 1 {
             return Err(Error::at(
                 "This function is available from multiple global modules.",
@@ -1015,53 +1061,49 @@ impl<'a> Evaluator<'a> {
         if count >= 1 {
             return Ok(Value::Bool(true));
         }
-        // A BUILT-IN module `@use`d as `*` — directly, or through a user module
-        // that forwards one — exposes its members the same way, and `map.get`
-        // is no global: only this lookup finds it.
-        if self.star_builtin_member(&name, pos)?.is_some() {
-            return Ok(Value::Bool(true));
-        }
         Ok(Value::Bool(
             crate::builtins::is_builtin(&name)
                 || crate::builtins::EVAL_GLOBAL_NAMES.contains(&name.replace('_', "-").as_str()),
         ))
     }
 
-    /// The built-in module and bare member a `name` written unprefixed resolves
-    /// to through a `@use … as *`: a built-in module starred directly, or a
-    /// user module starred that re-exports one with `@forward "sass:…"` (under
-    /// whatever name that forward gives it). `None` when none does; exposure
-    /// from more than one is an error, as it is for user members.
-    pub(super) fn star_builtin_member(
-        &self,
-        name: &str,
-        pos: Pos,
-    ) -> Result<Option<(String, String)>, Error> {
-        // The member is named canonically, as every built-in lookup is and as
-        // a captured reference is stored.
-        let name = &name.replace('_', "-");
-        let mut found: Option<(String, String)> = None;
-        let mut take = |hit: (String, String)| -> Result<(), Error> {
-            if found.is_some() {
-                return Err(Error::at(
-                    "This function is available from multiple global modules.",
-                    pos,
-                ));
-            }
-            found = Some(hit);
-            Ok(())
-        };
+    /// Every built-in member a `name` written unprefixed reaches through a
+    /// `@use … as *` — a built-in module starred directly, or a user module
+    /// starred that re-exports one with `@forward "sass:…"` (under whatever
+    /// name that forward gives it).
+    ///
+    /// Deduplicated by IDENTITY, because that is what dart's ambiguity rule is
+    /// about: `@use "fwd" as *` next to `@use "sass:map" as *`, where `fwd`
+    /// forwards `sass:map`, exposes ONE `map.get` and resolves fine, while
+    /// `sass:list`'s `index` next to `sass:string`'s is two members and an
+    /// error.
+    pub(super) fn star_builtin_hits(&self, name: &str, kind: MemberKind) -> Vec<(String, String)> {
+        let name = name.replace('_', "-");
+        let mut hits: Vec<(String, String)> = Vec::new();
         for m in &self.star_modules {
-            if crate::builtins::module_has_member(m, name) {
-                take((m.clone(), name.to_string()))?;
+            let owns = match kind {
+                MemberKind::Function => crate::builtins::module_has_member(m, &name),
+                MemberKind::Variable => crate::builtins::module_var(m, &name, Pos::NONE).is_ok(),
+                MemberKind::Mixin => is_builtin_mixin(m, &name),
+            };
+            let hit = (m.clone(), name.clone());
+            if owns && !hits.contains(&hit) {
+                hits.push(hit);
             }
         }
         for m in &self.star_user_modules {
-            if let Some(hit) = resolve_forwarded_builtin(m, name) {
-                take(hit)?;
+            let found = match kind {
+                MemberKind::Function => resolve_forwarded_builtin(m, &name),
+                MemberKind::Variable => resolve_forwarded_builtin_var(m, &name),
+                MemberKind::Mixin => resolve_forwarded_builtin_mixin(m, &name),
+            };
+            if let Some(hit) = found {
+                if !hits.contains(&hit) {
+                    hits.push(hit);
+                }
             }
         }
-        Ok(found)
+        hits
     }
 
     /// Count how many `@use … as *` modules expose `name` as the given member

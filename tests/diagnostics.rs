@@ -1019,3 +1019,111 @@ fn a_forwarded_builtin_brings_its_whole_public_face() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn every_kind_of_starred_member_competes_for_the_bare_name() {
+    // `@use … as *` puts user members and built-in members (direct, or
+    // forwarded by a starred user module) in ONE namespace: they shadow the
+    // global, two DIFFERENT ones under a name is an error, and the same one
+    // reached twice is not. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_star_share_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fmath.scss"), "@forward \"sass:math\";\n").expect("write");
+    std::fs::write(dir.join("_fmap.scss"), "@forward \"sass:map\";\n").expect("write");
+    std::fs::write(dir.join("_fmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    std::fs::write(dir.join("_fstr.scss"), "@forward \"sass:string\";\n").expect("write");
+    std::fs::write(dir.join("_upi.scss"), "$pi: USERPI;\n").expect("write");
+    std::fs::write(
+        dir.join("_uindex.scss"),
+        "@function index($a, $b) { @return USER; }\n",
+    )
+    .expect("write");
+    std::fs::write(dir.join("_umix.scss"), "@mixin load-css($x) { u: 1; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // The SAME member reached two ways is one member, not an ambiguity.
+    assert_eq!(
+        run("@use \"fmap\" as *; @use \"sass:map\" as *; a { b: get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert_eq!(
+        run("@use \"fmath\" as *; @use \"sass:math\" as *; a { b: $pi; }").as_deref(),
+        Ok("a {\n  b: 3.1415926536;\n}")
+    );
+    // A user member and a built-in one under the same name are two members.
+    for (src, what) in [
+        (
+            "@use \"uindex\" as *; @use \"sass:string\" as *; a { b: index(\"abc\", \"b\"); }",
+            "function",
+        ),
+        (
+            "@use \"upi\" as *; @use \"sass:math\" as *; a { b: $pi; }",
+            "variable",
+        ),
+        (
+            "@use \"umix\" as *; @use \"sass:meta\" as *; a { @include load-css(\"nope.css\"); }",
+            "mixin",
+        ),
+    ] {
+        let err = run(src).unwrap_err();
+        assert!(
+            err.contains(&format!("This {what} is available from multiple global modules.")),
+            "{src}: {err}"
+        );
+    }
+    // And the introspection predicates see exactly what resolution sees.
+    for (src, want) in [
+        (
+            "@use \"sass:math\" as *; @use \"sass:meta\";\na { b: meta.global-variable-exists(\"pi\"); }",
+            "true",
+        ),
+        (
+            "@use \"fmath\" as *; @use \"sass:meta\";\na { b: meta.variable-exists(\"pi\"); }",
+            "true",
+        ),
+        (
+            "@use \"sass:meta\" as *; @use \"sass:meta\" as m;\na { b: m.mixin-exists(\"load-css\"); }",
+            "true",
+        ),
+        (
+            "@use \"fmeta\" as *; @use \"sass:meta\" as m;\na { b: m.mixin-exists(\"load-css\"); }",
+            "true",
+        ),
+    ] {
+        assert_eq!(
+            run(src).as_deref(),
+            Ok(format!("a {{\n  b: {want};\n}}").as_str()),
+            "{src}"
+        );
+    }
+    // A starred built-in mixin is includable and referenceable.
+    assert!(
+        run("@use \"sass:meta\" as *; a { @include load-css(\"nope.css\"); }")
+            .unwrap_err()
+            .contains("Can't find stylesheet to import.")
+    );
+    assert_eq!(
+        run("@use \"sass:meta\" as *; a { b: inspect(get-mixin(\"load-css\")); }").as_deref(),
+        Ok("a {\n  b: get-mixin(\"load-css\");\n}")
+    );
+    assert_eq!(
+        run("@use \"fmeta\" as f; @use \"sass:meta\";\na { b: meta.inspect(meta.get-mixin(\"load-css\", $module: \"f\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-mixin(\"load-css\");\n}")
+    );
+    // An evaluator-owned `sass:meta` member reached unprefixed still reaches
+    // the evaluator.
+    assert!(
+        run("@use \"sass:meta\" as *; a { b: inspect(module-functions(\"meta\")); }")
+            .unwrap_err()
+            // dart drops the article in the `module-*` functions only.
+            .contains("There is no module with namespace \"meta\".")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
