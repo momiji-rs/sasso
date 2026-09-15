@@ -1232,3 +1232,54 @@ fn a_builtin_mixin_reference_can_be_taken_and_invoked() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_mixin_reached_through_a_reference_reports_where_it_was_included() {
+    // An error raised inside a first-class `load-css` carets the `@include`
+    // that reached it, exactly as a direct one does — and a bare `@include`
+    // that two starred modules both answer carets the same statement.
+    // Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_ref_span_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_umix.scss"), "@mixin load-css($x) { u: 1; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> String {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts)
+            .expect_err("expected a compile error")
+            .to_string()
+    };
+    // The reference and the direct call caret the same statement, `;` included.
+    let via_ref = run(
+        "@use \"sass:meta\";\na {\n  @include meta.apply(meta.get-mixin(\"load-css\", $module: \"meta\"), \"nope\");\n}\n",
+    );
+    assert!(
+        via_ref.starts_with("Error: Can't find stylesheet to import."),
+        "{via_ref}"
+    );
+    assert_eq!(caret_line(&via_ref).len(), 72, "{via_ref}");
+    let direct = run("@use \"sass:meta\";\na {\n  @include meta.load-css(\"nope\");\n}\n");
+    assert_eq!(caret_line(&direct).len(), 30, "{direct}");
+    // An argument error from the reference reports the same way.
+    let bad_arg = run(
+        "@use \"sass:meta\";\na {\n  @include meta.apply(meta.get-mixin(\"load-css\", $module: \"meta\"), 1);\n}\n",
+    );
+    assert!(
+        bad_arg.starts_with("Error: $url: 1 is not a string."),
+        "{bad_arg}"
+    );
+    assert_eq!(caret_line(&bad_arg).len(), 67, "{bad_arg}");
+    // Two starred modules answering one `@include` caret the include. (dart
+    // adds a secondary row per `@use`, which this renderer cannot draw yet.)
+    let ambiguous =
+        run("@use \"umix\" as *;\n@use \"sass:meta\" as *;\na {\n  @include load-css(\"nope\");\n}\n");
+    assert!(
+        ambiguous.starts_with("Error: This mixin is available from multiple global modules."),
+        "{ambiguous}"
+    );
+    assert_eq!(caret_line(&ambiguous).len(), 25, "{ambiguous}");
+    std::fs::remove_dir_all(&dir).ok();
+}

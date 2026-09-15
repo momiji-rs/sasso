@@ -601,7 +601,7 @@ impl<'a> Evaluator<'a> {
         if let Some(ns) = module {
             if self.used_modules.get(ns).map(String::as_str) == Some("meta") {
                 if name == "apply" {
-                    return self.exec_apply(args, content, content_params, parents, sink);
+                    return self.exec_apply(args, content, content_params, pos, parents, sink);
                 }
                 if name == "load-css" {
                     return self.exec_load_css(args, content, pos, parents, sink);
@@ -625,7 +625,7 @@ impl<'a> Evaluator<'a> {
                 if target.mixin(name).is_none() {
                     if let Some((owner, bare)) = super::meta::resolve_forwarded_builtin_mixin(&target, name) {
                         if owner == "meta" && bare == "apply" {
-                            return self.exec_apply(args, content, content_params, parents, sink);
+                            return self.exec_apply(args, content, content_params, pos, parents, sink);
                         }
                         if owner == "meta" && bare == "load-css" {
                             return self.exec_load_css(args, content, pos, parents, sink);
@@ -660,16 +660,19 @@ impl<'a> Evaluator<'a> {
             // forwards it) competes for the same bare name.
             let builtin_hits = self.star_builtin_hits(name, MemberKind::Mixin);
             if hits.len() + builtin_hits.len() > 1 {
-                return Err(Error::unpositioned(
-                    "This mixin is available from multiple global modules.",
-                ));
+                // dart carets the `@include` (and adds a secondary row per
+                // `@use`, which this renderer cannot draw yet).
+                return Err(
+                    Error::at("This mixin is available from multiple global modules.", pos)
+                        .with_length(full_length),
+                );
             }
             if let Some((m, mx)) = hits.into_iter().next() {
                 return self.run_module_mixin(&m, &mx, args, content, content_params, parents, sink);
             }
             if let Some((owner, bare)) = builtin_hits.into_iter().next() {
                 if owner == "meta" && bare == "apply" {
-                    return self.exec_apply(args, content, content_params, parents, sink);
+                    return self.exec_apply(args, content, content_params, pos, parents, sink);
                 }
                 if owner == "meta" && bare == "load-css" {
                     return self.exec_load_css(args, content, pos, parents, sink);
@@ -806,6 +809,7 @@ impl<'a> Evaluator<'a> {
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
+        pos: Pos,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -819,7 +823,7 @@ impl<'a> Evaluator<'a> {
         for (_, v) in &mut named {
             *v = std::mem::replace(v, Value::Null).without_slash();
         }
-        self.apply_evaled(pos_args, named, content, content_params, parents, sink)
+        self.apply_evaled(pos_args, named, content, content_params, pos, parents, sink)
     }
 
     /// `meta.apply` with its arguments already evaluated — the form a
@@ -831,6 +835,9 @@ impl<'a> Evaluator<'a> {
         mut named: Vec<(String, Value)>,
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
+        // The `@include` this invocation came from — what an error inside the
+        // mixin carets, exactly as a direct `@include meta.load-css(…)` does.
+        pos: Pos,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -859,6 +866,7 @@ impl<'a> Evaluator<'a> {
             rest_named,
             content,
             content_params,
+            pos,
             parents,
             sink,
         )
@@ -874,6 +882,7 @@ impl<'a> Evaluator<'a> {
         named: Vec<(String, Value)>,
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
+        pos: Pos,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -887,8 +896,10 @@ impl<'a> Evaluator<'a> {
             // invokes it like any other, so dispatch by name.
             None => {
                 return match mixin.name.replace('_', "-").as_str() {
-                    "load-css" => self.load_css_evaled(pos_args, named, content, Pos::NONE, parents, sink),
-                    "apply" => self.apply_evaled(pos_args, named, content, content_params, parents, sink),
+                    "load-css" => self.load_css_evaled(pos_args, named, content, pos, parents, sink),
+                    "apply" => {
+                        self.apply_evaled(pos_args, named, content, content_params, pos, parents, sink)
+                    }
                     _ => {
                         if content.is_some() {
                             return Err(Error::unpositioned("Mixin doesn't accept a content block."));
