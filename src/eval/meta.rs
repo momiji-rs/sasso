@@ -684,7 +684,7 @@ impl<'a> Evaluator<'a> {
                         &callable.def.params,
                         (pos_args, named, ListSep::Comma),
                         &ArgSpans::default(),
-                        &callable.def.name,
+                        &super::control_flow::declared(&callable),
                     )
                     .and_then(|()| {
                         self.in_mixin.push(false);
@@ -1244,7 +1244,12 @@ impl<'a> Evaluator<'a> {
         let saved_env_modules = self.install_env_modules(&func.env_modules);
         self.push_scope(false);
         let result = self
-            .bind_evaled_into_scope(&func.def.params, evaled, &arg_spans, &func.def.name)
+            .bind_evaled_into_scope(
+                &func.def.params,
+                evaled,
+                &arg_spans,
+                &super::control_flow::declared(func),
+            )
             .and_then(|()| {
                 // A function body is not a mixin body: `meta.content-exists()`
                 // called from a module function (even one a mixin with a

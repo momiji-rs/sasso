@@ -171,6 +171,16 @@ pub(crate) struct EnvModules {
 /// function/mixin scope chains captured at the definition site (shared
 /// frames, dart's `Environment.closure()`). The body runs against these
 /// chains, not the caller's stack.
+/// What an argument-binding failure points back at: the callable's name for
+/// the message, and the `name(params)` span in the file it was DECLARED in,
+/// which dart draws as the error's second span.
+pub(super) struct Declared<'a> {
+    pub pos: Pos,
+    pub length: usize,
+    /// The file the declaration is in. `None` means the current one.
+    pub origin: Option<&'a crate::value::MixinOrigin>,
+}
+
 pub(crate) struct UserCallable {
     pub def: Rc<Callable>,
     /// The file that defined the callable. Its body runs against that file
@@ -2011,6 +2021,72 @@ impl<'a> Evaluator<'a> {
     /// The call site is in the CALLER's file, which by now may not be the
     /// current one (a cross-file call has already switched context), so the
     /// block is rendered here, against that frame's own text.
+    /// [`Self::error_at_call`] with dart's SECOND span: the `declaration` the
+    /// failure is measured against, in the file it was written in.
+    ///
+    /// Falls back to the plain single-span block when the declaration spans
+    /// more than one line — dart draws arm glyphs and re-indents the whole
+    /// block for that, which this renderer cannot do yet.
+    pub(super) fn error_at_call_with_declaration(
+        &self,
+        message: impl Into<String>,
+        decl: &Declared<'_>,
+    ) -> Error {
+        let message = message.into();
+        let Some(frame) = self.call_stack.last() else {
+            return Error::unpositioned(message);
+        };
+        if !self.diag_enabled() || !decl.pos.is_known() {
+            return self.error_at_call(message);
+        }
+        let (decl_url, decl_source) = match decl.origin {
+            Some(o) => (o.diag_url.clone(), Rc::clone(&o.source)),
+            None => (frame.url.clone(), Rc::clone(&frame.source)),
+        };
+        let decl_span = crate::diag::Span {
+            line: decl.pos.line,
+            col: decl.pos.col,
+            length: decl.length,
+        };
+        if crate::diag::span_crosses_lines(&decl_source, decl_span) {
+            return self.error_at_call(message);
+        }
+        let mut e = Error::at(message.clone(), frame.pos).with_length(frame.length);
+        let mut frames = Vec::with_capacity(self.call_stack.len() + 1);
+        frames.push(DiagFrame {
+            url: frame.url.clone(),
+            pos: frame.pos,
+            member: self.member.clone(),
+            length: frame.length,
+            content: false,
+            source: Rc::clone(&frame.source),
+        });
+        frames.extend(self.call_stack.iter().rev().cloned());
+        let mut rendered = format!("Error: {message}\n");
+        rendered.push_str(&crate::diag::render_labelled_snippet(
+            &frame.url,
+            &frame.source,
+            crate::diag::Span {
+                line: frame.pos.line,
+                col: frame.pos.col,
+                length: frame.length,
+            },
+            "invocation",
+            &[crate::diag::Secondary {
+                url: &decl_url,
+                source: &decl_source,
+                span: decl_span,
+                label: "declaration",
+            }],
+            &[],
+            self.options.glyphs,
+        ));
+        rendered.push('\n');
+        rendered.push_str(&Self::render_frame_block(&frames, 2));
+        e.rendered = Some(rendered);
+        e
+    }
+
     pub(super) fn error_at_call(&self, message: impl Into<String>) -> Error {
         let Some(frame) = self.call_stack.last() else {
             return Error::unpositioned(message);

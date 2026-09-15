@@ -288,7 +288,7 @@ impl<'a> Evaluator<'a> {
         params: &ParamList,
         evaled: EvaledArgs,
         spans: &ArgSpans,
-        name: &str,
+        decl: &Declared<'_>,
     ) -> Result<(), Error> {
         let (positional, keyword_vec, rest_sep) = evaled;
         let mut keyword: HashMap<String, Value> = HashMap::default();
@@ -300,6 +300,7 @@ impl<'a> Evaluator<'a> {
             }
             keyword.insert(norm, v);
         }
+        let positional_count = positional.len();
         let mut pos_iter = positional.into_iter().enumerate();
         for param in &params.params {
             let (val, span) = if let Some((i, v)) = pos_iter.next() {
@@ -317,7 +318,9 @@ impl<'a> Evaluator<'a> {
                 // primary span; the declaration is a second one sasso does not
                 // render yet). Every call path pushes that frame before
                 // binding, so it is the innermost one.
-                return Err(self.error_at_call(format!("Missing argument ${}.", param.name)));
+                return Err(
+                    self.error_at_call_with_declaration(format!("Missing argument ${}.", param.name), decl)
+                );
             };
             if let Some(sc) = self.scopes.last() {
                 sc.borrow_mut().insert(param.name.clone(), val);
@@ -360,9 +363,18 @@ impl<'a> Evaluator<'a> {
                 frame.borrow_mut().insert(rest.clone(), VarSpan::default());
             }
         } else if pos_iter.next().is_some() {
-            return Err(Error::unpositioned(format!(
-                "{name} was passed too many arguments."
-            )));
+            // dart counts what was DECLARED against what was passed, and
+            // agrees with itself about the verb.
+            let allowed = params.params.len();
+            let passed = positional_count;
+            return Err(self.error_at_call_with_declaration(
+                format!(
+                    "Only {allowed} argument{} allowed, but {passed} {} passed.",
+                    if allowed == 1 { "" } else { "s" },
+                    if passed == 1 { "was" } else { "were" }
+                ),
+                decl,
+            ));
         }
         if params.rest.is_none() && !keyword.is_empty() {
             let leftover: Vec<&str> = keyword_order
@@ -381,7 +393,7 @@ impl<'a> Evaluator<'a> {
                         .join(", ");
                     format!("No parameters named {head} or ${last}.")
                 };
-                return Err(Error::unpositioned(msg));
+                return Err(self.error_at_call_with_declaration(msg, decl));
             }
         }
         Ok(())
@@ -411,7 +423,7 @@ impl<'a> Evaluator<'a> {
         let saved_env_modules = self.install_env_modules(&func.env_modules);
         self.push_scope(false);
         let result = self
-            .bind_evaled_into_scope(&func.def.params, evaled, &arg_spans, &func.def.name)
+            .bind_evaled_into_scope(&func.def.params, evaled, &arg_spans, &declared(func))
             .and_then(|()| {
                 // A function body is not a mixin body: `meta.content-exists()`
                 // called from a function (even one invoked by a mixin) errors.
@@ -712,7 +724,7 @@ impl<'a> Evaluator<'a> {
         let saved_env_modules = self.install_env_modules(&mixin.env_modules);
         self.push_scope(false);
         let result = self
-            .bind_evaled_into_scope(&mixin.def.params, evaled, &arg_spans, &mixin.def.name)
+            .bind_evaled_into_scope(&mixin.def.params, evaled, &arg_spans, &declared(&mixin))
             .and_then(|()| {
                 self.content_stack.push(content_block);
                 self.in_mixin.push(true);
@@ -777,7 +789,7 @@ impl<'a> Evaluator<'a> {
         let saved_env_modules = self.install_env_modules(&mixin.env_modules);
         self.push_scope(false);
         let result = self
-            .bind_evaled_into_scope(&mixin.def.params, evaled, &arg_spans, &mixin.def.name)
+            .bind_evaled_into_scope(&mixin.def.params, evaled, &arg_spans, &declared(mixin))
             .and_then(|()| {
                 self.content_stack.push(content_block);
                 // A mixin body: `meta.content-exists()` is allowed and answers
@@ -954,7 +966,7 @@ impl<'a> Evaluator<'a> {
                 &callable.def.params,
                 (pos_args, named, ListSep::Comma),
                 &ArgSpans::default(),
-                &callable.def.name,
+                &declared(&callable),
             )
             .and_then(|()| {
                 self.content_stack.push(content_block);
@@ -1037,7 +1049,18 @@ impl<'a> Evaluator<'a> {
         // itself (a recursive mixin chaining `@content` must terminate).
         let running = self.content_stack.pop();
         let result = match (&params, evaled) {
-            (Some(p), Some((evaled, spans))) => self.bind_evaled_into_scope(p, evaled, &spans, "@content"),
+            (Some(p), Some((evaled, spans))) => self.bind_evaled_into_scope(
+                p,
+                evaled,
+                &spans,
+                // A `using (…)` clause has no `name(params)` declaration to
+                // point back at; dart reports these against the call alone.
+                &Declared {
+                    pos: Pos::NONE,
+                    length: 0,
+                    origin: None,
+                },
+            ),
             _ => Ok(()),
         }
         .and_then(|()| self.exec(&stmts, parents, sink))
@@ -1286,5 +1309,15 @@ impl<'a> Evaluator<'a> {
                 Ok(combine_residuals(residuals, false))
             }
         }
+    }
+}
+
+/// The declaration description a bound callable carries: its `name(params)`
+/// span, in the file it was written in.
+pub(super) fn declared(callable: &Rc<UserCallable>) -> Declared<'_> {
+    Declared {
+        pos: callable.def.decl_pos,
+        length: callable.def.decl_length,
+        origin: Some(&callable.origin),
     }
 }

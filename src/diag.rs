@@ -105,6 +105,16 @@ impl GlyphSet {
         }
     }
 
+    /// Underline of a SECONDARY span (`━` / `=`) — the heavy rule dart draws
+    /// under the `declaration` a `Missing argument` is measured against, so it
+    /// reads differently from the primary's carets.
+    const fn secondary(self) -> char {
+        match self {
+            GlyphSet::Unicode => '\u{2501}',
+            GlyphSet::Ascii => '=',
+        }
+    }
+
     /// Horizontal rule used by the multi-line span arms (`─` / `-`).
     const fn horizontal(self) -> &'static str {
         match self {
@@ -576,7 +586,13 @@ fn render_group(out: &mut String, url: Option<&str>, source: &str, entries: &[En
     };
 
     out.push_str(&blank_gutter(width));
-    out.push_str(glyphs.top());
+    // A block introduced by its file name opens with the CORNER glyph the
+    // arrow grows out of, not the plain gutter tick.
+    out.push_str(if url.is_some() {
+        glyphs.top_left()
+    } else {
+        glyphs.top()
+    });
     if let Some(u) = url {
         out.push_str(glyphs.horizontal());
         out.push_str(glyphs.horizontal());
@@ -618,7 +634,7 @@ fn render_group(out: &mut String, url: Option<&str>, source: &str, entries: &[En
             for _ in 0..display_width_of_prefix(line, start_col0) {
                 out.push(' ');
             }
-            let mark = if e.primary { CARET } else { '=' };
+            let mark = if e.primary { CARET } else { glyphs.secondary() };
             for _ in 0..display_width_of_prefix_range(line, start_col0, end_col0) {
                 out.push(mark);
             }
@@ -660,6 +676,15 @@ fn elision_gutter(width: usize) -> String {
     }
     s.push(' ');
     s
+}
+
+/// Whether a span reaches past the end of the line it starts on.
+pub fn span_crosses_lines(source: &str, span: Span) -> bool {
+    let lines = split_lines(source);
+    let start_idx = span.line.saturating_sub(1).min(lines.len().saturating_sub(1));
+    let start_col0 = span.col.saturating_sub(1);
+    let (end_idx, _) = resolve_end(source, &lines, start_idx, start_col0, span.length);
+    end_idx != start_idx
 }
 
 /// The byte width of the terminator after `lines[idx]` — 1 for `\n` or a lone

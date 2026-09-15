@@ -2195,20 +2195,41 @@ impl Parser {
     pub(super) fn parse_callable_def(&mut self, is_function: bool) -> Result<Stmt, Error> {
         self.skip_ws_inline();
         let name_pos = self.sc.position();
+        let name_mark = self.sc.mark();
         let name = self.read_ident_name()?;
         // A user `@function` may not reuse a name the parser treats as a
         // SassScript operator or a special plain-CSS function (dart-sass).
         if is_function && is_reserved_function_name(&name) {
             return Err(Error::at("Invalid function name.", name_pos));
         }
+        // The `declaration` span an argument error points back at is
+        // `name(params)` — or just the name when no parameter list follows, so
+        // the whitespace `parse_param_list` skips on its way to nothing is not
+        // underlined.
+        let name_length = self.sc.byte_len_from(name_mark);
+        let before_params = self.sc.mark();
+        self.skip_ws_inline();
+        let has_params = self.sc.peek() == Some('(');
+        self.sc.reset(before_params);
         let params = self.parse_param_list()?;
+        let decl_length = if has_params {
+            self.sc.byte_len_from(name_mark)
+        } else {
+            name_length
+        };
         let body = self.parse_braced_body()?;
         // Unknown at-rules aren't allowed in a function body (parse-time in
         // dart-sass: "This at-rule is not allowed here.").
         if is_function {
             reject_at_rules_in(&body)?;
         }
-        let callable = Rc::new(Callable { name, params, body });
+        let callable = Rc::new(Callable {
+            name,
+            params,
+            body,
+            decl_pos: name_pos,
+            decl_length,
+        });
         Ok(if is_function {
             Stmt::FunctionDef(callable)
         } else {
