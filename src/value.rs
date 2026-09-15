@@ -2543,11 +2543,13 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
     if s == "-0" {
         s = "0".to_string();
     }
+    // Compressed style drops a leading zero — but only from a POSITIVE number.
+    // dart tests the rendered string for a literal `0.` prefix, which a minus
+    // sign has already pushed out of the way, so `-0.5` keeps its zero where
+    // `0.5` loses it. Mirrored rather than tidied: it is what dart writes.
     if compressed {
         if let Some(rest) = s.strip_prefix("0.") {
             s = format!(".{rest}");
-        } else if let Some(rest) = s.strip_prefix("-0.") {
-            s = format!("-.{rest}");
         }
     }
     s
@@ -2929,7 +2931,10 @@ mod tests {
     #[test]
     fn fmt_num_compressed_drops_leading_zero() {
         assert_eq!(fmt_num(0.5, true), ".5");
-        assert_eq!(fmt_num(-0.25, true), "-.25");
+        // A NEGATIVE number keeps its zero: dart looks for a literal `0.`
+        // prefix, which the minus sign has pushed out of the way (verified
+        // against dart-sass 1.103.1, 2026-09-15).
+        assert_eq!(fmt_num(-0.25, true), "-0.25");
         assert_eq!(fmt_num(2.0, true), "2");
     }
 

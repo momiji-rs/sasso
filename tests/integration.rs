@@ -325,6 +325,24 @@ fn compressed_output() {
 /// string below was produced by dart-sass 1.101.0 (`--style=compressed`).
 /// This is the offline regression gate for the color-serialization fix; the
 /// live cross-check lives in tests/parity.rs (compressed parity battery).
+/// Compressed style drops a leading zero from a POSITIVE number only — dart
+/// looks for a literal `0.` prefix on the rendered string, which a minus sign
+/// has already pushed out of the way. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_keeps_the_zero_on_a_negative_decimal() {
+    let v = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
+    assert_eq!(v("0.5px"), "a{x:.5px}");
+    assert_eq!(v("-0.5px"), "a{x:-0.5px}");
+    assert_eq!(v("-0.25%"), "a{x:-0.25%}");
+    assert_eq!(v("-0.5"), "a{x:-0.5}");
+    // Computed, not just written that way.
+    assert_eq!(v("-1px * 0.1"), "a{x:-0.1px}");
+    assert_eq!(v("1px -0.5px"), "a{x:1px -0.5px}");
+    // Zero itself has no fraction to shorten, either way round.
+    assert_eq!(v("0px"), "a{x:0px}");
+    assert_eq!(v("-0.0px"), "a{x:0px}");
+}
+
 /// Compressed style drops comments — except the LOUD ones, which open `/*!`
 /// and are how a stylesheet keeps its licence header. Measured against
 /// dart-sass 1.103.1.
