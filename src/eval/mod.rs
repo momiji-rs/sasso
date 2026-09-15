@@ -2042,14 +2042,33 @@ impl<'a> Evaluator<'a> {
         } else {
             frames
         };
-        match self.declaration_block(&message, pos, length, decl, &frames) {
-            Some(rendered) => {
-                let mut e = Error::at(message, pos).with_length(length);
-                e.rendered = Some(rendered);
-                e
+        let rendered = match self.declaration_block(&message, pos, length, decl, &frames) {
+            Some(rendered) => Some(rendered),
+            // The two spans cannot share a block. Draw the primary one HERE,
+            // against the frames as they stand: leaving the error unrendered
+            // would defer that until the `@include` arm has popped this call,
+            // and the trace would be built from whatever is current then.
+            None if self.diag_enabled() && !frames.is_empty() => {
+                let mut block = format!("Error: {message}\n");
+                block.push_str(&crate::diag::render_snippet(
+                    &frames[0].source,
+                    crate::diag::Span {
+                        line: pos.line,
+                        col: pos.col,
+                        length,
+                    },
+                    &[],
+                    self.options.glyphs,
+                ));
+                block.push('\n');
+                block.push_str(&Self::render_frame_block(&frames, 2));
+                Some(block)
             }
-            None => Error::at(message, pos).with_length(length),
-        }
+            None => None,
+        };
+        let mut e = Error::at(message, pos).with_length(length);
+        e.rendered = rendered;
+        e
     }
 
     /// The rendered two-span block, or `None` when this diagnostic cannot have
