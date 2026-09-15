@@ -457,6 +457,19 @@ fn compressed_selector_pseudo_dispatch_matches_dart() {
     assert_eq!(sel(".x:LANG(en, fr)"), ".x:LANG(en, fr){a:1}");
 }
 
+/// A comment is loud by what it SAYS, not by how it was spelled: dart resolves
+/// interpolation first, so `/*#{"!"} x */` is kept when compressing. Measured
+/// against dart-sass 1.103.1.
+#[test]
+fn compressed_loudness_is_decided_after_interpolation() {
+    assert_eq!(
+        css_compressed("/*#{\"!\"} normal */\n.a { b: 1; }"),
+        "/*! normal */.a{b:1}"
+    );
+    // A `!` that is not the first character is not loud.
+    assert_eq!(css_compressed("/* !late */\n.a { b: 1; }"), ".a{b:1}");
+}
+
 /// The CSS `@import` writes no space before its url when compressing, and a
 /// `url(…)` wrapper is unwrapped to save its four bytes. The modifiers keep the
 /// spaces they hold between themselves. Measured against dart-sass 1.103.1.
@@ -554,10 +567,24 @@ fn compressed_writes_private_use_characters_raw() {
         css_compressed(".a::before { content: \"\u{e028}\"; }"),
         "\u{feff}.a::before{content:\"\u{e028}\"}"
     );
-    // The supplementary private-use planes too, and the edges of the BMP range.
+    // Both edges of the BMP range, and the SUPPLEMENTARY private-use planes
+    // (U+F0000-U+10FFFF), whose characters are four UTF-8 bytes rather than
+    // three — the branch the escape used to hide.
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\e000\"; }"),
+        "\u{feff}.a::before{content:\"\u{e000}\"}"
+    );
     assert_eq!(
         css_compressed(".a::before { content: \"\\f8ff\"; }"),
         "\u{feff}.a::before{content:\"\u{f8ff}\"}"
+    );
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\f0000\"; }"),
+        "\u{feff}.a::before{content:\"\u{f0000}\"}"
+    );
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\10fffd\"; }"),
+        "\u{feff}.a::before{content:\"\u{10fffd}\"}"
     );
     // A character that is NOT private use is raw in both styles already, and a
     // control character stays escaped in both.
