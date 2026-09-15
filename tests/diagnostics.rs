@@ -1895,3 +1895,47 @@ fn a_span_that_crosses_lines_draws_an_arm_down_to_its_label() {
          5   \u{2502} \u{2502} ); }\n    \u{2502} \u{2514}\u{2500}^ invocation\n    \u{2575}"
     );
 }
+
+#[test]
+fn a_first_class_mixin_reference_carries_the_declaration_too() {
+    // `@include meta.apply(…)` reaches the same binding code by another road,
+    // and dart gives it the same two spans: the whole `meta.apply` call as the
+    // invocation (its content block excluded), the mixin as the declaration.
+    let run = |src: &str| -> String {
+        compile(src, &Options::default().with_url("t.scss"))
+            .expect_err("expected a compile error")
+            .to_string()
+    };
+    let block = run(
+        "@use \"sass:meta\";\n@mixin m { a: 1; }\n.a { @include meta.apply(meta.get-mixin(\"m\")) { b: 2; } }\n",
+    );
+    assert_eq!(
+        snippet(&block),
+        "Error: Mixin doesn't accept a content block.\n  \u{2577}\n\
+         2 \u{2502} @mixin m { a: 1; }\n  \u{2502}        \u{2501} declaration\n\
+         3 \u{2502} .a { @include meta.apply(meta.get-mixin(\"m\")) { b: 2; } }\n  \u{2502}      \
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ invocation\n  \u{2575}"
+    );
+    // The mixin is never entered, so the trace starts at the caller.
+    assert!(!block.contains("  m()"), "{block}");
+    // The argument-binding errors carry it as well.
+    for (src, message) in [
+        (
+            "@use \"sass:meta\";\n@mixin m($x) { a: $x; }\n.a { @include meta.apply(meta.get-mixin(\"m\")); }\n",
+            "Missing argument $x.",
+        ),
+        (
+            "@use \"sass:meta\";\n@mixin m() { a: 1; }\n.a { @include meta.apply(meta.get-mixin(\"m\"), 1); }\n",
+            "Only 0 arguments allowed, but 1 was passed.",
+        ),
+        (
+            "@use \"sass:meta\";\n@mixin m($x: 1) { a: $x; }\n.a { @include meta.apply(meta.get-mixin(\"m\"), $z: 1); }\n",
+            "No parameter named $z.",
+        ),
+    ] {
+        let block = run(src);
+        assert!(block.starts_with(&format!("Error: {message}\n")), "{block}");
+        assert!(block.contains(" declaration\n"), "{block}");
+        assert!(caret_line(&block).ends_with(" invocation"), "{block}");
+    }
+}

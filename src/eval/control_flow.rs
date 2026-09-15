@@ -618,7 +618,9 @@ impl<'a> Evaluator<'a> {
                 // `_` and `-` are one character in a Sass identifier, so
                 // `meta.load_css(…)` is `meta.load-css(…)`.
                 match normalize_arg_name(name).as_ref() {
-                    "apply" => return self.exec_apply(args, content, content_params, pos, parents, sink),
+                    "apply" => {
+                        return self.exec_apply(args, content, content_params, pos, length, parents, sink)
+                    }
                     "load-css" => return self.exec_load_css(args, content, pos, parents, sink),
                     _ => {}
                 }
@@ -641,7 +643,15 @@ impl<'a> Evaluator<'a> {
                 if target.mixin(name).is_none() {
                     if let Some((owner, bare)) = super::meta::resolve_forwarded_builtin_mixin(&target, name) {
                         if owner == "meta" && bare == "apply" {
-                            return self.exec_apply(args, content, content_params, pos, parents, sink);
+                            return self.exec_apply(
+                                args,
+                                content,
+                                content_params,
+                                pos,
+                                length,
+                                parents,
+                                sink,
+                            );
                         }
                         if owner == "meta" && bare == "load-css" {
                             return self.exec_load_css(args, content, pos, parents, sink);
@@ -708,7 +718,7 @@ impl<'a> Evaluator<'a> {
             }
             if let Some((owner, bare)) = builtin_hits.into_iter().next() {
                 if owner == "meta" && bare == "apply" {
-                    return self.exec_apply(args, content, content_params, pos, parents, sink);
+                    return self.exec_apply(args, content, content_params, pos, length, parents, sink);
                 }
                 if owner == "meta" && bare == "load-css" {
                     return self.exec_load_css(args, content, pos, parents, sink);
@@ -856,12 +866,16 @@ impl<'a> Evaluator<'a> {
     /// reference. The first argument is the mixin reference; the rest are the
     /// arguments passed on to that mixin (which may also accept a `@content`
     /// block).
+    #[allow(clippy::too_many_arguments)]
     fn exec_apply(
         &mut self,
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
         pos: Pos,
+        // The CALL's byte length, content block excluded — what an error about
+        // the call itself carets, exactly as a direct `@include` does.
+        length: usize,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -875,7 +889,16 @@ impl<'a> Evaluator<'a> {
         for (_, v) in &mut named {
             *v = std::mem::replace(v, Value::Null).without_slash();
         }
-        self.apply_evaled(pos_args, named, content, content_params, pos, parents, sink)
+        self.apply_evaled(
+            pos_args,
+            named,
+            content,
+            content_params,
+            pos,
+            length,
+            parents,
+            sink,
+        )
     }
 
     /// `meta.apply` with its arguments already evaluated — the form a
@@ -890,6 +913,7 @@ impl<'a> Evaluator<'a> {
         // The `@include` this invocation came from — what an error inside the
         // mixin carets, exactly as a direct `@include meta.load-css(…)` does.
         pos: Pos,
+        length: usize,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -919,6 +943,7 @@ impl<'a> Evaluator<'a> {
             content,
             content_params,
             pos,
+            length,
             parents,
             sink,
         )
@@ -935,6 +960,7 @@ impl<'a> Evaluator<'a> {
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
         pos: Pos,
+        length: usize,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -949,9 +975,16 @@ impl<'a> Evaluator<'a> {
             None => {
                 return match mixin.name.replace('_', "-").as_str() {
                     "load-css" => self.load_css_evaled(pos_args, named, content, pos, parents, sink),
-                    "apply" => {
-                        self.apply_evaled(pos_args, named, content, content_params, pos, parents, sink)
-                    }
+                    "apply" => self.apply_evaled(
+                        pos_args,
+                        named,
+                        content,
+                        content_params,
+                        pos,
+                        length,
+                        parents,
+                        sink,
+                    ),
                     _ => {
                         if content.is_some() {
                             return Err(Error::unpositioned("Mixin doesn't accept a content block."));
@@ -962,7 +995,14 @@ impl<'a> Evaluator<'a> {
             }
         };
         if content.is_some() && !body_uses_content(&callable.def.body) {
-            return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+            // Raised BEFORE the mixin is entered, so its own frame is not on
+            // the stack — dart shows only the caller's.
+            return Err(self.error_with_declaration_at(
+                "Mixin doesn't accept a content block.",
+                pos,
+                length,
+                &declared(&callable),
+            ));
         }
         let content_block = content.map(|stmts| {
             let snapshot = self.snapshot_env();
