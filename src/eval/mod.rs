@@ -1078,7 +1078,11 @@ pub(crate) struct Evaluator<'a> {
     deprecations_omitted: u32,
     /// Per-location dedup: a `(id, url, line, col)` already warned about is not
     /// warned about again (dart-sass collapses identical repeated warnings).
-    deprecations_seen: std::collections::HashSet<(&'static str, String, usize, usize)>,
+    /// Keyed `(id, message, url, line, col)`. The MESSAGE is part of the
+    /// identity because one span can carry two different warnings of the same
+    /// id: `call(get-function("percentage"))` is `[global-builtin]` twice, once
+    /// naming `meta.call` and once `math.percentage`, and dart prints both.
+    deprecations_seen: std::collections::HashSet<(&'static str, String, String, usize, usize)>,
     /// Small interned ids for source files, stamped into [`SrcLines`] so the
     /// serializer's trailing-comment rule can require same-file adjacency and
     /// the source map can name the file. Keyed by the file's CANONICAL URL —
@@ -1322,28 +1326,63 @@ struct Forwarded {
     mixin_src: HashMap<String, *const Module>,
 }
 
-/// A built-in module re-exported via `@forward "sass:x" [as p-*] [show|hide ...]`.
+/// A built-in module re-exported via `@forward "sass:x" [as p-*] [show|hide ...]`,
+/// possibly through further `@forward`s of the module that wrote that rule.
 #[derive(Clone)]
 struct ForwardedBuiltin {
     module: String,
-    prefix: Option<String>,
-    /// `show` allow-list of member names; `None` when no `show` clause.
+    /// One entry per `@forward` the member passed through, innermost first.
+    filters: Vec<ForwardFilter>,
+}
+
+/// The `show`/`hide` clause of one `@forward` in a chain, together with the
+/// prefix the member is exported under at that point. dart matches `show`/`hide`
+/// against the member's name AS THAT RULE EXPORTS IT — `@forward "sass:map" as
+/// p-* hide p-get` hides `p-get`, not `get` — which is what the prefix is for.
+#[derive(Clone)]
+struct ForwardFilter {
+    /// The accumulated prefix at this level, canonical and possibly empty.
+    prefix: String,
+    /// Whether the rule had a `show` clause at all: one that names only
+    /// variables still hides every function and mixin.
+    has_show: bool,
+    /// `show`/`hide` lists of exported function and mixin names.
     show: Option<std::collections::HashSet<String>>,
-    /// `hide` deny-list of member names.
     hide: Option<std::collections::HashSet<String>>,
+    /// The same, for the `$variable` entries of those clauses.
+    show_vars: Option<std::collections::HashSet<String>>,
+    hide_vars: Option<std::collections::HashSet<String>>,
+}
+
+/// Which kind of member a forwarded-built-in lookup is for: `show`/`hide`
+/// name variables separately from functions and mixins.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ForwardKind {
+    Name,
+    Var,
 }
 
 impl ForwardedBuiltin {
+    /// The full prefix the member is exported under.
+    fn prefix(&self) -> &str {
+        self.filters.last().map_or("", |f| f.prefix.as_str())
+    }
+
     /// Whether a re-exported built-in member (given by its bare, un-prefixed
-    /// name) is visible through this forward.
-    fn visible(&self, bare: &str) -> bool {
-        if let Some(show) = &self.show {
-            return show.contains(bare);
-        }
-        if let Some(hide) = &self.hide {
-            return !hide.contains(bare);
-        }
-        true
+    /// name) survives every `@forward` it passed through.
+    fn visible(&self, bare: &str, kind: ForwardKind) -> bool {
+        self.filters.iter().all(|f| {
+            let exported = format!("{}{bare}", f.prefix);
+            let (show, hide) = match kind {
+                ForwardKind::Name => (&f.show, &f.hide),
+                ForwardKind::Var => (&f.show_vars, &f.hide_vars),
+            };
+            if f.has_show {
+                show.as_ref().is_some_and(|s| s.contains(&exported))
+            } else {
+                !hide.as_ref().is_some_and(|h| h.contains(&exported))
+            }
+        })
     }
 }
 
@@ -1792,6 +1831,31 @@ impl<'a> Evaluator<'a> {
     /// per-id cap of 5 (further occurrences are counted into the aggregate
     /// footer rendered by [`Self::emit_deprecation_footer`]). No-op when
     /// diagnostics are disabled.
+    /// Emit whatever deprecations a call to `name` carries. `module` is the
+    /// namespace it was written with, if any: a GLOBAL built-in with a `sass:*`
+    /// equivalent is deprecated for being global, while `feature-exists` is
+    /// deprecated whichever way it is spelled.
+    pub(super) fn emit_call_deprecations(&mut self, name: &str, module: Option<&str>, pos: Pos, len: usize) {
+        // Both registries are keyed by the canonical spelling: `_` and `-` are
+        // one character in a Sass identifier, and dart deprecates `map_get(…)`
+        // exactly as it deprecates `map-get(…)`.
+        let canonical = if name.contains('_') {
+            Cow::Owned(name.replace('_', "-"))
+        } else {
+            Cow::Borrowed(name)
+        };
+        let name = canonical.as_ref();
+        if module.is_none() {
+            if let Some(replacement) = crate::builtins::global_builtin_replacement(name) {
+                let dep = crate::deprecation::Deprecation::global_builtin(replacement);
+                self.emit_deprecation(&dep, pos, len);
+            }
+        }
+        if name == "feature-exists" && module.map_or(true, |m| m == "meta") {
+            self.emit_deprecation(&crate::deprecation::Deprecation::feature_exists(), pos, len);
+        }
+    }
+
     fn emit_deprecation(&mut self, dep: &crate::deprecation::Deprecation, pos: Pos, len: usize) {
         if !self.diag_enabled() {
             return;
@@ -1805,9 +1869,20 @@ impl<'a> Evaluator<'a> {
                 return;
             }
         }
-        // Per-location dedup: an identical (id, file, line, col) warning fires
-        // only once.
-        let key = (dep.id, self.current_url.clone(), pos.line, pos.col);
+        // Per-location dedup: the SAME warning at the same place fires once.
+        // What makes it the same one is everything it SAYS, not just its id:
+        // `call(get-function("percentage"))` is two different
+        // `[global-builtin]` warnings at one span (one naming `meta.call`, one
+        // `math.percentage`), and `[call-string]` has a static message whose
+        // `Recommendation:` line carries the name — so one `call($n)` invoked
+        // with two names is two warnings. dart prints both, in both cases.
+        let key = (
+            dep.id,
+            dep.render_header(),
+            self.current_url.clone(),
+            pos.line,
+            pos.col,
+        );
         if !self.deprecations_seen.insert(key) {
             return;
         }

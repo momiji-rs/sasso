@@ -123,7 +123,11 @@ impl<'a> Evaluator<'a> {
                             .filter_map(|m| m.var(name))
                             .collect()
                     };
-                    if star_hits.len() > 1 {
+                    // A built-in module variable exposed unprefixed the same
+                    // way (`$pi` from `sass:math`, directly or through a user
+                    // module that forwards it) competes for the same bare name.
+                    let builtin_hits = self.star_builtin_hits(name, MemberKind::Variable);
+                    if star_hits.len() + builtin_hits.len() > 1 {
                         return Err(Error::at(
                             "This variable is available from multiple global modules.",
                             *pos,
@@ -132,12 +136,8 @@ impl<'a> Evaluator<'a> {
                     if let Some(v) = star_hits.into_iter().next() {
                         return Ok(v.without_slash());
                     }
-                    // A built-in module variable exposed unprefixed via
-                    // `@use "sass:…" as *` (e.g. `$pi` from `sass:math`).
-                    for m in &self.star_modules {
-                        if let Ok(v) = crate::builtins::module_var(m, name, *pos) {
-                            return Ok(v);
-                        }
+                    if let Some((owner, bare)) = builtin_hits.into_iter().next() {
+                        return crate::builtins::module_var(&owner, &bare, *pos);
                     }
                     // The caret covers `$name` (the `$` plus the identifier).
                     Err(Error::at("Undefined variable.", *pos).with_length(1 + name.len()))
@@ -313,6 +313,7 @@ impl<'a> Evaluator<'a> {
                         let f = crate::value::SassFunction {
                             name: "calc".to_string(),
                             css: false,
+                            module: None,
                             user: Some(callable as Rc<dyn std::any::Any>),
                         };
                         return self
@@ -431,23 +432,41 @@ impl<'a> Evaluator<'a> {
                 if let Some(func) = user_fn {
                     return self.call_function(&func, args, Some((*pos, *length)));
                 }
-                // A user module function exposed unprefixed via `@use … as *`.
-                if !self.star_user_modules.is_empty() && !is_private_member(name) {
-                    let hits: Vec<(Rc<Module>, Rc<UserCallable>)> = self
-                        .star_user_modules
+                // `_` and `-` are one character in a Sass identifier, so every
+                // built-in lookup from here down runs on the canonical spelling
+                // (`map_get(…)` IS the deprecated `map-get(…)`). The name as
+                // WRITTEN stays in `name` for the plain-CSS passthrough.
+                let canonical = if name.contains('_') {
+                    Cow::Owned(name.replace('_', "-"))
+                } else {
+                    Cow::Borrowed(name.as_str())
+                };
+                let canonical = canonical.as_ref();
+                // A member exposed unprefixed via `@use … as *` — from a user
+                // module, or from a built-in one (directly or through a user
+                // module that forwards it). All of them compete for the bare
+                // name, so ONE ambiguity check covers them, and it runs before
+                // the arguments are evaluated: a call that resolves to nothing
+                // must not warn about what is inside it.
+                let star_user: Vec<(Rc<Module>, Rc<UserCallable>)> = if is_private_member(name) {
+                    Vec::new()
+                } else {
+                    self.star_user_modules
                         .iter()
                         .filter_map(|m| m.function(name).map(|f| (Rc::clone(m), f)))
-                        .collect();
-                    if hits.len() > 1 {
-                        return Err(Error::at(
-                            "This function is available from multiple global modules.".to_string(),
-                            *pos,
-                        ));
-                    }
-                    if let Some((m, f)) = hits.into_iter().next() {
-                        return self.call_user_module_function(&m, &f, args, Some((*pos, *length)));
-                    }
+                        .collect()
+                };
+                let star_builtin = self.star_builtin_hits(canonical, MemberKind::Function);
+                if star_user.len() + star_builtin.len() > 1 {
+                    return Err(Error::at(
+                        "This function is available from multiple global modules.".to_string(),
+                        *pos,
+                    ));
                 }
+                if let Some((m, f)) = star_user.into_iter().next() {
+                    return self.call_user_module_function(&m, &f, args, Some((*pos, *length)));
+                }
+                let via_star = star_builtin.into_iter().next();
                 // A bare `calc()` reaches here as a plain call (the parser only
                 // treats `calc(<arg>)` as a calculation), so a user
                 // `@function calc()` could have handled it above. With no user
@@ -609,28 +628,36 @@ impl<'a> Evaluator<'a> {
                 // Evaluate args, expanding any `...` splat into positional /
                 // keyword arguments.
                 let (mut pos_args, mut named, call_sep) = self.eval_call_args(args)?;
+                // Whatever this call is deprecated for, it is reported here:
+                // before every dispatch — the `sass:meta` predicates below
+                // resolve against evaluator state and return early — and after
+                // the arguments, so a call inside one of them warns first, as
+                // dart's does.
+                //
+                // A `@use "sass:…" as *` makes the bare name that module's
+                // MEMBER, so it is deprecated as a function, if at all, and not
+                // as a global. A host function of the same name is NOT such a
+                // case: dart's `functions` do not shadow a built-in global at
+                // all (measured against 1.103.1's JS API — the built-in runs
+                // and still warns).
+                self.emit_call_deprecations(
+                    canonical,
+                    via_star.as_ref().map(|(owner, _)| owner.as_str()),
+                    *pos,
+                    *length,
+                );
                 // The global (deprecated) aliases of the `sass:meta` existence
                 // predicates resolve against the evaluator state, not the
                 // value-only builtin layer. A user-defined function of the same
                 // name still wins (checked above).
-                if matches!(
-                    name.as_str(),
-                    "variable-exists"
-                        | "global-variable-exists"
-                        | "mixin-exists"
-                        | "function-exists"
-                        | "content-exists"
-                        | "get-function"
-                        | "call"
-                        | "keywords"
-                ) {
+                if crate::builtins::EVAL_GLOBAL_NAMES.contains(&canonical) {
                     for v in &mut pos_args {
                         *v = std::mem::replace(v, Value::Null).without_slash();
                     }
                     for (_, v) in &mut named {
                         *v = std::mem::replace(v, Value::Null).without_slash();
                     }
-                    if let Some(r) = self.try_meta_eval_call(name, &pos_args, &named, *pos, *length) {
+                    if let Some(r) = self.try_meta_eval_call(canonical, &pos_args, &named, *pos, *length) {
                         return r;
                     }
                 }
@@ -657,24 +684,27 @@ impl<'a> Evaluator<'a> {
                         quoted: false,
                     }));
                 }
-                // A member exposed unprefixed via `@use "sass:<mod>" as *`: when
-                // the bare name is not already a global builtin, route it to the
-                // first star module that owns it (e.g. `div` -> `math.div`,
-                // `set` -> `map.set`). Global builtins keep their own behaviour.
-                if !crate::builtins::is_builtin(name) {
-                    for m in self.star_modules.clone() {
-                        if crate::builtins::module_has_member(&m, name) {
-                            for v in &mut pos_args {
-                                *v = std::mem::replace(v, Value::Null).without_slash();
-                            }
-                            for (n, v) in &mut named {
-                                *v = std::mem::replace(v, Value::Null).without_slash();
-                                let _ = n;
-                            }
-                            return crate::builtins::call_module(&m, name, &pos_args, &named, *pos)
-                                .map(Value::without_slash);
+                // A member exposed unprefixed via `@use "sass:<mod>" as *` is
+                // that module's, and it SHADOWS the global of the same name:
+                // after `@use "sass:string" as *`, `index("abc", "b")` is
+                // `string.index` (2), not the list one.
+                if let Some((owner, bare)) = via_star {
+                    for v in &mut pos_args {
+                        *v = std::mem::replace(v, Value::Null).without_slash();
+                    }
+                    for (n, v) in &mut named {
+                        *v = std::mem::replace(v, Value::Null).without_slash();
+                        let _ = n;
+                    }
+                    // A `sass:meta` member resolves against the evaluator, which
+                    // the value-only dispatcher cannot do.
+                    if owner == "meta" {
+                        if let Some(r) = self.try_meta_eval_call(&bare, &pos_args, &named, *pos, *length) {
+                            return r;
                         }
                     }
+                    return crate::builtins::call_module(&owner, &bare, &pos_args, &named, *pos)
+                        .map(Value::without_slash);
                 }
                 // Host-defined custom functions (dart-sass `functions`): they
                 // override built-in globals but lose to user `@function`s and

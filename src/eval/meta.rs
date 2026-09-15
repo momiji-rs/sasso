@@ -1,5 +1,50 @@
 use super::*;
 
+/// Resolve `member` against the built-in modules a user module re-exports with
+/// `@forward "sass:…"`, returning the owning module and the member's bare name.
+///
+/// Both the member and the forward's prefix are read in their canonical
+/// spelling first: `_` and `-` are one character in a Sass identifier, so
+/// `@forward "sass:map" as p-*` answers to `p_get` and `as p_*` answers to
+/// `p-get`. (The `show`/`hide` sets are canonicalized when the forward is
+/// recorded, so `visible` is asked with the canonical bare name.)
+pub(super) fn resolve_forwarded_builtin(module: &Module, member: &str) -> Option<(String, String)> {
+    resolve_forwarded(module, member, ForwardKind::Name, |m, b| {
+        crate::builtins::module_has_member(m, b)
+    })
+}
+
+/// The same, for a `$variable` a `@forward "sass:…"` re-exports (`$pi` from
+/// `sass:math`).
+pub(super) fn resolve_forwarded_builtin_var(module: &Module, member: &str) -> Option<(String, String)> {
+    resolve_forwarded(module, member, ForwardKind::Var, |m, b| {
+        crate::builtins::module_var(m, b, Pos::NONE).is_ok()
+    })
+}
+
+/// The same, for a built-in mixin (`load-css`/`apply` from `sass:meta`).
+pub(super) fn resolve_forwarded_builtin_mixin(module: &Module, member: &str) -> Option<(String, String)> {
+    resolve_forwarded(module, member, ForwardKind::Name, is_builtin_mixin)
+}
+
+fn resolve_forwarded(
+    module: &Module,
+    member: &str,
+    kind: ForwardKind,
+    owns: impl Fn(&str, &str) -> bool,
+) -> Option<(String, String)> {
+    let member = member.replace('_', "-");
+    for fb in &module.forwarded_builtins {
+        let Some(bare) = member.strip_prefix(fb.prefix()) else {
+            continue;
+        };
+        if fb.visible(bare, kind) && owns(&fb.module, bare) {
+            return Some((fb.module.clone(), bare.to_string()));
+        }
+    }
+    None
+}
+
 impl<'a> Evaluator<'a> {
     /// Dispatch a namespaced call `ns.member(args)`. Resolves a user module
     /// first, then a built-in module bound to `ns`.
@@ -26,7 +71,7 @@ impl<'a> Evaluator<'a> {
             }
             // Fall back to a built-in re-exported by this module via @forward.
             // Its errors report against the call, like a direct built-in's.
-            match self.try_forwarded_builtin_call(&module, member, args, pos) {
+            match self.try_forwarded_builtin_call(&module, member, args, pos, length) {
                 Ok(Some(v)) => return Ok(v),
                 Ok(None) => {}
                 Err(e) => return Err(e.with_length_at(pos, length)),
@@ -43,7 +88,21 @@ impl<'a> Evaluator<'a> {
                 );
             }
         };
+        // `call_module` canonicalizes the member (`_` and `-` are one
+        // character in a Sass identifier); so must every lookup here, or
+        // `meta.feature_exists(…)` reaches the dispatcher unannounced and
+        // `meta.get_function(…)` never reaches the evaluator at all.
+        let canonical = if member.contains('_') {
+            Cow::Owned(member.replace('_', "-"))
+        } else {
+            Cow::Borrowed(member)
+        };
+        let member = canonical.as_ref();
         let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
+        // Reported AFTER the arguments, so a deprecated call inside one warns
+        // first, as dart's does — and against the module's REAL name, which is
+        // not the namespace it was bound to (`@use "sass:meta" as m`).
+        self.emit_call_deprecations(member, Some(&module), pos, length);
         for v in &mut pos_args {
             *v = std::mem::replace(v, Value::Null).without_slash();
         }
@@ -201,38 +260,88 @@ impl<'a> Evaluator<'a> {
             return Ok(Value::Function(SassFunction {
                 name,
                 css: true,
+                module: None,
                 user: None,
             }));
         }
+        match self.resolve_function_name(&name, pos)? {
+            Some(f) => Ok(Value::Function(f)),
+            None => Err(Error::at(
+                format!("Function not found: {}", crate::value::serialize_quoted(&name)),
+                pos,
+            )),
+        }
+    }
+
+    /// The function a bare NAME resolves to: a user `@function` first, then a
+    /// member a `@use … as *` exposes (from a user module or a built-in one),
+    /// then the global. `None` when nothing owns it — `get-function` reports
+    /// that as an error, while `call("name")` lets the plain-CSS dispatcher
+    /// have it.
+    pub(super) fn resolve_function_name(&self, name: &str, pos: Pos) -> Result<Option<SassFunction>, Error> {
+        let name = name.to_string();
         // A user `@function` of that name (dash/underscore-insensitive) wins.
         let key = normalize_arg_name(&name);
         if let Some(f) = self.lookup_function_norm(&key) {
-            return Ok(Value::Function(SassFunction {
+            return Ok(Some(SassFunction {
                 name,
                 css: false,
+                module: None,
                 user: Some(f as Rc<dyn std::any::Any>),
             }));
         }
         // A function exposed unprefixed via `@use … as *` (or forwarded into one).
         if !is_private_member(&name) {
-            for m in &self.star_user_modules {
-                if let Some(f) = m.function(&name) {
-                    return Ok(Value::Function(SassFunction {
-                        name,
+            // A built-in module's member exposed unprefixed the same way is
+            // still that module's: dart keeps `get-function("get")` bound to
+            // `map.get` after `@use "sass:map" as *`, not to the global alias.
+            // Both kinds compete for the bare name, so one check covers them.
+            let star_user: Vec<Rc<UserCallable>> = self
+                .star_user_modules
+                .iter()
+                .filter_map(|m| m.function(&name))
+                .collect();
+            let star_builtin = self.star_builtin_hits(&name, MemberKind::Function);
+            if star_user.len() + star_builtin.len() > 1 {
+                return Err(Error::at(
+                    "This function is available from multiple global modules.",
+                    pos,
+                ));
+            }
+            if let Some(f) = star_user.into_iter().next() {
+                return Ok(Some(SassFunction {
+                    name,
+                    css: false,
+                    module: None,
+                    user: Some(f as Rc<dyn std::any::Any>),
+                }));
+            }
+            if let Some((owner, bare)) = star_builtin.into_iter().next() {
+                if let Some(module) = crate::value::BuiltinModule::from_name(&owner) {
+                    return Ok(Some(SassFunction {
+                        name: bare,
                         css: false,
-                        user: Some(Rc::clone(&f) as Rc<dyn std::any::Any>),
+                        module: Some(module),
+                        user: None,
                     }));
                 }
             }
         }
-        if crate::builtins::is_builtin(&name) {
-            return Ok(Value::Function(SassFunction {
-                name,
+        // The canonical spelling is what a reference is stored under, as dart
+        // stores it: `inspect(get-function("map_get"))` is
+        // `get-function("map-get")`.
+        let canonical = name.replace('_', "-");
+        if crate::builtins::is_builtin(&canonical)
+            || crate::builtins::EVAL_GLOBAL_NAMES.contains(&canonical.as_str())
+        {
+            return Ok(Some(SassFunction {
+                name: canonical,
                 css: false,
+                module: None,
                 user: None,
             }));
         }
-        Err(Error::at(format!("Function not found: {name}"), pos))
+        Ok(None)
     }
 
     /// `meta.get-mixin($name, $module: null)`: capture a reference to the named
@@ -299,31 +408,51 @@ impl<'a> Evaluator<'a> {
             })));
         }
         // A mixin exposed unprefixed via `@use … as *`. Its body runs in the
-        // owning module's environment, so capture that module too.
-        if !self.star_user_modules.is_empty() && !is_private_member(&name) {
-            let hits: Vec<&Rc<Module>> = self
-                .star_user_modules
-                .iter()
-                .filter(|m| m.mixin(&name).is_some())
-                .collect();
-            if hits.len() > 1 {
+        // owning module's environment, so capture that module too. A BUILT-IN
+        // mixin exposed the same way (`load-css` from a starred `sass:meta`,
+        // or from a starred module that forwards it) competes for the same bare
+        // name, so one check covers both.
+        let builtin_hits = self.star_builtin_hits(&name, MemberKind::Mixin);
+        {
+            let hits: Vec<&Rc<Module>> = if is_private_member(&name) {
+                Vec::new()
+            } else {
+                self.star_user_modules
+                    .iter()
+                    .filter(|m| m.mixin(&name).is_some())
+                    .collect()
+            };
+            if hits.len() + builtin_hits.len() > 1 {
                 return Err(Error::at(
                     "This mixin is available from multiple global modules.",
                     pos,
                 ));
             }
             if let Some(module) = hits.into_iter().next() {
-                let m = module
-                    .mixin(&name)
-                    .ok_or_else(|| Error::at(format!("Mixin not found: {name}"), pos))?;
+                let m = module.mixin(&name).ok_or_else(|| {
+                    Error::at(
+                        format!("Mixin not found: {}", crate::value::serialize_quoted(&name)),
+                        pos,
+                    )
+                })?;
                 return Ok(Value::Mixin(Box::new(SassMixin {
                     name,
                     user: Some(Rc::clone(&m) as Rc<dyn std::any::Any>),
                     module: Some(Rc::clone(module) as Rc<dyn std::any::Any>),
                 })));
             }
+            if let Some((_, bare)) = builtin_hits.into_iter().next() {
+                return Ok(Value::Mixin(Box::new(SassMixin {
+                    name: bare,
+                    user: None,
+                    module: None,
+                })));
+            }
         }
-        Err(Error::at(format!("Mixin not found: {name}"), pos))
+        Err(Error::at(
+            format!("Mixin not found: {}", crate::value::serialize_quoted(&name)),
+            pos,
+        ))
     }
 
     /// Resolve a `$module`-qualified mixin reference for `meta.get-mixin`. The
@@ -337,32 +466,57 @@ impl<'a> Evaluator<'a> {
             if is_private_member(name) {
                 // A private member is not in the module's public view, so the
                 // by-name lookup simply does not find it.
-                return Err(Error::at(format!("Function not found: \"{name}\""), pos));
+                return Err(Error::at(
+                    format!("Function not found: {}", crate::value::serialize_quoted(name)),
+                    pos,
+                ));
             }
             if let Some(f) = module.function(name) {
                 return Ok(Value::Function(SassFunction {
                     name: name.to_string(),
                     css: false,
+                    module: None,
                     user: Some(Rc::clone(&f) as Rc<dyn std::any::Any>),
                 }));
             }
-            return Err(Error::at(format!("Function not found: {name}"), pos));
+            // A built-in this module re-exports with `@forward "sass:…"` is
+            // reachable by reference exactly as it is by call, under the name
+            // the forward gives it. The reference itself is the MEMBER's
+            // (`@forward "sass:map" as p-*` answers to `p-get` and inspects as
+            // `get-function("get")`).
+            if let Some((owner, bare)) = resolve_forwarded_builtin(module, name) {
+                if let Some(owner) = crate::value::BuiltinModule::from_name(&owner) {
+                    return Ok(Value::Function(SassFunction {
+                        name: bare,
+                        css: false,
+                        module: Some(owner),
+                        user: None,
+                    }));
+                }
+            }
+            return Err(Error::at(
+                format!("Function not found: {}", crate::value::serialize_quoted(name)),
+                pos,
+            ));
         }
         if let Some(builtin) = self.used_modules.get(module_name) {
             if crate::builtins::module_has_member(builtin, name) {
-                // The captured reference dispatches through the GLOBAL alias
-                // (`color.scale` is the global `scale-color`), so a later
-                // meta.call resolves the right builtin (issue_2818).
-                let global = crate::builtins::module_member_to_global(builtin, name)
-                    .unwrap_or(name)
-                    .to_string();
+                // The reference keeps the MEMBER's name and remembers the
+                // module it came from, so invoking it dispatches through that
+                // module (`color.scale` is not the global `scale-color`, and
+                // dart neither prints nor compares them as the same function).
+                let module = crate::value::BuiltinModule::from_name(builtin);
                 return Ok(Value::Function(SassFunction {
-                    name: global,
+                    name: name.replace('_', "-"),
                     css: false,
+                    module,
                     user: None,
                 }));
             }
-            return Err(Error::at(format!("Function not found: {name}"), pos));
+            return Err(Error::at(
+                format!("Function not found: {}", crate::value::serialize_quoted(name)),
+                pos,
+            ));
         }
         Err(Error::at(
             format!("There is no module with the namespace \"{module_name}\"."),
@@ -373,7 +527,10 @@ impl<'a> Evaluator<'a> {
     fn get_mixin_from_module(&self, name: &str, module_name: &str, pos: Pos) -> Result<Value, Error> {
         if let Some(module) = self.used_user_modules.get(module_name) {
             if is_private_member(name) {
-                return Err(Error::at(format!("Mixin not found: \"{name}\""), pos));
+                return Err(Error::at(
+                    format!("Mixin not found: {}", crate::value::serialize_quoted(name)),
+                    pos,
+                ));
             }
             if let Some(m) = module.mixin(name) {
                 return Ok(Value::Mixin(Box::new(SassMixin {
@@ -382,17 +539,37 @@ impl<'a> Evaluator<'a> {
                     module: Some(Rc::clone(module) as Rc<dyn std::any::Any>),
                 })));
             }
-            return Err(Error::at(format!("Mixin not found: {name}"), pos));
-        }
-        if self.used_modules.contains_key(module_name) {
-            if is_builtin_mixin(module_name, name) {
+            // A built-in mixin this module re-exports is part of its public
+            // API too (`@forward "sass:meta"` brings `load-css`/`apply`).
+            if let Some((_, bare)) = resolve_forwarded_builtin_mixin(module, name) {
                 return Ok(Value::Mixin(Box::new(SassMixin {
-                    name: name.to_string(),
+                    name: bare,
                     user: None,
                     module: None,
                 })));
             }
-            return Err(Error::at(format!("Mixin not found: {name}"), pos));
+            return Err(Error::at(
+                format!("Mixin not found: {}", crate::value::serialize_quoted(name)),
+                pos,
+            ));
+        }
+        if let Some(builtin) = self.used_modules.get(module_name) {
+            // The RESOLVED module, not the namespace it was bound to: `@use
+            // "sass:meta" as m` makes `$module: "m"` the `meta` module.
+            if is_builtin_mixin(builtin, name) {
+                return Ok(Value::Mixin(Box::new(SassMixin {
+                    // Canonical, as dart stores it: `get-mixin("load_css")`
+                    // inspects as `get-mixin("load-css")` and compares equal
+                    // to one taken under that spelling.
+                    name: name.replace('_', "-"),
+                    user: None,
+                    module: None,
+                })));
+            }
+            return Err(Error::at(
+                format!("Mixin not found: {}", crate::value::serialize_quoted(name)),
+                pos,
+            ));
         }
         Err(Error::at(
             format!("There is no module with the namespace \"{module_name}\"."),
@@ -428,13 +605,21 @@ impl<'a> Evaluator<'a> {
             Value::Function(f) => self.invoke_function_ref(&f, rest_pos, rest_named, pos, length),
             // The deprecated string form: look up by name.
             Value::Str(s) => {
-                let f = SassFunction {
+                self.emit_deprecation(
+                    &crate::deprecation::Deprecation::call_string(&s.text),
+                    pos,
+                    length,
+                );
+                // The NAME resolves exactly as it would have if it were
+                // written: a user `@function`, a member a `@use … as *`
+                // exposes, then the global. An unknown one is left alone for
+                // the plain-CSS dispatcher.
+                let f = self.resolve_function_name(&s.text, pos)?.unwrap_or(SassFunction {
                     name: s.text.to_string(),
                     css: false,
-                    user: self
-                        .lookup_function_norm(&normalize_arg_name(&s.text))
-                        .map(|c| c as Rc<dyn std::any::Any>),
-                };
+                    module: None,
+                    user: None,
+                });
                 self.invoke_function_ref(&f, rest_pos, rest_named, pos, length)
             }
             other => Err(Error::at(
@@ -456,6 +641,15 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
         length: usize,
     ) -> Result<Value, Error> {
+        // Reaching a built-in through a reference is still using it, and dart
+        // reports that against the INVOCATION — as the GLOBAL it is only when
+        // the reference was taken globally, which is why the module it came
+        // from is remembered. (A reference with no position is an internal
+        // invocation — the user-overridden `calc()` hook — which reports
+        // nothing.)
+        if f.user.is_none() && !f.css && pos.line > 0 {
+            self.emit_call_deprecations(&f.name, f.module.map(|m| m.name()), pos, length);
+        }
         // A captured user `@function`: bind the evaluated args and run its
         // body in the callable's lexical closure. The payload is a
         // type-erased `Rc<UserCallable>` (cloning the `Rc` releases the
@@ -531,11 +725,29 @@ impl<'a> Evaluator<'a> {
         }
         // A built-in reference. The `sass:meta` introspection functions need
         // the evaluator's scopes/definitions; everything else dispatches
-        // through the value-only builtin library.
-        if let Some(r) = self.try_meta_eval_call(&f.name, &pos_args, &named, pos, length) {
-            return r;
+        // through the value-only builtin library — through the MODULE when the
+        // reference was taken from one, since a member and its global alias are
+        // not always the same function (`color.scale` vs `scale-color`).
+        //
+        // The name is looked up canonically (`call("variable_exists", …)` comes
+        // straight from a string and has never been through `get-function`),
+        // while `f.name` keeps the spelling a plain-CSS reference serializes.
+        let canonical = if f.name.contains('_') {
+            Cow::Owned(f.name.replace('_', "-"))
+        } else {
+            Cow::Borrowed(f.name.as_str())
+        };
+        let canonical = canonical.as_ref();
+        if f.module.map_or(true, |m| m == crate::value::BuiltinModule::Meta) {
+            if let Some(r) = self.try_meta_eval_call(canonical, &pos_args, &named, pos, length) {
+                return r;
+            }
         }
-        crate::builtins::call(&f.name, &pos_args, &named, pos).map(Value::without_slash)
+        match f.module {
+            Some(m) => crate::builtins::call_module(m.name(), canonical, &pos_args, &named, pos)
+                .map(Value::without_slash),
+            None => crate::builtins::call(canonical, &pos_args, &named, pos).map(Value::without_slash),
+        }
     }
 
     /// Read the single string `$name` argument of an existence predicate,
@@ -599,16 +811,22 @@ impl<'a> Evaluator<'a> {
     /// given kind (function/mixin/variable). An unknown namespace is an error.
     fn module_member_exists(&self, ns: &str, name: &str, kind: MemberKind, pos: Pos) -> Result<bool, Error> {
         if let Some(m) = self.used_user_modules.get(ns) {
+            // A built-in the module re-exports brings its own members along.
+            let forwarded = || resolve_forwarded_builtin(m, name);
             return Ok(match kind {
-                MemberKind::Function => m.function(name).is_some(),
-                MemberKind::Mixin => m.mixin(name).is_some(),
-                MemberKind::Variable => m.var(name).is_some(),
+                MemberKind::Function => m.function(name).is_some() || forwarded().is_some(),
+                MemberKind::Mixin => {
+                    m.mixin(name).is_some() || resolve_forwarded_builtin_mixin(m, name).is_some()
+                }
+                MemberKind::Variable => {
+                    m.var(name).is_some() || resolve_forwarded_builtin_var(m, name).is_some()
+                }
             });
         }
         if let Some(builtin) = self.used_modules.get(ns).cloned() {
             return Ok(match kind {
                 MemberKind::Function => crate::builtins::module_has_member(&builtin, name),
-                MemberKind::Mixin => builtin == "meta" && matches!(name, "load-css" | "apply"),
+                MemberKind::Mixin => is_builtin_mixin(&builtin, name),
                 MemberKind::Variable => crate::builtins::module_var(&builtin, name, pos).is_ok(),
             });
         }
@@ -660,6 +878,9 @@ impl<'a> Evaluator<'a> {
             // their callables are dispatched, not enumerated, so report the
             // names we know.
             if let Some(builtin) = self.used_modules.get(&ns) {
+                // The enumerated references belong to the module, not to the
+                // namespace they were reached through.
+                let owner = crate::value::BuiltinModule::from_name(builtin);
                 let names: Vec<&str> = match (builtin.as_str(), kind) {
                     ("meta", MemberKind::Function) => crate::builtins::META_FUNCTION_NAMES.to_vec(),
                     ("meta", MemberKind::Mixin) => crate::builtins::META_MIXIN_NAMES.to_vec(),
@@ -676,6 +897,7 @@ impl<'a> Evaluator<'a> {
                             MemberKind::Function => Value::Function(SassFunction {
                                 name: name.to_string(),
                                 css: false,
+                                module: owner,
                                 user: None,
                             }),
                             MemberKind::Mixin => Value::Mixin(Box::new(SassMixin {
@@ -690,8 +912,10 @@ impl<'a> Evaluator<'a> {
                     .collect();
                 return Ok(Value::Map(Map::new(entries)));
             }
+            // dart drops the article in the `module-*` functions ONLY: every
+            // other namespace error says "with the namespace".
             return Err(Error::at(
-                format!("There is no module with the namespace \"{ns}\"."),
+                format!("There is no module with namespace \"{ns}\"."),
                 pos,
             ));
         };
@@ -717,6 +941,7 @@ impl<'a> Evaluator<'a> {
                     MemberKind::Function => Value::Function(SassFunction {
                         name: name.clone(),
                         css: false,
+                        module: None,
                         user: module
                             .function(&name)
                             .map(|f| Rc::clone(&f) as Rc<dyn std::any::Any>),
@@ -769,8 +994,10 @@ impl<'a> Evaluator<'a> {
             return Ok(Value::Bool(true));
         }
         // A variable exposed unprefixed via `@use … as *` (or forwarded into
-        // one). Exposure from more than one star module is ambiguous.
-        let count = self.star_member_count(&name, MemberKind::Variable);
+        // one) — from a user module or a built-in one. Exposure of two
+        // DIFFERENT variables under the name is ambiguous.
+        let count = self.star_member_count(&name, MemberKind::Variable)
+            + self.star_builtin_hits(&name, MemberKind::Variable).len();
         if count > 1 {
             return Err(Error::at(
                 "This variable is available from multiple global modules.",
@@ -801,7 +1028,8 @@ impl<'a> Evaluator<'a> {
         if local {
             return Ok(Value::Bool(true));
         }
-        let count = self.star_member_count(&name, MemberKind::Mixin);
+        let count = self.star_member_count(&name, MemberKind::Mixin)
+            + self.star_builtin_hits(&name, MemberKind::Mixin).len();
         if count > 1 {
             return Err(Error::at(
                 "This mixin is available from multiple global modules.",
@@ -834,16 +1062,80 @@ impl<'a> Evaluator<'a> {
             return Ok(Value::Bool(true));
         }
         // A function exposed unprefixed via `@use … as *` (or forwarded into a
-        // module that is itself `@use`d as `*`). Exposure from more than one
-        // star module is ambiguous.
-        let count = self.star_member_count(&name, MemberKind::Function);
+        // module that is itself `@use`d as `*`), and a BUILT-IN module's member
+        // exposed the same way — `map.get` is no global, so only that lookup
+        // finds it. They compete for one name, so one count covers both.
+        let count = self.star_member_count(&name, MemberKind::Function)
+            + self.star_builtin_hits(&name, MemberKind::Function).len();
         if count > 1 {
             return Err(Error::at(
                 "This function is available from multiple global modules.",
                 pos,
             ));
         }
-        Ok(Value::Bool(count >= 1 || crate::builtins::is_builtin(&name)))
+        if count >= 1 {
+            return Ok(Value::Bool(true));
+        }
+        Ok(Value::Bool(
+            crate::builtins::is_builtin(&name)
+                || crate::builtins::EVAL_GLOBAL_NAMES.contains(&name.replace('_', "-").as_str()),
+        ))
+    }
+
+    /// Every built-in member a `name` written unprefixed reaches through a
+    /// `@use … as *` — a built-in module starred directly, or a user module
+    /// starred that re-exports one with `@forward "sass:…"` (under whatever
+    /// name that forward gives it).
+    ///
+    /// Deduplicated by IDENTITY, because that is what dart's ambiguity rule is
+    /// about: `@use "fwd" as *` next to `@use "sass:map" as *`, where `fwd`
+    /// forwards `sass:map`, exposes ONE `map.get` and resolves fine, while
+    /// `sass:list`'s `index` next to `sass:string`'s is two members and an
+    /// error.
+    pub(super) fn star_builtin_hits(&self, name: &str, kind: MemberKind) -> Vec<(String, String)> {
+        // The common case is no `@use … as *` at all; every call, variable and
+        // include asks this, so answer it before allocating anything.
+        if self.star_modules.is_empty() && self.star_user_modules.is_empty() {
+            return Vec::new();
+        }
+        let name = name.replace('_', "-");
+        let mut hits: Vec<(String, String)> = Vec::new();
+        for m in &self.star_modules {
+            let owns = match kind {
+                MemberKind::Function => crate::builtins::module_has_member(m, &name),
+                MemberKind::Variable => crate::builtins::module_var(m, &name, Pos::NONE).is_ok(),
+                MemberKind::Mixin => is_builtin_mixin(m, &name),
+            };
+            let hit = (m.clone(), name.clone());
+            if owns && !hits.contains(&hit) {
+                hits.push(hit);
+            }
+        }
+        for m in &self.star_user_modules {
+            // A module's OWN member shadows the built-in it forwards under the
+            // same name — `@forward "sass:string"` beside `@function index` is
+            // that module's `index`, namespaced and starred alike — so the
+            // forwarded one is not a second member competing for the name.
+            let own = match kind {
+                MemberKind::Function => m.function(&name).is_some(),
+                MemberKind::Variable => m.var(&name).is_some(),
+                MemberKind::Mixin => m.mixin(&name).is_some(),
+            };
+            if own {
+                continue;
+            }
+            let found = match kind {
+                MemberKind::Function => resolve_forwarded_builtin(m, &name),
+                MemberKind::Variable => resolve_forwarded_builtin_var(m, &name),
+                MemberKind::Mixin => resolve_forwarded_builtin_mixin(m, &name),
+            };
+            if let Some(hit) = found {
+                if !hits.contains(&hit) {
+                    hits.push(hit);
+                }
+            }
+        }
+        hits
     }
 
     /// Count how many `@use … as *` modules expose `name` as the given member
@@ -889,29 +1181,33 @@ impl<'a> Evaluator<'a> {
         member: &str,
         args: &[CallArg],
         pos: Pos,
+        length: usize,
     ) -> Result<Option<Value>, Error> {
-        for fb in &module.forwarded_builtins {
-            let bare = match &fb.prefix {
-                Some(p) => match member.strip_prefix(p.as_str()) {
-                    Some(rest) => rest,
-                    None => continue,
-                },
-                None => member,
-            };
-            if fb.visible(bare) && crate::builtins::module_has_member(&fb.module, bare) {
-                let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
-                for v in &mut pos_args {
-                    *v = std::mem::replace(v, Value::Null).without_slash();
-                }
-                for (_, v) in &mut named {
-                    *v = std::mem::replace(v, Value::Null).without_slash();
-                }
-                return Ok(Some(
-                    crate::builtins::call_module(&fb.module, bare, &pos_args, &named, pos)?.without_slash(),
-                ));
+        let Some((owner, bare)) = resolve_forwarded_builtin(module, member) else {
+            return Ok(None);
+        };
+        // Reached through a `@forward "sass:…"`, the member is still that
+        // module's — and still deprecated if it is (`m.feature-exists(…)`
+        // after `@forward "sass:meta"`).
+        let (mut pos_args, mut named, _) = self.eval_call_args(args)?;
+        self.emit_call_deprecations(&bare, Some(&owner), pos, length);
+        for v in &mut pos_args {
+            *v = std::mem::replace(v, Value::Null).without_slash();
+        }
+        for (_, v) in &mut named {
+            *v = std::mem::replace(v, Value::Null).without_slash();
+        }
+        // The `sass:meta` predicates resolve against the evaluator, which the
+        // value-only dispatcher cannot do — a forwarded `meta.get-function` is
+        // still `get-function`.
+        if owner == "meta" {
+            if let Some(r) = self.try_meta_eval_call(&bare, &pos_args, &named, pos, length) {
+                return r.map(Some);
             }
         }
-        Ok(None)
+        Ok(Some(
+            crate::builtins::call_module(&owner, &bare, &pos_args, &named, pos)?.without_slash(),
+        ))
     }
 
     /// Call a user module's function in the module's own environment: bind the

@@ -45,6 +45,14 @@ pub(crate) fn call(
     named: &[(String, Value)],
     pos: Pos,
 ) -> Result<Value, Error> {
+    // `_` and `-` are the same character in a Sass identifier, so a global
+    // built-in answers to either spelling (`map_get(…)` IS `map-get(…)`), like
+    // the module members `call_module` already normalizes. Only the LOOKUP is
+    // canonicalized: a name that turns out to be no builtin at all falls
+    // through to plain CSS spelled exactly as it was written.
+    let written = name;
+    let lookup = canonical_name(name);
+    let name = lookup.as_ref();
     if let Some(r) = color::try_call(name, pos_args, named, pos) {
         return r;
     }
@@ -71,7 +79,18 @@ pub(crate) fn call(
     if let Some(r) = selector::try_call(name, pos_args, named, pos) {
         return r;
     }
-    plain_css_function(name, pos_args, named, pos)
+    plain_css_function(written, pos_args, named, pos)
+}
+
+/// A name in its canonical spelling: `_` is `-` in every Sass identifier. The
+/// input is borrowed unchanged when it already holds no underscore, so the
+/// common case allocates nothing.
+fn canonical_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if name.contains('_') {
+        std::borrow::Cow::Owned(name.replace('_', "-"))
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    }
 }
 
 /// Whether `name` is a real Sass builtin function (as opposed to an unknown
@@ -96,6 +115,10 @@ pub(crate) fn call(
 ///   removes them from the builtin set), so they live in `list::NAMES` and are
 ///   deliberately absent from `map::NAMES`.
 pub(crate) fn is_builtin(name: &str) -> bool {
+    // Underscore and dash are one character in a Sass identifier, so the test
+    // runs on the canonical spelling (`str_index` is `str-index`).
+    let canonical = canonical_name(name);
+    let name = canonical.as_ref();
     // The `math` family matches `name.to_ascii_lowercase()`, so it owns these
     // names case-insensitively.
     if is_math_builtin_name(name) {
@@ -267,6 +290,103 @@ fn plain_css_function(
 }
 
 // ---- built-in module system (`@use "sass:<mod>"`) ----------------------
+
+/// The `sass:*` member dart names when a GLOBAL built-in with a module
+/// equivalent is called — the `global-builtin` deprecation's `Use … instead.`
+/// line. `None` for a global dart keeps: a CSS function it shares a name with
+/// (`abs`, `round`, `min`, `sqrt`, …), `if()` (which has its own deprecation),
+/// and `ie-hex-str`, which has no module form.
+///
+/// Every entry was measured against dart-sass 1.103.1 — the mapping is not
+/// mechanical: the legacy colour adjusters all point at `color.adjust`,
+/// `unitless` at `math.is-unitless`, `comparable` at `math.compatible`, and
+/// `list-separator` at `list.separator`.
+pub(crate) fn global_builtin_replacement(name: &str) -> Option<&'static str> {
+    // Matched EXACTLY apart from the underscore spelling every Sass identifier
+    // allows: dart resolves these Sass-only globals case-sensitively, so
+    // `MAP-GET(…)` and `FLOOR(…)` are plain CSS to it — no call, and so no
+    // deprecation — while `map_get(…)` is the deprecated `map-get(…)`. (The
+    // case-insensitive globals are the ones CSS shares, `abs`/`round`/`min`/
+    // `sin`/…, none of which are deprecated.)
+    let canonical = canonical_name(name);
+    Some(match canonical.as_ref() {
+        // sass:color — the getters keep their names, every legacy adjuster
+        // becomes `color.adjust`.
+        "red" => "color.red",
+        "green" => "color.green",
+        "blue" => "color.blue",
+        "hue" => "color.hue",
+        "saturation" => "color.saturation",
+        "lightness" => "color.lightness",
+        "alpha" => "color.alpha",
+        "opacity" => "color.opacity",
+        "mix" => "color.mix",
+        "invert" => "color.invert",
+        "grayscale" => "color.grayscale",
+        "complement" => "color.complement",
+        "change-color" => "color.change",
+        "scale-color" => "color.scale",
+        "adjust-color" | "adjust-hue" | "lighten" | "darken" | "saturate" | "desaturate" | "opacify"
+        | "fade-in" | "transparentize" | "fade-out" => "color.adjust",
+        // sass:math — only the members CSS has no function for.
+        "percentage" => "math.percentage",
+        "floor" => "math.floor",
+        "ceil" => "math.ceil",
+        "random" => "math.random",
+        "unit" => "math.unit",
+        "unitless" => "math.is-unitless",
+        "comparable" => "math.compatible",
+        // sass:list
+        "length" => "list.length",
+        "nth" => "list.nth",
+        "set-nth" => "list.set-nth",
+        "join" => "list.join",
+        "append" => "list.append",
+        "zip" => "list.zip",
+        "index" => "list.index",
+        "list-separator" => "list.separator",
+        "is-bracketed" => "list.is-bracketed",
+        // sass:map
+        "map-get" => "map.get",
+        "map-merge" => "map.merge",
+        "map-remove" => "map.remove",
+        "map-keys" => "map.keys",
+        "map-values" => "map.values",
+        "map-has-key" => "map.has-key",
+        // sass:string
+        "quote" => "string.quote",
+        "unquote" => "string.unquote",
+        "to-upper-case" => "string.to-upper-case",
+        "to-lower-case" => "string.to-lower-case",
+        "str-length" => "string.length",
+        "str-index" => "string.index",
+        "str-insert" => "string.insert",
+        "str-slice" => "string.slice",
+        "unique-id" => "string.unique-id",
+        // sass:meta
+        "type-of" => "meta.type-of",
+        "inspect" => "meta.inspect",
+        "keywords" => "meta.keywords",
+        "call" => "meta.call",
+        "get-function" => "meta.get-function",
+        "function-exists" => "meta.function-exists",
+        "feature-exists" => "meta.feature-exists",
+        "variable-exists" => "meta.variable-exists",
+        "global-variable-exists" => "meta.global-variable-exists",
+        "mixin-exists" => "meta.mixin-exists",
+        "content-exists" => "meta.content-exists",
+        // sass:selector
+        "selector-parse" => "selector.parse",
+        "selector-append" => "selector.append",
+        "selector-nest" => "selector.nest",
+        "selector-unify" => "selector.unify",
+        "selector-replace" => "selector.replace",
+        "selector-extend" => "selector.extend",
+        "is-superselector" => "selector.is-superselector",
+        "simple-selectors" => "selector.simple-selectors",
+        _ => return None,
+    })
+}
 
 /// Whether `module` names a built-in `sass:*` module this build supports.
 pub(crate) fn is_module(module: &str) -> bool {
@@ -441,7 +561,27 @@ pub(crate) const META_FUNCTION_NAMES: &[&str] = &[
 /// The `sass:meta` module's mixin members.
 pub(crate) const META_MIXIN_NAMES: &[&str] = &["apply", "load-css"];
 
+/// The `sass:meta` members that are ALSO global functions and are owned by the
+/// evaluator rather than by this value-only layer: each resolves against the
+/// evaluator's scopes, definitions or call state, so none of them appears in a
+/// family `NAMES` table and [`is_builtin`] does not know them. dart exposes
+/// them like any other global — callable, referenceable through
+/// `get-function`, and deprecated for being global — so the places that need
+/// the full global picture consult this list alongside `is_builtin`.
+pub(crate) const EVAL_GLOBAL_NAMES: &[&str] = &[
+    "call",
+    "content-exists",
+    "function-exists",
+    "get-function",
+    "global-variable-exists",
+    "keywords",
+    "mixin-exists",
+    "variable-exists",
+];
+
 pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
+    let canonical = canonical_name(member);
+    let member = canonical.as_ref();
     if module == "meta" && META_FUNCTION_NAMES.contains(&member) {
         return true;
     }

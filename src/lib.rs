@@ -270,6 +270,13 @@ impl<'a> Options<'a> {
     /// Custom functions take precedence over built-in global functions but not
     /// over user `@function` definitions or `@use`d module members. A malformed
     /// signature is reported only if the function is actually called.
+    ///
+    /// That precedence is where sasso is deliberately more permissive than
+    /// dart-sass 1.103.1, whose `functions` do not shadow a built-in global at
+    /// all (registering `type-of($v)` there leaves the built-in running and the
+    /// callback never invoked). The `[global-builtin]` deprecation follows
+    /// dart: writing a deprecated global's name warns whether or not a custom
+    /// function of that name is registered.
     #[must_use]
     pub fn with_function(mut self, signature: &str, callback: host_fn::HostFunction) -> Self {
         let (name, params) = host_fn::parse_signature(signature);

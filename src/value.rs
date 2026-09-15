@@ -56,12 +56,57 @@ pub(crate) enum Value {
 /// `Value` at one cache line. Bump this only with a deliberate measurement.
 const _: () = assert!(std::mem::size_of::<Value>() <= 64);
 
+/// One of the `sass:*` built-in modules, recorded as the provenance of a
+/// first-class function reference. A `u8`-sized enum rather than a `String`
+/// because it rides inside [`Value`], which is pinned to one cache line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BuiltinModule {
+    Color,
+    List,
+    Map,
+    Math,
+    Meta,
+    Selector,
+    String,
+}
+
+impl BuiltinModule {
+    /// The module for a `sass:` namespace name, or `None` for anything that is
+    /// not a built-in module.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "color" => BuiltinModule::Color,
+            "list" => BuiltinModule::List,
+            "map" => BuiltinModule::Map,
+            "math" => BuiltinModule::Math,
+            "meta" => BuiltinModule::Meta,
+            "selector" => BuiltinModule::Selector,
+            "string" => BuiltinModule::String,
+            _ => return None,
+        })
+    }
+
+    /// The module's name, as it is written after `sass:`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            BuiltinModule::Color => "color",
+            BuiltinModule::List => "list",
+            BuiltinModule::Map => "map",
+            BuiltinModule::Math => "math",
+            BuiltinModule::Meta => "meta",
+            BuiltinModule::Selector => "selector",
+            BuiltinModule::String => "string",
+        }
+    }
+}
+
 /// A first-class function reference. Built-in references compare equal by name
-/// (and CSS flag); user references compare by identity of the captured
-/// definition (so a redefined `@function` yields a distinct reference). The
-/// captured user definition is held as a type-erased `Rc` (the concrete
-/// `Callable` lives in `ast`, which cannot be referenced from this module
-/// without a dependency cycle); the evaluator downcasts it when invoking.
+/// (and CSS flag, and the module they were taken from); user references compare
+/// by identity of the captured definition (so a redefined `@function` yields a
+/// distinct reference). The captured user definition is held as a type-erased
+/// `Rc` (the concrete `Callable` lives in `ast`, which cannot be referenced
+/// from this module without a dependency cycle); the evaluator downcasts it
+/// when invoking.
 #[derive(Clone)]
 pub(crate) struct SassFunction {
     /// The function's name (for `inspect` and error messages).
@@ -69,6 +114,12 @@ pub(crate) struct SassFunction {
     /// Whether this is a plain-CSS reference (`$css: true`), which is preserved
     /// verbatim instead of dispatched to a Sass builtin.
     pub css: bool,
+    /// The built-in module this reference came from, for one taken through a
+    /// module (`meta.get-function("get", $module: "map")`, or a bare name a
+    /// `@use "sass:map" as *` exposes). A module member is NOT the global alias
+    /// of the same function: dart keeps the member's own name, compares the two
+    /// references unequal, and deprecates only the global spelling.
+    pub module: Option<BuiltinModule>,
     /// The captured user `@function` definition, or `None` for a built-in /
     /// plain-CSS reference. Type-erased to break the `ast` ↔ `value` cycle.
     pub user: Option<std::rc::Rc<dyn std::any::Any>>,
@@ -79,6 +130,7 @@ impl std::fmt::Debug for SassFunction {
         f.debug_struct("SassFunction")
             .field("name", &self.name)
             .field("css", &self.css)
+            .field("module", &self.module)
             .field("user", &self.user.is_some())
             .finish()
     }
@@ -89,8 +141,8 @@ impl PartialEq for SassFunction {
         match (&self.user, &other.user) {
             // User references: identity of the captured definition.
             (Some(a), Some(b)) => std::rc::Rc::ptr_eq(a, b),
-            // Built-in / plain-CSS references: same name and CSS flag.
-            (None, None) => self.name == other.name && self.css == other.css,
+            // Built-in / plain-CSS references: same name, CSS flag and module.
+            (None, None) => self.name == other.name && self.css == other.css && self.module == other.module,
             _ => false,
         }
     }

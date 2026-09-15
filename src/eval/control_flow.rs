@@ -600,11 +600,12 @@ impl<'a> Evaluator<'a> {
         // module path.
         if let Some(ns) = module {
             if self.used_modules.get(ns).map(String::as_str) == Some("meta") {
-                if name == "apply" {
-                    return self.exec_apply(args, content, content_params, parents, sink);
-                }
-                if name == "load-css" {
-                    return self.exec_load_css(args, content, pos, parents, sink);
+                // `_` and `-` are one character in a Sass identifier, so
+                // `meta.load_css(…)` is `meta.load-css(…)`.
+                match normalize_arg_name(name).as_ref() {
+                    "apply" => return self.exec_apply(args, content, content_params, pos, parents, sink),
+                    "load-css" => return self.exec_load_css(args, content, pos, parents, sink),
+                    _ => {}
                 }
             }
         }
@@ -619,6 +620,18 @@ impl<'a> Evaluator<'a> {
                     // with dart's privacy error; what does is an ESCAPED
                     // spelling, which dart treats as an ordinary member.)
                     return Err(Error::at("Undefined mixin.", pos).with_length(full_length));
+                }
+                // A built-in this module re-exports brings its mixins along
+                // (`@forward "sass:meta"` re-exports `load-css`/`apply`).
+                if target.mixin(name).is_none() {
+                    if let Some((owner, bare)) = super::meta::resolve_forwarded_builtin_mixin(&target, name) {
+                        if owner == "meta" && bare == "apply" {
+                            return self.exec_apply(args, content, content_params, pos, parents, sink);
+                        }
+                        if owner == "meta" && bare == "load-css" {
+                            return self.exec_load_css(args, content, pos, parents, sink);
+                        }
+                    }
                 }
                 let mixin = target
                     .mixin(name)
@@ -637,20 +650,34 @@ impl<'a> Evaluator<'a> {
         }
         // A bare `@include` may resolve a user module mixin exposed unprefixed
         // via `@use … as *`.
-        if self.lookup_mixin(name).is_none() && !self.star_user_modules.is_empty() && !is_private_member(name)
-        {
+        if self.lookup_mixin(name).is_none() && !is_private_member(name) {
             let hits: Vec<(Rc<Module>, Rc<UserCallable>)> = self
                 .star_user_modules
                 .iter()
                 .filter_map(|m| m.mixin(name).map(|mx| (Rc::clone(m), mx)))
                 .collect();
-            if hits.len() > 1 {
-                return Err(Error::unpositioned(
-                    "This mixin is available from multiple global modules.",
-                ));
+            // A built-in mixin exposed unprefixed the same way (`load-css` and
+            // `apply` from `sass:meta`, directly or through a user module that
+            // forwards it) competes for the same bare name.
+            let builtin_hits = self.star_builtin_hits(name, MemberKind::Mixin);
+            if hits.len() + builtin_hits.len() > 1 {
+                // dart carets the `@include` (and adds a secondary row per
+                // `@use`, which this renderer cannot draw yet).
+                return Err(
+                    Error::at("This mixin is available from multiple global modules.", pos)
+                        .with_length(full_length),
+                );
             }
             if let Some((m, mx)) = hits.into_iter().next() {
                 return self.run_module_mixin(&m, &mx, args, content, content_params, parents, sink);
+            }
+            if let Some((owner, bare)) = builtin_hits.into_iter().next() {
+                if owner == "meta" && bare == "apply" {
+                    return self.exec_apply(args, content, content_params, pos, parents, sink);
+                }
+                if owner == "meta" && bare == "load-css" {
+                    return self.exec_load_css(args, content, pos, parents, sink);
+                }
             }
         }
         let mixin = self
@@ -783,6 +810,7 @@ impl<'a> Evaluator<'a> {
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
+        pos: Pos,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -796,6 +824,24 @@ impl<'a> Evaluator<'a> {
         for (_, v) in &mut named {
             *v = std::mem::replace(v, Value::Null).without_slash();
         }
+        self.apply_evaled(pos_args, named, content, content_params, pos, parents, sink)
+    }
+
+    /// `meta.apply` with its arguments already evaluated — the form a
+    /// first-class reference to it arrives in.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_evaled(
+        &mut self,
+        pos_args: Vec<Value>,
+        mut named: Vec<(String, Value)>,
+        content: Option<Rc<Vec<Stmt>>>,
+        content_params: Option<Rc<ParamList>>,
+        // The `@include` this invocation came from — what an error inside the
+        // mixin carets, exactly as a direct `@include meta.load-css(…)` does.
+        pos: Pos,
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
         let (mixin_val, rest_pos): (Value, Vec<Value>) = if !pos_args.is_empty() {
             let mut iter = pos_args.into_iter();
             let first = iter.next().unwrap_or(Value::Null);
@@ -821,6 +867,7 @@ impl<'a> Evaluator<'a> {
             rest_named,
             content,
             content_params,
+            pos,
             parents,
             sink,
         )
@@ -836,6 +883,7 @@ impl<'a> Evaluator<'a> {
         named: Vec<(String, Value)>,
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
+        pos: Pos,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -845,13 +893,21 @@ impl<'a> Evaluator<'a> {
                 Ok(c) => c,
                 Err(_) => return Err(Error::unpositioned("Undefined mixin.")),
             },
-            // A built-in mixin reference (`meta.load-css`/`meta.apply`). Only the
-            // content-block validation is observable in the supported cases.
+            // A built-in mixin reference (`meta.load-css`/`meta.apply`): dart
+            // invokes it like any other, so dispatch by name.
             None => {
-                if content.is_some() {
-                    return Err(Error::unpositioned("Mixin doesn't accept a content block."));
-                }
-                return Err(Error::unpositioned("Undefined mixin."));
+                return match mixin.name.replace('_', "-").as_str() {
+                    "load-css" => self.load_css_evaled(pos_args, named, content, pos, parents, sink),
+                    "apply" => {
+                        self.apply_evaled(pos_args, named, content, content_params, pos, parents, sink)
+                    }
+                    _ => {
+                        if content.is_some() {
+                            return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+                        }
+                        Err(Error::unpositioned("Undefined mixin."))
+                    }
+                };
             }
         };
         if content.is_some() && !body_uses_content(&callable.def.body) {

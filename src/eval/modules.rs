@@ -278,13 +278,28 @@ impl<'a> Evaluator<'a> {
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
+        let (pos_args, named, _) = self.eval_call_args(args)?;
+        self.load_css_evaled(pos_args, named, content, pos, parents, sink)
+    }
+
+    /// `meta.load-css` with its arguments already evaluated — the form a
+    /// first-class reference to it arrives in (`meta.apply(meta.get-mixin(
+    /// "load-css"), …)`).
+    pub(super) fn load_css_evaled(
+        &mut self,
+        pos_args: Vec<Value>,
+        named: Vec<(String, Value)>,
+        content: Option<Rc<Vec<Stmt>>>,
+        pos: Pos,
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
         if content.is_some() {
             return Err(Error::at(
                 "Mixin doesn't accept a content block.".to_string(),
                 pos,
             ));
         }
-        let (pos_args, named, _) = self.eval_call_args(args)?;
         let mut iter = pos_args.into_iter();
         let mut url_val = iter.next();
         let mut with_val = iter.next();
@@ -1335,9 +1350,16 @@ impl<'a> Evaluator<'a> {
             }
             self.forwarded.builtins.push(ForwardedBuiltin {
                 module: m.to_string(),
-                prefix: prefix.map(str::to_string),
-                show: member_set(show, false),
-                hide: member_set(hide, false),
+                // The prefix is stored canonically, like the `show`/`hide`
+                // names: `@forward "sass:map" as p_*` answers to `p-get`.
+                filters: vec![ForwardFilter {
+                    prefix: prefix.map(|p| p.replace('_', "-")).unwrap_or_default(),
+                    has_show: show.is_some(),
+                    show: member_set(show, false),
+                    hide: member_set(hide, false),
+                    show_vars: member_set(show, true),
+                    hide_vars: member_set(hide, true),
+                }],
             });
             return Ok(());
         }
@@ -1571,6 +1593,29 @@ impl<'a> Evaluator<'a> {
                 self.forwarded.mixin_src.insert(key, m_src);
             }
         }
+        // A built-in this module re-exports is re-exported again: its members
+        // are as public here as the module's own. Each inner filter is re-based
+        // under this forward's prefix and this forward's own `show`/`hide` is
+        // appended, so a member has to survive every rule it passed through.
+        let outer_prefix = pfx.replace('_', "-");
+        for fb in &module.forwarded_builtins {
+            let mut filters = fb.filters.clone();
+            // Each existing filter keeps the prefix it was DECLARED under — an
+            // inner `show p-get` names `p-get`, whatever the outer rule renames
+            // it to. Only the filter this `@forward` adds sees the full name.
+            filters.push(ForwardFilter {
+                prefix: format!("{outer_prefix}{}", fb.prefix()),
+                has_show,
+                show: show_names.clone(),
+                hide: hide_names.clone(),
+                show_vars: show_vars.clone(),
+                hide_vars: hide_vars.clone(),
+            });
+            self.forwarded.builtins.push(ForwardedBuiltin {
+                module: fb.module.clone(),
+                filters,
+            });
+        }
         Ok(())
     }
 
@@ -1713,10 +1758,15 @@ impl<'a> Evaluator<'a> {
                 // (a literal `ns.-name` is the parser's privacy error instead).
                 return Err(Error::at("Undefined variable.".to_string(), pos));
             }
-            return match module.var(name) {
-                Some(v) => Ok(v.without_slash()),
-                None => Err(Error::at("Undefined variable.".to_string(), pos)),
-            };
+            if let Some(v) = module.var(name) {
+                return Ok(v.without_slash());
+            }
+            // A built-in this module re-exports brings its variables along
+            // (`@forward "sass:math"` re-exports `$pi`).
+            if let Some((owner, bare)) = super::meta::resolve_forwarded_builtin_var(module, name) {
+                return crate::builtins::module_var(&owner, &bare, pos);
+            }
+            return Err(Error::at("Undefined variable.".to_string(), pos));
         }
         match self.used_modules.get(ns) {
             Some(module) => crate::builtins::module_var(module, name, pos),

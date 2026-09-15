@@ -18,9 +18,10 @@ pub(crate) struct Deprecation {
     /// The message body, printed right after `DEPRECATION WARNING [id]: `. May
     /// contain embedded newlines for multi-line messages.
     pub message: String,
-    /// The text of the trailing info line, e.g.
-    /// `More info and automated migrator: https://sass-lang.com/d/import`, or
-    /// `None` for the ids dart-sass prints without one.
+    /// The text of the trailing line, e.g.
+    /// `More info and automated migrator: https://sass-lang.com/d/import` or
+    /// `call-string`'s `Recommendation: …`, or `None` for the ids dart-sass
+    /// prints without one.
     pub more_info: Option<String>,
 }
 
@@ -31,6 +32,48 @@ impl Deprecation {
             id: "import",
             message: "Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.".to_string(),
             more_info: Some("More info and automated migrator: https://sass-lang.com/d/import".to_string()),
+        }
+    }
+
+    /// The `global-builtin` deprecation: a global function that has a
+    /// `sass:*` module equivalent. `replacement` is the member dart names
+    /// (`map.get`, `color.adjust`, `math.is-unitless`), and the info line is
+    /// the migrator's — dart prints the `@import` URL here, not one of its own.
+    pub(crate) fn global_builtin(replacement: &str) -> Self {
+        Deprecation {
+            id: "global-builtin",
+            message: format!(
+                "Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.\nUse {replacement} instead."
+            ),
+            more_info: Some("More info and automated migrator: https://sass-lang.com/d/import".to_string()),
+        }
+    }
+
+    /// The `feature-exists` deprecation: the function itself is going away, in
+    /// its global spelling and as `meta.feature-exists` alike.
+    pub(crate) fn feature_exists() -> Self {
+        Deprecation {
+            id: "feature-exists",
+            message: "The feature-exists() function is deprecated.".to_string(),
+            more_info: Some("More info: https://sass-lang.com/d/feature-exists".to_string()),
+        }
+    }
+
+    /// The `call-string` deprecation: `call("name")` looks a function up by
+    /// name instead of taking a reference. The trailing line is a
+    /// `Recommendation:` rather than a `More info:`, in the same slot.
+    pub(crate) fn call_string(name: &str) -> Self {
+        Deprecation {
+            id: "call-string",
+            message: "Passing a string to call() is deprecated and will be illegal in Dart Sass 2.0.0."
+                .to_string(),
+            // The name is a STRING in the suggested code, so it is serialized
+            // as one — dart writes `call(get-function('a\\"b'))` for a name
+            // that holds a quote.
+            more_info: Some(format!(
+                "Recommendation: call(get-function({}))",
+                crate::value::serialize_quoted(name)
+            )),
         }
     }
 

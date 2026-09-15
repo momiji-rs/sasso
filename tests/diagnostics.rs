@@ -39,6 +39,10 @@ const MATCHING: &[&str] = &[
     "compile-gutter-alignment",
     // Deprecations (registry sub-step): the fully-static `@import` warning.
     "deprecation-import",
+    // The global-built-in family, and the two that ride along with it.
+    "deprecation-global-builtin",
+    "deprecation-feature-exists",
+    "deprecation-call-string",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {
@@ -475,4 +479,936 @@ fn a_value_that_cannot_start_reports_what_was_expected() {
             "{src:?}\n{block}"
         );
     }
+}
+
+/// Every `formatted` warning a compile of `src` produces.
+fn warnings(src: &str, url: &str) -> Vec<String> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&seen);
+    let opts =
+        Options::default()
+            .with_url(url)
+            .with_warn_handler(Rc::new(move |ev: &sasso::WarnEvent<'_>| {
+                sink.borrow_mut().push(ev.formatted.to_string());
+            }));
+    let _ = compile(src, &opts);
+    let out = seen.borrow().clone();
+    out
+}
+
+#[test]
+fn a_global_builtin_with_a_module_form_is_deprecated() {
+    // dart names the member to use and carets the whole call. The mapping is
+    // not mechanical — every entry below was measured against dart-sass
+    // 1.103.1 — so the table is checked, not just the machinery.
+    for (src, replacement, caret) in [
+        (".a { b: map-get((x: 1), x); }\n", "map.get", "^^^^^^^^^^^^^^^^^^"),
+        (".a { b: nth(1 2 3, 1); }\n", "list.nth", "^^^^^^^^^^^^^"),
+        (
+            ".a { b: percentage(0.5); }\n",
+            "math.percentage",
+            "^^^^^^^^^^^^^^^",
+        ),
+        (
+            ".a { b: lighten(#fff, 10%); }\n",
+            "color.adjust",
+            "^^^^^^^^^^^^^^^^^^",
+        ),
+        (".a { b: unitless(1); }\n", "math.is-unitless", "^^^^^^^^^^^"),
+        (
+            ".a { b: comparable(1px, 2px); }\n",
+            "math.compatible",
+            "^^^^^^^^^^^^^^^^^^^^",
+        ),
+        (
+            ".a { b: list-separator(1 2); }\n",
+            "list.separator",
+            "^^^^^^^^^^^^^^^^^^^",
+        ),
+        (
+            ".a { b: str-length(\"abc\"); }\n",
+            "string.length",
+            "^^^^^^^^^^^^^^^^^",
+        ),
+        (".a { b: type-of(1); }\n", "meta.type-of", "^^^^^^^^^^"),
+        (
+            ".a { b: selector-parse(\"a\"); }\n",
+            "selector.parse",
+            "^^^^^^^^^^^^^^^^^^",
+        ),
+    ] {
+        let w = warnings(src, "in.scss");
+        assert_eq!(w.len(), 1, "{src:?} -> {w:?}");
+        assert!(
+            w[0].starts_with(&format!(
+                "DEPRECATION WARNING [global-builtin]: Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.\nUse {replacement} instead.\n\nMore info and automated migrator: https://sass-lang.com/d/import\n"
+            )),
+            "{src:?}\n{}",
+            w[0]
+        );
+        assert!(w[0].contains(caret), "{src:?}\n{}", w[0]);
+    }
+    // A global dart KEEPS is not deprecated: a CSS function it shares a name
+    // with, or one with no module form.
+    for src in [
+        ".a { b: abs(-1); }\n",
+        ".a { b: round(1.5); }\n",
+        ".a { b: min(1, 2); }\n",
+        ".a { b: rgba(0, 0, 0, 0.5); }\n",
+        ".a { b: ie-hex-str(#fff); }\n",
+    ] {
+        assert!(warnings(src, "in.scss").is_empty(), "{src:?}");
+    }
+    // The module form itself is never deprecated.
+    assert!(warnings(
+        "@use \"sass:math\";\n.a { b: math.percentage(0.5); }\n",
+        "in.scss"
+    )
+    .is_empty());
+    // The `sass:meta` predicates resolve against evaluator state and return
+    // before the generic built-in dispatch: they are deprecated too.
+    for (src, replacement) in [
+        (
+            "$x: 1;\n.a { b: variable-exists(\"x\"); }\n",
+            "meta.variable-exists",
+        ),
+        (
+            "$x: 1;\n.a { b: global-variable-exists(\"x\"); }\n",
+            "meta.global-variable-exists",
+        ),
+        (
+            "@mixin m {}\n.a { b: mixin-exists(\"m\"); }\n",
+            "meta.mixin-exists",
+        ),
+        (
+            ".a { b: function-exists(\"percentage\"); }\n",
+            "meta.function-exists",
+        ),
+    ] {
+        let w = warnings(src, "in.scss");
+        assert!(
+            w.iter()
+                .any(|x| x.contains(&format!("Use {replacement} instead."))),
+            "{src:?}\n{w:?}"
+        );
+    }
+    // The name is matched EXACTLY: dart resolves these case-sensitively, so an
+    // upper-case spelling is plain CSS to it and carries no warning.
+    for src in [
+        ".a { b: MAP-GET((x: 1), x); }\n",
+        ".a { b: Lighten(#fff, 10%); }\n",
+        ".a { b: PERCENTAGE(0.5); }\n",
+    ] {
+        assert!(warnings(src, "in.scss").is_empty(), "{src:?}");
+    }
+    // The indented syntax reports it too, at its own position.
+    let seen: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = std::rc::Rc::clone(&seen);
+    let opts = Options::default()
+        .with_syntax(sasso::Syntax::Sass)
+        .with_url("in.sass")
+        .with_warn_handler(std::rc::Rc::new(move |ev: &sasso::WarnEvent<'_>| {
+            sink.borrow_mut().push(ev.formatted.to_string());
+        }));
+    let _ = compile(".a\n  b: nth(1 2, 1)\n", &opts);
+    let w = seen.borrow().clone();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("in.sass 2:6"), "{}", w[0]);
+}
+
+#[test]
+fn a_deprecated_function_reached_indirectly_still_warns() {
+    // dart reports the global built-in a `call()` reaches — by name or through
+    // a reference — against the INVOCATION, on top of the warnings for `call`
+    // and `get-function` themselves. Two `[global-builtin]` warnings can
+    // therefore share one span, saying different things.
+    let w = warnings(".a { b: call(get-function(\"percentage\"), 0.5); }\n", "in.scss");
+    assert_eq!(w.len(), 3, "{w:?}");
+    assert!(w[0].contains("Use meta.get-function instead."), "{}", w[0]);
+    assert!(w[1].contains("Use meta.call instead."), "{}", w[1]);
+    assert!(w[2].contains("Use math.percentage instead."), "{}", w[2]);
+    assert!(
+        w[1].contains("in.scss 1:9") && w[2].contains("in.scss 1:9"),
+        "{w:?}"
+    );
+    // The string form adds `[call-string]`, with the name it was given.
+    let w = warnings(
+        "@function foo() { @return 1; }\n.a { b: call(\"foo\"); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(w[0].contains("Use meta.call instead."), "{}", w[0]);
+    assert!(
+        w[1].starts_with("DEPRECATION WARNING [call-string]: Passing a string to call() is deprecated and will be illegal in Dart Sass 2.0.0.\n\nRecommendation: call(get-function(\"foo\"))\n"),
+        "{}",
+        w[1]
+    );
+    // `feature-exists` is deprecated whichever way it is spelled.
+    let w = warnings(".a { b: feature-exists(\"at-error\"); }\n", "in.scss");
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(w[1].starts_with("DEPRECATION WARNING [feature-exists]: The feature-exists() function is deprecated.\n\nMore info: https://sass-lang.com/d/feature-exists\n"), "{}", w[1]);
+    let w = warnings(
+        "@use \"sass:meta\";\n.a { b: meta.feature-exists(\"at-error\"); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+}
+
+#[test]
+fn a_deprecation_follows_the_call_that_is_actually_made() {
+    // Whether a call is deprecated depends on what it RESOLVES to, not on how
+    // it is spelled. Every expectation here was measured against dart-sass
+    // 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_dep_resolve_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fwdmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| {
+        std::fs::write(&entry, src).unwrap();
+        let seen: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = std::rc::Rc::clone(&seen);
+        let opts = Options::default()
+            .with_importer(&imp)
+            .with_url(&url)
+            .with_warn_handler(std::rc::Rc::new(move |ev: &sasso::WarnEvent<'_>| {
+                sink.borrow_mut().push(ev.formatted.to_string());
+            }));
+        let _ = compile(src, &opts);
+        let out = seen.borrow().clone();
+        out
+    };
+    // A built-in module bound to an alias is still that module.
+    let w = run("@use \"sass:meta\" as m;\n.a { b: m.feature-exists(\"at-error\"); }\n");
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    // So is one reached through a `@forward`.
+    let w = run("@use \"fwdmeta\" as m;\n.a { b: m.feature-exists(\"at-error\"); }\n");
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    // A member exposed by `@use … as *` is that module's, not a global: the
+    // function's own deprecation fires, the global-built-in one does not.
+    let w = run("@use \"sass:meta\" as *;\n.a { b: feature-exists(\"at-error\"); }\n");
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    // A user `@function` wins over the global, so nothing is deprecated.
+    assert!(run("@function type-of($x) { @return 1; }\n.a { b: type-of(2); }\n").is_empty());
+    // A deprecated call INSIDE a deprecated one is reported first, as dart
+    // reports it.
+    let w = run("@use \"sass:meta\";\n.a { b: meta.feature-exists(inspect(\"at-error\")); }\n");
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(w[0].contains("Use meta.inspect instead."), "{}", w[0]);
+    assert!(w[1].contains("[feature-exists]"), "{}", w[1]);
+    // A plain-CSS reference invokes no Sass built-in.
+    assert!(run(
+        "@use \"sass:meta\";\n.a { b: meta.call(meta.get-function(\"percentage\", $css: true), 1); }\n"
+    )
+    .is_empty());
+    // `call()`'s recommendation quotes the name as Sass would write it.
+    let w = run("@function a\\\"b() { @return 1; }\n.a { b: call(\"a\\\\\\\"b\"); }\n");
+    assert!(
+        w.iter()
+            .any(|x| x.contains("Recommendation: call(get-function('a\\\\\"b'))")),
+        "{w:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn what_a_call_resolves_to_decides_what_is_deprecated() {
+    // The underscore spelling reaches the same built-in, so it carries the same
+    // deprecation; a reference taken from a module is not the global. Every
+    // expectation measured against dart-sass 1.103.1.
+    let w = warnings("a { b: map_get((x: 1), x); }\n", "in.scss");
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("Use map.get instead."), "{}", w[0]);
+    // The caret covers the call as written, underscore and all.
+    assert!(w[0].contains("^^^^^^^^^^^^^^^^^^"), "{}", w[0]);
+    let w = warnings(
+        "@use \"sass:meta\";\na { b: meta.feature_exists(\"at-error\"); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    let w = warnings(
+        "@use \"sass:meta\" as *;\na { b: feature_exists(\"at-error\"); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    // A reference taken THROUGH a module is that module's member: the global
+    // spelling is what is deprecated, and this is not it.
+    assert!(warnings(
+        "@use \"sass:meta\"; @use \"sass:math\";\na { b: meta.call(meta.get-function(\"percentage\", $module: \"math\"), 1); }\n",
+        "in.scss",
+    )
+    .is_empty());
+    // The function's OWN deprecation still fires for a module-derived one.
+    let w = warnings(
+        "@use \"sass:meta\";\na { b: meta.call(meta.get-function(\"feature-exists\", $module: \"meta\"), \"at-error\"); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("[feature-exists]"), "{}", w[0]);
+    // Taken globally, it is deprecated for being global.
+    let w = warnings(
+        "@use \"sass:meta\";\na { b: meta.call(meta.get-function(\"percentage\"), 1); }\n",
+        "in.scss",
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("Use math.percentage instead."), "{}", w[0]);
+}
+
+#[test]
+fn a_host_function_does_not_exempt_a_global_builtin() {
+    // dart's `functions` do not shadow a built-in global at all: the built-in
+    // runs and still warns (measured against 1.103.1's JS API with a
+    // `type-of($v)` host function, which never runs).
+    use std::rc::Rc;
+    let cb: sasso::HostFunction = Rc::new(|_args: &[u8]| Ok(Vec::new()));
+    let seen: Rc<std::cell::RefCell<Vec<String>>> = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = Rc::clone(&seen);
+    let opts = Options::default()
+        .with_url("in.scss")
+        .with_function("type-of($v)", cb)
+        .with_warn_handler(Rc::new(move |ev: &sasso::WarnEvent<'_>| {
+            sink.borrow_mut().push(ev.formatted.to_string());
+        }));
+    let _ = compile(".a { b: type-of(1); }\n", &opts);
+    let w = seen.borrow().clone();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("Use meta.type-of instead."), "{}", w[0]);
+}
+
+#[test]
+fn a_forwarded_builtin_is_reachable_by_call_and_by_reference() {
+    // A `@forward "sass:…"` re-exports a built-in module under the forward's
+    // own name, and `_`/`-` are interchangeable in BOTH the member and the
+    // prefix. Every expectation measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_fwd_builtin_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_plain.scss"), "@forward \"sass:map\";\n").expect("write");
+    std::fs::write(dir.join("_pref.scss"), "@forward \"sass:map\" as p-*;\n").expect("write");
+    std::fs::write(dir.join("_upref.scss"), "@forward \"sass:map\" as p_*;\n").expect("write");
+    std::fs::write(
+        dir.join("_shown.scss"),
+        "@forward \"sass:string\" show to_upper_case;\n",
+    )
+    .expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // The prefix and the member are both read canonically.
+    for src in [
+        "@use \"pref\" as p; a { b: p.p-get((x: 1), x); }",
+        "@use \"pref\" as p; a { b: p.p_get((x: 1), x); }",
+        "@use \"upref\" as p; a { b: p.p-get((x: 1), x); }",
+        "@use \"upref\" as p; a { b: p.p_get((x: 1), x); }",
+    ] {
+        assert_eq!(run(src).as_deref(), Ok("a {\n  b: 1;\n}"), "{src}");
+    }
+    // A `show` list written with underscores accepts either spelling.
+    for src in [
+        "@use \"shown\" as s; a { b: s.to-upper-case(\"a\"); }",
+        "@use \"shown\" as s; a { b: s.to_upper_case(\"a\"); }",
+    ] {
+        assert_eq!(run(src).as_deref(), Ok("a {\n  b: \"A\";\n}"), "{src}");
+    }
+    // `get-function($module:)` reaches a forwarded built-in, under the name the
+    // forward gives it, and inspects as the MEMBER it is.
+    assert_eq!(
+        run("@use \"plain\" as f; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"get\", $module: \"f\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-function(\"get\");\n}")
+    );
+    assert_eq!(
+        run("@use \"plain\" as f; @use \"sass:meta\";\na { b: meta.call(meta.get-function(\"get\", $module: \"f\"), (x: 1), x); }")
+            .as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert_eq!(
+        run("@use \"pref\" as p; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"p-get\", $module: \"p\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-function(\"get\");\n}")
+    );
+    // The global alias is not a member of the module, prefixed or not.
+    assert!(run(
+        "@use \"plain\" as f; @use \"sass:meta\";\na { b: meta.get-function(\"map-get\", $module: \"f\"); }"
+    )
+    .unwrap_err()
+    .contains("Function not found: \"map-get\""));
+    assert!(run(
+        "@use \"pref\" as p; @use \"sass:meta\";\na { b: meta.get-function(\"get\", $module: \"p\"); }"
+    )
+    .unwrap_err()
+    .contains("Function not found: \"get\""));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_forward_carries_a_builtin_through_every_rule_it_passes() {
+    // A `@forward "sass:…"` survives being forwarded again, its `show`/`hide`
+    // match the name AS THAT RULE EXPORTS IT, and the members it exposes answer
+    // to calls, references and existence queries alike. Every expectation
+    // measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_fwd_chain_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_inner.scss"), "@forward \"sass:map\";\n").expect("write");
+    std::fs::write(dir.join("_outer.scss"), "@forward \"inner\";\n").expect("write");
+    std::fs::write(dir.join("_outerq.scss"), "@forward \"inner\" as q-*;\n").expect("write");
+    std::fs::write(dir.join("_fmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    std::fs::write(
+        dir.join("_hidepre.scss"),
+        "@forward \"sass:map\" as p-* hide p-get;\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.join("_hidebare.scss"),
+        "@forward \"sass:map\" as p-* hide get;\n",
+    )
+    .expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // A built-in forwarded through another module is still public, prefix and
+    // all, by call and by reference.
+    assert_eq!(
+        run("@use \"outer\" as o; a { b: o.get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert_eq!(
+        run("@use \"outerq\" as o; a { b: o.q-get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert_eq!(
+        run("@use \"outer\" as o; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"get\", $module: \"o\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-function(\"get\");\n}")
+    );
+    // `show`/`hide` name the member as the rule that wrote them exports it.
+    assert!(run("@use \"hidepre\" as p; a { b: p.p-get((x: 1), x); }")
+        .unwrap_err()
+        .contains("Undefined function."));
+    assert_eq!(
+        run("@use \"hidebare\" as p; a { b: p.p-get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    // A forwarded `sass:meta` member that resolves against the evaluator still
+    // reaches the evaluator.
+    assert_eq!(
+        run("$x: 1;\n@use \"fmeta\" as f; a { b: f.variable-exists(\"x\"); }").as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    assert_eq!(
+        run("@use \"fmeta\" as f; a { b: f.call(f.get-function(\"rgb\"), 1, 2, 3); }").as_deref(),
+        Ok("a {\n  b: rgb(1, 2, 3);\n}")
+    );
+    // Existence queries see exactly what the call and reference paths see.
+    assert_eq!(
+        run("@use \"inner\" as f; @use \"sass:meta\";\na { b: meta.function-exists(\"get\", $module: \"f\"); }")
+            .as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_forwarded_builtin_brings_its_whole_public_face() {
+    // A `@forward "sass:…"` re-exports variables and mixins, not only
+    // functions; an inner `show`/`hide` names the member in ITS OWN namespace
+    // whatever an outer rule renames it to; and a starred user module exposes
+    // what it forwards. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_fwd_face_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fmath.scss"), "@forward \"sass:math\";\n").expect("write");
+    std::fs::write(dir.join("_fmap.scss"), "@forward \"sass:map\";\n").expect("write");
+    std::fs::write(
+        dir.join("_ishow.scss"),
+        "@forward \"sass:map\" as p-* show p-get;\n",
+    )
+    .expect("write");
+    std::fs::write(
+        dir.join("_ihide.scss"),
+        "@forward \"sass:map\" as p-* hide p-get;\n",
+    )
+    .expect("write");
+    std::fs::write(dir.join("_oshow.scss"), "@forward \"ishow\" as q-*;\n").expect("write");
+    std::fs::write(dir.join("_ohide.scss"), "@forward \"ihide\" as q-*;\n").expect("write");
+    std::fs::write(dir.join("_novar.scss"), "@forward \"sass:math\" hide $pi;\n").expect("write");
+    std::fs::write(dir.join("_onlyvar.scss"), "@forward \"sass:math\" show $pi;\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // Variables travel with the forward, namespaced and starred alike, and a
+    // `hide $pi` stops them.
+    assert_eq!(
+        run("@use \"fmath\" as f; a { b: f.$pi; }").as_deref(),
+        Ok("a {\n  b: 3.1415926536;\n}")
+    );
+    assert_eq!(
+        run("@use \"fmath\" as *; a { b: $pi; }").as_deref(),
+        Ok("a {\n  b: 3.1415926536;\n}")
+    );
+    assert!(run("@use \"novar\" as f; a { b: f.$pi; }")
+        .unwrap_err()
+        .contains("Undefined variable."));
+    assert_eq!(
+        run("@use \"novar\" as f; a { b: f.floor(1.5); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    // A `show` that names only variables hides every function.
+    assert_eq!(
+        run("@use \"onlyvar\" as f; a { b: f.$pi; }").as_deref(),
+        Ok("a {\n  b: 3.1415926536;\n}")
+    );
+    assert!(run("@use \"onlyvar\" as f; a { b: f.floor(1.5); }")
+        .unwrap_err()
+        .contains("Undefined function."));
+    // So do mixins: `@forward "sass:meta"` re-exports `load-css`, which then
+    // fails on the STYLESHEET, not on the mixin name.
+    std::fs::write(dir.join("_fmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    assert!(
+        run("@use \"fmeta\" as f; a { @include f.load-css(\"nope.css\"); }")
+            .unwrap_err()
+            .contains("Can't find stylesheet to import.")
+    );
+    // An inner `show`/`hide` keeps naming the member as the INNER rule exports
+    // it, even after an outer rule renames it again.
+    assert_eq!(
+        run("@use \"oshow\" as o; a { b: o.q-p-get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert!(run("@use \"ohide\" as o; a { b: o.q-p-get((x: 1), x); }")
+        .unwrap_err()
+        .contains("Undefined function."));
+    // A starred user module exposes what it forwards, to calls and to
+    // introspection alike.
+    assert_eq!(
+        run("@use \"fmap\" as *; a { b: get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert_eq!(
+        run("@use \"fmap\" as *; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"get\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-function(\"get\");\n}")
+    );
+    assert_eq!(
+        run("@use \"fmap\" as *; @use \"sass:meta\";\na { b: meta.function-exists(\"get\"); }").as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn every_kind_of_starred_member_competes_for_the_bare_name() {
+    // `@use … as *` puts user members and built-in members (direct, or
+    // forwarded by a starred user module) in ONE namespace: they shadow the
+    // global, two DIFFERENT ones under a name is an error, and the same one
+    // reached twice is not. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_star_share_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fmath.scss"), "@forward \"sass:math\";\n").expect("write");
+    std::fs::write(dir.join("_fmap.scss"), "@forward \"sass:map\";\n").expect("write");
+    std::fs::write(dir.join("_fmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    std::fs::write(dir.join("_fstr.scss"), "@forward \"sass:string\";\n").expect("write");
+    std::fs::write(dir.join("_upi.scss"), "$pi: USERPI;\n").expect("write");
+    std::fs::write(
+        dir.join("_uindex.scss"),
+        "@function index($a, $b) { @return USER; }\n",
+    )
+    .expect("write");
+    std::fs::write(dir.join("_umix.scss"), "@mixin load-css($x) { u: 1; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // The SAME member reached two ways is one member, not an ambiguity.
+    assert_eq!(
+        run("@use \"fmap\" as *; @use \"sass:map\" as *; a { b: get((x: 1), x); }").as_deref(),
+        Ok("a {\n  b: 1;\n}")
+    );
+    assert_eq!(
+        run("@use \"fmath\" as *; @use \"sass:math\" as *; a { b: $pi; }").as_deref(),
+        Ok("a {\n  b: 3.1415926536;\n}")
+    );
+    // A user member and a built-in one under the same name are two members.
+    for (src, what) in [
+        (
+            "@use \"uindex\" as *; @use \"sass:string\" as *; a { b: index(\"abc\", \"b\"); }",
+            "function",
+        ),
+        (
+            "@use \"upi\" as *; @use \"sass:math\" as *; a { b: $pi; }",
+            "variable",
+        ),
+        (
+            "@use \"umix\" as *; @use \"sass:meta\" as *; a { @include load-css(\"nope.css\"); }",
+            "mixin",
+        ),
+    ] {
+        let err = run(src).unwrap_err();
+        assert!(
+            err.contains(&format!("This {what} is available from multiple global modules.")),
+            "{src}: {err}"
+        );
+    }
+    // And the introspection predicates see exactly what resolution sees.
+    for (src, want) in [
+        (
+            "@use \"sass:math\" as *; @use \"sass:meta\";\na { b: meta.global-variable-exists(\"pi\"); }",
+            "true",
+        ),
+        (
+            "@use \"fmath\" as *; @use \"sass:meta\";\na { b: meta.variable-exists(\"pi\"); }",
+            "true",
+        ),
+        (
+            "@use \"sass:meta\" as *; @use \"sass:meta\" as m;\na { b: m.mixin-exists(\"load-css\"); }",
+            "true",
+        ),
+        (
+            "@use \"fmeta\" as *; @use \"sass:meta\" as m;\na { b: m.mixin-exists(\"load-css\"); }",
+            "true",
+        ),
+    ] {
+        assert_eq!(
+            run(src).as_deref(),
+            Ok(format!("a {{\n  b: {want};\n}}").as_str()),
+            "{src}"
+        );
+    }
+    // A starred built-in mixin is includable and referenceable.
+    assert!(
+        run("@use \"sass:meta\" as *; a { @include load-css(\"nope.css\"); }")
+            .unwrap_err()
+            .contains("Can't find stylesheet to import.")
+    );
+    assert_eq!(
+        run("@use \"sass:meta\" as *; a { b: inspect(get-mixin(\"load-css\")); }").as_deref(),
+        Ok("a {\n  b: get-mixin(\"load-css\");\n}")
+    );
+    assert_eq!(
+        run("@use \"fmeta\" as f; @use \"sass:meta\";\na { b: meta.inspect(meta.get-mixin(\"load-css\", $module: \"f\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-mixin(\"load-css\");\n}")
+    );
+    // An evaluator-owned `sass:meta` member reached unprefixed still reaches
+    // the evaluator.
+    assert!(
+        run("@use \"sass:meta\" as *; a { b: inspect(module-functions(\"meta\")); }")
+            .unwrap_err()
+            // dart drops the article in the `module-*` functions only.
+            .contains("There is no module with namespace \"meta\".")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_modules_own_member_shadows_the_builtin_it_forwards() {
+    // A module that defines a member AND forwards a built-in exporting that
+    // name exposes ONE member — its own — namespaced and starred alike; it is
+    // not two members competing for the name. And a starred user mixin beside a
+    // starred built-in one IS two. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_own_shadow_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("_ownfn.scss"),
+        "@forward \"sass:string\";\n@function index($a, $b) { @return OWN; }\n",
+    )
+    .expect("write");
+    std::fs::write(dir.join("_ownvar.scss"), "@forward \"sass:math\";\n$pi: OWNPI;\n").expect("write");
+    std::fs::write(
+        dir.join("_ownmix.scss"),
+        "@forward \"sass:meta\";\n@mixin load-css($x) { own: 1; }\n",
+    )
+    .expect("write");
+    std::fs::write(dir.join("_umix.scss"), "@mixin load-css($x) { u: 1; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    for (src, want) in [
+        ("@use \"ownfn\" as f; a { b: f.index(\"abc\", \"b\"); }", "OWN"),
+        ("@use \"ownfn\" as *; a { b: index(\"abc\", \"b\"); }", "OWN"),
+        ("@use \"ownvar\" as f; a { b: f.$pi; }", "OWNPI"),
+        ("@use \"ownvar\" as *; a { b: $pi; }", "OWNPI"),
+    ] {
+        assert_eq!(
+            run(src).as_deref(),
+            Ok(format!("a {{\n  b: {want};\n}}").as_str()),
+            "{src}"
+        );
+    }
+    for src in [
+        "@use \"ownmix\" as f; a { @include f.load-css(\"x\"); }",
+        "@use \"ownmix\" as *; a { @include load-css(\"x\"); }",
+    ] {
+        assert_eq!(run(src).as_deref(), Ok("a {\n  own: 1;\n}"), "{src}");
+    }
+    // Introspection agrees: one member, and it is the module's own.
+    assert_eq!(
+        run("@use \"ownfn\" as *; @use \"sass:meta\";\na { b: meta.function-exists(\"index\"); }").as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    // Two starred sources for one mixin name ARE two members, whichever asks.
+    assert!(
+        run("@use \"umix\" as *; @use \"sass:meta\" as *;\na { b: inspect(get-mixin(\"load-css\")); }")
+            .unwrap_err()
+            .contains("This mixin is available from multiple global modules.")
+    );
+    // One star and one namespace is one member, so it resolves.
+    assert_eq!(
+        run("@use \"umix\" as *; @use \"sass:meta\" as m;\na { b: m.inspect(m.get-mixin(\"load-css\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-mixin(\"load-css\");\n}")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_builtin_mixin_reference_can_be_taken_and_invoked() {
+    // `meta.get-mixin` reaches `load-css`/`apply` through whatever namespace
+    // is bound — an alias included — and `meta.apply` then INVOKES the
+    // reference it returns. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_builtin_mixin_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    std::fs::write(dir.join("real.css"), "x { loaded: 1; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // An ALIASED built-in namespace is still that module.
+    for src in [
+        "@use \"sass:meta\" as m; a { b: m.inspect(m.get-mixin(\"load-css\", $module: \"m\")); }",
+        "@use \"sass:meta\"; a { b: meta.inspect(meta.get-mixin(\"load-css\", $module: \"meta\")); }",
+    ] {
+        assert_eq!(
+            run(src).as_deref(),
+            Ok("a {\n  b: get-mixin(\"load-css\");\n}"),
+            "{src}"
+        );
+    }
+    // And the reference is invocable, however it was obtained.
+    for src in [
+        "@use \"sass:meta\";\na { @include meta.apply(meta.get-mixin(\"load-css\", $module: \"meta\"), \"real\"); }",
+        "@use \"fmeta\" as f;\na { @include f.apply(f.get-mixin(\"load-css\", $module: \"f\"), \"real\"); }",
+        "@use \"sass:meta\" as *;\na { @include apply(get-mixin(\"load-css\"), \"real\"); }",
+    ] {
+        assert_eq!(run(src).as_deref(), Ok("a x {\n  loaded: 1;\n}"), "{src}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_mixin_reached_through_a_reference_reports_where_it_was_included() {
+    // An error raised inside a first-class `load-css` carets the `@include`
+    // that reached it, exactly as a direct one does — and a bare `@include`
+    // that two starred modules both answer carets the same statement.
+    // Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_ref_span_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_umix.scss"), "@mixin load-css($x) { u: 1; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> String {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts)
+            .expect_err("expected a compile error")
+            .to_string()
+    };
+    // The reference and the direct call caret the same statement, `;` included.
+    let via_ref = run(
+        "@use \"sass:meta\";\na {\n  @include meta.apply(meta.get-mixin(\"load-css\", $module: \"meta\"), \"nope\");\n}\n",
+    );
+    assert!(
+        via_ref.starts_with("Error: Can't find stylesheet to import."),
+        "{via_ref}"
+    );
+    assert_eq!(caret_line(&via_ref).len(), 72, "{via_ref}");
+    let direct = run("@use \"sass:meta\";\na {\n  @include meta.load-css(\"nope\");\n}\n");
+    assert_eq!(caret_line(&direct).len(), 30, "{direct}");
+    // An argument error from the reference reports the same way.
+    let bad_arg = run(
+        "@use \"sass:meta\";\na {\n  @include meta.apply(meta.get-mixin(\"load-css\", $module: \"meta\"), 1);\n}\n",
+    );
+    assert!(
+        bad_arg.starts_with("Error: $url: 1 is not a string."),
+        "{bad_arg}"
+    );
+    assert_eq!(caret_line(&bad_arg).len(), 67, "{bad_arg}");
+    // Two starred modules answering one `@include` caret the include. (dart
+    // adds a secondary row per `@use`, which this renderer cannot draw yet.)
+    let ambiguous =
+        run("@use \"umix\" as *;\n@use \"sass:meta\" as *;\na {\n  @include load-css(\"nope\");\n}\n");
+    assert!(
+        ambiguous.starts_with("Error: This mixin is available from multiple global modules."),
+        "{ambiguous}"
+    );
+    assert_eq!(caret_line(&ambiguous).len(), 25, "{ambiguous}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_builtin_mixin_answers_to_its_underscore_spelling() {
+    // `_` and `-` are one character in a Sass identifier, for `sass:meta`'s
+    // mixins as for everything else — by call, by reference, and by existence
+    // query. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_mixin_under_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    std::fs::write(dir.join("real.css"), "x { loaded: 1; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // Every route to the mixin takes either spelling.
+    for src in [
+        "@use \"sass:meta\"; a { @include meta.load_css(\"real\"); }",
+        "@use \"sass:meta\"; a { @include meta.load-css(\"real\"); }",
+        "@use \"sass:meta\" as m; a { @include m.load_css(\"real\"); }",
+        "@use \"sass:meta\" as *; a { @include load_css(\"real\"); }",
+        "@use \"fmeta\" as f; a { @include f.load_css(\"real\"); }",
+    ] {
+        assert_eq!(run(src).as_deref(), Ok("a x {\n  loaded: 1;\n}"), "{src}");
+    }
+    // A reference is stored canonically, so it inspects and compares as one.
+    assert_eq!(
+        run("@use \"sass:meta\";\na { b: meta.inspect(meta.get-mixin(\"load_css\", $module: \"meta\")); }")
+            .as_deref(),
+        Ok("a {\n  b: get-mixin(\"load-css\");\n}")
+    );
+    assert_eq!(
+        run("@use \"sass:meta\";\na { b: meta.get-mixin(\"load_css\", $module: \"meta\") == meta.get-mixin(\"load-css\", $module: \"meta\"); }")
+            .as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    // And the existence query agrees with both.
+    assert_eq!(
+        run("@use \"sass:meta\";\na { b: meta.mixin-exists(\"load_css\", $module: \"meta\"); }").as_deref(),
+        Ok("a {\n  b: true;\n}")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn call_by_name_resolves_what_the_name_would_have() {
+    // `call("name")` looks the name up exactly as writing it would: a user
+    // `@function`, then a member a `@use … as *` exposes (user or built-in),
+    // then the global — ambiguity included. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_call_name_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fmap.scss"), "@forward \"sass:map\";\n").expect("write");
+    std::fs::write(dir.join("_own.scss"), "@function own($x) { @return OWN; }\n").expect("write");
+    std::fs::write(
+        dir.join("_uindex.scss"),
+        "@function index($a, $b) { @return USER; }\n",
+    )
+    .expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    for (src, want) in [
+        (
+            "@use \"sass:map\" as *; @use \"sass:meta\";\na { b: meta.call(\"get\", (x: 1), x); }",
+            "1",
+        ),
+        (
+            "@use \"fmap\" as *; @use \"sass:meta\";\na { b: meta.call(\"get\", (x: 1), x); }",
+            "1",
+        ),
+        (
+            "@use \"own\" as *; @use \"sass:meta\";\na { b: meta.call(\"own\", 1); }",
+            "OWN",
+        ),
+        (
+            "@use \"sass:string\" as *; @use \"sass:meta\";\na { b: meta.call(\"index\", \"abc\", \"b\"); }",
+            "2",
+        ),
+    ] {
+        assert_eq!(
+            run(src).as_deref(),
+            Ok(format!("a {{\n  b: {want};\n}}").as_str()),
+            "{src}"
+        );
+    }
+    // Two starred sources for the name is the same error it would be written.
+    assert!(run(
+        "@use \"uindex\" as *; @use \"sass:string\" as *; @use \"sass:meta\";\na { b: meta.call(\"index\", \"abc\", \"b\"); }"
+    )
+    .unwrap_err()
+    .contains("This function is available from multiple global modules."));
+    // A name nothing owns is still left to the plain-CSS dispatcher.
+    assert_eq!(
+        run("@use \"sass:meta\"; a { b: meta.call(\"nope\", 1); }").as_deref(),
+        Ok("a {\n  b: nope(1);\n}")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn one_span_can_carry_two_call_string_recommendations() {
+    // The dedup identity is everything the warning SAYS: `[call-string]`'s
+    // message is static and its `Recommendation:` carries the name, so one
+    // `call($n)` invoked with two names warns twice. dart prints both.
+    let w = warnings(
+        "@use \"sass:meta\";\n@function pick($n) { @return meta.call($n, 1); }\n@function a($x) { @return A; }\n@function b($x) { @return B; }\n.x { p: pick(\"a\"); q: pick(\"b\"); }\n",
+        "in.scss",
+    );
+    let recs: Vec<&String> = w.iter().filter(|x| x.contains("[call-string]")).collect();
+    assert_eq!(recs.len(), 2, "{w:?}");
+    assert!(
+        recs[0].contains("Recommendation: call(get-function(\"a\"))"),
+        "{}",
+        recs[0]
+    );
+    assert!(
+        recs[1].contains("Recommendation: call(get-function(\"b\"))"),
+        "{}",
+        recs[1]
+    );
 }
