@@ -566,6 +566,34 @@ fn compressed_supports_declarations_keep_their_calculation_spaces() {
     );
 }
 
+/// A value is verbatim text and can end in a `;` of its own, which dart keeps
+/// — so what may be dropped is decided by the NODE that wrote the last byte,
+/// never by the byte. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_keeps_a_semicolon_that_belongs_to_a_value() {
+    let v = "$v: \";\";\n";
+    assert_eq!(
+        css_compressed(&format!("{v}.a {{ --x: #{{$v}}; }}")),
+        ".a{--x: ;}"
+    );
+    assert_eq!(
+        css_compressed(&format!("{v}@font-face {{ --x: #{{$v}}; }}")),
+        "@font-face{--x: ;}"
+    );
+    assert_eq!(
+        css_compressed(&format!("{v}@font-face {{ src: #{{$v}}; }}")),
+        "@font-face{src:;}"
+    );
+    assert_eq!(
+        css_compressed(&format!("{v}@font-face {{ a: 1; --x: #{{$v}}; }}")),
+        "@font-face{a:1;--x: ;}"
+    );
+    assert_eq!(
+        css_compressed(&format!("{v}@media a {{ @font-face {{ --x: #{{$v}}; }} }}")),
+        "@media a{@font-face{--x: ;}}"
+    );
+}
+
 /// dart writes a statement's `;` as a SEPARATOR, so compressed output never
 /// ends with one — at the end of the stylesheet or before a `}`. Measured
 /// against dart-sass 1.103.1.

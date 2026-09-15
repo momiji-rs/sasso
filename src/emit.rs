@@ -646,12 +646,34 @@ fn write_with_indent(out: &mut String, text: &str, min_indent: usize, indent: &s
     }
 }
 
+/// Whether this node's compressed output ends with a `;` the node itself wrote
+/// — true for a verbatim line, and for a wrapper whose last VISIBLE child is
+/// one.
+fn ends_with_own_semicolon(node: &OutNode) -> bool {
+    match node {
+        OutNode::Raw(s, _) => s.ends_with(';'),
+        // A childless at-rule (`@namespace "x";`) writes its own terminator.
+        OutNode::AtRule { has_block, .. } => !has_block,
+        OutNode::ModuleScope { nodes, .. } => nodes
+            .iter()
+            .rev()
+            .find(|n| !matches!(n, OutNode::Blank))
+            .is_some_and(ends_with_own_semicolon),
+        _ => false,
+    }
+}
+
 fn emit_compressed(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> String {
     let mut out = String::new();
+    let mut last: Option<&OutNode> = None;
     for node in nodes {
+        let before = out.len();
         emit_node_compressed(&mut out, node, collector);
+        if out.len() != before {
+            last = Some(node);
+        }
     }
-    drop_trailing_semicolon(&mut out);
+    drop_trailing_semicolon(&mut out, last);
     out
 }
 
@@ -659,8 +681,8 @@ fn emit_compressed(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> St
 /// ends with one — not at the end of the stylesheet and not before a `}`. Most
 /// nodes are separated that way here too; a verbatim line (a passed-through
 /// `@import`) carries its own `;`, which is one too many when it comes last.
-fn drop_trailing_semicolon(out: &mut String) {
-    if out.ends_with(';') {
+fn drop_trailing_semicolon(out: &mut String, last: Option<&OutNode>) {
+    if last.is_some_and(ends_with_own_semicolon) && out.ends_with(';') {
         out.pop();
     }
 }
@@ -670,6 +692,7 @@ fn drop_trailing_semicolon(out: &mut String) {
 /// separator, so no `;` is inserted after it (matching dart-sass).
 fn emit_compressed_body(out: &mut String, nodes: &[OutNode], collector: &mut Option<SmCollector>) {
     let mut prev_was_decl = false;
+    let mut last: Option<&OutNode> = None;
     for node in nodes {
         // A blank, and a comment that is not LOUD, produce no compressed
         // output; don't let them reset the separator state. A loud comment is
@@ -690,10 +713,14 @@ fn emit_compressed_body(out: &mut String, nodes: &[OutNode], collector: &mut Opt
         if prev_was_decl {
             out.push(';');
         }
+        let before = out.len();
         emit_node_compressed(out, node, collector);
+        if out.len() != before {
+            last = Some(node);
+        }
         prev_was_decl = matches!(node, OutNode::AtDecl { .. });
     }
-    drop_trailing_semicolon(out);
+    drop_trailing_semicolon(out, last);
 }
 
 /// dart `_writeFoldedValue` (compressed custom properties): each newline
