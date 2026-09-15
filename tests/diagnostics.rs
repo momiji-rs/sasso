@@ -1193,3 +1193,42 @@ fn a_modules_own_member_shadows_the_builtin_it_forwards() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_builtin_mixin_reference_can_be_taken_and_invoked() {
+    // `meta.get-mixin` reaches `load-css`/`apply` through whatever namespace
+    // is bound — an alias included — and `meta.apply` then INVOKES the
+    // reference it returns. Measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_builtin_mixin_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_fmeta.scss"), "@forward \"sass:meta\";\n").expect("write");
+    std::fs::write(dir.join("real.css"), "x { loaded: 1; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> Result<String, String> {
+        std::fs::write(&entry, src).unwrap();
+        let opts = Options::default().with_importer(&imp).with_url(&url);
+        compile(src, &opts).map_err(|e| e.to_string())
+    };
+    // An ALIASED built-in namespace is still that module.
+    for src in [
+        "@use \"sass:meta\" as m; a { b: m.inspect(m.get-mixin(\"load-css\", $module: \"m\")); }",
+        "@use \"sass:meta\"; a { b: meta.inspect(meta.get-mixin(\"load-css\", $module: \"meta\")); }",
+    ] {
+        assert_eq!(
+            run(src).as_deref(),
+            Ok("a {\n  b: get-mixin(\"load-css\");\n}"),
+            "{src}"
+        );
+    }
+    // And the reference is invocable, however it was obtained.
+    for src in [
+        "@use \"sass:meta\";\na { @include meta.apply(meta.get-mixin(\"load-css\", $module: \"meta\"), \"real\"); }",
+        "@use \"fmeta\" as f;\na { @include f.apply(f.get-mixin(\"load-css\", $module: \"f\"), \"real\"); }",
+        "@use \"sass:meta\" as *;\na { @include apply(get-mixin(\"load-css\"), \"real\"); }",
+    ] {
+        assert_eq!(run(src).as_deref(), Ok("a x {\n  loaded: 1;\n}"), "{src}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

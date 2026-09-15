@@ -278,13 +278,28 @@ impl<'a> Evaluator<'a> {
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
+        let (pos_args, named, _) = self.eval_call_args(args)?;
+        self.load_css_evaled(pos_args, named, content, pos, parents, sink)
+    }
+
+    /// `meta.load-css` with its arguments already evaluated — the form a
+    /// first-class reference to it arrives in (`meta.apply(meta.get-mixin(
+    /// "load-css"), …)`).
+    pub(super) fn load_css_evaled(
+        &mut self,
+        pos_args: Vec<Value>,
+        named: Vec<(String, Value)>,
+        content: Option<Rc<Vec<Stmt>>>,
+        pos: Pos,
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
         if content.is_some() {
             return Err(Error::at(
                 "Mixin doesn't accept a content block.".to_string(),
                 pos,
             ));
         }
-        let (pos_args, named, _) = self.eval_call_args(args)?;
         let mut iter = pos_args.into_iter();
         let mut url_val = iter.next();
         let mut with_val = iter.next();

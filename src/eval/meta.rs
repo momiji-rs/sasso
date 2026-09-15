@@ -540,8 +540,10 @@ impl<'a> Evaluator<'a> {
                 pos,
             ));
         }
-        if self.used_modules.contains_key(module_name) {
-            if is_builtin_mixin(module_name, name) {
+        if let Some(builtin) = self.used_modules.get(module_name) {
+            // The RESOLVED module, not the namespace it was bound to: `@use
+            // "sass:meta" as m` makes `$module: "m"` the `meta` module.
+            if is_builtin_mixin(builtin, name) {
                 return Ok(Value::Mixin(Box::new(SassMixin {
                     name: name.to_string(),
                     user: None,

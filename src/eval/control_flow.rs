@@ -819,6 +819,21 @@ impl<'a> Evaluator<'a> {
         for (_, v) in &mut named {
             *v = std::mem::replace(v, Value::Null).without_slash();
         }
+        self.apply_evaled(pos_args, named, content, content_params, parents, sink)
+    }
+
+    /// `meta.apply` with its arguments already evaluated — the form a
+    /// first-class reference to it arrives in.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_evaled(
+        &mut self,
+        pos_args: Vec<Value>,
+        mut named: Vec<(String, Value)>,
+        content: Option<Rc<Vec<Stmt>>>,
+        content_params: Option<Rc<ParamList>>,
+        parents: &[String],
+        sink: &mut Sink<'_>,
+    ) -> Result<(), Error> {
         let (mixin_val, rest_pos): (Value, Vec<Value>) = if !pos_args.is_empty() {
             let mut iter = pos_args.into_iter();
             let first = iter.next().unwrap_or(Value::Null);
@@ -868,13 +883,19 @@ impl<'a> Evaluator<'a> {
                 Ok(c) => c,
                 Err(_) => return Err(Error::unpositioned("Undefined mixin.")),
             },
-            // A built-in mixin reference (`meta.load-css`/`meta.apply`). Only the
-            // content-block validation is observable in the supported cases.
+            // A built-in mixin reference (`meta.load-css`/`meta.apply`): dart
+            // invokes it like any other, so dispatch by name.
             None => {
-                if content.is_some() {
-                    return Err(Error::unpositioned("Mixin doesn't accept a content block."));
-                }
-                return Err(Error::unpositioned("Undefined mixin."));
+                return match mixin.name.replace('_', "-").as_str() {
+                    "load-css" => self.load_css_evaled(pos_args, named, content, Pos::NONE, parents, sink),
+                    "apply" => self.apply_evaled(pos_args, named, content, content_params, parents, sink),
+                    _ => {
+                        if content.is_some() {
+                            return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+                        }
+                        Err(Error::unpositioned("Undefined mixin."))
+                    }
+                };
             }
         };
         if content.is_some() && !body_uses_content(&callable.def.body) {
