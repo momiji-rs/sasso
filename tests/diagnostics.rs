@@ -1640,6 +1640,14 @@ fn the_legacy_if_suggests_the_modern_syntax() {
         ),
         ("a { b: if(true, [], 2); }\n", "if(sass(true): []; else: 2)"),
         ("a { b: if(true, (), 2); }\n", "if(sass(true): (); else: 2)"),
+        // A one-element comma list needs the parens that make it a list, and
+        // the trailing comma with them — but inside brackets it needs neither.
+        ("a { b: if(true, (1,), 2); }\n", "if(sass(true): ((1,)); else: 2)"),
+        ("a { b: if(true, [1,], 2); }\n", "if(sass(true): [1]; else: 2)"),
+        (
+            "a { b: if(true, (1, 2), 3); }\n",
+            "if(sass(true): (1, 2); else: 3)",
+        ),
         ("a { b: if(not true, 1, 2); }\n", "if(sass(not true): 1; else: 2)"),
         (
             "$v: 1;\na { b: if($v > 1, 1, 2); }\n",

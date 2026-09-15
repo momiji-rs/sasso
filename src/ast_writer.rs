@@ -144,9 +144,10 @@ fn write_list(out: &mut String, items: &[Expr], sep: ListSep, bracketed: bool) {
         }
         write_into(out, item);
     }
-    // A one-element comma list keeps its trailing comma, which is what makes
-    // it a list at all.
-    if items.len() == 1 && comma {
+    // A one-element comma list keeps its trailing comma only when the
+    // parentheses are what make it a list: inside brackets the brackets
+    // already do, and dart writes `[1]` for `[1,]`.
+    if needs_parens && comma && !items.is_empty() {
         out.push(',');
     }
     if bracketed {
