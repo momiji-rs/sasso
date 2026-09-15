@@ -42,14 +42,10 @@
 //! The line/column numbers in the location line are **1-based**, matching
 //! dart-sass and [`crate::Error`].
 //!
-//! With `--no-unicode`, dart-sass swaps the glyph set:
-//! `╷│╵` → `,|'` and (for multi-line spans) `┌│└─` → `,|'-`.
-
-// This is a self-contained, not-yet-wired deliverable: the renderer's public
-// API is exercised by the unit tests below and is consumed by the later
-// integration step that attaches it to `crate::Error`. Until then the non-test
-// `cargo build` sees the items as unused, so we silence `dead_code` here; the
-// integration step that calls these functions removes this allow.
+//! With `--no-unicode`, dart-sass swaps the glyph set: `╷│╵` → `,|'`, and for
+//! a multi-line span `│─` → `|-`. Its two CORNERS have no single spelling:
+//! `┌└` are `,'` on the arrow rows that reach in to a span starting or ending
+//! mid-line, and `/\` where the arm begins or ends in the GUTTER instead.
 
 /// The glyph set used to draw the gutter and span decorations.
 ///

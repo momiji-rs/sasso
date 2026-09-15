@@ -314,10 +314,10 @@ impl<'a> Evaluator<'a> {
                 let sp = self.expression_node(def, param.default_pos);
                 (v, sp)
             } else {
-                // dart reports a missing argument against the INVOCATION (its
-                // primary span; the declaration is a second one sasso does not
-                // render yet). Every call path pushes that frame before
-                // binding, so it is the innermost one.
+                // dart reports a missing argument against the INVOCATION as
+                // its primary span, with the declaration it was measured
+                // against beside it. Every call path pushes the call's frame
+                // before binding, so it is the innermost one.
                 return Err(
                     self.error_at_call_with_declaration(format!("Missing argument ${}.", param.name), decl)
                 );
