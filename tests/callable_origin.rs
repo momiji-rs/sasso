@@ -314,8 +314,12 @@ impl Importer for SameNameImporter {
 
     fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError> {
         let contents = match canonical.as_str() {
-            "custom://a/foo" => "@mixin ma {\n  p: $nope;\n}\n@mixin boom {\n  @error \"boom\";\n}\n",
-            "custom://b/foo" => "@use \"a\";\n@mixin mb {\n\n\n  q: $nope;\n}\n@mixin via-a {\n\n\n\n\n  @include a.boom;\n}\n@mixin via-ma {\n  @include a.ma;\n}\n",
+            "custom://a/foo" => {
+                "@mixin ma {\n  p: $nope;\n}\n@mixin boom {\n  @error \"boom\";\n}\n@mixin need($x) {\n  p: $x;\n}\n"
+            }
+            "custom://b/foo" => {
+                "@use \"a\";\n@mixin mb {\n\n\n  q: $nope;\n}\n@mixin via-a {\n\n\n\n\n  @include a.boom;\n}\n@mixin via-ma {\n  @include a.ma;\n}\n@mixin via-need {\n  @include a.need;\n}\n"
+            }
             _ => return Ok(None),
         };
         Ok(Some(ImporterResult {
@@ -409,4 +413,28 @@ fn a_cross_module_capture_renders_its_own_module_source() {
     assert!(err.contains("2 │   p: $nope;\n"), "{err}");
     assert!(!err.contains("@mixin mb"), "{err}");
     assert!(err.contains("foo 2:6"), "{err}");
+}
+
+#[test]
+fn a_two_span_error_keeps_files_that_share_a_display_name_apart() {
+    // `Missing argument` points at the call AND at the declaration it was
+    // measured against. Here they are in DIFFERENT files that both display as
+    // `foo`, so grouping the two spans by display name alone would draw the
+    // declaration against the caller's lines. Each keeps its own block and its
+    // own text. (The block SHAPE is locked against dart by
+    // `tests/diagnostics.rs`; a custom importer is not reproducible in the dart
+    // CLI, so this test locks only the identity.)
+    let imp = SameNameImporter;
+    let opts = Options::default().with_importer(&imp).with_url("entry.scss");
+    let err = compile("@use \"b\";\nx {\n  @include b.via-need;\n}\n", &opts)
+        .expect_err("missing argument")
+        .to_string();
+    assert!(err.starts_with("Error: Missing argument $x.\n"), "{err}");
+    // Two blocks, each headed by the name the two files share.
+    assert_eq!(err.matches("\u{250c}\u{2500}\u{2500}> foo\n").count(), 2, "{err}");
+    // The invocation is B's line 18, the declaration A's line 7 — and each is
+    // rendered from ITS file, so neither block shows the other's text.
+    assert!(err.contains("18 \u{2502}   @include a.need;\n"), "{err}");
+    assert!(err.contains("7 \u{2502} @mixin need($x) {\n"), "{err}");
+    assert!(!err.contains("@mixin via-need"), "{err}");
 }

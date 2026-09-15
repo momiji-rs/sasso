@@ -288,7 +288,7 @@ impl<'a> Evaluator<'a> {
         params: &ParamList,
         evaled: EvaledArgs,
         spans: &ArgSpans,
-        name: &str,
+        decl: &Declared<'_>,
     ) -> Result<(), Error> {
         let (positional, keyword_vec, rest_sep) = evaled;
         let mut keyword: HashMap<String, Value> = HashMap::default();
@@ -300,6 +300,7 @@ impl<'a> Evaluator<'a> {
             }
             keyword.insert(norm, v);
         }
+        let positional_count = positional.len();
         let mut pos_iter = positional.into_iter().enumerate();
         for param in &params.params {
             let (val, span) = if let Some((i, v)) = pos_iter.next() {
@@ -313,11 +314,13 @@ impl<'a> Evaluator<'a> {
                 let sp = self.expression_node(def, param.default_pos);
                 (v, sp)
             } else {
-                // dart reports a missing argument against the INVOCATION (its
-                // primary span; the declaration is a second one sasso does not
-                // render yet). Every call path pushes that frame before
-                // binding, so it is the innermost one.
-                return Err(self.error_at_call(format!("Missing argument ${}.", param.name)));
+                // dart reports a missing argument against the INVOCATION as
+                // its primary span, with the declaration it was measured
+                // against beside it. Every call path pushes the call's frame
+                // before binding, so it is the innermost one.
+                return Err(
+                    self.error_at_call_with_declaration(format!("Missing argument ${}.", param.name), decl)
+                );
             };
             if let Some(sc) = self.scopes.last() {
                 sc.borrow_mut().insert(param.name.clone(), val);
@@ -360,9 +363,18 @@ impl<'a> Evaluator<'a> {
                 frame.borrow_mut().insert(rest.clone(), VarSpan::default());
             }
         } else if pos_iter.next().is_some() {
-            return Err(Error::unpositioned(format!(
-                "{name} was passed too many arguments."
-            )));
+            // dart counts what was DECLARED against what was passed, and
+            // agrees with itself about the verb.
+            let allowed = params.params.len();
+            let passed = positional_count;
+            return Err(self.error_at_call_with_declaration(
+                format!(
+                    "Only {allowed} argument{} allowed, but {passed} {} passed.",
+                    if allowed == 1 { "" } else { "s" },
+                    if passed == 1 { "was" } else { "were" }
+                ),
+                decl,
+            ));
         }
         if params.rest.is_none() && !keyword.is_empty() {
             let leftover: Vec<&str> = keyword_order
@@ -381,7 +393,7 @@ impl<'a> Evaluator<'a> {
                         .join(", ");
                     format!("No parameters named {head} or ${last}.")
                 };
-                return Err(Error::unpositioned(msg));
+                return Err(self.error_at_call_with_declaration(msg, decl));
             }
         }
         Ok(())
@@ -411,7 +423,7 @@ impl<'a> Evaluator<'a> {
         let saved_env_modules = self.install_env_modules(&func.env_modules);
         self.push_scope(false);
         let result = self
-            .bind_evaled_into_scope(&func.def.params, evaled, &arg_spans, &func.def.name)
+            .bind_evaled_into_scope(&func.def.params, evaled, &arg_spans, &declared(func))
             .and_then(|()| {
                 // A function body is not a mixin body: `meta.content-exists()`
                 // called from a function (even one invoked by a mixin) errors.
@@ -586,6 +598,9 @@ impl<'a> Evaluator<'a> {
         content_params: Option<Rc<ParamList>>,
         module: Option<&str>,
         pos: Pos,
+        // The CALL's byte length, content block excluded — dart's
+        // `spanWithoutContent`, which sizes an error about the call itself.
+        length: usize,
         // The whole statement's byte length — an error about the RULE (this
         // mixin does not exist, that namespace does not exist) carets all of
         // it, content block included, as dart's `span` does.
@@ -603,7 +618,9 @@ impl<'a> Evaluator<'a> {
                 // `_` and `-` are one character in a Sass identifier, so
                 // `meta.load_css(…)` is `meta.load-css(…)`.
                 match normalize_arg_name(name).as_ref() {
-                    "apply" => return self.exec_apply(args, content, content_params, pos, parents, sink),
+                    "apply" => {
+                        return self.exec_apply(args, content, content_params, pos, length, parents, sink)
+                    }
                     "load-css" => return self.exec_load_css(args, content, pos, parents, sink),
                     _ => {}
                 }
@@ -626,7 +643,15 @@ impl<'a> Evaluator<'a> {
                 if target.mixin(name).is_none() {
                     if let Some((owner, bare)) = super::meta::resolve_forwarded_builtin_mixin(&target, name) {
                         if owner == "meta" && bare == "apply" {
-                            return self.exec_apply(args, content, content_params, pos, parents, sink);
+                            return self.exec_apply(
+                                args,
+                                content,
+                                content_params,
+                                pos,
+                                length,
+                                parents,
+                                sink,
+                            );
                         }
                         if owner == "meta" && bare == "load-css" {
                             return self.exec_load_css(args, content, pos, parents, sink);
@@ -638,7 +663,17 @@ impl<'a> Evaluator<'a> {
                     .ok_or_else(|| Error::at("Undefined mixin.", pos).with_length(full_length))?;
                 // A forwarded mixin runs in its DEFINING module's environment.
                 let exec = target.mixin_origin(name).unwrap_or(target);
-                return self.run_module_mixin(&exec, &mixin, args, content, content_params, parents, sink);
+                return self.run_module_mixin(
+                    &exec,
+                    &mixin,
+                    args,
+                    content,
+                    content_params,
+                    pos,
+                    length,
+                    parents,
+                    sink,
+                );
             }
             if !self.used_modules.contains_key(ns) {
                 return Err(
@@ -669,11 +704,21 @@ impl<'a> Evaluator<'a> {
                 );
             }
             if let Some((m, mx)) = hits.into_iter().next() {
-                return self.run_module_mixin(&m, &mx, args, content, content_params, parents, sink);
+                return self.run_module_mixin(
+                    &m,
+                    &mx,
+                    args,
+                    content,
+                    content_params,
+                    pos,
+                    length,
+                    parents,
+                    sink,
+                );
             }
             if let Some((owner, bare)) = builtin_hits.into_iter().next() {
                 if owner == "meta" && bare == "apply" {
-                    return self.exec_apply(args, content, content_params, pos, parents, sink);
+                    return self.exec_apply(args, content, content_params, pos, length, parents, sink);
                 }
                 if owner == "meta" && bare == "load-css" {
                     return self.exec_load_css(args, content, pos, parents, sink);
@@ -686,7 +731,14 @@ impl<'a> Evaluator<'a> {
         // dart-sass: passing a content block to a mixin that never uses
         // `@content` is an error, even when the block is empty.
         if content.is_some() && !body_uses_content(&mixin.def.body) {
-            return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+            // Raised BEFORE the mixin is entered, so its own frame is not on
+            // the stack — dart shows only the caller's.
+            return Err(self.error_with_declaration_at(
+                "Mixin doesn't accept a content block.",
+                pos,
+                length,
+                &declared(&mixin),
+            ));
         }
         // Arguments evaluate in the caller's environment; the body runs in
         // the mixin's lexical closure. The content block captures the CALL
@@ -712,7 +764,7 @@ impl<'a> Evaluator<'a> {
         let saved_env_modules = self.install_env_modules(&mixin.env_modules);
         self.push_scope(false);
         let result = self
-            .bind_evaled_into_scope(&mixin.def.params, evaled, &arg_spans, &mixin.def.name)
+            .bind_evaled_into_scope(&mixin.def.params, evaled, &arg_spans, &declared(&mixin))
             .and_then(|()| {
                 self.content_stack.push(content_block);
                 self.in_mixin.push(true);
@@ -744,11 +796,20 @@ impl<'a> Evaluator<'a> {
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
+        pos: Pos,
+        length: usize,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         if content.is_some() && !body_uses_content(&mixin.def.body) {
-            return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+            // Raised BEFORE the mixin is entered, so its own frame is not on
+            // the stack — dart shows only the caller's.
+            return Err(self.error_with_declaration_at(
+                "Mixin doesn't accept a content block.",
+                pos,
+                length,
+                &declared(mixin),
+            ));
         }
         // Evaluate the arguments at the call site (so they resolve in the
         // caller's scope), then enter the module's environment and the
@@ -777,7 +838,7 @@ impl<'a> Evaluator<'a> {
         let saved_env_modules = self.install_env_modules(&mixin.env_modules);
         self.push_scope(false);
         let result = self
-            .bind_evaled_into_scope(&mixin.def.params, evaled, &arg_spans, &mixin.def.name)
+            .bind_evaled_into_scope(&mixin.def.params, evaled, &arg_spans, &declared(mixin))
             .and_then(|()| {
                 self.content_stack.push(content_block);
                 // A mixin body: `meta.content-exists()` is allowed and answers
@@ -805,12 +866,16 @@ impl<'a> Evaluator<'a> {
     /// reference. The first argument is the mixin reference; the rest are the
     /// arguments passed on to that mixin (which may also accept a `@content`
     /// block).
+    #[allow(clippy::too_many_arguments)]
     fn exec_apply(
         &mut self,
         args: &[CallArg],
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
         pos: Pos,
+        // The CALL's byte length, content block excluded — what an error about
+        // the call itself carets, exactly as a direct `@include` does.
+        length: usize,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -824,7 +889,16 @@ impl<'a> Evaluator<'a> {
         for (_, v) in &mut named {
             *v = std::mem::replace(v, Value::Null).without_slash();
         }
-        self.apply_evaled(pos_args, named, content, content_params, pos, parents, sink)
+        self.apply_evaled(
+            pos_args,
+            named,
+            content,
+            content_params,
+            pos,
+            length,
+            parents,
+            sink,
+        )
     }
 
     /// `meta.apply` with its arguments already evaluated — the form a
@@ -839,6 +913,7 @@ impl<'a> Evaluator<'a> {
         // The `@include` this invocation came from — what an error inside the
         // mixin carets, exactly as a direct `@include meta.load-css(…)` does.
         pos: Pos,
+        length: usize,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -868,6 +943,7 @@ impl<'a> Evaluator<'a> {
             content,
             content_params,
             pos,
+            length,
             parents,
             sink,
         )
@@ -884,6 +960,7 @@ impl<'a> Evaluator<'a> {
         content: Option<Rc<Vec<Stmt>>>,
         content_params: Option<Rc<ParamList>>,
         pos: Pos,
+        length: usize,
         parents: &[String],
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
@@ -898,9 +975,16 @@ impl<'a> Evaluator<'a> {
             None => {
                 return match mixin.name.replace('_', "-").as_str() {
                     "load-css" => self.load_css_evaled(pos_args, named, content, pos, parents, sink),
-                    "apply" => {
-                        self.apply_evaled(pos_args, named, content, content_params, pos, parents, sink)
-                    }
+                    "apply" => self.apply_evaled(
+                        pos_args,
+                        named,
+                        content,
+                        content_params,
+                        pos,
+                        length,
+                        parents,
+                        sink,
+                    ),
                     _ => {
                         if content.is_some() {
                             return Err(Error::unpositioned("Mixin doesn't accept a content block."));
@@ -911,7 +995,14 @@ impl<'a> Evaluator<'a> {
             }
         };
         if content.is_some() && !body_uses_content(&callable.def.body) {
-            return Err(Error::unpositioned("Mixin doesn't accept a content block."));
+            // Raised BEFORE the mixin is entered, so its own frame is not on
+            // the stack — dart shows only the caller's.
+            return Err(self.error_with_declaration_at(
+                "Mixin doesn't accept a content block.",
+                pos,
+                length,
+                &declared(&callable),
+            ));
         }
         let content_block = content.map(|stmts| {
             let snapshot = self.snapshot_env();
@@ -954,7 +1045,7 @@ impl<'a> Evaluator<'a> {
                 &callable.def.params,
                 (pos_args, named, ListSep::Comma),
                 &ArgSpans::default(),
-                &callable.def.name,
+                &declared(&callable),
             )
             .and_then(|()| {
                 self.content_stack.push(content_block);
@@ -1037,7 +1128,18 @@ impl<'a> Evaluator<'a> {
         // itself (a recursive mixin chaining `@content` must terminate).
         let running = self.content_stack.pop();
         let result = match (&params, evaled) {
-            (Some(p), Some((evaled, spans))) => self.bind_evaled_into_scope(p, evaled, &spans, "@content"),
+            (Some(p), Some((evaled, spans))) => self.bind_evaled_into_scope(
+                p,
+                evaled,
+                &spans,
+                // A `using (…)` clause has no `name(params)` declaration to
+                // point back at; dart reports these against the call alone.
+                &Declared {
+                    pos: Pos::NONE,
+                    length: 0,
+                    origin: None,
+                },
+            ),
             _ => Ok(()),
         }
         .and_then(|()| self.exec(&stmts, parents, sink))
@@ -1286,5 +1388,15 @@ impl<'a> Evaluator<'a> {
                 Ok(combine_residuals(residuals, false))
             }
         }
+    }
+}
+
+/// The declaration description a bound callable carries: its `name(params)`
+/// span, in the file it was written in.
+pub(super) fn declared(callable: &Rc<UserCallable>) -> Declared<'_> {
+    Declared {
+        pos: callable.def.decl_pos,
+        length: callable.def.decl_length,
+        origin: Some(&callable.origin),
     }
 }

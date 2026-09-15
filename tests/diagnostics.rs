@@ -384,27 +384,42 @@ fn a_missing_argument_points_at_the_invocation() {
             .expect_err("expected a compile error")
             .to_string()
     };
-    // A function in the same file.
+    // A function in the same file: the invocation IS the primary span, and
+    // dart's second span points back at the declaration.
     let block = run("@function f($x) { @return $x; }\n.a { b: f(); }\n");
     assert!(block.starts_with("Error: Missing argument $x.\n"), "{block}");
     assert!(block.contains("2 \u{2502} .a { b: f(); }\n"), "{block}");
-    assert_eq!(caret_line(&block), "^^^", "{block}");
+    assert_eq!(caret_line(&block), "^^^ invocation", "{block}");
+    assert!(
+        block.contains("1 \u{2502} @function f($x) { @return $x; }\n"),
+        "{block}"
+    );
+    assert!(
+        block.contains("\u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration"),
+        "{block}"
+    );
     // A function in ANOTHER file: the snippet is the caller's line, not the
     // definition's.
     let block = run("@use \"lib\";\n.a { b: lib.f(); }\n");
     assert!(block.contains("2 \u{2502} .a { b: lib.f(); }\n"), "{block}");
-    assert_eq!(caret_line(&block), "^^^^^^^", "{block}");
+    assert_eq!(caret_line(&block), "^^^^^^^ invocation", "{block}");
     assert!(block.contains("in.scss 2:9  f()"), "{block}");
     // The same for a mixin.
     let block = run("@use \"lib\";\n.a { @include lib.m; }\n");
     assert!(block.contains("2 \u{2502} .a { @include lib.m; }\n"), "{block}");
-    assert_eq!(caret_line(&block), "^^^^^^^^^^^^^^", "{block}");
+    assert_eq!(caret_line(&block), "^^^^^^^^^^^^^^ invocation", "{block}");
     // And through `meta.call`, which invokes a reference.
     let block = run(
         "@use \"sass:meta\";\n@function f($x) { @return $x; }\n.a { b: meta.call(meta.get-function(\"f\")); }\n",
     );
-    assert_eq!(caret_line(&block), "^".repeat(33), "{block}");
+    assert_eq!(
+        caret_line(&block),
+        format!("{} invocation", "^".repeat(33)),
+        "{block}"
+    );
     // A built-in re-exported through `@forward` reports like a direct one.
+    // It keeps the single-span block: dart points back at a declaration in
+    // `sass:math`, which has no source text here to point AT.
     std::fs::write(dir.join("_fwd.scss"), "@forward \"sass:math\";\n").expect("write");
     let block = run("@use \"fwd\";\n.a { b: fwd.div(1); }\n");
     assert_eq!(caret_line(&block), "^^^^^^^^^^", "{block}");
@@ -1738,4 +1753,256 @@ fn the_legacy_if_suggests_the_modern_syntax() {
             .collect();
         assert_eq!(found.len(), 1, "{src}: {found:?}");
     }
+}
+
+#[test]
+fn an_argument_error_shows_the_declaration_it_failed_against() {
+    // dart points at TWO places for the argument-binding family: where the
+    // call is, and the parameter list it was measured against. Every block
+    // below was measured against dart-sass 1.103.1.
+    let dir = std::env::temp_dir().join(format!("sasso_decl_span_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("_lib.scss"), "@mixin m($x) { a: $x; }\n").expect("write");
+    let entry = dir.join("in.scss");
+    let url = entry.to_string_lossy().into_owned();
+    let imp = sasso::FsImporter::new(Vec::new());
+    let run = |src: &str| -> String {
+        std::fs::write(&entry, src).unwrap();
+        compile(src, &Options::default().with_importer(&imp).with_url(&url))
+            .expect_err("expected a compile error")
+            .to_string()
+    };
+    // The arity message counts what was declared against what was passed, and
+    // agrees with itself about the verb.
+    for (src, message) in [
+        (
+            "@function f() { @return 1; }\n.a { b: f(1); }\n",
+            "Only 0 arguments allowed, but 1 was passed.",
+        ),
+        (
+            "@function f($x) { @return 1; }\n.a { b: f(1, 2); }\n",
+            "Only 1 argument allowed, but 2 were passed.",
+        ),
+        (
+            "@function f($x, $y) { @return 1; }\n.a { b: f(1, 2, 3); }\n",
+            "Only 2 arguments allowed, but 3 were passed.",
+        ),
+    ] {
+        let block = run(src);
+        assert!(block.starts_with(&format!("Error: {message}\n")), "{block}");
+        assert!(block.contains(" declaration\n"), "{block}");
+        assert!(caret_line(&block).ends_with(" invocation"), "{block}");
+    }
+    // `No parameter named` carries it too.
+    let block = run("@function f($x) { @return 1; }\n.a { b: f(1, $z: 2); }\n");
+    assert!(block.starts_with("Error: No parameter named $z.\n"), "{block}");
+    assert!(
+        block.contains("\u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration"),
+        "{block}"
+    );
+    // A content block a mixin does not take: the call is the primary span,
+    // the mixin NAME the secondary — and the trace starts at the caller,
+    // because the mixin is never entered.
+    let block = run("@mixin m { a: 1; }\n.a { @include m { b: 2; } }\n");
+    assert!(
+        block.starts_with("Error: Mixin doesn't accept a content block.\n"),
+        "{block}"
+    );
+    assert!(block.contains("\u{2501} declaration"), "{block}");
+    assert_eq!(caret_line(&block), "^^^^^^^^^^ invocation", "{block}");
+    assert!(!block.contains("m()"), "{block}");
+    // A declaration in ANOTHER file gets its own block, headed by its url.
+    let block = run("@use \"lib\";\n.a { @include lib.m; }\n");
+    assert!(block.contains("\u{250c}\u{2500}\u{2500}> "), "{block}");
+    assert!(block.contains("_lib.scss"), "{block}");
+    assert!(
+        block.contains("\u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration"),
+        "{block}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Everything up to and including the block's closing gutter glyph — the part
+/// that does not name a temporary directory.
+fn snippet(block: &str) -> String {
+    let lines: Vec<&str> = block.lines().collect();
+    let end = lines
+        .iter()
+        .rposition(|l| l.trim() == "\u{2575}")
+        .unwrap_or_else(|| panic!("no closing glyph in:\n{block}"));
+    lines[..=end].join("\n")
+}
+
+#[test]
+fn a_span_that_crosses_lines_draws_an_arm_down_to_its_label() {
+    // dart draws an arm beside every line a span covers and hangs the label on
+    // the row that closes it — and one such span anywhere indents EVERY line of
+    // the diagnostic by the arm column, blank arm included. Each block below is
+    // dart-sass 1.103.1's, byte for byte.
+    let run = |src: &str| -> String {
+        snippet(
+            &compile(src, &Options::default().with_url("t.scss"))
+                .expect_err("expected a compile error")
+                .to_string(),
+        )
+    };
+    // A call that starts mid-line opens with an arrow row; the closing row
+    // points at the last spanned character.
+    assert_eq!(
+        run("@mixin m($x) { a: $x; }\n.a { @include m(\n); }\n"),
+        "Error: Missing argument $x.\n  \u{2577}\n\
+         1 \u{2502}   @mixin m($x) { a: $x; }\n  \u{2502}          \u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration\n\
+         2 \u{2502}   .a { @include m(\n  \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         3 \u{2502} \u{2502} ); }\n  \u{2502} \u{2514}\u{2500}^ invocation\n  \u{2575}"
+    );
+    // A call that starts its line puts the arm in the gutter instead; one that
+    // also ENDS its line has nothing to point at, so dart draws a flat arm.
+    assert_eq!(
+        run("@mixin m($x) { a: $x; }\n@include m(\n)\n;\n"),
+        "Error: Missing argument $x.\n  \u{2577}\n\
+         1 \u{2502}   @mixin m($x) { a: $x; }\n  \u{2502}          \u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration\n\
+         2 \u{2502} \u{250c} @include m(\n\
+         3 \u{2502} \u{2502} )\n  \u{2502} \u{2514}\u{2500}\u{2500}\u{2500} invocation\n  \u{2575}"
+    );
+    // The DECLARATION crossing lines is the same shape — it just comes first.
+    assert_eq!(
+        run("@mixin m(\n  $x: 1\n) { a: $x; }\n.a { @include m(1, 2); }\n"),
+        "Error: Only 1 argument allowed, but 2 were passed.\n  \u{2577}\n\
+         1 \u{2502}   @mixin m(\n  \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         2 \u{2502} \u{2502}   $x: 1\n\
+         3 \u{2502} \u{2502} ) { a: $x; }\n  \u{2502} \u{2514}\u{2500}^ declaration\n\
+         4 \u{2502}   .a { @include m(1, 2); }\n  \u{2502}        ^^^^^^^^^^^^^^^^ invocation\n  \u{2575}"
+    );
+    // Both crossing lines: two arms, one after the other.
+    assert_eq!(
+        run("@mixin m(\n  $x: 1\n) { a: $x; }\n.a { @include m(\n  1, 2\n); }\n"),
+        "Error: Only 1 argument allowed, but 2 were passed.\n  \u{2577}\n\
+         1 \u{2502}   @mixin m(\n  \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         2 \u{2502} \u{2502}   $x: 1\n\
+         3 \u{2502} \u{2502} ) { a: $x; }\n  \u{2502} \u{2514}\u{2500}^ declaration\n\
+         4 \u{2502}   .a { @include m(\n  \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         5 \u{2502} \u{2502}   1, 2\n\
+         6 \u{2502} \u{2502} ); }\n  \u{2502} \u{2514}\u{2500}^ invocation\n  \u{2575}"
+    );
+    // An elision and an arm at once: the gutter widens and left-aligns, and the
+    // `...` row carries no arm.
+    assert_eq!(
+        run("@mixin m($x) { a: $x; }\n// pad\n// pad\n.a { @include m(\n); }\n"),
+        "Error: Missing argument $x.\n    \u{2577}\n\
+         1   \u{2502}   @mixin m($x) { a: $x; }\n    \u{2502}          \u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration\n\
+         ... \u{2502}\n\
+         4   \u{2502}   .a { @include m(\n    \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         5   \u{2502} \u{2502} ); }\n    \u{2502} \u{2514}\u{2500}^ invocation\n    \u{2575}"
+    );
+}
+
+#[test]
+fn a_first_class_mixin_reference_carries_the_declaration_too() {
+    // `@include meta.apply(…)` reaches the same binding code by another road,
+    // and dart gives it the same two spans: the whole `meta.apply` call as the
+    // invocation (its content block excluded), the mixin as the declaration.
+    let run = |src: &str| -> String {
+        compile(src, &Options::default().with_url("t.scss"))
+            .expect_err("expected a compile error")
+            .to_string()
+    };
+    let block = run(
+        "@use \"sass:meta\";\n@mixin m { a: 1; }\n.a { @include meta.apply(meta.get-mixin(\"m\")) { b: 2; } }\n",
+    );
+    assert_eq!(
+        snippet(&block),
+        "Error: Mixin doesn't accept a content block.\n  \u{2577}\n\
+         2 \u{2502} @mixin m { a: 1; }\n  \u{2502}        \u{2501} declaration\n\
+         3 \u{2502} .a { @include meta.apply(meta.get-mixin(\"m\")) { b: 2; } }\n  \u{2502}      \
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ invocation\n  \u{2575}"
+    );
+    // The mixin is never entered, so the trace starts at the caller.
+    assert!(!block.contains("  m()"), "{block}");
+    // The argument-binding errors carry it as well.
+    for (src, message) in [
+        (
+            "@use \"sass:meta\";\n@mixin m($x) { a: $x; }\n.a { @include meta.apply(meta.get-mixin(\"m\")); }\n",
+            "Missing argument $x.",
+        ),
+        (
+            "@use \"sass:meta\";\n@mixin m() { a: 1; }\n.a { @include meta.apply(meta.get-mixin(\"m\"), 1); }\n",
+            "Only 0 arguments allowed, but 1 was passed.",
+        ),
+        (
+            "@use \"sass:meta\";\n@mixin m($x: 1) { a: $x; }\n.a { @include meta.apply(meta.get-mixin(\"m\"), $z: 1); }\n",
+            "No parameter named $z.",
+        ),
+    ] {
+        let block = run(src);
+        assert!(block.starts_with(&format!("Error: {message}\n")), "{block}");
+        assert!(block.contains(" declaration\n"), "{block}");
+        assert!(caret_line(&block).ends_with(" invocation"), "{block}");
+    }
+}
+
+#[test]
+fn two_spans_on_one_line_stack_their_rows() {
+    // A stylesheet written on ONE line puts the call and the declaration it was
+    // measured against on that same line. dart prints the line once and stacks
+    // the underlines, the primary first — wherever the two sit relative to each
+    // other. Both blocks are dart-sass 1.103.1's.
+    let run = |src: &str| -> String {
+        snippet(
+            &compile(src, &Options::default().with_url("t.scss"))
+                .expect_err("expected a compile error")
+                .to_string(),
+        )
+    };
+    assert_eq!(
+        run("@function f($x) { @return 1; } .a { b: f(1, 2); }\n"),
+        "Error: Only 1 argument allowed, but 2 were passed.\n  \u{2577}\n1 \u{2502} \
+         @function f($x) { @return 1; } .a { b: f(1, 2); }\n  \u{2502}                                        \
+         ^^^^^^^ invocation\n  \u{2502}           \
+         \u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration\n  \u{2575}"
+    );
+    // The declaration can come AFTER the call on that line; the primary row is
+    // still written first.
+    assert_eq!(
+        run("@mixin caller { @include m; } @mixin m($x) { a: $x; } .a { @include caller; }\n"),
+        "Error: Missing argument $x.\n  \u{2577}\n1 \u{2502} \
+         @mixin caller { @include m; } @mixin m($x) { a: $x; } .a { @include caller; }\n  \u{2502}                 \
+         ^^^^^^^^^^ invocation\n  \u{2502}                                      \
+         \u{2501}\u{2501}\u{2501}\u{2501}\u{2501} declaration\n  \u{2575}"
+    );
+}
+
+#[test]
+fn a_span_inside_an_arms_range_writes_its_row_under_its_own_line() {
+    // A span that stays within its line can sit INSIDE the lines another span's
+    // arm covers. dart writes its row under its own line — before the arm's own
+    // rows — with the arm running down the column beside it. Both blocks are
+    // dart-sass 1.103.1's.
+    let run = |src: &str| -> String {
+        snippet(
+            &compile(src, &Options::default().with_url("t.scss"))
+                .expect_err("expected a compile error")
+                .to_string(),
+        )
+    };
+    // The call on the arm's LAST line: its row comes first, then the row that
+    // closes the arm and carries `declaration`.
+    assert_eq!(
+        run("@mixin m(\n  $x: 1\n) { a: $x; } .b { @include m { c: 1; } }\n"),
+        "Error: Mixin doesn't accept a content block.\n  \u{2577}\n\
+         1 \u{2502}   @mixin m(\n  \u{2502} \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         2 \u{2502} \u{2502}   $x: 1\n\
+         3 \u{2502} \u{2502} ) { a: $x; } .b { @include m { c: 1; } }\n  \u{2502} \u{2502}                   \
+         ^^^^^^^^^^ invocation\n  \u{2502} \u{2514}\u{2500}^ declaration\n  \u{2575}"
+    );
+    // On the arm's FIRST line the arm has not reached in yet — the `,-…-^` row
+    // comes after this one — so the column beside it is still blank.
+    assert_eq!(
+        run("@mixin caller { @include m { c: 1; } } @mixin m(\n  $x: 1\n) { a: $x; }\n.b { @include caller; }\n"),
+        "Error: Mixin doesn't accept a content block.\n  \u{2577}\n\
+         1 \u{2502}   @mixin caller { @include m { c: 1; } } @mixin m(\n  \u{2502}                   \
+         ^^^^^^^^^^ invocation\n  \u{2502} \u{250c}\
+         \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
+         2 \u{2502} \u{2502}   $x: 1\n\
+         3 \u{2502} \u{2502} ) { a: $x; }\n  \u{2502} \u{2514}\u{2500}^ declaration\n  \u{2575}"
+    );
 }

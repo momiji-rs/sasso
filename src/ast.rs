@@ -342,6 +342,12 @@ pub(crate) struct Callable {
     pub name: String,
     pub params: ParamList,
     pub body: Vec<Stmt>,
+    /// 1-based start of the declaration's `name(params)` text, and its byte
+    /// length. dart underlines exactly that as the `declaration` half of an
+    /// argument-binding error — `m($x)` for `@mixin m($x)`, and just `m` when
+    /// there is no parameter list at all.
+    pub decl_pos: Pos,
+    pub decl_length: usize,
 }
 
 /// A declared parameter list: positional/defaulted params plus an optional

@@ -171,6 +171,16 @@ pub(crate) struct EnvModules {
 /// function/mixin scope chains captured at the definition site (shared
 /// frames, dart's `Environment.closure()`). The body runs against these
 /// chains, not the caller's stack.
+/// What an argument-binding failure points back at: the callable's name for
+/// the message, and the `name(params)` span in the file it was DECLARED in,
+/// which dart draws as the error's second span.
+pub(super) struct Declared<'a> {
+    pub pos: Pos,
+    pub length: usize,
+    /// The file the declaration is in. `None` means the current one.
+    pub origin: Option<&'a crate::value::MixinOrigin>,
+}
+
 pub(crate) struct UserCallable {
     pub def: Rc<Callable>,
     /// The file that defined the callable. Its body runs against that file
@@ -2011,6 +2021,203 @@ impl<'a> Evaluator<'a> {
     /// The call site is in the CALLER's file, which by now may not be the
     /// current one (a cross-file call has already switched context), so the
     /// block is rendered here, against that frame's own text.
+    /// An error about a construct that has a `declaration` to point back at,
+    /// reported at `pos` with the frames as they stand — for a failure that
+    /// happens BEFORE the callable is entered, so its own frame is not on the
+    /// stack (dart shows only the caller's).
+    pub(super) fn error_with_declaration_at(
+        &self,
+        message: impl Into<String>,
+        pos: Pos,
+        length: usize,
+        decl: &Declared<'_>,
+    ) -> Error {
+        let message = message.into();
+        // The stack AS IT STANDS, without the synthetic frame naming the
+        // member being entered: this error happens before the callable runs,
+        // so dart's trace starts at the caller.
+        let frames: Vec<DiagFrame> = self.call_stack.iter().rev().cloned().collect();
+        let frames = if frames.is_empty() {
+            self.frames_for(pos)
+        } else {
+            frames
+        };
+        let rendered = match self.declaration_block(&message, pos, length, decl, &frames) {
+            Some(rendered) => Some(rendered),
+            // The two spans cannot share a block. Draw the primary one HERE,
+            // against the frames as they stand: leaving the error unrendered
+            // would defer that until the `@include` arm has popped this call,
+            // and the trace would be built from whatever is current then.
+            None if self.diag_enabled() && !frames.is_empty() => {
+                let mut block = format!("Error: {message}\n");
+                block.push_str(&crate::diag::render_snippet(
+                    &frames[0].source,
+                    crate::diag::Span {
+                        line: pos.line,
+                        col: pos.col,
+                        length,
+                    },
+                    &[],
+                    self.options.glyphs,
+                ));
+                block.push('\n');
+                block.push_str(&Self::render_frame_block(&frames, 2));
+                Some(block)
+            }
+            None => None,
+        };
+        let mut e = Error::at(message, pos).with_length(length);
+        e.rendered = rendered;
+        e
+    }
+
+    /// The rendered two-span block, or `None` when this diagnostic cannot have
+    /// one: diagnostics off, no declaration position, or two spans the renderer
+    /// cannot keep apart (see [`Self::spans_share_a_block`]).
+    fn declaration_block(
+        &self,
+        message: &str,
+        pos: Pos,
+        length: usize,
+        decl: &Declared<'_>,
+        frames: &[DiagFrame],
+    ) -> Option<String> {
+        if !self.diag_enabled() || !decl.pos.is_known() || frames.is_empty() {
+            return None;
+        }
+        let (decl_url, decl_source) = match decl.origin {
+            Some(o) => (o.diag_url.clone(), Rc::clone(&o.source)),
+            None => (frames[0].url.clone(), Rc::clone(&frames[0].source)),
+        };
+        let decl_span = crate::diag::Span {
+            line: decl.pos.line,
+            col: decl.pos.col,
+            length: decl.length,
+        };
+        let call_span = crate::diag::Span {
+            line: pos.line,
+            col: pos.col,
+            length,
+        };
+        if !Self::spans_share_a_block(
+            (&frames[0].url, &frames[0].source, call_span),
+            (&decl_url, &decl_source, decl_span),
+        ) {
+            return None;
+        }
+        let mut rendered = format!("Error: {message}\n");
+        rendered.push_str(&crate::diag::render_labelled_snippet(
+            &frames[0].url,
+            &frames[0].source,
+            call_span,
+            "invocation",
+            &[crate::diag::Secondary {
+                url: &decl_url,
+                source: &decl_source,
+                span: decl_span,
+                label: "declaration",
+            }],
+            &[],
+            self.options.glyphs,
+        ));
+        rendered.push('\n');
+        rendered.push_str(&Self::render_frame_block(frames, 2));
+        Some(rendered)
+    }
+
+    /// [`Self::error_at_call`] with dart's SECOND span: the `declaration` the
+    /// failure is measured against, in the file it was written in.
+    ///
+    /// Falls back to the plain single-span block for the one pair of spans the
+    /// renderer cannot keep apart (see [`Self::spans_share_a_block`]).
+    pub(super) fn error_at_call_with_declaration(
+        &self,
+        message: impl Into<String>,
+        decl: &Declared<'_>,
+    ) -> Error {
+        let message = message.into();
+        let Some(frame) = self.call_stack.last() else {
+            return Error::unpositioned(message);
+        };
+        if !self.diag_enabled() || !decl.pos.is_known() {
+            return self.error_at_call(message);
+        }
+        let (decl_url, decl_source) = match decl.origin {
+            Some(o) => (o.diag_url.clone(), Rc::clone(&o.source)),
+            None => (frame.url.clone(), Rc::clone(&frame.source)),
+        };
+        let decl_span = crate::diag::Span {
+            line: decl.pos.line,
+            col: decl.pos.col,
+            length: decl.length,
+        };
+        let call_span = crate::diag::Span {
+            line: frame.pos.line,
+            col: frame.pos.col,
+            length: frame.length,
+        };
+        if !Self::spans_share_a_block(
+            (&frame.url, &frame.source, call_span),
+            (&decl_url, &decl_source, decl_span),
+        ) {
+            return self.error_at_call(message);
+        }
+        let mut e = Error::at(message.clone(), frame.pos).with_length(frame.length);
+        let mut frames = Vec::with_capacity(self.call_stack.len() + 1);
+        frames.push(DiagFrame {
+            url: frame.url.clone(),
+            pos: frame.pos,
+            member: self.member.clone(),
+            length: frame.length,
+            content: false,
+            source: Rc::clone(&frame.source),
+        });
+        frames.extend(self.call_stack.iter().rev().cloned());
+        let mut rendered = format!("Error: {message}\n");
+        rendered.push_str(&crate::diag::render_labelled_snippet(
+            &frame.url,
+            &frame.source,
+            call_span,
+            "invocation",
+            &[crate::diag::Secondary {
+                url: &decl_url,
+                source: &decl_source,
+                span: decl_span,
+                label: "declaration",
+            }],
+            &[],
+            self.options.glyphs,
+        ));
+        rendered.push('\n');
+        rendered.push_str(&Self::render_frame_block(&frames, 2));
+        e.rendered = Some(rendered);
+        e
+    }
+
+    /// Whether the call and the declaration can be drawn in one rendered
+    /// block. They can, unless they sit in the SAME file with OVERLAPPING
+    /// lines AND both draw an ARM: dart nests a second arm column and crosses
+    /// the two for that shape, which the renderer cannot do. Anything less
+    /// overlapping is drawable — two spans on one line stack their underline
+    /// rows, and a span that stays within its line sits inside an arm's range
+    /// with the arm running down the column beside it. A file is identified by
+    /// its text as well as its display url: two custom-importer files can
+    /// share a display name.
+    fn spans_share_a_block(
+        call: (&str, &str, crate::diag::Span),
+        decl: (&str, &str, crate::diag::Span),
+    ) -> bool {
+        let ((call_url, call_source, call_span), (decl_url, decl_source, decl_span)) = (call, decl);
+        if call_url != decl_url || call_source != decl_source {
+            return true;
+        }
+        let (call_first, call_last) = crate::diag::span_line_range(call_source, call_span);
+        let (decl_first, decl_last) = crate::diag::span_line_range(decl_source, decl_span);
+        let overlapping = call_first <= decl_last && decl_first <= call_last;
+        let both_arms = call_first != call_last && decl_first != decl_last;
+        !(overlapping && both_arms)
+    }
+
     pub(super) fn error_at_call(&self, message: impl Into<String>) -> Error {
         let Some(frame) = self.call_stack.last() else {
             return Error::unpositioned(message);
@@ -2368,6 +2575,7 @@ impl<'a> Evaluator<'a> {
                         content_params.clone(),
                         module.as_deref(),
                         *pos,
+                        *length,
                         *full_length,
                         parents,
                         sink,

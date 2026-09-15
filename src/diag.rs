@@ -42,14 +42,10 @@
 //! The line/column numbers in the location line are **1-based**, matching
 //! dart-sass and [`crate::Error`].
 //!
-//! With `--no-unicode`, dart-sass swaps the glyph set:
-//! `╷│╵` → `,|'` and (for multi-line spans) `┌│└─` → `,|'-`.
-
-// This is a self-contained, not-yet-wired deliverable: the renderer's public
-// API is exercised by the unit tests below and is consumed by the later
-// integration step that attaches it to `crate::Error`. Until then the non-test
-// `cargo build` sees the items as unused, so we silence `dead_code` here; the
-// integration step that calls these functions removes this allow.
+//! With `--no-unicode`, dart-sass swaps the glyph set: `╷│╵` → `,|'`, and for
+//! a multi-line span `│─` → `|-`. Its two CORNERS have no single spelling:
+//! `┌└` are `,'` on the arrow rows that reach in to a span starting or ending
+//! mid-line, and `/\` where the arm begins or ends in the GUTTER instead.
 
 /// The glyph set used to draw the gutter and span decorations.
 ///
@@ -60,7 +56,7 @@
 pub enum GlyphSet {
     /// Box-drawing glyphs: `╷ │ ╵ ┌ └ ─` and the ASCII caret `^`.
     Unicode,
-    /// Pure-ASCII fallback: `, | ' , ' -` and the caret `^`.
+    /// Pure-ASCII fallback: `, | ' , ' / \ -` and the caret `^`.
     Ascii,
 }
 
@@ -102,6 +98,36 @@ impl GlyphSet {
         match self {
             GlyphSet::Unicode => "\u{2514}",
             GlyphSet::Ascii => "'",
+        }
+    }
+
+    /// Underline of a SECONDARY span (`━` / `=`) — the heavy rule dart draws
+    /// under the `declaration` a `Missing argument` is measured against, so it
+    /// reads differently from the primary's carets.
+    const fn secondary(self) -> char {
+        match self {
+            GlyphSet::Unicode => '\u{2501}',
+            GlyphSet::Ascii => '=',
+        }
+    }
+
+    /// The arm a multi-line span draws IN THE GUTTER when it starts at its
+    /// line's first non-whitespace character (`┌` / `/`). dart's ASCII set
+    /// spells this differently from the `,` that opens an arrow row, so the
+    /// two corners cannot share a glyph.
+    const fn arm_start(self) -> &'static str {
+        match self {
+            GlyphSet::Unicode => "\u{250c}",
+            GlyphSet::Ascii => "/",
+        }
+    }
+
+    /// The same for a span that ENDS at its line's last non-whitespace
+    /// character (`└` / `\`).
+    const fn arm_end(self) -> &'static str {
+        match self {
+            GlyphSet::Unicode => "\u{2514}",
+            GlyphSet::Ascii => "\\",
         }
     }
 
@@ -460,6 +486,391 @@ pub fn render_snippet(source: &str, span: Span, frames: &[Frame<'_>], glyphs: Gl
     out
 }
 
+/// One span drawn alongside the primary one, with the label dart-sass writes
+/// after its underline.
+///
+/// A secondary span can live in ANOTHER FILE — the `@mixin` a `Missing
+/// argument` points back to, or `sass:color` for a built-in — so it carries
+/// its own url and source text.
+pub struct Secondary<'a> {
+    /// The file the span is in, as the location line spells it.
+    pub url: &'a str,
+    /// That file's text. It is also half the identity of the block this span
+    /// is drawn in: a display url is a NAME two files can share (see
+    /// `MixinOrigin::source`), the canonical url is the identity — so spans
+    /// join one block only when their TEXT matches too, or one of them would
+    /// be rendered against the other's lines.
+    pub source: &'a str,
+    pub span: Span,
+    /// The words after the underline (`declaration`, `includes mixin`, …).
+    pub label: &'a str,
+}
+
+/// Render a snippet with LABELLED spans: the primary one underlined with
+/// carets, each secondary with `━`, every underline followed by its label.
+///
+/// dart draws this whenever a diagnostic has something to point at besides the
+/// place it failed — the parameter list behind `Missing argument $x.`, the
+/// `@use` rules that both expose a mixin. The shapes it uses, all measured:
+///
+/// * spans in one file share a block; each printed line is followed by one
+///   underline row per span on it, the primary first;
+/// * a span that CROSSES LINES draws an arm down the left of every line it
+///   covers, and the row that closes the arm carries the label;
+/// * one such span anywhere indents EVERY block by the arm column, blank arm
+///   included — dart sizes that column once for the whole diagnostic;
+/// * lines that are not adjacent are ELIDED with a `... |` row — dart never
+///   prints the lines in between — and the gutter then widens to at least
+///   three columns with the numbers LEFT-aligned in it;
+/// * spans in different files get one block each, introduced by `,--> <url>`
+///   and closed by the usual bottom glyph, the primary's file first.
+///
+/// A span that stays within its line can sit INSIDE an arm's range — its row
+/// is written under its own line, before the arm's, and carries the arm in the
+/// column. Two spans that BOTH cross lines and overlap are the one shape this
+/// cannot draw: dart nests a second arm column and crosses them with `+`.
+/// Callers keep that pair apart — see `Evaluator::spans_share_a_block`.
+pub fn render_labelled_snippet(
+    url: &str,
+    source: &str,
+    span: Span,
+    label: &str,
+    secondaries: &[Secondary<'_>],
+    frames: &[Frame<'_>],
+    glyphs: GlyphSet,
+) -> String {
+    // Group by file, primary first, each file keeping first-appearance order.
+    let mut groups: Vec<(&str, &str, Vec<Entry<'_>>)> = vec![(
+        url,
+        source,
+        vec![Entry {
+            span,
+            label,
+            primary: true,
+        }],
+    )];
+    for sec in secondaries {
+        let entry = Entry {
+            span: sec.span,
+            label: sec.label,
+            primary: false,
+        };
+        // The TEXT is part of the key: a display url is a name two files can
+        // share, so matching on it alone would draw one file's span against
+        // the other's lines.
+        match groups
+            .iter_mut()
+            .find(|(u, s, _)| *u == sec.url && *s == sec.source)
+        {
+            Some((_, _, entries)) => entries.push(entry),
+            None => groups.push((sec.url, sec.source, vec![entry])),
+        }
+    }
+
+    let multi_file = groups.len() > 1;
+    // The arm column is sized ONCE for the whole diagnostic: a span crossing
+    // lines in any block indents them all.
+    let arm = groups
+        .iter()
+        .any(|(_, s, entries)| entries.iter().any(|e| span_crosses_lines(s, e.span)));
+    let mut out = String::new();
+    for (i, (group_url, group_source, entries)) in groups.iter_mut().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        entries.sort_by_key(|e| (e.span.line, !e.primary));
+        render_group(
+            &mut out,
+            multi_file.then_some(*group_url),
+            group_source,
+            entries,
+            arm,
+            glyphs,
+        );
+    }
+    if !frames.is_empty() {
+        out.push('\n');
+        out.push_str(&render_frames(frames));
+    }
+    out
+}
+
+/// One labelled span inside a file's block.
+struct Entry<'a> {
+    span: Span,
+    label: &'a str,
+    primary: bool,
+}
+
+/// An [`Entry`] resolved to the lines and columns it actually covers.
+struct Placed<'a> {
+    label: &'a str,
+    primary: bool,
+    start_idx: usize,
+    start_col0: usize,
+    end_idx: usize,
+    end_col0: usize,
+    /// Whether the span starts at its line's first non-whitespace character,
+    /// which decides whether an arm opens in the gutter or behind an arrow row.
+    starts_at_edge: bool,
+}
+
+impl Placed<'_> {
+    fn crosses_lines(&self) -> bool {
+        self.start_idx != self.end_idx
+    }
+}
+
+fn render_group(
+    out: &mut String,
+    url: Option<&str>,
+    source: &str,
+    entries: &[Entry<'_>],
+    arm: bool,
+    glyphs: GlyphSet,
+) {
+    let lines = split_lines(source);
+    let v = glyphs.vertical();
+    let h = glyphs.horizontal();
+    let last_line = lines.len().saturating_sub(1);
+    let placed: Vec<Placed<'_>> = entries
+        .iter()
+        .map(|e| {
+            let start_idx = e.span.line.saturating_sub(1).min(last_line);
+            let start_col0 = e.span.col.saturating_sub(1);
+            let (end_idx, end_col0) = resolve_end(source, &lines, start_idx, start_col0, e.span.length);
+            let first = lines.get(start_idx).copied().unwrap_or("");
+            Placed {
+                label: e.label,
+                primary: e.primary,
+                start_idx,
+                start_col0,
+                end_idx,
+                end_col0,
+                starts_at_edge: first.chars().take(start_col0).all(char::is_whitespace),
+            }
+        })
+        .collect();
+
+    // Every line any span touches, each printed once, in order.
+    let mut line_nos: Vec<usize> = Vec::with_capacity(placed.len());
+    for p in &placed {
+        for li in p.start_idx..=p.end_idx {
+            if !line_nos.contains(&li) {
+                line_nos.push(li);
+            }
+        }
+    }
+    line_nos.sort_unstable();
+
+    let max_line_no = line_nos.last().copied().unwrap_or(0) + 1;
+    // A gap between printed lines is elided, never filled in — and the `...`
+    // row is three columns wide, which widens the gutter and left-aligns the
+    // numbers in it.
+    let elides = line_nos.windows(2).any(|w| w[1] > w[0] + 1);
+    let width = if elides {
+        digit_count(max_line_no).max(3)
+    } else {
+        digit_count(max_line_no)
+    };
+
+    out.push_str(&blank_gutter(width));
+    // A block introduced by its file name opens with the CORNER glyph the
+    // arrow grows out of, not the plain gutter tick.
+    out.push_str(if url.is_some() {
+        glyphs.top_left()
+    } else {
+        glyphs.top()
+    });
+    if let Some(u) = url {
+        out.push_str(h);
+        out.push_str(h);
+        out.push('>');
+        out.push(' ');
+        out.push_str(u);
+    }
+
+    let mut prev: Option<usize> = None;
+    for &li in &line_nos {
+        if let Some(p) = prev {
+            if li > p + 1 {
+                out.push('\n');
+                out.push_str(&elision_gutter(width));
+                out.push_str(v);
+            }
+        }
+        prev = Some(li);
+        // Spans that cross lines never overlap each other here (the caller
+        // keeps that pair apart), so at most one arm reaches this line, and
+        // every row on it — the source line and the underlines under it —
+        // carries that arm in the column.
+        let armed = placed
+            .iter()
+            .find(|p| p.crosses_lines() && p.start_idx <= li && li <= p.end_idx);
+        let slot = match armed {
+            // The arm opens IN THE GUTTER on the line it starts, when the span
+            // starts that line; otherwise the `,-…-^` row below reaches in for
+            // it and the column stays blank until then.
+            Some(a) if a.start_idx == li => {
+                if a.starts_at_edge {
+                    glyphs.arm_start()
+                } else {
+                    " "
+                }
+            }
+            Some(_) => v,
+            None => " ",
+        };
+        push_source_line(out, &lines, li, width, elides, arm.then_some(slot), glyphs);
+        // The underline rows of the spans that stay WITHIN this line, in the
+        // order the entries were sorted into: the primary first.
+        for p in placed.iter().filter(|p| !p.crosses_lines() && p.start_idx == li) {
+            let line = lines.get(li).copied().unwrap_or("");
+            out.push('\n');
+            out.push_str(&blank_gutter(width));
+            out.push_str(v);
+            out.push(' ');
+            // The arm is only OPEN below this row once it has reached in:
+            // on the line where it starts mid-line, the `,-…-^` row comes
+            // after this one, so the column is still blank here.
+            let row_slot = match armed {
+                Some(a) if a.start_idx == li && !a.starts_at_edge => " ",
+                Some(_) => v,
+                None => " ",
+            };
+            push_arm(out, arm.then_some(row_slot));
+            for _ in 0..display_width_of_prefix(line, p.start_col0) {
+                out.push(' ');
+            }
+            let mark = if p.primary { CARET } else { glyphs.secondary() };
+            for _ in 0..display_width_of_prefix_range(line, p.start_col0, p.end_col0) {
+                out.push(mark);
+            }
+            push_label(out, p.label);
+        }
+        let Some(a) = armed else { continue };
+        // Then the arm's own rows: the `,-…-^` that reaches in to a span
+        // starting mid-line, and the row that closes the arm and carries the
+        // label.
+        if a.start_idx == li && !a.starts_at_edge {
+            let first = lines.get(li).copied().unwrap_or("");
+            out.push('\n');
+            out.push_str(&blank_gutter(width));
+            out.push_str(v);
+            out.push(' ');
+            out.push_str(glyphs.top_left());
+            for _ in 0..display_width_of_prefix(first, a.start_col0) + 1 {
+                out.push_str(h);
+            }
+            out.push(CARET);
+        }
+        if a.end_idx == li {
+            // The closing row points at the last spanned character — unless the
+            // span runs to the end of its line, where dart has nothing to point
+            // at and draws a flat three-rule arm instead.
+            let last = lines.get(li).copied().unwrap_or("");
+            out.push('\n');
+            out.push_str(&blank_gutter(width));
+            out.push_str(v);
+            out.push(' ');
+            out.push_str(glyphs.bottom_left());
+            if last.chars().skip(a.end_col0).all(char::is_whitespace) {
+                for _ in 0..3 {
+                    out.push_str(h);
+                }
+            } else {
+                for _ in 0..display_width_of_prefix(last, a.end_col0) {
+                    out.push_str(h);
+                }
+                out.push(CARET);
+            }
+            push_label(out, a.label);
+        }
+    }
+
+    out.push('\n');
+    out.push_str(&blank_gutter(width));
+    out.push_str(glyphs.bottom());
+}
+
+/// Write one numbered source line of a labelled block: gutter, `│`, the arm
+/// column when the diagnostic has one (`Some(slot)`), then the text.
+fn push_source_line(
+    out: &mut String,
+    lines: &[&str],
+    idx: usize,
+    width: usize,
+    elides: bool,
+    slot: Option<&str>,
+    glyphs: GlyphSet,
+) {
+    out.push('\n');
+    out.push_str(&aligned_gutter(idx + 1, width, elides));
+    out.push_str(glyphs.vertical());
+    out.push(' ');
+    push_arm(out, slot);
+    out.push_str(&expand_tabs(lines.get(idx).copied().unwrap_or("")));
+}
+
+/// The arm column: one glyph and a space, or nothing when the diagnostic has
+/// no multi-line span to draw an arm for.
+fn push_arm(out: &mut String, slot: Option<&str>) {
+    if let Some(slot) = slot {
+        out.push_str(slot);
+        out.push(' ');
+    }
+}
+
+/// The words dart writes after an underline, when there are any.
+fn push_label(out: &mut String, label: &str) {
+    if !label.is_empty() {
+        out.push(' ');
+        out.push_str(label);
+    }
+}
+
+/// The gutter for a numbered source line: right-aligned normally, LEFT-aligned
+/// once an elision row is in play (dart pads them all to the `...` column).
+fn aligned_gutter(line_no: usize, width: usize, elides: bool) -> String {
+    if !elides {
+        return numbered_gutter(line_no, width);
+    }
+    let mut s = line_no.to_string();
+    while s.len() < width {
+        s.push(' ');
+    }
+    s.push(' ');
+    s
+}
+
+/// The `... ` gutter of an elision row.
+fn elision_gutter(width: usize) -> String {
+    let mut s = String::from("...");
+    while s.len() < width {
+        s.push(' ');
+    }
+    s.push(' ');
+    s
+}
+
+/// The 1-based line range a span covers, both ends inclusive.
+#[must_use]
+pub fn span_line_range(source: &str, span: Span) -> (usize, usize) {
+    let lines = split_lines(source);
+    let start_idx = span.line.saturating_sub(1).min(lines.len().saturating_sub(1));
+    let (end_idx, _) = resolve_end(source, &lines, start_idx, span.col.saturating_sub(1), span.length);
+    (start_idx + 1, end_idx + 1)
+}
+
+/// Whether a span reaches past the end of the line it starts on.
+pub fn span_crosses_lines(source: &str, span: Span) -> bool {
+    let lines = split_lines(source);
+    let start_idx = span.line.saturating_sub(1).min(lines.len().saturating_sub(1));
+    let start_col0 = span.col.saturating_sub(1);
+    let (end_idx, _) = resolve_end(source, &lines, start_idx, start_col0, span.length);
+    end_idx != start_idx
+}
+
 /// The byte width of the terminator after `lines[idx]` — 1 for `\n` or a lone
 /// `\r`, 2 for a `\r\n`. The lines are slices of `source`, so the gap between
 /// one line's end and the next line's start IS the terminator.
@@ -610,7 +1021,7 @@ fn render_multi_line(
     out.push_str(v);
     out.push(' ');
     if start_at_edge {
-        out.push_str(glyphs.top_left());
+        out.push_str(glyphs.arm_start());
     } else {
         out.push(' ');
     }
@@ -642,7 +1053,7 @@ fn render_multi_line(
         out.push_str(v);
         out.push(' ');
         if li == end_idx && end_at_edge {
-            out.push_str(glyphs.bottom_left());
+            out.push_str(glyphs.arm_end());
         } else {
             out.push_str(v);
         }
@@ -688,6 +1099,196 @@ pub fn render_error(message: &str, source: &str, url: &str, span: Span, glyphs: 
 
 #[cfg(test)]
 mod tests {
+    /// Every block below is dart-sass 1.103.1's own output, captured with
+    /// `--no-unicode` (scratch `dartref/ds1..ds4.sh`).
+    #[test]
+    fn labelled_spans_match_dart() {
+        let ascii = GlyphSet::Ascii;
+
+        // Adjacent lines: one block, one underline row each.
+        let src = "@mixin m($x) { a: $x; }\n.a { @include m; }\n";
+        let got = render_labelled_snippet(
+            "t.scss",
+            src,
+            Span {
+                line: 2,
+                col: 6,
+                length: 10,
+            },
+            "invocation",
+            &[Secondary {
+                url: "t.scss",
+                source: src,
+                span: Span {
+                    line: 1,
+                    col: 8,
+                    length: 5,
+                },
+                label: "declaration",
+            }],
+            &[],
+            ascii,
+        );
+        assert_eq!(
+            got,
+            "  ,\n\
+             1 | @mixin m($x) { a: $x; }\n\
+             \x20 |        ===== declaration\n\
+             2 | .a { @include m; }\n\
+             \x20 |      ^^^^^^^^^^ invocation\n\
+             \x20 '"
+        );
+
+        // Non-adjacent lines are elided, never filled in, and the gutter
+        // widens to the `...` column with the numbers left-aligned in it.
+        let mut far = String::from("@mixin m($x) { a: $x; }\n");
+        for i in 0..8 {
+            far.push_str(&format!("// {i}\n"));
+        }
+        far.push_str(".a { @include m; }\n");
+        let got = render_labelled_snippet(
+            "t.scss",
+            &far,
+            Span {
+                line: 10,
+                col: 6,
+                length: 10,
+            },
+            "invocation",
+            &[Secondary {
+                url: "t.scss",
+                source: &far,
+                span: Span {
+                    line: 1,
+                    col: 8,
+                    length: 5,
+                },
+                label: "declaration",
+            }],
+            &[],
+            ascii,
+        );
+        assert_eq!(
+            got,
+            "    ,\n\
+             1   | @mixin m($x) { a: $x; }\n\
+             \x20   |        ===== declaration\n\
+             ... |\n\
+             10  | .a { @include m; }\n\
+             \x20   |      ^^^^^^^^^^ invocation\n\
+             \x20   '"
+        );
+
+        // Several secondaries: one row each, in line order.
+        let src = "@use \"_a\" as *;\n@use \"_b\" as *;\n.x { @include m; }\n";
+        let secs: Vec<Secondary<'_>> = (1..=2)
+            .map(|line| Secondary {
+                url: "t.scss",
+                source: src,
+                span: Span {
+                    line,
+                    col: 1,
+                    length: 14,
+                },
+                label: "includes mixin",
+            })
+            .collect();
+        let got = render_labelled_snippet(
+            "t.scss",
+            src,
+            Span {
+                line: 3,
+                col: 6,
+                length: 10,
+            },
+            "mixin use",
+            &secs,
+            &[],
+            ascii,
+        );
+        assert_eq!(
+            got,
+            "  ,\n\
+             1 | @use \"_a\" as *;\n\
+             \x20 | ============== includes mixin\n\
+             2 | @use \"_b\" as *;\n\
+             \x20 | ============== includes mixin\n\
+             3 | .x { @include m; }\n\
+             \x20 |      ^^^^^^^^^^ mixin use\n\
+             \x20 '"
+        );
+
+        // Another file gets its own block, introduced by its url.
+        let entry = ".a { b: red(#abc, 1); }\n";
+        let builtin = "@function red($color) {\n";
+        let got = render_labelled_snippet(
+            "t.scss",
+            entry,
+            Span {
+                line: 1,
+                col: 9,
+                length: 12,
+            },
+            "invocation",
+            &[Secondary {
+                url: "sass:color",
+                source: builtin,
+                span: Span {
+                    line: 1,
+                    col: 11,
+                    length: 11,
+                },
+                label: "declaration",
+            }],
+            &[],
+            ascii,
+        );
+        assert_eq!(
+            got,
+            "  ,--> t.scss\n\
+             1 | .a { b: red(#abc, 1); }\n\
+             \x20 |         ^^^^^^^^^^^^ invocation\n\
+             \x20 '\n\
+             \x20 ,--> sass:color\n\
+             1 | @function red($color) {\n\
+             \x20 |           =========== declaration\n\
+             \x20 '"
+        );
+
+        // Two spans on ONE line: the line once, then both rows, primary first.
+        let src = ".a { b: get_((x: 1), x); }\n";
+        let got = render_labelled_snippet(
+            "t.scss",
+            src,
+            Span {
+                line: 1,
+                col: 14,
+                length: 6,
+            },
+            "value",
+            &[Secondary {
+                url: "t.scss",
+                source: src,
+                span: Span {
+                    line: 1,
+                    col: 9,
+                    length: 15,
+                },
+                label: "unknown function treated as plain CSS",
+            }],
+            &[],
+            ascii,
+        );
+        assert_eq!(
+            got,
+            "  ,\n\
+             1 | .a { b: get_((x: 1), x); }\n\
+             \x20 |              ^^^^^^ value\n\
+             \x20 |         =============== unknown function treated as plain CSS\n\
+             \x20 '"
+        );
+    }
+
     use super::*;
 
     // ----- Offline, hard-coded expectations (always run) -----
