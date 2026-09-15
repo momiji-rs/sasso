@@ -43,6 +43,10 @@ const MATCHING: &[&str] = &[
     "deprecation-global-builtin",
     "deprecation-feature-exists",
     "deprecation-call-string",
+    // The legacy `sass:color` members, whose suggestions are computed from the
+    // call's own arguments.
+    "deprecation-color-functions",
+    "deprecation-darken",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {
@@ -539,7 +543,12 @@ fn a_global_builtin_with_a_module_form_is_deprecated() {
             "^^^^^^^^^^^^^^^^^^",
         ),
     ] {
-        let w = warnings(src, "in.scss");
+        // A legacy colour function carries its own `[color-functions]`
+        // deprecation as well; this is about the global one.
+        let w: Vec<String> = warnings(src, "in.scss")
+            .into_iter()
+            .filter(|x| x.contains("[global-builtin]"))
+            .collect();
         assert_eq!(w.len(), 1, "{src:?} -> {w:?}");
         assert!(
             w[0].starts_with(&format!(
@@ -1411,4 +1420,138 @@ fn one_span_can_carry_two_call_string_recommendations() {
         "{}",
         recs[1]
     );
+}
+
+#[test]
+fn a_legacy_color_function_suggests_its_replacement() {
+    // dart computes the suggestion from the call's OWN arguments: a channel
+    // getter names the channel and its space, an adjuster offers the relative
+    // `color.scale` (whose percentage depends on where the colour already is)
+    // and the absolute `color.adjust`. Every expectation measured against
+    // dart-sass 1.103.1.
+    let sug = |src: &str| -> Vec<String> {
+        warnings(src, "in.scss")
+            .into_iter()
+            .filter(|w| w.contains("[color-functions]"))
+            .collect()
+    };
+    let one = |src: &str| -> String {
+        let w = sug(src);
+        assert_eq!(w.len(), 1, "{src}: {w:?}");
+        w.into_iter().next().unwrap()
+    };
+    // Channel getters name the space, because `color.channel` would otherwise
+    // default to the colour's own.
+    for (name, space) in [
+        ("red", "rgb"),
+        ("green", "rgb"),
+        ("blue", "rgb"),
+        ("hue", "hsl"),
+        ("saturation", "hsl"),
+        ("lightness", "hsl"),
+    ] {
+        let w = one(&format!("a {{ b: {name}(#abcdef); }}\n"));
+        assert!(w.contains(&format!("{name}() is deprecated. Suggestion:")), "{w}");
+        assert!(
+            w.contains(&format!("color.channel($color, \"{name}\", $space: {space})")),
+            "{w}"
+        );
+    }
+    // Through the module it names itself `color.<fn>`, under any namespace.
+    for src in [
+        "@use \"sass:color\";\na { b: color.whiteness(#abcdef); }\n",
+        "@use \"sass:color\" as c;\na { b: c.whiteness(#abcdef); }\n",
+        "@use \"sass:color\" as *;\na { b: whiteness(#abcdef); }\n",
+    ] {
+        let w = one(src);
+        assert!(w.contains("color.whiteness() is deprecated."), "{src}: {w}");
+        assert!(
+            w.contains("color.channel($color, \"whiteness\", $space: hwb)"),
+            "{src}: {w}"
+        );
+    }
+    // The adjusters: the scale percentage is the move over the room left in
+    // that direction, clamped, and omitted when the move is zero.
+    for (src, scale, adjust) in [
+        (
+            "a { b: lighten(#abcdef, 10%); }\n",
+            Some("51%"),
+            "$lightness: 10%",
+        ),
+        (
+            "a { b: darken(#abcdef, 10%); }\n",
+            Some("-12.4390243902%"),
+            "$lightness: -10%",
+        ),
+        (
+            "a { b: saturate(#abcdef, 10%); }\n",
+            Some("31.25%"),
+            "$saturation: 10%",
+        ),
+        (
+            "a { b: desaturate(#abcdef, 10%); }\n",
+            Some("-14.7058823529%"),
+            "$saturation: -10%",
+        ),
+        (
+            "a { b: opacify(rgba(1, 2, 3, 0.5), 0.1); }\n",
+            Some("$alpha: 20%"),
+            "$alpha: 0.1",
+        ),
+        (
+            "a { b: transparentize(rgba(1, 2, 3, 0.5), 0.1); }\n",
+            Some("$alpha: -20%"),
+            "$alpha: -0.1",
+        ),
+        // Already at the bound: all the way, however much was asked.
+        ("a { b: lighten(#fff, 10%); }\n", Some("100%"), "$lightness: 10%"),
+        ("a { b: darken(#000, 10%); }\n", Some("-100%"), "$lightness: -10%"),
+        // Past the bound clamps rather than exceeding 100%.
+        ("a { b: lighten(#ccc, 50%); }\n", Some("100%"), "$lightness: 50%"),
+        // A hue is an angle with no bound, so it never scales.
+        ("a { b: adjust-hue(#abcdef, 10deg); }\n", None, "$hue: 10deg"),
+        ("a { b: adjust-hue(#abcdef, 0.25turn); }\n", None, "$hue: 90deg"),
+        // Moving by nothing drops the scale line entirely.
+        ("a { b: saturate(#abcdef, 0%); }\n", None, "$saturation: 0%"),
+    ] {
+        let w = one(src);
+        match scale {
+            Some(s) => {
+                assert!(w.contains("Suggestions:"), "{src}: {w}");
+                assert!(w.contains("color.scale($color, "), "{src}: {w}");
+                assert!(w.contains(s), "{src}: {w}");
+            }
+            None => {
+                assert!(w.contains("Suggestion:"), "{src}: {w}");
+                assert!(!w.contains("color.scale"), "{src}: {w}");
+            }
+        }
+        assert!(
+            w.contains(&format!("color.adjust($color, {adjust})")),
+            "{src}: {w}"
+        );
+    }
+    // The amount is read as a value, so a unitless one still suggests `%`.
+    assert!(one("a { b: lighten(#abcdef, 10); }\n").contains("$lightness: 10%"));
+    // Members that were NOT deprecated stay quiet.
+    for src in [
+        "a { b: alpha(rgba(1, 2, 3, 0.5)); }\n",
+        "a { b: mix(#abcdef, #123456); }\n",
+        "a { b: grayscale(#abcdef); }\n",
+        "a { b: complement(#abcdef); }\n",
+        "a { b: invert(#abcdef); }\n",
+    ] {
+        assert!(sug(src).is_empty(), "{src}");
+    }
+    // A call whose arguments are rejected warns about nothing: dart raises
+    // this from INSIDE the function, after they are validated.
+    assert!(sug("a { b: lighten(3, 10%); }\n").is_empty());
+    assert!(sug("a { b: lighten(#abcdef, 150%); }\n").is_empty());
+    // And the suggestion follows the VALUE, so one call site can warn twice.
+    let w = sug(
+        "@mixin m($c) { b: lighten($c, 10%); }\na { @include m(#abcdef); }\nd { @include m(#123456); }\n",
+    );
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(w[0].contains("$lightness: 51%"), "{}", w[0]);
+    assert!(w[1].contains("$lightness: 12.5615763547%"), "{}", w[1]);
 }

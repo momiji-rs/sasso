@@ -82,6 +82,17 @@ pub(crate) fn call(
     plain_css_function(written, pos_args, named, pos)
 }
 
+/// The `[color-functions]` suggestions for a deprecated legacy `sass:color`
+/// member, or `None` when the member carries no such deprecation. See
+/// [`color::deprecate`].
+pub(crate) fn color_function_suggestions(
+    name: &str,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+) -> Option<Vec<String>> {
+    color::deprecate::suggestions(name, pos_args, named)
+}
+
 /// A name in its canonical spelling: `_` is `-` in every Sass identifier. The
 /// input is borrowed unchanged when it already holds no underscore, so the
 /// common case allocates nothing.

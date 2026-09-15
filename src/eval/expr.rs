@@ -703,8 +703,16 @@ impl<'a> Evaluator<'a> {
                             return r;
                         }
                     }
-                    return crate::builtins::call_module(&owner, &bare, &pos_args, &named, *pos)
-                        .map(Value::without_slash);
+                    let v = crate::builtins::call_module(&owner, &bare, &pos_args, &named, *pos)?;
+                    self.emit_color_function_deprecation(
+                        &bare,
+                        Some(&owner),
+                        *pos,
+                        *length,
+                        &pos_args,
+                        &named,
+                    );
+                    return Ok(v.without_slash());
                 }
                 // Host-defined custom functions (dart-sass `functions`): they
                 // override built-in globals but lose to user `@function`s and
@@ -772,7 +780,12 @@ impl<'a> Evaluator<'a> {
                 // A function call's RESULT is slash-free too (dart applies
                 // `withoutSlash()` to every call result): `list.nth(3 1/2 4,
                 // 2)` returns 0.5, not the slash form.
-                crate::builtins::call(name, &pos_args, &named, *pos).map(Value::without_slash)
+                // The name as WRITTEN: `builtins::call` canonicalizes its own
+                // lookup, and a name that is no builtin passes through as the
+                // plain-CSS function it was spelled as.
+                let v = crate::builtins::call(name, &pos_args, &named, *pos)?;
+                self.emit_color_function_deprecation(canonical, None, *pos, *length, &pos_args, &named);
+                Ok(v.without_slash())
             }
         }
     }

@@ -117,9 +117,10 @@ impl<'a> Evaluator<'a> {
             }
         }
         // Call results are slash-free (dart `withoutSlash()` on every call).
-        crate::builtins::call_module(&module, member, &pos_args, &named, pos)
-            .map_err(|e| e.with_length_at(pos, length))
-            .map(Value::without_slash)
+        let v = crate::builtins::call_module(&module, member, &pos_args, &named, pos)
+            .map_err(|e| e.with_length_at(pos, length))?;
+        self.emit_color_function_deprecation(member, Some(&module), pos, length, &pos_args, &named);
+        Ok(v.without_slash())
     }
 
     /// Handle a `sass:meta` member that depends on the evaluator's state
@@ -743,11 +744,17 @@ impl<'a> Evaluator<'a> {
                 return r;
             }
         }
-        match f.module {
-            Some(m) => crate::builtins::call_module(m.name(), canonical, &pos_args, &named, pos)
-                .map(Value::without_slash),
-            None => crate::builtins::call(canonical, &pos_args, &named, pos).map(Value::without_slash),
+        let owner = f.module.map(|m| m.name());
+        let v = match owner {
+            Some(m) => crate::builtins::call_module(m, canonical, &pos_args, &named, pos)?,
+            None => crate::builtins::call(canonical, &pos_args, &named, pos)?,
+        };
+        // A reference reaches the same function, so it carries the same
+        // deprecation — reported against the INVOCATION, as the others are.
+        if pos.line > 0 {
+            self.emit_color_function_deprecation(canonical, owner, pos, length, &pos_args, &named);
         }
+        Ok(v.without_slash())
     }
 
     /// Read the single string `$name` argument of an existence predicate,
@@ -1205,9 +1212,9 @@ impl<'a> Evaluator<'a> {
                 return r.map(Some);
             }
         }
-        Ok(Some(
-            crate::builtins::call_module(&owner, &bare, &pos_args, &named, pos)?.without_slash(),
-        ))
+        let v = crate::builtins::call_module(&owner, &bare, &pos_args, &named, pos)?;
+        self.emit_color_function_deprecation(&bare, Some(&owner), pos, length, &pos_args, &named);
+        Ok(Some(v.without_slash()))
     }
 
     /// Call a user module's function in the module's own environment: bind the
