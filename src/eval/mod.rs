@@ -1876,6 +1876,13 @@ impl<'a> Evaluator<'a> {
         if module.is_some_and(|m| m != "color") {
             return;
         }
+        // And a bare name that is no global built-in dispatched as a plain CSS
+        // function, not as the member it shares a name with: `whiteness` and
+        // `blackness` live ONLY on `sass:color`, so `whiteness(#abc)` is
+        // nobody's call and deprecates nothing.
+        if module.is_none() && !crate::builtins::is_builtin(name) {
+            return;
+        }
         let Some(suggestions) = crate::builtins::color_function_suggestions(name, pos_args, named) else {
             return;
         };

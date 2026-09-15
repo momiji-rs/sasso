@@ -1533,6 +1533,18 @@ fn a_legacy_color_function_suggests_its_replacement() {
     }
     // The amount is read as a value, so a unitless one still suggests `%`.
     assert!(one("a { b: lighten(#abcdef, 10); }\n").contains("$lightness: 10%"));
+    // Named arguments are read under the parameter name the FUNCTION uses,
+    // which is not uniform: `adjust-hue` binds `$degrees`, the rest `$amount`.
+    assert!(one("a { b: lighten($color: #abcdef, $amount: 10%); }\n").contains("$lightness: 10%"));
+    assert!(one("a { b: adjust-hue($color: #abcdef, $degrees: 10deg); }\n")
+        .contains("color.adjust($color, $hue: 10deg)"));
+    // `whiteness`/`blackness` are `sass:color`-ONLY, so the bare spelling is a
+    // plain CSS function that deprecates nothing — however it is reached.
+    assert!(sug("a { b: whiteness(#abcdef); }\n").is_empty());
+    assert!(sug("a { b: blackness(#abcdef); }\n").is_empty());
+    assert!(sug("@use \"sass:meta\"; a { b: meta.call(\"whiteness\", #abcdef); }\n").is_empty());
+    // A user `@function` of a deprecated name is the one that runs.
+    assert!(sug("@function lighten($c, $n) { @return MINE; }\na { b: lighten(#abcdef, 10%); }\n").is_empty());
     // Members that were NOT deprecated stay quiet.
     for src in [
         "a { b: alpha(rgba(1, 2, 3, 0.5)); }\n",

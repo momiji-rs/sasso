@@ -23,9 +23,9 @@ pub(crate) fn suggestions(name: &str, pos_args: &[Value], named: &[(String, Valu
             "color.channel($color, \"{name}\", $space: {space})"
         )]);
     }
-    let (channel, sign) = adjuster(name)?;
+    let (channel, sign, param) = adjuster(name)?;
     let color = arg(pos_args, named, 0, "color")?;
-    let amount = arg(pos_args, named, 1, "amount")?;
+    let amount = arg(pos_args, named, 1, param)?;
     let Value::Color(color) = color else { return None };
     let Value::Number(amount) = amount else {
         return None;
@@ -89,18 +89,22 @@ fn channel_space(name: &str) -> Option<&'static str> {
     })
 }
 
-/// The channel a legacy adjuster moves, and the direction it moves it: the
-/// pairs differ only by sign (`darken` is `lighten` negated), and dart's
-/// suggestion spells the signed amount.
-fn adjuster(name: &str) -> Option<(&'static str, f64)> {
+/// The channel a legacy adjuster moves, the direction it moves it, and the
+/// name of the parameter carrying the amount.
+///
+/// The pairs differ only by sign (`darken` is `lighten` negated), and dart's
+/// suggestion spells the signed amount. The parameter name is not uniform:
+/// `adjust-hue` binds `$degrees` where the rest bind `$amount`, and reading
+/// the wrong one loses the warning entirely for a call that names it.
+fn adjuster(name: &str) -> Option<(&'static str, f64, &'static str)> {
     Some(match name {
-        "lighten" => ("lightness", 1.0),
-        "darken" => ("lightness", -1.0),
-        "saturate" => ("saturation", 1.0),
-        "desaturate" => ("saturation", -1.0),
-        "opacify" | "fade-in" => ("alpha", 1.0),
-        "transparentize" | "fade-out" => ("alpha", -1.0),
-        "adjust-hue" => ("hue", 1.0),
+        "lighten" => ("lightness", 1.0, "amount"),
+        "darken" => ("lightness", -1.0, "amount"),
+        "saturate" => ("saturation", 1.0, "amount"),
+        "desaturate" => ("saturation", -1.0, "amount"),
+        "opacify" | "fade-in" => ("alpha", 1.0, "amount"),
+        "transparentize" | "fade-out" => ("alpha", -1.0, "amount"),
+        "adjust-hue" => ("hue", 1.0, "degrees"),
         _ => return None,
     })
 }
