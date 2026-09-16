@@ -1117,7 +1117,7 @@ pub(crate) struct Evaluator<'a> {
     /// [`Self::DEP_MEMO_MAX`] caps how many entries there can be, and
     /// [`Self::probe_arg_memoizable`] caps what one entry can hold. No `Value`
     /// graph ever enters it.
-    dep_memo: HashMap<(u32, u32, u32, u32, u64), DepProbe>,
+    dep_memo: HashMap<(u32, u32, u32, u64), DepProbe>,
     /// Small interned ids for source files, stamped into [`SrcLines`] so the
     /// serializer's trailing-comment rule can require same-file adjacency and
     /// the source map can name the file. Keyed by the file's CANONICAL URL —
@@ -1873,21 +1873,29 @@ impl<'a> Evaluator<'a> {
         out
     }
 
-    /// Whether a deprecation raised right here would survive the two
-    /// side-effect-free rejections at the top of [`Self::emit_deprecation`]
-    /// (`diag_enabled`, then dart's `quietDeps`). Hoisted verbatim so a caller
-    /// can skip building anything at all; must stay byte-for-byte those two
-    /// checks, and side-effect-free.
-    fn deprecations_live(&self) -> bool {
-        if !self.diag_enabled() {
-            return false;
+    /// dart's `quietDeps`: the second of the two side-effect-free rejections at
+    /// the top of [`Self::emit_deprecation`], hoisted verbatim so a caller can
+    /// skip building anything at all. Must stay byte-for-byte that check, and
+    /// side-effect-free.
+    ///
+    /// The FIRST of the two, `diag_enabled`, is a field test and belongs at the
+    /// top of a caller's gates. This one does not: with `quiet_deps` set it
+    /// pauses the arena and takes a mutex (see
+    /// [`crate::DependencySet::is_dependency`]), so it goes last among the
+    /// cheap gates — after the name lookups that reject nearly every call — and
+    /// a caller that asks it on every function call has made a compile with
+    /// `--quiet-deps` measurably slower than one without.
+    ///
+    /// It must still be asked ABOVE [`Self::dep_memo`], not below it. `quietDeps`
+    /// keys on the CANONICAL path, and the memo's key carries only the display
+    /// URL, which two canonical files may share: a probe quieted in a dependency
+    /// could otherwise answer for the same span in a file that is not one, and
+    /// drop its warning.
+    fn deprecation_quieted(&self) -> bool {
+        match self.options.quiet_deps {
+            Some(deps) => deps.is_dependency(self.current_path()),
+            None => false,
         }
-        if let Some(deps) = self.options.quiet_deps {
-            if deps.is_dependency(self.current_path()) {
-                return false;
-            }
-        }
-        true
     }
 
     /// Ceiling on [`Self::dep_memo`]. A sheet can probe one span with
@@ -1941,6 +1949,14 @@ impl<'a> Evaluator<'a> {
         }
         use std::hash::Hasher;
         let mut h = crate::fxhash::FxHasher::default();
+        // The URL's CONTENTS, not merely its length. A key whose stored material
+        // turns out to differ is answered `false` and NOT overwritten, so two
+        // files whose display URLs are the same length — `src/_a.scss` and
+        // `src/_b.scss` — would otherwise fight over one key at the same span,
+        // and every repeat in whichever lost would pay the slow path for the
+        // rest of the compile.
+        h.write(self.current_url.as_bytes());
+        h.write_u8(0xff);
         h.write(name.as_bytes());
         match module {
             Some(m) => {
@@ -1958,13 +1974,7 @@ impl<'a> Evaluator<'a> {
             h.write(n.as_bytes());
             Self::fingerprint_value(&mut h, v);
         }
-        let key = (
-            color_path as u32,
-            self.current_url.len() as u32,
-            pos.line as u32,
-            pos.col as u32,
-            h.finish(),
-        );
+        let key = (color_path as u32, pos.line as u32, pos.col as u32, h.finish());
         if let Some(prev) = self.dep_memo.get(&key) {
             return prev.url == self.current_url
                 && prev.name == name
@@ -2100,12 +2110,12 @@ impl<'a> Evaluator<'a> {
             Cow::Borrowed(name)
         };
         let name = canonical.as_ref();
-        // Cheap gates first: this runs on EVERY call, and all but a handful of
+        // Cheapest gate first: this runs on EVERY call, and all but a handful of
         // them deprecate nothing. `global_builtin_replacement` is still asked
         // about the already-canonicalised name, exactly as before (it
         // canonicalises internally too), and the emission ORDER below is
         // unchanged: global-builtin, then feature-exists.
-        if !self.deprecations_live() {
+        if !self.diag_enabled() {
             return;
         }
         let replacement = if module.is_none() {
@@ -2115,6 +2125,12 @@ impl<'a> Evaluator<'a> {
         };
         let feature_exists = name == "feature-exists" && module.map_or(true, |m| m == "meta");
         if replacement.is_none() && !feature_exists {
+            return;
+        }
+        // Only now the gate that can take a lock: a name nothing deprecates has
+        // already gone home, so `--quiet-deps` costs a mutex per WARNING, as it
+        // did before this hoist, not one per call.
+        if self.deprecation_quieted() {
             return;
         }
         if self.probe_already_done(false, name, module, pos, &[], &[]) {
@@ -2149,14 +2165,19 @@ impl<'a> Evaluator<'a> {
         if module.is_some_and(|m| m != "color") {
             return;
         }
-        // Cheap gates before any colour maths: nothing downstream of here has a
-        // side effect, so the liveness test and the name-only test can run
-        // first, and a probe already made at this span with these VALUES is a
-        // no-op (see `dep_memo`).
-        if !self.deprecations_live() {
+        // Cheap gates before any colour maths, cheapest first: nothing
+        // downstream of here has a side effect, so a field test and two name
+        // lookups can run ahead of it, and a probe already made at this span
+        // with these VALUES is a no-op (see `dep_memo`). `deprecation_quieted`
+        // sits after the name gate because it can take a lock, and above the
+        // memo because it reads the canonical path the memo's key omits.
+        if !self.diag_enabled() {
             return;
         }
         if !crate::builtins::color_function_deprecates(name) {
+            return;
+        }
+        if self.deprecation_quieted() {
             return;
         }
         if self.probe_already_done(true, name, module, pos, pos_args, named) {
