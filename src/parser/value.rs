@@ -1343,8 +1343,14 @@ impl Parser {
                         _ => {}
                     }
                 }
-                if let Some(color) = named_color(&name) {
-                    return Ok(Expr::Color(color));
+                // A colour KEYWORD is a Sass value, not a CSS one: dart's
+                // `CssParser` leaves `white` an identifier, so it passes
+                // through with its own spelling instead of compressing to
+                // `#fff` (and `TRANSPARENT` keeps its case).
+                if !self.plain_css {
+                    if let Some(color) = named_color(&name) {
+                        return Ok(Expr::Color(color));
+                    }
                 }
             }
         }

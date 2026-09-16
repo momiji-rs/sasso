@@ -174,3 +174,42 @@ fn a_loaded_files_values_serialize_for_the_output_style() {
         "calc(100% - 2*var(--x))",
     );
 }
+
+/// A colour KEYWORD is a Sass value, not a CSS one — dart's CSS parser leaves
+/// `white` an identifier, so it keeps its own spelling (and its case) instead
+/// of compressing to `#fff`. Measured against dart-sass 1.103.1.
+#[test]
+fn a_loaded_files_colour_keywords_stay_identifiers() {
+    let dir = scratch("keywords");
+    let case = |file: &str, decl: &str, want: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), format!(".a {{ b: {decl}; }}\n")).unwrap();
+        let src = format!("@use \"{file}\";\n");
+        assert_eq!(
+            compile_compressed_in(&dir, &format!("entry_{file}.scss"), &src),
+            format!(".a{{b:{want}}}"),
+            "{decl}"
+        );
+    };
+    // The keyword survives; only the LIST around it compresses.
+    for (i, (decl, want)) in [
+        ("white", "white"),
+        ("black", "black"),
+        ("magenta", "magenta"),
+        ("rebeccapurple", "rebeccapurple"),
+        ("transparent", "transparent"),
+        ("WHITE", "WHITE"),
+        ("1px solid white", "1px solid white"),
+        ("white, black", "white,black"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        case(&format!("kw{i}"), decl, want);
+    }
+    // Written as SCSS the same keyword IS a colour, and compresses.
+    let dir2 = scratch("keywords_scss");
+    assert_eq!(
+        compile_compressed_in(&dir2, "s.scss", ".a { b: white; }"),
+        ".a{b:#fff}"
+    );
+}
