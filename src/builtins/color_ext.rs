@@ -459,9 +459,15 @@ fn fn_invert(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option<
         let weight = match arg(&params, pos_args, named, 1) {
             Some(v) => {
                 let n = num(v, pos)?;
-                if !(0.0..=100.0).contains(&n) {
+                // A NaN is within no range (dart rejects it like any
+                // out-of-range value), and the bounds carry the value's unit.
+                if n.is_nan() || !(0.0..=100.0).contains(&n) {
+                    let unit = weight_unit(v);
                     return Err(Error::at(
-                        format!("$weight: Expected {} to be within 0% and 100%.", v.to_css(false)),
+                        format!(
+                            "$weight: Expected {} to be within 0{unit} and 100{unit}.",
+                            v.to_css(false)
+                        ),
                         pos,
                     ));
                 }
@@ -586,23 +592,37 @@ fn fn_saturate_two(
     let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
     require_legacy_color(&c, name, pos)?;
     let amount = require(&params, pos_args, named, 1, name, pos)?;
-    let amount = bounded(amount, 0.0, 100.0, pos)?;
+    let amount = bounded(amount, 0.0, 100.0, true, pos)?;
     let (h, s, l) = c.to_hsl();
     let new_s = (s + sign * amount / 100.0).clamp(0.0, 1.0);
     Ok(Value::Color(from_hsl(h, new_s, l, c.a)))
 }
 
+/// The unit a `$weight`/`$amount` percentage argument carries into the bounds
+/// of its range error (`0% and 100%`, `0px and 100px`, `0 and 100`).
+fn weight_unit(v: &Value) -> &str {
+    match v {
+        Value::Number(n) | Value::Slash(n, _) => n.unit(),
+        _ => "",
+    }
+}
+
 /// Read a number argument and require its value to be within `[lo, hi]`,
-/// raising dart-sass's "Expected … to be within …" error otherwise. The
-/// number's unit is preserved in the message (matching dart-sass), but the
-/// bound is applied to the raw value.
-fn bounded(v: &Value, lo: f64, hi: f64, pos: Pos) -> Result<f64, Error> {
+/// raising dart-sass's "Expected … to be within …" error otherwise. A NaN is
+/// within no range at all, so it is rejected like any out-of-range value
+/// (`saturate(red, math.div(0, 0))` is an error in dart-sass, not a color).
+/// The number's unit is preserved in the message, and `unit_bounds` spells the
+/// BOUNDS with it as well — which dart does for the percentage `$amount`
+/// (`saturate(red, 200px)` says `0px and 100px`) but not for the alpha ratio
+/// (`transparentize(red, 2px)` still says `0 and 1`).
+fn bounded(v: &Value, lo: f64, hi: f64, unit_bounds: bool, pos: Pos) -> Result<f64, Error> {
     match v {
         Value::Number(n) => {
-            if n.value < lo || n.value > hi {
+            if n.value.is_nan() || n.value < lo || n.value > hi {
+                let unit = if unit_bounds { n.unit() } else { "" };
                 Err(Error::at(
                     format!(
-                        "$amount: Expected {} to be within {} and {}.",
+                        "$amount: Expected {} to be within {}{unit} and {}{unit}.",
                         n.to_css(false),
                         fmt_bound(lo),
                         fmt_bound(hi),
@@ -642,7 +662,7 @@ fn fn_fade(
     let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
     require_legacy_color(&c, name, pos)?;
     let amount = require(&params, pos_args, named, 1, name, pos)?;
-    let amount = bounded(amount, 0.0, 1.0, pos)?;
+    let amount = bounded(amount, 0.0, 1.0, false, pos)?;
     let a = clamp01(c.a + sign * amount);
     Ok(Value::Color(computed(c.r, c.g, c.b, a)))
 }

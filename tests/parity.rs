@@ -1985,6 +1985,56 @@ fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
 }
 
 #[test]
+fn a_nan_is_within_no_range() {
+    // Every `$weight`/`$amount`/`$alpha` range check rejects a NaN, as
+    // dart-sass does — it is not "within" anything, and letting it through
+    // produced a color of NaN channels. The BOUNDS carry the value's unit for
+    // the percentage parameters (`0px and 100px`) but not for the alpha ratio
+    // (`transparentize(red, 2px)` still says `0 and 1`). Every message
+    // byte-matched to dart-sass 1.104.1. Offline.
+    let nan = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\n$nan: math.div(0, 0);\na {{ b: {call}; }}\n"
+        ))
+    };
+    assert!(
+        nan("mix(red, blue, $nan)").contains("$weight: Expected calc(NaN) to be within 0 and 100."),
+        "{}",
+        nan("mix(red, blue, $nan)")
+    );
+    for f in ["lighten", "darken", "saturate", "desaturate"] {
+        let msg = nan(&format!("{f}(red, $nan)"));
+        assert!(
+            msg.contains("$amount: Expected calc(NaN) to be within 0 and 100."),
+            "{f}: {msg}"
+        );
+    }
+    for f in ["opacify", "transparentize", "fade-in", "fade-out"] {
+        let msg = nan(&format!("{f}(red, $nan)"));
+        assert!(
+            msg.contains("$amount: Expected calc(NaN) to be within 0 and 1."),
+            "{f}: {msg}"
+        );
+    }
+    let msg = nan("color.change(red, $alpha: $nan)");
+    assert!(
+        msg.contains("$alpha: Expected calc(NaN) to be within 0 and 1."),
+        "{msg}"
+    );
+    // The bounds take the value's unit wherever the parameter is a percentage.
+    let over = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    assert!(over("mix(red, blue, 200)").contains("Expected 200 to be within 0 and 100."));
+    assert!(over("mix(red, blue, 200%)").contains("Expected 200% to be within 0% and 100%."));
+    assert!(over("mix(red, blue, 200px)").contains("Expected 200px to be within 0px and 100px."));
+    assert!(over("lighten(red, 200%)").contains("Expected 200% to be within 0% and 100%."));
+    assert!(over("saturate(red, 200deg)").contains("Expected 200deg to be within 0deg and 100deg."));
+    assert!(over("invert(red, 200%)").contains("$weight: Expected 200% to be within 0% and 100%."));
+    // The alpha ratio keeps unitless bounds whatever the value carries.
+    assert!(over("transparentize(red, 2px)").contains("Expected 2px to be within 0 and 1."));
+    assert!(over("opacify(red, 2%)").contains("Expected 2% to be within 0 and 1."));
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

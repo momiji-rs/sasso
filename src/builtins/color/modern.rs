@@ -499,7 +499,7 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
             match v {
                 Value::Number(n) => {
                     let max_disp = if n.unit() == "%" { 100.0 } else { 1.0 };
-                    if n.value < 0.0 || n.value > max_disp {
+                    if n.value.is_nan() || n.value < 0.0 || n.value > max_disp {
                         let (b0, b1) = if n.unit() == "%" {
                             ("0%".to_string(), "100%".to_string())
                         } else {

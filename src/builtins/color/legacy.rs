@@ -1518,9 +1518,15 @@ pub(super) fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     let c2 = as_color(require(&params, pos_args, named, 1, "mix", pos)?, pos)?;
     let weight = match arg(&params, pos_args, named, 2) {
         Some(Value::Number(w)) => {
-            if w.value < 0.0 || w.value > 100.0 {
+            // A NaN is within no range, and the bounds carry the value's unit
+            // (`200%` -> `0% and 100%`, `200` -> `0 and 100`).
+            if w.value.is_nan() || w.value < 0.0 || w.value > 100.0 {
+                let unit = w.unit();
                 return Err(Error::at(
-                    format!("$weight: Expected {} to be within 0% and 100%.", w.to_css(false)),
+                    format!(
+                        "$weight: Expected {} to be within 0{unit} and 100{unit}.",
+                        w.to_css(false)
+                    ),
                     pos,
                 ));
             }
@@ -1689,9 +1695,14 @@ pub(super) fn fn_adjust_lightness(
     require_legacy_color(&c, name, pos)?;
     let amount = match require(&params, pos_args, named, 1, name, pos)? {
         Value::Number(num) => {
-            if num.value < 0.0 || num.value > 100.0 {
+            // A NaN is within no range, and the bounds carry the value's unit.
+            if num.value.is_nan() || num.value < 0.0 || num.value > 100.0 {
+                let unit = num.unit();
                 return Err(Error::at(
-                    format!("$amount: Expected {} to be within 0 and 100.", num.to_css(false)),
+                    format!(
+                        "$amount: Expected {} to be within 0{unit} and 100{unit}.",
+                        num.to_css(false)
+                    ),
                     pos,
                 ));
             }
