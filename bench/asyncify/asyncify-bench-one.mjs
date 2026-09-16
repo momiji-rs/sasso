@@ -1,7 +1,7 @@
 // One (mode, K) measurement per process: node asyncify-bench-one.mjs <mode> <K>
 // mode: sync | async-syncimp | async-asyncimp
 // Prints: median p10 p90 (ms/compile) over REPS after WARMUP.
-import { compileString, compileStringAsync } from '/Users/linyiru/Projects/rust-sass/wasm/npm/sasso.mjs';
+import { compileString, compileStringAsync } from '../../wasm/npm/sasso.mjs';
 
 const [mode, kStr] = process.argv.slice(2);
 const K = parseInt(kStr, 10);

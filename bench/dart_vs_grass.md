@@ -7,7 +7,7 @@ in later; see [README.md](./README.md) for how.
 
 | Item | Value |
 |---|---|
-| CPU | Apple M2 Max (8 performance + 4 efficiency cores) |
+| CPU | arm64 (8 performance + 4 efficiency cores) |
 | `hw.ncpu` | 12 |
 | OS | macOS, Darwin 25.3.0 |
 | Rust | `cargo 1.95.0 (f2d3ce0bd 2026-03-21)` (Homebrew) |

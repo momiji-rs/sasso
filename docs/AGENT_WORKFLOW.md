@@ -8,7 +8,7 @@ I now have full grounding: the exact module coupling, the harness's `--filter`/`
 
 # METHODOLOGY: Parallel-Agent Conformance Ratchet for `sasso`
 
-Driving the `sasso` SCSS→CSS compiler (`/Users/linyiru/Projects/rust-sass`) toward 100% `sass-spec` conformance using parallel AI agents, atomic commits, locked-in test coverage, and a monotonically-rising pass-rate ratchet.
+Driving the `sasso` SCSS→CSS compiler in this repository toward 100% `sass-spec` conformance using parallel AI agents, atomic commits, locked-in test coverage, and a monotonically-rising pass-rate ratchet.
 
 ---
 

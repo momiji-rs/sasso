@@ -34,7 +34,7 @@ fastest form (the native-VM compiler daemon that `sass-embedded` runs), and
 
 | | |
 | --- | --- |
-| Machine | Apple M2 Max, 12 cores |
+| Machine | arm64 macOS, 12 cores |
 | OS | macOS 26.3.0 (arm64) |
 | Tool | `hyperfine` (`-N` where startup matters), ≥10 timed runs, warmups |
 | sasso | 0.1.0 @ master `ec7f955` (fmt/linebreaks/arena-registry/mul-div perf round) |
@@ -118,7 +118,7 @@ compile from ~9.0 to ~13.4 ms. A perf round recovered it (−27%):
 
 Method notes that paid off: bisect by **instructions retired** (load-immune,
 reproducible to ~0.1%); an Acquire-ordered registry variant measured **+7%
-wall on M2 Max** (ldar stalls) — write-once slots make all-Relaxed sound.
+wall on arm64** (ldar stalls) — write-once slots make all-Relaxed sound.
 
 ### Safety of the arena
 
@@ -157,7 +157,7 @@ done
 
 ## Caveats
 
-- One machine (Apple M2 Max), one corpus. Absolute numbers are hardware- and
+- One machine (arm64 macOS), one corpus. Absolute numbers are hardware- and
   corpus-dependent; the **ratios** are the durable signal.
 - The corpus exercises the implemented feature subset, not the full sass-spec
   surface.

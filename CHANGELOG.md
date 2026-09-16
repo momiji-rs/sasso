@@ -31,7 +31,7 @@ Conformance is tracked separately as a ratchet against the official
     to cap it), with diagnostics and exit status reported in command-line
     order; `--stop-on-error` stops scheduling more files after a failure.
     The full Lichess corpus (148 entry points, source maps with embedded
-    sources) builds in 0.79 s against dart-sass's 1.40 s on an M2 Max;
+    sources) builds in 0.79 s against dart-sass's 1.40 s on arm64 macOS;
   - `--[no-]source-map` (on by default when writing a file, like dart; the
     `.map` is written before the CSS that references it, and the map's `file`
     and the footer URL are percent-encoded like dart's),

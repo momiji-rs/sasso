@@ -200,7 +200,7 @@ $ SASS_BIN=target/release/sasso python3 spec/run_spec.py
 
 `sasso` is a native, in-process library — no subprocess, no Node, no Dart VM —
 so startup is effectively free, which dominates when a build compiles many
-files. On an Apple M2 Max it is the **fastest** of the three engines measured,
+files. On arm64 macOS it is the **fastest** of the three engines measured,
 beating dart-sass by 19–30× end-to-end and leading `grass` (the incumbent Rust
 compiler) by ~2.3–2.9×:
 

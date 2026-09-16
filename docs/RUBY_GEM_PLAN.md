@@ -718,4 +718,4 @@ Each step is one reviewable commit (or a tight cluster). Gate = the check that m
 
 **Critical path / recommended order:** S1 → S2 → S3 (this is "`Sasso.compile` works locally", ~1 day) → S4–S6 (tested + CI, ~0.5–1 day) → S8 → S9 (precompiled + release, ~1 day). Defer S7 (GVL) and the v2 importer/`CompileResult` until after the first published gem.
 
-**Relevant files:** plan targets `/Users/linyiru/Projects/rust-sass/Cargo.toml` (2-line edit), the new `/Users/linyiru/Projects/rust-sass/ruby/` tree, `/Users/linyiru/Projects/rust-sass/.github/workflows/ci.yml` (add `ruby` job), and new `/Users/linyiru/Projects/rust-sass/.github/workflows/release-gem.yml`. Grounded against `/Users/linyiru/Projects/rust-sass/src/lib.rs`, `src/error.rs`, `src/main.rs`, `wasm/Cargo.toml`, and `.github/workflows/release-wasm.yml`.
+**Relevant files:** plan targets `Cargo.toml` (2-line edit), the new `ruby/` tree, `.github/workflows/ci.yml` (add `ruby` job), and new `.github/workflows/release-gem.yml`. Grounded against `src/lib.rs`, `src/error.rs`, `src/main.rs`, `wasm/Cargo.toml`, and `.github/workflows/release-wasm.yml`.
