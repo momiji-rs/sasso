@@ -695,6 +695,29 @@ fn compressed_nested_plain_css_import_loses_its_gap() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A call sasso cannot dispatch becomes a STRING, and dart builds one with the
+/// DEFAULT style whatever the output style is — so its arguments keep their
+/// leading zeros. That holds for a name written out AND for one that arrives
+/// through interpolation, which reaches the same unquoted-string form by
+/// another path. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_plain_css_calls_keep_their_arguments_default_style() {
+    let v = |scss: &str| css_compressed(&format!("$o: o;\na{{x:{scss}}}"));
+    // An interpolated name, part of it and all of it.
+    assert_eq!(v("f#{$o}o(0.5)"), "a{x:foo(0.5)}");
+    assert_eq!(v("f#{$o}o(0.5, -0.5px)"), "a{x:foo(0.5, -0.5px)}");
+    assert_eq!(v("#{\"fo\" + $o}(0.5)"), "a{x:foo(0.5)}");
+    assert_eq!(v("1px f#{$o}o(0.5)"), "a{x:1px foo(0.5)}");
+    assert_eq!(v("f#{$o}o(inner(0.5))"), "a{x:foo(inner(0.5))}");
+    // And a name written out, which took the other path.
+    assert_eq!(v("foo(0.5)"), "a{x:foo(0.5)}");
+    assert_eq!(v("translate(0.5px)"), "a{x:translate(0.5px)}");
+    // Expanded output is the same string either way.
+    let e = |scss: &str| compile(&format!("$o: o;\na{{x:{scss}}}"), &Options::default()).expect("compile");
+    assert_eq!(e("f#{$o}o(0.5)"), "a {\n  x: foo(0.5);\n}");
+    assert_eq!(e("foo(0.5)"), "a {\n  x: foo(0.5);\n}");
+}
+
 /// Compressed output drops anything that writes nothing — a rule or at-rule
 /// whose body is only comments, however deep it nests, and the separator such
 /// an item would otherwise have taken. Measured against dart-sass 1.103.1.
