@@ -210,12 +210,13 @@ fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
     }
 }
 
-/// Clamp an alpha value to `[0, 1]`, mapping NaN to 0 (matching dart-sass).
+/// Clamp an alpha value to `[0, 1]`, mapping NaN — and a negative zero, which
+/// `clamp` keeps — to 0 (matching dart-sass).
 fn clamp_alpha(v: f64) -> f64 {
     if v.is_nan() {
         0.0
     } else {
-        v.clamp(0.0, 1.0)
+        crate::value::without_negative_zero(v.clamp(0.0, 1.0))
     }
 }
 

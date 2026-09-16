@@ -7553,6 +7553,24 @@ fn color_dart_vm_math_semantics() {
 }
 
 #[test]
+fn number_negative_zero_keeps_its_sign() {
+    // dart-sass 1.104.0 serializes a negative zero as `-0`. The sign is the
+    // IEEE sign bit, not the way the number was written: `0 * -1` and
+    // `-0 + -0` ARE negative zeros, while `0 - 0`, `0 + -0` and `-0 * -1` are
+    // positive ones. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:math\";\na {\n  b: 0 * -1;\n  c: -0 + -0;\n  d: 0 - 0;\n  e: 0 + -0;\n  f: -0 * -1;\n  g: math.div(0, -1);\n  h: -0;\n  i: -0.0px;\n  j: math.sqrt(-0);\n}\n"),
+        "a {\n  b: -0;\n  c: -0;\n  d: 0;\n  e: 0;\n  f: 0;\n  g: -0;\n  h: -0;\n  i: -0px;\n  j: -0;\n}\n"
+    );
+    // A color CHANNEL is the exception dart-sass carves out: it converts a
+    // negative zero to 0 "as per the CSS spec", the alpha included.
+    assert_eq!(
+        ours("a {\n  b: hsl(-0, 50%, 50%);\n  c: color(srgb 0 0 0 / -0);\n  d: rgb(-0, 0, 0);\n  e: color(srgb -0 0 0);\n}\n"),
+        "a {\n  b: hsl(0, 50%, 50%);\n  c: color(srgb 0 0 0 / 0);\n  d: rgb(0, 0, 0);\n  e: color(srgb 0 0 0);\n}\n"
+    );
+}
+
+#[test]
 fn number_format_dart_tostring_semantics() {
     // dart rounds the SHORTEST decimal spelling at the string level (11th
     // digit, half-up): 2154.15598416745's true value is …44978 (below the

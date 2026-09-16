@@ -811,6 +811,19 @@ pub(crate) struct Color {
     pub modern: Option<Box<ModernColor>>,
 }
 
+/// A color CHANNEL never holds a negative zero: dart-sass 1.104.0 converts
+/// one to `0` "as per the CSS spec", so `rgb(-0, 0, 0)` is `rgb(0, 0, 0)` and
+/// `hsl(-0, …)` is `hsl(0, …)`. (A negative zero is otherwise preserved —
+/// `math.div(0, -1)` is `-0` — so this is the color model's own rule, not the
+/// number serializer's.)
+pub(crate) fn without_negative_zero(v: f64) -> f64 {
+    if v == 0.0 {
+        0.0
+    } else {
+        v
+    }
+}
+
 /// A CSS Color 4 color space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColorSpace {
@@ -1586,10 +1599,10 @@ impl List {
 impl Color {
     pub(crate) fn rgb(r: f64, g: f64, b: f64, a: f64) -> Self {
         Color {
-            r,
-            g,
-            b,
-            a,
+            r: without_negative_zero(r),
+            g: without_negative_zero(g),
+            b: without_negative_zero(b),
+            a: without_negative_zero(a),
             repr: None,
             modern: None,
         }
@@ -1692,7 +1705,7 @@ impl Color {
 
     /// Build a color from HSL (hue degrees, sat/light `[0,1]`) + alpha.
     pub(crate) fn from_hsl(h: f64, s: f64, l: f64, a: f64) -> Color {
-        let h = h.rem_euclid(360.0);
+        let h = without_negative_zero(h).rem_euclid(360.0);
         let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
         let x = c * (1.0 - (((h / 60.0) % 2.0) - 1.0).abs());
         let m = l - c / 2.0;
@@ -2514,6 +2527,19 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
             "-Infinity".to_string()
         };
     }
+    // A NEGATIVE ZERO keeps its sign (dart-sass 1.104.0, "for greater
+    // compatibility when using it in CSS calculations"). This is the IEEE sign
+    // bit, not the printed text: `0 * -1` and `-0 + -0` are negative zeros and
+    // print `-0`, while `0 - 0`, `0 + -0` and `-0 * -1` are POSITIVE zeros and
+    // print `0`. A tiny negative that merely ROUNDS to zero is not a zero at
+    // all and prints `0` too — that one is handled further down.
+    if n == 0.0 {
+        return if n.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        };
+    }
     // Integers print the way the dart VM does: `fuzzyAsInt` converts the
     // double to a NATIVE int64 (saturating, exactly like Rust's `as i64`)
     // and prints its exact decimal expansion — `593644542057412224`, not the
@@ -2540,6 +2566,8 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
         // `…1675` because its shortest form ends in a literal `5`.
         round_decimal_string(ecma_shortest(n))
     };
+    // A tiny negative ROUNDS to `-0` at the string level; dart prints `0` for
+    // it. A true negative zero never reaches here — it returned above.
     if s == "-0" {
         s = "0".to_string();
     }
@@ -2890,7 +2918,11 @@ mod tests {
         assert_eq!(fmt_num(153.0, false), "153");
         assert_eq!(fmt_num(178.5, false), "178.5");
         assert_eq!(fmt_num(0.5, false), "0.5");
-        assert_eq!(fmt_num(-0.0, false), "0");
+        // A NEGATIVE ZERO keeps its sign from dart-sass 1.104.0 on; a tiny
+        // negative that merely rounds to zero does not.
+        assert_eq!(fmt_num(-0.0, false), "-0");
+        assert_eq!(fmt_num(0.0, false), "0");
+        assert_eq!(fmt_num(-0.00000000001, false), "0");
         assert_eq!(fmt_num(16.0, false), "16");
     }
 

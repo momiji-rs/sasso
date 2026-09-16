@@ -385,9 +385,11 @@ fn compressed_keeps_the_zero_on_a_negative_decimal() {
     // Computed, not just written that way.
     assert_eq!(v("-1px * 0.1"), "a{x:-0.1px}");
     assert_eq!(v("1px -0.5px"), "a{x:1px -0.5px}");
-    // Zero itself has no fraction to shorten, either way round.
+    // Zero itself has no fraction to shorten — but it does keep its SIGN
+    // (dart-sass 1.104.0), which the leading-zero rule must not eat.
     assert_eq!(v("0px"), "a{x:0px}");
-    assert_eq!(v("-0.0px"), "a{x:0px}");
+    assert_eq!(v("-0.0px"), "a{x:-0px}");
+    assert_eq!(v("-0"), "a{x:-0}");
 }
 
 /// Compressed style drops comments — except the LOUD ones, which open `/*!`

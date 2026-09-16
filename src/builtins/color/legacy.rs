@@ -73,11 +73,12 @@ pub(super) fn fn_rgb(
     channels.validate_count("rgb", pos)?;
     channels.validate_rgb_units(&["red", "green", "blue"], pos)?;
     let Channels { comps, alpha, .. } = channels;
-    let r = rgb_channel(&comps[0], pos)?;
-    let g = rgb_channel(&comps[1], pos)?;
-    let b = rgb_channel(&comps[2], pos)?;
+    let z = crate::value::without_negative_zero;
+    let r = z(rgb_channel(&comps[0], pos)?);
+    let g = z(rgb_channel(&comps[1], pos)?);
+    let b = z(rgb_channel(&comps[2], pos)?);
     let a = match &alpha {
-        Some(v) => alpha_value(v, pos)?,
+        Some(v) => z(alpha_value(v, pos)?),
         None => 1.0,
     };
     let mut c = Color::rgb(r, g, b, a);
@@ -741,8 +742,9 @@ pub(super) fn fn_hsl(
     // `500%`, `hsl(0, -100%, 50%)` becomes `0%`, lightness is left untouched).
     let s_raw = num(&comps[1], pos)?;
     let l_raw = num(&comps[2], pos)?;
-    let s_pct = if s_raw.is_nan() { 0.0 } else { s_raw.max(0.0) };
-    let l_pct = if l_raw.is_nan() { 0.0 } else { l_raw };
+    let z = crate::value::without_negative_zero;
+    let s_pct = z(if s_raw.is_nan() { 0.0 } else { s_raw.max(0.0) });
+    let l_pct = z(if l_raw.is_nan() { 0.0 } else { l_raw });
     let a = match &alpha {
         Some(v) => alpha_value(v, pos)?,
         None => 1.0,
@@ -758,7 +760,7 @@ pub(super) fn fn_hsl(
     // is normalized to degrees in `[0, 360)`. The modern Hsl tag carries the
     // space so `color.space`/`color.channel` work; serialization uses the
     // classic comma form via `ModernColor::legacy_css`.
-    let h_norm = h.rem_euclid(360.0);
+    let h_norm = crate::value::without_negative_zero(h.rem_euclid(360.0));
     c.modern = Some(Box::new(ModernColor {
         space: ColorSpace::Hsl,
         channels: [Some(h_norm), Some(s_pct), Some(l_pct)],
@@ -1034,7 +1036,7 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     let mut out = hwb_to_color(h, w_pct, b_pct, a);
     // Carry the modern Hwb tag (so `color.space`/`color.channel` work);
     // serialization uses the classic hsl comma form via `legacy_css`.
-    let h_norm = h.rem_euclid(360.0);
+    let h_norm = crate::value::without_negative_zero(h.rem_euclid(360.0));
     out.modern = Some(Box::new(ModernColor {
         space: ColorSpace::Hwb,
         channels: [Some(h_norm), Some(w_pct), Some(b_pct)],

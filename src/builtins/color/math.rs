@@ -214,7 +214,7 @@ fn normalize_polar(mut mc: ModernColor) -> ModernColor {
         ColorSpace::Hsl => (0, Some(1)),
         ColorSpace::Hwb => (0, None),
         ColorSpace::Lch | ColorSpace::Oklch => (2, Some(1)),
-        _ => return mc,
+        _ => return normalize_degenerate(mc),
     };
     let mut invert = false;
     if let Some(i) = mag_idx {
@@ -227,6 +227,16 @@ fn normalize_polar(mut mc: ModernColor) -> ModernColor {
         // No finite guard: dart's fmod sends an infinite hue to NaN, and the
         // spec expects `calc(NaN * 1deg)` for `lch(1% 2 calc(infinity))`.
         mc.channels[hue_idx] = Some(normalize_hue(h, invert));
+    }
+    normalize_degenerate(mc)
+}
+
+/// dart-sass 1.104.0 converts a negative zero CHANNEL to 0 "as per the CSS
+/// spec", even though a bare number keeps its sign. Applied to the stored
+/// channels, which the modern spaces serialize directly.
+pub(super) fn normalize_degenerate(mut mc: ModernColor) -> ModernColor {
+    for ch in mc.channels.iter_mut().flatten() {
+        *ch = crate::value::without_negative_zero(*ch);
     }
     mc
 }
@@ -295,6 +305,12 @@ pub(super) fn modern_hue(v: &Value) -> Option<f64> {
     }
 }
 
+/// Clamp an alpha to `[0, 1]`, dropping the negative zero `clamp` keeps: an
+/// alpha is a color channel, and `color(srgb 0 0 0 / -0)` is `… / 0`.
+fn z1(v: f64) -> f64 {
+    crate::value::without_negative_zero(v.clamp(0.0, 1.0))
+}
+
 /// Parse a modern alpha channel. `none` → `None`; otherwise clamp to 0..1.
 pub(super) fn modern_alpha(v: Option<&Value>) -> Option<f64> {
     match v {
@@ -302,7 +318,7 @@ pub(super) fn modern_alpha(v: Option<&Value>) -> Option<f64> {
         Some(a) if is_none_keyword(a) => None,
         Some(a) => {
             if let Some(c) = degenerate_value(a) {
-                return Some(if c.is_nan() { 0.0 } else { c.clamp(0.0, 1.0) });
+                return Some(if c.is_nan() { 0.0 } else { z1(c) });
             }
             match a {
                 Value::Number(num) => {
@@ -311,9 +327,9 @@ pub(super) fn modern_alpha(v: Option<&Value>) -> Option<f64> {
                     } else {
                         num.value
                     };
-                    Some(val.clamp(0.0, 1.0))
+                    Some(z1(val))
                 }
-                Value::Slash(num, _) => Some(num.value.clamp(0.0, 1.0)),
+                Value::Slash(num, _) => Some(z1(num.value)),
                 _ => Some(1.0),
             }
         }
@@ -366,6 +382,7 @@ pub(crate) fn space_arg(v: &Value, pos: Pos) -> Result<ColorSpace, Error> {
 /// `modern` tag attached. Plain-legacy rgb (no missing channels) drops the
 /// `modern` field so it serializes like a normal sRGB color.
 pub(crate) fn make_modern_in(mc: ModernColor, _space: ColorSpace) -> Color {
+    let mc = normalize_degenerate(mc);
     if mc.space == ColorSpace::Rgb && mc.channels.iter().all(|c| c.is_some()) && mc.alpha.is_some() {
         let r = mc.channels[0].unwrap_or(0.0);
         let g = mc.channels[1].unwrap_or(0.0);
