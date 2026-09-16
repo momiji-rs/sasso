@@ -718,6 +718,49 @@ fn compressed_plain_css_calls_keep_their_arguments_default_style() {
     assert_eq!(e("foo(0.5)"), "a {\n  x: foo(0.5);\n}");
 }
 
+/// An ESCAPE is one token, so an escaped delimiter is part of an identifier
+/// and not structure: `.a\,b` is ONE class whose name contains a comma, and
+/// `\&` is an ampersand rather than a parent reference. Every expectation
+/// below was measured against dart-sass 1.103.1.
+#[test]
+fn an_escaped_delimiter_is_not_selector_structure() {
+    let css = |scss: &str| compile(scss, &Options::default()).expect("compile");
+    // The comma does not split the selector list — and the class keeps its
+    // escape, rather than decoding to a replacement character.
+    assert_eq!(css(".a\\,b { c: 1; }"), ".a\\,b {\n  c: 1;\n}");
+    assert_eq!(css(".\\, { a: 1; }"), ".\\, {\n  a: 1;\n}");
+    assert_eq!(css("#a\\,b { c: 1; }"), "#a\\,b {\n  c: 1;\n}");
+    assert_eq!(css("a\\,b { c: 1; }"), "a\\,b {\n  c: 1;\n}");
+    assert_eq!(css(".a\\,b, .c { d: 1; }"), ".a\\,b, .c {\n  d: 1;\n}");
+    // Nested, where the parent is substituted into the child.
+    assert_eq!(css(".x { .a\\,b { c: 1; } }"), ".x .a\\,b {\n  c: 1;\n}");
+    assert_eq!(css(".a\\,b { .c { d: 1; } }"), ".a\\,b .c {\n  d: 1;\n}");
+    assert_eq!(css(".x { &\\,y { c: 1; } }"), ".x\\,y {\n  c: 1;\n}");
+    // An escaped `&` is a character, not the parent.
+    assert_eq!(css(".x { .a\\&b { c: 1; } }"), ".x .a\\&b {\n  c: 1;\n}");
+    assert_eq!(css("\\&a { b: 1; }"), "\\&a {\n  b: 1;\n}");
+    // `@extend` matches the same identifier through the same scanners.
+    assert_eq!(
+        css("%p { a: 1; }\n.x\\,y { @extend %p; }"),
+        ".x\\,y {\n  a: 1;\n}"
+    );
+    assert_eq!(
+        css(".a\\,b { c: 1; }\n.d { @extend .a\\,b; }"),
+        ".a\\,b, .d {\n  c: 1;\n}"
+    );
+    // A HEX escape of the same character behaves the same way — and is
+    // rewritten to the canonical spelling, as dart does.
+    assert_eq!(css(".a\\2c b { c: 1; }"), ".a\\,b {\n  c: 1;\n}");
+    assert_eq!(css(".a\\2c b, .c { d: 1; }"), ".a\\,b, .c {\n  d: 1;\n}");
+    // Everything above holds when compressing, where the same text is walked
+    // again to take the spaces out.
+    assert_eq!(css_compressed(".a\\,b, .c { d: 1; }"), ".a\\,b,.c{d:1}");
+    assert_eq!(
+        css_compressed(".x { .a\\&b > .c { d: 1; } }"),
+        ".x .a\\&b>.c{d:1}"
+    );
+}
+
 /// Compressed output drops anything that writes nothing — a rule or at-rule
 /// whose body is only comments, however deep it nests, and the separator such
 /// an item would otherwise have taken. Measured against dart-sass 1.103.1.
