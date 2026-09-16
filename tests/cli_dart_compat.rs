@@ -1404,6 +1404,45 @@ fn directory_mode_skips_css_whose_destination_is_itself() {
 }
 
 #[test]
+fn directory_mode_skips_sources_inside_a_nested_output() {
+    // dart-sass 1.104.1: a many-to-many compile skips every source file that
+    // lies INSIDE the output directory when that directory is nested in the
+    // source tree — otherwise `.:css` run twice mirrors `css/` into
+    // `css/css/`. Measured against dart-sass 1.104.1.
+    let dir = scratch("nested_out");
+    write(&dir, "one.scss", "a { b: c }\n");
+    write(&dir, "css/stale.scss", "d { e: f }\n");
+    write(&dir, "css/deep/deeper.scss", "g { h: i }\n");
+    let r = sasso(&dir, &["--no-source-map", ".:css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "css/one.css"), "a {\n  b: c;\n}\n");
+    assert!(
+        !dir.join("css/css").exists(),
+        "the output tree was mirrored into itself"
+    );
+    // The DESTINATION is what counts, not an intermediate directory: with the
+    // output one level deeper, `css/stale.scss` is still a source.
+    let r = sasso(&dir, &["--no-source-map", ".:css/deep"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "css/deep/css/stale.css"), "d {\n  e: f;\n}\n");
+    assert!(
+        !dir.join("css/deep/css/deep").exists(),
+        "files under the destination are skipped"
+    );
+    // A destination EQUAL to the source is not nested: an in-place compile
+    // still reaches every file.
+    let flat = scratch("nested_out_flat");
+    write(&flat, "one.scss", "a { b: c }\n");
+    write(&flat, "sub/two.scss", "j { k: l }\n");
+    let r = sasso(&flat, &["--no-source-map", ".:."]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&flat, "one.css"), "a {\n  b: c;\n}\n");
+    assert_eq!(read(&flat, "sub/two.css"), "j {\n  k: l;\n}\n");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&flat).ok();
+}
+
+#[test]
 fn source_map_sources_name_imported_files_by_path() {
     // dart writes each imported file's path relative to the map, so two
     // partials sharing a basename are two sources; an entry that emits nothing
