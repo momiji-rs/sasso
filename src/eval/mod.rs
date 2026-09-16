@@ -55,11 +55,6 @@ type CachedImport = std::rc::Rc<(
     Option<String>,
 )>;
 
-/// dart `_preModuleComments`: comments registered on a module's first load,
-/// keyed by its canonical key, shared by reference down nested module
-/// evaluations (see the field on [`Evaluator`]).
-type PreModuleComments = Rc<RefCell<HashMap<String, Vec<(String, SrcLines)>>>>;
-
 /// Parse imported/`@use`d source with the front-end matching its file syntax.
 fn parse_with_syntax(src: &str, syntax: Syntax) -> Result<crate::ast::Stylesheet, Error> {
     match syntax {
@@ -940,21 +935,6 @@ pub(crate) struct Evaluator<'a> {
     /// The same load edges in *load order* (for `meta.load-css` subtree
     /// re-emission, which walks dependencies upstream-first).
     module_dep_order: RefCell<HashMap<String, Vec<String>>>,
-    /// dart `_preModuleComments`: on a module's FIRST load, the loader's
-    /// pending top-level comments move into this map (keyed by the loaded
-    /// module's canonical key) and re-emit at every dependency edge into
-    /// that module. Crucially, dart does NOT reset the field when a child
-    /// module evaluates — the child inherits the loader's map by REFERENCE,
-    /// so the child's own edges re-emit the parent's registered comments
-    /// (bulma's `/* Bulma Form */` appears before each `@use "shared"`er's
-    /// CSS). `None` until a registration creates a map; eval_module
-    /// saves/restores so a child-created map never leaks upward.
-    pre_module_comments: Option<PreModuleComments>,
-    /// Top-sink index below which pending-comment scans must not reach:
-    /// everything below is a re-emitted comment CLONE (dart materializes
-    /// clones at combine time, so they never re-register as pending).
-    /// Indexes into the current module's top sink; reset per module eval.
-    pre_comment_floor: usize,
     /// `meta.load-css` copy scopes: (copy key, base module key). An origin
     /// inside the base's subtree also sees the copy (its extensions apply to
     /// the clone), in addition to the caller-edge reachability.
@@ -1188,12 +1168,6 @@ struct Module {
     /// `@import`-reached module can re-emit it at each import site (dart
     /// clones the module's CSS tree per import).
     css: Vec<OutNode>,
-    /// dart `transitivelyContainsCss` includes `preModuleComments.isNotEmpty`
-    /// on the map SNAPSHOT taken at module construction: a css-less module
-    /// built while the shared pre-module-comment map holds ANY entry counts
-    /// as css-bearing — it absorbs pending-comment registrations and its
-    /// edges re-emit like a visible module's.
-    phantom_css: bool,
 }
 
 impl Module {
@@ -1477,8 +1451,6 @@ impl<'a> Evaluator<'a> {
             current_module: String::new(),
             module_deps: RefCell::new(HashMap::default()),
             module_dep_order: RefCell::new(HashMap::default()),
-            pre_module_comments: None,
-            pre_comment_floor: 0,
             load_css_copies: RefCell::new(Vec::new()),
             copy_counter: std::cell::Cell::new(0),
             in_keyframes: false,

@@ -3354,16 +3354,15 @@ fn nested_at_rule_wrap_keeps_selector_linebreaks() {
 }
 
 #[test]
-fn pre_module_comments_reemit_on_inherited_edges() {
+fn pre_module_comments_are_emitted_once() {
     use std::fs;
 
-    // dart `_preModuleComments`: on a module's FIRST load the loader's
-    // pending comments move into a map keyed by the loaded module, and —
-    // because dart does not reset the map for nested module evaluations —
-    // a child module's own edge into the same dependency re-emits them
-    // (bulma's `/* Bulma Form */` before each `@use "shared"`er's CSS).
-    // A NON-first load registers nothing: its comments stay in place
-    // (sass-spec use_only comment_order/diamond).
+    // A comment preceding a `@use`/`@forward` is emitted exactly ONCE, in
+    // place, however many edges reach the module afterwards. Up to 1.104.0
+    // dart re-emitted it at every later edge into that module (the
+    // `_preModuleComments` map, which the inherited-map quirk made visible to
+    // nested module evaluations); dart-sass 1.104.1 removed that. Measured
+    // against dart-sass 1.104.1.
     let dir = std::env::temp_dir().join(format!(
         "sasso-premodule-comments-{}-{}",
         std::process::id(),
@@ -3378,13 +3377,13 @@ fn pre_module_comments_reemit_on_inherited_edges() {
     fs::write(dir.join("_a.scss"), "@use \"sass:list\";\n.a { x: y; }\n").unwrap();
     fs::write(dir.join("_b.scss"), "@use \"a\";\n.b { x: y; }\n").unwrap();
     fs::write(dir.join("_i.scss"), "/* C */\n@forward \"a\";\n@forward \"b\";\n").unwrap();
-    // Inherited-map re-emission: C appears before a's AND b's CSS.
+    // `i`'s header precedes a's CSS and is not repeated at b's edge.
     assert_eq!(
         compile("@use \"i\";\n", &opts).expect("module chain compiles"),
-        "/* C */\n.a {\n  x: y;\n}\n\n/* C */\n.b {\n  x: y;\n}"
+        "/* C */\n.a {\n  x: y;\n}\n\n.b {\n  x: y;\n}"
     );
-    // Diamond via sibling loaders: right's non-first `@use` registers
-    // nothing, so left's comment is NOT re-emitted at right's edge.
+    // Diamond via sibling loaders: right's `@use` is a repeat edge, so left's
+    // comment is not repeated there and right's own comment stays in place.
     fs::write(dir.join("_s.scss"), ".s { x: y; }\n").unwrap();
     fs::write(dir.join("_l.scss"), "/* L */\n@use \"s\";\n").unwrap();
     fs::write(dir.join("_r.scss"), "/* R */\n@use \"s\";\n").unwrap();
@@ -8706,12 +8705,12 @@ fn comment_scratch(tag: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn pre_module_comment_registers_through_invisible_loads() {
-    // dart's `_root.children` holds no placeholder for a CSS-less load: a
-    // file-heading comment stays pending across `@use "tokens"` (pure vars)
-    // and registers at the NEXT css-bearing edge (`@use "lib"`), then
-    // re-emits at every later edge into that module — here the nested
-    // sibling's repeat edge (uswds `_palette-registry.scss` PALETTE header).
+fn pre_module_comment_survives_an_invisible_load() {
+    // A CSS-less load (`@use "tokens"`, pure variables) puts nothing between
+    // a file-heading comment and the next module's CSS, so the header still
+    // leads `lib`'s comment — and the nested sibling's repeat edge into `lib`
+    // adds no second copy (uswds `_palette-registry.scss` PALETTE header).
+    // Measured against dart-sass 1.104.1.
     use std::fs;
     let dir = comment_scratch("deep");
     let imp = FsImporter::new(vec![dir.clone()]);
@@ -8725,14 +8724,14 @@ fn pre_module_comment_registers_through_invisible_loads() {
     .unwrap();
     fs::write(dir.join("_sib.scss"), "@use \"lib\" as *;\n$s: 1;\n").unwrap();
     let out = compile("@use \"reg\";\n", &opts).expect("reg compiles");
-    assert_eq!(out, "/* reg header */\n/* lib */\n/* reg header */");
+    assert_eq!(out, "/* reg header */\n/* lib */");
 }
 
 #[test]
-fn pre_module_comment_reemits_at_sibling_edge() {
-    // A repeat edge from a SIBLING module re-emits the comments registered
-    // for the target on its first load, provided the shared map already
-    // existed when the registrar was evaluated (dart's inherited-map quirk).
+fn pre_module_comment_not_repeated_at_a_sibling_edge() {
+    // A repeat edge from a SIBLING module into an already-loaded target adds
+    // nothing: `mid`'s header is written once, where it stands. Measured
+    // against dart-sass 1.104.1.
     use std::fs;
     let dir = comment_scratch("sib");
     let imp = FsImporter::new(vec![dir.clone()]);
@@ -8754,19 +8753,16 @@ fn pre_module_comment_reemits_at_sibling_edge() {
     let out = compile("@use \"outer\";\n", &opts).expect("outer compiles");
     assert_eq!(
         out,
-        "/* outer note */\n/* vis */\n/* mid header */\n/* lib */\n.m {\n  x: 1;\n}\n\n/* mid header */"
+        "/* outer note */\n/* vis */\n/* mid header */\n/* lib */\n.m {\n  x: 1;\n}"
     );
 }
 
 #[test]
-fn phantom_css_module_absorbs_pending_comments() {
-    // dart `transitivelyContainsCss` counts a NON-EMPTY pre-module-comment
-    // map snapshot: a css-less module built while the shared map holds any
-    // entry is "css-bearing", so it absorbs the pending comment registration
-    // (`[tokens -> mid header]`) and the css-bearing edge after it gets
-    // nothing — no sibling re-emission (contrast with
-    // `pre_module_comment_reemits_at_sibling_edge`, where `tokens` is loaded
-    // AFTER `lib`).
+fn pre_module_comment_not_repeated_after_a_css_less_load() {
+    // The same shape as `pre_module_comment_not_repeated_at_a_sibling_edge`
+    // with the CSS-less `tokens` loaded FIRST: the order of the invisible
+    // load made no difference to the output before 1.104.1 either, and makes
+    // none now. Measured against dart-sass 1.104.1.
     use std::fs;
     let dir = comment_scratch("phantom");
     let imp = FsImporter::new(vec![dir.clone()]);
@@ -8793,12 +8789,10 @@ fn phantom_css_module_absorbs_pending_comments() {
 }
 
 #[test]
-fn reemitted_comment_clones_never_reregister() {
-    // dart materializes pre-module-comment clones at COMBINE time, so they
-    // never sit in `_root.children` and can never register under a later
-    // first-load edge. Without the clone fence, `sib`'s in-stream clone of
-    // "/* note */" would cascade onto `vis2`'s key and `tail`'s repeat edge
-    // would emit a third copy (uswds color() 7-vs-6).
+fn pre_module_comments_never_cascade() {
+    // The shape that used to produce a THIRD copy of "/* note */" (uswds
+    // color() 7-vs-6): each comment is written once, at the point it stands.
+    // Measured against dart-sass 1.104.1.
     use std::fs;
     let dir = comment_scratch("cascade");
     let imp = FsImporter::new(vec![dir.clone()]);
@@ -8819,10 +8813,7 @@ fn reemitted_comment_clones_never_reregister() {
     )
     .unwrap();
     let out = compile("@use \"outer\";\n", &opts).expect("outer compiles");
-    assert_eq!(
-        out,
-        "/* outer */\n/* seed */\n/* note */\n/* lib */\n/* note */\n/* vis2 */"
-    );
+    assert_eq!(out, "/* outer */\n/* seed */\n/* note */\n/* lib */\n/* vis2 */");
 }
 
 #[test]
@@ -8964,12 +8955,12 @@ fn load_css_copy_reacquires_group_separators() {
 }
 
 #[test]
-fn reemitted_premodule_clone_stays_out_of_import_run() {
-    // A pre-module comment clone re-emitted at a repeat edge is combine-time
-    // material BETWEEN modules — dart never counts it among the loading
-    // file's own statements, so the loader's plain `@import` leading-run
-    // sweep must not carry it into the imports bucket (nextcloud:
-    // styles.scss's SPDX header at icons.scss's edge).
+fn a_module_header_stays_out_of_the_import_run() {
+    // A loaded module's heading comment belongs to the CSS flow, not to the
+    // loader's leading `@import` bucket: `b`'s hoisted `@import "x.css"` goes
+    // to the top while `/*! A HEADER */` stays down with `a`'s CSS
+    // (nextcloud: styles.scss's SPDX header at icons.scss's edge). Measured
+    // against dart-sass 1.104.1.
     use std::fs;
     let dir = comment_scratch("premodclone");
     let imp = FsImporter::new(vec![dir.clone()]);
@@ -8994,7 +8985,7 @@ fn reemitted_premodule_clone_stays_out_of_import_run() {
     let out = compile("@use \"outer\";\n", &opts).expect("compiles");
     assert_eq!(
         out,
-        "/* outer */\n@import \"x.css\";\n/* seed */\n/*! A HEADER */\n/* lib */\n.a {\n  q: 1;\n}\n\n/*! A HEADER */\n.b {\n  w: 2;\n}"
+        "/* outer */\n@import \"x.css\";\n/* seed */\n/*! A HEADER */\n/* lib */\n.a {\n  q: 1;\n}\n\n.b {\n  w: 2;\n}"
     );
 }
 

@@ -727,75 +727,26 @@ impl<'a> Evaluator<'a> {
                 return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
             }
         };
-        // dart moves the comments textually preceding a `@use`/`@forward`
-        // into `_preModuleComments[target]` and re-emits the full attached
-        // set at EVERY dependency edge into a module with visible CSS. Pop
-        // this site's trailing comment run; each outcome below re-emits it
-        // (plus any previously attached comments) before the module's CSS.
-        // `pre_comment_floor` fences off comment CLONES already re-emitted
-        // into this sink: dart materializes clones at combine time, so they
-        // never sit in `_root.children` and can never re-register (which
-        // would cascade the same comment onto ever more module keys).
-        let floor = self.pre_comment_floor;
+        // Pop the comment run textually preceding this `@use`/`@forward` so
+        // each outcome below can put it back in front of the module's CSS.
+        // dart-sass 1.104.1 emits such a comment exactly ONCE: up to 1.104.0 a
+        // repeat edge into an already-loaded module re-emitted the comments
+        // that preceded its first load, which is the duplication that release
+        // fixed.
         let own_run: Vec<OutNode> = match sink {
             Sink::Top(out) => {
-                let floor = floor.min(out.len());
                 let mut i = out.len();
-                while i > floor && matches!(out[i - 1], OutNode::Comment(..) | OutNode::Blank) {
+                while i > 0 && matches!(out[i - 1], OutNode::Comment(..) | OutNode::Blank) {
                     i -= 1;
                 }
                 out.split_off(i)
             }
             _ => Vec::new(),
         };
-        // dart's `_root.children` holds no placeholder for a CSS-less load, so
-        // a comment stays pending across any number of invisible loads. For
-        // REGISTRATION the scan continues back through invisible module scopes
-        // (a visible scope acts as dart's `clearChildren`); those stranded
-        // comments stay in place — their in-stream copy is this edge's own
-        // emission, exactly like the popped run's push-back below.
-        let own_comments: Vec<(String, SrcLines)> = {
-            let mut deep: Vec<(String, SrcLines)> = match sink {
-                Sink::Top(out) => {
-                    let floor = floor.min(out.len());
-                    let mut i = out.len();
-                    while i > floor {
-                        match &out[i - 1] {
-                            OutNode::Comment(..) | OutNode::Blank => i -= 1,
-                            OutNode::ModuleScope { nodes, .. } if !nodes_visible(nodes) => i -= 1,
-                            _ => break,
-                        }
-                    }
-                    out[i..]
-                        .iter()
-                        .filter_map(|n| match n {
-                            OutNode::Comment(t, l) => Some((t.clone(), *l)),
-                            _ => None,
-                        })
-                        .collect()
-                }
-                _ => Vec::new(),
-            };
-            deep.extend(own_run.iter().filter_map(|n| match n {
-                OutNode::Comment(t, l) => Some((t.clone(), *l)),
-                _ => None,
-            }));
-            deep
-        };
         fn push_run(sink: &mut Sink<'_>, run: Vec<OutNode>) {
             if let Sink::Top(out) = sink {
                 out.extend(run);
             }
-        }
-        // dart `transitivelyContainsCss`: a dependency's CSS is embedded as a
-        // ModuleScope wrapper, so recursing through wrappers covers the
-        // transitive check.
-        fn nodes_visible(nodes: &[OutNode]) -> bool {
-            nodes.iter().any(|n| match n {
-                OutNode::Blank | OutNode::GroupEnd | OutNode::AtRootPackTight => false,
-                OutNode::ModuleScope { nodes, .. } => nodes_visible(nodes),
-                _ => true,
-            })
         }
         // A module evaluated once and cached is shared; its CSS is NOT
         // re-emitted. Re-loading it with configuration is an error — unless the
@@ -870,48 +821,10 @@ impl<'a> Evaluator<'a> {
                     v.push(key.clone());
                 }
             }
-            // A repeat edge into a module with visible CSS re-emits the
-            // comments registered for it on its FIRST load (dart emits
-            // `module.preModuleComments[upstream]` per edge at combine time;
-            // the inherited-map quirk makes the loader's map visible here).
-            // This site's own comments are NOT registered (not a first load)
-            // and simply stay in place. The clones slot in after the run's
-            // leading blank so the group separator stays where it was.
-            let registered: Vec<(String, SrcLines)> = self
-                .pre_module_comments
-                .as_ref()
-                .and_then(|m| m.borrow().get(&key).cloned())
-                .unwrap_or_default();
-            if !force_reemit
-                && !registered.is_empty()
-                && (nodes_visible(&existing.css) || existing.phantom_css)
-            {
-                if let Sink::Top(out) = sink {
-                    let lead = own_run.iter().take_while(|n| matches!(n, OutNode::Blank)).count();
-                    let mut run = own_run;
-                    let tail = run.split_off(lead);
-                    out.extend(run);
-                    // dart materializes the clones BETWEEN modules at combine
-                    // time — they are not statements of the loading file. The
-                    // wrapper scope keeps the import hoist from sweeping them
-                    // into the loader's own leading import run (nextcloud:
-                    // styles.scss's SPDX header re-emitted at icons.scss's
-                    // edge must stay in the css flow, not join icons' leading
-                    // `@import` bucket).
-                    out.push(OutNode::ModuleScope {
-                        key: format!("{key}#premod"),
-                        nodes: registered
-                            .into_iter()
-                            .map(|(t, l)| OutNode::Comment(t, l))
-                            .collect(),
-                    });
-                    // Clones stop here; the pushed-back tail stays pending.
-                    self.pre_comment_floor = out.len();
-                    out.extend(tail);
-                }
-            } else {
-                push_run(sink, own_run);
-            }
+            // A repeat edge emits nothing of its own: this site's comments stay
+            // in place, and dart-sass 1.104.1 no longer re-emits the ones that
+            // preceded the module's first load.
+            push_run(sink, own_run);
             if force_reemit {
                 // A `meta.load-css` copy re-emits the module's whole SUBTREE
                 // at the call site under a unique copy scope: the caller's
@@ -1037,31 +950,7 @@ impl<'a> Evaluator<'a> {
         self.module_cache
             .borrow_mut()
             .insert(key.clone(), Rc::clone(&module));
-        // dart `_registerCommentsForModule`, first load only: the loader's
-        // pending comments join the map for this module when it (transitively)
-        // contains CSS. The verbatim push-back below IS this first edge's
-        // emission; later edges re-emit from the map. A map created here is
-        // deliberately assigned to `self` so sibling loads and nested module
-        // evaluations see it (dart's inherited-reference quirk).
-        let did_register = !own_comments.is_empty() && (nodes_visible(&css_buf) || module.phantom_css);
-        if did_register {
-            let map = self
-                .pre_module_comments
-                .get_or_insert_with(|| Rc::new(RefCell::new(HashMap::default())));
-            map.borrow_mut()
-                .entry(key.clone())
-                .or_default()
-                .extend(own_comments);
-        }
         push_run(sink, own_run);
-        // dart `clearChildren`: registered comments are consumed — the copies
-        // left in place are this edge's own emission and must never register
-        // again at a later edge.
-        if did_register {
-            if let Sink::Top(out) = sink {
-                self.pre_comment_floor = out.len();
-            }
-        }
         // A first load through `meta.load-css` (force_reemit) splices the
         // module's whole subtree under a unique copy scope at the call site;
         // an ordinary `@use`/`@forward` load wraps its own CSS in its module
@@ -1122,14 +1011,6 @@ impl<'a> Evaluator<'a> {
         let saved_url = std::mem::replace(&mut self.current_url, diag_url.to_string());
         self.current_url_stamp = 0;
         let saved_source = std::mem::replace(&mut self.current_source, module_source);
-        // dart does NOT reset `_preModuleComments` for a nested module
-        // evaluation — the child inherits the loader's live map by reference
-        // (its registrations join it, and its edges consult it) — but a map
-        // the child CREATES is dropped again on restore.
-        let saved_pre_comments = self.pre_module_comments.clone();
-        // The clone floor indexes into the CURRENT top sink; a module body
-        // evaluates into a fresh buffer, so it starts at zero.
-        let saved_comment_floor = std::mem::replace(&mut self.pre_comment_floor, 0);
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![new_scope()]);
         let saved_var_spans = std::mem::replace(
             &mut self.var_spans,
@@ -1235,8 +1116,6 @@ impl<'a> Evaluator<'a> {
         self.current_url = saved_url;
         self.current_url_stamp = 0;
         self.current_source = saved_source;
-        self.pre_module_comments = saved_pre_comments;
-        self.pre_comment_floor = saved_comment_floor;
 
         result?;
         let _ = pos;
@@ -1311,10 +1190,6 @@ impl<'a> Evaluator<'a> {
                 config_origin: std::cell::Cell::new(self.pending_config_id),
                 emitted_main: std::cell::Cell::new(false),
                 css: Vec::new(),
-                phantom_css: self
-                    .pre_module_comments
-                    .as_ref()
-                    .is_some_and(|m| !m.borrow().is_empty()),
             },
             consumed,
         ))
