@@ -204,7 +204,7 @@ fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
         }
         Value::Slash(num, _) => Ok(clamp_alpha(num.value)),
         other => Err(Error::at(
-            format!("$alpha: {} is not a number.", other.to_css(false)),
+            format!("$alpha: {} is not a number.", channel_err_css(other)),
             pos,
         )),
     }

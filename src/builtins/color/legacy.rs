@@ -283,6 +283,31 @@ impl Channels {
         })
     }
 
+    /// The POSITIONAL form's all-numeric pass: it skips `validate_numeric`,
+    /// so confirm every channel is a number first, with dart's `$<param>:`
+    /// prefix — which the bare [`channel`]/[`num`] readers do not attach. dart
+    /// runs this before any unit is examined, so a non-number channel is
+    /// reported ahead of a later bad-unit one.
+    fn validate_positional_numeric(&self, names: &[&str], pos: Pos) -> Result<(), Error> {
+        if self.single.is_some() {
+            return Ok(());
+        }
+        for (i, comp) in self.comps.iter().enumerate() {
+            let numeric = matches!(comp, Value::Number(_) | Value::Slash(..)) || is_degenerate_calc(comp);
+            if !numeric {
+                return Err(Error::at(
+                    format!(
+                        "${}: {} is not a number.",
+                        names[i.min(names.len() - 1)],
+                        channel_err_css(comp)
+                    ),
+                    pos,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate that every channel of a single-argument channels list is a
     /// number, matching dart-sass's per-channel check. A non-number channel
     /// (a plain string such as a non-`from` relative keyword, e.g.
@@ -328,24 +353,7 @@ impl Channels {
     /// left-to-right so a non-number channel is reported before a later
     /// bad-unit one, matching dart's two-pass (coerce-then-unit) order.
     fn validate_rgb_units(&self, names: &[&str], pos: Pos) -> Result<(), Error> {
-        // The positional form skips `validate_numeric`, so confirm every
-        // channel is a number first (with dart's `$<param>:` prefix), matching
-        // dart's all-numeric pass before any unit is examined.
-        if self.single.is_none() {
-            for (i, comp) in self.comps.iter().enumerate() {
-                let numeric = matches!(comp, Value::Number(_) | Value::Slash(..)) || is_degenerate_calc(comp);
-                if !numeric {
-                    return Err(Error::at(
-                        format!(
-                            "${}: {} is not a number.",
-                            names[i.min(names.len() - 1)],
-                            comp.to_css(false)
-                        ),
-                        pos,
-                    ));
-                }
-            }
-        }
+        self.validate_positional_numeric(names, pos)?;
         for (i, comp) in self.comps.iter().enumerate() {
             if let Some(num) = channel_unit_number(comp) {
                 let ok = num.is_unitless() || (!num.has_complex_units() && num.unit() == "%");
@@ -741,6 +749,7 @@ pub(super) fn fn_hsl(
         return hsl_degenerate(&channels, pos);
     }
     channels.validate_numeric(&["hue", "saturation", "lightness"], pos)?;
+    channels.validate_positional_numeric(&["hue", "saturation", "lightness"], pos)?;
     channels.validate_count("hsl", pos)?;
     let Channels { comps, alpha, .. } = channels;
     let h = hsl_hue(&comps[0], pos)?;

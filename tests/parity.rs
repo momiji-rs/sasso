@@ -2264,6 +2264,34 @@ fn a_color_channel_diagnostic_names_its_space() {
 }
 
 #[test]
+fn a_positional_channel_diagnostic_names_its_parameter() {
+    // The POSITIONAL (comma) color forms skip the channels-list validator, so
+    // they need their own all-numeric pass to attach dart's `$<param>:`
+    // prefix — `hsl` had none at all — and the value is rendered the same way
+    // a channels-list diagnostic renders it: an unbracketed list in
+    // parentheses, a bracketed one as written. Every message byte-matched to
+    // dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        ("rgb((1 2), 0, 0)", "$red: (1 2) is not a number."),
+        ("rgb(1, (1 2), 0)", "$green: (1 2) is not a number."),
+        ("rgb(1, 2, (1 2))", "$blue: (1 2) is not a number."),
+        ("rgb((1, 2), 0, 0)", "$red: (1, 2) is not a number."),
+        ("rgb([1 2], 0, 0)", "$red: [1 2] is not a number."),
+        ("rgb(c, 0, 0)", "$red: c is not a number."),
+        ("rgba(1, 2, 3, (1 2))", "$alpha: (1 2) is not a number."),
+        ("hsl((1 2), 0%, 0%)", "$hue: (1 2) is not a number."),
+        ("hsl(0, (1 2), 0%)", "$saturation: (1 2) is not a number."),
+        ("hsl(0, 0%, (1 2))", "$lightness: (1 2) is not a number."),
+        ("hsl(c, 0%, 0%)", "$hue: c is not a number."),
+        ("hsla(0, 0%, 0%, (1 2))", "$alpha: (1 2) is not a number."),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports
