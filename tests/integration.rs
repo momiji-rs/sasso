@@ -752,6 +752,19 @@ fn an_escaped_delimiter_is_not_selector_structure() {
     // rewritten to the canonical spelling, as dart does.
     assert_eq!(css(".a\\2c b { c: 1; }"), ".a\\,b {\n  c: 1;\n}");
     assert_eq!(css(".a\\2c b, .c { d: 1; }"), ".a\\,b, .c {\n  d: 1;\n}");
+    // The CARTESIAN path — two or more top-level `&`s, where the part is cut
+    // into segments and rebuilt once per parent — walks the same text again.
+    assert_eq!(css(".p { & .a\\,b & { c: 1; } }"), ".p .a\\,b .p {\n  c: 1;\n}");
+    assert_eq!(
+        css(".p { & .a\\,b & .c { d: 1; } }"),
+        ".p .a\\,b .p .c {\n  d: 1;\n}"
+    );
+    assert_eq!(
+        css(".p, .q { & .a\\,b & { c: 1; } }"),
+        ".p .a\\,b .p, .p .a\\,b .q, .q .a\\,b .p, .q .a\\,b .q {\n  c: 1;\n}"
+    );
+    assert_eq!(css(".p { & .a\\&b & { c: 1; } }"), ".p .a\\&b .p {\n  c: 1;\n}");
+    assert_eq!(css(".p { & & .a\\, { c: 1; } }"), ".p .p .a\\, {\n  c: 1;\n}");
     // Everything above holds when compressing, where the same text is walked
     // again to take the spaces out.
     assert_eq!(css_compressed(".a\\,b, .c { d: 1; }"), ".a\\,b,.c{d:1}");

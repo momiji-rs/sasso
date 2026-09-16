@@ -6336,6 +6336,9 @@ fn resolve_selectors_opt(
                 continue;
             }
             match c {
+                // The backslash itself is written by the shared push below —
+                // only the `&` arm leaves the loop early — and the character
+                // it escapes by the branch above, on the next turn.
                 '\\' => escaped = true,
                 '"' | '\'' => quote = Some(c),
                 '(' | '[' => depth += 1,
