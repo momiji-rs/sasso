@@ -974,7 +974,9 @@ fn scale_toward(current: f64, factor: f64, max: f64) -> f64 {
 fn scale_factor(name: &str, v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
         Value::Number(n) => {
-            if n.unit() != "%" {
+            // A COMPOUND unit only reports its first numerator, so `%*px` must
+            // be rejected explicitly rather than read as a percentage.
+            if n.has_complex_units() || n.unit() != "%" {
                 return Err(Error::at(
                     format!("${name}: Expected {} to have unit \"%\".", n.to_css(false)),
                     pos,

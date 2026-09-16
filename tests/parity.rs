@@ -2605,6 +2605,64 @@ fn a_non_number_channel_outranks_the_count_and_the_count_outranks_the_units() {
 }
 
 #[test]
+fn a_scale_factor_and_a_modified_alpha_reject_a_compound_unit() {
+    // The same first-numerator trap as the channel checks, in the two places
+    // that read a `%` ARGUMENT: `50% * 1px` and `50%/2px` are not percentages.
+    // The alpha modifier's bounds then carry the whole compound unit, as
+    // dart-sass spells it. Every message byte-matched to dart-sass 1.104.1.
+    // Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "color.scale(red, $red: 50% * 1px)",
+            "$red: Expected calc(50% * 1px) to have unit \"%\".",
+        ),
+        (
+            "color.scale(red, $alpha: 50% * 1px)",
+            "$alpha: Expected calc(50% * 1px) to have unit \"%\".",
+        ),
+        (
+            "color.scale(red, $red: 50%/2px)",
+            "$red: Expected calc(25% / 1px) to have unit \"%\".",
+        ),
+        (
+            "color.scale(oklch(50% 0.1 20deg), $chroma: 50% * 1px)",
+            "$chroma: Expected calc(50% * 1px) to have unit \"%\".",
+        ),
+        (
+            "scale-color(red, $red: 50% * 1px)",
+            "$red: Expected calc(50% * 1px) to have unit \"%\".",
+        ),
+        (
+            "scale-color(red, $alpha: 50% * 1px)",
+            "$alpha: Expected calc(50% * 1px) to have unit \"%\".",
+        ),
+        (
+            "color.change(red, $alpha: 50%/2px)",
+            "$alpha: Expected calc(25% / 1px) to be within 0%/px and 1%/px.",
+        ),
+        (
+            "color.change(red, $alpha: 50% * 1px)",
+            "$alpha: Expected calc(50% * 1px) to be within 0%*px and 1%*px.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // A SIMPLE `%` still scales, a simple unit still names itself in the
+    // bounds, and `adjust` (which strips the unit) is untouched.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {\n  b: color.scale(red, $green: 50%);\n  c: color.change(red, $alpha: 50%);\n  d: color.adjust(red, $alpha: 50% * 1px);\n}\n"),
+        "a {\n  b: rgb(100%, 50%, 0%);\n  c: rgba(255, 0, 0, 0.5);\n  d: red;\n}\n"
+    );
+    assert!(err("color.change(red, $alpha: 2px)").contains("$alpha: Expected 2px to be within 0px and 1px."));
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

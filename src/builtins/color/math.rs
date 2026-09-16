@@ -853,7 +853,9 @@ fn channel_pct_base(space: ColorSpace, idx: usize) -> f64 {
 /// parameter is the channel, not a generic `$amount`.
 pub(super) fn scale_pct(name: &str, v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
-        Value::Number(n) if n.unit() == "%" => {
+        // A COMPOUND unit only reports its first numerator, so `%*px` must be
+        // rejected explicitly rather than read as a percentage.
+        Value::Number(n) if !n.has_complex_units() && n.unit() == "%" => {
             // A NaN is within no range, so it is rejected like any
             // out-of-range value rather than scaling the channel to nothing.
             if n.value.is_nan() || n.value < -100.0 || n.value > 100.0 {

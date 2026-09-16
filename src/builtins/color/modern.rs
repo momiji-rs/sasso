@@ -502,19 +502,24 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
                 // named `$alpha:` argument has already evaluated to a number,
                 // so nothing reaches here as a `Slash` today.)
                 Value::Number(n) | Value::Slash(n, _) => {
-                    let max_disp = if n.unit() == "%" { 100.0 } else { 1.0 };
+                    // A COMPOUND unit only reports its first numerator, so it
+                    // is not the percentage it starts with: `50%/2px` is a
+                    // `%/px` value bounded at 1, not a 25% alpha.
+                    let pct = !n.has_complex_units() && n.unit() == "%";
+                    let max_disp = if pct { 100.0 } else { 1.0 };
                     if n.value.is_nan() || n.value < 0.0 || n.value > max_disp {
-                        let (b0, b1) = if n.unit() == "%" {
+                        let (b0, b1) = if pct {
                             ("0%".to_string(), "100%".to_string())
                         } else {
-                            (format!("0{}", n.unit()), format!("1{}", n.unit()))
+                            let u = n.unit_string();
+                            (format!("0{u}"), format!("1{u}"))
                         };
                         return Err(Error::at(
                             format!("$alpha: Expected {} to be within {b0} and {b1}.", n.to_css(false)),
                             pos,
                         ));
                     }
-                    Some(if n.unit() == "%" { n.value / 100.0 } else { n.value })
+                    Some(if pct { n.value / 100.0 } else { n.value })
                 }
                 other => {
                     return Err(Error::at(
