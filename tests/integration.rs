@@ -566,6 +566,76 @@ fn compressed_supports_declarations_keep_their_calculation_spaces() {
     );
 }
 
+/// A module's own trailing `;` is dropped by looking at its last VISIBLE
+/// child. Several kinds of node write nothing at all when compressing — a
+/// blank, a control-only marker (what a stripped `/*# sourceMappingURL */`
+/// leaves behind), a comment that is not loud, a rule holding only dropped
+/// comments — and none of them may hide the node that really wrote the last
+/// byte. Every block below was measured against dart-sass 1.103.1.
+#[test]
+fn compressed_finds_a_modules_last_visible_child() {
+    let dir = std::env::temp_dir().join(format!("sasso_tail_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let imp = sasso::FsImporter::new(vec![dir.clone()]);
+    let run = |name: &str, module: &str, entry: &str| -> String {
+        std::fs::write(dir.join(format!("_{name}.scss")), module).unwrap();
+        compile(
+            entry,
+            &Options::default()
+                .with_importer(&imp)
+                .with_style(OutputStyle::Compressed),
+        )
+        .expect("compile")
+    };
+    // A childless at-rule writes its own `;`, and it comes off when it is last
+    // — behind any number of nodes that write nothing.
+    for (name, module) in [
+        ("tail_plain", "@namespace \"x\";\n"),
+        ("tail_blank", "@namespace \"x\";\n\n\n"),
+        ("tail_quiet", "@namespace \"x\";\n/* quiet */\n"),
+        ("tail_map", "@namespace \"x\";\n/*# sourceMappingURL=x.map */\n"),
+        (
+            "tail_empty_rule",
+            "@namespace \"x\";\n.e { /* only a comment */ }\n",
+        ),
+        ("tail_empty_at", "@namespace \"x\";\n@media a {}\n"),
+    ] {
+        assert_eq!(
+            run(name, module, &format!("@use \"{name}\";")),
+            "@namespace \"x\"",
+            "{name}"
+        );
+    }
+    // A node that DOES write keeps the separator, loud comments included.
+    assert_eq!(
+        run(
+            "tail_loud",
+            "@namespace \"x\";\n/*! loud */\n",
+            "@use \"tail_loud\";"
+        ),
+        "@namespace \"x\";/*! loud */"
+    );
+    assert_eq!(
+        run(
+            "tail_after",
+            "@namespace \"x\";\n",
+            "@use \"tail_after\";\n.z { y: 1; }"
+        ),
+        "@namespace \"x\";.z{y:1}"
+    );
+    // And a passed-through `@import` behind an invisible tail, the other node
+    // kind that carries its own terminator.
+    assert_eq!(
+        run(
+            "tail_import",
+            "@import \"z.css\";\n/* quiet */\n",
+            "@use \"tail_import\";"
+        ),
+        "@import\"z.css\""
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A value is verbatim text and can end in a `;` of its own, which dart keeps
 /// — so what may be dropped is decided by the NODE that wrote the last byte,
 /// never by the byte. Measured against dart-sass 1.103.1.

@@ -688,9 +688,24 @@ fn ends_with_own_semicolon(node: &OutNode) -> bool {
         OutNode::ModuleScope { nodes, .. } => nodes
             .iter()
             .rev()
-            .find(|n| !matches!(n, OutNode::Blank))
+            .find(|n| writes_compressed_output(n))
             .is_some_and(ends_with_own_semicolon),
         _ => false,
+    }
+}
+
+/// Whether a node writes anything at all in compressed output. A blank, a
+/// control-only marker, a comment that is not loud, and a rule holding nothing
+/// but dropped comments all write nothing — so none of them can be the node
+/// that wrote the last byte.
+fn writes_compressed_output(node: &OutNode) -> bool {
+    match node {
+        OutNode::Blank => false,
+        OutNode::Comment(text, _) => is_loud_comment(text),
+        OutNode::Rule { items, .. } => !items
+            .iter()
+            .all(|it| matches!(it, OutItem::Comment(text, _) if !is_loud_comment(text))),
+        n => !n.is_inert_marker(),
     }
 }
 
