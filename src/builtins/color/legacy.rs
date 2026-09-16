@@ -701,7 +701,7 @@ pub(super) fn fn_hsl(
             pos,
         ));
     }
-    let channels = Channels::collect("hsl", &params, pos_args, named, pos)?;
+    let mut channels = Channels::collect("hsl", &params, pos_args, named, pos)?;
     // Echo the caller's spelling (`hsl` vs `hsla`) in the special/relative
     // passthroughs; the `none`-only path normalizes to canonical `hsl`.
     if let Some(verbatim) = channels.relative_passthrough(name) {
@@ -727,9 +727,11 @@ pub(super) fn fn_hsl(
     if pos_args.len() == 2 && named.is_empty() {
         return Err(Error::at("Missing argument $lightness.".to_string(), pos));
     }
-    // A degenerate `calc()` channel (`calc(infinity)`, `calc(-infinity)`,
-    // `calc(NaN)`) keeps the whole call as a special hsl() spelling, with each
-    // channel coerced per dart-sass's modern parsing (see `hsl_degenerate`).
+    channels.comps = normalize_channels(&channels.comps, Some(0));
+    // A degenerate channel that SURVIVED normalization — an infinite
+    // saturation or lightness — keeps the whole call as a special hsl()
+    // spelling, with each channel coerced per dart-sass's modern parsing (see
+    // `hsl_degenerate`). A NaN channel and a non-finite hue are 0 by now.
     if channels.comps.len() == 3 && channels.comps.iter().any(is_degenerate_calc) {
         return hsl_degenerate(&channels, pos);
     }
@@ -817,13 +819,14 @@ fn fold_degenerate(v: &Value) -> Value {
     v.clone()
 }
 
-/// Serialize an `hsl()`/`hsla()` call that carries a degenerate `calc()`
-/// channel. dart-sass keeps the legacy comma spelling and coerces each
-/// channel: the hue is reduced modulo 360 (so any non-finite becomes
-/// `calc(NaN)`); saturation/lightness gain an implicit `%` (`calc(X * 1%)`),
-/// with saturation additionally clamped at 0 (so `-infinity`/`NaN` → `0%`).
+/// Serialize an `hsl()`/`hsla()` call that carries an infinite saturation or
+/// lightness. dart-sass keeps the legacy comma spelling and coerces each
+/// channel: the hue is reduced modulo 360; saturation/lightness gain an
+/// implicit `%` (`calc(X * 1%)`), with saturation additionally clamped at 0
+/// (so `-infinity` → `0%`). Every channel has already passed through
+/// [`normalize_channel`], so none of them is NaN.
 fn hsl_degenerate(channels: &Channels, pos: Pos) -> Result<Value, Error> {
-    let hue = hsl_degenerate_hue(&channels.comps[0], pos)?;
+    let hue = fmt_num(hsl_hue(&channels.comps[0], pos)?.rem_euclid(360.0), false);
     let sat = hsl_degenerate_pct(&channels.comps[1], true, pos)?;
     let light = hsl_degenerate_pct(&channels.comps[2], false, pos)?;
     let name = match &channels.alpha {
@@ -842,50 +845,24 @@ fn hsl_degenerate(channels: &Channels, pos: Pos) -> Result<Value, Error> {
     }))
 }
 
-/// Serialize the hue channel of a degenerate hsl() call: a degenerate `calc()`
-/// reduces modulo 360 to `NaN` (emitted as `calc(NaN)`); any plain value keeps
-/// its normalized degree spelling.
-fn hsl_degenerate_hue(v: &Value, pos: Pos) -> Result<String, Error> {
-    if is_degenerate_calc(v) {
-        // infinity/-infinity/NaN, all reduced mod 360 → NaN.
-        return Ok("calc(NaN)".to_string());
-    }
-    let h = hsl_hue(v, pos)?;
-    Ok(fmt_num(h.rem_euclid(360.0), false))
-}
-
-/// Serialize a saturation/lightness channel of a degenerate hsl() call. A
-/// degenerate `calc()` is treated as a `%` value: saturation clamps a
-/// non-positive/`NaN` result to `0%`, otherwise both emit `calc(X * 1%)`. A
-/// plain number keeps its literal `%` spelling (saturation floored at 0).
+/// Serialize a saturation/lightness channel of a degenerate hsl() call. An
+/// infinite channel is treated as a `%` value: saturation clamps a negative
+/// one to `0%`, otherwise both emit `calc(infinity * 1%)`. A plain number
+/// keeps its literal `%` spelling (saturation floored at 0).
 fn hsl_degenerate_pct(v: &Value, is_saturation: bool, pos: Pos) -> Result<String, Error> {
     if let Some(c) = degenerate_value(v) {
-        {
-            if is_saturation && (c.is_nan() || c <= 0.0) {
-                return Ok("0%".to_string());
-            }
-            let token = if c.is_nan() {
-                "NaN"
-            } else if c.is_sign_negative() {
-                "-infinity"
-            } else {
-                "infinity"
-            };
-            return Ok(format!("calc({token} * 1%)"));
+        if is_saturation && c <= 0.0 {
+            return Ok("0%".to_string());
         }
+        let token = if c.is_sign_negative() {
+            "-infinity"
+        } else {
+            "infinity"
+        };
+        return Ok(format!("calc({token} * 1%)"));
     }
     let raw = num(v, pos)?;
-    let pct = if is_saturation {
-        if raw.is_nan() {
-            0.0
-        } else {
-            raw.max(0.0)
-        }
-    } else if raw.is_nan() {
-        0.0
-    } else {
-        raw
-    };
+    let pct = if is_saturation { raw.max(0.0) } else { raw };
     Ok(format!("{}%", fmt_num(pct, false)))
 }
 
@@ -945,6 +922,7 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
         return Ok(verbatim_call("hwb", &channels));
     }
     let comps: Vec<Value> = comps.iter().map(fold_degenerate).collect();
+    let comps = normalize_channels(&comps, Some(0));
     // A non-number channel (a non-`from` keyword such as `c`, or a quoted
     // string) is reported before the channel-count check, matching dart-sass.
     for (i, comp) in comps.iter().enumerate() {
@@ -1033,6 +1011,12 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
         w_pct = w_pct / t * 100.0;
         b_pct = b_pct / t * 100.0;
     }
+    // dart-sass 1.104.0 converts a NaN channel to 0 when the color is
+    // CONSTRUCTED, which is after that normalization — an infinite whiteness
+    // becomes NaN there (`∞ / ∞`) and lands on 0, so
+    // `hwb(0, calc(infinity * 1%), 40%)` is plain red.
+    let nan_zero = |v: f64| if v.is_nan() { 0.0 } else { v };
+    let (w_pct, b_pct) = (nan_zero(w_pct), nan_zero(b_pct));
     let mut out = hwb_to_color(h, w_pct, b_pct, a);
     // Carry the modern Hwb tag (so `color.space`/`color.channel` work);
     // serialization uses the classic hsl comma form via `legacy_css`.
@@ -1192,6 +1176,8 @@ pub(super) fn fn_lab_family(
     if is_relative || has_special {
         return Ok(verbatim_call(name, &channels));
     }
+    let is_polar_space = matches!(name, "lch" | "oklch");
+    let comps = normalize_channels(&comps, if is_polar_space { Some(2) } else { None });
     // All-plain channels: validate count, types, and units like dart-sass.
     let names = lab_channel_names(name);
     if comps.len() != 3 {
@@ -1205,7 +1191,7 @@ pub(super) fn fn_lab_family(
             pos,
         ));
     }
-    let is_hue = |i: usize| matches!(name, "lch" | "oklch") && i == 2;
+    let is_hue = |i: usize| is_polar_space && i == 2;
     for (i, comp) in comps.iter().enumerate() {
         if is_none_keyword(comp) || is_degenerate_calc(comp) {
             continue;
@@ -1261,7 +1247,7 @@ pub(super) fn fn_lab_family(
         "oklab" => (ColorSpace::Oklab, 1.0, 1.0),
         _ => (ColorSpace::Oklch, 1.0, 1.0),
     };
-    let is_polar = matches!(name, "lch" | "oklch");
+    let is_polar = is_polar_space;
     // Percentage references per CSS Color 4: lab a/b 100% = 125, oklab a/b
     // 100% = 0.4, lch chroma 100% = 150, oklch chroma 100% = 0.4.
     let (ab_base, chroma_base) = match name {
@@ -1398,6 +1384,10 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
             pos,
         ));
     }
+    // No predefined `color()` space has a polar hue, so only a NaN channel
+    // normalizes to 0 here.
+    let channels = normalize_channels(channels, None);
+    let channels = &channels[..];
     // Type-check each supplied channel (with its index-based name) before the
     // count check, matching dart-sass (`color(srgb (0.1 0.2 0.3))` reports a
     // non-number channel rather than a wrong count). A degenerate `calc()` is

@@ -224,19 +224,31 @@ fn normalize_polar(mut mc: ModernColor) -> ModernColor {
         }
     }
     if let Some(h) = mc.channels[hue_idx] {
-        // No finite guard: dart's fmod sends an infinite hue to NaN, and the
-        // spec expects `calc(NaN * 1deg)` for `lch(1% 2 calc(infinity))`.
+        // No finite guard here: dart's fmod sends an infinite hue to NaN, which
+        // `normalize_degenerate` then turns into 0 — the same 0 the CSS spec
+        // asks for.
         mc.channels[hue_idx] = Some(normalize_hue(h, invert));
     }
     normalize_degenerate(mc)
 }
 
-/// dart-sass 1.104.0 converts a negative zero CHANNEL to 0 "as per the CSS
-/// spec", even though a bare number keeps its sign. Applied to the stored
-/// channels, which the modern spaces serialize directly.
+/// dart-sass 1.104.0: "Colors now convert NaN and negative zero, as well as
+/// infinity and negative infinity for polar-hue channels, to 0 as per the CSS
+/// spec." Applied to the STORED channels, so a NaN a conversion produced (not
+/// just one the call spelled out) converts too. An infinite NON-hue channel is
+/// left alone: it still serializes as `calc(infinity * 1%)`.
 pub(super) fn normalize_degenerate(mut mc: ModernColor) -> ModernColor {
-    for ch in mc.channels.iter_mut().flatten() {
-        *ch = crate::value::without_negative_zero(*ch);
+    let hue_idx = match mc.space {
+        ColorSpace::Hsl | ColorSpace::Hwb => Some(0),
+        ColorSpace::Lch | ColorSpace::Oklch => Some(2),
+        _ => None,
+    };
+    for (i, ch) in mc.channels.iter_mut().enumerate() {
+        if let Some(v) = ch {
+            if v.is_nan() || *v == 0.0 || (hue_idx == Some(i) && v.is_infinite()) {
+                *v = 0.0;
+            }
+        }
     }
     mc
 }

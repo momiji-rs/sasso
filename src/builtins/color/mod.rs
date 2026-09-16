@@ -240,6 +240,38 @@ fn degenerate_value(v: &Value) -> Option<f64> {
     }
 }
 
+/// dart-sass 1.104.0: "Colors now convert NaN and negative zero, as well as
+/// infinity and negative infinity for polar-hue channels, to 0 as per the CSS
+/// spec." This runs on the channel VALUE before anything else inspects it, so
+/// a `NaN` channel stops being degenerate at all and the call parses into an
+/// ordinary color. Only a surviving infinity is still degenerate and keeps its
+/// `calc(...)` spelling (`hsl(0, calc(infinity * 1%), 50%)`).
+fn normalize_channel(v: &Value, polar_hue: bool) -> Value {
+    match degenerate_value(v) {
+        Some(c) if c.is_nan() || (polar_hue && c.is_infinite()) => {
+            // The zero keeps the channel's UNIT, so the per-channel unit checks
+            // still see what the caller wrote: `calc(NaN * 1%)` is a `%`
+            // whiteness, and `calc(NaN * 1px)` is still the wrong unit.
+            let zero = match v {
+                Value::Number(n) | Value::Slash(n, _) | Value::Calc(CalcNode::Number(n)) => n.copy_units(0.0),
+                _ => Number::unitless(0.0),
+            };
+            Value::Number(zero)
+        }
+        _ => v.clone(),
+    }
+}
+
+/// Apply [`normalize_channel`] to every component of a channel list, where
+/// `polar_hue` is the index of the space's hue channel (if it has one).
+fn normalize_channels(comps: &[Value], polar_hue: Option<usize>) -> Vec<Value> {
+    comps
+        .iter()
+        .enumerate()
+        .map(|(i, v)| normalize_channel(v, polar_hue == Some(i)))
+        .collect()
+}
+
 /// Serialize a list value wrapped in parentheses, as dart-sass does in its
 /// channel-list error messages (`(1%, 2, 3)`, `(1% 2)`).
 fn list_paren_css(v: &Value) -> String {

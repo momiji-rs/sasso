@@ -1838,16 +1838,17 @@ fn legacy_channels_special_slash_alpha() {
 fn color_function_degenerate_calc() {
     // A degenerate `calc()` (`NaN`/`infinity`/`-infinity`) in a `color()` call
     // is folded the way dart-sass folds it, and the result serializes in the
-    // modern (space-around-`/`) form. A degenerate channel is preserved; a
-    // degenerate alpha folds to a number (`infinity` = opaque/omitted,
-    // `-infinity`/`NaN` = 0). Byte-matched to `npx sass`. Offline.
+    // modern (space-around-`/`) form. An INFINITE channel is preserved; a NaN
+    // channel converts to 0 (dart-sass 1.104.0); a degenerate alpha folds to a
+    // number (`infinity` = opaque/omitted, `-infinity`/`NaN` = 0). Byte-matched
+    // to `npx sass`. Offline.
     assert_eq!(
         ours("a{x: color(srgb 0 0 calc(infinity) / 0.5)}\n"),
         "a {\n  x: color(srgb 0 0 calc(infinity) / 0.5);\n}\n"
     );
     assert_eq!(
         ours("a{x: color(srgb 0 0 calc(NaN) / 0.5)}\n"),
-        "a {\n  x: color(srgb 0 0 calc(NaN) / 0.5);\n}\n"
+        "a {\n  x: color(srgb 0 0 0 / 0.5);\n}\n"
     );
     assert_eq!(
         ours("a{x: color(srgb 0 0 0 / calc(infinity))}\n"),
@@ -1870,6 +1871,70 @@ fn color_function_degenerate_calc() {
     assert_eq!(
         ours("a{x: color(srgb calc(infinity) 0 0)}\n"),
         "a {\n  x: color(srgb calc(infinity) 0 0);\n}\n"
+    );
+}
+
+#[test]
+fn color_channels_convert_degenerate_values() {
+    // dart-sass 1.104.0: "Colors now convert NaN and negative zero, as well as
+    // infinity and negative infinity for polar-hue channels, to 0 as per the
+    // CSS spec." So a NaN channel stops being degenerate anywhere — the call
+    // parses into an ordinary color — and a hue converts every non-finite
+    // value. An infinite NON-hue channel is the only one still written as a
+    // `calc()`. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours(
+            "@use \"sass:color\";\n@use \"sass:math\";\n$nan: math.div(0, 0);\n$inf: math.div(1, 0);\na {\n  \
+             b: hsl($nan, 50%, 50%);\n  \
+             c: hsl($inf, 50%, 50%);\n  \
+             d: hsl(0, 50%, $nan);\n  \
+             e: hsl(0, $inf, 50%);\n  \
+             f: lab(1% calc(NaN) -3);\n  \
+             g: lab(1% calc(infinity) -3);\n  \
+             h: lch(1% 2 calc(infinity));\n  \
+             i: oklch(50% 0.1 calc(NaN));\n  \
+             j: color(srgb calc(NaN) 0 0);\n  \
+             k: color(srgb calc(infinity) 0 0);\n  \
+             l: hwb(calc(NaN) 10% 10%);\n\
+             }\n"
+        ),
+        "a {\n  \
+         b: hsl(0, 50%, 50%);\n  \
+         c: hsl(0, 50%, 50%);\n  \
+         d: hsl(0, 50%, 0%);\n  \
+         e: hsl(0, calc(infinity * 1%), 50%);\n  \
+         f: lab(1% 0 -3);\n  \
+         g: lab(1% calc(infinity) -3);\n  \
+         h: lch(1% 2 0deg);\n  \
+         i: oklch(50% 0.1 0deg);\n  \
+         j: color(srgb 0 0 0);\n  \
+         k: color(srgb calc(infinity) 0 0);\n  \
+         l: hsl(0, 80%, 50%);\n\
+         }\n"
+    );
+    // The conversion runs wherever a color is BUILT, not just on the channels
+    // a call spells out: an infinite hwb whiteness becomes NaN in the
+    // whiteness + blackness normalization (`∞ / ∞`) and lands on 0, and a
+    // negative infinity becomes NaN in the hwb -> hsl conversion instead.
+    // `change` builds its color in the WORKING space, so a NaN hue there is
+    // the 0 hue red already has.
+    assert_eq!(
+        ours(
+            "@use \"sass:color\";\n@use \"sass:math\";\n$nan: math.div(0, 0);\na {\n  \
+             b: color.hwb(0, calc(infinity * 1%), 40%, 0.5);\n  \
+             c: color.hwb(0, calc(-infinity * 1%), 40%, 0.5);\n  \
+             d: color.change(red, $hue: $nan);\n  \
+             e: color.channel(hsl($nan, 50%, 50%), \"hue\");\n  \
+             f: color.to-space(hsl($nan, 50%, 50%), oklch);\n\
+             }\n"
+        ),
+        "a {\n  \
+         b: hsla(0, 100%, 50%, 0.5);\n  \
+         c: hsla(0, 0%, 0%, 0.5);\n  \
+         d: red;\n  \
+         e: 0deg;\n  \
+         f: oklch(55.2338578785% 0.1636699547 24.2125389816deg);\n\
+         }\n"
     );
 }
 
@@ -7539,10 +7604,12 @@ fn color_dart_vm_math_semantics() {
         ours("@use \"sass:color\";\n@use \"sass:math\";\na {b: math.div(color.channel(color.to-space(lab(50% 1 2), lch), \"hue\"), 1deg) * 1e15}\n"),
         "a {\n  b: 63434948822922024;\n}\n"
     );
-    // An infinite hue goes through the same fmod and lands on NaN.
+    // An infinite hue goes through the same fmod and lands on NaN, which
+    // dart-sass 1.104.0 then converts to 0 (a polar hue converts every
+    // non-finite value).
     assert_eq!(
         ours("@use \"sass:meta\";\na {b: meta.inspect(lch(1% 2 calc(infinity)))}\n"),
-        "a {\n  b: lch(1% 2 calc(NaN * 1deg));\n}\n"
+        "a {\n  b: lch(1% 2 0deg);\n}\n"
     );
     // channel() builds a `%` number via `value * 100 / channel.max`; the
     // round trip through ×100 ÷100 perturbs far-range values by one ulp.

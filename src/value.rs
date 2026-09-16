@@ -2415,9 +2415,15 @@ impl ModernColor {
         } else {
             (h, s)
         };
-        // A non-finite channel (an hwb color with a degenerate calc() channel
-        // propagates NaN through the hsl conversion) serializes in its calc
-        // form: `calc(NaN)` for the hue, `calc(NaN * 1%)` for percentages.
+        // Writing this triple builds an hsl color, so dart-sass 1.104.0's
+        // channel conversion applies: a NaN becomes 0. That is how an hwb color
+        // with an infinite whiteness — which the hwb -> hsl conversion sends to
+        // NaN — serializes as `hsl(0, 0%, 0%)`.
+        let nan_zero = |v: f64| if v.is_nan() { 0.0 } else { v };
+        let (h, s, l) = (nan_zero(h), nan_zero(s), nan_zero(l));
+        // An INFINITE channel survives that conversion and serializes in its
+        // calc form: `calc(infinity)` for the hue, `calc(infinity * 1%)` for a
+        // percentage.
         let hh = if h.is_finite() {
             fmt_num(h, compressed)
         } else {

@@ -453,6 +453,11 @@ pub(crate) fn modify_in_space_full(
             }
         }
     }
+    // dart-sass builds the modified color in the WORKING space and only then
+    // converts it back, so 1.104.0's channel conversion applies to the new
+    // channel VALUES — `change(red, $hue: NaN)` is `hsl(0, 100%, 50%)`, i.e.
+    // red again, not the black an unnormalized NaN hue would convert to.
+    let work = normalize_degenerate(work);
     // The legacy-keyword path keeps the original format when the result is in
     // the sRGB gamut, otherwise serializes in the (legacy) working space.
     let dest = if legacy_format && !in_gamut(&work, ColorSpace::Rgb) {
