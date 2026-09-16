@@ -36,6 +36,21 @@ already pulled. The project's own measured verdict still holds:
 > micro-tune `ryu` / `fmt_num` / `eval_expr_inner` — they are intrinsic
 > byte-exact costs.
 
+The 2026-09-15 audit (`bench/perf_audit_2026-09-15.md`) re-tested both halves of
+that verdict and **confirmed** them: a full rebuild of the `fmt_num`/`ryu` path
+with a better design and byte-identical output over ~84M fuzzed formattings
+measured **0.0% ±0.25% on five real frameworks**, and the `@extend` carve-out
+came in at −13.6…−32.5% while staying 0.00% on the general path. The verdict now
+rests on measurement rather than assertion.
+
+It also needs a companion clause, because the audit's own largest lever is
+−14.3%:
+
+> The verdict describes **the tree**, not a snapshot. Only a perf gate keeps it
+> from decaying — that −14.3% is not a new optimisation, it is recovery of a
+> regression CI merged two days earlier with no perf threshold in the way. See
+> `docs/PERF_PLAN_2026-09-16.md`.
+
 So round 2 is **mostly maintainability** (collapse the last oversized files and
 the duplicated code the campaign couldn't reach), with a short list of
 **marginal perf/memory items gated behind a bench** — none are merged on a
@@ -59,7 +74,19 @@ hunch.
   Revisit only if a `massif` run shows the scanner >5% of peak RSS.
 - **`parser.rs` value hot path** (lines ~4248–5722). Clone density ~0.14%;
   already a clean single-pass recursive descent. Splitting it buys 0 perf.
-- **`diag.rs`.** Error-path only — never on a success compile. No hot-path cost.
+- **`diag.rs` itself.** Stays on this list: the ~10 warning blocks a success
+  compile actually prints are ≈0.5% of it. **But the reason given here until
+  2026-09-16 was wrong** — it read "error-path only — never on a success compile.
+  No hot-path cost." Neither half of that is right. Rendering does run on a
+  success compile — `emit_deprecation` calls `crate::diag::render_snippet`
+  (`src/eval/mod.rs:1979`) for each of the ~10 warnings that survive dedup and
+  the per-id cap — it is simply small, which is the ≈0.5% above. The
+  *deprecation bookkeeping* around it in `src/eval/mod.rs` is neither
+  error-path nor small: it runs ~20,800 guard probes and ~6,000
+  `emit_deprecation` calls per success compile, discards ~99% of them, and is the
+  top lever of `bench/perf_audit_2026-09-15.md` (§4.1, −14.3% instructions).
+  `--quiet` does not help: `diag_enabled()` keys off the source text
+  (`src/eval/mod.rs:1669`), and the dedup key is `format!`ed before the reject.
 
 ---
 
