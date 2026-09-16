@@ -114,3 +114,162 @@ fn nested_rules_keep_their_selector_lines() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The same, in COMPRESSED style — which is the only thing that tells a value
+/// dart kept TYPED from one it kept as text.
+fn compile_compressed_in(dir: &std::path::Path, name: &str, src: &str) -> String {
+    let entry = dir.join(name);
+    std::fs::write(&entry, src).unwrap();
+    let url = entry.to_string_lossy().into_owned();
+    let imp = FsImporter::new(Vec::new());
+    let opts = Options::default()
+        .with_importer(&imp)
+        .with_url(&url)
+        .with_style(sasso::OutputStyle::Compressed);
+    compile(src, &opts).expect("compile")
+}
+
+/// A value in a loaded `.css` file is a VALUE, not frozen text: dart parses it
+/// and re-serializes it for the output style, so compressing shortens its
+/// numbers, its hex colours and its list separators. Every expectation below
+/// was measured against dart-sass 1.103.1.
+#[test]
+fn a_loaded_files_values_serialize_for_the_output_style() {
+    let dir = scratch("values");
+    let case = |file: &str, decl: &str, expanded: &str, compressed: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), format!(".a {{ b: {decl}; }}\n")).unwrap();
+        let src = format!("@use \"{file}\";\n");
+        assert_eq!(
+            compile_in(&dir, &format!("entry_{file}.scss"), &src),
+            format!(".a {{\n  b: {expanded};\n}}"),
+            "expanded {decl}"
+        );
+        assert_eq!(
+            compile_compressed_in(&dir, &format!("entry_{file}_c.scss"), &src),
+            format!(".a{{b:{compressed}}}"),
+            "compressed {decl}"
+        );
+    };
+    // Numbers shorten, in a list and behind `!important` as well.
+    case("num", "0.5px", "0.5px", ".5px");
+    case("neg", "-0.5px", "-0.5px", "-0.5px");
+    case("list", "1px 0.5px", "1px 0.5px", "1px .5px");
+    case("clist", "1px, 0.5px", "1px, 0.5px", "1px,.5px");
+    // Hex colours take their shortest form.
+    case("hex6", "#cccccc", "#cccccc", "#ccc");
+    case("hex6u", "#CCCCCC", "#CCCCCC", "#ccc");
+    case("hex8", "#ccccccff", "#cccccc", "#ccc");
+    case("hexname", "#ff0000", "#ff0000", "red");
+    case(
+        "shorthand",
+        "1px solid #cccccc",
+        "1px solid #cccccc",
+        "1px solid #ccc",
+    );
+    // A calculation is a calculation.
+    case(
+        "calc",
+        "calc(100% - 2 * var(--x))",
+        "calc(100% - 2 * var(--x))",
+        "calc(100% - 2*var(--x))",
+    );
+}
+
+/// A colour KEYWORD is a Sass value, not a CSS one — dart's CSS parser leaves
+/// `white` an identifier, so it keeps its own spelling (and its case) instead
+/// of compressing to `#fff`. Measured against dart-sass 1.103.1.
+#[test]
+fn a_loaded_files_colour_keywords_stay_identifiers() {
+    let dir = scratch("keywords");
+    let case = |file: &str, decl: &str, want: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), format!(".a {{ b: {decl}; }}\n")).unwrap();
+        let src = format!("@use \"{file}\";\n");
+        assert_eq!(
+            compile_compressed_in(&dir, &format!("entry_{file}.scss"), &src),
+            format!(".a{{b:{want}}}"),
+            "{decl}"
+        );
+    };
+    // The keyword survives; only the LIST around it compresses.
+    for (i, (decl, want)) in [
+        ("white", "white"),
+        ("black", "black"),
+        ("magenta", "magenta"),
+        ("rebeccapurple", "rebeccapurple"),
+        ("transparent", "transparent"),
+        ("WHITE", "WHITE"),
+        ("1px solid white", "1px solid white"),
+        ("white, black", "white,black"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        case(&format!("kw{i}"), decl, want);
+    }
+    // Written as SCSS the same keyword IS a colour, and compresses.
+    let dir2 = scratch("keywords_scss");
+    assert_eq!(
+        compile_compressed_in(&dir2, "s.scss", ".a { b: white; }"),
+        ".a{b:#fff}"
+    );
+}
+
+/// A function call in a loaded `.css` file becomes a STRING, and dart builds
+/// that string with the DEFAULT style whatever the output style is — so its
+/// arguments keep their leading zeros and their `, ` even when compressing,
+/// while the separator is normalised from the source. Measured against
+/// dart-sass 1.103.1.
+#[test]
+fn a_loaded_files_function_call_serializes_in_the_default_style() {
+    let dir = scratch("calls");
+    let case = |file: &str, decl: &str, want: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), format!(".a {{ b: {decl}; }}\n")).unwrap();
+        let src = format!("@use \"{file}\";\n");
+        assert_eq!(
+            compile_compressed_in(&dir, &format!("entry_{file}.scss"), &src),
+            format!(".a{{b:{want}}}"),
+            "{decl}"
+        );
+    };
+    case("rgb", "rgb(255,255,255)", "rgb(255, 255, 255)");
+    case("rgba", "rgba(0, 0, 0, 0.15)", "rgba(0, 0, 0, 0.15)");
+    case("unk", "unknownfn(0.5px,2px)", "unknownfn(0.5px, 2px)");
+    case("nest", "nested(inner(0.5), 2)", "nested(inner(0.5), 2)");
+    case("tr", "translate(0.5px,-0.5px)", "translate(0.5px, -0.5px)");
+}
+
+/// A nested plain-CSS rule holding nothing that survives compression — a
+/// comment, or another such rule — is not written at all, and neither is the
+/// rule left empty around it. (`swiper-bundle.css` ships exactly this.)
+/// Measured against dart-sass 1.103.1.
+#[test]
+fn a_loaded_files_comment_only_rule_vanishes_when_compressed() {
+    let dir = scratch("emptyrule");
+    let case = |file: &str, css: &str, want: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), css).unwrap();
+        assert_eq!(
+            compile_compressed_in(
+                &dir,
+                &format!("entry_{file}.scss"),
+                &format!("@use \"{file}\";\n")
+            ),
+            want,
+            "{css}"
+        );
+    };
+    case("only", ".a {\n  .b {\n    /* c */\n  }\n}\n", "");
+    case(
+        "deep",
+        ".a {\n  .b {\n    .c {\n      /* c */\n    }\n  }\n}\n",
+        "",
+    );
+    case("at", ".a {\n  @media x {\n    /* c */\n  }\n}\n", "");
+    // A sibling that DOES write keeps its rule.
+    case(
+        "sibling",
+        ".a {\n  c: 1;\n  .b {\n    /* c */\n  }\n}\n",
+        ".a{c:1}",
+    );
+    // And a LOUD comment writes, so everything around it stays.
+    case("loud", ".a {\n  .b {\n    /*! c */\n  }\n}\n", ".a{.b{/*! c */}}");
+}

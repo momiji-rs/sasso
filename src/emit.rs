@@ -702,13 +702,14 @@ fn writes_compressed_output(node: &OutNode) -> bool {
     match node {
         OutNode::Blank => false,
         OutNode::Comment(text, _) => is_loud_comment(text),
-        OutNode::Rule { items, .. } => !items
-            .iter()
-            .all(|it| matches!(it, OutItem::Comment(text, _) if !is_loud_comment(text))),
+        OutNode::Rule { items, .. } => items.iter().any(item_writes_compressed),
         // A module splices in transparently, so it is only as visible as its
         // contents — `meta.load-css` of a stylesheet that is all comments
         // writes nothing and must not hide the node before it.
         OutNode::ModuleScope { nodes, .. } => nodes.iter().any(writes_compressed_output),
+        // An at-rule WITH a block is as visible as that block; a childless one
+        // (`@namespace "x";`) is always written.
+        OutNode::AtRule { body, has_block, .. } => !has_block || body.iter().any(writes_compressed_output),
         n => !n.is_inert_marker(),
     }
 }
@@ -730,10 +731,12 @@ fn emit_compressed_body(out: &mut String, nodes: &[OutNode], collector: &mut Opt
                     prev_was_decl = false;
                 }
                 write_comment_compressed(out, text, *lines, collector);
+                last = Some(node);
             }
             continue;
         }
-        if matches!(node, OutNode::Blank) {
+        // A node that writes nothing neither emits nor takes the separator.
+        if !writes_compressed_output(node) {
             continue;
         }
         if prev_was_decl {
@@ -789,13 +792,15 @@ fn compressed_at_rule_omits_space(name: &str, prelude: &str) -> bool {
 fn write_items_compressed(out: &mut String, items: &[OutItem], collector: &mut Option<SmCollector>) {
     let mut pending_semicolon = false;
     for item in items {
+        // An item that writes nothing — a dropped comment, a rule or at-rule
+        // holding only those — neither emits nor takes the pending separator.
+        if !item_writes_compressed(item) {
+            continue;
+        }
         if let OutItem::Comment(text, lines) = item {
-            // A comment is dropped when compressing unless it is LOUD, which
-            // is how a stylesheet keeps its licence header. It takes the
-            // pending separator (`b:1;/*! c */`) but needs none of its own.
-            if !is_loud_comment(text) {
-                continue;
-            }
+            // A LOUD comment is how a stylesheet keeps its licence header. It
+            // takes the pending separator (`b:1;/*! c */`) but needs none of
+            // its own.
             if pending_semicolon {
                 out.push(';');
                 pending_semicolon = false;
@@ -814,6 +819,20 @@ fn write_items_compressed(out: &mut String, items: &[OutItem], collector: &mut O
 /// `/*!`, the convention for "this is a licence, do not strip me".
 fn is_loud_comment(text: &str) -> bool {
     text.starts_with('!')
+}
+
+/// Whether an item writes anything at all in compressed output. A dropped
+/// comment writes nothing, and so does a nested rule or at-rule holding only
+/// such items — however deep that goes, a plain-CSS `.a { .b { /* c */ } }`
+/// leaves dart with nothing to print at either level.
+fn item_writes_compressed(item: &OutItem) -> bool {
+    match item {
+        OutItem::Comment(text, _) => is_loud_comment(text),
+        OutItem::NestedRule { items, .. } | OutItem::NestedAtRule { items, .. } => {
+            items.iter().any(item_writes_compressed)
+        }
+        _ => true,
+    }
 }
 
 /// Write a loud comment for compressed output — verbatim, newlines and all,
@@ -948,13 +967,10 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             lines,
             ..
         } => {
-            // A rule whose every item is a DROPPED comment produces nothing
-            // in compressed output, so it is not emitted at all — but a loud
-            // comment is output, and keeps its rule alive around it.
-            if items
-                .iter()
-                .all(|it| matches!(it, OutItem::Comment(text, _) if !is_loud_comment(text)))
-            {
+            // A rule that writes nothing produces nothing in compressed
+            // output, so it is not emitted at all — a dropped comment writes
+            // nothing, and neither does a nested rule holding only those.
+            if !items.iter().any(item_writes_compressed) {
                 return;
             }
             // Source-map: the selector list's first character.
@@ -1002,6 +1018,11 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             has_block,
             lines,
         } => {
+            // A block that writes nothing leaves dart nothing to print: the
+            // at-rule goes with it, exactly as a rule of dropped comments does.
+            if *has_block && !body.iter().any(writes_compressed_output) {
+                return;
+            }
             // Source-map: the at-rule's `@` keyword.
             record(out, *lines, collector);
             out.push('@');

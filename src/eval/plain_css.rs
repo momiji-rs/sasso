@@ -259,7 +259,7 @@ impl<'a> Evaluator<'a> {
                 }
                 Stmt::Decl(d) => {
                     let prop = self.eval_template(&d.property)?.trim().to_string();
-                    let value = self.eval_expr(&d.value)?.to_css(false);
+                    let value = self.eval_expr(&d.value)?.to_css(self.compressed());
                     // Plain CSS has no variables, so the value node is always
                     // the value's own text (dart's `_expressionNode` fallback).
                     let value_span = self.span_at(d.value_pos);
@@ -497,7 +497,7 @@ impl<'a> Evaluator<'a> {
         match stmt {
             Stmt::Decl(d) => {
                 let prop = self.eval_template(&d.property)?.trim().to_string();
-                let value = self.eval_expr(&d.value)?.to_css(false);
+                let value = self.eval_expr(&d.value)?.to_css(self.compressed());
                 // Plain CSS has no variables, so the value node is always the
                 // value's own text (dart's `_expressionNode` fallback).
                 let value_span = self.span_at(d.value_pos);

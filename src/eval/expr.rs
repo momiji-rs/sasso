@@ -365,8 +365,11 @@ impl<'a> Evaluator<'a> {
                 }
                 let mut parts: Vec<String> = Vec::with_capacity(args.len());
                 for a in args {
+                    // As on the ordinary plain-CSS call path: the result is a
+                    // STRING, and dart builds one with the default style
+                    // whatever the output style is.
                     let v = self.eval_expr(&a.value)?;
-                    parts.push(v.to_css(self.compressed()));
+                    parts.push(v.to_css(false));
                 }
                 Ok(Value::Str(SassStr {
                     text: format!("{fname}({})", parts.join(", ")).into(),
@@ -396,7 +399,11 @@ impl<'a> Evaluator<'a> {
                 {
                     let mut parts: Vec<String> = Vec::with_capacity(args.len());
                     for a in args {
-                        parts.push(self.eval_expr(&a.value)?.to_css(self.compressed()));
+                        // The call becomes a STRING here, and dart builds that
+                        // string with the default style whatever the output
+                        // style is — so `rgb(0.5, 2, 3)` keeps its zero and its
+                        // `, ` even when compressing.
+                        parts.push(self.eval_expr(&a.value)?.to_css(false));
                     }
                     return Ok(Value::Str(SassStr {
                         text: format!("{name}({})", parts.join(", ")).into(),

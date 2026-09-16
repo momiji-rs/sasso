@@ -695,6 +695,57 @@ fn compressed_nested_plain_css_import_loses_its_gap() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A call sasso cannot dispatch becomes a STRING, and dart builds one with the
+/// DEFAULT style whatever the output style is — so its arguments keep their
+/// leading zeros. That holds for a name written out AND for one that arrives
+/// through interpolation, which reaches the same unquoted-string form by
+/// another path. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_plain_css_calls_keep_their_arguments_default_style() {
+    let v = |scss: &str| css_compressed(&format!("$o: o;\na{{x:{scss}}}"));
+    // An interpolated name, part of it and all of it.
+    assert_eq!(v("f#{$o}o(0.5)"), "a{x:foo(0.5)}");
+    assert_eq!(v("f#{$o}o(0.5, -0.5px)"), "a{x:foo(0.5, -0.5px)}");
+    assert_eq!(v("#{\"fo\" + $o}(0.5)"), "a{x:foo(0.5)}");
+    assert_eq!(v("1px f#{$o}o(0.5)"), "a{x:1px foo(0.5)}");
+    assert_eq!(v("f#{$o}o(inner(0.5))"), "a{x:foo(inner(0.5))}");
+    // And a name written out, which took the other path.
+    assert_eq!(v("foo(0.5)"), "a{x:foo(0.5)}");
+    assert_eq!(v("translate(0.5px)"), "a{x:translate(0.5px)}");
+    // Expanded output is the same string either way.
+    let e = |scss: &str| compile(&format!("$o: o;\na{{x:{scss}}}"), &Options::default()).expect("compile");
+    assert_eq!(e("f#{$o}o(0.5)"), "a {\n  x: foo(0.5);\n}");
+    assert_eq!(e("foo(0.5)"), "a {\n  x: foo(0.5);\n}");
+}
+
+/// Compressed output drops anything that writes nothing — a rule or at-rule
+/// whose body is only comments, however deep it nests, and the separator such
+/// an item would otherwise have taken. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_drops_what_writes_nothing() {
+    assert_eq!(css_compressed("@media x { /* c */ }"), "");
+    assert_eq!(css_compressed("@media x { .a { /* c */ } }"), "");
+    assert_eq!(css_compressed("@supports (a: 1) { /* c */ }"), "");
+    assert_eq!(css_compressed(".a { /* c */ }"), "");
+    assert_eq!(css_compressed(".a { .b { /* c */ } }"), "");
+    // A declaration before one of those keeps no trailing separator.
+    assert_eq!(css_compressed(".a { c: 1; @media x { /* d */ } }"), ".a{c:1}");
+    assert_eq!(
+        css_compressed("@media x { .a { b: 1; } .c { /* d */ } }"),
+        "@media x{.a{b:1}}"
+    );
+    // Anything that DOES write keeps its wrapper.
+    assert_eq!(css_compressed("@media x { /*! c */ }"), "@media x{/*! c */}");
+    assert_eq!(css_compressed("@media x { .a { b: 1; } }"), "@media x{.a{b:1}}");
+    // Expanded output keeps them all, as dart does — on one line when they
+    // were written that way, and over three when they were not.
+    let expanded = |scss: &str| compile(scss, &Options::default()).expect("compile");
+    assert_eq!(expanded("@media x { /* c */ }"), "@media x { /* c */ }");
+    assert_eq!(expanded(".a { /* c */ }"), ".a { /* c */ }");
+    assert_eq!(expanded("@media x {\n  /* c */\n}"), "@media x {\n  /* c */\n}");
+    assert_eq!(expanded(".a {\n  /* c */\n}"), ".a {\n  /* c */\n}");
+}
+
 /// A value is verbatim text and can end in a `;` of its own, which dart keeps
 /// — so what may be dropped is decided by the NODE that wrote the last byte,
 /// never by the byte. Measured against dart-sass 1.103.1.
