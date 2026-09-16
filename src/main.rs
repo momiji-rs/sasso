@@ -677,8 +677,8 @@ fn expand_dir(src: &Path, dest: &Path, indented: bool, units: &mut Vec<Unit>) ->
     }
     files.sort();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let src_abs = normalize_path(&cwd.join(src));
-    let dest_abs = normalize_path(&cwd.join(dest));
+    let src_abs = path_key(&normalize_path(&cwd.join(src)));
+    let dest_abs = path_key(&normalize_path(&cwd.join(dest)));
     // dart-sass 1.104.1 skips every source file INSIDE the output directory
     // when that directory is nested in the source tree: `.:css` run twice
     // would otherwise mirror `css/` into `css/css/`. Nesting is strict — a
@@ -690,14 +690,14 @@ fn expand_dir(src: &Path, dest: &Path, indented: bool, units: &mut Vec<Unit>) ->
     for path in files {
         let rel = path.strip_prefix(src).unwrap_or(&path).with_extension("css");
         let out = dest.join(rel);
-        let path_abs = normalize_path(&cwd.join(&path));
+        let path_abs = path_key(&normalize_path(&cwd.join(&path)));
         if nested && path_abs.starts_with(&dest_abs) {
             continue;
         }
         // dart skips a CSS file whose destination is itself (`sasso dir`, or
         // `dir:dir`, with a `plain.css` inside): it would only be rewritten in
         // place.
-        if normalize_path(&cwd.join(&out)) == path_abs {
+        if path_key(&normalize_path(&cwd.join(&out))) == path_abs {
             continue;
         }
         units.push(Unit {
@@ -1556,6 +1556,26 @@ fn adjust_sources(
 /// Lexically normalize a path: resolve `.`/`..` components without touching the
 /// filesystem (so it works for paths that may not exist yet), like dart's URL
 /// normalization. Keeps it absolute if it started absolute.
+/// A path reduced to the key the two directory-relationship tests compare —
+/// "is this file inside the destination" and "is its destination itself".
+///
+/// On Windows the filesystem is case-insensitive and dart canonicalizes each
+/// part to lowercase (see `importer::absolute_normalized`), so `Src:src/css`
+/// names one directory two ways and the tests have to see that. Everywhere
+/// else the path is compared as written, again like dart — which case-folds
+/// for no other style, not even on a case-insensitive macOS volume. The key
+/// is lexical either way: no `realpath`, so a symlink is not resolved.
+#[cfg(windows)]
+fn path_key(p: &Path) -> PathBuf {
+    PathBuf::from(p.to_string_lossy().to_lowercase())
+}
+
+/// See the Windows variant above: elsewhere the path is its own key.
+#[cfg(not(windows))]
+fn path_key(p: &Path) -> PathBuf {
+    p.to_path_buf()
+}
+
 fn normalize_path(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out: Vec<Component<'_>> = Vec::new();
