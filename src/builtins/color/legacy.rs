@@ -1031,7 +1031,9 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     // channel before the value is read. The hue may be unitless or an angle.
     for (i, cname) in [(1usize, "whiteness"), (2usize, "blackness")] {
         if let Some(num) = channel_unit_number(&comps[i]) {
-            if num.unit() != "%" {
+            // A COMPOUND unit only reports its first numerator, so `%/px` must
+            // be rejected explicitly rather than read as a percentage.
+            if num.has_complex_units() || num.unit() != "%" {
                 // The message shows the spelling the caller wrote, not the
                 // zero a degenerate channel normalizes to.
                 return Err(Error::at(
@@ -1276,14 +1278,17 @@ pub(super) fn fn_lab_family(
         };
         let shown = comp.to_css(false);
         if is_hue(i) {
-            let ok = num.is_unitless() || matches!(num.unit(), "deg" | "grad" | "rad" | "turn");
+            // A COMPOUND unit only reports its first numerator, so `deg/px`
+            // must be rejected explicitly rather than read as an angle.
+            let ok = !num.has_complex_units()
+                && (num.is_unitless() || matches!(num.unit(), "deg" | "grad" | "rad" | "turn"));
             if !ok {
                 return Err(Error::at(
                     format!("$hue: Expected {shown} to have an angle unit (deg, grad, rad, turn)."),
                     pos,
                 ));
             }
-        } else if !num.is_unitless() && num.unit() != "%" {
+        } else if !num.is_unitless() && (num.has_complex_units() || num.unit() != "%") {
             return Err(Error::at(
                 format!("${}: Expected {shown} to have unit \"%\" or no units.", names[i]),
                 pos,
@@ -1477,7 +1482,7 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
                 ))
             }
         };
-        if !num.is_unitless() && num.unit() != "%" {
+        if !num.is_unitless() && (num.has_complex_units() || num.unit() != "%") {
             return Err(Error::at(
                 format!(
                     "${name}: Expected {} to have unit \"%\" or no units.",
@@ -1519,7 +1524,9 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
     let degenerate =
         channels.iter().any(is_degenerate_calc) || alpha.as_ref().is_some_and(is_degenerate_calc);
     if degenerate {
-        return Ok(modern_color(&space_name, channels, alpha.as_ref(), pos));
+        // The CANONICAL space name, like every other `color()` output:
+        // `color(SRGB calc(infinity) 0 0)` is `color(srgb …)`.
+        return Ok(modern_color(&space_lower, channels, alpha.as_ref(), pos));
     }
     // Compute the color: predefined `color()` spaces store red/green/blue (and
     // xyz x/y/z) channels in 0..1 with no clamping.

@@ -2433,6 +2433,59 @@ fn the_degenerate_hsl_spelling_drops_an_opaque_alpha() {
 }
 
 #[test]
+fn a_compound_unit_is_not_the_unit_it_starts_with() {
+    // A number's unit accessor reports only the FIRST numerator, so a compound
+    // unit like `%/px` reads as `%` — every channel check has to reject it
+    // explicitly. And the preserved-`calc()` `color()` spelling uses the
+    // canonical space name, as the ordinary path already did. Byte-matched to
+    // dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("a {\n  b: color(SRGB calc(infinity) 0 0);\n  c: color(Display-P3 calc(infinity) 0 0);\n  d: color(XYZ calc(infinity) 0 0);\n  e: color(SRGB 0 0 0 / calc(infinity));\n}\n"),
+        "a {\n  b: color(srgb calc(infinity) 0 0);\n  c: color(display-p3 calc(infinity) 0 0);\n  d: color(xyz calc(infinity) 0 0);\n  e: color(srgb 0 0 0);\n}\n"
+    );
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        (
+            "hwb(0 50%/2px 10%)",
+            "$whiteness: Expected 50%/2px to have unit \"%\".",
+        ),
+        (
+            "color.hwb(0, 50%/2px, 10%)",
+            "$whiteness: Expected calc(25% / 1px) to have unit \"%\".",
+        ),
+        (
+            "lab(1% 50%/2px 0)",
+            "$a: Expected 50%/2px to have unit \"%\" or no units.",
+        ),
+        (
+            "oklab(1% 50%/2px 0)",
+            "$a: Expected 50%/2px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 50%/2px 0 0)",
+            "$red: Expected 50%/2px to have unit \"%\" or no units.",
+        ),
+        (
+            "lch(1% 2 90deg/2px / 0.5)",
+            "$hue: Expected 90deg/2px to have an angle unit (deg, grad, rad, turn).",
+        ),
+        (
+            "oklch(1% 2 90deg/2px / 0.5)",
+            "$hue: Expected 90deg/2px to have an angle unit (deg, grad, rad, turn).",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // A SIMPLE unit of the same name is still accepted, so the check has not
+    // become "reject anything with a unit".
+    assert_eq!(
+        ours("a {\n  b: hwb(0 50% 10%);\n  c: lab(1% 50% 0);\n  d: color(srgb 50% 0 0);\n  e: lch(1% 2 90deg);\n}\n"),
+        "a {\n  b: hsl(0, 66.6666666667%, 70%);\n  c: lab(1% 62.5 0);\n  d: color(srgb 0.5 0 0);\n  e: lch(1% 2 90deg);\n}\n"
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports
