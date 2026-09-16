@@ -2378,6 +2378,12 @@ fn a_degenerate_call_still_converts_its_other_parts() {
         ours("a {\n  b: color(srgb 50% 0 calc(infinity));\n  c: color(srgb 50%/2 0 calc(infinity));\n  d: color(xyz 50% 0 calc(infinity));\n  e: color(display-p3 50% 0 calc(infinity));\n  f: color(srgb 0.5 0 calc(infinity));\n}\n"),
         "a {\n  b: color(srgb 0.5 0 calc(infinity));\n  c: color(srgb 0.25 0 calc(infinity));\n  d: color(xyz 0.5 0 calc(infinity));\n  e: color(display-p3 0.5 0 calc(infinity));\n  f: color(srgb 0.5 0 calc(infinity));\n}\n"
     );
+    // The NON-FINITE channel's own spelling is the calculation's, not the
+    // division that produced it: `1/0` is `calc(infinity)`, never `1/0`.
+    assert_eq!(
+        ours("@use \"sass:meta\";\na {\n  b: color(srgb 1/0 0 0);\n  c: color(srgb -1/0 0 0);\n  d: color(srgb 0/0 0 0);\n  e: color(xyz 1/0 0 0);\n  f: meta.inspect(color(srgb 1/0 0 0));\n}\n"),
+        "a {\n  b: color(srgb calc(infinity) 0 0);\n  c: color(srgb calc(-infinity) 0 0);\n  d: color(srgb 0 0 0);\n  e: color(xyz calc(infinity) 0 0);\n  f: color(srgb calc(infinity) 0 0);\n}\n"
+    );
     let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
     for (call, want) in [
         (

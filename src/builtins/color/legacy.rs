@@ -1547,9 +1547,12 @@ fn modern_color(space: &str, channels: &[Value], alpha: Option<&Value>, pos: Pos
     // rather than echoing what the caller wrote.
     let body: Vec<String> = channels
         .iter()
-        .map(|v| match degenerate_value(v) {
-            Some(_) => v.to_css(false),
-            None => match modern_channel(v, 1.0) {
+        .map(|v| match (degenerate_value(v), v) {
+            // A non-finite channel keeps its `calc(...)` spelling — which for
+            // a slash-division is the QUOTIENT's, not the `1/0` written.
+            (Some(_), Value::Slash(n, _)) => n.to_css(false),
+            (Some(_), _) => v.to_css(false),
+            (None, _) => match modern_channel(v, 1.0) {
                 Some(n) => fmt_num(n, false),
                 None => v.to_css(false),
             },
