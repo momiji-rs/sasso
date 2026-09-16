@@ -548,16 +548,19 @@ fn split_channels(channels: &Value) -> SplitChannels {
     let mut items: Vec<Value> = l.items.to_vec();
     // A trailing `n / a` slash-division shows up as a `Slash` whose textual
     // spelling contains `/`; recover the channel and alpha (each may carry a
-    // unit, e.g. `50%/0.4`).
+    // unit, e.g. `50%/0.4`). The split is at the LAST top-level slash, which is
+    // dart's rule for a chain: the final element is the alpha and every earlier
+    // slash stays a DIVISION inside the last channel, so `0 0 0/50%/2` is alpha
+    // `2` with a blue of `0/50%` — the spelling its own diagnostic shows.
     if let Some(Value::Slash(_, repr)) = items.last() {
-        if let Some((lhs, rhs)) = repr.split_once('/') {
-            let token = |s: &str| parse_number_token(s).or_else(|| parse_degenerate_token(s));
-            if let (Some(last), Some(alpha)) = (token(lhs), token(rhs)) {
+        if let Some(idx) = top_level_slash(repr) {
+            let (lhs, rhs) = (repr[..idx].trim(), repr[idx + 1..].trim());
+            if let (Some(last), Some(alpha)) = (slash_channel_token(lhs), numeric_token(rhs)) {
                 items.pop();
-                items.push(Value::Number(last));
+                items.push(last);
                 return SplitChannels {
                     comps: items,
-                    alpha: Some(Value::Number(alpha)),
+                    alpha: Some(alpha),
                     alpha_split: true,
                 };
             }
@@ -586,6 +589,32 @@ fn split_channels(channels: &Value) -> SplitChannels {
         }
     }
     no_split(items)
+}
+
+/// A channel token that must be NUMERIC: a plain number or a degenerate
+/// `calc()`. Anything else (a keyword, a `var()`, a leftover slash) is `None`,
+/// so the caller leaves the list unsplit rather than inventing a channel.
+fn numeric_token(s: &str) -> Option<Value> {
+    let v = channel_token(s);
+    if matches!(v, Value::Number(_) | Value::Calc(_)) {
+        return Some(v);
+    }
+    // The UNIT-bearing degenerate spelling a slash repr can carry
+    // (`calc(NaN * 1%)`), which the plain token reader does not recognize.
+    parse_degenerate_token(s).map(Value::Number)
+}
+
+/// A channel token that may itself be a chain of divisions (`0/50%`): each
+/// slash divides, and the result keeps the authored spelling, which is what
+/// the channel's unit diagnostic reports. `None` if any piece is not numeric.
+fn slash_channel_token(s: &str) -> Option<Value> {
+    let Some(idx) = top_level_slash(s) else {
+        return numeric_token(s);
+    };
+    let left = slash_channel_token(s[..idx].trim())?;
+    let right = numeric_token(s[idx + 1..].trim())?;
+    let (a, b) = (channel_unit_number(&left)?, channel_unit_number(&right)?);
+    Some(Value::Slash(a.div(b), s.to_string()))
 }
 
 /// Find the byte index of the (single) top-level `/` in an unquoted channel

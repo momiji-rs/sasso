@@ -2292,6 +2292,34 @@ fn a_positional_channel_diagnostic_names_its_parameter() {
 }
 
 #[test]
+fn the_last_slash_in_a_channels_list_is_the_alpha() {
+    // A chain of slashes is ONE list: dart takes its LAST element as the
+    // alpha, and every earlier slash stays a DIVISION inside the final
+    // channel. So `0 0 0/50%/2` is alpha `2` (clamped to opaque) with a blue
+    // of `0/50%` — which is also the spelling that channel's own unit
+    // diagnostic reports. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("a {\n  b: hsl(0 50% 50% / 50%/2);\n  c: hsl(0 50% 50% / 2px/1);\n  d: rgb(0 0 0 / 0.25/0.75);\n  e: lab(50% 1 4 / 2 / 0.5);\n  f: lch(50% 10 180deg/2 / 0.5);\n  g: color(srgb 0 0 0 / 0.25/0.75);\n}\n"),
+        "a {\n  b: hsl(0, 50%, 1%);\n  c: hsl(0, 50%, 25%);\n  d: rgba(0, 0, 0, 0.75);\n  e: lab(50% 1 2 / 0.5);\n  f: lch(50% 10 90deg / 0.5);\n  g: color(srgb 0 0 0 / 0.75);\n}\n"
+    );
+    // A single slash is unchanged — the last one is the only one.
+    assert_eq!(
+        ours("a {\n  b: rgb(0 0 0 / 50%);\n  c: color(srgb 0 0 0 / 50%);\n  d: rgb(510/2 0 0 / 0.5);\n  e: hsl(0 100%/2 50% / 0.5);\n}\n"),
+        "a {\n  b: rgba(0, 0, 0, 0.5);\n  c: color(srgb 0 0 0 / 0.5);\n  d: rgba(255, 0, 0, 0.5);\n  e: hsla(0, 50%, 50%, 0.5);\n}\n"
+    );
+    // The divided channel is validated like the one the caller wrote out.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    assert!(
+        err("color(srgb 0 0 0 / 50%/2)").contains("$blue: Expected 0/50% to have unit \"%\" or no units.")
+    );
+    assert!(err("rgb(0 0 0 / 50%/2)").contains("$blue: Expected 0/50% to have unit \"%\" or no units."));
+    assert!(err("lab(50% 1 2 / 50%/2)").contains("$b: Expected 2/50% to have unit \"%\" or no units."));
+    assert!(
+        err("color(srgb 0 0 0 / 2px/1)").contains("$blue: Expected 0/2px to have unit \"%\" or no units.")
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports
