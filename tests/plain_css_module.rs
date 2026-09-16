@@ -213,3 +213,27 @@ fn a_loaded_files_colour_keywords_stay_identifiers() {
         ".a{b:#fff}"
     );
 }
+
+/// A function call in a loaded `.css` file becomes a STRING, and dart builds
+/// that string with the DEFAULT style whatever the output style is — so its
+/// arguments keep their leading zeros and their `, ` even when compressing,
+/// while the separator is normalised from the source. Measured against
+/// dart-sass 1.103.1.
+#[test]
+fn a_loaded_files_function_call_serializes_in_the_default_style() {
+    let dir = scratch("calls");
+    let case = |file: &str, decl: &str, want: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), format!(".a {{ b: {decl}; }}\n")).unwrap();
+        let src = format!("@use \"{file}\";\n");
+        assert_eq!(
+            compile_compressed_in(&dir, &format!("entry_{file}.scss"), &src),
+            format!(".a{{b:{want}}}"),
+            "{decl}"
+        );
+    };
+    case("rgb", "rgb(255,255,255)", "rgb(255, 255, 255)");
+    case("rgba", "rgba(0, 0, 0, 0.15)", "rgba(0, 0, 0, 0.15)");
+    case("unk", "unknownfn(0.5px,2px)", "unknownfn(0.5px, 2px)");
+    case("nest", "nested(inner(0.5), 2)", "nested(inner(0.5), 2)");
+    case("tr", "translate(0.5px,-0.5px)", "translate(0.5px, -0.5px)");
+}
