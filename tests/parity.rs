@@ -2486,6 +2486,32 @@ fn a_compound_unit_is_not_the_unit_it_starts_with() {
 }
 
 #[test]
+fn a_bad_alpha_unit_outranks_the_channel_checks() {
+    // dart validates the alpha's UNIT after the all-numeric channel pass but
+    // before the channel count and before the channels' own units, so a bad
+    // alpha is what gets reported when the channels are wrong too. Byte-matched
+    // to dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for call in [
+        "rgb(0 0 / 2px)",
+        "rgb(0 0 1px / 2px)",
+        "hwb(0 10% 1px / 2px)",
+        "hsl(0 50% 50% / 2px)",
+        "rgb(0 0 0 / 2px)",
+    ] {
+        let msg = err(call);
+        assert!(
+            msg.contains("$alpha: Expected 2px to have unit \"%\" or no units."),
+            "{call}\n  got: {msg}"
+        );
+    }
+    // The all-numeric pass still comes first.
+    assert!(
+        err("rgb((1 2) 0 0 / 2px)").contains("$channels: Expected red channel to be a number, was (1 2).")
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

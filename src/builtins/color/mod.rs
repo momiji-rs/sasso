@@ -316,6 +316,26 @@ fn normalize_channels(comps: &[Value], polar_hue: Option<usize>) -> Vec<Value> {
         .collect()
 }
 
+/// dart validates the ALPHA's unit early — after the all-numeric channel pass
+/// but before the channel COUNT and before the channels' own units — so a bad
+/// alpha is what gets reported when the channels are wrong as well. Only the
+/// unit is checked here; every other alpha error stays where it is.
+fn validate_alpha_unit(alpha: Option<&Value>, pos: Pos) -> Result<(), Error> {
+    let Some(a) = alpha else { return Ok(()) };
+    if let Some(n) = channel_unit_number(a) {
+        if !n.is_unitless() && (n.has_complex_units() || n.unit() != "%") {
+            return Err(Error::at(
+                format!(
+                    "$alpha: Expected {} to have unit \"%\" or no units.",
+                    a.to_css(false)
+                ),
+                pos,
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Render a non-number CHANNEL for a "channel to be a number" diagnostic: an
 /// unbracketed multi-item list is parenthesized (`(1 2)`, `(1, 2)`), matching
 /// dart-sass; a bracketed one already carries its own delimiters, and every

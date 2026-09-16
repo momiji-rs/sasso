@@ -70,6 +70,7 @@ pub(super) fn fn_rgb(
         return Ok(verbatim);
     }
     channels.validate_numeric(&["red", "green", "blue"], pos)?;
+    validate_alpha_unit(channels.alpha.as_ref(), pos)?;
     channels.validate_count("rgb", pos)?;
     channels.validate_rgb_units(&["red", "green", "blue"], pos)?;
     let Channels { comps, alpha, .. } = channels;
@@ -779,6 +780,7 @@ pub(super) fn fn_hsl(
     }
     channels.validate_numeric(&["hue", "saturation", "lightness"], pos)?;
     channels.validate_positional_numeric(&["hue", "saturation", "lightness"], pos)?;
+    validate_alpha_unit(channels.alpha.as_ref(), pos)?;
     channels.validate_count("hsl", pos)?;
     let Channels { comps, alpha, .. } = channels;
     let h = hsl_hue(&comps[0], pos)?;
@@ -987,6 +989,7 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
             ));
         }
     }
+    validate_alpha_unit(alpha.as_ref(), pos)?;
     // Without a special function, the channel count must be exactly three.
     if comps.len() != 3 {
         return Err(Error::at(
