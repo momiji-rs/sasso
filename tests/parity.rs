@@ -2509,6 +2509,99 @@ fn a_bad_alpha_unit_outranks_the_channel_checks() {
     assert!(
         err("rgb((1 2) 0 0 / 2px)").contains("$channels: Expected red channel to be a number, was (1 2).")
     );
+    for (call, want) in [
+        (
+            "lab(1% 2 / 2px)",
+            "$alpha: Expected 2px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 0 0 / 2px)",
+            "$alpha: Expected 2px to have unit \"%\" or no units.",
+        ),
+        (
+            "lab(1% 2 1px / 2px)",
+            "$alpha: Expected 2px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 0 0 1px / 2px)",
+            "$alpha: Expected 2px to have unit \"%\" or no units.",
+        ),
+        (
+            "lab((1 2) 0 0 / 2px)",
+            "$channels: Expected lightness channel to be a number, was (1 2).",
+        ),
+        (
+            "color(srgb (1 2) 0 0 / 2px)",
+            "$description: Expected red channel to be a number, was (1 2).",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
+fn a_non_number_channel_outranks_the_count_and_the_count_outranks_the_units() {
+    // The rest of dart's order, which the lab family and `color()` had
+    // inverted: a non-number channel is reported before the channel COUNT, and
+    // the count before the channels' own units. A channel past the third is
+    // named by its INDEX (`channel 4`), as the legacy spaces already named it.
+    // Every message byte-matched to dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        (
+            "lab(c 2)",
+            "$channels: Expected lightness channel to be a number, was c.",
+        ),
+        (
+            "lab(c 2 3 4)",
+            "$channels: Expected lightness channel to be a number, was c.",
+        ),
+        (
+            "lab(1% c)",
+            "$channels: Expected a channel to be a number, was c.",
+        ),
+        (
+            "lab(1% 2 c 4)",
+            "$channels: Expected b channel to be a number, was c.",
+        ),
+        (
+            "lab(1% 2 3 c)",
+            "$channels: Expected channel 4 to be a number, was c.",
+        ),
+        (
+            "lab(1% 2 3 4 c)",
+            "$channels: Expected channel 5 to be a number, was c.",
+        ),
+        (
+            "color(srgb c 0)",
+            "$description: Expected red channel to be a number, was c.",
+        ),
+        (
+            "color(srgb 1 2 3 c)",
+            "$description: Expected channel 4 to be a number, was c.",
+        ),
+        (
+            "color(srgb 1 2 3 4 c)",
+            "$description: Expected channel 5 to be a number, was c.",
+        ),
+        (
+            "color(srgb 1px 0 0 0)",
+            "$description: The srgb color space has 3 channels but",
+        ),
+        (
+            "color(srgb 1px 0)",
+            "$description: The srgb color space has 3 channels but",
+        ),
+        (
+            "lab(1px 2 3 4)",
+            "$channels: The lab color space has 3 channels but",
+        ),
+        ("lab(1px 2)", "$channels: The lab color space has 3 channels but"),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
 }
 
 #[test]

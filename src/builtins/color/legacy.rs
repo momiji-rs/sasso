@@ -1241,8 +1241,25 @@ pub(super) fn fn_lab_family(
     }
     let is_polar_space = matches!(name, "lch" | "oklch");
     let normalized = normalize_channels(&comps, if is_polar_space { Some(2) } else { None });
-    // All-plain channels: validate count, types, and units like dart-sass.
+    // All-plain channels, in dart's order: every channel is a NUMBER, then the
+    // alpha's unit, then the channel COUNT, then the channels' own units.
     let names = lab_channel_names(name);
+    for (i, comp) in comps.iter().enumerate() {
+        if is_none_keyword(comp) || is_degenerate_calc(comp) {
+            continue;
+        }
+        if channel_unit_number(comp).is_none() {
+            return Err(Error::at(
+                format!(
+                    "$channels: Expected {} to be a number, was {}.",
+                    legacy_channel_name(&names, i),
+                    channel_err_css(comp)
+                ),
+                pos,
+            ));
+        }
+    }
+    validate_alpha_unit(alpha.as_ref(), pos)?;
     if comps.len() != 3 {
         return Err(Error::at(
             format!(
@@ -1261,23 +1278,10 @@ pub(super) fn fn_lab_family(
     // (`lab(1% 6px/2 -3)`). The message shows what the caller WROTE, not the
     // zero a degenerate channel normalizes to.
     for (i, comp) in comps.iter().enumerate() {
-        if is_none_keyword(comp) {
+        // A unitless degenerate constant (`calc(NaN)`) carries no unit, and a
+        // non-number channel was reported by the pass above.
+        let Some(num) = channel_unit_number(comp) else {
             continue;
-        }
-        let num = match channel_unit_number(comp) {
-            Some(n) => n,
-            // A unitless degenerate constant (`calc(NaN)`) carries no unit.
-            None if is_degenerate_calc(comp) => continue,
-            None => {
-                return Err(Error::at(
-                    format!(
-                        "$channels: Expected {} channel to be a number, was {}.",
-                        names[i],
-                        channel_err_css(comp)
-                    ),
-                    pos,
-                ))
-            }
         };
         let shown = comp.to_css(false);
         if is_hue(i) {
@@ -1460,30 +1464,45 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
             pos,
         ));
     }
-    // Type-check each supplied channel (with its index-based name) before the
-    // count check, matching dart-sass (`color(srgb (0.1 0.2 0.3))` reports a
-    // non-number channel rather than a wrong count). A degenerate `calc()` or
-    // a slash-division is a number channel and is unit-checked like one,
-    // reported in the spelling the caller wrote.
+    // Type-check each supplied channel before the count check, matching
+    // dart-sass (`color(srgb (0.1 0.2 0.3))` reports a non-number channel
+    // rather than a wrong count) — a degenerate `calc()` or a slash-division
+    // is a number channel. A channel past the third is named by its INDEX.
     let names = color_channel_names(&space_lower);
     for (i, comp) in channels.iter().enumerate() {
-        let name = names.get(i).copied().unwrap_or("");
-        if is_none_keyword(comp) {
+        if is_none_keyword(comp) || is_degenerate_calc(comp) {
             continue;
         }
-        let num = match channel_unit_number(comp) {
-            Some(n) => n,
-            // A unitless degenerate constant (`calc(NaN)`) carries no unit.
-            None if is_degenerate_calc(comp) => continue,
-            None => {
-                return Err(Error::at(
-                    format!(
-                        "$description: Expected {name} channel to be a number, was {}.",
-                        channel_err_css(comp)
-                    ),
-                    pos,
-                ))
-            }
+        if channel_unit_number(comp).is_none() {
+            return Err(Error::at(
+                format!(
+                    "$description: Expected {} to be a number, was {}.",
+                    legacy_channel_name(&names, i),
+                    channel_err_css(comp)
+                ),
+                pos,
+            ));
+        }
+    }
+    validate_alpha_unit(alpha.as_ref(), pos)?;
+    if channels.len() != 3 {
+        return Err(Error::at(
+            format!(
+                "$description: The {} color space has 3 channels but {} has {}.",
+                space_lower,
+                color_desc_css(&desc),
+                channels.len()
+            ),
+            pos,
+        ));
+    }
+    // The channels' own units, after the count — dart's order. This runs on
+    // the channels as WRITTEN, so the message shows `calc(NaN * 1px)` rather
+    // than the zero it is about to normalize to.
+    for (i, comp) in channels.iter().enumerate() {
+        let name = names.get(i).copied().unwrap_or("");
+        let Some(num) = channel_unit_number(comp) else {
+            continue;
         };
         if !num.is_unitless() && (num.has_complex_units() || num.unit() != "%") {
             return Err(Error::at(
@@ -1499,17 +1518,6 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
     // normalizes to 0 here.
     let channels = normalize_channels(channels, None);
     let channels = &channels[..];
-    if channels.len() != 3 {
-        return Err(Error::at(
-            format!(
-                "$description: The {} color space has 3 channels but {} has {}.",
-                space_lower,
-                color_desc_css(&desc),
-                channels.len()
-            ),
-            pos,
-        ));
-    }
     if let Some(a) = &alpha {
         if !is_none_keyword(a) {
             alpha_value(a, pos)?;
