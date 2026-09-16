@@ -2148,6 +2148,32 @@ fn color_scale_names_the_channel_it_rejects() {
 }
 
 #[test]
+fn a_slash_channel_in_a_space_separated_list_is_a_number() {
+    // Inside a SPACE-separated channels list a slash-division keeps its
+    // spelling instead of collapsing to a number — only a TRAILING slash is
+    // the alpha split. The legacy `hsl`/`hwb` reads have to see the quotient
+    // it carries, its unit is checked like any other, and a non-finite one is
+    // degenerate exactly as a non-finite number is. Byte-matched to dart-sass
+    // 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:meta\";\na {\n  b: hwb(0 60%/2 40%);\n  c: hsl(0 6px/2 50%);\n  d: hsl(0 1/0 50%);\n  e: hsl(0 -1/0 50%);\n  f: hsl(0 50% 1/0);\n}\n"),
+        "a {\n  b: hsl(0, 33.3333333333%, 45%);\n  c: hsl(0, 3%, 50%);\n  d: hsl(0, calc(infinity * 1%), 50%);\n  e: hsl(0, 0%, 50%);\n  f: hsla(0, 50%, 1%, 0);\n}\n"
+    );
+    // A degenerate slash converts like a degenerate number, and the STORED
+    // channel converts with it — the CSS output can hide a NaN hue behind its
+    // fallback, but `color.channel` and a space conversion read the storage.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:meta\";\na {\n  b: hsl(0/0 50% 50%);\n  c: color.channel(hsl(0/0 50% 50%), \"hue\");\n  d: color.channel(hsl(1/0 50% 50%), \"hue\");\n  e: meta.inspect(hwb(0/0 10% 10%));\n  f: color.to-space(hsl(0/0 50% 50%), oklch);\n}\n"),
+        "a {\n  b: hsl(0, 50%, 50%);\n  c: 0deg;\n  d: 0deg;\n  e: hwb(0 10% 10%);\n  f: oklch(55.2338578785% 0.1636699547 24.2125389816deg);\n}\n"
+    );
+    // The unit error names the slash the caller wrote, not its quotient.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    assert!(err("hwb(0 6px/2 40%)").contains("$whiteness: Expected 6px/2 to have unit \"%\"."));
+    assert!(err("hwb(0 0/0 40%)").contains("$whiteness: Expected 0/0 to have unit \"%\"."));
+    assert!(err("hwb(0 1/0 40%)").contains("$whiteness: Expected 1/0 to have unit \"%\"."));
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

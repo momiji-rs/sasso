@@ -742,8 +742,8 @@ pub(super) fn fn_hsl(
     // The repr preserves the supplied saturation/lightness percentages, except
     // saturation is floored at 0 (matching dart-sass: `hsl(0, 500%, 50%)` keeps
     // `500%`, `hsl(0, -100%, 50%)` becomes `0%`, lightness is left untouched).
-    let s_raw = num(&comps[1], pos)?;
-    let l_raw = num(&comps[2], pos)?;
+    let s_raw = channel_value(&comps[1], pos)?;
+    let l_raw = channel_value(&comps[2], pos)?;
     let z = crate::value::without_negative_zero;
     let s_pct = z(if s_raw.is_nan() { 0.0 } else { s_raw.max(0.0) });
     let l_pct = z(if l_raw.is_nan() { 0.0 } else { l_raw });
@@ -787,6 +787,16 @@ fn hsl_hue(v: &Value, pos: Pos) -> Result<f64, Error> {
             format!("{} is not a number.", other.to_css(false)),
             pos,
         )),
+    }
+}
+
+/// Read a legacy channel's numeric value, accepting the quotient a
+/// slash-division carries: inside a SPACE-separated channels list `60%/2`
+/// keeps its spelling, and `num` alone calls it "not a number".
+fn channel_value(v: &Value, pos: Pos) -> Result<f64, Error> {
+    match channel_unit_number(v) {
+        Some(n) => Ok(n.value),
+        None => num(v, pos),
     }
 }
 
@@ -848,7 +858,7 @@ fn hsl_degenerate_pct(v: &Value, is_saturation: bool, pos: Pos) -> Result<String
         };
         return Ok(format!("calc({token} * 1%)"));
     }
-    let raw = num(v, pos)?;
+    let raw = channel_value(v, pos)?;
     let pct = if is_saturation { raw.max(0.0) } else { raw };
     Ok(format!("{}%", fmt_num(pct, false)))
 }
@@ -970,7 +980,7 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     // Whiteness and blackness must carry a `%` unit (dart-sass), reported per
     // channel before the value is read. The hue may be unitless or an angle.
     for (i, cname) in [(1usize, "whiteness"), (2usize, "blackness")] {
-        if let Value::Number(num) = &comps[i] {
+        if let Some(num) = channel_unit_number(&comps[i]) {
             if num.unit() != "%" {
                 // The message shows the spelling the caller wrote, not the
                 // zero a degenerate channel normalizes to.
@@ -985,8 +995,8 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
         }
     }
     let h = hsl_hue(&comps[0], pos)?;
-    let mut w_pct = num(&comps[1], pos)?;
-    let mut b_pct = num(&comps[2], pos)?;
+    let mut w_pct = channel_value(&comps[1], pos)?;
+    let mut b_pct = channel_value(&comps[2], pos)?;
     let a = match &alpha {
         Some(v) => alpha_value(v, pos)?,
         None => 1.0,

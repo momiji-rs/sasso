@@ -227,11 +227,13 @@ fn is_degenerate_calc(v: &Value) -> bool {
 }
 
 /// The non-finite value of a degenerate channel: a non-finite number (the
-/// usual form, since a fully-folded `calc()` unwraps to a number), or a
-/// residual `calc()` constant.
+/// usual form, since a fully-folded `calc()` unwraps to a number), the
+/// quotient a slash-division carries (`hsl(0/0 50% 50%)` — inside a
+/// SPACE-separated channels list `0/0` keeps its spelling instead of
+/// collapsing to a number), or a residual `calc()` constant.
 fn degenerate_value(v: &Value) -> Option<f64> {
     match v {
-        Value::Number(n) if !n.value.is_finite() => Some(n.value),
+        Value::Number(n) | Value::Slash(n, _) if !n.value.is_finite() => Some(n.value),
         Value::Calc(node) => match node {
             CalcNode::Number(n) if !n.value.is_finite() => Some(n.value),
             _ => degenerate_const(node),
