@@ -6105,6 +6105,11 @@ fn part_has_parent_ref(part: &str) -> bool {
                 }
             }
             None => match c {
+                // `\&` is an ampersand in an identifier, not a parent
+                // reference.
+                '\\' => {
+                    chars.next();
+                }
                 '"' | '\'' => quote = Some(c),
                 '[' => bracket += 1,
                 ']' => bracket = (bracket - 1).max(0),
@@ -6169,6 +6174,12 @@ fn replace_parent_refs(part: &str, parent: &str) -> String {
                 }
             }
             None => match c {
+                '\\' => {
+                    out.push(c);
+                    if let Some(n) = chars.next() {
+                        out.push(n);
+                    }
+                }
                 '"' | '\'' => {
                     quote = Some(c);
                     out.push(c);
@@ -6217,8 +6228,34 @@ fn resolve_selectors_opt(
             return Ok(());
         }
         let chars: Vec<char> = part.chars().collect();
+        let mut skip = false;
+        let mut bracket = 0i32;
+        let mut quote: Option<char> = None;
         for (i, &c) in chars.iter().enumerate() {
-            if c == '&' {
+            if std::mem::take(&mut skip) {
+                continue;
+            }
+            if c == '\\' {
+                skip = true;
+                continue;
+            }
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match c {
+                '"' | '\'' => {
+                    quote = Some(c);
+                    continue;
+                }
+                '[' => bracket += 1,
+                ']' => bracket = (bracket - 1).max(0),
+                _ => {}
+            }
+            // An `&` inside an attribute is not a parent reference.
+            if c == '&' && bracket == 0 {
                 if let Some(&next) = chars.get(i + 1) {
                     if next.is_alphanumeric()
                         || matches!(next, '.' | '#' | ':' | '[' | '%' | '\\' | '-' | '_')
@@ -6242,14 +6279,44 @@ fn resolve_selectors_opt(
         }
         let chars: Vec<char> = part.chars().collect();
         let mut depth = 0i32;
+        let mut bracket = 0i32;
+        let mut quote: Option<char> = None;
         let mut out = String::new();
         let mut i = 0;
         let mut replaced = false;
         while i < chars.len() {
             let c = chars[i];
+            if let Some(q) = quote {
+                out.push(c);
+                i += 1;
+                if c == '\\' {
+                    if let Some(&n) = chars.get(i) {
+                        out.push(n);
+                        i += 1;
+                    }
+                } else if c == q {
+                    quote = None;
+                }
+                continue;
+            }
             match c {
+                '\\' => {
+                    out.push(c);
+                    i += 1;
+                    if let Some(&n) = chars.get(i) {
+                        out.push(n);
+                        i += 1;
+                    }
+                    continue;
+                }
+                '"' | '\'' => quote = Some(c),
+                '[' => bracket += 1,
+                ']' => bracket = (bracket - 1).max(0),
                 '(' => depth += 1,
                 ')' => depth -= 1,
+                // An `&` inside an attribute is text: copy it and let the
+                // normal path handle the part.
+                '&' if bracket > 0 => {}
                 '&' => {
                     if depth == 0 {
                         return None;
@@ -6294,15 +6361,32 @@ fn resolve_selectors_opt(
         let mut segments = vec![String::new()];
         let mut depth = 0i32;
         let mut quote: Option<char> = None;
+        let mut escaped = false;
         for c in part.chars() {
             if let Some(q) = quote {
                 segments.last_mut().unwrap().push(c);
-                if c == q {
+                // `\"` does not end a `"`-quoted value, and a quote that ends
+                // early would swallow the `]` after it and hide every top-level
+                // `&` that follows.
+                if std::mem::take(&mut escaped) {
+                    continue;
+                }
+                if c == '\\' {
+                    escaped = true;
+                } else if c == q {
                     quote = None;
                 }
                 continue;
             }
+            if std::mem::take(&mut escaped) {
+                segments.last_mut().unwrap().push(c);
+                continue;
+            }
             match c {
+                // The backslash itself is written by the shared push below —
+                // only the `&` arm leaves the loop early — and the character
+                // it escapes by the branch above, on the next turn.
+                '\\' => escaped = true,
                 '"' | '\'' => quote = Some(c),
                 '(' | '[' => depth += 1,
                 ')' | ']' => depth -= 1,
@@ -6475,8 +6559,15 @@ fn split_commas(s: &str) -> Vec<&str> {
     let mut paren = 0i32;
     let mut bracket = 0i32;
     let mut start = 0usize;
+    let mut escaped = false;
     for (idx, c) in s.char_indices() {
+        // `\,` is a comma IN AN IDENTIFIER, not a list separator.
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match c {
+            '\\' => escaped = true,
             '(' => paren += 1,
             ')' => paren -= 1,
             '[' => bracket += 1,

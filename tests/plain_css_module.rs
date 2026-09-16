@@ -273,3 +273,59 @@ fn a_loaded_files_comment_only_rule_vanishes_when_compressed() {
     // And a LOUD comment writes, so everything around it stays.
     case("loud", ".a {\n  .b {\n    /*! c */\n  }\n}\n", ".a{.b{/*! c */}}");
 }
+
+/// A loaded `.css` file reaches the same selector scanners: its list is cut by
+/// the comma split, and whether a rule keeps NATIVE CSS NESTING is decided by
+/// asking whether the part references its parent. An escaped delimiter must
+/// not answer either question. Every expectation measured against dart-sass
+/// 1.103.1.
+#[test]
+fn a_loaded_files_escaped_selectors_are_not_structure() {
+    let dir = scratch("escaped");
+    let load = |css: &str| std::fs::write(dir.join("_vendor.css"), css).unwrap();
+
+    // Through `@use`, where the split is all that runs.
+    load(".a\\,b, .c { d: 1; }\n");
+    assert_eq!(
+        compile_in(&dir, "use.scss", "@use \"vendor\";\n"),
+        ".a\\,b, .c {\n  d: 1;\n}"
+    );
+    load(".a\\[b, .c { d: 1; }\n");
+    assert_eq!(
+        compile_in(&dir, "use2.scss", "@use \"vendor\";\n"),
+        ".a\\[b, .c {\n  d: 1;\n}"
+    );
+    load(".a\\&b { c: 1; }\n");
+    assert_eq!(
+        compile_in(&dir, "use3.scss", "@use \"vendor\";\n"),
+        ".a\\&b {\n  c: 1;\n}"
+    );
+
+    // Through `@import` INSIDE a rule, where a part that references its parent
+    // keeps native nesting and one that does not gets the descendant join. An
+    // escaped `&` is not a reference, so it takes the join.
+    load(".a\\&b { c: 1; }\n");
+    assert_eq!(
+        compile_in(&dir, "imp.scss", ".p { @import \"vendor\"; }\n"),
+        ".p .a\\&b {\n  c: 1;\n}"
+    );
+    // A REAL `&` still keeps it, and one file can hold both.
+    load(".a\\&b { c: 1; }\n& .d { e: 1; }\n");
+    assert_eq!(
+        compile_in(&dir, "imp2.scss", ".p { @import \"vendor\"; }\n"),
+        ".p {\n  & .d {\n    e: 1;\n  }\n}\n.p .a\\&b {\n  c: 1;\n}"
+    );
+    // The comma split runs on this path too, so the list keeps its length.
+    load(".a\\,b, .c { d: 1; }\n");
+    assert_eq!(
+        compile_in(&dir, "imp3.scss", ".p { @import \"vendor\"; }\n"),
+        ".p .a\\,b, .p .c {\n  d: 1;\n}"
+    );
+    // And an `&` inside an attribute is text, not a reference.
+    load("[x=\"&\"] { c: 1; }\n");
+    assert_eq!(
+        compile_in(&dir, "imp4.scss", ".p { @import \"vendor\"; }\n"),
+        ".p [x=\"&\"] {\n  c: 1;\n}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

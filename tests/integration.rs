@@ -718,6 +718,155 @@ fn compressed_plain_css_calls_keep_their_arguments_default_style() {
     assert_eq!(e("foo(0.5)"), "a {\n  x: foo(0.5);\n}");
 }
 
+/// An ESCAPE is one token, so an escaped delimiter is part of an identifier
+/// and not structure: `.a\,b` is ONE class whose name contains a comma, and
+/// `\&` is an ampersand rather than a parent reference. Every expectation
+/// below was measured against dart-sass 1.103.1.
+#[test]
+fn an_escaped_delimiter_is_not_selector_structure() {
+    let css = |scss: &str| compile(scss, &Options::default()).expect("compile");
+    // The comma does not split the selector list — and the class keeps its
+    // escape, rather than decoding to a replacement character.
+    assert_eq!(css(".a\\,b { c: 1; }"), ".a\\,b {\n  c: 1;\n}");
+    assert_eq!(css(".\\, { a: 1; }"), ".\\, {\n  a: 1;\n}");
+    assert_eq!(css("#a\\,b { c: 1; }"), "#a\\,b {\n  c: 1;\n}");
+    assert_eq!(css("a\\,b { c: 1; }"), "a\\,b {\n  c: 1;\n}");
+    assert_eq!(css(".a\\,b, .c { d: 1; }"), ".a\\,b, .c {\n  d: 1;\n}");
+    // Nested, where the parent is substituted into the child.
+    assert_eq!(css(".x { .a\\,b { c: 1; } }"), ".x .a\\,b {\n  c: 1;\n}");
+    assert_eq!(css(".a\\,b { .c { d: 1; } }"), ".a\\,b .c {\n  d: 1;\n}");
+    assert_eq!(css(".x { &\\,y { c: 1; } }"), ".x\\,y {\n  c: 1;\n}");
+    // An escaped `&` is a character, not the parent.
+    assert_eq!(css(".x { .a\\&b { c: 1; } }"), ".x .a\\&b {\n  c: 1;\n}");
+    assert_eq!(css("\\&a { b: 1; }"), "\\&a {\n  b: 1;\n}");
+    // `@extend` matches the same identifier through the same scanners.
+    assert_eq!(
+        css("%p { a: 1; }\n.x\\,y { @extend %p; }"),
+        ".x\\,y {\n  a: 1;\n}"
+    );
+    assert_eq!(
+        css(".a\\,b { c: 1; }\n.d { @extend .a\\,b; }"),
+        ".a\\,b, .d {\n  c: 1;\n}"
+    );
+    // A HEX escape of the same character behaves the same way — and is
+    // rewritten to the canonical spelling, as dart does.
+    assert_eq!(css(".a\\2c b { c: 1; }"), ".a\\,b {\n  c: 1;\n}");
+    assert_eq!(css(".a\\2c b, .c { d: 1; }"), ".a\\,b, .c {\n  d: 1;\n}");
+    // The CARTESIAN path — two or more top-level `&`s, where the part is cut
+    // into segments and rebuilt once per parent — walks the same text again.
+    assert_eq!(css(".p { & .a\\,b & { c: 1; } }"), ".p .a\\,b .p {\n  c: 1;\n}");
+    assert_eq!(
+        css(".p { & .a\\,b & .c { d: 1; } }"),
+        ".p .a\\,b .p .c {\n  d: 1;\n}"
+    );
+    assert_eq!(
+        css(".p, .q { & .a\\,b & { c: 1; } }"),
+        ".p .a\\,b .p, .p .a\\,b .q, .q .a\\,b .p, .q .a\\,b .q {\n  c: 1;\n}"
+    );
+    assert_eq!(css(".p { & .a\\&b & { c: 1; } }"), ".p .a\\&b .p {\n  c: 1;\n}");
+    assert_eq!(css(".p { & & .a\\, { c: 1; } }"), ".p .p .a\\, {\n  c: 1;\n}");
+    // A quote that ends EARLY is the same mistake one level down: `\"` does
+    // not close a `"`-quoted attribute value, and a quote left open would
+    // swallow the `]` after it and hide every top-level `&` that follows —
+    // so the part would look like it had one. (The value below holds both
+    // quote characters, which is what keeps dart from re-quoting it and lets
+    // the expansion be compared on its own.)
+    assert_eq!(
+        css(".p, .q { & [data-x=\"a\\\"b'c\"] & { d: 1; } }"),
+        ".p [data-x=\"a\\\"b'c\"] .p, .p [data-x=\"a\\\"b'c\"] .q, \
+         .q [data-x=\"a\\\"b'c\"] .p, .q [data-x=\"a\\\"b'c\"] .q {\n  d: 1;\n}"
+    );
+    assert_eq!(
+        css(".p, .q { & [data-x=\"a\\\"&b'c\"] & { d: 1; } }"),
+        ".p [data-x=\"a\\\"&b'c\"] .p, .p [data-x=\"a\\\"&b'c\"] .q, \
+         .q [data-x=\"a\\\"&b'c\"] .p, .q [data-x=\"a\\\"&b'c\"] .q {\n  d: 1;\n}"
+    );
+    // An `&` inside a quoted value is text, not a reference, whichever quote
+    // holds it.
+    assert_eq!(
+        css(".p, .q { [data-x=\"a&b\"] { c: 1; } }"),
+        ".p [data-x=\"a&b\"], .q [data-x=\"a&b\"] {\n  c: 1;\n}"
+    );
+    // An `&` inside an ATTRIBUTE is text too, and two more scanners were
+    // reading it as a reference. The check that a parent ending in a
+    // combinator is not glued to a `&` rejected a selector it has no business
+    // rejecting:
+    assert_eq!(
+        css("p > { & [data-x=\"&.x\"] { d: 1; } }"),
+        "p > [data-x=\"&.x\"] {\n  d: 1;\n}"
+    );
+    // …while the pseudo-argument substitution expanded the parents INTO the
+    // attribute value instead of leaving the part to the normal path.
+    assert_eq!(
+        css(".p, .q { :not([data=\"&\"]) { c: 1; } }"),
+        ".p :not([data=\"&\"]), .q :not([data=\"&\"]) {\n  c: 1;\n}"
+    );
+    assert_eq!(
+        css(".p, .q { :not([data=\"&-c\"]) { c: 1; } }"),
+        ".p :not([data=\"&-c\"]), .q :not([data=\"&-c\"]) {\n  c: 1;\n}"
+    );
+    assert_eq!(
+        css(".p, .q { :is([data=\"&\"]) { c: 1; } }"),
+        ".p :is([data=\"&\"]), .q :is([data=\"&\"]) {\n  c: 1;\n}"
+    );
+    // A REAL pseudo-argument `&` still expands in place, one complex.
+    assert_eq!(
+        css(".p, .q { :not(&-c) { d: 1; } }"),
+        ":not(.p-c, .q-c) {\n  d: 1;\n}"
+    );
+    // And a parent that really IS glued to a suffix is still rejected.
+    assert!(compile("p > { &.x { d: 1; } }", &Options::default()).is_err());
+    // An escaped BRACKET or PAREN must not move the depth counters, which is
+    // what the comma split and the `&` counting are steered by. Without that,
+    // the list comma below is swallowed and the whole thing is ONE selector —
+    // and nothing above would notice.
+    // Nesting is what makes the failure visible: with the counter moved, the
+    // comma is swallowed and the list is ONE selector — whose own text reads
+    // the same, so only the LENGTH gives it away.
+    for esc in ["\\[", "\\(", "\\]", "\\)", "\\,"] {
+        assert_eq!(
+            css(&format!(".a{esc}b, .c {{ & .d {{ e: 1; }} }}")),
+            format!(".a{esc}b .d, .c .d {{\n  e: 1;\n}}"),
+            "{esc}"
+        );
+    }
+    // A REAL attribute or pseudo after the escape still counts, so its own
+    // comma stays inside it — an escaped CLOSER that had decremented the
+    // counter would let that comma split the list instead.
+    assert_eq!(
+        css(".a\\]b[x=\",\"], .c { d: 1; }"),
+        ".a\\]b[x=\",\"], .c {\n  d: 1;\n}"
+    );
+    assert_eq!(
+        css(".a\\)b:not(.x, .y), .c { d: 1; }"),
+        ".a\\)b:not(.x, .y), .c {\n  d: 1;\n}"
+    );
+    // The same invariant decides whether the SECOND top-level `&` is seen, so
+    // each of the four takes the cartesian path with two parents.
+    for esc in ["\\[", "\\(", "\\]", "\\)"] {
+        assert_eq!(
+            css(&format!(".p, .q {{ & .a{esc}b & {{ c: 1; }} }}")),
+            format!(".p .a{esc}b .p, .p .a{esc}b .q, .q .a{esc}b .p, .q .a{esc}b .q {{\n  c: 1;\n}}"),
+            "{esc}"
+        );
+    }
+    // …and with a real attribute after the escaped one.
+    assert_eq!(
+        css(".p, .q { & .a\\[b[x=\"y\"] & { c: 1; } }"),
+        ".p .a\\[b[x=y] .p, .p .a\\[b[x=y] .q, \
+         .q .a\\[b[x=y] .p, .q .a\\[b[x=y] .q {\n  c: 1;\n}"
+    );
+    // And whether the parent substitution finds the `&` at all.
+    assert_eq!(css(".p { .a\\[b & { c: 1; } }"), ".a\\[b .p {\n  c: 1;\n}");
+    // Everything above holds when compressing, where the same text is walked
+    // again to take the spaces out.
+    assert_eq!(css_compressed(".a\\,b, .c { d: 1; }"), ".a\\,b,.c{d:1}");
+    assert_eq!(
+        css_compressed(".x { .a\\&b > .c { d: 1; } }"),
+        ".x .a\\&b>.c{d:1}"
+    );
+}
+
 /// Compressed output drops anything that writes nothing — a rule or at-rule
 /// whose body is only comments, however deep it nests, and the separator such
 /// an item would otherwise have taken. Measured against dart-sass 1.103.1.
