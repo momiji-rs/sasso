@@ -422,7 +422,9 @@ fn emit_item_expanded(
             out.push('\n');
             *prev = *lines;
         }
-        OutItem::ChildlessAtRule { name, prelude, lines } => {
+        OutItem::ChildlessAtRule {
+            name, prelude, lines, ..
+        } => {
             out.push_str(indent);
             // Source-map: the at-rule's `@` keyword, spanning the header.
             let mapped = record(out, *lines, collector);
@@ -648,10 +650,67 @@ fn write_with_indent(out: &mut String, text: &str, min_indent: usize, indent: &s
 
 fn emit_compressed(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> String {
     let mut out = String::new();
+    let mut last: Option<&OutNode> = None;
     for node in nodes {
+        let before = out.len();
         emit_node_compressed(&mut out, node, collector);
+        if out.len() != before {
+            last = Some(node);
+        }
     }
+    drop_trailing_semicolon(&mut out, last);
     out
+}
+
+/// dart writes a statement's `;` as a SEPARATOR, so compressed output never
+/// ends with one — not at the end of the stylesheet and not before a `}`. Every
+/// node here is separated that way except a verbatim line (a passed-through
+/// `@import`), which carries its own `;`; that one is dropped when the line
+/// comes last.
+///
+/// The test is which NODE wrote the final byte, never the byte itself: a
+/// declaration's value is verbatim text and can end in a `;` of its own
+/// (`--x: #{";"}`), which dart keeps.
+fn drop_trailing_semicolon(out: &mut String, last: Option<&OutNode>) {
+    if last.is_some_and(ends_with_own_semicolon) && out.ends_with(';') {
+        out.pop();
+    }
+}
+
+/// Whether this node's compressed output ends with a `;` the node itself wrote
+/// — true for a verbatim line, and for a wrapper whose last VISIBLE child is
+/// one.
+fn ends_with_own_semicolon(node: &OutNode) -> bool {
+    match node {
+        OutNode::Raw(s, _) => s.ends_with(';'),
+        // A childless at-rule (`@namespace "x";`) writes its own terminator.
+        OutNode::AtRule { has_block, .. } => !has_block,
+        OutNode::ModuleScope { nodes, .. } => nodes
+            .iter()
+            .rev()
+            .find(|n| writes_compressed_output(n))
+            .is_some_and(ends_with_own_semicolon),
+        _ => false,
+    }
+}
+
+/// Whether a node writes anything at all in compressed output. A blank, a
+/// control-only marker, a comment that is not loud, a rule holding nothing but
+/// dropped comments, and a module whose whole CSS is one of those all write
+/// nothing — so none of them can be the node that wrote the last byte.
+fn writes_compressed_output(node: &OutNode) -> bool {
+    match node {
+        OutNode::Blank => false,
+        OutNode::Comment(text, _) => is_loud_comment(text),
+        OutNode::Rule { items, .. } => !items
+            .iter()
+            .all(|it| matches!(it, OutItem::Comment(text, _) if !is_loud_comment(text))),
+        // A module splices in transparently, so it is only as visible as its
+        // contents — `meta.load-css` of a stylesheet that is all comments
+        // writes nothing and must not hide the node before it.
+        OutNode::ModuleScope { nodes, .. } => nodes.iter().any(writes_compressed_output),
+        n => !n.is_inert_marker(),
+    }
 }
 
 /// Render `nodes` joined for compressed output. A declaration is terminated by
@@ -659,18 +718,35 @@ fn emit_compressed(nodes: &[OutNode], collector: &mut Option<SmCollector>) -> St
 /// separator, so no `;` is inserted after it (matching dart-sass).
 fn emit_compressed_body(out: &mut String, nodes: &[OutNode], collector: &mut Option<SmCollector>) {
     let mut prev_was_decl = false;
+    let mut last: Option<&OutNode> = None;
     for node in nodes {
-        // Comments and blanks produce no compressed output; don't let them
-        // reset the separator state.
-        if matches!(node, OutNode::Comment(..) | OutNode::Blank) {
+        // A blank, and a comment that is not LOUD, produce no compressed
+        // output; don't let them reset the separator state. A loud comment is
+        // written, takes the pending separator, and needs none of its own.
+        if let OutNode::Comment(text, lines) = node {
+            if is_loud_comment(text) {
+                if prev_was_decl {
+                    out.push(';');
+                    prev_was_decl = false;
+                }
+                write_comment_compressed(out, text, *lines, collector);
+            }
+            continue;
+        }
+        if matches!(node, OutNode::Blank) {
             continue;
         }
         if prev_was_decl {
             out.push(';');
         }
+        let before = out.len();
         emit_node_compressed(out, node, collector);
+        if out.len() != before {
+            last = Some(node);
+        }
         prev_was_decl = matches!(node, OutNode::AtDecl { .. });
     }
+    drop_trailing_semicolon(out, last);
 }
 
 /// dart `_writeFoldedValue` (compressed custom properties): each newline
@@ -713,9 +789,18 @@ fn compressed_at_rule_omits_space(name: &str, prelude: &str) -> bool {
 fn write_items_compressed(out: &mut String, items: &[OutItem], collector: &mut Option<SmCollector>) {
     let mut pending_semicolon = false;
     for item in items {
-        // Loud comments are dropped in compressed output; they neither emit
-        // nor disturb the separator state.
-        if matches!(item, OutItem::Comment(..)) {
+        if let OutItem::Comment(text, lines) = item {
+            // A comment is dropped when compressing unless it is LOUD, which
+            // is how a stylesheet keeps its licence header. It takes the
+            // pending separator (`b:1;/*! c */`) but needs none of its own.
+            if !is_loud_comment(text) {
+                continue;
+            }
+            if pending_semicolon {
+                out.push(';');
+                pending_semicolon = false;
+            }
+            write_comment_compressed(out, text, *lines, collector);
             continue;
         }
         if pending_semicolon {
@@ -723,6 +808,28 @@ fn write_items_compressed(out: &mut String, items: &[OutItem], collector: &mut O
         }
         pending_semicolon = write_item_compressed(out, item, collector);
     }
+}
+
+/// Whether a comment survives compressed output: dart keeps the ones that open
+/// `/*!`, the convention for "this is a licence, do not strip me".
+fn is_loud_comment(text: &str) -> bool {
+    text.starts_with('!')
+}
+
+/// Write a loud comment for compressed output — verbatim, newlines and all,
+/// with no separator of its own.
+fn write_comment_compressed(
+    out: &mut String,
+    text: &str,
+    lines: SrcLines,
+    collector: &mut Option<SmCollector>,
+) {
+    let mapped = record(out, lines, collector);
+    let from = out.len();
+    out.push_str("/*");
+    out.push_str(text);
+    out.push_str("*/");
+    continue_span(out, from, mapped, collector);
 }
 
 /// Write one rule-block item for compressed output. Returns whether a `;` must
@@ -752,13 +859,24 @@ fn write_item_compressed(out: &mut String, item: &OutItem, collector: &mut Optio
             true
         }
         OutItem::Comment(..) => false,
-        OutItem::ChildlessAtRule { name, prelude, lines } => {
+        OutItem::ChildlessAtRule {
+            name,
+            prelude,
+            css_import,
+            lines,
+        } => {
             // Source-map: the at-rule's `@` keyword.
             record(out, *lines, collector);
             out.push('@');
             out.push_str(name);
             if !prelude.is_empty() {
-                out.push(' ');
+                // A CSS `@import` writes no space before its url when
+                // compressing. That belongs to the IMPORT, not to the name: an
+                // at-rule whose name is interpolated (`@#{"import"} "x"`) is
+                // generic in dart and keeps its gap.
+                if !*css_import && !compressed_at_rule_omits_space(name, prelude) {
+                    out.push(' ');
+                }
                 out.push_str(prelude);
             }
             true
@@ -774,7 +892,7 @@ fn write_item_compressed(out: &mut String, item: &OutItem, collector: &mut Optio
         } => {
             // Source-map: the nested selector list's first character.
             record(out, *lines, collector);
-            out.push_str(&selectors.join(","));
+            write_selectors_compressed(out, selectors);
             out.push('{');
             write_items_compressed(out, items, collector);
             out.push('}');
@@ -804,6 +922,18 @@ fn write_item_compressed(out: &mut String, item: &OutItem, collector: &mut Optio
     }
 }
 
+/// Write a selector list for compressed output: a bare comma between the
+/// complexes, each one written the way dart compresses a selector (no space
+/// around a combinator, none after a selector-list comma).
+fn write_selectors_compressed(out: &mut String, selectors: &[String]) {
+    for (i, sel) in selectors.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&crate::selector::compress_selector(sel));
+    }
+}
+
 fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option<SmCollector>) {
     match node {
         OutNode::ModuleScope { nodes, .. } => {
@@ -818,21 +948,27 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             lines,
             ..
         } => {
-            // A rule whose every item is a comment produces nothing in
-            // compressed output, so it is not emitted at all.
-            if items.iter().all(|it| matches!(it, OutItem::Comment(..))) {
+            // A rule whose every item is a DROPPED comment produces nothing
+            // in compressed output, so it is not emitted at all — but a loud
+            // comment is output, and keeps its rule alive around it.
+            if items
+                .iter()
+                .all(|it| matches!(it, OutItem::Comment(text, _) if !is_loud_comment(text)))
+            {
                 return;
             }
             // Source-map: the selector list's first character.
             record(out, *lines, collector);
-            out.push_str(&selectors.to_strings().join(","));
+            write_selectors_compressed(out, &selectors.to_strings());
             out.push('{');
             write_items_compressed(out, items, collector);
             out.push('}');
         }
-        // Loud comments are dropped in compressed output (the slice does
-        // not yet special-case `/*!` important comments).
-        OutNode::Comment(..) => {}
+        OutNode::Comment(text, lines) => {
+            if is_loud_comment(text) {
+                write_comment_compressed(out, text, *lines, collector);
+            }
+        }
         OutNode::Raw(s, lines) => {
             // Source-map: a passed-through `@import` maps to its URL token.
             record(out, *lines, collector);

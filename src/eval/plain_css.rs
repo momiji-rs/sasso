@@ -126,7 +126,10 @@ impl<'a> Evaluator<'a> {
                         };
                         // Source-map: the rule maps to its URL token.
                         let lines = self.map_only_lines(pos);
-                        sink.push_at_rule(OutNode::Raw(format!("@import {text};"), lines));
+                        sink.push_at_rule(OutNode::Raw(
+                            format!("@import{}{text};", self.at_rule_gap()),
+                            lines,
+                        ));
                     }
                 }
                 Stmt::Media { query, body, lines } => {
@@ -372,7 +375,10 @@ impl<'a> Evaluator<'a> {
                             ImportArg::Sass { path, pos, .. } => (crate::value::serialize_quoted(path), *pos),
                         };
                         let lines = self.map_only_lines(pos);
-                        out.push(OutNode::Raw(format!("@import {text};"), lines));
+                        out.push(OutNode::Raw(
+                            format!("@import{}{text};", self.at_rule_gap()),
+                            lines,
+                        ));
                     }
                 }
                 _ => {}
@@ -565,6 +571,9 @@ impl<'a> Evaluator<'a> {
                     };
                     let lines = self.map_only_lines(pos);
                     items.push(OutItem::ChildlessAtRule {
+                        // A real CSS `@import`, whatever the parser made of its
+                        // url — compressed output spells it with no gap.
+                        css_import: true,
                         name: "import".to_string(),
                         prelude,
                         lines,
@@ -614,6 +623,7 @@ impl<'a> Evaluator<'a> {
                     None => {
                         let lines = self.stamp(*lines);
                         items.push(OutItem::ChildlessAtRule {
+                            css_import: false,
                             name: name.clone(),
                             prelude: prelude_s,
                             lines,

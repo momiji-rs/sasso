@@ -372,6 +372,549 @@ fn compressed_color_picks_shortest_form() {
     assert_eq!(case("hsl(0,0%,50%)"), "a{x:hsl(0,0%,50%)}");
 }
 
+/// Compressed style drops a leading zero from a POSITIVE number only — dart
+/// looks for a literal `0.` prefix on the rendered string, which a minus sign
+/// has already pushed out of the way. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_keeps_the_zero_on_a_negative_decimal() {
+    let v = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
+    assert_eq!(v("0.5px"), "a{x:.5px}");
+    assert_eq!(v("-0.5px"), "a{x:-0.5px}");
+    assert_eq!(v("-0.25%"), "a{x:-0.25%}");
+    assert_eq!(v("-0.5"), "a{x:-0.5}");
+    // Computed, not just written that way.
+    assert_eq!(v("-1px * 0.1"), "a{x:-0.1px}");
+    assert_eq!(v("1px -0.5px"), "a{x:1px -0.5px}");
+    // Zero itself has no fraction to shorten, either way round.
+    assert_eq!(v("0px"), "a{x:0px}");
+    assert_eq!(v("-0.0px"), "a{x:0px}");
+}
+
+/// Compressed style drops comments — except the LOUD ones, which open `/*!`
+/// and are how a stylesheet keeps its licence header. Measured against
+/// dart-sass 1.103.1.
+#[test]
+fn compressed_keeps_loud_comments() {
+    // Written verbatim, newlines and all, with no separator of its own.
+    assert_eq!(css_compressed("/*! head */\n.a { b: 1; }"), "/*! head */.a{b:1}");
+    assert_eq!(
+        css_compressed("/*!\n * line\n */\n.a { b: 1; }"),
+        "/*!\n * line\n */.a{b:1}"
+    );
+    assert_eq!(
+        css_compressed("/*! one */\n/*! two */\n.a { b: 1; }"),
+        "/*! one *//*! two */.a{b:1}"
+    );
+    assert_eq!(css_compressed(".a { b: 1; }\n/*! tail */"), ".a{b:1}/*! tail */");
+    assert_eq!(
+        css_compressed(".a { b: 1; }\n/*! mid */\n.c { d: 1; }"),
+        ".a{b:1}/*! mid */.c{d:1}"
+    );
+    // Inside a rule it takes the pending `;` and needs none of its own.
+    assert_eq!(
+        css_compressed(".a { b: 1; /*! c */ d: 2; }"),
+        ".a{b:1;/*! c */d:2}"
+    );
+    assert_eq!(css_compressed(".a { /*! c */ b: 1; }"), ".a{/*! c */b:1}");
+    assert_eq!(css_compressed(".a { b: 1; /*! c */ }"), ".a{b:1;/*! c */}");
+    // A rule that holds nothing else is still emitted around it — but one
+    // holding only a QUIET comment is not.
+    assert_eq!(css_compressed(".a { /*! c */ }"), ".a{/*! c */}");
+    assert_eq!(css_compressed(".a { /* c */ }"), "");
+    assert_eq!(
+        css_compressed(".a { /*! c */ .b { d: 1; } }"),
+        ".a{/*! c */}.a .b{d:1}"
+    );
+    // And inside an at-rule body.
+    assert_eq!(
+        css_compressed("@media (a: 1) { /*! c */ .a { b: 1; } }"),
+        "@media(a: 1){/*! c */.a{b:1}}"
+    );
+    // Interpolation resolves first, as in expanded output.
+    assert_eq!(
+        css_compressed("$x: 1;\n/*! v#{$x} */\n.a { b: 1; }"),
+        "/*! v1 */.a{b:1}"
+    );
+}
+
+/// A CSS escape is a TOKEN, and the whitespace that terminates a numeric one
+/// belongs to it: `.\31  .b` is the class `1` and then a descendant combinator,
+/// so compressing either space away changes which selector it is. Measured
+/// against dart-sass 1.103.1.
+#[test]
+fn compressed_selectors_keep_an_escapes_terminator() {
+    let sel = |scss: &str| css_compressed(&format!("{scss}{{a:1}}"));
+    // The terminator survives; the structural space beside it is what goes.
+    assert_eq!(sel(".\\31  > .b"), ".\\31 >.b{a:1}");
+    assert_eq!(sel(".\\31  .b"), ".\\31  .b{a:1}");
+    assert_eq!(sel(".\\31 .b"), ".\\31 .b{a:1}");
+    assert_eq!(sel(".\\31 "), ".\\31 {a:1}");
+    // Including at the end of a selector-list component, where trimming the
+    // part would have eaten it.
+    assert_eq!(sel(":not(.\\31 , .b)"), ":not(.\\31 ,.b){a:1}");
+    assert_eq!(sel(":not(.a, .\\31 )"), ":not(.a,.\\31 ){a:1}");
+    assert_eq!(sel(":is(.\\31 , .b) > .c"), ":is(.\\31 ,.b)>.c{a:1}");
+    // A non-hex escape is one character and carries no terminator.
+    assert_eq!(sel(".a\\ b > .c"), ".a\\ b>.c{a:1}");
+    assert_eq!(sel(".a\\9 b .c"), ".a\\9 b .c{a:1}");
+    // A hex digit after the terminator still belongs to the next token.
+    assert_eq!(sel(".\\31 a .b"), ".\\31 a .b{a:1}");
+}
+
+/// `::slotted()` takes a selector list like `:not()` and friends — and the
+/// dispatch is CASE-SENSITIVE, which is dart's own behaviour: `:NOT(.a, .b)`
+/// keeps its comma space. Both measured against dart-sass 1.103.1.
+#[test]
+fn compressed_selector_pseudo_dispatch_matches_dart() {
+    let sel = |scss: &str| css_compressed(&format!("{scss}{{a:1}}"));
+    assert_eq!(sel("::slotted(.b, .c)"), "::slotted(.b,.c){a:1}");
+    assert_eq!(sel(".x:-moz-any(.b, .c)"), ".x:-moz-any(.b,.c){a:1}");
+    // dart compares the unvendored name verbatim, so an upper-case spelling is
+    // opaque to it and keeps the space. Mirrored, not tidied.
+    assert_eq!(sel(".x:NOT(.b, .c)"), ".x:NOT(.b, .c){a:1}");
+    assert_eq!(sel(".x:Where(.b, .c)"), ".x:Where(.b, .c){a:1}");
+    // An opaque argument keeps its space whatever the case.
+    assert_eq!(sel(".x:LANG(en, fr)"), ".x:LANG(en, fr){a:1}");
+}
+
+/// A comment is loud by what it SAYS, not by how it was spelled: dart resolves
+/// interpolation first, so `/*#{"!"} x */` is kept when compressing. Measured
+/// against dart-sass 1.103.1.
+#[test]
+fn compressed_loudness_is_decided_after_interpolation() {
+    assert_eq!(
+        css_compressed("/*#{\"!\"} normal */\n.a { b: 1; }"),
+        "/*! normal */.a{b:1}"
+    );
+    // A `!` that is not the first character is not loud.
+    assert_eq!(css_compressed("/* !late */\n.a { b: 1; }"), ".a{b:1}");
+}
+
+/// The CSS `@import` writes no space before its url when compressing, and a
+/// `url(…)` wrapper is unwrapped to save its four bytes. The modifiers keep the
+/// spaces they hold between themselves. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_css_import_loses_its_prelude_space() {
+    assert_eq!(
+        css_compressed("@import \"x.css\";\n.a { b: 1; }"),
+        "@import\"x.css\";.a{b:1}"
+    );
+    assert_eq!(
+        css_compressed("@import url(x.css);\n.a { b: 1; }"),
+        "@import\"x.css\";.a{b:1}"
+    );
+    assert_eq!(
+        css_compressed("@import url(\"x.css\");\n.a { b: 1; }"),
+        "@import\"x.css\";.a{b:1}"
+    );
+    // A plain quoted url is written exactly as it was spelled.
+    assert_eq!(
+        css_compressed("@import 'x.css';\n.a { b: 1; }"),
+        "@import'x.css';.a{b:1}"
+    );
+    // Only the ONE separator before the modifiers goes.
+    assert_eq!(
+        css_compressed("@import \"x.css\" screen, print;\n.a { b: 1; }"),
+        "@import\"x.css\"screen, print;.a{b:1}"
+    );
+    assert_eq!(
+        css_compressed("@import \"x.css\" layer(a) supports(display: grid) screen;\n.a { b: 1; }"),
+        "@import\"x.css\"layer(a) supports(display: grid) screen;.a{b:1}"
+    );
+    // Nested in a rule and in an at-rule body.
+    assert_eq!(
+        css_compressed(".a { @import url(x.css); }"),
+        ".a{@import\"x.css\"}"
+    );
+    assert_eq!(
+        css_compressed("@media screen { @import \"x.css\"; }"),
+        "@media screen{@import\"x.css\"}"
+    );
+    // Expanded output is untouched: the source form survives.
+    let expanded = |scss: &str| compile(scss, &Options::default()).expect("compile");
+    assert_eq!(
+        expanded("@import url(x.css);\n.a { b: 1; }"),
+        "@import url(x.css);\n.a {\n  b: 1;\n}"
+    );
+}
+
+/// A `@supports` DECLARATION is not a value: dart writes its calculations
+/// verbatim, spaces and all, in both styles — `calc-size` included. Measured
+/// against dart-sass 1.103.1.
+#[test]
+fn compressed_supports_declarations_keep_their_calculation_spaces() {
+    for (scss, want) in [
+        (
+            "@supports (width: calc-size(auto, var(--y))) { .a { b: 1; } }",
+            "@supports(width: calc-size(auto, var(--y))){.a{b:1}}",
+        ),
+        (
+            "@supports (width: clamp(1px, var(--y), 2px)) { .a { b: 1; } }",
+            "@supports(width: clamp(1px, var(--y), 2px)){.a{b:1}}",
+        ),
+        (
+            "@supports (width: min(1px, var(--y))) { .a { b: 1; } }",
+            "@supports(width: min(1px, var(--y))){.a{b:1}}",
+        ),
+    ] {
+        assert_eq!(css_compressed(scss), want, "{scss}");
+    }
+    // The same calculations as VALUES do lose the space.
+    assert_eq!(
+        css_compressed(".a { b: calc-size(auto, var(--y)); }"),
+        ".a{b:calc-size(auto,var(--y))}"
+    );
+}
+
+/// A module's own trailing `;` is dropped by looking at its last VISIBLE
+/// child. Several kinds of node write nothing at all when compressing — a
+/// blank, a control-only marker (what a stripped `/*# sourceMappingURL */`
+/// leaves behind), a comment that is not loud, a rule holding only dropped
+/// comments — and none of them may hide the node that really wrote the last
+/// byte. Every block below was measured against dart-sass 1.103.1.
+#[test]
+fn compressed_finds_a_modules_last_visible_child() {
+    let dir = std::env::temp_dir().join(format!("sasso_tail_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let imp = sasso::FsImporter::new(vec![dir.clone()]);
+    let run = |name: &str, module: &str, entry: &str| -> String {
+        std::fs::write(dir.join(format!("_{name}.scss")), module).unwrap();
+        compile(
+            entry,
+            &Options::default()
+                .with_importer(&imp)
+                .with_style(OutputStyle::Compressed),
+        )
+        .expect("compile")
+    };
+    // A childless at-rule writes its own `;`, and it comes off when it is last
+    // — behind any number of nodes that write nothing.
+    for (name, module) in [
+        ("tail_plain", "@namespace \"x\";\n"),
+        ("tail_blank", "@namespace \"x\";\n\n\n"),
+        ("tail_quiet", "@namespace \"x\";\n/* quiet */\n"),
+        ("tail_map", "@namespace \"x\";\n/*# sourceMappingURL=x.map */\n"),
+        (
+            "tail_empty_rule",
+            "@namespace \"x\";\n.e { /* only a comment */ }\n",
+        ),
+        ("tail_empty_at", "@namespace \"x\";\n@media a {}\n"),
+    ] {
+        assert_eq!(
+            run(name, module, &format!("@use \"{name}\";")),
+            "@namespace \"x\"",
+            "{name}"
+        );
+    }
+    // A node that DOES write keeps the separator, loud comments included.
+    assert_eq!(
+        run(
+            "tail_loud",
+            "@namespace \"x\";\n/*! loud */\n",
+            "@use \"tail_loud\";"
+        ),
+        "@namespace \"x\";/*! loud */"
+    );
+    assert_eq!(
+        run(
+            "tail_after",
+            "@namespace \"x\";\n",
+            "@use \"tail_after\";\n.z { y: 1; }"
+        ),
+        "@namespace \"x\";.z{y:1}"
+    );
+    // And a passed-through `@import` behind an invisible tail, the other node
+    // kind that carries its own terminator.
+    assert_eq!(
+        run(
+            "tail_import",
+            "@import \"z.css\";\n/* quiet */\n",
+            "@use \"tail_import\";"
+        ),
+        "@import\"z.css\""
+    );
+    // A MODULE is only as visible as its contents: `meta.load-css` of a
+    // stylesheet that is all comments writes nothing, and splicing it in after
+    // the at-rule must not hide it.
+    std::fs::write(dir.join("_all_comments.scss"), "/* quiet */\n").unwrap();
+    std::fs::write(dir.join("_nothing.scss"), "\n").unwrap();
+    for loaded in ["all_comments", "nothing"] {
+        assert_eq!(
+            run(
+                "tail_load",
+                &format!("@use \"sass:meta\";\n@namespace \"x\";\n@include meta.load-css(\"{loaded}\");\n"),
+                "@use \"tail_load\";",
+            ),
+            "@namespace \"x\"",
+            "{loaded}"
+        );
+    }
+    // One that DOES write keeps the separator.
+    std::fs::write(dir.join("_writes.scss"), ".w { v: 1; }\n").unwrap();
+    assert_eq!(
+        run(
+            "tail_load2",
+            "@use \"sass:meta\";\n@namespace \"x\";\n@include meta.load-css(\"writes\");\n",
+            "@use \"tail_load2\";",
+        ),
+        "@namespace \"x\";.w{v:1}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An `@import` inside a rule of a LOADED plain-CSS file is a CSS import like
+/// any other, and compressed output spells it with no gap. Measured against
+/// dart-sass 1.103.1.
+#[test]
+fn compressed_nested_plain_css_import_loses_its_gap() {
+    let dir = std::env::temp_dir().join(format!("sasso_nested_import_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let imp = sasso::FsImporter::new(vec![dir.clone()]);
+    let run = |name: &str, css: &str| -> String {
+        std::fs::write(dir.join(format!("{name}.css")), css).unwrap();
+        compile(
+            &format!("@use \"{name}\";"),
+            &Options::default()
+                .with_importer(&imp)
+                .with_style(OutputStyle::Compressed),
+        )
+        .expect("compile")
+    };
+    assert_eq!(
+        run("v1", ".a {\n  @import url(x.css);\n}\n"),
+        ".a{@import\"x.css\"}"
+    );
+    assert_eq!(
+        run("v2", ".a {\n  @import \"x.css\";\n}\n"),
+        ".a{@import\"x.css\"}"
+    );
+    assert_eq!(
+        run("v3", "@import url(x.css);\n.a { b: 1; }\n"),
+        "@import\"x.css\";.a{b:1}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A value is verbatim text and can end in a `;` of its own, which dart keeps
+/// — so what may be dropped is decided by the NODE that wrote the last byte,
+/// never by the byte. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_keeps_a_semicolon_that_belongs_to_a_value() {
+    let v = "$v: \";\";\n";
+    assert_eq!(
+        css_compressed(&format!("{v}.a {{ --x: #{{$v}}; }}")),
+        ".a{--x: ;}"
+    );
+    assert_eq!(
+        css_compressed(&format!("{v}@font-face {{ --x: #{{$v}}; }}")),
+        "@font-face{--x: ;}"
+    );
+    assert_eq!(
+        css_compressed(&format!("{v}@font-face {{ src: #{{$v}}; }}")),
+        "@font-face{src:;}"
+    );
+    assert_eq!(
+        css_compressed(&format!("{v}@font-face {{ a: 1; --x: #{{$v}}; }}")),
+        "@font-face{a:1;--x: ;}"
+    );
+    assert_eq!(
+        css_compressed(&format!("{v}@media a {{ @font-face {{ --x: #{{$v}}; }} }}")),
+        "@media a{@font-face{--x: ;}}"
+    );
+}
+
+/// An at-rule whose NAME is interpolated is generic in dart — it never reaches
+/// the serializer's `@import` path — so it keeps the gap a real CSS `@import`
+/// loses. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_interpolated_at_rule_names_keep_their_gap() {
+    assert_eq!(
+        css_compressed("@#{\"import\"} \"x.css\";\n.a { b: 1; }"),
+        "@import \"x.css\";.a{b:1}"
+    );
+    // Written literally, the same rule loses it.
+    assert_eq!(
+        css_compressed("@import \"x.css\";\n.a { b: 1; }"),
+        "@import\"x.css\";.a{b:1}"
+    );
+    // And inside a style rule, where the import is an item rather than a node.
+    assert_eq!(
+        css_compressed(".a { @import url(x.css); }"),
+        ".a{@import\"x.css\"}"
+    );
+    assert_eq!(
+        css_compressed(".a { @#{\"import\"} \"x.css\"; }"),
+        ".a{@import \"x.css\"}"
+    );
+}
+
+/// `::cue` and `::cue-region` take a selector list by the grammar, but dart's
+/// serializer does not treat them as one — their commas keep the space, and so
+/// does `::part`'s. Recorded so the compressor's table is not "fixed" into a
+/// divergence. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_leaves_the_pseudo_elements_dart_leaves() {
+    let sel = |scss: &str| css_compressed(&format!("{scss}{{a:1}}"));
+    assert_eq!(sel("::cue(.b, .c)"), "::cue(.b, .c){a:1}");
+    assert_eq!(sel("::cue-region(.b, .c)"), "::cue-region(.b, .c){a:1}");
+    assert_eq!(sel("::part(b, c)"), "::part(b, c){a:1}");
+}
+
+/// dart writes a statement's `;` as a SEPARATOR, so compressed output never
+/// ends with one — at the end of the stylesheet or before a `}`. Measured
+/// against dart-sass 1.103.1.
+#[test]
+fn compressed_output_never_ends_with_a_semicolon() {
+    assert_eq!(css_compressed("@import \"x.css\";"), "@import\"x.css\"");
+    assert_eq!(
+        css_compressed("@import \"x.css\" screen;"),
+        "@import\"x.css\"screen"
+    );
+    assert_eq!(css_compressed("@namespace \"x\";"), "@namespace \"x\"");
+    assert_eq!(css_compressed("@unknown foo;"), "@unknown foo");
+    assert_eq!(
+        css_compressed("@media a { @unknown foo; }"),
+        "@media a{@unknown foo}"
+    );
+    assert_eq!(css_compressed(".a { b: 1; }"), ".a{b:1}");
+    assert_eq!(
+        css_compressed("@font-face { src: url(x); }"),
+        "@font-face{src:url(x)}"
+    );
+}
+
+/// A private-use character is escaped in expanded output and written RAW when
+/// compressing — dart trades the escape for the character once bytes are what
+/// matter. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_writes_private_use_characters_raw() {
+    let expanded = |scss: &str| compile(scss, &Options::default()).expect("compile");
+    // U+E028 is private use: escaped when expanded, raw when compressed — and
+    // the raw character makes the output non-ASCII, which brings the BOM that
+    // compressed style writes in place of `@charset`.
+    assert_eq!(
+        expanded(".a::before { content: \"\\e028\"; }"),
+        ".a::before {\n  content: \"\\e028\";\n}"
+    );
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\e028\"; }"),
+        "\u{feff}.a::before{content:\"\u{e028}\"}"
+    );
+    // Written raw in the source, it comes out the same way round.
+    assert_eq!(
+        expanded(".a::before { content: \"\u{e028}\"; }"),
+        ".a::before {\n  content: \"\\e028\";\n}"
+    );
+    assert_eq!(
+        css_compressed(".a::before { content: \"\u{e028}\"; }"),
+        "\u{feff}.a::before{content:\"\u{e028}\"}"
+    );
+    // Both edges of the BMP range, and the SUPPLEMENTARY private-use planes
+    // (U+F0000-U+10FFFF), whose characters are four UTF-8 bytes rather than
+    // three — the branch the escape used to hide.
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\e000\"; }"),
+        "\u{feff}.a::before{content:\"\u{e000}\"}"
+    );
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\f8ff\"; }"),
+        "\u{feff}.a::before{content:\"\u{f8ff}\"}"
+    );
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\f0000\"; }"),
+        "\u{feff}.a::before{content:\"\u{f0000}\"}"
+    );
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\10fffd\"; }"),
+        "\u{feff}.a::before{content:\"\u{10fffd}\"}"
+    );
+    // A character that is NOT private use is raw in both styles already, and a
+    // control character stays escaped in both.
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\4e2d\"; }"),
+        "\u{feff}.a::before{content:\"\u{4e2d}\"}"
+    );
+    assert_eq!(
+        css_compressed(".a::before { content: \"\\1\"; }"),
+        ".a::before{content:\"\\1\"}"
+    );
+    // `inspect` and error messages keep the escape whatever the style, because
+    // they are not CSS output.
+    assert_eq!(
+        css_compressed(".a { b: inspect(\"\\e028\"); }"),
+        ".a{b:\"\\e028\"}"
+    );
+}
+
+/// Compressed style drops the whitespace AROUND A COMBINATOR and the space
+/// after a SELECTOR LIST's comma — and nothing else. Every expectation below
+/// was measured against dart-sass 1.103.1 (`--style=compressed`).
+#[test]
+fn compressed_selectors_lose_only_structural_whitespace() {
+    let sel = |scss: &str| css_compressed(&format!("{scss}{{a:1}}"));
+    // The three combinators, on both sides.
+    assert_eq!(sel(".a > .b"), ".a>.b{a:1}");
+    assert_eq!(sel(".a + .b"), ".a+.b{a:1}");
+    assert_eq!(sel(".a ~ .b"), ".a~.b{a:1}");
+    assert_eq!(sel(".a .b > .c + .d ~ .e"), ".a .b>.c+.d~.e{a:1}");
+    assert_eq!(sel("* > *"), "*>*{a:1}");
+    // A descendant combinator IS a space; it stays.
+    assert_eq!(sel(".a .b"), ".a .b{a:1}");
+    // A combinator that opens a relative selector loses its trailing space.
+    assert_eq!(sel(":has(+ .b)"), ":has(+.b){a:1}");
+    assert_eq!(sel(":has(> .a, + .b)"), ":has(>.a,+.b){a:1}");
+    // A SELECTOR-list comma loses its space; an opaque argument keeps it.
+    assert_eq!(sel(":not(.b, .c)"), ":not(.b,.c){a:1}");
+    assert_eq!(sel(":where(.a, .b) .c"), ":where(.a,.b) .c{a:1}");
+    assert_eq!(sel(":is(:not(.a, .b), .c) > .d"), ":is(:not(.a,.b),.c)>.d{a:1}");
+    assert_eq!(sel(":host-context(.a, .b)"), ":host-context(.a,.b){a:1}");
+    assert_eq!(sel(":lang(en, fr)"), ":lang(en, fr){a:1}");
+    // `:nth-child()` carries an An+B, and only its `of` tail is a list.
+    assert_eq!(sel(":nth-child(2n + 1)"), ":nth-child(2n+1){a:1}");
+    assert_eq!(
+        sel(":nth-child(2n + 1 of .a, .b)"),
+        ":nth-child(2n+1 of .a,.b){a:1}"
+    );
+    // Quoted and escaped text is not selector structure.
+    assert_eq!(sel("[a=\"x > y\"]"), "[a=\"x > y\"]{a:1}");
+    assert_eq!(sel(":not([a=\"x, y\"], .b)"), ":not([a=\"x, y\"],.b){a:1}");
+    assert_eq!(sel(".a\\+b"), ".a\\+b{a:1}");
+    assert_eq!(sel(".a\\:b > .c"), ".a\\:b>.c{a:1}");
+    // A nested rule and an `@extend` rewrite go through the same writer.
+    assert_eq!(css_compressed(".a { > .b { c: 1; } }"), ".a>.b{c:1}");
+    assert_eq!(
+        css_compressed("%p { a: 1; }\n.x > .y { @extend %p; }"),
+        ".x>.y{a:1}"
+    );
+}
+
+/// A preserved CSS calculation — one that keeps a `var()` or `env()` and so
+/// cannot fold to a number — separates its arguments with a bare comma when
+/// compressing, like any other value. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_preserved_calculations_drop_the_argument_space() {
+    let v = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
+    assert_eq!(v("clamp(0.5px, var(--y), 2px)"), "a{x:clamp(.5px,var(--y),2px)}");
+    assert_eq!(
+        v("clamp(1px, env(safe-area), 2px)"),
+        "a{x:clamp(1px,env(safe-area),2px)}"
+    );
+    assert_eq!(v("min(1px, var(--y))"), "a{x:min(1px,var(--y))}");
+    assert_eq!(v("mod(var(--y), 2px)"), "a{x:mod(var(--y),2px)}");
+    assert_eq!(v("pow(var(--y), 2)"), "a{x:pow(var(--y),2)}");
+    assert_eq!(v("calc-size(auto, var(--y))"), "a{x:calc-size(auto,var(--y))}");
+    assert_eq!(
+        v("calc(1px + clamp(1px, var(--y), 2px))"),
+        "a{x:calc(1px + clamp(1px,var(--y),2px))}"
+    );
+    // A `@supports` declaration is not a value: dart writes it verbatim, space
+    // and all, in both styles.
+    assert_eq!(
+        css_compressed("@supports (width: clamp(1px, var(--y), 2px)) { .a { b: 1; } }"),
+        "@supports(width: clamp(1px, var(--y), 2px)){.a{b:1}}"
+    );
+}
+
 #[test]
 fn compressed_at_rule_prelude_spacing() {
     // dart-sass 1.101 compressed: `@media`/`@supports` drop the space before a
