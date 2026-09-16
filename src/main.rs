@@ -798,7 +798,7 @@ fn run(cli: Cli) -> ExitCode {
         let mut kept: Vec<Unit> = Vec::new();
         for unit in units {
             let key = match &unit.source {
-                Source::File(path) => normalize_path(&cwd.join(path)),
+                Source::File(path) => path_key(&normalize_path(&cwd.join(path))),
                 Source::Text(_) | Source::InvalidUtf8 => PathBuf::from("-"),
             };
             match keys.iter().position(|k| *k == key) {
