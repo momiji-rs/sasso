@@ -695,6 +695,34 @@ fn compressed_nested_plain_css_import_loses_its_gap() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Compressed output drops anything that writes nothing — a rule or at-rule
+/// whose body is only comments, however deep it nests, and the separator such
+/// an item would otherwise have taken. Measured against dart-sass 1.103.1.
+#[test]
+fn compressed_drops_what_writes_nothing() {
+    assert_eq!(css_compressed("@media x { /* c */ }"), "");
+    assert_eq!(css_compressed("@media x { .a { /* c */ } }"), "");
+    assert_eq!(css_compressed("@supports (a: 1) { /* c */ }"), "");
+    assert_eq!(css_compressed(".a { /* c */ }"), "");
+    assert_eq!(css_compressed(".a { .b { /* c */ } }"), "");
+    // A declaration before one of those keeps no trailing separator.
+    assert_eq!(css_compressed(".a { c: 1; @media x { /* d */ } }"), ".a{c:1}");
+    assert_eq!(
+        css_compressed("@media x { .a { b: 1; } .c { /* d */ } }"),
+        "@media x{.a{b:1}}"
+    );
+    // Anything that DOES write keeps its wrapper.
+    assert_eq!(css_compressed("@media x { /*! c */ }"), "@media x{/*! c */}");
+    assert_eq!(css_compressed("@media x { .a { b: 1; } }"), "@media x{.a{b:1}}");
+    // Expanded output keeps them all, as dart does — on one line when they
+    // were written that way, and over three when they were not.
+    let expanded = |scss: &str| compile(scss, &Options::default()).expect("compile");
+    assert_eq!(expanded("@media x { /* c */ }"), "@media x { /* c */ }");
+    assert_eq!(expanded(".a { /* c */ }"), ".a { /* c */ }");
+    assert_eq!(expanded("@media x {\n  /* c */\n}"), "@media x {\n  /* c */\n}");
+    assert_eq!(expanded(".a {\n  /* c */\n}"), ".a {\n  /* c */\n}");
+}
+
 /// A value is verbatim text and can end in a `;` of its own, which dart keeps
 /// — so what may be dropped is decided by the NODE that wrote the last byte,
 /// never by the byte. Measured against dart-sass 1.103.1.

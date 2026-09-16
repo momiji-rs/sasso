@@ -237,3 +237,39 @@ fn a_loaded_files_function_call_serializes_in_the_default_style() {
     case("nest", "nested(inner(0.5), 2)", "nested(inner(0.5), 2)");
     case("tr", "translate(0.5px,-0.5px)", "translate(0.5px, -0.5px)");
 }
+
+/// A nested plain-CSS rule holding nothing that survives compression — a
+/// comment, or another such rule — is not written at all, and neither is the
+/// rule left empty around it. (`swiper-bundle.css` ships exactly this.)
+/// Measured against dart-sass 1.103.1.
+#[test]
+fn a_loaded_files_comment_only_rule_vanishes_when_compressed() {
+    let dir = scratch("emptyrule");
+    let case = |file: &str, css: &str, want: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), css).unwrap();
+        assert_eq!(
+            compile_compressed_in(
+                &dir,
+                &format!("entry_{file}.scss"),
+                &format!("@use \"{file}\";\n")
+            ),
+            want,
+            "{css}"
+        );
+    };
+    case("only", ".a {\n  .b {\n    /* c */\n  }\n}\n", "");
+    case(
+        "deep",
+        ".a {\n  .b {\n    .c {\n      /* c */\n    }\n  }\n}\n",
+        "",
+    );
+    case("at", ".a {\n  @media x {\n    /* c */\n  }\n}\n", "");
+    // A sibling that DOES write keeps its rule.
+    case(
+        "sibling",
+        ".a {\n  c: 1;\n  .b {\n    /* c */\n  }\n}\n",
+        ".a{c:1}",
+    );
+    // And a LOUD comment writes, so everything around it stays.
+    case("loud", ".a {\n  .b {\n    /*! c */\n  }\n}\n", ".a{.b{/*! c */}}");
+}
