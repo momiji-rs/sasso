@@ -1,7 +1,11 @@
 # sasso performance audit — 2026-09-15
 
-A 31-agent measurement campaign against master `ad11c61` (sasso 0.9.1), run on
-one machine with one toolchain. Headline: **the engine's general path is still
+A 31-agent measurement campaign against master `ad11c61` (sasso 0.9.1),
+**primarily on one macOS machine with one toolchain**. Linux was measured for
+exactly one lever (4.4, §4.4) during the campaign, and for a whole-compile
+cross-machine control afterwards on 2026-09-16
+(`docs/PERF_PLAN_2026-09-16.md`, appendix); §7 states that coverage cap in full.
+Headline: **the engine's general path is still
 close to where the 2026-06-13 refactor campaign left it — but a 7.4 → 10.4 ms
 regression landed on 2026-09-15 itself, in two merges, and it is 82% of the
 gap.** The largest lever this audit found is therefore not a new optimisation:
@@ -162,8 +166,10 @@ a campaign to stop *creating* the objects.
 
 `bench/three_way.md` records **7.4 ms/compile** at master `dc5099b`
 (2026-06-13). Today the same corpus on the same machine is **10.4–10.6 ms**.
-**The regression is real, it is resolved, and `bench/three_way.md` is not
-stale — it was correct when written.**
+**The regression is real, it is *diagnosed and attributed*, and
+`bench/three_way.md` is not stale — it was correct when written.** Diagnosed is
+not fixed: today's tree is still at 10.4–10.6 ms, and the recovery is scheduled
+as PR 3 of `docs/PERF_PLAN_2026-09-16.md`.
 
 Method: 14 historical commits rebuilt with **one** toolchain (rustc/cargo
 1.98.1, `lto="thin"`, `codegen-units=1`), on **one** machine, against **one**
@@ -226,8 +232,9 @@ This is the important split, and both halves were measured.
   `[measured]`. **Lever 4.1 recovers 14.3% of the compile without changing one
   output byte** — that is the waste, quantified.
 
-So: the regression is ~82% two-merge, its *output* is non-negotiable, and
-~91% of its *cost* is recoverable.
+So: the regression is ~82% two-merge, its *output* is non-negotiable, and ~91%
+of the *deprecation feature tax* is recoverable — which is ~72% of the +30.5M
+the two merges themselves added. See the denominator note in §4.1.
 
 ### The process finding
 
@@ -333,8 +340,15 @@ landing.
   a regression" is measurably false; the memo costs a little where there is
   nothing to memoize. Also: the four −12.7…−14.3% workloads are **one
   `gen_corpus.rb` shape measured four times**, the −45.8% is a saturated
-  microbenchmark, and the honest framing is "**recovers 91% of a 48-hour-old
+  microbenchmark, and the honest framing is "**recovery of a 48-hour-old
   regression**", not "the largest general-path win".
+
+  *Denominator, stated precisely* — an earlier revision of this paragraph said
+  "91% of the regression", which mixed two different denominators. The lever
+  recovers **21.92M**. Against the **deprecation feature tax** bracketed by the
+  corpus migration (23.96M) that is **91%**; against the **+30.5M the two
+  merges actually added** (PR #39 +15.4M, PR #40 +15.1M) it is **~72%**. Use
+  whichever you name, and name it.
 - **correctness-and-cost — not refuted.** Re-measured −14.33%; modular +0.08%
   flat; audited the prototype's spec JSONs itself and confirmed
   `pass_including_error_expected=14061` matches `spec/BASELINE.json`; ran
@@ -891,9 +905,12 @@ Stated as caps, not as caveats — each one bounds a claim above.
   cross-platform check deflated its headline by ~3×. **No other lever in this
   report has been measured off macOS.** Levers 4.1 and 4.2 are hash- and
   allocation-bound, so they should port; that is `[estimated]`, not measured.
-- **Wasm was not measured at all.** The wasm build runs without the bump arena,
-  so bucket (b) does not apply there and lever 4.1's memo may behave
-  differently.
+- **Wasm was not measured at all.** Note that it *does* get the arena —
+  `wasm/src/lib.rs:39-40` installs `sasso::ScopedAlloc` as the wasm
+  `#[global_allocator]` (verified 2026-09-16), so bucket (b) applies there too.
+  What is unknown is how the wasm target's own allocator behaviour and lever
+  4.1's memo interact, not whether the arena is present. An earlier revision of
+  this note claimed the arena was absent; that was wrong.
 - **The ~6.6M (5%) residual regression over 2.5 months was bracketed by version
   tag, never bisected commit-by-commit.**
 - **The `bench/corpus/modular` figures from three earlier agents are void** —
@@ -973,10 +990,24 @@ Wall, for the record: `"$S" --loop 60 "$C" 2>&1 >/dev/null | grep ms/compile`.
 ### Crippled-build differencing (how "how much work" was measured)
 
 The stage split and the deprecation ceiling come from early-return builds, not
-from profilers. Environment switch: `SASSO_STOP_AFTER=parse|validate|eval`.
-Source-level arms used during the audit: `parse_only`, `no_emit`, `num_const`,
-`num_cheap_int`, `no_deprecation`, `no_arena`, and the arm2 control (a bare
-`return;` as the first statement of `emit_deprecation`).
+from profilers.
+
+> ⚠️ **None of the instrumentation named here exists in the tree.**
+> `SASSO_STOP_AFTER` and every named arm were **temporary local patches** made
+> for this audit and never committed; the only matches for those strings in the
+> repository are in this document (verified 2026-09-16). The commands in this
+> section therefore do **not** reproduce the stage split as written — you must
+> re-cripple a build first. Each arm is one early `return` or one constant
+> substitution, described below so it can be re-derived:
+
+| Arm | What to patch |
+| --- | --- |
+| `SASSO_STOP_AFTER=parse\|validate\|eval` | an env-gated early return at the end of the named stage in `src/lib.rs`'s compile sequence |
+| `parse_only`, `no_emit` | the same, expressed as a compile-time edit instead of an env switch |
+| `num_const` / `num_cheap_int` | replace `fmt_num`'s body with a constant / a cheap integer path, to price digit generation |
+| `no_deprecation` | early `return` at the top of `emit_call_deprecations` **and** `emit_color_function_deprecation`, i.e. ahead of construction |
+| `no_arena` | drop the `#[global_allocator]` from `src/main.rs:40` |
+| arm2 control | a bare `return;` as the first statement of `emit_deprecation` — note this sits *after* construction, which is why it brackets a smaller area (9.90%) than the corpus migration (15.62%) |
 
 ### Statistical profiling (how "how much wall" was measured)
 
@@ -1038,10 +1069,14 @@ bash spec/fetch.sh && python3 spec/check_baseline.py  # >=13895 ratchet, needs n
 cargo fmt --all --check && cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-All of these run in CI on every `push` to master/main and every
-`pull_request` (`.github/workflows/ci.yml`). `.github/workflows/codspeed.yml`
-also runs on every PR, but declares no threshold in the workflow — see the
-process finding in [§3](#the-process-finding).
+These run in CI on every `push` to master/main and every `pull_request`
+(`.github/workflows/ci.yml`), with two differences from the list above: CI runs
+`cargo test --all-features` **without** `--release` (`ci.yml:27`, verified
+2026-09-16), and the `--release` test run is an extra ship condition a lever
+should satisfy locally, not something CI does for you.
+`.github/workflows/codspeed.yml` also runs on every PR, but declares no
+threshold in the workflow — see the process finding in
+[§3](#the-process-finding).
 
 ### Full evidence set
 
