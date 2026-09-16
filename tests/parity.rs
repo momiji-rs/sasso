@@ -2174,6 +2174,23 @@ fn a_slash_channel_in_a_space_separated_list_is_a_number() {
 }
 
 #[test]
+fn a_slash_quotient_carries_its_unit() {
+    // A slash-division's quotient goes through the same unit handling as a
+    // literal number: an angle converts (`1turn/2` is 180deg, not 0.5) and a
+    // percentage is scaled against the channel's own base (`50%/2` is 25% of
+    // 255, of 125 for lab's a/b, of 150 for lch's chroma, of 0.4 for oklab's).
+    // Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("a {\n  b: hsl(1turn/2 50% 50%);\n  c: hsl(1turn/4 50% 50%);\n  d: hsl(200grad/2 50% 50%);\n  e: hsl(90deg/2 50% 50%);\n  f: hwb(1turn/4 10% 10%);\n}\n"),
+        "a {\n  b: hsl(180, 50%, 50%);\n  c: hsl(90, 50%, 50%);\n  d: hsl(90, 50%, 50%);\n  e: hsl(45, 50%, 50%);\n  f: hsl(90, 80%, 50%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {\n  b: rgb(50%/2 0 0);\n  c: color(srgb 50%/2 0 0);\n  d: lab(50% 50%/2 0);\n  e: oklab(50% 50%/2 0);\n  f: lch(50% 50%/2 20deg);\n  g: lab(50%/2 1 2);\n}\n"),
+        "a {\n  b: rgb(25%, 0%, 0%);\n  c: color(srgb 0.25 0 0);\n  d: lab(50% 31.25 0);\n  e: oklab(50% 0.1 0);\n  f: lch(50% 37.5 20deg);\n  g: lab(25% 1 2);\n}\n"
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

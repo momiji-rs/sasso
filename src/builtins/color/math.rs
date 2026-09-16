@@ -292,14 +292,15 @@ pub(super) fn modern_channel(v: &Value, pct_base: f64) -> Option<f64> {
         }
     }
     match v {
-        Value::Number(num) => {
+        // A slash-division carries its quotient AND its unit, so `50%/2` is
+        // 25% of the channel's base — not the raw 25.
+        Value::Number(num) | Value::Slash(num, _) => {
             if num.unit() == "%" {
                 Some(num.value / 100.0 * pct_base)
             } else {
                 Some(num.value)
             }
         }
-        Value::Slash(num, _) => Some(num.value),
         _ => Some(0.0),
     }
 }
@@ -315,13 +316,13 @@ pub(super) fn modern_hue(v: &Value) -> Option<f64> {
         }
     }
     match v {
-        Value::Number(num) => Some(match num.unit() {
+        // A slash-division carries its angle unit too: `1turn/4` is 90deg.
+        Value::Number(num) | Value::Slash(num, _) => Some(match num.unit() {
             "rad" => num.value.to_degrees(),
             "grad" => num.value * 360.0 / 400.0,
             "turn" => num.value * 360.0,
             _ => num.value,
         }),
-        Value::Slash(num, _) => Some(num.value),
         _ => Some(0.0),
     }
 }

@@ -158,8 +158,10 @@ fn color_arg_css(v: &Value) -> String {
 /// 255. NaN maps to 0, `±Infinity` clamp to the bounds. Delegates to the
 /// shared [`channel`] helper for the finite case, then normalizes NaN.
 fn rgb_channel(v: &Value, pos: Pos) -> Result<f64, Error> {
+    // A slash-division's quotient goes through the same unit handling as a
+    // literal number, so `50%/2` is 25% of 255 — not the raw 25.
     if let Value::Slash(num, _) = v {
-        return Ok(clamp_finite(num.value, 0.0, 255.0));
+        return channel(&Value::Number(num.clone()), pos);
     }
     if let Some(c) = degenerate_value(v) {
         if c.is_nan() {
@@ -776,13 +778,14 @@ pub(super) fn fn_hsl(
 /// are taken as degrees.
 fn hsl_hue(v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
-        Value::Number(num) => Ok(match num.unit() {
+        // A slash-division carries its quotient AND its unit, so `1turn/2` is
+        // half a turn — 180deg — not 0.5.
+        Value::Number(num) | Value::Slash(num, _) => Ok(match num.unit() {
             "rad" => num.value.to_degrees(),
             "grad" => num.value * 360.0 / 400.0,
             "turn" => num.value * 360.0,
             _ => num.value,
         }),
-        Value::Slash(num, _) => Ok(num.value),
         other => Err(Error::at(
             format!("{} is not a number.", other.to_css(false)),
             pos,
