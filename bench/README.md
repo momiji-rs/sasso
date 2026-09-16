@@ -23,6 +23,17 @@ merges on 2026-09-15, so today's tree is slower. The plan for recovering it and
 gating against a repeat is
 [`../docs/PERF_PLAN_2026-09-16.md`](../docs/PERF_PLAN_2026-09-16.md).
 
+The per-PR CI gate is a different harness: `../benches/compile.rs`, run by
+divan under `.github/workflows/codspeed.yml`. Two rules apply there and nowhere
+else in this directory. It **must** install `sasso::ScopedAlloc` as its
+`#[global_allocator]`, because without it every number measures sasso against
+the system malloc — an error that is not a constant offset but inverts the
+macOS/Linux ranking. And at least one workload **must** supply a display URL,
+because `compile` enables diagnostics only when `options.url` is `Some`, so a
+URL-less suite never executes the deprecation path at all. Both were missing
+until 2026-09-16; `large_expanded` and `large_expanded_with_url_silent` are a
+deliberate pair, and their ratio is the signal.
+
 There is also a **real-world corpus** harness in [`real-world/`](./real-world/):
 it sparse-clones pinned, vetted, currently-active OSS Sass codebases
 (bootstrap, bulma, mastodon, …), verifies output parity against dart-sass, and
