@@ -2097,6 +2097,57 @@ fn every_channel_spelling_is_unit_checked() {
 }
 
 #[test]
+fn color_scale_names_the_channel_it_rejects() {
+    // `color.scale`'s argument is the CHANNEL, so every message names it —
+    // `$red`, `$alpha`, `$chroma` — rather than a generic `$amount`. And a
+    // NaN percentage is within no range: it is rejected like any other
+    // out-of-range value instead of scaling the channel to nothing. Every
+    // message byte-matched to dart-sass 1.104.1. Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "color.scale(red, $red: math.div(0%, 0))",
+            "$red: Expected calc(NaN * 1%) to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(red, $lightness: math.div(0%, 0))",
+            "$lightness: Expected calc(NaN * 1%) to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(red, $alpha: math.div(0%, 0))",
+            "$alpha: Expected calc(NaN * 1%) to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(rgb(none none none), $alpha: math.div(0%, 0))",
+            "$alpha: Expected calc(NaN * 1%) to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(red, $green: 200%)",
+            "$green: Expected 200% to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(red, $alpha: -200%)",
+            "$alpha: Expected -200% to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(oklch(50% 0.1 20deg), $chroma: 200%)",
+            "$chroma: Expected 200% to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(red, $red: 50)",
+            "$red: Expected 50 to have unit \"%\".",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

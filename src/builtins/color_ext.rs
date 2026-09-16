@@ -980,7 +980,9 @@ fn scale_factor(name: &str, v: &Value, pos: Pos) -> Result<f64, Error> {
                     pos,
                 ));
             }
-            if n.value < -100.0 || n.value > 100.0 {
+            // A NaN is within no range, so it is rejected like any
+            // out-of-range value rather than scaling the channel to nothing.
+            if n.value.is_nan() || n.value < -100.0 || n.value > 100.0 {
                 return Err(Error::at(
                     format!(
                         "${name}: Expected {} to be within -100% and 100%.",

@@ -847,24 +847,31 @@ fn channel_pct_base(space: ColorSpace, idx: usize) -> f64 {
     }
 }
 
-/// Read a `scale-color` percentage factor in `[-1, 1]`.
-pub(super) fn scale_pct(v: &Value, pos: Pos) -> Result<f64, Error> {
+/// Read a `scale-color` percentage factor in `[-1, 1]`. Every message names
+/// the CHANNEL being scaled (`$red`, `$alpha`, …), as dart-sass does — the
+/// parameter is the channel, not a generic `$amount`.
+pub(super) fn scale_pct(name: &str, v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
         Value::Number(n) if n.unit() == "%" => {
-            if n.value < -100.0 || n.value > 100.0 {
+            // A NaN is within no range, so it is rejected like any
+            // out-of-range value rather than scaling the channel to nothing.
+            if n.value.is_nan() || n.value < -100.0 || n.value > 100.0 {
                 return Err(Error::at(
-                    format!("Expected {} to be within -100% and 100%.", n.to_css(false)),
+                    format!(
+                        "${name}: Expected {} to be within -100% and 100%.",
+                        n.to_css(false)
+                    ),
                     pos,
                 ));
             }
             Ok(n.value / 100.0)
         }
         Value::Number(n) => Err(Error::at(
-            format!("$amount: Expected {} to have unit \"%\".", n.to_css(false)),
+            format!("${name}: Expected {} to have unit \"%\".", n.to_css(false)),
             pos,
         )),
         other => Err(Error::at(
-            format!("$amount: {} is not a number.", other.to_css(false)),
+            format!("${name}: {} is not a number.", other.to_css(false)),
             pos,
         )),
     }

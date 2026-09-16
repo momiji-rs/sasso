@@ -436,7 +436,7 @@ pub(crate) fn modify_in_space_full(
             ModifyOp::Scale => {
                 let bounds = scale_bounds(space, idx)
                     .ok_or_else(|| Error::at(format!("${name}: Channel isn't scalable."), pos))?;
-                let factor = scale_pct(v, pos)?;
+                let factor = scale_pct(name, v, pos)?;
                 let cur = work.channels[idx].unwrap_or(0.0);
                 work.channels[idx] = Some(scale_to(cur, factor, bounds));
             }
@@ -538,7 +538,7 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
             Some((cur + amt).clamp(0.0, 1.0))
         }
         ModifyOp::Scale => {
-            let factor = scale_pct(v, pos)?;
+            let factor = scale_pct("alpha", v, pos)?;
             Some(scale_to(cur, factor, (0.0, 1.0)))
         }
     })
