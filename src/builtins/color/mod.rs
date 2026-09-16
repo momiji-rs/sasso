@@ -240,26 +240,46 @@ fn degenerate_value(v: &Value) -> Option<f64> {
     }
 }
 
+/// The [`Number`] underlying a color channel for unit inspection and
+/// normalization: a plain number, the quotient of a slash-division (`6px/2`,
+/// whose unit decides the channel's), or a degenerate `calc()` that folded to
+/// a unit-bearing number (`calc(infinity * 1px)`). Returns `None` for any
+/// non-numeric channel (handled by the "is not a number" / passthrough paths).
+fn channel_unit_number(v: &Value) -> Option<&Number> {
+    match v {
+        Value::Number(n) | Value::Slash(n, _) | Value::Calc(CalcNode::Number(n)) => Some(n),
+        _ => None,
+    }
+}
+
 /// dart-sass 1.104.0: "Colors now convert NaN and negative zero, as well as
 /// infinity and negative infinity for polar-hue channels, to 0 as per the CSS
 /// spec." This runs on the channel VALUE before anything else inspects it, so
 /// a `NaN` channel stops being degenerate at all and the call parses into an
 /// ordinary color. Only a surviving infinity is still degenerate and keeps its
 /// `calc(...)` spelling (`hsl(0, calc(infinity * 1%), 50%)`).
+///
+/// A FINITE negative zero converts here too, rather than on the stored
+/// channels: the degenerate path a surviving infinity takes serializes the
+/// values it was handed instead of a built color, so `hsl(-0, calc(infinity),
+/// 50%)` would otherwise write the sign back out.
 fn normalize_channel(v: &Value, polar_hue: bool) -> Value {
-    match degenerate_value(v) {
-        Some(c) if c.is_nan() || (polar_hue && c.is_infinite()) => {
-            // The zero keeps the channel's UNIT, so the per-channel unit checks
-            // still see what the caller wrote: `calc(NaN * 1%)` is a `%`
-            // whiteness, and `calc(NaN * 1px)` is still the wrong unit.
-            let zero = match v {
-                Value::Number(n) | Value::Slash(n, _) | Value::Calc(CalcNode::Number(n)) => n.copy_units(0.0),
-                _ => Number::unitless(0.0),
-            };
-            Value::Number(zero)
-        }
-        _ => v.clone(),
+    let num = channel_unit_number(v);
+    let converts = match degenerate_value(v) {
+        Some(c) => c.is_nan() || (polar_hue && c.is_infinite()),
+        None => num.is_some_and(|n| n.value == 0.0 && n.value.is_sign_negative()),
+    };
+    if !converts {
+        return v.clone();
     }
+    // The zero keeps the channel's UNIT, so the per-channel unit checks still
+    // see what the caller wrote: `calc(NaN * 1%)` is a `%` whiteness, and
+    // `calc(NaN * 1px)` is still the wrong unit.
+    let zero = match num {
+        Some(n) => n.copy_units(0.0),
+        None => Number::unitless(0.0),
+    };
+    Value::Number(zero)
 }
 
 /// Apply [`normalize_channel`] to every component of a channel list, where

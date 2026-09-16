@@ -1705,7 +1705,19 @@ impl Color {
 
     /// Build a color from HSL (hue degrees, sat/light `[0,1]`) + alpha.
     pub(crate) fn from_hsl(h: f64, s: f64, l: f64, a: f64) -> Color {
-        let h = without_negative_zero(h).rem_euclid(360.0);
+        // The conversion below has no answer for a non-finite channel — it
+        // would pick the fallback sector and hand back a NaN component — and
+        // dart-sass 1.104.0 does not ask it to: a polar HUE converts every
+        // non-finite value to 0, and a NaN elsewhere converts too. That is why
+        // `adjust-hue(red, NaN)`, which rotates the hue by NaN, is still red.
+        let h = if h.is_finite() {
+            without_negative_zero(h)
+        } else {
+            0.0
+        };
+        let s = if s.is_nan() { 0.0 } else { s };
+        let l = if l.is_nan() { 0.0 } else { l };
+        let h = h.rem_euclid(360.0);
         let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
         let x = c * (1.0 - (((h / 60.0) % 2.0) - 1.0).abs());
         let m = l - c / 2.0;

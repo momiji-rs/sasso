@@ -790,19 +790,6 @@ fn hsl_hue(v: &Value, pos: Pos) -> Result<f64, Error> {
     }
 }
 
-/// The [`Number`] underlying a legacy color channel for unit inspection: a
-/// plain number, the quotient of a slash-division (`6px/2`, whose unit decides
-/// the channel's), or a degenerate `calc()` that folded to a unit-bearing
-/// number (`calc(infinity * 1px)`). Returns `None` for any non-numeric channel
-/// (handled by the "is not a number" / passthrough paths).
-fn channel_unit_number(v: &Value) -> Option<&Number> {
-    match v {
-        Value::Number(n) | Value::Slash(n, _) => Some(n),
-        Value::Calc(CalcNode::Number(n)) => Some(n),
-        _ => None,
-    }
-}
-
 /// Fold a degenerate `calc()` channel (`calc(NaN)`, `calc(infinity * 1%)`)
 /// to its plain number, keeping the unit; any other value passes through.
 fn fold_degenerate(v: &Value) -> Value {
@@ -1487,7 +1474,15 @@ fn modern_color(space: &str, channels: &[Value], alpha: Option<&Value>, pos: Pos
         Some(v) => alpha_value(v, pos).unwrap_or(1.0),
         None => 1.0,
     };
-    let body: Vec<String> = channels.iter().map(|v| v.to_css(false)).collect();
+    // A slash-division channel prints its QUOTIENT: dart computes the channel
+    // and never writes the `6/2` spelling back out, even on this path.
+    let body: Vec<String> = channels
+        .iter()
+        .map(|v| match v {
+            Value::Slash(n, _) => n.to_css(false),
+            _ => v.to_css(false),
+        })
+        .collect();
     let body = body.join(" ");
     let text = if (a - 1.0).abs() < f64::EPSILON {
         format!("color({space} {body})")

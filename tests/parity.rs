@@ -1939,6 +1939,52 @@ fn color_channels_convert_degenerate_values() {
 }
 
 #[test]
+fn a_degenerate_channel_converts_on_every_spelling() {
+    // The conversion runs on the channel VALUE, so it has to see one whatever
+    // form it arrived in — a plain number, a `calc()`, or the quotient of a
+    // slash-division. And it has to run on the path a SURVIVING infinity
+    // takes, which serializes the values it was handed rather than a built
+    // color, so the sibling channels there never write a sign back out.
+    // Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours(
+            "@use \"sass:math\";\na {\n  \
+             b: hsl(0/0, 50%, 50%);\n  \
+             c: lch(1% 2 0/0);\n  \
+             d: hsl(-0, calc(infinity), 50%);\n  \
+             e: hsl(0, calc(infinity), -0);\n  \
+             f: color(srgb -0 0 calc(infinity));\n  \
+             g: color(srgb -0/1 0 calc(infinity));\n  \
+             h: color(srgb 6/2 0 calc(infinity));\n\
+             }\n"
+        ),
+        "a {\n  \
+         b: hsl(0, 50%, 50%);\n  \
+         c: lch(1% 2 0deg / 0);\n  \
+         d: hsl(0, calc(infinity * 1%), 50%);\n  \
+         e: hsl(0, calc(infinity * 1%), 0%);\n  \
+         f: color(srgb 0 0 calc(infinity));\n  \
+         g: color(srgb 0 0 calc(infinity));\n  \
+         h: color(srgb 3 0 calc(infinity));\n\
+         }\n"
+    );
+}
+
+#[test]
+fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
+    // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
+    // the fallback sector and hands back a NaN component. dart-sass 1.104.0
+    // converts the hue first: the ROTATED hue is the one that lands on 0, so
+    // rotating by NaN sends any color to hue 0 rather than to a NaN channel —
+    // `adjust-hue(blue, NaN)` is red, not blue, which is what makes this test
+    // discriminating. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:math\";\n$nan: math.div(0, 0);\n$inf: math.div(1, 0);\na {\n  b: adjust-hue(red, $nan);\n  c: adjust-hue(red, $inf);\n  d: adjust-hue(red, math.div(-1, 0));\n  e: color.adjust(red, $hue: $nan);\n  f: adjust-hue(blue, $nan);\n  g: adjust-hue(#00ff00, $nan);\n}\n"),
+        "a {\n  b: red;\n  c: red;\n  d: red;\n  e: red;\n  f: red;\n  g: red;\n}\n"
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports
