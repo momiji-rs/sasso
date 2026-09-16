@@ -14,6 +14,15 @@ and **grass** (Rust, in-process via `grass_runner`).
 Latest results: [`three_way.md`](./three_way.md) (sasso vs dart-sass vs grass).
 The older two-way report is [`dart_vs_grass.md`](./dart_vs_grass.md).
 
+For **why sasso costs what it costs**, rather than how it compares, read
+[`perf_audit_2026-09-15.md`](./perf_audit_2026-09-15.md): a stage split of a
+compile, the levers with measured deltas, and the dead ends not to re-propose.
+Note that `three_way.md`'s 7.4 ms/compile figure is from master `dc5099b`; the
+audit reproduced it and then traced a +37.4M-instruction regression to two
+merges on 2026-09-15, so today's tree is slower. The plan for recovering it and
+gating against a repeat is
+[`../docs/PERF_PLAN_2026-09-16.md`](../docs/PERF_PLAN_2026-09-16.md).
+
 There is also a **real-world corpus** harness in [`real-world/`](./real-world/):
 it sparse-clones pinned, vetted, currently-active OSS Sass codebases
 (bootstrap, bulma, mastodon, …), verifies output parity against dart-sass, and
@@ -27,6 +36,8 @@ benchmarks full CLI invocations with hyperfine. Report:
 bench/
 ├── README.md                 # this file
 ├── dart_vs_grass.md          # results report (regenerate after a run)
+├── three_way.md              # sasso vs dart-sass vs grass
+├── perf_audit_2026-09-15.md  # where a compile's time goes; levers and dead ends
 ├── corpus/
 │   ├── handwritten/
 │   │   ├── main.scss         # exercises every requested feature
