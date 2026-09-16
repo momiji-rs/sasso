@@ -816,6 +816,48 @@ fn an_escaped_delimiter_is_not_selector_structure() {
     );
     // And a parent that really IS glued to a suffix is still rejected.
     assert!(compile("p > { &.x { d: 1; } }", &Options::default()).is_err());
+    // An escaped BRACKET or PAREN must not move the depth counters, which is
+    // what the comma split and the `&` counting are steered by. Without that,
+    // the list comma below is swallowed and the whole thing is ONE selector —
+    // and nothing above would notice.
+    // Nesting is what makes the failure visible: with the counter moved, the
+    // comma is swallowed and the list is ONE selector — whose own text reads
+    // the same, so only the LENGTH gives it away.
+    for esc in ["\\[", "\\(", "\\]", "\\)", "\\,"] {
+        assert_eq!(
+            css(&format!(".a{esc}b, .c {{ & .d {{ e: 1; }} }}")),
+            format!(".a{esc}b .d, .c .d {{\n  e: 1;\n}}"),
+            "{esc}"
+        );
+    }
+    // A REAL attribute or pseudo after the escape still counts, so its own
+    // comma stays inside it — an escaped CLOSER that had decremented the
+    // counter would let that comma split the list instead.
+    assert_eq!(
+        css(".a\\]b[x=\",\"], .c { d: 1; }"),
+        ".a\\]b[x=\",\"], .c {\n  d: 1;\n}"
+    );
+    assert_eq!(
+        css(".a\\)b:not(.x, .y), .c { d: 1; }"),
+        ".a\\)b:not(.x, .y), .c {\n  d: 1;\n}"
+    );
+    // The same invariant decides whether the SECOND top-level `&` is seen, so
+    // each of the four takes the cartesian path with two parents.
+    for esc in ["\\[", "\\(", "\\]", "\\)"] {
+        assert_eq!(
+            css(&format!(".p, .q {{ & .a{esc}b & {{ c: 1; }} }}")),
+            format!(".p .a{esc}b .p, .p .a{esc}b .q, .q .a{esc}b .p, .q .a{esc}b .q {{\n  c: 1;\n}}"),
+            "{esc}"
+        );
+    }
+    // …and with a real attribute after the escaped one.
+    assert_eq!(
+        css(".p, .q { & .a\\[b[x=\"y\"] & { c: 1; } }"),
+        ".p .a\\[b[x=y] .p, .p .a\\[b[x=y] .q, \
+         .q .a\\[b[x=y] .p, .q .a\\[b[x=y] .q {\n  c: 1;\n}"
+    );
+    // And whether the parent substitution finds the `&` at all.
+    assert_eq!(css(".p { .a\\[b & { c: 1; } }"), ".a\\[b .p {\n  c: 1;\n}");
     // Everything above holds when compressing, where the same text is walked
     // again to take the spaces out.
     assert_eq!(css_compressed(".a\\,b, .c { d: 1; }"), ".a\\,b,.c{d:1}");
