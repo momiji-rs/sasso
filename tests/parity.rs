@@ -2191,6 +2191,17 @@ fn a_slash_quotient_carries_its_unit() {
 }
 
 #[test]
+fn a_degenerate_slash_channel_converts_before_it_is_clamped() {
+    // The degenerate check has to run before the unit-aware read, whatever
+    // spelling the channel has: the legacy rgb read CLAMPS, and a clamp keeps
+    // a NaN. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:meta\";\na {\n  b: rgb(0/0 0 0);\n  c: rgb(1/0 0 0);\n  d: rgb(-1/0 0 0);\n  e: rgba(0/0 0 0 / 0.5);\n  f: color.channel(rgb(0/0 0 0), \"red\");\n}\n"),
+        "a {\n  b: rgb(0, 0, 0);\n  c: rgb(255, 0, 0);\n  d: rgb(0, 0, 0);\n  e: rgba(0, 0, 0, 0.5);\n  f: 0;\n}\n"
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

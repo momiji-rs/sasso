@@ -158,16 +158,19 @@ fn color_arg_css(v: &Value) -> String {
 /// 255. NaN maps to 0, `±Infinity` clamp to the bounds. Delegates to the
 /// shared [`channel`] helper for the finite case, then normalizes NaN.
 fn rgb_channel(v: &Value, pos: Pos) -> Result<f64, Error> {
-    // A slash-division's quotient goes through the same unit handling as a
-    // literal number, so `50%/2` is 25% of 255 — not the raw 25.
-    if let Value::Slash(num, _) = v {
-        return channel(&Value::Number(num.clone()), pos);
-    }
+    // The degenerate check comes FIRST, whatever spelling the channel has:
+    // `channel` clamps, and a clamp keeps a NaN, so `rgb(0/0 0 0)` would
+    // serialize one instead of the `rgb(0, 0, 0)` dart-sass gives.
     if let Some(c) = degenerate_value(v) {
         if c.is_nan() {
             return Ok(0.0);
         }
         return Ok(clamp_finite(c, 0.0, 255.0));
+    }
+    // A finite slash-division's quotient goes through the same unit handling
+    // as a literal number, so `50%/2` is 25% of 255 — not the raw 25.
+    if let Value::Slash(num, _) = v {
+        return channel(&Value::Number(num.clone()), pos);
     }
     channel(v, pos)
 }
