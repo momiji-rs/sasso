@@ -6326,7 +6326,15 @@ fn resolve_selectors_opt(
         for c in part.chars() {
             if let Some(q) = quote {
                 segments.last_mut().unwrap().push(c);
-                if c == q {
+                // `\"` does not end a `"`-quoted value, and a quote that ends
+                // early would swallow the `]` after it and hide every top-level
+                // `&` that follows.
+                if std::mem::take(&mut escaped) {
+                    continue;
+                }
+                if c == '\\' {
+                    escaped = true;
+                } else if c == q {
                     quote = None;
                 }
                 continue;

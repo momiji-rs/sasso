@@ -765,6 +765,28 @@ fn an_escaped_delimiter_is_not_selector_structure() {
     );
     assert_eq!(css(".p { & .a\\&b & { c: 1; } }"), ".p .a\\&b .p {\n  c: 1;\n}");
     assert_eq!(css(".p { & & .a\\, { c: 1; } }"), ".p .p .a\\, {\n  c: 1;\n}");
+    // A quote that ends EARLY is the same mistake one level down: `\"` does
+    // not close a `"`-quoted attribute value, and a quote left open would
+    // swallow the `]` after it and hide every top-level `&` that follows —
+    // so the part would look like it had one. (The value below holds both
+    // quote characters, which is what keeps dart from re-quoting it and lets
+    // the expansion be compared on its own.)
+    assert_eq!(
+        css(".p, .q { & [data-x=\"a\\\"b'c\"] & { d: 1; } }"),
+        ".p [data-x=\"a\\\"b'c\"] .p, .p [data-x=\"a\\\"b'c\"] .q, \
+         .q [data-x=\"a\\\"b'c\"] .p, .q [data-x=\"a\\\"b'c\"] .q {\n  d: 1;\n}"
+    );
+    assert_eq!(
+        css(".p, .q { & [data-x=\"a\\\"&b'c\"] & { d: 1; } }"),
+        ".p [data-x=\"a\\\"&b'c\"] .p, .p [data-x=\"a\\\"&b'c\"] .q, \
+         .q [data-x=\"a\\\"&b'c\"] .p, .q [data-x=\"a\\\"&b'c\"] .q {\n  d: 1;\n}"
+    );
+    // An `&` inside a quoted value is text, not a reference, whichever quote
+    // holds it.
+    assert_eq!(
+        css(".p, .q { [data-x=\"a&b\"] { c: 1; } }"),
+        ".p [data-x=\"a&b\"], .q [data-x=\"a&b\"] {\n  c: 1;\n}"
+    );
     // Everything above holds when compressing, where the same text is walked
     // again to take the spaces out.
     assert_eq!(css_compressed(".a\\,b, .c { d: 1; }"), ".a\\,b,.c{d:1}");
