@@ -2035,6 +2035,68 @@ fn a_nan_is_within_no_range() {
 }
 
 #[test]
+fn every_channel_spelling_is_unit_checked() {
+    // A channel's UNIT is checked whatever spelling it arrived in — a
+    // degenerate `calc()` is the wrong unit as readily as a plain number, and
+    // so is a slash-division — and the message shows what the caller WROTE,
+    // not the zero a degenerate channel normalizes to. Every message
+    // byte-matched to dart-sass 1.104.1. Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "lab(1% calc(NaN * 1px) -3)",
+            "$a: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "lab(1% calc(infinity * 1px) -3)",
+            "$a: Expected calc(infinity * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "lab(1% 6px/2 -3)",
+            "$a: Expected 6px/2 to have unit \"%\" or no units.",
+        ),
+        (
+            "oklab(calc(NaN * 1px) 0.1 0.1)",
+            "$lightness: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "lch(1% 2 calc(NaN * 1px))",
+            "$hue: Expected calc(NaN * 1px) to have an angle unit (deg, grad, rad, turn).",
+        ),
+        (
+            "color(srgb calc(NaN * 1px) 0 0)",
+            "$red: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb calc(infinity * 1px) 0 0)",
+            "$red: Expected calc(infinity * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 6px/2 0 0)",
+            "$red: Expected 6px/2 to have unit \"%\" or no units.",
+        ),
+        (
+            "color.hwb(0, calc(NaN * 1px), 40%)",
+            "$whiteness: Expected calc(NaN * 1px) to have unit \"%\".",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // A UNITLESS degenerate constant carries no unit to check, so it still
+    // parses into an ordinary color; and the legacy spaces that never had a
+    // unit check on a channel still do not.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {\n  b: lab(1% calc(NaN * 1%) -3);\n  c: hsl(0, calc(NaN * 1px), 50%);\n  d: hwb(calc(NaN * 1px) 10% 10%);\n  e: lab(1% 6/2 -3);\n}\n"),
+        "a {\n  b: lab(1% 0 -3);\n  c: hsl(0, 0%, 50%);\n  d: hsl(0, 80%, 50%);\n  e: lab(1% 3 -3);\n}\n"
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

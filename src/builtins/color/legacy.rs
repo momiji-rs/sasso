@@ -908,8 +908,8 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     if is_relative || comps_func || alpha_func {
         return Ok(verbatim_call("hwb", &channels));
     }
-    let comps: Vec<Value> = comps.iter().map(fold_degenerate).collect();
-    let comps = normalize_channels(&comps, Some(0));
+    let folded: Vec<Value> = comps.iter().map(fold_degenerate).collect();
+    let comps = normalize_channels(&folded, Some(0));
     // A non-number channel (a non-`from` keyword such as `c`, or a quoted
     // string) is reported before the channel-count check, matching dart-sass.
     for (i, comp) in comps.iter().enumerate() {
@@ -972,10 +972,12 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     for (i, cname) in [(1usize, "whiteness"), (2usize, "blackness")] {
         if let Value::Number(num) = &comps[i] {
             if num.unit() != "%" {
+                // The message shows the spelling the caller wrote, not the
+                // zero a degenerate channel normalizes to.
                 return Err(Error::at(
                     format!(
                         "${cname}: Expected {} to have unit \"%\".",
-                        comps[i].to_css(false)
+                        folded[i].to_css(false)
                     ),
                     pos,
                 ));
@@ -1173,7 +1175,7 @@ pub(super) fn fn_lab_family(
         return Ok(verbatim_call(name, &channels));
     }
     let is_polar_space = matches!(name, "lch" | "oklch");
-    let comps = normalize_channels(&comps, if is_polar_space { Some(2) } else { None });
+    let normalized = normalize_channels(&comps, if is_polar_space { Some(2) } else { None });
     // All-plain channels: validate count, types, and units like dart-sass.
     let names = lab_channel_names(name);
     if comps.len() != 3 {
@@ -1188,45 +1190,44 @@ pub(super) fn fn_lab_family(
         ));
     }
     let is_hue = |i: usize| is_polar_space && i == 2;
+    // Every numeric channel is unit-checked, whatever spelling it arrived in:
+    // a degenerate `calc()` is the wrong unit as readily as a plain number
+    // (`lab(1% calc(NaN * 1px) -3)`), and so is a slash-division
+    // (`lab(1% 6px/2 -3)`). The message shows what the caller WROTE, not the
+    // zero a degenerate channel normalizes to.
     for (i, comp) in comps.iter().enumerate() {
-        if is_none_keyword(comp) || is_degenerate_calc(comp) {
+        if is_none_keyword(comp) {
             continue;
         }
-        match comp {
-            Value::Number(num) => {
-                if is_hue(i) {
-                    let ok = num.is_unitless() || matches!(num.unit(), "deg" | "grad" | "rad" | "turn");
-                    if !ok {
-                        return Err(Error::at(
-                            format!(
-                                "$hue: Expected {} to have an angle unit (deg, grad, rad, turn).",
-                                num.to_css(false)
-                            ),
-                            pos,
-                        ));
-                    }
-                } else if !num.is_unitless() && num.unit() != "%" {
-                    return Err(Error::at(
-                        format!(
-                            "${}: Expected {} to have unit \"%\" or no units.",
-                            names[i],
-                            num.to_css(false)
-                        ),
-                        pos,
-                    ));
-                }
-            }
-            Value::Slash(..) => {}
-            other => {
+        let num = match channel_unit_number(comp) {
+            Some(n) => n,
+            // A unitless degenerate constant (`calc(NaN)`) carries no unit.
+            None if is_degenerate_calc(comp) => continue,
+            None => {
                 return Err(Error::at(
                     format!(
                         "$channels: Expected {} channel to be a number, was {}.",
                         names[i],
-                        other.to_css(false)
+                        comp.to_css(false)
                     ),
+                    pos,
+                ))
+            }
+        };
+        let shown = comp.to_css(false);
+        if is_hue(i) {
+            let ok = num.is_unitless() || matches!(num.unit(), "deg" | "grad" | "rad" | "turn");
+            if !ok {
+                return Err(Error::at(
+                    format!("$hue: Expected {shown} to have an angle unit (deg, grad, rad, turn)."),
                     pos,
                 ));
             }
+        } else if !num.is_unitless() && num.unit() != "%" {
+            return Err(Error::at(
+                format!("${}: Expected {shown} to have unit \"%\" or no units.", names[i]),
+                pos,
+            ));
         }
     }
     if let Some(a) = &alpha {
@@ -1235,6 +1236,7 @@ pub(super) fn fn_lab_family(
             alpha_value(a, pos)?;
         }
     }
+    let comps = normalized;
     // Compute the modern color. Lightness is clamped (lab/lch 0..100, oklab/oklch
     // 0..1); chroma is floored at 0; a/b and the hue are unclamped.
     let (space, l_max, l_base) = match name {
@@ -1380,45 +1382,45 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
             pos,
         ));
     }
+    // Type-check each supplied channel (with its index-based name) before the
+    // count check, matching dart-sass (`color(srgb (0.1 0.2 0.3))` reports a
+    // non-number channel rather than a wrong count). A degenerate `calc()` or
+    // a slash-division is a number channel and is unit-checked like one,
+    // reported in the spelling the caller wrote.
+    let names = ["red", "green", "blue"];
+    for (i, comp) in channels.iter().enumerate() {
+        let name = names.get(i).copied().unwrap_or("");
+        if is_none_keyword(comp) {
+            continue;
+        }
+        let num = match channel_unit_number(comp) {
+            Some(n) => n,
+            // A unitless degenerate constant (`calc(NaN)`) carries no unit.
+            None if is_degenerate_calc(comp) => continue,
+            None => {
+                return Err(Error::at(
+                    format!(
+                        "$description: Expected {name} channel to be a number, was {}.",
+                        comp.to_css(false)
+                    ),
+                    pos,
+                ))
+            }
+        };
+        if !num.is_unitless() && num.unit() != "%" {
+            return Err(Error::at(
+                format!(
+                    "${name}: Expected {} to have unit \"%\" or no units.",
+                    comp.to_css(false)
+                ),
+                pos,
+            ));
+        }
+    }
     // No predefined `color()` space has a polar hue, so only a NaN channel
     // normalizes to 0 here.
     let channels = normalize_channels(channels, None);
     let channels = &channels[..];
-    // Type-check each supplied channel (with its index-based name) before the
-    // count check, matching dart-sass (`color(srgb (0.1 0.2 0.3))` reports a
-    // non-number channel rather than a wrong count). A degenerate `calc()` is
-    // accepted as a number channel.
-    let names = ["red", "green", "blue"];
-    for (i, comp) in channels.iter().enumerate() {
-        let name = names.get(i).copied().unwrap_or("");
-        if is_none_keyword(comp) || is_degenerate_calc(comp) {
-            continue;
-        }
-        match comp {
-            Value::Number(num) => {
-                if !num.is_unitless() && num.unit() != "%" {
-                    return Err(Error::at(
-                        format!(
-                            "${name}: Expected {} to have unit \"%\" or no units.",
-                            num.to_css(false)
-                        ),
-                        pos,
-                    ));
-                }
-            }
-            Value::Slash(..) => {}
-            Value::Calc(_) if is_degenerate_calc(comp) => {}
-            other => {
-                return Err(Error::at(
-                    format!(
-                        "$description: Expected {name} channel to be a number, was {}.",
-                        other.to_css(false)
-                    ),
-                    pos,
-                ));
-            }
-        }
-    }
     if channels.len() != 3 {
         return Err(Error::at(
             format!(
