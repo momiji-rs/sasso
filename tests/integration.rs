@@ -633,6 +633,32 @@ fn compressed_finds_a_modules_last_visible_child() {
         ),
         "@import\"z.css\""
     );
+    // A MODULE is only as visible as its contents: `meta.load-css` of a
+    // stylesheet that is all comments writes nothing, and splicing it in after
+    // the at-rule must not hide it.
+    std::fs::write(dir.join("_all_comments.scss"), "/* quiet */\n").unwrap();
+    std::fs::write(dir.join("_nothing.scss"), "\n").unwrap();
+    for loaded in ["all_comments", "nothing"] {
+        assert_eq!(
+            run(
+                "tail_load",
+                &format!("@use \"sass:meta\";\n@namespace \"x\";\n@include meta.load-css(\"{loaded}\");\n"),
+                "@use \"tail_load\";",
+            ),
+            "@namespace \"x\"",
+            "{loaded}"
+        );
+    }
+    // One that DOES write keeps the separator.
+    std::fs::write(dir.join("_writes.scss"), ".w { v: 1; }\n").unwrap();
+    assert_eq!(
+        run(
+            "tail_load2",
+            "@use \"sass:meta\";\n@namespace \"x\";\n@include meta.load-css(\"writes\");\n",
+            "@use \"tail_load2\";",
+        ),
+        "@namespace \"x\";.w{v:1}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

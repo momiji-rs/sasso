@@ -695,9 +695,9 @@ fn ends_with_own_semicolon(node: &OutNode) -> bool {
 }
 
 /// Whether a node writes anything at all in compressed output. A blank, a
-/// control-only marker, a comment that is not loud, and a rule holding nothing
-/// but dropped comments all write nothing — so none of them can be the node
-/// that wrote the last byte.
+/// control-only marker, a comment that is not loud, a rule holding nothing but
+/// dropped comments, and a module whose whole CSS is one of those all write
+/// nothing — so none of them can be the node that wrote the last byte.
 fn writes_compressed_output(node: &OutNode) -> bool {
     match node {
         OutNode::Blank => false,
@@ -705,6 +705,10 @@ fn writes_compressed_output(node: &OutNode) -> bool {
         OutNode::Rule { items, .. } => !items
             .iter()
             .all(|it| matches!(it, OutItem::Comment(text, _) if !is_loud_comment(text))),
+        // A module splices in transparently, so it is only as visible as its
+        // contents — `meta.load-css` of a stylesheet that is all comments
+        // writes nothing and must not hide the node before it.
+        OutNode::ModuleScope { nodes, .. } => nodes.iter().any(writes_compressed_output),
         n => !n.is_inert_marker(),
     }
 }
