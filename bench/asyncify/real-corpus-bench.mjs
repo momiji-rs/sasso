@@ -1,11 +1,18 @@
-// Real-corpus measurement: apps/rails tailwind.scss through sasso wasm,
+// Real-corpus measurement: a Rails app's tailwind.scss through sasso wasm,
 // sync module vs asyncify module (same built-in FS chain).
-// Usage: node real-corpus-bench.mjs <sync|async>
+// Usage: RAILS_APP=/path/to/rails/app node real-corpus-bench.mjs <sync|async>
+//
+// The corpus is a private application checkout, so its location comes from the
+// environment rather than being baked in here.
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { compileString, compileStringAsync } from '/Users/linyiru/Projects/rust-sass/wasm/npm/sasso.mjs';
+import { compileString, compileStringAsync } from '../../wasm/npm/sasso.mjs';
 
-const RAILS = '/Users/linyiru/Projects/manekineko/.claude/worktrees/swift-soaring-stroustrup/apps/rails';
+const RAILS = process.env.RAILS_APP;
+if (!RAILS) {
+  console.error('set RAILS_APP to a Rails app checkout (needs app/javascript/stylesheets/tailwind.scss)');
+  process.exit(1);
+}
 const entry = `${RAILS}/app/javascript/stylesheets/tailwind.scss`;
 const src = readFileSync(entry, 'utf8');
 const opts = {

@@ -40,7 +40,7 @@ prototyped and measured at **−14.3% instructions**.
 ### Headline, per workload
 
 All figures `[measured]` this session or by a campaign agent, release build
-(`lto="thin"`, `codegen-units=1`, rustc 1.98.1), Apple M2 Max / macOS 26.3.0.
+(`lto="thin"`, `codegen-units=1`, rustc 1.98.1), arm64 macOS 26.3.0.
 
 | Workload | Ms/compile (wall, loop-60) | Instr/compile (marginal) | Peak footprint |
 | --- | --- | --- | --- |
@@ -533,9 +533,9 @@ so `pretty_path` stops calling `getcwd` per diagnostic.
 293 paired invocations, 0 differences. `cargo test --release`: 801 passed.
 
 *Why it is refuted as a headline.* Both verifiers ran the analysis's own
-falsifier on **starship** (Arch Linux, Ryzen 7 8745HS, rustc 1.98.1):
+falsifier on **x86_64 Linux** (Arch, rustc 1.98.1):
 
-| | macOS (M2 Max) | Linux (starship) |
+| | macOS (arm64) | Linux (x86_64) |
 | --- | --- | --- |
 | modular entry_01, wall | −18.6% | **−4.6% / −4.9%** |
 | modular entry_01, instructions | −20.0% | **−0.34% / −0.35%** |
@@ -598,8 +598,7 @@ at the end. Includes the `src/value.rs:2552` `s.remove(0)` one-liner.
 *Why it is refuted.* The `attribution` verifier reproduced every number
 (−4.08% / −7.33% / −2.80%, whole-process −3.85%) and then **found the
 real-world corpora already checked out** at
-`/Users/linyiru/Projects/rust-sass/bench/real-world/repos` and measured five of
-them:
+`bench/real-world/repos` in another local checkout, and measured five of them:
 
 | Framework | Delta |
 | --- | --- |
@@ -891,7 +890,7 @@ Stated as caps, not as caveats — each one bounds a claim above.
   (target-simple index) is **unbuilt and unmeasured**.
 - **The real-world corpus was not checked out in the audit's own worktree**
   (cloning needs network). Two verifiers found a copy at
-  `/Users/linyiru/Projects/rust-sass/bench/real-world/repos` and used it — and
+  `bench/real-world/repos` in another local checkout and used it — and
   those runs are what refuted lever 4.5 and falsified 4.3's named best case.
   **Any lever whose evidence is only `bench/corpus/generated/large.scss` should
   be assumed corpus-specific until a real framework says otherwise.** That is
@@ -961,7 +960,7 @@ Stated as caps, not as caveats — each one bounds a claim above.
 
 ## 8. Reproduce
 
-Everything below was run on Apple M2 Max / macOS 26.3.0 (arm64), rustc/cargo
+Everything below was run on macOS 26.3.0 (arm64), rustc/cargo
 1.98.1, release profile (`lto="thin"`, `codegen-units=1`).
 
 > ⚠️ The boot volume on this machine is nearly full. Point cargo elsewhere
@@ -1027,8 +1026,8 @@ share (3.3%).
 
 ### Where the prototype patches live
 
-> **Salvaged 2026-09-16.** Every path in this section is machine-local to
-> `lawrences-mac-studio` and the `wf_*` worktrees are ephemeral, so all five
+> **Salvaged 2026-09-16.** Every path in this section is local to the machine
+> the audit ran on, and the `wf_*` worktrees are ephemeral, so all five
 > prototypes were extracted to plain patch files against pristine base trees
 > before those worktrees could be reaped:
 >
@@ -1052,10 +1051,10 @@ recoverable with `git -C <path> diff`.
 
 | Lever | Worktree | Branch tip | Note |
 | --- | --- | --- | --- |
-| 4.2 `dep-cheap-dedup-key` | `/Users/linyiru/Projects/momiji-rs/sasso/.claude/worktrees/wf_c383f781-ba0-16` | `ad11c61` | patch also at `/Volumes/DevSSD/caches/proto0-bins/arm1.patch`; binaries `arm0` (base), `arm1` (patched), `arm2` (`return;` control) in the same directory |
-| 4.5 `num-format-string-choreography` | `/Users/linyiru/Projects/momiji-rs/sasso/.claude/worktrees/wf_c383f781-ba0-19` | `ad11c61` | `git diff` there is byte-identical to `/tmp/numfmt_prototype.diff`; durable copies + fuzzers at `/Volumes/DevSSD/caches/sasso-perf-proto-2/` (`numfmt_prototype_plus_fuzz.diff`, `fuzz_mod.rs`, `fuzz2.rs`, `base-sasso`, `proto-sasso`) |
-| 4.4 `module-cache-before-load` | `/Users/linyiru/Projects/momiji-rs/sasso/.claude/worktrees/wf_c383f781-ba0-20` | `ad11c61` | — |
-| 4.1 `dep-no-eager-construction` | `/Users/linyiru/Projects/momiji-rs/sasso/.claude/worktrees/wf_c383f781-ba0-29` | **`42f6db9`** | ⚠️ **one commit newer than `ad11c61`** (`42f6db9` = "Merge pull request #45 from momiji-rs/fix/escaped-selector-chars"): master advanced mid-audit, so this lever's absolute base (153,421,811) is not strictly comparable to the other three (153,26x,xxx). Its A/B arms were interleaved against each other on the *same* base, so the **−14.29% delta stands**; only the absolute numbers need care. Also contains a throwaway `examples/embed_probe.rs` to drop before landing. |
+| 4.2 `dep-cheap-dedup-key` | `<repo>/.claude/worktrees/wf_c383f781-ba0-16` | `ad11c61` | patch also at `/Volumes/DevSSD/caches/proto0-bins/arm1.patch`; binaries `arm0` (base), `arm1` (patched), `arm2` (`return;` control) in the same directory |
+| 4.5 `num-format-string-choreography` | `<repo>/.claude/worktrees/wf_c383f781-ba0-19` | `ad11c61` | `git diff` there is byte-identical to `/tmp/numfmt_prototype.diff`; durable copies + fuzzers at `/Volumes/DevSSD/caches/sasso-perf-proto-2/` (`numfmt_prototype_plus_fuzz.diff`, `fuzz_mod.rs`, `fuzz2.rs`, `base-sasso`, `proto-sasso`) |
+| 4.4 `module-cache-before-load` | `<repo>/.claude/worktrees/wf_c383f781-ba0-20` | `ad11c61` | — |
+| 4.1 `dep-no-eager-construction` | `<repo>/.claude/worktrees/wf_c383f781-ba0-29` | **`42f6db9`** | ⚠️ **one commit newer than `ad11c61`** (`42f6db9` = "Merge pull request #45 from momiji-rs/fix/escaped-selector-chars"): master advanced mid-audit, so this lever's absolute base (153,421,811) is not strictly comparable to the other three (153,26x,xxx). Its A/B arms were interleaved against each other on the *same* base, so the **−14.29% delta stands**; only the absolute numbers need care. Also contains a throwaway `examples/embed_probe.rs` to drop before landing. |
 
 Lever 4.3's build (not a worktree patch) is at
 `/Volumes/DevSSD/caches/xt-scratch-target/release/sasso`, from the source tree
