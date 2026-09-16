@@ -2663,6 +2663,88 @@ fn a_scale_factor_and_a_modified_alpha_reject_a_compound_unit() {
 }
 
 #[test]
+fn a_range_bound_carries_the_whole_unit() {
+    // The bounds of a range error spell the value's FULL unit, compound
+    // included — the first numerator is not the unit. The alpha ratio still
+    // keeps unitless bounds. Every message byte-matched to dart-sass 1.104.1.
+    // Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "mix(red, blue, math.div(200%, 1px))",
+            "$weight: Expected calc(200% / 1px) to be within 0%/px and 100%/px.",
+        ),
+        (
+            "mix(red, blue, 200% * 1px)",
+            "$weight: Expected calc(200% * 1px) to be within 0%*px and 100%*px.",
+        ),
+        (
+            "invert(red, math.div(200%, 1px))",
+            "$weight: Expected calc(200% / 1px) to be within 0%/px and 100%/px.",
+        ),
+        (
+            "lighten(red, math.div(200%, 1px))",
+            "$amount: Expected calc(200% / 1px) to be within 0%/px and 100%/px.",
+        ),
+        (
+            "lighten(red, 200% * 1px)",
+            "$amount: Expected calc(200% * 1px) to be within 0%*px and 100%*px.",
+        ),
+        (
+            "saturate(red, math.div(200%, 1px))",
+            "$amount: Expected calc(200% / 1px) to be within 0%/px and 100%/px.",
+        ),
+        (
+            "transparentize(red, math.div(2%, 1px))",
+            "$amount: Expected calc(2% / 1px) to be within 0 and 1.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // A compound `%` is not a percentage alpha either, wherever it arrives.
+    assert!(err("rgba(red, 50% * 1px)")
+        .contains("$alpha: Expected calc(50% * 1px) to have unit \"%\" or no units."));
+}
+
+#[test]
+fn a_none_channel_does_not_excuse_the_alpha() {
+    // The `none`-channel construction returns before the caller's validation,
+    // so it owes the alpha the same unit check every other path applies. And
+    // the POSITIONAL all-numeric pass still outranks it. Byte-matched to
+    // dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for call in [
+        "rgb(none none none / 2px)",
+        "rgb(none 0 0 / 2px)",
+        "hsl(none 50% 50% / 2px)",
+        "hwb(none 10% 10% / 2px)",
+        "lab(none 2 3 / 2px)",
+        "color(srgb none 0 0 / 2px)",
+    ] {
+        let msg = err(call);
+        assert!(
+            msg.contains("$alpha: Expected 2px to have unit \"%\" or no units."),
+            "{call}\n  got: {msg}"
+        );
+    }
+    assert!(err("rgb((1 2), 0, 0, 2px)").contains("$red: (1 2) is not a number."));
+    assert!(err("hsl((1 2), 0%, 0%, 2px)").contains("$hue: (1 2) is not a number."));
+    assert!(
+        err("rgb((1 2) 0 0 / 2px)").contains("$channels: Expected red channel to be a number, was (1 2).")
+    );
+    // A valid alpha still builds the `none` color.
+    assert_eq!(
+        ours("a { b: rgb(none none none / 0.5); }\n"),
+        "a {\n  b: rgb(none none none / 0.5);\n}\n"
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

@@ -210,7 +210,9 @@ fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
         // evaluated to a number — but the two must not diverge if one ever
         // does.)
         Value::Number(num) | Value::Slash(num, _) => {
-            let raw = if num.unit() == "%" {
+            // A COMPOUND unit only reports its first numerator, so `%*px` is
+            // not the percentage it starts with.
+            let raw = if !num.has_complex_units() && num.unit() == "%" {
                 num.value / 100.0
             } else if num.is_unitless() {
                 num.value

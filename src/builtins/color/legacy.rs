@@ -70,6 +70,7 @@ pub(super) fn fn_rgb(
         return Ok(verbatim);
     }
     channels.validate_numeric(&["red", "green", "blue"], pos)?;
+    channels.validate_positional_numeric(&["red", "green", "blue"], pos)?;
     validate_alpha_unit(channels.alpha.as_ref(), pos)?;
     channels.validate_count("rgb", pos)?;
     channels.validate_rgb_units(&["red", "green", "blue"], pos)?;
@@ -1620,7 +1621,7 @@ pub(super) fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
             // A NaN is within no range, and the bounds carry the value's unit
             // (`200%` -> `0% and 100%`, `200` -> `0 and 100`).
             if w.value.is_nan() || w.value < 0.0 || w.value > 100.0 {
-                let unit = w.unit();
+                let unit = w.unit_string();
                 return Err(Error::at(
                     format!(
                         "$weight: Expected {} to be within 0{unit} and 100{unit}.",
@@ -1796,7 +1797,7 @@ pub(super) fn fn_adjust_lightness(
         Value::Number(num) => {
             // A NaN is within no range, and the bounds carry the value's unit.
             if num.value.is_nan() || num.value < 0.0 || num.value > 100.0 {
-                let unit = num.unit();
+                let unit = num.unit_string();
                 return Err(Error::at(
                     format!(
                         "$amount: Expected {} to be within 0{unit} and 100{unit}.",
@@ -1944,7 +1945,7 @@ pub(super) fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
 /// dart-sass's modern parsing. Returns `Ok(None)` when there is no `none`
 /// channel or a real special function is present (the caller falls through to
 /// its existing handling).
-fn legacy_none_color(channels: &Channels, space: ColorSpace, _pos: Pos) -> Result<Option<Value>, Error> {
+fn legacy_none_color(channels: &Channels, space: ColorSpace, pos: Pos) -> Result<Option<Value>, Error> {
     let comps_special = channels.comps.iter().any(is_special_legacy);
     let alpha_special = channels.alpha.as_ref().is_some_and(is_special_legacy);
     if comps_special || alpha_special {
@@ -1958,6 +1959,10 @@ fn legacy_none_color(channels: &Channels, space: ColorSpace, _pos: Pos) -> Resul
     if channels.comps.len() != 3 {
         return Ok(None);
     }
+    // This path returns before the caller's own validation, so it owes the
+    // alpha the same unit check: `rgb(none none none / 2px)` is an error, not
+    // an opaque color.
+    validate_alpha_unit(channels.alpha.as_ref(), pos)?;
     let comps = &channels.comps;
     let ch = match space {
         ColorSpace::Hsl => [

@@ -599,11 +599,13 @@ fn fn_saturate_two(
 }
 
 /// The unit a `$weight`/`$amount` percentage argument carries into the bounds
-/// of its range error (`0% and 100%`, `0px and 100px`, `0 and 100`).
-fn weight_unit(v: &Value) -> &str {
+/// of its range error (`0% and 100%`, `0px and 100px`, `0 and 100`). A
+/// COMPOUND unit carries whole (`0%/px and 100%/px`), so this is the full unit
+/// spelling, not the first numerator.
+fn weight_unit(v: &Value) -> String {
     match v {
-        Value::Number(n) | Value::Slash(n, _) => n.unit(),
-        _ => "",
+        Value::Number(n) | Value::Slash(n, _) => n.unit_string(),
+        _ => String::new(),
     }
 }
 
@@ -619,7 +621,11 @@ fn bounded(v: &Value, lo: f64, hi: f64, unit_bounds: bool, pos: Pos) -> Result<f
     match v {
         Value::Number(n) => {
             if n.value.is_nan() || n.value < lo || n.value > hi {
-                let unit = if unit_bounds { n.unit() } else { "" };
+                let unit = if unit_bounds {
+                    n.unit_string()
+                } else {
+                    String::new()
+                };
                 Err(Error::at(
                     format!(
                         "$amount: Expected {} to be within {}{unit} and {}{unit}.",
