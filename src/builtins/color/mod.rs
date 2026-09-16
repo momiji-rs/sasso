@@ -186,7 +186,13 @@ fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
         return Ok(clamp_alpha(c));
     }
     match v {
-        Value::Number(num) => {
+        // One arm for both spellings: a slash-division's quotient carries its
+        // unit like any number, so it cannot drift from the literal path. (No
+        // input reaches here as a `Slash` today — a channels list's alpha is
+        // split out as a plain token, and a division anywhere else has already
+        // evaluated to a number — but the two must not diverge if one ever
+        // does.)
+        Value::Number(num) | Value::Slash(num, _) => {
             let raw = if num.unit() == "%" {
                 num.value / 100.0
             } else if num.is_unitless() {
@@ -202,7 +208,6 @@ fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
             };
             Ok(clamp_alpha(raw))
         }
-        Value::Slash(num, _) => Ok(clamp_alpha(num.value)),
         other => Err(Error::at(
             format!("$alpha: {} is not a number.", channel_err_css(other)),
             pos,

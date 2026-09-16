@@ -2320,6 +2320,54 @@ fn the_last_slash_in_a_channels_list_is_the_alpha() {
 }
 
 #[test]
+fn an_alpha_argument_is_validated_however_it_is_written() {
+    // A division in an ARGUMENT position has already evaluated to a number by
+    // the time it arrives — `meta.inspect(2/1)` is `2`, not `2/1` — so the
+    // slash spelling changes nothing about the range check it meets. Pulling a
+    // value back out of the one construct that does carry a slash (a channels
+    // list) hands over a plain number too. Byte-matched to dart-sass 1.104.1.
+    // Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "color.change(red, $alpha: 2/1)",
+            "$alpha: Expected 2 to be within 0 and 1.",
+        ),
+        (
+            "color.change(red, $alpha: 4/2)",
+            "$alpha: Expected 2 to be within 0 and 1.",
+        ),
+        (
+            "color.change(red, $alpha: 0/0)",
+            "$alpha: Expected calc(NaN) to be within 0 and 1.",
+        ),
+        (
+            "color.change(red, $alpha: 1/0)",
+            "$alpha: Expected calc(infinity) to be within 0 and 1.",
+        ),
+        (
+            "color.change(red, $alpha: 200%/1)",
+            "$alpha: Expected 200% to be within 0% and 100%.",
+        ),
+        (
+            "color.change(red, $alpha: 2px/1)",
+            "$alpha: Expected 2px to be within 0px and 1px.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:list\";\n@use \"sass:meta\";\n$l: 0 0 0 / 2/1;\na {\n  b: meta.inspect(2/1);\n  c: meta.inspect(200%/1);\n  d: meta.inspect(list.nth($l, 3));\n  e: color.change(red, $alpha: list.nth($l, 3));\n  f: color.change(red, $alpha: 50%/2);\n}\n"),
+        "a {\n  b: 2;\n  c: 200%;\n  d: 0;\n  e: rgba(255, 0, 0, 0);\n  f: rgba(255, 0, 0, 0.25);\n}\n"
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

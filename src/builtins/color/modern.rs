@@ -497,7 +497,11 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
             // non-`%` unit is used as a raw value (within [0,1]); the bounds in
             // the error message carry that unit (e.g. `0px and 1px`).
             match v {
-                Value::Number(n) => {
+                // One arm for both spellings, as in `alpha_value`: a
+                // slash-division's quotient is validated like any number. (A
+                // named `$alpha:` argument has already evaluated to a number,
+                // so nothing reaches here as a `Slash` today.)
+                Value::Number(n) | Value::Slash(n, _) => {
                     let max_disp = if n.unit() == "%" { 100.0 } else { 1.0 };
                     if n.value.is_nan() || n.value < 0.0 || n.value > max_disp {
                         let (b0, b1) = if n.unit() == "%" {
@@ -512,7 +516,6 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
                     }
                     Some(if n.unit() == "%" { n.value / 100.0 } else { n.value })
                 }
-                Value::Slash(n, _) => Some(n.value),
                 other => {
                     return Err(Error::at(
                         format!("$alpha: {} is not a number.", other.to_css(false)),
