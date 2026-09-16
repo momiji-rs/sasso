@@ -20,9 +20,15 @@ prototyped and measured at **−14.3% instructions**.
 > is comparable only *within* one interleaved A/B, never across sections.
 > Reproduce commands: [§8](#8-reproduce).
 
-> **Reading rule.** Every number below is tagged with how it was obtained.
-> `[measured]` = an A/B or instrumented build actually run during this audit.
-> `[estimated]` = a model or extrapolation, never run. Where a prototype
+> **Reading rule.** Every *lever delta* below is tagged with how it was
+> obtained: `[measured]` = an A/B or instrumented build actually run during
+> this audit, `[estimated]` = a model or extrapolation, never run. The tags do
+> **not** cover every figure in the document, and an earlier draft of this
+> paragraph claimed they did. The headline above, §2's bisect table and the
+> secondary effects beside it carry their provenance in prose instead —
+> naive loop-20/20 instructions, min-of-3 loop-60 wall, both stated where they
+> appear. Read an untagged number as measured-but-uninterleaved: good enough to
+> bracket a 15M-instruction step, not to settle a 1% question. Where a prototype
 > measured flat, this report says flat. Where two agents disagreed, both
 > verdicts are printed, including the dissent. Four of the ten extracted
 > levers were **refuted by their own adversarial review** and are marked so.
