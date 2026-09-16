@@ -136,3 +136,109 @@ fn arg<'a>(pos_args: &'a [Value], named: &'a [(String, Value)], i: usize, name: 
         .get(i)
         .or_else(|| named.iter().find(|(n, _)| n == name).map(|(_, v)| v))
 }
+
+/// Whether `name` is a legacy colour member that [`suggestions`] describes —
+/// the name-only half of that test, so a caller can reject a call before doing
+/// any colour maths. Must stay in lockstep with [`suggestions`]: both are
+/// exactly the union of the `channel_space` and `adjuster` tables.
+pub(crate) fn deprecates(name: &str) -> bool {
+    channel_space(name).is_some() || adjuster(name).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{deprecates, suggestions};
+    use crate::value::{Color, Number, Value};
+
+    /// Every name that can reach the `[color-functions]` gate: the union of the
+    /// per-family `NAMES` tables `is_builtin` is built from, plus the two
+    /// `sass:color` members that have no global alias and therefore appear in no
+    /// `NAMES` table at all (`color_ext::call_module_member`).
+    fn every_builtin_name() -> Vec<&'static str> {
+        let mut v: Vec<&'static str> = crate::builtins::color::NAMES
+            .iter()
+            .chain(crate::builtins::color::MODERN_NAMES.iter())
+            .chain(crate::builtins::color_ext::NAMES.iter())
+            .chain(crate::builtins::string::NAMES.iter())
+            .chain(crate::builtins::map::NAMES.iter())
+            .chain(crate::builtins::list::NAMES.iter())
+            .chain(crate::builtins::meta::NAMES.iter())
+            .chain(crate::builtins::selector::NAMES.iter())
+            .chain(crate::builtins::math::NAMES.iter())
+            .copied()
+            .collect();
+        v.push("whiteness");
+        v.push("blackness");
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Drift guard for the name-only gate. [`deprecates`] exists so a caller can
+    /// reject a call before doing any colour maths, which means it is asked
+    /// FIRST and its answer is final: a name it says `false` to never reaches
+    /// [`suggestions`], so if the two ever disagree the gate wins and a warning
+    /// disappears silently. This asserts they cannot disagree, over the whole
+    /// universe of names that can reach the gate.
+    #[test]
+    fn the_name_gate_agrees_with_the_suggestion_tables() {
+        // Arguments every adjuster can read: a colour and an amount. The channel
+        // getters ignore them.
+        let args = [
+            Value::Color(Color::rgb(171.0, 205.0, 239.0, 1.0)),
+            Value::Number(Number::with_unit(10.0, "%")),
+        ];
+        let mut gated = Vec::new();
+        for name in every_builtin_name() {
+            let gate = deprecates(name);
+            let sug = suggestions(name, &args, &[]).is_some();
+            assert_eq!(gate, sug, "`{name}`: gate says {gate}, suggestions() says {sug}");
+            if sug {
+                gated.push(name);
+            }
+        }
+        // And the set itself, so a table that silently loses an arm fails here
+        // rather than quietly stopping a warning. These are exactly the legacy
+        // members Color 4 replaced; `alpha`, `mix`, `grayscale`, `complement`
+        // and `invert` are deliberately absent (see [`suggestions`]).
+        assert_eq!(
+            gated,
+            [
+                "adjust-hue",
+                "blackness",
+                "blue",
+                "darken",
+                "desaturate",
+                "fade-in",
+                "fade-out",
+                "green",
+                "hue",
+                "lighten",
+                "lightness",
+                "opacify",
+                "red",
+                "saturate",
+                "saturation",
+                "transparentize",
+                "whiteness",
+            ]
+        );
+    }
+
+    /// The one direction that is allowed to disagree, and why it is safe.
+    /// [`suggestions`] reads the call's arguments and yields `None` when it
+    /// cannot, so it is NARROWER than the gate. That order is the safe one: the
+    /// gate over-admits, the exact path then declines, and nothing is lost.
+    /// Reversed — a gate narrower than the tables — would drop warnings.
+    #[test]
+    fn the_gate_over_admits_and_never_under_admits() {
+        assert!(deprecates("lighten"));
+        assert!(suggestions("lighten", &[], &[]).is_none());
+        // A colour with no amount is the same shape: admitted, then declined.
+        let color = [Value::Color(Color::rgb(1.0, 2.0, 3.0, 1.0))];
+        assert!(suggestions("lighten", &color, &[]).is_none());
+        // A channel getter needs no arguments at all, so it never declines.
+        assert!(deprecates("red"));
+        assert!(suggestions("red", &[], &[]).is_some());
+    }
+}

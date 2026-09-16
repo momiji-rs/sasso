@@ -1103,7 +1103,16 @@ pub(crate) struct Evaluator<'a> {
     /// identity because one span can carry two different warnings of the same
     /// id: `call(get-function("percentage"))` is `[global-builtin]` twice, once
     /// naming `meta.call` and once `math.percentage`, and dart prints both.
-    deprecations_seen: std::collections::HashSet<(&'static str, String, String, usize, usize)>,
+    deprecations_seen: crate::fxhash::FxHashSet<(&'static str, String, String, usize, usize)>,
+    /// Memo over deprecation PROBES: the material a call site would build a
+    /// `Deprecation` from, so a repeat can skip the whole path. Sound only
+    /// because the dedup insert at [`Self::emit_deprecation`] precedes the
+    /// per-id cap: a repeat of an already-seen key is a TOTAL no-op there (it
+    /// does not even increment `deprecations_omitted`), so skipping it early
+    /// cannot change stderr. Keyed by a fingerprint; the stored material is
+    /// compared with `==` on a hit, so a 64-bit collision only costs the slow
+    /// path.
+    dep_memo: HashMap<(u32, u32, u32, u32, u64), DepProbe>,
     /// Small interned ids for source files, stamped into [`SrcLines`] so the
     /// serializer's trailing-comment rule can require same-file adjacency and
     /// the source map can name the file. Keyed by the file's CANONICAL URL —
@@ -1441,7 +1450,8 @@ impl<'a> Evaluator<'a> {
             current_source: source,
             deprecations_shown: HashMap::default(),
             deprecations_omitted: 0,
-            deprecations_seen: std::collections::HashSet::new(),
+            deprecations_seen: crate::fxhash::FxHashSet::default(),
+            dep_memo: HashMap::default(),
             file_ids: HashMap::default(),
             file_texts,
             file_map_urls: HashMap::default(),
@@ -1858,6 +1868,149 @@ impl<'a> Evaluator<'a> {
         out
     }
 
+    /// Whether a deprecation raised right here would survive the two
+    /// side-effect-free rejections at the top of [`Self::emit_deprecation`]
+    /// (`diag_enabled`, then dart's `quietDeps`). Hoisted verbatim so a caller
+    /// can skip building anything at all; must stay byte-for-byte those two
+    /// checks, and side-effect-free.
+    fn deprecations_live(&self) -> bool {
+        if !self.diag_enabled() {
+            return false;
+        }
+        if let Some(deps) = self.options.quiet_deps {
+            if deps.is_dependency(self.current_path()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Ceiling on [`Self::dep_memo`]. A sheet can probe one span with
+    /// unboundedly many distinct VALUES, and such probes do not all leave a
+    /// matching entry in `deprecations_seen` to bound them against: `@each $c
+    /// in <n colours> { whiteness($c) }` records one probe per colour and emits
+    /// nothing, because the bare spelling is rejected *below* the memo. Past
+    /// the ceiling the memo simply stops learning — every further probe takes
+    /// the same path it took before this memo existed, which is slower and
+    /// byte-identical. The largest sheet in `bench/corpus` peaks at 70 entries
+    /// (measured 2026-09-16), so this is ~58x observed usage and about a
+    /// megabyte at worst against a ~25 MB peak.
+    const DEP_MEMO_MAX: usize = 4096;
+
+    /// Whether this exact deprecation probe has already run to completion at
+    /// this exact place, making a second run a no-op (see [`Self::dep_memo`]).
+    /// A miss records the material and returns `false`; a fingerprint collision
+    /// whose stored material differs also returns `false`, so the exact path
+    /// still runs.
+    ///
+    /// The `==` verify is UNCONDITIONAL, not a `debug_assert`: a hash collision
+    /// would otherwise drop a warning, and a dropped warning is a parity break
+    /// that no release build should be able to reach. The cost of being wrong
+    /// is therefore only speed — a colliding probe takes the slow path, and is
+    /// not re-memoised either, so it keeps taking it. The behaviour this
+    /// protects is locked from the outside as well: one span reached with two
+    /// different colours must warn twice, with a different suggestion each time
+    /// (`tests/diagnostics.rs`, `a_legacy_color_function_suggests_its_replacement`).
+    fn probe_already_done(
+        &mut self,
+        color_path: bool,
+        name: &str,
+        module: Option<&str>,
+        pos: Pos,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+    ) -> bool {
+        use std::hash::Hasher;
+        let mut h = crate::fxhash::FxHasher::default();
+        h.write(name.as_bytes());
+        match module {
+            Some(m) => {
+                h.write_u8(1);
+                h.write(m.as_bytes());
+            }
+            None => h.write_u8(0),
+        }
+        h.write_u8(0xfe);
+        for v in pos_args {
+            Self::fingerprint_value(&mut h, v);
+        }
+        h.write_u8(0xfd);
+        for (n, v) in named {
+            h.write(n.as_bytes());
+            Self::fingerprint_value(&mut h, v);
+        }
+        let key = (
+            color_path as u32,
+            self.current_url.len() as u32,
+            pos.line as u32,
+            pos.col as u32,
+            h.finish(),
+        );
+        if let Some(prev) = self.dep_memo.get(&key) {
+            return prev.url == self.current_url
+                && prev.name == name
+                && prev.module.as_deref() == module
+                && prev.pos_args == *pos_args
+                && prev.named == *named;
+        }
+        if self.dep_memo.len() < Self::DEP_MEMO_MAX {
+            self.dep_memo.insert(
+                key,
+                DepProbe {
+                    url: self.current_url.clone(),
+                    name: name.to_string(),
+                    module: module.map(str::to_string),
+                    pos_args: pos_args.to_vec(),
+                    named: named.to_vec(),
+                },
+            );
+        }
+        false
+    }
+
+    /// Fold a value into a probe fingerprint. Deliberately COARSE for the
+    /// composite variants: the `==` verify in [`Self::probe_already_done`] is
+    /// what makes the memo exact, and a coarse fingerprint only ever costs a
+    /// trip down the slow path. Numbers are hashed by `to_bits()` (not `==` on
+    /// the float) WITH their unit, because `red(1px)`, `red(1)` and
+    /// `red(1.0000000000000002)` render three different `Recommendation:` lines.
+    fn fingerprint_value(h: &mut crate::fxhash::FxHasher, v: &Value) {
+        use std::hash::{Hash, Hasher};
+        std::mem::discriminant(v).hash(h);
+        match v {
+            Value::Number(n) => {
+                h.write_u64(n.value.to_bits());
+                h.write(n.unit().as_bytes());
+            }
+            Value::Color(c) => {
+                h.write_u64(c.r.to_bits());
+                h.write_u64(c.g.to_bits());
+                h.write_u64(c.b.to_bits());
+                h.write_u64(c.a.to_bits());
+                match &c.modern {
+                    None => h.write_u8(0),
+                    Some(m) => {
+                        h.write_u8(1);
+                        std::mem::discriminant(&m.space).hash(h);
+                        for ch in m.channels.iter().chain(std::iter::once(&m.alpha)) {
+                            match ch {
+                                Some(x) => h.write_u64(x.to_bits()),
+                                None => h.write_u8(0),
+                            }
+                        }
+                    }
+                }
+            }
+            Value::Str(s) => {
+                h.write(s.text.as_bytes());
+                h.write_u8(s.quoted as u8);
+            }
+            Value::Bool(b) => h.write_u8(*b as u8),
+            Value::Null => {}
+            _ => {}
+        }
+    }
+
     /// Emit a deprecation warning at `pos` (caret length `len`): the header
     /// block + a snippet pointing at the deprecated construct + a 4-space stack
     /// trace + a trailing blank line. Honours dart-sass's per-location dedup and
@@ -1878,13 +2031,31 @@ impl<'a> Evaluator<'a> {
             Cow::Borrowed(name)
         };
         let name = canonical.as_ref();
-        if module.is_none() {
-            if let Some(replacement) = crate::builtins::global_builtin_replacement(name) {
-                let dep = crate::deprecation::Deprecation::global_builtin(replacement);
-                self.emit_deprecation(&dep, pos, len);
-            }
+        // Cheap gates first: this runs on EVERY call, and all but a handful of
+        // them deprecate nothing. `global_builtin_replacement` is still asked
+        // about the already-canonicalised name, exactly as before (it
+        // canonicalises internally too), and the emission ORDER below is
+        // unchanged: global-builtin, then feature-exists.
+        if !self.deprecations_live() {
+            return;
         }
-        if name == "feature-exists" && module.map_or(true, |m| m == "meta") {
+        let replacement = if module.is_none() {
+            crate::builtins::global_builtin_replacement(name)
+        } else {
+            None
+        };
+        let feature_exists = name == "feature-exists" && module.map_or(true, |m| m == "meta");
+        if replacement.is_none() && !feature_exists {
+            return;
+        }
+        if self.probe_already_done(false, name, module, pos, &[], &[]) {
+            return;
+        }
+        if let Some(replacement) = replacement {
+            let dep = crate::deprecation::Deprecation::global_builtin(replacement);
+            self.emit_deprecation(&dep, pos, len);
+        }
+        if feature_exists {
             self.emit_deprecation(&crate::deprecation::Deprecation::feature_exists(), pos, len);
         }
     }
@@ -1907,6 +2078,19 @@ impl<'a> Evaluator<'a> {
         // Only `sass:color` has these members; every other module's call is
         // someone else's business.
         if module.is_some_and(|m| m != "color") {
+            return;
+        }
+        // Cheap gates before any colour maths: nothing downstream of here has a
+        // side effect, so the liveness test and the name-only test can run
+        // first, and a probe already made at this span with these VALUES is a
+        // no-op (see `dep_memo`).
+        if !self.deprecations_live() {
+            return;
+        }
+        if !crate::builtins::color_function_deprecates(name) {
+            return;
+        }
+        if self.probe_already_done(true, name, module, pos, pos_args, named) {
             return;
         }
         // And a bare name that is no global built-in dispatched as a plain CSS
@@ -2007,6 +2191,18 @@ impl<'a> Evaluator<'a> {
             "{} repetitive deprecation warnings omitted.",
             self.deprecations_omitted
         );
+        // The second line is dart's, copied verbatim, and it advertises a flag
+        // sasso does not have. That is deliberate rather than an oversight: the
+        // footer is part of the stderr parity contract (locked by
+        // `tests/fixtures/diagnostics/deprecation-cap-{omitted,per-id}.stderr`),
+        // so it says what dart says. In dart `--verbose` lifts the per-id cap
+        // of 5 that produced this count, and drops this footer along with it --
+        // on `deprecation-cap-omitted.scss`, dart-sass 1.103.1 prints 5
+        // warnings plus this line without the flag and 8 warnings with no
+        // footer under it (verified 2026-09-16). sasso implements only the
+        // capped half, so the advice here is unreachable, not wrong. Adding the
+        // flag is a CLI feature with fixtures of its own, not a fix to this
+        // line.
         let formatted = format!("WARNING: {msg}\nRun in verbose mode to see all warnings.\n");
         self.emit_diag(crate::WarnEvent {
             kind: crate::WarnKind::Warn,
@@ -7728,4 +7924,16 @@ fn serialize_if_value(v: &Value) -> Result<String, Error> {
             None => Ok(other.to_css(false)),
         },
     }
+}
+
+/// The material one deprecation probe was made from, retained by
+/// [`Evaluator::dep_memo`] so a fingerprint hit can be VERIFIED with `==`
+/// rather than trusted. Lives on the evaluator and dies with it, so nothing
+/// here outlives the arena scope of a single compile.
+struct DepProbe {
+    url: String,
+    name: String,
+    module: Option<String>,
+    pos_args: Vec<Value>,
+    named: Vec<(String, Value)>,
 }

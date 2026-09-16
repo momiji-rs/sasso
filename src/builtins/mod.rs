@@ -93,6 +93,13 @@ pub(crate) fn color_function_suggestions(
     color::deprecate::suggestions(name, pos_args, named)
 }
 
+/// The name-only half of [`color_function_suggestions`]: whether `name` is a
+/// legacy `sass:color` member that carries a `[color-functions]` deprecation at
+/// all. Lets a caller reject a call before evaluating any suggestion text.
+pub(crate) fn color_function_deprecates(name: &str) -> bool {
+    color::deprecate::deprecates(name)
+}
+
 /// A name in its canonical spelling: `_` is `-` in every Sass identifier. The
 /// input is borrowed unchanged when it already holds no underscore, so the
 /// common case allocates nothing.
