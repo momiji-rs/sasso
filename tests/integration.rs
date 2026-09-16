@@ -636,6 +636,39 @@ fn compressed_finds_a_modules_last_visible_child() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// An `@import` inside a rule of a LOADED plain-CSS file is a CSS import like
+/// any other, and compressed output spells it with no gap. Measured against
+/// dart-sass 1.103.1.
+#[test]
+fn compressed_nested_plain_css_import_loses_its_gap() {
+    let dir = std::env::temp_dir().join(format!("sasso_nested_import_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let imp = sasso::FsImporter::new(vec![dir.clone()]);
+    let run = |name: &str, css: &str| -> String {
+        std::fs::write(dir.join(format!("{name}.css")), css).unwrap();
+        compile(
+            &format!("@use \"{name}\";"),
+            &Options::default()
+                .with_importer(&imp)
+                .with_style(OutputStyle::Compressed),
+        )
+        .expect("compile")
+    };
+    assert_eq!(
+        run("v1", ".a {\n  @import url(x.css);\n}\n"),
+        ".a{@import\"x.css\"}"
+    );
+    assert_eq!(
+        run("v2", ".a {\n  @import \"x.css\";\n}\n"),
+        ".a{@import\"x.css\"}"
+    );
+    assert_eq!(
+        run("v3", "@import url(x.css);\n.a { b: 1; }\n"),
+        "@import\"x.css\";.a{b:1}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A value is verbatim text and can end in a `;` of its own, which dart keeps
 /// — so what may be dropped is decided by the NODE that wrote the last byte,
 /// never by the byte. Measured against dart-sass 1.103.1.

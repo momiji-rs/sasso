@@ -571,7 +571,9 @@ impl<'a> Evaluator<'a> {
                     };
                     let lines = self.map_only_lines(pos);
                     items.push(OutItem::ChildlessAtRule {
-                        css_import: false,
+                        // A real CSS `@import`, whatever the parser made of its
+                        // url — compressed output spells it with no gap.
+                        css_import: true,
                         name: "import".to_string(),
                         prelude,
                         lines,
