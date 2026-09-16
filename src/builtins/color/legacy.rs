@@ -325,7 +325,9 @@ impl Channels {
         for (i, comp) in self.comps.iter().enumerate() {
             // A degenerate `calc()` is a valid (NaN/infinity) channel value, so
             // it is left for the count/compute path rather than reported here.
-            let numeric = matches!(comp, Value::Number(_) | Value::Slash(..)) || is_degenerate_calc(comp);
+            let numeric = matches!(comp, Value::Number(_) | Value::Slash(..))
+                || is_degenerate_calc(comp)
+                || is_none_keyword(comp);
             if !numeric {
                 return Err(Error::at(
                     format!(
@@ -1002,6 +1004,26 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
             pos,
         ));
     }
+    // Whiteness and blackness must carry a `%` unit (dart-sass), reported per
+    // channel before the value is read — and before the `none` construction
+    // below, which exempts only the `none` channels themselves.
+    for (i, cname) in [(1usize, "whiteness"), (2usize, "blackness")] {
+        if let Some(num) = channel_unit_number(&comps[i]) {
+            // A COMPOUND unit only reports its first numerator, so `%/px` must
+            // be rejected explicitly rather than read as a percentage.
+            if num.has_complex_units() || num.unit() != "%" {
+                // The message shows the spelling the caller wrote, not the
+                // zero a degenerate channel normalizes to.
+                return Err(Error::at(
+                    format!(
+                        "${cname}: Expected {} to have unit \"%\".",
+                        folded[i].to_css(false)
+                    ),
+                    pos,
+                ));
+            }
+        }
+    }
     // A `none` missing-channel keyword (with otherwise plain numbers) builds a
     // modern legacy hwb color.
     let comps_none = comps.iter().any(is_none_keyword);
@@ -1030,25 +1052,6 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
             alpha: modern_alpha(alpha.as_ref()),
         };
         return Ok(Value::Color(make_modern(mc)));
-    }
-    // Whiteness and blackness must carry a `%` unit (dart-sass), reported per
-    // channel before the value is read. The hue may be unitless or an angle.
-    for (i, cname) in [(1usize, "whiteness"), (2usize, "blackness")] {
-        if let Some(num) = channel_unit_number(&comps[i]) {
-            // A COMPOUND unit only reports its first numerator, so `%/px` must
-            // be rejected explicitly rather than read as a percentage.
-            if num.has_complex_units() || num.unit() != "%" {
-                // The message shows the spelling the caller wrote, not the
-                // zero a degenerate channel normalizes to.
-                return Err(Error::at(
-                    format!(
-                        "${cname}: Expected {} to have unit \"%\".",
-                        folded[i].to_css(false)
-                    ),
-                    pos,
-                ));
-            }
-        }
     }
     let h = hsl_hue(&comps[0], pos)?;
     let mut w_pct = channel_value(&comps[1], pos)?;
@@ -1959,10 +1962,20 @@ fn legacy_none_color(channels: &Channels, space: ColorSpace, pos: Pos) -> Result
     if channels.comps.len() != 3 {
         return Ok(None);
     }
-    // This path returns before the caller's own validation, so it owes the
-    // alpha the same unit check: `rgb(none none none / 2px)` is an error, not
-    // an opaque color.
+    // This path returns before the caller's own validation, so it runs the
+    // same checks: a `none` channel exempts ITSELF, not the call — `rgb(none
+    // 1px 0)` is still the green channel's unit error, and a positional
+    // `none` is not a channel at all (`rgb(none, 1px, 0)`).
+    let names: &[&str] = match space {
+        ColorSpace::Hsl => &["hue", "saturation", "lightness"],
+        _ => &["red", "green", "blue"],
+    };
+    channels.validate_numeric(names, pos)?;
+    channels.validate_positional_numeric(names, pos)?;
     validate_alpha_unit(channels.alpha.as_ref(), pos)?;
+    if space != ColorSpace::Hsl {
+        channels.validate_rgb_units(names, pos)?;
+    }
     let comps = &channels.comps;
     let ch = match space {
         ColorSpace::Hsl => [

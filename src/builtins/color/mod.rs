@@ -188,7 +188,7 @@ fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
         // color. A `%` one divides like a literal percentage (which changes
         // nothing for a non-finite value, but keeps the two paths the same).
         let pct = match channel_unit_number(v) {
-            Some(n) if n.unit() == "%" => true,
+            Some(n) if !n.has_complex_units() && n.unit() == "%" => true,
             Some(n) if !n.is_unitless() => {
                 return Err(Error::at(
                     format!(

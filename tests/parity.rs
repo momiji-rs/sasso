@@ -2745,6 +2745,78 @@ fn a_none_channel_does_not_excuse_the_alpha() {
 }
 
 #[test]
+fn a_none_channel_exempts_itself_not_the_call() {
+    // The `none`-channel construction returns before its caller's validation,
+    // so it runs the same checks: a sibling's unit, a sibling that is not a
+    // number, and the alpha are all still reported. And `none` is a CHANNEL
+    // keyword, not an argument — the positional form rejects it outright.
+    // Every message byte-matched to dart-sass 1.104.1. Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "rgb(none 1px 0)",
+            "$green: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "rgb(none 1px 0 / 0.5)",
+            "$green: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "rgb(none calc(NaN * 1px) 0)",
+            "$green: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "rgb(none 6px/2 0)",
+            "$green: Expected 6px/2 to have unit \"%\" or no units.",
+        ),
+        (
+            "rgb(none (1 2) 0)",
+            "$channels: Expected green channel to be a number, was (1 2).",
+        ),
+        ("rgb(none 0)", "$channels: The rgb color space has 3 channels but"),
+        (
+            "hwb(none 10px 20%)",
+            "$whiteness: Expected 10px to have unit \"%\".",
+        ),
+        (
+            "hwb(none 10% 20px)",
+            "$blackness: Expected 20px to have unit \"%\".",
+        ),
+        (
+            "hwb(0 10px none)",
+            "$whiteness: Expected 10px to have unit \"%\".",
+        ),
+        (
+            "hwb(none 6px/2 20%)",
+            "$whiteness: Expected 6px/2 to have unit \"%\".",
+        ),
+        (
+            "color.hwb(none, 10px, 20%)",
+            "$whiteness: Expected 10px to have unit \"%\".",
+        ),
+        ("rgb(none, 1px, 0)", "$red: none is not a number."),
+        ("rgb(none, (1 2), 0)", "$red: none is not a number."),
+        ("hsl(none, 1px, 50%)", "$hue: none is not a number."),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // What a `none` channel DOES exempt is itself: the rest still computes,
+    // and `hsl` has no unit check on its channels either way.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {\n  b: rgb(none 50% 0);\n  c: hsl(none 50% 50%);\n  d: hsl(none 1px 50%);\n  e: hwb(none 10% 20%);\n  f: rgb(none calc(NaN) 0);\n}\n"),
+        "a {\n  b: rgb(none 127.5 0);\n  c: hsl(none 50% 50%);\n  d: hsl(none 1% 50%);\n  e: hwb(none 10% 20%);\n  f: rgb(none 0 0);\n}\n"
+    );
+    // A compound `%` is not a percentage DEGENERATE alpha either.
+    assert!(err("rgba(red, math.div(math.div(1, 0) * 1%, 1px))")
+        .contains("$alpha: Expected calc(infinity * 1% / 1px) to have unit \"%\" or no units."));
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports
