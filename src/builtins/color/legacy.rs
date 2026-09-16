@@ -873,10 +873,16 @@ fn hsl_degenerate(channels: &Channels, pos: Pos) -> Result<Value, Error> {
     let name = match &channels.alpha {
         Some(a) => {
             let av = alpha_value(a, pos)?;
-            return Ok(Value::Str(crate::value::SassStr {
-                text: format!("hsla({hue}, {sat}, {light}, {})", fmt_num(av, false)).into(),
-                quoted: false,
-            }));
+            // An OPAQUE alpha is dropped, exactly as the ordinary hsl path and
+            // `color()` drop theirs: `hsl(0 50% calc(infinity) / 1)` is an
+            // `hsl()`, not an `hsla(…, 1)`.
+            if (av - 1.0).abs() >= f64::EPSILON {
+                return Ok(Value::Str(crate::value::SassStr {
+                    text: format!("hsla({hue}, {sat}, {light}, {})", fmt_num(av, false)).into(),
+                    quoted: false,
+                }));
+            }
+            "hsl"
         }
         None => "hsl",
     };

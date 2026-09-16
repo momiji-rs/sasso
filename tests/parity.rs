@@ -2415,6 +2415,24 @@ fn a_degenerate_call_still_converts_its_other_parts() {
 }
 
 #[test]
+fn the_degenerate_hsl_spelling_drops_an_opaque_alpha() {
+    // The preserved-`calc()` hsl spelling omits its alpha when the color is
+    // opaque, exactly as the ordinary hsl path and `color()` omit theirs — an
+    // alpha clamped up to 1 included. Byte-matched to dart-sass 1.104.1.
+    // Offline.
+    assert_eq!(
+        ours("a {\n  b: hsl(0 50% calc(infinity) / 1);\n  c: hsl(0 50% calc(infinity)/2);\n  d: hsl(0 50% calc(infinity) / 100%);\n  e: hsla(0, calc(infinity), 50%, 1);\n  f: hsl(0 calc(infinity) 50% / 2);\n}\n"),
+        "a {\n  b: hsl(0, 50%, calc(infinity * 1%));\n  c: hsl(0, 50%, calc(infinity * 1%));\n  d: hsl(0, 50%, calc(infinity * 1%));\n  e: hsl(0, calc(infinity * 1%), 50%);\n  f: hsl(0, calc(infinity * 1%), 50%);\n}\n"
+    );
+    // A TRANSPARENT one is still written, and a degenerate channel before a
+    // slash alpha still splits at the last slash.
+    assert_eq!(
+        ours("a {\n  b: hsl(0 50% calc(infinity) / 0.5);\n  c: hsla(0, calc(infinity), 50%, 0.5);\n  d: hsl(0 50% calc(NaN)/2);\n  e: color(srgb 0 0 calc(infinity)/2);\n  f: color(srgb 0 0 calc(NaN)/0.5);\n}\n"),
+        "a {\n  b: hsla(0, 50%, calc(infinity * 1%), 0.5);\n  c: hsla(0, calc(infinity * 1%), 50%, 0.5);\n  d: hsl(0, 50%, 0%);\n  e: color(srgb 0 0 calc(infinity));\n  f: color(srgb 0 0 0 / 0.5);\n}\n"
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports
