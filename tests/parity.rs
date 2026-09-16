@@ -2202,6 +2202,68 @@ fn a_degenerate_slash_channel_converts_before_it_is_clamped() {
 }
 
 #[test]
+fn a_color_channel_diagnostic_names_its_space() {
+    // A `color()` channel is named by the SPACE it belongs to — the xyz spaces
+    // name their axes — and a non-number channel that is an unbracketed list
+    // is parenthesized, as dart-sass renders it. Every message byte-matched to
+    // dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        (
+            "color(xyz 1px 0 0)",
+            "$x: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(xyz 0 1px 0)",
+            "$y: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(xyz-d50 0 0 1px)",
+            "$z: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(xyz-d65 1px 0 0)",
+            "$x: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 1px 0 0)",
+            "$red: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(display-p3 0 1px 0)",
+            "$green: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(rec2020 0 0 1px)",
+            "$blue: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(xyz (1 2) 0 0)",
+            "$description: Expected x channel to be a number, was (1 2).",
+        ),
+        (
+            "color(srgb (1, 2) 0 0)",
+            "$description: Expected red channel to be a number, was (1, 2).",
+        ),
+        (
+            "color(srgb [1 2] 0 0)",
+            "$description: Expected red channel to be a number, was [1 2].",
+        ),
+        (
+            "rgb((1 2) 0 0)",
+            "$channels: Expected red channel to be a number, was (1 2).",
+        ),
+        (
+            "lab((1 2) 0 0)",
+            "$channels: Expected lightness channel to be a number, was (1 2).",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

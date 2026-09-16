@@ -304,7 +304,7 @@ impl Channels {
                     format!(
                         "$channels: Expected {} to be a number, was {}.",
                         legacy_channel_name(names, i),
-                        comp.to_css(false)
+                        channel_err_css(comp)
                     ),
                     pos,
                 ));
@@ -937,7 +937,7 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
                 format!(
                     "$channels: Expected {} to be a number, was {}.",
                     legacy_channel_name(&["hue", "whiteness", "blackness"], i),
-                    comp.to_css(false)
+                    channel_err_css(comp)
                 ),
                 pos,
             ));
@@ -1224,7 +1224,7 @@ pub(super) fn fn_lab_family(
                     format!(
                         "$channels: Expected {} channel to be a number, was {}.",
                         names[i],
-                        comp.to_css(false)
+                        channel_err_css(comp)
                     ),
                     pos,
                 ))
@@ -1293,6 +1293,16 @@ pub(super) fn fn_lab_family(
         alpha: modern_alpha(alpha.as_ref()),
     };
     Ok(Value::Color(make_modern(mc)))
+}
+
+/// The channel names a `color()` space reports in its per-channel
+/// diagnostics: the xyz spaces name their axes, every rgb-like space names
+/// `red`/`green`/`blue`.
+fn color_channel_names(space: &str) -> [&'static str; 3] {
+    match space {
+        "xyz" | "xyz-d50" | "xyz-d65" => ["x", "y", "z"],
+        _ => ["red", "green", "blue"],
+    }
 }
 
 /// The known predefined color spaces accepted by `color()`. All have three
@@ -1403,7 +1413,7 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
     // non-number channel rather than a wrong count). A degenerate `calc()` or
     // a slash-division is a number channel and is unit-checked like one,
     // reported in the spelling the caller wrote.
-    let names = ["red", "green", "blue"];
+    let names = color_channel_names(&space_lower);
     for (i, comp) in channels.iter().enumerate() {
         let name = names.get(i).copied().unwrap_or("");
         if is_none_keyword(comp) {
@@ -1417,7 +1427,7 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
                 return Err(Error::at(
                     format!(
                         "$description: Expected {name} channel to be a number, was {}.",
-                        comp.to_css(false)
+                        channel_err_css(comp)
                     ),
                     pos,
                 ))

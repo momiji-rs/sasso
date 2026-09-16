@@ -294,6 +294,17 @@ fn normalize_channels(comps: &[Value], polar_hue: Option<usize>) -> Vec<Value> {
         .collect()
 }
 
+/// Render a non-number CHANNEL for a "channel to be a number" diagnostic: an
+/// unbracketed multi-item list is parenthesized (`(1 2)`, `(1, 2)`), matching
+/// dart-sass; a bracketed one already carries its own delimiters, and every
+/// other value prints plainly.
+fn channel_err_css(v: &Value) -> String {
+    match v {
+        Value::List(l) if l.items.len() > 1 && !l.bracketed => list_paren_css(v),
+        _ => v.to_css(false),
+    }
+}
+
 /// Serialize a list value wrapped in parentheses, as dart-sass does in its
 /// channel-list error messages (`(1%, 2, 3)`, `(1% 2)`).
 fn list_paren_css(v: &Value) -> String {
