@@ -74,10 +74,30 @@ pub(super) fn try_call(
 fn unary_op(name: &str) -> Option<fn(f64) -> f64> {
     Some(match name {
         "abs" => f64::abs,
-        "ceil" => f64::ceil,
-        "floor" => f64::floor,
+        "ceil" => ceil_int,
+        "floor" => floor_int,
         _ => return None,
     })
+}
+
+/// A rounding RESULT is an int in dart, so it is never a negative zero:
+/// `math.round(-0.4)`, `math.ceil(-0.4)` and `round(to-zero, -0.4, 1)` are all
+/// `0`, where IEEE rounding gives `-0`. Everything else keeps the sign —
+/// `math.div(0, -1)` and `math.sqrt(-0)` ARE negative zeros.
+fn int_result(v: f64) -> f64 {
+    if v == 0.0 {
+        0.0
+    } else {
+        v
+    }
+}
+
+fn ceil_int(v: f64) -> f64 {
+    int_result(v.ceil())
+}
+
+fn floor_int(v: f64) -> f64 {
+    int_result(v.floor())
 }
 
 /// `math.div($number1, $number2)`: true division. Unlike the `/` operator it
@@ -150,7 +170,7 @@ fn round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
     // which reports the arity/name error.
     if pos_args.is_empty() && named.len() == 1 && named[0].0 == "number" {
         let n = as_num(&named[0].1, pos)?;
-        return Ok(num_value(n.copy_units(n.value.round())));
+        return Ok(num_value(n.copy_units(int_result(n.value.round()))));
     }
     let args = all_args(pos_args, named);
     match args.len() {
@@ -159,7 +179,7 @@ fn round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
             // One-argument form: nearest, unit preserved. An unsimplifiable
             // argument (a `var()`, interpolation, …) preserves the call.
             match round_operand(&args[0], pos)? {
-                Some(n) => Ok(num_value(n.copy_units(n.value.round()))),
+                Some(n) => Ok(num_value(n.copy_units(int_result(n.value.round())))),
                 None => Ok(preserved_round(&args)),
             }
         }
@@ -350,7 +370,7 @@ fn round_with_step(
             }
         }
     };
-    Ok(with_unit(rounded * step_v))
+    Ok(with_unit(int_result(rounded * step_v)))
 }
 
 /// The outcome of coercing a `round()` step into the number's unit.
@@ -828,7 +848,7 @@ pub(super) fn module_round(pos_args: &[Value], named: &[(String, Value)], pos: P
     }
     let v = super::require(&["number"], pos_args, named, 0, "round", pos)?;
     let n = as_num(v, pos)?;
-    Ok(num_value(n.copy_units(n.value.round())))
+    Ok(num_value(n.copy_units(int_result(n.value.round()))))
 }
 
 /// `math.min(...)` / `math.max(...)`: the numeric (not CSS-calc) reductions.

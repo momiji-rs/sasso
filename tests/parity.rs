@@ -7571,6 +7571,19 @@ fn number_negative_zero_keeps_its_sign() {
 }
 
 #[test]
+fn rounding_never_returns_a_negative_zero() {
+    // A rounding RESULT is an integer in dart-sass, so it is never a negative
+    // zero even where IEEE rounding produces one: `math.round(-0.4)` and
+    // `round(to-zero, -0.4, 1)` are `0`, not `-0`. Everything else keeps the
+    // sign (`math.div(0, -1)`, `math.abs(-0)`). Byte-matched to dart-sass
+    // 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:math\";\na {\n  b: math.round(-0.4);\n  c: math.ceil(-0.4);\n  d: math.floor(-0);\n  e: round(to-zero, -0.4, 1);\n  f: round(nearest, -0.4, 1);\n  g: math.round(-0.4px);\n  h: math.abs(-0);\n}\n"),
+        "a {\n  b: 0;\n  c: 0;\n  d: 0;\n  e: 0;\n  f: 0;\n  g: 0px;\n  h: 0;\n}\n"
+    );
+}
+
+#[test]
 fn number_format_dart_tostring_semantics() {
     // dart rounds the SHORTEST decimal spelling at the string level (11th
     // digit, half-up): 2154.15598416745's true value is …44978 (below the
