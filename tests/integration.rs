@@ -787,6 +787,35 @@ fn an_escaped_delimiter_is_not_selector_structure() {
         css(".p, .q { [data-x=\"a&b\"] { c: 1; } }"),
         ".p [data-x=\"a&b\"], .q [data-x=\"a&b\"] {\n  c: 1;\n}"
     );
+    // An `&` inside an ATTRIBUTE is text too, and two more scanners were
+    // reading it as a reference. The check that a parent ending in a
+    // combinator is not glued to a `&` rejected a selector it has no business
+    // rejecting:
+    assert_eq!(
+        css("p > { & [data-x=\"&.x\"] { d: 1; } }"),
+        "p > [data-x=\"&.x\"] {\n  d: 1;\n}"
+    );
+    // …while the pseudo-argument substitution expanded the parents INTO the
+    // attribute value instead of leaving the part to the normal path.
+    assert_eq!(
+        css(".p, .q { :not([data=\"&\"]) { c: 1; } }"),
+        ".p :not([data=\"&\"]), .q :not([data=\"&\"]) {\n  c: 1;\n}"
+    );
+    assert_eq!(
+        css(".p, .q { :not([data=\"&-c\"]) { c: 1; } }"),
+        ".p :not([data=\"&-c\"]), .q :not([data=\"&-c\"]) {\n  c: 1;\n}"
+    );
+    assert_eq!(
+        css(".p, .q { :is([data=\"&\"]) { c: 1; } }"),
+        ".p :is([data=\"&\"]), .q :is([data=\"&\"]) {\n  c: 1;\n}"
+    );
+    // A REAL pseudo-argument `&` still expands in place, one complex.
+    assert_eq!(
+        css(".p, .q { :not(&-c) { d: 1; } }"),
+        ":not(.p-c, .q-c) {\n  d: 1;\n}"
+    );
+    // And a parent that really IS glued to a suffix is still rejected.
+    assert!(compile("p > { &.x { d: 1; } }", &Options::default()).is_err());
     // Everything above holds when compressing, where the same text is walked
     // again to take the spaces out.
     assert_eq!(css_compressed(".a\\,b, .c { d: 1; }"), ".a\\,b,.c{d:1}");

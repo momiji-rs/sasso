@@ -6229,6 +6229,8 @@ fn resolve_selectors_opt(
         }
         let chars: Vec<char> = part.chars().collect();
         let mut skip = false;
+        let mut bracket = 0i32;
+        let mut quote: Option<char> = None;
         for (i, &c) in chars.iter().enumerate() {
             if std::mem::take(&mut skip) {
                 continue;
@@ -6237,7 +6239,23 @@ fn resolve_selectors_opt(
                 skip = true;
                 continue;
             }
-            if c == '&' {
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match c {
+                '"' | '\'' => {
+                    quote = Some(c);
+                    continue;
+                }
+                '[' => bracket += 1,
+                ']' => bracket = (bracket - 1).max(0),
+                _ => {}
+            }
+            // An `&` inside an attribute is not a parent reference.
+            if c == '&' && bracket == 0 {
                 if let Some(&next) = chars.get(i + 1) {
                     if next.is_alphanumeric()
                         || matches!(next, '.' | '#' | ':' | '[' | '%' | '\\' | '-' | '_')
@@ -6261,11 +6279,26 @@ fn resolve_selectors_opt(
         }
         let chars: Vec<char> = part.chars().collect();
         let mut depth = 0i32;
+        let mut bracket = 0i32;
+        let mut quote: Option<char> = None;
         let mut out = String::new();
         let mut i = 0;
         let mut replaced = false;
         while i < chars.len() {
             let c = chars[i];
+            if let Some(q) = quote {
+                out.push(c);
+                i += 1;
+                if c == '\\' {
+                    if let Some(&n) = chars.get(i) {
+                        out.push(n);
+                        i += 1;
+                    }
+                } else if c == q {
+                    quote = None;
+                }
+                continue;
+            }
             match c {
                 '\\' => {
                     out.push(c);
@@ -6276,8 +6309,14 @@ fn resolve_selectors_opt(
                     }
                     continue;
                 }
+                '"' | '\'' => quote = Some(c),
+                '[' => bracket += 1,
+                ']' => bracket = (bracket - 1).max(0),
                 '(' => depth += 1,
                 ')' => depth -= 1,
+                // An `&` inside an attribute is text: copy it and let the
+                // normal path handle the part.
+                '&' if bracket > 0 => {}
                 '&' => {
                     if depth == 0 {
                         return None;
