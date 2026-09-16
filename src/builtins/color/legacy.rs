@@ -1540,13 +1540,19 @@ fn modern_color(space: &str, channels: &[Value], alpha: Option<&Value>, pos: Pos
         Some(v) => alpha_value(v, pos).unwrap_or(1.0),
         None => 1.0,
     };
-    // A slash-division channel prints its QUOTIENT: dart computes the channel
-    // and never writes the `6/2` spelling back out, even on this path.
+    // Only the NON-FINITE channel keeps its `calc(...)` spelling. Every other
+    // one is converted exactly as the ordinary path converts it — `50%` is 0.5
+    // of a `color()` space's 0..1 range, and a slash-division prints its
+    // quotient — because dart builds the color and serializes its channels,
+    // rather than echoing what the caller wrote.
     let body: Vec<String> = channels
         .iter()
-        .map(|v| match v {
-            Value::Slash(n, _) => n.to_css(false),
-            _ => v.to_css(false),
+        .map(|v| match degenerate_value(v) {
+            Some(_) => v.to_css(false),
+            None => match modern_channel(v, 1.0) {
+                Some(n) => fmt_num(n, false),
+                None => v.to_css(false),
+            },
         })
         .collect();
     let body = body.join(" ");

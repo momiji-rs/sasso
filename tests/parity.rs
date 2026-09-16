@@ -2368,6 +2368,47 @@ fn an_alpha_argument_is_validated_however_it_is_written() {
 }
 
 #[test]
+fn a_degenerate_call_still_converts_its_other_parts() {
+    // Only the NON-FINITE channel keeps its `calc(...)` spelling. dart builds
+    // the color and serializes its channels, so a finite sibling is converted
+    // exactly as it would be without the degenerate one — `50%` is 0.5 of a
+    // `color()` space's 0..1 range — and the alpha is unit-checked even when
+    // IT is the degenerate part. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("a {\n  b: color(srgb 50% 0 calc(infinity));\n  c: color(srgb 50%/2 0 calc(infinity));\n  d: color(xyz 50% 0 calc(infinity));\n  e: color(display-p3 50% 0 calc(infinity));\n  f: color(srgb 0.5 0 calc(infinity));\n}\n"),
+        "a {\n  b: color(srgb 0.5 0 calc(infinity));\n  c: color(srgb 0.25 0 calc(infinity));\n  d: color(xyz 0.5 0 calc(infinity));\n  e: color(display-p3 0.5 0 calc(infinity));\n  f: color(srgb 0.5 0 calc(infinity));\n}\n"
+    );
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        (
+            "rgb(0 0 0 / calc(infinity * 1px))",
+            "$alpha: Expected calc(infinity * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "rgb(0 0 0 / calc(NaN * 1px))",
+            "$alpha: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 0 0 0 / calc(infinity * 1px))",
+            "$alpha: Expected calc(infinity * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "lab(50% 1 2 / calc(NaN * 1px))",
+            "$alpha: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // A unitless or `%` degenerate alpha is fine, and an infinite non-hue
+    // channel keeps its spelling whatever unit it was folded from.
+    assert_eq!(
+        ours("a {\n  b: rgb(0 0 0 / calc(infinity));\n  c: rgb(0 0 0 / calc(infinity * 1%));\n  d: rgb(0 0 0 / calc(NaN * 1%));\n  e: lab(1% calc(infinity * 1%) -3);\n  f: oklab(1% calc(infinity * 1%) -3);\n}\n"),
+        "a {\n  b: rgb(0, 0, 0);\n  c: rgb(0, 0, 0);\n  d: rgba(0, 0, 0, 0);\n  e: lab(1% calc(infinity) -3);\n  f: oklab(1% calc(infinity) -3);\n}\n"
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

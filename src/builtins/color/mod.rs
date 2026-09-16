@@ -183,7 +183,24 @@ pub(super) fn try_call(
 /// other unit is an error (`Expected … to have unit "%" or no units.`).
 fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
     if let Some(c) = degenerate_value(v) {
-        return Ok(clamp_alpha(c));
+        // A degenerate alpha is still an alpha: its UNIT is checked first, so
+        // `calc(infinity * 1px)` is the wrong unit rather than an opaque
+        // color. A `%` one divides like a literal percentage (which changes
+        // nothing for a non-finite value, but keeps the two paths the same).
+        let pct = match channel_unit_number(v) {
+            Some(n) if n.unit() == "%" => true,
+            Some(n) if !n.is_unitless() => {
+                return Err(Error::at(
+                    format!(
+                        "$alpha: Expected {} to have unit \"%\" or no units.",
+                        v.to_css(false)
+                    ),
+                    pos,
+                ))
+            }
+            _ => false,
+        };
+        return Ok(clamp_alpha(if pct { c / 100.0 } else { c }));
     }
     match v {
         // One arm for both spellings: a slash-division's quotient carries its
