@@ -1011,12 +1011,21 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
         w_pct = w_pct / t * 100.0;
         b_pct = b_pct / t * 100.0;
     }
-    // dart-sass 1.104.0 converts a NaN channel to 0 when the color is
-    // CONSTRUCTED, which is after that normalization — an infinite whiteness
-    // becomes NaN there (`∞ / ∞`) and lands on 0, so
-    // `hwb(0, calc(infinity * 1%), 40%)` is plain red.
-    let nan_zero = |v: f64| if v.is_nan() { 0.0 } else { v };
-    let (w_pct, b_pct) = (nan_zero(w_pct), nan_zero(b_pct));
+    // dart-sass 1.104.0 converts a NaN channel — and a negative zero — to 0
+    // when the color is CONSTRUCTED, which is after that normalization. An
+    // infinite whiteness becomes NaN there (`∞ / ∞`) and lands on 0, so
+    // `hwb(0, calc(infinity * 1%), 40%)` is plain red; and because this path
+    // stores its own channels rather than going through `make_modern`, it is
+    // also where `hwb(0, -0%, 0%)` would otherwise keep a signed zero that
+    // `color.channel` and `meta.inspect` read straight back.
+    let channel_zero = |v: f64| {
+        if v.is_nan() {
+            0.0
+        } else {
+            crate::value::without_negative_zero(v)
+        }
+    };
+    let (w_pct, b_pct) = (channel_zero(w_pct), channel_zero(b_pct));
     let mut out = hwb_to_color(h, w_pct, b_pct, a);
     // Carry the modern Hwb tag (so `color.space`/`color.channel` work);
     // serialization uses the classic hsl comma form via `legacy_css`.

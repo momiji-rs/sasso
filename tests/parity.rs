@@ -7634,18 +7634,39 @@ fn number_negative_zero_keeps_its_sign() {
         ours("a {\n  b: hsl(-0, 50%, 50%);\n  c: color(srgb 0 0 0 / -0);\n  d: rgb(-0, 0, 0);\n  e: color(srgb -0 0 0);\n}\n"),
         "a {\n  b: hsl(0, 50%, 50%);\n  c: color(srgb 0 0 0 / 0);\n  d: rgb(0, 0, 0);\n  e: color(srgb 0 0 0);\n}\n"
     );
+    // The channel a COMPUTATION writes counts too: `change`/`adjust`/`scale`
+    // set the alpha directly on the working color, so the normalization has to
+    // reach the stored alpha and not just a parsed one.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {\n  b: color.change(oklch(50% 0.1 20deg), $alpha: -0);\n  c: color.change(lab(50% 1 2), $alpha: -0);\n  d: color.change(red, $alpha: -0);\n}\n"),
+        "a {\n  b: oklch(50% 0.1 20deg / 0);\n  c: lab(50% 1 2 / 0);\n  d: rgba(255, 0, 0, 0);\n}\n"
+    );
+    // The comma-form `color.hwb()` stores its own channels instead of going
+    // through the shared color construction, so it needs the same treatment —
+    // `color.channel` and `meta.inspect` read that storage back verbatim.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:meta\";\na {\n  b: color.channel(color.hwb(0, -0%, 0%), \"whiteness\");\n  c: meta.inspect(color.hwb(-0, -0%, -0%));\n  d: color.hwb(0, -0%, 0%);\n}\n"),
+        "a {\n  b: 0%;\n  c: hwb(0 0% 0%);\n  d: red;\n}\n"
+    );
 }
 
 #[test]
 fn rounding_never_returns_a_negative_zero() {
     // A rounding RESULT is an integer in dart-sass, so it is never a negative
     // zero even where IEEE rounding produces one: `math.round(-0.4)` and
-    // `round(to-zero, -0.4, 1)` are `0`, not `-0`. Everything else keeps the
-    // sign (`math.div(0, -1)`, `math.abs(-0)`). Byte-matched to dart-sass
-    // 1.104.1. Offline.
+    // `round(to-zero, -0.4, 1)` are `0`, not `-0`. `math.abs(-0)` is `0` for a
+    // different reason — IEEE `abs` clears the sign — while `math.div(0, -1)`
+    // keeps it. Byte-matched to dart-sass 1.104.1. Offline.
     assert_eq!(
-        ours("@use \"sass:math\";\na {\n  b: math.round(-0.4);\n  c: math.ceil(-0.4);\n  d: math.floor(-0);\n  e: round(to-zero, -0.4, 1);\n  f: round(nearest, -0.4, 1);\n  g: math.round(-0.4px);\n  h: math.abs(-0);\n}\n"),
-        "a {\n  b: 0;\n  c: 0;\n  d: 0;\n  e: 0;\n  f: 0;\n  g: 0px;\n  h: 0;\n}\n"
+        ours("@use \"sass:math\";\na {\n  b: math.round(-0.4);\n  c: math.ceil(-0.4);\n  d: math.floor(-0);\n  e: round(to-zero, -0.4, 1);\n  f: round(nearest, -0.4, 1);\n  g: math.round(-0.4px);\n  h: math.abs(-0);\n  i: math.abs(-0px);\n}\n"),
+        "a {\n  b: 0;\n  c: 0;\n  d: 0;\n  e: 0;\n  f: 0;\n  g: 0px;\n  h: 0;\n  i: 0px;\n}\n"
+    );
+    // An INFINITE step is the exception: `round()` returns the input's sign
+    // unrounded rather than an integer, so a negative zero survives it. (Only
+    // `down` runs off to `calc(-infinity)`.)
+    assert_eq!(
+        ours("@use \"sass:math\";\n$inf: math.div(1, 0);\na {\n  b: round(to-zero, -0.4, $inf);\n  c: round(nearest, -0, $inf);\n  d: round(up, -0.4, $inf);\n  e: round(down, -0.4, $inf);\n  f: round(to-zero, -0.4px, $inf * 1px);\n}\n"),
+        "a {\n  b: -0;\n  c: -0;\n  d: -0;\n  e: calc(-infinity);\n  f: -0px;\n}\n"
     );
 }
 

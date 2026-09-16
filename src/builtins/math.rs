@@ -82,8 +82,12 @@ fn unary_op(name: &str) -> Option<fn(f64) -> f64> {
 
 /// A rounding RESULT is an int in dart, so it is never a negative zero:
 /// `math.round(-0.4)`, `math.ceil(-0.4)` and `round(to-zero, -0.4, 1)` are all
-/// `0`, where IEEE rounding gives `-0`. Everything else keeps the sign —
-/// `math.div(0, -1)` and `math.sqrt(-0)` ARE negative zeros.
+/// `0`, where IEEE rounding gives `-0`. Two neighbours are NOT covered by
+/// that: `math.abs(-0)` is `0` because IEEE `abs` clears the sign of its own
+/// accord (dart's answer too), while `round()` with an INFINITE step returns
+/// the input's sign unrounded, so `round(to-zero, -0.4, infinity)` IS `-0` —
+/// it never reaches the multiply below. Everything else keeps the sign:
+/// `math.div(0, -1)` and `math.sqrt(-0)` are negative zeros.
 fn int_result(v: f64) -> f64 {
     if v == 0.0 {
         0.0

@@ -250,6 +250,15 @@ pub(super) fn normalize_degenerate(mut mc: ModernColor) -> ModernColor {
             }
         }
     }
+    // The alpha is a channel as well, and it reaches here from a COMPUTATION
+    // as readily as from a call: `change`/`adjust`/`scale` write `work.alpha`
+    // directly, so `color.change(oklch(50% 0.1 20deg), $alpha: -0)` is
+    // `… / 0`, not `… / -0`.
+    if let Some(a) = &mut mc.alpha {
+        if a.is_nan() || *a == 0.0 {
+            *a = 0.0;
+        }
+    }
     mc
 }
 
@@ -317,12 +326,6 @@ pub(super) fn modern_hue(v: &Value) -> Option<f64> {
     }
 }
 
-/// Clamp an alpha to `[0, 1]`, dropping the negative zero `clamp` keeps: an
-/// alpha is a color channel, and `color(srgb 0 0 0 / -0)` is `… / 0`.
-fn z1(v: f64) -> f64 {
-    crate::value::without_negative_zero(v.clamp(0.0, 1.0))
-}
-
 /// Parse a modern alpha channel. `none` → `None`; otherwise clamp to 0..1.
 pub(super) fn modern_alpha(v: Option<&Value>) -> Option<f64> {
     match v {
@@ -330,7 +333,7 @@ pub(super) fn modern_alpha(v: Option<&Value>) -> Option<f64> {
         Some(a) if is_none_keyword(a) => None,
         Some(a) => {
             if let Some(c) = degenerate_value(a) {
-                return Some(if c.is_nan() { 0.0 } else { z1(c) });
+                return Some(if c.is_nan() { 0.0 } else { c.clamp(0.0, 1.0) });
             }
             match a {
                 Value::Number(num) => {
@@ -339,9 +342,9 @@ pub(super) fn modern_alpha(v: Option<&Value>) -> Option<f64> {
                     } else {
                         num.value
                     };
-                    Some(z1(val))
+                    Some(val.clamp(0.0, 1.0))
                 }
-                Value::Slash(num, _) => Some(z1(num.value)),
+                Value::Slash(num, _) => Some(num.value.clamp(0.0, 1.0)),
                 _ => Some(1.0),
             }
         }
