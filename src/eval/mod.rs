@@ -1112,6 +1112,11 @@ pub(crate) struct Evaluator<'a> {
     /// cannot change stderr. Keyed by a fingerprint; the stored material is
     /// compared with `==` on a hit, so a 64-bit collision only costs the slow
     /// path.
+    ///
+    /// Bounded in BOTH directions, because it retains what it was asked about:
+    /// [`Self::DEP_MEMO_MAX`] caps how many entries there can be, and
+    /// [`Self::probe_arg_memoizable`] caps what one entry can hold. No `Value`
+    /// graph ever enters it.
     dep_memo: HashMap<(u32, u32, u32, u32, u64), DepProbe>,
     /// Small interned ids for source files, stamped into [`SrcLines`] so the
     /// serializer's trailing-comment rule can require same-file adjacency and
@@ -1893,8 +1898,14 @@ impl<'a> Evaluator<'a> {
     /// the ceiling the memo simply stops learning — every further probe takes
     /// the same path it took before this memo existed, which is slower and
     /// byte-identical. The largest sheet in `bench/corpus` peaks at 70 entries
-    /// (measured 2026-09-16), so this is ~58x observed usage and about a
-    /// megabyte at worst against a ~25 MB peak.
+    /// (measured 2026-09-16), so this is ~58x observed usage.
+    ///
+    /// The count is only half a bound; [`Self::probe_arg_memoizable`] is the
+    /// other half, and without it this number would mean nothing. With both, a
+    /// full memo costs about 645 bytes an entry — measured 2026-09-16 on a
+    /// generated sheet with 4000 distinct probe sites, +2.46 MB of peak RSS
+    /// under the CLI's bump arena, which never reuses a freed block — so ~2.6
+    /// MB at the ceiling, against a ~25 MB peak for the largest bench sheet.
     const DEP_MEMO_MAX: usize = 4096;
 
     /// Whether this exact deprecation probe has already run to completion at
@@ -1920,6 +1931,14 @@ impl<'a> Evaluator<'a> {
         pos_args: &[Value],
         named: &[(String, Value)],
     ) -> bool {
+        // A shape this memo must not retain is not memoised at all: no entry,
+        // no fingerprint, straight down the path it took before the memo
+        // existed. See [`Self::probe_arg_memoizable`].
+        if !pos_args.iter().all(Self::probe_arg_memoizable)
+            || !named.iter().all(|(_, v)| Self::probe_arg_memoizable(v))
+        {
+            return false;
+        }
         use std::hash::Hasher;
         let mut h = crate::fxhash::FxHasher::default();
         h.write(name.as_bytes());
@@ -1968,12 +1987,62 @@ impl<'a> Evaluator<'a> {
         false
     }
 
+    /// Whether an argument of this shape may enter [`Self::dep_memo`] at all.
+    ///
+    /// The memo RETAINS its arguments, because that is what makes the `==`
+    /// verify possible — so an entry count is only a bound if one entry is
+    /// bounded too. `Calc`, `Slash`, `Function` and `Mixin` clone their whole
+    /// tree, a `List` clones the keyword map of an argument list, and a `Number`
+    /// clones its unit lists when they are complex. One large value reached from
+    /// many call sites would then be retained once per site: measured
+    /// 2026-09-16, a sheet with 4000 `saturate($c)` sites where `$c` is a
+    /// 4000-term `calc()` cost the memo **1.19 GB** on top of the 1.80 GB that
+    /// sheet already costs without it. `Str` and `Map` clone an `Rc` and so
+    /// amplify nothing, but they are refused with the rest: admitting them buys
+    /// no speed, and the rule is easier to keep true when it is "only what the
+    /// suggestion tables read".
+    ///
+    /// Which is the reason refusing costs nothing. Every probe reaches here only
+    /// after the call itself SUCCEEDED, and
+    /// [`crate::builtins::color_function_suggestions`] reads exactly a `Color`
+    /// and a `Number`: a channel getter (`red`, `whiteness`, …) has no plain-CSS
+    /// overload, so a non-`Color` argument fails the call before this point, and
+    /// a legacy adjuster (`saturate($c)`) that does pass through as CSS yields
+    /// no suggestion. A refused probe is therefore one that had no warning to
+    /// skip. The `[global-builtin]` probes, which are the bulk of the win, pass
+    /// no arguments at all and are unaffected.
+    ///
+    /// The match is exhaustive ON PURPOSE: a new [`Value`] variant must not
+    /// default into a memo that retains it, so adding one has to fail the build
+    /// here.
+    fn probe_arg_memoizable(v: &Value) -> bool {
+        match v {
+            // A simple unit is one `String` from the call's own spelling.
+            Value::Number(n) => !n.has_complex_units(),
+            Value::Color(_) => true,
+            Value::Str(_)
+            | Value::List(_)
+            | Value::Map(_)
+            | Value::Bool(_)
+            | Value::Null
+            | Value::Slash(_, _)
+            | Value::Calc(_)
+            | Value::Function(_)
+            | Value::Mixin(_) => false,
+        }
+    }
+
     /// Fold a value into a probe fingerprint. Deliberately COARSE for the
     /// composite variants: the `==` verify in [`Self::probe_already_done`] is
     /// what makes the memo exact, and a coarse fingerprint only ever costs a
     /// trip down the slow path. Numbers are hashed by `to_bits()` (not `==` on
     /// the float) WITH their unit, because `red(1px)`, `red(1)` and
     /// `red(1.0000000000000002)` render three different `Recommendation:` lines.
+    ///
+    /// Only `Number` and `Color` can reach it, since
+    /// [`Self::probe_arg_memoizable`] refuses the rest before any hashing. The
+    /// other arms stay because coarse-but-verified is the safe default: widening
+    /// that gate would cost hash quality here, never correctness.
     fn fingerprint_value(h: &mut crate::fxhash::FxHasher, v: &Value) {
         use std::hash::{Hash, Hasher};
         std::mem::discriminant(v).hash(h);
@@ -7930,10 +7999,86 @@ fn serialize_if_value(v: &Value) -> Result<String, Error> {
 /// [`Evaluator::dep_memo`] so a fingerprint hit can be VERIFIED with `==`
 /// rather than trusted. Lives on the evaluator and dies with it, so nothing
 /// here outlives the arena scope of a single compile.
+///
+/// Every field is a bounded constant plus the current file's URL:
+/// [`Evaluator::probe_arg_memoizable`] is what keeps `pos_args` and `named` from
+/// holding a `Value` graph, so this struct's size does not depend on the size of
+/// the sheet that produced it.
 struct DepProbe {
     url: String,
     name: String,
     module: Option<String>,
     pos_args: Vec<Value>,
     named: Vec<(String, Value)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The memo's retention bound. [`Evaluator::probe_arg_memoizable`]'s match is
+    /// exhaustive, so the compiler already forces a new [`Value`] variant to be
+    /// classified; what this locks is the ANSWER, because the answer that costs
+    /// memory — admit it, and retain whatever graph it points at — is the one a
+    /// hurried patch reaches for. Every shape is written out, so widening the
+    /// rule has to be a visible edit here rather than a silent change in
+    /// footprint.
+    #[test]
+    fn the_probe_memo_admits_only_bounded_argument_shapes() {
+        // What `color_function_suggestions` actually reads, and nothing else.
+        let admitted = vec![
+            Value::Number(Number::unitless(1.0)),
+            Value::Number(Number::with_unit(10.0, "%")),
+            Value::Color(crate::value::Color::rgb(171.0, 205.0, 239.0, 1.0)),
+        ];
+        for v in &admitted {
+            assert!(Evaluator::probe_arg_memoizable(v), "should be memoizable: {v:?}");
+        }
+
+        let refused = vec![
+            // Simple units are one `String`; a complex unit list is two `Vec`s
+            // of them, and it clones deeply.
+            Value::Number(Number::with_units(
+                1.0,
+                vec!["px".to_string(), "px".to_string()],
+                Vec::new(),
+            )),
+            Value::Str(SassStr {
+                text: "x".into(),
+                quoted: true,
+            }),
+            Value::List(List::new(Vec::<Value>::new(), ListSep::Space, false)),
+            Value::Map(Map::new(Vec::new())),
+            Value::Bool(true),
+            Value::Null,
+            Value::Slash(Number::unitless(1.0), "1/2".to_string()),
+            Value::Calc(CalcNode::Str("var(--x)".to_string())),
+            Value::Function(SassFunction {
+                name: "f".to_string(),
+                css: false,
+                module: None,
+                user: None,
+            }),
+            Value::Mixin(Box::new(SassMixin {
+                name: "m".to_string(),
+                user: None,
+                module: None,
+            })),
+        ];
+        for v in &refused {
+            assert!(
+                !Evaluator::probe_arg_memoizable(v),
+                "should not be memoizable: {v:?}"
+            );
+        }
+
+        // The two lists together are the whole enum, so a new variant cannot be
+        // added without landing on one side of it or the other.
+        let variants: std::collections::HashSet<_> = admitted
+            .iter()
+            .chain(refused.iter())
+            .map(std::mem::discriminant)
+            .collect();
+        assert_eq!(variants.len(), 11, "one case per `Value` variant");
+    }
 }
