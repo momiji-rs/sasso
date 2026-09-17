@@ -58,6 +58,16 @@ gate measures shapes that are in parity rather than shapes only sasso accepts.
 otherwise just report a faster number, which is exactly how three `@use`-graph
 measurements in `perf_audit_2026-09-15.md` came to be void.
 
+One limit those deltas do not show. CodSpeed's simulation mode counts
+instructions, and the first CI run put the `@use`-graph benchmarks at 6.7 ms
+simulated against 3.5 ms of wall time here, where
+`large_expanded_with_url_silent` is 71 ms simulated against 9.4 ms — about four
+times less instruction work per unit of wall time. Import resolution spends much
+of its time in the kernel, which instruction counting cannot see, so a lever that
+saves syscalls will read smaller in CI than it does locally. That is the same
+caveat the plan's B3 records for A3; the corpus is still worth gating, but read
+its CI number as a floor.
+
 There is also a **real-world corpus** harness in [`real-world/`](./real-world/):
 it sparse-clones pinned, vetted, currently-active OSS Sass codebases
 (bootstrap, bulma, mastodon, …), verifies output parity against dart-sass, and
