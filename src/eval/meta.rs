@@ -218,16 +218,7 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
     ) -> Result<Value, Error> {
         let params = ["name", "css", "module"];
-        if pos_args.len() > params.len() {
-            return Err(Error::at(
-                format!(
-                    "Only {} arguments allowed, but {} were passed.",
-                    params.len(),
-                    pos_args.len()
-                ),
-                pos,
-            ));
-        }
+        crate::builtins::check_arity(params.len(), pos_args, named, pos)?;
         let arg = |i: usize| -> Option<&Value> {
             pos_args
                 .get(i)
@@ -357,16 +348,7 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
     ) -> Result<Value, Error> {
         let params = ["name", "module"];
-        if pos_args.len() > params.len() {
-            return Err(Error::at(
-                format!(
-                    "Only {} arguments allowed, but {} were passed.",
-                    params.len(),
-                    pos_args.len()
-                ),
-                pos,
-            ));
-        }
+        crate::builtins::check_arity(params.len(), pos_args, named, pos)?;
         let arg = |i: usize| -> Option<&Value> {
             pos_args
                 .get(i)

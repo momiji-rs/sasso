@@ -2626,7 +2626,7 @@ fn only_positional_arguments_count_toward_arity() {
     // measured against dart-sass 1.104.1. Offline.
     let prelude = "@use \"sass:color\";\n@use \"sass:math\";\n@use \"sass:string\";\n\
                    @use \"sass:list\";\n@use \"sass:map\";\n@use \"sass:meta\";\n\
-                   @use \"sass:selector\";\n";
+                   @use \"sass:selector\";\n@function f() { @return 1; }\n";
     for (call, want) in [
         // No named argument: the plain wording, unchanged.
         (
@@ -2781,6 +2781,17 @@ fn only_positional_arguments_count_toward_arity() {
         (
             "meta.variable-exists(\"v\", \"m\", $nope: 1)",
             "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        // `get-function` is evaluator-owned and kept its own copy of the
+        // check, in BOTH the builtin fallback and the evaluator path — the
+        // second is the one that actually runs.
+        (
+            "meta.get-function(\"f\", true, \"x\", 4, $nope: 5)",
+            "Only 3 positional arguments allowed, but 4 were passed.",
+        ),
+        (
+            "get-function(\"f\", true, \"x\", 4, $nope: 5)",
+            "Only 3 positional arguments allowed, but 4 were passed.",
         ),
     ] {
         let msg = ours_err(&format!("{prelude}a {{ b: {call}; }}\n"));

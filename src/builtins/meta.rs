@@ -272,15 +272,8 @@ fn fn_function_exists(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -
 /// error dart-sass raises.
 fn fn_get_function(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option<Result<Value, Error>> {
     let params = ["name", "css", "module"];
-    if pos_args.len() > params.len() {
-        return Some(Err(Error::at(
-            format!(
-                "Only {} arguments allowed, but {} were passed.",
-                params.len(),
-                pos_args.len()
-            ),
-            pos,
-        )));
+    if let Err(e) = super::check_arity(params.len(), pos_args, named, pos) {
+        return Some(Err(e));
     }
     let v = match super::arg(&params, pos_args, named, 0) {
         Some(v) => v,
