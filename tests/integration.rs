@@ -314,6 +314,137 @@ fn first_class_mixin_load_css_resolves_against_defining_module() {
     assert_eq!(out, ".out .loaded {\n  x: from-sub-dep;\n}");
 }
 
+/// A [`DirImporter`] that counts calls per url, and can be told to fail every
+/// `load` after the first.
+struct CountingImporter {
+    inner: DirImporter,
+    canonicalized: std::cell::RefCell<HashMap<String, usize>>,
+    loaded: std::cell::RefCell<HashMap<String, usize>>,
+    /// When true, the SECOND and later `load` of any url returns an error --
+    /// standing in for a file that becomes unreadable mid-compile.
+    poison_reload: bool,
+}
+
+impl CountingImporter {
+    fn new(files: HashMap<String, String>, poison_reload: bool) -> Self {
+        CountingImporter {
+            inner: DirImporter(files),
+            canonicalized: std::cell::RefCell::new(HashMap::new()),
+            loaded: std::cell::RefCell::new(HashMap::new()),
+            poison_reload,
+        }
+    }
+    fn count(map: &std::cell::RefCell<HashMap<String, usize>>, key: &str) -> usize {
+        *map.borrow().get(key).unwrap_or(&0)
+    }
+}
+
+impl Importer for CountingImporter {
+    fn canonicalize(
+        &self,
+        url: &str,
+        ctx: &CanonicalizeContext<'_>,
+    ) -> Result<Option<CanonicalUrl>, ImporterError> {
+        *self
+            .canonicalized
+            .borrow_mut()
+            .entry(url.to_string())
+            .or_insert(0) += 1;
+        self.inner.canonicalize(url, ctx)
+    }
+
+    fn load(&self, canonical: &CanonicalUrl) -> Result<Option<ImporterResult>, ImporterError> {
+        let key = canonical.as_str().to_string();
+        let seen = {
+            let mut counts = self.loaded.borrow_mut();
+            let n = counts.entry(key.clone()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        if self.poison_reload && seen > 1 {
+            return Err(ImporterError {
+                message: format!("load #{seen} of {key}"),
+            });
+        }
+        self.inner.load(canonical)
+    }
+}
+
+/// The `@use` graph for the two tests below: `shared` is reached three times --
+/// directly by the entry and through each of `a` and `b`.
+fn diamond_files() -> HashMap<String, String> {
+    let mut files = HashMap::new();
+    files.insert(
+        "/_shared".to_string(),
+        "$w: 4px;\n.shared { x: 1; }\n".to_string(),
+    );
+    files.insert(
+        "/_a".to_string(),
+        "@use \"shared\";\n.a { width: shared.$w; }\n".to_string(),
+    );
+    files.insert(
+        "/_b".to_string(),
+        "@use \"shared\";\n.b { width: shared.$w; }\n".to_string(),
+    );
+    files
+}
+
+const DIAMOND_ENTRY: &str = "@use \"shared\";\n@use \"a\";\n@use \"b\";\n.entry { width: shared.$w; }\n";
+
+/// Byte-for-byte dart-sass 1.104.1 on the same graph written to disk, minus
+/// the single trailing newline the CLI adds and the library API does not.
+const DIAMOND_CSS: &str =
+    ".shared {\n  x: 1;\n}\n\n.a {\n  width: 4px;\n}\n\n.b {\n  width: 4px;\n}\n\n.entry {\n  width: 4px;\n}";
+
+/// An importer's `load` runs **once per canonical url**, not once per `@use`
+/// edge, while `canonicalize` still runs on every edge.
+///
+/// That split is the contract of the module cache, and both halves matter.
+/// Skipping the repeat `load` is the point: a module already in the cache
+/// re-emits nothing and re-parses nothing, so reading its text again is a
+/// syscall spent on a string that is dropped -- dart-sass's `ImportCache`
+/// memoizes at the same granularity. Keeping `canonicalize` per edge is what
+/// makes that safe: dependency provenance for `--quiet-deps` is recorded there
+/// (`src/importer.rs`), so a cache hit must not skip it.
+#[test]
+fn a_repeat_use_edge_canonicalizes_again_but_does_not_reload() {
+    let importer = CountingImporter::new(diamond_files(), false);
+    let out = compile(
+        DIAMOND_ENTRY,
+        &Options::default().with_url("/entry").with_importer(&importer),
+    )
+    .expect("compile");
+    assert_eq!(out, DIAMOND_CSS);
+    assert_eq!(
+        CountingImporter::count(&importer.canonicalized, "shared"),
+        3,
+        "canonicalize runs per edge: the entry, /_a and /_b each `@use \"shared\"`"
+    );
+    assert_eq!(
+        CountingImporter::count(&importer.loaded, "/_shared"),
+        1,
+        "load runs once per canonical url"
+    );
+}
+
+/// The observable consequence of the above: a module that becomes unreadable
+/// after its first load still compiles, because nothing reads it again.
+///
+/// This is dart-sass's behaviour too (`ImportCache` caches the loaded
+/// stylesheet, not just the canonical url), and it is pinned here because the
+/// alternative -- re-reading per edge and failing -- is what this repo did
+/// before, so a revert would be silent without a test.
+#[test]
+fn a_module_that_becomes_unreadable_after_its_first_load_still_compiles() {
+    let importer = CountingImporter::new(diamond_files(), true);
+    let out = compile(
+        DIAMOND_ENTRY,
+        &Options::default().with_url("/entry").with_importer(&importer),
+    )
+    .expect("a cached module is never re-read, so the poisoned reload is never reached");
+    assert_eq!(out, DIAMOND_CSS);
+}
+
 #[test]
 fn compressed_output() {
     let out = css_compressed(".a { color: #336699; width: 10px; .b { color: #2a7ae2; } }");
