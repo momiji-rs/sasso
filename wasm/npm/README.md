@@ -54,6 +54,9 @@ interface CompileResult { css: string; loadedUrls: URL[]; sourceMap?: object }
 - **Warnings.** `@warn` / `@debug` / deprecation warnings print to stderr by
   default, or go to a `logger` (`{ warn(message, opts), debug(message, opts) }`,
   dart-sass-shaped). `Logger.silent` discards them.
+- `unicode: false` renders diagnostics with the ASCII glyph set (`,`/`|`/`'`
+  instead of `╷`/`│`/`╵`), like the CLI's `--no-unicode`. A sasso extension:
+  dart-sass exposes this on its command line only.
 - `quietDeps: true` drops deprecation warnings raised inside *dependencies* —
   stylesheets reached through a `loadPaths` directory or a custom importer, and
   whatever those load relatively. It is about how a file was REACHED, not where
@@ -192,14 +195,15 @@ Flags: `-s/--style <expanded|compressed>`, `-I/--load-path <dir>` (repeatable),
 `-o/--output <file>`, `--stdin`, `--indented`, `--[no-]source-map` (on by default
 when writing a file), `--source-map-urls <relative|absolute>`, `--embed-sources`,
 `--embed-source-map` (inline the map), `--[no-]charset`, `-q/--quiet` (silence
-`@warn`/`@debug`), `--[no-]quiet-deps`, `--[no-]stop-on-error`, `--no-css`,
-`--update` (skip outputs newer than their input), `-w/--watch` (re-compiles when
-the input or any dependency changes), `--help`, `--version`. Accepted for
-dart-sass compatibility: `-c/--[no-]color` and `--[no-]unicode` (no-ops — sasso
-never colors its output), `-j/--jobs <N>` (this CLI compiles sequentially), and
-`--[no-]error-css` (**not implemented**: a failing compile always behaves as
-`--no-error-css`, dropping a stale output file rather than describing the error
-in CSS).
+`@warn`/`@debug`), `--[no-]quiet-deps`, `--[no-]unicode` (ASCII glyphs in
+diagnostics), `--[no-]stop-on-error`, `--no-css`, `--update` (skip outputs newer
+than their input), `-w/--watch` (re-compiles when the input or any dependency
+changes), `--loop <N>` (recompile N times and report throughput), `--help`,
+`--version`. An input of `-` is standard input. Accepted for dart-sass
+compatibility: `-c/--[no-]color` (a no-op — sasso never colors its output),
+`-j/--jobs <N>` (this CLI compiles sequentially), and `--[no-]error-css`
+(**not implemented**: a failing compile always behaves as `--no-error-css`,
+dropping a stale output file rather than describing the error in CSS).
 
 An `<in>:<out>` pair may name **directories**: every `.scss`/`.sass`/`.css` file
 under `<in>` that is not a partial compiles to the matching path under `<out>`,

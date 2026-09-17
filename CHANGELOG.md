@@ -19,6 +19,10 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Added
 
+- **`unicode` in the npm package's JS API** (the CLI's `--[no-]unicode`):
+  `unicode: false` renders diagnostics with the ASCII glyph set. dart-sass
+  exposes this on its command line only, so it is a sasso extension — but its
+  CLI flag is not a no-op there, and was one here.
 - **`quietDeps` in the npm package's JS API** (dart-sass `quietDeps`): drops
   deprecation warnings raised inside dependencies — stylesheets reached through
   a `loadPaths` directory or a custom importer, and whatever those load
@@ -71,6 +75,34 @@ Conformance is tracked separately as a ratchet against the official
   reproducible mirror, and skips sources inside the destination when the
   destination is nested in the source tree. `sasso <dir>` compiles a tree in
   place, and `-o`/`--output` names an output file, both as the native CLI does.
+- **The npm CLI enforces the same argument grammar as the native one.** It
+  accepted shapes the native CLI (and dart) reject, so one command line meant
+  different things depending on which sasso was installed: a third positional
+  argument was silently ignored rather than `Only two positional args may be
+  passed.`, a second one under `--stdin` likewise, `:out.css` / `in.scss:` /
+  `in.scss:out:other.css` were taken as paths, `in.scss:a.css in.scss:b.css`
+  compiled twice instead of `Duplicate source "in.scss".`, and a file named by
+  both a directory pair and an explicit pair was compiled twice and published
+  to both destinations rather than once to the last. `--jobs`/`--loop` now
+  reject a non-positive value, `-` (and `-:out.css`) reads standard input, a
+  directory pair that expands to nothing exits 0 rather than claiming there was
+  no input, and the source-map combinations dart rejects
+  (`--embed-sources`/`--embed-source-map`/`--source-map-urls` with
+  `--no-source-map`) are rejected for a file output too, not only for stdout.
+- **`--no-unicode` and `--loop` did nothing in the npm CLI.** Both are real
+  flags of the native CLI, and both were accepted and dropped on the floor:
+  `--no-unicode` left every diagnostic in Unicode box glyphs where the native
+  CLI and dart switch to ASCII, and `--loop N` compiled once instead of N times
+  and reported no throughput. The compiler now takes `unicode` through the wasm
+  bridge and the native addon alike, and `--loop` measures and reports as the
+  native CLI does (stdout only, warnings silenced, no source map).
+- **The npm CLI's source-map URLs are encoded as dart encodes them.** Segments
+  were run through `encodeURIComponent`, which escapes the sub-delimiters dart
+  keeps, so a source or output named `the+me,1.scss` was spelled
+  `the%2Bme%2C1.scss` in `sources[]`, in the map's `file` and in the
+  `sourceMappingURL` footer. A `--stdin` entry also named itself `stdin` where
+  dart records the source TEXT as a `data:;charset=utf-8,…` URI. `--no-css` no
+  longer builds a source map it is about to discard.
 - **The npm CLI drops a stale output when a compile fails.** It always behaves
   as `--no-error-css`, and dart then *removes* the output file rather than leave
   the last good build in place for a server to keep serving. `--no-css` now
