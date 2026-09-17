@@ -134,7 +134,7 @@ impl<'a> Evaluator<'a> {
             };
             let res = {
                 let mut child = Sink::Rule {
-                    selectors: parents,
+                    selectors: SinkSelectors::Borrowed(parents),
                     linebreaks: &wrap_linebreaks,
                     // The wrap re-uses the enclosing selectors, so it has no
                     // source rule of its own: `file`/`start`/`end` stay 0 to keep

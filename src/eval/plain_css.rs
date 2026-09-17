@@ -88,7 +88,7 @@ impl<'a> Evaluator<'a> {
                     // serializing) — e.g. when its whole body bubbled out.
                     if !items.is_empty() {
                         sink.push_at_rule(OutNode::Rule {
-                            selectors: RuleSelectors::Raw(selectors),
+                            selectors: RuleSelectors::Raw(Rc::new(selectors)),
                             linebreaks,
                             items,
                             lines: self.stamp(SrcLines {
@@ -239,7 +239,7 @@ impl<'a> Evaluator<'a> {
                     let (items, bubbled) = self.css_rule_children(&r.body, &selectors)?;
                     if !items.is_empty() {
                         out.push(OutNode::Rule {
-                            selectors: RuleSelectors::Raw(selectors),
+                            selectors: RuleSelectors::Raw(Rc::new(selectors)),
                             linebreaks,
                             items,
                             lines: self.stamp(SrcLines {
