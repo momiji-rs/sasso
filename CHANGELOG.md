@@ -17,6 +17,17 @@ Conformance is tracked separately as a ratchet against the official
 > burned three minors that the crate never spent. From 0.14.0 the two lines
 > carry the same number; `release-wasm.yml` enforces it and explains the rest.
 
+### Added
+
+- **`quietDeps` in the npm package's JS API** (dart-sass `quietDeps`): drops
+  deprecation warnings raised inside dependencies — stylesheets reached through
+  a `loadPaths` directory or a custom importer, and whatever those load
+  relatively. The compiler applies it from how each file was RESOLVED, which is
+  what dart does: a stylesheet the entry loads relatively still warns, even from
+  inside a load path, and a dependency's own `@warn`/`@debug` still reaches the
+  logger. Doing it inside the compiler also keeps a silenced warning from
+  counting toward the deprecation repetition cap.
+
 ### Fixed
 
 - **The npm package's CLI accepts the dart-sass flags.** `sasso` ships two
@@ -41,6 +52,30 @@ Conformance is tracked separately as a ratchet against the official
 
   A test derives the flag set from the Rust parser and fails if this CLI
   rejects any of them, so the next flag added to one has to reach the other.
+- **The npm CLI's source maps are the ones dart writes.** Its `sources[]` were
+  absolute `file://` URLs where dart's default (`--source-map-urls=relative`)
+  is the path from the `.map` file — `../sub/_x.scss`, not
+  `file:///home/me/app/sub/_x.scss` — so a map moved with its CSS resolved
+  nothing. `--embed-source-map` wrote base64 where dart writes a percent-encoded
+  `data:application/json;charset=utf-8,…` URI, expanded output lost dart's blank
+  line before the `/*# sourceMappingURL=… */` footer, and the JSON's fields came
+  out in a different order without `sourceRoot`. `--source-map-urls` is now
+  implemented rather than parsed and dropped, and a `<dir>:<dir>` job into a
+  fresh tree no longer dies with `ENOENT` writing the `.map` before creating the
+  directory.
+- **The npm CLI's directory mode walks dart's tree.** It listed entries with
+  `Dirent.isDirectory()`, which is false for a *symlinked* directory, so whole
+  subtrees silently vanished from the output; it also skipped plain `.css`
+  sources, which dart compiles. It now follows symlinked directories — each one
+  once, by canonical identity, so a cycle cannot loop — sorts for a
+  reproducible mirror, and skips sources inside the destination when the
+  destination is nested in the source tree. `sasso <dir>` compiles a tree in
+  place, and `-o`/`--output` names an output file, both as the native CLI does.
+- **The npm CLI drops a stale output when a compile fails.** It always behaves
+  as `--no-error-css`, and dart then *removes* the output file rather than leave
+  the last good build in place for a server to keep serving. `--no-css` now
+  means no output-side effects at all — it applies to `--stdin` and `--watch`
+  too, not only to batch jobs.
 - **An attribute selector's value is decoded and re-quoted, not echoed.** The
   value between the quotes was copied through verbatim and wrapped in double
   quotes, so a single-quoted value containing a `"` produced invalid CSS:
