@@ -54,7 +54,7 @@ fn channel_name_arg(v: &Value, pos: Pos) -> Result<String, Error> {
 
 fn fn_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
-    max_positional(pos_args, params.len(), pos)?;
+    check_arity(params.len(), pos_args, named, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     Ok(Value::Str(crate::value::SassStr {
         text: color_space_of(&c).name().to_string().into(),
@@ -64,7 +64,7 @@ fn fn_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
 
 fn fn_is_legacy(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
-    max_positional(pos_args, params.len(), pos)?;
+    check_arity(params.len(), pos_args, named, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     Ok(Value::Bool(color_space_of(&c).is_legacy()))
 }
@@ -116,7 +116,7 @@ fn fn_color_channel(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> 
 
 fn fn_is_missing(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "channel"];
-    max_positional(pos_args, params.len(), pos)?;
+    check_arity(params.len(), pos_args, named, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     let chan = channel_name_arg(require(&params, pos_args, named, 1, pos)?, pos)?;
     let mc = legacy_to_modern(&c);
@@ -184,7 +184,7 @@ fn fn_is_powerless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
 
 fn fn_same(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color1", "color2"];
-    max_positional(pos_args, params.len(), pos)?;
+    check_arity(params.len(), pos_args, named, pos)?;
     let c1 = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     let c2 = as_color(require(&params, pos_args, named, 1, pos)?, pos)?;
     let m1 = legacy_to_modern(&c1);
@@ -215,7 +215,7 @@ fn fn_same(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
 
 fn fn_to_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "space", "method"];
-    max_positional(pos_args, params.len(), pos)?;
+    check_arity(params.len(), pos_args, named, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     let mc = legacy_to_modern(&c);
     let space = match arg(&params, pos_args, named, 1) {

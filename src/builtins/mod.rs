@@ -202,10 +202,6 @@ pub(super) fn require<'v>(
 /// "Only N arguments allowed, but M were passed." A named argument naming an
 /// excess parameter is handled separately by `require`, so only the positional
 /// overflow is checked here.
-pub(super) fn max_positional(pos_args: &[Value], max: usize, pos: Pos) -> Result<(), Error> {
-    check_arity(max, pos_args, &[], pos)
-}
-
 /// dart's arity check (`ArgumentDeclaration.verify`): only POSITIONAL
 /// arguments count against a function's parameter count, and the moment any
 /// NAMED argument is present the message says so —

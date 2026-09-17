@@ -16,7 +16,7 @@ mod modern;
 // Shared imports. These are private to `color`, but Rust makes them visible to
 // the child submodules, which pull them in with `use super::*;`.
 use super::color_ext::{computed, named_repr};
-use super::{arg, as_color, channel, check_arity, max_positional, num, require, require_legacy_color};
+use super::{arg, as_color, channel, check_arity, num, require, require_legacy_color};
 use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{fmt_num, CalcNode, Color, ColorSpace, List, ListSep, ModernColor, Number, Value};

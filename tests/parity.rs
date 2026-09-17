@@ -2701,6 +2701,51 @@ fn only_positional_arguments_count_toward_arity() {
             "color.mix(red, blue, 50%, hsl, 5, $nope: 1)",
             "Only 4 positional arguments allowed, but 5 were passed.",
         ),
+        // The members that used to take the `named`-less shortcut.
+        (
+            "color.space(red, 1, $nope: 2)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "color.is-legacy(red, 1, $nope: 2)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "color.is-missing(red, \"red\", 3, $nope: 4)",
+            "Only 2 positional arguments allowed, but 3 were passed.",
+        ),
+        (
+            "color.same(red, blue, 3, $nope: 4)",
+            "Only 2 positional arguments allowed, but 3 were passed.",
+        ),
+        (
+            "color.to-gamut(red, hsl, local-minde, 4, $nope: 5)",
+            "Only 3 positional arguments allowed, but 4 were passed.",
+        ),
+        (
+            "color.red(red, 1, $nope: 2)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "color.green(red, 1, $nope: 2)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "color.whiteness(red, 1, $nope: 2)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "math.percentage(1, 2, $nope: 3)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "percentage(1, 2, $nope: 3)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "opacity(red, 1, $nope: 2)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
     ] {
         let msg = ours_err(&format!("{prelude}a {{ b: {call}; }}\n"));
         assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
@@ -2737,6 +2782,26 @@ fn only_positional_arguments_count_toward_arity() {
     ] {
         let msg = ours_err(&format!("{prelude}a {{ b: {call}; }}\n"));
         assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // `alpha()` is dart's one exception, and it comes from its OVERLOADED
+    // declaration (the `$color` getter beside the variadic ms-filter form),
+    // not from the rule: it reports without the "positional" wording even with
+    // a named argument in play, where its twin `opacity()` — same filter
+    // overload, ordinary declaration — uses it. Both spellings measured.
+    for (call, want) in [
+        (
+            "alpha(red, 1, $nope: 2)",
+            "Only 1 argument allowed, but 2 were passed.",
+        ),
+        ("alpha(red, 1)", "Only 1 argument allowed, but 2 were passed."),
+        ("alpha(red, blue)", "Only 1 argument allowed, but 2 were passed."),
+    ] {
+        let msg = ours_err(&format!("{prelude}a {{ b: {call}; }}\n"));
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+        assert!(
+            !msg.contains("positional"),
+            "{call} should not say positional: {msg}"
+        );
     }
 }
 

@@ -1798,7 +1798,7 @@ pub(super) fn fn_adjust_lightness(
 
 pub(super) fn fn_percentage(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["number"];
-    max_positional(pos_args, params.len(), pos)?;
+    check_arity(params.len(), pos_args, named, pos)?;
     let arg = require(&params, pos_args, named, 0, pos)?;
     if let Value::Number(num) = arg {
         if !num.is_unitless() {
@@ -1819,7 +1819,7 @@ pub(super) fn fn_channel(
     pos: Pos,
 ) -> Result<Value, Error> {
     let params = ["color"];
-    max_positional(pos_args, params.len(), pos)?;
+    check_arity(params.len(), pos_args, named, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     // The legacy red/green/blue getters only support legacy colors.
     if c.modern.as_ref().is_some_and(|m| !m.space.is_legacy()) {
@@ -1894,7 +1894,13 @@ pub(super) fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
             quoted: false,
         }));
     }
-    check_arity(1, pos_args, named, pos)?;
+    // `alpha()` is declared in dart as an OVERLOADED function (the `$color`
+    // getter beside the variadic ms-filter form above), and its overload
+    // dispatch reports the arity without dart's "positional" wording even when
+    // a named argument is present: `alpha(red, 1, $nope: 2)` is "Only 1
+    // argument allowed, but 2 were passed." where every non-overloaded member
+    // says "Only 1 positional argument allowed". Hence the empty `named` here.
+    check_arity(1, pos_args, &[], pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     // The legacy alpha getter only supports legacy colors.
     if c.modern.as_ref().is_some_and(|m| !m.space.is_legacy()) {
