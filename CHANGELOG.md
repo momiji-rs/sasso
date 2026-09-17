@@ -11,6 +11,31 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Changed
+
+- **The npm CLI uses the native addon when it is installed, and compiles files
+  in parallel.** It did neither: it hard-coded the size-optimised wasm build
+  even though `npm install sasso` had already fetched
+  `sasso-native-<platform>` as an optionalDependency, and it compiled
+  sequentially while `-j/--jobs` was accepted and ignored. Compiling the
+  137-stylesheet Lichess tree on a 12-core machine went from **2229 ms to
+  265 ms** — from dart-sass's speed (2048 ms) to within 1.9× of the native
+  binary (139 ms) — with output byte-identical to that binary in every
+  engine/concurrency combination.
+
+  The pool is `node:worker_threads` with workers pulling from a shared index,
+  so one heavy stylesheet cannot leave the others idle, and `--stop-on-error`
+  is a shared flag: whoever fails stops the rest from taking new work, which is
+  the native CLI's "don't start more files once one fails". A single job,
+  `--stdin` and `-j 1` stay in-process — a worker costs more than the compile.
+  `SASSO_ENGINE=wasm|native` forces an engine.
+
+  What that flag means now differs at the edges: `--stop-on-error` skips the
+  remaining files at `-j 1` but not necessarily at the default, because they
+  have already started — the native CLI behaves the same way (measured
+  2026-09-17), and the test that assumed otherwise was pinning a
+  sequential-only accident (#83).
+
 ## [0.14.0] - 2026-09-17
 
 _The release that makes the npm package the CLI the release notes have been

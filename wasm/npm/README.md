@@ -199,11 +199,20 @@ when writing a file), `--source-map-urls <relative|absolute>`, `--embed-sources`
 diagnostics), `--[no-]stop-on-error`, `--no-css`, `--update` (skip outputs newer
 than their input), `-w/--watch` (re-compiles when the input or any dependency
 changes), `--loop <N>` (recompile N times and report throughput), `--help`,
-`--version`. An input of `-` is standard input. Accepted for dart-sass
-compatibility: `-c/--[no-]color` (a no-op — sasso never colors its output),
-`-j/--jobs <N>` (this CLI compiles sequentially), and `--[no-]error-css`
-(**not implemented**: a failing compile always behaves as `--no-error-css`,
-dropping a stale output file rather than describing the error in CSS).
+`--version`, and `-j/--jobs <N>` (how many files to compile at once; the
+default is one per CPU). An input of `-` is standard input. Accepted for
+dart-sass compatibility: `-c/--[no-]color` (a no-op — sasso never colors its
+output) and `--[no-]error-css` (**not implemented**: a failing compile always
+behaves as `--no-error-css`, dropping a stale output file rather than
+describing the error in CSS).
+
+**Which engine the CLI uses.** It prefers the native addon — `npm install
+sasso` already fetched `sasso-native-<platform>` as an optionalDependency on
+macOS and Linux — and falls back to the wasm build (the speed-optimised one)
+everywhere else. Both produce byte-identical output; `SASSO_ENGINE=wasm` or
+`SASSO_ENGINE=native` forces one. Compiling a 137-stylesheet tree on a 12-core
+machine: **265 ms** on the native engine, 612 ms on wasm, against dart-sass's
+2048 ms.
 
 An `<in>:<out>` pair may name **directories**: every `.scss`/`.sass`/`.css` file
 under `<in>` that is not a partial compiles to the matching path under `<out>`,
