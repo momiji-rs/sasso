@@ -694,10 +694,20 @@ impl<'a> Evaluator<'a> {
         // allocator. The returned `String`s are then deep-copied into the arena
         // below by the parse/eval pipeline.
         let paused = crate::arena::pause();
-        // Two-phase resolution (canonicalize, then load), both inside ONE arena
-        // pause so the importer's owned allocations survive this compile's arena
-        // reset. `@use`/`@forward` never consider import-only files.
-        let two_phase = match importer {
+        // Phase 1 of resolution: canonicalize, inside the arena pause so the
+        // importer's owned allocations survive this compile's arena reset.
+        // `@use`/`@forward` never consider import-only files.
+        //
+        // Phase 2 (`load`) used to run here too, unconditionally. It is now
+        // deferred past the module-cache probe below, because the canonical URL
+        // is the cache key and a hit never reads the loaded text: a second
+        // `@use` of an already-evaluated module re-emits nothing and re-parses
+        // nothing, so reading the file again is a syscall spent on a string
+        // that is dropped. dart-sass caches the same way and at the same
+        // granularity -- `ImportCache.importCanonical` memoizes per canonical
+        // URL, not per edge -- and this file's `@import` path already probes
+        // `import_cache` ahead of both phases.
+        let phase1 = match importer {
             Some(imp) => {
                 let ctx = CanonicalizeContext {
                     from_import: false,
@@ -706,25 +716,41 @@ impl<'a> Evaluator<'a> {
                 match imp.canonicalize(url, &ctx) {
                     Err(e) => return Err(Error::at(e.message, pos)),
                     Ok(None) => None,
-                    Ok(Some(canon)) => match imp.load(&canon) {
-                        Err(e) => return Err(Error::at(e.message, pos)),
-                        Ok(None) => None,
-                        Ok(Some(res)) => Some((
-                            canon.as_str().to_string(),
-                            res.contents,
-                            res.syntax,
-                            res.source_map_url,
-                        )),
-                    },
+                    // The key is built inside the pause: it outlives this
+                    // compile's arena reset in `module_cache`. `imp` rides
+                    // along so phase 2 cannot be handed a different importer
+                    // than the one that produced `canon`.
+                    Ok(Some(canon)) => Some((canon.as_str().to_string(), canon, imp)),
                 }
             }
             None => None,
         };
         drop(paused);
-        let (key, src, syntax, source_map_url) = match two_phase {
-            Some(quad) => quad,
+        let (key, canon, imp) = match phase1 {
+            Some(triple) => triple,
             None => {
                 return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
+            }
+        };
+        // The cache probe, and phase 2 only on a miss. Both sit ABOVE the sink
+        // mutation below on purpose: popping the pre-module comment run is an
+        // edit to the output, and an error out of `load` must not leave it
+        // already popped.
+        let cached = self.module_cache.borrow().get(&key).cloned();
+        let loaded = if cached.is_some() {
+            None
+        } else {
+            let paused = crate::arena::pause();
+            let res = match imp.load(&canon) {
+                Err(e) => return Err(Error::at(e.message, pos)),
+                Ok(v) => v,
+            };
+            drop(paused);
+            match res {
+                Some(res) => Some((res.contents, res.syntax, res.source_map_url)),
+                None => {
+                    return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
+                }
             }
         };
         // Pop the comment run textually preceding this `@use`/`@forward` so
@@ -753,7 +779,6 @@ impl<'a> Evaluator<'a> {
         // configuration targets no variable the module actually defines (a
         // module with no configurable variables may be loaded with or without
         // config). The keys it *does* define count as consumed for the caller.
-        let cached = self.module_cache.borrow().get(&key).cloned();
         if let Some(existing) = cached {
             let consumed: Vec<String> = config
                 .keys()
@@ -866,6 +891,12 @@ impl<'a> Evaluator<'a> {
                 pos,
             ));
         }
+        // Past the cache-hit block, every branch of which returns, so phase 2
+        // ran and this is `Some`. Erring rather than unwrapping keeps a later
+        // edit to that block from turning a missed `return` into a panic.
+        let Some((src, syntax, source_map_url)) = loaded else {
+            return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
+        };
         // The display URL a snippet/frame shows for this file.
         let diag_url = self.module_diag_url(url, &key);
         // One shared copy of the module's text: for the source-map table, for
@@ -1565,7 +1596,8 @@ impl<'a> Evaluator<'a> {
     pub(super) fn module_diag_url(&self, url: &str, key: &str) -> String {
         let path = std::path::Path::new(key);
         if path.is_absolute() {
-            return pretty_path(path);
+            let cwd = self.cwd_cache.get_or_init(|| std::env::current_dir().ok());
+            return pretty_path(path, cwd.as_deref());
         }
         let base = key.rsplit(['/', '\\']).next().unwrap_or(key);
         if base.is_empty() {
@@ -1684,8 +1716,12 @@ fn regroup_load_css_copy(nodes: Vec<OutNode>, prev_rule: &mut bool) -> Vec<OutNo
 /// dart's `p.prettyUri` for a filesystem path: the path relative to the
 /// current directory, unless that has more segments than the absolute path
 /// (a file far outside the tree), in which case the absolute path.
-fn pretty_path(abs: &std::path::Path) -> String {
-    let Ok(cwd) = std::env::current_dir() else {
+///
+/// `cwd` is passed in rather than read here because the caller memoizes it for
+/// the compile (`Evaluator::cwd_cache`); `None` is "the process has no readable
+/// current directory", the same case the `getcwd` failure took before.
+fn pretty_path(abs: &std::path::Path, cwd: Option<&std::path::Path>) -> String {
+    let Some(cwd) = cwd else {
         return abs.to_string_lossy().into_owned();
     };
     let target: Vec<std::path::Component<'_>> = abs.components().collect();

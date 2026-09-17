@@ -991,6 +991,13 @@ pub(crate) struct Evaluator<'a> {
     /// and `enter_origin_file`. (The two are kept separate rather than derived
     /// because `current_file_dir` is also the `@import` cache key.)
     current_canonical: Option<CanonicalUrl>,
+    /// The process's current directory, resolved at most once per compile.
+    /// Only `pretty_path` in `modules.rs` reads it, and only to build a
+    /// display string, but `getcwd` is a real syscall -- ~10-19 us on macOS
+    /// against ~0.5 us on Linux -- and it was being made once per module
+    /// loaded. `None` means the call failed, which `pretty_path` already had a
+    /// fallback for.
+    cwd_cache: std::cell::OnceCell<Option<std::path::PathBuf>>,
     /// Whether evaluation is inside a `@keyframes` body: frame blocks are not
     /// style rules in dart-sass, so nested at-rules do not bubble out of them
     /// and frame selectors get keyframe normalization (`E` -> `e`).
@@ -1481,6 +1488,7 @@ impl<'a> Evaluator<'a> {
             // derives the same search base from its dirname (a bare name like
             // `input.scss` -> "" = CWD, matching `entry_dir`).
             current_canonical: Some(entry_canonical),
+            cwd_cache: std::cell::OnceCell::new(),
             media_hoist: Vec::new(),
             at_root_hoist: std::collections::VecDeque::new(),
             at_rule_ctx: Vec::new(),
