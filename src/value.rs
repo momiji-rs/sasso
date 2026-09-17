@@ -3133,6 +3133,55 @@ mod tests {
         assert_eq!(fmt_num(2.0, true), "2");
     }
 
+    #[test]
+    fn push_num_writes_at_an_offset() {
+        // `push_num` rounds, carries, strips a leading zero and rewrites `-0`
+        // by mutating the bytes it just wrote, addressed from `out.len()` at
+        // entry. Every one of those fix-ups must therefore be blind to what is
+        // already in the buffer: a number appended after a prefix must render
+        // exactly as it does into an empty string, and must leave the prefix
+        // untouched — including a multibyte one, where a byte-indexed
+        // `truncate`/`remove` would panic if the offset arithmetic slipped.
+        let cases = [
+            153.0,
+            178.5,
+            -0.0,
+            -0.25,
+            0.5,
+            1.0 / 3.0,
+            // Rounding that carries through every digit, with and without a
+            // digit to increment on the left of the dot.
+            0.99999999995,
+            9.99999999995,
+            0.30000000005,
+            1e-11,
+            // Exponent removal, at both ends of the range.
+            1e-7,
+            1e20,
+            1.5e300,
+            // A shortest form whose literal last digit drives the rounding.
+            2154.15598416745,
+        ];
+        for prefix in ["", "margin:", "邊界：", "🎨 "] {
+            for compressed in [false, true] {
+                for n in cases {
+                    let mut out = String::from(prefix);
+                    push_num(&mut out, n, compressed);
+                    assert_eq!(
+                        &out[..prefix.len()],
+                        prefix,
+                        "prefix {prefix:?} clobbered writing {n} (compressed {compressed})"
+                    );
+                    assert_eq!(
+                        &out[prefix.len()..],
+                        fmt_num(n, compressed),
+                        "{n} rendered differently after {prefix:?} (compressed {compressed})"
+                    );
+                }
+            }
+        }
+    }
+
     fn num(value: f64, unit: &str) -> CalcNode {
         CalcNode::Number(Number::with_unit(value, unit))
     }
