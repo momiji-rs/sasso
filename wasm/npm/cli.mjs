@@ -869,10 +869,10 @@ function runLoop(opts, common) {
 
 /** A worker thread: same compile loop, same code, pulling from the shared index. */
 async function runWorker() {
-  const { jobs, opts, ctl } = workerData;
+  const { jobs, opts, ctl, stdinSource } = workerData;
   await loadEngine();
   const common = commonOptions(opts);
-  const failed = compileSlice(jobs, opts, common, ctl);
+  const failed = compileSlice(jobs, opts, common, ctl, stdinSource);
   parentPort.postMessage({ failed });
 }
 
@@ -964,21 +964,23 @@ async function main() {
  * which is the native "don't start more files once one fails".
  *
  * Staying in-process is the right answer for one job (a worker costs more than
- * the compile), for `--stdin` (there is one stdin, and it is here), and when
- * `-j 1` asks for it.
+ * the compile) and when `-j 1` asks for it.
  */
 async function runJobs(jobs, opts, common) {
   const wanted = opts.jobs ?? (os.availableParallelism ? os.availableParallelism() : os.cpus().length);
+  // Standard input is read ONCE, here, and handed to whoever needs it. It used
+  // to force the whole batch into this thread instead, so one `-` job cost
+  // every OTHER job its parallelism.
+  const stdinSource = jobs.some((j) => j.input === "-") ? readStdin() : undefined;
   const workers = Math.min(jobs.length, Math.max(1, wanted));
-  const usesStdin = jobs.some((j) => j.input === "-");
-  if (workers < 2 || usesStdin) return compileSlice(jobs, opts, common, null);
+  if (workers < 2) return compileSlice(jobs, opts, common, null, stdinSource);
 
   // [0] the next job to take, [1] the stop-on-error flag.
   const ctl = new Int32Array(new SharedArrayBuffer(8));
   const results = await Promise.all(
     Array.from({ length: workers }, () => {
       const worker = new Worker(fileURLToPath(import.meta.url), {
-        workerData: { sassoWorker: true, jobs, opts, ctl },
+        workerData: { sassoWorker: true, jobs, opts, ctl, stdinSource },
         // stdout/stderr are forwarded to this thread's by default, so warnings
         // and diagnostics come out where the user expects them.
       });
@@ -998,8 +1000,7 @@ async function runJobs(jobs, opts, common) {
  * Returns the number that failed; it never exits the process, so a worker can
  * report back and the parent can decide.
  */
-function compileSlice(jobs, opts, common, ctl) {
-  let stdinSource; // standard input is read at most once, however many jobs name it
+function compileSlice(jobs, opts, common, ctl, stdinSource) {
   let failed = 0;
   let next = 0;
   for (;;) {
@@ -1023,8 +1024,7 @@ function compileSlice(jobs, opts, common, ctl) {
     let result;
     try {
       if (input === "-") {
-        if (stdinSource === undefined) stdinSource = readStdin();
-        result = compileString(stdinSource, {
+        result = compileString(stdinSource ?? "", {
           ...common,
           sourceMap: wantMap,
           syntax: opts.indented ? "indented" : "scss",

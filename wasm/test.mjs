@@ -1186,6 +1186,24 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // A `-` job reads the one stdin there is — and does not drag the other jobs
+  // out of the pool with it.
+  {
+    const sdir = join(dir, "stdin");
+    mkdirSync(sdir, { recursive: true });
+    const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4", `-:${join(sdir, "from-stdin.css")}`];
+    for (let i = 0; i < 6; i++) {
+      writeFileSync(join(sdir, `f${i}.scss`), `.f${i}{a:${i}}\n`);
+      args.push(`${join(sdir, `f${i}.scss`)}:${join(sdir, `f${i}.css`)}`);
+    }
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", input: ".stdin{b:1}\n", timeout: 60000 });
+    assert.equal(r.status, 0, `cli: a stdin job alongside file jobs (stderr: ${r.stderr})`);
+    assert.equal(readFileSync(join(sdir, "from-stdin.css"), "utf8").trim(), ".stdin{b:1}", "cli: the `-` job read stdin");
+    for (let i = 0; i < 6; i++) {
+      assert.equal(readFileSync(join(sdir, `f${i}.css`), "utf8").trim(), `.f${i}{a:${i}}`, `cli: f${i} compiled too`);
+    }
+  }
+
   // A failure inside the pool is still reported and still exits non-zero.
   writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
   const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});
