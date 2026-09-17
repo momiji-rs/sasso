@@ -1297,6 +1297,29 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // The job list reaches a worker as shared BYTES, decoded on claim, so a path
+  // that is not ASCII has to survive the round trip — and a worker must get
+  // the right job, not its neighbour's, when the byte lengths differ.
+  {
+    const udir = join(dir, "unicode");
+    mkdirSync(udir, { recursive: true });
+    const names = ["\u65e5\u672c\u8a9e", "caf\u00e9", "\u00f6\u00df\u00e9-\u00fc", "emoji-\u{1f3a8}", "plain"];
+    const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4"];
+    names.forEach((name, i) => {
+      writeFileSync(join(udir, `${name}.scss`), `.n${i}{content:"${name}"}\n`);
+      args.push(`${join(udir, `${name}.scss`)}:${join(udir, `${name}.css`)}`);
+    });
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+    assert.equal(r.status, 0, `cli: non-ASCII paths compile in the pool (stderr: ${r.stderr})`);
+    names.forEach((name, i) => {
+      assert.equal(
+        readFileSync(join(udir, `${name}.css`), "utf8").trim(),
+        `.n${i}{content:"${name}"}`,
+        `cli: ${name}.css holds its own output`,
+      );
+    });
+  }
+
   // A failure inside the pool is still reported and still exits non-zero.
   writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
   const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});

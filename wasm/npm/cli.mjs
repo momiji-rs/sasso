@@ -871,16 +871,14 @@ function runLoop(opts, common) {
 
 /** A worker thread: same compile loop, same code, pulling from the shared index. */
 async function runWorker() {
-  const { jobs, opts, ctl, stdinSource } = workerData;
+  const { shared, opts, ctl, stdinSource } = workerData;
   await loadEngine();
   const common = commonOptions(opts);
-  const diagnostics = new Array(jobs.length).fill("");
-  const failed = compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics);
-  // Only the jobs THIS worker took carry text; the parent merges by index, so
-  // the batch reports in command-line order however the threads interleaved.
-  const mine = [];
-  diagnostics.forEach((text, i) => text && mine.push([i, text]));
-  parentPort.postMessage({ failed, diagnostics: mine });
+  // Only the jobs THIS worker took are in the map; the parent merges by index,
+  // so the batch reports in command-line order however the threads interleaved.
+  const diagnostics = new Map();
+  const failed = compileSlice(sharedList(shared), opts, common, ctl, stdinSource, diagnostics);
+  parentPort.postMessage({ failed, diagnostics: [...diagnostics] });
 }
 
 /** The compile options every job shares, rebuilt per thread (a logger cannot be cloned). */
@@ -988,6 +986,7 @@ async function runJobs(jobs, opts, common) {
   // parallel and the winner is whoever finishes last, which is the race the
   // native CLI has today. A collision is almost always a slip in the command
   // line, so the parallelism given up here costs nothing real.
+  //
   // A job writes its CSS *and*, with source maps on, a `<output>.map` beside
   // it — so `a.scss:out.css` and `b.scss:out.css.map` collide on that sidecar
   // even though their `output`s differ. Both count.
@@ -1012,21 +1011,30 @@ async function runJobs(jobs, opts, common) {
   // Diagnostics are collected per job and printed in COMMAND-LINE order, never
   // in completion order: the native CLI reports each unit in input order, and
   // two stylesheets' warnings interleaving mid-block would be worse here than
-  // there, with a dozen threads writing at once.
-  const diagnostics = new Array(jobs.length).fill("");
+  // there, with a dozen threads writing at once. Sparse — most jobs say
+  // nothing, and a directory build can have thousands.
+  const diagnostics = new Map();
 
   if (workers < 2 || collides) {
-    const failed = compileSlice(jobs, opts, common, null, stdinSource, diagnostics);
-    flushDiagnostics(diagnostics);
+    const failed = compileSlice(listOf(jobs), opts, common, null, stdinSource, diagnostics);
+    flushDiagnostics(diagnostics, jobs.length);
     return failed;
   }
 
   // [0] the next job to take, [1] the stop-on-error flag.
   const ctl = new Int32Array(new SharedArrayBuffer(8));
+  // The job list goes over SHARED memory, decoded one job at a time as each is
+  // claimed. In `workerData` it was structure-cloned per worker instead, which
+  // is O(workers x jobs): a 5,000-file directory build at -j 12 paid ~109 MB
+  // for twelve copies of a list that never changes (measured 2026-09-17).
+  // `positionals` is dropped for the same reason — it is the same paths again,
+  // and a worker has no use for them.
+  const shared = shareJobs(jobs);
+  const { positionals: _unused, ...workerOpts } = opts;
   const results = await Promise.all(
     Array.from({ length: workers }, () => {
       const worker = new Worker(fileURLToPath(import.meta.url), {
-        workerData: { sassoWorker: true, jobs, opts, ctl, stdinSource },
+        workerData: { sassoWorker: true, shared, opts: workerOpts, ctl, stdinSource },
         // stdout/stderr are NOT captured here: a job's diagnostics are
         // collected around the compile itself (see `captureStderr`) and come
         // back in the message, while anything else a worker prints — a crash,
@@ -1044,10 +1052,67 @@ async function runJobs(jobs, opts, common) {
   let failed = 0;
   for (const result of results) {
     failed += result?.failed ?? 0;
-    for (const [i, text] of result?.diagnostics ?? []) diagnostics[i] = text;
+    for (const [i, text] of result?.diagnostics ?? []) diagnostics.set(i, text);
   }
-  flushDiagnostics(diagnostics);
+  flushDiagnostics(diagnostics, jobs.length);
   return failed;
+}
+
+/**
+ * The job list as bytes in SHARED memory: every worker reads the same buffer
+ * and decodes only the jobs it claims, so the list costs one copy rather than
+ * one per thread. `index` holds three ints per job — where its input starts,
+ * how long the input is, and how long the output is (-1 for "no output", which
+ * is stdout; an empty output is not a thing `parseJobs` produces).
+ */
+function shareJobs(jobs) {
+  const encoder = new TextEncoder();
+  const encoded = jobs.map((job) => [
+    encoder.encode(job.input),
+    job.output === undefined ? undefined : encoder.encode(job.output),
+  ]);
+  let total = 0;
+  for (const [input, output] of encoded) total += input.length + (output ? output.length : 0);
+  const bytes = new Uint8Array(new SharedArrayBuffer(total));
+  const index = new Int32Array(new SharedArrayBuffer(jobs.length * 12));
+  let at = 0;
+  encoded.forEach(([input, output], i) => {
+    index[i * 3] = at;
+    index[i * 3 + 1] = input.length;
+    index[i * 3 + 2] = output ? output.length : -1;
+    bytes.set(input, at);
+    at += input.length;
+    if (output) {
+      bytes.set(output, at);
+      at += output.length;
+    }
+  });
+  return { bytes, index, count: jobs.length };
+}
+
+/** A `{ length, at(i) }` view over the plain array, for the in-process path. */
+function listOf(jobs) {
+  return { length: jobs.length, at: (i) => jobs[i] };
+}
+
+/** The same view over `shareJobs`'s buffers, decoding a job only when claimed. */
+function sharedList(shared) {
+  const decoder = new TextDecoder();
+  return {
+    length: shared.count,
+    at(i) {
+      const start = shared.index[i * 3];
+      const inputLen = shared.index[i * 3 + 1];
+      const outputLen = shared.index[i * 3 + 2];
+      return {
+        input: decoder.decode(shared.bytes.subarray(start, start + inputLen)),
+        output:
+          outputLen < 0
+            ? undefined
+            : decoder.decode(shared.bytes.subarray(start + inputLen, start + inputLen + outputLen)),
+      };
+    },
+  };
 }
 
 /**
@@ -1055,9 +1120,10 @@ async function runJobs(jobs, opts, common) {
  * job's block and the next — dart's shape: a warning block already ends in
  * one, an error does not.
  */
-function flushDiagnostics(diagnostics) {
+function flushDiagnostics(diagnostics, count) {
   let endsBlank = true;
-  for (const text of diagnostics) {
+  for (let i = 0; i < count; i++) {
+    const text = diagnostics.get(i);
     if (!text) continue;
     if (!endsBlank) process.stderr.write("\n");
     process.stderr.write(text);
@@ -1096,12 +1162,14 @@ function captureStderr(fn) {
 /**
  * The compile loop itself. With `ctl` it takes jobs from the shared index
  * (worker mode); without it, it walks the list in order (in-process mode).
- * Diagnostics go into `diagnostics[i]`, not to stderr, so the caller can put
- * them back in job order.
+ * `jobs` is a `{ length, at(i) }` view — a plain array in this thread, shared
+ * bytes in a worker. Diagnostics go into the `diagnostics` map under the job's
+ * index, not to stderr, so the caller can put them back in job order.
  * Returns the number that failed; it never exits the process, so a worker can
  * report back and the parent can decide.
  */
 function compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics) {
+  const note = (i, text) => diagnostics.set(i, (diagnostics.get(i) ?? "") + text);
   let failed = 0;
   let next = 0;
   for (;;) {
@@ -1118,7 +1186,7 @@ function compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics) {
       i = next++;
     }
     if (i >= jobs.length) break;
-    const { input, output } = jobs[i];
+    const { input, output } = jobs.at(i);
     const wantMap = wantSourceMap(opts, output);
     // --update: leave outputs that are already newer than their input untouched.
     if (opts.update && output && isFresh(output, input)) continue;
@@ -1132,7 +1200,7 @@ function compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics) {
           })
         : compile(input, { ...common, sourceMap: wantMap, ...syntaxOf(opts) }),
     );
-    diagnostics[i] += run.text;
+    if (run.text) note(i, run.text);
     let result;
     try {
       if (run.error) throw run.error;
@@ -1146,12 +1214,12 @@ function compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics) {
           : e && e.code === "ENOENT"
             ? `Error reading ${input}: Cannot open file.`
             : `error: ${e && e.message ? e.message : e}`;
-      diagnostics[i] += String(msg).replace(/\n?$/, "\n");
+      note(i, String(msg).replace(/\n?$/, "\n"));
       failed++;
       // This CLI always behaves as --no-error-css, and dart then drops a stale
       // output rather than leaving the last good build in place.
       const removeError = discardStaleOutput(output, opts);
-      if (removeError) diagnostics[i] += `${removeError}\n`;
+      if (removeError) note(i, `${removeError}\n`);
       if (opts.stopOnError || jobs.length === 1) {
         if (ctl) Atomics.store(ctl, 1, 1);
         break;
@@ -1160,7 +1228,7 @@ function compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics) {
     }
     const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource : undefined);
     if (writeError) {
-      diagnostics[i] += `${writeError}\n`;
+      note(i, `${writeError}\n`);
       failed++;
       if (opts.stopOnError) {
         if (ctl) Atomics.store(ctl, 1, 1);
