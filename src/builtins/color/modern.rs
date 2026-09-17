@@ -410,7 +410,7 @@ pub(crate) fn modify_in_space_full(
         // Validate the channel value's unit (skipped for a scale `%` and for a
         // `none` change keyword, handled below).
         if !matches!(op, ModifyOp::Scale) && !is_none_keyword(v) {
-            validate_modify_unit(space, idx, name, v, pos)?;
+            validate_modify_unit(space, idx, name, v, matches!(op, ModifyOp::Change), pos)?;
         }
         // `adjust`/`scale` combine each amount with the channel's current value,
         // so a missing (`none`) — or, on a conversion's powerless — channel of
@@ -523,7 +523,10 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
                 }
                 other => {
                     return Err(Error::at(
-                        format!("$alpha: {} is not a number.", other.to_css(false)),
+                        format!(
+                            "$alpha: {} is not a number or unquoted \"none\".",
+                            other.to_css(false)
+                        ),
                         pos,
                     ))
                 }

@@ -2817,6 +2817,65 @@ fn a_none_channel_exempts_itself_not_the_call() {
 }
 
 #[test]
+fn a_folded_calc_is_a_number_to_a_constructor_but_not_to_change() {
+    // The evaluator preserves calculations inside `@supports`, so a FOLDED
+    // numeric `calc()` reaches the color builtins there as a calculation. A
+    // constructor reads it like the number it holds; `change`/`adjust`/`scale`
+    // reject it — only a DEGENERATE calculation is a channel value for them,
+    // and `change`, the one op that takes `none`, says so in the message.
+    // Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@supports (a: lch(1% calc(infinity) 20deg)) { x { y: 1 } }\n"),
+        "@supports (a: lch(1% calc(infinity) 20deg)) {\n  x {\n    y: 1;\n  }\n}\n"
+    );
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\n@supports (a: {call}) {{ x {{ y: 1 }} }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "color.change(red, $red: calc(0.5))",
+            "$red: calc(0.5) is not a number or unquoted \"none\".",
+        ),
+        (
+            "color.change(red, $hue: calc(0.5))",
+            "$hue: calc(0.5) is not a number or unquoted \"none\".",
+        ),
+        (
+            "color.change(red, $alpha: calc(0.5))",
+            "$alpha: calc(0.5) is not a number or unquoted \"none\".",
+        ),
+        (
+            "color.adjust(red, $red: calc(0.5))",
+            "$red: calc(0.5) is not a number.",
+        ),
+        (
+            "color.scale(red, $red: calc(50%))",
+            "$red: calc(50%) is not a number.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // Outside `@supports` a calculation folds to a number before it arrives,
+    // so only the DEGENERATE spellings are still calculations — and those are
+    // channel values, accepted as they were.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {\n  b: color.change(red, $hue: calc(NaN));\n  c: color.adjust(red, $red: calc(NaN));\n  d: color.change(red, $red: calc(0.5));\n}\n"),
+        "a {\n  b: red;\n  c: black;\n  d: rgb(0.1960784314%, 0%, 0%);\n}\n"
+    );
+    // `change`'s "or unquoted \"none\"" is the op's, not the argument's.
+    let plain = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    assert!(
+        plain("color.change(red, $alpha: red)").contains("$alpha: red is not a number or unquoted \"none\".")
+    );
+    assert!(plain("color.change(red, $red: red)").contains("$red: red is not a number or unquoted \"none\"."));
+    assert!(plain("color.adjust(red, $alpha: red)").contains("$alpha: red is not a number."));
+    assert!(plain("color.scale(red, $alpha: red)").contains("$alpha: red is not a number."));
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

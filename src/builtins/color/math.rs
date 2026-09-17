@@ -291,17 +291,19 @@ pub(super) fn modern_channel(v: &Value, pct_base: f64) -> Option<f64> {
             return Some(c);
         }
     }
-    match v {
-        // A slash-division carries its quotient AND its unit, so `50%/2` is
-        // 25% of the channel's base — not the raw 25.
-        Value::Number(num) | Value::Slash(num, _) => {
+    // A slash-division carries its quotient AND its unit, so `50%/2` is 25% of
+    // the channel's base — not the raw 25 — and a FOLDED numeric `calc()`,
+    // which only survives where the evaluator preserves calculations (inside
+    // `@supports`), is a number like any other.
+    match channel_unit_number(v) {
+        Some(num) => {
             if num.unit() == "%" {
                 Some(num.value / 100.0 * pct_base)
             } else {
                 Some(num.value)
             }
         }
-        _ => Some(0.0),
+        None => Some(0.0),
     }
 }
 
@@ -315,15 +317,16 @@ pub(super) fn modern_hue(v: &Value) -> Option<f64> {
             return Some(c);
         }
     }
-    match v {
-        // A slash-division carries its angle unit too: `1turn/4` is 90deg.
-        Value::Number(num) | Value::Slash(num, _) => Some(match num.unit() {
+    // A slash-division carries its angle unit too (`1turn/4` is 90deg), as does
+    // a folded numeric `calc()` preserved inside `@supports`.
+    match channel_unit_number(v) {
+        Some(num) => Some(match num.unit() {
             "rad" => num.value.to_degrees(),
             "grad" => num.value * 360.0 / 400.0,
             "turn" => num.value * 360.0,
             _ => num.value,
         }),
-        _ => Some(0.0),
+        None => Some(0.0),
     }
 }
 
@@ -899,6 +902,16 @@ pub(super) fn scale_to(current: f64, factor: f64, bounds: (f64, f64)) -> f64 {
     }
 }
 
+/// dart names `none` among the things it wanted wherever it would have been
+/// accepted — which is `change`, the only modify op that takes one.
+fn none_suffix(accepts_none: bool) -> &'static str {
+    if accepts_none {
+        " or unquoted \"none\""
+    } else {
+        ""
+    }
+}
+
 /// Validate a channel value's unit for the modern change/adjust path. A hue
 /// requires an angle unit (or none); other channels accept `%` or no unit.
 pub(super) fn validate_modify_unit(
@@ -906,14 +919,23 @@ pub(super) fn validate_modify_unit(
     idx: usize,
     name: &str,
     v: &Value,
+    accepts_none: bool,
     pos: Pos,
 ) -> Result<(), Error> {
     let num = match v {
         Value::Number(n) => n,
-        Value::Slash(..) | Value::Calc(_) => return Ok(()),
+        Value::Slash(..) => return Ok(()),
+        // A DEGENERATE `calc()` is a channel value; a folded numeric one —
+        // which only survives where the evaluator preserves calculations,
+        // inside `@supports` — is not a number at all.
+        Value::Calc(node) if degenerate_const(node).is_some() => return Ok(()),
         other => {
             return Err(Error::at(
-                format!("${name}: {} is not a number.", other.to_css(false)),
+                format!(
+                    "${name}: {} is not a number{}.",
+                    other.to_css(false),
+                    none_suffix(accepts_none)
+                ),
                 pos,
             ))
         }
