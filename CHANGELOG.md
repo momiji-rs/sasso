@@ -17,8 +17,98 @@ Conformance is tracked separately as a ratchet against the official
 > burned three minors that the crate never spent. From 0.14.0 the two lines
 > carry the same number; `release-wasm.yml` enforces it and explains the rest.
 
+### Added
+
+- **`unicode` in the npm package's JS API** (the CLI's `--[no-]unicode`):
+  `unicode: false` renders diagnostics with the ASCII glyph set. dart-sass
+  exposes this on its command line only, so it is a sasso extension — but its
+  CLI flag is not a no-op there, and was one here.
+- **`quietDeps` in the npm package's JS API** (dart-sass `quietDeps`): drops
+  deprecation warnings raised inside dependencies — stylesheets reached through
+  a `loadPaths` directory or a custom importer, and whatever those load
+  relatively. The compiler applies it from how each file was RESOLVED, which is
+  what dart does: a stylesheet the entry loads relatively still warns, even from
+  inside a load path, and a dependency's own `@warn`/`@debug` still reaches the
+  logger. Doing it inside the compiler also keeps a silenced warning from
+  counting toward the deprecation repetition cap.
+
 ### Fixed
 
+- **The npm package's CLI accepts the dart-sass flags.** `sasso` ships two
+  command-line implementations — the Rust binary and `cli.mjs` in the npm
+  package — and 0.10.0's dart-compatible CLI work only reached the first. So
+  `npm install sasso` gave a command that rejected every flag a dart-sass build
+  script passes except `--quiet`:
+
+  ```
+  $ sasso --no-error-css --stop-on-error --no-color --quiet --quiet-deps in.scss:out.css
+  error: unknown option "--no-error-css" (try --help)
+  ```
+
+  Reported on #24 by someone whose build it broke, after release notes that
+  advertised a CLI one of the two distribution channels did not have. The npm
+  CLI now accepts every flag the native one does — implementing
+  `--quiet-deps`, `--stop-on-error`, `--no-css`, `--source-map-urls`, the
+  `--no-*` negations and `<dir>:<dir>` pairs, and accepting `-c/--color` and
+  `-j/--jobs` as documented no-ops (the first is one in the native CLI too, the
+  second has no meaning without parallelism). `--error-css` is accepted but not
+  implemented: a failing compile still behaves as `--no-error-css`, which the
+  help text says.
+
+  A test derives the flag set from the Rust parser and fails if this CLI
+  rejects any of them, so the next flag added to one has to reach the other.
+- **The npm CLI's source maps are the ones dart writes.** Its `sources[]` were
+  absolute `file://` URLs where dart's default (`--source-map-urls=relative`)
+  is the path from the `.map` file — `../sub/_x.scss`, not
+  `file:///home/me/app/sub/_x.scss` — so a map moved with its CSS resolved
+  nothing. `--embed-source-map` wrote base64 where dart writes a percent-encoded
+  `data:application/json;charset=utf-8,…` URI, expanded output lost dart's blank
+  line before the `/*# sourceMappingURL=… */` footer, and the JSON's fields came
+  out in a different order without `sourceRoot`. `--source-map-urls` is now
+  implemented rather than parsed and dropped, and a `<dir>:<dir>` job into a
+  fresh tree no longer dies with `ENOENT` writing the `.map` before creating the
+  directory.
+- **The npm CLI's directory mode walks dart's tree.** It listed entries with
+  `Dirent.isDirectory()`, which is false for a *symlinked* directory, so whole
+  subtrees silently vanished from the output; it also skipped plain `.css`
+  sources, which dart compiles. It now follows symlinked directories — each one
+  once, by canonical identity, so a cycle cannot loop — sorts for a
+  reproducible mirror, and skips sources inside the destination when the
+  destination is nested in the source tree. `sasso <dir>` compiles a tree in
+  place, and `-o`/`--output` names an output file, both as the native CLI does.
+- **The npm CLI enforces the same argument grammar as the native one.** It
+  accepted shapes the native CLI (and dart) reject, so one command line meant
+  different things depending on which sasso was installed: a third positional
+  argument was silently ignored rather than `Only two positional args may be
+  passed.`, a second one under `--stdin` likewise, `:out.css` / `in.scss:` /
+  `in.scss:out:other.css` were taken as paths, `in.scss:a.css in.scss:b.css`
+  compiled twice instead of `Duplicate source "in.scss".`, and a file named by
+  both a directory pair and an explicit pair was compiled twice and published
+  to both destinations rather than once to the last. `--jobs`/`--loop` now
+  reject a non-positive value, `-` (and `-:out.css`) reads standard input, a
+  directory pair that expands to nothing exits 0 rather than claiming there was
+  no input, and the source-map combinations dart rejects
+  (`--embed-sources`/`--embed-source-map`/`--source-map-urls` with
+  `--no-source-map`) are rejected for a file output too, not only for stdout.
+- **`--no-unicode` and `--loop` did nothing in the npm CLI.** Both are real
+  flags of the native CLI, and both were accepted and dropped on the floor:
+  `--no-unicode` left every diagnostic in Unicode box glyphs where the native
+  CLI and dart switch to ASCII, and `--loop N` compiled once instead of N times
+  and reported no throughput. The compiler now takes `unicode` through the wasm
+  bridge and the native addon alike, and `--loop` measures and reports as the
+  native CLI does (stdout only, warnings silenced, no source map).
+- **The npm CLI's source-map URLs are encoded as dart encodes them.** Segments
+  were run through `encodeURIComponent`, which escapes the sub-delimiters dart
+  keeps, so a source or output named `the+me,1.scss` was spelled
+  `the%2Bme%2C1.scss` in `sources[]`, in the map's `file` and in the
+  `sourceMappingURL` footer. A `--stdin` entry also named itself `stdin` where
+  dart records the source TEXT as a `data:;charset=utf-8,…` URI. `--no-css` no
+  longer builds a source map it is about to discard.
+- **The npm CLI drops a stale output when a compile fails.** It always behaves
+  as `--no-error-css`, and dart then *removes* the output file rather than leave
+  the last good build in place for a server to keep serving. `--no-css` now
+  means no output-side effects at all — it applies to `--stdin` and `--watch`
+  too, not only to batch jobs.
 - **An attribute selector's value is decoded and re-quoted, not echoed.** The
   value between the quotes was copied through verbatim and wrapped in double
   quotes, so a single-quoted value containing a `"` produced invalid CSS:

@@ -22,6 +22,19 @@ export interface Options {
    */
   functions?: Record<string, CustomFunction>;
   /**
+   * Don't report deprecation warnings raised inside dependencies: stylesheets
+   * reached through {@link loadPaths} or a custom importer, and whatever those
+   * load relatively. A dependency's own `@warn`/`@debug` still reaches the
+   * logger, as in dart-sass.
+   */
+  quietDeps?: boolean;
+  /**
+   * Render diagnostics with the Unicode box glyphs (`╷`/`│`/`╵`), default
+   * `true`; `false` selects the ASCII set, like the CLI's `--no-unicode`. A
+   * sasso extension — dart-sass exposes it on its command line only.
+   */
+  unicode?: boolean;
+  /**
    * Diagnostic handler for `@warn` / `@debug` / deprecation warnings. When
    * omitted, they print to stderr. Pass {@link Logger.silent} to discard them.
    */

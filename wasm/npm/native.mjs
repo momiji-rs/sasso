@@ -19,7 +19,8 @@
 // the wasm entries — one source of truth for API semantics.
 
 import { createRequire } from "node:module";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import {
   isThenable,
@@ -297,6 +298,8 @@ function buildCfg(options, syntax, urlForCore) {
     wantMap: !!options.sourceMap,
     includeSources: !!options.sourceMapIncludeSources,
     charset: options.charset !== false,
+    quietDeps: !!options.quietDeps,
+    unicode: options.unicode !== false,
     loadPaths: (options.loadPaths || []).map(String),
     hasUserImporters: !!(options.importers && options.importers.length),
     functionSignatures: options.functions ? Object.keys(options.functions) : [],
@@ -381,12 +384,9 @@ export function compileStringAsync(source, options = {}) {
 function entryFor(path, options) {
   const fsPath = path instanceof URL || String(path).startsWith("file:") ? fileURLToPath(path) : String(path);
   const source = readFileSync(fsPath, "utf8");
-  let realPath = fsPath;
-  try {
-    realPath = realpathSync(fsPath);
-  } catch {
-    // keep fsPath if realpath fails
-  }
+  // As in the wasm loader: absolute and normalized, symlinks intact, so a map
+  // names the path the file was reached through (see `canonicalHrefFor`).
+  const realPath = resolvePath(fsPath);
   const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(realPath);
   return { source, realPath, entryHref: pathToFileURL(realPath).href, syntax };
 }

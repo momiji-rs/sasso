@@ -28,7 +28,8 @@
 // importer chain in `_importer.mjs` (user importers + a Node-fs importer for
 // `loadPaths`/relative loads) and record `loadedUrls`.
 
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 // Default import, NOT a named one: `availableParallelism` only exists on
 // Node >= 18.14, and a missing named export fails ESM *linking* — the whole
 // package (sync APIs included) would throw at import time on older Nodes.
@@ -154,10 +155,23 @@ function frameLoad(res) {
  */
 function buildChain(options, async) {
   const userImporters = (options.importers || []).map((i) => normalizeImporter(i, async));
-  const fsImporter = makeFsImporter(options.loadPaths);
+  // dart-sass `quietDeps`: the canonical URLs reached through a load path or a
+  // custom importer, plus whatever those load relatively. Filled in as the
+  // compile resolves, and read back by `host_canonicalize` — the compiler
+  // itself decides what to silence, so a silenced warning does not surface as
+  // a "repetitive deprecation warnings omitted" count either.
+  const deps = new Set();
+  const fsImporter = makeFsImporter(options.loadPaths, deps);
   const resolvers = [...userImporters, fsImporter];
   const byCanonical = new Map();
   const loaded = [];
+  // A custom importer's stylesheets are dependencies whatever they are named
+  // (measured: dart 1.104.1's JS API silences their deprecations under
+  // `quietDeps`); the fs importer decides for itself, by load path.
+  const note = (canon, r) => {
+    byCanonical.set(canon, r);
+    if (r !== fsImporter) deps.add(canon);
+  };
   if (async) {
     // Walk the resolver list synchronously; on the first thenable, switch to
     // a Promise continuation that resumes the walk where it left off.
@@ -168,14 +182,14 @@ function buildChain(options, async) {
         if (isThenable(canon)) {
           return canon.then((c) => {
             if (c != null) {
-              byCanonical.set(c, r);
+              note(c, r);
               return c;
             }
             return walk(i + 1, url, fromImport, containing);
           });
         }
         if (canon != null) {
-          byCanonical.set(canon, r);
+          note(canon, r);
           return canon;
         }
       }
@@ -183,6 +197,7 @@ function buildChain(options, async) {
     };
     return {
       loaded,
+      deps,
       canonicalize(url, fromImport, containing) {
         return walk(0, url, fromImport, containing);
       },
@@ -202,11 +217,12 @@ function buildChain(options, async) {
   }
   return {
     loaded,
+    deps,
     canonicalize(url, fromImport, containing) {
       for (const r of resolvers) {
         const canon = r.canonicalize(url, fromImport, containing);
         if (canon != null) {
-          byCanonical.set(canon, r);
+          note(canon, r);
           return canon;
         }
       }
@@ -322,6 +338,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     return w.sasso_compile2(
       m.inPtr, m.inLen, opts.compressed ? 1 : 0, opts.syntax, 1,
       m.urlPtr, m.urlLen, opts.wantMap ? 1 : 0, opts.includeSources ? 1 : 0, opts.charset ? 1 : 0,
+      opts.quietDeps ? 1 : 0, opts.unicode ? 1 : 0,
       m.scratch, m.scratch + 4,
     );
   }
@@ -401,6 +418,18 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     defaultLog(ev);
   }
 
+  // `host_canonicalize`'s success frame: [dependency: u8][canonical URL bytes].
+  // The flag travels with the URL rather than through a second call, because
+  // only the host knows HOW a load resolved, and the compiler needs that to
+  // apply `quietDeps` ahead of its deprecation repetition cap.
+  function frameCanon(chain, canon) {
+    const url = encoder.encode(canon);
+    const frame = new Uint8Array(url.length + 1);
+    frame[0] = chain && chain.deps && chain.deps.has(canon) ? 1 : 0;
+    frame.set(url, 1);
+    return frame;
+  }
+
   const syncHost = {
     host_canonicalize(uPtr, uLen, fromImport, cPtr, cLen, outPtr, outLen) {
       const url = readStr(syncEx, uPtr, uLen);
@@ -408,7 +437,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       try {
         const canon = syncChain ? syncChain.canonicalize(url, fromImport !== 0, containing) : null;
         if (canon == null) return 0;
-        deliver(syncEx, encoder.encode(canon), outPtr, outLen);
+        deliver(syncEx, frameCanon(syncChain, canon), outPtr, outLen);
         return 1;
       } catch (e) {
         deliver(syncEx, encoder.encode(errMessage(e)), outPtr, outLen);
@@ -590,7 +619,9 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
           const containing = args[4] ? readStr(engine.ex, args[3], args[4]) : null;
           return engine.chain.canonicalize(url, args[2] !== 0, containing);
         },
-        (canon) => encoder.encode(canon),
+        // The dependency flag is read when the frame is built, which is after
+        // an async resolver has settled — by then the chain has recorded it.
+        (canon) => frameCanon(engine.chain, canon),
       ),
       host_load: hostFn(
         (args) => engine.chain.load(readStr(engine.ex, args[0], args[1])),
@@ -724,6 +755,8 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       wantMap: !!options.sourceMap,
       includeSources: !!options.sourceMapIncludeSources,
       charset: options.charset !== false, // dart-sass default: true
+      quietDeps: !!options.quietDeps,
+      unicode: options.unicode !== false, // sasso extension: the CLI's --no-unicode
     };
   }
 
@@ -785,14 +818,11 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
   function compile(path, options = {}) {
     const fsPath = toFsPath(path);
     const source = readFileSync(fsPath, "utf8");
-    let realPath = fsPath;
-    try {
-      realPath = realpathSync(fsPath);
-    } catch {
-      // keep fsPath if realpath fails
-    }
-    const entryHref = toFileUrl(realPath).href;
-    const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(realPath);
+    // The entry keeps the path it was NAMED by (absolute and normalized, but
+    // symlinks intact), like every other load — see `canonicalHrefFor`.
+    const entryPath = resolvePath(fsPath);
+    const entryHref = toFileUrl(entryPath).href;
+    const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(entryPath);
     const chain = buildChain(options, false);
     const callbacks = registerFunctions(syncInstance(), options);
     const prevChain = syncChain;
@@ -831,14 +861,9 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     return withEngine(async (engine) => {
       const fsPath = toFsPath(path);
       const source = readFileSync(fsPath, "utf8");
-      let realPath = fsPath;
-      try {
-        realPath = realpathSync(fsPath);
-      } catch {
-        // keep fsPath
-      }
-      const entryHref = toFileUrl(realPath).href;
-      const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(realPath);
+      const entryPath = resolvePath(fsPath);
+      const entryHref = toFileUrl(entryPath).href;
+      const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(entryPath);
       const chain = buildChain(options, true);
       engine.functions = registerFunctions(engine.ex, options);
       engine.chain = chain;

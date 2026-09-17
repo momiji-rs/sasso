@@ -417,5 +417,99 @@ writeFileSync(join(root, "fi.scss"), "$s: 10px;\n");
   assert.ok(out.includes("OVERRIDE-OK"), "SASSO_NATIVE_BINARY override tier resolves and compiles");
 }
 
+// (n) `quietDeps` behaves as it does on the wasm engine — the two entry points
+// share one type declaration, so an option one of them silently ignored would
+// be a promise the package does not keep. dart's rule is about how a file was
+// REACHED: through a load path or a user importer it is a dependency (its
+// deprecations are dropped); loaded relatively by the entry it is not, even
+// from inside a load path. A dependency's own @warn still reaches the logger.
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-napi-qd-"));
+  mkdirSync(join(dir, "lib"), { recursive: true });
+  writeFileSync(join(dir, "lib", "dep.scss"), '@warn "dep-warn";\n.d{color: lighten(#036, 10%)}\n');
+  writeFileSync(join(dir, "lib", "rel.scss"), ".r{color: lighten(#036, 30%)}\n");
+
+  const collect = (mod, source, options) => {
+    const seen = [];
+    mod.compileString(source, {
+      url: pathToFileURL(join(dir, "entry.scss")).href,
+      loadPaths: [join(dir, "lib")],
+      logger: {
+        warn: (m, o) => seen.push(`${o.deprecation ? "DEPRECATION" : "WARNING"} ${o.span && o.span.url}`),
+      },
+      ...options,
+    });
+    return seen;
+  };
+
+  for (const [name, mod] of [["native", napi], ["wasm", wasm]]) {
+    const loud = collect(mod, '@use "dep";\n', { quietDeps: false });
+    assert.ok(
+      loud.some((w) => w.startsWith("DEPRECATION") && w.includes("dep.scss")),
+      `quietDeps(${name}): a dependency's deprecations print by default`,
+    );
+    const quiet = collect(mod, '@use "dep";\n', { quietDeps: true });
+    assert.ok(
+      !quiet.some((w) => w.startsWith("DEPRECATION")),
+      `quietDeps(${name}): a load-path dependency's deprecations are dropped`,
+    );
+    assert.ok(quiet.some((w) => w.startsWith("WARNING")), `quietDeps(${name}): its @warn still prints`);
+    // The same file, loaded relatively by the entry: not a dependency.
+    const rel = collect(mod, '@use "lib/rel";\n', { quietDeps: true });
+    assert.ok(
+      rel.some((w) => w.startsWith("DEPRECATION") && w.includes("rel.scss")),
+      `quietDeps(${name}): a relatively-loaded file is not a dependency`,
+    );
+  }
+
+  // A user importer's stylesheet counts as a dependency too (dart 1.104.1).
+  const importer = {
+    canonicalize: (u) => (u.startsWith("virt:") ? new URL(u) : null),
+    load: () => ({ contents: ".v{color: lighten(#036, 10%)}", syntax: "scss" }),
+  };
+  for (const [name, mod] of [["native", napi], ["wasm", wasm]]) {
+    const seen = collect(mod, '@use "virt:a" as v;\n', { quietDeps: true, importers: [importer] });
+    assert.ok(!seen.some((w) => w.startsWith("DEPRECATION")), `quietDeps(${name}): an importer's stylesheet is a dependency`);
+  }
+}
+
+console.log("ok: quietDeps — native and wasm agree on dart's provenance rule");
+
+// (o) `unicode: false` — the CLI's `--no-unicode` — selects the ASCII glyph set
+// for rendered diagnostics, on both engines. Same reason as quietDeps: one
+// shared type declaration, so neither engine may quietly ignore it.
+{
+  const render = (mod, unicode) => {
+    let out = "";
+    try {
+      mod.compileString(".d{color: lighten(#036, 10%)}", {
+        url: "file:///x.scss",
+        unicode,
+        logger: { warn: (m) => (out += m) },
+      });
+    } catch (e) {
+      out += e.message;
+    }
+    return out;
+  };
+  for (const [name, mod] of [["native", napi], ["wasm", wasm]]) {
+    // A rendered error carries the gutter whether or not a warning does.
+    const fail = (unicode) => {
+      try {
+        mod.compileString(".a{b: }", { url: "file:///x.scss", unicode });
+        return "";
+      } catch (e) {
+        return e.message;
+      }
+    };
+    assert.match(fail(true), /╷/, `unicode(${name}): the Unicode gutter by default`);
+    assert.ok(!/[╷│╵]/.test(fail(false)), `unicode(${name}): --no-unicode renders ASCII`);
+    assert.match(fail(false), /^\s*,$/m, `unicode(${name}): … opening with a comma, as dart does`);
+    render(mod, true); // exercises the warning path with the same option
+  }
+}
+
+console.log("ok: unicode — native and wasm render the same ASCII/Unicode gutters");
+
 console.log("ok: behavior guards — importers, errors, logger, functions, isolation, overlap, re-entrancy, valueOp");
 console.log("all sasso-napi native-addon tests passed");

@@ -3468,7 +3468,7 @@ impl<'a> Evaluator<'a> {
                             if let Some(deps) = self.options.quiet_deps {
                                 if deps.is_dependency(self.current_path()) {
                                     let _paused = crate::arena::pause();
-                                    deps.insert(&e.0);
+                                    deps.mark(&e.0);
                                 }
                             }
                             Some(e.clone())

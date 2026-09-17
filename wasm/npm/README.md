@@ -42,9 +42,9 @@ interface CompileResult { css: string; loadedUrls: URL[]; sourceMap?: object }
 
 - `options`: `{ style?: "expanded" | "compressed", sourceMap?: boolean,
   sourceMapIncludeSources?: boolean, loadPaths?: string[], importers?: [...],
-  functions?: {...}, charset?: boolean, logger?: Logger }`. `compileString` also
-  accepts `url?: string | URL` (the source's canonical URL, the base for its
-  relative imports) and `syntax?: "scss" | "indented" | "css"`.
+  functions?: {...}, charset?: boolean, quietDeps?: boolean, logger?: Logger }`.
+  `compileString` also accepts `url?: string | URL` (the source's canonical URL,
+  the base for its relative imports) and `syntax?: "scss" | "indented" | "css"`.
 - **Imports.** `@use` / `@forward` / `@import` resolve via `loadPaths`, relative
   paths (against `url` / the `compile(path)` file), and custom `importers` —
   dart-sass *modern* `Importer` (`{ canonicalize, load }`) and `FileImporter`
@@ -54,6 +54,15 @@ interface CompileResult { css: string; loadedUrls: URL[]; sourceMap?: object }
 - **Warnings.** `@warn` / `@debug` / deprecation warnings print to stderr by
   default, or go to a `logger` (`{ warn(message, opts), debug(message, opts) }`,
   dart-sass-shaped). `Logger.silent` discards them.
+- `unicode: false` renders diagnostics with the ASCII glyph set (`,`/`|`/`'`
+  instead of `╷`/`│`/`╵`), like the CLI's `--no-unicode`. A sasso extension:
+  dart-sass exposes this on its command line only.
+- `quietDeps: true` drops deprecation warnings raised inside *dependencies* —
+  stylesheets reached through a `loadPaths` directory or a custom importer, and
+  whatever those load relatively. It is about how a file was REACHED, not where
+  it lives: one the entry loads relatively still warns, even from inside a load
+  path. A dependency's own `@warn` / `@debug` still reaches the logger, as in
+  dart-sass.
 - `charset: false` suppresses the `@charset` / BOM prefix for non-ASCII output.
 - `info` is exported for build-tool auto-detection; `initCompiler()` /
   `initAsyncCompiler()` implement the dart-sass Compiler API (Vite uses these).
@@ -172,7 +181,9 @@ dart-sass `sass` CLI flags:
 ```bash
 npx sasso input.scss                      # compile to stdout
 npx sasso input.scss output.css           # write output.css (+ output.css.map)
+npx sasso -o output.css input.scss        # the same, as a flag
 npx sasso a.scss:a.css b.scss:b.css       # multiple input:output pairs
+npx sasso scss:public/css                 # a whole tree, mirrored
 npx sasso --style=compressed input.scss
 npx sasso -I node_modules -I scss main.scss   # add load paths
 npx sasso --watch input.scss output.css   # recompile on change (deps tracked)
@@ -181,11 +192,26 @@ npx sasso --help
 ```
 
 Flags: `-s/--style <expanded|compressed>`, `-I/--load-path <dir>` (repeatable),
-`--stdin`, `--indented`, `--[no-]source-map` (on by default when writing a file),
-`--embed-sources`, `--embed-source-map` (inline the map), `--[no-]charset`,
-`-q/--quiet` (silence `@warn`/`@debug`), `--update` (skip outputs newer than their
-input), `-w/--watch` (re-compiles when the input or any dependency changes),
-`--help`, `--version`.
+`-o/--output <file>`, `--stdin`, `--indented`, `--[no-]source-map` (on by default
+when writing a file), `--source-map-urls <relative|absolute>`, `--embed-sources`,
+`--embed-source-map` (inline the map), `--[no-]charset`, `-q/--quiet` (silence
+`@warn`/`@debug`), `--[no-]quiet-deps`, `--[no-]unicode` (ASCII glyphs in
+diagnostics), `--[no-]stop-on-error`, `--no-css`, `--update` (skip outputs newer
+than their input), `-w/--watch` (re-compiles when the input or any dependency
+changes), `--loop <N>` (recompile N times and report throughput), `--help`,
+`--version`. An input of `-` is standard input. Accepted for dart-sass
+compatibility: `-c/--[no-]color` (a no-op — sasso never colors its output),
+`-j/--jobs <N>` (this CLI compiles sequentially), and `--[no-]error-css`
+(**not implemented**: a failing compile always behaves as `--no-error-css`,
+dropping a stale output file rather than describing the error in CSS).
+
+An `<in>:<out>` pair may name **directories**: every `.scss`/`.sass`/`.css` file
+under `<in>` that is not a partial compiles to the matching path under `<out>`,
+following symlinked directories once each. `sasso <dir>` compiles a tree in
+place.
+
+The same flags as the native `sasso` binary, whose parser this one is tested
+against — a flag the native CLI accepts and this one rejects fails the suite.
 
 ## Native addon — `sasso/native`
 
