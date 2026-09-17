@@ -1232,6 +1232,43 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // Diagnostics belong to their job and print in COMMAND-LINE order, never in
+  // completion order — which is what a dozen threads writing to one stderr
+  // gives you. The first stylesheet is deliberately the slow one, so its
+  // warning finishes LAST: an unordered run cannot pass by luck.
+  //
+  // (Order measured 2026-09-17 against the native binary, which reports each
+  // job in input order at every `-j`. dart-sass prints every warning first and
+  // its errors at the end; the native CLI has never done that and this does
+  // not change it.)
+  {
+    const odir = join(dir, "order");
+    mkdirSync(odir, { recursive: true });
+    // The warning comes AFTER the slow loop, so in completion order it is the
+    // last one written, not the first.
+    writeFileSync(join(odir, "j0.scss"), `@for $i from 1 through 4000 { .slow-#{$i} { a: $i * 2 } }\n@warn "mark-0";\n`);
+    for (let i = 1; i < 8; i++) writeFileSync(join(odir, `j${i}.scss`), `@warn "mark-${i}";\n.j${i}{a:${i}}\n`);
+    // One failure in the middle: its Error takes the failing job's place in
+    // the sequence, rather than being hoisted or trailed.
+    writeFileSync(join(odir, "j4.scss"), `.j4{a:}\n`);
+    const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4"];
+    for (let i = 0; i < 8; i++) args.push(`${join(odir, `j${i}.scss`)}:${join(odir, `j${i}.css`)}`);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+      assert.equal(r.status, 1, "cli: the batch with one bad job exits non-zero");
+      const seq = (r.stderr.match(/mark-\d|^Error: /gm) || []).map((m) => (m === "Error: " ? "E" : m));
+      assert.deepEqual(
+        seq,
+        ["mark-0", "mark-1", "mark-2", "mark-3", "E", "mark-5", "mark-6", "mark-7"],
+        `cli: diagnostics print in command-line order (attempt ${attempt})`,
+      );
+      // The block, not just the message: a warning carries its stack frame and
+      // ends in a blank line, the shape dart prints.
+      assert.match(r.stderr, /WARNING: mark-1\n\s+\S*j1\.scss 1:1\s+root stylesheet\n\n/, "cli: … as whole blocks");
+    }
+  }
+
   // A failure inside the pool is still reported and still exits non-zero.
   writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
   const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});

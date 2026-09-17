@@ -534,13 +534,14 @@ function emit(result, outPath, wantMap, opts, stdinText) {
  * output-side effects at all, so it leaves the file be.
  */
 function discardStaleOutput(outPath, opts) {
-  if (!outPath || opts.noCss) return false;
+  if (!outPath || opts.noCss) return undefined;
   try {
     rmSync(outPath, { force: true });
-    return false;
+    return undefined;
   } catch (e) {
-    process.stderr.write(`error: cannot remove ${outPath}: ${e && e.message ? e.message : e}\n`);
-    return true;
+    // Returned rather than printed: this belongs to one job's diagnostics, and
+    // the caller decides when that job's block reaches stderr.
+    return `error: cannot remove ${outPath}: ${e && e.message ? e.message : e}`;
   }
 }
 
@@ -774,7 +775,8 @@ function runWatch(input, output, common, opts) {
     } catch (e) {
       const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(msg.replace(/\n?$/, "\n"));
-      discardStaleOutput(output, opts);
+      const removeError = discardStaleOutput(output, opts);
+      if (removeError) process.stderr.write(`${removeError}\n`);
       // keep watching at least the entry so a fix re-triggers a compile
       rewatch([pathToFileURL(resolve(input))]);
     }
@@ -872,8 +874,13 @@ async function runWorker() {
   const { jobs, opts, ctl, stdinSource } = workerData;
   await loadEngine();
   const common = commonOptions(opts);
-  const failed = compileSlice(jobs, opts, common, ctl, stdinSource);
-  parentPort.postMessage({ failed });
+  const diagnostics = new Array(jobs.length).fill("");
+  const failed = compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics);
+  // Only the jobs THIS worker took carry text; the parent merges by index, so
+  // the batch reports in command-line order however the threads interleaved.
+  const mine = [];
+  diagnostics.forEach((text, i) => text && mine.push([i, text]));
+  parentPort.postMessage({ failed, diagnostics: mine });
 }
 
 /** The compile options every job shares, rebuilt per thread (a logger cannot be cloned). */
@@ -918,7 +925,8 @@ async function main() {
     try {
       result = compileString(source, { ...common, sourceMap: wantMap, syntax: opts.indented ? "indented" : "scss" });
     } catch (e) {
-      discardStaleOutput(output, opts);
+      const removeError = discardStaleOutput(output, opts);
+      if (removeError) process.stderr.write(`${removeError}\n`);
       if (e instanceof Exception) fail(e.message);
       fail(`error: ${e && e.message ? e.message : e}`);
     }
@@ -993,7 +1001,17 @@ async function runJobs(jobs, opts, common) {
   }
 
   const workers = Math.min(jobs.length, Math.max(1, wanted));
-  if (workers < 2 || collides) return compileSlice(jobs, opts, common, null, stdinSource);
+  // Diagnostics are collected per job and printed in COMMAND-LINE order, never
+  // in completion order: the native CLI reports each unit in input order, and
+  // two stylesheets' warnings interleaving mid-block would be worse here than
+  // there, with a dozen threads writing at once.
+  const diagnostics = new Array(jobs.length).fill("");
+
+  if (workers < 2 || collides) {
+    const failed = compileSlice(jobs, opts, common, null, stdinSource, diagnostics);
+    flushDiagnostics(diagnostics);
+    return failed;
+  }
 
   // [0] the next job to take, [1] the stop-on-error flag.
   const ctl = new Int32Array(new SharedArrayBuffer(8));
@@ -1001,26 +1019,81 @@ async function runJobs(jobs, opts, common) {
     Array.from({ length: workers }, () => {
       const worker = new Worker(fileURLToPath(import.meta.url), {
         workerData: { sassoWorker: true, jobs, opts, ctl, stdinSource },
-        // stdout/stderr are forwarded to this thread's by default, so warnings
-        // and diagnostics come out where the user expects them.
+        // stdout/stderr are NOT captured here: a job's diagnostics are
+        // collected around the compile itself (see `captureStderr`) and come
+        // back in the message, while anything else a worker prints — a crash,
+        // say — should reach the user rather than a stream nobody reads.
       });
       return new Promise((resolve, reject) => {
         worker.on("message", resolve);
         worker.on("error", reject);
-        worker.on("exit", (code) => (code === 0 ? resolve({ failed: 0 }) : resolve({ failed: 1 })));
+        worker.on("exit", (code) =>
+          code === 0 ? resolve({ failed: 0, diagnostics: [] }) : resolve({ failed: 1, diagnostics: [] }),
+        );
       });
     }),
   );
-  return results.reduce((n, r) => n + (r?.failed ?? 0), 0);
+  let failed = 0;
+  for (const result of results) {
+    failed += result?.failed ?? 0;
+    for (const [i, text] of result?.diagnostics ?? []) diagnostics[i] = text;
+  }
+  flushDiagnostics(diagnostics);
+  return failed;
+}
+
+/**
+ * Write the collected diagnostics in JOB order, one blank line between one
+ * job's block and the next — dart's shape: a warning block already ends in
+ * one, an error does not.
+ */
+function flushDiagnostics(diagnostics) {
+  let endsBlank = true;
+  for (const text of diagnostics) {
+    if (!text) continue;
+    if (!endsBlank) process.stderr.write("\n");
+    process.stderr.write(text);
+    endsBlank = text.endsWith("\n\n");
+  }
+}
+
+/**
+ * Run `fn` with everything it writes to stderr collected instead of printed.
+ *
+ * The compiler's warnings come from the engine's default logger, which writes
+ * the FORMATTED block — location, deprecation label, source snippet — straight
+ * to stderr. A `logger` callback would see the message and the span but not
+ * that block, so the write is intercepted rather than the logging. A compile
+ * is synchronous and a worker runs one at a time, so nothing else of ours can
+ * write in between.
+ */
+function captureStderr(fn) {
+  const chunks = [];
+  const original = process.stderr.write;
+  process.stderr.write = (chunk, encoding, callback) => {
+    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+    if (typeof encoding === "function") encoding();
+    else if (typeof callback === "function") callback();
+    return true;
+  };
+  try {
+    return { value: fn(), text: chunks.join("") };
+  } catch (e) {
+    return { error: e, text: chunks.join("") };
+  } finally {
+    process.stderr.write = original;
+  }
 }
 
 /**
  * The compile loop itself. With `ctl` it takes jobs from the shared index
  * (worker mode); without it, it walks the list in order (in-process mode).
+ * Diagnostics go into `diagnostics[i]`, not to stderr, so the caller can put
+ * them back in job order.
  * Returns the number that failed; it never exits the process, so a worker can
  * report back and the parent can decide.
  */
-function compileSlice(jobs, opts, common, ctl, stdinSource) {
+function compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics) {
   let failed = 0;
   let next = 0;
   for (;;) {
@@ -1041,17 +1114,21 @@ function compileSlice(jobs, opts, common, ctl, stdinSource) {
     const wantMap = wantSourceMap(opts, output);
     // --update: leave outputs that are already newer than their input untouched.
     if (opts.update && output && isFresh(output, input)) continue;
+    // Warnings and deprecations belong to THIS job, wherever it ran.
+    const run = captureStderr(() =>
+      input === "-"
+        ? compileString(stdinSource ?? "", {
+            ...common,
+            sourceMap: wantMap,
+            syntax: opts.indented ? "indented" : "scss",
+          })
+        : compile(input, { ...common, sourceMap: wantMap, ...syntaxOf(opts) }),
+    );
+    diagnostics[i] += run.text;
     let result;
     try {
-      if (input === "-") {
-        result = compileString(stdinSource ?? "", {
-          ...common,
-          sourceMap: wantMap,
-          syntax: opts.indented ? "indented" : "scss",
-        });
-      } else {
-        result = compile(input, { ...common, sourceMap: wantMap, ...syntaxOf(opts) });
-      }
+      if (run.error) throw run.error;
+      result = run.value;
     } catch (e) {
       // With several jobs dart keeps going unless --stop-on-error, and exits
       // non-zero at the end.
@@ -1061,11 +1138,12 @@ function compileSlice(jobs, opts, common, ctl, stdinSource) {
           : e && e.code === "ENOENT"
             ? `Error reading ${input}: Cannot open file.`
             : `error: ${e && e.message ? e.message : e}`;
-      process.stderr.write(String(msg).replace(/\n?$/, "\n"));
+      diagnostics[i] += String(msg).replace(/\n?$/, "\n");
       failed++;
       // This CLI always behaves as --no-error-css, and dart then drops a stale
       // output rather than leaving the last good build in place.
-      discardStaleOutput(output, opts);
+      const removeError = discardStaleOutput(output, opts);
+      if (removeError) diagnostics[i] += `${removeError}\n`;
       if (opts.stopOnError || jobs.length === 1) {
         if (ctl) Atomics.store(ctl, 1, 1);
         break;
@@ -1074,7 +1152,7 @@ function compileSlice(jobs, opts, common, ctl, stdinSource) {
     }
     const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource : undefined);
     if (writeError) {
-      process.stderr.write(`${writeError}\n`);
+      diagnostics[i] += `${writeError}\n`;
       failed++;
       if (opts.stopOnError) {
         if (ctl) Atomics.store(ctl, 1, 1);
