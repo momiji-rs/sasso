@@ -1000,6 +1000,52 @@ fn an_escaped_delimiter_is_not_selector_structure() {
     );
 }
 
+/// A part with two or more top-level `&`s is cut at the references and rebuilt
+/// from the text between them, so every cut has to land on a CHARACTER
+/// boundary: `.ü` is two bytes and an emoji four. Every expectation below was
+/// measured against dart-sass 1.104.1.
+#[test]
+fn a_cartesian_part_is_cut_on_character_boundaries() {
+    // Non-ASCII output carries dart's `@charset` prologue; these cases are
+    // about the expansion, so it is taken off here.
+    let sel = |scss: &str| -> String {
+        let out = compile(scss, &Options::default()).expect("compile");
+        out.strip_prefix("@charset \"UTF-8\";\n")
+            .expect("non-ASCII output opens with the charset prologue")
+            .to_string()
+    };
+    assert_eq!(
+        sel(".p, .q { & .ü & { c: 1; } }"),
+        ".p .ü .p, .p .ü .q, .q .ü .p, .q .ü .q {\n  c: 1;\n}"
+    );
+    assert_eq!(
+        sel(".p { & .日本語-クラス & { c: 2; } }"),
+        ".p .日本語-クラス .p {\n  c: 2;\n}"
+    );
+    // An escape and a multi-byte character in the same segment.
+    assert_eq!(
+        sel(".p, .q { & .a\\,ü & { c: 3; } }"),
+        ".p .a\\,ü .p, .p .a\\,ü .q, .q .a\\,ü .p, .q .a\\,ü .q {\n  c: 3;\n}"
+    );
+    // A `&` inside a quoted attribute value is text, not a cut — and the
+    // characters around it are still counted in bytes.
+    assert_eq!(
+        sel(".p, .q { & [data-x=\"ü&é\"] & { c: 4; } }"),
+        ".p [data-x=\"ü&é\"] .p, .p [data-x=\"ü&é\"] .q, \
+         .q [data-x=\"ü&é\"] .p, .q [data-x=\"ü&é\"] .q {\n  c: 4;\n}"
+    );
+    // A four-byte character before the second reference, and a trailing
+    // segment after it.
+    assert_eq!(sel(".p { & .🎉 & .é { c: 5; } }"), ".p .🎉 .p .é {\n  c: 5;\n}");
+    // Non-ASCII PARENTS, substituted into every cartesian position.
+    assert_eq!(
+        sel(".ü, .é { & & { c: 6; } }"),
+        ".ü .ü, .ü .é, .é .ü, .é .é {\n  c: 6;\n}"
+    );
+    // One reference is not a cut at all: it takes the substitution path.
+    assert_eq!(sel(".ü { &-é { c: 7; } }"), ".ü-é {\n  c: 7;\n}");
+}
+
 /// Compressed output drops anything that writes nothing — a rule or at-rule
 /// whose body is only comments, however deep it nests, and the separator such
 /// an item would otherwise have taken. Measured against dart-sass 1.103.1.
