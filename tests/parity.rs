@@ -2857,6 +2857,51 @@ fn only_positional_arguments_count_toward_arity() {
 }
 
 #[test]
+fn an_attribute_value_is_decoded_and_requoted() {
+    // dart does not echo an attribute value's source text: it DECODES the
+    // escapes and re-serializes, dropping the quotes for an identifier and
+    // otherwise picking whichever quote needs fewer escapes. Echoing the text
+    // is what made `[a='b"c']` come out `[a="b"c"]` — CSS a browser reads as
+    // `[a="b"` and then garbage. Byte-matched to dart-sass 1.104.1. Offline.
+    for (sel, want) in [
+        // Quote choice: single quotes only when the value has a `"` and no `'`.
+        (r#"[a='b"c']"#, r#"[a='b"c']"#),
+        (r#"[a="b\"c"]"#, r#"[a='b"c']"#),
+        (r#"[a="b'c"]"#, r#"[a="b'c"]"#),
+        (r#"[a='b\'c']"#, r#"[a="b'c"]"#),
+        // Both quotes present: double, with the `"` escaped.
+        (r#"[a='b"c\'d']"#, r#"[a="b\"c'd"]"#),
+        (r#"[a="b\"c'd"]"#, r#"[a="b\"c'd"]"#),
+        // An identifier loses its quotes; one leading `-` is still an
+        // identifier, two are not, and a leading digit is not.
+        (r#"[a="plain"]"#, "[a=plain]"),
+        (r#"[a='b']"#, "[a=b]"),
+        (r#"[a="with-dash"]"#, "[a=with-dash]"),
+        (r#"[a="_under"]"#, "[a=_under]"),
+        (r#"[a="-leading"]"#, "[a=-leading]"),
+        (r#"[a="--two"]"#, r#"[a="--two"]"#),
+        (r#"[a="1leading"]"#, r#"[a="1leading"]"#),
+        (r#"[a=""]"#, r#"[a=""]"#),
+        (r#"[a="b c"]"#, r#"[a="b c"]"#),
+        // Hex escapes decode, delimiter whitespace and all.
+        (r#"[a="b\22 c"]"#, r#"[a='b"c']"#),
+        (r#"[a="b\27 c"]"#, r#"[a="b'c"]"#),
+        (r#"[a="\61 bc"]"#, "[a=abc]"),
+        (r#"[a="b\9 c"]"#, "[a=\"b\tc\"]"),
+        // The operator and the modifier are untouched by any of it.
+        (r#"[a^="b'c"]"#, r#"[a^="b'c"]"#),
+        (r#"[a="b'c" i]"#, r#"[a="b'c" i]"#),
+        (r#"[a|="b"]"#, "[a|=b]"),
+    ] {
+        assert_eq!(
+            ours(&format!("{sel} {{ c: d }}\n")),
+            format!("{want} {{\n  c: d;\n}}\n"),
+            "{sel}"
+        );
+    }
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0

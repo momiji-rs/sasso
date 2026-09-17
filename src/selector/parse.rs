@@ -304,6 +304,63 @@ fn read_ident(chars: &[char], i: &mut usize) -> Option<String> {
 /// quoted value that is a plain identifier loses its quotes
 /// (`[a="b"]` -> `[a=b]`). Anything that doesn't fit the simple
 /// `[name op value modifier?]` grammar is returned verbatim.
+/// Decode the CSS escapes in an attribute selector's quoted value, the way
+/// dart's parser does before the serializer re-escapes it: `\22 ` is a `"`,
+/// `\61 bc` is `abc`, and `\<char>` is that character. A hex escape takes up
+/// to six digits and swallows ONE trailing whitespace as its delimiter.
+fn decode_css_escapes(raw: &str) -> String {
+    if !raw.contains('\\') {
+        return raw.to_string();
+    }
+    let cs: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < cs.len() {
+        if cs[i] != '\\' || i + 1 >= cs.len() {
+            out.push(cs[i]);
+            i += 1;
+            continue;
+        }
+        i += 1; // the backslash
+        if !cs[i].is_ascii_hexdigit() {
+            // `\<char>` is that character. A newline is a line continuation
+            // inside a string and contributes nothing.
+            if cs[i] != '\n' {
+                out.push(cs[i]);
+            }
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < cs.len() && i - start < 6 && cs[i].is_ascii_hexdigit() {
+            i += 1;
+        }
+        let hex: String = cs[start..i].iter().collect();
+        // Exactly one whitespace may follow as the escape's delimiter.
+        if i < cs.len() && cs[i].is_whitespace() {
+            i += 1;
+        }
+        let cp = u32::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
+        // NUL, a surrogate and an out-of-range code point all become U+FFFD,
+        // as CSS requires.
+        out.push(char::from_u32(cp).filter(|_| cp != 0).unwrap_or('\u{FFFD}'));
+    }
+    out
+}
+
+/// Whether an attribute value can be written without quotes — a CSS
+/// identifier. dart allows ONE leading `-` before the name-start character
+/// (`[a="-leading"]` is `[a=-leading]`) but not two (`--two` stays quoted),
+/// and a leading digit keeps its quotes.
+fn is_attr_identifier(v: &str) -> bool {
+    let body = v.strip_prefix('-').unwrap_or(v);
+    let mut chars = body.chars();
+    let starts = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || (c as u32) >= 0x80);
+    starts && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_') || (c as u32) >= 0x80)
+}
+
 pub(crate) fn normalize_attribute(text: &str) -> String {
     let inner = match text.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
         Some(i) => i.trim(),
@@ -367,16 +424,18 @@ pub(crate) fn normalize_attribute(text: &str) -> String {
         }
         let raw: String = cs[vstart..j].iter().collect();
         j += 1; // closing quote
-                // A plain-identifier value loses its quotes (dart-sass).
-        let is_ident = !raw.is_empty()
-            && raw
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || (c as u32) >= 0x80)
-            && raw
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_') || (c as u32) >= 0x80);
-        value = if is_ident { raw } else { format!("\"{raw}\"") };
+                // dart DECODES the escapes and re-serializes, rather than
+                // echoing the source text: a plain-identifier value loses its
+                // quotes, and everything else is re-quoted with whichever quote
+                // needs fewer escapes. Echoing `raw` between double quotes —
+                // which is what this did — turns `[a='b"c']` into `[a="b"c"]`,
+                // CSS a browser reads as `[a="b"` plus garbage.
+        let decoded = decode_css_escapes(&raw);
+        value = if is_attr_identifier(&decoded) {
+            decoded
+        } else {
+            crate::value::serialize_quoted(&decoded)
+        };
     } else {
         let vstart = j;
         while j < cs.len() && !cs[j].is_whitespace() && cs[j] != ']' {

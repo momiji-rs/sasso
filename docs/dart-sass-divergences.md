@@ -8,10 +8,9 @@ meaning rather than being a number without a denominator.
 running both compilers on the same input. Where a row says "dart", that is the
 observed output of 1.104.1 — not a reading of the specification.
 
-Last verified: 2026-09-17. The six that need design work or affect compiled
+Last verified: 2026-09-17. The ones that need design work or affect compiled
 output are tracked as issues
-([#61](https://github.com/momiji-rs/sasso/issues/61),
-[#62](https://github.com/momiji-rs/sasso/issues/62),
+([#62](https://github.com/momiji-rs/sasso/issues/62),
 [#63](https://github.com/momiji-rs/sasso/issues/63),
 [#64](https://github.com/momiji-rs/sasso/issues/64),
 [#65](https://github.com/momiji-rs/sasso/issues/65),
@@ -54,25 +53,7 @@ silently drift away from the reference.
 These change the bytes a build emits. All of them are absent from the Lichess
 corpus, which is why it still measures 147/148.
 
-### 1.1 An attribute selector's quotes are not re-chosen — and can produce invalid CSS ([#61](https://github.com/momiji-rs/sasso/issues/61))
-
-dart decodes an attribute value's escapes and then re-quotes it, choosing
-whichever quote character needs fewer escapes — and dropping the quotes
-entirely when the value is identifier-safe. sasso re-emits the value with
-double quotes and copies the inner text through verbatim, so an unescaped `"`
-inside a single-quoted value survives into the output and breaks it:
-
-```scss
-[a='b"c']   { c: d }   // dart: [a='b"c']   sasso: [a="b"c"]    ← invalid CSS
-[a="b\"c"]  { c: d }   // dart: [a='b"c']   sasso: [a="b\"c"]   ← cosmetic
-[a='b\'c']  { c: d }   // dart: [a="b'c"]   sasso: [a="b\'c"]   ← cosmetic
-[a="b\\c"]  { c: d }   // dart: [a=b\\c]     sasso: [a="b\\c"]   ← cosmetic
-```
-
-The first row silently corrupts the selector: a browser reads `[a="b"` and then
-garbage. `[a="b'c"]`, `[a="b c"]`, `[a="b"]` and `[a='plain']` already match.
-
-### 1.2 An interpolated at-rule name loses a space when compressed
+### 1.1 An interpolated at-rule name loses a space when compressed
 
 ```scss
 @#{"media"} (a: 1) { a { b: c } }
@@ -86,7 +67,7 @@ writer. A literal `@media` and an interpolated one resolve to the same string,
 so the distinction has to be carried as a field on the node rather than
 inferred from its name.
 
-### 1.3 A literal property inside a custom `@function --foo()` is not evaluated
+### 1.2 A literal property inside a custom `@function --foo()` is not evaluated
 
 ```scss
 @function --foo() { q: 1 + 2; }
@@ -96,7 +77,7 @@ inferred from its name.
 
 dart parses the body of a custom-property-named function as SassScript.
 
-### 1.4 A degenerate calculation inside `@supports` is evaluated instead of preserved
+### 1.3 A degenerate calculation inside `@supports` is evaluated instead of preserved
 
 ```scss
 @supports (a: lab(calc(infinity) 1 2)) { a { b: c } }
@@ -104,7 +85,7 @@ dart parses the body of a custom-property-named function as SassScript.
 // sasso: @supports (a: lab(100% 1 2))
 ```
 
-### 1.5 `meta.call()` with an unknown name compiles instead of erroring ([#63](https://github.com/momiji-rs/sasso/issues/63))
+### 1.4 `meta.call()` with an unknown name compiles instead of erroring ([#63](https://github.com/momiji-rs/sasso/issues/63))
 
 ```scss
 @use "sass:meta";
@@ -293,6 +274,11 @@ define a function named length.` check needs, and dart returns these members in
 - **`learn.css` in the Lichess corpus.** An extender that reaches a placeholder
   through two chains is listed twice by dart (`.w, .w`), and which duplicate
   survives depends on `ExtensionStore` bookkeeping order. We emit it once.
+- **`[a="b\\c"]`** — an attribute value holding a literal backslash. dart writes
+  `[a=b\\c]`, which is not stable under its own compiler: feeding that output
+  back through dart-sass 1.104.1 gives `[a=b\\c ]`, a different string again. We
+  write `[a="b\\c"]`, which is valid and round-trips. Every other
+  attribute-value shape matches (#61).
 - **`color.alpha(red, 1)`** reports `Only 1 argument allowed, but 1 were
   passed.` in dart — two arguments reported as one, with the verb disagreeing
   with the count. It is an artifact of dart's overloaded declaration of
@@ -301,7 +287,15 @@ define a function named length.` check needs, and dart returns these members in
 
 ## Version skew worth knowing
 
-Lichess's own build bundles **dart-sass 1.100.0**, not 1.104.1. Nine files in
-that corpus differ between those two dart versions before sasso is involved
-(`rgb()` channel serialisation changed). Any comparison should state which dart
-it was measured against.
+Lichess's own build bundles **dart-sass 1.100.0**, not 1.104.1, and those two
+darts already disagree with each other on that corpus — measured 2026-09-17,
+one dart against the other, no sasso involved:
+
+| | files differing, dart 1.100.0 vs 1.104.1 |
+|---|---|
+| `--style=expanded` | 8 / 148 |
+| `--style=compressed` | **100 / 148** |
+
+So a comparison against a different dart than the one above is measuring mostly
+that difference. Every number in this file is against 1.104.1; any comparison
+should say which dart it used.
