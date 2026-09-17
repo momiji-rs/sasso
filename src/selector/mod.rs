@@ -1261,17 +1261,45 @@ pub(crate) fn extend_selectors(
         let mut pre_set: FxHashSet<usize> = pre_batches.iter().copied().collect();
         pre_set.extend(foreign.iter().copied());
         let seed: Vec<(Complex, bool, bool)> = if !pre_batches.is_empty() {
-            let one_shot_store: Vec<Extension> = pre_batches
-                .iter()
-                .flat_map(|&i| {
-                    let start = if i == 0 {
-                        0
-                    } else {
-                        plan.batch_registry_marks[i - 1]
-                    };
-                    registry[start..plan.batch_registry_marks[i]].iter().cloned()
-                })
-                .collect();
+            // The one-shot store is the concatenation of these batches' registry
+            // slices. `pre_batches` is sorted by registry position, so those
+            // slices are usually adjacent, and then the concatenation *is* a
+            // subslice of `registry` -- borrow it rather than cloning every
+            // `Extension` in it. Cloning unconditionally is a copy of the whole
+            // registry prefix per extending rule, which is where an
+            // `@extend`-heavy sheet's allocation went.
+            let batch_range = |i: usize| {
+                let start = if i == 0 {
+                    0
+                } else {
+                    plan.batch_registry_marks[i - 1]
+                };
+                start..plan.batch_registry_marks[i]
+            };
+            let mut lo = 0usize;
+            let mut hi = 0usize;
+            let mut contiguous = true;
+            for (k, &i) in pre_batches.iter().enumerate() {
+                let range = batch_range(i);
+                if k == 0 {
+                    lo = range.start;
+                } else if range.start != hi {
+                    // A gap, or out of order: the union is not itself a slice.
+                    contiguous = false;
+                    break;
+                }
+                hi = range.end;
+            }
+            let one_shot_store: std::borrow::Cow<'_, [Extension]> = if contiguous {
+                std::borrow::Cow::Borrowed(&registry[lo..hi])
+            } else {
+                std::borrow::Cow::Owned(
+                    pre_batches
+                        .iter()
+                        .flat_map(|&i| registry[batch_range(i)].iter().cloned())
+                        .collect(),
+                )
+            };
             let all_orig: Vec<bool> = vec![true; original.len()];
             let (res, changed) = extend_to_fixpoint_breaks(
                 original,
@@ -2141,7 +2169,7 @@ fn type_namespace(t: &str) -> Option<String> {
 /// option of every component is the original, so the unextended selector comes
 /// out first. (dart-sass `Extender._extendComplex`.)
 fn extend_complex(complex: &Complex, extensions: &[Extension]) -> Vec<Complex> {
-    let empty: FxHashMap<Complex, bool> = FxHashMap::default();
+    let empty: FxHashSet<Complex> = FxHashSet::default();
     extend_complex_breaks(
         complex,
         false,
@@ -2180,7 +2208,7 @@ fn extend_complex_breaks(
     in_orig: bool,
     orig_scope: Option<&str>,
     extensions: &[Extension],
-    ext_breaks: &FxHashMap<Complex, bool>,
+    ext_breaks: &FxHashSet<Complex>,
     order: CartesianOrder,
 ) -> Vec<(Complex, bool, bool)> {
     let d = to_dart(complex);
@@ -3306,16 +3334,24 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
         // Extensions the pre-extension below may apply: the store so far,
         // visibility-gated to what this `@extend`'s module can see (dart's
         // per-module stores).
-        let visible_registry: Vec<Extension> = if registry.is_empty() {
-            Vec::new()
-        } else {
-            registry
-                .iter()
-                .filter(|r| ext.origin_closure.contains(&r.origin))
-                .cloned()
-                .collect()
-        };
+        //
+        // The gate usually drops nothing -- a sheet whose `@extend`s all come
+        // from one module has one origin -- so check for that before cloning the
+        // store. The block is what ends the borrow: the registration below
+        // pushes to `registry`.
         let pre_extended: Vec<(Complex, bool)> = {
+            let visible_registry: std::borrow::Cow<'_, [Extension]> =
+                if registry.iter().all(|r| ext.origin_closure.contains(&r.origin)) {
+                    std::borrow::Cow::Borrowed(&registry[..])
+                } else {
+                    std::borrow::Cow::Owned(
+                        registry
+                            .iter()
+                            .filter(|r| ext.origin_closure.contains(&r.origin))
+                            .cloned()
+                            .collect(),
+                    )
+                };
             let mut out: Vec<(Complex, bool)> = Vec::new();
             let mut seen: FxHashSet<Complex> = FxHashSet::default();
             for (j, extender) in ext.extenders.iter().enumerate() {
@@ -3341,7 +3377,7 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
                     // chained extends get dart's FORWARD product order
                     // (bootstrap's navbar containers). Trim like `_extendList`
                     // so a product the original covers drops.
-                    let empty: FxHashMap<Complex, bool> = FxHashMap::default();
+                    let empty: FxHashSet<Complex> = FxHashSet::default();
                     trim(
                         extend_complex_breaks(
                             extender,
@@ -3454,7 +3490,7 @@ fn expand_extensions(input: &[Extension]) -> (Vec<Vec<Extension>>, Vec<Extension
                 // so a derived extender covered by the original at equal-or-greater
                 // specificity is dropped before registration — the bound that keeps
                 // self-overlapping chains finite.
-                let empty: FxHashMap<Complex, bool> = FxHashMap::default();
+                let empty: FxHashSet<Complex> = FxHashSet::default();
                 let extended = trim(
                     extend_complex_breaks(
                         &old_extender,
@@ -3544,12 +3580,23 @@ fn extend_list_batch(
     };
     let batch_origin = rep.origin.clone();
     let batch_closure = std::rc::Rc::clone(&rep.origin_closure);
-    let mut ext_breaks: FxHashMap<Complex, bool> = FxHashMap::default();
+    // Which extenders carry a source line break (dart's
+    // `ComplexSelector.lineBreak`), as a set of the flagged ones only. The
+    // lookup at the point of use is a yes/no question, so a map from every
+    // extender to a `bool` clones a `Complex` key to record `false` almost every
+    // time; the flag is rare, and an absent key answers the question.
+    //
+    // It has to be built per store, from the entries that store holds. Building
+    // one plan-level map instead is unsound: an extender registered twice with
+    // different flags reads back the OR, so a store that holds only the
+    // unflagged registration would see `true` -- and that flag decides a newline
+    // in expanded output.
+    let mut ext_breaks: FxHashSet<Complex> = FxHashSet::default();
     for ext in batch {
         for (j, c) in ext.extenders.iter().enumerate() {
-            let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
-            let e = ext_breaks.entry(c.clone()).or_insert(false);
-            *e = *e || flag;
+            if ext.extender_breaks.get(j).copied().unwrap_or(false) {
+                ext_breaks.insert(c.clone());
+            }
         }
     }
     // The batch's target simples, computed ONCE. A complex that mentions none of
@@ -3666,13 +3713,15 @@ fn extend_to_fixpoint_inner(
     order: CartesianOrder,
     refeed: bool,
 ) -> (Vec<(Complex, bool, bool)>, bool) {
-    // Extender flags by extender selector, for the per-option lookup.
-    let mut ext_breaks: FxHashMap<Complex, bool> = FxHashMap::default();
+    // Extender flags by extender selector, for the per-option lookup: the
+    // flagged extenders only, and built from this store rather than hoisted (see
+    // the same set in `extend_list_batch`).
+    let mut ext_breaks: FxHashSet<Complex> = FxHashSet::default();
     for ext in extensions {
         for (j, c) in ext.extenders.iter().enumerate() {
-            let flag = ext.extender_breaks.get(j).copied().unwrap_or(false);
-            let e = ext_breaks.entry(c.clone()).or_insert(false);
-            *e = *e || flag;
+            if ext.extender_breaks.get(j).copied().unwrap_or(false) {
+                ext_breaks.insert(c.clone());
+            }
         }
     }
     let mut result: Vec<(Complex, bool, bool)> = Vec::new();
@@ -4119,7 +4168,7 @@ fn expand_pseudos_in_compound(compound: &Compound, extensions: &[Extension]) -> 
 fn extend_component(
     comp: &TComp,
     extensions: &[Extension],
-    ext_breaks: &FxHashMap<Complex, bool>,
+    ext_breaks: &FxHashSet<Complex>,
     order: CartesianOrder,
 ) -> Option<Vec<(DComplex, bool)>> {
     // First, extend any selector-pseudo arguments (`:not(...)`, `:is(...)`,
@@ -4152,7 +4201,7 @@ fn extend_component(
             }
             // The extender's source line-break flag travels with the option
             // (dart's ComplexSelector.lineBreak).
-            let flag = ext_breaks.get(&extender).copied().unwrap_or(false);
+            let flag = ext_breaks.contains(&extender);
             seen.insert(extender.clone());
             opts.push(Some((extender, flag)));
             any = true;
