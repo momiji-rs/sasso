@@ -1113,10 +1113,21 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     writeFileSync(join(dir, "src", `s${i}.scss`), `.s${i}{a: ${i} + 1; b: "x${i}"}\n`);
     expected.set(`s${i}.css`, `.s${i}{a:${i + 1};b:"x${i}"}`);
   }
+  // The engine variables are CLEARED and only what a case asks for is put
+  // back. Inheriting them would turn the unforced runs into forced ones: an
+  // exported `SASSO_ENGINE=wasm` makes the "default jobs" case test the
+  // override, and `SASSO_ENGINE=native` makes the fallback case fail instead
+  // of exercising the fallback. Both are supported things to have in a shell.
+  const engineEnv = (env) => {
+    const base = { ...process.env };
+    delete base.SASSO_ENGINE;
+    delete base.SASSO_NATIVE_BINARY;
+    return { ...base, ...env };
+  };
   const compileAll = (out, extra, env) => {
     const args = [cliPath, "--no-source-map", "--style=compressed", ...extra];
     for (const [name] of expected) args.push(`${join(dir, "src", name.replace(".css", ".scss"))}:${join(out, name)}`);
-    return spawnSync(process.execPath, args, { encoding: "utf8", env: { ...process.env, ...env }, timeout: 60000 });
+    return spawnSync(process.execPath, args, { encoding: "utf8", env: engineEnv(env), timeout: 60000 });
   };
   const check = (label, out, r) => {
     assert.equal(r.status, 0, `cli: ${label} compiles (stderr: ${r.stderr})`);
@@ -1238,20 +1249,14 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       big,
       `@use "sass:math";\n@for $i from 1 through 300 { .c#{$i} { width: math.div($i,3)*1px; color: rgba(0,0,0,math.div($i,100)) } }\n`,
     );
-    // The two engine variables are cleared before each run and only the ones
-    // this measurement asks for are put back. Inheriting them would let a
-    // `SASSO_ENGINE=wasm` in the caller's shell — a supported thing to set —
-    // make the "default" run measure wasm and fail the comparison below, or,
-    // with a stale `SASSO_NATIVE_BINARY`, test the override instead.
+    // `engineEnv` for the same reason as above: inheriting `SASSO_ENGINE=wasm`
+    // would make the "default" run measure wasm and fail the comparison below.
     const perCompile = (env) => {
-      const base = { ...process.env };
-      delete base.SASSO_ENGINE;
-      delete base.SASSO_NATIVE_BINARY;
       let best = Infinity;
       for (let k = 0; k < 3; k++) {
         const r = spawnSync(process.execPath, [cliPath, "--loop", "60", "--no-css", big], {
           encoding: "utf8",
-          env: { ...base, ...env },
+          env: engineEnv(env),
           timeout: 60000,
         });
         if (r.status !== 0) return undefined;
