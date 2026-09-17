@@ -26,15 +26,30 @@ Conformance is tracked separately as a ratchet against the official
   The pool is `node:worker_threads` with workers pulling from a shared index,
   so one heavy stylesheet cannot leave the others idle, and `--stop-on-error`
   is a shared flag: whoever fails stops the rest from taking new work, which is
-  the native CLI's "don't start more files once one fails". A single job,
-  `--stdin` and `-j 1` stay in-process — a worker costs more than the compile.
+  the native CLI's "don't start more files once one fails". A single job and
+  `-j 1` stay in-process — a worker costs more than the compile — and so does a
+  batch in which two jobs name one output file, because dart's last-one-wins is
+  an order and an order needs a sequence. A `-` job reads standard input once,
+  in the parent, so it no longer costs the rest of the batch its parallelism
+  (138 Lichess stylesheets plus one `-` job: 767 ms to 217 ms).
   `SASSO_ENGINE=wasm|native` forces an engine.
+
+  Each job's warnings and errors are collected and printed in **command-line
+  order**, as whole blocks, however the threads interleaved — the order the
+  native binary reports at every `-j`.
 
   What that flag means now differs at the edges: `--stop-on-error` skips the
   remaining files at `-j 1` but not necessarily at the default, because they
   have already started — the native CLI behaves the same way (measured
   2026-09-17), and the test that assumed otherwise was pinning a
   sequential-only accident (#83).
+
+### Fixed
+
+- **`sass --version` on the npm package prints the package's version.** It
+  parsed the engine's `info` string, which names the engine crate: with the
+  native addon installed the pattern missed, and the fallback printed
+  dart-sass's compatibility version as if it were sasso's.
 
 ## [0.14.0] - 2026-09-17
 
