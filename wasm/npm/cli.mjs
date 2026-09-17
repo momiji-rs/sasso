@@ -1381,7 +1381,12 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics) {
     if (output === undefined) {
       const pending = diagnostics.get(i);
       if (pending) {
-        process.stderr.write(pending);
+        // Synchronously, like the `--stdin` and `--loop` paths: `emit` is about
+        // to write the CSS to stdout, and under `2>&1` that is the SAME pipe
+        // reached through a second stream. Two asynchronous streams on one
+        // file descriptor have no defined interleaving, so flushing before
+        // `emit` is only an order if this write has actually finished.
+        writeStderrSync(pending);
         diagnostics.delete(i);
       }
     }
