@@ -1038,6 +1038,16 @@ impl Parser {
         }
     }
 
+    /// The interned `Rc<str>` for a numeric literal's unit (`""` included).
+    fn unit_name(&mut self, unit: &str) -> Rc<str> {
+        if let Some(u) = self.unit_names.iter().find(|u| u.as_ref() == unit) {
+            return Rc::clone(u);
+        }
+        let interned: Rc<str> = Rc::from(unit);
+        self.unit_names.push(Rc::clone(&interned));
+        interned
+    }
+
     fn parse_number(&mut self) -> Result<Expr, Error> {
         let mut s = String::new();
         while matches!(self.sc.peek(), Some(c) if c.is_ascii_digit()) {
@@ -1131,7 +1141,7 @@ impl Parser {
                 }
             }
         }
-        Ok(Expr::Number(value, unit))
+        Ok(Expr::Number(value, self.unit_name(&unit)))
     }
 
     fn parse_hex(&mut self) -> Result<Expr, Error> {

@@ -2082,7 +2082,7 @@ impl<'a> Evaluator<'a> {
     /// here.
     fn probe_arg_memoizable(v: &Value) -> bool {
         match v {
-            // A simple unit is one `String` from the call's own spelling.
+            // A simple unit is a shared `Rc<str>`, cloned by refcount.
             Value::Number(n) => !n.has_complex_units(),
             Value::Color(_) => true,
             Value::Str(_)
@@ -2834,11 +2834,7 @@ impl<'a> Evaluator<'a> {
                     let span = self.expression_node(from, *from_pos);
                     let mut result = Ok(());
                     for i in for_indices(start_i, end_i, *inclusive) {
-                        self.set_local(
-                            var,
-                            Value::Number(Number::with_unit(i as f64, unit.clone())),
-                            span,
-                        );
+                        self.set_local(var, Value::Number(Number::with_unit(i as f64, &unit)), span);
                         result = self.exec(body, parents, sink);
                         if result.is_err() {
                             break;
@@ -3113,7 +3109,13 @@ impl<'a> Evaluator<'a> {
         } else {
             &[]
         };
-        let (current, resolved_lbs): (Vec<String>, Vec<bool>) = if self.in_keyframes {
+        // Per-complex source line-breaks (`a,\nb`), on the same fast path as
+        // `part_lbs`: when every flag would be false the resolver is told not to
+        // derive them, and hands back the empty vec all consumers read as
+        // all-false. Keyframe selector lists always take it (dart re-serializes
+        // the stops joined with ", ", dropping author line breaks that
+        // style-rule selectors preserve).
+        let (current, full_lbs): (Vec<String>, Vec<bool>) = if self.in_keyframes {
             (
                 split_commas(&sel_str)
                     .iter()
@@ -3123,15 +3125,15 @@ impl<'a> Evaluator<'a> {
                 Vec::new(),
             )
         } else {
-            resolve_selectors_opt(
+            let resolved = resolve_selectors_opt(
                 &sel_str,
                 parents,
                 !self.at_root_excluding_style_rule,
                 &part_lbs,
                 parent_lbs,
-            )?
-            .into_iter()
-            .unzip()
+                !lbs_fast,
+            )?;
+            (resolved.sels, resolved.lbs)
         };
         // Drop "bogus combinator" complex selectors from the emitted block;
         // dart-sass omits them from the generated CSS. A top-level TRAILING
@@ -3141,19 +3143,10 @@ impl<'a> Evaluator<'a> {
         // for nested rules (`a >` + `b` -> `a > b`). A nested rule that inherits
         // a genuinely bogus combinator (double, or leading/trailing in a pseudo)
         // is dropped in turn.
-        // Per-complex source line-breaks (`a,\nb`). `current` is `parents ×
-        // parts` (or just `parts` at the root), so complex `i` came from part
-        // `i % parts.len()`; carry that part's "newline before" flag, filtered
-        // in step with the dropped bogus selectors.
-        // Fast path: no newline anywhere in the source list and no inherited
-        // parent breaks means every flag is false — an EMPTY vec, which all
-        // consumers (`.get(i)` fallbacks, the `parents.len()` match below for
-        // nested rules) already read as all-false. Skips the split/scan and
-        // three per-rule allocations on the overwhelmingly common shape.
-        // Keyframe selector lists always take it: dart re-serializes the
-        // stops joined with ", " (KeyframeSelectorParser), dropping author
-        // line breaks that style-rule selectors would preserve.
-        let full_lbs: Vec<bool> = if lbs_fast { Vec::new() } else { resolved_lbs };
+        // `current` is `parents × parts` (or just `parts` at the root), so
+        // complex `i` came from part `i % parts.len()`; `full_lbs` carries that
+        // part's "newline before" flag, and is filtered below in step with the
+        // dropped bogus selectors.
         let current = Rc::new(current);
         // Nothing bogus to drop, no keyframe stop to normalize and no per-complex
         // line-break flags to filter in step: the emitted list is `current`
@@ -6702,6 +6695,49 @@ fn split_parent_refs(part: &str) -> Option<Vec<&str>> {
     Some(segments)
 }
 
+/// One rule's resolved selector list: the complexes, and their source
+/// line-break flags only when the caller asked for them. A selector list with
+/// no newline in it, under parents that carry no break of their own, has
+/// all-false flags — which every consumer already reads off an EMPTY vec — so
+/// on that shape, which is nearly every rule, the flags are not collected at
+/// all. Keeping the two as separate lists is also what lets the caller take the
+/// complexes as they are: paired into tuples they would have to be unzipped
+/// again, into two fresh vectors, one of which it then drops.
+struct ResolvedSelectors {
+    sels: Vec<String>,
+    /// Empty unless `flags`; parallel to `sels` when collected.
+    lbs: Vec<bool>,
+    flags: bool,
+}
+
+impl ResolvedSelectors {
+    fn new(flags: bool) -> ResolvedSelectors {
+        ResolvedSelectors {
+            sels: Vec::new(),
+            lbs: Vec::new(),
+            flags,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.sels.len()
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        self.sels.reserve(additional);
+        if self.flags {
+            self.lbs.reserve(additional);
+        }
+    }
+
+    fn push(&mut self, sel: String, lb: bool) {
+        self.sels.push(sel);
+        if self.flags {
+            self.lbs.push(lb);
+        }
+    }
+}
+
 /// Resolve a selector against its parents with dart's `implicitParent` switch: inside
 /// `@at-root` (before the first nested style rule) a part WITHOUT `&` stays
 /// at the root instead of joining the parent, while `&` still substitutes.
@@ -6710,13 +6746,16 @@ fn split_parent_refs(part: &str) -> Option<Vec<&str>> {
 /// own flag OR'd with the joined parent's; a part WITH `&` drops its own flag
 /// and takes the substituted parent's (dart rebuilds those complexes from a
 /// `lineBreak: false` base); a k>=2 cartesian combo ORs its chosen parents'.
+/// The flags are only derived when `want_linebreaks` says the caller has a use
+/// for them.
 fn resolve_selectors_opt(
     sel: &str,
     parents: &[String],
     implicit_parent: bool,
     part_lbs: &[bool],
     parent_lbs: &[bool],
-) -> Result<Vec<(String, bool)>, Error> {
+    want_linebreaks: bool,
+) -> Result<ResolvedSelectors, Error> {
     // Borrowed: every part is a contiguous substring of `sel` and nothing below
     // needs to own one, so a rule pays no `String` per selector part. A
     // selector with no top-level comma is a single part, which is the common
@@ -6877,7 +6916,7 @@ fn resolve_selectors_opt(
             None
         }
     };
-    let expand_cartesian = |segments: &[&str], result: &mut Vec<(String, bool)>| {
+    let expand_cartesian = |segments: &[&str], result: &mut ResolvedSelectors| {
         let k = segments.len() - 1;
         let n = parents.len();
         let mut idx = vec![0usize; k];
@@ -6896,7 +6935,7 @@ fn resolve_selectors_opt(
             // The combo's flag ORs its chosen parents' flags (mastodon's
             // adjacent-state selectors break per combo, not per template).
             let flag = idx.iter().any(|&pi| parent_lbs.get(pi).copied().unwrap_or(false));
-            result.push((normalize_selector_owned(s), flag));
+            result.push(normalize_selector_owned(s), flag);
             // Increment with the LAST ref fastest (dart's order).
             let mut j = k;
             loop {
@@ -6912,24 +6951,25 @@ fn resolve_selectors_opt(
             }
         }
     };
-    let mut result: Vec<(String, bool)> = Vec::new();
+    let mut result = ResolvedSelectors::new(want_linebreaks);
     if parents.is_empty() {
         // At the document root (no enclosing style rule) a parent selector `&`
         // has no parent to substitute, so dart-sass keeps it literal: `& {a: b}`
         // emits `& {\u{2026}}` and `&.foo {\u{2026}}` emits `&.foo {\u{2026}}`. (A `&`-with-suffix
         // such as `&foo` is rejected earlier by `validate_selector`.)
+        result.reserve(parts.len());
         for (pi, part) in parts.iter().enumerate() {
-            result.push((
+            result.push(
                 normalize_selector(part),
                 part_lbs.get(pi).copied().unwrap_or(false),
-            ));
+            );
         }
     } else if !implicit_parent {
         // dart resolves per complex: a part with `&` expands across the
         // parents; a part without stays at the root exactly once.
         for (part_i, part) in parts.iter().enumerate() {
             if let Some(s) = substitute_pseudo_refs(part) {
-                result.push((normalize_selector_owned(s), false));
+                result.push(normalize_selector_owned(s), false);
             } else if let Some(segments) = split_parent_refs(part) {
                 for parent in parents {
                     check_compound_parent(part, parent)?;
@@ -6938,16 +6978,16 @@ fn resolve_selectors_opt(
             } else if part_has_parent_ref(part) {
                 for (pi, parent) in parents.iter().enumerate() {
                     check_compound_parent(part, parent)?;
-                    result.push((
+                    result.push(
                         normalize_selector_owned(replace_parent_refs(part, parent)),
                         parent_lbs.get(pi).copied().unwrap_or(false),
-                    ));
+                    );
                 }
             } else {
-                result.push((
+                result.push(
                     normalize_selector(part),
                     part_lbs.get(part_i).copied().unwrap_or(false),
-                ));
+                );
             }
         }
     } else {
@@ -6959,11 +6999,11 @@ fn resolve_selectors_opt(
         // `parents.len()^k` combos, interleaved column-by-column with its
         // sibling parts (mastodon's `&:hover + &:is(...)` lists).
         // One part's row, appended to `out`.
-        let resolve_row = |part_i: usize, part: &str, out: &mut Vec<(String, bool)>| -> Result<(), Error> {
+        let resolve_row = |part_i: usize, part: &str, out: &mut ResolvedSelectors| -> Result<(), Error> {
             // A pseudo-only `&` part resolves ONCE (whole parent list in
             // place): a single-entry row.
             if let Some(s) = substitute_pseudo_refs(part) {
-                out.push((normalize_selector_owned(s), false));
+                out.push(normalize_selector_owned(s), false);
                 return Ok(());
             }
             if let Some(segments) = split_parent_refs(part) {
@@ -6994,7 +7034,7 @@ fn resolve_selectors_opt(
                         part_lbs.get(part_i).copied().unwrap_or(false) || parent_lb,
                     )
                 };
-                out.push((normalize_selector_owned(combined), flag));
+                out.push(normalize_selector_owned(combined), flag);
             }
             Ok(())
         };
@@ -7005,9 +7045,10 @@ fn resolve_selectors_opt(
             result.reserve(parents.len());
             resolve_row(0, part, &mut result)?;
         } else {
-            let mut rows: Vec<Vec<(String, bool)>> = Vec::with_capacity(parts.len());
+            let mut rows: Vec<ResolvedSelectors> = Vec::with_capacity(parts.len());
             for (part_i, part) in parts.iter().enumerate() {
-                let mut row = Vec::with_capacity(parents.len());
+                let mut row = ResolvedSelectors::new(want_linebreaks);
+                row.reserve(parents.len());
                 resolve_row(part_i, part, &mut row)?;
                 rows.push(row);
             }
@@ -7018,8 +7059,9 @@ fn resolve_selectors_opt(
                 // of being cloned; what stays behind is an empty `String`, which
                 // owns no buffer, and `rows` is dropped right after.
                 for row in rows.iter_mut() {
-                    if let Some(entry) = row.get_mut(j) {
-                        result.push((std::mem::take(&mut entry.0), entry.1));
+                    if let Some(sel) = row.sels.get_mut(j) {
+                        let lb = row.lbs.get(j).copied().unwrap_or(false);
+                        result.push(std::mem::take(sel), lb);
                     }
                 }
             }
@@ -8302,11 +8344,11 @@ mod tests {
         }
 
         let refused = vec![
-            // Simple units are one `String`; a complex unit list is two `Vec`s
-            // of them, and it clones deeply.
+            // A simple unit is a shared `Rc<str>`; a complex unit list is a
+            // boxed pair of `Vec`s, and it clones deeply.
             Value::Number(Number::with_units(
                 1.0,
-                vec!["px".to_string(), "px".to_string()],
+                vec!["px".into(), "px".into()],
                 Vec::new(),
             )),
             Value::Str(SassStr {

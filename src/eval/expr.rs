@@ -101,7 +101,7 @@ impl<'a> Evaluator<'a> {
 
     pub(super) fn eval_expr_inner(&mut self, expr: &Expr) -> Result<Value, Error> {
         match expr {
-            Expr::Number(v, unit) => Ok(Value::Number(Number::with_unit(*v, unit.clone()))),
+            Expr::Number(v, unit) => Ok(Value::Number(Number::with_shared_unit(*v, unit))),
             Expr::Color(c) => Ok(Value::Color(c.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),

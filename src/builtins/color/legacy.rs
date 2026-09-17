@@ -683,8 +683,8 @@ fn parse_degenerate_token(s: &str) -> Option<Number> {
     let t = s.trim();
     let inner = t.strip_prefix("calc(")?.strip_suffix(')')?.trim();
     let (const_part, unit) = match inner.split_once('*') {
-        Some((c, u)) => (c.trim(), u.trim().strip_prefix('1')?.to_string()),
-        None => (inner, String::new()),
+        Some((c, u)) => (c.trim(), u.trim().strip_prefix('1')?),
+        None => (inner, ""),
     };
     let value = match const_part.to_ascii_lowercase().as_str() {
         "nan" => f64::NAN,
@@ -704,7 +704,7 @@ fn parse_number_token(s: &str) -> Option<Number> {
         .unwrap_or(s.len());
     let (num_part, unit) = s.split_at(split);
     let value = num_part.parse::<f64>().ok()?;
-    Some(Number::with_unit(value, unit.to_string()))
+    Some(Number::with_unit(value, unit))
 }
 
 pub(super) fn rgb_repr(r: f64, g: f64, b: f64, a: f64) -> String {
@@ -1797,7 +1797,7 @@ pub(super) fn fn_percentage(pos_args: &[Value], named: &[(String, Value)], pos: 
         }
     }
     let n = num(arg, pos)?;
-    Ok(Value::Number(Number::with_unit(n * 100.0, "%".to_string())))
+    Ok(Value::Number(Number::with_unit(n * 100.0, "%")))
 }
 
 pub(super) fn fn_channel(

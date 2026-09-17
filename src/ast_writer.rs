@@ -21,7 +21,7 @@ fn write_into(out: &mut String, e: &Expr) {
         // A number is written as its VALUE, not as it was typed: `1e3` is
         // `1000` and `.5` is `0.5`.
         Expr::Number(v, unit) => {
-            out.push_str(&Value::Number(Number::with_unit(*v, unit.clone())).to_css(false));
+            out.push_str(&Value::Number(Number::with_unit(*v, unit)).to_css(false));
         }
         // A colour keeps the spelling it was authored with (`#ABCDEF`, `red`).
         Expr::Color(c) => out.push_str(&Value::Color(c.clone()).to_css(false)),

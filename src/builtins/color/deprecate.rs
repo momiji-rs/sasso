@@ -95,7 +95,7 @@ fn adjust_line(channel: &str, amount: f64, unit: &str) -> String {
 /// A number in the spelling Sass would write it, which is what dart embeds in
 /// the suggestion.
 fn number(value: f64, unit: &str) -> String {
-    Value::Number(Number::with_unit(value, unit.to_string())).to_css(false)
+    Value::Number(Number::with_unit(value, unit)).to_css(false)
 }
 
 /// The space a deprecated channel getter reads its channel from. dart names it

@@ -287,7 +287,7 @@ fn round_with_step(
     pos: Pos,
 ) -> Result<Value, Error> {
     let unit = number.unit().to_string();
-    let with_unit = |value: f64| num_value(Number::with_unit(value, unit.clone()));
+    let with_unit = |value: f64| num_value(Number::with_unit(value, &unit));
     // Coerce the step into the number's unit; an incompatible pair preserves
     // the call (a real/unitless or known cross-dimension mix errors, matching
     // the two-argument unit rules).
@@ -502,7 +502,7 @@ fn unary(
 fn sign(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     check_max_args(pos_args, named, 1, pos)?;
     let n = require_num(&["number"], pos_args, named, 0, pos)?;
-    if n.numer_units().iter().any(|u| u == "%") {
+    if n.numer_units().iter().any(|u| &**u == "%") {
         return Ok(preserved_call("sign", &all_args(pos_args, named)));
     }
     let s = if n.value > 0.0 {
@@ -1245,7 +1245,7 @@ fn unitless(value: f64) -> Value {
 }
 
 fn degrees(value: f64) -> Value {
-    num_value(Number::with_unit(value, "deg".to_string()))
+    num_value(Number::with_unit(value, "deg"))
 }
 
 fn incompatible(a: &Number, b: &Number, pos: Pos) -> Error {
@@ -1287,7 +1287,7 @@ mod tests {
     }
 
     fn n(value: f64, unit: &str) -> Value {
-        Value::Number(Number::with_unit(value, unit.to_string()))
+        Value::Number(Number::with_unit(value, unit))
     }
 
     fn call(name: &str, args: &[Value]) -> Value {

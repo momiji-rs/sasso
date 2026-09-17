@@ -225,7 +225,11 @@ pub fn host_value_op(op: u32, input: &[u8]) -> Result<Vec<u8>, String> {
             let n = as_number(args.first())?;
             let unit = as_string(args.get(1))?;
             let from = (n.numer_units(), n.denom_units());
-            let to_numer = if unit.is_empty() { vec![] } else { vec![unit] };
+            let to_numer: Vec<Rc<str>> = if unit.is_empty() {
+                vec![]
+            } else {
+                vec![unit.into()]
+            };
             let ok = number_factor(from, (&to_numer, &[]), true).is_some();
             Value::Bool(ok)
         }
@@ -305,28 +309,28 @@ fn as_string(v: Option<&Value>) -> Result<String, String> {
         _ => Err("sasso: value op expected a string".to_string()),
     }
 }
-/// Extract a `Vec<String>` from a list (or single string / empty / null) value.
-fn as_string_list(v: Option<&Value>) -> Vec<String> {
+/// Extract a unit list from a list (or single string / empty / null) value.
+fn as_string_list(v: Option<&Value>) -> Vec<Rc<str>> {
     match v {
         Some(Value::List(l)) => l
             .items
             .iter()
             .filter_map(|i| {
                 if let Value::Str(s) = i {
-                    Some(s.text.to_string())
+                    Some(Rc::clone(&s.text))
                 } else {
                     None
                 }
             })
             .collect(),
-        Some(Value::Str(s)) => vec![s.text.to_string()],
+        Some(Value::Str(s)) => vec![Rc::clone(&s.text)],
         _ => vec![],
     }
 }
 
 /// The multiplier from `from` units to `to` units under convert/coerce rules,
 /// or `None` if the conversion is illegal.
-fn number_factor(from: (&[String], &[String]), to: (&[String], &[String]), coerce: bool) -> Option<f64> {
+fn number_factor(from: (&[Rc<str>], &[Rc<str>]), to: (&[Rc<str>], &[Rc<str>]), coerce: bool) -> Option<f64> {
     let from_unitless = from.0.is_empty() && from.1.is_empty();
     let to_unitless = to.0.is_empty() && to.1.is_empty();
     if from_unitless || to_unitless {
@@ -775,14 +779,14 @@ fn read_value(r: &mut Reader<'_>) -> Result<Value, String> {
 fn read_number_body(r: &mut Reader<'_>) -> Result<Number, String> {
     let value = r.f64()?;
     let nn = r.u32()?;
-    let mut numer = Vec::with_capacity(nn);
+    let mut numer: Vec<Rc<str>> = Vec::with_capacity(nn);
     for _ in 0..nn {
-        numer.push(r.str()?);
+        numer.push(r.str()?.into());
     }
     let dn = r.u32()?;
-    let mut denom = Vec::with_capacity(dn);
+    let mut denom: Vec<Rc<str>> = Vec::with_capacity(dn);
     for _ in 0..dn {
-        denom.push(r.str()?);
+        denom.push(r.str()?.into());
     }
     Ok(Number::with_units(value, numer, denom))
 }

@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn rejects_unknown_names_and_units() {
         assert!(try_call("frobnicate", &[s("x", true)], &[], pos()).is_none());
-        let unit_idx = Value::Number(Number::with_unit(2.0, "px".to_string()));
+        let unit_idx = Value::Number(Number::with_unit(2.0, "px"));
         let err = try_call("str-slice", &[s("abc", true), unit_idx], &[], pos());
         assert!(err.expect("owned").is_err());
     }
