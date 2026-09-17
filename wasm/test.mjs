@@ -1562,6 +1562,43 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       ["nocss-0", "nocss-1", "nocss-2", "nocss-3", "nocss-4", "nocss-5"],
       "cli: every job still ran, exactly once, reported in command-line order",
     );
+
+    // …and that it KEPT the pool, which the assertions above cannot show: a
+    // serialized run produces the same files (none) and the same warnings.
+    // Nothing is written under `--no-css`, so write order is no help either.
+    //
+    // `--stop-on-error` is: run in order, a failing FIRST job stops the rest
+    // before they warn; in the pool the others have already started and do
+    // warn. Job 0 is slow, so the workers are certainly past their claim by
+    // the time it fails. Measured 2026-09-17, five runs each: `-j 1` saw 0
+    // warnings every time, `-j 4` saw 5.
+    const cdir2 = join(dir, "nocss-conc");
+    mkdirSync(cdir2, { recursive: true });
+    writeFileSync(
+      join(cdir2, "j0.scss"),
+      `@for $i from 1 through 30000 { .slow-#{$i}{a:$i} }\n.bad{a: 1px + #fff}\n`,
+    );
+    for (let i = 1; i < 6; i++) writeFileSync(join(cdir2, `j${i}.scss`), `@warn "conc-${i}";\n.n${i}{a:${i}}\n`);
+    const shared = join(cdir2, "out.css");
+    const concArgs = (jobs) => {
+      const a = [cliPath, "--no-css", "--no-source-map", "--stop-on-error", "-j", String(jobs)];
+      for (let i = 0; i < 6; i++) a.push(`${join(cdir2, `j${i}.scss`)}:${shared}`);
+      return a;
+    };
+    const warnCount = (jobs) => {
+      const run = spawnSync(process.execPath, concArgs(jobs), { encoding: "utf8", timeout: 60000 });
+      assert.notEqual(run.status, 0, `cli: the --no-css -j ${jobs} run fails on its first job`);
+      return (run.stderr.match(/conc-\d/g) || []).length;
+    };
+    // The control: in order, nothing after the failure gets to warn. If this
+    // ever stopped being true the comparison below would prove nothing.
+    assert.equal(warnCount(1), 0, "cli: --stop-on-error at -j 1 stops the rest before they warn");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      assert.ok(
+        warnCount(4) > 0,
+        `cli: a --no-css batch with one destination keeps the pool (attempt ${attempt})`,
+      );
+    }
   }
 
   // One job WRITES a path another job READS: `a.scss:b.scss b.scss:out.css`.
