@@ -11,14 +11,34 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
-> **The next release is 0.14.0**, not 0.11.0. The crate skips forward to meet
-> the npm package, which is at 0.13.0 and cannot go back — npm forbids
-> republishing a version, so the packaging iterations of June and July 2026
-> burned three minors that the crate never spent. From 0.14.0 the two lines
-> carry the same number; `release-wasm.yml` enforces it and explains the rest.
+## [0.14.0] - 2026-09-17
+
+_The release that makes the npm package the CLI the release notes have been
+describing. 0.10.0 gave the `sasso` binary a dart-compatible command line and
+the npm package did not get it — reported on #24 by someone whose build it
+broke — so `npm install sasso` shipped a command that rejected every flag a
+dart-sass build script passes except `--quiet`. It accepts them all now, and
+behaves as the native CLI does down to the argument grammar, the source-map
+shapes and the error wording._
+
+_**0.14.0, not 0.11.0**: the crate skips forward to meet the npm package, which
+is at 0.13.0 and cannot go back — npm forbids republishing a version, so the
+packaging iterations of June and July 2026 burned three minors that the crate
+never spent. From here the two lines carry the same number, and
+`release-wasm.yml` enforces it: an `npm-v*` tag whose version does not equal
+`Cargo.toml`'s fails before anything reaches the registry._
+
+_No output changes: the sass-spec ratchet is unchanged at 14,107 of 14,258
+attempted (98.94%, delta +0) against dart-sass 1.104.1 and sass-spec
+`b39c3276`._
 
 ### Added
 
+- **`DependencySet::mark` (crate)**: record a stylesheet as a dependency from an
+  embedder's own importer. `FsImporter` fills its record from its own
+  resolution, but an embedder that resolves load paths itself — the wasm bridge,
+  whose host does every file lookup — needs a way in, or `quietDeps` has nothing
+  to consult. Previously crate-private as `insert`.
 - **`unicode` in the npm package's JS API** (the CLI's `--[no-]unicode`):
   `unicode: false` renders diagnostics with the ASCII glyph set. dart-sass
   exposes this on its command line only, so it is a sasso extension — but its
@@ -1354,7 +1374,8 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/momiji-rs/sasso/compare/v0.10.0...v0.14.0
 [0.10.0]: https://github.com/momiji-rs/sasso/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/momiji-rs/sasso/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/momiji-rs/sasso/compare/v0.8.1...v0.9.0
