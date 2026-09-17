@@ -1166,6 +1166,22 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     SASSO_NATIVE_BINARY: join(dir, "no-such-addon.node"),
   }));
 
+  // `--help` and `--version` answer from the package alone, so they must work
+  // where no engine can be loaded at all — a metadata question must not need a
+  // compiler.
+  {
+    const blind = { ...process.env, SASSO_ENGINE: "native", SASSO_NATIVE_BINARY: join(dir, "no-such-addon.node") };
+    const pkg = JSON.parse(readFileSync(new URL("./npm/package.json", import.meta.url), "utf8"));
+    const v = spawnSync(process.execPath, [cliPath, "--version"], { encoding: "utf8", env: blind, timeout: 20000 });
+    assert.equal(v.status, 0, `cli: --version without a loadable engine (stderr: ${v.stderr})`);
+    assert.equal(v.stdout.trim(), pkg.version, "cli: … and it is still the package's version");
+    const h = spawnSync(process.execPath, [cliPath, "--help"], { encoding: "utf8", env: blind, timeout: 20000 });
+    assert.equal(h.status, 0, `cli: --help without a loadable engine (stderr: ${h.stderr})`);
+    // The help prints the negatable spelling, `--[no-]stop-on-error` — the
+    // bare flag name matches nothing (this assertion caught itself).
+    assert.match(h.stdout, /--\[no-\]stop-on-error/, "cli: … and it is the real help text");
+  }
+
   // Each job must run EXACTLY once. Correct output does not prove that — a pool
   // where every worker walks the whole list from 0 produces the same files,
   // just N times over — so make the repetition audible: one `@warn` per

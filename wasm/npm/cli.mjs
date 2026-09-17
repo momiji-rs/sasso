@@ -36,7 +36,7 @@ import { isMainThread, workerData, parentPort, Worker } from "node:worker_thread
  * `SASSO_ENGINE=wasm|native` forces one, which is what the tests use to hold
  * both to the same output.
  */
-let compile, compileString, info, Exception, Logger;
+let compile, compileString, Exception, Logger;
 async function loadEngine() {
   const want = process.env.SASSO_ENGINE;
   let mod;
@@ -55,7 +55,7 @@ async function loadEngine() {
     mod = await import("./sasso.speed.mjs");
     kind = "wasm";
   }
-  ({ compile, compileString, info, Exception, Logger } = mod);
+  ({ compile, compileString, Exception, Logger } = mod);
   return kind;
 }
 
@@ -903,8 +903,12 @@ function commonOptions(opts) {
 }
 
 async function main() {
-  await loadEngine();
+  // Arguments FIRST: `--help` and `--version` answer from this file alone and
+  // exit inside `parseArgs`. Loading the engine before them made a metadata
+  // question depend on a compiler — `SASSO_ENGINE=native sasso --version` on a
+  // machine without the addon printed the addon error instead of the version.
   const opts = parseArgs(process.argv.slice(2));
+  await loadEngine();
   const common = commonOptions(opts);
 
   // --loop: recompile in-process and report throughput, never writing a file.
