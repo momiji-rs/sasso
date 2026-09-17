@@ -119,6 +119,15 @@ Symlinked directories are followed, each one only once.
 With no output file the CSS is written to stdout. A Sass error is printed to
 stderr and exits non-zero.`;
 
+/** The version npm installed: the `version` of the package.json beside this file. */
+function packageVersion() {
+  try {
+    return JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
+  } catch {
+    return "unknown";
+  }
+}
+
 function fail(msg) {
   process.stderr.write(String(msg).replace(/\n?$/, "\n"));
   process.exit(1);
@@ -164,9 +173,12 @@ function parseArgs(argv) {
       process.stdout.write(HELP + "\n");
       process.exit(0);
     } else if (a === "--version") {
-      // info is "dart-sass\t<ver>\t(sasso <ver>)\t[Rust]" — surface the sasso one.
-      const m = /\(sasso ([^)]+)\)/.exec(info);
-      process.stdout.write((m ? m[1] : info.split("\t")[1] || "unknown") + "\n");
+      // The PACKAGE's version, from the package.json beside this file — not
+      // parsed out of an engine's `info`, which names the ENGINE crate: the
+      // native addon reports `(sasso-native <ver>)`, the old regex missed it,
+      // and the fallback printed the second field — dart's compatibility
+      // version — as if it were ours.
+      process.stdout.write(`${packageVersion()}\n`);
       process.exit(0);
     } else if (a === "--stdin") {
       opts.stdin = true;

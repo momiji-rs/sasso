@@ -417,7 +417,17 @@ const cliPath = fileURLToPath(new URL("./npm/cli.mjs", import.meta.url));
 const cli = (args, input) =>
   execFileSync(process.execPath, [cliPath, ...args], { input, encoding: "utf8" });
 
-assert.match(cli(["--version"]).trim(), /^\d+\.\d+\.\d+/, "cli: --version prints a version");
+// Not just "version-shaped": the engine's `info` carries dart's compatibility
+// version too, and printing THAT looks perfectly valid to a regex.
+{
+  const pkg = JSON.parse(readFileSync(new URL("./npm/package.json", import.meta.url), "utf8"));
+  assert.equal(cli(["--version"]).trim(), pkg.version, "cli: --version prints the package's version");
+  assert.equal(
+    spawnSync(process.execPath, [cliPath, "--version"], { encoding: "utf8", env: { ...process.env, SASSO_ENGINE: "wasm" } }).stdout.trim(),
+    pkg.version,
+    "cli: … the same on either engine",
+  );
+}
 assert.ok(cli(["--help"]).includes("Usage: sasso"), "cli: --help");
 assert.equal(cli(["--stdin"], ".a{b: 1 + 2}\n").trim(), ".a {\n  b: 3;\n}", "cli: --stdin compile");
 assert.equal(cli(["--style=compressed", "--stdin"], ".a{b:1+2}\n").trim(), ".a{b:3}", "cli: --style=compressed");
