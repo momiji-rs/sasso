@@ -150,6 +150,22 @@ Conformance is tracked separately as a ratchet against the official
   50%)` was an opaque blend, not the `rgba(255, 255, 255, 0.5)` a fully
   transparent color mixes to) and the `[color-functions]` deprecation's
   suggested `color.scale` percentage all inherited it.
+- **A conversion between spaces resolves a missing alpha.** Converting a color
+  resolves its missing alpha to 0 whatever the destination — only a LEGACY
+  destination also zero-fills the channels — while a same-space conversion
+  stays the identity and keeps everything missing. So
+  `color.is-missing(color.to-space(oklch(50% 0.1 20deg / none), oklab),
+  "alpha")` is now `false`, as are the results of `complement`, `mix`, and
+  `change`/`adjust`/`scale` reached through a `$space`/`$method` other than the
+  color's own. `color.to-gamut()`, which hands the color back in its own space,
+  still keeps it; so does an op given no `$space`. `invert()` rebuilds the
+  color like `change` does, so its alpha comes out concrete even with no
+  conversion.
+- **`color.scale($color, $alpha: …)` rejects a missing alpha** on the shortcut
+  that preserves a color's missing channels, instead of reading it as opaque:
+  `color.scale(hsl(240 none 50% / none), $alpha: 10%)` now raises dart-sass's
+  "doesn't currently support modifying missing channels" error, which the
+  common path already raised.
 - **`color.change()` hands back a concrete alpha.** dart rebuilds the result
   with the alpha the getter above reports, so changing any channel of a color
   with a missing alpha resolves it to 0:

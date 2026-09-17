@@ -9,8 +9,8 @@
 //! [`legacy_hsl_adjust`] and [`legacy_alpha_adjust`] are for.
 
 use super::color::{
-    legacy_alpha_adjust, legacy_hsl_adjust, modify_in_space, modify_in_space_opt, space_arg, stored_alpha,
-    ModifyOp,
+    legacy_alpha_adjust, legacy_hsl_adjust, missing_channel_err, modify_in_space, modify_in_space_opt,
+    space_arg, stored_alpha, ModifyOp,
 };
 use super::{arg, as_color, clamp01, num, require, require_legacy_color};
 use crate::error::Error;
@@ -965,6 +965,12 @@ fn fn_scale_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
         if mc.channels.iter().any(Option::is_none) && chans.iter().all(|(n, _)| *n == "alpha") {
             let mut out = mc;
             for (_, v) in &chans {
+                // `scale` combines the amount with the channel's current value,
+                // so a MISSING alpha is unsupported here exactly as it is on the
+                // common path — this shortcut must not read it as opaque.
+                if out.alpha.is_none() {
+                    return Err(missing_channel_err("alpha", &Value::Color(c.clone()), pos));
+                }
                 let factor = scale_factor("alpha", v, pos)?;
                 let a = out.alpha.unwrap_or(1.0);
                 out.alpha = Some(scale_toward(a, factor, 1.0));

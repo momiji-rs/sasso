@@ -150,8 +150,17 @@ pub(crate) fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColo
 /// round trip. Same-space conversion stays the identity in both.
 pub(super) fn convert_modern_filled(mc: &ModernColor, target: ColorSpace) -> ModernColor {
     let out = convert_modern(mc, target);
-    if mc.space == target || !target.is_legacy() {
+    // Same-space is the identity in dart too, and keeps every missing channel.
+    if mc.space == target {
         return out;
+    }
+    // A REAL conversion resolves a missing ALPHA to 0 whatever the target —
+    // `color.is-missing(color.to-space(oklch(50% 0.1 20deg / none), oklab),
+    // "alpha")` is false in dart — where the CHANNELS are only zero-filled for
+    // a legacy target.
+    let alpha = Some(out.alpha.unwrap_or(0.0));
+    if !target.is_legacy() {
+        return ModernColor { alpha, ..out };
     }
     ModernColor {
         space: target,
@@ -160,7 +169,7 @@ pub(super) fn convert_modern_filled(mc: &ModernColor, target: ColorSpace) -> Mod
             Some(out.channels[1].unwrap_or(0.0)),
             Some(out.channels[2].unwrap_or(0.0)),
         ],
-        alpha: Some(out.alpha.unwrap_or(0.0)),
+        alpha,
     }
 }
 

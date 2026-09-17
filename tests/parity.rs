@@ -2367,6 +2367,146 @@ fn an_unknown_channel_names_the_colors_own_space() {
 }
 
 #[test]
+fn a_real_conversion_resolves_a_missing_alpha() {
+    // Converting a color between spaces resolves a missing alpha to 0 —
+    // whatever the destination, legacy or not, where only a LEGACY destination
+    // also zero-fills the channels. A same-space conversion is the identity
+    // and keeps everything missing. Every op that converts inherits this:
+    // `to-space`, `complement`/`invert`/`mix` with a `$space`/`$method`, and
+    // `change`/`adjust`/`scale` with a `$space` that is not the color's own.
+    // Byte-matched to dart-sass 1.104.1. Offline.
+    for (call, want) in [
+        // to-space: converted vs identity.
+        ("color.is-missing(color.to-space($o, oklab), \"alpha\")", "false"),
+        ("color.is-missing(color.to-space($o, lab), \"alpha\")", "false"),
+        ("color.is-missing(color.to-space($o, srgb), \"alpha\")", "false"),
+        ("color.is-missing(color.to-space($o, rgb), \"alpha\")", "false"),
+        ("color.is-missing(color.to-space($o, oklch), \"alpha\")", "true"),
+        ("color.is-missing(color.to-space($c, hwb), \"alpha\")", "false"),
+        ("color.is-missing(color.to-space($c, hsl), \"alpha\")", "true"),
+        ("color.is-missing(color.to-space($l, lch), \"alpha\")", "false"),
+        ("color.is-missing(color.to-space($l, lab), \"alpha\")", "true"),
+        // The ops that convert on the way in or out.
+        (
+            "color.is-missing(complement($o, $space: hsl), \"alpha\")",
+            "false",
+        ),
+        ("color.is-missing(complement($c), \"alpha\")", "true"),
+        (
+            "color.is-missing(color.mix($o, $o, $method: oklab), \"alpha\")",
+            "false",
+        ),
+        (
+            "color.is-missing(color.adjust($o, $lightness: 10%, $space: oklab), \"alpha\")",
+            "false",
+        ),
+        (
+            "color.is-missing(color.scale($o, $lightness: 10%, $space: oklab), \"alpha\")",
+            "false",
+        ),
+        (
+            "color.is-missing(color.adjust($o, $lightness: 10%), \"alpha\")",
+            "true",
+        ),
+        // `to-gamut` is not a conversion in this sense: it hands the color
+        // back in its own space and keeps the missing alpha.
+        (
+            "color.is-missing(color.to-gamut($o, $method: local-minde), \"alpha\")",
+            "true",
+        ),
+        (
+            "color.is-missing(color.to-gamut(oklch(50% 0.9 20deg / none), $method: local-minde), \"alpha\")",
+            "true",
+        ),
+        // `invert` REBUILDS the color, so its alpha comes out concrete even
+        // when the working space is the color's own and nothing converted.
+        ("color.is-missing(invert($o, $space: oklch), \"alpha\")", "false"),
+        (
+            "meta.inspect(invert($o, $space: oklch))",
+            "oklch(50% 0.1 200deg / 0)",
+        ),
+        // And an explicit `$alpha: none` only survives where nothing converts.
+        (
+            "meta.inspect(color.change($c, $alpha: none, $space: hsl))",
+            "hsl(240deg 100% 50% / none)",
+        ),
+        (
+            "meta.inspect(color.change($c, $alpha: none, $space: rgb))",
+            "hsla(240, 100%, 50%, 0)",
+        ),
+        (
+            "meta.inspect(color.change($c, $alpha: none, $space: hwb))",
+            "hsla(240, 100%, 50%, 0)",
+        ),
+        (
+            "meta.inspect(color.change(blue, $alpha: none, $space: hsl))",
+            "rgba(0, 0, 255, 0)",
+        ),
+    ] {
+        assert_eq!(
+            ours(&format!(
+                "@use \"sass:color\";\n@use \"sass:meta\";\n\
+                 $o: oklch(50% 0.1 20deg / none);\n\
+                 $c: hsl(240 100% 50% / none);\n\
+                 $l: lab(50% 1 2 / none);\na {{ b: {call}; }}\n"
+            )),
+            format!("a {{\n  b: {want};\n}}\n"),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn the_alpha_only_scale_shortcut_still_rejects_a_missing_alpha() {
+    // `scale` combines its amount with the channel's current value, so a
+    // missing alpha is unsupported — and the shortcut that preserves a
+    // color's missing CHANNELS through an alpha-only scale must not read the
+    // alpha as opaque instead of erroring. Byte-matched to dart-sass 1.104.1.
+    // Offline.
+    let src = |call: &str| {
+        format!(
+            "@use \"sass:color\";\n@use \"sass:meta\";\n\
+             $b: hsl(240 none 50% / none);\n\
+             $r: rgb(none none none / none);\n\
+             $s: hsl(240 none 50%);\na {{ b: {call}; }}\n"
+        )
+    };
+    for call in [
+        "color.scale($b, $alpha: 10%)",
+        "color.scale($b, $alpha: -10%)",
+        "color.scale($r, $alpha: 10%)",
+        "scale-color($b, $alpha: 10%)",
+    ] {
+        let msg = ours_err(&src(call));
+        assert!(
+            msg.contains(
+                "$alpha: Because the CSS working group is still deciding on the best behavior, \
+                 Sass doesn't currently support modifying missing channels"
+            ),
+            "{call}: {msg}"
+        );
+    }
+    // A concrete alpha still takes the shortcut, missing channels intact.
+    for (call, want) in [
+        (
+            "meta.inspect(color.scale($s, $alpha: -10%))",
+            "hsl(240deg none 50% / 0.9)",
+        ),
+        (
+            "meta.inspect(color.scale(rgb(none none none), $alpha: -10%))",
+            "rgb(none none none / 0.9)",
+        ),
+        (
+            "meta.inspect(scale-color($s, $alpha: -10%))",
+            "hsl(240deg none 50% / 0.9)",
+        ),
+        ("meta.inspect(color.scale($s))", "hsl(240deg none 50%)"),
+    ] {
+        assert_eq!(ours(&src(call)), format!("a {{\n  b: {want};\n}}\n"), "{call}");
+    }
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0

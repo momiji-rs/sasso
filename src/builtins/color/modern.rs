@@ -606,7 +606,11 @@ pub(crate) fn invert_in_space(
     // resurrect a missing channel from the original via the interpolation
     // missing-takes-other rule.
     if (weight - 1.0).abs() < 1e-11 {
-        let back = convert_modern_filled(&inverted, dest);
+        let mut back = convert_modern_filled(&inverted, dest);
+        // Like `change` and `grayscale`, the rebuilt color carries a concrete
+        // alpha even when no conversion resolved it:
+        // `invert(oklch(50% 0.1 20deg / none), $space: oklch)` is `/ 0`.
+        back.alpha = Some(back.alpha.unwrap_or(0.0));
         return Ok(make_modern_in(back, dest));
     }
     // Mix the inverted color toward the original by `1 - weight` (per channel).

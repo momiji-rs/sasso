@@ -36,7 +36,8 @@ pub(crate) use math::{
     stored_alpha,
 };
 pub(crate) use modern::{
-    grayscale_modern, invert_in_space, modify_in_space, modify_in_space_full, modify_in_space_opt, ModifyOp,
+    grayscale_modern, invert_in_space, missing_channel_err, modify_in_space, modify_in_space_full,
+    modify_in_space_opt, ModifyOp,
 };
 
 /// Whether a value is a "special" channel argument that cannot be evaluated
