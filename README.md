@@ -113,14 +113,14 @@ wasm when it is not; `SASSO_ENGINE=wasm|native` forces a choice.
 the size-optimised wasm build and ignores `SASSO_ENGINE`, `"sasso/speed"` is
 the faster, larger wasm build, and the addon is the explicit `"sasso/native"`
 subpath. Compiling the 138 stylesheets above in one process, with lila's own
-flags, best of five (2026-09-17, M2 Max):
+flags, best of five, one run for the whole table (2026-09-17, M2 Max):
 
 | | |
 |---|---|
-| `npx sasso` (native engine) | **232 ms** |
-| `npx sasso` (wasm engine) | 674 ms |
-| the `sasso` 0.14.0 binary | 154 ms |
-| dart-sass 1.104.1 | 2348 ms |
+| `npx sasso` (native engine) | **228 ms** |
+| `npx sasso` (wasm engine) | 646 ms |
+| the `sasso` 0.14.0 binary | 143 ms |
+| dart-sass 1.104.1 | 2322 ms |
 
 ```js
 import { compileString } from "sasso";

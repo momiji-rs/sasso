@@ -216,8 +216,8 @@ sasso` already fetched `sasso-native-<platform>` as an optionalDependency on
 macOS and Linux — and falls back to the wasm build (the speed-optimised one)
 everywhere else. Both produce byte-identical output; `SASSO_ENGINE=wasm` or
 `SASSO_ENGINE=native` forces one. Compiling a 138-stylesheet tree on a 12-core
-machine, that tree's own flags, best of five (2026-09-17): **232 ms** on the
-native engine, 674 ms on wasm, against dart-sass 1.104.1's 2348 ms.
+machine, that tree's own flags, best of five (2026-09-17): **228 ms** on the
+native engine, 646 ms on wasm, against dart-sass 1.104.1's 2322 ms.
 
 Importing the library selects nothing: `"sasso"` is always the size-optimised
 wasm build and ignores `SASSO_ENGINE`, and the addon is the `"sasso/native"`

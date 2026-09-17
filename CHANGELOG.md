@@ -19,15 +19,16 @@ Conformance is tracked separately as a ratchet against the official
   `sasso-native-<platform>` as an optionalDependency, and it compiled
   sequentially while `-j/--jobs` was accepted and ignored. Compiling the 138
   Lichess stylesheets that build without npm dependencies, with lila's own
-  flags on a 12-core machine, best of five (2026-09-17):
+  flags (it passes no load paths) on a 12-core machine, best of five, one run
+  for the whole table (2026-09-17):
 
   | | |
   |---|---|
-  | `npx sasso` before | 2379 ms |
-  | `npx sasso` after (native engine) | **243 ms** |
-  | `npx sasso` after (wasm engine) | 649 ms |
-  | the `sasso` 0.14.0 binary | 154 ms |
-  | dart-sass 1.104.1 | 2348 ms |
+  | `npx sasso` before | 2340 ms |
+  | `npx sasso` after (native engine) | **228 ms** |
+  | `npx sasso` after (wasm engine) | 646 ms |
+  | the `sasso` 0.14.0 binary | 143 ms |
+  | dart-sass 1.104.1 | 2322 ms |
 
   So the npm package was at parity with the thing it replaces, and is now
   within 1.6× of the release binary — with output byte-identical to that

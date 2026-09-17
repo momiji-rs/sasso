@@ -1018,9 +1018,10 @@ async function main() {
  * The jobs are independent — each reads one input and writes one output — so
  * the native CLI gives them one worker per CPU (`available_parallelism`) and
  * this one now does the same, which is what `-j/--jobs` has always claimed.
- * Sequentially, the difference is most of the gap between the two: 137 lila
- * stylesheets take 686 ms through the binary at `-j 1` and 139 ms at its
- * default.
+ * Sequentially, the difference is most of the gap between the two: the 138
+ * lila stylesheets that build without npm dependencies take 704 ms through the
+ * binary at `-j 1` and 138 ms at its default (measured 2026-09-17, the same
+ * corpus and flags as the changelog's table).
  *
  * Workers pull from a SHARED index rather than taking a fixed slice, so one
  * heavy stylesheet cannot leave eleven threads idle. `--stop-on-error` is a
