@@ -34,6 +34,30 @@ URL-less suite never executes the deprecation path at all. Both were missing
 until 2026-09-16; `large_expanded` and `large_expanded_with_url_silent` are a
 deliberate pair, and their ratio is the signal.
 
+`corpus/gate/` exists because that suite protected only the shapes that
+happened to be in `corpus/generated/`, while three of the improvements in
+`../docs/PERF_PLAN_2026-09-16.md` measure ~0.00% there. Landing one and later
+regressing it would have looked identical in CI. Each corpus was verified to
+show its lever, byte-identical output in both arms, on macOS/arm64 2026-09-16:
+
+| Corpus | Protects | Delta on this corpus | On `large.scss` |
+| --- | --- | --- | --- |
+| `gate/legacy_deprecations.scss` | the deprecation path (A1) | **−48.3%** | −17.4% |
+| `gate/extend_heavy.scss` | `@extend` (A2) | **−49.7%** | −0.2% |
+| `gate/use_graph/entry.scss` | the module cache (A3) | **−39.5%** | −2.1% |
+| `gate/use_graph/redundant.scss` | ditto, redundant `@use` | **−42.2%** | — |
+
+All four are compiled through the `diagnostics_live()` helper in
+`../benches/compile.rs`, which is the only place the URL-and-silent-handler
+pairing lives: a corpus wired up with a bare `Options::default()` would leave
+`diag_enabled()` false and protect half of what it was added for. All four also
+produce output byte-identical to dart-sass 1.103.1 (verified 2026-09-16), so the
+gate measures shapes that are in parity rather than shapes only sasso accepts.
+`corpora_still_compile()` runs before divan and asserts the marker rule
+`.sasso-gate-corpus` in each — a corpus that stops resolving its imports would
+otherwise just report a faster number, which is exactly how three `@use`-graph
+measurements in `perf_audit_2026-09-15.md` came to be void.
+
 There is also a **real-world corpus** harness in [`real-world/`](./real-world/):
 it sparse-clones pinned, vetted, currently-active OSS Sass codebases
 (bootstrap, bulma, mastodon, …), verifies output parity against dart-sass, and
@@ -54,11 +78,18 @@ bench/
 │   │   ├── main.scss         # exercises every requested feature
 │   │   └── partials/         # _variables.scss, _mixins.scss (@import targets)
 │   ├── generated/large.scss  # big file (gen_corpus.rb), ~26k lines of CSS
-│   └── batch/                # 40 medium generated files (amortized-startup test)
+│   ├── batch/                # 40 medium generated files (amortized-startup test)
+│   ├── modular/              # 51-file @use graph (gen_modular_corpus.mjs)
+│   └── gate/                 # the CI gate's corpora (gen_gate_corpora.py):
+│       ├── legacy_deprecations.scss   #   deprecation-dense (protects A1)
+│       ├── extend_heavy.scss          #   @extend-heavy (protects A2)
+│       ├── use_graph/                 #   43-file @use graph + a redundant entry
+│       └── MANIFEST.json              #   generator version, bytes, sha256
 ├── grass_runner/             # tiny Rust crate: grass CLI wrapper (build --release)
 │   └── src/main.rs
 ├── scripts/
 │   ├── gen_corpus.rb         # corpus generator (deterministic, offline)
+│   ├── gen_gate_corpora.py   # the gate corpora; `--check` verifies no drift
 │   ├── run_bench.sh          # the harness (hyperfine-driven)
 │   ├── normalize_css.sh      # whitespace-only CSS normalizer
 │   └── canon_css.py          # + canonicalizes color serialization (rgb<->hex)
@@ -91,6 +122,20 @@ npx --yes sass --version
 
 `gen_corpus.rb N OUTFILE` emits a self-contained SCSS file with `N` themed
 components (default 400). Bigger `N` → more work per compile.
+
+The CI gate's corpora under `corpus/gate/` are checked into git — `benches/compile.rs`
+reads them with `include_str!`, so the benchmark must not depend on a generator
+having been run — and are regenerated, or verified, with:
+
+```bash
+python3 scripts/gen_gate_corpora.py            # rewrite in place
+python3 scripts/gen_gate_corpora.py --check     # verify, write nothing (CI-able)
+```
+
+Deterministic by construction: no PRNG, no clock, no environment, so
+re-running is byte-identical and `--check` exits non-zero only on a hand-edit.
+Changing a size constant there changes what CI measures, which resets that
+benchmark's CodSpeed history — do it deliberately, in its own commit.
 
 ## Run the benchmark
 
