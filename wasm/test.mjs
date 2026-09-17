@@ -1180,6 +1180,14 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // The help prints the negatable spelling, `--[no-]stop-on-error` — the
     // bare flag name matches nothing (this assertion caught itself).
     assert.match(h.stdout, /--\[no-\]stop-on-error/, "cli: … and it is the real help text");
+    // And it describes what the flag does now that files run concurrently:
+    // the ones already running finish. dart's own wording says exactly that,
+    // so use dart's (measured from 1.104.1's --help, 2026-09-17).
+    assert.match(
+      h.stdout,
+      /Don't compile more files once an error is\s+encountered\./,
+      "cli: … and --stop-on-error is described as dart describes it",
+    );
   }
 
   // With no output file the CSS goes to the terminal the warnings are on, so

@@ -93,7 +93,8 @@ Options:
                                      a load path, and whatever those load
                                      relatively. Their own @warn/@debug still
                                      prints, as in dart-sass.
-      --[no-]stop-on-error           Stop after the first file that fails.
+      --[no-]stop-on-error           Don't compile more files once an error is
+                                     encountered.
       --[no-]error-css               On a compile error, write a stylesheet
                                      describing it. NOT IMPLEMENTED in this CLI:
                                      the flag is accepted, and a failing compile
