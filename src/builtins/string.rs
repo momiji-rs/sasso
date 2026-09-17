@@ -99,10 +99,9 @@ fn require_string<'v>(
     pos_args: &'v [Value],
     named: &'v [(String, Value)],
     i: usize,
-    fname: &str,
     pos: Pos,
 ) -> Result<(&'v str, bool), Error> {
-    let v = super::require(params, pos_args, named, i, fname, pos)?;
+    let v = super::require(params, pos_args, named, i, pos)?;
     match v {
         Value::Str(SassStr { text, quoted }) => Ok((text.as_ref(), *quoted)),
         other => Err(Error::at(
@@ -123,10 +122,9 @@ fn require_index(
     pos_args: &[Value],
     named: &[(String, Value)],
     i: usize,
-    fname: &str,
     pos: Pos,
 ) -> Result<i64, Error> {
-    let v = super::require(params, pos_args, named, i, fname, pos)?;
+    let v = super::require(params, pos_args, named, i, pos)?;
     let pname = params.get(i).copied().unwrap_or("");
     match v {
         Value::Number(n) => {
@@ -169,8 +167,7 @@ fn fn_set_quoted(
     pos: Pos,
     quoted: bool,
 ) -> Result<Value, Error> {
-    let fname = if quoted { "quote" } else { "unquote" };
-    let (text, _) = require_string(&["string"], pos_args, named, 0, fname, pos)?;
+    let (text, _) = require_string(&["string"], pos_args, named, 0, pos)?;
     Ok(quoted_str(text.to_string(), quoted))
 }
 
@@ -182,8 +179,7 @@ fn fn_change_case(
     pos: Pos,
     upper: bool,
 ) -> Result<Value, Error> {
-    let fname = if upper { "to-upper-case" } else { "to-lower-case" };
-    let (text, quoted) = require_string(&["string"], pos_args, named, 0, fname, pos)?;
+    let (text, quoted) = require_string(&["string"], pos_args, named, 0, pos)?;
     let mapped: String = if upper {
         text.chars().map(|c| c.to_ascii_uppercase()).collect()
     } else {
@@ -194,7 +190,7 @@ fn fn_change_case(
 
 /// `str-length($string)`: unitless character count.
 fn fn_str_length(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let (text, _) = require_string(&["string"], pos_args, named, 0, "str-length", pos)?;
+    let (text, _) = require_string(&["string"], pos_args, named, 0, pos)?;
     Ok(Value::Number(Number::unitless(text.chars().count() as f64)))
 }
 
@@ -202,8 +198,8 @@ fn fn_str_length(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
 /// occurrence, or `null` when absent.
 fn fn_str_index(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["string", "substring"];
-    let (text, _) = require_string(&params, pos_args, named, 0, "str-index", pos)?;
-    let (sub, _) = require_string(&params, pos_args, named, 1, "str-index", pos)?;
+    let (text, _) = require_string(&params, pos_args, named, 0, pos)?;
+    let (sub, _) = require_string(&params, pos_args, named, 1, pos)?;
     match text.find(sub) {
         // `find` gives a byte offset; convert to a 1-based char index.
         Some(byte) => Ok(Value::Number(Number::unitless(
@@ -229,13 +225,13 @@ fn normalize_index(index: i64, len: i64) -> i64 {
 /// negative indices counting from the end; preserves quotedness.
 fn fn_str_slice(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["string", "start-at", "end-at"];
-    let (text, quoted) = require_string(&params, pos_args, named, 0, "str-slice", pos)?;
+    let (text, quoted) = require_string(&params, pos_args, named, 0, pos)?;
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len() as i64;
 
-    let start_at = require_index(&params, pos_args, named, 1, "str-slice", pos)?;
+    let start_at = require_index(&params, pos_args, named, 1, pos)?;
     let end_at = match super::arg(&params, pos_args, named, 2) {
-        Some(_) => require_index(&params, pos_args, named, 2, "str-slice", pos)?,
+        Some(_) => require_index(&params, pos_args, named, 2, pos)?,
         None => -1,
     };
 
@@ -257,11 +253,11 @@ fn fn_str_slice(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resu
 /// (negative counts from the end); preserves the host string's quotedness.
 fn fn_str_insert(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["string", "insert", "index"];
-    let (text, quoted) = require_string(&params, pos_args, named, 0, "str-insert", pos)?;
-    let (insert, _) = require_string(&params, pos_args, named, 1, "str-insert", pos)?;
+    let (text, quoted) = require_string(&params, pos_args, named, 0, pos)?;
+    let (insert, _) = require_string(&params, pos_args, named, 1, pos)?;
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len() as i64;
-    let index = require_index(&params, pos_args, named, 2, "str-insert", pos)?;
+    let index = require_index(&params, pos_args, named, 2, pos)?;
 
     // Compute the 0-based offset at which `insert` is placed.
     let offset: usize = if index > 0 {
@@ -335,8 +331,8 @@ fn to_base36(mut n: u64) -> String {
 fn fn_split(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["string", "separator", "limit"];
     check_arity(pos_args, 3, pos)?;
-    let (text, text_quoted) = require_string(&params, pos_args, named, 0, "split", pos)?;
-    let (sep, _) = require_string(&params, pos_args, named, 1, "split", pos)?;
+    let (text, text_quoted) = require_string(&params, pos_args, named, 0, pos)?;
+    let (sep, _) = require_string(&params, pos_args, named, 1, pos)?;
     // `$limit` is the maximum number of splits (not parts). `null`/absent means
     // unlimited; it must be a positive integer otherwise.
     let limit = match super::arg(&params, pos_args, named, 2) {

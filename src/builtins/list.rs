@@ -130,11 +130,10 @@ fn resolve_index(
     pos_args: &[Value],
     named: &[(String, Value)],
     i: usize,
-    fname: &str,
     len: usize,
     pos: Pos,
 ) -> Result<usize, Error> {
-    let v = super::require(params, pos_args, named, i, fname, pos)?;
+    let v = super::require(params, pos_args, named, i, pos)?;
     let pname = params.get(i).copied().unwrap_or("");
     let raw = match v {
         Value::Number(n) => n.value,
@@ -193,7 +192,7 @@ fn parse_separator(v: &Value, pos: Pos) -> Result<Option<ListSep>, Error> {
 /// `length($list)`: the unitless element count.
 fn fn_length(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     validate_args(&["list"], pos_args, named, pos)?;
-    let v = super::require(&["list"], pos_args, named, 0, "length", pos)?;
+    let v = super::require(&["list"], pos_args, named, 0, pos)?;
     Ok(unitless(list_len(v) as f64))
 }
 
@@ -201,9 +200,9 @@ fn fn_length(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<
 fn fn_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "n"];
     validate_args(&params, pos_args, named, pos)?;
-    let list = super::require(&params, pos_args, named, 0, "nth", pos)?;
+    let list = super::require(&params, pos_args, named, 0, pos)?;
     let (items, _) = as_items(list);
-    let idx = resolve_index(&params, pos_args, named, 1, "nth", items.len(), pos)?;
+    let idx = resolve_index(&params, pos_args, named, 1, items.len(), pos)?;
     items
         .get(idx)
         .cloned()
@@ -215,10 +214,10 @@ fn fn_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Val
 fn fn_set_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "n", "value"];
     validate_args(&params, pos_args, named, pos)?;
-    let list = super::require(&params, pos_args, named, 0, "set-nth", pos)?;
+    let list = super::require(&params, pos_args, named, 0, pos)?;
     let (mut items, sep) = as_items(list);
-    let idx = resolve_index(&params, pos_args, named, 1, "set-nth", items.len(), pos)?;
-    let value = super::require(&params, pos_args, named, 2, "set-nth", pos)?.clone();
+    let idx = resolve_index(&params, pos_args, named, 1, items.len(), pos)?;
+    let value = super::require(&params, pos_args, named, 2, pos)?.clone();
     if let Some(slot) = items.get_mut(idx) {
         *slot = value;
     }
@@ -255,8 +254,8 @@ fn settled_sep(v: &Value) -> Option<ListSep> {
 fn fn_join(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list1", "list2", "separator", "bracketed"];
     validate_args(&params, pos_args, named, pos)?;
-    let list1 = super::require(&params, pos_args, named, 0, "join", pos)?;
-    let list2 = super::require(&params, pos_args, named, 1, "join", pos)?;
+    let list1 = super::require(&params, pos_args, named, 0, pos)?;
+    let list2 = super::require(&params, pos_args, named, 1, pos)?;
     let (items1, _) = as_items(list1);
     let (items2, _) = as_items(list2);
 
@@ -333,8 +332,8 @@ fn join_auto_separator(list1: &Value, list2: &Value) -> ListSep {
 fn fn_append(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "val", "separator"];
     validate_args(&params, pos_args, named, pos)?;
-    let list = super::require(&params, pos_args, named, 0, "append", pos)?;
-    let val = super::require(&params, pos_args, named, 1, "append", pos)?.clone();
+    let list = super::require(&params, pos_args, named, 0, pos)?;
+    let val = super::require(&params, pos_args, named, 1, pos)?.clone();
     let (mut items, _) = as_items(list);
 
     let sep = match super::arg(&params, pos_args, named, 2) {
@@ -356,8 +355,8 @@ fn fn_append(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<
 fn fn_index(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "value"];
     validate_args(&params, pos_args, named, pos)?;
-    let list = super::require(&params, pos_args, named, 0, "index", pos)?;
-    let value = super::require(&params, pos_args, named, 1, "index", pos)?;
+    let list = super::require(&params, pos_args, named, 0, pos)?;
+    let value = super::require(&params, pos_args, named, 1, pos)?;
     let (items, _) = as_items(list);
     match items.iter().position(|item| item.sass_eq(value)) {
         Some(i) => Ok(unitless((i + 1) as f64)),
@@ -369,7 +368,7 @@ fn fn_index(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
 /// list or a bare value is "undecided" and reports `space`.
 fn fn_list_separator(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     validate_args(&["list"], pos_args, named, pos)?;
-    let v = super::require(&["list"], pos_args, named, 0, "list-separator", pos)?;
+    let v = super::require(&["list"], pos_args, named, 0, pos)?;
     // A bare value or empty list is "undecided", which dart-sass reports as
     // space; otherwise the list's own separator is authoritative.
     let sep = settled_sep(v).unwrap_or(ListSep::Space);
@@ -388,7 +387,7 @@ fn fn_list_separator(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
 /// brackets. A bare value or an empty/non-bracketed list reports `false`.
 fn fn_is_bracketed(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     validate_args(&["list"], pos_args, named, pos)?;
-    let v = super::require(&["list"], pos_args, named, 0, "is-bracketed", pos)?;
+    let v = super::require(&["list"], pos_args, named, 0, pos)?;
     let bracketed = matches!(v, Value::List(l) if l.bracketed);
     Ok(Value::Bool(bracketed))
 }
