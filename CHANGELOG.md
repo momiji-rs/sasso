@@ -11,6 +11,20 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-17
+
+_A dart-sass-compatible CLI, alignment with dart-sass 1.104.1, and the
+compatibility work that came out of compiling the Lichess stylesheets (#24).
+Minor rather than patch: the CLI gains a whole argument grammar, and several
+outputs change — a negative zero keeps its sign, colors convert their
+degenerate channels, and the legacy color adjusters keep the color's own
+space._
+
+_Against the 148-entry-point Lichess corpus, sasso is byte-identical to
+dart-sass 1.104.1 on 147 files in **both** output styles, with 148/148
+identical source maps. Every known remaining difference is written down in
+[`docs/dart-sass-divergences.md`](docs/dart-sass-divergences.md)._
+
 ### Added
 
 - **dart-sass-compatible CLI.** `sasso` now takes the same arguments as
@@ -562,7 +576,6 @@ Conformance is tracked separately as a ratchet against the official
   RAII guard rather than a zeroed scope depth: a `compile` run from inside an
   importer or warn callback nests instead of resetting the arena under its
   caller, and a callback that panics no longer leaves the thread paused.
-
 ## [0.9.1] - 2026-09-01
 
 _C-ABI release fixes — no compiler changes. Ships musl c-api tarballs for
@@ -1232,7 +1245,8 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/momiji-rs/sasso/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/momiji-rs/sasso/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/momiji-rs/sasso/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/momiji-rs/sasso/compare/v0.8.0...v0.8.1
