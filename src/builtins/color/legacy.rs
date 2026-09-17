@@ -56,7 +56,7 @@ pub(super) fn fn_rgb(
         }
     }
     // Otherwise gather the channel list and an optional alpha.
-    let channels = Channels::collect("rgb", &params, pos_args, named, pos)?;
+    let channels = Channels::collect(&params, pos_args, named, pos)?;
     // The special/relative passthroughs echo the spelling the caller used
     // (`rgb` vs `rgba`), matching dart-sass; the `none`-only passthrough inside
     // `special_passthrough` normalizes to the canonical `rgb`.
@@ -211,7 +211,6 @@ impl Channels {
     /// is treated as a channels list, splitting a trailing slash-division
     /// (`1 2 3 / 0.5`) into components plus alpha.
     fn collect(
-        fname: &str,
         params: &[&str],
         pos_args: &[Value],
         named: &[(String, Value)],
@@ -240,7 +239,7 @@ impl Channels {
                 .iter()
                 .find(|(n, _)| n == "channels")
                 .map(|(_, v)| v.clone())
-                .ok_or_else(|| Error::at(format!("Missing argument $channels for {fname}()."), pos))?,
+                .ok_or_else(|| Error::at("Missing argument $channels.".to_string(), pos))?,
         };
         // A channels list must be unbracketed and space/slash-separated. A
         // bracketed and/or comma list is rejected with dart-sass's message.
@@ -747,7 +746,7 @@ pub(super) fn fn_hsl(
             pos,
         ));
     }
-    let mut channels = Channels::collect("hsl", &params, pos_args, named, pos)?;
+    let mut channels = Channels::collect(&params, pos_args, named, pos)?;
     // Echo the caller's spelling (`hsl` vs `hsla`) in the special/relative
     // passthroughs; the `none`-only path normalizes to canonical `hsl`.
     if let Some(verbatim) = channels.relative_passthrough(name) {
@@ -927,7 +926,10 @@ fn hsl_degenerate_pct(v: &Value, is_saturation: bool, pos: Pos) -> Result<String
 pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["channels"];
     let n = pos_args.len() + named.len();
-    if n != 1 {
+    // Only an OVERFLOW is an arity error: with nothing passed the parameter is
+    // simply missing, and dart says so (`hwb()` is `Missing argument
+    // $channels.`, not "but 0 were passed").
+    if n > 1 {
         return Err(Error::at(
             format!("Only 1 argument allowed, but {n} were passed."),
             pos,
@@ -1127,7 +1129,7 @@ fn fn_color_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resu
         return fn_hwb(pos_args, named, pos);
     }
     let params = ["hue", "whiteness", "blackness", "alpha"];
-    let ch = Channels::collect("hwb", &params, pos_args, named, pos)?;
+    let ch = Channels::collect(&params, pos_args, named, pos)?;
     let space = Value::List(List {
         items: ch.comps.into(),
         sep: ListSep::Space,

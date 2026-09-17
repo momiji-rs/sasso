@@ -766,7 +766,6 @@ impl<'a> Evaluator<'a> {
         &self,
         pos_args: &[Value],
         named: &[(String, Value)],
-        fname: &str,
         pos: Pos,
         allow_module: bool,
     ) -> Result<(String, Option<String>), Error> {
@@ -784,7 +783,7 @@ impl<'a> Evaluator<'a> {
         let name_v = pos_args
             .first()
             .or_else(|| named.iter().find(|(n, _)| n == "name").map(|(_, v)| v))
-            .ok_or_else(|| Error::at(format!("Missing argument $name for {fname}()."), pos))?;
+            .ok_or_else(|| Error::at("Missing argument $name.".to_string(), pos))?;
         let name = match name_v {
             Value::Str(s) => s.text.to_string(),
             other => {
@@ -855,11 +854,6 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
         kind: MemberKind,
     ) -> Result<Value, Error> {
-        let fname = match kind {
-            MemberKind::Function => "module-functions",
-            MemberKind::Mixin => "module-mixins",
-            MemberKind::Variable => "module-variables",
-        };
         if pos_args.len() > 1 {
             return Err(Error::at(
                 format!("Only 1 argument allowed, but {} were passed.", pos_args.len()),
@@ -869,7 +863,7 @@ impl<'a> Evaluator<'a> {
         let v = pos_args
             .first()
             .or_else(|| named.iter().find(|(n, _)| n == "module").map(|(_, v)| v))
-            .ok_or_else(|| Error::at(format!("Missing argument $module for {fname}()."), pos))?;
+            .ok_or_else(|| Error::at("Missing argument $module.".to_string(), pos))?;
         let ns = match v {
             Value::Str(s) => s.text.to_string(),
             other => {
@@ -977,13 +971,8 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
         global: bool,
     ) -> Result<Value, Error> {
-        let fname = if global {
-            "global-variable-exists"
-        } else {
-            "variable-exists"
-        };
         // Only `global-variable-exists` takes the optional `$module` namespace.
-        let (name, module) = self.exists_name_module_args(pos_args, named, fname, pos, global)?;
+        let (name, module) = self.exists_name_module_args(pos_args, named, pos, global)?;
         if let Some(ns) = module {
             return Ok(Value::Bool(self.module_member_exists(
                 &ns,
@@ -1021,7 +1010,7 @@ impl<'a> Evaluator<'a> {
         named: &[(String, Value)],
         pos: Pos,
     ) -> Result<Value, Error> {
-        let (name, module) = self.exists_name_module_args(pos_args, named, "mixin-exists", pos, true)?;
+        let (name, module) = self.exists_name_module_args(pos_args, named, pos, true)?;
         if let Some(ns) = module {
             return Ok(Value::Bool(self.module_member_exists(
                 &ns,
@@ -1054,7 +1043,7 @@ impl<'a> Evaluator<'a> {
         named: &[(String, Value)],
         pos: Pos,
     ) -> Result<Value, Error> {
-        let (name, module) = self.exists_name_module_args(pos_args, named, "function-exists", pos, true)?;
+        let (name, module) = self.exists_name_module_args(pos_args, named, pos, true)?;
         if let Some(ns) = module {
             return Ok(Value::Bool(self.module_member_exists(
                 &ns,

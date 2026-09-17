@@ -2555,10 +2555,60 @@ fn a_missing_argument_names_only_the_parameter() {
         // These two already read the dart way and must keep doing so.
         ("meta.call()", "Missing argument $function."),
         ("meta.get-function()", "Missing argument $name."),
+        // The channels functions build the message by hand, and an empty call
+        // is a MISSING argument, not an arity overflow — `hwb()` used to say
+        // "Only 1 argument allowed, but 0 were passed."
+        ("rgb()", "Missing argument $channels."),
+        ("rgba()", "Missing argument $channels."),
+        ("hsl()", "Missing argument $channels."),
+        ("hsla()", "Missing argument $channels."),
+        ("hwb()", "Missing argument $channels."),
+        ("color.hwb()", "Missing argument $channels."),
+        ("lab()", "Missing argument $channels."),
+        ("lch()", "Missing argument $channels."),
+        ("oklab()", "Missing argument $channels."),
+        ("oklch()", "Missing argument $channels."),
+        ("color()", "Missing argument $description."),
+        ("rgb($nope: 1)", "Missing argument $channels."),
+        ("hwb($nope: 1)", "Missing argument $channels."),
+        // The evaluator owns these, and they built the message by hand too.
+        ("meta.function-exists()", "Missing argument $name."),
+        ("meta.variable-exists()", "Missing argument $name."),
+        ("meta.mixin-exists()", "Missing argument $name."),
+        ("meta.global-variable-exists()", "Missing argument $name."),
+        ("function-exists()", "Missing argument $name."),
+        ("variable-exists()", "Missing argument $name."),
+        ("mixin-exists()", "Missing argument $name."),
+        ("global-variable-exists()", "Missing argument $name."),
+        ("meta.module-functions()", "Missing argument $module."),
+        ("meta.module-variables()", "Missing argument $module."),
+        ("meta.function-exists($nope: 1)", "Missing argument $name."),
+        ("meta.module-functions($nope: 1)", "Missing argument $module."),
     ] {
         let msg = ours_err(&format!("{prelude}a {{ b: {call}; }}\n"));
         assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
         assert!(!msg.contains(" for "), "{call} still names a function: {msg}");
+    }
+    // An arity OVERFLOW is still an overflow: only the empty call changed.
+    for (call, want) in [
+        ("hwb(1, 2)", "Only 1 argument allowed, but 2 were passed."),
+        (
+            "hwb(240, 10%, 20%)",
+            "Only 1 argument allowed, but 3 were passed.",
+        ),
+        ("lab(1, 2)", "Only 1 argument allowed, but 2 were passed."),
+        ("color(1, 2)", "Only 1 argument allowed, but 2 were passed."),
+        (
+            "color.hwb(1, 2, 3, 4, 5)",
+            "Only 4 arguments allowed, but 5 were passed.",
+        ),
+        (
+            "meta.function-exists(\"a\", \"b\", \"c\")",
+            "Only 2 arguments allowed, but 3 were passed.",
+        ),
+    ] {
+        let msg = ours_err(&format!("{prelude}a {{ b: {call}; }}\n"));
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
     }
     // A user-defined function, unchanged.
     let msg = ours_err("@function f($x) { @return $x; }\na { b: f(); }\n");

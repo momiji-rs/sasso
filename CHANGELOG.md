@@ -147,9 +147,17 @@ Conformance is tracked separately as a ratchet against the official
   never wrote, where dart says `Missing argument $color.` (the frame underneath
   already points at the declaration the parameter belongs to). User-defined
   functions always read the dart way; the built-ins now match, across every
-  module and their global spellings alike. A variadic member names no parameter
-  at all: `math.hypot()` is now `At least one argument must be passed.`, as
-  `math.min()` already was.
+  module and their global spellings alike — including the three that built the
+  message by hand rather than through the shared helper: the channels functions
+  (`rgb()`, `hsl()`, `hwb()`, …) and the evaluator-owned `meta.function-exists`
+  / `variable-exists` / `mixin-exists` / `global-variable-exists` and
+  `meta.module-functions` / `module-variables`. A variadic member names no
+  parameter at all: `math.hypot()` is now `At least one argument must be
+  passed.`, as `math.min()` already was.
+- **`hwb()` with no arguments is a missing argument, not an arity overflow.**
+  It reported `Only 1 argument allowed, but 0 were passed.` — which is not even
+  true of zero — where dart-sass says `Missing argument $channels.`. Only an
+  overflow is an arity error now; `hwb(1, 2)` still reports one.
 - **A missing alpha reads as 0 everywhere, not just in some places.** A color
   written `/ none` carries an opaque `1` alongside its missing alpha, for
   serialization to fall back to — and every reader that wanted the alpha as a
