@@ -49,10 +49,11 @@ Conformance is tracked separately as a ratchet against the official
   advertised a CLI one of the two distribution channels did not have. The npm
   CLI now accepts every flag the native one does — implementing
   `--quiet-deps`, `--stop-on-error`, `--no-css`, `--source-map-urls`, the
-  `--no-*` negations and `<dir>:<dir>` pairs, and accepting `-j/--jobs`,
-  `-c/--color` and `--[no-]unicode` as documented no-ops. `--error-css` is
-  accepted but not implemented: a failing compile still behaves as
-  `--no-error-css`, which the help text says.
+  `--no-*` negations and `<dir>:<dir>` pairs, and accepting `-c/--color` and
+  `-j/--jobs` as documented no-ops (the first is one in the native CLI too, the
+  second has no meaning without parallelism). `--error-css` is accepted but not
+  implemented: a failing compile still behaves as `--no-error-css`, which the
+  help text says.
 
   A test derives the flag set from the Rust parser and fails if this CLI
   rejects any of them, so the next flag added to one has to reach the other.
