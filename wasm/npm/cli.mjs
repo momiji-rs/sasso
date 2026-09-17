@@ -1,8 +1,18 @@
 #!/usr/bin/env node
 // sasso CLI — `npx sasso input.scss [output.css]`. Pure Node + wasm, no deps.
 // A subset of the dart-sass `sass` CLI flags, sharing the package's compiler.
-import { readFileSync, writeFileSync, watch, statSync, existsSync, readdirSync, mkdirSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import {
+  readFileSync,
+  writeFileSync,
+  watch,
+  statSync,
+  existsSync,
+  readdirSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
+import { basename, dirname, join, resolve, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { compile, compileString, info, Exception, Logger } from "./sasso.mjs";
 
@@ -10,12 +20,16 @@ const HELP = `sasso — compile SCSS/Sass to CSS
 
 Usage: sasso [options] <input.scss> [output.css]
        sasso [options] <input.scss>:<output.css> [<in>:<out> ...]
+       sasso [options] <in-dir>:<out-dir>
+       sasso [options] <dir>                 (compiles the tree in place)
        sasso [options] --stdin [output.css]
        cat a.scss | sasso --stdin
 
 Options:
   -s, --style <expanded|compressed>  Output style (default: expanded).
   -I, --load-path <dir>              Add a load path for @use/@import (repeatable).
+  -o, --output <file>                Write the CSS to <file> (the same as a
+                                     second positional argument).
       --stdin                        Read the stylesheet from standard input.
       --indented                     Parse stdin as the indented .sass syntax.
       --[no-]source-map              Emit a source map (default: on when writing
@@ -28,14 +42,19 @@ Options:
                                      How the map references its sources
                                      (default: relative).
   -q, --[no-]quiet                   Suppress @warn / @debug / deprecation output.
-      --[no-]quiet-deps              Suppress warnings from stylesheets reached
-                                     through a load path.
+      --[no-]quiet-deps              Drop deprecation warnings raised inside
+                                     dependencies: stylesheets reached through
+                                     a load path, and whatever those load
+                                     relatively. Their own @warn/@debug still
+                                     prints, as in dart-sass.
       --[no-]stop-on-error           Stop after the first file that fails.
       --[no-]error-css               On a compile error, write a stylesheet
                                      describing it. NOT IMPLEMENTED in this CLI:
                                      the flag is accepted, and a failing compile
                                      always behaves as --no-error-css.
-      --no-css                       Compile but discard the CSS.
+      --no-css                       Compile but discard the CSS: no output
+                                     file, no stdout, and an existing output is
+                                     left exactly as it was.
       --update                       Skip outputs already newer than their input.
   -w, --watch                        Recompile when the input or any dependency
                                      changes (requires <input> <output>).
@@ -47,8 +66,9 @@ Options:
   -h, --help                         Print this help.
       --version                      Print the version.
 
-An <in>:<out> pair may name DIRECTORIES: every .scss/.sass file under <in>
-that is not a partial compiles to the matching path under <out>.
+An <in>:<out> pair may name DIRECTORIES: every .scss/.sass/.css file under
+<in> that is not a partial compiles to the matching path under <out>.
+Symlinked directories are followed, each one only once.
 
 With no output file the CSS is written to stdout. A Sass error is printed to
 stderr and exits non-zero.`;
@@ -72,9 +92,12 @@ function parseArgs(argv) {
     quietDeps: false,
     stopOnError: false,
     noCss: false,
-    sourceMapUrls: "relative",
+    // Tri-state: dart's default is "relative", but only an EXPLICIT
+    // --source-map-urls is rejected when printing to stdout.
+    sourceMapUrls: undefined,
     update: false,
     watch: false,
+    output: undefined,
     positionals: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -159,6 +182,10 @@ function parseArgs(argv) {
       const v = takeValue(inline);
       if (v !== "relative" && v !== "absolute") fail(`error: unknown --source-map-urls "${v}"`);
       opts.sourceMapUrls = v;
+    } else if (a === "-o" || a === "--output" || a.startsWith("--output=")) {
+      const inline = a.startsWith("--output=") ? a.slice(9) : undefined;
+      if (opts.output !== undefined) fail("error: --output requires a single input");
+      opts.output = takeValue(inline);
     } else if (a === "-s" || a === "--style" || a.startsWith("--style=")) {
       const inline = a.startsWith("--style=") ? a.slice(8) : undefined;
       const v = takeValue(inline);
@@ -175,7 +202,43 @@ function parseArgs(argv) {
       opts.positionals.push(a);
     }
   }
+  validate(opts);
   return opts;
+}
+
+/**
+ * The combinations the native CLI rejects before compiling anything (dart-sass
+ * rejects the source-map ones with the same wording): `--output` names ONE
+ * output, and a map printed to stdout can only be an embedded one with
+ * absolute sources.
+ */
+function validate(opts) {
+  const pairs = opts.positionals.some((a) => colonIndex(a) >= 0);
+  if (opts.output !== undefined) {
+    if (pairs) fail('error: --output may not be used with ":" arguments.');
+    if (opts.positionals.length > 1) fail("error: --output requires a single input");
+  }
+  // A bare directory entry (`sasso src`) compiles to files, not to stdout.
+  const toStdout =
+    !pairs &&
+    opts.output === undefined &&
+    (opts.stdin
+      ? opts.positionals.length === 0
+      : opts.positionals.length < 2 && !isDirectory(opts.positionals[0] ?? ""));
+  if (!toStdout) return;
+  if (opts.sourceMapUrls === "relative") {
+    fail("error: --source-map-urls=relative isn't allowed when printing to stdout.");
+  }
+  if (opts.embedSourceMap) return;
+  if (opts.sourceMap === true) {
+    fail("error: When printing to stdout, --source-map requires --embed-source-map.");
+  }
+  if (opts.embedSources) {
+    fail("error: When printing to stdout, --embed-sources requires --embed-source-map.");
+  }
+  if (opts.sourceMapUrls !== undefined) {
+    fail("error: When printing to stdout, --source-map-urls requires --embed-source-map.");
+  }
 }
 
 function readStdin() {
@@ -186,63 +249,221 @@ function readStdin() {
   }
 }
 
-// Write a compile result to `outPath` (file) or stdout. The source map is either
-// inlined as a data: URI (`embedMap`) or written as a `.map` sidecar + footer.
-function emit(result, outPath, wantMap, embedMap) {
-  let css = result.css;
-  if (wantMap && embedMap) {
-    const map = { ...result.sourceMap, file: outPath ? basename(outPath) : undefined };
-    const b64 = Buffer.from(JSON.stringify(map), "utf8").toString("base64");
-    css = css.replace(/\n?$/, "") + `\n/*# sourceMappingURL=data:application/json;base64,${b64} */\n`;
-  } else if (wantMap && outPath) {
-    const mapPath = outPath + ".map";
-    const map = { ...result.sourceMap, file: basename(outPath) };
-    css = css.replace(/\n?$/, "") + `\n/*# sourceMappingURL=${basename(mapPath)} */\n`;
-    writeFileSync(mapPath, JSON.stringify(map));
-  } else if (css) {
-    // No source map: dart-sass's CLI terminates non-empty output with a single
-    // newline that the library API (`compileString().css`) omits; empty output
-    // stays empty.
-    css = css.replace(/\n?$/, "") + "\n";
+/**
+ * dart's `--source-map-urls`: how the map's `sources[]` reference the inputs.
+ * `relative` (dart's default) is the lexical path from the MAP file's directory
+ * to each source, as a URL — each segment percent-encoded, `/` kept as the
+ * separator; `absolute` is a `file://` URL. A source that is not a `file:` URL
+ * (a custom importer's) passes through untouched. Mirrors `adjust_sources` in
+ * ../../src/main.rs.
+ */
+function adjustSources(sources, mapDir, mode) {
+  return (sources || []).map((src) => {
+    let path;
+    try {
+      path = fileURLToPath(src);
+    } catch {
+      return src;
+    }
+    if (mode === "absolute") return pathToFileURL(path).href;
+    return relative(mapDir, path)
+      .split(sep)
+      .map((seg) => encodeURIComponent(seg))
+      .join("/");
+  });
+}
+
+/**
+ * The map JSON in dart-sass's exact field order:
+ * `version, sourceRoot, sources, names, mappings[, file][, sourcesContent]`.
+ * `file` is omitted for a map embedded in stdout output, as dart does.
+ */
+function mapJson(map, sources, file) {
+  const out = { version: 3, sourceRoot: "", sources, names: map.names || [], mappings: map.mappings };
+  if (file !== undefined) out.file = file;
+  if (map.sourcesContent) out.sourcesContent = map.sourcesContent;
+  return JSON.stringify(out);
+}
+
+/**
+ * dart's `sourceMappingURL` footer. The compiled CSS carries no trailing
+ * newline, so EXPANDED appends `\n\n/*# … *\/\n` (the line terminator plus
+ * dart's blank separator line) and COMPRESSED appends `/*# … *\/\n` with no
+ * leading newline. A `*\/` inside the URL is escaped so it cannot end the
+ * comment early.
+ */
+function sourceMapFooter(css, url, style) {
+  const safe = url.replace(/\*\//g, "%2A/");
+  return style === "compressed"
+    ? `${css}/*# sourceMappingURL=${safe} */\n`
+    : `${css}\n\n/*# sourceMappingURL=${safe} */\n`;
+}
+
+/** dart's inline map URI: percent-encoded JSON, not base64 (`Uri.dataFromString`). */
+function dataUri(json) {
+  // encodeURI keeps exactly dart's "uric" set plus `#`, which must be encoded.
+  return `data:application/json;charset=utf-8,${encodeURI(json).replace(/#/g, "%23")}`;
+}
+
+/**
+ * Write a compile result to `outPath` (file) or stdout. The source map is
+ * either inlined as a data: URI (`--embed-source-map`) or written as a `.map`
+ * sidecar plus a footer. `--no-css` discards everything, output file included.
+ */
+function emit(result, outPath, wantMap, opts) {
+  // --no-css: the compile (and its diagnostics) was all that was wanted — no
+  // stdout, no file, and an existing output is left exactly as it was.
+  if (opts.noCss) return;
+  // A `<dir>:<dir>` job writes into a tree that may not exist yet, and the map
+  // goes in before the CSS (dart's order: nothing should point at a map that
+  // failed to write), so the directory has to exist before either.
+  if (outPath) mkdirSync(dirname(outPath), { recursive: true });
+  const body = result.css.replace(/\n?$/, "");
+  let css;
+  if (wantMap && result.sourceMap) {
+    // A stdout map can only be embedded, and dart gives it absolute sources
+    // and no `file` field; a file's map is adjusted relative to the `.map`,
+    // which sits next to the CSS.
+    const mode = outPath ? opts.sourceMapUrls || "relative" : "absolute";
+    // The compiler stamps each source as its REAL path, so the map directory
+    // has to be resolved the same way or `/var` and `/private/var` (macOS)
+    // would produce an eleven-step `../` climb instead of dart's `../in.scss`.
+    const mapDir = outPath ? realPath(dirname(outPath)) : realPath(process.cwd());
+    const sources = adjustSources(result.sourceMap.sources, mapDir, mode);
+    const file = outPath ? encodeURIComponent(basename(outPath)) : undefined;
+    const json = mapJson(result.sourceMap, sources, file);
+    if (opts.embedSourceMap || !outPath) {
+      css = sourceMapFooter(body, dataUri(json), opts.style);
+    } else {
+      const mapPath = outPath + ".map";
+      css = sourceMapFooter(body, encodeURIComponent(basename(mapPath)), opts.style);
+      writeFileSync(mapPath, json);
+    }
+  } else {
+    // dart terminates a CSS FILE with exactly one newline, an empty stylesheet
+    // included; only stdout gets nothing for empty output.
+    css = outPath || body ? `${body}\n` : "";
   }
-  if (outPath) {
-    // A `<dir>:<dir>` job writes into a tree that may not exist yet.
-    mkdirSync(dirname(outPath), { recursive: true });
-    writeFileSync(outPath, css);
-  }
+  if (outPath) writeFileSync(outPath, css);
   else process.stdout.write(css);
+}
+
+/**
+ * A compile failed: this CLI always behaves as `--no-error-css`, and dart then
+ * REMOVES a stale output file so nothing keeps consuming the CSS of an earlier
+ * successful build (the `.map`, if any, is left alone). `--no-css` means no
+ * output-side effects at all, so it leaves the file be.
+ */
+function discardStaleOutput(outPath, opts) {
+  if (!outPath || opts.noCss) return false;
+  try {
+    rmSync(outPath, { force: true });
+    return false;
+  } catch (e) {
+    process.stderr.write(`error: cannot remove ${outPath}: ${e && e.message ? e.message : e}\n`);
+    return true;
+  }
 }
 
 /** The `:` index separating `<input>:<output>` (skips a leading drive letter). */
 function colonIndex(p) {
   return p.indexOf(":", /^[a-zA-Z]:[\\/]/.test(p) ? 2 : 0);
 }
-/** Every compilable stylesheet under `dir`: `.scss`/`.sass`, no partials. */
-function* walkStylesheets(dir, prefix = "") {
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    const rel = prefix ? join(prefix, e.name) : e.name;
-    if (e.isDirectory()) {
-      yield* walkStylesheets(join(dir, e.name), rel);
-    } else if (/\.(scss|sass)$/.test(e.name) && !e.name.startsWith("_")) {
-      yield rel;
+/**
+ * A path with its symlinks resolved, or its absolute form when it cannot be
+ * resolved. Two spellings of one directory answer the same string, which is
+ * what both the source-map base and the walker's cycle detection need.
+ */
+function realPath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * Every compilable stylesheet under `dir`, relative to it: `.scss`, `.sass` and
+ * `.css` (exact lowercase suffixes) that are not partials, in sorted order.
+ * Symlinked directories are followed — dart does — but each directory is
+ * visited once by canonical identity, so a symlink cycle cannot loop or
+ * duplicate output. Mirrors `expand_dir` in ../../src/main.rs.
+ */
+function walkStylesheets(dir) {
+  const found = [];
+  const seen = new Set([realPath(dir)]);
+  const stack = [{ abs: dir, rel: "" }];
+  while (stack.length > 0) {
+    const { abs, rel } = stack.pop();
+    let names;
+    try {
+      names = readdirSync(abs);
+    } catch {
+      fail(`Error reading ${abs}: Cannot open file.`);
+    }
+    // readdir order is unspecified; sort so that, of two names for the same
+    // directory (symlinks), the same one is mirrored every run.
+    names.sort();
+    for (const name of names) {
+      const child = join(abs, name);
+      const childRel = rel ? join(rel, name) : name;
+      let isDir = false;
+      try {
+        isDir = statSync(child).isDirectory(); // follows symlinks, unlike Dirent
+      } catch {
+        continue; // a broken link or a file that vanished
+      }
+      if (isDir) {
+        const id = realPath(child);
+        if (!seen.has(id)) {
+          seen.add(id);
+          stack.push({ abs: child, rel: childRel });
+        }
+      } else if (!name.startsWith("_") && /\.(scss|sass|css)$/.test(name)) {
+        found.push(childRel);
+      }
     }
   }
+  found.sort();
+  return found;
 }
 
 /** Expand a `<dir>:<dir>` pair into one job per stylesheet under it. */
 function expandDirPair(input, output) {
   const jobs = [];
+  const inAbs = resolve(input);
+  const outAbs = resolve(output);
+  // dart skips every source INSIDE the output directory when that directory is
+  // nested in the source tree: `.:css` run twice would otherwise mirror `css/`
+  // into `css/css/`. Nesting is strict — a destination EQUAL to the source is
+  // not nested, so `dir:dir` still compiles every file.
+  const nested = outAbs !== inAbs && (outAbs + sep).startsWith(inAbs + sep);
   for (const rel of walkStylesheets(input)) {
-    jobs.push({
-      input: join(input, rel),
-      output: join(output, rel.replace(/\.(scss|sass)$/, ".css")),
-    });
+    const from = join(input, rel);
+    const to = join(output, rel.replace(/\.(scss|sass|css)$/, ".css"));
+    if (nested && (resolve(from) + sep).startsWith(outAbs + sep)) continue;
+    // dart also skips a plain CSS file whose destination is itself (`dir:dir`
+    // with a `plain.css` inside): it would only be rewritten in place.
+    if (resolve(to) === resolve(from)) continue;
+    jobs.push({ input: from, output: to });
   }
   return jobs;
 }
 
-/** Parse positionals into `{input, output}` jobs (colon-pair form or space form). */
-function parseJobs(positionals) {
+/** Whether `path` is a directory (a missing path is not). */
+function isDirectory(path) {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false; // missing input: let the compile report it
+  }
+}
+
+/**
+ * Parse positionals into `{input, output}` jobs: the `<in>:<out>` pair form, or
+ * the space form (`<input> [output]`, where `-o` names the same output).
+ */
+function parseJobs(positionals, output) {
   if (positionals.some((p) => colonIndex(p) >= 0)) {
     const jobs = [];
     for (const p of positionals) {
@@ -252,19 +473,24 @@ function parseJobs(positionals) {
       const output = p.slice(i + 1);
       // A directory on the left compiles the whole tree, as dart-sass and the
       // native CLI do.
-      let isDir = false;
-      try {
-        isDir = statSync(input).isDirectory();
-      } catch {
-        // missing input: let the compile report it
-      }
-      if (isDir) jobs.push(...expandDirPair(input, output));
+      if (isDirectory(input)) jobs.push(...expandDirPair(input, output));
       else jobs.push({ input, output });
     }
     return jobs;
   }
-  const [input, output] = positionals;
-  return input === undefined ? [] : [{ input, output }];
+  const [input, second] = positionals;
+  if (input === undefined) return [];
+  const out = output !== undefined ? output : second;
+  // dart: a bare directory compiles in place (`sasso dir` is `dir:dir`); with
+  // an output it may not be a positional argument.
+  if (isDirectory(input)) {
+    if (out !== undefined) fail(`error: Directory "${input}" may not be a positional arg.`);
+    return expandDirPair(input, input);
+  }
+  if (out !== undefined && isDirectory(out)) {
+    fail(`error: Directory "${out}" may not be a positional arg.`);
+  }
+  return [{ input, output: out }];
 }
 /** `--update`: true when `output` already exists and is newer than `input`. */
 function isFresh(output, input) {
@@ -278,7 +504,7 @@ function isFresh(output, input) {
 // `--watch`: recompile `input` -> `output` whenever the input or any of its
 // dependencies (the compile's `loadedUrls`) changes. Watches the directories of
 // all involved files (so editor atomic-saves are caught) and debounces bursts.
-function runWatch(input, output, common, embedMap) {
+function runWatch(input, output, common, opts) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
   let watchers = [];
   let timer = null;
@@ -315,11 +541,12 @@ function runWatch(input, output, common, embedMap) {
       // watchers are guaranteed live (a change saved right after the output
       // appears must not fall between emit and watcher registration).
       rewatch(result.loadedUrls);
-      emit(result, output, common.sourceMap, embedMap);
-      process.stderr.write(`Compiled ${input} to ${output}.\n`);
+      emit(result, output, common.sourceMap, opts);
+      if (!opts.noCss) process.stderr.write(`Compiled ${input} to ${output}.\n`);
     } catch (e) {
       const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(msg.replace(/\n?$/, "\n"));
+      discardStaleOutput(output, opts);
       // keep watching at least the entry so a fix re-triggers a compile
       rewatch([pathToFileURL(resolve(input))]);
     }
@@ -341,53 +568,39 @@ function main() {
     loadPaths: opts.loadPaths,
     sourceMapIncludeSources: opts.embedSources,
     charset: opts.charset,
+    // The COMPILER applies --quiet-deps, from how each file was resolved: the
+    // only place that knows, and early enough that a silenced warning does not
+    // count toward the deprecation repetition cap either. Filtering here by
+    // where a file lives would silence the wrong ones and lose the formatted
+    // diagnostic for the rest.
+    quietDeps: opts.quietDeps,
   };
-  if (opts.quiet) {
-    common.logger = Logger.silent;
-  } else if (opts.quietDeps && opts.loadPaths.length > 0) {
-    // A "dependency" is a stylesheet reached through a load path, which is how
-    // the native CLI draws the line too. A warning with no span is the
-    // entrypoint's own and always prints.
-    const deps = opts.loadPaths.map((d) => pathToFileURL(resolve(d)).href);
-    const fromDep = (span) => {
-      const url = span && span.url && span.url.href;
-      return !!url && deps.some((d) => url.startsWith(d.replace(/\/?$/, "/")));
-    };
-    common.logger = {
-      warn(message, o) {
-        if (fromDep(o && o.span)) return;
-        process.stderr.write(`WARNING: ${message}\n`);
-      },
-      debug(message, o) {
-        if (fromDep(o && o.span)) return;
-        process.stderr.write(`DEBUG: ${message}\n`);
-      },
-    };
-  }
+  if (opts.quiet) common.logger = Logger.silent;
 
   // --stdin: a single job reading source from standard input.
   if (opts.stdin) {
     if (opts.watch) fail("error: --watch cannot be used with --stdin");
-    const output = opts.positionals[0];
+    const output = opts.output !== undefined ? opts.output : opts.positionals[0];
     const wantMap = opts.sourceMap === undefined ? !!output || opts.embedSourceMap : opts.sourceMap;
     let result;
     try {
       result = compileString(readStdin(), { ...common, sourceMap: wantMap, syntax: opts.indented ? "indented" : "scss" });
     } catch (e) {
+      discardStaleOutput(output, opts);
       if (e instanceof Exception) fail(e.message);
       fail(`error: ${e && e.message ? e.message : e}`);
     }
-    emit(result, output, wantMap, opts.embedSourceMap);
+    emit(result, output, wantMap, opts);
     return;
   }
 
-  const jobs = parseJobs(opts.positionals);
+  const jobs = parseJobs(opts.positionals, opts.output);
   if (jobs.length === 0) fail("error: no input file (pass a path, or --stdin). Try --help.");
 
   if (opts.watch) {
     if (jobs.length !== 1 || !jobs[0].output) fail("error: --watch requires <input> <output>");
     const wantMap = opts.sourceMap === undefined ? true : opts.sourceMap;
-    runWatch(jobs[0].input, jobs[0].output, { ...common, sourceMap: wantMap }, opts.embedSourceMap);
+    runWatch(jobs[0].input, jobs[0].output, { ...common, sourceMap: wantMap }, opts);
     return; // keep the process alive on the watchers
   }
 
@@ -410,11 +623,13 @@ function main() {
             : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(String(msg).replace(/\n?$/, "\n"));
       failed++;
+      // This CLI always behaves as --no-error-css, and dart then drops a stale
+      // output rather than leaving the last good build in place.
+      discardStaleOutput(output, opts);
       if (opts.stopOnError || jobs.length === 1) process.exit(1);
       continue;
     }
-    // --no-css: compile for the diagnostics and the timing, write nothing.
-    if (!opts.noCss) emit(result, output, wantMap, opts.embedSourceMap);
+    emit(result, output, wantMap, opts);
   }
   if (failed > 0) process.exit(1);
 }
