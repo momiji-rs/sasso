@@ -857,7 +857,16 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.equal(pairDir.status, 1, "cli: a directory as a pair destination exits non-zero");
   assert.match(pairDir.stderr, /^error: cannot write adir: /m, "cli: … reporting the write, not throwing");
   assert.ok(!/at \w+ \(node:/.test(pairDir.stderr), "cli: … with no Node stack trace");
-  console.log("ok: cli — the argument grammar: arity, pairs, duplicates, `-`, counts, directories");
+  // --indented is documented for stdin, but dart applies it to FILE inputs too
+  // (measured 2026-09-17), and so does the native CLI: the extension does not
+  // get a vote once it is passed.
+  writeFileSync(join(dir, "indented.scss"), ".a\n  b: 1\n");
+  const indented = run(["--indented", "indented.scss"]);
+  assert.equal(indented.status, 0, `cli: --indented parses a .scss file as Sass (stderr: ${indented.stderr})`);
+  assert.match(indented.stdout, /b: 1/, "cli: … and compiles it");
+  const notIndented = run(["indented.scss"]);
+  assert.equal(notIndented.status, 1, "cli: without --indented the extension decides, and this file is not SCSS");
+  console.log("ok: cli — the argument grammar: arity, pairs, duplicates, `-`, counts, directories, --indented");
 }
 
 // === Phase 3i: --no-unicode, dart's URL encoding, the stdin data: URI ===

@@ -205,9 +205,9 @@ function parseArgs(argv) {
       if (a.startsWith("--load-path=")) inline = a.slice(12);
       else if (a.startsWith("-I") && a.length > 2) inline = a.slice(2);
       opts.loadPaths.push(takeValue(inline));
+    } else if (a.startsWith("-") && a !== "-" && !a.startsWith("-:")) {
       // `-` is standard input and `-:out.css` is a pair reading it, so neither
       // is an unknown option (the native CLI carves out the same two).
-    } else if (a.startsWith("-") && a !== "-" && !a.startsWith("-:")) {
       fail(`error: unknown option ${a}`);
     } else {
       opts.positionals.push(a);
@@ -710,6 +710,16 @@ function runWatch(input, output, common, opts) {
 }
 
 /**
+ * `--indented` for a FILE input, which forces the indented syntax whatever the
+ * extension says — dart-sass documents the flag for stdin but applies it to
+ * files too (measured 2026-09-17), and so does the native CLI. Without it the
+ * extension decides, so the option is left out entirely.
+ */
+function syntaxOf(opts) {
+  return opts.indented ? { syntax: "indented" } : {};
+}
+
+/**
  * Whether this job needs a source map: on by default when writing to a file,
  * off for stdout — and never under `--no-css`, which discards the output, so
  * building a map for it would be paid for and thrown away (the native CLI
@@ -743,7 +753,7 @@ function runLoop(opts, common) {
       // would outside the loop; only stdin takes `--indented`.
       last = fromStdin
         ? compileString(source, { ...options, syntax: opts.indented ? "indented" : "scss" }).css
-        : compile(path, options).css;
+        : compile(path, { ...options, ...syntaxOf(opts) }).css;
     } catch (e) {
       const msg =
         e instanceof Exception
@@ -823,7 +833,7 @@ function main() {
   if (opts.watch) {
     if (jobs.length !== 1 || !jobs[0].output) fail("error: --watch requires <input> <output>");
     const wantMap = opts.noCss ? false : opts.sourceMap === undefined ? true : opts.sourceMap;
-    runWatch(jobs[0].input, jobs[0].output, { ...common, sourceMap: wantMap }, opts);
+    runWatch(jobs[0].input, jobs[0].output, { ...common, sourceMap: wantMap, ...syntaxOf(opts) }, opts);
     return; // keep the process alive on the watchers
   }
 
@@ -844,7 +854,7 @@ function main() {
           syntax: opts.indented ? "indented" : "scss",
         });
       } else {
-        result = compile(input, { ...common, sourceMap: wantMap });
+        result = compile(input, { ...common, sourceMap: wantMap, ...syntaxOf(opts) });
       }
     } catch (e) {
       // With several jobs dart keeps going unless --stop-on-error, and exits
