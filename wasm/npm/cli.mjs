@@ -1078,7 +1078,22 @@ async function runJobs(jobs, opts, common) {
       if (!inputOwner.has(key)) inputOwner.set(key, i);
     });
   }
+  // A path does not have to match exactly to conflict: `a.scss:out` writes the
+  // FILE `out` while `b.scss:out/sub.css` needs `out` to be a DIRECTORY, and
+  // on a fresh tree whichever job runs first decides which one fails. dart
+  // writes the file and then fails the nested job, the same way every run;
+  // the pool alternated (measured 2026-09-17: four runs left a directory, two
+  // left a file). So an output that is an ancestor or a descendant of another
+  // output counts too.
+  //
+  // Both directions, without comparing every pair: `seenOut` holds the paths
+  // written so far and `seenAncestors` every directory above them. A new path
+  // conflicts if it IS one already written, if it is a directory some earlier
+  // output sits under, or if any directory above it was written as a file.
+  // Sharing a parent directory is not a conflict — that is every ordinary
+  // batch — because only written paths ever go into `seenOut`.
   const seenOut = new Set();
+  const seenAncestors = new Set();
   let collides = false;
   const scan = opts.noCss ? [] : jobs;
   for (let i = 0; i < scan.length && !collides; i++) {
@@ -1089,10 +1104,24 @@ async function runJobs(jobs, opts, common) {
     for (const path of written) {
       const key = pathKey(path);
       const owner = inputOwner.get(key);
-      if (seenOut.has(key) || (owner !== undefined && owner !== i)) {
+      if (seenOut.has(key) || seenAncestors.has(key) || (owner !== undefined && owner !== i)) {
         collides = true;
         break;
       }
+      for (const dir of ancestorsOf(key)) {
+        if (seenOut.has(dir)) {
+          collides = true;
+          break;
+        }
+        // Already recorded means everything above it was too, and was checked
+        // against `seenOut` then. A later output that IS one of those
+        // directories is still caught, by the `seenAncestors` test above. So
+        // the walk can stop here, which is what keeps a directory build from
+        // paying for its whole depth once per file.
+        if (seenAncestors.has(dir)) break;
+        seenAncestors.add(dir);
+      }
+      if (collides) break;
       seenOut.add(key);
     }
   }
@@ -1186,6 +1215,19 @@ function shareJobs(jobs) {
     }
   });
   return { bytes, index, count: jobs.length };
+}
+
+/**
+ * Every directory above an absolute path, nearest first, stopping at the root.
+ * Used to compare outputs that are not equal but cannot both exist — a file
+ * and a directory of the same name.
+ */
+function* ancestorsOf(key) {
+  let at = dirname(key);
+  while (at !== dirname(at)) {
+    yield at;
+    at = dirname(at);
+  }
 }
 
 /** A `{ length, at(i) }` view over the plain array, for the in-process path. */

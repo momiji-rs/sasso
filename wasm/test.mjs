@@ -1661,6 +1661,35 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // Outputs conflict without matching: `a.scss:out` writes the FILE `out` while
+  // `b.scss:out/sub.css` needs `out` to be a DIRECTORY, so on a fresh tree
+  // whichever job runs first decides which one fails. dart writes the file and
+  // then fails the nested job, the same way every run; the pool alternated
+  // (measured 2026-09-17: four runs of six left a directory, two left a file).
+  {
+    const ndir = join(dir, "nested-out");
+    for (let attempt = 0; attempt < 4; attempt++) {
+      rmSync(ndir, { recursive: true, force: true });
+      mkdirSync(ndir, { recursive: true });
+      writeFileSync(join(ndir, "a.scss"), `@for $i from 1 through 4000 { .slow-#{$i}{a:$i} }\n.from-a{x:1}\n`);
+      writeFileSync(join(ndir, "b.scss"), `.from-b{y:2}\n`);
+      const r = spawnSync(
+        process.execPath,
+        [cliPath, "--no-source-map", "--style=compressed", "-j", "4",
+         `${join(ndir, "a.scss")}:${join(ndir, "out")}`, `${join(ndir, "b.scss")}:${join(ndir, "out", "sub.css")}`],
+        { encoding: "utf8", timeout: 60000 },
+      );
+      assert.notEqual(r.status, 0, `cli: the nested-output batch fails, as dart's does (attempt ${attempt})`);
+      assert.ok(
+        statSync(join(ndir, "out")).isFile(),
+        `cli: the first job wrote the file and the nested one lost, as in dart (attempt ${attempt})`,
+      );
+      const out = readFileSync(join(ndir, "out"), "utf8");
+      assert.match(out, /\.from-a\{x:1\}/, "cli: … and it is a's output");
+      assert.doesNotMatch(out, /from-b/, "cli: … not b's");
+    }
+  }
+
   // A failure inside the pool is still reported and still exits non-zero.
   writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
   const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});
