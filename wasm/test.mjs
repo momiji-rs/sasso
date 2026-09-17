@@ -1388,6 +1388,31 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     );
   }
 
+  // One job WRITES a path another job READS: `a.scss:b.scss b.scss:out.css`.
+  // dart compiles a into b.scss and then b.scss into out.css, so out.css holds
+  // a's output; the pool read whichever b.scss it found first. a.scss is the
+  // slow one, so a run that does not serialize reads the ORIGINAL b.scss every
+  // time (measured 2026-09-17: dart and `-j 1` say a, the pool said b).
+  {
+    const wdir = join(dir, "write-read");
+    mkdirSync(wdir, { recursive: true });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      writeFileSync(join(wdir, "a.scss"), `@for $i from 1 through 4000 { .slow-#{$i}{a:$i} }\n.from-a{x:1}\n`);
+      writeFileSync(join(wdir, "b.scss"), `.original-b{y:2}\n`);
+      rmSync(join(wdir, "out.css"), { force: true });
+      const r = spawnSync(
+        process.execPath,
+        [cliPath, "--no-source-map", "--style=compressed", "-j", "4",
+         `${join(wdir, "a.scss")}:${join(wdir, "b.scss")}`, `${join(wdir, "b.scss")}:${join(wdir, "out.css")}`],
+        { encoding: "utf8", timeout: 60000 },
+      );
+      assert.equal(r.status, 0, `cli: write-then-read compiles (stderr: ${r.stderr})`);
+      const out = readFileSync(join(wdir, "out.css"), "utf8");
+      assert.match(out, /from-a/, `cli: the second job read what the first job wrote (attempt ${attempt})`);
+      assert.doesNotMatch(out, /original-b/, `cli: … not the file as it was before the batch (attempt ${attempt})`);
+    }
+  }
+
   // A failure inside the pool is still reported and still exits non-zero.
   writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
   const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});

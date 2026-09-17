@@ -974,8 +974,9 @@ async function main() {
  * which is the native "don't start more files once one fails".
  *
  * Staying in-process is the right answer for one job (a worker costs more than
- * the compile), when `-j 1` asks for it, and when two jobs name one output
- * file — dart's last-one-wins is an ORDER, and an order needs a sequence.
+ * the compile), when `-j 1` asks for it, and when the batch's writes overlap
+ * its own paths — dart's last-one-wins, and its write-then-read, are ORDERS,
+ * and an order needs a sequence.
  */
 async function runJobs(jobs, opts, common) {
   const wanted = opts.jobs ?? (os.availableParallelism ? os.availableParallelism() : os.cpus().length);
@@ -994,9 +995,24 @@ async function runJobs(jobs, opts, common) {
   // A job writes its CSS *and*, with source maps on, a `<output>.map` beside
   // it — so `a.scss:out.css` and `b.scss:out.css.map` collide on that sidecar
   // even though their `output`s differ. Both count.
-  // `--no-css` is the exception: `emit` and `discardStaleOutput` both return
-  // early under it, so the batch touches no output at all and there is no
-  // last-writer to get right.
+  // The same goes for a path one job WRITES and another READS:
+  // `a.scss:b.scss b.scss:out.css` compiles a into b.scss and then b.scss into
+  // out.css, and dart, being sequential, always reads the new b.scss. In the
+  // pool the second job reads whichever version it finds (measured: dart and
+  // `-j 1` compile a's output, the pool compiled the original b.scss).
+  //
+  // `--no-css` is the exception to both: `emit` and `discardStaleOutput`
+  // return early under it, so the batch touches no output at all and there is
+  // no last-writer to get right.
+  //
+  // Only ENTRY paths are compared. A job that writes a file some other job
+  // `@use`s is the same hazard and cannot be seen from here — the dependency
+  // is known only once that stylesheet has been parsed — so it stays a
+  // scheduling race, as it is in the native CLI (#87).
+  const inputs = new Set();
+  if (!opts.noCss) {
+    for (const job of jobs) if (job.input !== "-") inputs.add(pathKey(job.input));
+  }
   const seenOut = new Set();
   let collides = false;
   for (const job of opts.noCss ? [] : jobs) {
@@ -1005,7 +1021,7 @@ async function runJobs(jobs, opts, common) {
     if (wantSourceMap(opts, job.output) && !opts.embedSourceMap) written.push(`${job.output}.map`);
     for (const path of written) {
       const key = pathKey(path);
-      if (seenOut.has(key)) {
+      if (seenOut.has(key) || inputs.has(key)) {
         collides = true;
         break;
       }
