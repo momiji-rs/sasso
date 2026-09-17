@@ -23,7 +23,10 @@ impl<'a> Evaluator<'a> {
         if parents.is_empty() || self.at_root_excluding_style_rule {
             return Err(Error::at("@extend may only be used within style rules.", pos));
         }
-        let extenders = self.current_selector.clone().unwrap_or_else(|| parents.to_vec());
+        let extenders = match &self.current_selector {
+            Some(sel) => Rc::clone(sel),
+            None => Rc::new(parents.to_vec()),
+        };
         let target = self.eval_template(selector)?;
         if target.trim().is_empty() {
             return Err(Error::at("expected selector.", pos));
