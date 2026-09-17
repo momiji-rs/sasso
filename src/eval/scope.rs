@@ -156,9 +156,14 @@ impl<'a> Evaluator<'a> {
     /// mixin chains push in lockstep with the variable chain.
     pub(super) fn push_scope(&mut self, semi_global: bool) {
         let effective = semi_global && self.scope_semi_global.last().copied().unwrap_or(false);
-        self.scopes.push(new_scope());
+        // A table left behind by a block that has already closed, if there is
+        // one: a sheet's blocks come and go in strict LIFO order, and a scope
+        // nothing captured is indistinguishable from a fresh one once cleared.
+        let scope = self.scope_pool.pop().unwrap_or_else(new_scope);
+        self.scopes.push(scope);
         if self.options.source_map {
-            self.var_spans.push(new_span_scope());
+            let frame = self.span_pool.pop().unwrap_or_else(new_span_scope);
+            self.var_spans.push(frame);
         }
         self.scope_semi_global.push(effective);
         // Empty frames: the block gets a table only if it declares something
@@ -168,8 +173,12 @@ impl<'a> Evaluator<'a> {
     }
 
     pub(super) fn pop_scope(&mut self) {
-        self.scopes.pop();
-        self.var_spans.pop();
+        if let Some(scope) = self.scopes.pop() {
+            recycle_scope(&mut self.scope_pool, scope);
+        }
+        if let Some(frame) = self.var_spans.pop() {
+            recycle_scope(&mut self.span_pool, frame);
+        }
         self.scope_semi_global.pop();
         self.functions.pop();
         self.mixins.pop();
@@ -462,10 +471,25 @@ impl<'a> Evaluator<'a> {
     /// iteration (dart-sass `setLocalVariable`).
     pub(super) fn set_local(&mut self, name: &str, val: Value, span: VarSpan) {
         if let Some(sc) = self.scopes.last_mut() {
-            sc.borrow_mut().insert(name.to_string(), val);
+            rebind(&mut sc.borrow_mut(), name, val);
         }
         if let Some(frame) = self.var_spans.last_mut() {
-            frame.borrow_mut().insert(name.to_string(), span);
+            rebind(&mut frame.borrow_mut(), name, span);
+        }
+    }
+}
+
+/// Bind `name` in an already-open scope, keeping the key that is already there.
+///
+/// A loop pushes ONE scope for all of its iterations and rebinds its variable
+/// inside it, so from the second iteration on the entry exists and only its
+/// value is new — `insert` would spell the name into a fresh `String` and throw
+/// away the one the map is already holding.
+fn rebind<T>(vars: &mut HashMap<String, T>, name: &str, val: T) {
+    match vars.get_mut(name) {
+        Some(slot) => *slot = val,
+        None => {
+            vars.insert(name.to_string(), val);
         }
     }
 }

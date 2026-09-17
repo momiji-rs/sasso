@@ -109,6 +109,43 @@ fn new_scope() -> Scope {
     std::rc::Rc::new(std::cell::RefCell::new(HashMap::default()))
 }
 
+/// How many popped scope tables to keep for reuse. Blocks nest, so the pool
+/// only has to cover a sheet's nesting depth plus the churn of its siblings;
+/// past that, freeing a table is cheaper than holding its buckets.
+const SCOPE_POOL_MAX: usize = 32;
+
+/// A table wider than this came from a block with an unusual number of
+/// bindings. Parking it would keep those buckets alive for the whole compile,
+/// which is the one thing the pool must not trade for its allocations.
+const SCOPE_POOL_MAX_CAPACITY: usize = 64;
+
+/// Park a popped scope table for reuse, or let it go.
+///
+/// The table returns to the pool only when this is the LAST reference to it: a
+/// closure that captured the chain — a `@function` or `@mixin` body, a
+/// `@content` block — holds an `Rc` of its own, and the bindings it can still
+/// read must stay exactly where they are. `Rc::strong_count` answers precisely
+/// that question, and a `Weak` (none exist today) would be one more holder, so
+/// it is checked too.
+fn recycle_scope<T>(
+    pool: &mut Vec<Rc<std::cell::RefCell<HashMap<String, T>>>>,
+    scope: Rc<std::cell::RefCell<HashMap<String, T>>>,
+) {
+    if pool.len() >= SCOPE_POOL_MAX || Rc::strong_count(&scope) != 1 || Rc::weak_count(&scope) != 0 {
+        return;
+    }
+    {
+        let mut vars = scope.borrow_mut();
+        if vars.capacity() > SCOPE_POOL_MAX_CAPACITY {
+            return;
+        }
+        // `clear` keeps the buckets: the next block to take this table finds an
+        // empty map that no longer has to build its own.
+        vars.clear();
+    }
+    pool.push(scope);
+}
+
 /// Where a variable was DEFINED: the interned source file id plus the 0-based
 /// line/column of the defining expression's first character.
 ///
@@ -941,6 +978,15 @@ pub(crate) struct Evaluator<'a> {
     /// reach the global scope, but only when every enclosing scope up to the
     /// root is itself semi-global. Rule/mixin/function scopes are not.
     scope_semi_global: Vec<bool>,
+    /// Popped scope tables, kept for the next block to use. A block's scope
+    /// lives exactly as long as the block unless a closure captured the chain,
+    /// so [`pop_scope`](Evaluator::pop_scope) usually holds the only reference
+    /// to a table it is about to free — and entering the next block would
+    /// immediately allocate another. Bounded by [`SCOPE_POOL_MAX`].
+    scope_pool: Vec<Scope>,
+    /// The same for the definition-span frames, which are pushed in lockstep
+    /// with `scopes` when a source map is being built.
+    span_pool: Vec<SpanScope>,
     options: EvalOptions<'a>,
     /// Import paths currently being loaded, deepest last. Re-entering one is a
     /// load cycle (dart-sass "This file is already being loaded."); a path that
@@ -1533,6 +1579,8 @@ impl<'a> Evaluator<'a> {
             // The global scope is treated as semi-global so a top-level control
             // flow scope (its child) becomes semi-global too.
             scope_semi_global: vec![true],
+            scope_pool: Vec::new(),
+            span_pool: Vec::new(),
             options,
             loading: Vec::new(),
             import_cache: HashMap::default(),

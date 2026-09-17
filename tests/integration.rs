@@ -1473,6 +1473,55 @@ fn at_mixin_include_content() {
 }
 
 #[test]
+fn a_reused_scope_table_is_empty_and_a_captured_one_is_untouched() {
+    // A block's variable table is recycled when the block closes and nothing
+    // captured it, so the next block to open gets a table that has already
+    // held someone else's bindings. Two things have to hold for that to be
+    // invisible: a reused table must read as empty, and a table a closure
+    // still holds must not be reused at all.
+    //
+    // The sheet exercises both against a stream of opening and closing blocks
+    // — a loop that rebinds its variables every iteration into ONE scope, a
+    // `@content` block that reads the loop's bindings from inside a rule that
+    // pushed and popped scopes of its own, and a mixin whose closure holds its
+    // defining block's table while sibling rules come and go. Verified against
+    // dart-sass 1.104.1.
+    assert_eq!(
+        css(concat!(
+            "@mixin wrap($n) {\n  .w-#{$n} { @content; }\n}\n",
+            "@each $name, $step in (a: 1, b: 2) {\n",
+            "  $scaled: $step * 10;\n",
+            "  .row-#{$name} {\n    $inner: $scaled + 1;\n    width: $inner * 1px;\n  }\n",
+            "  @include wrap($name) { order: $scaled; }\n}\n",
+            "@for $i from 1 through 3 {\n  $doubled: $i * 2;\n",
+            "  .col-#{$i} {\n",
+            "    @if $i > 1 {\n      $doubled: $doubled + 100;\n      margin: $doubled * 1px;\n",
+            "    } @else {\n      margin: $doubled * 1px;\n    }\n  }\n}\n",
+            ".outer {\n  $shared: 3;\n  @mixin local { pad: $shared * 1px; }\n",
+            "  .a { @include local; }\n",
+            "  .b {\n    $shared: 9;\n    @include local;\n  }\n",
+            "  .c { @include local; }\n}\n",
+        )),
+        concat!(
+            ".row-a {\n  width: 11px;\n}\n\n",
+            ".w-a {\n  order: 10;\n}\n\n",
+            ".row-b {\n  width: 21px;\n}\n\n",
+            ".w-b {\n  order: 20;\n}\n\n",
+            ".col-1 {\n  margin: 2px;\n}\n\n",
+            ".col-2 {\n  margin: 104px;\n}\n\n",
+            ".col-3 {\n  margin: 106px;\n}\n\n",
+            // `$shared: 9` in `.b` assigns the enclosing block's variable
+            // rather than declaring a new one, so `.c` reads 9 as well: the
+            // mixin's closure and the block share one table, and it is that
+            // sharing which keeps the table out of the pool.
+            ".outer .a {\n  pad: 3px;\n}\n",
+            ".outer .b {\n  pad: 9px;\n}\n",
+            ".outer .c {\n  pad: 9px;\n}\n",
+        )
+    );
+}
+
+#[test]
 fn a_nested_declaration_sees_its_blocks_later_siblings() {
     // A block's function/mixin frame is SHARED with the closure of every
     // callable declared in it, so a callable can name a sibling written after
