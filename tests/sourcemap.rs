@@ -684,6 +684,31 @@ fn sasso_charset_prefix_and_utf16_columns() {
         .any(|m| m.gen_line == 1 && m.src_line == 0 && m.src_col == 0));
 }
 
+#[test]
+fn sasso_compressed_astral_char_shifts_the_generated_column_like_dart() {
+    // The expanded case above puts the astral char at the end of its line, so
+    // every later column is measured from a fresh line. Compressed packs the
+    // whole sheet onto generated line 0, which is where the UTF-16 unit count
+    // has to be carried ACROSS the 4-byte char: `color` sits 13 units past
+    // `content` (`content:"` = 9, `𝕏` = 2, `";` = 2), not 15 bytes past it.
+    // Compressed also prefixes a BOM rather than `@charset`, and that BOM is
+    // itself one unit, which is why the first segment starts at column 1.
+    //
+    // Both expected strings are dart-sass 1.104.1's own bytes for this input.
+    let src = ".a {\n  content: \"𝕏\";\n  color: red;\n}\n";
+    let opts = Options::default()
+        .with_style(OutputStyle::Compressed)
+        .with_url("in.scss");
+    let (css, maps, json) = sasso_map(src, &opts);
+    assert!(css.starts_with('\u{feff}'), "expected a BOM: {css:?}");
+    assert_eq!(
+        maps.iter().map(|m| m.gen_col).collect::<Vec<_>>(),
+        vec![1, 4, 17],
+        "generated columns in UTF-16 units: {maps:?}"
+    );
+    assert_eq!(sasso_mappings(&json), "CAAA,GACE,aACA", "dart-sass 1.104.1 map");
+}
+
 /// A custom importer that resolves one virtual module and reports a custom
 /// `source_map_url` for it (dart-sass `ImporterResult.sourceMapUrl`).
 struct SourceMapUrlImporter;
