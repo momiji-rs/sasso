@@ -458,6 +458,20 @@ fn sasso_bare_variable_value_maps_to_its_definition() {
     let (_c, _m, json) = sasso_map("@mixin m($p) { pad: $p; }\n.a { @include m(4px); }\n", &opts);
     assert_eq!(sasso_mappings(&json), "AACA;EADe,KACC");
 
+    // An argument passed BY NAME resolves the same way — to the `4px` in
+    // `@include m($p: 4px)` (src 1:20).
+    let (_c, _m, json) = sasso_map("@mixin m($p) { pad: $p; }\n.a { @include m($p: 4px); }\n", &opts);
+    assert_eq!(sasso_mappings(&json), "AACA;EADe,KACK");
+
+    // So does one spread from a `...` splat, which carries the SPLAT
+    // EXPRESSION's node: `$args` is a bare variable, so `pad: $p` reaches the
+    // `(4px,)` its list was declared from (src 1:7), not the `@include`.
+    let (_c, _m, json) = sasso_map(
+        "@mixin m($p) { pad: $p; }\n$args: (4px,);\n.a { @include m($args...); }\n",
+        &opts,
+    );
+    assert_eq!(sasso_mappings(&json), "AAEA;EAFe,KACR");
+
     // ONLY a bare variable resolves. Every other expression shape keeps its own
     // span, which sits on the declaration's own source line and is therefore
     // dropped as redundant — so `a: $c` is the only one of these six to gain a

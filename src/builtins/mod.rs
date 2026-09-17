@@ -428,10 +428,18 @@ pub(crate) fn global_builtin_replacement(name: &str) -> Option<&'static str> {
 
 /// Whether `module` names a built-in `sass:*` module this build supports.
 pub(crate) fn is_module(module: &str) -> bool {
-    matches!(
-        module,
-        "math" | "color" | "list" | "map" | "string" | "selector" | "meta"
-    )
+    module_name(module).is_some()
+}
+
+/// The canonical name of the built-in module `module` names, as a `'static`
+/// string, or `None` when there is no such module.
+///
+/// The set is closed and known at compile time, so a namespace bound by
+/// `@use "sass:math"` points at the program's own copy of the name instead of
+/// owning one: the tables that hold them are cloned into every callable's
+/// lexical environment and read back on every `ns.member()` call.
+pub(crate) fn module_name(module: &str) -> Option<&'static str> {
+    crate::value::BuiltinModule::from_name(module).map(crate::value::BuiltinModule::name)
 }
 
 /// Translate a `(module, member)` pair to the global builtin name that
