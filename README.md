@@ -22,6 +22,13 @@ subset it implements.
 > attempted)**, tracked as a ratchet (see [Conformance](#conformance) for what
 > that denominator means). Every divergence we know about is listed in
 > [docs/dart-sass-divergences.md](docs/dart-sass-divergences.md).
+>
+> Re-checked on 2026-09-17 against a **fresh clone** of that corpus with the
+> **published** 0.14.0 binary — nothing built into the tree, the compiler
+> downloaded from the release page: of the 137 stylesheets that compile without
+> npm dependencies (dart fails on the other ten too), **136 are byte-identical
+> to dart-sass 1.104.1**; the one that differs is the `@extend` duplicate-
+> extender case written up in the divergences doc.
 
 ## Why another Sass compiler?
 
@@ -88,13 +95,26 @@ $ cargo install sasso         # build from source (needs a Rust toolchain)
 $ cargo add sasso
 ```
 
-**WebAssembly — npm.** A tiny, dependency-free wasm build that mirrors the
-dart-sass *modern* JS API, so it's a drop-in for the `sass` npm package in build
-tools (no wasm-bindgen, no native add-ons):
+**npm.** Mirrors the dart-sass *modern* JS API, so it is a drop-in for the
+`sass` package in build tools (no wasm-bindgen, no build step):
 
 ```console
 $ npm install sasso
 ```
+
+One install, two engines. The package carries the wasm build — which works
+everywhere, including the browser — and pulls a **native addon**
+(`sasso-native-<platform>`) as an `optionalDependency` on macOS and Linux. The
+API and the CLI prefer the addon when it is there and fall back to wasm when it
+is not; the output is byte-identical either way, and `SASSO_ENGINE=wasm|native`
+forces a choice. Compiling a 137-stylesheet production tree, one process:
+
+| | |
+|---|---|
+| `npx sasso` (native engine) | **265 ms** |
+| `npx sasso` (wasm engine) | 612 ms |
+| the `sasso` release binary | 139 ms |
+| dart-sass 1.104.1 | 2048 ms |
 
 ```js
 import { compileString } from "sasso";
@@ -157,8 +177,10 @@ order. Supported dart-sass flags: `--[no-]source-map`, `--source-map-urls`,
 `--[no-]charset`, `-q/--quiet`, `--quiet-deps`, `--stop-on-error`,
 `--[no-]unicode`, `--[no-]color` (accepted; sasso never colors), `--indented`,
 `--stdin`. Exit codes match too (64 usage, 65 compile error, 66 unreadable
-input). Not supported: `--watch`, `--update`, `--pkg-importer`, and the
-deprecation-selection flags. `sasso --help` lists everything.
+input). Not supported by the binary: `--watch`, `--update`, `--pkg-importer`,
+and the deprecation-selection flags — note that the **npm** CLI does have
+`--watch` and `--update`, so the two are not yet identical in that direction
+(#86). `sasso --help` lists everything.
 
 ## Conformance
 
@@ -246,7 +268,12 @@ allocation trimming — skipping the per-rule selector clone when nothing extend
 it, iterating `@each` over the list's shared handle, and dropping redundant
 per-declaration copies — shaves a further ~2.8% off pure compile on
 representative stylesheets (measured by instructions-retired, since the win is
-below wall-clock jitter at this ms scale; byte-identical output). Full
+below wall-clock jitter at this ms scale; byte-identical output). Three further
+rounds — a rule's selector list resolved once and shared, carried into the
+output tree rather than re-materialised, and the selector scanners reading from
+an inline character buffer — take that campaign to **-5.61% instructions and
+-27.1% allocations** on the large corpus, each verifying the sass-spec ratchet
+at delta +0. Full
 methodology, per-file numbers and the correctness diff are in
 [`bench/three_way.md`](bench/three_way.md); run it yourself with
 `cd bench && RUNS=12 WARMUP=3 LOOP_N=200 bash scripts/run_bench.sh`.
