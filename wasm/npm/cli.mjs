@@ -1086,13 +1086,6 @@ async function runJobs(jobs, opts, common) {
   return failed;
 }
 
-/**
- * The job list as bytes in SHARED memory: every worker reads the same buffer
- * and decodes only the jobs it claims, so the list costs one copy rather than
- * one per thread. `index` holds three ints per job — where its input starts,
- * how long the input is, and how long the output is (-1 for "no output", which
- * is stdout; an empty output is not a thing `parseJobs` produces).
- */
 /** A string in shared memory, so `workerData` carries a handle, not a copy. */
 function shareText(text) {
   const bytes = new TextEncoder().encode(text);
@@ -1101,6 +1094,13 @@ function shareText(text) {
   return shared;
 }
 
+/**
+ * The job list as bytes in SHARED memory: every worker reads the same buffer
+ * and decodes only the jobs it claims, so the list costs one copy rather than
+ * one per thread. `index` holds three ints per job — where its input starts,
+ * how long the input is, and how long the output is (-1 for "no output", which
+ * is stdout; an empty output is not a thing `parseJobs` produces).
+ */
 function shareJobs(jobs) {
   const encoder = new TextEncoder();
   const encoded = jobs.map((job) => [

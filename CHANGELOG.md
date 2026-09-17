@@ -72,7 +72,7 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
-- **`sass --version` on the npm package prints the package's version.** It
+- **`sasso --version` on the npm package prints the package's version.** It
   parsed the engine's `info` string, which names the engine crate: with the
   native addon installed the pattern missed, and the fallback printed
   dart-sass's compatibility version as if it were sasso's.
