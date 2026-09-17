@@ -1211,6 +1211,61 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     );
   }
 
+  // The headline of the engine work is that the DEFAULT picks the addon. No
+  // output test can see that — the two engines are byte-identical on purpose,
+  // which is the point — so the only honest observable is throughput, and
+  // `--loop` reports it per compile with process start-up and file I/O already
+  // out of the way.
+  //
+  // Measured 2026-09-17 on one 300-rule stylesheet, three runs each:
+  // default 0.362-0.376 ms/compile, native 0.374-0.385, wasm 1.403-1.458. The
+  // default tracks native and wasm is ~3.9x slower, so the 0.7 threshold below
+  // sits about 5x away from both sides. A regression that always loaded
+  // `sasso.speed.mjs` would land at the wasm number and fail.
+  {
+    const ldir = join(dir, "engine-speed");
+    mkdirSync(ldir, { recursive: true });
+    const big = join(ldir, "big.scss");
+    writeFileSync(
+      big,
+      `@use "sass:math";\n@for $i from 1 through 300 { .c#{$i} { width: math.div($i,3)*1px; color: rgba(0,0,0,math.div($i,100)) } }\n`,
+    );
+    const perCompile = (env) => {
+      let best = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const r = spawnSync(process.execPath, [cliPath, "--loop", "60", "--no-css", big], {
+          encoding: "utf8",
+          env: { ...process.env, ...env },
+          timeout: 60000,
+        });
+        if (r.status !== 0) return undefined;
+        const m = /=> ([\d.]+) ms\/compile/.exec(r.stderr);
+        assert.ok(m, `cli: --loop reports a per-compile time (stderr: ${r.stderr})`);
+        best = Math.min(best, Number(m[1]));
+      }
+      return best;
+    };
+
+    const native = perCompile({ SASSO_ENGINE: "native" });
+    if (native === undefined) {
+      // No prebuild for this platform: there is no addon to prefer, and the
+      // "demanded engine is missing" path above already covers saying so.
+      console.log("  (no native addon here — default-engine preference not checked)");
+    } else {
+      const wasm = perCompile({ SASSO_ENGINE: "wasm" });
+      const dflt = perCompile({});
+      assert.ok(wasm !== undefined && dflt !== undefined, "cli: --loop runs on both engines");
+      assert.ok(
+        native < wasm * 0.7,
+        `cli: the addon is the faster engine here (native ${native} ms, wasm ${wasm} ms) — otherwise this test proves nothing`,
+      );
+      assert.ok(
+        dflt < wasm * 0.7,
+        `cli: the DEFAULT engine is the addon, not wasm (default ${dflt} ms, native ${native} ms, wasm ${wasm} ms)`,
+      );
+    }
+  }
+
   // Each job must run EXACTLY once. Correct output does not prove that — a pool
   // where every worker walks the whole list from 0 produces the same files,
   // just N times over — so make the repetition audible: one `@warn` per
