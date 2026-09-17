@@ -66,20 +66,32 @@ enum MessageKind {
     Error,
 }
 
+/// `trim(piece)` as a new shared buffer, or `None` when the trim removed
+/// nothing and the piece can be left alone. A literal's text is shared, so
+/// copying it to say "unchanged" is pure waste.
+fn trimmed_lit(piece: &Rc<str>, trim: fn(&str) -> &str) -> Option<Rc<str>> {
+    let trimmed = trim(piece);
+    (trimmed.len() != piece.len()).then(|| Rc::from(trimmed))
+}
+
 /// Trim leading/trailing whitespace from a parsed prelude template, dropping
 /// any whitespace-only literals at the ends. Interior interpolation is kept.
 fn trim_prelude(pieces: Vec<TplPiece>) -> Vec<TplPiece> {
     let mut pieces = pieces;
     if let Some(TplPiece::Lit(first)) = pieces.first_mut() {
-        let trimmed = first.trim_start().to_string();
-        *first = trimmed;
+        // A prelude written without leading padding — the usual one — has
+        // nothing to trim, and keeps the buffer it was parsed into.
+        if let Some(trimmed) = trimmed_lit(first, str::trim_start) {
+            *first = trimmed;
+        }
         if first.is_empty() {
             pieces.remove(0);
         }
     }
     if let Some(TplPiece::Lit(last)) = pieces.last_mut() {
-        let trimmed = last.trim_end().to_string();
-        *last = trimmed;
+        if let Some(trimmed) = trimmed_lit(last, str::trim_end) {
+            *last = trimmed;
+        }
         if last.is_empty() {
             pieces.pop();
         }
@@ -505,11 +517,11 @@ fn validate_if_cond(cond: &IfCond) -> Result<(bool, bool), Error> {
 fn import_url_is_css(pieces: &[TplPiece]) -> bool {
     let mut head = "";
     if let Some(TplPiece::Lit(s)) = pieces.first() {
-        head = s.as_str();
+        head = s;
     }
-    let mut tail = String::new();
+    let mut tail = "";
     if let Some(TplPiece::Lit(s)) = pieces.last() {
-        tail = s.clone();
+        tail = s;
     }
     tail.ends_with(".css")
         || head.starts_with("http://")
@@ -520,12 +532,29 @@ fn import_url_is_css(pieces: &[TplPiece]) -> bool {
 /// Drop trailing whitespace-only literal pieces and trim the last literal.
 /// Append a single literal character to a template, merging into a trailing
 /// `Lit` piece when possible.
+///
+/// The merge is load-bearing, not an optimization: adjacent literals must stay
+/// one piece, because [`import_url_is_css`] reads the first and last piece as
+/// whole affixes, [`trim_prelude`] trims only the end pieces, and a template
+/// that is a single literal is the one evaluation hands out without copying.
+/// Rebuilding the piece is what an `Rc<str>` costs to extend, and this runs a
+/// few times per `@import` that has modifiers at all — never in a loop.
 fn push_lit(pieces: &mut Vec<TplPiece>, c: char) {
     if let Some(TplPiece::Lit(s)) = pieces.last_mut() {
-        s.push(c);
+        *s = Rc::from(format!("{s}{c}"));
     } else {
-        pieces.push(TplPiece::Lit(c.to_string()));
+        pieces.push(TplPiece::Lit(c.to_string().into()));
     }
+}
+
+/// End the literal piece accumulated in `lit`, keeping its buffer for the next
+/// one. A piece's text is shared from here on — a single-literal template hands
+/// it straight to the string it evaluates to — so it is copied into its own
+/// allocation exactly once, here.
+fn take_lit(lit: &mut String) -> TplPiece {
+    let piece = TplPiece::Lit(Rc::from(lit.as_str()));
+    lit.clear();
+    piece
 }
 
 /// Whether `expr` is eligible to keep the deprecated `/` slash spelling.
@@ -869,7 +898,7 @@ impl Parser {
                         ));
                     }
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -931,7 +960,7 @@ impl Parser {
                                 ));
                             }
                             if !lit.is_empty() {
-                                pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                                pieces.push(take_lit(&mut lit));
                             }
                             self.sc.bump();
                             self.sc.bump();
@@ -977,7 +1006,7 @@ impl Parser {
             }
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         Ok(pieces)
     }

@@ -258,7 +258,7 @@ impl<'a> Evaluator<'a> {
                     out.extend(bubbled);
                 }
                 Stmt::Decl(d) => {
-                    let prop = self.eval_template(&d.property)?.trim().to_string();
+                    let prop = trim_shared(self.eval_template_shared(&d.property)?);
                     let value = self.eval_expr(&d.value)?.to_css(self.compressed());
                     // Plain CSS has no variables, so the value node is always
                     // the value's own text (dart's `_expressionNode` fallback).
@@ -281,7 +281,7 @@ impl<'a> Evaluator<'a> {
                     });
                 }
                 Stmt::CustomDecl(d) => {
-                    let prop = self.eval_template(&d.property)?.trim().to_string();
+                    let prop = trim_shared(self.eval_template_shared(&d.property)?);
                     let value = self.eval_template(&d.value)?;
                     let value_span = self.span_at(d.value_pos);
                     out.push(OutNode::AtDecl {
@@ -496,7 +496,7 @@ impl<'a> Evaluator<'a> {
     fn css_body_stmt(&mut self, stmt: &Stmt, items: &mut Vec<OutItem>) -> Result<(), Error> {
         match stmt {
             Stmt::Decl(d) => {
-                let prop = self.eval_template(&d.property)?.trim().to_string();
+                let prop = trim_shared(self.eval_template_shared(&d.property)?);
                 let value = self.eval_expr(&d.value)?.to_css(self.compressed());
                 // Plain CSS has no variables, so the value node is always the
                 // value's own text (dart's `_expressionNode` fallback).
@@ -519,7 +519,7 @@ impl<'a> Evaluator<'a> {
                 });
             }
             Stmt::CustomDecl(d) => {
-                let prop = self.eval_template(&d.property)?.trim().to_string();
+                let prop = trim_shared(self.eval_template_shared(&d.property)?);
                 let value = self.eval_template(&d.value)?;
                 let value_span = self.span_at(d.value_pos);
                 items.push(OutItem::Decl {

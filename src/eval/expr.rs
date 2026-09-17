@@ -1,5 +1,34 @@
 use super::*;
 
+/// Where each `#{…}` in a template landed in its output: `(char start, char
+/// length)`, in source order. A template with a single interpolation — `.item-#{$i}`
+/// and every selector shaped like it — keeps its one range inline, because a
+/// vector for it would be an allocation per style rule on the path that resolves
+/// every selector in the sheet.
+pub(super) enum InterpBounds {
+    None,
+    One((usize, usize)),
+    Many(Vec<(usize, usize)>),
+}
+
+impl InterpBounds {
+    fn push(&mut self, b: (usize, usize)) {
+        match self {
+            Self::None => *self = Self::One(b),
+            Self::One(first) => *self = Self::Many(vec![*first, b]),
+            Self::Many(v) => v.push(b),
+        }
+    }
+
+    pub(super) fn as_slice(&self) -> &[(usize, usize)] {
+        match self {
+            Self::None => &[],
+            Self::One(b) => std::slice::from_ref(b),
+            Self::Many(v) => v,
+        }
+    }
+}
+
 impl<'a> Evaluator<'a> {
     // ---- templates & expressions ------------------------------------
 
@@ -17,17 +46,45 @@ impl<'a> Evaluator<'a> {
         Ok(s)
     }
 
+    /// The template's text as a shared string. A template that is a single
+    /// literal piece — every `color`, every `solid`, every `.card` — already has
+    /// its text in the AST, and this hands that buffer out rather than copying
+    /// it, so the string it becomes costs a refcount bump. Anything with
+    /// interpolation in it has to be built, and pays one buffer for the result
+    /// exactly as before.
+    pub(super) fn eval_template_shared(&mut self, pieces: &[TplPiece]) -> Result<Rc<str>, Error> {
+        if let [TplPiece::Lit(t)] = pieces {
+            return Ok(Rc::clone(t));
+        }
+        Ok(Rc::from(self.eval_template(pieces)?))
+    }
+
     /// Like [`Self::eval_template`], additionally returning each `Interp`
     /// piece's (char start, char length) range in the output — used to decide
     /// whether a resolved-selector error column falls inside interpolated
     /// text (the dual-span "error in interpolated output" diagnostic).
-    pub(super) fn eval_template_bounds(
+    ///
+    /// The text is borrowed from the AST when the template is a single literal —
+    /// the shape of nearly every selector — which is why it is a [`Cow`]: that
+    /// case has nothing to build and no interpolation to record, so it costs
+    /// neither the buffer nor the bounds vector.
+    pub(super) fn eval_template_bounds<'p>(
         &mut self,
-        pieces: &[TplPiece],
-    ) -> Result<(String, Vec<(usize, usize)>), Error> {
+        pieces: &'p [TplPiece],
+    ) -> Result<(Cow<'p, str>, InterpBounds), Error> {
+        if let [TplPiece::Lit(t)] = pieces {
+            return Ok((Cow::Borrowed(t), InterpBounds::None));
+        }
+        // Sized up front so the ranges are recorded without a single reallocation:
+        // a generated selector can carry a dozen interpolations.
+        let interps = pieces.iter().filter(|p| matches!(p, TplPiece::Interp(_))).count();
         let mut s = String::new();
         let mut chars = 0usize;
-        let mut bounds = Vec::new();
+        let mut bounds = if interps > 1 {
+            InterpBounds::Many(Vec::with_capacity(interps))
+        } else {
+            InterpBounds::None
+        };
         for piece in pieces {
             match piece {
                 TplPiece::Lit(t) => {
@@ -44,7 +101,7 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
-        Ok((s, bounds))
+        Ok((Cow::Owned(s), bounds))
     }
 
     /// The value of `&` in value position: the current resolved selector list
@@ -158,19 +215,19 @@ impl<'a> Evaluator<'a> {
             // `visitStringExpression`.
             Expr::QuotedString(pieces) => {
                 let saved = std::mem::replace(&mut self.in_supports_declaration, false);
-                let text = self.eval_template(pieces);
+                let text = self.eval_template_shared(pieces);
                 self.in_supports_declaration = saved;
                 Ok(Value::Str(SassStr {
-                    text: text?.into(),
+                    text: text?,
                     quoted: true,
                 }))
             }
             Expr::Ident(pieces) => {
                 let saved = std::mem::replace(&mut self.in_supports_declaration, false);
-                let text = self.eval_template(pieces);
+                let text = self.eval_template_shared(pieces);
                 self.in_supports_declaration = saved;
                 Ok(Value::Str(SassStr {
-                    text: text?.into(),
+                    text: text?,
                     quoted: false,
                 }))
             }

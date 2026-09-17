@@ -629,7 +629,7 @@ impl Parser {
                 self.sc.bump();
                 self.skip_ws_inline();
                 let _ = self.read_ident_name()?;
-                Ok(Expr::Ident(vec![TplPiece::Lit("!important".to_string())]))
+                Ok(Expr::Ident(vec![TplPiece::Lit("!important".into())]))
             }
             Some('$') => {
                 let pos = self.sc.position();
@@ -704,7 +704,7 @@ impl Parser {
                 self.skip_ws_inline();
                 let rhs = self.multiplicative()?;
                 Ok(Expr::Div {
-                    lhs: Box::new(Expr::Ident(vec![TplPiece::Lit(String::new())])),
+                    lhs: Box::new(Expr::Ident(vec![TplPiece::Lit("".into())])),
                     rhs: Box::new(rhs),
                     slash: true,
                     pos,
@@ -778,7 +778,7 @@ impl Parser {
             // consumed here.
             Some('%') => {
                 self.sc.bump();
-                Ok(Expr::Ident(vec![TplPiece::Lit("%".to_string())]))
+                Ok(Expr::Ident(vec![TplPiece::Lit("%".into())]))
             }
             // dart names what it WANTED here, whatever it found — a character
             // that cannot start one, or the end of the file.
@@ -844,7 +844,7 @@ impl Parser {
         if count == 6 && matches!(self.sc.peek(), Some(c) if c.is_ascii_hexdigit() || c == '?') {
             return Err(Error::at("Expected at most 6 digits.", start));
         }
-        let token = Expr::Ident(vec![TplPiece::Lit(s)]);
+        let token = Expr::Ident(vec![TplPiece::Lit(s.into())]);
         if !saw_question {
             // A plain or `-end` range is terminal: any directly-following
             // identifier char (a stray `-name` chain like `U+123-456-ABC`, or
@@ -1193,7 +1193,7 @@ impl Parser {
         if ident.is_empty() {
             return Err(Error::at("Expected identifier.", pos));
         }
-        Ok(Expr::Ident(vec![TplPiece::Lit(format!("#{ident}"))]))
+        Ok(Expr::Ident(vec![TplPiece::Lit(format!("#{ident}").into())]))
     }
 
     /// dart-sass `_hexColorContents`: the character after `#` was a digit, so
@@ -1260,7 +1260,7 @@ impl Parser {
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     self.reject_plain_css_interp()?;
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -1308,7 +1308,7 @@ impl Parser {
             }
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         Ok(pieces)
     }
@@ -1333,7 +1333,7 @@ impl Parser {
                     }
                 }
                 if self.sc.peek() == Some('(') {
-                    return self.parse_call(name, name_pos, name_mark);
+                    return self.parse_call(name.to_string(), name_pos, name_mark);
                 }
                 // IE `progid:` special function: `[-vendor-]progid:Name(...)`.
                 // The identifier `progid` (or a vendor-prefixed `-x-progid`) is
@@ -1346,7 +1346,7 @@ impl Parser {
                 // In plain CSS `true`/`false`/`null` have no special meaning;
                 // they stay plain identifiers (dart-sass `CssParser`).
                 if !self.plain_css {
-                    match name.as_str() {
+                    match &*name {
                         "true" => return Ok(Expr::Bool(true)),
                         "false" => return Ok(Expr::Bool(false)),
                         "null" => return Ok(Expr::Null),
@@ -1480,7 +1480,7 @@ impl Parser {
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     self.reject_plain_css_interp()?;
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -1513,7 +1513,7 @@ impl Parser {
             }
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         Ok(pieces)
     }
@@ -1697,7 +1697,7 @@ impl Parser {
                 None => break,
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -1719,7 +1719,7 @@ impl Parser {
                             None => break,
                             Some('#') if self.sc.peek_at(1) == Some('{') => {
                                 if !lit.is_empty() {
-                                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                                    pieces.push(take_lit(&mut lit));
                                 }
                                 self.sc.bump();
                                 self.sc.bump();
@@ -1820,7 +1820,7 @@ impl Parser {
             return Err(Error::at("expected \")\"", self.sc.position()));
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         Ok(Expr::Ident(pieces))
     }
@@ -1850,7 +1850,7 @@ impl Parser {
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     self.reject_plain_css_interp()?;
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -1909,7 +1909,7 @@ impl Parser {
             return Ok(None);
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         Ok(Some(pieces))
     }
@@ -2142,7 +2142,7 @@ impl Parser {
                         self.sc.position(),
                     ));
                 }
-                pieces.push(TplPiece::Lit(" ".to_string()));
+                pieces.push(TplPiece::Lit(" ".into()));
                 if !self.read_if_raw_token(&mut pieces)? {
                     self.sc.reset(mark);
                     break;
@@ -2247,7 +2247,7 @@ impl Parser {
                 None => return Err(Error::at("expected \")\".", self.sc.position())),
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -2278,7 +2278,7 @@ impl Parser {
             }
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         Ok(())
     }
@@ -2292,7 +2292,7 @@ impl Parser {
             match self.sc.peek() {
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -2311,7 +2311,7 @@ impl Parser {
             }
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         if pieces.is_empty() {
             return Err(Error::at("Expected identifier.", self.sc.position()));

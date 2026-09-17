@@ -10510,6 +10510,13 @@ fn at_in_selector_is_expected_selector_with_dual_span() {
     let msg = format!("{err}");
     assert!(msg.contains("expected selector."), "{msg}");
     assert!(msg.contains("1:10"), "{msg}");
+    // With MORE than one interpolation the offending column has to be matched
+    // to the right one: `@` comes out of the second, so the caret is at its
+    // start (2:11), not the first's (dart, verified 2026-09-17).
+    let err = compile("$x: \"y\";\n.a#{$x}b#{'\\@z'} { c: d; }\n", &Options::default()).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("expected selector."), "{msg}");
+    assert!(msg.contains("2:11"), "{msg}");
 }
 
 #[test]

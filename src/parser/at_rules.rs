@@ -38,7 +38,7 @@ impl Parser {
         }
         let name = self.read_ident_name()?;
         if self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{') {
-            let mut stmt = self.parse_interp_at_rule(vec![TplPiece::Lit(name)])?;
+            let mut stmt = self.parse_interp_at_rule(vec![TplPiece::Lit(name.into())])?;
             stamp_at_keyword(&mut stmt, pos);
             return Ok(stmt);
         }
@@ -130,9 +130,9 @@ impl Parser {
                 if !matches!(self.sc.peek(), Some('"' | '\'')) {
                     return Err(Error::at("Expected string.", self.sc.position()));
                 }
-                let mut prelude = vec![TplPiece::Lit("\"".to_string())];
+                let mut prelude = vec![TplPiece::Lit("\"".into())];
                 prelude.extend(self.parse_quoted_string()?);
-                prelude.push(TplPiece::Lit("\"".to_string()));
+                prelude.push(TplPiece::Lit("\"".into()));
                 self.skip_ws_inline();
                 self.sc.eat(';');
                 Ok(Stmt::AtRule {
@@ -522,9 +522,9 @@ impl Parser {
             // A `.css`/protocol url is a plain-CSS import, emitted QUOTED with
             // its text verbatim — dart writes `@import "#{$x}o.css";`, leaving
             // even an interpolation unresolved.
-            if import_url_is_css(&[TplPiece::Lit(path.clone())]) {
+            if import_url_is_css(&[TplPiece::Lit(path.as_str().into())]) {
                 return Ok(ImportArg::Css {
-                    url: vec![TplPiece::Lit(crate::value::serialize_quoted(&path))],
+                    url: vec![TplPiece::Lit(crate::value::serialize_quoted(&path).into())],
                     modifiers: Vec::new(),
                     pos: url_pos,
                 });
@@ -569,7 +569,7 @@ impl Parser {
                     })
                 } else {
                     Ok(ImportArg::Css {
-                        url: vec![TplPiece::Lit(raw_url)],
+                        url: vec![TplPiece::Lit(raw_url.into())],
                         modifiers,
                         pos: url_pos,
                     })
@@ -645,9 +645,9 @@ impl Parser {
         let space = |raw: &mut Vec<TplPiece>| {
             if !raw.is_empty() {
                 if let Some(TplPiece::Lit(s)) = raw.last_mut() {
-                    s.push(' ');
+                    *s = Rc::from(format!("{s} "));
                 } else {
-                    raw.push(TplPiece::Lit(" ".to_string()));
+                    raw.push(TplPiece::Lit(" ".into()));
                 }
             }
         };
@@ -1157,7 +1157,7 @@ impl Parser {
                             // verbatim, `#{…}` is not part of it.
                             Some('#') if self.sc.peek_at(1) == Some('{') => {
                                 if !lit.is_empty() {
-                                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                                    pieces.push(take_lit(&mut lit));
                                 }
                                 self.sc.bump();
                                 self.sc.bump();
@@ -1191,7 +1191,7 @@ impl Parser {
                 }
                 '#' if self.sc.peek_at(1) == Some('{') => {
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -1284,7 +1284,7 @@ impl Parser {
             return Err(Error::at(format!("expected \"{expected}\""), self.sc.position()));
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         if !allow_empty && !wrote_anything {
             return Err(Error::at("Expected token.", start));
@@ -1339,7 +1339,7 @@ impl Parser {
                 }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -1366,7 +1366,7 @@ impl Parser {
             }
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         Ok(pieces)
     }
@@ -1385,7 +1385,7 @@ impl Parser {
                 self.sc.bump();
                 self.interpolated_identifier_body(&mut pieces, &mut lit)?;
                 if !lit.is_empty() {
-                    pieces.push(TplPiece::Lit(lit));
+                    pieces.push(take_lit(&mut lit));
                 }
                 return Ok(pieces);
             }
@@ -1405,7 +1405,7 @@ impl Parser {
                     return Err(Error::at("expected \"}\"", self.sc.position()));
                 }
                 if !lit.is_empty() {
-                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                    pieces.push(take_lit(&mut lit));
                 }
                 pieces.push(TplPiece::Interp(e));
             }
@@ -1417,7 +1417,7 @@ impl Parser {
         }
         self.interpolated_identifier_body(&mut pieces, &mut lit)?;
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         Ok(pieces)
     }
@@ -1449,7 +1449,7 @@ impl Parser {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(lit)));
+                        pieces.push(take_lit(lit));
                     }
                     pieces.push(TplPiece::Interp(e));
                 }
@@ -1561,9 +1561,9 @@ impl Parser {
         if !self.sc.eat(')') {
             return Err(Error::at("expected \")\".", self.sc.position()));
         }
-        let mut pieces = vec![TplPiece::Lit(format!("({kw}: "))];
+        let mut pieces = vec![TplPiece::Lit(format!("({kw}: ").into())];
         pieces.extend(trim_prelude(value));
-        pieces.push(TplPiece::Lit(")".to_string()));
+        pieces.push(TplPiece::Lit(")".into()));
         Ok(pieces)
     }
 
@@ -1606,7 +1606,7 @@ impl Parser {
             match self.sc.peek() {
                 Some(c) if is_ident_char(c) => {
                     let lit = self.read_ident_name()?;
-                    name.push(TplPiece::Lit(lit));
+                    name.push(TplPiece::Lit(lit.into()));
                 }
                 _ => break,
             }
@@ -2110,7 +2110,7 @@ impl Parser {
             match self.sc.peek() {
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -2137,7 +2137,7 @@ impl Parser {
             }
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         if pieces.is_empty() {
             return Err(Error::at("Expected identifier.", self.sc.position()));
@@ -2387,7 +2387,7 @@ impl Parser {
                 }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -2416,7 +2416,7 @@ impl Parser {
                             // as the custom-property reader already did.
                             Some('#') if self.sc.peek_at(1) == Some('{') => {
                                 if !lit.is_empty() {
-                                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                                    pieces.push(take_lit(&mut lit));
                                 }
                                 self.sc.bump();
                                 self.sc.bump();
@@ -2477,7 +2477,7 @@ impl Parser {
             return Err(Error::at(format!("expected \"{expected}\"."), self.sc.position()));
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         Ok(pieces)
     }
@@ -2523,7 +2523,7 @@ impl Parser {
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
                     self.reject_plain_css_interp()?;
                     if !lit.is_empty() {
-                        pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                        pieces.push(take_lit(&mut lit));
                     }
                     self.sc.bump();
                     self.sc.bump();
@@ -2553,7 +2553,7 @@ impl Parser {
                             }
                             Some('#') if self.sc.peek_at(1) == Some('{') => {
                                 if !lit.is_empty() {
-                                    pieces.push(TplPiece::Lit(std::mem::take(&mut lit)));
+                                    pieces.push(take_lit(&mut lit));
                                 }
                                 self.sc.bump();
                                 self.sc.bump();
@@ -2629,15 +2629,13 @@ impl Parser {
             return Err(Error::at(format!("expected \"{expected}\"."), self.sc.position()));
         }
         if !lit.is_empty() {
-            pieces.push(TplPiece::Lit(lit));
+            pieces.push(take_lit(&mut lit));
         }
         // A trailing newline-run collapses to a single space (dart-sass emits a
         // trailing newline before the terminator as a space, not a line break).
         if let Some(TplPiece::Lit(s)) = pieces.last_mut() {
             if s.ends_with('\n') {
-                let trimmed_len = s.trim_end_matches([' ', '\t', '\n']).len();
-                s.truncate(trimmed_len);
-                s.push(' ');
+                *s = Rc::from(format!("{} ", s.trim_end_matches([' ', '\t', '\n'])));
             }
         }
         Ok(pieces)

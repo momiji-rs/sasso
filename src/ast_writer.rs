@@ -184,7 +184,7 @@ fn write_quoted(out: &mut String, pieces: &[TplPiece]) {
     let literal: String = pieces
         .iter()
         .map(|p| match p {
-            TplPiece::Lit(s) => s.as_str(),
+            TplPiece::Lit(s) => s,
             TplPiece::Interp(_) => "",
         })
         .collect();
