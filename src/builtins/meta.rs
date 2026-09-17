@@ -47,17 +47,8 @@ pub(super) fn try_call(
         _ => None,
     };
     if let Some(max) = max {
-        if pos_args.len() > max {
-            return Some(Err(Error::at(
-                format!(
-                    "Only {} argument{} allowed, but {} {} passed.",
-                    max,
-                    if max == 1 { "" } else { "s" },
-                    pos_args.len(),
-                    if pos_args.len() == 1 { "was" } else { "were" }
-                ),
-                pos,
-            )));
+        if let Err(e) = super::check_arity(max, pos_args, named, pos) {
+            return Some(Err(e));
         }
     }
     Some(match name {
@@ -257,16 +248,7 @@ fn fn_feature_exists(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
 /// ignored.)
 fn fn_function_exists(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["name", "module"];
-    if pos_args.len() > params.len() {
-        return Err(Error::at(
-            format!(
-                "Only {} arguments allowed, but {} were passed.",
-                params.len(),
-                pos_args.len()
-            ),
-            pos,
-        ));
-    }
+    super::check_arity(params.len(), pos_args, named, pos)?;
     let v = super::require(&params, pos_args, named, 0, pos)?;
     let name = match v {
         Value::Str(s) => &s.text,
@@ -290,15 +272,8 @@ fn fn_function_exists(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -
 /// error dart-sass raises.
 fn fn_get_function(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option<Result<Value, Error>> {
     let params = ["name", "css", "module"];
-    if pos_args.len() > params.len() {
-        return Some(Err(Error::at(
-            format!(
-                "Only {} arguments allowed, but {} were passed.",
-                params.len(),
-                pos_args.len()
-            ),
-            pos,
-        )));
+    if let Err(e) = super::check_arity(params.len(), pos_args, named, pos) {
+        return Some(Err(e));
     }
     let v = match super::arg(&params, pos_args, named, 0) {
         Some(v) => v,

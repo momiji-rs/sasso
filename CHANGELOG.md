@@ -140,6 +140,16 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **Only positional arguments count toward a function's arity.** Every
+  built-in summed the positional and named counts, so both halves of
+  dart-sass's sentence came out wrong: `lighten(red, 10%, 3, $nope: 1)` said
+  `Only 2 arguments allowed, but 4 were passed.` where dart says `Only 2
+  positional arguments allowed, but 3 were passed.` — the word "positional"
+  appears the moment any named argument is in play, and the count is of the
+  positional ones alone. User-defined functions gain the same wording, and
+  `hwb($nope: 1)` no longer reports an overflow for a call with no positional
+  arguments at all. Where two errors could both apply, dart's order now holds:
+  a positional overflow is reported before an unrecognized parameter name.
 - **`Missing argument $x.` no longer names a function, and no longer names the
   wrong one.** Every built-in appended ` for <name>()` to dart-sass's message,
   and the name it appended was the GLOBAL alias — so `color.adjust()` reported

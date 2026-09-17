@@ -218,16 +218,7 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
     ) -> Result<Value, Error> {
         let params = ["name", "css", "module"];
-        if pos_args.len() > params.len() {
-            return Err(Error::at(
-                format!(
-                    "Only {} arguments allowed, but {} were passed.",
-                    params.len(),
-                    pos_args.len()
-                ),
-                pos,
-            ));
-        }
+        crate::builtins::check_arity(params.len(), pos_args, named, pos)?;
         let arg = |i: usize| -> Option<&Value> {
             pos_args
                 .get(i)
@@ -357,16 +348,7 @@ impl<'a> Evaluator<'a> {
         pos: Pos,
     ) -> Result<Value, Error> {
         let params = ["name", "module"];
-        if pos_args.len() > params.len() {
-            return Err(Error::at(
-                format!(
-                    "Only {} arguments allowed, but {} were passed.",
-                    params.len(),
-                    pos_args.len()
-                ),
-                pos,
-            ));
-        }
+        crate::builtins::check_arity(params.len(), pos_args, named, pos)?;
         let arg = |i: usize| -> Option<&Value> {
             pos_args
                 .get(i)
@@ -770,16 +752,7 @@ impl<'a> Evaluator<'a> {
         allow_module: bool,
     ) -> Result<(String, Option<String>), Error> {
         let max = if allow_module { 2 } else { 1 };
-        if pos_args.len() > max {
-            return Err(Error::at(
-                format!(
-                    "Only {max} argument{} allowed, but {} were passed.",
-                    if max == 1 { "" } else { "s" },
-                    pos_args.len()
-                ),
-                pos,
-            ));
-        }
+        crate::builtins::check_arity(max, pos_args, named, pos)?;
         let name_v = pos_args
             .first()
             .or_else(|| named.iter().find(|(n, _)| n == "name").map(|(_, v)| v))

@@ -283,11 +283,14 @@ fn fn_join(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
 }
 
 /// The dart-sass "Only N argument(s) allowed, but M were passed." error.
-fn too_many(passed: usize, max: usize, pos: Pos) -> Error {
+/// `named` decides the "positional" wording, as in [`super::check_arity`].
+fn too_many(passed: usize, max: usize, named: &[(String, Value)], pos: Pos) -> Error {
+    let kind = if named.is_empty() { "" } else { "positional " };
     Error::at(
         format!(
-            "Only {} argument{} allowed, but {} {} passed.",
+            "Only {} {}argument{} allowed, but {} {} passed.",
             max,
+            kind,
             if max == 1 { "" } else { "s" },
             passed,
             if passed == 1 { "was" } else { "were" }
@@ -297,22 +300,23 @@ fn too_many(passed: usize, max: usize, pos: Pos) -> Error {
 }
 
 /// Validate a fixed-arity (non-variadic) builtin's argument list against its
-/// declared `params`: too many positional arguments is the dart-sass "Only N
-/// argument(s) allowed…" error (counting positional + named), and any named
-/// argument whose name is not a declared parameter is "No parameter named $X.".
-/// dart-sass reports the unknown-name error before the over-arity one.
+/// declared `params`, in dart's own order: a POSITIONAL overflow is the
+/// "Only N argument(s) allowed…" error (only positional arguments count toward
+/// it — see [`super::check_arity`]), and only then is a named argument whose
+/// name is not a declared parameter "No parameter named $X.".
 fn validate_args(
     params: &[&str],
     pos_args: &[Value],
     named: &[(String, Value)],
     pos: Pos,
 ) -> Result<(), Error> {
+    // dart's order (`ArgumentDeclaration.verify`): the positional overflow is
+    // reported before an unrecognized name.
+    if pos_args.len() > params.len() {
+        return Err(too_many(pos_args.len(), params.len(), named, pos));
+    }
     if let Some((n, _)) = named.iter().find(|(n, _)| !params.contains(&n.as_str())) {
         return Err(Error::at(format!("No parameter named ${n}."), pos));
-    }
-    let total = pos_args.len() + named.len();
-    if total > params.len() {
-        return Err(too_many(total, params.len(), pos));
     }
     Ok(())
 }

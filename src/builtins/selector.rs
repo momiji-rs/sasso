@@ -58,20 +58,8 @@ pub(super) fn try_call(
 /// Reject more positional arguments than `max` (dart-sass "Only N argument(s)
 /// allowed, but M were passed."). Used by the fixed-arity selector functions;
 /// `selector-nest` and `selector-append` are variadic and skip this.
-fn check_arity(pos_args: &[Value], max: usize, pos: Pos) -> Result<(), Error> {
-    if pos_args.len() > max {
-        return Err(Error::at(
-            format!(
-                "Only {} argument{} allowed, but {} {} passed.",
-                max,
-                if max == 1 { "" } else { "s" },
-                pos_args.len(),
-                if pos_args.len() == 1 { "was" } else { "were" }
-            ),
-            pos,
-        ));
-    }
-    Ok(())
+fn check_arity(pos_args: &[Value], named: &[(String, Value)], max: usize, pos: Pos) -> Result<(), Error> {
+    super::check_arity(max, pos_args, named, pos)
 }
 
 // ---- value <-> selector-string marshalling ----------------------------
@@ -714,7 +702,7 @@ fn extend_or_replace(
     } else {
         &["selector", "extendee", "extender"]
     };
-    check_arity(pos_args, 3, pos)?;
+    check_arity(pos_args, named, 3, pos)?;
     let selector = selector_list_arg(params, pos_args, named, 0, pos)?;
     let target_list = selector_list_arg(params, pos_args, named, 1, pos)?;
     let extender = selector_list_arg(params, pos_args, named, 2, pos)?;
@@ -756,7 +744,7 @@ fn compound_targets(list: &[Complex], pos: Pos) -> Result<Vec<crate::selector::C
 /// or `null` when no combination unifies (dart-sass `unify`).
 fn fn_unify(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = &["selector1", "selector2"];
-    check_arity(pos_args, 2, pos)?;
+    check_arity(pos_args, named, 2, pos)?;
     let s1 = selector_list_arg(params, pos_args, named, 0, pos)?;
     let s2 = selector_list_arg(params, pos_args, named, 1, pos)?;
     match selector::unify_lists(&s1, &s2) {
@@ -771,7 +759,7 @@ fn fn_unify(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
 /// `$sub` matches (dart-sass `is-superselector`).
 fn fn_is_superselector(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = &["super", "sub"];
-    check_arity(pos_args, 2, pos)?;
+    check_arity(pos_args, named, 2, pos)?;
     let sup = selector_list_arg(params, pos_args, named, 0, pos)?;
     let sub = selector_list_arg(params, pos_args, named, 1, pos)?;
     Ok(Value::Bool(selector::list_is_superselector(&sup, &sub)))
@@ -783,7 +771,7 @@ fn fn_is_superselector(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
 /// selector, as a comma list of unquoted strings (dart-sass `simple-selectors`).
 fn fn_simple_selectors(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = &["selector"];
-    check_arity(pos_args, 1, pos)?;
+    check_arity(pos_args, named, 1, pos)?;
     let v = super::require(params, pos_args, named, 0, pos)?;
     let text = value_to_selector_string(v, "selector", pos)?;
     if text.trim().is_empty() {
@@ -814,7 +802,7 @@ fn fn_simple_selectors(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
 /// value (dart-sass `parse`).
 fn fn_parse(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = &["selector"];
-    check_arity(pos_args, 1, pos)?;
+    check_arity(pos_args, named, 1, pos)?;
     let list = selector_list_arg(params, pos_args, named, 0, pos)?;
     Ok(selectors_to_value(&list))
 }

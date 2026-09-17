@@ -310,19 +310,11 @@ pub(super) fn call_module_member(
     }
 }
 
-/// Error when more than `max` positional/named arguments were supplied to a
-/// fixed-arity builtin, matching dart-sass's message.
+/// Error when more than `max` POSITIONAL arguments were supplied to a
+/// fixed-arity builtin — named ones do not count toward the limit, they only
+/// change the wording. See [`super::check_arity`].
 fn check_max_args(pos_args: &[Value], named: &[(String, Value)], max: usize, pos: Pos) -> Result<(), Error> {
-    let n = pos_args.len() + named.len();
-    if n > max {
-        let plural = if max == 1 { "argument" } else { "arguments" };
-        Err(Error::at(
-            format!("Only {max} {plural} allowed, but {n} were passed."),
-            pos,
-        ))
-    } else {
-        Ok(())
-    }
+    super::check_arity(max, pos_args, named, pos)
 }
 
 /// True when a value is a plain-CSS "special" expression (a number, a

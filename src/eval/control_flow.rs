@@ -369,7 +369,14 @@ impl<'a> Evaluator<'a> {
             let passed = positional_count;
             return Err(self.error_at_call_with_declaration(
                 format!(
-                    "Only {allowed} argument{} allowed, but {passed} {} passed.",
+                    "Only {allowed} {}argument{} allowed, but {passed} {} passed.",
+                    // dart says "positional" the moment a NAMED argument is in
+                    // play, and counts only the positional ones.
+                    if keyword_order.is_empty() {
+                        ""
+                    } else {
+                        "positional "
+                    },
                     if allowed == 1 { "" } else { "s" },
                     if passed == 1 { "was" } else { "were" }
                 ),

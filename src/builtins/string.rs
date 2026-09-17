@@ -40,7 +40,7 @@ pub(super) fn try_call(
         "str-slice" | "str-insert" => 3,
         _ => usize::MAX,
     };
-    if let Err(e) = check_arity(pos_args, max, pos) {
+    if let Err(e) = check_arity(pos_args, named, max, pos) {
         // Only enforce for names this family actually owns.
         if max != usize::MAX {
             return Some(Err(e));
@@ -76,20 +76,8 @@ pub(super) fn call_module_member(
 
 /// Reject more positional arguments than `max` (dart-sass "Only N argument(s)
 /// allowed, but M were passed.").
-fn check_arity(pos_args: &[Value], max: usize, pos: Pos) -> Result<(), Error> {
-    if pos_args.len() > max {
-        return Err(Error::at(
-            format!(
-                "Only {} argument{} allowed, but {} {} passed.",
-                max,
-                if max == 1 { "" } else { "s" },
-                pos_args.len(),
-                if pos_args.len() == 1 { "was" } else { "were" }
-            ),
-            pos,
-        ));
-    }
-    Ok(())
+fn check_arity(pos_args: &[Value], named: &[(String, Value)], max: usize, pos: Pos) -> Result<(), Error> {
+    super::check_arity(max, pos_args, named, pos)
 }
 
 /// Extract `(text, quoted)` from a required string argument, erroring with
@@ -330,7 +318,7 @@ fn to_base36(mut n: u64) -> String {
 /// positive `$limit` caps the number of splits (so at most `limit + 1` parts).
 fn fn_split(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["string", "separator", "limit"];
-    check_arity(pos_args, 3, pos)?;
+    check_arity(pos_args, named, 3, pos)?;
     let (text, text_quoted) = require_string(&params, pos_args, named, 0, pos)?;
     let (sep, _) = require_string(&params, pos_args, named, 1, pos)?;
     // `$limit` is the maximum number of splits (not parts). `null`/absent means
