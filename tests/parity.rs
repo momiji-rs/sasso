@@ -2621,8 +2621,9 @@ fn only_positional_arguments_count_toward_arity() {
     // and says so the moment a named argument is in play: `Only 2 positional
     // arguments allowed, but 3 were passed.` — three, not the four written.
     // Every built-in here summed the positional and named counts, so both
-    // halves of the sentence were wrong. Byte-matched to dart-sass 1.104.1.
-    // Offline.
+    // halves of the sentence were wrong. Each row pins the message SUBSTRING
+    // (the frame around it is not part of the claim); every substring was
+    // measured against dart-sass 1.104.1. Offline.
     let prelude = "@use \"sass:color\";\n@use \"sass:math\";\n@use \"sass:string\";\n\
                    @use \"sass:list\";\n@use \"sass:map\";\n@use \"sass:meta\";\n\
                    @use \"sass:selector\";\n";
@@ -2746,6 +2747,41 @@ fn only_positional_arguments_count_toward_arity() {
             "opacity(red, 1, $nope: 2)",
             "Only 1 positional argument allowed, but 2 were passed.",
         ),
+        // The channels constructors, whose leading `n == 0` branch kept them
+        // out of the first sweep.
+        (
+            "lab(1, 2, $nope: 3)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "lch(1, 2, $nope: 3)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "oklab(1, 2, $nope: 3)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "oklch(1, 2, $nope: 3)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "color(1, 2, $nope: 3)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        // …and the ones that built the message from `pos_args.len()` by hand.
+        (
+            "math.clamp(1, 2, 3, 4, $nope: 5)",
+            "Only 3 positional arguments allowed, but 4 were passed.",
+        ),
+        (
+            "math.round(1.5, 2, $nope: 3)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "meta.variable-exists(\"v\", \"m\", $nope: 1)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
     ] {
         let msg = ours_err(&format!("{prelude}a {{ b: {call}; }}\n"));
         assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
@@ -2778,6 +2814,10 @@ fn only_positional_arguments_count_toward_arity() {
     for (call, want) in [
         ("hwb($nope: 1)", "Missing argument $channels."),
         ("rgb()", "Missing argument $channels."),
+        ("lab()", "Missing argument $channels."),
+        ("lab($nope: 1)", "Missing argument $channels."),
+        ("color()", "Missing argument $description."),
+        ("color($nope: 1)", "Missing argument $description."),
         ("lighten($color: red, $nope: 1)", "Missing argument $amount."),
     ] {
         let msg = ours_err(&format!("{prelude}a {{ b: {call}; }}\n"));

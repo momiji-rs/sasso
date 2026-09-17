@@ -198,18 +198,19 @@ pub(super) fn require<'v>(
     })
 }
 
-/// Reject more positional arguments than `max`, matching dart-sass's
-/// "Only N arguments allowed, but M were passed." A named argument naming an
-/// excess parameter is handled separately by `require`, so only the positional
-/// overflow is checked here.
 /// dart's arity check (`ArgumentDeclaration.verify`): only POSITIONAL
 /// arguments count against a function's parameter count, and the moment any
 /// NAMED argument is present the message says so —
 /// `lighten(red, 10%, 3, $nope: 1)` is "Only 2 positional arguments allowed,
 /// but 3 were passed.", counting the three positional ones, not the four
-/// arguments written. A named argument that matches no parameter is a separate
-/// error dart raises after this one.
-pub(super) fn check_arity(
+/// arguments written.
+///
+/// A named argument that matches no parameter is a separate error, which dart
+/// raises after this one — and which sasso does not raise at all yet outside
+/// `list.rs`'s `validate_args` (momiji-rs/sasso#62). Nothing downstream checks
+/// it: `require` only looks a parameter up BY name, so an unrecognized one is
+/// simply never read.
+pub(crate) fn check_arity(
     max: usize,
     pos_args: &[Value],
     named: &[(String, Value)],

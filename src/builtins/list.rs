@@ -300,10 +300,10 @@ fn too_many(passed: usize, max: usize, named: &[(String, Value)], pos: Pos) -> E
 }
 
 /// Validate a fixed-arity (non-variadic) builtin's argument list against its
-/// declared `params`: too many positional arguments is the dart-sass "Only N
-/// argument(s) allowed…" error (counting positional + named), and any named
-/// argument whose name is not a declared parameter is "No parameter named $X.".
-/// dart-sass reports the unknown-name error before the over-arity one.
+/// declared `params`, in dart's own order: a POSITIONAL overflow is the
+/// "Only N argument(s) allowed…" error (only positional arguments count toward
+/// it — see [`super::check_arity`]), and only then is a named argument whose
+/// name is not a declared parameter "No parameter named $X.".
 fn validate_args(
     params: &[&str],
     pos_args: &[Value],

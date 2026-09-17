@@ -115,10 +115,10 @@ pub(super) fn module_div(pos_args: &[Value], named: &[(String, Value)], pos: Pos
     crate::eval::eval_div(a, b, false, pos)
 }
 
-/// Reject a call with more positional/named arguments than a fixed-arity
-/// function accepts. dart-sass distinguishes the singular ("Only 1 argument
-/// allowed, but 2 were passed.") from the plural ("Only 2 arguments allowed,
-/// …"). `max_args` is the function's declared arity.
+/// Reject a call with more POSITIONAL arguments than a fixed-arity function
+/// accepts; named ones do not count toward the limit. `max_args` is the
+/// function's declared arity. See [`super::check_arity`] for the wording rules
+/// (singular/plural, and "positional" once a named argument is in play).
 fn check_max_args(
     pos_args: &[Value],
     named: &[(String, Value)],
@@ -827,12 +827,7 @@ fn clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
 /// extra arguments are an error (unlike the global CSS `round()` calculation,
 /// which accepts a rounding strategy and step and preserves unknown args).
 pub(super) fn module_round(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    if pos_args.len() > 1 {
-        return Err(Error::at(
-            format!("Only 1 argument allowed, but {} were passed.", pos_args.len()),
-            pos,
-        ));
-    }
+    super::check_arity(1, pos_args, named, pos)?;
     let v = super::require(&["number"], pos_args, named, 0, pos)?;
     let n = as_num(v, pos)?;
     Ok(num_value(n.copy_units(int_result(n.value.round()))))
@@ -891,16 +886,7 @@ pub(super) fn module_min_max(
 /// keeping the winning argument's own unit.
 pub(super) fn module_clamp(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["min", "number", "max"];
-    if pos_args.len() > params.len() {
-        return Err(Error::at(
-            format!(
-                "Only {} arguments allowed, but {} were passed.",
-                params.len(),
-                pos_args.len()
-            ),
-            pos,
-        ));
-    }
+    super::check_arity(params.len(), pos_args, named, pos)?;
     let want = |i: usize, label: &str| -> Result<Number, Error> {
         let v = super::require(&params, pos_args, named, i, pos)?;
         match v {

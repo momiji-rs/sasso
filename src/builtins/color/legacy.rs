@@ -1163,15 +1163,9 @@ pub(super) fn fn_lab_family(
     pos: Pos,
 ) -> Result<Value, Error> {
     let params = ["channels"];
-    let n = pos_args.len() + named.len();
-    if n == 0 {
+    check_arity(1, pos_args, named, pos)?;
+    if pos_args.is_empty() && named.is_empty() {
         return Err(Error::at("Missing argument $channels.".to_string(), pos));
-    }
-    if n > 1 {
-        return Err(Error::at(
-            format!("Only 1 argument allowed, but {n} were passed."),
-            pos,
-        ));
     }
     let channels = require(&params, pos_args, named, 0, pos)?.clone();
     // A comma-separated or bracketed list is not a valid channels list.
@@ -1368,15 +1362,9 @@ fn is_known_color_space(name: &str) -> bool {
 /// verbatim, while malformed calls raise dart-sass's validation errors.
 pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["description"];
-    let n = pos_args.len() + named.len();
-    if n == 0 {
+    check_arity(1, pos_args, named, pos)?;
+    if pos_args.is_empty() && named.is_empty() {
         return Err(Error::at("Missing argument $description.".to_string(), pos));
-    }
-    if n > 1 {
-        return Err(Error::at(
-            format!("Only 1 argument allowed, but {n} were passed."),
-            pos,
-        ));
     }
     let desc = require(&params, pos_args, named, 0, pos)?.clone();
     if let Value::List(l) = &desc {
