@@ -871,13 +871,13 @@ function runLoop(opts, common) {
 
 /** A worker thread: same compile loop, same code, pulling from the shared index. */
 async function runWorker() {
-  const { shared, opts, ctl, stdinSource } = workerData;
+  const { shared, opts, ctl, stdinBytes } = workerData;
   await loadEngine();
   const common = commonOptions(opts);
   // Only the jobs THIS worker took are in the map; the parent merges by index,
   // so the batch reports in command-line order however the threads interleaved.
   const diagnostics = new Map();
-  const failed = compileSlice(sharedList(shared), opts, common, ctl, stdinSource, diagnostics);
+  const failed = compileSlice(sharedList(shared), opts, common, ctl, stdinBytes, diagnostics);
   parentPort.postMessage({ failed, diagnostics: [...diagnostics] });
 }
 
@@ -980,10 +980,12 @@ async function main() {
  */
 async function runJobs(jobs, opts, common) {
   const wanted = opts.jobs ?? (os.availableParallelism ? os.availableParallelism() : os.cpus().length);
-  // Standard input is read ONCE, here, and handed to whoever needs it. It used
-  // to force the whole batch into this thread instead, so one `-` job cost
-  // every OTHER job its parallelism.
-  const stdinSource = jobs.some((j) => j.input === "-") ? readStdin() : undefined;
+  // Standard input is read ONCE, here, and handed to whoever needs it — as
+  // SHARED bytes, because `workerData` copies what it carries and only the one
+  // worker that claims the `-` job ever reads them. (It used to force the whole
+  // batch into this thread instead, so one `-` job cost every OTHER job its
+  // parallelism.)
+  const stdinBytes = jobs.some((j) => j.input === "-") ? shareText(readStdin()) : undefined;
 
   // Two sources writing to ONE destination have to stay in command-line order:
   // dart compiles both and the LAST one wins — the same file every run
@@ -1039,7 +1041,7 @@ async function runJobs(jobs, opts, common) {
   const diagnostics = new Map();
 
   if (workers < 2 || collides) {
-    const failed = compileSlice(listOf(jobs), opts, common, null, stdinSource, diagnostics);
+    const failed = compileSlice(listOf(jobs), opts, common, null, stdinBytes, diagnostics);
     flushDiagnostics(diagnostics, jobs.length);
     return failed;
   }
@@ -1057,7 +1059,7 @@ async function runJobs(jobs, opts, common) {
   const results = await Promise.all(
     Array.from({ length: workers }, () => {
       const worker = new Worker(fileURLToPath(import.meta.url), {
-        workerData: { sassoWorker: true, shared, opts: workerOpts, ctl, stdinSource },
+        workerData: { sassoWorker: true, shared, opts: workerOpts, ctl, stdinBytes },
         // stdout/stderr are NOT captured here: a job's diagnostics are
         // collected around the compile itself (see `captureStderr`) and come
         // back in the message, while anything else a worker prints — a crash,
@@ -1088,6 +1090,14 @@ async function runJobs(jobs, opts, common) {
  * how long the input is, and how long the output is (-1 for "no output", which
  * is stdout; an empty output is not a thing `parseJobs` produces).
  */
+/** A string in shared memory, so `workerData` carries a handle, not a copy. */
+function shareText(text) {
+  const bytes = new TextEncoder().encode(text);
+  const shared = new Uint8Array(new SharedArrayBuffer(bytes.length));
+  shared.set(bytes);
+  return shared;
+}
+
 function shareJobs(jobs) {
   const encoder = new TextEncoder();
   const encoded = jobs.map((job) => [
@@ -1191,8 +1201,12 @@ function captureStderr(fn) {
  * Returns the number that failed; it never exits the process, so a worker can
  * report back and the parent can decide.
  */
-function compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics) {
+function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics) {
   const note = (i, text) => diagnostics.set(i, (diagnostics.get(i) ?? "") + text);
+  // Decoded on first use, so a worker that never claims the `-` job never
+  // touches the bytes; there is at most one such job, so at most one decode.
+  let stdinText;
+  const stdinSource = () => (stdinText ??= stdinBytes ? new TextDecoder().decode(stdinBytes) : "");
   let failed = 0;
   let next = 0;
   for (;;) {
@@ -1216,7 +1230,7 @@ function compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics) {
     // Warnings and deprecations belong to THIS job, wherever it ran.
     const run = captureStderr(() =>
       input === "-"
-        ? compileString(stdinSource ?? "", {
+        ? compileString(stdinSource(), {
             ...common,
             sourceMap: wantMap,
             syntax: opts.indented ? "indented" : "scss",
@@ -1263,7 +1277,7 @@ function compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics) {
         diagnostics.delete(i);
       }
     }
-    const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource : undefined);
+    const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource() : undefined);
     if (writeError) {
       note(i, `${writeError}\n`);
       failed++;

@@ -1241,9 +1241,16 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       writeFileSync(join(sdir, `f${i}.scss`), `.f${i}{a:${i}}\n`);
       args.push(`${join(sdir, `f${i}.scss`)}:${join(sdir, `f${i}.css`)}`);
     }
-    const r = spawnSync(process.execPath, args, { encoding: "utf8", input: ".stdin{b:1}\n", timeout: 60000 });
+    // Not ASCII: standard input reaches the worker as shared BYTES, so the
+    // content has the same round trip to get wrong as the job paths do.
+    const stdin = `.stdin{content:"\u65e5\u672c\u8a9e \u{1f3a8} caf\u00e9";b:1}\n`;
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", input: stdin, timeout: 60000 });
     assert.equal(r.status, 0, `cli: a stdin job alongside file jobs (stderr: ${r.stderr})`);
-    assert.equal(readFileSync(join(sdir, "from-stdin.css"), "utf8").trim(), ".stdin{b:1}", "cli: the `-` job read stdin");
+    assert.equal(
+      readFileSync(join(sdir, "from-stdin.css"), "utf8").trim(),
+      stdin.trim(),
+      "cli: the `-` job read stdin, byte for byte",
+    );
     for (let i = 0; i < 6; i++) {
       assert.equal(readFileSync(join(sdir, `f${i}.css`), "utf8").trim(), `.f${i}{a:${i}}`, `cli: f${i} compiled too`);
     }
