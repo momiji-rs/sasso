@@ -1818,11 +1818,11 @@ pub(super) fn fn_adjust_lightness(
             ))
         }
     };
-    let (h, s, l) = c.to_hsl();
-    let new_l = (l + sign * amount / 100.0).clamp(0.0, 1.0);
-    let mut out = Color::from_hsl(h, s, new_l, c.a);
-    out.repr = named_repr(out.r, out.g, out.b, out.a);
-    Ok(Value::Color(out))
+    // dart shifts the hsl LIGHTNESS and returns the color in its own space,
+    // so an `hsl()` input stays `hsl` rather than collapsing to a hex.
+    Ok(Value::Color(legacy_hsl_adjust(&c, |ch| {
+        ch[2] = (ch[2] + sign * amount).clamp(0.0, 100.0);
+    })))
 }
 
 pub(super) fn fn_percentage(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {

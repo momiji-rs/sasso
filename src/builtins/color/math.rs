@@ -422,6 +422,70 @@ pub(crate) fn make_modern_in(mc: ModernColor, _space: ColorSpace) -> Color {
     make_modern(mc)
 }
 
+/// The legacy hsl-space adjusters — `lighten`/`darken`, `saturate`/
+/// `desaturate` and `adjust-hue` — the way dart-sass runs them: READ the
+/// color's hsl channels (a missing channel reads as 0), let `f` change them,
+/// rebuild an hsl color from those plain numbers, and hand it back in the
+/// color's OWN space.
+///
+/// Keeping the space is what makes `lighten(hsl(240, 100%, 50%), 10%)` stay
+/// `hsl(240, 100%, 60%)` instead of collapsing to `#3333ff`, and it keeps the
+/// untouched channels bit-exact for an `hsl()` input — the trip to hsl and
+/// back is the identity there, so `lighten(hsl(240, 150%, 50%), 10%)` is
+/// `hsl(240, 150%, 60%)`, out of gamut and all. An `hwb()` input stays `hwb`
+/// and the trip back applies the ordinary conversion rules, so a result whose
+/// whiteness and blackness cover everything picks up a powerless `none` hue
+/// (`lighten(hwb(240 90% 0%), 50%)` is `hwb(none 100% 0%)`). Only an
+/// `rgb()`/hex/named input still collapses to sRGB, which is where it started.
+///
+/// Rebuilding from plain numbers is also why a MISSING channel does not
+/// survive: `lighten(hsl(240 none 50%), 10%)` is `hsl(240, 0%, 60%)`, where
+/// `color.adjust($lightness: 10%)` on the same color keeps the `none`.
+pub(crate) fn legacy_hsl_adjust(c: &Color, f: impl FnOnce(&mut [f64; 3])) -> Color {
+    let src = legacy_to_modern(c);
+    let space = src.space;
+    let hsl = convert_modern(&src, ColorSpace::Hsl);
+    let mut ch = [z(hsl.channels[0]), z(hsl.channels[1]), z(hsl.channels[2])];
+    f(&mut ch);
+    // Rebuilding the hsl color normalizes it the way dart's `SassColor.hsl`
+    // constructor does, BEFORE the trip back: a non-finite hue becomes 0 there
+    // (so `adjust-hue(red, NaN)` is red, not a color of NaN channels), where
+    // converting first would hand the rgb arithmetic a hue it has no answer
+    // for.
+    let adjusted = normalize_polar(ModernColor {
+        space: ColorSpace::Hsl,
+        channels: [Some(ch[0]), Some(ch[1]), Some(ch[2])],
+        alpha: Some(z(src.alpha)),
+    });
+    make_modern_in(convert_modern(&adjusted, space), space)
+}
+
+/// The alpha-only legacy adjusters (`opacify`/`fade-in` and
+/// `transparentize`/`fade-out`): dart rebuilds the color in its own space from
+/// its own channels, so the space and every channel survive untouched
+/// (`transparentize(hsl(240, 100%, 50%), 0.2)` is `hsla(240, 100%, 50%, 0.8)`)
+/// and only a missing channel is filled in with 0.
+///
+/// `f` is handed the STORED alpha, a missing one reading as 0 like any other
+/// missing channel — not the 1.0 that `Color::a` mirrors it as for
+/// serialization. That is the alpha dart shifts, so
+/// `opacify(hsl(240 100% 50% / none), 0.2)` is `hsla(240, 100%, 50%, 0.2)`
+/// and `transparentize` of the same color stays at 0.
+pub(crate) fn legacy_alpha_adjust(c: &Color, f: impl FnOnce(f64) -> f64) -> Color {
+    let src = legacy_to_modern(c);
+    let space = src.space;
+    let mc = ModernColor {
+        space,
+        channels: [
+            Some(z(src.channels[0])),
+            Some(z(src.channels[1])),
+            Some(z(src.channels[2])),
+        ],
+        alpha: Some(f(z(src.alpha))),
+    };
+    make_modern_in(mc, space)
+}
+
 /// Convert `mc` to `space`, carrying over the hue of a polar source when the
 /// chroma/saturation is zero (powerless), matching dart-sass's missing-channel
 /// behavior is not applied here — only the plain numeric conversion.
