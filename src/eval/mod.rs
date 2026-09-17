@@ -899,7 +899,12 @@ pub(crate) struct Evaluator<'a> {
     /// The resolved selector list of the enclosing style rule, used to resolve
     /// `&` in value position. `None` at the document root (where `&` is `null`).
     /// Each element is one resolved complex selector (space-joined).
-    current_selector: Option<Vec<String>>,
+    ///
+    /// Shared rather than owned: the same list is also the `parents` of every
+    /// nested rule and the extender list of every `@extend` in the body, and a
+    /// rule resolves its selectors once. Handing out an `Rc` keeps that one list
+    /// instead of deep-copying it per reader.
+    current_selector: Option<Rc<Vec<String>>>,
     /// Source line-break flags parallel to `current_selector` (whether each
     /// resolved complex selector started on a fresh source line). A nested
     /// rule's complex inherits its parent's flag OR its own part's flag.
@@ -1408,8 +1413,10 @@ struct PendingExtend {
     target: crate::selector::Simple,
     /// The resolved target selector string, for error messages.
     target_str: String,
-    /// The enclosing rule's resolved selector list (the extenders).
-    extenders: Vec<String>,
+    /// The enclosing rule's resolved selector list (the extenders), shared with
+    /// the rule that registered this `@extend` — see
+    /// [`Evaluator::current_selector`].
+    extenders: Rc<Vec<String>>,
     /// Source line-break flags parallel to `extenders` (an extend product
     /// inherits its extender's flag, dart's ComplexSelector.lineBreak).
     extender_breaks: Vec<bool>,
@@ -2983,6 +2990,17 @@ impl<'a> Evaluator<'a> {
     /// Evaluate a style rule: resolve its selector against `parents`, run its
     /// body into a fresh rule sink, then hand the produced block and the
     /// rules that bubbled out of it to the enclosing `sink`.
+    /// A placeholder rule stays an `@extend` target even when its body produces
+    /// nothing (`%bam { bam: null }` is "found", dart keeps every rule in the
+    /// extend graph; we prune empty rules from the output tree, so the selector
+    /// is recorded with its module scope).
+    fn note_placeholder_rule(&mut self, s: &str) {
+        if s.contains('%') {
+            self.placeholder_rules
+                .push((self.current_module.clone(), s.to_string()));
+        }
+    }
+
     fn eval_style_rule(&mut self, rule: &Rule, parents: &[String], sink: &mut Sink<'_>) -> Result<(), Error> {
         let (sel_str, interp_bounds) = self.eval_template_bounds(&rule.selector)?;
         // A selector that resolves to nothing (e.g. `#{&}` at the document root,
@@ -3068,38 +3086,48 @@ impl<'a> Evaluator<'a> {
         // stops joined with ", " (KeyframeSelectorParser), dropping author
         // line breaks that style-rule selectors would preserve.
         let full_lbs: Vec<bool> = if lbs_fast { Vec::new() } else { resolved_lbs };
-        let mut emit_selectors: Vec<String> = Vec::with_capacity(current.len());
-        let mut emit_linebreaks: Vec<bool> = Vec::with_capacity(current.len());
-        for (i, s) in current.iter().enumerate() {
-            if complex_selector_block_is_bogus(s) {
-                // The omitted selector still participates in @extend target
-                // matching (dart keeps the rule in the extend graph and only
-                // omits it from the emitted CSS).
-                self.bogus_selectors.push(s.clone());
-                continue;
+        let current = Rc::new(current);
+        // Nothing bogus to drop, no keyframe stop to normalize and no per-complex
+        // line-break flags to filter in step: the emitted list is `current`
+        // itself, and copying every string to say so is pure waste on the shape
+        // almost every rule has. The placeholder bookkeeping below still runs.
+        let share_current = !self.in_keyframes
+            && full_lbs.is_empty()
+            && !current.iter().any(|s| complex_selector_block_is_bogus(s));
+        let mut emit_selectors: Vec<String> = Vec::new();
+        let mut emit_linebreaks: Vec<bool> = Vec::new();
+        if share_current {
+            for s in current.iter() {
+                self.note_placeholder_rule(s);
             }
-            // A placeholder rule stays an @extend target even when its body
-            // produces nothing (`%bam { bam: null }` is "found", dart keeps
-            // every rule in the extend graph; we prune empty rules from the
-            // output tree, so record the selector with its module scope).
-            if s.contains('%') {
-                self.placeholder_rules
-                    .push((self.current_module.clone(), s.clone()));
-            }
-            // A keyframe selector's percentage normalizes its exponent marker
-            // to lowercase (`130E-1%` -> `130e-1%`), digits untouched.
-            let s = if self.in_keyframes {
-                normalize_keyframe_selector(s)
-            } else {
-                s.clone()
-            };
-            emit_selectors.push(s);
-            if !full_lbs.is_empty() {
-                emit_linebreaks.push(full_lbs.get(i).copied().unwrap_or(false));
+        } else {
+            emit_selectors.reserve(current.len());
+            emit_linebreaks.reserve(current.len());
+            for (i, s) in current.iter().enumerate() {
+                if complex_selector_block_is_bogus(s) {
+                    // The omitted selector still participates in @extend target
+                    // matching (dart keeps the rule in the extend graph and only
+                    // omits it from the emitted CSS).
+                    self.bogus_selectors.push(s.clone());
+                    continue;
+                }
+                self.note_placeholder_rule(s);
+                // A keyframe selector's percentage normalizes its exponent marker
+                // to lowercase (`130E-1%` -> `130e-1%`), digits untouched.
+                let s = if self.in_keyframes {
+                    normalize_keyframe_selector(s)
+                } else {
+                    s.clone()
+                };
+                emit_selectors.push(s);
+                if !full_lbs.is_empty() {
+                    emit_linebreaks.push(full_lbs.get(i).copied().unwrap_or(false));
+                }
             }
         }
+        let emitted: &[String] = if share_current { &current } else { &emit_selectors };
         self.push_scope(false);
-        let prev_selector = self.current_selector.replace(current.clone());
+        let prev_selector = self.current_selector.replace(Rc::clone(&current));
         let prev_linebreaks = std::mem::replace(&mut self.current_linebreaks, full_lbs);
         // Entering a style rule re-enables the implicit parent join for
         // anything nested below it (dart resets _atRootExcludingStyleRule).
@@ -3138,7 +3166,7 @@ impl<'a> Evaluator<'a> {
         self.last_child_invisible = false;
         let result = {
             let mut child = Sink::Rule {
-                selectors: &emit_selectors,
+                selectors: emitted,
                 linebreaks: &emit_linebreaks,
                 lines: rule_lines,
                 items: &mut items,
@@ -3147,7 +3175,7 @@ impl<'a> Evaluator<'a> {
                 flushed: &mut flushed,
                 extend_base,
             };
-            let r = self.exec(&rule.body, &current, &mut child);
+            let r = self.exec(&rule.body, current.as_slice(), &mut child);
             // Flush any declarations/loud comments that follow the last nested
             // rule, so they emit (in their own block) after the bubbled rules.
             if r.is_ok() && child.flush_rule_block() {
@@ -6470,10 +6498,12 @@ fn resolve_selectors_opt(
     part_lbs: &[bool],
     parent_lbs: &[bool],
 ) -> Result<Vec<(String, bool)>, Error> {
-    let parts: Vec<String> = split_commas(sel)
+    // Borrowed: every part is a contiguous substring of `sel` and nothing below
+    // needs to own one, so a rule pays no `String` per selector part.
+    let parts: Vec<&str> = split_commas(sel)
         .iter()
         .copied()
-        .map(|p| trim_selector_part(p).to_string())
+        .map(trim_selector_part)
         .filter(|p| !p.is_empty())
         .collect();
     // dart: a parent that ends in a combinator can't substitute into a `&`
@@ -6679,7 +6709,7 @@ fn resolve_selectors_opt(
             // The combo's flag ORs its chosen parents' flags (mastodon's
             // adjacent-state selectors break per combo, not per template).
             let flag = idx.iter().any(|&pi| parent_lbs.get(pi).copied().unwrap_or(false));
-            result.push((normalize_selector(&s), flag));
+            result.push((normalize_selector_owned(s), flag));
             // Increment with the LAST ref fastest (dart's order).
             let mut j = k;
             loop {
@@ -6712,7 +6742,7 @@ fn resolve_selectors_opt(
         // parents; a part without stays at the root exactly once.
         for (part_i, part) in parts.iter().enumerate() {
             if let Some(s) = substitute_pseudo_refs(part) {
-                result.push((normalize_selector(&s), false));
+                result.push((normalize_selector_owned(s), false));
             } else if let Some(segments) = split_parent_refs(part) {
                 for parent in parents {
                     check_compound_parent(part, parent)?;
@@ -6722,7 +6752,7 @@ fn resolve_selectors_opt(
                 for (pi, parent) in parents.iter().enumerate() {
                     check_compound_parent(part, parent)?;
                     result.push((
-                        normalize_selector(&replace_parent_refs(part, parent)),
+                        normalize_selector_owned(replace_parent_refs(part, parent)),
                         parent_lbs.get(pi).copied().unwrap_or(false),
                     ));
                 }
@@ -6746,7 +6776,7 @@ fn resolve_selectors_opt(
             // A pseudo-only `&` part resolves ONCE (whole parent list in
             // place): a single-entry row.
             if let Some(s) = substitute_pseudo_refs(part) {
-                rows.push(vec![(normalize_selector(&s), false)]);
+                rows.push(vec![(normalize_selector_owned(s), false)]);
                 continue;
             }
             if let Some(segments) = split_parent_refs(part) {
@@ -6774,15 +6804,19 @@ fn resolve_selectors_opt(
                         part_lbs.get(part_i).copied().unwrap_or(false) || parent_lb,
                     )
                 };
-                row.push((normalize_selector(&combined), flag));
+                row.push((normalize_selector_owned(combined), flag));
             }
             rows.push(row);
         }
         let longest = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        result.reserve(rows.iter().map(|r| r.len()).sum());
         for j in 0..longest {
-            for row in &rows {
-                if let Some(entry) = row.get(j) {
-                    result.push(entry.clone());
+            // Each slot is read exactly once, so the string moves out instead of
+            // being cloned; what stays behind is an empty `String`, which owns no
+            // buffer, and `rows` is dropped right after.
+            for row in rows.iter_mut() {
+                if let Some(entry) = row.get_mut(j) {
+                    result.push((std::mem::take(&mut entry.0), entry.1));
                 }
             }
         }
@@ -6903,6 +6937,18 @@ fn is_canonical_plain(s: &str) -> bool {
         }
     }
     true
+}
+
+/// [`normalize_selector`] for a string the caller already owns: hands the
+/// buffer back untouched when it is already canonical, instead of copying its
+/// bytes into a fresh `String`. Every selector this module builds by
+/// substituting a parent (`format!("{parent} {part}")`, `replace_parent_refs`)
+/// is owned and canonical, which is the common shape of a nested rule.
+fn normalize_selector_owned(s: String) -> String {
+    if is_canonical_plain(&s) {
+        return s;
+    }
+    normalize_selector_slow(&s)
 }
 
 fn normalize_selector_slow(s: &str) -> String {
