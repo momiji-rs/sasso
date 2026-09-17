@@ -19,6 +19,28 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **The npm package's CLI accepts the dart-sass flags.** `sasso` ships two
+  command-line implementations — the Rust binary and `cli.mjs` in the npm
+  package — and 0.10.0's dart-compatible CLI work only reached the first. So
+  `npm install sasso` gave a command that rejected every flag a dart-sass build
+  script passes except `--quiet`:
+
+  ```
+  $ sasso --no-error-css --stop-on-error --no-color --quiet --quiet-deps in.scss:out.css
+  error: unknown option "--no-error-css" (try --help)
+  ```
+
+  Reported on #24 by someone whose build it broke, after release notes that
+  advertised a CLI one of the two distribution channels did not have. The npm
+  CLI now accepts every flag the native one does — implementing
+  `--quiet-deps`, `--stop-on-error`, `--no-css`, `--source-map-urls`, the
+  `--no-*` negations and `<dir>:<dir>` pairs, and accepting `-j/--jobs`,
+  `-c/--color` and `--[no-]unicode` as documented no-ops. `--error-css` is
+  accepted but not implemented: a failing compile still behaves as
+  `--no-error-css`, which the help text says.
+
+  A test derives the flag set from the Rust parser and fails if this CLI
+  rejects any of them, so the next flag added to one has to reach the other.
 - **An attribute selector's value is decoded and re-quoted, not echoed.** The
   value between the quotes was copied through verbatim and wrapped in double
   quotes, so a single-quoted value containing a `"` produced invalid CSS:

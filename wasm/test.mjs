@@ -456,6 +456,110 @@ assert.ok(
 }
 console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + embed-map/quiet/multi-IO/update");
 
+// === Phase 3b: the npm CLI must accept every flag the NATIVE CLI accepts ===
+// These are two separate implementations of one command. The dart-compatible
+// flags were added to the Rust CLI (src/main.rs) and this one was left behind,
+// so `sasso@0.13.0` rejected every flag a dart-sass build script passes except
+// `--quiet` — reported on momiji-rs/sasso#24 by someone whose build it broke.
+// This derives the flag set from the Rust parser rather than a hand-kept list,
+// so the next flag added there fails here until this CLI takes it too.
+{
+  const mainRs = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+  // The parser is one `match a.as_str()` over string literals.
+  const start = mainRs.indexOf("match a.as_str()");
+  assert.ok(start > 0, "drift: found the native CLI's argument match");
+  const body = mainRs.slice(start, start + 8000);
+  const flags = [...new Set([...body.matchAll(/"(--?[a-zA-Z][a-zA-Z-]*)"/g)].map((m) => m[1]))];
+  assert.ok(flags.length > 25, `drift: extracted a plausible flag set (got ${flags.length})`);
+
+  // Flags that take a value, and a value that is valid for each.
+  const withValue = {
+    "-s": "expanded", "--style": "expanded",
+    "-I": ".", "--load-path": ".",
+    "-o": null, // output is a positional here; skipped below
+    "--output": null,
+    "-j": "1", "--jobs": "1",
+    "--loop": "1",
+    "--source-map-urls": "relative",
+  };
+  // Flags that exit before compiling, so they cannot be probed this way.
+  const terminal = new Set(["-h", "--help", "--version", "--"]);
+
+  const dir = mkdtempSync(join(tmpdir(), "sasso-drift-"));
+  const src = join(dir, "in.scss");
+  writeFileSync(src, ".a{b:1}\n");
+
+  const rejected = [];
+  for (const f of flags) {
+    if (terminal.has(f)) continue;
+    if (f in withValue && withValue[f] === null) continue;
+    const args = f in withValue ? [f, withValue[f]] : [f];
+    const r = spawnSync(process.execPath, [cliPath, "--no-source-map", ...args, `${src}:${join(dir, "out.css")}`], {
+      encoding: "utf8",
+    });
+    if (/unknown option/.test(r.stderr || "")) rejected.push(f);
+  }
+  assert.deepEqual(
+    rejected,
+    [],
+    `cli: these flags are accepted by the native CLI and rejected here: ${rejected.join(" ")}`,
+  );
+
+  // The shape that actually broke: the flag set a dart-sass build passes.
+  const lila = ["--no-error-css", "--stop-on-error", "--no-color", "--quiet", "--quiet-deps"];
+  const a = join(dir, "a.scss"), b = join(dir, "b.scss");
+  writeFileSync(a, ".a{x:1}\n");
+  writeFileSync(b, ".b{y:2}\n");
+  const r = spawnSync(
+    process.execPath,
+    [cliPath, ...lila, "--style=compressed", "--no-source-map", `${a}:${join(dir, "a.css")}`, `${b}:${join(dir, "b.css")}`],
+    { encoding: "utf8" },
+  );
+  assert.equal(r.status, 0, `cli: a dart-sass build's flag set compiles (stderr: ${r.stderr})`);
+  assert.equal(readFileSync(join(dir, "a.css"), "utf8").trim(), ".a{x:1}", "cli: dart flag set output a");
+  assert.equal(readFileSync(join(dir, "b.css"), "utf8").trim(), ".b{y:2}", "cli: dart flag set output b");
+  console.log(`ok: cli flag parity — ${flags.length} native flags, none rejected + a dart-sass build's flag set`);
+}
+
+// === Phase 3c: directory pairs, --no-css, --stop-on-error ===
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-dir-"));
+  mkdirSync(join(dir, "src", "sub"), { recursive: true });
+  writeFileSync(join(dir, "src", "one.scss"), ".a{x:1}\n");
+  writeFileSync(join(dir, "src", "sub", "two.scss"), ".b{y:2}\n");
+  writeFileSync(join(dir, "src", "_partial.scss"), ".c{z:3}\n");
+  cli(["--quiet", "--no-source-map", `${join(dir, "src")}:${join(dir, "out")}`]);
+  assert.ok(existsSync(join(dir, "out", "one.css")), "cli: directory pair compiles a top-level file");
+  assert.ok(existsSync(join(dir, "out", "sub", "two.css")), "cli: directory pair preserves the tree");
+  assert.ok(!existsSync(join(dir, "out", "_partial.css")), "cli: directory pair skips partials");
+
+  // --no-css compiles and writes nothing.
+  const nocss = join(dir, "nocss.css");
+  cli(["--quiet", "--no-source-map", "--no-css", `${join(dir, "src", "one.scss")}:${nocss}`]);
+  assert.ok(!existsSync(nocss), "cli: --no-css writes no output");
+
+  // --stop-on-error stops at the first failure; the default keeps going. Both
+  // exit non-zero.
+  const bad = join(dir, "bad.scss");
+  writeFileSync(bad, ".a{b:}\n");
+  const second = join(dir, "second.css");
+  const stop = spawnSync(
+    process.execPath,
+    [cliPath, "--no-source-map", "--stop-on-error", `${bad}:${join(dir, "s1.css")}`, `${join(dir, "src", "one.scss")}:${second}`],
+    { encoding: "utf8" },
+  );
+  assert.equal(stop.status, 1, "cli: --stop-on-error exits non-zero");
+  assert.ok(!existsSync(second), "cli: --stop-on-error skips the rest");
+  const go = spawnSync(
+    process.execPath,
+    [cliPath, "--no-source-map", `${bad}:${join(dir, "s2.css")}`, `${join(dir, "src", "one.scss")}:${second}`],
+    { encoding: "utf8" },
+  );
+  assert.equal(go.status, 1, "cli: a failed job still exits non-zero without --stop-on-error");
+  assert.ok(existsSync(second), "cli: without --stop-on-error the rest still compiles");
+  console.log("ok: cli — directory pairs, --no-css, --stop-on-error");
+}
+
 // === Trailing-newline parity: the JS API omits it, the CLI appends one ===
 // dart-sass's `compileString().css` carries NO trailing newline (either style);
 // the CLI terminates NON-empty output with exactly one (empty output stays
