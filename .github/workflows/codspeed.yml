@@ -17,6 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The corpora under bench/corpus/gate/ are generated and committed. A
+      # hand-edit would silently change what every number since means, so the
+      # generator verifies its own output before anything is measured.
+      - name: Check the gate corpora against their generator
+        run: python3 bench/scripts/gen_gate_corpora.py --check
+
       - name: Setup rust toolchain, cache and cargo-codspeed binary
         uses: moonrepo/setup-rust@v1
         with:
