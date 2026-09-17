@@ -1,0 +1,61 @@
+# A throwaway job: build the nixpkgs derivation for sasso on a NATIVE
+# aarch64-linux runner, so the nixpkgs submission can cite a public log for
+# that platform instead of an untested checkbox.
+#
+# This is not part of the project's CI. It exists to answer one question for
+# NixOS/nixpkgs#564362 and is deleted with its branch once it has answered it.
+name: nixpkgs aarch64-linux check
+
+on:
+  # `workflow_dispatch` only works for workflows already on the default
+  # branch, and this one deliberately never lands there.
+  push:
+    branches: [ci/aarch64-nixpkgs-check]
+
+permissions: {}
+
+jobs:
+  build:
+    name: nix-build -A sasso (aarch64-linux)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: the runner really is aarch64
+        run: |
+          uname -m
+          test "$(uname -m)" = "aarch64"
+          nproc
+          free -h | head -2
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: check out nixpkgs at the same commit the PR targets
+        run: git clone --depth 1 https://github.com/NixOS/nixpkgs.git "$RUNNER_TEMP/nixpkgs"
+
+      - name: take the package from the submission branch
+        run: |
+          git clone --depth 1 --branch sasso-init https://github.com/linyiru/nixpkgs.git "$RUNNER_TEMP/submission"
+          mkdir -p "$RUNNER_TEMP/nixpkgs/pkgs/by-name/sa/sasso"
+          cp "$RUNNER_TEMP/submission/pkgs/by-name/sa/sasso/package.nix" \
+             "$RUNNER_TEMP/nixpkgs/pkgs/by-name/sa/sasso/package.nix"
+          cp "$RUNNER_TEMP/submission/maintainers/maintainer-list.nix" \
+             "$RUNNER_TEMP/nixpkgs/maintainers/maintainer-list.nix"
+          echo '--- package.nix under test ---'
+          cat "$RUNNER_TEMP/nixpkgs/pkgs/by-name/sa/sasso/package.nix"
+
+      - name: nix-build -A sasso
+        working-directory: ${{ runner.temp }}/nixpkgs
+        run: nix-build -A sasso
+
+      - name: run what was built
+        working-directory: ${{ runner.temp }}/nixpkgs
+        run: |
+          ./result/bin/sasso --version
+          printf '$c: #2a7ae2;\n.button { color: $c; padding: 4px * 2 }\n' > /tmp/t.scss
+          ./result/bin/sasso --no-source-map --style=compressed /tmp/t.scss
+          test "$(./result/bin/sasso --no-source-map --style=compressed /tmp/t.scss)" \
+             = '.button{color:#2a7ae2;padding:8px}'
+          echo "output matches what x86_64-linux and aarch64-darwin produced"
