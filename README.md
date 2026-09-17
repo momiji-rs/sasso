@@ -303,7 +303,7 @@ per-round tables are in the [0.14.0](CHANGELOG.md#0140---2026-09-17) and
 [0.15.0](CHANGELOG.md#0150---2026-09-17) changelog entries. Full three-way
 methodology, per-file numbers and the correctness diff are in
 [`bench/three_way.md`](bench/three_way.md) — which reports through the earlier
-−27% round, not these four; run it yourself with
+−27% round and none of the allocation campaign above; run it yourself with
 `cd bench && RUNS=12 WARMUP=3 LOOP_N=200 bash scripts/run_bench.sh`.
 
 ## WebAssembly
