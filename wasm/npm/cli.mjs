@@ -14,7 +14,45 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { compile, compileString, info, Exception, Logger } from "./sasso.mjs";
+import { availableParallelism } from "node:os";
+import { isMainThread, workerData, parentPort, Worker } from "node:worker_threads";
+
+/**
+ * The engine, chosen at startup rather than imported statically.
+ *
+ * `sasso-native-<platform>` is an `optionalDependency`, so `npm install sasso`
+ * already fetched the native addon on the four prebuilt targets — it is the
+ * same compiler as the wasm build, byte-identical in output (`napi/test.mjs`
+ * asserts that), and about 2.2x the throughput. Everywhere else the wasm build
+ * takes over, and the CLI picks the SPEED variant of it: a command line has
+ * none of the download-size pressure that makes `sasso.mjs` the right default
+ * for a bundled web build.
+ *
+ * `SASSO_ENGINE=wasm|native` forces one, which is what the tests use to hold
+ * both to the same output.
+ */
+let compile, compileString, info, Exception, Logger;
+async function loadEngine() {
+  const want = process.env.SASSO_ENGINE;
+  let mod;
+  let kind = "native";
+  if (want !== "wasm") {
+    try {
+      mod = await import("./native.mjs");
+    } catch (e) {
+      if (want === "native") {
+        process.stderr.write(`error: SASSO_ENGINE=native but the addon is unavailable: ${e.message}\n`);
+        process.exit(1);
+      }
+    }
+  }
+  if (!mod) {
+    mod = await import("./sasso.speed.mjs");
+    kind = "wasm";
+  }
+  ({ compile, compileString, info, Exception, Logger } = mod);
+  return kind;
+}
 
 const HELP = `sasso — compile SCSS/Sass to CSS
 
@@ -58,8 +96,8 @@ Options:
       --update                       Skip outputs already newer than their input.
   -w, --watch                        Recompile when the input or any dependency
                                      changes (requires <input> <output>).
-  -j, --jobs <N>                     Accepted for dart-sass compatibility; this
-                                     CLI compiles sequentially.
+  -j, --jobs <N>                     Compile at most N files at once
+                                     (default: one per CPU).
       --loop <N>                     Recompile in-process N times and report
                                      throughput (stdout inputs only).
   -c, --[no-]color                   Accepted for compatibility (no-op: output is
@@ -99,6 +137,7 @@ function parseArgs(argv) {
     // --source-map-urls is rejected when printing to stdout.
     sourceMapUrls: undefined,
     update: false,
+    jobs: undefined,
     watch: false,
     unicode: true,
     loop: undefined,
@@ -181,9 +220,7 @@ function parseArgs(argv) {
       let inline;
       if (a.startsWith("--jobs=")) inline = a.slice(7);
       else if (a.startsWith("-j") && a.length > 2) inline = a.slice(2);
-      // Consumed and ignored (this CLI is sequential), but validated: the
-      // native CLI rejects a non-positive value rather than compiling.
-      positiveInt("--jobs", takeValue(inline), USIZE_MAX);
+      opts.jobs = positiveInt("--jobs", takeValue(inline), USIZE_MAX);
     } else if (a === "--loop" || a.startsWith("--loop=")) {
       opts.loop = positiveInt("--loop", takeValue(a.startsWith("--loop=") ? a.slice(7) : undefined), U32_MAX);
     } else if (a === "--source-map-urls" || a.startsWith("--source-map-urls=")) {
@@ -813,8 +850,17 @@ function runLoop(opts, common) {
   if (!opts.noCss && last) process.stdout.write(`${last.replace(/\n?$/, "")}\n`);
 }
 
-function main() {
-  const opts = parseArgs(process.argv.slice(2));
+/** A worker thread: same compile loop, same code, pulling from the shared index. */
+async function runWorker() {
+  const { jobs, opts, ctl } = workerData;
+  await loadEngine();
+  const common = commonOptions(opts);
+  const failed = compileSlice(jobs, opts, common, ctl);
+  parentPort.postMessage({ failed });
+}
+
+/** The compile options every job shares, rebuilt per thread (a logger cannot be cloned). */
+function commonOptions(opts) {
   const common = {
     style: opts.style,
     loadPaths: opts.loadPaths,
@@ -831,6 +877,13 @@ function main() {
     quietDeps: opts.quietDeps,
   };
   if (opts.quiet) common.logger = Logger.silent;
+  return common;
+}
+
+async function main() {
+  await loadEngine();
+  const opts = parseArgs(process.argv.slice(2));
+  const common = commonOptions(opts);
 
   // --loop: recompile in-process and report throughput, never writing a file.
   if (opts.loop !== undefined) {
@@ -874,10 +927,74 @@ function main() {
     return; // keep the process alive on the watchers
   }
 
-  // Standard input is read at most once, however many jobs name it.
-  let stdinSource;
+  const failed = await runJobs(jobs, opts, common);
+  if (failed > 0) process.exit(1);
+}
+
+/**
+ * Compile `jobs`, in this thread or across worker threads.
+ *
+ * The jobs are independent — each reads one input and writes one output — so
+ * the native CLI gives them one worker per CPU (`available_parallelism`) and
+ * this one now does the same, which is what `-j/--jobs` has always claimed.
+ * Sequentially, the difference is most of the gap between the two: 137 lila
+ * stylesheets take 686 ms through the binary at `-j 1` and 139 ms at its
+ * default.
+ *
+ * Workers pull from a SHARED index rather than taking a fixed slice, so one
+ * heavy stylesheet cannot leave eleven threads idle. `--stop-on-error` is a
+ * second shared cell: whoever fails sets it, and the others stop taking work,
+ * which is the native "don't start more files once one fails".
+ *
+ * Staying in-process is the right answer for one job (a worker costs more than
+ * the compile), for `--stdin` (there is one stdin, and it is here), and when
+ * `-j 1` asks for it.
+ */
+async function runJobs(jobs, opts, common) {
+  const wanted = opts.jobs ?? availableParallelism();
+  const workers = Math.min(jobs.length, Math.max(1, wanted));
+  const usesStdin = jobs.some((j) => j.input === "-");
+  if (workers < 2 || usesStdin) return compileSlice(jobs, opts, common, null);
+
+  // [0] the next job to take, [1] the stop-on-error flag.
+  const ctl = new Int32Array(new SharedArrayBuffer(8));
+  const results = await Promise.all(
+    Array.from({ length: workers }, () => {
+      const worker = new Worker(fileURLToPath(import.meta.url), {
+        workerData: { sassoWorker: true, jobs, opts, ctl },
+        // stdout/stderr are forwarded to this thread's by default, so warnings
+        // and diagnostics come out where the user expects them.
+      });
+      return new Promise((resolve, reject) => {
+        worker.on("message", resolve);
+        worker.on("error", reject);
+        worker.on("exit", (code) => (code === 0 ? resolve({ failed: 0 }) : resolve({ failed: 1 })));
+      });
+    }),
+  );
+  return results.reduce((n, r) => n + (r?.failed ?? 0), 0);
+}
+
+/**
+ * The compile loop itself. With `ctl` it takes jobs from the shared index
+ * (worker mode); without it, it walks the list in order (in-process mode).
+ * Returns the number that failed; it never exits the process, so a worker can
+ * report back and the parent can decide.
+ */
+function compileSlice(jobs, opts, common, ctl) {
+  let stdinSource; // standard input is read at most once, however many jobs name it
   let failed = 0;
-  for (const { input, output } of jobs) {
+  let next = 0;
+  for (;;) {
+    let i;
+    if (ctl) {
+      if (Atomics.load(ctl, 1)) break; // another job failed and --stop-on-error is on
+      i = Atomics.add(ctl, 0, 1);
+    } else {
+      i = next++;
+    }
+    if (i >= jobs.length) break;
+    const { input, output } = jobs[i];
     const wantMap = wantSourceMap(opts, output);
     // --update: leave outputs that are already newer than their input untouched.
     if (opts.update && output && isFresh(output, input)) continue;
@@ -895,7 +1012,7 @@ function main() {
       }
     } catch (e) {
       // With several jobs dart keeps going unless --stop-on-error, and exits
-      // non-zero at the end; `fail` would stop at the first one.
+      // non-zero at the end.
       const msg =
         e instanceof Exception
           ? e.message
@@ -907,17 +1024,25 @@ function main() {
       // This CLI always behaves as --no-error-css, and dart then drops a stale
       // output rather than leaving the last good build in place.
       discardStaleOutput(output, opts);
-      if (opts.stopOnError || jobs.length === 1) process.exit(1);
+      if (opts.stopOnError || jobs.length === 1) {
+        if (ctl) Atomics.store(ctl, 1, 1);
+        break;
+      }
       continue;
     }
     const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource : undefined);
     if (writeError) {
       process.stderr.write(`${writeError}\n`);
       failed++;
-      if (opts.stopOnError) process.exit(1);
+      if (opts.stopOnError) {
+        if (ctl) Atomics.store(ctl, 1, 1);
+        break;
+      }
     }
   }
-  if (failed > 0) process.exit(1);
+  return failed;
 }
 
-main();
+// A worker thread runs the same file, telling itself apart by its workerData.
+if (!isMainThread && workerData && workerData.sassoWorker) runWorker();
+else main();

@@ -563,13 +563,26 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const bad = join(dir, "bad.scss");
   writeFileSync(bad, ".a{b:}\n");
   const second = join(dir, "second.css");
+  // `--stop-on-error` is "don't START more files once one fails", so what it
+  // skips depends on how many are already running. At `-j 1` the second job
+  // never starts; with the default one-per-CPU it may already have, and the
+  // NATIVE CLI behaves the same way (measured 2026-09-17: `sasso
+  // --stop-on-error bad:a good:b` writes b, `-j 1` does not). So the
+  // deterministic claim is pinned at -j 1, and the parallel case is pinned on
+  // what it does guarantee: a non-zero exit.
   const stop = spawnSync(
     process.execPath,
-    [cliPath, "--no-source-map", "--stop-on-error", `${bad}:${join(dir, "s1.css")}`, `${join(dir, "src", "one.scss")}:${second}`],
+    [cliPath, "--no-source-map", "-j", "1", "--stop-on-error", `${bad}:${join(dir, "s1.css")}`, `${join(dir, "src", "one.scss")}:${second}`],
     { encoding: "utf8" },
   );
   assert.equal(stop.status, 1, "cli: --stop-on-error exits non-zero");
-  assert.ok(!existsSync(second), "cli: --stop-on-error skips the rest");
+  assert.ok(!existsSync(second), "cli: --stop-on-error -j 1 skips the rest");
+  const stopParallel = spawnSync(
+    process.execPath,
+    [cliPath, "--no-source-map", "--stop-on-error", `${bad}:${join(dir, "s3.css")}`, `${join(dir, "src", "one.scss")}:${join(dir, "s4.css")}`],
+    { encoding: "utf8" },
+  );
+  assert.equal(stopParallel.status, 1, "cli: --stop-on-error exits non-zero in parallel too");
   const go = spawnSync(
     process.execPath,
     [cliPath, "--no-source-map", `${bad}:${join(dir, "s2.css")}`, `${join(dir, "src", "one.scss")}:${second}`],
@@ -1073,6 +1086,102 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.ok(r.stderr.includes(wanted), `cli: --loop ${args.join(" ")} says "${wanted}"`);
   }
   console.log("ok: cli — --loop: warm pass, silent timing, stdout only");
+}
+
+// === Phase 3l: the CLI's engine choice and its worker pool ===
+// The CLI picks the native addon when the platform package is installed and
+// falls back to wasm, and it compiles jobs across worker threads. Both are
+// invisible in the output BY DESIGN — which is exactly why they need a test
+// that pins the output rather than the mechanism.
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-engine-"));
+  mkdirSync(join(dir, "src"), { recursive: true });
+  // Enough jobs that the pool actually splits them, and varied enough that a
+  // shared-state bug would show up as crossed output.
+  const expected = new Map();
+  for (let i = 0; i < 24; i++) {
+    writeFileSync(join(dir, "src", `s${i}.scss`), `.s${i}{a: ${i} + 1; b: "x${i}"}\n`);
+    expected.set(`s${i}.css`, `.s${i}{a:${i + 1};b:"x${i}"}`);
+  }
+  const compileAll = (out, extra, env) => {
+    const args = [cliPath, "--no-source-map", "--style=compressed", ...extra];
+    for (const [name] of expected) args.push(`${join(dir, "src", name.replace(".css", ".scss"))}:${join(out, name)}`);
+    return spawnSync(process.execPath, args, { encoding: "utf8", env: { ...process.env, ...env }, timeout: 60000 });
+  };
+  const check = (label, out, r) => {
+    assert.equal(r.status, 0, `cli: ${label} compiles (stderr: ${r.stderr})`);
+    for (const [name, css] of expected) {
+      assert.equal(readFileSync(join(out, name), "utf8").trim(), css, `cli: ${label} — ${name} is its own output`);
+    }
+  };
+
+  const seq = join(dir, "seq");
+  check("-j 1", seq, compileAll(seq, ["-j", "1"], {}));
+  const par = join(dir, "par");
+  check("-j 4 (worker pool)", par, compileAll(par, ["-j", "4"], {}));
+  const def = join(dir, "def");
+  check("default jobs", def, compileAll(def, [], {}));
+
+  // Both engines, forced, must agree with each other byte for byte.
+  const wasm = join(dir, "wasm");
+  check("SASSO_ENGINE=wasm", wasm, compileAll(wasm, [], { SASSO_ENGINE: "wasm" }));
+  const native = join(dir, "native");
+  const nativeRun = compileAll(native, [], { SASSO_ENGINE: "native" });
+  if (nativeRun.status === 0) {
+    check("SASSO_ENGINE=native", native, nativeRun);
+    for (const [name] of expected) {
+      assert.equal(
+        readFileSync(join(wasm, name), "utf8"),
+        readFileSync(join(native, name), "utf8"),
+        `cli: the two engines agree on ${name}`,
+      );
+    }
+  } else {
+    // No prebuild for this platform: the CLI must still say so clearly rather
+    // than falling back silently when the engine was demanded by name.
+    assert.match(nativeRun.stderr, /SASSO_ENGINE=native/, "cli: a demanded engine that is missing says so");
+  }
+  // The same path, forced on EVERY platform: `SASSO_NATIVE_BINARY` is
+  // native.mjs's own override, so pointing it at nothing makes the addon
+  // unloadable here too. A DEMANDED engine must fail loudly; only the default
+  // falls back quietly.
+  const demanded = compileAll(join(dir, "nope"), [], {
+    SASSO_ENGINE: "native",
+    SASSO_NATIVE_BINARY: join(dir, "no-such-addon.node"),
+  });
+  assert.equal(demanded.status, 1, "cli: SASSO_ENGINE=native with an unloadable addon exits non-zero");
+  assert.match(demanded.stderr, /SASSO_ENGINE=native/, "cli: … naming the engine that was demanded");
+  const fellBack = join(dir, "fallback");
+  check("the default engine falls back to wasm", fellBack, compileAll(fellBack, [], {
+    SASSO_NATIVE_BINARY: join(dir, "no-such-addon.node"),
+  }));
+
+  // Each job must run EXACTLY once. Correct output does not prove that — a pool
+  // where every worker walks the whole list from 0 produces the same files,
+  // just N times over — so make the repetition audible: one `@warn` per
+  // stylesheet, counted on stderr.
+  {
+    const wdir = join(dir, "warn");
+    mkdirSync(wdir, { recursive: true });
+    const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4"];
+    for (let i = 0; i < 12; i++) {
+      writeFileSync(join(wdir, `w${i}.scss`), `@warn "once-${i}";\n.w${i}{a:1}\n`);
+      args.push(`${join(wdir, `w${i}.scss`)}:${join(wdir, `w${i}.css`)}`);
+    }
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+    assert.equal(r.status, 0, `cli: the warning run compiles (stderr: ${r.stderr})`);
+    for (let i = 0; i < 12; i++) {
+      const seen = (r.stderr.match(new RegExp(`once-${i}\\b`, "g")) || []).length;
+      assert.equal(seen, 1, `cli: job w${i} ran exactly once (saw its @warn ${seen} times)`);
+    }
+  }
+
+  // A failure inside the pool is still reported and still exits non-zero.
+  writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
+  const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});
+  assert.equal(broken.status, 1, "cli: a job that fails in a worker exits non-zero");
+  assert.match(broken.stderr, /Error: /, "cli: … and its diagnostic reaches stderr");
+  console.log("ok: cli — engine selection (wasm/native agree) and the worker pool");
 }
 
 // === The `quietDeps` option, on the JS API and on both engines ===
