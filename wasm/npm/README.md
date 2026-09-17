@@ -210,9 +210,13 @@ describing the error in CSS).
 sasso` already fetched `sasso-native-<platform>` as an optionalDependency on
 macOS and Linux — and falls back to the wasm build (the speed-optimised one)
 everywhere else. Both produce byte-identical output; `SASSO_ENGINE=wasm` or
-`SASSO_ENGINE=native` forces one. Compiling a 137-stylesheet tree on a 12-core
-machine: **265 ms** on the native engine, 612 ms on wasm, against dart-sass's
-2048 ms.
+`SASSO_ENGINE=native` forces one. Compiling a 138-stylesheet tree on a 12-core
+machine, that tree's own flags, best of five (2026-09-17): **232 ms** on the
+native engine, 674 ms on wasm, against dart-sass 1.104.1's 2348 ms.
+
+Importing the library selects nothing: `"sasso"` is always the size-optimised
+wasm build and ignores `SASSO_ENGINE`, and the addon is the `"sasso/native"`
+subpath below.
 
 An `<in>:<out>` pair may name **directories**: every `.scss`/`.sass`/`.css` file
 under `<in>` that is not a partial compiles to the matching path under `<out>`,

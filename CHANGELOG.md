@@ -29,10 +29,17 @@ Conformance is tracked separately as a ratchet against the official
   the native CLI's "don't start more files once one fails". A single job and
   `-j 1` stay in-process — a worker costs more than the compile — and so does a
   batch in which two jobs name one output file, because dart's last-one-wins is
-  an order and an order needs a sequence. A `-` job reads standard input once,
-  in the parent, so it no longer costs the rest of the batch its parallelism
-  (138 Lichess stylesheets plus one `-` job: 767 ms to 217 ms).
-  `SASSO_ENGINE=wasm|native` forces an engine.
+  an order and an order needs a sequence (a job's `<output>.map` sidecar counts
+  as a destination too, so `a.scss:out.css` and `b.scss:out.css.map` collide).
+  A `-` job reads standard input once, in the parent, so it no longer costs the
+  rest of the batch its parallelism (138 Lichess stylesheets plus one `-` job:
+  767 ms to 217 ms). `SASSO_ENGINE=wasm|native` forces an engine — and only for
+  the CLI: `import … from "sasso"` is always the wasm build.
+
+  The job list reaches the workers through shared memory, decoded one job at a
+  time as each is claimed, rather than being structure-cloned into every
+  worker: a 5,000-file directory build at `-j 12` peaks at 234 MB instead of
+  283 MB, with no change in wall time.
 
   Each job's warnings and errors are collected and printed in **command-line
   order**, as whole blocks, however the threads interleaved — the order the
