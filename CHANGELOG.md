@@ -11,6 +11,12 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+> **The next release is 0.14.0**, not 0.11.0. The crate skips forward to meet
+> the npm package, which is at 0.13.0 and cannot go back — npm forbids
+> republishing a version, so the packaging iterations of June and July 2026
+> burned three minors that the crate never spent. From 0.14.0 the two lines
+> carry the same number; `release-wasm.yml` enforces it and explains the rest.
+
 ## [0.10.0] - 2026-09-17
 
 _A dart-sass-compatible CLI, alignment with dart-sass 1.104.1, and the
