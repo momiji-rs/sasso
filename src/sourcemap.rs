@@ -325,25 +325,45 @@ impl SmCollector {
 
         for e in &self.entries {
             let target = body_off + e.byte_off as usize;
-            // Advance the cursor to `target`, counting newlines and UTF-16
-            // units. We step by whole chars (offsets always land on a token
-            // start, i.e. a char boundary).
-            while cur_byte < target {
-                let ch = output[cur_byte..].chars().next().expect("offset within output");
-                if ch == '\n' {
-                    gen_line += 1;
-                    gen_col16 = 0;
-                } else {
-                    gen_col16 += ch.len_utf16() as u32;
+            // Advance the cursor to `target` in one bulk step, rather than one
+            // decoded `char` at a time. Only three facts about the skipped text
+            // matter: how many newlines it holds, where the last one is, and how
+            // many UTF-16 units follow it. Searching for a single ASCII `char`
+            // goes through core's byte searcher instead of the UTF-8 decoder,
+            // and `utf16_units` costs one vectorized `is_ascii` on the slices
+            // that hold no non-ASCII text — which is nearly all of them.
+            debug_assert!(cur_byte <= target, "offsets are sorted ascending");
+            // Offsets always land on a token start, i.e. a char boundary; the
+            // decoding loop this replaced assumed the same thing (it walked
+            // whole chars and asserted it had landed exactly on `target`).
+            debug_assert!(output.is_char_boundary(target), "offset on a char boundary");
+            let skipped = &output[cur_byte..target];
+            match skipped.rfind('\n') {
+                // Past a newline the column restarts, so only the text after
+                // the LAST one contributes to it.
+                Some(last_nl) => {
+                    gen_line += skipped.matches('\n').count() as u32;
+                    gen_col16 = utf16_units(&skipped[last_nl + 1..]);
                 }
-                cur_byte += ch.len_utf8();
+                None => gen_col16 += utf16_units(skipped),
             }
-            debug_assert_eq!(cur_byte, target, "offset landed on a char boundary");
+            cur_byte = target;
             let src = m.source_index(e.file_id);
             m.add(gen_line, gen_col16, src, e.src_line, e.src_col);
         }
         m
     }
+}
+
+/// Length of `s` in UTF-16 code units, which is what a source map's generated
+/// column counts (`Mappings::add`). ASCII is one unit per byte and `is_ascii`
+/// vectorizes, so the per-`char` decode only runs on the slices that really do
+/// carry non-ASCII text — a stylesheet is otherwise ASCII from end to end.
+fn utf16_units(s: &str) -> u32 {
+    if s.is_ascii() {
+        return s.len() as u32;
+    }
+    s.chars().map(|c| c.len_utf16() as u32).sum()
 }
 
 /// A finished [Source Map v3](https://tc39.es/ecma426/), ready to serialize as

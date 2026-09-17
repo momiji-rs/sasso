@@ -20,7 +20,7 @@
 //!    regression landed -- never executes.
 
 use divan::{black_box, Bencher};
-use sasso::{compile, Options, OutputStyle};
+use sasso::{compile, compile_with_source_map, Options, OutputStyle};
 
 /// The allocator the CLI and the wasm package ship with (`src/main.rs:40`,
 /// `wasm/src/lib.rs:40`). Benchmarking without it measures a different program.
@@ -284,6 +284,26 @@ fn use_graph_redundant_with_url_silent(bencher: Bencher<'_, '_>) {
         let opts = diagnostics_live(USE_GRAPH_REDUNDANT_URL).with_importer(&importer);
         compile(black_box(USE_GRAPH_REDUNDANT), &opts).unwrap()
     });
+}
+
+/// `large_expanded_with_url_silent` with a source map generated alongside the
+/// CSS: the corpus for the source-map row of `docs/PERF_PLAN_2026-09-16.md`
+/// (A5), which no other benchmark here touches at all.
+///
+/// Read this **against** `large_expanded_with_url_silent`, exactly as that one
+/// is read against `large_expanded`: the ratio is the map surcharge, measured at
+/// +25% (CLI) to +37% (in-process) on 2026-09-16. Only the difference is
+/// meaningful — the map path is the only thing the two benchmarks disagree
+/// about, and the map's JSON is deliberately *not* serialized here, because
+/// `SourceMap::to_json` is string escaping rather than mapping arithmetic.
+///
+/// The CLI cannot stand in for this. `--loop` refuses to run with
+/// `--source-map` (`src/main.rs`), so before this benchmark existed the map path
+/// could only be measured one process at a time, with process startup inside
+/// every reading.
+#[divan::bench]
+fn large_expanded_with_map_silent(bencher: Bencher<'_, '_>) {
+    bencher.bench(|| compile_with_source_map(black_box(LARGE), &diagnostics_live("large.scss")).unwrap());
 }
 
 #[divan::bench]
