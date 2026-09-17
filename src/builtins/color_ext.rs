@@ -2,11 +2,15 @@
 //! `complement`, `invert`, `grayscale`, `opacify`/`transparentize`, the
 //! `hue`/`saturation`/`lightness` getters, …).
 //!
-//! Results are *computed* colors: they are built with [`Color::rgb`] or
-//! [`Color::from_hsl`] and left with `repr = None`, so they serialize via
-//! the normal `rgb()`/`rgba()`/hex rule, matching dart-sass.
+//! Results are *computed* colors: they carry no source spelling, so they
+//! serialize via the normal `rgb()`/`rgba()`/hex rule, matching dart-sass.
+//! The adjusters keep the input color's SPACE, though — dart hands
+//! `saturate(hsl(…), 10%)` back as an `hsl()` — which is what
+//! [`legacy_hsl_adjust`] and [`legacy_alpha_adjust`] are for.
 
-use super::color::{modify_in_space, modify_in_space_opt, space_arg, ModifyOp};
+use super::color::{
+    legacy_alpha_adjust, legacy_hsl_adjust, modify_in_space, modify_in_space_opt, space_arg, ModifyOp,
+};
 use super::{arg, as_color, clamp01, num, require, require_legacy_color};
 use crate::error::Error;
 use crate::scanner::Pos;
@@ -416,17 +420,10 @@ fn fn_complement(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
 }
 
 fn rotate_hue(c: &Color, degrees: f64) -> Color {
-    let (h, s, l) = c.to_hsl();
-    from_hsl(h + degrees, s, l, c.a)
-}
-
-/// Like [`Color::from_hsl`] but tags the result with a CSS named-color
-/// spelling when it matches one (so e.g. `adjust-hue(red, 180)` → `aqua`).
-fn from_hsl(h: f64, s: f64, l: f64, a: f64) -> Color {
-    let c = Color::from_hsl(h, s, l, a);
-    let mut c = c;
-    c.repr = named_repr(c.r, c.g, c.b, c.a);
-    c
+    // The hue is normalized back into `[0, 360)` when the result is rebuilt,
+    // and an `rgb()`/hex input still ends up as a computed sRGB color — so
+    // `adjust-hue(red, 180)` is still `aqua`.
+    legacy_hsl_adjust(c, |ch| ch[0] += degrees)
 }
 
 /// `invert($color, $weight: 100%)` — invert the RGB channels, then mix the
@@ -593,9 +590,9 @@ fn fn_saturate_two(
     require_legacy_color(&c, name, pos)?;
     let amount = require(&params, pos_args, named, 1, name, pos)?;
     let amount = bounded(amount, 0.0, 100.0, true, pos)?;
-    let (h, s, l) = c.to_hsl();
-    let new_s = (s + sign * amount / 100.0).clamp(0.0, 1.0);
-    Ok(Value::Color(from_hsl(h, new_s, l, c.a)))
+    Ok(Value::Color(legacy_hsl_adjust(&c, |ch| {
+        ch[1] = (ch[1] + sign * amount).clamp(0.0, 100.0);
+    })))
 }
 
 /// The unit a `$weight`/`$amount` percentage argument carries into the bounds
@@ -670,7 +667,7 @@ fn fn_fade(
     let amount = require(&params, pos_args, named, 1, name, pos)?;
     let amount = bounded(amount, 0.0, 1.0, false, pos)?;
     let a = clamp01(c.a + sign * amount);
-    Ok(Value::Color(computed(c.r, c.g, c.b, a)))
+    Ok(Value::Color(legacy_alpha_adjust(&c, a)))
 }
 
 /// `hue` (deg), `saturation`/`lightness` (%), and the HWB-derived

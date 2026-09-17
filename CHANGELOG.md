@@ -140,6 +140,18 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **The legacy color adjusters keep the color's own space.**
+  `lighten`/`darken`, `saturate`/`desaturate`, `adjust-hue` and
+  `opacify`/`fade-in`/`transparentize`/`fade-out` converted every input to
+  sRGB, so `lighten(hsl(240, 100%, 50%), 10%)` came out `#3333ff` where
+  dart-sass writes `hsl(240, 100%, 60%)`. They now shift the hsl channel (or
+  the alpha) and rebuild the color in the space it arrived in, so
+  `color.space()` of the result is the input's. That also keeps an untouched
+  channel bit-exact — `lighten(hsl(240, 150%, 50%), 10%)` stays
+  `hsl(240, 150%, 60%)`, out of gamut and all, only the shifted channel being
+  clamped — and lets an `hwb()` result pick up a powerless `none` hue the way
+  a conversion does. An `rgb()`/hex/named input still becomes a computed sRGB
+  color.
 - **`calc(#{-$x} …)` no longer errors** with "This expression can't be used
   in a calculation." Interpolation is a full SassScript context even inside a
   calculation, so the calc-only grammar restrictions (no `-$x`, no `- 1px`)

@@ -31,7 +31,9 @@ use modern::*;
 // `crate::builtins::color::…` and `super::color::…` that `builtins::mod` and
 // `builtins::color_ext` already use).
 pub(crate) use legacy::call_module_member;
-pub(crate) use math::{convert_modern, legacy_to_modern, make_modern_in, space_arg};
+pub(crate) use math::{
+    convert_modern, legacy_alpha_adjust, legacy_hsl_adjust, legacy_to_modern, make_modern_in, space_arg,
+};
 pub(crate) use modern::{
     grayscale_modern, invert_in_space, modify_in_space, modify_in_space_full, modify_in_space_opt, ModifyOp,
 };

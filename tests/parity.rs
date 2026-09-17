@@ -1971,6 +1971,136 @@ fn a_degenerate_channel_converts_on_every_spelling() {
 }
 
 #[test]
+fn the_legacy_adjusters_keep_the_colors_own_space() {
+    // `lighten`/`darken`, `saturate`/`desaturate`, `adjust-hue` and the
+    // `opacify`/`transparentize` pair shift one hsl channel (or the alpha) and
+    // hand the color back in the space it arrived in, so an `hsl()` input
+    // stays an `hsl()` instead of collapsing to a hex. Only the channel the
+    // function shifts is clamped — an untouched one stays bit-exact, out of
+    // gamut and all — and an `rgb()`/hex/named input still ends up as a
+    // computed sRGB color, named spelling included. Byte-matched to dart-sass
+    // 1.104.1. Offline.
+    for (call, want) in [
+        ("lighten(hsl(240, 100%, 50%), 10%)", "hsl(240, 100%, 60%)"),
+        ("darken(hsl(240, 100%, 50%), 10%)", "hsl(240, 100%, 40%)"),
+        ("saturate(hsl(240, 50%, 50%), 10%)", "hsl(240, 60%, 50%)"),
+        ("desaturate(hsl(240, 50%, 50%), 10%)", "hsl(240, 40%, 50%)"),
+        ("adjust-hue(hsl(240, 100%, 50%), 30deg)", "hsl(270, 100%, 50%)"),
+        (
+            "opacify(hsla(240, 100%, 50%, 0.5), 0.2)",
+            "hsla(240, 100%, 50%, 0.7)",
+        ),
+        (
+            "fade-in(hsla(240, 100%, 50%, 0.5), 0.2)",
+            "hsla(240, 100%, 50%, 0.7)",
+        ),
+        (
+            "transparentize(hsl(240, 100%, 50%), 0.2)",
+            "hsla(240, 100%, 50%, 0.8)",
+        ),
+        ("fade-out(hsl(240, 100%, 50%), 0.2)", "hsla(240, 100%, 50%, 0.8)"),
+        // The shifted channel clamps; a channel left alone does not.
+        ("lighten(hsl(0, 100%, 95%), 10%)", "hsl(0, 100%, 100%)"),
+        ("darken(hsl(0, 100%, 5%), 10%)", "hsl(0, 100%, 0%)"),
+        ("saturate(hsl(0, 95%, 50%), 10%)", "hsl(0, 100%, 50%)"),
+        ("lighten(hsl(240, 150%, 50%), 10%)", "hsl(240, 150%, 60%)"),
+        // An sRGB-spelled input is unchanged by all this.
+        ("lighten(rgb(0, 0, 255), 10%)", "#3333ff"),
+        ("lighten(blue, 10%)", "#3333ff"),
+        ("adjust-hue(rgb(0, 0, 255), 30deg)", "rgb(50%, 0%, 100%)"),
+        ("adjust-hue(red, 180)", "aqua"),
+        ("transparentize(rgb(0, 0, 255), 0.2)", "rgba(0, 0, 255, 0.8)"),
+        ("lighten(rgb(300, -20, 40), 10%)", "#ff3353"),
+    ] {
+        assert_eq!(
+            ours(&format!("a {{ b: {call}; }}\n")),
+            format!("a {{\n  b: {want};\n}}\n"),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn a_legacy_adjuster_rebuilds_the_color_from_plain_numbers() {
+    // The color is rebuilt from the hsl channels it read, so a MISSING channel
+    // reads as 0 and does not survive (where `color.adjust($lightness:)` on the
+    // same color keeps the `none`), a non-finite rotation lands the hue on 0
+    // rather than on a NaN channel, and the trip back to an `hwb()` input's own
+    // space applies the ordinary conversion rules — a result whose whiteness
+    // and blackness cover everything picks up a powerless `none` hue. Every row
+    // byte-matched to dart-sass 1.104.1. Offline.
+    for (call, want) in [
+        // The space survives; the serialization is the space's own.
+        ("color.space(lighten(hsl(240, 100%, 50%), 10%))", "hsl"),
+        ("color.space(lighten(hwb(240 10% 20%), 10%))", "hwb"),
+        ("color.space(lighten(rgb(0, 0, 255), 10%))", "rgb"),
+        ("color.space(transparentize(hwb(240 10% 20%), 0.2))", "hwb"),
+        ("lighten(hwb(240 10% 20%), 10%)", "hsl(240, 77.7777777778%, 55%)"),
+        (
+            "transparentize(hwb(240 10% 20%), 0.2)",
+            "hsla(240, 77.7777777778%, 45%, 0.8)",
+        ),
+        // A missing channel is filled in with 0 by the read.
+        (
+            "meta.inspect(lighten(hsl(240 none 50%), 10%))",
+            "hsl(240, 0%, 60%)",
+        ),
+        (
+            "meta.inspect(transparentize(hsl(none 100% 50%), 0.2))",
+            "hsla(0, 100%, 50%, 0.8)",
+        ),
+        (
+            "meta.inspect(transparentize(hwb(none 10% 20%), 0.2))",
+            "hwb(0 10% 20% / 0.8)",
+        ),
+        // A powerless hue on the way back to hwb.
+        ("meta.inspect(lighten(hwb(240 90% 0%), 50%))", "hwb(none 100% 0%)"),
+        ("meta.inspect(darken(hwb(240 0% 90%), 50%))", "hwb(none 0% 100%)"),
+        ("meta.inspect(saturate(hwb(240 40% 40%), 100%))", "hwb(240 0% 0%)"),
+        (
+            "meta.inspect(desaturate(hwb(240 40% 40%), 100%))",
+            "hwb(none 50% 50%)",
+        ),
+        // The hwb hue rotates and normalizes in place.
+        (
+            "meta.inspect(adjust-hue(hwb(37.5 13% 21%), 30deg))",
+            "hwb(67.5 13% 21%)",
+        ),
+        (
+            "meta.inspect(adjust-hue(hwb(240 10% 20%), 400deg))",
+            "hwb(280 10% 20%)",
+        ),
+        (
+            "meta.inspect(adjust-hue(hsl(240, 100%, 50%), -400deg))",
+            "hsl(200, 100%, 50%)",
+        ),
+        // A non-finite rotation lands on hue 0, in whatever space.
+        (
+            "meta.inspect(adjust-hue(hsl(240, 100%, 50%), $nan))",
+            "hsl(0, 100%, 50%)",
+        ),
+        (
+            "meta.inspect(adjust-hue(hsl(240, 100%, 50%), $inf))",
+            "hsl(0, 100%, 50%)",
+        ),
+        (
+            "meta.inspect(adjust-hue(hwb(240 10% 20%), $nan))",
+            "hwb(0 10% 20%)",
+        ),
+        ("meta.inspect(adjust-hue(rgb(0, 0, 255), $nan))", "red"),
+    ] {
+        assert_eq!(
+            ours(&format!(
+                "@use \"sass:color\";\n@use \"sass:math\";\n@use \"sass:meta\";\n\
+                 $nan: math.div(0, 0);\n$inf: math.div(1, 0);\na {{ b: {call}; }}\n"
+            )),
+            format!("a {{\n  b: {want};\n}}\n"),
+            "{call}"
+        );
+    }
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0
