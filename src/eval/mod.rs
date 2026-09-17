@@ -3004,7 +3004,7 @@ impl<'a> Evaluator<'a> {
         // A selector starting with a digit is dart's "expected selector."
         // (`1a {}`, issue_2023) — except keyframe stops (`50%`, `13E2%`).
         if !self.in_keyframes {
-            for part in split_commas(&sel_str) {
+            for part in split_commas(&sel_str).iter() {
                 if part.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
                     return Err(Error::unpositioned("expected selector."));
                 }
@@ -3030,7 +3030,7 @@ impl<'a> Evaluator<'a> {
         let (current, resolved_lbs): (Vec<String>, Vec<bool>) = if self.in_keyframes {
             (
                 split_commas(&sel_str)
-                    .into_iter()
+                    .iter()
                     .map(|p| p.trim().to_string())
                     .filter(|p| !p.is_empty())
                     .collect(),
@@ -4899,25 +4899,14 @@ fn is_calc_function(name: &str) -> bool {
 /// warning) instead of rejecting non-calculation operands, and `clamp`/`min`/
 /// `max` keep their dedicated builtin preservation.
 fn is_pure_calc_math_function(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "sin"
-            | "cos"
-            | "tan"
-            | "asin"
-            | "acos"
-            | "atan"
-            | "atan2"
-            | "exp"
-            | "log"
-            | "pow"
-            | "hypot"
-            | "sqrt"
-            | "sign"
-            | "mod"
-            | "rem"
-    )
+    // Compared case-insensitively in place. Folding `name` into an owned
+    // lowercase copy first would allocate on every call, and this predicate is
+    // reached for every function call in every expression.
+    const NAMES: [&str; 15] = [
+        "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "exp", "log", "pow", "hypot", "sqrt", "sign",
+        "mod", "rem",
+    ];
+    NAMES.iter().any(|n| name.eq_ignore_ascii_case(n))
 }
 
 /// Whether a calc node carries an opaque operand — a `var()`, interpolation, or
@@ -5560,7 +5549,7 @@ fn validate_plain_sigils(sel: &str) -> Result<(), Error> {
 
 /// The full per-part validation walk (slow path).
 fn validate_selector_tail(sel: &str, has_parent: bool) -> Result<(), Error> {
-    for part in split_commas(sel) {
+    for part in split_commas(sel).iter() {
         let chars: Vec<char> = part.chars().collect();
         let mut i = 0;
         // True at the start of each compound selector (start of the part and
@@ -6482,7 +6471,8 @@ fn resolve_selectors_opt(
     parent_lbs: &[bool],
 ) -> Result<Vec<(String, bool)>, Error> {
     let parts: Vec<String> = split_commas(sel)
-        .into_iter()
+        .iter()
+        .copied()
         .map(|p| trim_selector_part(p).to_string())
         .filter(|p| !p.is_empty())
         .collect();
@@ -6800,10 +6790,6 @@ fn resolve_selectors_opt(
     Ok(result)
 }
 
-/// Split `s` on top-level commas (paren/bracket depth 0), returning borrowed
-/// slices of `s` — no per-part allocation. Commas inside `(...)`/`[...]` stay
-/// within their part. Each part is a contiguous substring of `s`, so callers
-/// that need an owned `String` call `.to_string()` themselves.
 /// `s.trim().to_string()` without the allocation when `s` has no surrounding
 /// whitespace — the common case for an evaluated property name. Reuses the
 /// owned buffer in place (`trim` removed nothing → same length) instead of
@@ -6816,10 +6802,35 @@ fn trim_owned(s: String) -> String {
     }
 }
 
-fn split_commas(s: &str) -> Vec<&str> {
+/// The segments [`split_commas`] found. The overwhelmingly common shape has no
+/// top-level comma at all, and that case is the whole reason this type exists:
+/// it keeps the single segment inline instead of putting it in a one-element
+/// `Vec`. Both variants deref to a slice, so a caller reads either shape as
+/// `&[&str]`.
+enum Segments<'a> {
+    One(&'a str),
+    Many(Vec<&'a str>),
+}
+
+impl<'a> std::ops::Deref for Segments<'a> {
+    type Target = [&'a str];
+
+    fn deref(&self) -> &[&'a str] {
+        match self {
+            Segments::One(s) => std::slice::from_ref(s),
+            Segments::Many(v) => v,
+        }
+    }
+}
+
+/// Split `s` on top-level commas (paren/bracket depth 0), returning borrowed
+/// slices of `s` — no per-part allocation. Commas inside `(...)`/`[...]` stay
+/// within their part. Each part is a contiguous substring of `s`, so callers
+/// that need an owned `String` call `.to_string()` themselves.
+fn split_commas(s: &str) -> Segments<'_> {
     // No comma anywhere means one segment, whatever the nesting structure.
     if !s.as_bytes().contains(&b',') {
-        return vec![s];
+        return Segments::One(s);
     }
     let mut out = Vec::new();
     let mut paren = 0i32;
@@ -6846,7 +6857,7 @@ fn split_commas(s: &str) -> Vec<&str> {
         }
     }
     out.push(&s[start..]);
-    out
+    Segments::Many(out)
 }
 
 /// Collapse whitespace and put single spaces around `>`/`+`/`~`
@@ -7317,7 +7328,7 @@ fn compound_has_bogus_pseudo(compound: &str) -> bool {
                 if is_selector_pseudo(&name) {
                     let allow_leading = name.eq_ignore_ascii_case("has");
                     let arg: String = chars[open + 1..k.min(chars.len())].iter().collect();
-                    for part in split_commas(&arg) {
+                    for part in split_commas(&arg).iter() {
                         let part = part.trim();
                         if !part.is_empty() && complex_selector_is_bogus(part, true, allow_leading) {
                             return true;

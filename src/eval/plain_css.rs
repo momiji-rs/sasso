@@ -462,7 +462,7 @@ impl<'a> Evaluator<'a> {
     ) -> Result<(Vec<String>, Vec<bool>), Error> {
         let s = self.eval_template(sel)?;
         let parts: Vec<String> = split_commas(&s)
-            .into_iter()
+            .iter()
             .map(|p| p.trim().to_string())
             .filter(|p| !p.is_empty())
             .collect();
