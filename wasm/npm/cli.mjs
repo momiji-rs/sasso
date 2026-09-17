@@ -60,9 +60,12 @@ Options:
                                      changes (requires <input> <output>).
   -j, --jobs <N>                     Accepted for dart-sass compatibility; this
                                      CLI compiles sequentially.
+      --loop <N>                     Recompile in-process N times and report
+                                     throughput (stdout inputs only).
   -c, --[no-]color                   Accepted for compatibility (no-op: output is
                                      never colored).
-      --[no-]unicode                 Accepted for compatibility (no-op).
+      --[no-]unicode                 Unicode box glyphs in diagnostics
+                                     (default: on).
   -h, --help                         Print this help.
       --version                      Print the version.
 
@@ -97,6 +100,8 @@ function parseArgs(argv) {
     sourceMapUrls: undefined,
     update: false,
     watch: false,
+    unicode: true,
+    loop: undefined,
     output: undefined,
     positionals: [],
   };
@@ -162,21 +167,25 @@ function parseArgs(argv) {
     } else if (a === "--no-charset") {
       opts.charset = false;
       // Accepted for dart-sass compatibility. `--error-css` is a real dart
-      // feature this CLI does not implement (see HELP); the rest are no-ops in
-      // the native CLI too, or have no meaning without parallelism.
+      // feature this CLI does not implement (see HELP); `--color` is a no-op in
+      // the native CLI too, and `--jobs` has no meaning without parallelism.
     } else if (a === "--error-css" || a === "--no-error-css") {
       // no-op: a failing compile always behaves as --no-error-css here
     } else if (a === "-c" || a === "--color" || a === "--no-color") {
       // no-op: output is never colored
-    } else if (a === "--unicode" || a === "--no-unicode") {
-      // no-op
+    } else if (a === "--unicode") {
+      opts.unicode = true;
+    } else if (a === "--no-unicode") {
+      opts.unicode = false;
     } else if (a === "-j" || a === "--jobs" || a.startsWith("--jobs=") || (a.startsWith("-j") && a.length > 2)) {
       let inline;
       if (a.startsWith("--jobs=")) inline = a.slice(7);
       else if (a.startsWith("-j") && a.length > 2) inline = a.slice(2);
-      takeValue(inline); // consumed and ignored: this CLI is sequential
+      // Consumed and ignored (this CLI is sequential), but validated: the
+      // native CLI rejects a non-positive value rather than compiling.
+      positiveInt("--jobs", takeValue(inline));
     } else if (a === "--loop" || a.startsWith("--loop=")) {
-      takeValue(a.startsWith("--loop=") ? a.slice(7) : undefined);
+      opts.loop = positiveInt("--loop", takeValue(a.startsWith("--loop=") ? a.slice(7) : undefined));
     } else if (a === "--source-map-urls" || a.startsWith("--source-map-urls=")) {
       const inline = a.startsWith("--source-map-urls=") ? a.slice(18) : undefined;
       const v = takeValue(inline);
@@ -196,8 +205,10 @@ function parseArgs(argv) {
       if (a.startsWith("--load-path=")) inline = a.slice(12);
       else if (a.startsWith("-I") && a.length > 2) inline = a.slice(2);
       opts.loadPaths.push(takeValue(inline));
-    } else if (a.startsWith("-") && a !== "-") {
-      fail(`error: unknown option "${a}" (try --help)`);
+      // `-` is standard input and `-:out.css` is a pair reading it, so neither
+      // is an unknown option (the native CLI carves out the same two).
+    } else if (a.startsWith("-") && a !== "-" && !a.startsWith("-:")) {
+      fail(`error: unknown option ${a}`);
     } else {
       opts.positionals.push(a);
     }
@@ -206,17 +217,57 @@ function parseArgs(argv) {
   return opts;
 }
 
+/** A positive integer, or the native CLI's rejection of what was passed. */
+function positiveInt(flag, value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) fail(`error: ${flag} expects a positive integer (got ${JSON.stringify(value)})`);
+  return n;
+}
+
 /**
  * The combinations the native CLI rejects before compiling anything (dart-sass
- * rejects the source-map ones with the same wording): `--output` names ONE
- * output, and a map printed to stdout can only be an embedded one with
- * absolute sources.
+ * rejects the source-map and arity ones with the same wording): the positional
+ * grammar is `<input> [output]`, `--output` names ONE output, source-map flags
+ * need a source map, and a map printed to stdout can only be an embedded one
+ * with absolute sources.
  */
 function validate(opts) {
   const pairs = opts.positionals.some((a) => colonIndex(a) >= 0);
   if (opts.output !== undefined) {
     if (pairs) fail('error: --output may not be used with ":" arguments.');
     if (opts.positionals.length > 1) fail("error: --output requires a single input");
+  }
+  if (opts.stdin) {
+    if (pairs) fail('error: --stdin may not be used with ":" arguments.');
+    if (opts.positionals.length > 1) fail("error: Only one argument is allowed with --stdin.");
+  } else if (!pairs && opts.positionals.length > 2) {
+    fail("error: Only two positional args may be passed.");
+  }
+  // Source-map flags need a source map, wherever the CSS goes. (`validate`
+  // used to check only the stdout cases, so a file output accepted and then
+  // ignored them.)
+  if (opts.sourceMap === false) {
+    if (opts.embedSourceMap) fail("error: --embed-source-map isn't allowed with --no-source-map.");
+    if (opts.embedSources) fail("error: --embed-sources isn't allowed with --no-source-map.");
+    if (opts.sourceMapUrls !== undefined) fail("error: --source-map-urls isn't allowed with --no-source-map.");
+  }
+  if (opts.loop !== undefined) {
+    // --loop measures the compiler, so it compiles to stdout, once per
+    // iteration, with no source map to build and no warnings to print.
+    if (pairs || opts.output !== undefined) {
+      fail('error: --loop compiles to stdout only (no ":" arguments or --output).');
+    }
+    if (!opts.stdin && opts.positionals.length > 1) {
+      fail('error: --loop compiles to stdout only (no ":" arguments or --output).');
+    }
+    if (opts.positionals.length === 1 && !opts.stdin && isDirectory(opts.positionals[0])) {
+      fail('error: --loop compiles to stdout only (no directories, ":" arguments or --output).');
+    }
+    if (opts.sourceMap === true || opts.embedSourceMap || opts.embedSources) {
+      fail(
+        "error: --loop does not generate source maps (drop --source-map, --embed-source-map and --embed-sources).",
+      );
+    }
   }
   // A bare directory entry (`sasso src`) compiles to files, not to stdout.
   const toStdout =
@@ -257,8 +308,12 @@ function readStdin() {
  * (a custom importer's) passes through untouched. Mirrors `adjust_sources` in
  * ../../src/main.rs.
  */
-function adjustSources(sources, mapDir, mode) {
+function adjustSources(sources, mapDir, mode, stdinText) {
   return (sources || []).map((src) => {
+    // A stdin entry has no path: dart records its text as a data: URI.
+    if (src === "stdin" || src === "-") {
+      return stdinText === undefined ? src : `data:;charset=utf-8,${uricEncode(stdinText)}`;
+    }
     let path;
     try {
       path = fileURLToPath(src);
@@ -266,11 +321,33 @@ function adjustSources(sources, mapDir, mode) {
       return src;
     }
     if (mode === "absolute") return pathToFileURL(path).href;
-    return relative(mapDir, path)
-      .split(sep)
-      .map((seg) => encodeURIComponent(seg))
-      .join("/");
+    return relative(mapDir, path).split(sep).map(encodeUrlSegment).join("/");
   });
+}
+
+/**
+ * Percent-encode one URL path segment exactly like dart's `Uri`: keep the
+ * unreserved set (`A-Za-z0-9-._~`), the sub-delims (`!$&'()*+,;=`) and `@`.
+ * `encodeURIComponent` escapes the sub-delims, which would spell a source
+ * named `the+me,1.scss` differently from dart.
+ */
+function encodeUrlSegment(seg) {
+  let out = "";
+  for (const byte of new TextEncoder().encode(seg)) {
+    const c = String.fromCharCode(byte);
+    if (/[A-Za-z0-9\-._~!$&'()*+,;=@]/.test(c)) out += c;
+    else out += `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+/**
+ * Percent-encode for a data: URI the way dart's `Uri.dataFromString` does:
+ * every byte outside the URI "uric" set becomes uppercase `%XX`. `encodeURI`
+ * keeps exactly that set plus `#`, which must be encoded.
+ */
+function uricEncode(text) {
+  return encodeURI(text).replace(/#/g, "%23");
 }
 
 /**
@@ -301,8 +378,7 @@ function sourceMapFooter(css, url, style) {
 
 /** dart's inline map URI: percent-encoded JSON, not base64 (`Uri.dataFromString`). */
 function dataUri(json) {
-  // encodeURI keeps exactly dart's "uric" set plus `#`, which must be encoded.
-  return `data:application/json;charset=utf-8,${encodeURI(json).replace(/#/g, "%23")}`;
+  return `data:application/json;charset=utf-8,${uricEncode(json)}`;
 }
 
 /**
@@ -310,7 +386,7 @@ function dataUri(json) {
  * either inlined as a data: URI (`--embed-source-map`) or written as a `.map`
  * sidecar plus a footer. `--no-css` discards everything, output file included.
  */
-function emit(result, outPath, wantMap, opts) {
+function emit(result, outPath, wantMap, opts, stdinText) {
   // --no-css: the compile (and its diagnostics) was all that was wanted — no
   // stdout, no file, and an existing output is left exactly as it was.
   if (opts.noCss) return;
@@ -329,14 +405,14 @@ function emit(result, outPath, wantMap, opts) {
     // has to be resolved the same way or `/var` and `/private/var` (macOS)
     // would produce an eleven-step `../` climb instead of dart's `../in.scss`.
     const mapDir = outPath ? realPath(dirname(outPath)) : realPath(process.cwd());
-    const sources = adjustSources(result.sourceMap.sources, mapDir, mode);
-    const file = outPath ? encodeURIComponent(basename(outPath)) : undefined;
+    const sources = adjustSources(result.sourceMap.sources, mapDir, mode, stdinText);
+    const file = outPath ? encodeUrlSegment(basename(outPath)) : undefined;
     const json = mapJson(result.sourceMap, sources, file);
     if (opts.embedSourceMap || !outPath) {
       css = sourceMapFooter(body, dataUri(json), opts.style);
     } else {
       const mapPath = outPath + ".map";
-      css = sourceMapFooter(body, encodeURIComponent(basename(mapPath)), opts.style);
+      css = sourceMapFooter(body, encodeUrlSegment(basename(mapPath)), opts.style);
       writeFileSync(mapPath, json);
     }
   } else {
@@ -460,23 +536,60 @@ function isDirectory(path) {
 }
 
 /**
+ * Split one `<source>:<destination>` operand. Both sides must be non-empty and
+ * there may be exactly one separator, as the native CLI's `split_pair` (and
+ * dart, for the second rule) requires — `in.scss:out:other.css` is a mistake,
+ * not a destination named `out:other.css`.
+ */
+function splitPair(arg) {
+  const i = colonIndex(arg);
+  if (i < 0) fail(`error: expected <input>:<output>, got "${arg}"`);
+  const source = arg.slice(0, i);
+  const destination = arg.slice(i + 1);
+  if (!source || !destination) fail(`error: expected <source>:<destination>, got "${arg}"`);
+  if (colonIndex(destination) >= 0) fail(`error: "${arg}" may only contain one ":".`);
+  return { source, destination };
+}
+
+/**
+ * dart keeps its sources in a path-keyed map, so the same file named twice —
+ * two spellings of one path, or a directory pair plus an explicit pair naming
+ * a file inside it — compiles ONCE, to the destination named last. (An exact
+ * duplicate is rejected earlier, as dart does.)
+ */
+function coalesceJobs(jobs) {
+  const byKey = new Map();
+  for (const job of jobs) {
+    const key = job.input === "-" ? "-" : resolve(job.input);
+    const seen = byKey.get(key);
+    if (seen) seen.output = job.output;
+    else byKey.set(key, { ...job });
+  }
+  return [...byKey.values()];
+}
+
+/**
  * Parse positionals into `{input, output}` jobs: the `<in>:<out>` pair form, or
- * the space form (`<input> [output]`, where `-o` names the same output).
+ * the space form (`<input> [output]`, where `-o` names the same output). An
+ * input of `-` is standard input, as in dart.
  */
 function parseJobs(positionals, output) {
   if (positionals.some((p) => colonIndex(p) >= 0)) {
-    const jobs = [];
-    for (const p of positionals) {
-      const i = colonIndex(p);
-      if (i < 0) fail(`error: expected <input>:<output>, got "${p}"`);
-      const input = p.slice(0, i);
-      const output = p.slice(i + 1);
-      // A directory on the left compiles the whole tree, as dart-sass and the
-      // native CLI do.
-      if (isDirectory(input)) jobs.push(...expandDirPair(input, output));
-      else jobs.push({ input, output });
+    const pairs = positionals.map(splitPair);
+    // dart: each source appears once (`-` included) …
+    const seen = new Set();
+    for (const { source } of pairs) {
+      if (seen.has(source)) fail(`error: Duplicate source "${source}".`);
+      seen.add(source);
     }
-    return jobs;
+    // … and a directory on the left compiles the whole tree, as dart-sass and
+    // the native CLI do.
+    const jobs = [];
+    for (const { source, destination } of pairs) {
+      if (isDirectory(source)) jobs.push(...expandDirPair(source, destination));
+      else jobs.push({ input: source, output: destination });
+    }
+    return coalesceJobs(jobs);
   }
   const [input, second] = positionals;
   if (input === undefined) return [];
@@ -561,6 +674,63 @@ function runWatch(input, output, common, opts) {
   process.stderr.write("Watching for changes... (press Ctrl-C to stop)\n");
 }
 
+/**
+ * Whether this job needs a source map: on by default when writing to a file,
+ * off for stdout — and never under `--no-css`, which discards the output, so
+ * building a map for it would be paid for and thrown away (the native CLI
+ * makes the same call).
+ */
+function wantSourceMap(opts, output) {
+  if (opts.noCss) return false;
+  return opts.sourceMap === undefined ? !!output || opts.embedSourceMap : opts.sourceMap;
+}
+
+/**
+ * `--loop N`: compile the same input N times in-process and report throughput
+ * on stderr, then print the last CSS (unless `--no-css`). It measures the
+ * compiler, so warnings are silenced and no source map is built — and, as in
+ * the native CLI, it only ever compiles to stdout.
+ */
+function runLoop(opts, common) {
+  const path = opts.stdin ? undefined : opts.positionals[0];
+  // No input at all would otherwise block on a terminal's stdin.
+  if (path === undefined && !opts.stdin) {
+    fail("error: no input file (pass a path, an <in>:<out> pair, or --stdin)");
+  }
+  const fromStdin = path === undefined || path === "-";
+  const source = fromStdin ? readStdin() : undefined;
+  const options = { ...common, logger: Logger.silent, sourceMap: false };
+  let last = "";
+  const start = process.hrtime.bigint();
+  for (let i = 0; i < opts.loop; i++) {
+    try {
+      // A file keeps its own syntax (`.sass`, `.css`) and its own URL, as it
+      // would outside the loop; only stdin takes `--indented`.
+      last = fromStdin
+        ? compileString(source, { ...options, syntax: opts.indented ? "indented" : "scss" }).css
+        : compile(path, options).css;
+    } catch (e) {
+      const msg =
+        e instanceof Exception
+          ? e.message
+          : e && e.code === "ENOENT"
+            ? `Error reading ${path}: Cannot open file.`
+            : `error: ${e && e.message ? e.message : e}`;
+      fail(msg);
+    }
+  }
+  const ms = Number(process.hrtime.bigint() - start) / 1e6;
+  const per = ms / opts.loop;
+  const perSec = per > 0 ? 1000 / per : Infinity;
+  // The native CLI prints a Rust `Duration`, which picks its own unit.
+  const elapsed =
+    ms >= 1000 ? `${(ms / 1000).toFixed(3)}s` : ms >= 1 ? `${ms.toFixed(3)}ms` : `${(ms * 1000).toFixed(3)}µs`;
+  process.stderr.write(
+    `sasso: ${opts.loop} compiles in ${elapsed} => ${per.toFixed(3)} ms/compile, ${perSec.toFixed(1)} compiles/sec\n`,
+  );
+  if (!opts.noCss && last) process.stdout.write(`${last.replace(/\n?$/, "")}\n`);
+}
+
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   const common = {
@@ -568,6 +738,9 @@ function main() {
     loadPaths: opts.loadPaths,
     sourceMapIncludeSources: opts.embedSources,
     charset: opts.charset,
+    // --no-unicode is not a no-op: it selects the ASCII glyph set for every
+    // diagnostic the compiler renders (`,`/`|`/`'` for `╷`/`│`/`╵`).
+    unicode: opts.unicode,
     // The COMPILER applies --quiet-deps, from how each file was resolved: the
     // only place that knows, and early enough that a silenced warning does not
     // count toward the deprecation repetition cap either. Filtering here by
@@ -577,41 +750,66 @@ function main() {
   };
   if (opts.quiet) common.logger = Logger.silent;
 
+  // --loop: recompile in-process and report throughput, never writing a file.
+  if (opts.loop !== undefined) {
+    runLoop(opts, common);
+    return;
+  }
+
   // --stdin: a single job reading source from standard input.
   if (opts.stdin) {
     if (opts.watch) fail("error: --watch cannot be used with --stdin");
     const output = opts.output !== undefined ? opts.output : opts.positionals[0];
-    const wantMap = opts.sourceMap === undefined ? !!output || opts.embedSourceMap : opts.sourceMap;
+    const wantMap = wantSourceMap(opts, output);
+    const source = readStdin();
     let result;
     try {
-      result = compileString(readStdin(), { ...common, sourceMap: wantMap, syntax: opts.indented ? "indented" : "scss" });
+      result = compileString(source, { ...common, sourceMap: wantMap, syntax: opts.indented ? "indented" : "scss" });
     } catch (e) {
       discardStaleOutput(output, opts);
       if (e instanceof Exception) fail(e.message);
       fail(`error: ${e && e.message ? e.message : e}`);
     }
-    emit(result, output, wantMap, opts);
+    emit(result, output, wantMap, opts, source);
     return;
   }
 
   const jobs = parseJobs(opts.positionals, opts.output);
-  if (jobs.length === 0) fail("error: no input file (pass a path, or --stdin). Try --help.");
+  if (jobs.length === 0) {
+    // A directory pair that expands to nothing (an empty tree, or one holding
+    // only partials) is not an error — dart exits 0. Having no input at all is.
+    if (opts.positionals.length === 0) {
+      fail("error: no input file (pass a path, an <in>:<out> pair, or --stdin)");
+    }
+    return;
+  }
 
   if (opts.watch) {
     if (jobs.length !== 1 || !jobs[0].output) fail("error: --watch requires <input> <output>");
-    const wantMap = opts.sourceMap === undefined ? true : opts.sourceMap;
+    const wantMap = opts.noCss ? false : opts.sourceMap === undefined ? true : opts.sourceMap;
     runWatch(jobs[0].input, jobs[0].output, { ...common, sourceMap: wantMap }, opts);
     return; // keep the process alive on the watchers
   }
 
+  // Standard input is read at most once, however many jobs name it.
+  let stdinSource;
   let failed = 0;
   for (const { input, output } of jobs) {
-    const wantMap = opts.sourceMap === undefined ? !!output || opts.embedSourceMap : opts.sourceMap;
+    const wantMap = wantSourceMap(opts, output);
     // --update: leave outputs that are already newer than their input untouched.
     if (opts.update && output && isFresh(output, input)) continue;
     let result;
     try {
-      result = compile(input, { ...common, sourceMap: wantMap });
+      if (input === "-") {
+        if (stdinSource === undefined) stdinSource = readStdin();
+        result = compileString(stdinSource, {
+          ...common,
+          sourceMap: wantMap,
+          syntax: opts.indented ? "indented" : "scss",
+        });
+      } else {
+        result = compile(input, { ...common, sourceMap: wantMap });
+      }
     } catch (e) {
       // With several jobs dart keeps going unless --stop-on-error, and exits
       // non-zero at the end; `fail` would stop at the first one.
@@ -619,7 +817,7 @@ function main() {
         e instanceof Exception
           ? e.message
           : e && e.code === "ENOENT"
-            ? `error: cannot read "${input}": no such file`
+            ? `Error reading ${input}: Cannot open file.`
             : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(String(msg).replace(/\n?$/, "\n"));
       failed++;
@@ -629,7 +827,7 @@ function main() {
       if (opts.stopOnError || jobs.length === 1) process.exit(1);
       continue;
     }
-    emit(result, output, wantMap, opts);
+    emit(result, output, wantMap, opts, input === "-" ? stdinSource : undefined);
   }
   if (failed > 0) process.exit(1);
 }

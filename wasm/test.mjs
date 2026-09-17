@@ -427,7 +427,8 @@ let cliErr = false;
 try { cli(["--stdin"], ".a{color:}\n"); } catch { cliErr = true; }
 assert.ok(cliErr, "cli: a Sass error exits non-zero");
 let cliMissing = false;
-try { cli(["/no/such/file.scss"]); } catch (e) { cliMissing = /no such file/.test(String(e.stderr || "")); }
+// The native CLI's wording, verbatim: one CLI in two implementations.
+try { cli(["/no/such/file.scss"]); } catch (e) { cliMissing = /Error reading \/no\/such\/file\.scss: Cannot open file\./.test(String(e.stderr || "")); }
 assert.ok(cliMissing, "cli: a missing input file errors cleanly");
 
 // CLI polish flags: --embed-source-map / --quiet / multiple input:output / --update
@@ -763,6 +764,148 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     "cli: a file loaded relatively is not a dependency, wherever it lives",
   );
   console.log("ok: cli — --quiet-deps by provenance (load path vs relative), @warn kept");
+}
+
+// === Phase 3h: the argument grammar the native CLI enforces ===
+// Accepting a flag is not implementing it, and accepting an ARGUMENT SHAPE the
+// native CLI rejects is its own kind of drift: the same command line then means
+// different things depending on which sasso is installed. Every message below
+// is the native CLI's, and all but the empty-pair sides are dart-sass 1.104.1's
+// own wording (measured 2026-09-17; dart answers an empty side with an I/O
+// error instead, which the native CLI deliberately improves on).
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-args-"));
+  mkdirSync(join(dir, "src"), { recursive: true });
+  mkdirSync(join(dir, "empty"), { recursive: true });
+  mkdirSync(join(dir, "partials"), { recursive: true });
+  const src = join(dir, "in.scss");
+  writeFileSync(src, ".a{b:1}\n");
+  writeFileSync(join(dir, "src", "a.scss"), ".x{y:2}\n");
+  writeFileSync(join(dir, "partials", "_p.scss"), ".p{q:3}\n");
+  const run = (args, input) => spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { encoding: "utf8", input, cwd: dir });
+  const rejects = (args, wanted) => {
+    const r = run(args);
+    assert.equal(r.status, 1, `cli: ${args.join(" ")} is rejected`);
+    assert.ok(r.stderr.includes(wanted), `cli: ${args.join(" ")} says "${wanted}" (got: ${r.stderr.split("\n")[0]})`);
+  };
+
+  rejects(["in.scss", "a.css", "b.css"], "Only two positional args may be passed.");
+  rejects(["--stdin", "a.css", "b.css"], "Only one argument is allowed with --stdin.");
+  rejects([":out.css"], "expected <source>:<destination>");
+  rejects(["in.scss:"], "expected <source>:<destination>");
+  rejects(["in.scss:out:other.css"], 'may only contain one ":".');
+  rejects(["in.scss:one.css", "in.scss:two.css"], 'Duplicate source "in.scss".');
+  rejects(["--no-source-map", "--embed-sources", "in.scss", "out.css"], "--embed-sources isn't allowed with --no-source-map.");
+  rejects(["--no-source-map", "--embed-source-map", "in.scss", "out.css"], "--embed-source-map isn't allowed with --no-source-map.");
+  rejects(["--no-source-map", "--source-map-urls=absolute", "in.scss", "out.css"], "--source-map-urls isn't allowed with --no-source-map.");
+  rejects(["--jobs", "0"], "--jobs expects a positive integer");
+  rejects(["--loop", "nope"], "--loop expects a positive integer");
+
+  // The same file named by a directory pair AND an explicit pair compiles once,
+  // to the destination named last — dart keeps its sources in a path-keyed map.
+  // (Spellings are compared lexically against the cwd, as the native CLI does,
+  // so these stay relative: on macOS an absolute /var path and the cwd's
+  // /private/var realpath are two different keys, there as here.)
+  const both = run(["src:out", "src/a.scss:elsewhere.css"]);
+  assert.equal(both.status, 0, `cli: a directory pair plus an explicit pair compiles (stderr: ${both.stderr})`);
+  assert.ok(existsSync(join(dir, "elsewhere.css")), "cli: the LAST destination wins");
+  assert.ok(!existsSync(join(dir, "out", "a.css")), "cli: the earlier destination is not written too");
+  // Two spellings of one path are one source (and not a "duplicate" either).
+  const spellings = run(["src/a.scss:first.css", "./src/a.scss:second.css"]);
+  assert.equal(spellings.status, 0, `cli: two spellings of one source compile (stderr: ${spellings.stderr})`);
+  assert.ok(!existsSync(join(dir, "first.css")), "cli: two spellings coalesce …");
+  assert.ok(existsSync(join(dir, "second.css")), "cli: … to the later destination");
+
+  // A directory that expands to nothing is not an error (dart exits 0); no
+  // input at all still is.
+  assert.equal(run([`empty:${join(dir, "e1")}`]).status, 0, "cli: an empty directory pair succeeds");
+  assert.equal(run([`partials:${join(dir, "e2")}`]).status, 0, "cli: a directory of only partials succeeds");
+  const noInput = run([]);
+  assert.equal(noInput.status, 1, "cli: no input at all is an error");
+  assert.match(noInput.stderr, /no input file/, "cli: and says so");
+
+  // `-` is standard input, in both the positional and the pair form.
+  assert.match(run(["-"], ".s{t:1}\n").stdout, /\.s/, "cli: `-` reads standard input");
+  const pairDash = run([`-:${join(dir, "dash.css")}`], ".u{v:2}\n");
+  assert.equal(pairDash.status, 0, `cli: \`-\` as a pair source (stderr: ${pairDash.stderr})`);
+  assert.match(readFileSync(join(dir, "dash.css"), "utf8"), /\.u/, "cli: and writes its output");
+  console.log("ok: cli — the argument grammar: arity, pairs, duplicates, `-`, empty trees");
+}
+
+// === Phase 3i: --no-unicode, dart's URL encoding, the stdin data: URI ===
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-diag-"));
+  mkdirSync(join(dir, "sub"), { recursive: true });
+  const dep = join(dir, "dep.scss");
+  writeFileSync(dep, ".d{color: lighten(#036, 10%)}\n");
+  const glyphs = (args) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args, dep], { encoding: "utf8" }).stderr;
+  assert.match(glyphs([]), /╷/, "cli: diagnostics use the Unicode gutter by default");
+  const ascii = glyphs(["--no-unicode"]);
+  assert.ok(!/[╷│╵]/.test(ascii), "cli: --no-unicode renders the ASCII glyph set");
+  assert.match(ascii, /^\s*,$/m, "cli: … which opens the snippet with a comma, as dart does");
+
+  // dart's URL encoder keeps the sub-delims `!$&'()*+,;=@`; encodeURIComponent
+  // escapes `+` and `,`, which would spell these sources differently.
+  writeFileSync(join(dir, "sub", "_the+me,1.scss"), ".x{y:2}\n");
+  writeFileSync(join(dir, "ent.scss"), '@use "sub/the+me,1" as t;\n.e{a:1}\n');
+  const out = join(dir, "out", "a+b,c.css");
+  cli([join(dir, "ent.scss"), out]);
+  const map = JSON.parse(readFileSync(out + ".map", "utf8"));
+  assert.ok(
+    map.sources.includes("../sub/_the+me,1.scss"),
+    `cli: a source's sub-delims survive the map (got ${JSON.stringify(map.sources)})`,
+  );
+  assert.equal(map.file, "a+b,c.css", "cli: and so do the output's");
+  assert.ok(
+    readFileSync(out, "utf8").includes("sourceMappingURL=a+b,c.css.map"),
+    "cli: and the footer's",
+  );
+
+  // A stdin entry has no path: dart records its TEXT as a data: URI.
+  const stdinOut = join(dir, "stdin.css");
+  spawnSync(process.execPath, [cliPath, "--stdin", stdinOut], { encoding: "utf8", input: ".a{b:1}\n" });
+  const stdinMap = JSON.parse(readFileSync(stdinOut + ".map", "utf8"));
+  assert.deepEqual(
+    stdinMap.sources,
+    ["data:;charset=utf-8,.a%7Bb:1%7D%0A"],
+    "cli: a --stdin map names its source by the text, as dart does",
+  );
+
+  // --no-css builds no map for an output it is about to discard, and writes
+  // neither the CSS nor the sidecar.
+  const discarded = join(dir, "none.css");
+  const nocss = spawnSync(process.execPath, [cliPath, "--no-css", "--source-map", join(dir, "ent.scss"), discarded], {
+    encoding: "utf8",
+  });
+  assert.equal(nocss.status, 0, `cli: --no-css --source-map compiles (stderr: ${nocss.stderr})`);
+  assert.ok(!existsSync(discarded) && !existsSync(discarded + ".map"), "cli: --no-css writes neither CSS nor map");
+  console.log("ok: cli — --no-unicode, dart's URL encoding, the stdin data: URI");
+}
+
+// === Phase 3j: --loop measures the compiler, on stdout only ===
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-loop-"));
+  const src = join(dir, "in.scss");
+  writeFileSync(src, '@warn "quiet me";\n.a{b: 1 + 1}\n');
+  const looped = spawnSync(process.execPath, [cliPath, "--loop", "3", src], { encoding: "utf8" });
+  assert.equal(looped.status, 0, `cli: --loop compiles (stderr: ${looped.stderr})`);
+  assert.match(looped.stdout, /b: 2/, "cli: --loop prints the last CSS");
+  assert.match(looped.stderr, /sasso: 3 compiles in .* ms\/compile, .* compiles\/sec/, "cli: --loop reports throughput");
+  assert.ok(!looped.stderr.includes("quiet me"), "cli: --loop silences warnings (it is measuring the compiler)");
+  const quietLoop = spawnSync(process.execPath, [cliPath, "--loop", "2", "--no-css", src], { encoding: "utf8" });
+  assert.equal(quietLoop.stdout, "", "cli: --loop --no-css prints no CSS");
+  assert.match(quietLoop.stderr, /2 compiles/, "cli: … but still reports throughput");
+  for (const [args, wanted] of [
+    [[`${src}:${join(dir, "out.css")}`], "--loop compiles to stdout only"],
+    [["-o", join(dir, "out.css"), src], "--loop compiles to stdout only"],
+    [["--source-map", src], "--loop does not generate source maps"],
+  ]) {
+    const r = spawnSync(process.execPath, [cliPath, "--loop", "2", ...args], { encoding: "utf8" });
+    assert.equal(r.status, 1, `cli: --loop ${args.join(" ")} is rejected`);
+    assert.ok(r.stderr.includes(wanted), `cli: --loop ${args.join(" ")} says "${wanted}"`);
+  }
+  console.log("ok: cli — --loop: throughput, silence, stdout only");
 }
 
 // === The `quietDeps` option, on the JS API and on both engines ===
