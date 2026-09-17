@@ -18,13 +18,10 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-// Default import, NOT a named one: `availableParallelism` only exists on
-// Node >= 18.14, and a missing named export fails ESM *linking* — this file is
-// the package's `bin`, so the CLI would not start at all on an older Node,
-// before any fallback could run. (`_loader.mjs` carries the same note for the
-// library entries.)
-import os from "node:os";
 import { isMainThread, workerData, parentPort, Worker } from "node:worker_threads";
+// The pool's default size — physical cores, not SMT threads. See _jobs.mjs for
+// the measurement behind that.
+import { defaultJobs } from "./_jobs.mjs";
 
 /**
  * The engine, chosen at startup rather than imported statically.
@@ -1041,7 +1038,7 @@ async function main() {
  * and an order needs a sequence.
  */
 async function runJobs(jobs, opts, common) {
-  const wanted = opts.jobs ?? (os.availableParallelism ? os.availableParallelism() : os.cpus().length);
+  const wanted = opts.jobs ?? defaultJobs();
   // Standard input is read ONCE, here, and handed to whoever needs it — as
   // SHARED bytes, because `workerData` copies what it carries and only the one
   // worker that claims the `-` job ever reads them. (It used to force the whole

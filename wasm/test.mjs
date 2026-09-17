@@ -1380,6 +1380,67 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // The pool's default size is PHYSICAL cores, not SMT threads: a compile is
+  // pure computation, so two hyperthreads on one core contend for the same
+  // execution units instead of overlapping stalls. Measured on a Ryzen 7
+  // 8745HS (8 cores / 16 threads), 138 Lichess stylesheets: `-j 8` beat
+  // `-j 16` by 16% here and 13% through the native binary, and the default
+  // taking the core count moved that corpus from 451 ms to 342 ms.
+  //
+  // The host's own topology cannot be asserted, so the detector is fed
+  // synthetic `/proc/cpuinfo` text instead — the shapes that matter are an SMT
+  // machine, a dual-socket one (where `core id` repeats per socket), and the
+  // containers that publish no topology at all.
+  {
+    const jobs = await import("./npm/_jobs.mjs");
+    const logical = jobs.logicalCpus();
+
+    const smt = Array.from({ length: 8 }, (_v, i) =>
+      `processor\t: ${i}\nphysical id\t: 0\ncore id\t: ${i >> 1}\n`,
+    ).join("\n");
+    assert.equal(jobs.physicalCoresFromCpuinfo(smt), 4, "cli: 8 threads on 4 cores reads as 4");
+
+    // Two sockets, four cores each: `core id` 0-3 appears twice and must not
+    // collapse into four.
+    const dual = [];
+    for (const pkg of [0, 1]) {
+      for (let c = 0; c < 4; c++) dual.push(`processor\t: ${pkg * 4 + c}\nphysical id\t: ${pkg}\ncore id\t: ${c}\n`);
+    }
+    assert.equal(jobs.physicalCoresFromCpuinfo(dual.join("\n")), 8, "cli: two sockets of 4 read as 8, not 4");
+
+    assert.equal(
+      jobs.physicalCoresFromCpuinfo("processor\t: 0\nmodel name\t: Whatever\n"),
+      undefined,
+      "cli: no topology reported means no answer, not zero",
+    );
+
+    // …and the default that is built on it.
+    const readFake = (text) => () => text;
+    assert.equal(
+      jobs.defaultJobs({ platform: "linux", readCpuinfo: readFake(smt) }),
+      Math.min(4, logical),
+      "cli: on Linux the default is the core count",
+    );
+    assert.equal(
+      jobs.defaultJobs({ platform: "linux", readCpuinfo: () => undefined }),
+      logical,
+      "cli: an unreadable /proc/cpuinfo falls back to the kernel's count",
+    );
+    assert.equal(
+      jobs.defaultJobs({ platform: "darwin", readCpuinfo: readFake(smt) }),
+      logical,
+      "cli: off Linux the logical count stands — Apple silicon has no SMT",
+    );
+    // A cgroup- or taskset-restricted process sees fewer CPUs than the machine
+    // has cores; the smaller number has to win.
+    const many = Array.from({ length: 512 }, (_v, i) => `physical id\t: 0\ncore id\t: ${i}\n`).join("\n");
+    assert.equal(
+      jobs.defaultJobs({ platform: "linux", readCpuinfo: readFake(many) }),
+      logical,
+      "cli: never more workers than the kernel offers this process",
+    );
+  }
+
   // Each job must run EXACTLY once. Correct output does not prove that — a pool
   // where every worker walks the whole list from 0 produces the same files,
   // just N times over — so make the repetition audible: one `@warn` per
