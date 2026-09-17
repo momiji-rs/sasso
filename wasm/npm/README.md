@@ -180,8 +180,9 @@ export default { css: { preprocessorOptions: { scss: {} } } };
 
 ## CLI — `npx sasso`
 
-The package ships a `sasso` bin (pure Node + wasm), with a subset of the
-dart-sass `sass` CLI flags:
+The package ships a `sasso` bin — pure Node, no dependencies of its own,
+compiling through the native addon when the platform package is installed and
+the wasm build otherwise — with a subset of the dart-sass `sass` CLI flags:
 
 ```bash
 npx sasso input.scss                      # compile to stdout

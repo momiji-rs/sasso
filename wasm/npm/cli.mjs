@@ -259,8 +259,9 @@ function parseArgs(argv) {
     } else if (a === "--no-charset") {
       opts.charset = false;
       // Accepted for dart-sass compatibility. `--error-css` is a real dart
-      // feature this CLI does not implement (see HELP); `--color` is a no-op in
-      // the native CLI too, and `--jobs` has no meaning without parallelism.
+      // feature this CLI does not implement (see HELP), and `--color` is a
+      // no-op in the native CLI too. (`--jobs` is no longer in this company:
+      // it caps the worker pool — see `runJobs`.)
     } else if (a === "--error-css" || a === "--no-error-css") {
       // no-op: a failing compile always behaves as --no-error-css here
     } else if (a === "-c" || a === "--color" || a === "--no-color") {
