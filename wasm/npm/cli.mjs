@@ -1104,7 +1104,7 @@ function compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics) {
       // Re-check AFTER claiming: between the check above and this claim
       // another worker can fail, and starting this job then would be exactly
       // what --stop-on-error forbids. (The native scheduler re-checks in the
-      // same place — src/main.rs:946.)
+      // same place, after its own `next.fetch_add` in ../../src/main.rs.)
       if (Atomics.load(ctl, 1)) break;
     } else {
       i = next++;
