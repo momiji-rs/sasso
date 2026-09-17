@@ -17,6 +17,19 @@ Conformance is tracked separately as a ratchet against the official
 > burned three minors that the crate never spent. From 0.14.0 the two lines
 > carry the same number; `release-wasm.yml` enforces it and explains the rest.
 
+### Fixed
+
+- **An attribute selector's value is decoded and re-quoted, not echoed.** The
+  value between the quotes was copied through verbatim and wrapped in double
+  quotes, so a single-quoted value containing a `"` produced invalid CSS:
+  `[a='b"c']` came out `[a="b"c"]`, which a browser reads as `[a="b"` followed
+  by garbage, silently dropping the rule. dart decodes the escapes and
+  re-serializes — an identifier loses its quotes, everything else takes
+  whichever quote needs fewer escapes — so `[a='b"c']` is `[a='b"c']`,
+  `[a="b\"c"]` is `[a='b"c']`, `[a='b"c\'d']` is `[a="b\"c'd"]`, and
+  `[a="-leading"]` is `[a=-leading]`. Hex escapes decode too, delimiter
+  whitespace and all (`[a="\61 bc"]` is `[a=abc]`) (#61).
+
 ## [0.10.0] - 2026-09-17
 
 _A dart-sass-compatible CLI, alignment with dart-sass 1.104.1, and the
