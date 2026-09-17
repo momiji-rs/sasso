@@ -11,6 +11,28 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-17
+
+_The release that makes `npm install sasso` as fast as the binary the release
+notes describe, and puts sasso on Nix. The npm CLI had been compiling one file
+at a time through the size-optimised wasm build while the native addon it had
+already downloaded sat unused — 2340 ms for a tree the binary does in 143 ms.
+It is 228 ms now. `nix run github:momiji-rs/sasso` works, which is what #24's
+NixOS maintainer asked for. Five more rounds of allocation work ride along._
+
+### Added
+
+- **A Nix flake: the `sasso` CLI and the C ABI** (#82, #90). `nix run
+  github:momiji-rs/sasso -- --version` works the moment this tag exists, with
+  no nixpkgs review to wait for. `nix/ffi.nix` packages the C ABI the way a
+  consumer needs it — `libsasso.{so,dylib}`, `libsasso.a`, `sasso.h` and a
+  pkg-config file — and both derivations read their version from the
+  `Cargo.toml` they are built from, so a release bumps one number and the flake
+  follows. `nix flake check` builds three derivations, and because the sandbox
+  has no network it runs all 15 suites rather than merely compiling; a `nix
+  flake` CI job runs them on ubuntu and macos so the packaging cannot rot
+  silently between releases.
+
 ### Changed
 
 - **The npm CLI uses the native addon when it is installed, and compiles files
@@ -82,6 +104,41 @@ Conformance is tracked separately as a ratchet against the official
   the compiler before parsing arguments, so `SASSO_ENGINE=native sasso
   --version` on a machine without the addon answered with the addon error
   instead of the version.
+
+- **A trace-frame test no longer depends on where the build tree sits.**
+  `module_callables_know_whether_they_are_a_mixin` asserted on the whitespace
+  padding of a stack frame, which varies with the scratch tree's path relative
+  to the working directory — so the suite failed inside a build sandbox (Nix
+  builds in `/build/source` with `$TMPDIR=/build`) while passing everywhere
+  else. Nothing about sasso's behaviour differed; a test's assumption did.
+  Downstream packagers can build this tag without carrying a patch.
+
+### Performance
+
+- **Five more rounds of allocation work in the evaluator** (#81, #88, #89, #92,
+  #93), each verifying the sass-spec ratchet at delta +0 (14,107 passing
+  throughout). Continuing the campaign the four rounds in 0.14.0 began, and
+  measured the same way — instructions retired on
+  `bench/corpus/generated/large.scss`, which is the corpus every round reports:
+
+  | | change | instructions | allocations |
+  |---|---|---|---|
+  | #81 | a block gets `@function`/`@mixin` frames only when a declaration lands in one or a closure captures the chain, instead of ~14,400 empty tables per compile | 126.330M → 124.843M (-1.176%) | 275,297 → 260,895 (-5.23%) |
+  | #88 | a built-in call stops collecting argument spans nothing will read (source maps are off by default) and stops cloning a module's name on every `ns.member()` | 124.843M → 122.939M (-1.525%) | 260,895 → 244,093 (-6.44%) |
+  | #89 | the nested-selector resolver borrows segments instead of copying every character into a `Vec<String>`, and a comma-free selector skips the row-of-rows scaffolding | 122.939M → 117.993M (-4.023%) | 244,093 → 212,093 (-13.11%) |
+  | #92 | a number's unit is an `Rc<str>` shared on clone and interned per file, so cloning a `Number` is a refcount bump | 117.993M → 113.883M (-3.483%) | 212,093 → 181,630 (-14.36%) |
+  | #93 | an interpolation template hands back its literal text instead of rebuilding it, and a literal selector borrows the AST's text | 113.883M → 109.616M (-3.747%) | 181,630 → 155,656 (-14.30%) |
+
+  End to end that is **126.330M → 109.616M instructions (-13.2%)** and
+  **275,297 → 155,656 allocations (-43.5%)** on that corpus. (Those two totals
+  are arithmetic on the endpoints above; each round reports only its own pair.)
+
+  Where a round lands depends on what a sheet does, and the spread is the point:
+  #89 takes a deeply nested sheet -10.417% on its own, #92 takes a unit-heavy
+  one -7.039% and a namespaced-call one -6.506%, #93 takes those two -4.780%
+  and -4.494%. `extend_heavy.scss` moves least in every round (-0.013% to
+  -0.149%), which is the expected shape: it spends its time in `@extend`, not
+  in the paths these rounds touch.
 
 ## [0.14.0] - 2026-09-17
 
@@ -1471,7 +1528,8 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/momiji-rs/sasso/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/momiji-rs/sasso/compare/v0.10.0...v0.14.0
 [0.10.0]: https://github.com/momiji-rs/sasso/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/momiji-rs/sasso/compare/v0.9.0...v0.9.1

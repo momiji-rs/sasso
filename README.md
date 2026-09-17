@@ -288,16 +288,22 @@ allocation trimming — skipping the per-rule selector clone when nothing extend
 it, iterating `@each` over the list's shared handle, and dropping redundant
 per-declaration copies — shaves a further ~2.8% off pure compile on
 representative stylesheets (measured by instructions-retired, since the win is
-below wall-clock jitter at this ms scale; byte-identical output). Three further
-rounds — a rule's selector list resolved once and shared, carried into the
-output tree rather than re-materialised, and the selector scanners reading from
-an inline character buffer — take that campaign to **-5.61% instructions and
--27.1% allocations** on the large corpus, each verifying the sass-spec ratchet
-at delta +0; the per-round table is in the
-[0.14.0 changelog entry](CHANGELOG.md#0140---2026-09-17). Full three-way
+below wall-clock jitter at this ms scale; byte-identical output). Eight further
+rounds carry that campaign on — a rule's selector list resolved once and shared,
+carried into the output tree rather than re-materialised, the selector scanners
+reading from an inline character buffer, `@function` and
+`@mixin` frames built only where something lands in them, a built-in call that
+stops collecting argument spans nothing will read, a nested selector resolved
+without the throwaway scaffolding, a number's unit shared rather than copied,
+and a template's literal text handed back rather than rebuilt. On the large
+corpus that is **133.840M → 109.616M instructions and 377,761 → 155,656
+allocations** — -18.1% and -58.8%, arithmetic on the endpoints each round
+reports — every round verifying the sass-spec ratchet at delta +0. The
+per-round tables are in the [0.14.0](CHANGELOG.md#0140---2026-09-17) and
+[0.15.0](CHANGELOG.md#0150---2026-09-17) changelog entries. Full three-way
 methodology, per-file numbers and the correctness diff are in
 [`bench/three_way.md`](bench/three_way.md) — which reports through the earlier
-−27% round, not these four; run it yourself with
+−27% round and none of the allocation campaign above; run it yourself with
 `cd bench && RUNS=12 WARMUP=3 LOOP_N=200 bash scripts/run_bench.sh`.
 
 ## WebAssembly
