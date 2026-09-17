@@ -9,7 +9,7 @@
 // asyncify refactors must preserve (docs/HANDOFF_ASYNC_IMPORTER_PERF.md).
 // Run after build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, existsSync, statSync, symlinkSync, rmSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, existsSync, statSync, symlinkSync, rmSync, openSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -1180,6 +1180,35 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // The help prints the negatable spelling, `--[no-]stop-on-error` — the
     // bare flag name matches nothing (this assertion caught itself).
     assert.match(h.stdout, /--\[no-\]stop-on-error/, "cli: … and it is the real help text");
+  }
+
+  // With no output file the CSS goes to the terminal the warnings are on, so
+  // the order between them is what the user sees under `2>&1`: dart and the
+  // native binary both print the warning during the compile, ahead of the CSS
+  // (measured 2026-09-17). Buffering a job's diagnostics must not reverse it.
+  //
+  // Both streams go to ONE file descriptor — the same thing `2>&1` does — so
+  // this reads the real interleaving. Reading two pipes and concatenating them
+  // would order the streams by hand and could never fail.
+  {
+    const sodir = join(dir, "stdout-order");
+    mkdirSync(sodir, { recursive: true });
+    const src = join(sodir, "warns.scss");
+    writeFileSync(src, `@warn "before-the-css";\n.a{x:1}\n`);
+    const merged = join(sodir, "merged.log");
+    const fd = openSync(merged, "w");
+    const r = spawnSync(process.execPath, [cliPath, "--style=compressed", "--no-source-map", src], {
+      stdio: ["ignore", fd, fd],
+      timeout: 20000,
+    });
+    closeSync(fd);
+    const text = readFileSync(merged, "utf8");
+    assert.equal(r.status, 0, `cli: a stdout job with a warning (output: ${text})`);
+    assert.ok(text.includes("before-the-css") && text.includes(".a{x:1}"), `cli: both reached the terminal (${text})`);
+    assert.ok(
+      text.indexOf("before-the-css") < text.indexOf(".a{x:1}"),
+      `cli: a stdout job's warning is written before its CSS (got: ${text})`,
+    );
   }
 
   // Each job must run EXACTLY once. Correct output does not prove that — a pool

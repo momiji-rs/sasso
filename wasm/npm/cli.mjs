@@ -1233,6 +1233,20 @@ function compileSlice(jobs, opts, common, ctl, stdinSource, diagnostics) {
       }
       continue;
     }
+    // A job with no output file writes its CSS to the terminal the diagnostics
+    // are already on, so buffering reverses what the user sees: dart, the
+    // native binary and this CLI before the pool all print the warning during
+    // the compile, ahead of the CSS. Flush this job's block before `emit`
+    // rather than after it. (`parseJobs` only makes an output-less job from a
+    // lone positional, so such a job is always the whole batch — there is no
+    // other job's block it could jump ahead of.)
+    if (output === undefined) {
+      const pending = diagnostics.get(i);
+      if (pending) {
+        process.stderr.write(pending);
+        diagnostics.delete(i);
+      }
+    }
     const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource : undefined);
     if (writeError) {
       note(i, `${writeError}\n`);
