@@ -217,10 +217,17 @@ function parseArgs(argv) {
   return opts;
 }
 
-/** A positive integer, or the native CLI's rejection of what was passed. */
+/**
+ * A positive integer, or the native CLI's rejection of what was passed. The
+ * token itself has to be a decimal integer, as Rust's `parse::<u32>` requires:
+ * `Number()` would take `1.0`, `1e3`, `0x2` and whitespace-padded values that
+ * the native CLI refuses (`+3` and `03` it accepts, and so does this).
+ */
 function positiveInt(flag, value) {
-  const n = Number(value);
-  if (!Number.isInteger(n) || n < 1) fail(`error: ${flag} expects a positive integer (got ${JSON.stringify(value)})`);
+  const n = /^\+?[0-9]+$/.test(value) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
+    fail(`error: ${flag} expects a positive integer (got ${JSON.stringify(value)})`);
+  }
   return n;
 }
 
@@ -242,6 +249,16 @@ function validate(opts) {
     if (opts.positionals.length > 1) fail("error: Only one argument is allowed with --stdin.");
   } else if (!pairs && opts.positionals.length > 2) {
     fail("error: Only two positional args may be passed.");
+  }
+  // A directory may not be the OUTPUT, however it was named — `--output`, the
+  // second positional, or the one positional `--stdin` takes. (The `--stdin`
+  // path does not go through `parseJobs`, so checking there alone left it to
+  // fail as an uncaught EISDIR from `writeFileSync`.)
+  if (!pairs) {
+    const named = opts.output !== undefined ? opts.output : opts.positionals[opts.stdin ? 0 : 1];
+    if (named !== undefined && isDirectory(named)) {
+      fail(`error: Directory "${named}" may not be a positional arg.`);
+    }
   }
   // Source-map flags need a source map, wherever the CSS goes. (`validate`
   // used to check only the stdout cases, so a file output accepted and then
@@ -387,13 +404,31 @@ function dataUri(json) {
  * sidecar plus a footer. `--no-css` discards everything, output file included.
  */
 function emit(result, outPath, wantMap, opts, stdinText) {
+  // Writing can fail for reasons the compile cannot see — a destination that
+  // is a directory, a read-only tree, a full disk. The native CLI reports
+  // `cannot write <path>: …` and moves on to the next job rather than dying
+  // mid-batch, so this returns the message instead of throwing.
+  const write = (path, data) => {
+    try {
+      writeFileSync(path, data);
+      return undefined;
+    } catch (e) {
+      return `error: cannot write ${path}: ${e && e.message ? e.message : e}`;
+    }
+  };
   // --no-css: the compile (and its diagnostics) was all that was wanted — no
   // stdout, no file, and an existing output is left exactly as it was.
   if (opts.noCss) return;
   // A `<dir>:<dir>` job writes into a tree that may not exist yet, and the map
   // goes in before the CSS (dart's order: nothing should point at a map that
   // failed to write), so the directory has to exist before either.
-  if (outPath) mkdirSync(dirname(outPath), { recursive: true });
+  if (outPath) {
+    try {
+      mkdirSync(dirname(outPath), { recursive: true });
+    } catch (e) {
+      return `error: cannot write ${outPath}: ${e && e.message ? e.message : e}`;
+    }
+  }
   const body = result.css.replace(/\n?$/, "");
   let css;
   if (wantMap && result.sourceMap) {
@@ -413,15 +448,17 @@ function emit(result, outPath, wantMap, opts, stdinText) {
     } else {
       const mapPath = outPath + ".map";
       css = sourceMapFooter(body, encodeUrlSegment(basename(mapPath)), opts.style);
-      writeFileSync(mapPath, json);
+      const mapError = write(mapPath, json);
+      if (mapError) return mapError;
     }
   } else {
     // dart terminates a CSS FILE with exactly one newline, an empty stylesheet
     // included; only stdout gets nothing for empty output.
     css = outPath || body ? `${body}\n` : "";
   }
-  if (outPath) writeFileSync(outPath, css);
-  else process.stdout.write(css);
+  if (outPath) return write(outPath, css);
+  process.stdout.write(css);
+  return undefined;
 }
 
 /**
@@ -600,9 +637,6 @@ function parseJobs(positionals, output) {
     if (out !== undefined) fail(`error: Directory "${input}" may not be a positional arg.`);
     return expandDirPair(input, input);
   }
-  if (out !== undefined && isDirectory(out)) {
-    fail(`error: Directory "${out}" may not be a positional arg.`);
-  }
   return [{ input, output: out }];
 }
 /** `--update`: true when `output` already exists and is newer than `input`. */
@@ -654,8 +688,9 @@ function runWatch(input, output, common, opts) {
       // watchers are guaranteed live (a change saved right after the output
       // appears must not fall between emit and watcher registration).
       rewatch(result.loadedUrls);
-      emit(result, output, common.sourceMap, opts);
-      if (!opts.noCss) process.stderr.write(`Compiled ${input} to ${output}.\n`);
+      const writeError = emit(result, output, common.sourceMap, opts);
+      if (writeError) process.stderr.write(`${writeError}\n`);
+      else if (!opts.noCss) process.stderr.write(`Compiled ${input} to ${output}.\n`);
     } catch (e) {
       const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(msg.replace(/\n?$/, "\n"));
@@ -770,7 +805,8 @@ function main() {
       if (e instanceof Exception) fail(e.message);
       fail(`error: ${e && e.message ? e.message : e}`);
     }
-    emit(result, output, wantMap, opts, source);
+    const writeError = emit(result, output, wantMap, opts, source);
+    if (writeError) fail(writeError);
     return;
   }
 
@@ -827,7 +863,12 @@ function main() {
       if (opts.stopOnError || jobs.length === 1) process.exit(1);
       continue;
     }
-    emit(result, output, wantMap, opts, input === "-" ? stdinSource : undefined);
+    const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource : undefined);
+    if (writeError) {
+      process.stderr.write(`${writeError}\n`);
+      failed++;
+      if (opts.stopOnError) process.exit(1);
+    }
   }
   if (failed > 0) process.exit(1);
 }

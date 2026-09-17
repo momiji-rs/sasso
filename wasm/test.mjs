@@ -782,7 +782,8 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   writeFileSync(src, ".a{b:1}\n");
   writeFileSync(join(dir, "src", "a.scss"), ".x{y:2}\n");
   writeFileSync(join(dir, "partials", "_p.scss"), ".p{q:3}\n");
-  const run = (args, input) => spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { encoding: "utf8", input, cwd: dir });
+  const run = (args, input) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { encoding: "utf8", input: input ?? "", cwd: dir });
   const rejects = (args, wanted) => {
     const r = run(args);
     assert.equal(r.status, 1, `cli: ${args.join(" ")} is rejected`);
@@ -829,7 +830,34 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const pairDash = run([`-:${join(dir, "dash.css")}`], ".u{v:2}\n");
   assert.equal(pairDash.status, 0, `cli: \`-\` as a pair source (stderr: ${pairDash.stderr})`);
   assert.match(readFileSync(join(dir, "dash.css"), "utf8"), /\.u/, "cli: and writes its output");
-  console.log("ok: cli — the argument grammar: arity, pairs, duplicates, `-`, empty trees");
+  // A count is a decimal integer TOKEN, not whatever `Number()` will coerce:
+  // the native CLI parses it as Rust does, taking `+3` and `03` but refusing
+  // `1.0`, `1e3`, `0x2` and anything padded with spaces.
+  for (const flag of ["--jobs", "--loop"]) {
+    for (const value of ["1.0", "1e3", "0x2", " 3", "3 ", "2_0", "-1", ""]) {
+      rejects([`${flag}=${value}`, "in.scss"], `${flag} expects a positive integer`);
+    }
+    for (const value of ["+3", "03"]) {
+      const r = run([`${flag}=${value}`, "in.scss"]);
+      assert.equal(r.status, 0, `cli: ${flag}=${value} is accepted, as Rust's parse is (stderr: ${r.stderr})`);
+    }
+  }
+
+  // A DIRECTORY may not be the output, however it is named. The --stdin path
+  // does not go through parseJobs, and used to die with an uncaught EISDIR.
+  mkdirSync(join(dir, "adir"), { recursive: true });
+  rejects(["in.scss", "adir"], 'Directory "adir" may not be a positional arg.');
+  rejects(["-o", "adir", "in.scss"], 'Directory "adir" may not be a positional arg.');
+  const stdinDir = run(["--stdin", "adir"], ".a{b:1}\n");
+  assert.equal(stdinDir.status, 1, "cli: --stdin with a directory output is rejected");
+  assert.match(stdinDir.stderr, /may not be a positional arg\./, "cli: … with the native CLI's message");
+  // A pair destination that is a directory only fails on the write, as it does
+  // natively — but it fails as an ERROR, not as a raw stack trace.
+  const pairDir = run(["in.scss:adir"]);
+  assert.equal(pairDir.status, 1, "cli: a directory as a pair destination exits non-zero");
+  assert.match(pairDir.stderr, /^error: cannot write adir: /m, "cli: … reporting the write, not throwing");
+  assert.ok(!/at \w+ \(node:/.test(pairDir.stderr), "cli: … with no Node stack trace");
+  console.log("ok: cli — the argument grammar: arity, pairs, duplicates, `-`, counts, directories");
 }
 
 // === Phase 3i: --no-unicode, dart's URL encoding, the stdin data: URI ===
