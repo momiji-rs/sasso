@@ -203,16 +203,33 @@ pub(super) fn require<'v>(
 /// excess parameter is handled separately by `require`, so only the positional
 /// overflow is checked here.
 pub(super) fn max_positional(pos_args: &[Value], max: usize, pos: Pos) -> Result<(), Error> {
+    check_arity(max, pos_args, &[], pos)
+}
+
+/// dart's arity check (`ArgumentDeclaration.verify`): only POSITIONAL
+/// arguments count against a function's parameter count, and the moment any
+/// NAMED argument is present the message says so —
+/// `lighten(red, 10%, 3, $nope: 1)` is "Only 2 positional arguments allowed,
+/// but 3 were passed.", counting the three positional ones, not the four
+/// arguments written. A named argument that matches no parameter is a separate
+/// error dart raises after this one.
+pub(super) fn check_arity(
+    max: usize,
+    pos_args: &[Value],
+    named: &[(String, Value)],
+    pos: Pos,
+) -> Result<(), Error> {
     let n = pos_args.len();
-    if n > max {
-        let noun = if max == 1 { "argument" } else { "arguments" };
-        let verb = if n == 1 { "was" } else { "were" };
-        return Err(Error::at(
-            format!("Only {max} {noun} allowed, but {n} {verb} passed."),
-            pos,
-        ));
+    if n <= max {
+        return Ok(());
     }
-    Ok(())
+    let noun = if max == 1 { "argument" } else { "arguments" };
+    let kind = if named.is_empty() { "" } else { "positional " };
+    let verb = if n == 1 { "was" } else { "were" };
+    Err(Error::at(
+        format!("Only {max} {kind}{noun} allowed, but {n} {verb} passed."),
+        pos,
+    ))
 }
 
 /// Extract an `f64` from a number value (ignoring its unit).

@@ -2616,6 +2616,131 @@ fn a_missing_argument_names_only_the_parameter() {
 }
 
 #[test]
+fn only_positional_arguments_count_toward_arity() {
+    // dart counts POSITIONAL arguments against a function's parameter count,
+    // and says so the moment a named argument is in play: `Only 2 positional
+    // arguments allowed, but 3 were passed.` — three, not the four written.
+    // Every built-in here summed the positional and named counts, so both
+    // halves of the sentence were wrong. Byte-matched to dart-sass 1.104.1.
+    // Offline.
+    let prelude = "@use \"sass:color\";\n@use \"sass:math\";\n@use \"sass:string\";\n\
+                   @use \"sass:list\";\n@use \"sass:map\";\n@use \"sass:meta\";\n\
+                   @use \"sass:selector\";\n";
+    for (call, want) in [
+        // No named argument: the plain wording, unchanged.
+        (
+            "lighten(red, 10%, 3)",
+            "Only 2 arguments allowed, but 3 were passed.",
+        ),
+        (
+            "math.pow(1, 2, 3)",
+            "Only 2 arguments allowed, but 3 were passed.",
+        ),
+        (
+            "string.slice(\"abc\", 1, 2, 3)",
+            "Only 3 arguments allowed, but 4 were passed.",
+        ),
+        (
+            "list.nth((1 2), 1, 3)",
+            "Only 2 arguments allowed, but 3 were passed.",
+        ),
+        (
+            "selector.unify(\"a\", \"b\", \"c\")",
+            "Only 2 arguments allowed, but 3 were passed.",
+        ),
+        (
+            "meta.type-of(1, 2)",
+            "Only 1 argument allowed, but 2 were passed.",
+        ),
+        (
+            "rgb(1, 2, 3, 4, 5)",
+            "Only 4 arguments allowed, but 5 were passed.",
+        ),
+        (
+            "hwb(240, 10%, 20%)",
+            "Only 1 argument allowed, but 3 were passed.",
+        ),
+        // With one: "positional", and only the positional ones are counted.
+        (
+            "lighten(red, 10%, 3, $nope: 1)",
+            "Only 2 positional arguments allowed, but 3 were passed.",
+        ),
+        (
+            "math.pow(1, 2, 3, $nope: 1)",
+            "Only 2 positional arguments allowed, but 3 were passed.",
+        ),
+        (
+            "string.slice(\"abc\", 1, 2, 3, $nope: 1)",
+            "Only 3 positional arguments allowed, but 4 were passed.",
+        ),
+        (
+            "list.nth((1 2), 1, 3, $nope: 1)",
+            "Only 2 positional arguments allowed, but 3 were passed.",
+        ),
+        (
+            "selector.unify(\"a\", \"b\", \"c\", $nope: 1)",
+            "Only 2 positional arguments allowed, but 3 were passed.",
+        ),
+        (
+            "meta.type-of(1, 2, $nope: 1)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "rgb(1, 2, 3, 4, 5, $nope: 1)",
+            "Only 4 positional arguments allowed, but 5 were passed.",
+        ),
+        (
+            "hwb(1, 2, $nope: 3)",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        (
+            "color.channel(red, \"red\", hsl, 4, $nope: 1)",
+            "Only 3 positional arguments allowed, but 4 were passed.",
+        ),
+        (
+            "color.mix(red, blue, 50%, hsl, 5, $nope: 1)",
+            "Only 4 positional arguments allowed, but 5 were passed.",
+        ),
+    ] {
+        let msg = ours_err(&format!("{prelude}a {{ b: {call}; }}\n"));
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // A user-defined function follows the same rule.
+    for (src, want) in [
+        (
+            "@function f($x, $y) { @return $x; }\na { b: f(1, 2, 3, $nope: 4); }\n",
+            "Only 2 positional arguments allowed, but 3 were passed.",
+        ),
+        (
+            "@function f($x, $y) { @return $x; }\na { b: f(1, 2, 3); }\n",
+            "Only 2 arguments allowed, but 3 were passed.",
+        ),
+        (
+            "@function f($x) { @return $x; }\na { b: f(1, 2, $nope: 3); }\n",
+            "Only 1 positional argument allowed, but 2 were passed.",
+        ),
+        // A named argument that IS a parameter still leaves the count alone.
+        (
+            "@function f($x, $y) { @return $x; }\na { b: f(1, 2, 3, $y: 4); }\n",
+            "Only 2 positional arguments allowed, but 3 were passed.",
+        ),
+    ] {
+        let msg = ours_err(src);
+        assert!(msg.contains(want), "{src}\n  want: {want}\n  got:  {msg}");
+    }
+    // And a named argument alone never triggers it: `$channels` is simply
+    // unbound, which is a missing argument, not an overflow.
+    for (call, want) in [
+        ("hwb($nope: 1)", "Missing argument $channels."),
+        ("rgb()", "Missing argument $channels."),
+        ("lighten($color: red, $nope: 1)", "Missing argument $amount."),
+    ] {
+        let msg = ours_err(&format!("{prelude}a {{ b: {call}; }}\n"));
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0

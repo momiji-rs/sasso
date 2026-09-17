@@ -71,13 +71,7 @@ fn fn_is_legacy(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resu
 
 fn fn_to_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "space"];
-    let n = pos_args.len() + named.len();
-    if n > 2 {
-        return Err(Error::at(
-            format!("Only 2 arguments allowed, but {n} were passed."),
-            pos,
-        ));
-    }
+    check_arity(2, pos_args, named, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     let space = space_arg(require(&params, pos_args, named, 1, pos)?, pos)?;
     let mc = legacy_to_modern(&c);
@@ -90,13 +84,7 @@ fn fn_to_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
 
 fn fn_color_channel(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "channel", "space"];
-    let n = pos_args.len() + named.len();
-    if n > 3 {
-        return Err(Error::at(
-            format!("Only 3 arguments allowed, but {n} were passed."),
-            pos,
-        ));
-    }
+    check_arity(3, pos_args, named, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     let chan = channel_name_arg(require(&params, pos_args, named, 1, pos)?, pos)?;
     let mc = legacy_to_modern(&c);
@@ -156,13 +144,7 @@ fn fn_is_missing(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
 
 fn fn_is_in_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "space"];
-    let n = pos_args.len() + named.len();
-    if n > 2 {
-        return Err(Error::at(
-            format!("Only 2 arguments allowed, but {n} were passed."),
-            pos,
-        ));
-    }
+    check_arity(2, pos_args, named, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     let mc = legacy_to_modern(&c);
     let space = match arg(&params, pos_args, named, 1) {
@@ -174,13 +156,7 @@ fn fn_is_in_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
 
 fn fn_is_powerless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "channel", "space"];
-    let n = pos_args.len() + named.len();
-    if n > 3 {
-        return Err(Error::at(
-            format!("Only 3 arguments allowed, but {n} were passed."),
-            pos,
-        ));
-    }
+    check_arity(3, pos_args, named, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     let chan = channel_name_arg(require(&params, pos_args, named, 1, pos)?, pos)?;
     let mc = legacy_to_modern(&c);

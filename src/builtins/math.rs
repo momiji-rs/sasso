@@ -125,15 +125,7 @@ fn check_max_args(
     max_args: usize,
     pos: Pos,
 ) -> Result<(), Error> {
-    let total = pos_args.len() + named.len();
-    if total <= max_args {
-        return Ok(());
-    }
-    let noun = if max_args == 1 { "argument" } else { "arguments" };
-    Err(Error::at(
-        format!("Only {max_args} {noun} allowed, but {total} were passed."),
-        pos,
-    ))
+    super::check_arity(max_args, pos_args, named, pos)
 }
 
 /// The rounding strategy keyword of a `round()` call's first argument.

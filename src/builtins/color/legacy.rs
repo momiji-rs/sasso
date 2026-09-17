@@ -7,13 +7,7 @@ pub(super) fn fn_rgb(
     pos: Pos,
 ) -> Result<Value, Error> {
     let params = ["red", "green", "blue", "alpha"];
-    let n = pos_args.len() + named.len();
-    if n > 4 {
-        return Err(Error::at(
-            format!("Only 4 arguments allowed, but {n} were passed."),
-            pos,
-        ));
-    }
+    check_arity(4, pos_args, named, pos)?;
     // rgb($color, $alpha) two-argument form: a concrete color and an alpha.
     // The result is a computed color (serialized by name/hex/rgba), not the
     // literal rgb() spelling. When either argument is a special value the
@@ -739,13 +733,7 @@ pub(super) fn fn_hsl(
     pos: Pos,
 ) -> Result<Value, Error> {
     let params = ["hue", "saturation", "lightness", "alpha"];
-    let n = pos_args.len() + named.len();
-    if n > 4 {
-        return Err(Error::at(
-            format!("Only 4 arguments allowed, but {n} were passed."),
-            pos,
-        ));
-    }
+    check_arity(4, pos_args, named, pos)?;
     let mut channels = Channels::collect(&params, pos_args, named, pos)?;
     // Echo the caller's spelling (`hsl` vs `hsla`) in the special/relative
     // passthroughs; the `none`-only path normalizes to canonical `hsl`.
@@ -925,16 +913,11 @@ fn hsl_degenerate_pct(v: &Value, is_saturation: bool, pos: Pos) -> Result<String
 /// verbatim, space-joined, with a bare numeric hue suffixed `deg`.
 pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["channels"];
-    let n = pos_args.len() + named.len();
-    // Only an OVERFLOW is an arity error: with nothing passed the parameter is
-    // simply missing, and dart says so (`hwb()` is `Missing argument
-    // $channels.`, not "but 0 were passed").
-    if n > 1 {
-        return Err(Error::at(
-            format!("Only 1 argument allowed, but {n} were passed."),
-            pos,
-        ));
-    }
+    // Only an OVERFLOW is an arity error, and only POSITIONAL arguments count
+    // toward it: with nothing passed the parameter is simply missing, and dart
+    // says so (`hwb()` is `Missing argument $channels.`, not "but 0 were
+    // passed").
+    check_arity(1, pos_args, named, pos)?;
     let channels = require(&params, pos_args, named, 0, pos)?.clone();
     // A single channels list must be unbracketed and space/slash-separated; a
     // bracketed and/or comma list is rejected with dart-sass's message.
@@ -1118,14 +1101,8 @@ pub(crate) fn call_module_member(
 /// global `hwb()`; the comma form rebuilds an `h w b` (+ ` / alpha`) channels
 /// value so the global's none/special/compute paths apply unchanged.
 fn fn_color_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let n = pos_args.len() + named.len();
-    if n > 4 {
-        return Err(Error::at(
-            format!("Only 4 arguments allowed, but {n} were passed."),
-            pos,
-        ));
-    }
-    if n <= 1 {
+    check_arity(4, pos_args, named, pos)?;
+    if pos_args.len() + named.len() <= 1 {
         return fn_hwb(pos_args, named, pos);
     }
     let params = ["hue", "whiteness", "blackness", "alpha"];
@@ -1612,13 +1589,7 @@ fn color_desc_css(desc: &Value) -> String {
 
 pub(super) fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color1", "color2", "weight", "method"];
-    let n = pos_args.len() + named.len();
-    if n > 4 {
-        return Err(Error::at(
-            format!("Only 4 arguments allowed, but {n} were passed."),
-            pos,
-        ));
-    }
+    check_arity(4, pos_args, named, pos)?;
     let c1 = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     let c2 = as_color(require(&params, pos_args, named, 1, pos)?, pos)?;
     let weight = match arg(&params, pos_args, named, 2) {
@@ -1793,13 +1764,7 @@ pub(super) fn fn_adjust_lightness(
     sign: f64,
 ) -> Result<Value, Error> {
     let params = ["color", "amount"];
-    let n = pos_args.len() + named.len();
-    if n > 2 {
-        return Err(Error::at(
-            format!("Only 2 arguments allowed, but {n} were passed."),
-            pos,
-        ));
-    }
+    check_arity(2, pos_args, named, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     require_legacy_color(&c, name, pos)?;
     let amount = match require(&params, pos_args, named, 1, pos)? {
@@ -1929,13 +1894,7 @@ pub(super) fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
             quoted: false,
         }));
     }
-    let n = pos_args.len() + named.len();
-    if n > 1 {
-        return Err(Error::at(
-            format!("Only 1 argument allowed, but {n} were passed."),
-            pos,
-        ));
-    }
+    check_arity(1, pos_args, named, pos)?;
     let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     // The legacy alpha getter only supports legacy colors.
     if c.modern.as_ref().is_some_and(|m| !m.space.is_legacy()) {

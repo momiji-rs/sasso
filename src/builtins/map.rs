@@ -159,25 +159,13 @@ fn fn_map_get(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
 
 /// Reject more positional arguments than a fixed-arity function accepts
 /// (dart-sass "Only N argument(s) allowed, but M were passed.").
-fn check_arity(pos_args: &[Value], max: usize, pos: Pos) -> Result<(), Error> {
-    if pos_args.len() > max {
-        return Err(Error::at(
-            format!(
-                "Only {} argument{} allowed, but {} {} passed.",
-                max,
-                if max == 1 { "" } else { "s" },
-                pos_args.len(),
-                if pos_args.len() == 1 { "was" } else { "were" }
-            ),
-            pos,
-        ));
-    }
-    Ok(())
+fn check_arity(pos_args: &[Value], named: &[(String, Value)], max: usize, pos: Pos) -> Result<(), Error> {
+    super::check_arity(max, pos_args, named, pos)
 }
 
 /// `map-keys($map)`: a comma list of the map's keys in order.
 fn fn_map_keys(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    check_arity(pos_args, 1, pos)?;
+    check_arity(pos_args, named, 1, pos)?;
     let map_v = super::require(&["map"], pos_args, named, 0, pos)?;
     let entries = as_map(map_v, "map-keys", pos)?;
     Ok(comma_list(entries.into_iter().map(|(k, _)| k).collect()))
@@ -185,7 +173,7 @@ fn fn_map_keys(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
 
 /// `map-values($map)`: a comma list of the map's values in order.
 fn fn_map_values(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    check_arity(pos_args, 1, pos)?;
+    check_arity(pos_args, named, 1, pos)?;
     let map_v = super::require(&["map"], pos_args, named, 0, pos)?;
     let entries = as_map(map_v, "map-values", pos)?;
     Ok(comma_list(entries.into_iter().map(|(_, v)| v).collect()))
