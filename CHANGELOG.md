@@ -140,6 +140,33 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **A missing alpha reads as 0 everywhere, not just in some places.** A color
+  written `/ none` carries an opaque `1` alongside its missing alpha, for
+  serialization to fall back to — and every reader that wanted the alpha as a
+  number took that `1` instead of the channel. So
+  `color.alpha(hsl(240 100% 50% / none))` answered 1 where dart-sass answers
+  0, and `color.opacity`, the global `alpha`/`opacity`, `ie-hex-str`
+  (`#FF0000FF` for `#000000FF`), `mix` (`mix(hsl(240 100% 50% / none), white,
+  50%)` was an opaque blend, not the `rgba(255, 255, 255, 0.5)` a fully
+  transparent color mixes to) and the `[color-functions]` deprecation's
+  suggested `color.scale` percentage all inherited it.
+- **`color.change()` hands back a concrete alpha.** dart rebuilds the result
+  with the alpha the getter above reports, so changing any channel of a color
+  with a missing alpha resolves it to 0:
+  `color.change(hsl(240 100% 50% / none), $lightness: 60%)` is
+  `hsla(240, 100%, 60%, 0)`, not `hsl(240deg 100% 60% / none)`. This holds in
+  every space, for non-legacy colors, and with no channel named at all;
+  `grayscale()` rebuilds the same way. An explicit `$alpha: none` still sets
+  it missing, and `color.adjust`/`color.scale` — which would have to read it —
+  are unchanged.
+- **`change`/`adjust`/`scale` work in the color's own space when no channel
+  names one.** A channel-less or alpha-only call fell back to `rgb`, and the
+  round trip filled in any missing channel:
+  `color.change(hsl(240 none 50%), $alpha: 0.5)` came out
+  `hsla(0, 0%, 50%, 0.5)` instead of `hsl(240deg none 50% / 0.5)`. The
+  unknown-channel error follows the same resolution, so
+  `color.change(hsl(240 none 50%), $foo: 1)` now reports `Color space hsl`
+  rather than `rgb`. (`$hue` alone still means `hsl`, as in dart.)
 - **The legacy color adjusters keep the color's own space.**
   `lighten`/`darken`, `saturate`/`desaturate`, `adjust-hue` and
   `opacify`/`fade-in`/`transparentize`/`fade-out` converted every input to

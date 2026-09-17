@@ -390,12 +390,14 @@ pub(crate) fn modify_in_space_full(
         };
         missing_channel_err(name, &Value::Color(color), pos)
     };
+    let mut alpha_given = false;
     for (name, v) in chans {
         if name == "alpha" {
             if combining && orig_work.alpha.is_none() {
                 return Err(missing_channel_error(name));
             }
             work.alpha = apply_alpha(work.alpha.unwrap_or(1.0), v, op, pos)?;
+            alpha_given = true;
             continue;
         }
         let idx = channel_index_in(space, name).ok_or_else(|| {
@@ -452,6 +454,15 @@ pub(crate) fn modify_in_space_full(
                 work.channels[2] = Some(bv / t * 100.0);
             }
         }
+    }
+    // dart rebuilds a `change` result with `alpha ?? color.alpha`, and that
+    // getter answers 0 for a missing alpha — so `change` hands back a CONCRETE
+    // alpha even when it was missing and even when no channel was named
+    // (`color.change(hsl(240 100% 50% / none), $lightness: 60%)` is
+    // `hsla(240, 100%, 60%, 0)`). Only an explicit `$alpha: none` keeps it
+    // missing. `adjust`/`scale` errored on a missing alpha long before here.
+    if matches!(op, ModifyOp::Change) && !alpha_given {
+        work.alpha = Some(work.alpha.unwrap_or(0.0));
     }
     // dart-sass builds the modified color in the WORKING space and only then
     // converts it back, so 1.104.0's channel conversion applies to the new
@@ -639,6 +650,9 @@ pub(crate) fn grayscale_modern(c: &Color) -> Color {
     let dest = orig.space;
     let mut oklch = convert_modern(&orig, ColorSpace::Oklch);
     oklch.channels[1] = Some(0.0);
-    let back = convert_modern(&oklch, dest);
+    let mut back = convert_modern(&oklch, dest);
+    // Like `change`, the rebuilt color carries a concrete alpha:
+    // `grayscale(hsl(240 100% 50% / none))` is `hsla(240, 0%, 50%, 0)`.
+    back.alpha = Some(back.alpha.unwrap_or(0.0));
     make_modern_in(back, dest)
 }

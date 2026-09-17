@@ -1664,7 +1664,11 @@ pub(super) fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     }
     let p = weight / 100.0;
     let w = p * 2.0 - 1.0;
-    let a = c1.a - c2.a;
+    // A missing alpha weighs as 0, not as the opaque 1.0 the color mirrors it
+    // as: `mix(hsl(240 100% 50% / none), white, 50%)` is
+    // `rgba(255, 255, 255, 0.5)`, the transparent blue contributing no color.
+    let (a1, a2) = (stored_alpha(&c1), stored_alpha(&c2));
+    let a = a1 - a2;
     let w1 = ((if (w * a) == -1.0 {
         w
     } else {
@@ -1675,7 +1679,7 @@ pub(super) fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     let r = c1.r * w1 + c2.r * w2;
     let g = c1.g * w1 + c2.g * w2;
     let b = c1.b * w1 + c2.b * w2;
-    let alpha = c1.a * p + c2.a * (1.0 - p);
+    let alpha = a1 * p + a2 * (1.0 - p);
     Ok(Value::Color(computed(r, g, b, alpha)))
 }
 
@@ -1940,7 +1944,7 @@ pub(super) fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
             pos,
         ));
     }
-    Ok(Value::Number(Number::unitless(c.a)))
+    Ok(Value::Number(Number::unitless(stored_alpha(&c))))
 }
 
 /// Build a modern legacy color (rgb/hsl) from a [`Channels`] set when it

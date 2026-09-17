@@ -2156,6 +2156,217 @@ fn a_missing_alpha_reads_as_zero_through_the_legacy_adjusters() {
 }
 
 #[test]
+fn a_missing_alpha_reads_as_zero() {
+    // dart's alpha getter answers 0 for a missing alpha, like any other
+    // missing channel — the opaque 1 a color carries alongside it is only the
+    // default serialization falls back to. Every reader that takes the alpha
+    // as a NUMBER follows: the getters, `ie-hex-str`'s leading byte, and
+    // `mix`, where a transparent color contributes no color at all. Byte-
+    // matched to dart-sass 1.104.1. Offline.
+    for (call, want) in [
+        ("color.alpha($c)", "0"),
+        ("color.alpha($h)", "0"),
+        ("color.alpha($r)", "0"),
+        ("color.opacity($c)", "0"),
+        ("alpha($c)", "0"),
+        ("opacity($c)", "0"),
+        ("color.channel($c, \"alpha\")", "0"),
+        ("ie-hex-str($c)", "#000000FF"),
+        ("ie-hex-str($h)", "#001A1ACC"),
+        ("ie-hex-str($r)", "#000000FF"),
+        // `mix` weighs with it on both sides, and carries it into the result.
+        ("meta.inspect(mix($c, white, 50%))", "rgba(255, 255, 255, 0.5)"),
+        ("meta.inspect(mix(white, $c, 50%))", "rgba(255, 255, 255, 0.5)"),
+        ("meta.inspect(mix($c, $c, 50%))", "rgba(0, 0, 255, 0)"),
+        (
+            "meta.inspect(mix($c, rgba(white, 0.5), 50%))",
+            "rgba(75%, 75%, 100%, 0.25)",
+        ),
+        ("meta.inspect(mix($c, white, 100%))", "rgba(0, 0, 255, 0)"),
+        // Controls: a concrete alpha is unaffected, opaque included.
+        ("color.alpha(hsl(240 100% 50% / 0.5))", "0.5"),
+        ("color.alpha(hsl(240, 100%, 50%))", "1"),
+        ("color.alpha(blue)", "1"),
+        ("ie-hex-str(hsl(240 100% 50% / 0.5))", "#800000FF"),
+        ("meta.inspect(mix($c, white, 0%))", "white"),
+    ] {
+        assert_eq!(
+            ours(&format!(
+                "@use \"sass:color\";\n@use \"sass:meta\";\n\
+                 $c: hsl(240 100% 50% / none);\n\
+                 $h: hwb(240 10% 20% / none);\n\
+                 $r: rgb(0 0 255 / none);\na {{ b: {call}; }}\n"
+            )),
+            format!("a {{\n  b: {want};\n}}\n"),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn change_hands_back_a_concrete_alpha() {
+    // dart rebuilds a `change` result with `alpha ?? color.alpha`, and that
+    // getter answers 0 — so `change` turns a missing alpha into a concrete 0
+    // whatever channel it was asked for, in any space, legacy or not, and even
+    // with no channel at all. `grayscale` rebuilds the same way. Only an
+    // explicit `$alpha: none` keeps it missing, and `adjust`/`scale` — which
+    // would have to READ the missing alpha — leave it alone. Byte-matched to
+    // dart-sass 1.104.1. Offline.
+    for (call, want) in [
+        (
+            "meta.inspect(color.change($c, $lightness: 60%))",
+            "hsla(240, 100%, 60%, 0)",
+        ),
+        (
+            "meta.inspect(color.change($c, $hue: 30deg))",
+            "hsla(30, 100%, 50%, 0)",
+        ),
+        (
+            "meta.inspect(color.change($c, $lightness: none))",
+            "hsl(240deg 100% none / 0)",
+        ),
+        ("meta.inspect(color.change($c))", "hsla(240, 100%, 50%, 0)"),
+        (
+            "meta.inspect(color.change($h, $whiteness: 30%))",
+            "hwb(240 30% 20% / 0)",
+        ),
+        (
+            "meta.inspect(color.change(oklch(50% 0.1 20deg / none), $lightness: 60%))",
+            "oklch(60% 0.1 20deg / 0)",
+        ),
+        (
+            "meta.inspect(change-color($c, $lightness: 60%))",
+            "hsla(240, 100%, 60%, 0)",
+        ),
+        (
+            "meta.inspect(color.change($c, $saturation: 0%))",
+            "hsla(240, 0%, 50%, 0)",
+        ),
+        ("meta.inspect(grayscale($c))", "hsla(240, 0%, 50%, 0)"),
+        ("meta.inspect(grayscale($h))", "hwb(0 45% 55% / 0)"),
+        (
+            "meta.inspect(grayscale(oklch(50% 0.1 20deg / none)))",
+            "oklch(50% 0 20deg / 0)",
+        ),
+        // `$alpha: none` is the one way to keep it missing.
+        (
+            "meta.inspect(color.change($c, $lightness: 60%, $alpha: none))",
+            "hsl(240deg 100% 60% / none)",
+        ),
+        (
+            "meta.inspect(color.change($c, $alpha: none))",
+            "hsl(240deg 100% 50% / none)",
+        ),
+        (
+            "meta.inspect(color.change(blue, $alpha: none))",
+            "rgb(0 0 255 / none)",
+        ),
+        // `adjust`/`scale` never rebuild it.
+        (
+            "meta.inspect(color.adjust($c, $lightness: 10%))",
+            "hsl(240deg 100% 60% / none)",
+        ),
+        (
+            "meta.inspect(color.scale($c, $lightness: 10%))",
+            "hsl(240deg 100% 55% / none)",
+        ),
+        (
+            "meta.inspect(adjust-color($c, $lightness: 10%))",
+            "hsl(240deg 100% 60% / none)",
+        ),
+        ("meta.inspect(complement($c))", "hsl(60deg 100% 50% / none)"),
+    ] {
+        assert_eq!(
+            ours(&format!(
+                "@use \"sass:color\";\n@use \"sass:meta\";\n\
+                 $c: hsl(240 100% 50% / none);\n\
+                 $h: hwb(240 10% 20% / none);\na {{ b: {call}; }}\n"
+            )),
+            format!("a {{\n  b: {want};\n}}\n"),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn a_modify_with_no_space_channel_works_in_the_colors_own_space() {
+    // When no channel keyword names a space — a channel-less or alpha-only
+    // call — dart works in the color's OWN space rather than falling back to
+    // rgb. Only a MISSING channel makes that visible: a round trip through rgb
+    // would fill it in. (`$hue` alone still means hsl, so an hwb color's
+    // missing whiteness is filled there, as dart does.) Byte-matched to
+    // dart-sass 1.104.1. Offline.
+    for (call, want) in [
+        ("meta.inspect(color.change($s))", "hsl(240deg none 50%)"),
+        (
+            "meta.inspect(color.change($s, $alpha: 0.5))",
+            "hsl(240deg none 50% / 0.5)",
+        ),
+        (
+            "meta.inspect(color.change($s, $alpha: none))",
+            "hsl(240deg none 50% / none)",
+        ),
+        ("meta.inspect(color.change($b))", "hsl(240deg none 50% / 0)"),
+        (
+            "meta.inspect(color.change($b, $lightness: 60%))",
+            "hsl(240deg none 60% / 0)",
+        ),
+        ("meta.inspect(color.change($w))", "hwb(240deg none 20%)"),
+        (
+            "meta.inspect(color.change($w, $alpha: 0.5))",
+            "hwb(240deg none 20% / 0.5)",
+        ),
+        ("meta.inspect(change-color($s))", "hsl(240deg none 50%)"),
+        ("meta.inspect(color.adjust($s))", "hsl(240deg none 50%)"),
+        ("meta.inspect(adjust-color($s))", "hsl(240deg none 50%)"),
+        ("meta.inspect(color.scale($s))", "hsl(240deg none 50%)"),
+        // `$hue` alone still resolves to hsl, filling an hwb whiteness.
+        ("meta.inspect(color.change($w, $hue: 30deg))", "hwb(30 0% 20%)"),
+        // Concrete channels round-trip losslessly, so these never moved.
+        (
+            "meta.inspect(color.change(hwb(240 10% 20%), $alpha: 0.5))",
+            "hwb(240 10% 20% / 0.5)",
+        ),
+        (
+            "meta.inspect(color.change(rgb(0 0 255), $alpha: 0.5))",
+            "rgba(0, 0, 255, 0.5)",
+        ),
+        ("meta.inspect(color.change(hwb(240 10% 20%)))", "hwb(240 10% 20%)"),
+        ("meta.inspect(color.change(rgb(0 0 255)))", "blue"),
+    ] {
+        assert_eq!(
+            ours(&format!(
+                "@use \"sass:color\";\n@use \"sass:meta\";\n\
+                 $s: hsl(240 none 50%);\n\
+                 $b: hsl(240 none 50% / none);\n\
+                 $w: hwb(240 none 20%);\na {{ b: {call}; }}\n"
+            )),
+            format!("a {{\n  b: {want};\n}}\n"),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_channel_names_the_colors_own_space() {
+    // The same resolution drives the error: with no channel to name a space,
+    // the one reported is the color's own. Byte-matched to dart-sass 1.104.1.
+    // Offline.
+    for (color, space) in [
+        ("hsl(240 none 50%)", "hsl"),
+        ("hwb(240 none 20%)", "hwb"),
+        ("blue", "rgb"),
+        ("oklch(50% 0.1 20deg)", "oklch"),
+    ] {
+        let msg = ours_err(&format!(
+            "@use \"sass:color\";\na {{ b: color.change({color}, $foo: 1); }}\n"
+        ));
+        let want = format!("$foo: Color space {space} doesn't have a channel with this name.");
+        assert!(msg.contains(&want), "{color}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0

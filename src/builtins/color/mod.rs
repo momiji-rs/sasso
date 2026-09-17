@@ -33,6 +33,7 @@ use modern::*;
 pub(crate) use legacy::call_module_member;
 pub(crate) use math::{
     convert_modern, legacy_alpha_adjust, legacy_hsl_adjust, legacy_to_modern, make_modern_in, space_arg,
+    stored_alpha,
 };
 pub(crate) use modern::{
     grayscale_modern, invert_in_space, modify_in_space, modify_in_space_full, modify_in_space_opt, ModifyOp,

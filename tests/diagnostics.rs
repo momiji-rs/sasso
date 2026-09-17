@@ -1530,6 +1530,19 @@ fn a_legacy_color_function_suggests_its_replacement() {
         ("a { b: adjust-hue(#abcdef, 0.25turn); }\n", None, "$hue: 90deg"),
         // Moving by nothing drops the scale line entirely.
         ("a { b: saturate(#abcdef, 0%); }\n", None, "$saturation: 0%"),
+        // A MISSING alpha is 0, not the opaque 1 the color carries for
+        // serialization, so the room left is the whole range: opacifying by
+        // 0.2 is 20% of the way up, and transparentizing is all the way down.
+        (
+            "a { b: opacify(hsl(240 100% 50% / none), 0.2); }\n",
+            Some("$alpha: 20%"),
+            "$alpha: 0.2",
+        ),
+        (
+            "a { b: transparentize(hsl(240 100% 50% / none), 0.2); }\n",
+            Some("$alpha: -100%"),
+            "$alpha: -0.2",
+        ),
     ] {
         let w = one(src);
         match scale {

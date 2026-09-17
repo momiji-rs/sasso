@@ -164,6 +164,20 @@ pub(super) fn convert_modern_filled(mc: &ModernColor, target: ColorSpace) -> Mod
     }
 }
 
+/// The color's alpha the way dart's `SassColor.alpha` getter answers it: a
+/// MISSING alpha reads as **0**, like any other missing channel.
+///
+/// [`Color::a`] cannot stand in for this. It mirrors a missing alpha as the
+/// opaque `1.0` that *serialization* falls back to, so reading it makes
+/// `color.alpha(hsl(240 100% 50% / none))` answer 1 where dart answers 0, and
+/// carries that 1 into every arithmetic built on top of it.
+pub(crate) fn stored_alpha(c: &Color) -> f64 {
+    match &c.modern {
+        Some(m) => m.alpha.unwrap_or(0.0),
+        None => c.a,
+    }
+}
+
 /// Build a [`ModernColor`] from a legacy [`Color`] (its current space is
 /// `rgb`/`hsl`/`hwb` per `mc.modern`, or plain sRGB → `rgb`).
 pub(crate) fn legacy_to_modern(c: &Color) -> ModernColor {
