@@ -1738,6 +1738,51 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // The promise of the SHARED index — a heavy stylesheet must not leave other
+  // workers idle — is not what "exactly once" checks: fixed contiguous slices
+  // also run every job once and write every file correctly.
+  //
+  // Four heavy jobs first, eight trivial after, `-j 4`. Sharing the index,
+  // every worker takes a heavy job, so no trivial output can be written before
+  // the first heavy one finishes. Splitting the list into slices leaves two
+  // workers holding only trivial jobs, which they write at once. Measured
+  // 2026-09-17, five runs each: with the shared index the first trivial write
+  // came 0-1 ms AFTER the first heavy one; with slices, 22-23 ms BEFORE it.
+  {
+    const bdir = join(dir, "balance");
+    mkdirSync(bdir, { recursive: true });
+    const HEAVY = 4;
+    const TOTAL = 12;
+    for (let i = 0; i < TOTAL; i++) {
+      writeFileSync(
+        join(bdir, `j${i}.scss`),
+        i < HEAVY
+          ? `@use "sass:math";\n@for $j from 1 through 20000 { .h${i}-#{$j} { width: math.div($j,3)*1px } }\n`
+          : `.t${i}{a:${i}}\n`,
+      );
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      for (let i = 0; i < TOTAL; i++) rmSync(join(bdir, `j${i}.css`), { force: true });
+      const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4"];
+      for (let i = 0; i < TOTAL; i++) args.push(`${join(bdir, `j${i}.scss`)}:${join(bdir, `j${i}.css`)}`);
+      const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+      assert.equal(r.status, 0, `cli: the load-balancing run compiles (stderr: ${r.stderr})`);
+      const times = [];
+      for (let i = 0; i < TOTAL; i++) times.push(statSync(join(bdir, `j${i}.css`)).mtimeMs);
+      const firstHeavy = Math.min(...times.slice(0, HEAVY));
+      const firstTrivial = Math.min(...times.slice(HEAVY));
+      // `>=`, not `>`: with the shared index the two can land in the same
+      // millisecond, and that is fine. What must not happen is a trivial
+      // output appearing while every heavy job is still running.
+      assert.ok(
+        firstTrivial >= firstHeavy,
+        `cli: no worker was left holding only cheap jobs (attempt ${attempt}, first trivial ${Math.round(
+          firstTrivial - firstHeavy,
+        )} ms before the first heavy one)`,
+      );
+    }
+  }
+
   // A failure inside the pool is still reported and still exits non-zero.
   writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
   const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});
