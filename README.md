@@ -105,16 +105,22 @@ $ npm install sasso
 One install, two engines. The package carries the wasm build — which works
 everywhere, including the browser — and pulls a **native addon**
 (`sasso-native-<platform>`) as an `optionalDependency` on macOS and Linux. The
-API and the CLI prefer the addon when it is there and fall back to wasm when it
-is not; the output is byte-identical either way, and `SASSO_ENGINE=wasm|native`
-forces a choice. Compiling a 137-stylesheet production tree, one process:
+output is byte-identical either way.
+
+**The `sasso` command** prefers the addon when it is there and falls back to
+wasm when it is not; `SASSO_ENGINE=wasm|native` forces a choice.
+**Importing the library** selects nothing: `import … from "sasso"` is always
+the size-optimised wasm build and ignores `SASSO_ENGINE`, `"sasso/speed"` is
+the faster, larger wasm build, and the addon is the explicit `"sasso/native"`
+subpath. Compiling the 138 stylesheets above in one process, with lila's own
+flags, best of five (2026-09-17, M2 Max):
 
 | | |
 |---|---|
-| `npx sasso` (native engine) | **265 ms** |
-| `npx sasso` (wasm engine) | 612 ms |
-| the `sasso` release binary | 139 ms |
-| dart-sass 1.104.1 | 2048 ms |
+| `npx sasso` (native engine) | **232 ms** |
+| `npx sasso` (wasm engine) | 674 ms |
+| the `sasso` 0.14.0 binary | 154 ms |
+| dart-sass 1.104.1 | 2348 ms |
 
 ```js
 import { compileString } from "sasso";
