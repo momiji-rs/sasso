@@ -691,6 +691,15 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.ok(existsSync(join(dir, "eq.css")), "cli: --output=<file>");
   const bothForms = spawnSync(process.execPath, [cliPath, "-o", viaFlag, `${src}:${viaPos}`], { encoding: "utf8" });
   assert.equal(bothForms.status, 1, "cli: --output with an in:out pair is rejected");
+  // Repeating the flag is an assignment in the native parser, not an error:
+  // the last one wins. (Naming the output twice in DIFFERENT ways — `-o` plus
+  // a second positional — is what it rejects.)
+  const first = join(dir, "first.css"), second = join(dir, "second.css");
+  cli(["--no-source-map", `--output=${first}`, `--output=${second}`, src]);
+  assert.ok(!existsSync(first), "cli: a repeated --output does not write the earlier one");
+  assert.ok(existsSync(second), "cli: … it writes the last one");
+  const twoWays = spawnSync(process.execPath, [cliPath, "-o", first, src, second], { encoding: "utf8" });
+  assert.equal(twoWays.status, 1, "cli: but --output plus a positional output is still rejected");
 
   // A failed compile drops a stale output (this CLI is always --no-error-css,
   // and dart removes the file rather than leave the last good build in place).
@@ -1004,12 +1013,33 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 {
   const dir = mkdtempSync(join(tmpdir(), "sasso-loop-"));
   const src = join(dir, "in.scss");
-  writeFileSync(src, '@warn "quiet me";\n.a{b: 1 + 1}\n');
+  writeFileSync(src, '@warn "said once";\n.a{b: 1 + 1}\n');
   const looped = spawnSync(process.execPath, [cliPath, "--loop", "3", src], { encoding: "utf8" });
   assert.equal(looped.status, 0, `cli: --loop compiles (stderr: ${looped.stderr})`);
   assert.match(looped.stdout, /b: 2/, "cli: --loop prints the last CSS");
   assert.match(looped.stderr, /sasso: 3 compiles in .* ms\/compile, .* compiles\/sec/, "cli: --loop reports throughput");
-  assert.ok(!looped.stderr.includes("quiet me"), "cli: --loop silences warnings (it is measuring the compiler)");
+  // An untimed WARM pass runs first and is the one that talks; the timed
+  // iterations are silent. So a warning appears exactly once however many
+  // times the loop runs — and the number measures compiling rather than the
+  // engine's first-compile costs (measured: 3.699 -> 0.114 ms/compile here).
+  assert.equal(
+    (looped.stderr.match(/said once/g) || []).length,
+    1,
+    "cli: --loop reports a warning once, from the warm pass",
+  );
+  const looped9 = spawnSync(process.execPath, [cliPath, "--loop", "9", src], { encoding: "utf8" });
+  assert.equal(
+    (looped9.stderr.match(/said once/g) || []).length,
+    1,
+    "cli: … once whatever N is, so the timed loop really is silent",
+  );
+  // A failure is reported by that same pass, before anything is timed.
+  const badLoop = join(dir, "bad.scss");
+  writeFileSync(badLoop, ".a{b:}\n");
+  const failed = spawnSync(process.execPath, [cliPath, "--loop", "3", badLoop], { encoding: "utf8" });
+  assert.equal(failed.status, 1, "cli: --loop on a broken stylesheet exits non-zero");
+  assert.match(failed.stderr, /^Error: /m, "cli: … with the compile error");
+  assert.ok(!/compiles in/.test(failed.stderr), "cli: … and no throughput line");
   const quietLoop = spawnSync(process.execPath, [cliPath, "--loop", "2", "--no-css", src], { encoding: "utf8" });
   assert.equal(quietLoop.stdout, "", "cli: --loop --no-css prints no CSS");
   assert.match(quietLoop.stderr, /2 compiles/, "cli: … but still reports throughput");
@@ -1022,7 +1052,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.equal(r.status, 1, `cli: --loop ${args.join(" ")} is rejected`);
     assert.ok(r.stderr.includes(wanted), `cli: --loop ${args.join(" ")} says "${wanted}"`);
   }
-  console.log("ok: cli — --loop: throughput, silence, stdout only");
+  console.log("ok: cli — --loop: warm pass, silent timing, stdout only");
 }
 
 // === The `quietDeps` option, on the JS API and on both engines ===

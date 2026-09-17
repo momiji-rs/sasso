@@ -193,7 +193,9 @@ function parseArgs(argv) {
       opts.sourceMapUrls = v;
     } else if (a === "-o" || a === "--output" || a.startsWith("--output=")) {
       const inline = a.startsWith("--output=") ? a.slice(9) : undefined;
-      if (opts.output !== undefined) fail("error: --output requires a single input");
+      // Repeating it is an assignment, as in the native parser: the last one
+      // wins. (Naming the output twice in DIFFERENT ways — `-o` plus a second
+      // positional — is the error, and `validate` catches that.)
       opts.output = takeValue(inline);
     } else if (a === "-s" || a === "--style" || a.startsWith("--style=")) {
       const inline = a.startsWith("--style=") ? a.slice(8) : undefined;
@@ -493,9 +495,23 @@ function colonIndex(p) {
   return p.indexOf(":", /^[a-zA-Z]:[\\/]/.test(p) ? 2 : 0);
 }
 /**
+ * The key two paths are compared BY. On Windows the filesystem is
+ * case-insensitive and dart lowercases each part, so `Src` and `src` name one
+ * path; everywhere else a path is compared as written — again like dart, which
+ * case-folds for no other platform, not even on a case-insensitive macOS
+ * volume. Lexical either way: no `realpath`, so a symlink is not resolved.
+ * (`path_key` in ../../src/main.rs, same rule.)
+ */
+function pathKey(path) {
+  const abs = resolve(path);
+  return process.platform === "win32" ? abs.toLowerCase() : abs;
+}
+
+/**
  * A path with its symlinks resolved, or its absolute form when it cannot be
  * resolved. Two spellings of one directory answer the same string, which is
- * what both the source-map base and the walker's cycle detection need.
+ * what the walker's cycle detection needs (the native walker canonicalizes for
+ * the same reason). NOT for comparing paths a user named — see `pathKey`.
  */
 function realPath(path) {
   try {
@@ -554,8 +570,8 @@ function walkStylesheets(dir) {
 /** Expand a `<dir>:<dir>` pair into one job per stylesheet under it. */
 function expandDirPair(input, output) {
   const jobs = [];
-  const inAbs = resolve(input);
-  const outAbs = resolve(output);
+  const inAbs = pathKey(input);
+  const outAbs = pathKey(output);
   // dart skips every source INSIDE the output directory when that directory is
   // nested in the source tree: `.:css` run twice would otherwise mirror `css/`
   // into `css/css/`. Nesting is strict — a destination EQUAL to the source is
@@ -564,10 +580,10 @@ function expandDirPair(input, output) {
   for (const rel of walkStylesheets(input)) {
     const from = join(input, rel);
     const to = join(output, rel.replace(/\.(scss|sass|css)$/, ".css"));
-    if (nested && (resolve(from) + sep).startsWith(outAbs + sep)) continue;
+    if (nested && (pathKey(from) + sep).startsWith(outAbs + sep)) continue;
     // dart also skips a plain CSS file whose destination is itself (`dir:dir`
     // with a `plain.css` inside): it would only be rewritten in place.
-    if (resolve(to) === resolve(from)) continue;
+    if (pathKey(to) === pathKey(from)) continue;
     jobs.push({ input: from, output: to });
   }
   return jobs;
@@ -607,7 +623,7 @@ function splitPair(arg) {
 function coalesceJobs(jobs) {
   const byKey = new Map();
   for (const job of jobs) {
-    const key = job.input === "-" ? "-" : resolve(job.input);
+    const key = job.input === "-" ? "-" : pathKey(job.input);
     const seen = byKey.get(key);
     if (seen) seen.output = job.output;
     else byKey.set(key, { ...job });
@@ -742,9 +758,11 @@ function wantSourceMap(opts, output) {
 
 /**
  * `--loop N`: compile the same input N times in-process and report throughput
- * on stderr, then print the last CSS (unless `--no-css`). It measures the
- * compiler, so warnings are silenced and no source map is built — and, as in
- * the native CLI, it only ever compiles to stdout.
+ * on stderr, then print the last CSS (unless `--no-css`). As in the native CLI
+ * an untimed WARM pass runs first — it is the one that reports diagnostics and
+ * fails early — and only the timed iterations are silent, so the number
+ * measures compiling rather than the first-compile costs around it. No source
+ * map is built, and it only ever compiles to stdout.
  */
 function runLoop(opts, common) {
   const path = opts.stdin ? undefined : opts.positionals[0];
@@ -754,16 +772,15 @@ function runLoop(opts, common) {
   }
   const fromStdin = path === undefined || path === "-";
   const source = fromStdin ? readStdin() : undefined;
-  const options = { ...common, logger: Logger.silent, sourceMap: false };
-  let last = "";
-  const start = process.hrtime.bigint();
-  for (let i = 0; i < opts.loop; i++) {
+  // A file keeps its own syntax (`.sass`, `.css`) and its own URL, as it would
+  // outside the loop; only stdin takes `--indented`.
+  const compileOnce = (options) =>
+    fromStdin
+      ? compileString(source, { ...options, sourceMap: false, syntax: opts.indented ? "indented" : "scss" })
+      : compile(path, { ...options, sourceMap: false, ...syntaxOf(opts) });
+  const run = (options) => {
     try {
-      // A file keeps its own syntax (`.sass`, `.css`) and its own URL, as it
-      // would outside the loop; only stdin takes `--indented`.
-      last = fromStdin
-        ? compileString(source, { ...options, syntax: opts.indented ? "indented" : "scss" }).css
-        : compile(path, { ...options, ...syntaxOf(opts) }).css;
+      return compileOnce(options).css;
     } catch (e) {
       const msg =
         e instanceof Exception
@@ -772,7 +789,17 @@ function runLoop(opts, common) {
             ? `Error reading ${path}: Cannot open file.`
             : `error: ${e && e.message ? e.message : e}`;
       fail(msg);
+      return "";
     }
+  };
+
+  // The warm/correctness pass: diagnostics once, and a failure here never
+  // reaches the timer.
+  let last = run(common);
+  const silent = { ...common, logger: Logger.silent };
+  const start = process.hrtime.bigint();
+  for (let i = 0; i < opts.loop; i++) {
+    last = run(silent);
   }
   const ms = Number(process.hrtime.bigint() - start) / 1e6;
   const per = ms / opts.loop;
