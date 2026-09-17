@@ -291,7 +291,18 @@ fn module_callables_know_whether_they_are_a_mixin() {
         err.starts_with("Error: content-exists() may only be called within a mixin.\n"),
         "{err}"
     );
-    assert!(err.contains("_lib.scss 11:11  probe()"), "{err}");
+    // Match the frame with its whitespace collapsed: the trace pads its
+    // location column to the widest frame, and which frame that is depends on
+    // where the scratch tree sits relative to the process's working directory.
+    // A build sandbox that puts $TMPDIR above the cwd (Nix uses /build and
+    // /build/source) renders this frame relative and the entry's absolute, so
+    // the gap here is not always two spaces.
+    let frame = err
+        .lines()
+        .find(|l| l.contains("_lib.scss 11:11"))
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
+    assert!(frame.ends_with("_lib.scss 11:11 probe()"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
