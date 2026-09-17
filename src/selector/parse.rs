@@ -299,15 +299,23 @@ fn read_ident(chars: &[char], i: &mut usize) -> Option<String> {
     Some(s)
 }
 
-/// Canonicalize an attribute selector the way dart-sass serializes one:
-/// whitespace around the operator is dropped (`[a = b]` -> `[a=b]`), and a
-/// quoted value that is a plain identifier loses its quotes
-/// (`[a="b"]` -> `[a=b]`). Anything that doesn't fit the simple
-/// `[name op value modifier?]` grammar is returned verbatim.
+/// Whether `c` is CSS whitespace — the five code points CSS counts, which is
+/// NOT `char::is_whitespace()`: that also matches NBSP and the other Unicode
+/// spaces, and eating one of those as an escape's delimiter would delete a
+/// character the value is supposed to keep.
+fn is_css_whitespace(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
+}
+
 /// Decode the CSS escapes in an attribute selector's quoted value, the way
 /// dart's parser does before the serializer re-escapes it: `\22 ` is a `"`,
-/// `\61 bc` is `abc`, and `\<char>` is that character. A hex escape takes up
-/// to six digits and swallows ONE trailing whitespace as its delimiter.
+/// `\61 bc` is `abc`, and `\<char>` is that character.
+///
+/// Two details the spec is picky about. A hex escape takes up to six digits and
+/// then swallows ONE trailing whitespace as its delimiter — a CRLF counting as
+/// that one, not as two. And a backslash before a newline is a line
+/// continuation inside a string, contributing nothing, where "newline" again
+/// means LF, CR, CRLF or form feed.
 fn decode_css_escapes(raw: &str) -> String {
     if !raw.contains('\\') {
         return raw.to_string();
@@ -323,12 +331,17 @@ fn decode_css_escapes(raw: &str) -> String {
         }
         i += 1; // the backslash
         if !cs[i].is_ascii_hexdigit() {
-            // `\<char>` is that character. A newline is a line continuation
-            // inside a string and contributes nothing.
-            if cs[i] != '\n' {
-                out.push(cs[i]);
+            // `\<char>` is that character, EXCEPT a newline: that is a line
+            // continuation inside a string and contributes nothing. CRLF is
+            // one newline, so it consumes both.
+            match cs[i] {
+                '\r' if cs.get(i + 1) == Some(&'\n') => i += 2,
+                '\n' | '\r' | '\u{c}' => i += 1,
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
             }
-            i += 1;
             continue;
         }
         let start = i;
@@ -336,9 +349,14 @@ fn decode_css_escapes(raw: &str) -> String {
             i += 1;
         }
         let hex: String = cs[start..i].iter().collect();
-        // Exactly one whitespace may follow as the escape's delimiter.
-        if i < cs.len() && cs[i].is_whitespace() {
-            i += 1;
+        // Exactly one whitespace may follow as the escape's delimiter, and a
+        // CRLF is that one whitespace rather than two.
+        if i < cs.len() && is_css_whitespace(cs[i]) {
+            if cs[i] == '\r' && cs.get(i + 1) == Some(&'\n') {
+                i += 2;
+            } else {
+                i += 1;
+            }
         }
         let cp = u32::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
         // NUL, a surrogate and an out-of-range code point all become U+FFFD,
@@ -361,6 +379,12 @@ fn is_attr_identifier(v: &str) -> bool {
     starts && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_') || (c as u32) >= 0x80)
 }
 
+/// Canonicalize an attribute selector the way dart-sass serializes one:
+/// whitespace around the operator is dropped (`[a = b]` -> `[a=b]`), and the
+/// value is decoded and re-serialized — a plain identifier loses its quotes
+/// (`[a="b"]` -> `[a=b]`), anything else takes whichever quote needs fewer
+/// escapes. Anything that doesn't fit the simple `[name op value modifier?]`
+/// grammar is returned verbatim.
 pub(crate) fn normalize_attribute(text: &str) -> String {
     let inner = match text.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
         Some(i) => i.trim(),
