@@ -24,11 +24,13 @@ subset it implements.
 > [docs/dart-sass-divergences.md](docs/dart-sass-divergences.md).
 >
 > Re-checked on 2026-09-17 against a **fresh clone** of that corpus with the
-> **published** 0.14.0 binary — nothing built into the tree, the compiler
+> **published** 0.15.0 binary — nothing built into the tree, the compiler
 > downloaded from the release page: of its 148 entry points, **138 compile
 > without npm dependencies** (dart-sass 1.104.1 fails on the same ten) and
 > **137 of those 138 are byte-identical to dart**; the one that differs is the
-> `@extend` duplicate-extender case written up in the divergences doc.
+> `@extend` duplicate-extender case written up in the divergences doc. The npm
+> package, installed from the registry, matches that binary on all 138 — on
+> either engine.
 
 ## Why another Sass compiler?
 
@@ -127,14 +129,16 @@ wasm when it is not; `SASSO_ENGINE=wasm|native` forces a choice.
 the size-optimised wasm build and ignores `SASSO_ENGINE`, `"sasso/speed"` is
 the faster, larger wasm build, and the addon is the explicit `"sasso/native"`
 subpath. Compiling the 138 stylesheets above in one process, with lila's own
-flags, best of five, one run for the whole table (2026-09-17, M2 Max):
+flags, best of five, one run for the whole table — every figure measured against
+the **published** artifacts, the binary downloaded from the release page and the
+package from `npm install sasso` (2026-09-17, M2 Max):
 
 | | |
 |---|---|
-| `npx sasso` (native engine) | **228 ms** |
-| `npx sasso` (wasm engine) | 646 ms |
-| the `sasso` 0.14.0 binary | 143 ms |
-| dart-sass 1.104.1 | 2322 ms |
+| `npx sasso` (native engine) | **266 ms** |
+| `npx sasso` (wasm engine) | 610 ms |
+| the `sasso` 0.15.0 binary | 137 ms |
+| dart-sass 1.104.1 | 2268 ms |
 
 ```js
 import { compileString } from "sasso";

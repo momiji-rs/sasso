@@ -16,8 +16,8 @@ Conformance is tracked separately as a ratchet against the official
 _The release that makes `npm install sasso` as fast as the binary the release
 notes describe, and puts sasso on Nix. The npm CLI had been compiling one file
 at a time through the size-optimised wasm build while the native addon it had
-already downloaded sat unused — 2340 ms for a tree the binary does in 143 ms.
-It is 228 ms now. `nix run github:momiji-rs/sasso` works, which is what #24's
+already downloaded sat unused — 2340 ms for a tree the binary does in 137 ms.
+It is 266 ms now. `nix run github:momiji-rs/sasso` works, which is what #24's
 NixOS maintainer asked for. Five more rounds of allocation work ride along._
 
 ### Added
@@ -47,14 +47,23 @@ NixOS maintainer asked for. Five more rounds of allocation work ride along._
   | | |
   |---|---|
   | `npx sasso` before | 2340 ms |
-  | `npx sasso` after (native engine) | **228 ms** |
-  | `npx sasso` after (wasm engine) | 646 ms |
-  | the `sasso` 0.14.0 binary | 143 ms |
-  | dart-sass 1.104.1 | 2322 ms |
+  | `npx sasso` after (native engine) | **266 ms** |
+  | `npx sasso` after (wasm engine) | 610 ms |
+  | the `sasso` 0.15.0 binary | 137 ms |
+  | dart-sass 1.104.1 | 2268 ms |
 
   So the npm package was at parity with the thing it replaces, and is now
-  within 1.6× of the release binary — with output byte-identical to that
-  binary in every engine/concurrency combination.
+  within 1.9× of the release binary — with output byte-identical to that
+  binary in every engine/concurrency combination (138 of 138, both engines,
+  checked against the published artifacts).
+
+  The "after" figures are measured against what `npm install sasso` actually
+  fetches. An earlier draft of this entry quoted 228 ms, taken from a locally
+  built addon that no commit in this repository produces — 318 KB larger than
+  any build of this source, most likely a leftover from an abandoned
+  experiment. Building v0.15.0 here reproduces the published artifact to
+  within 64 bytes and the same speed, and every perf round from #81 to the tag
+  measures within noise of it, so the number was wrong, not the release.
 
   The pool is `node:worker_threads` with workers pulling from a shared index,
   so one heavy stylesheet cannot leave the others idle, and `--stop-on-error`
