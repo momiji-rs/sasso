@@ -1380,6 +1380,47 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // `package.json`'s `files` is a WHITELIST: a module the CLI imports but the
+  // list omits is missing from the published tarball, and `npx sasso` dies on
+  // start with a resolution error that no test in this repo would see, because
+  // every test runs against the working tree where the file is present.
+  // Adding `_jobs.mjs` nearly shipped exactly that.
+  {
+    const pkgDir = new URL("./npm/", import.meta.url);
+    const pkg = JSON.parse(readFileSync(new URL("package.json", pkgDir), "utf8"));
+    const shipped = new Set(pkg.files);
+    const entries = ["cli.mjs", "sasso.mjs", "sasso.speed.mjs", "native.mjs"];
+    const seen = new Set();
+    const queue = [...entries];
+    while (queue.length) {
+      const name = queue.pop();
+      if (seen.has(name)) continue;
+      seen.add(name);
+      let text;
+      try {
+        text = readFileSync(new URL(name, pkgDir), "utf8");
+      } catch {
+        continue; // a .wasm or other non-JS entry
+      }
+      for (const m of text.matchAll(/(?:^|\s)(?:import|export)[^;\n]*?from\s+["'](\.\/[^"']+)["']/g)) {
+        const dep = m[1].slice(2);
+        assert.ok(
+          shipped.has(dep),
+          `packaging: ${name} imports ./${dep}, which package.json's "files" does not ship`,
+        );
+        queue.push(dep);
+      }
+      for (const m of text.matchAll(/import\(\s*["'](\.\/[^"']+)["']\s*\)/g)) {
+        const dep = m[1].slice(2);
+        assert.ok(
+          shipped.has(dep),
+          `packaging: ${name} dynamically imports ./${dep}, which package.json's "files" does not ship`,
+        );
+        queue.push(dep);
+      }
+    }
+  }
+
   // The pool's default size is PHYSICAL cores, not SMT threads: a compile is
   // pure computation, so two hyperthreads on one core contend for the same
   // execution units instead of overlapping stalls. Measured on a Ryzen 7
