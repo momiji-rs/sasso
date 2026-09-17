@@ -900,6 +900,26 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.match(indented.stdout, /b: 1/, "cli: … and compiles it");
   const notIndented = run(["indented.scss"]);
   assert.equal(notIndented.status, 1, "cli: without --indented the extension decides, and this file is not SCSS");
+  // Short options with an ATTACHED value (`-Ilib`, `-j4`). dart's own parser
+  // takes them — `sass -Ilib in.scss` compiles, measured against 1.104.1 on
+  // 2026-09-17 — so this CLI takes them too, and is pinned here because the
+  // NATIVE CLI currently rejects them (momiji-rs/sasso#78): if that parser
+  // gains the form, these stay true; if this one ever loses it, a build script
+  // written for `sass` breaks.
+  mkdirSync(join(dir, "lib"), { recursive: true });
+  writeFileSync(join(dir, "lib", "_v.scss"), "$w: 7px;\n");
+  writeFileSync(join(dir, "uses.scss"), '@use "v" as v;\n.a{width: v.$w}\n');
+  for (const args of [["-I", "lib"], ["-Ilib"], ["--load-path=lib"], ["--load-path", "lib"]]) {
+    const r = run([...args, "uses.scss"]);
+    assert.equal(r.status, 0, `cli: ${args.join(" ")} resolves the load path (stderr: ${r.stderr})`);
+    assert.match(r.stdout, /width: 7px/, `cli: ${args.join(" ")} compiles`);
+  }
+  assert.equal(run(["-j4", "in.scss"]).status, 0, "cli: -j4 (attached) is accepted, like dart's short options");
+  // What dart does NOT take: a value attached to a flag that has none, and a
+  // bundle. Both CLIs reject them.
+  rejects(["-scompressed", "in.scss"], "unknown option -scompressed");
+  rejects(["-qc", "in.scss"], "unknown option -qc");
+
   // A count that overflows the Rust integer the native parser uses is a
   // rejection, not four billion compiles.
   rejects(["--loop=4294967296", "in.scss"], "--loop expects a positive integer");
