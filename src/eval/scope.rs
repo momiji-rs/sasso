@@ -89,7 +89,7 @@ impl<'a> Evaluator<'a> {
     /// Capture the current variable and function/mixin scope chains as a
     /// callable's lexical closure (dart `Environment.closure()` — shared
     /// frames, not snapshots).
-    pub(super) fn capture_callable(&self, def: &Rc<Callable>) -> Rc<UserCallable> {
+    pub(super) fn capture_callable(&mut self, def: &Rc<Callable>) -> Rc<UserCallable> {
         let env_modules = EnvModules {
             used_modules: self.used_modules.clone(),
             star_modules: self.star_modules.clone(),
@@ -106,16 +106,20 @@ impl<'a> Evaluator<'a> {
     /// importing scope (dart's import is textual inclusion), but its body
     /// still maps to and diagnoses against the file that wrote it, and still
     /// resolves `math.div` through THAT file's `@use "sass:math"`.
-    pub(super) fn recapture_callable(&self, src: &UserCallable) -> Rc<UserCallable> {
+    pub(super) fn recapture_callable(&mut self, src: &UserCallable) -> Rc<UserCallable> {
         self.capture_callable_from(&src.def, src.origin.clone(), src.env_modules.clone())
     }
 
     fn capture_callable_from(
-        &self,
+        &mut self,
         def: &Rc<Callable>,
         origin: crate::value::MixinOrigin,
         env_modules: EnvModules,
     ) -> Rc<UserCallable> {
+        // The closure must SHARE the frames it captures, so every frame it
+        // takes has to exist by the time it is cloned.
+        materialize_fn_frames(&mut self.functions);
+        materialize_fn_frames(&mut self.mixins);
         Rc::new(UserCallable {
             def: Rc::clone(def),
             origin,
@@ -157,8 +161,10 @@ impl<'a> Evaluator<'a> {
             self.var_spans.push(new_span_scope());
         }
         self.scope_semi_global.push(effective);
-        self.functions.push(new_fn_scope());
-        self.mixins.push(new_fn_scope());
+        // Empty frames: the block gets a table only if it declares something
+        // (or a closure captures the chain). See [`FnFrame`].
+        self.functions.push(None);
+        self.mixins.push(None);
     }
 
     pub(super) fn pop_scope(&mut self) {
@@ -176,8 +182,9 @@ impl<'a> Evaluator<'a> {
     /// true)` — `@function a_b` and `@function a-b` define the SAME name (the
     /// AST keeps the original spelling for plain-CSS fallback and messages).
     pub(super) fn define_function(&mut self, name: &str, c: Rc<UserCallable>) {
-        if let Some(frame) = self.functions.last() {
+        if let Some(frame) = self.functions.last_mut() {
             frame
+                .get_or_insert_with(new_fn_scope)
                 .borrow_mut()
                 .insert(normalize_arg_name(name).into_owned(), c);
         }
@@ -185,8 +192,9 @@ impl<'a> Evaluator<'a> {
 
     /// Define a user `@mixin` in the innermost frame (dart `visitMixinRule`).
     pub(super) fn define_mixin(&mut self, name: &str, c: Rc<UserCallable>) {
-        if let Some(frame) = self.mixins.last() {
+        if let Some(frame) = self.mixins.last_mut() {
             frame
+                .get_or_insert_with(new_fn_scope)
                 .borrow_mut()
                 .insert(normalize_arg_name(name).into_owned(), c);
         }
@@ -196,7 +204,7 @@ impl<'a> Evaluator<'a> {
     /// innermost frame first.
     pub(super) fn lookup_function(&self, name: &str) -> Option<Rc<UserCallable>> {
         let key = normalize_arg_name(name);
-        for frame in self.functions.iter().rev() {
+        for frame in self.functions.iter().rev().flatten() {
             if let Some(f) = frame.borrow().get(key.as_ref()) {
                 return Some(Rc::clone(f));
             }
@@ -208,7 +216,7 @@ impl<'a> Evaluator<'a> {
     /// frame first.
     pub(super) fn lookup_mixin(&self, name: &str) -> Option<Rc<UserCallable>> {
         let key = normalize_arg_name(name);
-        for frame in self.mixins.iter().rev() {
+        for frame in self.mixins.iter().rev().flatten() {
             if let Some(m) = frame.borrow().get(key.as_ref()) {
                 return Some(Rc::clone(m));
             }
@@ -219,7 +227,7 @@ impl<'a> Evaluator<'a> {
     /// Look up a user `@function` dash/underscore-insensitively (for the
     /// `meta` introspection functions), innermost frame first.
     pub(super) fn lookup_function_norm(&self, key: &str) -> Option<Rc<UserCallable>> {
-        for frame in self.functions.iter().rev() {
+        for frame in self.functions.iter().rev().flatten() {
             let frame = frame.borrow();
             if let Some((_, f)) = frame.iter().find(|(k, _)| normalize_arg_name(k) == key) {
                 return Some(Rc::clone(f));
@@ -230,7 +238,7 @@ impl<'a> Evaluator<'a> {
 
     /// Look up a user `@mixin` dash/underscore-insensitively, innermost first.
     pub(super) fn lookup_mixin_norm(&self, key: &str) -> Option<Rc<UserCallable>> {
-        for frame in self.mixins.iter().rev() {
+        for frame in self.mixins.iter().rev().flatten() {
             let frame = frame.borrow();
             if let Some((_, m)) = frame.iter().find(|(k, _)| normalize_arg_name(k) == key) {
                 return Some(Rc::clone(m));

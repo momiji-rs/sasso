@@ -422,7 +422,11 @@ impl<'a> Evaluator<'a> {
 
     /// Clone the current per-module environment (for capturing a content block's
     /// call-site closure).
-    pub(super) fn snapshot_env(&self) -> SavedModuleEnv {
+    pub(super) fn snapshot_env(&mut self) -> SavedModuleEnv {
+        // Like a callable's closure, the snapshot SHARES its frames with the
+        // chain it was taken from, so they have to exist first.
+        materialize_fn_frames(&mut self.functions);
+        materialize_fn_frames(&mut self.mixins);
         SavedModuleEnv {
             scopes: self.scopes.clone(),
             var_spans: self.var_spans.clone(),
@@ -1055,8 +1059,8 @@ impl<'a> Evaluator<'a> {
             },
         );
         let saved_semi = std::mem::replace(&mut self.scope_semi_global, vec![true]);
-        let saved_funcs = std::mem::replace(&mut self.functions, vec![new_fn_scope()]);
-        let saved_mixins = std::mem::replace(&mut self.mixins, vec![new_fn_scope()]);
+        let saved_funcs = std::mem::replace(&mut self.functions, vec![None]);
+        let saved_mixins = std::mem::replace(&mut self.mixins, vec![None]);
         let saved_used = std::mem::take(&mut self.used_modules);
         let saved_star = std::mem::take(&mut self.star_modules);
         let saved_used_user = std::mem::take(&mut self.used_user_modules);
@@ -1111,14 +1115,19 @@ impl<'a> Evaluator<'a> {
             .next()
             .unwrap_or_else(new_span_scope);
         // The module's top-level function/mixin frames, shared by Rc with the
-        // chains the module's own callables captured.
+        // chains the module's own callables captured. A module always exposes a
+        // table even when it declares nothing (its members are looked up
+        // through the `Module`, not through a chain), so an empty frame
+        // materializes here.
         let functions = std::mem::take(&mut self.functions)
             .into_iter()
             .next()
+            .flatten()
             .unwrap_or_else(new_fn_scope);
         let mixins = std::mem::take(&mut self.mixins)
             .into_iter()
             .next()
+            .flatten()
             .unwrap_or_else(new_fn_scope);
         let used_user_modules = std::mem::take(&mut self.used_user_modules);
         let star_user_modules = std::mem::take(&mut self.star_user_modules);
@@ -1626,8 +1635,11 @@ impl<'a> Evaluator<'a> {
             scopes: std::mem::replace(&mut self.scopes, vec![module_scope]),
             var_spans: std::mem::replace(&mut self.var_spans, module_spans),
             scope_semi_global: std::mem::replace(&mut self.scope_semi_global, vec![true]),
-            functions: std::mem::replace(&mut self.functions, vec![std::rc::Rc::clone(&module.functions)]),
-            mixins: std::mem::replace(&mut self.mixins, vec![std::rc::Rc::clone(&module.mixins)]),
+            functions: std::mem::replace(
+                &mut self.functions,
+                vec![Some(std::rc::Rc::clone(&module.functions))],
+            ),
+            mixins: std::mem::replace(&mut self.mixins, vec![Some(std::rc::Rc::clone(&module.mixins))]),
             used_modules: std::mem::replace(&mut self.used_modules, module.used_builtin_modules.clone()),
             star_modules: std::mem::replace(&mut self.star_modules, module.star_builtin_modules.clone()),
             used_user_modules: std::mem::replace(
