@@ -279,9 +279,11 @@ rounds — a rule's selector list resolved once and shared, carried into the
 output tree rather than re-materialised, and the selector scanners reading from
 an inline character buffer — take that campaign to **-5.61% instructions and
 -27.1% allocations** on the large corpus, each verifying the sass-spec ratchet
-at delta +0. Full
+at delta +0; the per-round table is in the
+[0.14.0 changelog entry](CHANGELOG.md#0140---2026-09-17). Full three-way
 methodology, per-file numbers and the correctness diff are in
-[`bench/three_way.md`](bench/three_way.md); run it yourself with
+[`bench/three_way.md`](bench/three_way.md) — which reports through the earlier
+−27% round, not these four; run it yourself with
 `cd bench && RUNS=12 WARMUP=3 LOOP_N=200 bash scripts/run_bench.sh`.
 
 ## WebAssembly
