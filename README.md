@@ -25,10 +25,10 @@ subset it implements.
 >
 > Re-checked on 2026-09-17 against a **fresh clone** of that corpus with the
 > **published** 0.14.0 binary — nothing built into the tree, the compiler
-> downloaded from the release page: of the 137 stylesheets that compile without
-> npm dependencies (dart fails on the other ten too), **136 are byte-identical
-> to dart-sass 1.104.1**; the one that differs is the `@extend` duplicate-
-> extender case written up in the divergences doc.
+> downloaded from the release page: of its 148 entry points, **138 compile
+> without npm dependencies** (dart-sass 1.104.1 fails on the same ten) and
+> **137 of those 138 are byte-identical to dart**; the one that differs is the
+> `@extend` duplicate-extender case written up in the divergences doc.
 
 ## Why another Sass compiler?
 
