@@ -1528,7 +1528,8 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/momiji-rs/sasso/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/momiji-rs/sasso/compare/v0.10.0...v0.14.0
 [0.10.0]: https://github.com/momiji-rs/sasso/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/momiji-rs/sasso/compare/v0.9.0...v0.9.1
