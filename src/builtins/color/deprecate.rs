@@ -7,6 +7,7 @@
 //! `color.adjust` (the absolute one it always was). Every shape here was
 //! measured against dart-sass 1.103.1.
 
+use super::stored_alpha;
 use crate::value::{Number, Value};
 
 /// The suggestions for a deprecated call, or `None` when the member carries no
@@ -46,7 +47,7 @@ pub(crate) fn suggestions(name: &str, pos_args: &[Value], named: &[(String, Valu
     // `$lightness`/`$saturation` are read and written as percentages; `$alpha`
     // is the unitless 0-1 value it is passed as.
     let (current, limit, unit) = match channel {
-        "alpha" => (color.a, 1.0, ""),
+        "alpha" => (stored_alpha(color), 1.0, ""),
         "saturation" => (hsl_channel(color, 1), 100.0, "%"),
         _ => (hsl_channel(color, 2), 100.0, "%"),
     };

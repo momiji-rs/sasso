@@ -9,7 +9,8 @@
 //! [`legacy_hsl_adjust`] and [`legacy_alpha_adjust`] are for.
 
 use super::color::{
-    legacy_alpha_adjust, legacy_hsl_adjust, modify_in_space, modify_in_space_opt, space_arg, ModifyOp,
+    legacy_alpha_adjust, legacy_hsl_adjust, missing_channel_err, modify_in_space, modify_in_space_opt,
+    space_arg, stored_alpha, ModifyOp,
 };
 use super::{arg, as_color, clamp01, num, require, require_legacy_color};
 use crate::error::Error;
@@ -746,7 +747,7 @@ fn fn_opacity(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option
     }
     Some((|| {
         let c = as_color(color, pos)?;
-        Ok(Value::Number(Number::unitless(c.a)))
+        Ok(Value::Number(Number::unitless(stored_alpha(&c))))
     })())
 }
 
@@ -758,7 +759,7 @@ fn fn_ie_hex_str(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
     let byte = |v: f64| v.round().clamp(0.0, 255.0) as u8;
     let text = format!(
         "#{:02X}{:02X}{:02X}{:02X}",
-        byte(c.a * 255.0),
+        byte(stored_alpha(&c) * 255.0),
         byte(c.r),
         byte(c.g),
         byte(c.b)
@@ -789,6 +790,16 @@ impl Space {
     }
 }
 
+/// The legacy [`Space`] a color is already in — the fallback working space
+/// when no channel keyword names one.
+fn own_space(c: &Color) -> Space {
+    match c.modern.as_ref().map(|m| m.space) {
+        Some(ColorSpace::Hsl) => Space::Hsl,
+        Some(ColorSpace::Hwb) => Space::Hwb,
+        _ => Space::Rgb,
+    }
+}
+
 /// A resolved channel argument: its keyword name and the supplied value.
 type ChannelArg<'v> = (&'v str, &'v Value);
 
@@ -812,6 +823,7 @@ fn channel_space(name: &str) -> Option<(Option<Space>, bool)> {
 /// that space is an error.
 fn resolve_channels<'v>(
     _fname: &str,
+    c: &Color,
     named: &'v [(String, Value)],
     pos: Pos,
 ) -> Result<(Space, Vec<ChannelArg<'v>>), Error> {
@@ -823,7 +835,12 @@ fn resolve_channels<'v>(
         .collect();
     // Determine the space from the first space-specific channel. If only the
     // shared `hue` channel is given, default to HSL; with no recognized
-    // channel at all, dart-sass falls back to RGB.
+    // channel at all — a channel-less or alpha-only call, or an unknown
+    // channel name — dart works in the COLOR'S OWN space. That is only
+    // observable through a missing channel, which an unnecessary round trip
+    // through rgb would fill in (`color.change(hsl(240 none 50%), $alpha: 0.5)`
+    // is `hsl(240deg none 50% / 0.5)`, not `hsla(0, 0%, 50%, 0.5)`), and
+    // through the unknown-channel error, which names that space.
     let mut space: Option<Space> = None;
     let mut has_hue = false;
     for (n, _) in &chans {
@@ -836,7 +853,7 @@ fn resolve_channels<'v>(
             _ => {}
         }
     }
-    let space = space.unwrap_or(if has_hue { Space::Hsl } else { Space::Rgb });
+    let space = space.unwrap_or(if has_hue { Space::Hsl } else { own_space(c) });
     // Validate every channel belongs to the resolved space (alpha is allowed
     // everywhere; unknown channels error against the resolved space too).
     for (n, _) in &chans {
@@ -880,7 +897,7 @@ fn fn_adjust_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
     // Legacy color with no $space: detect the legacy space from the channel
     // keywords, then run the modern adjust path (which clamps only rgb/[0,255]
     // and the perceptual lightness/chroma, leaving hsl/hwb percentages free).
-    let (space, chans) = resolve_channels("adjust-color", named, pos)?;
+    let (space, chans) = resolve_channels("adjust-color", &c, named, pos)?;
     let cspace = match space {
         Space::Rgb => ColorSpace::Rgb,
         Space::Hsl => ColorSpace::Hsl,
@@ -908,7 +925,7 @@ fn fn_change_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
     // Legacy color with no $space: detect the legacy space from the channel
     // keywords, then run the modern (non-clamping, `none`-aware) modify path so
     // out-of-range channels and missing channels match dart-sass.
-    let (space, chans) = resolve_channels("change-color", named, pos)?;
+    let (space, chans) = resolve_channels("change-color", &c, named, pos)?;
     let cspace = match space {
         Space::Rgb => ColorSpace::Rgb,
         Space::Hsl => ColorSpace::Hsl,
@@ -934,7 +951,7 @@ fn fn_scale_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
     if let Some(r) = modify_with_space(&c, named, super::color::ModifyOp::Scale, pos) {
         return r;
     }
-    let (space, chans) = resolve_channels("scale-color", named, pos)?;
+    let (space, chans) = resolve_channels("scale-color", &c, named, pos)?;
     let cspace = match space {
         Space::Rgb => ColorSpace::Rgb,
         Space::Hsl => ColorSpace::Hsl,
@@ -948,6 +965,12 @@ fn fn_scale_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
         if mc.channels.iter().any(Option::is_none) && chans.iter().all(|(n, _)| *n == "alpha") {
             let mut out = mc;
             for (_, v) in &chans {
+                // `scale` combines the amount with the channel's current value,
+                // so a MISSING alpha is unsupported here exactly as it is on the
+                // common path — this shortcut must not read it as opaque.
+                if out.alpha.is_none() {
+                    return Err(missing_channel_err("alpha", &Value::Color(c.clone()), pos));
+                }
                 let factor = scale_factor("alpha", v, pos)?;
                 let a = out.alpha.unwrap_or(1.0);
                 out.alpha = Some(scale_toward(a, factor, 1.0));

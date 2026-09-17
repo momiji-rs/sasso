@@ -150,8 +150,17 @@ pub(crate) fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColo
 /// round trip. Same-space conversion stays the identity in both.
 pub(super) fn convert_modern_filled(mc: &ModernColor, target: ColorSpace) -> ModernColor {
     let out = convert_modern(mc, target);
-    if mc.space == target || !target.is_legacy() {
+    // Same-space is the identity in dart too, and keeps every missing channel.
+    if mc.space == target {
         return out;
+    }
+    // A REAL conversion resolves a missing ALPHA to 0 whatever the target —
+    // `color.is-missing(color.to-space(oklch(50% 0.1 20deg / none), oklab),
+    // "alpha")` is false in dart — where the CHANNELS are only zero-filled for
+    // a legacy target.
+    let alpha = Some(out.alpha.unwrap_or(0.0));
+    if !target.is_legacy() {
+        return ModernColor { alpha, ..out };
     }
     ModernColor {
         space: target,
@@ -160,7 +169,21 @@ pub(super) fn convert_modern_filled(mc: &ModernColor, target: ColorSpace) -> Mod
             Some(out.channels[1].unwrap_or(0.0)),
             Some(out.channels[2].unwrap_or(0.0)),
         ],
-        alpha: Some(out.alpha.unwrap_or(0.0)),
+        alpha,
+    }
+}
+
+/// The color's alpha the way dart's `SassColor.alpha` getter answers it: a
+/// MISSING alpha reads as **0**, like any other missing channel.
+///
+/// [`Color::a`] cannot stand in for this. It mirrors a missing alpha as the
+/// opaque `1.0` that *serialization* falls back to, so reading it makes
+/// `color.alpha(hsl(240 100% 50% / none))` answer 1 where dart answers 0, and
+/// carries that 1 into every arithmetic built on top of it.
+pub(crate) fn stored_alpha(c: &Color) -> f64 {
+    match &c.modern {
+        Some(m) => m.alpha.unwrap_or(0.0),
+        None => c.a,
     }
 }
 
