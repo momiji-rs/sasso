@@ -219,9 +219,9 @@ impl Channels {
     ) -> Result<Channels, Error> {
         let count = pos_args.len() + named.len();
         if count >= 3 {
-            let c0 = require(params, pos_args, named, 0, fname, pos)?.clone();
-            let c1 = require(params, pos_args, named, 1, fname, pos)?.clone();
-            let c2 = require(params, pos_args, named, 2, fname, pos)?.clone();
+            let c0 = require(params, pos_args, named, 0, pos)?.clone();
+            let c1 = require(params, pos_args, named, 1, pos)?.clone();
+            let c2 = require(params, pos_args, named, 2, pos)?.clone();
             let alpha = arg(params, pos_args, named, 3).cloned();
             return Ok(Channels {
                 comps: vec![c0, c1, c2],
@@ -933,7 +933,7 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
             pos,
         ));
     }
-    let channels = require(&params, pos_args, named, 0, "hwb", pos)?.clone();
+    let channels = require(&params, pos_args, named, 0, pos)?.clone();
     // A single channels list must be unbracketed and space/slash-separated; a
     // bracketed and/or comma list is rejected with dart-sass's message.
     if let Value::List(l) = &channels {
@@ -1194,7 +1194,7 @@ pub(super) fn fn_lab_family(
             pos,
         ));
     }
-    let channels = require(&params, pos_args, named, 0, name, pos)?.clone();
+    let channels = require(&params, pos_args, named, 0, pos)?.clone();
     // A comma-separated or bracketed list is not a valid channels list.
     if let Value::List(l) = &channels {
         let comma = l.sep == ListSep::Comma;
@@ -1399,7 +1399,7 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
             pos,
         ));
     }
-    let desc = require(&params, pos_args, named, 0, "color", pos)?.clone();
+    let desc = require(&params, pos_args, named, 0, pos)?.clone();
     if let Value::List(l) = &desc {
         let comma = l.sep == ListSep::Comma;
         if l.bracketed || comma {
@@ -1617,8 +1617,8 @@ pub(super) fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
             pos,
         ));
     }
-    let c1 = as_color(require(&params, pos_args, named, 0, "mix", pos)?, pos)?;
-    let c2 = as_color(require(&params, pos_args, named, 1, "mix", pos)?, pos)?;
+    let c1 = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
+    let c2 = as_color(require(&params, pos_args, named, 1, pos)?, pos)?;
     let weight = match arg(&params, pos_args, named, 2) {
         Some(Value::Number(w)) => {
             // A NaN is within no range, and the bounds carry the value's unit
@@ -1798,9 +1798,9 @@ pub(super) fn fn_adjust_lightness(
             pos,
         ));
     }
-    let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     require_legacy_color(&c, name, pos)?;
-    let amount = match require(&params, pos_args, named, 1, name, pos)? {
+    let amount = match require(&params, pos_args, named, 1, pos)? {
         Value::Number(num) => {
             // A NaN is within no range, and the bounds carry the value's unit.
             if num.value.is_nan() || num.value < 0.0 || num.value > 100.0 {
@@ -1832,7 +1832,7 @@ pub(super) fn fn_adjust_lightness(
 pub(super) fn fn_percentage(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["number"];
     max_positional(pos_args, params.len(), pos)?;
-    let arg = require(&params, pos_args, named, 0, "percentage", pos)?;
+    let arg = require(&params, pos_args, named, 0, pos)?;
     if let Value::Number(num) = arg {
         if !num.is_unitless() {
             return Err(Error::at(
@@ -1853,7 +1853,7 @@ pub(super) fn fn_channel(
 ) -> Result<Value, Error> {
     let params = ["color"];
     max_positional(pos_args, params.len(), pos)?;
-    let c = as_color(require(&params, pos_args, named, 0, name, pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     // The legacy red/green/blue getters only support legacy colors.
     if c.modern.as_ref().is_some_and(|m| !m.space.is_legacy()) {
         return Err(Error::at(
@@ -1934,7 +1934,7 @@ pub(super) fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
             pos,
         ));
     }
-    let c = as_color(require(&params, pos_args, named, 0, "alpha", pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     // The legacy alpha getter only supports legacy colors.
     if c.modern.as_ref().is_some_and(|m| !m.space.is_legacy()) {
         return Err(Error::at(

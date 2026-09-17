@@ -113,7 +113,6 @@ fn comma_list(items: Vec<Value>) -> Value {
 fn key_path<'v>(
     pos_args: &'v [Value],
     named: &'v [(String, Value)],
-    fname: &str,
     pos: Pos,
 ) -> Result<Vec<&'v Value>, Error> {
     let mut keys: Vec<&Value> = Vec::new();
@@ -123,7 +122,7 @@ fn key_path<'v>(
         keys.push(v);
     }
     if keys.is_empty() {
-        return Err(Error::at(format!("Missing argument $key for {fname}()."), pos));
+        return Err(Error::at("Missing argument $key.".to_string(), pos));
     }
     keys.extend(pos_args.iter().skip(2));
     Ok(keys)
@@ -132,9 +131,9 @@ fn key_path<'v>(
 /// `map-get($map, $key, $keys...)`: the value at the nested key path, or `null`
 /// when any key along the path is absent (or an intermediate value is not a map).
 fn fn_map_get(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let map_v = super::require(&["map"], pos_args, named, 0, "map-get", pos)?;
+    let map_v = super::require(&["map"], pos_args, named, 0, pos)?;
     let mut entries = as_map(map_v, "map-get", pos)?;
-    let keys = key_path(pos_args, named, "map-get", pos)?;
+    let keys = key_path(pos_args, named, pos)?;
     for (i, key) in keys.iter().enumerate() {
         let found = entries
             .iter()
@@ -179,7 +178,7 @@ fn check_arity(pos_args: &[Value], max: usize, pos: Pos) -> Result<(), Error> {
 /// `map-keys($map)`: a comma list of the map's keys in order.
 fn fn_map_keys(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     check_arity(pos_args, 1, pos)?;
-    let map_v = super::require(&["map"], pos_args, named, 0, "map-keys", pos)?;
+    let map_v = super::require(&["map"], pos_args, named, 0, pos)?;
     let entries = as_map(map_v, "map-keys", pos)?;
     Ok(comma_list(entries.into_iter().map(|(k, _)| k).collect()))
 }
@@ -187,7 +186,7 @@ fn fn_map_keys(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
 /// `map-values($map)`: a comma list of the map's values in order.
 fn fn_map_values(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     check_arity(pos_args, 1, pos)?;
-    let map_v = super::require(&["map"], pos_args, named, 0, "map-values", pos)?;
+    let map_v = super::require(&["map"], pos_args, named, 0, pos)?;
     let entries = as_map(map_v, "map-values", pos)?;
     Ok(comma_list(entries.into_iter().map(|(_, v)| v).collect()))
 }
@@ -195,9 +194,9 @@ fn fn_map_values(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
 /// `map-has-key($map, $key, $keys...)`: whether the map contains the nested key
 /// path.
 fn fn_map_has_key(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let map_v = super::require(&["map"], pos_args, named, 0, "map-has-key", pos)?;
+    let map_v = super::require(&["map"], pos_args, named, 0, pos)?;
     let mut entries = as_map(map_v, "map-has-key", pos)?;
-    let keys = key_path(pos_args, named, "map-has-key", pos)?;
+    let keys = key_path(pos_args, named, pos)?;
     for (i, key) in keys.iter().enumerate() {
         let found = entries
             .iter()
@@ -295,24 +294,18 @@ fn modify_map(
 /// `map-merge($map1, $map2)` or the nested `map-merge($map1, $keys..., $map2)`:
 /// merge `$map2` into the (possibly nested) submap of `$map1` at the key path.
 fn fn_map_merge(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    merge_impl(pos_args, named, pos, "map-merge", false)
+    merge_impl(pos_args, named, pos, false)
 }
 
 /// `map-deep-merge($map1, $map2)`: like `map-merge` but recursive.
 fn fn_map_deep_merge(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    merge_impl(pos_args, named, pos, "map-deep-merge", true)
+    merge_impl(pos_args, named, pos, true)
 }
 
 /// Shared body for `map.merge` / `map.deep-merge`. With named `$map1`/`$map2`
 /// the call is the simple two-map form; otherwise the first positional argument
 /// is `$map1`, the last is `$map2`, and the keys in between form the nested path.
-fn merge_impl(
-    pos_args: &[Value],
-    named: &[(String, Value)],
-    pos: Pos,
-    fname: &str,
-    deep: bool,
-) -> Result<Value, Error> {
+fn merge_impl(pos_args: &[Value], named: &[(String, Value)], pos: Pos, deep: bool) -> Result<Value, Error> {
     let merge = |a: Vec<(Value, Value)>, b: Vec<(Value, Value)>| {
         if deep {
             deep_merge(a, b)
@@ -321,7 +314,7 @@ fn merge_impl(
         }
     };
     // Resolve `$map1` (positional 0 or named) and the path/`$map2`.
-    let map1_v = super::require(&["map1"], pos_args, named, 0, fname, pos)?;
+    let map1_v = super::require(&["map1"], pos_args, named, 0, pos)?;
     let map1 = as_map_named(map1_v, "map1", pos)?;
     if pos_args.len() <= 1 {
         // Two-map form via named `$map2`.
@@ -329,7 +322,7 @@ fn merge_impl(
             .iter()
             .find(|(n, _)| n == "map2")
             .map(|(_, v)| v)
-            .ok_or_else(|| Error::at(format!("Missing argument $map2 for {fname}()."), pos))?;
+            .ok_or_else(|| Error::at("Missing argument $map2.".to_string(), pos))?;
         let map2 = as_map_named(map2_v, "map2", pos)?;
         return Ok(Value::Map(merge(map1, map2)));
     }
@@ -355,7 +348,7 @@ fn merge_impl(
 /// path, creating maps along the way. Requires the map, at least one key, and a
 /// value (the last argument).
 fn fn_map_set(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let map_v = super::require(&["map"], pos_args, named, 0, "map-set", pos)?;
+    let map_v = super::require(&["map"], pos_args, named, 0, pos)?;
     let entries = as_map_named(map_v, "map", pos)?;
     // Named two-arg form `map.set($map, $key, $value)` via $key/$value.
     let named_key = named.iter().find(|(n, _)| n == "key").map(|(_, v)| v);
@@ -380,7 +373,7 @@ fn fn_map_set(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
 /// `$keys`. The `$keys` rest is positional; a single key may also be passed as
 /// the named `$key` (but not mixed with positional keys).
 fn fn_map_remove(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let map_v = super::require(&["map"], pos_args, named, 0, "map-remove", pos)?;
+    let map_v = super::require(&["map"], pos_args, named, 0, pos)?;
     let mut entries = as_map_named(map_v, "map", pos)?;
     // Every argument after the map is a positional key to remove.
     let mut keys: Vec<Value> = pos_args.iter().skip(1).cloned().collect();
@@ -402,9 +395,9 @@ fn fn_map_remove(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
 /// `map-deep-remove($map, $key, $keys...)`: remove the entry at the nested key
 /// path. Needs at least one key (dart-sass).
 fn fn_map_deep_remove(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let map_v = super::require(&["map"], pos_args, named, 0, "map-deep-remove", pos)?;
+    let map_v = super::require(&["map"], pos_args, named, 0, pos)?;
     let entries = as_map_named(map_v, "map", pos)?;
-    let keys = key_path(pos_args, named, "map-deep-remove", pos)?;
+    let keys = key_path(pos_args, named, pos)?;
     // The last key is removed; the keys before it locate the parent submap.
     let (last, parents) = match keys.split_last() {
         Some(pair) => pair,
@@ -448,7 +441,7 @@ fn as_map_named(v: &Value, param: &str, pos: Pos) -> Result<Vec<(Value, Value)>,
 
 /// `length($map)`: the number of entries.
 fn fn_length(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let map_v = super::require(&["map"], pos_args, named, 0, "length", pos)?;
+    let map_v = super::require(&["map"], pos_args, named, 0, pos)?;
     let entries = as_map(map_v, "length", pos)?;
     Ok(unitless(entries.len() as f64))
 }
@@ -457,9 +450,9 @@ fn fn_length(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<
 /// space list.
 fn fn_nth(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["list", "n"];
-    let map_v = super::require(&params, pos_args, named, 0, "nth", pos)?;
+    let map_v = super::require(&params, pos_args, named, 0, pos)?;
     let entries = as_map(map_v, "nth", pos)?;
-    let n = super::require(&params, pos_args, named, 1, "nth", pos)?;
+    let n = super::require(&params, pos_args, named, 1, pos)?;
     let raw = super::num(n, pos)?;
     if raw.fract() != 0.0 {
         return Err(Error::at(

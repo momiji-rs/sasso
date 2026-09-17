@@ -180,17 +180,21 @@ pub(super) fn arg<'v>(
 }
 
 /// Like [`arg`] but errors with a "missing argument" message when absent.
+///
+/// dart names only the PARAMETER (`Missing argument $amount.`) — never the
+/// function — because the frame underneath already points at the declaration
+/// the parameter belongs to. A user-defined function's message has always read
+/// that way here; this is the built-in half of the same sentence.
 pub(super) fn require<'v>(
     params: &[&str],
     pos_args: &'v [Value],
     named: &'v [(String, Value)],
     i: usize,
-    fname: &str,
     pos: Pos,
 ) -> Result<&'v Value, Error> {
     arg(params, pos_args, named, i).ok_or_else(|| {
         let pname = params.get(i).copied().unwrap_or("");
-        Error::at(format!("Missing argument ${pname} for {fname}()."), pos)
+        Error::at(format!("Missing argument ${pname}."), pos)
     })
 }
 

@@ -140,6 +140,16 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **`Missing argument $x.` no longer names a function, and no longer names the
+  wrong one.** Every built-in appended ` for <name>()` to dart-sass's message,
+  and the name it appended was the GLOBAL alias — so `color.adjust()` reported
+  `Missing argument $color for adjust-color().`, blaming a function the author
+  never wrote, where dart says `Missing argument $color.` (the frame underneath
+  already points at the declaration the parameter belongs to). User-defined
+  functions always read the dart way; the built-ins now match, across every
+  module and their global spellings alike. A variadic member names no parameter
+  at all: `math.hypot()` is now `At least one argument must be passed.`, as
+  `math.min()` already was.
 - **A missing alpha reads as 0 everywhere, not just in some places.** A color
   written `/ none` carries an opaque `1` alongside its missing alpha, for
   serialization to fall back to — and every reader that wanted the alpha as a

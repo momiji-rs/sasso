@@ -2507,6 +2507,65 @@ fn the_alpha_only_scale_shortcut_still_rejects_a_missing_alpha() {
 }
 
 #[test]
+fn a_missing_argument_names_only_the_parameter() {
+    // dart's message is `Missing argument $amount.` — the PARAMETER alone,
+    // never the function, because the frame underneath already points at the
+    // declaration it belongs to. A user-defined function always read that way
+    // here; every built-in appended ` for <name>()`, and the name it appended
+    // was the GLOBAL alias, so a module call reported a function the author
+    // never wrote (`color.adjust()` blamed `adjust-color()`). A variadic
+    // member names no parameter at all and asks for one argument instead.
+    // Every message byte-matched to dart-sass 1.104.1. Offline.
+    let prelude = "@use \"sass:color\";\n@use \"sass:math\";\n@use \"sass:string\";\n\
+                   @use \"sass:list\";\n@use \"sass:map\";\n@use \"sass:meta\";\n\
+                   @use \"sass:selector\";\n";
+    for (call, want) in [
+        // The module spellings, which used to name their global alias.
+        ("color.adjust()", "Missing argument $color."),
+        ("color.change()", "Missing argument $color."),
+        ("color.scale()", "Missing argument $color."),
+        ("color.mix(red)", "Missing argument $color2."),
+        ("color.channel(red)", "Missing argument $channel."),
+        ("math.pow(2)", "Missing argument $exponent."),
+        ("math.clamp()", "Missing argument $min."),
+        ("math.clamp(1)", "Missing argument $number."),
+        ("math.clamp(1, 2)", "Missing argument $max."),
+        ("math.atan2(1)", "Missing argument $x."),
+        ("string.slice(\"abc\")", "Missing argument $start-at."),
+        ("string.index(\"a\")", "Missing argument $substring."),
+        ("list.nth((1 2 3))", "Missing argument $n."),
+        ("list.set-nth((1 2), 1)", "Missing argument $value."),
+        ("list.join()", "Missing argument $list1."),
+        ("map.get((a: 1))", "Missing argument $key."),
+        ("map.has-key((a: 1))", "Missing argument $key."),
+        ("map.deep-merge((a: 1))", "Missing argument $map2."),
+        // The global spellings say the same thing.
+        ("adjust-color()", "Missing argument $color."),
+        ("mix(red)", "Missing argument $color2."),
+        ("str-slice(\"abc\")", "Missing argument $start-at."),
+        ("nth((1 2 3))", "Missing argument $n."),
+        // A variadic member has no parameter to name.
+        ("math.hypot()", "At least one argument must be passed."),
+        ("math.min()", "At least one argument must be passed."),
+        ("math.max()", "At least one argument must be passed."),
+        (
+            "selector.nest()",
+            "$selectors: At least one selector must be passed.",
+        ),
+        // These two already read the dart way and must keep doing so.
+        ("meta.call()", "Missing argument $function."),
+        ("meta.get-function()", "Missing argument $name."),
+    ] {
+        let msg = ours_err(&format!("{prelude}a {{ b: {call}; }}\n"));
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+        assert!(!msg.contains(" for "), "{call} still names a function: {msg}");
+    }
+    // A user-defined function, unchanged.
+    let msg = ours_err("@function f($x) { @return $x; }\na { b: f(); }\n");
+    assert!(msg.contains("Missing argument $x."), "{msg}");
+}
+
+#[test]
 fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
     // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
     // the fallback sector and hands back a NaN component. dart-sass 1.104.0

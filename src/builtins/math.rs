@@ -44,7 +44,7 @@ pub(super) fn try_call(
     let name = lname.as_str();
     // Simple unit-preserving unary ops.
     if let Some(op) = unary_op(name) {
-        return Some(unary(name, pos_args, named, pos, op));
+        return Some(unary(pos_args, named, pos, op));
     }
     match name {
         "round" => Some(round(pos_args, named, pos)),
@@ -53,16 +53,16 @@ pub(super) fn try_call(
         "clamp" => Some(clamp(pos_args, named, pos)),
         "sign" => Some(sign(pos_args, named, pos)),
         "pow" => Some(pow(pos_args, named, pos)),
-        "sqrt" => Some(unitless_unary("sqrt", "number", pos_args, named, pos, f64::sqrt)),
-        "exp" => Some(unitless_unary("exp", "number", pos_args, named, pos, f64::exp)),
+        "sqrt" => Some(unitless_unary("number", pos_args, named, pos, f64::sqrt)),
+        "exp" => Some(unitless_unary("number", pos_args, named, pos, f64::exp)),
         "log" => Some(log(pos_args, named, pos)),
         "hypot" => Some(hypot(pos_args, named, pos)),
-        "sin" => Some(trig("sin", pos_args, named, pos, f64::sin)),
-        "cos" => Some(trig("cos", pos_args, named, pos, f64::cos)),
-        "tan" => Some(trig("tan", pos_args, named, pos, f64::tan)),
-        "asin" => Some(inverse_trig("asin", pos_args, named, pos, f64::asin)),
-        "acos" => Some(inverse_trig("acos", pos_args, named, pos, f64::acos)),
-        "atan" => Some(inverse_trig("atan", pos_args, named, pos, f64::atan)),
+        "sin" => Some(trig(pos_args, named, pos, f64::sin)),
+        "cos" => Some(trig(pos_args, named, pos, f64::cos)),
+        "tan" => Some(trig(pos_args, named, pos, f64::tan)),
+        "asin" => Some(inverse_trig(pos_args, named, pos, f64::asin)),
+        "acos" => Some(inverse_trig(pos_args, named, pos, f64::acos)),
+        "atan" => Some(inverse_trig(pos_args, named, pos, f64::atan)),
         "atan2" => Some(atan2(pos_args, named, pos)),
         "rem" => Some(remainder("rem", pos_args, named, pos, true)),
         "mod" => Some(remainder("mod", pos_args, named, pos, false)),
@@ -110,8 +110,8 @@ fn floor_int(v: f64) -> f64 {
 pub(super) fn module_div(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["number1", "number2"];
     check_max_args(pos_args, named, 2, pos)?;
-    let a = super::require(&params, pos_args, named, 0, "div", pos)?.clone();
-    let b = super::require(&params, pos_args, named, 1, "div", pos)?.clone();
+    let a = super::require(&params, pos_args, named, 0, pos)?.clone();
+    let b = super::require(&params, pos_args, named, 1, pos)?.clone();
     crate::eval::eval_div(a, b, false, pos)
 }
 
@@ -492,14 +492,13 @@ fn preserved_round_nums(strategy: RoundStrategy, number: &Number, step: &Number,
 
 /// Apply a unit-preserving unary numeric operation, requiring a number.
 fn unary(
-    fname: &str,
     pos_args: &[Value],
     named: &[(String, Value)],
     pos: Pos,
     op: fn(f64) -> f64,
 ) -> Result<Value, Error> {
     check_max_args(pos_args, named, 1, pos)?;
-    let n = require_num(&["number"], pos_args, named, 0, fname, pos)?;
+    let n = require_num(&["number"], pos_args, named, 0, pos)?;
     Ok(num_value(n.copy_units(op(n.value))))
 }
 
@@ -510,7 +509,7 @@ fn unary(
 /// reference value), so the call is preserved.
 fn sign(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     check_max_args(pos_args, named, 1, pos)?;
-    let n = require_num(&["number"], pos_args, named, 0, "sign", pos)?;
+    let n = require_num(&["number"], pos_args, named, 0, pos)?;
     if n.numer_units().iter().any(|u| u == "%") {
         return Ok(preserved_call("sign", &all_args(pos_args, named)));
     }
@@ -527,8 +526,8 @@ fn sign(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value
 /// `pow(base, exp)`: both operands must be unitless; result is unitless.
 fn pow(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     check_max_args(pos_args, named, 2, pos)?;
-    let base = require_num(&["base", "exponent"], pos_args, named, 0, "pow", pos)?;
-    let exp = require_num(&["base", "exponent"], pos_args, named, 1, "pow", pos)?;
+    let base = require_num(&["base", "exponent"], pos_args, named, 0, pos)?;
+    let exp = require_num(&["base", "exponent"], pos_args, named, 1, pos)?;
     no_unit(&base, pos)?;
     no_unit(&exp, pos)?;
     Ok(unitless(base.value.powf(exp.value)))
@@ -537,7 +536,6 @@ fn pow(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value,
 /// A unitless unary op (`sqrt`, `exp`): the argument must have no units and
 /// the result is unitless.
 fn unitless_unary(
-    fname: &str,
     param: &str,
     pos_args: &[Value],
     named: &[(String, Value)],
@@ -545,7 +543,7 @@ fn unitless_unary(
     op: fn(f64) -> f64,
 ) -> Result<Value, Error> {
     check_max_args(pos_args, named, 1, pos)?;
-    let n = require_num(&[param], pos_args, named, 0, fname, pos)?;
+    let n = require_num(&[param], pos_args, named, 0, pos)?;
     no_unit(&n, pos)?;
     Ok(unitless(op(n.value)))
 }
@@ -554,7 +552,7 @@ fn unitless_unary(
 fn log(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     check_max_args(pos_args, named, 2, pos)?;
     let params = &["number", "base"];
-    let x = require_num(params, pos_args, named, 0, "log", pos)?;
+    let x = require_num(params, pos_args, named, 0, pos)?;
     no_unit(&x, pos)?;
     match super::arg(params, pos_args, named, 1) {
         // An explicit `null` base means the natural logarithm (dart-sass).
@@ -573,7 +571,7 @@ fn log(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value,
 /// is an error, while an unknown/relative-unit pair that can't be converted
 /// preserves the whole call verbatim (`hypot(1%, 2%)`).
 fn hypot(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let nums = collect_nums("hypot", pos_args, named, pos)?;
+    let nums = collect_nums(pos_args, named, pos)?;
     let first = match nums.first() {
         Some(n) => n.clone(),
         None => return Err(Error::at("At least one argument must be passed.", pos)),
@@ -603,15 +601,9 @@ fn hypot(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Valu
 
 /// `sin`/`cos`/`tan`: accept an angle (`deg`/`grad`/`rad`/`turn`) or a
 /// unitless number treated as radians; return a unitless number.
-fn trig(
-    fname: &str,
-    pos_args: &[Value],
-    named: &[(String, Value)],
-    pos: Pos,
-    op: fn(f64) -> f64,
-) -> Result<Value, Error> {
+fn trig(pos_args: &[Value], named: &[(String, Value)], pos: Pos, op: fn(f64) -> f64) -> Result<Value, Error> {
     check_max_args(pos_args, named, 1, pos)?;
-    let n = require_num(&["number"], pos_args, named, 0, fname, pos)?;
+    let n = require_num(&["number"], pos_args, named, 0, pos)?;
     let radians = angle_to_radians(&n, pos)?;
     Ok(unitless(op(radians)))
 }
@@ -619,14 +611,13 @@ fn trig(
 /// `asin`/`acos`/`atan`: the argument must be unitless; the result is in
 /// degrees.
 fn inverse_trig(
-    fname: &str,
     pos_args: &[Value],
     named: &[(String, Value)],
     pos: Pos,
     op: fn(f64) -> f64,
 ) -> Result<Value, Error> {
     check_max_args(pos_args, named, 1, pos)?;
-    let n = require_num(&["number"], pos_args, named, 0, fname, pos)?;
+    let n = require_num(&["number"], pos_args, named, 0, pos)?;
     no_unit(&n, pos)?;
     Ok(degrees(op(n.value).to_degrees()))
 }
@@ -638,8 +629,8 @@ fn inverse_trig(
 fn atan2(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     check_max_args(pos_args, named, 2, pos)?;
     let params = &["y", "x"];
-    let y = require_num(params, pos_args, named, 0, "atan2", pos)?;
-    let x = require_num(params, pos_args, named, 1, "atan2", pos)?;
+    let y = require_num(params, pos_args, named, 0, pos)?;
+    let x = require_num(params, pos_args, named, 1, pos)?;
     // A complex-unit operand is rejected before the `%` preserve below.
     verify_no_complex_units(&[&y, &x], pos)?;
     // A `%` operand would produce a context-dependent result, so dart-sass
@@ -676,8 +667,8 @@ fn remainder(
 ) -> Result<Value, Error> {
     check_max_args(pos_args, named, 2, pos)?;
     let params = &["dividend", "modulus"];
-    let a = require_num(params, pos_args, named, 0, fname, pos)?;
-    let b = require_num(params, pos_args, named, 1, fname, pos)?;
+    let a = require_num(params, pos_args, named, 0, pos)?;
+    let b = require_num(params, pos_args, named, 1, pos)?;
     let bv = match combine_into(&b, &a, pos) {
         StepCoercion::Value(v) => v,
         StepCoercion::Preserve => return Ok(preserved_call(fname, &[Value::Number(a), Value::Number(b)])),
@@ -850,7 +841,7 @@ pub(super) fn module_round(pos_args: &[Value], named: &[(String, Value)], pos: P
             pos,
         ));
     }
-    let v = super::require(&["number"], pos_args, named, 0, "round", pos)?;
+    let v = super::require(&["number"], pos_args, named, 0, pos)?;
     let n = as_num(v, pos)?;
     Ok(num_value(n.copy_units(int_result(n.value.round()))))
 }
@@ -919,7 +910,7 @@ pub(super) fn module_clamp(pos_args: &[Value], named: &[(String, Value)], pos: P
         ));
     }
     let want = |i: usize, label: &str| -> Result<Number, Error> {
-        let v = super::require(&params, pos_args, named, i, "clamp", pos)?;
+        let v = super::require(&params, pos_args, named, i, pos)?;
         match v {
             Value::Number(n) => Ok(n.clone()),
             other => Err(Error::at(
@@ -1186,15 +1177,14 @@ fn angle_to_radians(n: &Number, pos: Pos) -> Result<f64, Error> {
 }
 
 /// Collect every argument as a number, erroring on the first non-number.
-fn collect_nums(
-    fname: &str,
-    pos_args: &[Value],
-    named: &[(String, Value)],
-    pos: Pos,
-) -> Result<Vec<Number>, Error> {
+fn collect_nums(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Vec<Number>, Error> {
     let args = all_args(pos_args, named);
     if args.is_empty() {
-        return Err(Error::at(format!("Missing argument for {fname}()."), pos));
+        // A variadic member names no parameter to be missing.
+        return Err(Error::at(
+            "At least one argument must be passed.".to_string(),
+            pos,
+        ));
     }
     let mut out = Vec::with_capacity(args.len());
     for v in &args {
@@ -1242,10 +1232,9 @@ fn require_num(
     pos_args: &[Value],
     named: &[(String, Value)],
     i: usize,
-    fname: &str,
     pos: Pos,
 ) -> Result<Number, Error> {
-    let v = super::require(params, pos_args, named, i, fname, pos)?;
+    let v = super::require(params, pos_args, named, i, pos)?;
     as_num(v, pos)
 }
 

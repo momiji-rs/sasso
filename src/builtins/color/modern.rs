@@ -55,7 +55,7 @@ fn channel_name_arg(v: &Value, pos: Pos) -> Result<String, Error> {
 fn fn_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
     max_positional(pos_args, params.len(), pos)?;
-    let c = as_color(require(&params, pos_args, named, 0, "space", pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     Ok(Value::Str(crate::value::SassStr {
         text: color_space_of(&c).name().to_string().into(),
         quoted: false,
@@ -65,7 +65,7 @@ fn fn_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<V
 fn fn_is_legacy(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
     max_positional(pos_args, params.len(), pos)?;
-    let c = as_color(require(&params, pos_args, named, 0, "is-legacy", pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     Ok(Value::Bool(color_space_of(&c).is_legacy()))
 }
 
@@ -78,8 +78,8 @@ fn fn_to_space(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
             pos,
         ));
     }
-    let c = as_color(require(&params, pos_args, named, 0, "to-space", pos)?, pos)?;
-    let space = space_arg(require(&params, pos_args, named, 1, "to-space", pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
+    let space = space_arg(require(&params, pos_args, named, 1, pos)?, pos)?;
     let mc = legacy_to_modern(&c);
     if mc.space == space {
         return Ok(Value::Color(c));
@@ -97,8 +97,8 @@ fn fn_color_channel(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> 
             pos,
         ));
     }
-    let c = as_color(require(&params, pos_args, named, 0, "channel", pos)?, pos)?;
-    let chan = channel_name_arg(require(&params, pos_args, named, 1, "channel", pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
+    let chan = channel_name_arg(require(&params, pos_args, named, 1, pos)?, pos)?;
     let mc = legacy_to_modern(&c);
     // The space to read the channel in: explicit `$space`, else the color's own.
     let space = match arg(&params, pos_args, named, 2) {
@@ -129,8 +129,8 @@ fn fn_color_channel(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> 
 fn fn_is_missing(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "channel"];
     max_positional(pos_args, params.len(), pos)?;
-    let c = as_color(require(&params, pos_args, named, 0, "is-missing", pos)?, pos)?;
-    let chan = channel_name_arg(require(&params, pos_args, named, 1, "is-missing", pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
+    let chan = channel_name_arg(require(&params, pos_args, named, 1, pos)?, pos)?;
     let mc = legacy_to_modern(&c);
     let missing = if chan == "alpha" {
         mc.alpha.is_none()
@@ -163,7 +163,7 @@ fn fn_is_in_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Re
             pos,
         ));
     }
-    let c = as_color(require(&params, pos_args, named, 0, "is-in-gamut", pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     let mc = legacy_to_modern(&c);
     let space = match arg(&params, pos_args, named, 1) {
         Some(v) => space_arg(v, pos)?,
@@ -181,8 +181,8 @@ fn fn_is_powerless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
             pos,
         ));
     }
-    let c = as_color(require(&params, pos_args, named, 0, "is-powerless", pos)?, pos)?;
-    let chan = channel_name_arg(require(&params, pos_args, named, 1, "is-powerless", pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
+    let chan = channel_name_arg(require(&params, pos_args, named, 1, pos)?, pos)?;
     let mc = legacy_to_modern(&c);
     let space = match arg(&params, pos_args, named, 2) {
         Some(v) => space_arg(v, pos)?,
@@ -209,8 +209,8 @@ fn fn_is_powerless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> R
 fn fn_same(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color1", "color2"];
     max_positional(pos_args, params.len(), pos)?;
-    let c1 = as_color(require(&params, pos_args, named, 0, "same", pos)?, pos)?;
-    let c2 = as_color(require(&params, pos_args, named, 1, "same", pos)?, pos)?;
+    let c1 = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
+    let c2 = as_color(require(&params, pos_args, named, 1, pos)?, pos)?;
     let m1 = legacy_to_modern(&c1);
     let m2 = legacy_to_modern(&c2);
     // color.same compares the *realized* colors: a missing channel counts as 0
@@ -240,7 +240,7 @@ fn fn_same(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
 fn fn_to_gamut(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color", "space", "method"];
     max_positional(pos_args, params.len(), pos)?;
-    let c = as_color(require(&params, pos_args, named, 0, "to-gamut", pos)?, pos)?;
+    let c = as_color(require(&params, pos_args, named, 0, pos)?, pos)?;
     let mc = legacy_to_modern(&c);
     let space = match arg(&params, pos_args, named, 1) {
         Some(v) => space_arg(v, pos)?,

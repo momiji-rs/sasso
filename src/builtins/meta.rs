@@ -77,7 +77,7 @@ pub(super) fn try_call(
 /// `meta.calc-name($calc)`: the calculation's function name as a quoted string
 /// (`"calc"`, `"min"`, `"clamp"`, …).
 fn fn_calc_name(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let v = super::require(&["calc"], pos_args, named, 0, "calc-name", pos)?;
+    let v = super::require(&["calc"], pos_args, named, 0, pos)?;
     match v {
         Value::Calc(node) => {
             let name = match node {
@@ -101,7 +101,7 @@ fn fn_calc_name(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resu
 /// stays a number, a nested operation becomes an unquoted string, and any other
 /// operand (a `var()`/interpolation result) is its unquoted string.
 fn fn_calc_args(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let v = super::require(&["calc"], pos_args, named, 0, "calc-args", pos)?;
+    let v = super::require(&["calc"], pos_args, named, 0, pos)?;
     match v {
         // A function calculation (`min`/`clamp`/…) exposes its own arguments; a
         // bare `calc()` has a single argument, its expression.
@@ -159,7 +159,7 @@ fn quoted(text: impl Into<String>) -> Value {
 /// `type-of($value)`: the value's type as an unquoted string
 /// (`number`, `string`, `color`, `list`, `bool`, `null`).
 fn fn_type_of(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let v = super::require(&["value"], pos_args, named, 0, "type-of", pos)?;
+    let v = super::require(&["value"], pos_args, named, 0, pos)?;
     Ok(unquoted(v.type_name()))
 }
 
@@ -167,7 +167,7 @@ fn fn_type_of(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result
 /// or `""` for a unitless number). Errors on a non-number, matching
 /// dart-sass.
 fn fn_unit(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let v = super::require(&["number"], pos_args, named, 0, "unit", pos)?;
+    let v = super::require(&["number"], pos_args, named, 0, pos)?;
     match v {
         Value::Number(n) => Ok(quoted(n.unit_string())),
         other => Err(Error::at(
@@ -180,7 +180,7 @@ fn fn_unit(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Va
 /// `unitless($number)`: `true` when the number carries no unit. Errors on a
 /// non-number.
 fn fn_unitless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let v = super::require(&["number"], pos_args, named, 0, "unitless", pos)?;
+    let v = super::require(&["number"], pos_args, named, 0, pos)?;
     match v {
         Value::Number(n) => Ok(Value::Bool(n.is_unitless())),
         other => Err(Error::at(
@@ -194,8 +194,8 @@ fn fn_unitless(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Resul
 /// compatible — either operand unitless, or the full unit lists convert.
 fn fn_comparable(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["number1", "number2"];
-    let a = super::require(&params, pos_args, named, 0, "comparable", pos)?;
-    let b = super::require(&params, pos_args, named, 1, "comparable", pos)?;
+    let a = super::require(&params, pos_args, named, 0, pos)?;
+    let b = super::require(&params, pos_args, named, 1, pos)?;
     let num_of = |v: &Value, which: &str| -> Result<crate::value::Number, Error> {
         match v {
             Value::Number(n) => Ok(n.clone()),
@@ -225,7 +225,7 @@ fn fn_comparable(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
 /// feature names (accepting both quoted and unquoted strings); any other name
 /// is `false`, and a non-string argument is an error.
 fn fn_feature_exists(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let v = super::require(&["feature"], pos_args, named, 0, "feature-exists", pos)?;
+    let v = super::require(&["feature"], pos_args, named, 0, pos)?;
     let name = match v {
         Value::Str(s) => &s.text,
         other => {
@@ -267,7 +267,7 @@ fn fn_function_exists(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -
             pos,
         ));
     }
-    let v = super::require(&params, pos_args, named, 0, "function-exists", pos)?;
+    let v = super::require(&params, pos_args, named, 0, pos)?;
     let name = match v {
         Value::Str(s) => &s.text,
         other => {
@@ -318,7 +318,7 @@ fn fn_get_function(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> O
 /// their quotes, `null` becomes `null`, the empty list becomes `()`, and a
 /// single-element comma list keeps its trailing comma `(x,)`.
 fn fn_inspect(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
-    let v = super::require(&["value"], pos_args, named, 0, "inspect", pos)?;
+    let v = super::require(&["value"], pos_args, named, 0, pos)?;
     Ok(unquoted(inspect_value(v)))
 }
 
