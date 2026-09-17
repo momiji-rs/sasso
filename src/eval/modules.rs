@@ -456,23 +456,22 @@ impl<'a> Evaluator<'a> {
     ) -> Result<(), Error> {
         // Built-in `sass:<mod>` modules.
         if let Some(m) = url.strip_prefix("sass:") {
-            if !crate::builtins::is_module(m) {
+            let Some(module) = crate::builtins::module_name(m) else {
                 return Err(Error::at("Can't find stylesheet to import.".to_string(), pos));
-            }
+            };
             if !config.is_empty() {
                 return Err(Error::at(
                     "Built-in modules can't be configured.".to_string(),
                     pos,
                 ));
             }
-            let module = m.to_string();
             if star {
                 if !self.star_modules.contains(&module) {
                     self.star_modules.push(module);
                 }
                 return Ok(());
             }
-            let ns = namespace.unwrap_or(&module).to_string();
+            let ns = namespace.unwrap_or(module).to_string();
             self.check_namespace_free(&ns, pos)?;
             self.used_modules.insert(ns, module);
             return Ok(());

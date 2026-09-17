@@ -80,7 +80,7 @@ impl<'a> Evaluator<'a> {
         }
         // A built-in module bound to this namespace.
         let module = match self.used_modules.get(ns) {
-            Some(m) => m.clone(),
+            Some(m) => *m,
             None => {
                 return Err(
                     Error::at(format!("There is no module with the namespace \"{ns}\"."), pos)
@@ -102,7 +102,7 @@ impl<'a> Evaluator<'a> {
         // Reported AFTER the arguments, so a deprecated call inside one warns
         // first, as dart's does — and against the module's REAL name, which is
         // not the namespace it was bound to (`@use "sass:meta" as m`).
-        self.emit_call_deprecations(member, Some(&module), pos, length);
+        self.emit_call_deprecations(member, Some(module), pos, length);
         for v in &mut pos_args {
             *v = std::mem::replace(v, Value::Null).without_slash();
         }
@@ -117,9 +117,9 @@ impl<'a> Evaluator<'a> {
             }
         }
         // Call results are slash-free (dart `withoutSlash()` on every call).
-        let v = crate::builtins::call_module(&module, member, &pos_args, &named, pos)
+        let v = crate::builtins::call_module(module, member, &pos_args, &named, pos)
             .map_err(|e| e.with_length_at(pos, length))?;
-        self.emit_color_function_deprecation(member, Some(&module), pos, length, &pos_args, &named);
+        self.emit_color_function_deprecation(member, Some(module), pos, length, &pos_args, &named);
         Ok(v.without_slash())
     }
 
@@ -802,11 +802,11 @@ impl<'a> Evaluator<'a> {
                 }
             });
         }
-        if let Some(builtin) = self.used_modules.get(ns).cloned() {
+        if let Some(builtin) = self.used_modules.get(ns).copied() {
             return Ok(match kind {
-                MemberKind::Function => crate::builtins::module_has_member(&builtin, name),
-                MemberKind::Mixin => is_builtin_mixin(&builtin, name),
-                MemberKind::Variable => crate::builtins::module_var(&builtin, name, pos).is_ok(),
+                MemberKind::Function => crate::builtins::module_has_member(builtin, name),
+                MemberKind::Mixin => is_builtin_mixin(builtin, name),
+                MemberKind::Variable => crate::builtins::module_var(builtin, name, pos).is_ok(),
             });
         }
         Err(Error::at(
@@ -855,7 +855,7 @@ impl<'a> Evaluator<'a> {
                 // The enumerated references belong to the module, not to the
                 // namespace they were reached through.
                 let owner = crate::value::BuiltinModule::from_name(builtin);
-                let names: Vec<&str> = match (builtin.as_str(), kind) {
+                let names: Vec<&str> = match (*builtin, kind) {
                     ("meta", MemberKind::Function) => crate::builtins::META_FUNCTION_NAMES.to_vec(),
                     ("meta", MemberKind::Mixin) => crate::builtins::META_MIXIN_NAMES.to_vec(),
                     _ => Vec::new(),
@@ -1075,7 +1075,7 @@ impl<'a> Evaluator<'a> {
                 MemberKind::Variable => crate::builtins::module_var(m, &name, Pos::NONE).is_ok(),
                 MemberKind::Mixin => is_builtin_mixin(m, &name),
             };
-            let hit = (m.clone(), name.clone());
+            let hit = (m.to_string(), name.clone());
             if owns && !hits.contains(&hit) {
                 hits.push(hit);
             }

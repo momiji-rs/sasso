@@ -145,10 +145,11 @@ impl<'a> Evaluator<'a> {
     /// hyphen/underscore normalization) are rejected, and a positional arg
     /// after a keyword arg is an error — matching dart-sass.
     ///
-    /// This form discards the source-map definition spans; callers that bind
-    /// the results to user parameters want [`Self::eval_call_args_spanned`].
+    /// This form discards the source-map definition spans — and so never
+    /// collects them; callers that bind the results to user parameters want
+    /// [`Self::eval_call_args_spanned`].
     pub(super) fn eval_call_args(&mut self, args: &[CallArg]) -> Result<EvaledArgs, Error> {
-        Ok(self.eval_call_args_spanned(args)?.0)
+        Ok(self.eval_call_args_inner(args, false)?.0)
     }
 
     /// As [`Self::eval_call_args`], but also returns each argument's definition
@@ -158,6 +159,25 @@ impl<'a> Evaluator<'a> {
         &mut self,
         args: &[CallArg],
     ) -> Result<(EvaledArgs, ArgSpans), Error> {
+        self.eval_call_args_inner(args, true)
+    }
+
+    /// The shared body. `want_spans` is the caller's answer to "will anything
+    /// read the spans?" — a built-in binds its arguments by position and by
+    /// name, never by span, so `math.div($a, $b)` was building a vector of them
+    /// and dropping it on return.
+    ///
+    /// Together with `EvalOptions::source_map`, which gates definition-span
+    /// bookkeeping everywhere else, that decides whether spans are tracked at
+    /// all. When they are not, the three span vectors below stay EMPTY and
+    /// never allocate: an [`ArgSpans`] entry that is absent reads back as the
+    /// "unknown" span, which is what an untracked argument carries anyway.
+    fn eval_call_args_inner(
+        &mut self,
+        args: &[CallArg],
+        want_spans: bool,
+    ) -> Result<(EvaledArgs, ArgSpans), Error> {
+        let track_spans = want_spans && self.options.source_map;
         // Explicit positional args are gathered first; positionals spread from
         // a `...` splat are appended after them, so `f([1, 2]..., 3)` binds
         // `3` before `1, 2` (matching dart-sass's misplaced-rest behaviour).
@@ -170,7 +190,8 @@ impl<'a> Evaluator<'a> {
         // evaluate.dart:3812-3824). Every element a splat expands to gets the
         // SPLAT EXPRESSION's own span, not a per-element one — dart fills the
         // whole run with `restNodeForSpan` (evaluate.dart:3851).
-        let mut explicit_pos_spans: Vec<VarSpan> = Vec::with_capacity(args.len());
+        let mut explicit_pos_spans: Vec<VarSpan> =
+            Vec::with_capacity(if track_spans { args.len() } else { 0 });
         let mut splat_pos_spans: Vec<VarSpan> = Vec::new();
         let mut keyword_spans: Vec<(String, VarSpan)> = Vec::new();
         // A splatted list's separator survives into the callee's rest arglist
@@ -186,7 +207,9 @@ impl<'a> Evaluator<'a> {
             if keyword.iter().any(|(n, _)| normalize_arg_name(n) == norm) {
                 return Err(Error::unpositioned("Duplicate argument."));
             }
-            spans.push((name.clone(), sp));
+            if track_spans {
+                spans.push((name.clone(), sp));
+            }
             keyword.push((name, v));
             Ok(())
         };
@@ -194,8 +217,13 @@ impl<'a> Evaluator<'a> {
             let v = self.eval_expr(&a.value)?;
             // dart resolves each argument's node right after evaluating it
             // (evaluate.dart:3814), so a bare `$x` argument carries `$x`'s
-            // DEFINITION rather than the call site.
-            let sp = self.expression_node(&a.value, a.value_pos);
+            // DEFINITION rather than the call site. Resolving one walks the
+            // scope chain, so it waits until something wants the answer too.
+            let sp = if track_spans {
+                self.expression_node(&a.value, a.value_pos)
+            } else {
+                VarSpan::default()
+            };
             if a.splat {
                 // A splat list spreads into positional args; a map spreads
                 // into keyword args (string keys only). A single non-list/map
@@ -220,7 +248,9 @@ impl<'a> Evaluator<'a> {
                             rest_sep = l.sep;
                         }
                         // `iter::repeat_n` is 1.82; the crate's MSRV is 1.74.
-                        splat_pos_spans.extend(std::iter::repeat(sp).take(l.items.len()));
+                        if track_spans {
+                            splat_pos_spans.extend(std::iter::repeat(sp).take(l.items.len()));
+                        }
                         splat_pos.extend(l.items.to_vec());
                         // An argument-list splat (`$args...`) also forwards its
                         // captured keyword arguments as named arguments.
@@ -241,7 +271,9 @@ impl<'a> Evaluator<'a> {
                     Value::Null => {}
                     other => {
                         splat_pos.push(other);
-                        splat_pos_spans.push(sp);
+                        if track_spans {
+                            splat_pos_spans.push(sp);
+                        }
                     }
                 }
                 continue;
@@ -259,7 +291,9 @@ impl<'a> Evaluator<'a> {
                         ));
                     }
                     explicit_pos.push(v);
-                    explicit_pos_spans.push(sp);
+                    if track_spans {
+                        explicit_pos_spans.push(sp);
+                    }
                 }
             }
         }
@@ -621,7 +655,7 @@ impl<'a> Evaluator<'a> {
         // bound to the `sass:meta` namespace, so resolve them before the generic
         // module path.
         if let Some(ns) = module {
-            if self.used_modules.get(ns).map(String::as_str) == Some("meta") {
+            if self.used_modules.get(ns).copied() == Some("meta") {
                 // `_` and `-` are one character in a Sass identifier, so
                 // `meta.load_css(…)` is `meta.load-css(…)`.
                 match normalize_arg_name(name).as_ref() {

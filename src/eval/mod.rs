@@ -186,8 +186,8 @@ fn materialize_fn_frames(chain: &mut [FnFrame]) {
 /// (uswds `units()`, quasar `str-fe()`).
 #[derive(Clone)]
 pub(crate) struct EnvModules {
-    pub(self) used_modules: HashMap<String, String>,
-    pub(self) star_modules: Vec<String>,
+    pub(self) used_modules: HashMap<String, &'static str>,
+    pub(self) star_modules: Vec<&'static str>,
     pub(self) used_user_modules: HashMap<String, Rc<Module>>,
     pub(self) star_user_modules: Vec<Rc<Module>>,
 }
@@ -1106,11 +1106,11 @@ pub(crate) struct Evaluator<'a> {
     /// Built-in modules made available via `@use "sass:<mod>"`, keyed by the
     /// in-scope namespace (default = the part after `sass:`, or the `as ns`
     /// override). The value is the canonical built-in module name (e.g.
-    /// `math`).
-    used_modules: HashMap<String, String>,
+    /// `math`) — one of a closed set, so it is borrowed, not owned.
+    used_modules: HashMap<String, &'static str>,
     /// Built-in modules brought into scope unprefixed via `@use "sass:<mod>"
     /// as *`. Their members resolve as bare calls/variables.
-    star_modules: Vec<String>,
+    star_modules: Vec<&'static str>,
     /// User stylesheet modules brought into scope via `@use "<file>" [as ns]`,
     /// keyed by the in-scope namespace.
     used_user_modules: HashMap<String, Rc<Module>>,
@@ -1236,8 +1236,8 @@ struct Module {
     used_user_modules: HashMap<String, Rc<Module>>,
     star_user_modules: Vec<Rc<Module>>,
     /// Built-in modules this module `@use`d, by namespace, and unprefixed.
-    used_builtin_modules: HashMap<String, String>,
-    star_builtin_modules: Vec<String>,
+    used_builtin_modules: HashMap<String, &'static str>,
+    star_builtin_modules: Vec<&'static str>,
     /// Built-in `sass:*` modules re-exported via `@forward`. A `ns.member` that
     /// misses every captured member is retried against these.
     forwarded_builtins: Vec<ForwardedBuiltin>,
@@ -1379,8 +1379,8 @@ struct SavedModuleEnv {
     scope_semi_global: Vec<bool>,
     functions: Vec<FnFrame>,
     mixins: Vec<FnFrame>,
-    used_modules: HashMap<String, String>,
-    star_modules: Vec<String>,
+    used_modules: HashMap<String, &'static str>,
+    star_modules: Vec<&'static str>,
     used_user_modules: HashMap<String, Rc<Module>>,
     star_user_modules: Vec<Rc<Module>>,
     /// When set (a cross-module call), the module whose global scope was
