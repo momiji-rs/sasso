@@ -1971,7 +1971,7 @@ fn a_degenerate_channel_converts_on_every_spelling() {
 }
 
 #[test]
-fn the_legacy_adjusters_keep_the_colors_own_space() {
+fn the_legacy_adjusters_keep_the_input_space() {
     // `lighten`/`darken`, `saturate`/`desaturate`, `adjust-hue` and the
     // `opacify`/`transparentize` pair shift one hsl channel (or the alpha) and
     // hand the color back in the space it arrived in, so an `hsl()` input
@@ -2093,6 +2093,61 @@ fn a_legacy_adjuster_rebuilds_the_color_from_plain_numbers() {
             ours(&format!(
                 "@use \"sass:color\";\n@use \"sass:math\";\n@use \"sass:meta\";\n\
                  $nan: math.div(0, 0);\n$inf: math.div(1, 0);\na {{ b: {call}; }}\n"
+            )),
+            format!("a {{\n  b: {want};\n}}\n"),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn a_missing_alpha_reads_as_zero_through_the_legacy_adjusters() {
+    // The alpha is read like any other channel, so a missing one reads as 0 —
+    // not as the opaque 1.0 the legacy mirror carries for serialization. The
+    // channel shifters therefore hand back a fully transparent color, and the
+    // alpha pair shifts away from 0: `opacify(… / none, 0.2)` lands on 0.2 and
+    // `transparentize` stays at 0. Byte-matched to dart-sass 1.104.1. Offline.
+    for (call, want) in [
+        (
+            "meta.inspect(lighten(hsl(240 100% 50% / none), 10%))",
+            "hsla(240, 100%, 60%, 0)",
+        ),
+        (
+            "meta.inspect(saturate(hsl(240 100% 50% / none), 10%))",
+            "hsla(240, 100%, 50%, 0)",
+        ),
+        (
+            "meta.inspect(adjust-hue(hsl(240 100% 50% / none), 30deg))",
+            "hsla(270, 100%, 50%, 0)",
+        ),
+        (
+            "meta.inspect(lighten(hwb(240 10% 20% / none), 10%))",
+            "hwb(240 20% 10% / 0)",
+        ),
+        (
+            "meta.inspect(lighten(rgb(0 0 255 / none), 10%))",
+            "rgba(51, 51, 255, 0)",
+        ),
+        (
+            "meta.inspect(opacify(hsl(240 100% 50% / none), 0.2))",
+            "hsla(240, 100%, 50%, 0.2)",
+        ),
+        (
+            "meta.inspect(transparentize(hsl(240 100% 50% / none), 0.2))",
+            "hsla(240, 100%, 50%, 0)",
+        ),
+        (
+            "meta.inspect(transparentize(hwb(240 10% 20% / none), 0.2))",
+            "hwb(240 10% 20% / 0)",
+        ),
+        (
+            "meta.inspect(opacify(rgb(0 0 255 / none), 0.2))",
+            "rgba(0, 0, 255, 0.2)",
+        ),
+    ] {
+        assert_eq!(
+            ours(&format!(
+                "@use \"sass:color\";\n@use \"sass:meta\";\na {{ b: {call}; }}\n"
             )),
             format!("a {{\n  b: {want};\n}}\n"),
             "{call}"

@@ -465,7 +465,13 @@ pub(crate) fn legacy_hsl_adjust(c: &Color, f: impl FnOnce(&mut [f64; 3])) -> Col
 /// its own channels, so the space and every channel survive untouched
 /// (`transparentize(hsl(240, 100%, 50%), 0.2)` is `hsla(240, 100%, 50%, 0.8)`)
 /// and only a missing channel is filled in with 0.
-pub(crate) fn legacy_alpha_adjust(c: &Color, alpha: f64) -> Color {
+///
+/// `f` is handed the STORED alpha, a missing one reading as 0 like any other
+/// missing channel — not the 1.0 that `Color::a` mirrors it as for
+/// serialization. That is the alpha dart shifts, so
+/// `opacify(hsl(240 100% 50% / none), 0.2)` is `hsla(240, 100%, 50%, 0.2)`
+/// and `transparentize` of the same color stays at 0.
+pub(crate) fn legacy_alpha_adjust(c: &Color, f: impl FnOnce(f64) -> f64) -> Color {
     let src = legacy_to_modern(c);
     let space = src.space;
     let mc = ModernColor {
@@ -475,7 +481,7 @@ pub(crate) fn legacy_alpha_adjust(c: &Color, alpha: f64) -> Color {
             Some(z(src.channels[1])),
             Some(z(src.channels[2])),
         ],
-        alpha: Some(alpha),
+        alpha: Some(f(z(src.alpha))),
     };
     make_modern_in(mc, space)
 }

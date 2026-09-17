@@ -666,8 +666,9 @@ fn fn_fade(
     require_legacy_color(&c, name, pos)?;
     let amount = require(&params, pos_args, named, 1, name, pos)?;
     let amount = bounded(amount, 0.0, 1.0, false, pos)?;
-    let a = clamp01(c.a + sign * amount);
-    Ok(Value::Color(legacy_alpha_adjust(&c, a)))
+    Ok(Value::Color(legacy_alpha_adjust(&c, |a| {
+        clamp01(a + sign * amount)
+    })))
 }
 
 /// `hue` (deg), `saturation`/`lightness` (%), and the HWB-derived

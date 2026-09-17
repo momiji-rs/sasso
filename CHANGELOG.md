@@ -152,6 +152,12 @@ Conformance is tracked separately as a ratchet against the official
   clamped — and lets an `hwb()` result pick up a powerless `none` hue the way
   a conversion does. An `rgb()`/hex/named input still becomes a computed sRGB
   color.
+- **`opacify`/`transparentize` shift a MISSING alpha from 0.** A legacy color
+  written `/ none` reads its alpha as 0, like any other missing channel; the
+  `1` the color carries alongside it is only the opaque default serialization
+  falls back to. So `opacify(hsl(240 100% 50% / none), 0.2)` is
+  `hsla(240, 100%, 50%, 0.2)` (was the opaque `hsl(240, 100%, 50%)`) and
+  `transparentize` of the same color stays at 0 (was `0.8`).
 - **`calc(#{-$x} …)` no longer errors** with "This expression can't be used
   in a calculation." Interpolation is a full SassScript context even inside a
   calculation, so the calc-only grammar restrictions (no `-$x`, no `- 1px`)
