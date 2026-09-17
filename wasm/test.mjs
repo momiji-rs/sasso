@@ -1238,12 +1238,20 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       big,
       `@use "sass:math";\n@for $i from 1 through 300 { .c#{$i} { width: math.div($i,3)*1px; color: rgba(0,0,0,math.div($i,100)) } }\n`,
     );
+    // The two engine variables are cleared before each run and only the ones
+    // this measurement asks for are put back. Inheriting them would let a
+    // `SASSO_ENGINE=wasm` in the caller's shell — a supported thing to set —
+    // make the "default" run measure wasm and fail the comparison below, or,
+    // with a stale `SASSO_NATIVE_BINARY`, test the override instead.
     const perCompile = (env) => {
+      const base = { ...process.env };
+      delete base.SASSO_ENGINE;
+      delete base.SASSO_NATIVE_BINARY;
       let best = Infinity;
       for (let k = 0; k < 3; k++) {
         const r = spawnSync(process.execPath, [cliPath, "--loop", "60", "--no-css", big], {
           encoding: "utf8",
-          env: { ...process.env, ...env },
+          env: { ...base, ...env },
           timeout: 60000,
         });
         if (r.status !== 0) return undefined;
