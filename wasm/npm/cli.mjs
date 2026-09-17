@@ -1,9 +1,13 @@
 #!/usr/bin/env node
-// sasso CLI — `npx sasso input.scss [output.css]`. Pure Node + wasm, no deps.
+// sasso CLI — `npx sasso input.scss [output.css]`. Pure Node, no dependencies
+// of its own: it compiles through the native addon when the platform package
+// is installed and the wasm build otherwise (see `loadEngine`), and spreads
+// independent jobs over `node:worker_threads`.
 // A subset of the dart-sass `sass` CLI flags, sharing the package's compiler.
 import {
   readFileSync,
   writeFileSync,
+  writeSync,
   watch,
   statSync,
   existsSync,
@@ -14,7 +18,48 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { compile, compileString, info, Exception, Logger } from "./sasso.mjs";
+// Default import, NOT a named one: `availableParallelism` only exists on
+// Node >= 18.14, and a missing named export fails ESM *linking* — this file is
+// the package's `bin`, so the CLI would not start at all on an older Node,
+// before any fallback could run. (`_loader.mjs` carries the same note for the
+// library entries.)
+import os from "node:os";
+import { isMainThread, workerData, parentPort, Worker } from "node:worker_threads";
+
+/**
+ * The engine, chosen at startup rather than imported statically.
+ *
+ * `sasso-native-<platform>` is an `optionalDependency`, so `npm install sasso`
+ * already fetched the native addon on the four prebuilt targets — it is the
+ * same compiler as the wasm build, byte-identical in output (`napi/test.mjs`
+ * asserts that), and about 2.2x the throughput. Everywhere else the wasm build
+ * takes over, and the CLI picks the SPEED variant of it: a command line has
+ * none of the download-size pressure that makes `sasso.mjs` the right default
+ * for a bundled web build.
+ *
+ * `SASSO_ENGINE=wasm|native` forces one, which is what the tests use to hold
+ * both to the same output.
+ */
+let compile, compileString, Exception, Logger;
+async function loadEngine() {
+  const want = process.env.SASSO_ENGINE;
+  let mod;
+  let kind = "native";
+  if (want !== "wasm") {
+    try {
+      mod = await import("./native.mjs");
+    } catch (e) {
+      // `fail` writes synchronously, which matters because it exits at once.
+      if (want === "native") fail(`error: SASSO_ENGINE=native but the addon is unavailable: ${e.message}`);
+    }
+  }
+  if (!mod) {
+    mod = await import("./sasso.speed.mjs");
+    kind = "wasm";
+  }
+  ({ compile, compileString, Exception, Logger } = mod);
+  return kind;
+}
 
 const HELP = `sasso — compile SCSS/Sass to CSS
 
@@ -47,7 +92,8 @@ Options:
                                      a load path, and whatever those load
                                      relatively. Their own @warn/@debug still
                                      prints, as in dart-sass.
-      --[no-]stop-on-error           Stop after the first file that fails.
+      --[no-]stop-on-error           Don't compile more files once an error is
+                                     encountered.
       --[no-]error-css               On a compile error, write a stylesheet
                                      describing it. NOT IMPLEMENTED in this CLI:
                                      the flag is accepted, and a failing compile
@@ -58,8 +104,8 @@ Options:
       --update                       Skip outputs already newer than their input.
   -w, --watch                        Recompile when the input or any dependency
                                      changes (requires <input> <output>).
-  -j, --jobs <N>                     Accepted for dart-sass compatibility; this
-                                     CLI compiles sequentially.
+  -j, --jobs <N>                     Compile at most N files at once
+                                     (default: one per CPU).
       --loop <N>                     Recompile in-process N times and report
                                      throughput (stdout inputs only).
   -c, --[no-]color                   Accepted for compatibility (no-op: output is
@@ -76,9 +122,51 @@ Symlinked directories are followed, each one only once.
 With no output file the CSS is written to stdout. A Sass error is printed to
 stderr and exits non-zero.`;
 
+/** The version npm installed: the `version` of the package.json beside this file. */
+function packageVersion() {
+  try {
+    return JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
+  } catch {
+    return "unknown";
+  }
+}
+
 function fail(msg) {
-  process.stderr.write(String(msg).replace(/\n?$/, "\n"));
+  writeStderrSync(String(msg).replace(/\n?$/, "\n"));
   process.exit(1);
+}
+
+// One shared cell, only ever used to sleep a millisecond (see below).
+const idle = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Write to stderr and do not come back until the OS has it.
+ *
+ * `process.stderr.write` on a PIPE is asynchronous and `process.exit` throws
+ * away whatever has not reached the kernel: a 480 KB error came out of
+ * `sasso huge.scss 2>&1 | cat` as exactly 131072 bytes, every run, while the
+ * same error redirected to a file was whole (measured 2026-09-17). A caller
+ * that exits immediately afterwards therefore cannot use the stream.
+ *
+ * A full pipe raises EAGAIN rather than blocking, because Node puts stdio
+ * pipes in non-blocking mode; that means the reader is behind, so wait a
+ * moment and continue. EPIPE means there is no reader left to tell.
+ */
+function writeStderrSync(text) {
+  const bytes = Buffer.from(text, "utf8");
+  let at = 0;
+  while (at < bytes.length) {
+    try {
+      at += writeSync(2, bytes, at, bytes.length - at);
+    } catch (e) {
+      if (e.code === "EAGAIN") {
+        Atomics.wait(idle, 0, 0, 1);
+        continue;
+      }
+      if (e.code === "EPIPE") return;
+      throw e;
+    }
+  }
 }
 
 function parseArgs(argv) {
@@ -99,6 +187,7 @@ function parseArgs(argv) {
     // --source-map-urls is rejected when printing to stdout.
     sourceMapUrls: undefined,
     update: false,
+    jobs: undefined,
     watch: false,
     unicode: true,
     loop: undefined,
@@ -120,9 +209,12 @@ function parseArgs(argv) {
       process.stdout.write(HELP + "\n");
       process.exit(0);
     } else if (a === "--version") {
-      // info is "dart-sass\t<ver>\t(sasso <ver>)\t[Rust]" — surface the sasso one.
-      const m = /\(sasso ([^)]+)\)/.exec(info);
-      process.stdout.write((m ? m[1] : info.split("\t")[1] || "unknown") + "\n");
+      // The PACKAGE's version, from the package.json beside this file — not
+      // parsed out of an engine's `info`, which names the ENGINE crate: the
+      // native addon reports `(sasso-native <ver>)`, the old regex missed it,
+      // and the fallback printed the second field — dart's compatibility
+      // version — as if it were ours.
+      process.stdout.write(`${packageVersion()}\n`);
       process.exit(0);
     } else if (a === "--stdin") {
       opts.stdin = true;
@@ -167,8 +259,9 @@ function parseArgs(argv) {
     } else if (a === "--no-charset") {
       opts.charset = false;
       // Accepted for dart-sass compatibility. `--error-css` is a real dart
-      // feature this CLI does not implement (see HELP); `--color` is a no-op in
-      // the native CLI too, and `--jobs` has no meaning without parallelism.
+      // feature this CLI does not implement (see HELP), and `--color` is a
+      // no-op in the native CLI too. (`--jobs` is no longer in this company:
+      // it caps the worker pool — see `runJobs`.)
     } else if (a === "--error-css" || a === "--no-error-css") {
       // no-op: a failing compile always behaves as --no-error-css here
     } else if (a === "-c" || a === "--color" || a === "--no-color") {
@@ -181,9 +274,7 @@ function parseArgs(argv) {
       let inline;
       if (a.startsWith("--jobs=")) inline = a.slice(7);
       else if (a.startsWith("-j") && a.length > 2) inline = a.slice(2);
-      // Consumed and ignored (this CLI is sequential), but validated: the
-      // native CLI rejects a non-positive value rather than compiling.
-      positiveInt("--jobs", takeValue(inline), USIZE_MAX);
+      opts.jobs = positiveInt("--jobs", takeValue(inline), USIZE_MAX);
     } else if (a === "--loop" || a.startsWith("--loop=")) {
       opts.loop = positiveInt("--loop", takeValue(a.startsWith("--loop=") ? a.slice(7) : undefined), U32_MAX);
     } else if (a === "--source-map-urls" || a.startsWith("--source-map-urls=")) {
@@ -480,13 +571,14 @@ function emit(result, outPath, wantMap, opts, stdinText) {
  * output-side effects at all, so it leaves the file be.
  */
 function discardStaleOutput(outPath, opts) {
-  if (!outPath || opts.noCss) return false;
+  if (!outPath || opts.noCss) return undefined;
   try {
     rmSync(outPath, { force: true });
-    return false;
+    return undefined;
   } catch (e) {
-    process.stderr.write(`error: cannot remove ${outPath}: ${e && e.message ? e.message : e}\n`);
-    return true;
+    // Returned rather than printed: this belongs to one job's diagnostics, and
+    // the caller decides when that job's block reaches stderr.
+    return `error: cannot remove ${outPath}: ${e && e.message ? e.message : e}`;
   }
 }
 
@@ -720,7 +812,8 @@ function runWatch(input, output, common, opts) {
     } catch (e) {
       const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(msg.replace(/\n?$/, "\n"));
-      discardStaleOutput(output, opts);
+      const removeError = discardStaleOutput(output, opts);
+      if (removeError) process.stderr.write(`${removeError}\n`);
       // keep watching at least the entry so a fix re-triggers a compile
       rewatch([pathToFileURL(resolve(input))]);
     }
@@ -779,18 +872,26 @@ function runLoop(opts, common) {
       ? compileString(source, { ...options, sourceMap: false, syntax: opts.indented ? "indented" : "scss" })
       : compile(path, { ...options, sourceMap: false, ...syntaxOf(opts) });
   const run = (options) => {
-    try {
-      return compileOnce(options).css;
-    } catch (e) {
-      const msg =
-        e instanceof Exception
-          ? e.message
-          : e && e.code === "ENOENT"
-            ? `Error reading ${path}: Cannot open file.`
-            : `error: ${e && e.message ? e.message : e}`;
-      fail(msg);
-      return "";
-    }
+    // Same reason as the `--stdin` path: the warm pass is the one that
+    // reports, and `fail` exits before an asynchronous stderr write can drain.
+    //
+    // The TIMED passes carry `Logger.silent`, so nothing of theirs can reach
+    // stderr and there is nothing to capture. They skip it: swapping
+    // `process.stderr.write` and allocating a chunk list per iteration is this
+    // CLI's bookkeeping, and `--loop` exists to report the compiler's time.
+    const timed = options.logger === Logger.silent;
+    const attempt = timed ? compileOrError(() => compileOnce(options)) : captureStderr(() => compileOnce(options));
+    if (attempt.text) writeStderrSync(attempt.text);
+    if (!attempt.error) return attempt.value.css;
+    const e = attempt.error;
+    const msg =
+      e instanceof Exception
+        ? e.message
+        : e && e.code === "ENOENT"
+          ? `Error reading ${path}: Cannot open file.`
+          : `error: ${e && e.message ? e.message : e}`;
+    fail(msg);
+    return "";
   };
 
   // The warm/correctness pass: diagnostics once, and a failure here never
@@ -813,8 +914,20 @@ function runLoop(opts, common) {
   if (!opts.noCss && last) process.stdout.write(`${last.replace(/\n?$/, "")}\n`);
 }
 
-function main() {
-  const opts = parseArgs(process.argv.slice(2));
+/** A worker thread: same compile loop, same code, pulling from the shared index. */
+async function runWorker() {
+  const { shared, opts, ctl, stdinBytes } = workerData;
+  await loadEngine();
+  const common = commonOptions(opts);
+  // Only the jobs THIS worker took are in the map; the parent merges by index,
+  // so the batch reports in command-line order however the threads interleaved.
+  const diagnostics = new Map();
+  const failed = compileSlice(sharedList(shared), opts, common, ctl, stdinBytes, diagnostics);
+  parentPort.postMessage({ failed, diagnostics: [...diagnostics] });
+}
+
+/** The compile options every job shares, rebuilt per thread (a logger cannot be cloned). */
+function commonOptions(opts) {
   const common = {
     style: opts.style,
     loadPaths: opts.loadPaths,
@@ -831,6 +944,17 @@ function main() {
     quietDeps: opts.quietDeps,
   };
   if (opts.quiet) common.logger = Logger.silent;
+  return common;
+}
+
+async function main() {
+  // Arguments FIRST: `--help` and `--version` answer from this file alone and
+  // exit inside `parseArgs`. Loading the engine before them made a metadata
+  // question depend on a compiler — `SASSO_ENGINE=native sasso --version` on a
+  // machine without the addon printed the addon error instead of the version.
+  const opts = parseArgs(process.argv.slice(2));
+  await loadEngine();
+  const common = commonOptions(opts);
 
   // --loop: recompile in-process and report throughput, never writing a file.
   if (opts.loop !== undefined) {
@@ -844,11 +968,23 @@ function main() {
     const output = opts.output !== undefined ? opts.output : opts.positionals[0];
     const wantMap = wantSourceMap(opts, output);
     const source = readStdin();
+    // Captured and written synchronously, like a job's: the engine's logger
+    // writes warnings through the ASYNCHRONOUS stream, and `fail` exits at
+    // once, so on a pipe a warning would arrive after the error it preceded —
+    // or, past the 64 KB pipe buffer, not at all (measured 2026-09-17: a
+    // 1.2 MB warning came out of `--stdin` as 65584 bytes through a pipe and
+    // 1200070 to a file).
+    const run = captureStderr(() =>
+      compileString(source, { ...common, sourceMap: wantMap, syntax: opts.indented ? "indented" : "scss" }),
+    );
+    if (run.text) writeStderrSync(run.text);
     let result;
     try {
-      result = compileString(source, { ...common, sourceMap: wantMap, syntax: opts.indented ? "indented" : "scss" });
+      if (run.error) throw run.error;
+      result = run.value;
     } catch (e) {
-      discardStaleOutput(output, opts);
+      const removeError = discardStaleOutput(output, opts);
+      if (removeError) writeStderrSync(`${removeError}\n`);
       if (e instanceof Exception) fail(e.message);
       fail(`error: ${e && e.message ? e.message : e}`);
     }
@@ -874,50 +1010,414 @@ function main() {
     return; // keep the process alive on the watchers
   }
 
-  // Standard input is read at most once, however many jobs name it.
-  let stdinSource;
+  const failed = await runJobs(jobs, opts, common);
+  // `process.exit` here would discard whatever of the diagnostics just flushed
+  // has not reached the kernel yet — stderr on a PIPE is asynchronous, and a
+  // 400-job batch lost 26 of its warnings that way (measured 2026-09-17).
+  // Setting the code and returning lets Node finish the writes and exit on its
+  // own; nothing else is keeping the loop alive by this point.
+  if (failed > 0) process.exitCode = 1;
+}
+
+/**
+ * Compile `jobs`, in this thread or across worker threads.
+ *
+ * The jobs are independent — each reads one input and writes one output — so
+ * the native CLI gives them one worker per CPU (`available_parallelism`) and
+ * this one now does the same, which is what `-j/--jobs` has always claimed.
+ * Sequentially, the difference is most of the gap between the two: the 138
+ * lila stylesheets that build without npm dependencies take 704 ms through the
+ * binary at `-j 1` and 138 ms at its default (measured 2026-09-17, the same
+ * corpus and flags as the changelog's table).
+ *
+ * Workers pull from a SHARED index rather than taking a fixed slice, so one
+ * heavy stylesheet cannot leave eleven threads idle. `--stop-on-error` is a
+ * second shared cell: whoever fails sets it, and the others stop taking work,
+ * which is the native "don't start more files once one fails".
+ *
+ * Staying in-process is the right answer for one job (a worker costs more than
+ * the compile), when `-j 1` asks for it, and when the batch's writes overlap
+ * its own paths — dart's last-one-wins, and its write-then-read, are ORDERS,
+ * and an order needs a sequence.
+ */
+async function runJobs(jobs, opts, common) {
+  const wanted = opts.jobs ?? (os.availableParallelism ? os.availableParallelism() : os.cpus().length);
+  // Standard input is read ONCE, here, and handed to whoever needs it — as
+  // SHARED bytes, because `workerData` copies what it carries and only the one
+  // worker that claims the `-` job ever reads them. (It used to force the whole
+  // batch into this thread instead, so one `-` job cost every OTHER job its
+  // parallelism.)
+  const stdinBytes = jobs.some((j) => j.input === "-") ? shareText(readStdin()) : undefined;
+
+  // Two sources writing to ONE destination have to stay in command-line order:
+  // dart compiles both and the LAST one wins — the same file every run
+  // (measured against 1.104.1 on 2026-09-17, in both orders). Run them in
+  // parallel and the winner is whoever finishes last, which is the race the
+  // native CLI has today. A collision is almost always a slip in the command
+  // line, so the parallelism given up here costs nothing real.
+  //
+  // A job writes its CSS *and*, with source maps on, a `<output>.map` beside
+  // it — so `a.scss:out.css` and `b.scss:out.css.map` collide on that sidecar
+  // even though their `output`s differ. Both count.
+  // The same goes for a path one job WRITES and another READS:
+  // `a.scss:b.scss b.scss:out.css` compiles a into b.scss and then b.scss into
+  // out.css, and dart, being sequential, always reads the new b.scss. In the
+  // pool the second job reads whichever version it finds (measured: dart and
+  // `-j 1` compile a's output, the pool compiled the original b.scss).
+  //
+  // `--no-css` is the exception to both: `emit` and `discardStaleOutput`
+  // return early under it, so the batch touches no output at all and there is
+  // no last-writer to get right.
+  //
+  // Only ENTRY paths are compared. A job that writes a file some other job
+  // `@use`s is the same hazard and cannot be seen from here — the dependency
+  // is known only once that stylesheet has been parsed — so it stays a
+  // scheduling race, as it is in the native CLI (#87).
+  // A job writing over its OWN input is not one of them: `a.scss:a.scss` reads
+  // before it writes, inside a single job, so there is no order between
+  // threads to get wrong. Only ANOTHER job's input counts, which is why this
+  // remembers who owns each one instead of just that it exists.
+  const inputOwner = new Map();
+  if (!opts.noCss) {
+    jobs.forEach((job, i) => {
+      if (job.input === "-") return;
+      const key = pathKey(job.input);
+      if (!inputOwner.has(key)) inputOwner.set(key, i);
+    });
+  }
+  // A path does not have to match exactly to conflict: `a.scss:out` writes the
+  // FILE `out` while `b.scss:out/sub.css` needs `out` to be a DIRECTORY, and
+  // on a fresh tree whichever job runs first decides which one fails. dart
+  // writes the file and then fails the nested job, the same way every run;
+  // the pool alternated (measured 2026-09-17: four runs left a directory, two
+  // left a file). So an output that is an ancestor or a descendant of another
+  // output counts too.
+  //
+  // Both directions, without comparing every pair: `seenOut` holds the paths
+  // written so far and `seenAncestors` every directory above them. A new path
+  // conflicts if it IS one already written, if it is a directory some earlier
+  // output sits under, or if any directory above it was written as a file.
+  // Sharing a parent directory is not a conflict — that is every ordinary
+  // batch — because only written paths ever go into `seenOut`.
+  const seenOut = new Set();
+  const seenAncestors = new Set();
+  let collides = false;
+  const scan = opts.noCss ? [] : jobs;
+  for (let i = 0; i < scan.length && !collides; i++) {
+    const job = scan[i];
+    if (job.output === undefined) continue;
+    const written = [job.output];
+    if (wantSourceMap(opts, job.output) && !opts.embedSourceMap) written.push(`${job.output}.map`);
+    for (const path of written) {
+      const key = pathKey(path);
+      const owner = inputOwner.get(key);
+      if (seenOut.has(key) || seenAncestors.has(key) || (owner !== undefined && owner !== i)) {
+        collides = true;
+        break;
+      }
+      for (const dir of ancestorsOf(key)) {
+        if (seenOut.has(dir)) {
+          collides = true;
+          break;
+        }
+        // Already recorded means everything above it was too, and was checked
+        // against `seenOut` then. A later output that IS one of those
+        // directories is still caught, by the `seenAncestors` test above. So
+        // the walk can stop here, which is what keeps a directory build from
+        // paying for its whole depth once per file.
+        if (seenAncestors.has(dir)) break;
+        seenAncestors.add(dir);
+      }
+      if (collides) break;
+      seenOut.add(key);
+    }
+  }
+
+  const workers = Math.min(jobs.length, Math.max(1, wanted));
+  // Diagnostics are collected per job and printed in COMMAND-LINE order, never
+  // in completion order: the native CLI reports each unit in input order, and
+  // two stylesheets' warnings interleaving mid-block would be worse here than
+  // there, with a dozen threads writing at once. Sparse — most jobs say
+  // nothing, and a directory build can have thousands.
+  const diagnostics = new Map();
+
+  if (workers < 2 || collides) {
+    const failed = compileSlice(listOf(jobs), opts, common, null, stdinBytes, diagnostics);
+    flushDiagnostics(diagnostics, jobs.length);
+    return failed;
+  }
+
+  // [0] the next job to take, [1] the stop-on-error flag.
+  const ctl = new Int32Array(new SharedArrayBuffer(8));
+  // The job list goes over SHARED memory, decoded one job at a time as each is
+  // claimed. In `workerData` it was structure-cloned per worker instead, which
+  // is O(workers x jobs): a 5,000-file directory build at -j 12 paid ~109 MB
+  // for twelve copies of a list that never changes (measured 2026-09-17).
+  // `positionals` is dropped for the same reason — it is the same paths again,
+  // and a worker has no use for them.
+  const shared = shareJobs(jobs);
+  const { positionals: _unused, ...workerOpts } = opts;
+  const results = await Promise.all(
+    Array.from({ length: workers }, () => {
+      const worker = new Worker(fileURLToPath(import.meta.url), {
+        workerData: { sassoWorker: true, shared, opts: workerOpts, ctl, stdinBytes },
+        // stdout/stderr are NOT captured here: a job's diagnostics are
+        // collected around the compile itself (see `captureStderr`) and come
+        // back in the message, while anything else a worker prints — a crash,
+        // say — should reach the user rather than a stream nobody reads.
+      });
+      return new Promise((resolve, reject) => {
+        worker.on("message", resolve);
+        worker.on("error", reject);
+        worker.on("exit", (code) =>
+          code === 0 ? resolve({ failed: 0, diagnostics: [] }) : resolve({ failed: 1, diagnostics: [] }),
+        );
+      });
+    }),
+  );
   let failed = 0;
-  for (const { input, output } of jobs) {
+  for (const result of results) {
+    failed += result?.failed ?? 0;
+    for (const [i, text] of result?.diagnostics ?? []) diagnostics.set(i, text);
+  }
+  flushDiagnostics(diagnostics, jobs.length);
+  return failed;
+}
+
+/** A string in shared memory, so `workerData` carries a handle, not a copy. */
+function shareText(text) {
+  const bytes = new TextEncoder().encode(text);
+  const shared = new Uint8Array(new SharedArrayBuffer(bytes.length));
+  shared.set(bytes);
+  return shared;
+}
+
+/**
+ * The job list as bytes in SHARED memory: every worker reads the same buffer
+ * and decodes only the jobs it claims, so the list costs one copy rather than
+ * one per thread. `index` holds three ints per job — where its input starts,
+ * how long the input is, and how long the output is (-1 for "no output", which
+ * is stdout; an empty output is not a thing `parseJobs` produces).
+ */
+function shareJobs(jobs) {
+  const encoder = new TextEncoder();
+  const encoded = jobs.map((job) => [
+    encoder.encode(job.input),
+    job.output === undefined ? undefined : encoder.encode(job.output),
+  ]);
+  let total = 0;
+  for (const [input, output] of encoded) total += input.length + (output ? output.length : 0);
+  const bytes = new Uint8Array(new SharedArrayBuffer(total));
+  const index = new Int32Array(new SharedArrayBuffer(jobs.length * 12));
+  let at = 0;
+  encoded.forEach(([input, output], i) => {
+    index[i * 3] = at;
+    index[i * 3 + 1] = input.length;
+    index[i * 3 + 2] = output ? output.length : -1;
+    bytes.set(input, at);
+    at += input.length;
+    if (output) {
+      bytes.set(output, at);
+      at += output.length;
+    }
+  });
+  return { bytes, index, count: jobs.length };
+}
+
+/**
+ * Every directory above an absolute path, nearest first, stopping at the root.
+ * Used to compare outputs that are not equal but cannot both exist — a file
+ * and a directory of the same name.
+ */
+function* ancestorsOf(key) {
+  let at = dirname(key);
+  while (at !== dirname(at)) {
+    yield at;
+    at = dirname(at);
+  }
+}
+
+/** A `{ length, at(i) }` view over the plain array, for the in-process path. */
+function listOf(jobs) {
+  return { length: jobs.length, at: (i) => jobs[i] };
+}
+
+/** The same view over `shareJobs`'s buffers, decoding a job only when claimed. */
+function sharedList(shared) {
+  const decoder = new TextDecoder();
+  return {
+    length: shared.count,
+    at(i) {
+      const start = shared.index[i * 3];
+      const inputLen = shared.index[i * 3 + 1];
+      const outputLen = shared.index[i * 3 + 2];
+      return {
+        input: decoder.decode(shared.bytes.subarray(start, start + inputLen)),
+        output:
+          outputLen < 0
+            ? undefined
+            : decoder.decode(shared.bytes.subarray(start + inputLen, start + inputLen + outputLen)),
+      };
+    },
+  };
+}
+
+/**
+ * Write the collected diagnostics in JOB order, one blank line between one
+ * job's block and the next — dart's shape: a warning block already ends in
+ * one, an error does not.
+ */
+function flushDiagnostics(diagnostics, count) {
+  let endsBlank = true;
+  for (let i = 0; i < count; i++) {
+    const text = diagnostics.get(i);
+    if (!text) continue;
+    if (!endsBlank) process.stderr.write("\n");
+    process.stderr.write(text);
+    endsBlank = text.endsWith("\n\n");
+  }
+}
+
+/** `captureStderr`'s shape without the capture, for a pass that cannot report. */
+function compileOrError(fn) {
+  try {
+    return { value: fn() };
+  } catch (e) {
+    return { error: e };
+  }
+}
+
+/**
+ * Run `fn` with everything it writes to stderr collected instead of printed.
+ *
+ * The compiler's warnings come from the engine's default logger, which writes
+ * the FORMATTED block — location, deprecation label, source snippet — straight
+ * to stderr. A `logger` callback would see the message and the span but not
+ * that block, so the write is intercepted rather than the logging. A compile
+ * is synchronous and a worker runs one at a time, so nothing else of ours can
+ * write in between.
+ */
+function captureStderr(fn) {
+  const chunks = [];
+  const original = process.stderr.write;
+  process.stderr.write = (chunk, encoding, callback) => {
+    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+    if (typeof encoding === "function") encoding();
+    else if (typeof callback === "function") callback();
+    return true;
+  };
+  try {
+    return { value: fn(), text: chunks.join("") };
+  } catch (e) {
+    return { error: e, text: chunks.join("") };
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+/**
+ * The compile loop itself. With `ctl` it takes jobs from the shared index
+ * (worker mode); without it, it walks the list in order (in-process mode).
+ * `jobs` is a `{ length, at(i) }` view — a plain array in this thread, shared
+ * bytes in a worker. Diagnostics go into the `diagnostics` map under the job's
+ * index, not to stderr, so the caller can put them back in job order.
+ * Returns the number that failed; it never exits the process, so a worker can
+ * report back and the parent can decide.
+ */
+function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics) {
+  const note = (i, text) => diagnostics.set(i, (diagnostics.get(i) ?? "") + text);
+  // Decoded on first use, so a worker that never claims the `-` job never
+  // touches the bytes; there is at most one such job, so at most one decode.
+  let stdinText;
+  const stdinSource = () => (stdinText ??= stdinBytes ? new TextDecoder().decode(stdinBytes) : "");
+  let failed = 0;
+  let next = 0;
+  for (;;) {
+    let i;
+    if (ctl) {
+      if (Atomics.load(ctl, 1)) break; // another job failed and --stop-on-error is on
+      i = Atomics.add(ctl, 0, 1);
+      // Re-check AFTER claiming: between the check above and this claim
+      // another worker can fail, and starting this job then would be exactly
+      // what --stop-on-error forbids. (The native scheduler re-checks in the
+      // same place, after its own `next.fetch_add` in ../../src/main.rs.)
+      if (Atomics.load(ctl, 1)) break;
+    } else {
+      i = next++;
+    }
+    if (i >= jobs.length) break;
+    const { input, output } = jobs.at(i);
     const wantMap = wantSourceMap(opts, output);
     // --update: leave outputs that are already newer than their input untouched.
     if (opts.update && output && isFresh(output, input)) continue;
+    // Warnings and deprecations belong to THIS job, wherever it ran.
+    const run = captureStderr(() =>
+      input === "-"
+        ? compileString(stdinSource(), {
+            ...common,
+            sourceMap: wantMap,
+            syntax: opts.indented ? "indented" : "scss",
+          })
+        : compile(input, { ...common, sourceMap: wantMap, ...syntaxOf(opts) }),
+    );
+    if (run.text) note(i, run.text);
     let result;
     try {
-      if (input === "-") {
-        if (stdinSource === undefined) stdinSource = readStdin();
-        result = compileString(stdinSource, {
-          ...common,
-          sourceMap: wantMap,
-          syntax: opts.indented ? "indented" : "scss",
-        });
-      } else {
-        result = compile(input, { ...common, sourceMap: wantMap, ...syntaxOf(opts) });
-      }
+      if (run.error) throw run.error;
+      result = run.value;
     } catch (e) {
       // With several jobs dart keeps going unless --stop-on-error, and exits
-      // non-zero at the end; `fail` would stop at the first one.
+      // non-zero at the end.
       const msg =
         e instanceof Exception
           ? e.message
           : e && e.code === "ENOENT"
             ? `Error reading ${input}: Cannot open file.`
             : `error: ${e && e.message ? e.message : e}`;
-      process.stderr.write(String(msg).replace(/\n?$/, "\n"));
+      note(i, String(msg).replace(/\n?$/, "\n"));
       failed++;
       // This CLI always behaves as --no-error-css, and dart then drops a stale
       // output rather than leaving the last good build in place.
-      discardStaleOutput(output, opts);
-      if (opts.stopOnError || jobs.length === 1) process.exit(1);
+      const removeError = discardStaleOutput(output, opts);
+      if (removeError) note(i, `${removeError}\n`);
+      if (opts.stopOnError || jobs.length === 1) {
+        if (ctl) Atomics.store(ctl, 1, 1);
+        break;
+      }
       continue;
     }
-    const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource : undefined);
+    // A job with no output file writes its CSS to the terminal the diagnostics
+    // are already on, so buffering reverses what the user sees: dart, the
+    // native binary and this CLI before the pool all print the warning during
+    // the compile, ahead of the CSS. Flush this job's block before `emit`
+    // rather than after it. (`parseJobs` only makes an output-less job from a
+    // lone positional, so such a job is always the whole batch — there is no
+    // other job's block it could jump ahead of.)
+    if (output === undefined) {
+      const pending = diagnostics.get(i);
+      if (pending) {
+        // Synchronously, like the `--stdin` and `--loop` paths: `emit` is about
+        // to write the CSS to stdout, and under `2>&1` that is the SAME pipe
+        // reached through a second stream. Two asynchronous streams on one
+        // file descriptor have no defined interleaving, so flushing before
+        // `emit` is only an order if this write has actually finished.
+        writeStderrSync(pending);
+        diagnostics.delete(i);
+      }
+    }
+    const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource() : undefined);
     if (writeError) {
-      process.stderr.write(`${writeError}\n`);
+      note(i, `${writeError}\n`);
       failed++;
-      if (opts.stopOnError) process.exit(1);
+      if (opts.stopOnError) {
+        if (ctl) Atomics.store(ctl, 1, 1);
+        break;
+      }
     }
   }
-  if (failed > 0) process.exit(1);
+  return failed;
 }
 
-main();
+// A worker thread runs the same file, telling itself apart by its workerData.
+if (!isMainThread && workerData && workerData.sassoWorker) runWorker();
+else main();

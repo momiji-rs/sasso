@@ -9,7 +9,7 @@
 // asyncify refactors must preserve (docs/HANDOFF_ASYNC_IMPORTER_PERF.md).
 // Run after build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, existsSync, statSync, symlinkSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, existsSync, statSync, symlinkSync, rmSync, openSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -417,7 +417,17 @@ const cliPath = fileURLToPath(new URL("./npm/cli.mjs", import.meta.url));
 const cli = (args, input) =>
   execFileSync(process.execPath, [cliPath, ...args], { input, encoding: "utf8" });
 
-assert.match(cli(["--version"]).trim(), /^\d+\.\d+\.\d+/, "cli: --version prints a version");
+// Not just "version-shaped": the engine's `info` carries dart's compatibility
+// version too, and printing THAT looks perfectly valid to a regex.
+{
+  const pkg = JSON.parse(readFileSync(new URL("./npm/package.json", import.meta.url), "utf8"));
+  assert.equal(cli(["--version"]).trim(), pkg.version, "cli: --version prints the package's version");
+  assert.equal(
+    spawnSync(process.execPath, [cliPath, "--version"], { encoding: "utf8", env: { ...process.env, SASSO_ENGINE: "wasm" } }).stdout.trim(),
+    pkg.version,
+    "cli: … the same on either engine",
+  );
+}
 assert.ok(cli(["--help"]).includes("Usage: sasso"), "cli: --help");
 assert.equal(cli(["--stdin"], ".a{b: 1 + 2}\n").trim(), ".a {\n  b: 3;\n}", "cli: --stdin compile");
 assert.equal(cli(["--style=compressed", "--stdin"], ".a{b:1+2}\n").trim(), ".a{b:3}", "cli: --style=compressed");
@@ -563,13 +573,26 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const bad = join(dir, "bad.scss");
   writeFileSync(bad, ".a{b:}\n");
   const second = join(dir, "second.css");
+  // `--stop-on-error` is "don't START more files once one fails", so what it
+  // skips depends on how many are already running. At `-j 1` the second job
+  // never starts; with the default one-per-CPU it may already have, and the
+  // NATIVE CLI behaves the same way (measured 2026-09-17: `sasso
+  // --stop-on-error bad:a good:b` writes b, `-j 1` does not). So the
+  // deterministic claim is pinned at -j 1, and the parallel case is pinned on
+  // what it does guarantee: a non-zero exit.
   const stop = spawnSync(
     process.execPath,
-    [cliPath, "--no-source-map", "--stop-on-error", `${bad}:${join(dir, "s1.css")}`, `${join(dir, "src", "one.scss")}:${second}`],
+    [cliPath, "--no-source-map", "-j", "1", "--stop-on-error", `${bad}:${join(dir, "s1.css")}`, `${join(dir, "src", "one.scss")}:${second}`],
     { encoding: "utf8" },
   );
   assert.equal(stop.status, 1, "cli: --stop-on-error exits non-zero");
-  assert.ok(!existsSync(second), "cli: --stop-on-error skips the rest");
+  assert.ok(!existsSync(second), "cli: --stop-on-error -j 1 skips the rest");
+  const stopParallel = spawnSync(
+    process.execPath,
+    [cliPath, "--no-source-map", "--stop-on-error", `${bad}:${join(dir, "s3.css")}`, `${join(dir, "src", "one.scss")}:${join(dir, "s4.css")}`],
+    { encoding: "utf8" },
+  );
+  assert.equal(stopParallel.status, 1, "cli: --stop-on-error exits non-zero in parallel too");
   const go = spawnSync(
     process.execPath,
     [cliPath, "--no-source-map", `${bad}:${join(dir, "s2.css")}`, `${join(dir, "src", "one.scss")}:${second}`],
@@ -1073,6 +1096,699 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.ok(r.stderr.includes(wanted), `cli: --loop ${args.join(" ")} says "${wanted}"`);
   }
   console.log("ok: cli — --loop: warm pass, silent timing, stdout only");
+}
+
+// === Phase 3l: the CLI's engine choice and its worker pool ===
+// The CLI picks the native addon when the platform package is installed and
+// falls back to wasm, and it compiles jobs across worker threads. Both are
+// invisible in the output BY DESIGN — which is exactly why they need a test
+// that pins the output rather than the mechanism.
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-engine-"));
+  mkdirSync(join(dir, "src"), { recursive: true });
+  // Enough jobs that the pool actually splits them, and varied enough that a
+  // shared-state bug would show up as crossed output.
+  const expected = new Map();
+  for (let i = 0; i < 24; i++) {
+    writeFileSync(join(dir, "src", `s${i}.scss`), `.s${i}{a: ${i} + 1; b: "x${i}"}\n`);
+    expected.set(`s${i}.css`, `.s${i}{a:${i + 1};b:"x${i}"}`);
+  }
+  // The engine variables are CLEARED and only what a case asks for is put
+  // back. Inheriting them would turn the unforced runs into forced ones: an
+  // exported `SASSO_ENGINE=wasm` makes the "default jobs" case test the
+  // override, and `SASSO_ENGINE=native` makes the fallback case fail instead
+  // of exercising the fallback. Both are supported things to have in a shell.
+  const engineEnv = (env) => {
+    const base = { ...process.env };
+    delete base.SASSO_ENGINE;
+    delete base.SASSO_NATIVE_BINARY;
+    return { ...base, ...env };
+  };
+  const compileAll = (out, extra, env) => {
+    const args = [cliPath, "--no-source-map", "--style=compressed", ...extra];
+    for (const [name] of expected) args.push(`${join(dir, "src", name.replace(".css", ".scss"))}:${join(out, name)}`);
+    return spawnSync(process.execPath, args, { encoding: "utf8", env: engineEnv(env), timeout: 60000 });
+  };
+  const check = (label, out, r) => {
+    assert.equal(r.status, 0, `cli: ${label} compiles (stderr: ${r.stderr})`);
+    for (const [name, css] of expected) {
+      assert.equal(readFileSync(join(out, name), "utf8").trim(), css, `cli: ${label} — ${name} is its own output`);
+    }
+  };
+
+  const seq = join(dir, "seq");
+  check("-j 1", seq, compileAll(seq, ["-j", "1"], {}));
+  const par = join(dir, "par");
+  check("-j 4 (worker pool)", par, compileAll(par, ["-j", "4"], {}));
+  const def = join(dir, "def");
+  check("default jobs", def, compileAll(def, [], {}));
+
+  // Both engines, forced, must agree with each other byte for byte.
+  const wasm = join(dir, "wasm");
+  check("SASSO_ENGINE=wasm", wasm, compileAll(wasm, [], { SASSO_ENGINE: "wasm" }));
+  const native = join(dir, "native");
+  const nativeRun = compileAll(native, [], { SASSO_ENGINE: "native" });
+  if (nativeRun.status === 0) {
+    check("SASSO_ENGINE=native", native, nativeRun);
+    for (const [name] of expected) {
+      assert.equal(
+        readFileSync(join(wasm, name), "utf8"),
+        readFileSync(join(native, name), "utf8"),
+        `cli: the two engines agree on ${name}`,
+      );
+    }
+  } else {
+    // No prebuild for this platform: the CLI must still say so clearly rather
+    // than falling back silently when the engine was demanded by name.
+    assert.match(nativeRun.stderr, /SASSO_ENGINE=native/, "cli: a demanded engine that is missing says so");
+  }
+  // The same path, forced on EVERY platform: `SASSO_NATIVE_BINARY` is
+  // native.mjs's own override, so pointing it at nothing makes the addon
+  // unloadable here too. A DEMANDED engine must fail loudly; only the default
+  // falls back quietly.
+  const demanded = compileAll(join(dir, "nope"), [], {
+    SASSO_ENGINE: "native",
+    SASSO_NATIVE_BINARY: join(dir, "no-such-addon.node"),
+  });
+  assert.equal(demanded.status, 1, "cli: SASSO_ENGINE=native with an unloadable addon exits non-zero");
+  assert.match(demanded.stderr, /SASSO_ENGINE=native/, "cli: … naming the engine that was demanded");
+  const fellBack = join(dir, "fallback");
+  check("the default engine falls back to wasm", fellBack, compileAll(fellBack, [], {
+    SASSO_NATIVE_BINARY: join(dir, "no-such-addon.node"),
+  }));
+
+  // `--help` and `--version` answer from the package alone, so they must work
+  // where no engine can be loaded at all — a metadata question must not need a
+  // compiler.
+  {
+    const blind = { ...process.env, SASSO_ENGINE: "native", SASSO_NATIVE_BINARY: join(dir, "no-such-addon.node") };
+    const pkg = JSON.parse(readFileSync(new URL("./npm/package.json", import.meta.url), "utf8"));
+    const v = spawnSync(process.execPath, [cliPath, "--version"], { encoding: "utf8", env: blind, timeout: 20000 });
+    assert.equal(v.status, 0, `cli: --version without a loadable engine (stderr: ${v.stderr})`);
+    assert.equal(v.stdout.trim(), pkg.version, "cli: … and it is still the package's version");
+    const h = spawnSync(process.execPath, [cliPath, "--help"], { encoding: "utf8", env: blind, timeout: 20000 });
+    assert.equal(h.status, 0, `cli: --help without a loadable engine (stderr: ${h.stderr})`);
+    // The help prints the negatable spelling, `--[no-]stop-on-error` — the
+    // bare flag name matches nothing (this assertion caught itself).
+    assert.match(h.stdout, /--\[no-\]stop-on-error/, "cli: … and it is the real help text");
+    // And it describes what the flag does now that files run concurrently:
+    // the ones already running finish. dart's own wording says exactly that,
+    // so use dart's (measured from 1.104.1's --help, 2026-09-17).
+    assert.match(
+      h.stdout,
+      /Don't compile more files once an error is\s+encountered\./,
+      "cli: … and --stop-on-error is described as dart describes it",
+    );
+  }
+
+  // With no output file the CSS goes to the terminal the warnings are on, so
+  // the order between them is what the user sees under `2>&1`: dart and the
+  // native binary both print the warning during the compile, ahead of the CSS
+  // (measured 2026-09-17). Buffering a job's diagnostics must not reverse it.
+  //
+  // Both streams go to ONE file descriptor — the same thing `2>&1` does — so
+  // this reads the real interleaving. Reading two pipes and concatenating them
+  // would order the streams by hand and could never fail.
+  {
+    const sodir = join(dir, "stdout-order");
+    mkdirSync(sodir, { recursive: true });
+    const src = join(sodir, "warns.scss");
+    writeFileSync(src, `@warn "before-the-css";\n.a{x:1}\n`);
+    const merged = join(sodir, "merged.log");
+    const fd = openSync(merged, "w");
+    const r = spawnSync(process.execPath, [cliPath, "--style=compressed", "--no-source-map", src], {
+      stdio: ["ignore", fd, fd],
+      timeout: 20000,
+    });
+    closeSync(fd);
+    const text = readFileSync(merged, "utf8");
+    assert.equal(r.status, 0, `cli: a stdout job with a warning (output: ${text})`);
+    assert.ok(text.includes("before-the-css") && text.includes(".a{x:1}"), `cli: both reached the terminal (${text})`);
+    assert.ok(
+      text.indexOf("before-the-css") < text.indexOf(".a{x:1}"),
+      `cli: a stdout job's warning is written before its CSS (got: ${text})`,
+    );
+  }
+
+  // The headline of the engine work is that the DEFAULT picks the addon. No
+  // output test can see that — the two engines are byte-identical on purpose,
+  // which is the point — so the only honest observable is throughput, and
+  // `--loop` reports it per compile with process start-up and file I/O already
+  // out of the way.
+  //
+  // Measured 2026-09-17 on one 300-rule stylesheet, three runs each:
+  // default 0.362-0.376 ms/compile, native 0.374-0.385, wasm 1.403-1.458. The
+  // default tracks native and wasm is ~3.9x slower, so the 0.7 threshold below
+  // sits about 5x away from both sides. A regression that always loaded
+  // `sasso.speed.mjs` would land at the wasm number and fail.
+  {
+    const ldir = join(dir, "engine-speed");
+    mkdirSync(ldir, { recursive: true });
+    const big = join(ldir, "big.scss");
+    writeFileSync(
+      big,
+      `@use "sass:math";\n@for $i from 1 through 300 { .c#{$i} { width: math.div($i,3)*1px; color: rgba(0,0,0,math.div($i,100)) } }\n`,
+    );
+    // `engineEnv` for the same reason as above: inheriting `SASSO_ENGINE=wasm`
+    // would make the "default" run measure wasm and fail the comparison below.
+    // `undefined` means ONE thing: this platform has no prebuilt addon, which
+    // `loadEngine` reports by name. Any other failure is a failure — treating
+    // it as "no addon" would skip the default-engine assertions below and let
+    // the guard pass while the thing it guards is broken.
+    const perCompile = (env) => {
+      let best = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const r = spawnSync(process.execPath, [cliPath, "--loop", "60", "--no-css", big], {
+          encoding: "utf8",
+          env: engineEnv(env),
+          timeout: 60000,
+        });
+        if (r.status !== 0) {
+          assert.match(
+            r.stderr,
+            /SASSO_ENGINE=native but the addon is unavailable/,
+            `cli: --loop failed for a reason other than a missing addon (status ${r.status}: ${r.stderr})`,
+          );
+          return undefined;
+        }
+        const m = /=> ([\d.]+) ms\/compile/.exec(r.stderr);
+        assert.ok(m, `cli: --loop reports a per-compile time (stderr: ${r.stderr})`);
+        best = Math.min(best, Number(m[1]));
+      }
+      return best;
+    };
+
+    const native = perCompile({ SASSO_ENGINE: "native" });
+    if (native === undefined) {
+      // No prebuild for this platform: there is no addon to prefer, and the
+      // "demanded engine is missing" path above already covers saying so.
+      console.log("  (no native addon here — default-engine preference not checked)");
+    } else {
+      const wasm = perCompile({ SASSO_ENGINE: "wasm" });
+      const dflt = perCompile({});
+      assert.ok(wasm !== undefined && dflt !== undefined, "cli: --loop runs on both engines");
+      assert.ok(
+        native < wasm * 0.7,
+        `cli: the addon is the faster engine here (native ${native} ms, wasm ${wasm} ms) — otherwise this test proves nothing`,
+      );
+      assert.ok(
+        dflt < wasm * 0.7,
+        `cli: the DEFAULT engine is the addon, not wasm (default ${dflt} ms, native ${native} ms, wasm ${wasm} ms)`,
+      );
+    }
+  }
+
+  // `-j` must actually run jobs AT THE SAME TIME. Correct output cannot show
+  // that, and neither can the "exactly once" guard below — a sequential run
+  // satisfies both — so a regression that ignored `-j` and kept the batch in
+  // this thread would pass the whole suite.
+  //
+  // The observable is WRITE ORDER, not a stopwatch: make the first job the
+  // slow one and the rest trivial. In order, its output is written first; with
+  // workers pulling from the shared index, the others overtake it and it is
+  // written last. Measured 2026-09-17, three runs each: `-j 1` wrote
+  // `0 1 2 3 4 5 6 7` every time, `-j 4` ended `… 0` every time.
+  {
+    const cdir = join(dir, "concurrent");
+    mkdirSync(cdir, { recursive: true });
+    writeFileSync(
+      join(cdir, "j0.scss"),
+      `@use "sass:math";\n@for $i from 1 through 30000 { .slow-#{$i} { width: math.div($i,3)*1px } }\n`,
+    );
+    for (let i = 1; i < 8; i++) writeFileSync(join(cdir, `j${i}.scss`), `.j${i}{a:${i}}\n`);
+    const writeTimes = (jobs) => {
+      for (let i = 0; i < 8; i++) rmSync(join(cdir, `j${i}.css`), { force: true });
+      const args = [cliPath, "--no-source-map", "--style=compressed", "-j", String(jobs)];
+      for (let i = 0; i < 8; i++) args.push(`${join(cdir, `j${i}.scss`)}:${join(cdir, `j${i}.css`)}`);
+      const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+      assert.equal(r.status, 0, `cli: the -j ${jobs} run compiles (stderr: ${r.stderr})`);
+      const times = [];
+      for (let i = 0; i < 8; i++) times.push(statSync(join(cdir, `j${i}.css`)).mtimeMs);
+      return times;
+    };
+
+    const seqTimes = writeTimes(1);
+    if (!(seqTimes[0] < seqTimes[7])) {
+      // A filesystem whose timestamps are too coarse to separate two writes
+      // milliseconds apart cannot answer this question either way.
+      console.log("  (file timestamps too coarse to order writes — concurrency not checked)");
+    } else {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const par = writeTimes(4);
+        const last = par.indexOf(Math.max(...par));
+        assert.equal(
+          last,
+          0,
+          `cli: -j 4 runs jobs at the same time — the slow FIRST job finishes last (attempt ${attempt}, write times ${par.map((t) => Math.round(t - Math.min(...par))).join(",")})`,
+        );
+      }
+    }
+  }
+
+  // `a.scss:a.scss` writes over its own input — dart compiles it and leaves
+  // the CSS there (exit 0, measured 2026-09-17, as do both sasso CLIs). It
+  // reads before it writes inside ONE job, so there is no order between
+  // threads to get wrong and it must not serialize the batch. Same write-order
+  // observable as above: the slow first job still has to finish last.
+  {
+    const sdir = join(dir, "self-write");
+    mkdirSync(sdir, { recursive: true });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      writeFileSync(
+        join(sdir, "j0.scss"),
+        `@use "sass:math";\n@for $i from 1 through 30000 { .slow-#{$i} { width: math.div($i,3)*1px } }\n`,
+      );
+      for (let i = 1; i < 8; i++) writeFileSync(join(sdir, `j${i}.scss`), `.j${i}{a:${i}}\n`);
+      writeFileSync(join(sdir, "self.scss"), `$c: #2a7ae2;\n.self{color: $c}\n`);
+      for (let i = 0; i < 8; i++) rmSync(join(sdir, `j${i}.css`), { force: true });
+      const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4", `${join(sdir, "self.scss")}:${join(sdir, "self.scss")}`];
+      for (let i = 0; i < 8; i++) args.push(`${join(sdir, `j${i}.scss`)}:${join(sdir, `j${i}.css`)}`);
+      const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+      assert.equal(r.status, 0, `cli: a self-writing job compiles (stderr: ${r.stderr})`);
+      assert.equal(
+        readFileSync(join(sdir, "self.scss"), "utf8").trim(),
+        ".self{color:#2a7ae2}",
+        `cli: the self-writing job replaced its own file (attempt ${attempt})`,
+      );
+      const times = [];
+      for (let i = 0; i < 8; i++) times.push(statSync(join(sdir, `j${i}.css`)).mtimeMs);
+      assert.equal(
+        times.indexOf(Math.max(...times)),
+        0,
+        `cli: … and the rest of the batch kept the pool (attempt ${attempt})`,
+      );
+    }
+  }
+
+  // Each job must run EXACTLY once. Correct output does not prove that — a pool
+  // where every worker walks the whole list from 0 produces the same files,
+  // just N times over — so make the repetition audible: one `@warn` per
+  // stylesheet, counted on stderr.
+  {
+    const wdir = join(dir, "warn");
+    mkdirSync(wdir, { recursive: true });
+    const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4"];
+    for (let i = 0; i < 12; i++) {
+      writeFileSync(join(wdir, `w${i}.scss`), `@warn "once-${i}";\n.w${i}{a:1}\n`);
+      args.push(`${join(wdir, `w${i}.scss`)}:${join(wdir, `w${i}.css`)}`);
+    }
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+    assert.equal(r.status, 0, `cli: the warning run compiles (stderr: ${r.stderr})`);
+    for (let i = 0; i < 12; i++) {
+      const seen = (r.stderr.match(new RegExp(`once-${i}\\b`, "g")) || []).length;
+      assert.equal(seen, 1, `cli: job w${i} ran exactly once (saw its @warn ${seen} times)`);
+    }
+  }
+
+  // A `-` job reads the one stdin there is — and does not drag the other jobs
+  // out of the pool with it.
+  {
+    const sdir = join(dir, "stdin");
+    mkdirSync(sdir, { recursive: true });
+    const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4", `-:${join(sdir, "from-stdin.css")}`];
+    for (let i = 0; i < 6; i++) {
+      writeFileSync(join(sdir, `f${i}.scss`), `.f${i}{a:${i}}\n`);
+      args.push(`${join(sdir, `f${i}.scss`)}:${join(sdir, `f${i}.css`)}`);
+    }
+    // Not ASCII: standard input reaches the worker as shared BYTES, so the
+    // content has the same round trip to get wrong as the job paths do.
+    const stdin = `.stdin{content:"\u65e5\u672c\u8a9e \u{1f3a8} caf\u00e9";b:1}\n`;
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", input: stdin, timeout: 60000 });
+    assert.equal(r.status, 0, `cli: a stdin job alongside file jobs (stderr: ${r.stderr})`);
+    assert.equal(
+      readFileSync(join(sdir, "from-stdin.css"), "utf8").trim(),
+      stdin.trim(),
+      "cli: the `-` job read stdin, byte for byte",
+    );
+    for (let i = 0; i < 6; i++) {
+      assert.equal(readFileSync(join(sdir, `f${i}.css`), "utf8").trim(), `.f${i}{a:${i}}`, `cli: f${i} compiled too`);
+    }
+  }
+
+  // Several sources naming one destination: dart compiles them all and the
+  // LAST on the command line wins, the same file every run (1.104.1, measured
+  // both orders). Run them in parallel and the winner is whoever finishes
+  // last, so a collision has to serialize the batch.
+  {
+    const cdir = join(dir, "collide");
+    mkdirSync(cdir, { recursive: true });
+    for (const name of ["a", "b", "c"]) writeFileSync(join(cdir, `${name}.scss`), `.${name}{x:"${name}"}\n`);
+    const target = join(cdir, "out.css");
+    const order = (names) => [
+      cliPath, "--no-source-map", "--style=compressed", "-j", "4",
+      ...names.map((n) => `${join(cdir, `${n}.scss`)}:${target}`),
+    ];
+    for (let attempt = 0; attempt < 5; attempt++) {
+      for (const names of [["a", "b", "c"], ["c", "b", "a"]]) {
+        rmSync(target, { force: true });
+        const r = spawnSync(process.execPath, order(names), { encoding: "utf8", timeout: 60000 });
+        assert.equal(r.status, 0, `cli: colliding destinations compile (stderr: ${r.stderr})`);
+        const last = names[names.length - 1];
+        assert.equal(
+          readFileSync(target, "utf8").trim(),
+          `.${last}{x:"${last}"}`,
+          `cli: the LAST source on the command line wins (${names.join(" ")}, attempt ${attempt})`,
+        );
+      }
+    }
+  }
+
+  // Diagnostics belong to their job and print in COMMAND-LINE order, never in
+  // completion order — which is what a dozen threads writing to one stderr
+  // gives you. The first stylesheet is deliberately the slow one, so its
+  // warning finishes LAST: an unordered run cannot pass by luck.
+  //
+  // (Order measured 2026-09-17 against the native binary, which reports each
+  // job in input order at every `-j`. dart-sass prints every warning first and
+  // its errors at the end; the native CLI has never done that and this does
+  // not change it.)
+  {
+    const odir = join(dir, "order");
+    mkdirSync(odir, { recursive: true });
+    // The warning comes AFTER the slow loop, so in completion order it is the
+    // last one written, not the first.
+    writeFileSync(join(odir, "j0.scss"), `@for $i from 1 through 4000 { .slow-#{$i} { a: $i * 2 } }\n@warn "mark-0";\n`);
+    for (let i = 1; i < 8; i++) writeFileSync(join(odir, `j${i}.scss`), `@warn "mark-${i}";\n.j${i}{a:${i}}\n`);
+    // One failure in the middle: its Error takes the failing job's place in
+    // the sequence, rather than being hoisted or trailed.
+    writeFileSync(join(odir, "j4.scss"), `.j4{a:}\n`);
+    const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4"];
+    for (let i = 0; i < 8; i++) args.push(`${join(odir, `j${i}.scss`)}:${join(odir, `j${i}.css`)}`);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+      assert.equal(r.status, 1, "cli: the batch with one bad job exits non-zero");
+      const seq = (r.stderr.match(/mark-\d|^Error: /gm) || []).map((m) => (m === "Error: " ? "E" : m));
+      assert.deepEqual(
+        seq,
+        ["mark-0", "mark-1", "mark-2", "mark-3", "E", "mark-5", "mark-6", "mark-7"],
+        `cli: diagnostics print in command-line order (attempt ${attempt})`,
+      );
+      // The block, not just the message: a warning carries its stack frame and
+      // ends in a blank line, the shape dart prints.
+      assert.match(r.stderr, /WARNING: mark-1\n\s+\S*j1\.scss 1:1\s+root stylesheet\n\n/, "cli: … as whole blocks");
+    }
+  }
+
+  // The same collision through the sourcemap SIDECAR: `a.scss:out.css` writes
+  // `out.css.map` too, which is exactly what `b.scss:out.css.map` writes. The
+  // command-line order and the completion order are made to disagree — a.scss
+  // is first and slow — so a run that ignores the sidecar writes a's map over
+  // b's CSS (measured: dart and `-j 1` keep b's CSS, `-j 4` did not).
+  {
+    const mdir = join(dir, "sidecar");
+    mkdirSync(mdir, { recursive: true });
+    writeFileSync(join(mdir, "a.scss"), `@for $i from 1 through 4000 { .slow-#{$i}{a:$i} }\n.a{x:"a"}\n`);
+    writeFileSync(join(mdir, "b.scss"), `.b{x:"b"}\n`);
+    const target = join(mdir, "out.css.map");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      rmSync(target, { force: true });
+      rmSync(join(mdir, "out.css"), { force: true });
+      const r = spawnSync(
+        process.execPath,
+        [cliPath, "--style=compressed", "-j", "4", `${join(mdir, "a.scss")}:${join(mdir, "out.css")}`, `${join(mdir, "b.scss")}:${target}`],
+        { encoding: "utf8", timeout: 60000 },
+      );
+      assert.equal(r.status, 0, `cli: the sidecar collision compiles (stderr: ${r.stderr})`);
+      assert.match(
+        readFileSync(target, "utf8"),
+        /\.b\{x:"b"\}/,
+        `cli: the last job on the command line owns out.css.map, sidecar or not (attempt ${attempt})`,
+      );
+    }
+  }
+
+  // The job list reaches a worker as shared BYTES, decoded on claim, so a path
+  // that is not ASCII has to survive the round trip — and a worker must get
+  // the right job, not its neighbour's, when the byte lengths differ.
+  {
+    const udir = join(dir, "unicode");
+    mkdirSync(udir, { recursive: true });
+    const names = ["\u65e5\u672c\u8a9e", "caf\u00e9", "\u00f6\u00df\u00e9-\u00fc", "emoji-\u{1f3a8}", "plain"];
+    const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4"];
+    names.forEach((name, i) => {
+      writeFileSync(join(udir, `${name}.scss`), `.n${i}{content:"${name}"}\n`);
+      args.push(`${join(udir, `${name}.scss`)}:${join(udir, `${name}.css`)}`);
+    });
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+    assert.equal(r.status, 0, `cli: non-ASCII paths compile in the pool (stderr: ${r.stderr})`);
+    names.forEach((name, i) => {
+      assert.equal(
+        readFileSync(join(udir, `${name}.css`), "utf8").trim(),
+        `.n${i}{content:"${name}"}`,
+        `cli: ${name}.css holds its own output`,
+      );
+    });
+  }
+
+  // Under `--no-css` a repeated destination is not a collision: nothing is
+  // written, so there is no last-writer to get right and the batch keeps its
+  // parallelism. What must not change is the compiling and the reporting.
+  {
+    const ndir = join(dir, "nocss");
+    mkdirSync(ndir, { recursive: true });
+    const target = join(ndir, "out.css");
+    const args = [cliPath, "--no-css", "--no-source-map", "-j", "4"];
+    for (let i = 0; i < 6; i++) {
+      writeFileSync(join(ndir, `n${i}.scss`), `@warn "nocss-${i}";\n.n${i}{a:${i}}\n`);
+      args.push(`${join(ndir, `n${i}.scss`)}:${target}`);
+    }
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+    assert.equal(r.status, 0, `cli: --no-css with a repeated destination (stderr: ${r.stderr})`);
+    assert.ok(!existsSync(target), "cli: --no-css wrote nothing, collision or not");
+    const seq = (r.stderr.match(/nocss-\d/g) || []);
+    assert.deepEqual(
+      seq,
+      ["nocss-0", "nocss-1", "nocss-2", "nocss-3", "nocss-4", "nocss-5"],
+      "cli: every job still ran, exactly once, reported in command-line order",
+    );
+
+    // …and that it KEPT the pool, which the assertions above cannot show: a
+    // serialized run produces the same files (none) and the same warnings.
+    // Nothing is written under `--no-css`, so write order is no help either.
+    //
+    // `--stop-on-error` is: run in order, a failing FIRST job stops the rest
+    // before they warn; in the pool the others have already started and do
+    // warn. Job 0 is slow, so the workers are certainly past their claim by
+    // the time it fails. Measured 2026-09-17, five runs each: `-j 1` saw 0
+    // warnings every time, `-j 4` saw 5.
+    const cdir2 = join(dir, "nocss-conc");
+    mkdirSync(cdir2, { recursive: true });
+    writeFileSync(
+      join(cdir2, "j0.scss"),
+      `@for $i from 1 through 30000 { .slow-#{$i}{a:$i} }\n.bad{a: 1px + #fff}\n`,
+    );
+    for (let i = 1; i < 6; i++) writeFileSync(join(cdir2, `j${i}.scss`), `@warn "conc-${i}";\n.n${i}{a:${i}}\n`);
+    const shared = join(cdir2, "out.css");
+    const concArgs = (jobs) => {
+      const a = [cliPath, "--no-css", "--no-source-map", "--stop-on-error", "-j", String(jobs)];
+      for (let i = 0; i < 6; i++) a.push(`${join(cdir2, `j${i}.scss`)}:${shared}`);
+      return a;
+    };
+    const warnCount = (jobs) => {
+      const run = spawnSync(process.execPath, concArgs(jobs), { encoding: "utf8", timeout: 60000 });
+      assert.notEqual(run.status, 0, `cli: the --no-css -j ${jobs} run fails on its first job`);
+      return (run.stderr.match(/conc-\d/g) || []).length;
+    };
+    // The control: in order, nothing after the failure gets to warn. If this
+    // ever stopped being true the comparison below would prove nothing.
+    assert.equal(warnCount(1), 0, "cli: --stop-on-error at -j 1 stops the rest before they warn");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      assert.ok(
+        warnCount(4) > 0,
+        `cli: a --no-css batch with one destination keeps the pool (attempt ${attempt})`,
+      );
+    }
+  }
+
+  // One job WRITES a path another job READS: `a.scss:b.scss b.scss:out.css`.
+  // dart compiles a into b.scss and then b.scss into out.css, so out.css holds
+  // a's output; the pool read whichever b.scss it found first. a.scss is the
+  // slow one, so a run that does not serialize reads the ORIGINAL b.scss every
+  // time (measured 2026-09-17: dart and `-j 1` say a, the pool said b).
+  {
+    const wdir = join(dir, "write-read");
+    mkdirSync(wdir, { recursive: true });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      writeFileSync(join(wdir, "a.scss"), `@for $i from 1 through 4000 { .slow-#{$i}{a:$i} }\n.from-a{x:1}\n`);
+      writeFileSync(join(wdir, "b.scss"), `.original-b{y:2}\n`);
+      rmSync(join(wdir, "out.css"), { force: true });
+      const r = spawnSync(
+        process.execPath,
+        [cliPath, "--no-source-map", "--style=compressed", "-j", "4",
+         `${join(wdir, "a.scss")}:${join(wdir, "b.scss")}`, `${join(wdir, "b.scss")}:${join(wdir, "out.css")}`],
+        { encoding: "utf8", timeout: 60000 },
+      );
+      assert.equal(r.status, 0, `cli: write-then-read compiles (stderr: ${r.stderr})`);
+      const out = readFileSync(join(wdir, "out.css"), "utf8");
+      assert.match(out, /from-a/, `cli: the second job read what the first job wrote (attempt ${attempt})`);
+      assert.doesNotMatch(out, /original-b/, `cli: … not the file as it was before the batch (attempt ${attempt})`);
+    }
+  }
+
+  // Diagnostics have to survive the exit. `process.stderr.write` on a PIPE is
+  // asynchronous and `process.exit` discards whatever has not reached the
+  // kernel, so a batch that printed a lot and then exited non-zero lost the
+  // tail of it (measured 2026-09-17: 374 of 400 warnings through a pipe, and
+  // a 480 KB error cut to exactly 131072 bytes).
+  //
+  // The pipe is the point: to a FILE both paths were always whole, so a test
+  // that redirects to a file proves nothing. `stdio: "pipe"` is what spawnSync
+  // gives us, and the payload has to be bigger than the 64 KB pipe buffer or
+  // the write finishes in one go and nothing can be lost.
+  {
+    const tdir = join(dir, "drain");
+    mkdirSync(tdir, { recursive: true });
+    const args = [cliPath, "--no-source-map", "--style=compressed"];
+    // 400 x ~2 KB is several times the 64 KB pipe buffer. At 400 bytes each the
+    // loss was intermittent (374 of 400 once in three runs); at 2 KB the
+    // broken version came back with 31-54 of 400, every run.
+    const padding = "x".repeat(2000);
+    for (let i = 0; i < 400; i++) {
+      writeFileSync(join(tdir, `w${i}.scss`), `@warn "mark-${i} ${padding}";\n.w${i}{a:1}\n`);
+      args.push(`${join(tdir, `w${i}.scss`)}:${join(tdir, `w${i}.css`)}`);
+    }
+    // One failure at the end, so the run exits 1 right after the flush.
+    writeFileSync(join(tdir, "bad.scss"), `.bad{a:}\n`);
+    args.push(`${join(tdir, "bad.scss")}:${join(tdir, "bad.css")}`);
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 120000 });
+    assert.equal(r.status, 1, "cli: the batch with one bad job exits 1");
+    const seen = (r.stderr.match(/WARNING: mark-\d+/g) || []).length;
+    assert.equal(seen, 400, `cli: every warning survived the non-zero exit through a pipe (saw ${seen})`);
+
+    // The same for the single-error path, which exits from `fail` and cannot
+    // wait for a stream to drain — its write has to be synchronous.
+    const huge = join(tdir, "huge.scss");
+    writeFileSync(huge, `.x{${"a:1;".repeat(60000)}b:}\n`);
+    const one = spawnSync(process.execPath, [cliPath, "--no-source-map", huge], {
+      encoding: "utf8",
+      timeout: 120000,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    assert.equal(one.status, 1, "cli: the huge broken stylesheet fails");
+    assert.ok(
+      one.stderr.length > 200_000,
+      `cli: a diagnostic larger than the pipe buffer is not cut short (got ${one.stderr.length} bytes)`,
+    );
+    assert.match(one.stderr, /root stylesheet/, "cli: … and it ends with the stack frame, not mid-line");
+
+    // The single-job paths do not go through the pool, so they have their own
+    // copy of this hazard: the engine's logger writes a warning through the
+    // asynchronous stream and `fail` then exits at once. Measured 2026-09-17,
+    // a 1.2 MB warning followed by an evaluation error: `--stdin` gave 65584
+    // bytes through a pipe against 1200070 to a file, `--loop` 65808 against
+    // 1200469. The error must arrive, the warning must arrive WHOLE, and the
+    // warning must come first.
+    const warnThenFail = join(tdir, "warn-then-fail.scss");
+    const bigWarning = "w".repeat(1_200_000);
+    writeFileSync(warnThenFail, `@warn "kept ${bigWarning}";\n.bad{a: 1px + #fff}\n`);
+    const direct = [
+      ["--stdin", [cliPath, "--stdin", "--no-source-map"], readFileSync(warnThenFail, "utf8")],
+      ["--loop", [cliPath, "--loop", "2", "--no-css", warnThenFail], undefined],
+      // A lone positional compiles to stdout and reports through the pool's
+      // path; kept here so all three single-job shapes are covered together.
+      ["positional", [cliPath, "--no-source-map", warnThenFail], undefined],
+    ];
+    for (const [label, argv, input] of direct) {
+      const d = spawnSync(process.execPath, argv, {
+        encoding: "utf8",
+        input,
+        timeout: 120000,
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      assert.equal(d.status, 1, `cli: ${label} reports the evaluation error`);
+      assert.match(d.stderr, /Undefined operation/, `cli: ${label} — the error reached stderr`);
+      assert.ok(
+        d.stderr.includes(`kept ${bigWarning}`),
+        `cli: ${label} — the whole warning reached stderr, not the first 64 KB of it (got ${d.stderr.length} bytes)`,
+      );
+      assert.ok(
+        d.stderr.indexOf("WARNING: kept") < d.stderr.indexOf("Undefined operation"),
+        `cli: ${label} — the warning comes before the error that followed it`,
+      );
+    }
+  }
+
+  // Outputs conflict without matching: `a.scss:out` writes the FILE `out` while
+  // `b.scss:out/sub.css` needs `out` to be a DIRECTORY, so on a fresh tree
+  // whichever job runs first decides which one fails. dart writes the file and
+  // then fails the nested job, the same way every run; the pool alternated
+  // (measured 2026-09-17: four runs of six left a directory, two left a file).
+  {
+    const ndir = join(dir, "nested-out");
+    for (let attempt = 0; attempt < 4; attempt++) {
+      rmSync(ndir, { recursive: true, force: true });
+      mkdirSync(ndir, { recursive: true });
+      writeFileSync(join(ndir, "a.scss"), `@for $i from 1 through 4000 { .slow-#{$i}{a:$i} }\n.from-a{x:1}\n`);
+      writeFileSync(join(ndir, "b.scss"), `.from-b{y:2}\n`);
+      const r = spawnSync(
+        process.execPath,
+        [cliPath, "--no-source-map", "--style=compressed", "-j", "4",
+         `${join(ndir, "a.scss")}:${join(ndir, "out")}`, `${join(ndir, "b.scss")}:${join(ndir, "out", "sub.css")}`],
+        { encoding: "utf8", timeout: 60000 },
+      );
+      assert.notEqual(r.status, 0, `cli: the nested-output batch fails, as dart's does (attempt ${attempt})`);
+      assert.ok(
+        statSync(join(ndir, "out")).isFile(),
+        `cli: the first job wrote the file and the nested one lost, as in dart (attempt ${attempt})`,
+      );
+      const out = readFileSync(join(ndir, "out"), "utf8");
+      assert.match(out, /\.from-a\{x:1\}/, "cli: … and it is a's output");
+      assert.doesNotMatch(out, /from-b/, "cli: … not b's");
+    }
+  }
+
+  // The promise of the SHARED index — a heavy stylesheet must not leave other
+  // workers idle — is not what "exactly once" checks: fixed contiguous slices
+  // also run every job once and write every file correctly.
+  //
+  // Four heavy jobs first, eight trivial after, `-j 4`. Sharing the index,
+  // every worker takes a heavy job, so no trivial output can be written before
+  // the first heavy one finishes. Splitting the list into slices leaves two
+  // workers holding only trivial jobs, which they write at once. Measured
+  // 2026-09-17, five runs each: with the shared index the first trivial write
+  // came 0-1 ms AFTER the first heavy one; with slices, 22-23 ms BEFORE it.
+  {
+    const bdir = join(dir, "balance");
+    mkdirSync(bdir, { recursive: true });
+    const HEAVY = 4;
+    const TOTAL = 12;
+    for (let i = 0; i < TOTAL; i++) {
+      writeFileSync(
+        join(bdir, `j${i}.scss`),
+        i < HEAVY
+          ? `@use "sass:math";\n@for $j from 1 through 20000 { .h${i}-#{$j} { width: math.div($j,3)*1px } }\n`
+          : `.t${i}{a:${i}}\n`,
+      );
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      for (let i = 0; i < TOTAL; i++) rmSync(join(bdir, `j${i}.css`), { force: true });
+      const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4"];
+      for (let i = 0; i < TOTAL; i++) args.push(`${join(bdir, `j${i}.scss`)}:${join(bdir, `j${i}.css`)}`);
+      const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+      assert.equal(r.status, 0, `cli: the load-balancing run compiles (stderr: ${r.stderr})`);
+      const times = [];
+      for (let i = 0; i < TOTAL; i++) times.push(statSync(join(bdir, `j${i}.css`)).mtimeMs);
+      const firstHeavy = Math.min(...times.slice(0, HEAVY));
+      const firstTrivial = Math.min(...times.slice(HEAVY));
+      // `>=`, not `>`: with the shared index the two can land in the same
+      // millisecond, and that is fine. What must not happen is a trivial
+      // output appearing while every heavy job is still running.
+      assert.ok(
+        firstTrivial >= firstHeavy,
+        `cli: no worker was left holding only cheap jobs (attempt ${attempt}, first trivial ${Math.round(
+          firstTrivial - firstHeavy,
+        )} ms before the first heavy one)`,
+      );
+    }
+  }
+
+  // A failure inside the pool is still reported and still exits non-zero.
+  writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
+  const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});
+  assert.equal(broken.status, 1, "cli: a job that fails in a worker exits non-zero");
+  assert.match(broken.stderr, /Error: /, "cli: … and its diagnostic reaches stderr");
+  console.log("ok: cli — engine selection (wasm/native agree) and the worker pool");
 }
 
 // === The `quietDeps` option, on the JS API and on both engines ===

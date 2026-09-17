@@ -1,9 +1,14 @@
 # sasso
 
 [sasso](https://github.com/momiji-rs/sasso) — a pure-Rust SCSS → CSS compiler
-(a dart-sass alternative) — as a tiny, **dependency-free** WebAssembly module.
-No wasm-bindgen, no native add-ons: one small `.wasm` plus a hand-written
-loader. It mirrors the **dart-sass *modern* JS API**, so it's a drop-in for the
+(a dart-sass alternative). The package is a tiny, **dependency-free**
+WebAssembly module: no wasm-bindgen, one small `.wasm` plus a hand-written
+loader, and it is all you need — nothing here requires a native build step. On
+macOS and Linux it additionally pulls a prebuilt **native addon**
+(`sasso-native-<platform>`) as an `optionalDependency`; the `sasso` command
+uses it when it is there, and importing the library reaches it through the
+`"sasso/native"` subpath. Both produce byte-identical output. It mirrors the
+**dart-sass *modern* JS API**, so it's a drop-in for the
 [`sass`](https://www.npmjs.com/package/sass) npm package in build tools.
 
 ```bash
@@ -175,8 +180,9 @@ export default { css: { preprocessorOptions: { scss: {} } } };
 
 ## CLI — `npx sasso`
 
-The package ships a `sasso` bin (pure Node + wasm), with a subset of the
-dart-sass `sass` CLI flags:
+The package ships a `sasso` bin — pure Node, no dependencies of its own,
+compiling through the native addon when the platform package is installed and
+the wasm build otherwise — with a subset of the dart-sass `sass` CLI flags:
 
 ```bash
 npx sasso input.scss                      # compile to stdout
@@ -199,11 +205,24 @@ when writing a file), `--source-map-urls <relative|absolute>`, `--embed-sources`
 diagnostics), `--[no-]stop-on-error`, `--no-css`, `--update` (skip outputs newer
 than their input), `-w/--watch` (re-compiles when the input or any dependency
 changes), `--loop <N>` (recompile N times and report throughput), `--help`,
-`--version`. An input of `-` is standard input. Accepted for dart-sass
-compatibility: `-c/--[no-]color` (a no-op — sasso never colors its output),
-`-j/--jobs <N>` (this CLI compiles sequentially), and `--[no-]error-css`
-(**not implemented**: a failing compile always behaves as `--no-error-css`,
-dropping a stale output file rather than describing the error in CSS).
+`--version`, and `-j/--jobs <N>` (how many files to compile at once; the
+default is one per CPU). An input of `-` is standard input. Accepted for
+dart-sass compatibility: `-c/--[no-]color` (a no-op — sasso never colors its
+output) and `--[no-]error-css` (**not implemented**: a failing compile always
+behaves as `--no-error-css`, dropping a stale output file rather than
+describing the error in CSS).
+
+**Which engine the CLI uses.** It prefers the native addon — `npm install
+sasso` already fetched `sasso-native-<platform>` as an optionalDependency on
+macOS and Linux — and falls back to the wasm build (the speed-optimised one)
+everywhere else. Both produce byte-identical output; `SASSO_ENGINE=wasm` or
+`SASSO_ENGINE=native` forces one. Compiling a 138-stylesheet tree on a 12-core
+machine, that tree's own flags, best of five (2026-09-17): **228 ms** on the
+native engine, 646 ms on wasm, against dart-sass 1.104.1's 2322 ms.
+
+Importing the library selects nothing: `"sasso"` is always the size-optimised
+wasm build and ignores `SASSO_ENGINE`, and the addon is the `"sasso/native"`
+subpath below.
 
 An `<in>:<out>` pair may name **directories**: every `.scss`/`.sass`/`.css` file
 under `<in>` that is not a partial compiles to the matching path under `<out>`,
