@@ -1588,6 +1588,42 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       `cli: a diagnostic larger than the pipe buffer is not cut short (got ${one.stderr.length} bytes)`,
     );
     assert.match(one.stderr, /root stylesheet/, "cli: … and it ends with the stack frame, not mid-line");
+
+    // The single-job paths do not go through the pool, so they have their own
+    // copy of this hazard: the engine's logger writes a warning through the
+    // asynchronous stream and `fail` then exits at once. Measured 2026-09-17,
+    // a 1.2 MB warning followed by an evaluation error: `--stdin` gave 65584
+    // bytes through a pipe against 1200070 to a file, `--loop` 65808 against
+    // 1200469. The error must arrive, the warning must arrive WHOLE, and the
+    // warning must come first.
+    const warnThenFail = join(tdir, "warn-then-fail.scss");
+    const bigWarning = "w".repeat(1_200_000);
+    writeFileSync(warnThenFail, `@warn "kept ${bigWarning}";\n.bad{a: 1px + #fff}\n`);
+    const direct = [
+      ["--stdin", [cliPath, "--stdin", "--no-source-map"], readFileSync(warnThenFail, "utf8")],
+      ["--loop", [cliPath, "--loop", "2", "--no-css", warnThenFail], undefined],
+      // A lone positional compiles to stdout and reports through the pool's
+      // path; kept here so all three single-job shapes are covered together.
+      ["positional", [cliPath, "--no-source-map", warnThenFail], undefined],
+    ];
+    for (const [label, argv, input] of direct) {
+      const d = spawnSync(process.execPath, argv, {
+        encoding: "utf8",
+        input,
+        timeout: 120000,
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      assert.equal(d.status, 1, `cli: ${label} reports the evaluation error`);
+      assert.match(d.stderr, /Undefined operation/, `cli: ${label} — the error reached stderr`);
+      assert.ok(
+        d.stderr.includes(`kept ${bigWarning}`),
+        `cli: ${label} — the whole warning reached stderr, not the first 64 KB of it (got ${d.stderr.length} bytes)`,
+      );
+      assert.ok(
+        d.stderr.indexOf("WARNING: kept") < d.stderr.indexOf("Undefined operation"),
+        `cli: ${label} — the warning comes before the error that followed it`,
+      );
+    }
   }
 
   // A failure inside the pool is still reported and still exits non-zero.

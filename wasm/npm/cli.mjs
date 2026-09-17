@@ -871,18 +871,20 @@ function runLoop(opts, common) {
       ? compileString(source, { ...options, sourceMap: false, syntax: opts.indented ? "indented" : "scss" })
       : compile(path, { ...options, sourceMap: false, ...syntaxOf(opts) });
   const run = (options) => {
-    try {
-      return compileOnce(options).css;
-    } catch (e) {
-      const msg =
-        e instanceof Exception
-          ? e.message
-          : e && e.code === "ENOENT"
-            ? `Error reading ${path}: Cannot open file.`
-            : `error: ${e && e.message ? e.message : e}`;
-      fail(msg);
-      return "";
-    }
+    // Same reason as the `--stdin` path: the warm pass is the one that
+    // reports, and `fail` exits before an asynchronous stderr write can drain.
+    const attempt = captureStderr(() => compileOnce(options));
+    if (attempt.text) writeStderrSync(attempt.text);
+    if (!attempt.error) return attempt.value.css;
+    const e = attempt.error;
+    const msg =
+      e instanceof Exception
+        ? e.message
+        : e && e.code === "ENOENT"
+          ? `Error reading ${path}: Cannot open file.`
+          : `error: ${e && e.message ? e.message : e}`;
+    fail(msg);
+    return "";
   };
 
   // The warm/correctness pass: diagnostics once, and a failure here never
@@ -959,12 +961,23 @@ async function main() {
     const output = opts.output !== undefined ? opts.output : opts.positionals[0];
     const wantMap = wantSourceMap(opts, output);
     const source = readStdin();
+    // Captured and written synchronously, like a job's: the engine's logger
+    // writes warnings through the ASYNCHRONOUS stream, and `fail` exits at
+    // once, so on a pipe a warning would arrive after the error it preceded —
+    // or, past the 64 KB pipe buffer, not at all (measured 2026-09-17: a
+    // 1.2 MB warning came out of `--stdin` as 65584 bytes through a pipe and
+    // 1200070 to a file).
+    const run = captureStderr(() =>
+      compileString(source, { ...common, sourceMap: wantMap, syntax: opts.indented ? "indented" : "scss" }),
+    );
+    if (run.text) writeStderrSync(run.text);
     let result;
     try {
-      result = compileString(source, { ...common, sourceMap: wantMap, syntax: opts.indented ? "indented" : "scss" });
+      if (run.error) throw run.error;
+      result = run.value;
     } catch (e) {
       const removeError = discardStaleOutput(output, opts);
-      if (removeError) process.stderr.write(`${removeError}\n`);
+      if (removeError) writeStderrSync(`${removeError}\n`);
       if (e instanceof Exception) fail(e.message);
       fail(`error: ${e && e.message ? e.message : e}`);
     }
