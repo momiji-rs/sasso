@@ -874,7 +874,13 @@ function runLoop(opts, common) {
   const run = (options) => {
     // Same reason as the `--stdin` path: the warm pass is the one that
     // reports, and `fail` exits before an asynchronous stderr write can drain.
-    const attempt = captureStderr(() => compileOnce(options));
+    //
+    // The TIMED passes carry `Logger.silent`, so nothing of theirs can reach
+    // stderr and there is nothing to capture. They skip it: swapping
+    // `process.stderr.write` and allocating a chunk list per iteration is this
+    // CLI's bookkeeping, and `--loop` exists to report the compiler's time.
+    const timed = options.logger === Logger.silent;
+    const attempt = timed ? compileOrError(() => compileOnce(options)) : captureStderr(() => compileOnce(options));
     if (attempt.text) writeStderrSync(attempt.text);
     if (!attempt.error) return attempt.value.css;
     const e = attempt.error;
@@ -1269,6 +1275,15 @@ function flushDiagnostics(diagnostics, count) {
     if (!endsBlank) process.stderr.write("\n");
     process.stderr.write(text);
     endsBlank = text.endsWith("\n\n");
+  }
+}
+
+/** `captureStderr`'s shape without the capture, for a pass that cannot report. */
+function compileOrError(fn) {
+  try {
+    return { value: fn() };
+  } catch (e) {
+    return { error: e };
   }
 }
 
