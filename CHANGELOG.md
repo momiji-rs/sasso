@@ -142,23 +142,28 @@ attempted (98.94%, delta +0) against dart-sass 1.104.1 and sass-spec
 
 ### Performance
 
-- **Four rounds of allocation work in the evaluator** (#68, #73, #76, #77),
-  each measured on the same corpora and each verifying the sass-spec ratchet at
-  delta +0. On `bench/corpus/generated/large.scss`, instructions retired:
+- **Four rounds of allocation work in the evaluator** (#68, #73, #76, #77), each
+  verifying the sass-spec ratchet at delta +0. Two corpora run through all four
+  — `bench/corpus/generated/large.scss` and `bench/corpus/gate/extend_heavy.scss`
+  — and the later rounds add more (`handwritten/main.scss` from #73, a
+  long-selector sheet from #77). On `large.scss`, instructions retired:
 
   | | change | delta |
   |---|---|---|
   | #68 | a one-element `Vec` in `split_commas`, and a lowercased copy allocated only to compare a function name | -0.516% |
   | #73 | a rule's selector list resolved once and shared, rather than per use | -2.614% |
   | #76 | that shared list carried into the output tree instead of re-materialized | -0.764% |
-  | #77 | selector scanners reading from a 64-character inline buffer, so a scan touches the allocator not at all | -1.825% |
+  | #77 | selector scanners reading from a 64-character inline buffer, so a scan over a selector that fits touches the allocator not at all (longer input keeps the heap `collect`) | -1.825% |
 
   Together **133.840M → 126.330M instructions (-5.61%)** and **377,761 →
   275,297 allocations (-27.1%)** on that corpus — the reallocation share fell
   furthest, since the scanners had been growing a `Vec<char>` from a quarter of
-  the size it needed. `bench/corpus/gate/extend_heavy.scss` moved least, 59.395M
-  → 59.143M (**-0.424%**), which is the expected shape: it spends its time in
-  `@extend`, not in scanning.
+  the size it needed. `extend_heavy.scss` moved least, 59.395M → 59.143M
+  (**-0.424%**), which is the expected shape: it spends its time in `@extend`,
+  not in scanning. The sheet of deliberately long selectors — the one that
+  spills past the inline buffer — still improved in #77, -0.987% instructions
+  and -2.79% allocations, so the spill path costs nothing it did not cost
+  before.
 
 ## [0.10.0] - 2026-09-17
 
