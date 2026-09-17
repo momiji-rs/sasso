@@ -9,7 +9,7 @@
 // asyncify refactors must preserve (docs/HANDOFF_ASYNC_IMPORTER_PERF.md).
 // Run after build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, existsSync, statSync, symlinkSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, existsSync, statSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -1201,6 +1201,34 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.equal(readFileSync(join(sdir, "from-stdin.css"), "utf8").trim(), ".stdin{b:1}", "cli: the `-` job read stdin");
     for (let i = 0; i < 6; i++) {
       assert.equal(readFileSync(join(sdir, `f${i}.css`), "utf8").trim(), `.f${i}{a:${i}}`, `cli: f${i} compiled too`);
+    }
+  }
+
+  // Several sources naming one destination: dart compiles them all and the
+  // LAST on the command line wins, the same file every run (1.104.1, measured
+  // both orders). Run them in parallel and the winner is whoever finishes
+  // last, so a collision has to serialize the batch.
+  {
+    const cdir = join(dir, "collide");
+    mkdirSync(cdir, { recursive: true });
+    for (const name of ["a", "b", "c"]) writeFileSync(join(cdir, `${name}.scss`), `.${name}{x:"${name}"}\n`);
+    const target = join(cdir, "out.css");
+    const order = (names) => [
+      cliPath, "--no-source-map", "--style=compressed", "-j", "4",
+      ...names.map((n) => `${join(cdir, `${n}.scss`)}:${target}`),
+    ];
+    for (let attempt = 0; attempt < 5; attempt++) {
+      for (const names of [["a", "b", "c"], ["c", "b", "a"]]) {
+        rmSync(target, { force: true });
+        const r = spawnSync(process.execPath, order(names), { encoding: "utf8", timeout: 60000 });
+        assert.equal(r.status, 0, `cli: colliding destinations compile (stderr: ${r.stderr})`);
+        const last = names[names.length - 1];
+        assert.equal(
+          readFileSync(target, "utf8").trim(),
+          `.${last}{x:"${last}"}`,
+          `cli: the LAST source on the command line wins (${names.join(" ")}, attempt ${attempt})`,
+        );
+      }
     }
   }
 

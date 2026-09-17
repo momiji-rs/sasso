@@ -964,7 +964,8 @@ async function main() {
  * which is the native "don't start more files once one fails".
  *
  * Staying in-process is the right answer for one job (a worker costs more than
- * the compile) and when `-j 1` asks for it.
+ * the compile), when `-j 1` asks for it, and when two jobs name one output
+ * file — dart's last-one-wins is an ORDER, and an order needs a sequence.
  */
 async function runJobs(jobs, opts, common) {
   const wanted = opts.jobs ?? (os.availableParallelism ? os.availableParallelism() : os.cpus().length);
@@ -972,8 +973,27 @@ async function runJobs(jobs, opts, common) {
   // to force the whole batch into this thread instead, so one `-` job cost
   // every OTHER job its parallelism.
   const stdinSource = jobs.some((j) => j.input === "-") ? readStdin() : undefined;
+
+  // Two sources writing to ONE destination have to stay in command-line order:
+  // dart compiles both and the LAST one wins — the same file every run
+  // (measured against 1.104.1 on 2026-09-17, in both orders). Run them in
+  // parallel and the winner is whoever finishes last, which is the race the
+  // native CLI has today. A collision is almost always a slip in the command
+  // line, so the parallelism given up here costs nothing real.
+  const seenOut = new Set();
+  let collides = false;
+  for (const job of jobs) {
+    if (job.output === undefined) continue;
+    const key = pathKey(job.output);
+    if (seenOut.has(key)) {
+      collides = true;
+      break;
+    }
+    seenOut.add(key);
+  }
+
   const workers = Math.min(jobs.length, Math.max(1, wanted));
-  if (workers < 2) return compileSlice(jobs, opts, common, null, stdinSource);
+  if (workers < 2 || collides) return compileSlice(jobs, opts, common, null, stdinSource);
 
   // [0] the next job to take, [1] the stop-on-error flag.
   const ctl = new Int32Array(new SharedArrayBuffer(8));
