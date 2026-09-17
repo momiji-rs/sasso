@@ -17,33 +17,52 @@ Conformance is tracked separately as a ratchet against the official
   in parallel.** It did neither: it hard-coded the size-optimised wasm build
   even though `npm install sasso` had already fetched
   `sasso-native-<platform>` as an optionalDependency, and it compiled
-  sequentially while `-j/--jobs` was accepted and ignored. Compiling the
-  137-stylesheet Lichess tree on a 12-core machine went from **2229 ms to
-  265 ms** — from dart-sass's speed (2048 ms) to within 1.9× of the native
-  binary (139 ms) — with output byte-identical to that binary in every
-  engine/concurrency combination.
+  sequentially while `-j/--jobs` was accepted and ignored. Compiling the 138
+  Lichess stylesheets that build without npm dependencies, with lila's own
+  flags on a 12-core machine, best of five (2026-09-17):
+
+  | | |
+  |---|---|
+  | `npx sasso` before | 2379 ms |
+  | `npx sasso` after (native engine) | **243 ms** |
+  | `npx sasso` after (wasm engine) | 649 ms |
+  | the `sasso` 0.14.0 binary | 154 ms |
+  | dart-sass 1.104.1 | 2348 ms |
+
+  So the npm package was at parity with the thing it replaces, and is now
+  within 1.6× of the release binary — with output byte-identical to that
+  binary in every engine/concurrency combination.
 
   The pool is `node:worker_threads` with workers pulling from a shared index,
   so one heavy stylesheet cannot leave the others idle, and `--stop-on-error`
   is a shared flag: whoever fails stops the rest from taking new work, which is
   the native CLI's "don't start more files once one fails". A single job and
   `-j 1` stay in-process — a worker costs more than the compile — and so does a
-  batch in which two jobs name one output file, because dart's last-one-wins is
-  an order and an order needs a sequence (a job's `<output>.map` sidecar counts
-  as a destination too, so `a.scss:out.css` and `b.scss:out.css.map` collide).
-  A `-` job reads standard input once, in the parent, so it no longer costs the
-  rest of the batch its parallelism (138 Lichess stylesheets plus one `-` job:
-  767 ms to 217 ms). `SASSO_ENGINE=wasm|native` forces an engine — and only for
-  the CLI: `import … from "sasso"` is always the wasm build.
+  batch whose writes overlap its own paths, because dart's last-one-wins and
+  its write-then-read are orders and an order needs a sequence: two jobs naming
+  one output file (a job's `<output>.map` sidecar counts, so `a.scss:out.css`
+  and `b.scss:out.css.map` collide), or one job writing a path another job
+  reads (`a.scss:b.scss b.scss:out.css`). Under `--no-css` none of that applies
+  — nothing is written — so the batch keeps the pool. A `-` job reads standard
+  input once, in the parent, so it no longer costs the rest of the batch its
+  parallelism (138 Lichess stylesheets plus one `-` job: 767 ms to 217 ms).
+  `SASSO_ENGINE=wasm|native` forces an engine — and only for the CLI:
+  `import … from "sasso"` is always the wasm build.
 
-  The job list reaches the workers through shared memory, decoded one job at a
-  time as each is claimed, rather than being structure-cloned into every
-  worker: a 5,000-file directory build at `-j 12` peaks at 234 MB instead of
-  283 MB, with no change in wall time.
+  Only entry paths are compared: a job that writes a file another job `@use`s
+  is the same hazard and cannot be seen before compiling, so it stays a
+  scheduling race, as it is in the native CLI (#87).
+
+  The job list and standard input reach the workers through shared memory
+  rather than being structure-cloned into every one: a 5,000-file directory
+  build at `-j 12` peaks at 234 MB instead of 283 MB, and 5.1 MB on stdin
+  beside 24 file jobs at 838 MB instead of 901 MB, with no change in wall time.
 
   Each job's warnings and errors are collected and printed in **command-line
   order**, as whole blocks, however the threads interleaved — the order the
-  native binary reports at every `-j`.
+  native binary reports at every `-j`. A job with no output file is the
+  exception: its CSS goes to the same terminal, so its warnings are written
+  before it, which is what dart and the native binary do.
 
   What that flag means now differs at the edges: `--stop-on-error` skips the
   remaining files at `-j 1` but not necessarily at the default, because they
@@ -57,6 +76,11 @@ Conformance is tracked separately as a ratchet against the official
   parsed the engine's `info` string, which names the engine crate: with the
   native addon installed the pattern missed, and the fallback printed
   dart-sass's compatibility version as if it were sasso's.
+
+- **`--help` and `--version` no longer need a working engine.** The CLI loaded
+  the compiler before parsing arguments, so `SASSO_ENGINE=native sasso
+  --version` on a machine without the addon answered with the addon error
+  instead of the version.
 
 ## [0.14.0] - 2026-09-17
 
