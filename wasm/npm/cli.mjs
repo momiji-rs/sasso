@@ -1007,6 +1007,11 @@ function compileSlice(jobs, opts, common, ctl) {
     if (ctl) {
       if (Atomics.load(ctl, 1)) break; // another job failed and --stop-on-error is on
       i = Atomics.add(ctl, 0, 1);
+      // Re-check AFTER claiming: between the check above and this claim
+      // another worker can fail, and starting this job then would be exactly
+      // what --stop-on-error forbids. (The native scheduler re-checks in the
+      // same place — src/main.rs:946.)
+      if (Atomics.load(ctl, 1)) break;
     } else {
       i = next++;
     }
