@@ -70,14 +70,17 @@ pub(super) fn fn_rgb(
         return Ok(verbatim);
     }
     channels.validate_numeric(&["red", "green", "blue"], pos)?;
+    channels.validate_positional_numeric(&["red", "green", "blue"], pos)?;
+    validate_alpha_unit(channels.alpha.as_ref(), pos)?;
     channels.validate_count("rgb", pos)?;
     channels.validate_rgb_units(&["red", "green", "blue"], pos)?;
     let Channels { comps, alpha, .. } = channels;
-    let r = rgb_channel(&comps[0], pos)?;
-    let g = rgb_channel(&comps[1], pos)?;
-    let b = rgb_channel(&comps[2], pos)?;
+    let z = crate::value::without_negative_zero;
+    let r = z(rgb_channel(&comps[0], pos)?);
+    let g = z(rgb_channel(&comps[1], pos)?);
+    let b = z(rgb_channel(&comps[2], pos)?);
     let a = match &alpha {
-        Some(v) => alpha_value(v, pos)?,
+        Some(v) => z(alpha_value(v, pos)?),
         None => 1.0,
     };
     let mut c = Color::rgb(r, g, b, a);
@@ -157,14 +160,19 @@ fn color_arg_css(v: &Value) -> String {
 /// 255. NaN maps to 0, `±Infinity` clamp to the bounds. Delegates to the
 /// shared [`channel`] helper for the finite case, then normalizes NaN.
 fn rgb_channel(v: &Value, pos: Pos) -> Result<f64, Error> {
-    if let Value::Slash(num, _) = v {
-        return Ok(clamp_finite(num.value, 0.0, 255.0));
-    }
+    // The degenerate check comes FIRST, whatever spelling the channel has:
+    // `channel` clamps, and a clamp keeps a NaN, so `rgb(0/0 0 0)` would
+    // serialize one instead of the `rgb(0, 0, 0)` dart-sass gives.
     if let Some(c) = degenerate_value(v) {
         if c.is_nan() {
             return Ok(0.0);
         }
         return Ok(clamp_finite(c, 0.0, 255.0));
+    }
+    // A finite slash-division's quotient goes through the same unit handling
+    // as a literal number, so `50%/2` is 25% of 255 — not the raw 25.
+    if let Value::Slash(num, _) = v {
+        return channel(&Value::Number(num.clone()), pos);
     }
     channel(v, pos)
 }
@@ -277,6 +285,31 @@ impl Channels {
         })
     }
 
+    /// The POSITIONAL form's all-numeric pass: it skips `validate_numeric`,
+    /// so confirm every channel is a number first, with dart's `$<param>:`
+    /// prefix — which the bare [`channel`]/[`num`] readers do not attach. dart
+    /// runs this before any unit is examined, so a non-number channel is
+    /// reported ahead of a later bad-unit one.
+    fn validate_positional_numeric(&self, names: &[&str], pos: Pos) -> Result<(), Error> {
+        if self.single.is_some() {
+            return Ok(());
+        }
+        for (i, comp) in self.comps.iter().enumerate() {
+            let numeric = matches!(comp, Value::Number(_) | Value::Slash(..)) || is_degenerate_calc(comp);
+            if !numeric {
+                return Err(Error::at(
+                    format!(
+                        "${}: {} is not a number.",
+                        names[i.min(names.len() - 1)],
+                        channel_err_css(comp)
+                    ),
+                    pos,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate that every channel of a single-argument channels list is a
     /// number, matching dart-sass's per-channel check. A non-number channel
     /// (a plain string such as a non-`from` relative keyword, e.g.
@@ -292,13 +325,15 @@ impl Channels {
         for (i, comp) in self.comps.iter().enumerate() {
             // A degenerate `calc()` is a valid (NaN/infinity) channel value, so
             // it is left for the count/compute path rather than reported here.
-            let numeric = matches!(comp, Value::Number(_) | Value::Slash(..)) || is_degenerate_calc(comp);
+            let numeric = matches!(comp, Value::Number(_) | Value::Slash(..))
+                || is_degenerate_calc(comp)
+                || is_none_keyword(comp);
             if !numeric {
                 return Err(Error::at(
                     format!(
                         "$channels: Expected {} to be a number, was {}.",
                         legacy_channel_name(names, i),
-                        comp.to_css(false)
+                        channel_err_css(comp)
                     ),
                     pos,
                 ));
@@ -322,24 +357,7 @@ impl Channels {
     /// left-to-right so a non-number channel is reported before a later
     /// bad-unit one, matching dart's two-pass (coerce-then-unit) order.
     fn validate_rgb_units(&self, names: &[&str], pos: Pos) -> Result<(), Error> {
-        // The positional form skips `validate_numeric`, so confirm every
-        // channel is a number first (with dart's `$<param>:` prefix), matching
-        // dart's all-numeric pass before any unit is examined.
-        if self.single.is_none() {
-            for (i, comp) in self.comps.iter().enumerate() {
-                let numeric = matches!(comp, Value::Number(_) | Value::Slash(..)) || is_degenerate_calc(comp);
-                if !numeric {
-                    return Err(Error::at(
-                        format!(
-                            "${}: {} is not a number.",
-                            names[i.min(names.len() - 1)],
-                            comp.to_css(false)
-                        ),
-                        pos,
-                    ));
-                }
-            }
-        }
+        self.validate_positional_numeric(names, pos)?;
         for (i, comp) in self.comps.iter().enumerate() {
             if let Some(num) = channel_unit_number(comp) {
                 let ok = num.is_unitless() || (!num.has_complex_units() && num.unit() == "%");
@@ -534,16 +552,19 @@ fn split_channels(channels: &Value) -> SplitChannels {
     let mut items: Vec<Value> = l.items.to_vec();
     // A trailing `n / a` slash-division shows up as a `Slash` whose textual
     // spelling contains `/`; recover the channel and alpha (each may carry a
-    // unit, e.g. `50%/0.4`).
+    // unit, e.g. `50%/0.4`). The split is at the LAST top-level slash, which is
+    // dart's rule for a chain: the final element is the alpha and every earlier
+    // slash stays a DIVISION inside the last channel, so `0 0 0/50%/2` is alpha
+    // `2` with a blue of `0/50%` — the spelling its own diagnostic shows.
     if let Some(Value::Slash(_, repr)) = items.last() {
-        if let Some((lhs, rhs)) = repr.split_once('/') {
-            let token = |s: &str| parse_number_token(s).or_else(|| parse_degenerate_token(s));
-            if let (Some(last), Some(alpha)) = (token(lhs), token(rhs)) {
+        if let Some(idx) = top_level_slash(repr) {
+            let (lhs, rhs) = (repr[..idx].trim(), repr[idx + 1..].trim());
+            if let (Some(last), Some(alpha)) = (slash_channel_token(lhs), numeric_token(rhs)) {
                 items.pop();
-                items.push(Value::Number(last));
+                items.push(last);
                 return SplitChannels {
                     comps: items,
-                    alpha: Some(Value::Number(alpha)),
+                    alpha: Some(alpha),
                     alpha_split: true,
                 };
             }
@@ -572,6 +593,32 @@ fn split_channels(channels: &Value) -> SplitChannels {
         }
     }
     no_split(items)
+}
+
+/// A channel token that must be NUMERIC: a plain number or a degenerate
+/// `calc()`. Anything else (a keyword, a `var()`, a leftover slash) is `None`,
+/// so the caller leaves the list unsplit rather than inventing a channel.
+fn numeric_token(s: &str) -> Option<Value> {
+    let v = channel_token(s);
+    if matches!(v, Value::Number(_) | Value::Calc(_)) {
+        return Some(v);
+    }
+    // The UNIT-bearing degenerate spelling a slash repr can carry
+    // (`calc(NaN * 1%)`), which the plain token reader does not recognize.
+    parse_degenerate_token(s).map(Value::Number)
+}
+
+/// A channel token that may itself be a chain of divisions (`0/50%`): each
+/// slash divides, and the result keeps the authored spelling, which is what
+/// the channel's unit diagnostic reports. `None` if any piece is not numeric.
+fn slash_channel_token(s: &str) -> Option<Value> {
+    let Some(idx) = top_level_slash(s) else {
+        return numeric_token(s);
+    };
+    let left = slash_channel_token(s[..idx].trim())?;
+    let right = numeric_token(s[idx + 1..].trim())?;
+    let (a, b) = (channel_unit_number(&left)?, channel_unit_number(&right)?);
+    Some(Value::Slash(a.div(b), s.to_string()))
 }
 
 /// Find the byte index of the (single) top-level `/` in an unquoted channel
@@ -700,7 +747,7 @@ pub(super) fn fn_hsl(
             pos,
         ));
     }
-    let channels = Channels::collect("hsl", &params, pos_args, named, pos)?;
+    let mut channels = Channels::collect("hsl", &params, pos_args, named, pos)?;
     // Echo the caller's spelling (`hsl` vs `hsla`) in the special/relative
     // passthroughs; the `none`-only path normalizes to canonical `hsl`.
     if let Some(verbatim) = channels.relative_passthrough(name) {
@@ -726,23 +773,28 @@ pub(super) fn fn_hsl(
     if pos_args.len() == 2 && named.is_empty() {
         return Err(Error::at("Missing argument $lightness.".to_string(), pos));
     }
-    // A degenerate `calc()` channel (`calc(infinity)`, `calc(-infinity)`,
-    // `calc(NaN)`) keeps the whole call as a special hsl() spelling, with each
-    // channel coerced per dart-sass's modern parsing (see `hsl_degenerate`).
+    channels.comps = normalize_channels(&channels.comps, Some(0));
+    // A degenerate channel that SURVIVED normalization — an infinite
+    // saturation or lightness — keeps the whole call as a special hsl()
+    // spelling, with each channel coerced per dart-sass's modern parsing (see
+    // `hsl_degenerate`). A NaN channel and a non-finite hue are 0 by now.
     if channels.comps.len() == 3 && channels.comps.iter().any(is_degenerate_calc) {
         return hsl_degenerate(&channels, pos);
     }
     channels.validate_numeric(&["hue", "saturation", "lightness"], pos)?;
+    channels.validate_positional_numeric(&["hue", "saturation", "lightness"], pos)?;
+    validate_alpha_unit(channels.alpha.as_ref(), pos)?;
     channels.validate_count("hsl", pos)?;
     let Channels { comps, alpha, .. } = channels;
     let h = hsl_hue(&comps[0], pos)?;
     // The repr preserves the supplied saturation/lightness percentages, except
     // saturation is floored at 0 (matching dart-sass: `hsl(0, 500%, 50%)` keeps
     // `500%`, `hsl(0, -100%, 50%)` becomes `0%`, lightness is left untouched).
-    let s_raw = num(&comps[1], pos)?;
-    let l_raw = num(&comps[2], pos)?;
-    let s_pct = if s_raw.is_nan() { 0.0 } else { s_raw.max(0.0) };
-    let l_pct = if l_raw.is_nan() { 0.0 } else { l_raw };
+    let s_raw = channel_value(&comps[1], pos)?;
+    let l_raw = channel_value(&comps[2], pos)?;
+    let z = crate::value::without_negative_zero;
+    let s_pct = z(if s_raw.is_nan() { 0.0 } else { s_raw.max(0.0) });
+    let l_pct = z(if l_raw.is_nan() { 0.0 } else { l_raw });
     let a = match &alpha {
         Some(v) => alpha_value(v, pos)?,
         None => 1.0,
@@ -758,7 +810,7 @@ pub(super) fn fn_hsl(
     // is normalized to degrees in `[0, 360)`. The modern Hsl tag carries the
     // space so `color.space`/`color.channel` work; serialization uses the
     // classic comma form via `ModernColor::legacy_css`.
-    let h_norm = h.rem_euclid(360.0);
+    let h_norm = crate::value::without_negative_zero(h.rem_euclid(360.0));
     c.modern = Some(Box::new(ModernColor {
         space: ColorSpace::Hsl,
         channels: [Some(h_norm), Some(s_pct), Some(l_pct)],
@@ -772,13 +824,14 @@ pub(super) fn fn_hsl(
 /// are taken as degrees.
 fn hsl_hue(v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
-        Value::Number(num) => Ok(match num.unit() {
+        // A slash-division carries its quotient AND its unit, so `1turn/2` is
+        // half a turn — 180deg — not 0.5.
+        Value::Number(num) | Value::Slash(num, _) => Ok(match num.unit() {
             "rad" => num.value.to_degrees(),
             "grad" => num.value * 360.0 / 400.0,
             "turn" => num.value * 360.0,
             _ => num.value,
         }),
-        Value::Slash(num, _) => Ok(num.value),
         other => Err(Error::at(
             format!("{} is not a number.", other.to_css(false)),
             pos,
@@ -786,16 +839,13 @@ fn hsl_hue(v: &Value, pos: Pos) -> Result<f64, Error> {
     }
 }
 
-/// The [`Number`] underlying a legacy color channel for unit inspection: a
-/// plain number, the quotient of a slash-division (`6px/2`, whose unit decides
-/// the channel's), or a degenerate `calc()` that folded to a unit-bearing
-/// number (`calc(infinity * 1px)`). Returns `None` for any non-numeric channel
-/// (handled by the "is not a number" / passthrough paths).
-fn channel_unit_number(v: &Value) -> Option<&Number> {
-    match v {
-        Value::Number(n) | Value::Slash(n, _) => Some(n),
-        Value::Calc(CalcNode::Number(n)) => Some(n),
-        _ => None,
+/// Read a legacy channel's numeric value, accepting the quotient a
+/// slash-division carries: inside a SPACE-separated channels list `60%/2`
+/// keeps its spelling, and `num` alone calls it "not a number".
+fn channel_value(v: &Value, pos: Pos) -> Result<f64, Error> {
+    match channel_unit_number(v) {
+        Some(n) => Ok(n.value),
+        None => num(v, pos),
     }
 }
 
@@ -815,22 +865,29 @@ fn fold_degenerate(v: &Value) -> Value {
     v.clone()
 }
 
-/// Serialize an `hsl()`/`hsla()` call that carries a degenerate `calc()`
-/// channel. dart-sass keeps the legacy comma spelling and coerces each
-/// channel: the hue is reduced modulo 360 (so any non-finite becomes
-/// `calc(NaN)`); saturation/lightness gain an implicit `%` (`calc(X * 1%)`),
-/// with saturation additionally clamped at 0 (so `-infinity`/`NaN` → `0%`).
+/// Serialize an `hsl()`/`hsla()` call that carries an infinite saturation or
+/// lightness. dart-sass keeps the legacy comma spelling and coerces each
+/// channel: the hue is reduced modulo 360; saturation/lightness gain an
+/// implicit `%` (`calc(X * 1%)`), with saturation additionally clamped at 0
+/// (so `-infinity` → `0%`). Every channel has already passed through
+/// [`normalize_channel`], so none of them is NaN.
 fn hsl_degenerate(channels: &Channels, pos: Pos) -> Result<Value, Error> {
-    let hue = hsl_degenerate_hue(&channels.comps[0], pos)?;
+    let hue = fmt_num(hsl_hue(&channels.comps[0], pos)?.rem_euclid(360.0), false);
     let sat = hsl_degenerate_pct(&channels.comps[1], true, pos)?;
     let light = hsl_degenerate_pct(&channels.comps[2], false, pos)?;
     let name = match &channels.alpha {
         Some(a) => {
             let av = alpha_value(a, pos)?;
-            return Ok(Value::Str(crate::value::SassStr {
-                text: format!("hsla({hue}, {sat}, {light}, {})", fmt_num(av, false)).into(),
-                quoted: false,
-            }));
+            // An OPAQUE alpha is dropped, exactly as the ordinary hsl path and
+            // `color()` drop theirs: `hsl(0 50% calc(infinity) / 1)` is an
+            // `hsl()`, not an `hsla(…, 1)`.
+            if (av - 1.0).abs() >= f64::EPSILON {
+                return Ok(Value::Str(crate::value::SassStr {
+                    text: format!("hsla({hue}, {sat}, {light}, {})", fmt_num(av, false)).into(),
+                    quoted: false,
+                }));
+            }
+            "hsl"
         }
         None => "hsl",
     };
@@ -840,50 +897,24 @@ fn hsl_degenerate(channels: &Channels, pos: Pos) -> Result<Value, Error> {
     }))
 }
 
-/// Serialize the hue channel of a degenerate hsl() call: a degenerate `calc()`
-/// reduces modulo 360 to `NaN` (emitted as `calc(NaN)`); any plain value keeps
-/// its normalized degree spelling.
-fn hsl_degenerate_hue(v: &Value, pos: Pos) -> Result<String, Error> {
-    if is_degenerate_calc(v) {
-        // infinity/-infinity/NaN, all reduced mod 360 → NaN.
-        return Ok("calc(NaN)".to_string());
-    }
-    let h = hsl_hue(v, pos)?;
-    Ok(fmt_num(h.rem_euclid(360.0), false))
-}
-
-/// Serialize a saturation/lightness channel of a degenerate hsl() call. A
-/// degenerate `calc()` is treated as a `%` value: saturation clamps a
-/// non-positive/`NaN` result to `0%`, otherwise both emit `calc(X * 1%)`. A
-/// plain number keeps its literal `%` spelling (saturation floored at 0).
+/// Serialize a saturation/lightness channel of a degenerate hsl() call. An
+/// infinite channel is treated as a `%` value: saturation clamps a negative
+/// one to `0%`, otherwise both emit `calc(infinity * 1%)`. A plain number
+/// keeps its literal `%` spelling (saturation floored at 0).
 fn hsl_degenerate_pct(v: &Value, is_saturation: bool, pos: Pos) -> Result<String, Error> {
     if let Some(c) = degenerate_value(v) {
-        {
-            if is_saturation && (c.is_nan() || c <= 0.0) {
-                return Ok("0%".to_string());
-            }
-            let token = if c.is_nan() {
-                "NaN"
-            } else if c.is_sign_negative() {
-                "-infinity"
-            } else {
-                "infinity"
-            };
-            return Ok(format!("calc({token} * 1%)"));
+        if is_saturation && c <= 0.0 {
+            return Ok("0%".to_string());
         }
-    }
-    let raw = num(v, pos)?;
-    let pct = if is_saturation {
-        if raw.is_nan() {
-            0.0
+        let token = if c.is_sign_negative() {
+            "-infinity"
         } else {
-            raw.max(0.0)
-        }
-    } else if raw.is_nan() {
-        0.0
-    } else {
-        raw
-    };
+            "infinity"
+        };
+        return Ok(format!("calc({token} * 1%)"));
+    }
+    let raw = channel_value(v, pos)?;
+    let pct = if is_saturation { raw.max(0.0) } else { raw };
     Ok(format!("{}%", fmt_num(pct, false)))
 }
 
@@ -942,7 +973,8 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     if is_relative || comps_func || alpha_func {
         return Ok(verbatim_call("hwb", &channels));
     }
-    let comps: Vec<Value> = comps.iter().map(fold_degenerate).collect();
+    let folded: Vec<Value> = comps.iter().map(fold_degenerate).collect();
+    let comps = normalize_channels(&folded, Some(0));
     // A non-number channel (a non-`from` keyword such as `c`, or a quoted
     // string) is reported before the channel-count check, matching dart-sass.
     for (i, comp) in comps.iter().enumerate() {
@@ -954,12 +986,13 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
                 format!(
                     "$channels: Expected {} to be a number, was {}.",
                     legacy_channel_name(&["hue", "whiteness", "blackness"], i),
-                    comp.to_css(false)
+                    channel_err_css(comp)
                 ),
                 pos,
             ));
         }
     }
+    validate_alpha_unit(alpha.as_ref(), pos)?;
     // Without a special function, the channel count must be exactly three.
     if comps.len() != 3 {
         return Err(Error::at(
@@ -970,6 +1003,26 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
             ),
             pos,
         ));
+    }
+    // Whiteness and blackness must carry a `%` unit (dart-sass), reported per
+    // channel before the value is read — and before the `none` construction
+    // below, which exempts only the `none` channels themselves.
+    for (i, cname) in [(1usize, "whiteness"), (2usize, "blackness")] {
+        if let Some(num) = channel_unit_number(&comps[i]) {
+            // A COMPOUND unit only reports its first numerator, so `%/px` must
+            // be rejected explicitly rather than read as a percentage.
+            if num.has_complex_units() || num.unit() != "%" {
+                // The message shows the spelling the caller wrote, not the
+                // zero a degenerate channel normalizes to.
+                return Err(Error::at(
+                    format!(
+                        "${cname}: Expected {} to have unit \"%\".",
+                        folded[i].to_css(false)
+                    ),
+                    pos,
+                ));
+            }
+        }
     }
     // A `none` missing-channel keyword (with otherwise plain numbers) builds a
     // modern legacy hwb color.
@@ -1000,24 +1053,9 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
         };
         return Ok(Value::Color(make_modern(mc)));
     }
-    // Whiteness and blackness must carry a `%` unit (dart-sass), reported per
-    // channel before the value is read. The hue may be unitless or an angle.
-    for (i, cname) in [(1usize, "whiteness"), (2usize, "blackness")] {
-        if let Value::Number(num) = &comps[i] {
-            if num.unit() != "%" {
-                return Err(Error::at(
-                    format!(
-                        "${cname}: Expected {} to have unit \"%\".",
-                        comps[i].to_css(false)
-                    ),
-                    pos,
-                ));
-            }
-        }
-    }
     let h = hsl_hue(&comps[0], pos)?;
-    let mut w_pct = num(&comps[1], pos)?;
-    let mut b_pct = num(&comps[2], pos)?;
+    let mut w_pct = channel_value(&comps[1], pos)?;
+    let mut b_pct = channel_value(&comps[2], pos)?;
     let a = match &alpha {
         Some(v) => alpha_value(v, pos)?,
         None => 1.0,
@@ -1031,10 +1069,25 @@ pub(super) fn fn_hwb(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
         w_pct = w_pct / t * 100.0;
         b_pct = b_pct / t * 100.0;
     }
+    // dart-sass 1.104.0 converts a NaN channel — and a negative zero — to 0
+    // when the color is CONSTRUCTED, which is after that normalization. An
+    // infinite whiteness becomes NaN there (`∞ / ∞`) and lands on 0, so
+    // `hwb(0, calc(infinity * 1%), 40%)` is plain red; and because this path
+    // stores its own channels rather than going through `make_modern`, it is
+    // also where `hwb(0, -0%, 0%)` would otherwise keep a signed zero that
+    // `color.channel` and `meta.inspect` read straight back.
+    let channel_zero = |v: f64| {
+        if v.is_nan() {
+            0.0
+        } else {
+            crate::value::without_negative_zero(v)
+        }
+    };
+    let (w_pct, b_pct) = (channel_zero(w_pct), channel_zero(b_pct));
     let mut out = hwb_to_color(h, w_pct, b_pct, a);
     // Carry the modern Hwb tag (so `color.space`/`color.channel` work);
     // serialization uses the classic hsl comma form via `legacy_css`.
-    let h_norm = h.rem_euclid(360.0);
+    let h_norm = crate::value::without_negative_zero(h.rem_euclid(360.0));
     out.modern = Some(Box::new(ModernColor {
         space: ColorSpace::Hwb,
         channels: [Some(h_norm), Some(w_pct), Some(b_pct)],
@@ -1190,8 +1243,27 @@ pub(super) fn fn_lab_family(
     if is_relative || has_special {
         return Ok(verbatim_call(name, &channels));
     }
-    // All-plain channels: validate count, types, and units like dart-sass.
+    let is_polar_space = matches!(name, "lch" | "oklch");
+    let normalized = normalize_channels(&comps, if is_polar_space { Some(2) } else { None });
+    // All-plain channels, in dart's order: every channel is a NUMBER, then the
+    // alpha's unit, then the channel COUNT, then the channels' own units.
     let names = lab_channel_names(name);
+    for (i, comp) in comps.iter().enumerate() {
+        if is_none_keyword(comp) || is_degenerate_calc(comp) {
+            continue;
+        }
+        if channel_unit_number(comp).is_none() {
+            return Err(Error::at(
+                format!(
+                    "$channels: Expected {} to be a number, was {}.",
+                    legacy_channel_name(&names, i),
+                    channel_err_css(comp)
+                ),
+                pos,
+            ));
+        }
+    }
+    validate_alpha_unit(alpha.as_ref(), pos)?;
     if comps.len() != 3 {
         return Err(Error::at(
             format!(
@@ -1203,46 +1275,35 @@ pub(super) fn fn_lab_family(
             pos,
         ));
     }
-    let is_hue = |i: usize| matches!(name, "lch" | "oklch") && i == 2;
+    let is_hue = |i: usize| is_polar_space && i == 2;
+    // Every numeric channel is unit-checked, whatever spelling it arrived in:
+    // a degenerate `calc()` is the wrong unit as readily as a plain number
+    // (`lab(1% calc(NaN * 1px) -3)`), and so is a slash-division
+    // (`lab(1% 6px/2 -3)`). The message shows what the caller WROTE, not the
+    // zero a degenerate channel normalizes to.
     for (i, comp) in comps.iter().enumerate() {
-        if is_none_keyword(comp) || is_degenerate_calc(comp) {
+        // A unitless degenerate constant (`calc(NaN)`) carries no unit, and a
+        // non-number channel was reported by the pass above.
+        let Some(num) = channel_unit_number(comp) else {
             continue;
-        }
-        match comp {
-            Value::Number(num) => {
-                if is_hue(i) {
-                    let ok = num.is_unitless() || matches!(num.unit(), "deg" | "grad" | "rad" | "turn");
-                    if !ok {
-                        return Err(Error::at(
-                            format!(
-                                "$hue: Expected {} to have an angle unit (deg, grad, rad, turn).",
-                                num.to_css(false)
-                            ),
-                            pos,
-                        ));
-                    }
-                } else if !num.is_unitless() && num.unit() != "%" {
-                    return Err(Error::at(
-                        format!(
-                            "${}: Expected {} to have unit \"%\" or no units.",
-                            names[i],
-                            num.to_css(false)
-                        ),
-                        pos,
-                    ));
-                }
-            }
-            Value::Slash(..) => {}
-            other => {
+        };
+        let shown = comp.to_css(false);
+        if is_hue(i) {
+            // A COMPOUND unit only reports its first numerator, so `deg/px`
+            // must be rejected explicitly rather than read as an angle.
+            let ok = !num.has_complex_units()
+                && (num.is_unitless() || matches!(num.unit(), "deg" | "grad" | "rad" | "turn"));
+            if !ok {
                 return Err(Error::at(
-                    format!(
-                        "$channels: Expected {} channel to be a number, was {}.",
-                        names[i],
-                        other.to_css(false)
-                    ),
+                    format!("$hue: Expected {shown} to have an angle unit (deg, grad, rad, turn)."),
                     pos,
                 ));
             }
+        } else if !num.is_unitless() && (num.has_complex_units() || num.unit() != "%") {
+            return Err(Error::at(
+                format!("${}: Expected {shown} to have unit \"%\" or no units.", names[i]),
+                pos,
+            ));
         }
     }
     if let Some(a) = &alpha {
@@ -1251,6 +1312,7 @@ pub(super) fn fn_lab_family(
             alpha_value(a, pos)?;
         }
     }
+    let comps = normalized;
     // Compute the modern color. Lightness is clamped (lab/lch 0..100, oklab/oklch
     // 0..1); chroma is floored at 0; a/b and the hue are unclamped.
     let (space, l_max, l_base) = match name {
@@ -1259,7 +1321,7 @@ pub(super) fn fn_lab_family(
         "oklab" => (ColorSpace::Oklab, 1.0, 1.0),
         _ => (ColorSpace::Oklch, 1.0, 1.0),
     };
-    let is_polar = matches!(name, "lch" | "oklch");
+    let is_polar = is_polar_space;
     // Percentage references per CSS Color 4: lab a/b 100% = 125, oklab a/b
     // 100% = 0.4, lch chroma 100% = 150, oklch chroma 100% = 0.4.
     let (ab_base, chroma_base) = match name {
@@ -1291,6 +1353,16 @@ pub(super) fn fn_lab_family(
         alpha: modern_alpha(alpha.as_ref()),
     };
     Ok(Value::Color(make_modern(mc)))
+}
+
+/// The channel names a `color()` space reports in its per-channel
+/// diagnostics: the xyz spaces name their axes, every rgb-like space names
+/// `red`/`green`/`blue`.
+fn color_channel_names(space: &str) -> [&'static str; 3] {
+    match space {
+        "xyz" | "xyz-d50" | "xyz-d65" => ["x", "y", "z"],
+        _ => ["red", "green", "blue"],
+    }
 }
 
 /// The known predefined color spaces accepted by `color()`. All have three
@@ -1396,41 +1468,27 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
             pos,
         ));
     }
-    // Type-check each supplied channel (with its index-based name) before the
-    // count check, matching dart-sass (`color(srgb (0.1 0.2 0.3))` reports a
-    // non-number channel rather than a wrong count). A degenerate `calc()` is
-    // accepted as a number channel.
-    let names = ["red", "green", "blue"];
+    // Type-check each supplied channel before the count check, matching
+    // dart-sass (`color(srgb (0.1 0.2 0.3))` reports a non-number channel
+    // rather than a wrong count) — a degenerate `calc()` or a slash-division
+    // is a number channel. A channel past the third is named by its INDEX.
+    let names = color_channel_names(&space_lower);
     for (i, comp) in channels.iter().enumerate() {
-        let name = names.get(i).copied().unwrap_or("");
         if is_none_keyword(comp) || is_degenerate_calc(comp) {
             continue;
         }
-        match comp {
-            Value::Number(num) => {
-                if !num.is_unitless() && num.unit() != "%" {
-                    return Err(Error::at(
-                        format!(
-                            "${name}: Expected {} to have unit \"%\" or no units.",
-                            num.to_css(false)
-                        ),
-                        pos,
-                    ));
-                }
-            }
-            Value::Slash(..) => {}
-            Value::Calc(_) if is_degenerate_calc(comp) => {}
-            other => {
-                return Err(Error::at(
-                    format!(
-                        "$description: Expected {name} channel to be a number, was {}.",
-                        other.to_css(false)
-                    ),
-                    pos,
-                ));
-            }
+        if channel_unit_number(comp).is_none() {
+            return Err(Error::at(
+                format!(
+                    "$description: Expected {} to be a number, was {}.",
+                    legacy_channel_name(&names, i),
+                    channel_err_css(comp)
+                ),
+                pos,
+            ));
         }
     }
+    validate_alpha_unit(alpha.as_ref(), pos)?;
     if channels.len() != 3 {
         return Err(Error::at(
             format!(
@@ -1442,6 +1500,28 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
             pos,
         ));
     }
+    // The channels' own units, after the count — dart's order. This runs on
+    // the channels as WRITTEN, so the message shows `calc(NaN * 1px)` rather
+    // than the zero it is about to normalize to.
+    for (i, comp) in channels.iter().enumerate() {
+        let name = names.get(i).copied().unwrap_or("");
+        let Some(num) = channel_unit_number(comp) else {
+            continue;
+        };
+        if !num.is_unitless() && (num.has_complex_units() || num.unit() != "%") {
+            return Err(Error::at(
+                format!(
+                    "${name}: Expected {} to have unit \"%\" or no units.",
+                    comp.to_css(false)
+                ),
+                pos,
+            ));
+        }
+    }
+    // No predefined `color()` space has a polar hue, so only a NaN channel
+    // normalizes to 0 here.
+    let channels = normalize_channels(channels, None);
+    let channels = &channels[..];
     if let Some(a) = &alpha {
         if !is_none_keyword(a) {
             alpha_value(a, pos)?;
@@ -1459,7 +1539,9 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
     let degenerate =
         channels.iter().any(is_degenerate_calc) || alpha.as_ref().is_some_and(is_degenerate_calc);
     if degenerate {
-        return Ok(modern_color(&space_name, channels, alpha.as_ref(), pos));
+        // The CANONICAL space name, like every other `color()` output:
+        // `color(SRGB calc(infinity) 0 0)` is `color(srgb …)`.
+        return Ok(modern_color(&space_lower, channels, alpha.as_ref(), pos));
     }
     // Compute the color: predefined `color()` spaces store red/green/blue (and
     // xyz x/y/z) channels in 0..1 with no clamping.
@@ -1486,7 +1568,24 @@ fn modern_color(space: &str, channels: &[Value], alpha: Option<&Value>, pos: Pos
         Some(v) => alpha_value(v, pos).unwrap_or(1.0),
         None => 1.0,
     };
-    let body: Vec<String> = channels.iter().map(|v| v.to_css(false)).collect();
+    // Only the NON-FINITE channel keeps its `calc(...)` spelling. Every other
+    // one is converted exactly as the ordinary path converts it — `50%` is 0.5
+    // of a `color()` space's 0..1 range, and a slash-division prints its
+    // quotient — because dart builds the color and serializes its channels,
+    // rather than echoing what the caller wrote.
+    let body: Vec<String> = channels
+        .iter()
+        .map(|v| match (degenerate_value(v), v) {
+            // A non-finite channel keeps its `calc(...)` spelling — which for
+            // a slash-division is the QUOTIENT's, not the `1/0` written.
+            (Some(_), Value::Slash(n, _)) => n.to_css(false),
+            (Some(_), _) => v.to_css(false),
+            (None, _) => match modern_channel(v, 1.0) {
+                Some(n) => fmt_num(n, false),
+                None => v.to_css(false),
+            },
+        })
+        .collect();
     let body = body.join(" ");
     let text = if (a - 1.0).abs() < f64::EPSILON {
         format!("color({space} {body})")
@@ -1522,9 +1621,15 @@ pub(super) fn fn_mix(pos_args: &[Value], named: &[(String, Value)], pos: Pos) ->
     let c2 = as_color(require(&params, pos_args, named, 1, "mix", pos)?, pos)?;
     let weight = match arg(&params, pos_args, named, 2) {
         Some(Value::Number(w)) => {
-            if w.value < 0.0 || w.value > 100.0 {
+            // A NaN is within no range, and the bounds carry the value's unit
+            // (`200%` -> `0% and 100%`, `200` -> `0 and 100`).
+            if w.value.is_nan() || w.value < 0.0 || w.value > 100.0 {
+                let unit = w.unit_string();
                 return Err(Error::at(
-                    format!("$weight: Expected {} to be within 0% and 100%.", w.to_css(false)),
+                    format!(
+                        "$weight: Expected {} to be within 0{unit} and 100{unit}.",
+                        w.to_css(false)
+                    ),
                     pos,
                 ));
             }
@@ -1693,9 +1798,14 @@ pub(super) fn fn_adjust_lightness(
     require_legacy_color(&c, name, pos)?;
     let amount = match require(&params, pos_args, named, 1, name, pos)? {
         Value::Number(num) => {
-            if num.value < 0.0 || num.value > 100.0 {
+            // A NaN is within no range, and the bounds carry the value's unit.
+            if num.value.is_nan() || num.value < 0.0 || num.value > 100.0 {
+                let unit = num.unit_string();
                 return Err(Error::at(
-                    format!("$amount: Expected {} to be within 0 and 100.", num.to_css(false)),
+                    format!(
+                        "$amount: Expected {} to be within 0{unit} and 100{unit}.",
+                        num.to_css(false)
+                    ),
                     pos,
                 ));
             }
@@ -1838,7 +1948,7 @@ pub(super) fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
 /// dart-sass's modern parsing. Returns `Ok(None)` when there is no `none`
 /// channel or a real special function is present (the caller falls through to
 /// its existing handling).
-fn legacy_none_color(channels: &Channels, space: ColorSpace, _pos: Pos) -> Result<Option<Value>, Error> {
+fn legacy_none_color(channels: &Channels, space: ColorSpace, pos: Pos) -> Result<Option<Value>, Error> {
     let comps_special = channels.comps.iter().any(is_special_legacy);
     let alpha_special = channels.alpha.as_ref().is_some_and(is_special_legacy);
     if comps_special || alpha_special {
@@ -1851,6 +1961,20 @@ fn legacy_none_color(channels: &Channels, space: ColorSpace, _pos: Pos) -> Resul
     }
     if channels.comps.len() != 3 {
         return Ok(None);
+    }
+    // This path returns before the caller's own validation, so it runs the
+    // same checks: a `none` channel exempts ITSELF, not the call — `rgb(none
+    // 1px 0)` is still the green channel's unit error, and a positional
+    // `none` is not a channel at all (`rgb(none, 1px, 0)`).
+    let names: &[&str] = match space {
+        ColorSpace::Hsl => &["hue", "saturation", "lightness"],
+        _ => &["red", "green", "blue"],
+    };
+    channels.validate_numeric(names, pos)?;
+    channels.validate_positional_numeric(names, pos)?;
+    validate_alpha_unit(channels.alpha.as_ref(), pos)?;
+    if space != ColorSpace::Hsl {
+        channels.validate_rgb_units(names, pos)?;
     }
     let comps = &channels.comps;
     let ch = match space {

@@ -214,7 +214,7 @@ fn normalize_polar(mut mc: ModernColor) -> ModernColor {
         ColorSpace::Hsl => (0, Some(1)),
         ColorSpace::Hwb => (0, None),
         ColorSpace::Lch | ColorSpace::Oklch => (2, Some(1)),
-        _ => return mc,
+        _ => return normalize_degenerate(mc),
     };
     let mut invert = false;
     if let Some(i) = mag_idx {
@@ -224,9 +224,40 @@ fn normalize_polar(mut mc: ModernColor) -> ModernColor {
         }
     }
     if let Some(h) = mc.channels[hue_idx] {
-        // No finite guard: dart's fmod sends an infinite hue to NaN, and the
-        // spec expects `calc(NaN * 1deg)` for `lch(1% 2 calc(infinity))`.
+        // No finite guard here: dart's fmod sends an infinite hue to NaN, which
+        // `normalize_degenerate` then turns into 0 — the same 0 the CSS spec
+        // asks for.
         mc.channels[hue_idx] = Some(normalize_hue(h, invert));
+    }
+    normalize_degenerate(mc)
+}
+
+/// dart-sass 1.104.0: "Colors now convert NaN and negative zero, as well as
+/// infinity and negative infinity for polar-hue channels, to 0 as per the CSS
+/// spec." Applied to the STORED channels, so a NaN a conversion produced (not
+/// just one the call spelled out) converts too. An infinite NON-hue channel is
+/// left alone: it still serializes as `calc(infinity * 1%)`.
+pub(super) fn normalize_degenerate(mut mc: ModernColor) -> ModernColor {
+    let hue_idx = match mc.space {
+        ColorSpace::Hsl | ColorSpace::Hwb => Some(0),
+        ColorSpace::Lch | ColorSpace::Oklch => Some(2),
+        _ => None,
+    };
+    for (i, ch) in mc.channels.iter_mut().enumerate() {
+        if let Some(v) = ch {
+            if v.is_nan() || *v == 0.0 || (hue_idx == Some(i) && v.is_infinite()) {
+                *v = 0.0;
+            }
+        }
+    }
+    // The alpha is a channel as well, and it reaches here from a COMPUTATION
+    // as readily as from a call: `change`/`adjust`/`scale` write `work.alpha`
+    // directly, so `color.change(oklch(50% 0.1 20deg), $alpha: -0)` is
+    // `… / 0`, not `… / -0`.
+    if let Some(a) = &mut mc.alpha {
+        if a.is_nan() || *a == 0.0 {
+            *a = 0.0;
+        }
     }
     mc
 }
@@ -260,16 +291,19 @@ pub(super) fn modern_channel(v: &Value, pct_base: f64) -> Option<f64> {
             return Some(c);
         }
     }
-    match v {
-        Value::Number(num) => {
+    // A slash-division carries its quotient AND its unit, so `50%/2` is 25% of
+    // the channel's base — not the raw 25 — and a FOLDED numeric `calc()`,
+    // which only survives where the evaluator preserves calculations (inside
+    // `@supports`), is a number like any other.
+    match channel_unit_number(v) {
+        Some(num) => {
             if num.unit() == "%" {
                 Some(num.value / 100.0 * pct_base)
             } else {
                 Some(num.value)
             }
         }
-        Value::Slash(num, _) => Some(num.value),
-        _ => Some(0.0),
+        None => Some(0.0),
     }
 }
 
@@ -283,15 +317,16 @@ pub(super) fn modern_hue(v: &Value) -> Option<f64> {
             return Some(c);
         }
     }
-    match v {
-        Value::Number(num) => Some(match num.unit() {
+    // A slash-division carries its angle unit too (`1turn/4` is 90deg), as does
+    // a folded numeric `calc()` preserved inside `@supports`.
+    match channel_unit_number(v) {
+        Some(num) => Some(match num.unit() {
             "rad" => num.value.to_degrees(),
             "grad" => num.value * 360.0 / 400.0,
             "turn" => num.value * 360.0,
             _ => num.value,
         }),
-        Value::Slash(num, _) => Some(num.value),
-        _ => Some(0.0),
+        None => Some(0.0),
     }
 }
 
@@ -366,6 +401,7 @@ pub(crate) fn space_arg(v: &Value, pos: Pos) -> Result<ColorSpace, Error> {
 /// `modern` tag attached. Plain-legacy rgb (no missing channels) drops the
 /// `modern` field so it serializes like a normal sRGB color.
 pub(crate) fn make_modern_in(mc: ModernColor, _space: ColorSpace) -> Color {
+    let mc = normalize_degenerate(mc);
     if mc.space == ColorSpace::Rgb && mc.channels.iter().all(|c| c.is_some()) && mc.alpha.is_some() {
         let r = mc.channels[0].unwrap_or(0.0);
         let g = mc.channels[1].unwrap_or(0.0);
@@ -815,24 +851,33 @@ fn channel_pct_base(space: ColorSpace, idx: usize) -> f64 {
     }
 }
 
-/// Read a `scale-color` percentage factor in `[-1, 1]`.
-pub(super) fn scale_pct(v: &Value, pos: Pos) -> Result<f64, Error> {
+/// Read a `scale-color` percentage factor in `[-1, 1]`. Every message names
+/// the CHANNEL being scaled (`$red`, `$alpha`, …), as dart-sass does — the
+/// parameter is the channel, not a generic `$amount`.
+pub(super) fn scale_pct(name: &str, v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
-        Value::Number(n) if n.unit() == "%" => {
-            if n.value < -100.0 || n.value > 100.0 {
+        // A COMPOUND unit only reports its first numerator, so `%*px` must be
+        // rejected explicitly rather than read as a percentage.
+        Value::Number(n) if !n.has_complex_units() && n.unit() == "%" => {
+            // A NaN is within no range, so it is rejected like any
+            // out-of-range value rather than scaling the channel to nothing.
+            if n.value.is_nan() || n.value < -100.0 || n.value > 100.0 {
                 return Err(Error::at(
-                    format!("Expected {} to be within -100% and 100%.", n.to_css(false)),
+                    format!(
+                        "${name}: Expected {} to be within -100% and 100%.",
+                        n.to_css(false)
+                    ),
                     pos,
                 ));
             }
             Ok(n.value / 100.0)
         }
         Value::Number(n) => Err(Error::at(
-            format!("$amount: Expected {} to have unit \"%\".", n.to_css(false)),
+            format!("${name}: Expected {} to have unit \"%\".", n.to_css(false)),
             pos,
         )),
         other => Err(Error::at(
-            format!("$amount: {} is not a number.", other.to_css(false)),
+            format!("${name}: {} is not a number.", other.to_css(false)),
             pos,
         )),
     }
@@ -857,6 +902,16 @@ pub(super) fn scale_to(current: f64, factor: f64, bounds: (f64, f64)) -> f64 {
     }
 }
 
+/// dart names `none` among the things it wanted wherever it would have been
+/// accepted — which is `change`, the only modify op that takes one.
+fn none_suffix(accepts_none: bool) -> &'static str {
+    if accepts_none {
+        " or unquoted \"none\""
+    } else {
+        ""
+    }
+}
+
 /// Validate a channel value's unit for the modern change/adjust path. A hue
 /// requires an angle unit (or none); other channels accept `%` or no unit.
 pub(super) fn validate_modify_unit(
@@ -864,14 +919,26 @@ pub(super) fn validate_modify_unit(
     idx: usize,
     name: &str,
     v: &Value,
+    accepts_none: bool,
     pos: Pos,
 ) -> Result<(), Error> {
     let num = match v {
-        Value::Number(n) => n,
-        Value::Slash(..) | Value::Calc(_) => return Ok(()),
+        // One arm for both spellings, as in the channel readers: a
+        // slash-division's quotient is unit-checked like any number. (Nothing
+        // reaches here as a `Slash` today — an argument's division has already
+        // evaluated — but the two must not diverge if one ever does.)
+        Value::Number(n) | Value::Slash(n, _) => n,
+        // A DEGENERATE `calc()` is a channel value; a folded numeric one —
+        // which only survives where the evaluator preserves calculations,
+        // inside `@supports` — is not a number at all.
+        Value::Calc(node) if degenerate_const(node).is_some() => return Ok(()),
         other => {
             return Err(Error::at(
-                format!("${name}: {} is not a number.", other.to_css(false)),
+                format!(
+                    "${name}: {} is not a number{}.",
+                    other.to_css(false),
+                    none_suffix(accepts_none)
+                ),
                 pos,
             ))
         }

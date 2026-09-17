@@ -81,6 +81,48 @@ Conformance is tracked separately as a ratchet against the official
   also follows the evaluator's `@import` cache: a file a dependency loads is
   a dependency even when its resolution was cached by an earlier load.
 
+### Changed (dart-sass 1.104.x alignment)
+
+- **The reference pins move to dart-sass 1.104.1** — the CI parity binary
+  (`sass@1.103.1` → `sass@1.104.1`), the sass-spec pin (`4a9eea66` →
+  `b39c3276`, 2026-09-08) and `spec/BASELINE.json` (14061 → 14107 passing).
+  Every behaviour change in 1.104.0 and 1.104.1 is implemented below, except
+  two: the indented-syntax parser crash 1.104.1 fixes has no reproduction
+  here, and the output file's modification time now reflecting when
+  compilation STARTED is a watch-mode rebuild concern that sasso, having no
+  watch mode, has nothing to rebuild from. On the Lichess corpus sasso stays
+  byte-identical to dart on 147 of the 148 entry points in BOTH output
+  styles.
+- **A negative zero keeps its sign.** `0 * -1`, `-0` and `math.div(0, -1)`
+  now serialize as `-0`. The sign is the IEEE sign bit, not the way the
+  number was written, so `0 - 0`, `0 + -0` and `-0 * -1` stay `0`, and a tiny
+  negative that merely rounds to zero (`-1e-11`) was never a zero at all. A
+  rounding RESULT is an integer and so is never a negative zero:
+  `math.round(-0.4)`, `math.ceil(-0.4)` and `round(to-zero, -0.4, 1)` are `0`.
+- **Colors convert their degenerate channels.** A `NaN` channel becomes `0`
+  in every color function — it stops being degenerate at all, so the call
+  parses into an ordinary color instead of a preserved `calc()` spelling —
+  and a polar HUE converts every non-finite value: `hsl(calc(NaN), 50%, 50%)`
+  is `hsl(0, 50%, 50%)`, `lch(1% 2 calc(infinity))` is `lch(1% 2 0deg)`,
+  `color(srgb calc(NaN) 0 0)` is `color(srgb 0 0 0)`. An infinite non-hue
+  channel is the only one still written as a `calc()`
+  (`hsl(0, calc(infinity * 1%), 50%)`). The conversion runs wherever a color
+  is built, so it also reaches a channel a computation produced — an hwb
+  color with an infinite whiteness, or `color.change(red, $hue: NaN)`, which
+  is red. A color channel also drops a negative zero, the alpha included
+  (`color(srgb 0 0 0 / -0)` is `… / 0`), which is the exception to the rule
+  above.
+- **A comment before `@use` is emitted exactly once.** Up to 1.104.0 a REPEAT
+  edge into an already-loaded module re-emitted the comments that had
+  preceded its first load — a second `@use` of it from the same file, or a
+  sibling or nested module's, each wrote another copy. 1.104.1 removed the
+  behaviour, and so does this release, along with the machinery that mirrored
+  it.
+- **A many-to-many compile skips sources inside a nested output directory.**
+  `sasso .:css` run twice used to mirror `css/` into `css/css/`. Nesting is
+  strict — `sasso dir` (which is `dir:dir`) still compiles every file — and
+  it is the destination that counts, not an intermediate directory.
+
 ### Changed
 
 - **Library:** `WarnEvent` is now `#[non_exhaustive]` and gained the `path`

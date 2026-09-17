@@ -183,11 +183,36 @@ pub(super) fn try_call(
 /// other unit is an error (`Expected … to have unit "%" or no units.`).
 fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
     if let Some(c) = degenerate_value(v) {
-        return Ok(clamp_alpha(c));
+        // A degenerate alpha is still an alpha: its UNIT is checked first, so
+        // `calc(infinity * 1px)` is the wrong unit rather than an opaque
+        // color. A `%` one divides like a literal percentage (which changes
+        // nothing for a non-finite value, but keeps the two paths the same).
+        let pct = match channel_unit_number(v) {
+            Some(n) if !n.has_complex_units() && n.unit() == "%" => true,
+            Some(n) if !n.is_unitless() => {
+                return Err(Error::at(
+                    format!(
+                        "$alpha: Expected {} to have unit \"%\" or no units.",
+                        v.to_css(false)
+                    ),
+                    pos,
+                ))
+            }
+            _ => false,
+        };
+        return Ok(clamp_alpha(if pct { c / 100.0 } else { c }));
     }
     match v {
-        Value::Number(num) => {
-            let raw = if num.unit() == "%" {
+        // One arm for both spellings: a slash-division's quotient carries its
+        // unit like any number, so it cannot drift from the literal path. (No
+        // input reaches here as a `Slash` today — a channels list's alpha is
+        // split out as a plain token, and a division anywhere else has already
+        // evaluated to a number — but the two must not diverge if one ever
+        // does.)
+        Value::Number(num) | Value::Slash(num, _) => {
+            // A COMPOUND unit only reports its first numerator, so `%*px` is
+            // not the percentage it starts with.
+            let raw = if !num.has_complex_units() && num.unit() == "%" {
                 num.value / 100.0
             } else if num.is_unitless() {
                 num.value
@@ -202,20 +227,20 @@ fn alpha_value(v: &Value, pos: Pos) -> Result<f64, Error> {
             };
             Ok(clamp_alpha(raw))
         }
-        Value::Slash(num, _) => Ok(clamp_alpha(num.value)),
         other => Err(Error::at(
-            format!("$alpha: {} is not a number.", other.to_css(false)),
+            format!("$alpha: {} is not a number.", channel_err_css(other)),
             pos,
         )),
     }
 }
 
-/// Clamp an alpha value to `[0, 1]`, mapping NaN to 0 (matching dart-sass).
+/// Clamp an alpha value to `[0, 1]`, mapping NaN — and a negative zero, which
+/// `clamp` keeps — to 0 (matching dart-sass).
 fn clamp_alpha(v: f64) -> f64 {
     if v.is_nan() {
         0.0
     } else {
-        v.clamp(0.0, 1.0)
+        crate::value::without_negative_zero(v.clamp(0.0, 1.0))
     }
 }
 
@@ -226,16 +251,101 @@ fn is_degenerate_calc(v: &Value) -> bool {
 }
 
 /// The non-finite value of a degenerate channel: a non-finite number (the
-/// usual form, since a fully-folded `calc()` unwraps to a number), or a
-/// residual `calc()` constant.
+/// usual form, since a fully-folded `calc()` unwraps to a number), the
+/// quotient a slash-division carries (`hsl(0/0 50% 50%)` — inside a
+/// SPACE-separated channels list `0/0` keeps its spelling instead of
+/// collapsing to a number), or a residual `calc()` constant.
 fn degenerate_value(v: &Value) -> Option<f64> {
     match v {
-        Value::Number(n) if !n.value.is_finite() => Some(n.value),
+        Value::Number(n) | Value::Slash(n, _) if !n.value.is_finite() => Some(n.value),
         Value::Calc(node) => match node {
             CalcNode::Number(n) if !n.value.is_finite() => Some(n.value),
             _ => degenerate_const(node),
         },
         _ => None,
+    }
+}
+
+/// The [`Number`] underlying a color channel for unit inspection and
+/// normalization: a plain number, the quotient of a slash-division (`6px/2`,
+/// whose unit decides the channel's), or a degenerate `calc()` that folded to
+/// a unit-bearing number (`calc(infinity * 1px)`). Returns `None` for any
+/// non-numeric channel (handled by the "is not a number" / passthrough paths).
+fn channel_unit_number(v: &Value) -> Option<&Number> {
+    match v {
+        Value::Number(n) | Value::Slash(n, _) | Value::Calc(CalcNode::Number(n)) => Some(n),
+        _ => None,
+    }
+}
+
+/// dart-sass 1.104.0: "Colors now convert NaN and negative zero, as well as
+/// infinity and negative infinity for polar-hue channels, to 0 as per the CSS
+/// spec." This runs on the channel VALUE before anything else inspects it, so
+/// a `NaN` channel stops being degenerate at all and the call parses into an
+/// ordinary color. Only a surviving infinity is still degenerate and keeps its
+/// `calc(...)` spelling (`hsl(0, calc(infinity * 1%), 50%)`).
+///
+/// A FINITE negative zero converts here too, rather than on the stored
+/// channels: the degenerate path a surviving infinity takes serializes the
+/// values it was handed instead of a built color, so `hsl(-0, calc(infinity),
+/// 50%)` would otherwise write the sign back out.
+fn normalize_channel(v: &Value, polar_hue: bool) -> Value {
+    let num = channel_unit_number(v);
+    let converts = match degenerate_value(v) {
+        Some(c) => c.is_nan() || (polar_hue && c.is_infinite()),
+        None => num.is_some_and(|n| n.value == 0.0 && n.value.is_sign_negative()),
+    };
+    if !converts {
+        return v.clone();
+    }
+    // The zero keeps the channel's UNIT, so the per-channel unit checks still
+    // see what the caller wrote: `calc(NaN * 1%)` is a `%` whiteness, and
+    // `calc(NaN * 1px)` is still the wrong unit.
+    let zero = match num {
+        Some(n) => n.copy_units(0.0),
+        None => Number::unitless(0.0),
+    };
+    Value::Number(zero)
+}
+
+/// Apply [`normalize_channel`] to every component of a channel list, where
+/// `polar_hue` is the index of the space's hue channel (if it has one).
+fn normalize_channels(comps: &[Value], polar_hue: Option<usize>) -> Vec<Value> {
+    comps
+        .iter()
+        .enumerate()
+        .map(|(i, v)| normalize_channel(v, polar_hue == Some(i)))
+        .collect()
+}
+
+/// dart validates the ALPHA's unit early — after the all-numeric channel pass
+/// but before the channel COUNT and before the channels' own units — so a bad
+/// alpha is what gets reported when the channels are wrong as well. Only the
+/// unit is checked here; every other alpha error stays where it is.
+fn validate_alpha_unit(alpha: Option<&Value>, pos: Pos) -> Result<(), Error> {
+    let Some(a) = alpha else { return Ok(()) };
+    if let Some(n) = channel_unit_number(a) {
+        if !n.is_unitless() && (n.has_complex_units() || n.unit() != "%") {
+            return Err(Error::at(
+                format!(
+                    "$alpha: Expected {} to have unit \"%\" or no units.",
+                    a.to_css(false)
+                ),
+                pos,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Render a non-number CHANNEL for a "channel to be a number" diagnostic: an
+/// unbracketed multi-item list is parenthesized (`(1 2)`, `(1, 2)`), matching
+/// dart-sass; a bracketed one already carries its own delimiters, and every
+/// other value prints plainly.
+fn channel_err_css(v: &Value) -> String {
+    match v {
+        Value::List(l) if l.items.len() > 1 && !l.bracketed => list_paren_css(v),
+        _ => v.to_css(false),
     }
 }
 

@@ -1838,16 +1838,17 @@ fn legacy_channels_special_slash_alpha() {
 fn color_function_degenerate_calc() {
     // A degenerate `calc()` (`NaN`/`infinity`/`-infinity`) in a `color()` call
     // is folded the way dart-sass folds it, and the result serializes in the
-    // modern (space-around-`/`) form. A degenerate channel is preserved; a
-    // degenerate alpha folds to a number (`infinity` = opaque/omitted,
-    // `-infinity`/`NaN` = 0). Byte-matched to `npx sass`. Offline.
+    // modern (space-around-`/`) form. An INFINITE channel is preserved; a NaN
+    // channel converts to 0 (dart-sass 1.104.0); a degenerate alpha folds to a
+    // number (`infinity` = opaque/omitted, `-infinity`/`NaN` = 0). Byte-matched
+    // to `npx sass`. Offline.
     assert_eq!(
         ours("a{x: color(srgb 0 0 calc(infinity) / 0.5)}\n"),
         "a {\n  x: color(srgb 0 0 calc(infinity) / 0.5);\n}\n"
     );
     assert_eq!(
         ours("a{x: color(srgb 0 0 calc(NaN) / 0.5)}\n"),
-        "a {\n  x: color(srgb 0 0 calc(NaN) / 0.5);\n}\n"
+        "a {\n  x: color(srgb 0 0 0 / 0.5);\n}\n"
     );
     assert_eq!(
         ours("a{x: color(srgb 0 0 0 / calc(infinity))}\n"),
@@ -1871,6 +1872,1089 @@ fn color_function_degenerate_calc() {
         ours("a{x: color(srgb calc(infinity) 0 0)}\n"),
         "a {\n  x: color(srgb calc(infinity) 0 0);\n}\n"
     );
+}
+
+#[test]
+fn color_channels_convert_degenerate_values() {
+    // dart-sass 1.104.0: "Colors now convert NaN and negative zero, as well as
+    // infinity and negative infinity for polar-hue channels, to 0 as per the
+    // CSS spec." So a NaN channel stops being degenerate anywhere — the call
+    // parses into an ordinary color — and a hue converts every non-finite
+    // value. An infinite NON-hue channel is the only one still written as a
+    // `calc()`. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours(
+            "@use \"sass:color\";\n@use \"sass:math\";\n$nan: math.div(0, 0);\n$inf: math.div(1, 0);\na {\n  \
+             b: hsl($nan, 50%, 50%);\n  \
+             c: hsl($inf, 50%, 50%);\n  \
+             d: hsl(0, 50%, $nan);\n  \
+             e: hsl(0, $inf, 50%);\n  \
+             f: lab(1% calc(NaN) -3);\n  \
+             g: lab(1% calc(infinity) -3);\n  \
+             h: lch(1% 2 calc(infinity));\n  \
+             i: oklch(50% 0.1 calc(NaN));\n  \
+             j: color(srgb calc(NaN) 0 0);\n  \
+             k: color(srgb calc(infinity) 0 0);\n  \
+             l: hwb(calc(NaN) 10% 10%);\n\
+             }\n"
+        ),
+        "a {\n  \
+         b: hsl(0, 50%, 50%);\n  \
+         c: hsl(0, 50%, 50%);\n  \
+         d: hsl(0, 50%, 0%);\n  \
+         e: hsl(0, calc(infinity * 1%), 50%);\n  \
+         f: lab(1% 0 -3);\n  \
+         g: lab(1% calc(infinity) -3);\n  \
+         h: lch(1% 2 0deg);\n  \
+         i: oklch(50% 0.1 0deg);\n  \
+         j: color(srgb 0 0 0);\n  \
+         k: color(srgb calc(infinity) 0 0);\n  \
+         l: hsl(0, 80%, 50%);\n\
+         }\n"
+    );
+    // The conversion runs wherever a color is BUILT, not just on the channels
+    // a call spells out: an infinite hwb whiteness becomes NaN in the
+    // whiteness + blackness normalization (`∞ / ∞`) and lands on 0, and a
+    // negative infinity becomes NaN in the hwb -> hsl conversion instead.
+    // `change` builds its color in the WORKING space, so a NaN hue there is
+    // the 0 hue red already has.
+    assert_eq!(
+        ours(
+            "@use \"sass:color\";\n@use \"sass:math\";\n$nan: math.div(0, 0);\na {\n  \
+             b: color.hwb(0, calc(infinity * 1%), 40%, 0.5);\n  \
+             c: color.hwb(0, calc(-infinity * 1%), 40%, 0.5);\n  \
+             d: color.change(red, $hue: $nan);\n  \
+             e: color.channel(hsl($nan, 50%, 50%), \"hue\");\n  \
+             f: color.to-space(hsl($nan, 50%, 50%), oklch);\n\
+             }\n"
+        ),
+        "a {\n  \
+         b: hsla(0, 100%, 50%, 0.5);\n  \
+         c: hsla(0, 0%, 0%, 0.5);\n  \
+         d: red;\n  \
+         e: 0deg;\n  \
+         f: oklch(55.2338578785% 0.1636699547 24.2125389816deg);\n\
+         }\n"
+    );
+}
+
+#[test]
+fn a_degenerate_channel_converts_on_every_spelling() {
+    // The conversion runs on the channel VALUE, so it has to see one whatever
+    // form it arrived in — a plain number, a `calc()`, or the quotient of a
+    // slash-division. And it has to run on the path a SURVIVING infinity
+    // takes, which serializes the values it was handed rather than a built
+    // color, so the sibling channels there never write a sign back out.
+    // Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours(
+            "@use \"sass:math\";\na {\n  \
+             b: hsl(0/0, 50%, 50%);\n  \
+             c: lch(1% 2 0/0);\n  \
+             d: hsl(-0, calc(infinity), 50%);\n  \
+             e: hsl(0, calc(infinity), -0);\n  \
+             f: color(srgb -0 0 calc(infinity));\n  \
+             g: color(srgb -0/1 0 calc(infinity));\n  \
+             h: color(srgb 6/2 0 calc(infinity));\n\
+             }\n"
+        ),
+        "a {\n  \
+         b: hsl(0, 50%, 50%);\n  \
+         c: lch(1% 2 0deg / 0);\n  \
+         d: hsl(0, calc(infinity * 1%), 50%);\n  \
+         e: hsl(0, calc(infinity * 1%), 0%);\n  \
+         f: color(srgb 0 0 calc(infinity));\n  \
+         g: color(srgb 0 0 calc(infinity));\n  \
+         h: color(srgb 3 0 calc(infinity));\n\
+         }\n"
+    );
+}
+
+#[test]
+fn a_non_finite_hue_never_reaches_the_hsl_conversion() {
+    // The hsl -> rgb arithmetic has no answer for a non-finite hue: it picks
+    // the fallback sector and hands back a NaN component. dart-sass 1.104.0
+    // converts the hue first: the ROTATED hue is the one that lands on 0, so
+    // rotating by NaN sends any color to hue 0 rather than to a NaN channel —
+    // `adjust-hue(blue, NaN)` is red, not blue, which is what makes this test
+    // discriminating. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:math\";\n$nan: math.div(0, 0);\n$inf: math.div(1, 0);\na {\n  b: adjust-hue(red, $nan);\n  c: adjust-hue(red, $inf);\n  d: adjust-hue(red, math.div(-1, 0));\n  e: color.adjust(red, $hue: $nan);\n  f: adjust-hue(blue, $nan);\n  g: adjust-hue(#00ff00, $nan);\n}\n"),
+        "a {\n  b: red;\n  c: red;\n  d: red;\n  e: red;\n  f: red;\n  g: red;\n}\n"
+    );
+}
+
+#[test]
+fn a_nan_is_within_no_range() {
+    // Every `$weight`/`$amount`/`$alpha` range check rejects a NaN, as
+    // dart-sass does — it is not "within" anything, and letting it through
+    // produced a color of NaN channels. The BOUNDS carry the value's unit for
+    // the percentage parameters (`0px and 100px`) but not for the alpha ratio
+    // (`transparentize(red, 2px)` still says `0 and 1`). Every message
+    // byte-matched to dart-sass 1.104.1. Offline.
+    let nan = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\n$nan: math.div(0, 0);\na {{ b: {call}; }}\n"
+        ))
+    };
+    assert!(
+        nan("mix(red, blue, $nan)").contains("$weight: Expected calc(NaN) to be within 0 and 100."),
+        "{}",
+        nan("mix(red, blue, $nan)")
+    );
+    for f in ["lighten", "darken", "saturate", "desaturate"] {
+        let msg = nan(&format!("{f}(red, $nan)"));
+        assert!(
+            msg.contains("$amount: Expected calc(NaN) to be within 0 and 100."),
+            "{f}: {msg}"
+        );
+    }
+    for f in ["opacify", "transparentize", "fade-in", "fade-out"] {
+        let msg = nan(&format!("{f}(red, $nan)"));
+        assert!(
+            msg.contains("$amount: Expected calc(NaN) to be within 0 and 1."),
+            "{f}: {msg}"
+        );
+    }
+    let msg = nan("color.change(red, $alpha: $nan)");
+    assert!(
+        msg.contains("$alpha: Expected calc(NaN) to be within 0 and 1."),
+        "{msg}"
+    );
+    // The bounds take the value's unit wherever the parameter is a percentage.
+    let over = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    assert!(over("mix(red, blue, 200)").contains("Expected 200 to be within 0 and 100."));
+    assert!(over("mix(red, blue, 200%)").contains("Expected 200% to be within 0% and 100%."));
+    assert!(over("mix(red, blue, 200px)").contains("Expected 200px to be within 0px and 100px."));
+    assert!(over("lighten(red, 200%)").contains("Expected 200% to be within 0% and 100%."));
+    assert!(over("saturate(red, 200deg)").contains("Expected 200deg to be within 0deg and 100deg."));
+    assert!(over("invert(red, 200%)").contains("$weight: Expected 200% to be within 0% and 100%."));
+    // The alpha ratio keeps unitless bounds whatever the value carries.
+    assert!(over("transparentize(red, 2px)").contains("Expected 2px to be within 0 and 1."));
+    assert!(over("opacify(red, 2%)").contains("Expected 2% to be within 0 and 1."));
+}
+
+#[test]
+fn every_channel_spelling_is_unit_checked() {
+    // A channel's UNIT is checked whatever spelling it arrived in — a
+    // degenerate `calc()` is the wrong unit as readily as a plain number, and
+    // so is a slash-division — and the message shows what the caller WROTE,
+    // not the zero a degenerate channel normalizes to. Every message
+    // byte-matched to dart-sass 1.104.1. Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "lab(1% calc(NaN * 1px) -3)",
+            "$a: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "lab(1% calc(infinity * 1px) -3)",
+            "$a: Expected calc(infinity * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "lab(1% 6px/2 -3)",
+            "$a: Expected 6px/2 to have unit \"%\" or no units.",
+        ),
+        (
+            "oklab(calc(NaN * 1px) 0.1 0.1)",
+            "$lightness: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "lch(1% 2 calc(NaN * 1px))",
+            "$hue: Expected calc(NaN * 1px) to have an angle unit (deg, grad, rad, turn).",
+        ),
+        (
+            "color(srgb calc(NaN * 1px) 0 0)",
+            "$red: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb calc(infinity * 1px) 0 0)",
+            "$red: Expected calc(infinity * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 6px/2 0 0)",
+            "$red: Expected 6px/2 to have unit \"%\" or no units.",
+        ),
+        (
+            "color.hwb(0, calc(NaN * 1px), 40%)",
+            "$whiteness: Expected calc(NaN * 1px) to have unit \"%\".",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // A UNITLESS degenerate constant carries no unit to check, so it still
+    // parses into an ordinary color; and the legacy spaces that never had a
+    // unit check on a channel still do not.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {\n  b: lab(1% calc(NaN * 1%) -3);\n  c: hsl(0, calc(NaN * 1px), 50%);\n  d: hwb(calc(NaN * 1px) 10% 10%);\n  e: lab(1% 6/2 -3);\n}\n"),
+        "a {\n  b: lab(1% 0 -3);\n  c: hsl(0, 0%, 50%);\n  d: hsl(0, 80%, 50%);\n  e: lab(1% 3 -3);\n}\n"
+    );
+}
+
+#[test]
+fn color_scale_names_the_channel_it_rejects() {
+    // `color.scale`'s argument is the CHANNEL, so every message names it —
+    // `$red`, `$alpha`, `$chroma` — rather than a generic `$amount`. And a
+    // NaN percentage is within no range: it is rejected like any other
+    // out-of-range value instead of scaling the channel to nothing. Every
+    // message byte-matched to dart-sass 1.104.1. Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "color.scale(red, $red: math.div(0%, 0))",
+            "$red: Expected calc(NaN * 1%) to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(red, $lightness: math.div(0%, 0))",
+            "$lightness: Expected calc(NaN * 1%) to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(red, $alpha: math.div(0%, 0))",
+            "$alpha: Expected calc(NaN * 1%) to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(rgb(none none none), $alpha: math.div(0%, 0))",
+            "$alpha: Expected calc(NaN * 1%) to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(red, $green: 200%)",
+            "$green: Expected 200% to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(red, $alpha: -200%)",
+            "$alpha: Expected -200% to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(oklch(50% 0.1 20deg), $chroma: 200%)",
+            "$chroma: Expected 200% to be within -100% and 100%.",
+        ),
+        (
+            "color.scale(red, $red: 50)",
+            "$red: Expected 50 to have unit \"%\".",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
+fn a_slash_channel_in_a_space_separated_list_is_a_number() {
+    // Inside a SPACE-separated channels list a slash-division keeps its
+    // spelling instead of collapsing to a number — only a TRAILING slash is
+    // the alpha split. The legacy `hsl`/`hwb` reads have to see the quotient
+    // it carries, its unit is checked like any other, and a non-finite one is
+    // degenerate exactly as a non-finite number is. Byte-matched to dart-sass
+    // 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:meta\";\na {\n  b: hwb(0 60%/2 40%);\n  c: hsl(0 6px/2 50%);\n  d: hsl(0 1/0 50%);\n  e: hsl(0 -1/0 50%);\n  f: hsl(0 50% 1/0);\n}\n"),
+        "a {\n  b: hsl(0, 33.3333333333%, 45%);\n  c: hsl(0, 3%, 50%);\n  d: hsl(0, calc(infinity * 1%), 50%);\n  e: hsl(0, 0%, 50%);\n  f: hsla(0, 50%, 1%, 0);\n}\n"
+    );
+    // A degenerate slash converts like a degenerate number, and the STORED
+    // channel converts with it — the CSS output can hide a NaN hue behind its
+    // fallback, but `color.channel` and a space conversion read the storage.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:meta\";\na {\n  b: hsl(0/0 50% 50%);\n  c: color.channel(hsl(0/0 50% 50%), \"hue\");\n  d: color.channel(hsl(1/0 50% 50%), \"hue\");\n  e: meta.inspect(hwb(0/0 10% 10%));\n  f: color.to-space(hsl(0/0 50% 50%), oklch);\n}\n"),
+        "a {\n  b: hsl(0, 50%, 50%);\n  c: 0deg;\n  d: 0deg;\n  e: hwb(0 10% 10%);\n  f: oklch(55.2338578785% 0.1636699547 24.2125389816deg);\n}\n"
+    );
+    // The unit error names the slash the caller wrote, not its quotient.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    assert!(err("hwb(0 6px/2 40%)").contains("$whiteness: Expected 6px/2 to have unit \"%\"."));
+    assert!(err("hwb(0 0/0 40%)").contains("$whiteness: Expected 0/0 to have unit \"%\"."));
+    assert!(err("hwb(0 1/0 40%)").contains("$whiteness: Expected 1/0 to have unit \"%\"."));
+}
+
+#[test]
+fn a_slash_quotient_carries_its_unit() {
+    // A slash-division's quotient goes through the same unit handling as a
+    // literal number: an angle converts (`1turn/2` is 180deg, not 0.5) and a
+    // percentage is scaled against the channel's own base (`50%/2` is 25% of
+    // 255, of 125 for lab's a/b, of 150 for lch's chroma, of 0.4 for oklab's).
+    // Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("a {\n  b: hsl(1turn/2 50% 50%);\n  c: hsl(1turn/4 50% 50%);\n  d: hsl(200grad/2 50% 50%);\n  e: hsl(90deg/2 50% 50%);\n  f: hwb(1turn/4 10% 10%);\n}\n"),
+        "a {\n  b: hsl(180, 50%, 50%);\n  c: hsl(90, 50%, 50%);\n  d: hsl(90, 50%, 50%);\n  e: hsl(45, 50%, 50%);\n  f: hsl(90, 80%, 50%);\n}\n"
+    );
+    assert_eq!(
+        ours("a {\n  b: rgb(50%/2 0 0);\n  c: color(srgb 50%/2 0 0);\n  d: lab(50% 50%/2 0);\n  e: oklab(50% 50%/2 0);\n  f: lch(50% 50%/2 20deg);\n  g: lab(50%/2 1 2);\n}\n"),
+        "a {\n  b: rgb(25%, 0%, 0%);\n  c: color(srgb 0.25 0 0);\n  d: lab(50% 31.25 0);\n  e: oklab(50% 0.1 0);\n  f: lch(50% 37.5 20deg);\n  g: lab(25% 1 2);\n}\n"
+    );
+}
+
+#[test]
+fn a_degenerate_slash_channel_converts_before_it_is_clamped() {
+    // The degenerate check has to run before the unit-aware read, whatever
+    // spelling the channel has: the legacy rgb read CLAMPS, and a clamp keeps
+    // a NaN. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:meta\";\na {\n  b: rgb(0/0 0 0);\n  c: rgb(1/0 0 0);\n  d: rgb(-1/0 0 0);\n  e: rgba(0/0 0 0 / 0.5);\n  f: color.channel(rgb(0/0 0 0), \"red\");\n}\n"),
+        "a {\n  b: rgb(0, 0, 0);\n  c: rgb(255, 0, 0);\n  d: rgb(0, 0, 0);\n  e: rgba(0, 0, 0, 0.5);\n  f: 0;\n}\n"
+    );
+}
+
+#[test]
+fn a_color_channel_diagnostic_names_its_space() {
+    // A `color()` channel is named by the SPACE it belongs to — the xyz spaces
+    // name their axes — and a non-number channel that is an unbracketed list
+    // is parenthesized, as dart-sass renders it. Every message byte-matched to
+    // dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        (
+            "color(xyz 1px 0 0)",
+            "$x: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(xyz 0 1px 0)",
+            "$y: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(xyz-d50 0 0 1px)",
+            "$z: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(xyz-d65 1px 0 0)",
+            "$x: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 1px 0 0)",
+            "$red: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(display-p3 0 1px 0)",
+            "$green: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(rec2020 0 0 1px)",
+            "$blue: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(xyz (1 2) 0 0)",
+            "$description: Expected x channel to be a number, was (1 2).",
+        ),
+        (
+            "color(srgb (1, 2) 0 0)",
+            "$description: Expected red channel to be a number, was (1, 2).",
+        ),
+        (
+            "color(srgb [1 2] 0 0)",
+            "$description: Expected red channel to be a number, was [1 2].",
+        ),
+        (
+            "rgb((1 2) 0 0)",
+            "$channels: Expected red channel to be a number, was (1 2).",
+        ),
+        (
+            "lab((1 2) 0 0)",
+            "$channels: Expected lightness channel to be a number, was (1 2).",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
+fn a_positional_channel_diagnostic_names_its_parameter() {
+    // The POSITIONAL (comma) color forms skip the channels-list validator, so
+    // they need their own all-numeric pass to attach dart's `$<param>:`
+    // prefix — `hsl` had none at all — and the value is rendered the same way
+    // a channels-list diagnostic renders it: an unbracketed list in
+    // parentheses, a bracketed one as written. Every message byte-matched to
+    // dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        ("rgb((1 2), 0, 0)", "$red: (1 2) is not a number."),
+        ("rgb(1, (1 2), 0)", "$green: (1 2) is not a number."),
+        ("rgb(1, 2, (1 2))", "$blue: (1 2) is not a number."),
+        ("rgb((1, 2), 0, 0)", "$red: (1, 2) is not a number."),
+        ("rgb([1 2], 0, 0)", "$red: [1 2] is not a number."),
+        ("rgb(c, 0, 0)", "$red: c is not a number."),
+        ("rgba(1, 2, 3, (1 2))", "$alpha: (1 2) is not a number."),
+        ("hsl((1 2), 0%, 0%)", "$hue: (1 2) is not a number."),
+        ("hsl(0, (1 2), 0%)", "$saturation: (1 2) is not a number."),
+        ("hsl(0, 0%, (1 2))", "$lightness: (1 2) is not a number."),
+        ("hsl(c, 0%, 0%)", "$hue: c is not a number."),
+        ("hsla(0, 0%, 0%, (1 2))", "$alpha: (1 2) is not a number."),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
+fn the_last_slash_in_a_channels_list_is_the_alpha() {
+    // A chain of slashes is ONE list: dart takes its LAST element as the
+    // alpha, and every earlier slash stays a DIVISION inside the final
+    // channel. So `0 0 0/50%/2` is alpha `2` (clamped to opaque) with a blue
+    // of `0/50%` — which is also the spelling that channel's own unit
+    // diagnostic reports. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("a {\n  b: hsl(0 50% 50% / 50%/2);\n  c: hsl(0 50% 50% / 2px/1);\n  d: rgb(0 0 0 / 0.25/0.75);\n  e: lab(50% 1 4 / 2 / 0.5);\n  f: lch(50% 10 180deg/2 / 0.5);\n  g: color(srgb 0 0 0 / 0.25/0.75);\n}\n"),
+        "a {\n  b: hsl(0, 50%, 1%);\n  c: hsl(0, 50%, 25%);\n  d: rgba(0, 0, 0, 0.75);\n  e: lab(50% 1 2 / 0.5);\n  f: lch(50% 10 90deg / 0.5);\n  g: color(srgb 0 0 0 / 0.75);\n}\n"
+    );
+    // A single slash is unchanged — the last one is the only one.
+    assert_eq!(
+        ours("a {\n  b: rgb(0 0 0 / 50%);\n  c: color(srgb 0 0 0 / 50%);\n  d: rgb(510/2 0 0 / 0.5);\n  e: hsl(0 100%/2 50% / 0.5);\n}\n"),
+        "a {\n  b: rgba(0, 0, 0, 0.5);\n  c: color(srgb 0 0 0 / 0.5);\n  d: rgba(255, 0, 0, 0.5);\n  e: hsla(0, 50%, 50%, 0.5);\n}\n"
+    );
+    // The divided channel is validated like the one the caller wrote out.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    assert!(
+        err("color(srgb 0 0 0 / 50%/2)").contains("$blue: Expected 0/50% to have unit \"%\" or no units.")
+    );
+    assert!(err("rgb(0 0 0 / 50%/2)").contains("$blue: Expected 0/50% to have unit \"%\" or no units."));
+    assert!(err("lab(50% 1 2 / 50%/2)").contains("$b: Expected 2/50% to have unit \"%\" or no units."));
+    assert!(
+        err("color(srgb 0 0 0 / 2px/1)").contains("$blue: Expected 0/2px to have unit \"%\" or no units.")
+    );
+}
+
+#[test]
+fn an_alpha_argument_is_validated_however_it_is_written() {
+    // A division in an ARGUMENT position has already evaluated to a number by
+    // the time it arrives — `meta.inspect(2/1)` is `2`, not `2/1` — so the
+    // slash spelling changes nothing about the range check it meets. Pulling a
+    // value back out of the one construct that does carry a slash (a channels
+    // list) hands over a plain number too. Byte-matched to dart-sass 1.104.1.
+    // Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "color.change(red, $alpha: 2/1)",
+            "$alpha: Expected 2 to be within 0 and 1.",
+        ),
+        (
+            "color.change(red, $alpha: 4/2)",
+            "$alpha: Expected 2 to be within 0 and 1.",
+        ),
+        (
+            "color.change(red, $alpha: 0/0)",
+            "$alpha: Expected calc(NaN) to be within 0 and 1.",
+        ),
+        (
+            "color.change(red, $alpha: 1/0)",
+            "$alpha: Expected calc(infinity) to be within 0 and 1.",
+        ),
+        (
+            "color.change(red, $alpha: 200%/1)",
+            "$alpha: Expected 200% to be within 0% and 100%.",
+        ),
+        (
+            "color.change(red, $alpha: 2px/1)",
+            "$alpha: Expected 2px to be within 0px and 1px.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:list\";\n@use \"sass:meta\";\n$l: 0 0 0 / 2/1;\na {\n  b: meta.inspect(2/1);\n  c: meta.inspect(200%/1);\n  d: meta.inspect(list.nth($l, 3));\n  e: color.change(red, $alpha: list.nth($l, 3));\n  f: color.change(red, $alpha: 50%/2);\n}\n"),
+        "a {\n  b: 2;\n  c: 200%;\n  d: 0;\n  e: rgba(255, 0, 0, 0);\n  f: rgba(255, 0, 0, 0.25);\n}\n"
+    );
+}
+
+#[test]
+fn a_degenerate_call_still_converts_its_other_parts() {
+    // Only the NON-FINITE channel keeps its `calc(...)` spelling. dart builds
+    // the color and serializes its channels, so a finite sibling is converted
+    // exactly as it would be without the degenerate one — `50%` is 0.5 of a
+    // `color()` space's 0..1 range — and the alpha is unit-checked even when
+    // IT is the degenerate part. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("a {\n  b: color(srgb 50% 0 calc(infinity));\n  c: color(srgb 50%/2 0 calc(infinity));\n  d: color(xyz 50% 0 calc(infinity));\n  e: color(display-p3 50% 0 calc(infinity));\n  f: color(srgb 0.5 0 calc(infinity));\n}\n"),
+        "a {\n  b: color(srgb 0.5 0 calc(infinity));\n  c: color(srgb 0.25 0 calc(infinity));\n  d: color(xyz 0.5 0 calc(infinity));\n  e: color(display-p3 0.5 0 calc(infinity));\n  f: color(srgb 0.5 0 calc(infinity));\n}\n"
+    );
+    // The NON-FINITE channel's own spelling is the calculation's, not the
+    // division that produced it: `1/0` is `calc(infinity)`, never `1/0`.
+    assert_eq!(
+        ours("@use \"sass:meta\";\na {\n  b: color(srgb 1/0 0 0);\n  c: color(srgb -1/0 0 0);\n  d: color(srgb 0/0 0 0);\n  e: color(xyz 1/0 0 0);\n  f: meta.inspect(color(srgb 1/0 0 0));\n}\n"),
+        "a {\n  b: color(srgb calc(infinity) 0 0);\n  c: color(srgb calc(-infinity) 0 0);\n  d: color(srgb 0 0 0);\n  e: color(xyz calc(infinity) 0 0);\n  f: color(srgb calc(infinity) 0 0);\n}\n"
+    );
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        (
+            "rgb(0 0 0 / calc(infinity * 1px))",
+            "$alpha: Expected calc(infinity * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "rgb(0 0 0 / calc(NaN * 1px))",
+            "$alpha: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 0 0 0 / calc(infinity * 1px))",
+            "$alpha: Expected calc(infinity * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "lab(50% 1 2 / calc(NaN * 1px))",
+            "$alpha: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // A unitless or `%` degenerate alpha is fine, and an infinite non-hue
+    // channel keeps its spelling whatever unit it was folded from.
+    assert_eq!(
+        ours("a {\n  b: rgb(0 0 0 / calc(infinity));\n  c: rgb(0 0 0 / calc(infinity * 1%));\n  d: rgb(0 0 0 / calc(NaN * 1%));\n  e: lab(1% calc(infinity * 1%) -3);\n  f: oklab(1% calc(infinity * 1%) -3);\n}\n"),
+        "a {\n  b: rgb(0, 0, 0);\n  c: rgb(0, 0, 0);\n  d: rgba(0, 0, 0, 0);\n  e: lab(1% calc(infinity) -3);\n  f: oklab(1% calc(infinity) -3);\n}\n"
+    );
+}
+
+#[test]
+fn the_degenerate_hsl_spelling_drops_an_opaque_alpha() {
+    // The preserved-`calc()` hsl spelling omits its alpha when the color is
+    // opaque, exactly as the ordinary hsl path and `color()` omit theirs — an
+    // alpha clamped up to 1 included. Byte-matched to dart-sass 1.104.1.
+    // Offline.
+    assert_eq!(
+        ours("a {\n  b: hsl(0 50% calc(infinity) / 1);\n  c: hsl(0 50% calc(infinity)/2);\n  d: hsl(0 50% calc(infinity) / 100%);\n  e: hsla(0, calc(infinity), 50%, 1);\n  f: hsl(0 calc(infinity) 50% / 2);\n}\n"),
+        "a {\n  b: hsl(0, 50%, calc(infinity * 1%));\n  c: hsl(0, 50%, calc(infinity * 1%));\n  d: hsl(0, 50%, calc(infinity * 1%));\n  e: hsl(0, calc(infinity * 1%), 50%);\n  f: hsl(0, calc(infinity * 1%), 50%);\n}\n"
+    );
+    // A TRANSPARENT one is still written, and a degenerate channel before a
+    // slash alpha still splits at the last slash.
+    assert_eq!(
+        ours("a {\n  b: hsl(0 50% calc(infinity) / 0.5);\n  c: hsla(0, calc(infinity), 50%, 0.5);\n  d: hsl(0 50% calc(NaN)/2);\n  e: color(srgb 0 0 calc(infinity)/2);\n  f: color(srgb 0 0 calc(NaN)/0.5);\n}\n"),
+        "a {\n  b: hsla(0, 50%, calc(infinity * 1%), 0.5);\n  c: hsla(0, calc(infinity * 1%), 50%, 0.5);\n  d: hsl(0, 50%, 0%);\n  e: color(srgb 0 0 calc(infinity));\n  f: color(srgb 0 0 0 / 0.5);\n}\n"
+    );
+}
+
+#[test]
+fn a_compound_unit_is_not_the_unit_it_starts_with() {
+    // A number's unit accessor reports only the FIRST numerator, so a compound
+    // unit like `%/px` reads as `%` — every channel check has to reject it
+    // explicitly. And the preserved-`calc()` `color()` spelling uses the
+    // canonical space name, as the ordinary path already did. Byte-matched to
+    // dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("a {\n  b: color(SRGB calc(infinity) 0 0);\n  c: color(Display-P3 calc(infinity) 0 0);\n  d: color(XYZ calc(infinity) 0 0);\n  e: color(SRGB 0 0 0 / calc(infinity));\n}\n"),
+        "a {\n  b: color(srgb calc(infinity) 0 0);\n  c: color(display-p3 calc(infinity) 0 0);\n  d: color(xyz calc(infinity) 0 0);\n  e: color(srgb 0 0 0);\n}\n"
+    );
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        (
+            "hwb(0 50%/2px 10%)",
+            "$whiteness: Expected 50%/2px to have unit \"%\".",
+        ),
+        (
+            "color.hwb(0, 50%/2px, 10%)",
+            "$whiteness: Expected calc(25% / 1px) to have unit \"%\".",
+        ),
+        (
+            "lab(1% 50%/2px 0)",
+            "$a: Expected 50%/2px to have unit \"%\" or no units.",
+        ),
+        (
+            "oklab(1% 50%/2px 0)",
+            "$a: Expected 50%/2px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 50%/2px 0 0)",
+            "$red: Expected 50%/2px to have unit \"%\" or no units.",
+        ),
+        (
+            "lch(1% 2 90deg/2px / 0.5)",
+            "$hue: Expected 90deg/2px to have an angle unit (deg, grad, rad, turn).",
+        ),
+        (
+            "oklch(1% 2 90deg/2px / 0.5)",
+            "$hue: Expected 90deg/2px to have an angle unit (deg, grad, rad, turn).",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // A SIMPLE unit of the same name is still accepted, so the check has not
+    // become "reject anything with a unit".
+    assert_eq!(
+        ours("a {\n  b: hwb(0 50% 10%);\n  c: lab(1% 50% 0);\n  d: color(srgb 50% 0 0);\n  e: lch(1% 2 90deg);\n}\n"),
+        "a {\n  b: hsl(0, 66.6666666667%, 70%);\n  c: lab(1% 62.5 0);\n  d: color(srgb 0.5 0 0);\n  e: lch(1% 2 90deg);\n}\n"
+    );
+}
+
+#[test]
+fn a_bad_alpha_unit_outranks_the_channel_checks() {
+    // dart validates the alpha's UNIT after the all-numeric channel pass but
+    // before the channel count and before the channels' own units, so a bad
+    // alpha is what gets reported when the channels are wrong too. Byte-matched
+    // to dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for call in [
+        "rgb(0 0 / 2px)",
+        "rgb(0 0 1px / 2px)",
+        "hwb(0 10% 1px / 2px)",
+        "hsl(0 50% 50% / 2px)",
+        "rgb(0 0 0 / 2px)",
+    ] {
+        let msg = err(call);
+        assert!(
+            msg.contains("$alpha: Expected 2px to have unit \"%\" or no units."),
+            "{call}\n  got: {msg}"
+        );
+    }
+    // The all-numeric pass still comes first.
+    assert!(
+        err("rgb((1 2) 0 0 / 2px)").contains("$channels: Expected red channel to be a number, was (1 2).")
+    );
+    for (call, want) in [
+        (
+            "lab(1% 2 / 2px)",
+            "$alpha: Expected 2px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 0 0 / 2px)",
+            "$alpha: Expected 2px to have unit \"%\" or no units.",
+        ),
+        (
+            "lab(1% 2 1px / 2px)",
+            "$alpha: Expected 2px to have unit \"%\" or no units.",
+        ),
+        (
+            "color(srgb 0 0 1px / 2px)",
+            "$alpha: Expected 2px to have unit \"%\" or no units.",
+        ),
+        (
+            "lab((1 2) 0 0 / 2px)",
+            "$channels: Expected lightness channel to be a number, was (1 2).",
+        ),
+        (
+            "color(srgb (1 2) 0 0 / 2px)",
+            "$description: Expected red channel to be a number, was (1 2).",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
+fn a_non_number_channel_outranks_the_count_and_the_count_outranks_the_units() {
+    // The rest of dart's order, which the lab family and `color()` had
+    // inverted: a non-number channel is reported before the channel COUNT, and
+    // the count before the channels' own units. A channel past the third is
+    // named by its INDEX (`channel 4`), as the legacy spaces already named it.
+    // Every message byte-matched to dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        (
+            "lab(c 2)",
+            "$channels: Expected lightness channel to be a number, was c.",
+        ),
+        (
+            "lab(c 2 3 4)",
+            "$channels: Expected lightness channel to be a number, was c.",
+        ),
+        (
+            "lab(1% c)",
+            "$channels: Expected a channel to be a number, was c.",
+        ),
+        (
+            "lab(1% 2 c 4)",
+            "$channels: Expected b channel to be a number, was c.",
+        ),
+        (
+            "lab(1% 2 3 c)",
+            "$channels: Expected channel 4 to be a number, was c.",
+        ),
+        (
+            "lab(1% 2 3 4 c)",
+            "$channels: Expected channel 5 to be a number, was c.",
+        ),
+        (
+            "color(srgb c 0)",
+            "$description: Expected red channel to be a number, was c.",
+        ),
+        (
+            "color(srgb 1 2 3 c)",
+            "$description: Expected channel 4 to be a number, was c.",
+        ),
+        (
+            "color(srgb 1 2 3 4 c)",
+            "$description: Expected channel 5 to be a number, was c.",
+        ),
+        (
+            "color(srgb 1px 0 0 0)",
+            "$description: The srgb color space has 3 channels but",
+        ),
+        (
+            "color(srgb 1px 0)",
+            "$description: The srgb color space has 3 channels but",
+        ),
+        (
+            "lab(1px 2 3 4)",
+            "$channels: The lab color space has 3 channels but",
+        ),
+        ("lab(1px 2)", "$channels: The lab color space has 3 channels but"),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
+fn a_scale_factor_and_a_modified_alpha_reject_a_compound_unit() {
+    // The same first-numerator trap as the channel checks, in the two places
+    // that read a `%` ARGUMENT: `50% * 1px` and `50%/2px` are not percentages.
+    // The alpha modifier's bounds then carry the whole compound unit, as
+    // dart-sass spells it. Every message byte-matched to dart-sass 1.104.1.
+    // Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "color.scale(red, $red: 50% * 1px)",
+            "$red: Expected calc(50% * 1px) to have unit \"%\".",
+        ),
+        (
+            "color.scale(red, $alpha: 50% * 1px)",
+            "$alpha: Expected calc(50% * 1px) to have unit \"%\".",
+        ),
+        (
+            "color.scale(red, $red: 50%/2px)",
+            "$red: Expected calc(25% / 1px) to have unit \"%\".",
+        ),
+        (
+            "color.scale(oklch(50% 0.1 20deg), $chroma: 50% * 1px)",
+            "$chroma: Expected calc(50% * 1px) to have unit \"%\".",
+        ),
+        (
+            "scale-color(red, $red: 50% * 1px)",
+            "$red: Expected calc(50% * 1px) to have unit \"%\".",
+        ),
+        (
+            "scale-color(red, $alpha: 50% * 1px)",
+            "$alpha: Expected calc(50% * 1px) to have unit \"%\".",
+        ),
+        (
+            "color.change(red, $alpha: 50%/2px)",
+            "$alpha: Expected calc(25% / 1px) to be within 0%/px and 1%/px.",
+        ),
+        (
+            "color.change(red, $alpha: 50% * 1px)",
+            "$alpha: Expected calc(50% * 1px) to be within 0%*px and 1%*px.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // A SIMPLE `%` still scales, a simple unit still names itself in the
+    // bounds, and `adjust` (which strips the unit) is untouched.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {\n  b: color.scale(red, $green: 50%);\n  c: color.change(red, $alpha: 50%);\n  d: color.adjust(red, $alpha: 50% * 1px);\n}\n"),
+        "a {\n  b: rgb(100%, 50%, 0%);\n  c: rgba(255, 0, 0, 0.5);\n  d: red;\n}\n"
+    );
+    assert!(err("color.change(red, $alpha: 2px)").contains("$alpha: Expected 2px to be within 0px and 1px."));
+}
+
+#[test]
+fn a_range_bound_carries_the_whole_unit() {
+    // The bounds of a range error spell the value's FULL unit, compound
+    // included — the first numerator is not the unit. The alpha ratio still
+    // keeps unitless bounds. Every message byte-matched to dart-sass 1.104.1.
+    // Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "mix(red, blue, math.div(200%, 1px))",
+            "$weight: Expected calc(200% / 1px) to be within 0%/px and 100%/px.",
+        ),
+        (
+            "mix(red, blue, 200% * 1px)",
+            "$weight: Expected calc(200% * 1px) to be within 0%*px and 100%*px.",
+        ),
+        (
+            "invert(red, math.div(200%, 1px))",
+            "$weight: Expected calc(200% / 1px) to be within 0%/px and 100%/px.",
+        ),
+        (
+            "lighten(red, math.div(200%, 1px))",
+            "$amount: Expected calc(200% / 1px) to be within 0%/px and 100%/px.",
+        ),
+        (
+            "lighten(red, 200% * 1px)",
+            "$amount: Expected calc(200% * 1px) to be within 0%*px and 100%*px.",
+        ),
+        (
+            "saturate(red, math.div(200%, 1px))",
+            "$amount: Expected calc(200% / 1px) to be within 0%/px and 100%/px.",
+        ),
+        (
+            "transparentize(red, math.div(2%, 1px))",
+            "$amount: Expected calc(2% / 1px) to be within 0 and 1.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // A compound `%` is not a percentage alpha either, wherever it arrives.
+    assert!(err("rgba(red, 50% * 1px)")
+        .contains("$alpha: Expected calc(50% * 1px) to have unit \"%\" or no units."));
+}
+
+#[test]
+fn a_none_channel_does_not_excuse_the_alpha() {
+    // The `none`-channel construction returns before the caller's validation,
+    // so it owes the alpha the same unit check every other path applies. And
+    // the POSITIONAL all-numeric pass still outranks it. Byte-matched to
+    // dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for call in [
+        "rgb(none none none / 2px)",
+        "rgb(none 0 0 / 2px)",
+        "hsl(none 50% 50% / 2px)",
+        "hwb(none 10% 10% / 2px)",
+        "lab(none 2 3 / 2px)",
+        "color(srgb none 0 0 / 2px)",
+    ] {
+        let msg = err(call);
+        assert!(
+            msg.contains("$alpha: Expected 2px to have unit \"%\" or no units."),
+            "{call}\n  got: {msg}"
+        );
+    }
+    assert!(err("rgb((1 2), 0, 0, 2px)").contains("$red: (1 2) is not a number."));
+    assert!(err("hsl((1 2), 0%, 0%, 2px)").contains("$hue: (1 2) is not a number."));
+    assert!(
+        err("rgb((1 2) 0 0 / 2px)").contains("$channels: Expected red channel to be a number, was (1 2).")
+    );
+    // A valid alpha still builds the `none` color.
+    assert_eq!(
+        ours("a { b: rgb(none none none / 0.5); }\n"),
+        "a {\n  b: rgb(none none none / 0.5);\n}\n"
+    );
+}
+
+#[test]
+fn a_none_channel_exempts_itself_not_the_call() {
+    // The `none`-channel construction returns before its caller's validation,
+    // so it runs the same checks: a sibling's unit, a sibling that is not a
+    // number, and the alpha are all still reported. And `none` is a CHANNEL
+    // keyword, not an argument — the positional form rejects it outright.
+    // Every message byte-matched to dart-sass 1.104.1. Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "rgb(none 1px 0)",
+            "$green: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "rgb(none 1px 0 / 0.5)",
+            "$green: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "rgb(none calc(NaN * 1px) 0)",
+            "$green: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "rgb(none 6px/2 0)",
+            "$green: Expected 6px/2 to have unit \"%\" or no units.",
+        ),
+        (
+            "rgb(none (1 2) 0)",
+            "$channels: Expected green channel to be a number, was (1 2).",
+        ),
+        ("rgb(none 0)", "$channels: The rgb color space has 3 channels but"),
+        (
+            "hwb(none 10px 20%)",
+            "$whiteness: Expected 10px to have unit \"%\".",
+        ),
+        (
+            "hwb(none 10% 20px)",
+            "$blackness: Expected 20px to have unit \"%\".",
+        ),
+        (
+            "hwb(0 10px none)",
+            "$whiteness: Expected 10px to have unit \"%\".",
+        ),
+        (
+            "hwb(none 6px/2 20%)",
+            "$whiteness: Expected 6px/2 to have unit \"%\".",
+        ),
+        (
+            "color.hwb(none, 10px, 20%)",
+            "$whiteness: Expected 10px to have unit \"%\".",
+        ),
+        ("rgb(none, 1px, 0)", "$red: none is not a number."),
+        ("rgb(none, (1 2), 0)", "$red: none is not a number."),
+        ("hsl(none, 1px, 50%)", "$hue: none is not a number."),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // What a `none` channel DOES exempt is itself: the rest still computes,
+    // and `hsl` has no unit check on its channels either way.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {\n  b: rgb(none 50% 0);\n  c: hsl(none 50% 50%);\n  d: hsl(none 1px 50%);\n  e: hwb(none 10% 20%);\n  f: rgb(none calc(NaN) 0);\n}\n"),
+        "a {\n  b: rgb(none 127.5 0);\n  c: hsl(none 50% 50%);\n  d: hsl(none 1% 50%);\n  e: hwb(none 10% 20%);\n  f: rgb(none 0 0);\n}\n"
+    );
+    // A compound `%` is not a percentage DEGENERATE alpha either.
+    assert!(err("rgba(red, math.div(math.div(1, 0) * 1%, 1px))")
+        .contains("$alpha: Expected calc(infinity * 1% / 1px) to have unit \"%\" or no units."));
+}
+
+#[test]
+fn a_folded_calc_is_a_number_to_a_constructor_but_not_to_change() {
+    // The evaluator preserves calculations inside `@supports`, so a FOLDED
+    // numeric `calc()` reaches the color builtins there as a calculation. A
+    // constructor reads it like the number it holds; `change`/`adjust`/`scale`
+    // reject it — only a DEGENERATE calculation is a channel value for them,
+    // and `change`, the one op that takes `none`, says so in the message.
+    // Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@supports (a: lch(1% calc(infinity) 20deg)) { x { y: 1 } }\n"),
+        "@supports (a: lch(1% calc(infinity) 20deg)) {\n  x {\n    y: 1;\n  }\n}\n"
+    );
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:math\";\n@supports (a: {call}) {{ x {{ y: 1 }} }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "color.change(red, $red: calc(0.5))",
+            "$red: calc(0.5) is not a number or unquoted \"none\".",
+        ),
+        (
+            "color.change(red, $hue: calc(0.5))",
+            "$hue: calc(0.5) is not a number or unquoted \"none\".",
+        ),
+        (
+            "color.change(red, $alpha: calc(0.5))",
+            "$alpha: calc(0.5) is not a number or unquoted \"none\".",
+        ),
+        (
+            "color.adjust(red, $red: calc(0.5))",
+            "$red: calc(0.5) is not a number.",
+        ),
+        (
+            "color.scale(red, $red: calc(50%))",
+            "$red: calc(50%) is not a number.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    // Outside `@supports` a calculation folds to a number before it arrives,
+    // so only the DEGENERATE spellings are still calculations — and those are
+    // channel values, accepted as they were.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {\n  b: color.change(red, $hue: calc(NaN));\n  c: color.adjust(red, $red: calc(NaN));\n  d: color.change(red, $red: calc(0.5));\n}\n"),
+        "a {\n  b: red;\n  c: black;\n  d: rgb(0.1960784314%, 0%, 0%);\n}\n"
+    );
+    // `change`'s "or unquoted \"none\"" is the op's, not the argument's.
+    let plain = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    assert!(
+        plain("color.change(red, $alpha: red)").contains("$alpha: red is not a number or unquoted \"none\".")
+    );
+    assert!(plain("color.change(red, $red: red)").contains("$red: red is not a number or unquoted \"none\"."));
+    assert!(plain("color.adjust(red, $alpha: red)").contains("$alpha: red is not a number."));
+    assert!(plain("color.scale(red, $alpha: red)").contains("$alpha: red is not a number."));
+}
+
+#[test]
+fn a_modify_channel_is_unit_checked_however_it_is_written() {
+    // A division in an ARGUMENT position has already evaluated by the time it
+    // arrives — `meta.inspect(1px/1)` is `1px`, and so is the third element of
+    // `0 0 1px/1` — so the slash spelling changes nothing about the unit check
+    // a modify channel meets, in a supports declaration either. Byte-matched
+    // to dart-sass 1.104.1. Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:list\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "color.change(red, $red: 1px/1)",
+            "$red: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color.change(red, $red: 6px/2)",
+            "$red: Expected 3px to have unit \"%\" or no units.",
+        ),
+        (
+            "color.adjust(red, $red: 1px/1)",
+            "$red: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color.change(oklch(50% 0.1 20deg), $hue: 1px/1)",
+            "$hue: Expected 1px to have an angle unit (deg, grad, rad, turn).",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    assert!(ours_err(
+        "@use \"sass:color\";\n@use \"sass:list\";\n$l: 0 0 1px/1;\na { b: color.change(red, $red: list.nth($l, 3)); }\n"
+    )
+    .contains("$red: Expected 1px to have unit \"%\" or no units."));
+    assert!(
+        ours_err("@use \"sass:color\";\n@supports (a: color.change(red, $red: 1px/1)) { x { y: 1 } }\n")
+            .contains("$red: Expected 1px to have unit \"%\" or no units.")
+    );
+    // And a channel whose unit the space DOES accept still computes.
+    assert_eq!(
+        ours("@use \"sass:color\";\na { b: color.change(red, $saturation: 1px/1); }\n"),
+        "a {\n  b: rgb(50.5%, 49.5%, 49.5%);\n}\n"
+    );
+}
+
+#[test]
+fn a_unit_bearing_degenerate_calc_is_checked_by_the_modify_ops_too() {
+    // A degenerate `calc()` that carries a unit arrives as a plain number —
+    // the calculation only survives where the evaluator preserves one — so the
+    // modify ops unit-check it like any other channel, the alpha's bounds
+    // carrying that unit. Byte-matched to dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        (
+            "color.change(red, $red: calc(infinity * 1px))",
+            "$red: Expected calc(infinity * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color.change(red, $red: calc(NaN * 1px))",
+            "$red: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color.adjust(red, $red: calc(NaN * 1px))",
+            "$red: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color.change(oklch(50% 0.1 20deg), $hue: calc(NaN * 1px))",
+            "$hue: Expected calc(NaN * 1px) to have an angle unit (deg, grad, rad, turn).",
+        ),
+        (
+            "color.change(red, $alpha: calc(NaN * 1px))",
+            "$alpha: Expected calc(NaN * 1px) to be within 0px and 1px.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
 }
 
 #[test]
@@ -3289,16 +4373,15 @@ fn nested_at_rule_wrap_keeps_selector_linebreaks() {
 }
 
 #[test]
-fn pre_module_comments_reemit_on_inherited_edges() {
+fn pre_module_comments_are_emitted_once() {
     use std::fs;
 
-    // dart `_preModuleComments`: on a module's FIRST load the loader's
-    // pending comments move into a map keyed by the loaded module, and —
-    // because dart does not reset the map for nested module evaluations —
-    // a child module's own edge into the same dependency re-emits them
-    // (bulma's `/* Bulma Form */` before each `@use "shared"`er's CSS).
-    // A NON-first load registers nothing: its comments stay in place
-    // (sass-spec use_only comment_order/diamond).
+    // A comment preceding a `@use`/`@forward` is emitted exactly ONCE, in
+    // place, however many edges reach the module afterwards. Up to 1.104.0
+    // dart re-emitted it at every later edge into that module (the
+    // `_preModuleComments` map, which the inherited-map quirk made visible to
+    // nested module evaluations); dart-sass 1.104.1 removed that. Measured
+    // against dart-sass 1.104.1.
     let dir = std::env::temp_dir().join(format!(
         "sasso-premodule-comments-{}-{}",
         std::process::id(),
@@ -3313,13 +4396,13 @@ fn pre_module_comments_reemit_on_inherited_edges() {
     fs::write(dir.join("_a.scss"), "@use \"sass:list\";\n.a { x: y; }\n").unwrap();
     fs::write(dir.join("_b.scss"), "@use \"a\";\n.b { x: y; }\n").unwrap();
     fs::write(dir.join("_i.scss"), "/* C */\n@forward \"a\";\n@forward \"b\";\n").unwrap();
-    // Inherited-map re-emission: C appears before a's AND b's CSS.
+    // `i`'s header precedes a's CSS and is not repeated at b's edge.
     assert_eq!(
         compile("@use \"i\";\n", &opts).expect("module chain compiles"),
-        "/* C */\n.a {\n  x: y;\n}\n\n/* C */\n.b {\n  x: y;\n}"
+        "/* C */\n.a {\n  x: y;\n}\n\n.b {\n  x: y;\n}"
     );
-    // Diamond via sibling loaders: right's non-first `@use` registers
-    // nothing, so left's comment is NOT re-emitted at right's edge.
+    // Diamond via sibling loaders: right's `@use` is a repeat edge, so left's
+    // comment is not repeated there and right's own comment stays in place.
     fs::write(dir.join("_s.scss"), ".s { x: y; }\n").unwrap();
     fs::write(dir.join("_l.scss"), "/* L */\n@use \"s\";\n").unwrap();
     fs::write(dir.join("_r.scss"), "/* R */\n@use \"s\";\n").unwrap();
@@ -7539,16 +8622,70 @@ fn color_dart_vm_math_semantics() {
         ours("@use \"sass:color\";\n@use \"sass:math\";\na {b: math.div(color.channel(color.to-space(lab(50% 1 2), lch), \"hue\"), 1deg) * 1e15}\n"),
         "a {\n  b: 63434948822922024;\n}\n"
     );
-    // An infinite hue goes through the same fmod and lands on NaN.
+    // An infinite hue goes through the same fmod and lands on NaN, which
+    // dart-sass 1.104.0 then converts to 0 (a polar hue converts every
+    // non-finite value).
     assert_eq!(
         ours("@use \"sass:meta\";\na {b: meta.inspect(lch(1% 2 calc(infinity)))}\n"),
-        "a {\n  b: lch(1% 2 calc(NaN * 1deg));\n}\n"
+        "a {\n  b: lch(1% 2 0deg);\n}\n"
     );
     // channel() builds a `%` number via `value * 100 / channel.max`; the
     // round trip through ×100 ÷100 perturbs far-range values by one ulp.
     assert_eq!(
         ours("@use \"sass:color\";\na {b: color.channel(color.to-space(color.change(black, $red: -999999), hwb), \"whiteness\") * 1e9}\n"),
         "a {\n  b: -392156470588235.4%;\n}\n"
+    );
+}
+
+#[test]
+fn number_negative_zero_keeps_its_sign() {
+    // dart-sass 1.104.0 serializes a negative zero as `-0`. The sign is the
+    // IEEE sign bit, not the way the number was written: `0 * -1` and
+    // `-0 + -0` ARE negative zeros, while `0 - 0`, `0 + -0` and `-0 * -1` are
+    // positive ones. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:math\";\na {\n  b: 0 * -1;\n  c: -0 + -0;\n  d: 0 - 0;\n  e: 0 + -0;\n  f: -0 * -1;\n  g: math.div(0, -1);\n  h: -0;\n  i: -0.0px;\n  j: math.sqrt(-0);\n}\n"),
+        "a {\n  b: -0;\n  c: -0;\n  d: 0;\n  e: 0;\n  f: 0;\n  g: -0;\n  h: -0;\n  i: -0px;\n  j: -0;\n}\n"
+    );
+    // A color CHANNEL is the exception dart-sass carves out: it converts a
+    // negative zero to 0 "as per the CSS spec", the alpha included.
+    assert_eq!(
+        ours("a {\n  b: hsl(-0, 50%, 50%);\n  c: color(srgb 0 0 0 / -0);\n  d: rgb(-0, 0, 0);\n  e: color(srgb -0 0 0);\n}\n"),
+        "a {\n  b: hsl(0, 50%, 50%);\n  c: color(srgb 0 0 0 / 0);\n  d: rgb(0, 0, 0);\n  e: color(srgb 0 0 0);\n}\n"
+    );
+    // The channel a COMPUTATION writes counts too: `change`/`adjust`/`scale`
+    // set the alpha directly on the working color, so the normalization has to
+    // reach the stored alpha and not just a parsed one.
+    assert_eq!(
+        ours("@use \"sass:color\";\na {\n  b: color.change(oklch(50% 0.1 20deg), $alpha: -0);\n  c: color.change(lab(50% 1 2), $alpha: -0);\n  d: color.change(red, $alpha: -0);\n}\n"),
+        "a {\n  b: oklch(50% 0.1 20deg / 0);\n  c: lab(50% 1 2 / 0);\n  d: rgba(255, 0, 0, 0);\n}\n"
+    );
+    // The comma-form `color.hwb()` stores its own channels instead of going
+    // through the shared color construction, so it needs the same treatment —
+    // `color.channel` and `meta.inspect` read that storage back verbatim.
+    assert_eq!(
+        ours("@use \"sass:color\";\n@use \"sass:meta\";\na {\n  b: color.channel(color.hwb(0, -0%, 0%), \"whiteness\");\n  c: meta.inspect(color.hwb(-0, -0%, -0%));\n  d: color.hwb(0, -0%, 0%);\n}\n"),
+        "a {\n  b: 0%;\n  c: hwb(0 0% 0%);\n  d: red;\n}\n"
+    );
+}
+
+#[test]
+fn rounding_never_returns_a_negative_zero() {
+    // A rounding RESULT is an integer in dart-sass, so it is never a negative
+    // zero even where IEEE rounding produces one: `math.round(-0.4)` and
+    // `round(to-zero, -0.4, 1)` are `0`, not `-0`. `math.abs(-0)` is `0` for a
+    // different reason — IEEE `abs` clears the sign — while `math.div(0, -1)`
+    // keeps it. Byte-matched to dart-sass 1.104.1. Offline.
+    assert_eq!(
+        ours("@use \"sass:math\";\na {\n  b: math.round(-0.4);\n  c: math.ceil(-0.4);\n  d: math.floor(-0);\n  e: round(to-zero, -0.4, 1);\n  f: round(nearest, -0.4, 1);\n  g: math.round(-0.4px);\n  h: math.abs(-0);\n  i: math.abs(-0px);\n}\n"),
+        "a {\n  b: 0;\n  c: 0;\n  d: 0;\n  e: 0;\n  f: 0;\n  g: 0px;\n  h: 0;\n  i: 0px;\n}\n"
+    );
+    // An INFINITE step is the exception: `round()` returns the input's sign
+    // unrounded rather than an integer, so a negative zero survives it. (Only
+    // `down` runs off to `calc(-infinity)`.)
+    assert_eq!(
+        ours("@use \"sass:math\";\n$inf: math.div(1, 0);\na {\n  b: round(to-zero, -0.4, $inf);\n  c: round(nearest, -0, $inf);\n  d: round(up, -0.4, $inf);\n  e: round(down, -0.4, $inf);\n  f: round(to-zero, -0.4px, $inf * 1px);\n}\n"),
+        "a {\n  b: -0;\n  c: -0;\n  d: -0;\n  e: calc(-infinity);\n  f: -0px;\n}\n"
     );
 }
 
@@ -8608,12 +9745,12 @@ fn comment_scratch(tag: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn pre_module_comment_registers_through_invisible_loads() {
-    // dart's `_root.children` holds no placeholder for a CSS-less load: a
-    // file-heading comment stays pending across `@use "tokens"` (pure vars)
-    // and registers at the NEXT css-bearing edge (`@use "lib"`), then
-    // re-emits at every later edge into that module — here the nested
-    // sibling's repeat edge (uswds `_palette-registry.scss` PALETTE header).
+fn pre_module_comment_survives_an_invisible_load() {
+    // A CSS-less load (`@use "tokens"`, pure variables) puts nothing between
+    // a file-heading comment and the next module's CSS, so the header still
+    // leads `lib`'s comment — and the nested sibling's repeat edge into `lib`
+    // adds no second copy (uswds `_palette-registry.scss` PALETTE header).
+    // Measured against dart-sass 1.104.1.
     use std::fs;
     let dir = comment_scratch("deep");
     let imp = FsImporter::new(vec![dir.clone()]);
@@ -8627,14 +9764,14 @@ fn pre_module_comment_registers_through_invisible_loads() {
     .unwrap();
     fs::write(dir.join("_sib.scss"), "@use \"lib\" as *;\n$s: 1;\n").unwrap();
     let out = compile("@use \"reg\";\n", &opts).expect("reg compiles");
-    assert_eq!(out, "/* reg header */\n/* lib */\n/* reg header */");
+    assert_eq!(out, "/* reg header */\n/* lib */");
 }
 
 #[test]
-fn pre_module_comment_reemits_at_sibling_edge() {
-    // A repeat edge from a SIBLING module re-emits the comments registered
-    // for the target on its first load, provided the shared map already
-    // existed when the registrar was evaluated (dart's inherited-map quirk).
+fn pre_module_comment_not_repeated_at_a_sibling_edge() {
+    // A repeat edge from a SIBLING module into an already-loaded target adds
+    // nothing: `mid`'s header is written once, where it stands. Measured
+    // against dart-sass 1.104.1.
     use std::fs;
     let dir = comment_scratch("sib");
     let imp = FsImporter::new(vec![dir.clone()]);
@@ -8656,19 +9793,16 @@ fn pre_module_comment_reemits_at_sibling_edge() {
     let out = compile("@use \"outer\";\n", &opts).expect("outer compiles");
     assert_eq!(
         out,
-        "/* outer note */\n/* vis */\n/* mid header */\n/* lib */\n.m {\n  x: 1;\n}\n\n/* mid header */"
+        "/* outer note */\n/* vis */\n/* mid header */\n/* lib */\n.m {\n  x: 1;\n}"
     );
 }
 
 #[test]
-fn phantom_css_module_absorbs_pending_comments() {
-    // dart `transitivelyContainsCss` counts a NON-EMPTY pre-module-comment
-    // map snapshot: a css-less module built while the shared map holds any
-    // entry is "css-bearing", so it absorbs the pending comment registration
-    // (`[tokens -> mid header]`) and the css-bearing edge after it gets
-    // nothing — no sibling re-emission (contrast with
-    // `pre_module_comment_reemits_at_sibling_edge`, where `tokens` is loaded
-    // AFTER `lib`).
+fn pre_module_comment_not_repeated_after_a_css_less_load() {
+    // The same shape as `pre_module_comment_not_repeated_at_a_sibling_edge`
+    // with the CSS-less `tokens` loaded FIRST: the order of the invisible
+    // load made no difference to the output before 1.104.1 either, and makes
+    // none now. Measured against dart-sass 1.104.1.
     use std::fs;
     let dir = comment_scratch("phantom");
     let imp = FsImporter::new(vec![dir.clone()]);
@@ -8695,12 +9829,10 @@ fn phantom_css_module_absorbs_pending_comments() {
 }
 
 #[test]
-fn reemitted_comment_clones_never_reregister() {
-    // dart materializes pre-module-comment clones at COMBINE time, so they
-    // never sit in `_root.children` and can never register under a later
-    // first-load edge. Without the clone fence, `sib`'s in-stream clone of
-    // "/* note */" would cascade onto `vis2`'s key and `tail`'s repeat edge
-    // would emit a third copy (uswds color() 7-vs-6).
+fn pre_module_comments_never_cascade() {
+    // The shape that used to produce a THIRD copy of "/* note */" (uswds
+    // color() 7-vs-6): each comment is written once, at the point it stands.
+    // Measured against dart-sass 1.104.1.
     use std::fs;
     let dir = comment_scratch("cascade");
     let imp = FsImporter::new(vec![dir.clone()]);
@@ -8721,10 +9853,7 @@ fn reemitted_comment_clones_never_reregister() {
     )
     .unwrap();
     let out = compile("@use \"outer\";\n", &opts).expect("outer compiles");
-    assert_eq!(
-        out,
-        "/* outer */\n/* seed */\n/* note */\n/* lib */\n/* note */\n/* vis2 */"
-    );
+    assert_eq!(out, "/* outer */\n/* seed */\n/* note */\n/* lib */\n/* vis2 */");
 }
 
 #[test]
@@ -8866,12 +9995,12 @@ fn load_css_copy_reacquires_group_separators() {
 }
 
 #[test]
-fn reemitted_premodule_clone_stays_out_of_import_run() {
-    // A pre-module comment clone re-emitted at a repeat edge is combine-time
-    // material BETWEEN modules — dart never counts it among the loading
-    // file's own statements, so the loader's plain `@import` leading-run
-    // sweep must not carry it into the imports bucket (nextcloud:
-    // styles.scss's SPDX header at icons.scss's edge).
+fn a_module_header_stays_out_of_the_import_run() {
+    // A loaded module's heading comment belongs to the CSS flow, not to the
+    // loader's leading `@import` bucket: `b`'s hoisted `@import "x.css"` goes
+    // to the top while `/*! A HEADER */` stays down with `a`'s CSS
+    // (nextcloud: styles.scss's SPDX header at icons.scss's edge). Measured
+    // against dart-sass 1.104.1.
     use std::fs;
     let dir = comment_scratch("premodclone");
     let imp = FsImporter::new(vec![dir.clone()]);
@@ -8896,7 +10025,7 @@ fn reemitted_premodule_clone_stays_out_of_import_run() {
     let out = compile("@use \"outer\";\n", &opts).expect("compiles");
     assert_eq!(
         out,
-        "/* outer */\n@import \"x.css\";\n/* seed */\n/*! A HEADER */\n/* lib */\n.a {\n  q: 1;\n}\n\n/*! A HEADER */\n.b {\n  w: 2;\n}"
+        "/* outer */\n@import \"x.css\";\n/* seed */\n/*! A HEADER */\n/* lib */\n.a {\n  q: 1;\n}\n\n.b {\n  w: 2;\n}"
     );
 }
 

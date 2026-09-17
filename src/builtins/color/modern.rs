@@ -410,7 +410,7 @@ pub(crate) fn modify_in_space_full(
         // Validate the channel value's unit (skipped for a scale `%` and for a
         // `none` change keyword, handled below).
         if !matches!(op, ModifyOp::Scale) && !is_none_keyword(v) {
-            validate_modify_unit(space, idx, name, v, pos)?;
+            validate_modify_unit(space, idx, name, v, matches!(op, ModifyOp::Change), pos)?;
         }
         // `adjust`/`scale` combine each amount with the channel's current value,
         // so a missing (`none`) — or, on a conversion's powerless — channel of
@@ -436,7 +436,7 @@ pub(crate) fn modify_in_space_full(
             ModifyOp::Scale => {
                 let bounds = scale_bounds(space, idx)
                     .ok_or_else(|| Error::at(format!("${name}: Channel isn't scalable."), pos))?;
-                let factor = scale_pct(v, pos)?;
+                let factor = scale_pct(name, v, pos)?;
                 let cur = work.channels[idx].unwrap_or(0.0);
                 work.channels[idx] = Some(scale_to(cur, factor, bounds));
             }
@@ -453,6 +453,11 @@ pub(crate) fn modify_in_space_full(
             }
         }
     }
+    // dart-sass builds the modified color in the WORKING space and only then
+    // converts it back, so 1.104.0's channel conversion applies to the new
+    // channel VALUES — `change(red, $hue: NaN)` is `hsl(0, 100%, 50%)`, i.e.
+    // red again, not the black an unnormalized NaN hue would convert to.
+    let work = normalize_degenerate(work);
     // The legacy-keyword path keeps the original format when the result is in
     // the sRGB gamut, otherwise serializes in the (legacy) working space.
     let dest = if legacy_format && !in_gamut(&work, ColorSpace::Rgb) {
@@ -492,25 +497,36 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
             // non-`%` unit is used as a raw value (within [0,1]); the bounds in
             // the error message carry that unit (e.g. `0px and 1px`).
             match v {
-                Value::Number(n) => {
-                    let max_disp = if n.unit() == "%" { 100.0 } else { 1.0 };
-                    if n.value < 0.0 || n.value > max_disp {
-                        let (b0, b1) = if n.unit() == "%" {
+                // One arm for both spellings, as in `alpha_value`: a
+                // slash-division's quotient is validated like any number. (A
+                // named `$alpha:` argument has already evaluated to a number,
+                // so nothing reaches here as a `Slash` today.)
+                Value::Number(n) | Value::Slash(n, _) => {
+                    // A COMPOUND unit only reports its first numerator, so it
+                    // is not the percentage it starts with: `50%/2px` is a
+                    // `%/px` value bounded at 1, not a 25% alpha.
+                    let pct = !n.has_complex_units() && n.unit() == "%";
+                    let max_disp = if pct { 100.0 } else { 1.0 };
+                    if n.value.is_nan() || n.value < 0.0 || n.value > max_disp {
+                        let (b0, b1) = if pct {
                             ("0%".to_string(), "100%".to_string())
                         } else {
-                            (format!("0{}", n.unit()), format!("1{}", n.unit()))
+                            let u = n.unit_string();
+                            (format!("0{u}"), format!("1{u}"))
                         };
                         return Err(Error::at(
                             format!("$alpha: Expected {} to be within {b0} and {b1}.", n.to_css(false)),
                             pos,
                         ));
                     }
-                    Some(if n.unit() == "%" { n.value / 100.0 } else { n.value })
+                    Some(if pct { n.value / 100.0 } else { n.value })
                 }
-                Value::Slash(n, _) => Some(n.value),
                 other => {
                     return Err(Error::at(
-                        format!("$alpha: {} is not a number.", other.to_css(false)),
+                        format!(
+                            "$alpha: {} is not a number or unquoted \"none\".",
+                            other.to_css(false)
+                        ),
                         pos,
                     ))
                 }
@@ -533,7 +549,7 @@ fn apply_alpha(cur: f64, v: &Value, op: ModifyOp, pos: Pos) -> Result<Option<f64
             Some((cur + amt).clamp(0.0, 1.0))
         }
         ModifyOp::Scale => {
-            let factor = scale_pct(v, pos)?;
+            let factor = scale_pct("alpha", v, pos)?;
             Some(scale_to(cur, factor, (0.0, 1.0)))
         }
     })
