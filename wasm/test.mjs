@@ -1269,6 +1269,34 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // The same collision through the sourcemap SIDECAR: `a.scss:out.css` writes
+  // `out.css.map` too, which is exactly what `b.scss:out.css.map` writes. The
+  // command-line order and the completion order are made to disagree — a.scss
+  // is first and slow — so a run that ignores the sidecar writes a's map over
+  // b's CSS (measured: dart and `-j 1` keep b's CSS, `-j 4` did not).
+  {
+    const mdir = join(dir, "sidecar");
+    mkdirSync(mdir, { recursive: true });
+    writeFileSync(join(mdir, "a.scss"), `@for $i from 1 through 4000 { .slow-#{$i}{a:$i} }\n.a{x:"a"}\n`);
+    writeFileSync(join(mdir, "b.scss"), `.b{x:"b"}\n`);
+    const target = join(mdir, "out.css.map");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      rmSync(target, { force: true });
+      rmSync(join(mdir, "out.css"), { force: true });
+      const r = spawnSync(
+        process.execPath,
+        [cliPath, "--style=compressed", "-j", "4", `${join(mdir, "a.scss")}:${join(mdir, "out.css")}`, `${join(mdir, "b.scss")}:${target}`],
+        { encoding: "utf8", timeout: 60000 },
+      );
+      assert.equal(r.status, 0, `cli: the sidecar collision compiles (stderr: ${r.stderr})`);
+      assert.match(
+        readFileSync(target, "utf8"),
+        /\.b\{x:"b"\}/,
+        `cli: the last job on the command line owns out.css.map, sidecar or not (attempt ${attempt})`,
+      );
+    }
+  }
+
   // A failure inside the pool is still reported and still exits non-zero.
   writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
   const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});

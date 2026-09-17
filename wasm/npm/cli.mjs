@@ -988,16 +988,24 @@ async function runJobs(jobs, opts, common) {
   // parallel and the winner is whoever finishes last, which is the race the
   // native CLI has today. A collision is almost always a slip in the command
   // line, so the parallelism given up here costs nothing real.
+  // A job writes its CSS *and*, with source maps on, a `<output>.map` beside
+  // it — so `a.scss:out.css` and `b.scss:out.css.map` collide on that sidecar
+  // even though their `output`s differ. Both count.
   const seenOut = new Set();
   let collides = false;
   for (const job of jobs) {
     if (job.output === undefined) continue;
-    const key = pathKey(job.output);
-    if (seenOut.has(key)) {
-      collides = true;
-      break;
+    const written = [job.output];
+    if (wantSourceMap(opts, job.output) && !opts.embedSourceMap) written.push(`${job.output}.map`);
+    for (const path of written) {
+      const key = pathKey(path);
+      if (seenOut.has(key)) {
+        collides = true;
+        break;
+      }
+      seenOut.add(key);
     }
-    seenOut.add(key);
+    if (collides) break;
   }
 
   const workers = Math.min(jobs.length, Math.max(1, wanted));
