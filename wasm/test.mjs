@@ -1334,6 +1334,41 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // `a.scss:a.scss` writes over its own input — dart compiles it and leaves
+  // the CSS there (exit 0, measured 2026-09-17, as do both sasso CLIs). It
+  // reads before it writes inside ONE job, so there is no order between
+  // threads to get wrong and it must not serialize the batch. Same write-order
+  // observable as above: the slow first job still has to finish last.
+  {
+    const sdir = join(dir, "self-write");
+    mkdirSync(sdir, { recursive: true });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      writeFileSync(
+        join(sdir, "j0.scss"),
+        `@use "sass:math";\n@for $i from 1 through 30000 { .slow-#{$i} { width: math.div($i,3)*1px } }\n`,
+      );
+      for (let i = 1; i < 8; i++) writeFileSync(join(sdir, `j${i}.scss`), `.j${i}{a:${i}}\n`);
+      writeFileSync(join(sdir, "self.scss"), `$c: #2a7ae2;\n.self{color: $c}\n`);
+      for (let i = 0; i < 8; i++) rmSync(join(sdir, `j${i}.css`), { force: true });
+      const args = [cliPath, "--no-source-map", "--style=compressed", "-j", "4", `${join(sdir, "self.scss")}:${join(sdir, "self.scss")}`];
+      for (let i = 0; i < 8; i++) args.push(`${join(sdir, `j${i}.scss`)}:${join(sdir, `j${i}.css`)}`);
+      const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+      assert.equal(r.status, 0, `cli: a self-writing job compiles (stderr: ${r.stderr})`);
+      assert.equal(
+        readFileSync(join(sdir, "self.scss"), "utf8").trim(),
+        ".self{color:#2a7ae2}",
+        `cli: the self-writing job replaced its own file (attempt ${attempt})`,
+      );
+      const times = [];
+      for (let i = 0; i < 8; i++) times.push(statSync(join(sdir, `j${i}.css`)).mtimeMs);
+      assert.equal(
+        times.indexOf(Math.max(...times)),
+        0,
+        `cli: … and the rest of the batch kept the pool (attempt ${attempt})`,
+      );
+    }
+  }
+
   // Each job must run EXACTLY once. Correct output does not prove that — a pool
   // where every worker walks the whole list from 0 produces the same files,
   // just N times over — so make the repetition audible: one `@warn` per

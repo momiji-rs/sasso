@@ -1066,25 +1066,35 @@ async function runJobs(jobs, opts, common) {
   // `@use`s is the same hazard and cannot be seen from here — the dependency
   // is known only once that stylesheet has been parsed — so it stays a
   // scheduling race, as it is in the native CLI (#87).
-  const inputs = new Set();
+  // A job writing over its OWN input is not one of them: `a.scss:a.scss` reads
+  // before it writes, inside a single job, so there is no order between
+  // threads to get wrong. Only ANOTHER job's input counts, which is why this
+  // remembers who owns each one instead of just that it exists.
+  const inputOwner = new Map();
   if (!opts.noCss) {
-    for (const job of jobs) if (job.input !== "-") inputs.add(pathKey(job.input));
+    jobs.forEach((job, i) => {
+      if (job.input === "-") return;
+      const key = pathKey(job.input);
+      if (!inputOwner.has(key)) inputOwner.set(key, i);
+    });
   }
   const seenOut = new Set();
   let collides = false;
-  for (const job of opts.noCss ? [] : jobs) {
+  const scan = opts.noCss ? [] : jobs;
+  for (let i = 0; i < scan.length && !collides; i++) {
+    const job = scan[i];
     if (job.output === undefined) continue;
     const written = [job.output];
     if (wantSourceMap(opts, job.output) && !opts.embedSourceMap) written.push(`${job.output}.map`);
     for (const path of written) {
       const key = pathKey(path);
-      if (seenOut.has(key) || inputs.has(key)) {
+      const owner = inputOwner.get(key);
+      if (seenOut.has(key) || (owner !== undefined && owner !== i)) {
         collides = true;
         break;
       }
       seenOut.add(key);
     }
-    if (collides) break;
   }
 
   const workers = Math.min(jobs.length, Math.max(1, wanted));
