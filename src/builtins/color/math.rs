@@ -923,8 +923,11 @@ pub(super) fn validate_modify_unit(
     pos: Pos,
 ) -> Result<(), Error> {
     let num = match v {
-        Value::Number(n) => n,
-        Value::Slash(..) => return Ok(()),
+        // One arm for both spellings, as in the channel readers: a
+        // slash-division's quotient is unit-checked like any number. (Nothing
+        // reaches here as a `Slash` today — an argument's division has already
+        // evaluated — but the two must not diverge if one ever does.)
+        Value::Number(n) | Value::Slash(n, _) => n,
         // A DEGENERATE `calc()` is a channel value; a folded numeric one —
         // which only survives where the evaluator preserves calculations,
         // inside `@supports` — is not a number at all.

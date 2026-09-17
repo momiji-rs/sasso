@@ -2876,6 +2876,54 @@ fn a_folded_calc_is_a_number_to_a_constructor_but_not_to_change() {
 }
 
 #[test]
+fn a_modify_channel_is_unit_checked_however_it_is_written() {
+    // A division in an ARGUMENT position has already evaluated by the time it
+    // arrives — `meta.inspect(1px/1)` is `1px`, and so is the third element of
+    // `0 0 1px/1` — so the slash spelling changes nothing about the unit check
+    // a modify channel meets, in a supports declaration either. Byte-matched
+    // to dart-sass 1.104.1. Offline.
+    let err = |call: &str| {
+        ours_err(&format!(
+            "@use \"sass:color\";\n@use \"sass:list\";\na {{ b: {call}; }}\n"
+        ))
+    };
+    for (call, want) in [
+        (
+            "color.change(red, $red: 1px/1)",
+            "$red: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color.change(red, $red: 6px/2)",
+            "$red: Expected 3px to have unit \"%\" or no units.",
+        ),
+        (
+            "color.adjust(red, $red: 1px/1)",
+            "$red: Expected 1px to have unit \"%\" or no units.",
+        ),
+        (
+            "color.change(oklch(50% 0.1 20deg), $hue: 1px/1)",
+            "$hue: Expected 1px to have an angle unit (deg, grad, rad, turn).",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+    assert!(ours_err(
+        "@use \"sass:color\";\n@use \"sass:list\";\n$l: 0 0 1px/1;\na { b: color.change(red, $red: list.nth($l, 3)); }\n"
+    )
+    .contains("$red: Expected 1px to have unit \"%\" or no units."));
+    assert!(
+        ours_err("@use \"sass:color\";\n@supports (a: color.change(red, $red: 1px/1)) { x { y: 1 } }\n")
+            .contains("$red: Expected 1px to have unit \"%\" or no units.")
+    );
+    // And a channel whose unit the space DOES accept still computes.
+    assert_eq!(
+        ours("@use \"sass:color\";\na { b: color.change(red, $saturation: 1px/1); }\n"),
+        "a {\n  b: rgb(50.5%, 49.5%, 49.5%);\n}\n"
+    );
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports
