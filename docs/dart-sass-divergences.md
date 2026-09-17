@@ -8,7 +8,15 @@ meaning rather than being a number without a denominator.
 running both compilers on the same input. Where a row says "dart", that is the
 observed output of 1.104.1 — not a reading of the specification.
 
-Last verified: 2026-09-17.
+Last verified: 2026-09-17. The six that need design work or affect compiled
+output are tracked as issues
+([#61](https://github.com/momiji-rs/sasso/issues/61),
+[#62](https://github.com/momiji-rs/sasso/issues/62),
+[#63](https://github.com/momiji-rs/sasso/issues/63),
+[#64](https://github.com/momiji-rs/sasso/issues/64),
+[#65](https://github.com/momiji-rs/sasso/issues/65),
+[#66](https://github.com/momiji-rs/sasso/issues/66)); the rest live here, and
+are fixed as they come up.
 
 ## Where we stand
 
@@ -41,7 +49,7 @@ silently drift away from the reference.
 These change the bytes a build emits. All of them are absent from the Lichess
 corpus, which is why it still measures 147/148.
 
-### 1.1 An attribute selector's quotes are not re-chosen — and can produce invalid CSS
+### 1.1 An attribute selector's quotes are not re-chosen — and can produce invalid CSS ([#61](https://github.com/momiji-rs/sasso/issues/61))
 
 dart decodes an attribute value's escapes and re-quotes it with whichever quote
 character needs fewer of them. sasso keeps the written form, and for one input
@@ -87,7 +95,7 @@ dart parses the body of a custom-property-named function as SassScript.
 // sasso: @supports (a: lab(100% 1 2))
 ```
 
-### 1.5 `meta.call()` with an unknown name compiles instead of erroring
+### 1.5 `meta.call()` with an unknown name compiles instead of erroring ([#63](https://github.com/momiji-rs/sasso/issues/63))
 
 ```scss
 @use "sass:meta";
@@ -102,7 +110,7 @@ A wrong value, or a missing error, rather than a wrong message.
 
 | input | dart-sass 1.104.1 | sasso |
 |---|---|---|
-| `rgb(1, 2, 3, $nope: 4)` | `No parameter named $nope.` | returns `rgb(1, 2, 3)` |
+| `rgb(1, 2, 3, $nope: 4)` ([#62](https://github.com/momiji-rs/sasso/issues/62)) | `No parameter named $nope.` | returns `rgb(1, 2, 3)` |
 | `color.change(hsl(240 none 50%), $alpha: 0.5)` | keeps the missing channel | fills it in |
 | `meta.inspect(33.333333333333336%)` | `33.333333333333336%` | `33.3333333333%` |
 | `meta.inspect(color.hwb(0, calc(-infinity * 1%), 40%, 0.5))` | `hwb(0 calc(-infinity)% 40% / 0.5)` | `hwb(0 -Infinity% 40% / 0.5)` |
@@ -128,14 +136,14 @@ programs; only what it prints differs.
 
 | input | dart-sass 1.104.1 | sasso |
 |---|---|---|
-| `color.opacify(c, 0.1)` and the other eight removed `sass:color` members | names the member, recommends a replacement computed from the call's own arguments, links the docs | `Undefined function.` |
+| `color.opacify(c, 0.1)` and the other eight removed `sass:color` members ([#65](https://github.com/momiji-rs/sasso/issues/65)) | names the member, recommends a replacement computed from the call's own arguments, links the docs | `Undefined function.` |
 | `red(#abcdef, 1)` | the arity error alone | the arity error **plus** a `[global-builtin]` deprecation |
 | `string.index("abc" "b", "x")` | `$string: ("abc" "b") is not a string.` | drops the parentheses |
 | a stray `}` | `unmatched "}".` | `unexpected "}"` |
-| `p > { &.x }` | draws two spans (`outer selector` / `parent selector`) | one span |
+| `p > { &.x }` ([#66](https://github.com/momiji-rs/sasso/issues/66)) | draws two spans (`outer selector` / `parent selector`) | one span |
 | `Missing argument $x.` where the parameter was written with surrounding space | takes the name from the parameter's own span text | normalises it |
 | any `.sass` span crossing a CRLF line ending | correct | one byte short per CRLF |
-| every builtin arity/missing-argument error | two frames: the invocation, then the declaration | one frame |
+| every builtin arity/missing-argument error ([#66](https://github.com/momiji-rs/sasso/issues/66)) | two frames: the invocation, then the declaration | one frame |
 
 The last two rows share a cause worth naming: sasso has no dual-span diagnostic
 renderer, so any message dart draws with two frames is drawn with one. dart's
@@ -150,7 +158,7 @@ Error: Selector "p >" can't be used as a parent in a compound selector.
   ╵
 ```
 
-## 4. Module member enumeration
+## 4. Module member enumeration ([#64](https://github.com/momiji-rs/sasso/issues/64))
 
 `meta.module-functions()`, `meta.module-mixins()` and `meta.module-variables()`
 list members only for `sass:meta`; every other built-in module answers with an
