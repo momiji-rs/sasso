@@ -22,7 +22,7 @@ are fixed as they come up.
 
 | measurement | result |
 |---|---|
-| [sass-spec](https://github.com/sass/sass-spec) suite | **14107 / 14266 passing (98.89%)**, ratcheted in CI |
+| [sass-spec](https://github.com/sass/sass-spec) suite | **14,107 / 14,258 attempted (98.94%)**, ratcheted in CI — 98.89% of all 14,266, the other 8 being cases tagged `:todo` for dart-sass itself |
 | Lichess (lila) corpus, 148 entry points, `--style=expanded` | **147 / 148 byte-identical** |
 | the same corpus, `--style=compressed` | **147 / 148 byte-identical** |
 | the same corpus, source maps (`--embed-sources`) | **148 / 148 byte-identical** |
@@ -56,17 +56,21 @@ corpus, which is why it still measures 147/148.
 
 ### 1.1 An attribute selector's quotes are not re-chosen — and can produce invalid CSS ([#61](https://github.com/momiji-rs/sasso/issues/61))
 
-dart decodes an attribute value's escapes and re-quotes it with whichever quote
-character needs fewer of them. sasso keeps the written form, and for one input
-shape that is not merely cosmetic:
+dart decodes an attribute value's escapes and then re-quotes it, choosing
+whichever quote character needs fewer escapes — and dropping the quotes
+entirely when the value is identifier-safe. sasso re-emits the value with
+double quotes and copies the inner text through verbatim, so an unescaped `"`
+inside a single-quoted value survives into the output and breaks it:
 
 ```scss
-[a='b"c'] { c: d }     // dart: [a='b"c']     sasso: [a="b"c"]   ← invalid CSS
-[a="b\"c"] { c: d }    // dart: [a='b"c']     sasso: [a="b\"c"]  ← cosmetic
+[a='b"c']   { c: d }   // dart: [a='b"c']   sasso: [a="b"c"]    ← invalid CSS
+[a="b\"c"]  { c: d }   // dart: [a='b"c']   sasso: [a="b\"c"]   ← cosmetic
+[a='b\'c']  { c: d }   // dart: [a="b'c"]   sasso: [a="b\'c"]   ← cosmetic
+[a="b\\c"]  { c: d }   // dart: [a=b\\c]     sasso: [a="b\\c"]   ← cosmetic
 ```
 
 The first row silently corrupts the selector: a browser reads `[a="b"` and then
-garbage. `[a="b'c"]`, `[a="b c"]`, `[a="b"]` and `[a='b']` all already match.
+garbage. `[a="b'c"]`, `[a="b c"]`, `[a="b"]` and `[a='plain']` already match.
 
 ### 1.2 An interpolated at-rule name loses a space when compressed
 
@@ -162,13 +166,13 @@ programs; only what it prints differs.
 
 | input | dart-sass 1.104.1 | sasso |
 |---|---|---|
-| `red(#abcdef, 1)` | the arity error alone | the arity error **plus** a `[global-builtin]` deprecation |
-| `string.index("abc" "b", "x")` | `$string: ("abc" "b") is not a string.` | drops the parentheses |
-| a stray `}` | `unmatched "}".` | `unexpected "}"` |
-| `p > { &.x { a: b } }` ([#66](https://github.com/momiji-rs/sasso/issues/66)) | draws two spans (`outer selector` / `parent selector`) | one span |
-| `Missing argument $x.` where the parameter was written with surrounding space | takes the name from the parameter's own span text | normalises it |
-| any `.sass` span crossing a CRLF line ending | correct | one byte short per CRLF |
-| every builtin arity/missing-argument error ([#66](https://github.com/momiji-rs/sasso/issues/66)) | two frames: the invocation, then the declaration | one frame |
+| `string.index("abc" "b", "x")` | `$string: ("abc" "b") is not a string.` | `$string: "abc" "b" is not a string.` |
+| a stray `}` after a complete rule | `unmatched "}".` | `unexpected "}"` |
+| `red(#abcdef, 1)` | `Only 1 argument allowed, but 2 were passed.` | the same error, preceded by a `[global-builtin]` deprecation warning |
+| `@mixin m($x )` included with no argument | `Missing argument $x .` — dart takes the name from the parameter's own span text, which swallowed the trailing space | `Missing argument $x.` |
+
+The three below are classes rather than single inputs, so each gets its own
+example.
 
 ### The nine removed `sass:color` members ([#65](https://github.com/momiji-rs/sasso/issues/65))
 
@@ -200,20 +204,79 @@ not stand in for the rest: `opacify`/`fade-in` suggest `$alpha: <amount>`,
 lists each with the exact shape, including the details that are easy to get
 wrong (the negation is textual, and no unit conversion happens).
 
-### Two-frame messages ([#66](https://github.com/momiji-rs/sasso/issues/66))
+### Two-span messages ([#66](https://github.com/momiji-rs/sasso/issues/66))
 
-The `p > { &.x }` row and the built-in arity row above share a cause: sasso has
-no dual-span diagnostic renderer, so any message dart draws with two frames is
-drawn with one. dart's `p > { &.x }` error, for instance:
+sasso *does* have the two-frame renderer — a user-defined callable's arity error
+draws the declaration and the invocation exactly as dart does. Two shapes do not
+use it.
+
+**A labelled second span on the same line.** dart marks the two halves of the
+parent-selector error separately; sasso draws one unlabelled span:
+
+```scss
+p > { &.x { a: b } }
+```
 
 ```
-Error: Selector "p >" can't be used as a parent in a compound selector.
-  ╷
-1 │ p > { &.x { a: b } }
-  │ ^^^ outer selector
-  │       ━ parent selector
+dart-sass 1.104.1:                          sasso:
+Error: Selector "p >" can't be used …       Error: Selector "p >" can't be used …
+  ╷                                           ╷
+1 │ p > { &.x { a: b } }                     1 │ p > { &.x { a: b } }
+  │ ^^^ outer selector                         │ ^^^
+  │       ━ parent selector                    ╵
   ╵
 ```
+
+**A declaration frame in another file, for a BUILT-IN.** dart shows where the
+built-in is declared; sasso prints only the invocation, because it has no source
+text for `sass:color` to point at:
+
+```scss
+@use "sass:color";
+.a { b: color.lighten(#abcdef); }
+```
+
+```
+dart-sass 1.104.1:
+Error: Missing argument $amount.
+  ┌──> t.scss
+2 │ .a { b: color.lighten(#abcdef); }
+  │         ^^^^^^^^^^^^^^^^^^^^^^ invocation
+  ╵
+  ┌──> sass:color
+1 │ @function lighten($color, $amount) {
+  │           ━━━━━━━━━━━━━━━━━━━━━━━━ declaration
+  ╵
+
+sasso: the first frame only.
+```
+
+The message text itself matches (#56, #58).
+
+### A multi-line span in a CRLF `.sass` file is one column long
+
+Every `.sass` span that crosses a line ending is one byte short per CRLF,
+because the transpiler normalises `\r\n` before the spans are taken. It is only
+visible where a span covers more than one line:
+
+```sass
+@mixin m($a, $b)
+  x: $a
+
+.a
+  @include m(1,
+    2,
+    3)
+```
+
+Saved with CRLF endings, the invocation's closing marker lands a column late:
+
+```
+dart-sass 1.104.1:        sasso:
+    │ └─── invocation         │ └────^ invocation
+```
+
+With LF endings the same file matches exactly.
 
 ## 4. Module member enumeration ([#64](https://github.com/momiji-rs/sasso/issues/64))
 
