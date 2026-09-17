@@ -1396,6 +1396,23 @@ fn at_mixin_include_content() {
 }
 
 #[test]
+fn a_nested_declaration_sees_its_blocks_later_siblings() {
+    // A block's function/mixin frame is SHARED with the closure of every
+    // callable declared in it, so a callable can name a sibling written after
+    // it (dart-sass `Environment.closure()`). Both cases fail if a declaration
+    // captures a snapshot of the frame instead.
+    assert_eq!(
+        css(".a {\n  @function first($n) { @return second($n) + 1; }\n  @function second($n) { @return $n * 2; }\n  order: first(3);\n}"),
+        ".a {\n  order: 7;\n}\n"
+    );
+    // Mutual recursion between two mixins declared in a style rule.
+    assert_eq!(
+        css(".b {\n  @mixin ping($n) { @if $n > 0 { @include pong($n - 1); } @else { done: true; } }\n  @mixin pong($n) { @include ping($n); }\n  @include ping(3);\n}"),
+        ".b {\n  done: true;\n}\n"
+    );
+}
+
+#[test]
 fn undefined_variable_is_an_error() {
     let err = compile(".a { color: $missing; }", &Options::default()).unwrap_err();
     assert!(err.message.contains("Undefined variable"));

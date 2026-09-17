@@ -149,6 +149,36 @@ fn new_fn_scope() -> FnScope {
     std::rc::Rc::new(std::cell::RefCell::new(HashMap::default()))
 }
 
+/// One frame of the function or mixin chain, EMPTY until something is defined
+/// in it. Nearly every block is empty: a `@function` or `@mixin` is written at
+/// the top level of a file or a mixin body, while the blocks that push a frame
+/// are style rules and control flow, which almost never declare one. `None`
+/// says "no definitions here" without paying for a table to hold them.
+///
+/// The frame is materialized on the two events that can make it observable
+/// beyond the current block — a definition landing in it
+/// ([`Evaluator::define_function`]) and the chain being closed over by a
+/// callable or a `@content` block — so a materialized frame is always the
+/// SHARED `Rc` the chain and every closure over it see, exactly as an eagerly
+/// allocated one was (see [`materialize_fn_frames`]).
+pub(crate) type FnFrame = Option<FnScope>;
+
+/// Give every frame of a function or mixin chain a table, so the chain can be
+/// cloned into a lexical closure.
+///
+/// A closure over the chain (a callable's capture, a `@content` block's call-site
+/// snapshot) does not copy the frames — it shares them, so a definition written
+/// into a frame afterwards is visible through both. A cloned `None` would share
+/// nothing: each side would materialize its own table on its next definition and
+/// the other would never see it. Materializing first keeps the sharing that an
+/// eagerly allocated frame had, and costs an allocation only for frames that
+/// went unused up to this point.
+fn materialize_fn_frames(chain: &mut [FnFrame]) {
+    for frame in chain {
+        frame.get_or_insert_with(new_fn_scope);
+    }
+}
+
 /// The `@use` namespace tables visible at a callable's definition site.
 /// dart's `Environment.closure()` carries them with the rest of the lexical
 /// environment: a callable inlined by `@import` must resolve `list.length()`
@@ -192,8 +222,8 @@ pub(crate) struct UserCallable {
     /// environment).
     pub env_spans: Vec<SpanScope>,
     pub env_semi: Vec<bool>,
-    pub env_fns: Vec<FnScope>,
-    pub env_mixins: Vec<FnScope>,
+    pub env_fns: Vec<FnFrame>,
+    pub env_mixins: Vec<FnFrame>,
     pub env_modules: EnvModules,
 }
 
@@ -920,9 +950,10 @@ pub(crate) struct Evaluator<'a> {
     /// User function/mixin scope chains, parallel to `scopes` (dart's
     /// `Environment._functions`/`_mixins`): a definition always lands in the
     /// innermost frame, so a nested `@function`/`@mixin` shadows an outer one
-    /// only within its block.
-    functions: Vec<FnScope>,
-    mixins: Vec<FnScope>,
+    /// only within its block. A frame holds no table until it has something to
+    /// put in it ([`FnFrame`]).
+    functions: Vec<FnFrame>,
+    mixins: Vec<FnFrame>,
     /// Stack of `@content` blocks, one per active `@include`.
     content_stack: Vec<Option<ContentBlock>>,
     /// Whether we are *directly* executing a mixin body (dart-sass `_inMixin`).
@@ -1346,8 +1377,8 @@ struct SavedModuleEnv {
     /// Definition spans parallel to `scopes` (source-map only).
     var_spans: Vec<SpanScope>,
     scope_semi_global: Vec<bool>,
-    functions: Vec<FnScope>,
-    mixins: Vec<FnScope>,
+    functions: Vec<FnFrame>,
+    mixins: Vec<FnFrame>,
     used_modules: HashMap<String, String>,
     star_modules: Vec<String>,
     used_user_modules: HashMap<String, Rc<Module>>,
@@ -1501,8 +1532,8 @@ impl<'a> Evaluator<'a> {
             loading: Vec::new(),
             import_cache: HashMap::default(),
             current_url_stamp: 0,
-            functions: vec![new_fn_scope()],
-            mixins: vec![new_fn_scope()],
+            functions: vec![None],
+            mixins: vec![None],
             content_stack: Vec::new(),
             in_mixin: Vec::new(),
             media_queries: Vec::new(),
