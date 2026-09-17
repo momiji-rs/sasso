@@ -1103,7 +1103,21 @@ pub(crate) struct Evaluator<'a> {
     /// identity because one span can carry two different warnings of the same
     /// id: `call(get-function("percentage"))` is `[global-builtin]` twice, once
     /// naming `meta.call` and once `math.percentage`, and dart prints both.
-    deprecations_seen: std::collections::HashSet<(&'static str, String, String, usize, usize)>,
+    deprecations_seen: crate::fxhash::FxHashSet<(&'static str, String, String, usize, usize)>,
+    /// Memo over deprecation PROBES: the material a call site would build a
+    /// `Deprecation` from, so a repeat can skip the whole path. Sound only
+    /// because the dedup insert at [`Self::emit_deprecation`] precedes the
+    /// per-id cap: a repeat of an already-seen key is a TOTAL no-op there (it
+    /// does not even increment `deprecations_omitted`), so skipping it early
+    /// cannot change stderr. Keyed by a fingerprint; the stored material is
+    /// compared with `==` on a hit, so a 64-bit collision only costs the slow
+    /// path.
+    ///
+    /// Bounded in BOTH directions, because it retains what it was asked about:
+    /// [`Self::DEP_MEMO_MAX`] caps how many entries there can be, and
+    /// [`Self::probe_arg_memoizable`] caps what one entry can hold. No `Value`
+    /// graph ever enters it.
+    dep_memo: HashMap<(u32, u32, u32, u64), DepProbe>,
     /// Small interned ids for source files, stamped into [`SrcLines`] so the
     /// serializer's trailing-comment rule can require same-file adjacency and
     /// the source map can name the file. Keyed by the file's CANONICAL URL —
@@ -1441,7 +1455,8 @@ impl<'a> Evaluator<'a> {
             current_source: source,
             deprecations_shown: HashMap::default(),
             deprecations_omitted: 0,
-            deprecations_seen: std::collections::HashSet::new(),
+            deprecations_seen: crate::fxhash::FxHashSet::default(),
+            dep_memo: HashMap::default(),
             file_ids: HashMap::default(),
             file_texts,
             file_map_urls: HashMap::default(),
@@ -1858,6 +1873,223 @@ impl<'a> Evaluator<'a> {
         out
     }
 
+    /// dart's `quietDeps`: the second of the two side-effect-free rejections at
+    /// the top of [`Self::emit_deprecation`], hoisted verbatim so a caller can
+    /// skip building anything at all. Must stay byte-for-byte that check, and
+    /// side-effect-free.
+    ///
+    /// The FIRST of the two, `diag_enabled`, is a field test and belongs at the
+    /// top of a caller's gates. This one does not: with `quiet_deps` set it
+    /// pauses the arena and takes a mutex (see
+    /// [`crate::DependencySet::is_dependency`]), so it goes last among the
+    /// cheap gates — after the name lookups that reject nearly every call — and
+    /// a caller that asks it on every function call has made a compile with
+    /// `--quiet-deps` measurably slower than one without.
+    ///
+    /// It must still be asked ABOVE [`Self::dep_memo`], not below it. `quietDeps`
+    /// keys on the CANONICAL path, and the memo's key carries only the display
+    /// URL, which two canonical files may share: a probe quieted in a dependency
+    /// could otherwise answer for the same span in a file that is not one, and
+    /// drop its warning.
+    fn deprecation_quieted(&self) -> bool {
+        match self.options.quiet_deps {
+            Some(deps) => deps.is_dependency(self.current_path()),
+            None => false,
+        }
+    }
+
+    /// Ceiling on [`Self::dep_memo`]. A sheet can probe one span with
+    /// unboundedly many distinct VALUES, and such probes do not all leave a
+    /// matching entry in `deprecations_seen` to bound them against: `@each $c
+    /// in <n colours> { whiteness($c) }` records one probe per colour and emits
+    /// nothing, because the bare spelling is rejected *below* the memo. Past
+    /// the ceiling the memo simply stops learning — every further probe takes
+    /// the same path it took before this memo existed, which is slower and
+    /// byte-identical. The largest sheet in `bench/corpus` peaks at 70 entries
+    /// (measured 2026-09-16), so this is ~58x observed usage.
+    ///
+    /// The count is only half a bound; [`Self::probe_arg_memoizable`] is the
+    /// other half, and without it this number would mean nothing. With both, a
+    /// full memo costs about 645 bytes an entry — measured 2026-09-16 on a
+    /// generated sheet with 4000 distinct probe sites, +2.46 MB of peak RSS
+    /// under the CLI's bump arena, which never reuses a freed block — so ~2.6
+    /// MB at the ceiling, against a ~25 MB peak for the largest bench sheet.
+    const DEP_MEMO_MAX: usize = 4096;
+
+    /// Whether this exact deprecation probe has already run to completion at
+    /// this exact place, making a second run a no-op (see [`Self::dep_memo`]).
+    /// A miss records the material and returns `false`; a fingerprint collision
+    /// whose stored material differs also returns `false`, so the exact path
+    /// still runs.
+    ///
+    /// The `==` verify is UNCONDITIONAL, not a `debug_assert`: a hash collision
+    /// would otherwise drop a warning, and a dropped warning is a parity break
+    /// that no release build should be able to reach. The cost of being wrong
+    /// is therefore only speed — a colliding probe takes the slow path, and is
+    /// not re-memoised either, so it keeps taking it. The behaviour this
+    /// protects is locked from the outside as well: one span reached with two
+    /// different colours must warn twice, with a different suggestion each time
+    /// (`tests/diagnostics.rs`, `a_legacy_color_function_suggests_its_replacement`).
+    fn probe_already_done(
+        &mut self,
+        color_path: bool,
+        name: &str,
+        module: Option<&str>,
+        pos: Pos,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+    ) -> bool {
+        // A shape this memo must not retain is not memoised at all: no entry,
+        // no fingerprint, straight down the path it took before the memo
+        // existed. See [`Self::probe_arg_memoizable`].
+        if !pos_args.iter().all(Self::probe_arg_memoizable)
+            || !named.iter().all(|(_, v)| Self::probe_arg_memoizable(v))
+        {
+            return false;
+        }
+        use std::hash::Hasher;
+        let mut h = crate::fxhash::FxHasher::default();
+        // The URL's CONTENTS, not merely its length. A key whose stored material
+        // turns out to differ is answered `false` and NOT overwritten, so two
+        // files whose display URLs are the same length — `src/_a.scss` and
+        // `src/_b.scss` — would otherwise fight over one key at the same span,
+        // and every repeat in whichever lost would pay the slow path for the
+        // rest of the compile.
+        h.write(self.current_url.as_bytes());
+        h.write_u8(0xff);
+        h.write(name.as_bytes());
+        match module {
+            Some(m) => {
+                h.write_u8(1);
+                h.write(m.as_bytes());
+            }
+            None => h.write_u8(0),
+        }
+        h.write_u8(0xfe);
+        for v in pos_args {
+            Self::fingerprint_value(&mut h, v);
+        }
+        h.write_u8(0xfd);
+        for (n, v) in named {
+            h.write(n.as_bytes());
+            Self::fingerprint_value(&mut h, v);
+        }
+        let key = (color_path as u32, pos.line as u32, pos.col as u32, h.finish());
+        if let Some(prev) = self.dep_memo.get(&key) {
+            return prev.url == self.current_url
+                && prev.name == name
+                && prev.module.as_deref() == module
+                && prev.pos_args == *pos_args
+                && prev.named == *named;
+        }
+        if self.dep_memo.len() < Self::DEP_MEMO_MAX {
+            self.dep_memo.insert(
+                key,
+                DepProbe {
+                    url: self.current_url.clone(),
+                    name: name.to_string(),
+                    module: module.map(str::to_string),
+                    pos_args: pos_args.to_vec(),
+                    named: named.to_vec(),
+                },
+            );
+        }
+        false
+    }
+
+    /// Whether an argument of this shape may enter [`Self::dep_memo`] at all.
+    ///
+    /// The memo RETAINS its arguments, because that is what makes the `==`
+    /// verify possible — so an entry count is only a bound if one entry is
+    /// bounded too. `Calc`, `Slash`, `Function` and `Mixin` clone their whole
+    /// tree, a `List` clones the keyword map of an argument list, and a `Number`
+    /// clones its unit lists when they are complex. One large value reached from
+    /// many call sites would then be retained once per site: measured
+    /// 2026-09-16, a sheet with 4000 `saturate($c)` sites where `$c` is a
+    /// 4000-term `calc()` cost the memo **1.19 GB** on top of the 1.80 GB that
+    /// sheet already costs without it. `Str` and `Map` clone an `Rc` and so
+    /// amplify nothing, but they are refused with the rest: admitting them buys
+    /// no speed, and the rule is easier to keep true when it is "only what the
+    /// suggestion tables read".
+    ///
+    /// Which is the reason refusing costs nothing. Every probe reaches here only
+    /// after the call itself SUCCEEDED, and
+    /// [`crate::builtins::color_function_suggestions`] reads exactly a `Color`
+    /// and a `Number`: a channel getter (`red`, `whiteness`, …) has no plain-CSS
+    /// overload, so a non-`Color` argument fails the call before this point, and
+    /// a legacy adjuster (`saturate($c)`) that does pass through as CSS yields
+    /// no suggestion. A refused probe is therefore one that had no warning to
+    /// skip. The `[global-builtin]` probes, which are the bulk of the win, pass
+    /// no arguments at all and are unaffected.
+    ///
+    /// The match is exhaustive ON PURPOSE: a new [`Value`] variant must not
+    /// default into a memo that retains it, so adding one has to fail the build
+    /// here.
+    fn probe_arg_memoizable(v: &Value) -> bool {
+        match v {
+            // A simple unit is one `String` from the call's own spelling.
+            Value::Number(n) => !n.has_complex_units(),
+            Value::Color(_) => true,
+            Value::Str(_)
+            | Value::List(_)
+            | Value::Map(_)
+            | Value::Bool(_)
+            | Value::Null
+            | Value::Slash(_, _)
+            | Value::Calc(_)
+            | Value::Function(_)
+            | Value::Mixin(_) => false,
+        }
+    }
+
+    /// Fold a value into a probe fingerprint. Deliberately COARSE for the
+    /// composite variants: the `==` verify in [`Self::probe_already_done`] is
+    /// what makes the memo exact, and a coarse fingerprint only ever costs a
+    /// trip down the slow path. Numbers are hashed by `to_bits()` (not `==` on
+    /// the float) WITH their unit, because `red(1px)`, `red(1)` and
+    /// `red(1.0000000000000002)` render three different `Recommendation:` lines.
+    ///
+    /// Only `Number` and `Color` can reach it, since
+    /// [`Self::probe_arg_memoizable`] refuses the rest before any hashing. The
+    /// other arms stay because coarse-but-verified is the safe default: widening
+    /// that gate would cost hash quality here, never correctness.
+    fn fingerprint_value(h: &mut crate::fxhash::FxHasher, v: &Value) {
+        use std::hash::{Hash, Hasher};
+        std::mem::discriminant(v).hash(h);
+        match v {
+            Value::Number(n) => {
+                h.write_u64(n.value.to_bits());
+                h.write(n.unit().as_bytes());
+            }
+            Value::Color(c) => {
+                h.write_u64(c.r.to_bits());
+                h.write_u64(c.g.to_bits());
+                h.write_u64(c.b.to_bits());
+                h.write_u64(c.a.to_bits());
+                match &c.modern {
+                    None => h.write_u8(0),
+                    Some(m) => {
+                        h.write_u8(1);
+                        std::mem::discriminant(&m.space).hash(h);
+                        for ch in m.channels.iter().chain(std::iter::once(&m.alpha)) {
+                            match ch {
+                                Some(x) => h.write_u64(x.to_bits()),
+                                None => h.write_u8(0),
+                            }
+                        }
+                    }
+                }
+            }
+            Value::Str(s) => {
+                h.write(s.text.as_bytes());
+                h.write_u8(s.quoted as u8);
+            }
+            Value::Bool(b) => h.write_u8(*b as u8),
+            Value::Null => {}
+            _ => {}
+        }
+    }
+
     /// Emit a deprecation warning at `pos` (caret length `len`): the header
     /// block + a snippet pointing at the deprecated construct + a 4-space stack
     /// trace + a trailing blank line. Honours dart-sass's per-location dedup and
@@ -1878,13 +2110,37 @@ impl<'a> Evaluator<'a> {
             Cow::Borrowed(name)
         };
         let name = canonical.as_ref();
-        if module.is_none() {
-            if let Some(replacement) = crate::builtins::global_builtin_replacement(name) {
-                let dep = crate::deprecation::Deprecation::global_builtin(replacement);
-                self.emit_deprecation(&dep, pos, len);
-            }
+        // Cheapest gate first: this runs on EVERY call, and all but a handful of
+        // them deprecate nothing. `global_builtin_replacement` is still asked
+        // about the already-canonicalised name, exactly as before (it
+        // canonicalises internally too), and the emission ORDER below is
+        // unchanged: global-builtin, then feature-exists.
+        if !self.diag_enabled() {
+            return;
         }
-        if name == "feature-exists" && module.map_or(true, |m| m == "meta") {
+        let replacement = if module.is_none() {
+            crate::builtins::global_builtin_replacement(name)
+        } else {
+            None
+        };
+        let feature_exists = name == "feature-exists" && module.map_or(true, |m| m == "meta");
+        if replacement.is_none() && !feature_exists {
+            return;
+        }
+        // Only now the gate that can take a lock: a name nothing deprecates has
+        // already gone home, so `--quiet-deps` costs a mutex per WARNING, as it
+        // did before this hoist, not one per call.
+        if self.deprecation_quieted() {
+            return;
+        }
+        if self.probe_already_done(false, name, module, pos, &[], &[]) {
+            return;
+        }
+        if let Some(replacement) = replacement {
+            let dep = crate::deprecation::Deprecation::global_builtin(replacement);
+            self.emit_deprecation(&dep, pos, len);
+        }
+        if feature_exists {
             self.emit_deprecation(&crate::deprecation::Deprecation::feature_exists(), pos, len);
         }
     }
@@ -1907,6 +2163,24 @@ impl<'a> Evaluator<'a> {
         // Only `sass:color` has these members; every other module's call is
         // someone else's business.
         if module.is_some_and(|m| m != "color") {
+            return;
+        }
+        // Cheap gates before any colour maths, cheapest first: nothing
+        // downstream of here has a side effect, so a field test and two name
+        // lookups can run ahead of it, and a probe already made at this span
+        // with these VALUES is a no-op (see `dep_memo`). `deprecation_quieted`
+        // sits after the name gate because it can take a lock, and above the
+        // memo because it reads the canonical path the memo's key omits.
+        if !self.diag_enabled() {
+            return;
+        }
+        if !crate::builtins::color_function_deprecates(name) {
+            return;
+        }
+        if self.deprecation_quieted() {
+            return;
+        }
+        if self.probe_already_done(true, name, module, pos, pos_args, named) {
             return;
         }
         // And a bare name that is no global built-in dispatched as a plain CSS
@@ -2007,6 +2281,18 @@ impl<'a> Evaluator<'a> {
             "{} repetitive deprecation warnings omitted.",
             self.deprecations_omitted
         );
+        // The second line is dart's, copied verbatim, and it advertises a flag
+        // sasso does not have. That is deliberate rather than an oversight: the
+        // footer is part of the stderr parity contract (locked by
+        // `tests/fixtures/diagnostics/deprecation-cap-{omitted,per-id}.stderr`),
+        // so it says what dart says. In dart `--verbose` lifts the per-id cap
+        // of 5 that produced this count, and drops this footer along with it --
+        // on `deprecation-cap-omitted.scss`, dart-sass 1.103.1 prints 5
+        // warnings plus this line without the flag and 8 warnings with no
+        // footer under it (verified 2026-09-16). sasso implements only the
+        // capped half, so the advice here is unreachable, not wrong. Adding the
+        // flag is a CLI feature with fixtures of its own, not a fix to this
+        // line.
         let formatted = format!("WARNING: {msg}\nRun in verbose mode to see all warnings.\n");
         self.emit_diag(crate::WarnEvent {
             kind: crate::WarnKind::Warn,
@@ -7727,5 +8013,93 @@ fn serialize_if_value(v: &Value) -> Result<String, Error> {
             ))),
             None => Ok(other.to_css(false)),
         },
+    }
+}
+
+/// The material one deprecation probe was made from, retained by
+/// [`Evaluator::dep_memo`] so a fingerprint hit can be VERIFIED with `==`
+/// rather than trusted. Lives on the evaluator and dies with it, so nothing
+/// here outlives the arena scope of a single compile.
+///
+/// Every field is a bounded constant plus the current file's URL:
+/// [`Evaluator::probe_arg_memoizable`] is what keeps `pos_args` and `named` from
+/// holding a `Value` graph, so this struct's size does not depend on the size of
+/// the sheet that produced it.
+struct DepProbe {
+    url: String,
+    name: String,
+    module: Option<String>,
+    pos_args: Vec<Value>,
+    named: Vec<(String, Value)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The memo's retention bound. [`Evaluator::probe_arg_memoizable`]'s match is
+    /// exhaustive, so the compiler already forces a new [`Value`] variant to be
+    /// classified; what this locks is the ANSWER, because the answer that costs
+    /// memory — admit it, and retain whatever graph it points at — is the one a
+    /// hurried patch reaches for. Every shape is written out, so widening the
+    /// rule has to be a visible edit here rather than a silent change in
+    /// footprint.
+    #[test]
+    fn the_probe_memo_admits_only_bounded_argument_shapes() {
+        // What `color_function_suggestions` actually reads, and nothing else.
+        let admitted = vec![
+            Value::Number(Number::unitless(1.0)),
+            Value::Number(Number::with_unit(10.0, "%")),
+            Value::Color(crate::value::Color::rgb(171.0, 205.0, 239.0, 1.0)),
+        ];
+        for v in &admitted {
+            assert!(Evaluator::probe_arg_memoizable(v), "should be memoizable: {v:?}");
+        }
+
+        let refused = vec![
+            // Simple units are one `String`; a complex unit list is two `Vec`s
+            // of them, and it clones deeply.
+            Value::Number(Number::with_units(
+                1.0,
+                vec!["px".to_string(), "px".to_string()],
+                Vec::new(),
+            )),
+            Value::Str(SassStr {
+                text: "x".into(),
+                quoted: true,
+            }),
+            Value::List(List::new(Vec::<Value>::new(), ListSep::Space, false)),
+            Value::Map(Map::new(Vec::new())),
+            Value::Bool(true),
+            Value::Null,
+            Value::Slash(Number::unitless(1.0), "1/2".to_string()),
+            Value::Calc(CalcNode::Str("var(--x)".to_string())),
+            Value::Function(SassFunction {
+                name: "f".to_string(),
+                css: false,
+                module: None,
+                user: None,
+            }),
+            Value::Mixin(Box::new(SassMixin {
+                name: "m".to_string(),
+                user: None,
+                module: None,
+            })),
+        ];
+        for v in &refused {
+            assert!(
+                !Evaluator::probe_arg_memoizable(v),
+                "should not be memoizable: {v:?}"
+            );
+        }
+
+        // The two lists together are the whole enum, so a new variant cannot be
+        // added without landing on one side of it or the other.
+        let variants: std::collections::HashSet<_> = admitted
+            .iter()
+            .chain(refused.iter())
+            .map(std::mem::discriminant)
+            .collect();
+        assert_eq!(variants.len(), 11, "one case per `Value` variant");
     }
 }
