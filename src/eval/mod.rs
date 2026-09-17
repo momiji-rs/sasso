@@ -481,8 +481,8 @@ enum MemberKind {
 /// bodies, and every nested-block construct (conditionals, loops, mixins).
 /// The enclosing rule's selector list as a sink sees it. A style rule owns a
 /// shared handle it can hand to every block it flushes for the price of a
-/// refcount; the `@media`-inside-a-rule wrap re-emits its enclosing `parents`,
-/// which it only ever has as a slice.
+/// refcount; a sink that only has the enclosing selectors as a slice copies
+/// them once per block instead.
 enum SinkSelectors<'a> {
     Shared(&'a Rc<Vec<String>>),
     Borrowed(&'a [String]),
