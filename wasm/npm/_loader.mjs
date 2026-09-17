@@ -28,7 +28,8 @@
 // importer chain in `_importer.mjs` (user importers + a Node-fs importer for
 // `loadPaths`/relative loads) and record `loadedUrls`.
 
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 // Default import, NOT a named one: `availableParallelism` only exists on
 // Node >= 18.14, and a missing named export fails ESM *linking* — the whole
 // package (sync APIs included) would throw at import time on older Nodes.
@@ -817,14 +818,11 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
   function compile(path, options = {}) {
     const fsPath = toFsPath(path);
     const source = readFileSync(fsPath, "utf8");
-    let realPath = fsPath;
-    try {
-      realPath = realpathSync(fsPath);
-    } catch {
-      // keep fsPath if realpath fails
-    }
-    const entryHref = toFileUrl(realPath).href;
-    const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(realPath);
+    // The entry keeps the path it was NAMED by (absolute and normalized, but
+    // symlinks intact), like every other load — see `canonicalHrefFor`.
+    const entryPath = resolvePath(fsPath);
+    const entryHref = toFileUrl(entryPath).href;
+    const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(entryPath);
     const chain = buildChain(options, false);
     const callbacks = registerFunctions(syncInstance(), options);
     const prevChain = syncChain;
@@ -863,14 +861,9 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     return withEngine(async (engine) => {
       const fsPath = toFsPath(path);
       const source = readFileSync(fsPath, "utf8");
-      let realPath = fsPath;
-      try {
-        realPath = realpathSync(fsPath);
-      } catch {
-        // keep fsPath
-      }
-      const entryHref = toFileUrl(realPath).href;
-      const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(realPath);
+      const entryPath = resolvePath(fsPath);
+      const entryHref = toFileUrl(entryPath).href;
+      const syntax = options.syntax != null ? syntaxCode(options.syntax) : syntaxForPath(entryPath);
       const chain = buildChain(options, true);
       engine.functions = registerFunctions(engine.ex, options);
       engine.chain = chain;

@@ -25,7 +25,7 @@
 // delivers a plain value without suspending (`_loader.mjs` `asyncHostFn`), so
 // keeping sync resolutions synchronous is a performance contract, not style.
 
-import { existsSync, statSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, statSync, readFileSync } from "node:fs";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import * as nodePath from "node:path";
 
@@ -155,14 +155,17 @@ function resolveInBase(base, path, allowImportOnly) {
 }
 
 /** Canonical key for a resolved path: its realpath as a `file:` URL href. */
+/**
+ * The canonical URL for a resolved path: absolute and lexically normalized, so
+ * two spellings of one file (`a.scss`, `./a.scss`, `dir/../a.scss`) are one
+ * module — but symlinks are NOT resolved, exactly as `absolute_normalized` in
+ * ../../src/importer.rs leaves them. dart-sass keeps the path a file was
+ * REACHED through: a source map then names the link (a pnpm
+ * `node_modules/<pkg>` path, not its `.pnpm` target), and a file reached
+ * through two links is two modules.
+ */
 function canonicalHrefFor(path) {
-  let real = path;
-  try {
-    real = realpathSync(path);
-  } catch {
-    // keep the un-canonicalized path (mirrors src/importer.rs's fallback)
-  }
-  return pathToFileURL(real).href;
+  return pathToFileURL(nodePath.resolve(path)).href;
 }
 
 /** Read a resolved file as an importer result (`null` if it vanished). */

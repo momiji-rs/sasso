@@ -183,9 +183,9 @@ function parseArgs(argv) {
       else if (a.startsWith("-j") && a.length > 2) inline = a.slice(2);
       // Consumed and ignored (this CLI is sequential), but validated: the
       // native CLI rejects a non-positive value rather than compiling.
-      positiveInt("--jobs", takeValue(inline));
+      positiveInt("--jobs", takeValue(inline), USIZE_MAX);
     } else if (a === "--loop" || a.startsWith("--loop=")) {
-      opts.loop = positiveInt("--loop", takeValue(a.startsWith("--loop=") ? a.slice(7) : undefined));
+      opts.loop = positiveInt("--loop", takeValue(a.startsWith("--loop=") ? a.slice(7) : undefined), U32_MAX);
     } else if (a === "--source-map-urls" || a.startsWith("--source-map-urls=")) {
       const inline = a.startsWith("--source-map-urls=") ? a.slice(18) : undefined;
       const v = takeValue(inline);
@@ -219,17 +219,26 @@ function parseArgs(argv) {
 
 /**
  * A positive integer, or the native CLI's rejection of what was passed. The
- * token itself has to be a decimal integer, as Rust's `parse::<u32>` requires:
+ * token itself has to be a decimal integer, as Rust's `parse` requires:
  * `Number()` would take `1.0`, `1e3`, `0x2` and whitespace-padded values that
- * the native CLI refuses (`+3` and `03` it accepts, and so does this).
+ * the native CLI refuses (`+3` and `03` it accepts, and so does this). `max` is
+ * the Rust integer type the native parser uses, so a value that overflows there
+ * is rejected here too rather than starting work nobody can wait for —
+ * `--loop=4294967296` overflows a `u32` and would otherwise run four billion
+ * compiles.
  */
-function positiveInt(flag, value) {
-  const n = /^\+?[0-9]+$/.test(value) ? Number(value) : NaN;
-  if (!Number.isSafeInteger(n) || n < 1) {
+function positiveInt(flag, value, max) {
+  const digits = /^\+?[0-9]+$/.test(value);
+  const n = digits ? BigInt(value) : 0n;
+  if (!digits || n < 1n || n > max) {
     fail(`error: ${flag} expects a positive integer (got ${JSON.stringify(value)})`);
   }
-  return n;
+  return Number(n);
 }
+
+/** `u32::MAX` and `usize::MAX`, the widths `parse_loop` and `parse_jobs` use. */
+const U32_MAX = 4294967295n;
+const USIZE_MAX = 18446744073709551615n;
 
 /**
  * The combinations the native CLI rejects before compiling anything (dart-sass
@@ -239,45 +248,42 @@ function positiveInt(flag, value) {
  * with absolute sources.
  */
 function validate(opts) {
-  const pairs = opts.positionals.some((a) => colonIndex(a) >= 0);
-  if (opts.output !== undefined) {
-    if (pairs) fail('error: --output may not be used with ":" arguments.');
-    if (opts.positionals.length > 1) fail("error: --output requires a single input");
-  }
-  if (opts.stdin) {
-    if (pairs) fail('error: --stdin may not be used with ":" arguments.');
-    if (opts.positionals.length > 1) fail("error: Only one argument is allowed with --stdin.");
-  } else if (!pairs && opts.positionals.length > 2) {
-    fail("error: Only two positional args may be passed.");
-  }
-  // A directory may not be the OUTPUT, however it was named — `--output`, the
-  // second positional, or the one positional `--stdin` takes. (The `--stdin`
-  // path does not go through `parseJobs`, so checking there alone left it to
-  // fail as an uncaught EISDIR from `writeFileSync`.)
-  if (!pairs) {
-    const named = opts.output !== undefined ? opts.output : opts.positionals[opts.stdin ? 0 : 1];
-    if (named !== undefined && isDirectory(named)) {
-      fail(`error: Directory "${named}" may not be a positional arg.`);
-    }
-  }
-  // Source-map flags need a source map, wherever the CSS goes. (`validate`
-  // used to check only the stdout cases, so a file output accepted and then
-  // ignored them.)
+  const operands = opts.positionals;
+  const pairs = operands.some((a) => colonIndex(a) >= 0);
+
+  // Checked in the native parser's order, so a command line that trips two
+  // rules reports the same one there and here.
   if (opts.sourceMap === false) {
     if (opts.embedSourceMap) fail("error: --embed-source-map isn't allowed with --no-source-map.");
     if (opts.embedSources) fail("error: --embed-sources isn't allowed with --no-source-map.");
     if (opts.sourceMapUrls !== undefined) fail("error: --source-map-urls isn't allowed with --no-source-map.");
   }
+  if (pairs) {
+    if (!operands.every((a) => colonIndex(a) >= 0)) {
+      fail('error: Positional and ":" arguments may not both be used.');
+    }
+    if (opts.stdin) fail('error: --stdin may not be used with ":" arguments.');
+    if (opts.output !== undefined) fail('error: --output may not be used with ":" arguments.');
+  } else if (opts.stdin) {
+    if (operands.length > 1) fail("error: Only one argument is allowed with --stdin.");
+    // With --stdin the single positional IS the output, so naming both it and
+    // --output is the same mistake as `<input> <output> --output`.
+    if (opts.output !== undefined && operands.length > 0) fail("error: --output requires a single input");
+  } else {
+    if (operands.length > 2) fail("error: Only two positional args may be passed.");
+    if (opts.output !== undefined && operands.length > 1) fail("error: --output requires a single input");
+  }
+
+  // The output, however it was named: `--output`, the second positional, or
+  // the one positional `--stdin` takes.
+  const namedOutput = opts.output !== undefined ? opts.output : pairs ? undefined : operands[opts.stdin ? 0 : 1];
   if (opts.loop !== undefined) {
     // --loop measures the compiler, so it compiles to stdout, once per
     // iteration, with no source map to build and no warnings to print.
-    if (pairs || opts.output !== undefined) {
+    if (pairs || namedOutput !== undefined) {
       fail('error: --loop compiles to stdout only (no ":" arguments or --output).');
     }
-    if (!opts.stdin && opts.positionals.length > 1) {
-      fail('error: --loop compiles to stdout only (no ":" arguments or --output).');
-    }
-    if (opts.positionals.length === 1 && !opts.stdin && isDirectory(opts.positionals[0])) {
+    if (!opts.stdin && operands.length === 1 && isDirectory(operands[0])) {
       fail('error: --loop compiles to stdout only (no directories, ":" arguments or --output).');
     }
     if (opts.sourceMap === true || opts.embedSourceMap || opts.embedSources) {
@@ -286,13 +292,17 @@ function validate(opts) {
       );
     }
   }
+  // A directory may not be the OUTPUT. (The `--stdin` path does not go through
+  // `parseJobs`, so checking there alone left it to fail as an uncaught EISDIR
+  // from `writeFileSync`.)
+  if (namedOutput !== undefined && isDirectory(namedOutput)) {
+    fail(`error: Directory "${namedOutput}" may not be a positional arg.`);
+  }
   // A bare directory entry (`sasso src`) compiles to files, not to stdout.
   const toStdout =
     !pairs &&
-    opts.output === undefined &&
-    (opts.stdin
-      ? opts.positionals.length === 0
-      : opts.positionals.length < 2 && !isDirectory(opts.positionals[0] ?? ""));
+    namedOutput === undefined &&
+    (opts.stdin || operands.length === 0 || !isDirectory(operands[0]));
   if (!toStdout) return;
   if (opts.sourceMapUrls === "relative") {
     fail("error: --source-map-urls=relative isn't allowed when printing to stdout.");
@@ -436,10 +446,10 @@ function emit(result, outPath, wantMap, opts, stdinText) {
     // and no `file` field; a file's map is adjusted relative to the `.map`,
     // which sits next to the CSS.
     const mode = outPath ? opts.sourceMapUrls || "relative" : "absolute";
-    // The compiler stamps each source as its REAL path, so the map directory
-    // has to be resolved the same way or `/var` and `/private/var` (macOS)
-    // would produce an eleven-step `../` climb instead of dart's `../in.scss`.
-    const mapDir = outPath ? realPath(dirname(outPath)) : realPath(process.cwd());
+    // Lexical on both sides, as `adjust_sources` is natively: the compiler
+    // stamps each source as the path it was named by, normalized but with its
+    // symlinks intact, so the map mirrors the tree the build actually walked.
+    const mapDir = outPath ? resolve(dirname(outPath)) : process.cwd();
     const sources = adjustSources(result.sourceMap.sources, mapDir, mode, stdinText);
     const file = outPath ? encodeUrlSegment(basename(outPath)) : undefined;
     const json = mapJson(result.sourceMap, sources, file);

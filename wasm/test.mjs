@@ -469,12 +469,27 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 // so the next flag added there fails here until this CLI takes it too.
 {
   const mainRs = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
-  // The parser is one `match a.as_str()` over string literals.
-  const start = mainRs.indexOf("match a.as_str()");
-  assert.ok(start > 0, "drift: found the native CLI's argument match");
-  const body = mainRs.slice(start, start + 8000);
-  const flags = [...new Set([...body.matchAll(/"(--?[a-zA-Z][a-zA-Z-]*)"/g)].map((m) => m[1]))];
+  // Every flag the native parser handles, taken from the parser's own shape —
+  // the `"--x" | "-y" => …` match arms and the `--x=value` forms it strips a
+  // prefix for — rather than from a fixed slice of the file. The first version
+  // of this guard read 8,000 characters after `match a.as_str()`, which would
+  // have quietly stopped covering flags added past the cutoff: a drift guard
+  // that drifts.
+  const found = new Set();
+  for (const line of mainRs.split("\n")) {
+    const arm = /^\s*("-[^"]*"(?:\s*\|\s*"-[^"]*")*)\s*=>/.exec(line);
+    if (arm) for (const m of arm[1].matchAll(/"(-[^"]*)"/g)) found.add(m[1]);
+    for (const m of line.matchAll(/strip_prefix\("(--[a-zA-Z-]+)=/g)) found.add(m[1]);
+  }
+  const flags = [...found];
   assert.ok(flags.length > 25, `drift: extracted a plausible flag set (got ${flags.length})`);
+  // If the extraction itself breaks, the set above goes quietly empty-ish and
+  // every "is it accepted?" probe below passes vacuously. These are flags the
+  // native CLI has had since 0.10.0: their absence means the guard, not the
+  // CLI, is what changed.
+  for (const flag of ["-s", "--style", "-I", "--load-path", "-o", "--output", "--quiet-deps", "--no-css", "--source-map-urls", "--loop", "--jobs", "--stop-on-error", "--embed-source-map", "--no-unicode"]) {
+    assert.ok(found.has(flag), `drift: the extraction still finds ${flag} in src/main.rs`);
+  }
 
   // Flags that take a value, and a value that is valid for each.
   const withValue = {
@@ -780,10 +795,20 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   mkdirSync(join(dir, "partials"), { recursive: true });
   const src = join(dir, "in.scss");
   writeFileSync(src, ".a{b:1}\n");
+  writeFileSync(join(dir, "two.scss"), ".b{c:2}\n");
   writeFileSync(join(dir, "src", "a.scss"), ".x{y:2}\n");
   writeFileSync(join(dir, "partials", "_p.scss"), ".p{q:3}\n");
+  // A timeout, because half of what this block asserts is that the CLI REFUSES
+  // to start work: a count it should have rejected (`--loop=4294967296`) would
+  // otherwise run four billion compiles and wedge the suite instead of failing
+  // it.
   const run = (args, input) =>
-    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { encoding: "utf8", input: input ?? "", cwd: dir });
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], {
+      encoding: "utf8",
+      input: input ?? "",
+      cwd: dir,
+      timeout: 20000,
+    });
   const rejects = (args, wanted) => {
     const r = run(args);
     assert.equal(r.status, 1, `cli: ${args.join(" ")} is rejected`);
@@ -866,7 +891,62 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.match(indented.stdout, /b: 1/, "cli: … and compiles it");
   const notIndented = run(["indented.scss"]);
   assert.equal(notIndented.status, 1, "cli: without --indented the extension decides, and this file is not SCSS");
+  // A count that overflows the Rust integer the native parser uses is a
+  // rejection, not four billion compiles.
+  rejects(["--loop=4294967296", "in.scss"], "--loop expects a positive integer");
+  assert.equal(run(["--jobs=4294967296", "in.scss"]).status, 0, "cli: --jobs is a usize natively, so this fits");
+  // Mixing the two operand forms, and naming the output twice.
+  rejects(["in.scss:out.css", "two.scss"], 'Positional and ":" arguments may not both be used.');
+  rejects(["--stdin", "-o", "a.css", "b.css"], "--output requires a single input");
+  rejects(["--loop", "2", "--stdin", "out.css"], "--loop compiles to stdout only");
   console.log("ok: cli — the argument grammar: arity, pairs, duplicates, `-`, counts, directories, --indented");
+}
+
+// === Phase 3k: symlinks keep the path they were REACHED through ===
+// dart-sass resolves a load lexically and leaves symlinks alone: a map names
+// the link, not its target — a pnpm `node_modules/<pkg>` path rather than the
+// `.pnpm` store it points into, which is what makes such a map navigable. The
+// npm package used to `realpathSync` every entry and every resolved import, so
+// all three of these named the physical file (measured against dart-sass
+// 1.104.1 on 2026-09-17).
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-link-"));
+  mkdirSync(join(dir, "real"), { recursive: true });
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "real", "c.scss"), ".c{d:1}\n");
+  symlinkSync(join(dir, "real"), join(dir, "src", "link"));
+  symlinkSync(join(dir, "real", "c.scss"), join(dir, "linkfile.scss"));
+  const sourcesOf = (mapPath) => JSON.parse(readFileSync(mapPath, "utf8")).sources;
+
+  cli([`${join(dir, "src")}:${join(dir, "out")}`]);
+  assert.deepEqual(
+    sourcesOf(join(dir, "out", "link", "c.css.map")),
+    ["../../src/link/c.scss"],
+    "cli: a directory job through a symlink mirrors the logical tree",
+  );
+  cli([join(dir, "src", "link", "c.scss"), join(dir, "one", "x.css")]);
+  assert.deepEqual(
+    sourcesOf(join(dir, "one", "x.css.map")),
+    ["../src/link/c.scss"],
+    "cli: a file reached through a symlinked directory keeps that path",
+  );
+  cli([join(dir, "linkfile.scss"), join(dir, "two", "y.css")]);
+  assert.deepEqual(
+    sourcesOf(join(dir, "two", "y.css.map")),
+    ["../linkfile.scss"],
+    "cli: a symlinked file keeps its own name",
+  );
+
+  // The JS API answers the same way — this is the loader's rule, not the CLI's.
+  for (const [name, mod] of [["size", size], ["speed", speed]]) {
+    const result = mod.compile(join(dir, "linkfile.scss"), { sourceMap: true });
+    assert.equal(
+      result.loadedUrls[0].href,
+      pathToFileURL(join(dir, "linkfile.scss")).href,
+      `loadedUrls(${name}): a symlinked entry is named by its link`,
+    );
+  }
+  console.log("ok: symlinks — maps and loadedUrls name the path taken, not the target");
 }
 
 // === Phase 3i: --no-unicode, dart's URL encoding, the stdin data: URI ===
