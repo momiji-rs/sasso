@@ -156,11 +156,13 @@ pub(crate) fn is_builtin(name: &str) -> bool {
     .any(|family| family.contains(&name))
 }
 
-/// Whether `name` (case-insensitively) is a `math` builtin. The math family
-/// folds the name with `to_ascii_lowercase` before dispatch, so `SiN` and
-/// `sin` both count; `math::NAMES` holds the lowercase names accordingly.
+/// Whether `name` (case-insensitively) is a `math` builtin. `math::NAMES` holds
+/// the lowercase spellings, because the family's own dispatcher
+/// (`math::try_call`) lowercases before it matches — so `SiN` and `sin` both count.
+/// The comparison here folds case in place instead of allocating a lowercase
+/// copy of `name` just to compare it.
 fn is_math_builtin_name(name: &str) -> bool {
-    math::NAMES.contains(&name.to_ascii_lowercase().as_str())
+    math::NAMES.iter().any(|n| name.eq_ignore_ascii_case(n))
 }
 
 // ---- shared argument helpers, available to every family module --------

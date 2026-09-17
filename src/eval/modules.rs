@@ -36,7 +36,7 @@ impl<'a> Evaluator<'a> {
             return Err(Error::at("expected selector.", pos));
         }
         let in_media = !self.media_queries.is_empty();
-        for t in split_commas(&target) {
+        for t in split_commas(&target).iter() {
             let t = t.trim();
             if t.is_empty() {
                 continue;
