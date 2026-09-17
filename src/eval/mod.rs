@@ -5398,7 +5398,8 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
 
 fn validate_plain_css_selector(part: &str, top_level: bool) -> Result<(), Error> {
     let trimmed = part.trim();
-    let chars: Vec<char> = trimmed.chars().collect();
+    let chars_buf = CharBuf::of(trimmed);
+    let chars: &[char] = &chars_buf;
     // A leading combinator is allowed when *nested* (it joins onto the parent),
     // but not at the top level.
     if top_level && matches!(chars.first(), Some('>' | '+' | '~')) {
@@ -5554,15 +5555,16 @@ fn validate_selector(sel: &str, has_parent: bool) -> Result<(), Error> {
 /// selector-argument pseudo (`:not(::)`) — is dart's `Expected identifier.`.
 /// Colons inside `[...]` attribute selectors and string literals are exempt.
 fn validate_pseudo_names(sel: &str) -> Result<(), Error> {
-    let chars: Vec<char> = sel.chars().collect();
+    let chars_buf = CharBuf::of(sel);
+    let chars: &[char] = &chars_buf;
     let mut i = 0usize;
     while i < chars.len() {
         match chars[i] {
             '\\' => {
                 i += 2;
             }
-            '"' | '\'' => i = skip_string(&chars, i),
-            '[' => i = matching_bracket(&chars, i) + 1,
+            '"' | '\'' => i = skip_string(chars, i),
+            '[' => i = matching_bracket(chars, i) + 1,
             ':' => {
                 i += 1;
                 // A second colon makes a pseudo-element (`::before`).
@@ -5570,7 +5572,7 @@ fn validate_pseudo_names(sel: &str) -> Result<(), Error> {
                     i += 1;
                 }
                 // The name must begin with a CSS identifier-start character.
-                if !pseudo_name_starts_at(&chars, i) {
+                if !pseudo_name_starts_at(chars, i) {
                     return Err(Error::unpositioned("Expected identifier."));
                 }
             }
@@ -5621,7 +5623,8 @@ fn validate_plain_sigils(sel: &str) -> Result<(), Error> {
 /// The full per-part validation walk (slow path).
 fn validate_selector_tail(sel: &str, has_parent: bool) -> Result<(), Error> {
     for part in split_commas(sel).iter() {
-        let chars: Vec<char> = part.chars().collect();
+        let chars_buf = CharBuf::of(part);
+        let chars: &[char] = &chars_buf;
         let mut i = 0;
         // True at the start of each compound selector (start of the part and
         // immediately after any combinator or whitespace).
@@ -5637,12 +5640,12 @@ fn validate_selector_tail(sel: &str, has_parent: bool) -> Result<(), Error> {
                     continue;
                 }
                 '"' | '\'' => {
-                    i = skip_string(&chars, i);
+                    i = skip_string(chars, i);
                     at_compound_start = false;
                     continue;
                 }
                 '[' if depth == 0 => {
-                    let end = matching_bracket(&chars, i);
+                    let end = matching_bracket(chars, i);
                     validate_attribute(&chars[i + 1..end])?;
                     i = end + 1;
                     at_compound_start = false;
@@ -5654,7 +5657,7 @@ fn validate_selector_tail(sel: &str, has_parent: bool) -> Result<(), Error> {
                 // else — compound start, after a plain identifier, after `]` —
                 // dart-sass reports "expected selector." (`a(b)`, `a (b)`).
                 '(' if depth == 0 => {
-                    if !paren_follows_pseudo(&chars, i) {
+                    if !paren_follows_pseudo(chars, i) {
                         return Err(Error::unpositioned("expected selector."));
                     }
                     depth += 1;
@@ -5729,6 +5732,79 @@ fn validate_selector_tail(sel: &str, has_parent: bool) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// Inline capacity of a [`CharBuf`], in characters. Selector parts measure
+/// around 16 characters on the benchmark corpora and whole selectors around
+/// 40, so 64 keeps effectively all of them off the heap, and initializing that
+/// much stack costs far less than the allocate-and-grow it replaces. Longer
+/// input takes the heap arm, which builds no array at all.
+const CHAR_BUF_INLINE: usize = 64;
+
+/// A selector's characters, materialized for index-based scanning.
+///
+/// The scanners here want `[char]` rather than bytes: an escape advances by one
+/// CHARACTER, and several of the predicates are Unicode-aware, so a byte cursor
+/// would have to decode as it walks. Collecting a `Vec<char>` is what that used
+/// to cost — and more than one allocation per call, because `str::chars()` only
+/// promises `len / 4` characters, so the `Vec` started at a quarter of the size
+/// it needed and doubled its way up. Selectors are short, so the characters go
+/// into an inline array instead and a scan touches the allocator not at all.
+///
+/// Never pooled across calls: inside a compile scope the heap arm's allocation
+/// comes from the arena, and the arena is reset wholesale when the scope ends
+/// (see [`crate::arena`]), so a buffer kept past that point would hand out
+/// memory the next compile is also using.
+///
+/// Bind a `&[char]` from it once (`let chars: &[char] = &buf;`) instead of
+/// indexing the buffer: a scan loop then walks a plain slice, exactly as it did
+/// the `Vec` this replaces, with no per-index arm to pick.
+// The big inline arm is the point of the type, and every `CharBuf` is a
+// stack local that never enters a collection, so the arms' size difference
+// costs nothing.
+#[allow(clippy::large_enum_variant)]
+enum CharBuf {
+    /// The characters are `chars[..len]` — no allocation.
+    Inline {
+        chars: [char; CHAR_BUF_INLINE],
+        len: usize,
+    },
+    /// Input too long for the array.
+    Heap(Vec<char>),
+}
+
+impl CharBuf {
+    /// The characters of `s`, in order.
+    fn of(s: &str) -> CharBuf {
+        // A character is at least one byte, so a string of at most
+        // `CHAR_BUF_INLINE` bytes holds at most that many characters.
+        if s.len() > CHAR_BUF_INLINE {
+            // Deliberately a plain `collect`. Sizing the `Vec` from the byte
+            // length first (`with_capacity(s.len())` — one allocation instead
+            // of the grow chain) measured SLOWER on every corpus: a `char` is
+            // four bytes, so that asks the arena for four times what the text
+            // needs, while growing into the arena's tail is nearly free.
+            return CharBuf::Heap(s.chars().collect());
+        }
+        let mut chars = ['\0'; CHAR_BUF_INLINE];
+        let mut len = 0;
+        for (slot, c) in chars.iter_mut().zip(s.chars()) {
+            *slot = c;
+            len += 1;
+        }
+        CharBuf::Inline { chars, len }
+    }
+}
+
+impl std::ops::Deref for CharBuf {
+    type Target = [char];
+
+    fn deref(&self) -> &[char] {
+        match self {
+            CharBuf::Inline { chars, len } => &chars[..*len],
+            CharBuf::Heap(chars) => chars,
+        }
+    }
 }
 
 /// Index just past a quoted string starting at `start` (a `"` or `'`),
@@ -5848,7 +5924,8 @@ fn is_name_start(c: char) -> bool {
 /// conservatively treated as non-identifiers (kept quoted) so nothing
 /// regresses.
 fn is_plain_css_identifier(s: &str) -> bool {
-    let chars: Vec<char> = s.chars().collect();
+    let chars_buf = CharBuf::of(s);
+    let chars: &[char] = &chars_buf;
     if chars.is_empty() {
         return false;
     }
@@ -5870,7 +5947,8 @@ fn is_plain_css_identifier(s: &str) -> bool {
 /// unquoting). On any parse uncertainty the original (trimmed) text is kept so
 /// no currently-passing selector regresses.
 fn normalize_attribute_text(inner: &str) -> String {
-    let chars: Vec<char> = inner.chars().collect();
+    let chars_buf = CharBuf::of(inner);
+    let chars: &[char] = &chars_buf;
     let fallback = || inner.trim().to_string();
     let mut i = 0;
     let skip_ws = |i: &mut usize| {
@@ -5915,7 +5993,7 @@ fn normalize_attribute_text(inner: &str) -> String {
     // Value (quoted string or unquoted run), preserved verbatim.
     let value_start = i;
     match chars.get(i) {
-        Some('"') | Some('\'') => i = skip_string(&chars, i),
+        Some('"') | Some('\'') => i = skip_string(chars, i),
         Some(_) => {
             while i < chars.len() {
                 let c = chars[i];
@@ -5949,7 +6027,8 @@ fn normalize_attribute_text(inner: &str) -> String {
 /// Drop the quotes from an attribute value when its content is a plain CSS
 /// identifier; otherwise return it unchanged.
 fn unquote_plain_attribute_value(raw: &str) -> String {
-    let bytes: Vec<char> = raw.chars().collect();
+    let bytes_buf = CharBuf::of(raw);
+    let bytes: &[char] = &bytes_buf;
     if bytes.len() >= 2 {
         let q = bytes[0];
         if (q == '"' || q == '\'') && bytes[bytes.len() - 1] == q {
@@ -6556,7 +6635,8 @@ fn resolve_selectors_opt(
         if !matches!(trimmed.chars().last(), Some('>' | '+' | '~')) {
             return Ok(());
         }
-        let chars: Vec<char> = part.chars().collect();
+        let chars_buf = CharBuf::of(part);
+        let chars: &[char] = &chars_buf;
         let mut skip = false;
         let mut bracket = 0i32;
         let mut quote: Option<char> = None;
@@ -6606,7 +6686,8 @@ fn resolve_selectors_opt(
         if !part.contains('&') {
             return None;
         }
-        let chars: Vec<char> = part.chars().collect();
+        let chars_buf = CharBuf::of(part);
+        let chars: &[char] = &chars_buf;
         let mut depth = 0i32;
         let mut bracket = 0i32;
         let mut quote: Option<char> = None;
@@ -7002,7 +7083,8 @@ fn normalize_selector_slow(s: &str) -> String {
     // newline collapses to '\n' instead: dart's arg complexes carry their
     // source lineBreak and the serializer honors it anywhere
     // (`:is(a,\n[type=color])` keeps its lines — quasar's field selectors).
-    let cs: Vec<char> = s.chars().collect();
+    let cs_buf = CharBuf::of(s);
+    let cs: &[char] = &cs_buf;
     let mut collapsed = String::with_capacity(s.len());
     let mut prev_space = true; // trims leading whitespace
     let mut paren = 0i32;
@@ -7064,7 +7146,8 @@ fn normalize_selector_slow(s: &str) -> String {
     if prev_space && collapsed.ends_with(' ') {
         collapsed.pop();
     }
-    let chars: Vec<char> = collapsed.chars().collect();
+    let chars_buf = CharBuf::of(&collapsed);
+    let chars: &[char] = &chars_buf;
     let mut out = String::new();
     let mut i = 0;
     // True when the current top-level compound already holds a simple selector.
@@ -7073,7 +7156,7 @@ fn normalize_selector_slow(s: &str) -> String {
         let c = chars[i];
         match c {
             '[' => {
-                let end = matching_bracket(&chars, i);
+                let end = matching_bracket(chars, i);
                 if end < chars.len() {
                     let whole: String = chars[i..=end].iter().collect();
                     out.push_str(&crate::selector::normalize_attribute(&whole));
@@ -7090,7 +7173,7 @@ fn normalize_selector_slow(s: &str) -> String {
                 // A class/id/placeholder sigil plus its name (one simple).
                 out.push(c);
                 i += 1;
-                copy_name(&chars, &mut i, &mut out);
+                copy_name(chars, &mut i, &mut out);
                 mid_compound = true;
                 continue;
             }
@@ -7098,7 +7181,7 @@ fn normalize_selector_slow(s: &str) -> String {
                 // A pseudo-class/element (with any `(...)` argument). A
                 // selector-argument pseudo re-serializes canonically.
                 let start = out.len();
-                copy_pseudo(&chars, &mut i, &mut out);
+                copy_pseudo(chars, &mut i, &mut out);
                 let text = out[start..].to_string();
                 // An `:nth-child`/`:nth-last-child` An+B argument
                 // canonicalizes (whitespace drops, lowercase `n`); a
@@ -7140,13 +7223,13 @@ fn normalize_selector_slow(s: &str) -> String {
                 mid_compound = false;
                 continue;
             }
-            _ if type_selector_starts_at(&chars, i) => {
+            _ if type_selector_starts_at(chars, i) => {
                 // A type/namespaced-type selector. Mid-compound, it is a
                 // separate adjacent compound: join with a descendant space.
                 if mid_compound && !out.ends_with(' ') {
                     out.push(' ');
                 }
-                copy_type_selector(&chars, &mut i, &mut out);
+                copy_type_selector(chars, &mut i, &mut out);
                 mid_compound = true;
                 continue;
             }
@@ -7361,7 +7444,8 @@ fn is_selector_pseudo(name: &str) -> bool {
 /// `:nth-child(2n)` or `:global(> a)`, keep their argument verbatim). `:has` is
 /// a relative selector list, so a leading combinator there is allowed.
 fn compound_has_bogus_pseudo(compound: &str) -> bool {
-    let chars: Vec<char> = compound.chars().collect();
+    let chars_buf = CharBuf::of(compound);
+    let chars: &[char] = &chars_buf;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -7371,7 +7455,7 @@ fn compound_has_bogus_pseudo(compound: &str) -> bool {
         }
         if c == '[' {
             // Skip an attribute selector verbatim.
-            i = matching_bracket(&chars, i) + 1;
+            i = matching_bracket(chars, i) + 1;
             continue;
         }
         if c == ':' {
@@ -7400,7 +7484,7 @@ fn compound_has_bogus_pseudo(compound: &str) -> bool {
                             continue;
                         }
                         '"' | '\'' => {
-                            k = skip_string(&chars, k);
+                            k = skip_string(chars, k);
                             continue;
                         }
                         '(' => depth += 1,
@@ -7762,7 +7846,8 @@ fn split_top_level_media_commas(s: &str) -> Vec<String> {
 }
 
 fn css_media_parse_one(t: &str) -> Result<ResolvedQuery, Error> {
-    let chars: Vec<char> = t.chars().collect();
+    let chars_buf = CharBuf::of(t);
+    let chars: &[char] = &chars_buf;
     let mut i = 0usize;
     let skip_ws = |i: &mut usize| {
         while *i < chars.len() && chars[*i].is_whitespace() {
