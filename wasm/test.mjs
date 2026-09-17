@@ -1538,6 +1538,53 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // Diagnostics have to survive the exit. `process.stderr.write` on a PIPE is
+  // asynchronous and `process.exit` discards whatever has not reached the
+  // kernel, so a batch that printed a lot and then exited non-zero lost the
+  // tail of it (measured 2026-09-17: 374 of 400 warnings through a pipe, and
+  // a 480 KB error cut to exactly 131072 bytes).
+  //
+  // The pipe is the point: to a FILE both paths were always whole, so a test
+  // that redirects to a file proves nothing. `stdio: "pipe"` is what spawnSync
+  // gives us, and the payload has to be bigger than the 64 KB pipe buffer or
+  // the write finishes in one go and nothing can be lost.
+  {
+    const tdir = join(dir, "drain");
+    mkdirSync(tdir, { recursive: true });
+    const args = [cliPath, "--no-source-map", "--style=compressed"];
+    // 400 x ~2 KB is several times the 64 KB pipe buffer. At 400 bytes each the
+    // loss was intermittent (374 of 400 once in three runs); at 2 KB the
+    // broken version came back with 31-54 of 400, every run.
+    const padding = "x".repeat(2000);
+    for (let i = 0; i < 400; i++) {
+      writeFileSync(join(tdir, `w${i}.scss`), `@warn "mark-${i} ${padding}";\n.w${i}{a:1}\n`);
+      args.push(`${join(tdir, `w${i}.scss`)}:${join(tdir, `w${i}.css`)}`);
+    }
+    // One failure at the end, so the run exits 1 right after the flush.
+    writeFileSync(join(tdir, "bad.scss"), `.bad{a:}\n`);
+    args.push(`${join(tdir, "bad.scss")}:${join(tdir, "bad.css")}`);
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 120000 });
+    assert.equal(r.status, 1, "cli: the batch with one bad job exits 1");
+    const seen = (r.stderr.match(/WARNING: mark-\d+/g) || []).length;
+    assert.equal(seen, 400, `cli: every warning survived the non-zero exit through a pipe (saw ${seen})`);
+
+    // The same for the single-error path, which exits from `fail` and cannot
+    // wait for a stream to drain — its write has to be synchronous.
+    const huge = join(tdir, "huge.scss");
+    writeFileSync(huge, `.x{${"a:1;".repeat(60000)}b:}\n`);
+    const one = spawnSync(process.execPath, [cliPath, "--no-source-map", huge], {
+      encoding: "utf8",
+      timeout: 120000,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    assert.equal(one.status, 1, "cli: the huge broken stylesheet fails");
+    assert.ok(
+      one.stderr.length > 200_000,
+      `cli: a diagnostic larger than the pipe buffer is not cut short (got ${one.stderr.length} bytes)`,
+    );
+    assert.match(one.stderr, /root stylesheet/, "cli: … and it ends with the stack frame, not mid-line");
+  }
+
   // A failure inside the pool is still reported and still exits non-zero.
   writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
   const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});

@@ -7,6 +7,7 @@
 import {
   readFileSync,
   writeFileSync,
+  writeSync,
   watch,
   statSync,
   existsSync,
@@ -48,10 +49,8 @@ async function loadEngine() {
     try {
       mod = await import("./native.mjs");
     } catch (e) {
-      if (want === "native") {
-        process.stderr.write(`error: SASSO_ENGINE=native but the addon is unavailable: ${e.message}\n`);
-        process.exit(1);
-      }
+      // `fail` writes synchronously, which matters because it exits at once.
+      if (want === "native") fail(`error: SASSO_ENGINE=native but the addon is unavailable: ${e.message}`);
     }
   }
   if (!mod) {
@@ -133,8 +132,41 @@ function packageVersion() {
 }
 
 function fail(msg) {
-  process.stderr.write(String(msg).replace(/\n?$/, "\n"));
+  writeStderrSync(String(msg).replace(/\n?$/, "\n"));
   process.exit(1);
+}
+
+// One shared cell, only ever used to sleep a millisecond (see below).
+const idle = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Write to stderr and do not come back until the OS has it.
+ *
+ * `process.stderr.write` on a PIPE is asynchronous and `process.exit` throws
+ * away whatever has not reached the kernel: a 480 KB error came out of
+ * `sasso huge.scss 2>&1 | cat` as exactly 131072 bytes, every run, while the
+ * same error redirected to a file was whole (measured 2026-09-17). A caller
+ * that exits immediately afterwards therefore cannot use the stream.
+ *
+ * A full pipe raises EAGAIN rather than blocking, because Node puts stdio
+ * pipes in non-blocking mode; that means the reader is behind, so wait a
+ * moment and continue. EPIPE means there is no reader left to tell.
+ */
+function writeStderrSync(text) {
+  const bytes = Buffer.from(text, "utf8");
+  let at = 0;
+  while (at < bytes.length) {
+    try {
+      at += writeSync(2, bytes, at, bytes.length - at);
+    } catch (e) {
+      if (e.code === "EAGAIN") {
+        Atomics.wait(idle, 0, 0, 1);
+        continue;
+      }
+      if (e.code === "EPIPE") return;
+      throw e;
+    }
+  }
 }
 
 function parseArgs(argv) {
@@ -959,7 +991,12 @@ async function main() {
   }
 
   const failed = await runJobs(jobs, opts, common);
-  if (failed > 0) process.exit(1);
+  // `process.exit` here would discard whatever of the diagnostics just flushed
+  // has not reached the kernel yet — stderr on a PIPE is asynchronous, and a
+  // 400-job batch lost 26 of its warnings that way (measured 2026-09-17).
+  // Setting the code and returning lets Node finish the writes and exit on its
+  // own; nothing else is keeping the loop alive by this point.
+  if (failed > 0) process.exitCode = 1;
 }
 
 /**
