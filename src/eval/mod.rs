@@ -6636,6 +6636,72 @@ fn replace_parent_refs(part: &str, parent: &str) -> String {
     out
 }
 
+/// Count a part's TOP-LEVEL `&` references (outside parens/brackets) and split
+/// it into the segments between them. With k >= 2 refs the part expands to the
+/// parents' k-fold cartesian product (`& &` under `ul, ol` is
+/// `ul ul, ul ol, ol ul, ol ol`, issue_1710); with fewer, a cheaper path
+/// resolves it and there is nothing to split, so `None` comes back having
+/// allocated nothing at all — a part with one `&` or none is the common case.
+/// The segments are borrowed: they are the substrings between the references,
+/// character for character.
+fn split_parent_refs(part: &str) -> Option<Vec<&str>> {
+    let mut first: Option<usize> = None;
+    // Stays empty — and unallocated — until a SECOND reference proves the part
+    // is cartesian; only then does the first one become a cut too.
+    let mut cuts: Vec<usize> = Vec::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in part.char_indices() {
+        if let Some(q) = quote {
+            // `\"` does not end a `"`-quoted value, and a quote that ends
+            // early would swallow the `]` after it and hide every top-level
+            // `&` that follows.
+            if std::mem::take(&mut escaped) {
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        // The character a backslash escapes is skipped by the branch above on
+        // the next turn, so `\&` is a literal rather than a reference.
+        if std::mem::take(&mut escaped) {
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '"' | '\'' => quote = Some(c),
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '&' if depth == 0 => match first {
+                None => first = Some(i),
+                Some(f) => {
+                    if cuts.is_empty() {
+                        cuts.push(f);
+                    }
+                    cuts.push(i);
+                }
+            },
+            _ => {}
+        }
+    }
+    if cuts.is_empty() {
+        return None;
+    }
+    let mut segments = Vec::with_capacity(cuts.len() + 1);
+    let mut start = 0;
+    for cut in cuts {
+        segments.push(&part[start..cut]);
+        start = cut + 1; // '&' is ASCII (1 byte)
+    }
+    segments.push(&part[start..]);
+    Some(segments)
+}
+
 /// Resolve a selector against its parents with dart's `implicitParent` switch: inside
 /// `@at-root` (before the first nested style rule) a part WITHOUT `&` stays
 /// at the root instead of joining the parent, while `&` still substitutes.
@@ -6652,13 +6718,30 @@ fn resolve_selectors_opt(
     parent_lbs: &[bool],
 ) -> Result<Vec<(String, bool)>, Error> {
     // Borrowed: every part is a contiguous substring of `sel` and nothing below
-    // needs to own one, so a rule pays no `String` per selector part.
-    let parts: Vec<&str> = split_commas(sel)
-        .iter()
-        .copied()
-        .map(trim_selector_part)
-        .filter(|p| !p.is_empty())
-        .collect();
+    // needs to own one, so a rule pays no `String` per selector part. A
+    // selector with no top-level comma is a single part, which is the common
+    // shape of a nested rule, and it reads out of a fixed slot instead of a
+    // heap vector.
+    let single;
+    let many;
+    let parts: &[&str] = match split_commas(sel) {
+        Segments::One(p) => {
+            single = [trim_selector_part(p)];
+            if single[0].is_empty() {
+                &[]
+            } else {
+                &single
+            }
+        }
+        Segments::Many(v) => {
+            many = v
+                .into_iter()
+                .map(trim_selector_part)
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>();
+            &many
+        }
+    };
     // dart: a parent that ends in a combinator can't substitute into a `&`
     // that is part of a compound (`.a > { &.b {} }` errors; `& .b` is fine).
     let check_compound_parent = |part: &str, parent: &str| -> Result<(), Error> {
@@ -6794,58 +6877,7 @@ fn resolve_selectors_opt(
             None
         }
     };
-    // Count a part's TOP-LEVEL `&` references (outside parens/brackets) and
-    // split it into the segments between them. With k >= 2 refs the part
-    // expands to the parents' k-fold cartesian product (`& &` under
-    // `ul, ol` is `ul ul, ul ol, ol ul, ol ol`, issue_1710).
-    let split_parent_refs = |part: &str| -> Option<Vec<String>> {
-        let mut segments = vec![String::new()];
-        let mut depth = 0i32;
-        let mut quote: Option<char> = None;
-        let mut escaped = false;
-        for c in part.chars() {
-            if let Some(q) = quote {
-                segments.last_mut().unwrap().push(c);
-                // `\"` does not end a `"`-quoted value, and a quote that ends
-                // early would swallow the `]` after it and hide every top-level
-                // `&` that follows.
-                if std::mem::take(&mut escaped) {
-                    continue;
-                }
-                if c == '\\' {
-                    escaped = true;
-                } else if c == q {
-                    quote = None;
-                }
-                continue;
-            }
-            if std::mem::take(&mut escaped) {
-                segments.last_mut().unwrap().push(c);
-                continue;
-            }
-            match c {
-                // The backslash itself is written by the shared push below —
-                // only the `&` arm leaves the loop early — and the character
-                // it escapes by the branch above, on the next turn.
-                '\\' => escaped = true,
-                '"' | '\'' => quote = Some(c),
-                '(' | '[' => depth += 1,
-                ')' | ']' => depth -= 1,
-                '&' if depth == 0 => {
-                    segments.push(String::new());
-                    continue;
-                }
-                _ => {}
-            }
-            segments.last_mut().unwrap().push(c);
-        }
-        if segments.len() >= 3 {
-            Some(segments)
-        } else {
-            None
-        }
-    };
-    let expand_cartesian = |segments: &[String], result: &mut Vec<(String, bool)>| {
+    let expand_cartesian = |segments: &[&str], result: &mut Vec<(String, bool)>| {
         let k = segments.len() - 1;
         let n = parents.len();
         let mut idx = vec![0usize; k];
@@ -6855,7 +6887,7 @@ fn resolve_selectors_opt(
                 s.push_str(seg);
                 s.push_str(&parents[idx[i]]);
             }
-            s.push_str(&segments[k]);
+            s.push_str(segments[k]);
             // A `&` nested in pseudo parens is NOT a cartesian position (the
             // split counts depth-0 refs only) but still substitutes — with
             // the whole parent list, like any pseudo-`&`
@@ -6926,25 +6958,22 @@ fn resolve_selectors_opt(
         // order; a part with k >= 2 top-level refs contributes a row of
         // `parents.len()^k` combos, interleaved column-by-column with its
         // sibling parts (mastodon's `&:hover + &:is(...)` lists).
-        let mut rows: Vec<Vec<(String, bool)>> = Vec::with_capacity(parts.len());
-        for (part_i, part) in parts.iter().enumerate() {
+        // One part's row, appended to `out`.
+        let resolve_row = |part_i: usize, part: &str, out: &mut Vec<(String, bool)>| -> Result<(), Error> {
             // A pseudo-only `&` part resolves ONCE (whole parent list in
             // place): a single-entry row.
             if let Some(s) = substitute_pseudo_refs(part) {
-                rows.push(vec![(normalize_selector_owned(s), false)]);
-                continue;
+                out.push((normalize_selector_owned(s), false));
+                return Ok(());
             }
             if let Some(segments) = split_parent_refs(part) {
                 for parent in parents {
                     check_compound_parent(part, parent)?;
                 }
-                let mut row = Vec::new();
-                expand_cartesian(&segments, &mut row);
-                rows.push(row);
-                continue;
+                expand_cartesian(&segments, out);
+                return Ok(());
             }
             let has_ref = part_has_parent_ref(part);
-            let mut row = Vec::with_capacity(parents.len());
             for (pi, parent) in parents.iter().enumerate() {
                 let parent_lb = parent_lbs.get(pi).copied().unwrap_or(false);
                 let (combined, flag) = if has_ref {
@@ -6954,24 +6983,44 @@ fn resolve_selectors_opt(
                     // substituted parent's.
                     (replace_parent_refs(part, parent), parent_lb)
                 } else {
+                    // The joined length is known, so the buffer is sized once
+                    // here instead of growing out of an empty `format!`.
+                    let mut combined = String::with_capacity(parent.len() + 1 + part.len());
+                    combined.push_str(parent);
+                    combined.push(' ');
+                    combined.push_str(part);
                     (
-                        format!("{parent} {part}"),
+                        combined,
                         part_lbs.get(part_i).copied().unwrap_or(false) || parent_lb,
                     )
                 };
-                row.push((normalize_selector_owned(combined), flag));
+                out.push((normalize_selector_owned(combined), flag));
             }
-            rows.push(row);
-        }
-        let longest = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        result.reserve(rows.iter().map(|r| r.len()).sum());
-        for j in 0..longest {
-            // Each slot is read exactly once, so the string moves out instead of
-            // being cloned; what stays behind is an empty `String`, which owns no
-            // buffer, and `rows` is dropped right after.
-            for row in rows.iter_mut() {
-                if let Some(entry) = row.get_mut(j) {
-                    result.push((std::mem::take(&mut entry.0), entry.1));
+            Ok(())
+        };
+        // A single part is a single row, and flattening one row leaves it in
+        // its own order: it resolves straight into the result, without the
+        // row-of-rows scaffolding the general case needs.
+        if let [part] = parts {
+            result.reserve(parents.len());
+            resolve_row(0, part, &mut result)?;
+        } else {
+            let mut rows: Vec<Vec<(String, bool)>> = Vec::with_capacity(parts.len());
+            for (part_i, part) in parts.iter().enumerate() {
+                let mut row = Vec::with_capacity(parents.len());
+                resolve_row(part_i, part, &mut row)?;
+                rows.push(row);
+            }
+            let longest = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+            result.reserve(rows.iter().map(|r| r.len()).sum());
+            for j in 0..longest {
+                // Each slot is read exactly once, so the string moves out instead
+                // of being cloned; what stays behind is an empty `String`, which
+                // owns no buffer, and `rows` is dropped right after.
+                for row in rows.iter_mut() {
+                    if let Some(entry) = row.get_mut(j) {
+                        result.push((std::mem::take(&mut entry.0), entry.1));
+                    }
                 }
             }
         }
