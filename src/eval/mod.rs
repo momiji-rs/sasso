@@ -5120,10 +5120,20 @@ pub(super) fn css_value_error_msg(v: &Value) -> Option<String> {
 /// feature decls). The error carries no span — these template sites have no
 /// per-piece source position — but matches dart's message and non-zero exit.
 pub(super) fn interp_checked(v: &Value) -> Result<String, Error> {
+    let mut s = String::new();
+    interp_checked_into(&mut s, v)?;
+    Ok(s)
+}
+
+/// [`interp_checked`] into the caller's buffer, for the template evaluators
+/// that are already building one: `#{$i}` writes its digits into the template's
+/// string rather than into one of its own.
+pub(super) fn interp_checked_into(out: &mut String, v: &Value) -> Result<(), Error> {
     if let Some(msg) = css_value_error_msg(v) {
         return Err(Error::unpositioned(msg));
     }
-    Ok(v.to_interp())
+    v.write_interp(out);
+    Ok(())
 }
 
 fn for_indices(start: i64, end: i64, inclusive: bool) -> Vec<i64> {

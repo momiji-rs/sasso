@@ -553,11 +553,18 @@ pub(crate) fn serialize_quoted(text: &str) -> String {
 /// output then holds non-ASCII text, and picks up the `@charset`/BOM that
 /// comes with it.) Everything else escapes the same either way.
 pub(crate) fn serialize_quoted_styled(text: &str, compressed: bool) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    push_quoted_styled(&mut out, text, compressed);
+    out
+}
+
+/// [`serialize_quoted_styled`] into the caller's buffer.
+pub(crate) fn push_quoted_styled(out: &mut String, text: &str, compressed: bool) {
     let has_double = text.contains('"');
     let has_single = text.contains('\'');
     // Use single quotes only when the text has a `"` and no `'`.
     let quote = if has_double && !has_single { '\'' } else { '"' };
-    serialize_quoted_with_styled(text, quote, compressed)
+    push_quoted_with_styled(out, text, quote, compressed);
 }
 
 /// The same, with the quote character already chosen — for a string whose
@@ -570,6 +577,15 @@ pub(crate) fn serialize_quoted_with(text: &str, quote: char) -> String {
 /// [`serialize_quoted_with`] for CSS output — see [`serialize_quoted_styled`]
 /// for what the style changes.
 pub(crate) fn serialize_quoted_with_styled(text: &str, quote: char, compressed: bool) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    push_quoted_with_styled(&mut out, text, quote, compressed);
+    out
+}
+
+/// [`serialize_quoted_with_styled`] into the caller's buffer: a quoted string
+/// in a list or a declaration value is written where it belongs instead of into
+/// a string of its own.
+pub(crate) fn push_quoted_with_styled(out: &mut String, text: &str, quote: char, compressed: bool) {
     // A private-use character is escaped only when NOT compressing.
     let escapes_private_use = !compressed;
     // Fast path: when no character needs escaping, the body is `text` verbatim
@@ -584,14 +600,14 @@ pub(crate) fn serialize_quoted_with_styled(text: &str, quote: char, compressed: 
             || (escapes_private_use && is_private_use(cp))
     });
     if !needs_escape {
-        let mut out = String::with_capacity(text.len() + 2);
+        out.reserve(text.len() + 2);
         out.push(quote);
         out.push_str(text);
         out.push(quote);
-        return out;
+        return;
     }
     let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len() + 2);
+    out.reserve(text.len() + 2);
     out.push(quote);
     for (i, &c) in chars.iter().enumerate() {
         let cp = c as u32;
@@ -615,7 +631,6 @@ pub(crate) fn serialize_quoted_with_styled(text: &str, quote: char, compressed: 
         }
     }
     out.push(quote);
-    out
 }
 
 /// Serialize an unquoted string for CSS / interpolation output (dart-sass
@@ -625,14 +640,24 @@ pub(crate) fn serialize_quoted_with_styled(text: &str, quote: char, compressed: 
 /// unlike in a quoted string, are written verbatim here); every other code
 /// point is written verbatim.
 pub(crate) fn serialize_unquoted(text: &str) -> String {
+    let mut out = String::new();
+    push_unquoted(&mut out, text);
+    out
+}
+
+/// [`serialize_unquoted`] into the caller's buffer. Almost every unquoted
+/// string is written verbatim — `bold`, `solid`, `inherit`, a url — so this
+/// costs nothing beyond the copy the caller was going to make anyway.
+pub(crate) fn push_unquoted(out: &mut String, text: &str) {
     // Fast path: nothing to rewrite unless a newline or private-use char is
     // present. Scan without allocating; only collect into a `Vec<char>` (needed
     // for the escape look-ahead) on the rare slow path.
     if !text.chars().any(|c| c == '\n' || is_private_use(c as u32)) {
-        return text.to_string();
+        out.push_str(text);
+        return;
     }
     let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
+    out.reserve(text.len());
     let mut after_newline = false;
     for (i, &c) in chars.iter().enumerate() {
         let cp = c as u32;
@@ -664,7 +689,6 @@ pub(crate) fn serialize_unquoted(text: &str) -> String {
             }
         }
     }
-    out
 }
 
 /// A list value.
@@ -950,6 +974,45 @@ pub(crate) struct ModernColor {
 }
 
 impl Value {
+    /// Serialize as it would appear in a CSS declaration value, into `out`.
+    ///
+    /// This is the primitive for every caller that already has a buffer — a
+    /// declaration's value, a list's elements, an interpolation — because the
+    /// string a value serializes to is nearly always about to be copied into
+    /// one. The arms spelled out here are the ones a stylesheet writes in
+    /// bulk; the rest build a string of their own through [`Value::to_css`],
+    /// which is the full dispatch.
+    pub(crate) fn write_css(&self, out: &mut String, compressed: bool) {
+        match self {
+            Value::Number(n) => n.write_css(out, compressed),
+            Value::Color(c) => c.write_css(out, compressed),
+            Value::List(l) => l.write_css(out, compressed),
+            Value::Str(s) => {
+                if s.quoted {
+                    push_quoted_styled(out, &s.text, compressed);
+                } else {
+                    push_unquoted(out, &s.text);
+                }
+            }
+            Value::Null => {}
+            other => out.push_str(&other.to_css(compressed)),
+        }
+    }
+
+    /// [`Value::to_interp`] into `out`, on the same terms as
+    /// [`Value::write_css`]: interpolating `#{$i}` or `#{$name}` writes the
+    /// number or the string's raw text straight into the template's buffer.
+    pub(crate) fn write_interp(&self, out: &mut String) {
+        match self {
+            Value::Str(s) => out.push_str(&s.text),
+            Value::Null => {}
+            Value::List(l) => l.write_interp(out),
+            Value::Number(n) => n.write_css(out, false),
+            Value::Color(c) => c.write_css(out, false),
+            other => out.push_str(&other.to_interp()),
+        }
+    }
+
     /// Serialize as it would appear in a CSS declaration value.
     pub(crate) fn to_css(&self, compressed: bool) -> String {
         match self {
@@ -1202,7 +1265,11 @@ fn push_unit_escaped(out: &mut String, unit: &str) {
 }
 
 impl Number {
-    pub(crate) fn to_css(&self, compressed: bool) -> String {
+    /// Serialize as it would appear in a CSS declaration value, into `out`.
+    /// This is the hottest serialization path in the compiler — every dimension
+    /// in every declaration — and it allocates nothing: the digits and the unit
+    /// are generated where they belong.
+    pub(crate) fn write_css(&self, out: &mut String, compressed: bool) {
         // A non-finite number serializes as a `calc()` constant, matching
         // dart-sass: a unitless `infinity`/`-infinity`/`NaN` prints as
         // `calc(infinity)` etc., and a unit-bearing one as `calc(infinity * 1px)`.
@@ -1211,13 +1278,18 @@ impl Number {
         // — dart-sass uses this form everywhere, including `meta.inspect`,
         // interpolation, and error messages.
         if !self.value.is_finite() || self.has_complex_units() {
-            return format!("calc({})", calc_number_css(self, compressed));
+            out.push_str("calc(");
+            out.push_str(&calc_number_css(self, compressed));
+            out.push(')');
+            return;
         }
-        // Append the unit onto fmt_num's own String — a `format!` here would
-        // re-run the formatting machinery and allocate a second time on the
-        // hottest serialization path in the compiler.
-        let mut s = fmt_num(self.value, compressed);
-        push_unit_escaped(&mut s, self.unit());
+        push_num(out, self.value, compressed);
+        push_unit_escaped(out, self.unit());
+    }
+
+    pub(crate) fn to_css(&self, compressed: bool) -> String {
+        let mut s = String::new();
+        self.write_css(&mut s, compressed);
         s
     }
 
@@ -1566,7 +1638,11 @@ fn value_is_blank(v: &Value) -> bool {
 }
 
 impl List {
-    fn to_css(&self, compressed: bool) -> String {
+    /// Serialize into `out`, element by element. A shorthand value such as
+    /// `0 auto` used to cost a string per element, a vector of them, a joined
+    /// buffer and — bracketed — a fourth for the brackets; it now costs none of
+    /// those, because every element writes where it belongs.
+    fn write_css(&self, out: &mut String, compressed: bool) {
         let sep = match (self.sep, compressed) {
             // An undecided list has at most one element, so its separator
             // string is never actually used; serialize it like a space list.
@@ -1576,45 +1652,57 @@ impl List {
             (ListSep::Slash, true) => "/",
             (ListSep::Slash, false) => " / ",
         };
-        let inner = self
-            .items
-            .iter()
-            .filter(|v| !value_is_blank(v))
-            .map(|v| v.to_css(compressed))
-            .collect::<Vec<_>>()
-            .join(sep);
         if self.bracketed {
-            format!("[{inner}]")
-        } else {
-            inner
+            out.push('[');
+        }
+        for (i, v) in self.items.iter().filter(|v| !value_is_blank(v)).enumerate() {
+            if i > 0 {
+                out.push_str(sep);
+            }
+            v.write_css(out, compressed);
+        }
+        if self.bracketed {
+            out.push(']');
         }
     }
 
-    fn to_interp(&self) -> String {
+    fn to_css(&self, compressed: bool) -> String {
+        let mut s = String::new();
+        self.write_css(&mut s, compressed);
+        s
+    }
+
+    fn write_interp(&self, out: &mut String) {
         let sep = match self.sep {
             ListSep::Space | ListSep::Undecided => " ",
             ListSep::Comma => ", ",
             ListSep::Slash => " / ",
         };
-        let inner = self
-            .items
-            .iter()
-            .filter(|v| !value_is_blank(v))
-            // A string INSIDE a composite value serializes through dart's
-            // quote-less serializer (`_visitUnquotedString`): its newlines
-            // collapse to single spaces (issue_1786 `"#{a $str-with-lf}"`),
-            // unlike a directly interpolated string's raw text.
-            .map(|v| match v {
-                Value::Str(s) => serialize_unquoted(&s.text),
-                other => other.to_interp(),
-            })
-            .collect::<Vec<_>>()
-            .join(sep);
         if self.bracketed {
-            format!("[{inner}]")
-        } else {
-            inner
+            out.push('[');
         }
+        for (i, v) in self.items.iter().filter(|v| !value_is_blank(v)).enumerate() {
+            if i > 0 {
+                out.push_str(sep);
+            }
+            match v {
+                // A string INSIDE a composite value serializes through dart's
+                // quote-less serializer (`_visitUnquotedString`): its newlines
+                // collapse to single spaces (issue_1786 `"#{a $str-with-lf}"`),
+                // unlike a directly interpolated string's raw text.
+                Value::Str(s) => push_unquoted(out, &s.text),
+                other => other.write_interp(out),
+            }
+        }
+        if self.bracketed {
+            out.push(']');
+        }
+    }
+
+    fn to_interp(&self) -> String {
+        let mut s = String::new();
+        self.write_interp(&mut s);
+        s
     }
 }
 
@@ -1765,12 +1853,23 @@ impl Color {
     }
 
     pub(crate) fn to_css(&self, compressed: bool) -> String {
+        let mut s = String::new();
+        self.write_css(&mut s, compressed);
+        s
+    }
+
+    /// Serialize into `out`. A color is written where it belongs: the source
+    /// spelling a literal keeps, a hex triple, and the `rgb()`/`rgba()` form all
+    /// go straight into the caller's buffer, digits included.
+    pub(crate) fn write_css(&self, out: &mut String, compressed: bool) {
         if let Some(m) = &self.modern {
-            return m.to_css(compressed);
+            out.push_str(&m.to_css(compressed));
+            return;
         }
         if !compressed {
             if let Some(repr) = &self.repr {
-                return repr.clone();
+                out.push_str(repr);
+                return;
             }
         }
         let opaque = (self.a - 1.0).abs() < f64::EPSILON;
@@ -1778,38 +1877,52 @@ impl Color {
             let r = self.r.round().clamp(0.0, 255.0) as u8;
             let g = self.g.round().clamp(0.0, 255.0) as u8;
             let b = self.b.round().clamp(0.0, 255.0) as u8;
-            let hex = format!("#{r:02x}{g:02x}{b:02x}");
             if compressed {
+                // `#aabbcc` shortens to `#abc` when each channel's nibbles
+                // match, so the shortest hex is four characters wide instead of
+                // seven — the width a name has to beat, decided without either
+                // spelling being built.
+                let halvable = |v: u8| v >> 4 == v & 0xf;
+                let hex_len = if halvable(r) && halvable(g) && halvable(b) {
+                    4
+                } else {
+                    7
+                };
                 // dart-sass compressed: emit whichever is shorter, the shortest
                 // hex or the color's canonical CSS name (name wins ties — e.g.
                 // `aqua` == `#0ff`). `compressed_color_name` is the value-keyed
                 // reverse table of exactly the names that are no longer than the
                 // hex; absent => hex is shorter.
-                let short = shorten_hex(&hex);
                 if let Some(name) = compressed_color_name(r, g, b) {
-                    if name.len() <= short.len() {
-                        return name.to_string();
+                    if name.len() <= hex_len {
+                        out.push_str(name);
+                        return;
                     }
                 }
-                return short;
+                if hex_len == 4 {
+                    out.push('#');
+                    for v in [r, g, b] {
+                        out.push(HEX_DIGITS[(v & 0xf) as usize] as char);
+                    }
+                    return;
+                }
             }
-            return hex;
+            out.push('#');
+            for v in [r, g, b] {
+                out.push(HEX_DIGITS[(v >> 4) as usize] as char);
+                out.push(HEX_DIGITS[(v & 0xf) as usize] as char);
+            }
+            return;
         }
-        let (r, g, b) = rgb_channel_text(self.r, self.g, self.b, compressed);
-        let rgb_css = if opaque {
-            if compressed {
-                format!("rgb({r},{g},{b})")
-            } else {
-                format!("rgb({r}, {g}, {b})")
-            }
-        } else {
-            let a = fmt_num(self.a, compressed);
-            if compressed {
-                format!("rgba({r},{g},{b},{a})")
-            } else {
-                format!("rgba({r}, {g}, {b}, {a})")
-            }
-        };
+        let start = out.len();
+        let sep = if compressed { "," } else { ", " };
+        out.push_str(if opaque { "rgb(" } else { "rgba(" });
+        push_rgb_channels(out, self.r, self.g, self.b, compressed, sep);
+        if !opaque {
+            out.push_str(sep);
+            push_num(out, self.a, compressed);
+        }
+        out.push(')');
         // dart-sass compressed output emits whichever legacy form is SHORTER:
         // the rgb()/rgba() form or the equivalent hsl()/hsla() form. A computed
         // color such as `darken(#336699, 10%)` -> `rgb(38.25,76.5,114.75)` is
@@ -1821,6 +1934,10 @@ impl Color {
         if compressed {
             let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
             if in_gamut(self.r) && in_gamut(self.g) && in_gamut(self.b) {
+                // The candidate is built rather than written: it only replaces
+                // what is already in `out` if it turns out to be shorter, and
+                // compressed output is the one style where the comparison —
+                // not the copy — is what costs.
                 let hsl = crate::builtins::srgb_to_hsl([self.r / 255.0, self.g / 255.0, self.b / 255.0]);
                 // dart nulls the hue when saturation is fuzzy-zero (srgb.dart:
                 // `fuzzyEquals(saturation, 0) ? null : hue`), and a missing hue
@@ -1840,12 +1957,12 @@ impl Color {
                 // — its comment: "Add two characters for HSL for the %s on
                 // saturation and lightness." So rgb wins ties AND wins when it is
                 // up to two characters longer.
-                if rgb_css.len() > hsl_css.len() + 2 {
-                    return hsl_css;
+                if out.len() - start > hsl_css.len() + 2 {
+                    out.truncate(start);
+                    out.push_str(&hsl_css);
                 }
             }
         }
-        rgb_css
     }
 
     /// The `inspect: true` serialization of this color.
@@ -2023,15 +2140,8 @@ pub(crate) fn rgb_name(r: f64, g: f64, b: f64) -> Option<&'static str> {
     }
 }
 
-fn shorten_hex(hex: &str) -> String {
-    // `#aabbcc` -> `#abc` when each channel's nibbles match.
-    let b = hex.as_bytes();
-    if b.len() == 7 && b[1] == b[2] && b[3] == b[4] && b[5] == b[6] {
-        format!("#{}{}{}", b[1] as char, b[3] as char, b[5] as char)
-    } else {
-        hex.to_string()
-    }
-}
+/// Lowercase hex digits, for writing a color's channels without `core::fmt`.
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// The canonical CSS name for an opaque RGB value, but ONLY for the colors whose
 /// name is no longer than their shortest hex — i.e. the exact set dart-sass
@@ -2521,7 +2631,7 @@ impl ModernColor {
     }
 }
 
-/// The three `rgb()` channel spellings dart-sass uses.
+/// Write the three `rgb()` channel spellings dart-sass uses, separated by `sep`.
 ///
 /// dart switches the WHOLE triple to percentages as soon as ANY channel is
 /// non-integral: `mix(red, blue)` is `rgb(50%, 0%, 50%)`, not
@@ -2532,40 +2642,44 @@ impl ModernColor {
 /// elsewhere in this file: dart switches on a channel that differs from an
 /// integer by as little as 1e-10, and the ~7e-15 dust an hsl round trip leaves
 /// behind is enough to flip it.
-fn rgb_channel_text(r: f64, g: f64, b: f64, compressed: bool) -> (String, String, String) {
+fn push_rgb_channels(out: &mut String, r: f64, g: f64, b: f64, compressed: bool, sep: &str) {
     // dart `_tryIntegerRgbChannels` -> `_asInt`: fuzzyIsInt AND in [0, 256).
     // An out-of-gamut or non-integral channel sends the WHOLE triple to
     // percentages (serialize.dart:869-886).
     let as_int = |v: f64| (v - v.round()).abs() < 1e-11 && (0.0..256.0).contains(&v);
-    if as_int(r) && as_int(g) && as_int(b) {
-        return (
-            fmt_num(r, compressed),
-            fmt_num(g, compressed),
-            fmt_num(b, compressed),
-        );
+    let ints = as_int(r) && as_int(g) && as_int(b);
+    for (i, v) in [r, g, b].into_iter().enumerate() {
+        if i > 0 {
+            out.push_str(sep);
+        }
+        if ints {
+            push_num(out, v, compressed);
+        } else {
+            // `v * 100 / 255`, in dart's operand order — `v / 255.0 * 100.0`
+            // differs in the last bit.
+            push_num(out, v * 100.0 / 255.0, compressed);
+            out.push('%');
+        }
     }
-    // `v * 100 / 255`, in dart's operand order — `v / 255.0 * 100.0` differs in
-    // the last bit.
-    let pct = |v: f64| {
-        let mut s = fmt_num(v * 100.0 / 255.0, compressed);
-        s.push('%');
-        s
-    };
-    (pct(r), pct(g), pct(b))
 }
 
-/// Format a number the way dart-sass does: round to 10 decimal places,
-/// trim trailing zeros, and (when compressed) drop a leading `0`.
-pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
+/// Write a number the way dart-sass does — round to 10 decimal places, trim
+/// trailing zeros, and (when compressed) drop a leading `0` — into `out`.
+///
+/// This is the primitive; [`fmt_num`] wraps it for callers that want a string
+/// of their own. Every spelling a stylesheet actually writes is generated
+/// straight into `out`, so serializing a dimension into a declaration's value
+/// allocates nothing at all. The rounding and the leading-zero trim work on
+/// the tail of `out`: the spelling is the last thing in the buffer, so
+/// truncating or inserting only ever moves bytes this call just wrote.
+pub(crate) fn push_num(out: &mut String, n: f64, compressed: bool) {
     if n.is_nan() {
-        return "NaN".to_string();
+        out.push_str("NaN");
+        return;
     }
     if n.is_infinite() {
-        return if n > 0.0 {
-            "Infinity".to_string()
-        } else {
-            "-Infinity".to_string()
-        };
+        out.push_str(if n > 0.0 { "Infinity" } else { "-Infinity" });
+        return;
     }
     // A NEGATIVE ZERO keeps its sign (dart-sass 1.104.0, "for greater
     // compatibility when using it in CSS calculations"). This is the IEEE sign
@@ -2574,60 +2688,66 @@ pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
     // print `0`. A tiny negative that merely ROUNDS to zero is not a zero at
     // all and prints `0` too — that one is handled further down.
     if n == 0.0 {
-        return if n.is_sign_negative() {
-            "-0".to_string()
-        } else {
-            "0".to_string()
-        };
+        out.push_str(if n.is_sign_negative() { "-0" } else { "0" });
+        return;
     }
+    let start = out.len();
     // Integers print the way the dart VM does: `fuzzyAsInt` converts the
     // double to a NATIVE int64 (saturating, exactly like Rust's `as i64`)
     // and prints its exact decimal expansion — `593644542057412224`, not the
     // shortest-roundtrip `…200`. A magnitude past int64 fails the round-trip
     // check (saturation changes the value) and falls back to the shortest
     // form, which never overflows into exponential notation.
-    let mut s = if n.fract() == 0.0 {
+    if n.fract() == 0.0 {
         let i = n as i64;
         if i as f64 == n {
-            fmt_i64(i)
+            push_i64(out, i);
         } else {
             // Integer-valued but past i64: Ryū prints the shortest form in
             // plain positional notation, exactly like Display.
-            let mut s = String::with_capacity(24);
-            crate::ryu::format64(n, &mut s);
-            s
+            crate::ryu::format64(n, out);
         }
-    } else {
-        // dart `_writeNumber`: serialize the SHORTEST round-trip decimal
-        // (`double.toString()` + exponent removal), then round it AT THE
-        // STRING LEVEL to 10 decimal places, looking only at the 11th digit
-        // (half-up). This follows the shortest spelling, not the true value:
-        // `2154.15598416745` (true value …44978) still rounds UP to
-        // `…1675` because its shortest form ends in a literal `5`.
-        round_decimal_string(ecma_shortest(n))
-    };
+        // An integer's spelling has no fraction to round, cannot be `-0` (a
+        // true zero returned above) and cannot start `0.`, so both of the
+        // fix-ups below are dead on this path.
+        return;
+    }
+    // dart `_writeNumber`: serialize the SHORTEST round-trip decimal
+    // (`double.toString()` + exponent removal), then round it AT THE
+    // STRING LEVEL to 10 decimal places, looking only at the 11th digit
+    // (half-up). This follows the shortest spelling, not the true value:
+    // `2154.15598416745` (true value …44978) still rounds UP to
+    // `…1675` because its shortest form ends in a literal `5`.
+    push_ecma_shortest(out, n);
+    round_decimal_in_place(out, start);
     // A tiny negative ROUNDS to `-0` at the string level; dart prints `0` for
     // it. A true negative zero never reaches here — it returned above.
-    if s == "-0" {
-        s = "0".to_string();
+    if &out[start..] == "-0" {
+        out.truncate(start);
+        out.push('0');
     }
     // Compressed style drops a leading zero — but only from a POSITIVE number.
     // dart tests the rendered string for a literal `0.` prefix, which a minus
     // sign has already pushed out of the way, so `-0.5` keeps its zero where
     // `0.5` loses it. Mirrored rather than tidied: it is what dart writes.
-    if compressed {
-        if let Some(rest) = s.strip_prefix("0.") {
-            s = format!(".{rest}");
-        }
+    if compressed && out[start..].starts_with("0.") {
+        out.remove(start);
     }
+}
+
+/// [`push_num`] into a string of its own, for the callers that want one.
+pub(crate) fn fmt_num(n: f64, compressed: bool) -> String {
+    let mut s = String::new();
+    push_num(&mut s, n, compressed);
     s
 }
 
-/// `i64` → decimal `String` without the `core::fmt` machinery. Numbers are
-/// the hottest serialization path (every dimension in every declaration), and
-/// `format!("{i}")` spends most of its time in `Formatter` dispatch, not in
-/// digit generation. Output is byte-identical to `i64`'s `Display`.
-fn fmt_i64(v: i64) -> String {
+/// Append an `i64`'s decimal spelling without the `core::fmt` machinery.
+/// Numbers are the hottest serialization path (every dimension in every
+/// declaration), and `format!("{i}")` spends most of its time in `Formatter`
+/// dispatch, not in digit generation. Output is byte-identical to `i64`'s
+/// `Display`.
+fn push_i64(out: &mut String, v: i64) {
     // Longest spelling: "-9223372036854775808" = 20 bytes.
     let mut buf = [0u8; 20];
     let neg = v < 0;
@@ -2646,21 +2766,22 @@ fn fmt_i64(v: i64) -> String {
         buf[at] = b'-';
     }
     // The buffer holds only ASCII digits and '-'.
-    std::str::from_utf8(&buf[at..]).expect("ascii").to_string()
+    out.push_str(std::str::from_utf8(&buf[at..]).expect("ascii"));
 }
 
-/// dart `double.toString()` (ECMA-262 Number::toString): the shortest
+/// Append dart `double.toString()` (ECMA-262 Number::toString): the shortest
 /// decimal that round-trips, breaking a tie between two equidistant
 /// spellings by choosing the EVEN final digit. Rust's `{}` is also shortest
 /// but ties differently (`657390374199289.25` prints `…289.3`, dart prints
 /// `…289.2`), so re-round to the same significant-digit count through
 /// `{:e}`'s half-to-even rounding and expand the exponent form.
-fn ecma_shortest(n: f64) -> String {
+fn push_ecma_shortest(out: &mut String, n: f64) {
+    let start = out.len();
     // The zero-dep Ryū port: byte-identical to `format!("{n}")` (proven by
     // its differential fuzz) without the core::fmt machinery, writing into
-    // one pre-sized allocation.
-    let mut rust = String::with_capacity(24);
-    crate::ryu::format64(n, &mut rust);
+    // the caller's buffer.
+    crate::ryu::format64(n, out);
+    let rust = &out[start..];
     // Count significant digits (skipping sign, dot, and leading zeros).
     let sig = rust
         .chars()
@@ -2668,7 +2789,7 @@ fn ecma_shortest(n: f64) -> String {
         .skip_while(|&c| c == '0')
         .count();
     if sig == 0 {
-        return rust;
+        return;
     }
     if !rust.contains('e') && n.abs() >= f64::MIN_POSITIVE {
         // A tie between two equidistant shortest spellings requires the
@@ -2680,7 +2801,7 @@ fn ecma_shortest(n: f64) -> String {
         // two parses. Subnormals (wider relative ulps) and exponent-form
         // spellings take the slow path.
         if sig <= 15 {
-            return rust;
+            return;
         }
         // A tie can only flip the FINAL digit of the spelling: the two
         // candidates are same-length decimals one apart in the last place,
@@ -2691,19 +2812,21 @@ fn ecma_shortest(n: f64) -> String {
         // reaches the output and the tie-break is moot.
         if let Some(dot) = rust.find('.') {
             if rust.len() - dot - 1 > 11 {
-                return rust;
+                return;
             }
         }
     }
+    // The slow path is the only one that allocates, and it is reached by a
+    // spelling of 16 significant digits or more — never by a hand-written
+    // dimension, only by arithmetic that lands on one.
     let sci = format!("{:.*e}", sig - 1, n);
     if sci.parse::<f64>() != Ok(n) {
-        return rust;
+        return;
     }
     let expanded = expand_exponent(&sci);
     if expanded.parse::<f64>() == Ok(n) {
-        expanded
-    } else {
-        rust
+        out.truncate(start);
+        out.push_str(&expanded);
     }
 }
 
@@ -2736,61 +2859,61 @@ fn expand_exponent(sci: &str) -> String {
     }
 }
 
-/// dart `_writeRounded`: round a plain decimal string to 10 fractional
-/// digits by inspecting ONLY the 11th digit (>= '5' carries up), then trim
-/// trailing fractional zeros. Ten or fewer fractional digits pass verbatim.
-fn round_decimal_string(text: String) -> String {
-    let Some(dot) = text.find('.') else {
-        return text;
+/// dart `_writeRounded`, in place: round the plain decimal spelling that
+/// starts at `start` to 10 fractional digits by inspecting ONLY the 11th
+/// digit (>= '5' carries up), then trim trailing fractional zeros. Ten or
+/// fewer fractional digits pass verbatim.
+fn round_decimal_in_place(out: &mut String, start: usize) {
+    let Some(dot) = out[start..].find('.').map(|i| start + i) else {
+        return;
     };
-    if text.len() - dot - 1 <= 10 {
-        return trim_fraction(text);
-    }
-    let mut bytes: Vec<u8> = text.into_bytes();
-    let round_up = bytes[dot + 11] >= b'5';
-    bytes.truncate(dot + 11);
-    if round_up {
-        let mut i = bytes.len() - 1;
-        loop {
-            match bytes[i] {
-                b'.' => i -= 1,
-                b'9' => {
-                    bytes[i] = b'0';
-                    if i == 0 {
-                        bytes.insert(0, b'1');
-                        break;
-                    }
-                    i -= 1;
-                }
-                b'-' => {
-                    bytes.insert(i + 1, b'1');
-                    break;
-                }
-                _ => {
-                    bytes[i] += 1;
-                    break;
-                }
-            }
+    if out.len() - dot - 1 > 10 {
+        let round_up = out.as_bytes()[dot + 11] >= b'5';
+        out.truncate(dot + 11);
+        if round_up {
+            carry_one(out, start);
         }
     }
-    trim_fraction(String::from_utf8(bytes).expect("ascii decimal"))
+    trim_fraction_in_place(out, start);
 }
 
-/// Trim trailing fractional zeros (and a then-trailing dot); `-0` and
-/// all-zero results collapse to `0` at the caller.
-fn trim_fraction(mut s: String) -> String {
-    if s.contains('.') {
-        while s.ends_with('0') {
-            s.pop();
-        }
-        if s.ends_with('.') {
-            s.pop();
-        }
+/// Add one to the last digit of the decimal spelling at `start..`, carrying
+/// leftwards: `1.29` -> `1.30`, `9.99` -> `10.00`, `-9.9` -> `-10.0`.
+fn carry_one(out: &mut String, start: usize) {
+    // Walk back over the digits a carry turns into zeros — the trailing `9`s
+    // and the decimal point between them — stopping on the byte that absorbs
+    // it: a digit below `9`, the sign, or the start of the spelling.
+    let mut i = out.len();
+    while i > start && matches!(out.as_bytes()[i - 1], b'9' | b'.') {
+        i -= 1;
     }
-    if s == "-0" || s == "0" {
-        return "0".to_string();
+    // Everything from `i` on is `9`s with at most one `.` among them, and it
+    // is the tail of the buffer, so the carry is one truncate and one push
+    // instead of a byte edited in the middle of a string.
+    let width = out.len() - i;
+    let dot = out[i..].find('.');
+    let (cut, lead) = match (i > start).then(|| out.as_bytes()[i - 1]) {
+        Some(d) if d.is_ascii_digit() => (i - 1, (d + 1) as char),
+        // Nothing left to absorb the carry — the spelling was all `9`s, or the
+        // only thing before them is the sign — so it grows a leading `1`.
+        _ => (i, '1'),
+    };
+    out.truncate(cut);
+    out.push(lead);
+    for k in 0..width {
+        out.push(if dot == Some(k) { '.' } else { '0' });
     }
-    s
+}
+
+/// Trim trailing fractional zeros (and a then-trailing dot) from the spelling
+/// at `start..`; `-0` and all-zero results collapse to `0` at the caller.
+fn trim_fraction_in_place(out: &mut String, start: usize) {
+    let text = &out[start..];
+    if !text.contains('.') {
+        return;
+    }
+    let kept = text.trim_end_matches('0').trim_end_matches('.').len();
+    out.truncate(start + kept);
 }
 
 /// Look up a CSS named color. Covers the complete set of 148 CSS Color 4

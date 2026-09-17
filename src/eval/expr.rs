@@ -39,7 +39,7 @@ impl<'a> Evaluator<'a> {
                 TplPiece::Lit(t) => s.push_str(t),
                 TplPiece::Interp(e) => {
                     let v = self.eval_expr(e)?;
-                    s.push_str(&interp_checked(&v)?);
+                    interp_checked_into(&mut s, &v)?;
                 }
             }
         }
@@ -93,10 +93,13 @@ impl<'a> Evaluator<'a> {
                 }
                 TplPiece::Interp(e) => {
                     let v = self.eval_expr(e)?;
-                    let out = interp_checked(&v)?;
-                    let len = out.chars().count();
+                    // Written into the output first, then measured there: the
+                    // range is what the interpolation occupies in `s`, which is
+                    // the same count either way and one buffer cheaper.
+                    let at = s.len();
+                    interp_checked_into(&mut s, &v)?;
+                    let len = s[at..].chars().count();
                     bounds.push((chars, len));
-                    s.push_str(&out);
                     chars += len;
                 }
             }
