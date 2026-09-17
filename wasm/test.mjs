@@ -1336,6 +1336,29 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     });
   }
 
+  // Under `--no-css` a repeated destination is not a collision: nothing is
+  // written, so there is no last-writer to get right and the batch keeps its
+  // parallelism. What must not change is the compiling and the reporting.
+  {
+    const ndir = join(dir, "nocss");
+    mkdirSync(ndir, { recursive: true });
+    const target = join(ndir, "out.css");
+    const args = [cliPath, "--no-css", "--no-source-map", "-j", "4"];
+    for (let i = 0; i < 6; i++) {
+      writeFileSync(join(ndir, `n${i}.scss`), `@warn "nocss-${i}";\n.n${i}{a:${i}}\n`);
+      args.push(`${join(ndir, `n${i}.scss`)}:${target}`);
+    }
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+    assert.equal(r.status, 0, `cli: --no-css with a repeated destination (stderr: ${r.stderr})`);
+    assert.ok(!existsSync(target), "cli: --no-css wrote nothing, collision or not");
+    const seq = (r.stderr.match(/nocss-\d/g) || []);
+    assert.deepEqual(
+      seq,
+      ["nocss-0", "nocss-1", "nocss-2", "nocss-3", "nocss-4", "nocss-5"],
+      "cli: every job still ran, exactly once, reported in command-line order",
+    );
+  }
+
   // A failure inside the pool is still reported and still exits non-zero.
   writeFileSync(join(dir, "src", "s7.scss"), ".s7{a:}\n");
   const broken = compileAll(join(dir, "broken"), ["-j", "4"], {});

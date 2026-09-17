@@ -994,9 +994,12 @@ async function runJobs(jobs, opts, common) {
   // A job writes its CSS *and*, with source maps on, a `<output>.map` beside
   // it — so `a.scss:out.css` and `b.scss:out.css.map` collide on that sidecar
   // even though their `output`s differ. Both count.
+  // `--no-css` is the exception: `emit` and `discardStaleOutput` both return
+  // early under it, so the batch touches no output at all and there is no
+  // last-writer to get right.
   const seenOut = new Set();
   let collides = false;
-  for (const job of jobs) {
+  for (const job of opts.noCss ? [] : jobs) {
     if (job.output === undefined) continue;
     const written = [job.output];
     if (wantSourceMap(opts, job.output) && !opts.embedSourceMap) written.push(`${job.output}.map`);
