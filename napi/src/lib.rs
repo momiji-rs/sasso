@@ -197,6 +197,10 @@ pub struct CompileConfig {
     pub want_map: bool,
     pub include_sources: bool,
     pub charset: bool,
+    /// dart-sass `quietDeps`: drop deprecation warnings raised inside a
+    /// stylesheet reached through a load path or a user importer (see
+    /// `NapiChain::canonicalize`).
+    pub quiet_deps: bool,
     pub load_paths: Vec<String>,
     /// Whether any user importers exist (routes canonicalize through JS first).
     pub has_user_importers: bool,
@@ -400,6 +404,11 @@ impl Importer for NapiChain<'_> {
         if let Some(canon) = self.user_canonicalize(url, ctx)? {
             let key = file_url_to_path(&canon).unwrap_or_else(|| canon.clone());
             self.owner.borrow_mut().insert(key.clone(), Owner::User(canon));
+            // A user importer's stylesheet is a dependency for `quietDeps`, as
+            // in dart (measured against dart-sass 1.104.1's JS API on
+            // 2026-09-17). The fs importer keeps the record for the whole
+            // chain, so what this file then loads relatively counts too.
+            self.fs.dependencies().mark(&key);
             return Ok(Some(CanonicalUrl::new(key)));
         }
         // 2. Native fs. The core FsImporter unconditionally searches the
@@ -434,6 +443,10 @@ impl Importer for NapiChain<'_> {
                         containing_url: Some(&fake),
                     };
                     if let Some(c) = one.canonicalize(url, &fs_ctx)? {
+                        // Found through a load path: a dependency. The throwaway
+                        // importer has its own record, so mark it on the one the
+                        // compile reads.
+                        self.fs.dependencies().mark(c.as_str());
                         found = Some(c);
                         break;
                     }
@@ -579,6 +592,11 @@ fn run_compile(
         .with_syntax(syntax_from(cfg.syntax))
         .with_charset(cfg.charset)
         .with_importer(chain);
+    if cfg.quiet_deps {
+        // The record fills in as the chain resolves each load, so a deprecation
+        // is judged by how its file was REACHED, not by where it sits.
+        opts = opts.with_quiet_deps(chain.fs.dependencies());
+    }
     if let Some(u) = cfg.url.as_deref() {
         opts = opts.with_url(u);
     }

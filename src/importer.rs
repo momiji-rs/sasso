@@ -206,7 +206,12 @@ impl DependencySet {
         }
     }
 
-    pub(crate) fn insert(&self, canonical: &str) {
+    /// Record `canonical` as a dependency. [`FsImporter`] calls this from its
+    /// own resolution; an embedder whose importer resolves load paths itself —
+    /// the wasm bridge, whose host does every file lookup — marks each
+    /// dependency here, so `quietDeps` follows dart's provenance rule rather
+    /// than guessing from where a file happens to live.
+    pub fn mark(&self, canonical: &str) {
         if let Some((_paused, mut st)) = self.lock() {
             st.set.insert(canonical.to_string());
         }
@@ -295,7 +300,7 @@ impl Importer for FsImporter {
                         .map(|c| self.dependencies.is_dependency(c.as_str()))
                         .unwrap_or(false);
                     if via_load_path || from_dependency {
-                        self.dependencies.insert(&key);
+                        self.dependencies.mark(&key);
                     }
                     return Ok(Some(CanonicalUrl::new(key)));
                 }

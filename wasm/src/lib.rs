@@ -25,7 +25,8 @@
 use std::alloc::{alloc, dealloc, Layout};
 
 use sasso::{
-    CanonicalUrl, CanonicalizeContext, Importer, ImporterError, ImporterResult, Options, OutputStyle, Syntax,
+    CanonicalUrl, CanonicalizeContext, DependencySet, Importer, ImporterError, ImporterResult, Options,
+    OutputStyle, Syntax,
 };
 
 // Install sasso's scoped bump arena as the wasm global allocator. Every
@@ -91,7 +92,11 @@ pub extern "C" fn sasso_free(ptr: *mut u8, len: usize) {
 #[link(wasm_import_module = "sasso_host")]
 extern "C" {
     /// Map `url` (with the `from_import` flag and optional containing URL) to a
-    /// canonical URL. On success the `out` buffer is the canonical URL's UTF-8.
+    /// canonical URL. On success the `out` buffer is FRAMED: one byte that is
+    /// `1` when the host resolved this load through a load path or a custom
+    /// importer (dart's "dependency", what `quiet_deps` silences) and `0`
+    /// otherwise, then the canonical URL's UTF-8. The host owns that rule
+    /// because the host does the resolving.
     fn host_canonicalize(
         url_ptr: *const u8,
         url_len: usize,
@@ -293,7 +298,11 @@ fn parse_load_frame(bytes: &[u8]) -> Result<ImporterResult, ImporterError> {
 
 /// Bridges the core two-phase [`Importer`] trait to the host's
 /// `host_canonicalize` / `host_load` import functions.
-struct HostImporter;
+struct HostImporter {
+    /// The loads the host flagged as dependencies (see `host_canonicalize`),
+    /// handed to [`Options::with_quiet_deps`] when `quiet_deps` is on.
+    deps: DependencySet,
+}
 
 impl Importer for HostImporter {
     fn canonicalize(
@@ -322,9 +331,15 @@ impl Importer for HostImporter {
         };
         let bytes = take_host_bytes(out_ptr, out_len);
         match rc {
-            1 => Ok(Some(CanonicalUrl::new(
-                String::from_utf8_lossy(&bytes).into_owned(),
-            ))),
+            1 => {
+                // [dependency: u8][canonical URL bytes] — see `host_canonicalize`.
+                let dep = bytes.first().copied().unwrap_or(0) != 0;
+                let url = String::from_utf8_lossy(bytes.get(1..).unwrap_or_default()).into_owned();
+                if dep {
+                    self.deps.mark(&url);
+                }
+                Ok(Some(CanonicalUrl::new(url)))
+            }
             0 => Ok(None),
             _ => Err(host_error(bytes, "canonicalize")),
         }
@@ -355,6 +370,9 @@ impl Importer for HostImporter {
 ///   `@import` call back into the host; `0` disables file imports.
 /// - `(url_ptr, url_len)`: the entry's URL for diagnostics, source-map sources,
 ///   and as the base for the first level of relative imports (`0`/`0` = none).
+/// - `quiet_deps != 0` drops deprecation warnings raised inside the stylesheets
+///   the host flagged as dependencies (dart-sass `quietDeps`); a dependency's
+///   own `@warn`/`@debug` still reaches the logger, as in dart.
 /// - `want_map != 0` also produces a Source Map v3 — the result buffer is then
 ///   FRAMED: a little-endian `u32` CSS byte length, the CSS bytes, then the
 ///   source-map JSON bytes. `include_sources != 0` embeds source text in the
@@ -376,6 +394,7 @@ pub extern "C" fn sasso_compile2(
     want_map: u8,
     include_sources: u8,
     charset: u8,
+    quiet_deps: u8,
     out_len_ptr: *mut usize,
     ok_ptr: *mut u8,
 ) -> *mut u8 {
@@ -398,7 +417,9 @@ pub extern "C" fn sasso_compile2(
         2 => Syntax::Css,
         _ => Syntax::Scss,
     };
-    let importer = HostImporter;
+    let importer = HostImporter {
+        deps: DependencySet::default(),
+    };
 
     let (bytes, ok): (Vec<u8>, u8) = match std::str::from_utf8(input) {
         Ok(scss) => {
@@ -414,6 +435,12 @@ pub extern "C" fn sasso_compile2(
             }
             if use_importer != 0 {
                 opts = opts.with_importer(&importer);
+            }
+            if quiet_deps != 0 {
+                // The record fills in as the host resolves each load, and the
+                // compiler consults it when a deprecation fires — so a file is
+                // judged by how it was REACHED, not by where it sits.
+                opts = opts.with_quiet_deps(importer.deps.clone());
             }
             // Register host custom functions (each bridges to host_call_function).
             let sigs: Vec<String> = FUNCTIONS.with(|f| f.borrow().clone());

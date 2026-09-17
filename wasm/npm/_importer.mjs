@@ -7,7 +7,8 @@
 //
 //   • a Node-fs importer (`makeFsImporter`) for `loadPaths` and relative-to-
 //     containing-file resolution — a faithful JS port of the dart-sass
-//     partial / index / import-only precedence in `../../src/importer.rs`; and
+//     partial / index / import-only precedence in `../../src/importer.rs`; it
+//     also records which loads came through a load path (`quietDeps`); and
 //   • a bridge (`normalizeImporter`) for user-supplied dart-sass *modern*
 //     importers — both `{ canonicalize, load }` Importers and `{ findFileUrl }`
 //     FileImporters.
@@ -180,7 +181,7 @@ function loadFsPath(path) {
  * A Node-fs importer searching, in order, the containing file's directory then
  * `loadPaths`, with dart-faithful partial/index/import-only precedence.
  */
-export function makeFsImporter(loadPaths) {
+export function makeFsImporter(loadPaths, deps) {
   const bases = (loadPaths || []).map((p) => String(p));
   return {
     canonicalize(url, fromImport, containingHref) {
@@ -190,19 +191,33 @@ export function makeFsImporter(loadPaths) {
       // `compileString` only resolves relative URLs when given a `url` (or via
       // `loadPaths`), so an import with neither simply misses.
       const baseDirs = [];
+      let firstLoadPath = 0; // index in baseDirs where the load paths begin
       if (containingHref) {
         try {
           baseDirs.push(nodePath.dirname(fileURLToPath(containingHref)));
+          firstLoadPath = 1;
         } catch {
           // containing URL isn't a file: URL — skip relative resolution
         }
       }
       for (const b of bases) baseDirs.push(b);
 
-      for (const base of baseDirs) {
-        const r = resolveInBase(base, url, fromImport);
+      for (let i = 0; i < baseDirs.length; i++) {
+        const r = resolveInBase(baseDirs[i], url, fromImport);
         if (r === "ambiguous") return null; // dart errors; we treat as a miss
-        if (r) return canonicalHrefFor(r);
+        if (r) {
+          const href = canonicalHrefFor(r);
+          // dart's `quietDeps` rule is about how a file was REACHED, not where
+          // it lives: a file found through a load path is a dependency, and so
+          // is anything a dependency loads relatively — but a file the entry
+          // loads relatively is not, even when it sits under a load path.
+          // (Measured against dart-sass 1.104.1 on 2026-09-17; the same rule
+          // the native CLI's FsImporter applies in ../../src/importer.rs.)
+          if (deps && (i >= firstLoadPath || (containingHref && deps.has(containingHref)))) {
+            deps.add(href);
+          }
+          return href;
+        }
       }
       return null;
     },

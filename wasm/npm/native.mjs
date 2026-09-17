@@ -297,6 +297,7 @@ function buildCfg(options, syntax, urlForCore) {
     wantMap: !!options.sourceMap,
     includeSources: !!options.sourceMapIncludeSources,
     charset: options.charset !== false,
+    quietDeps: !!options.quietDeps,
     loadPaths: (options.loadPaths || []).map(String),
     hasUserImporters: !!(options.importers && options.importers.length),
     functionSignatures: options.functions ? Object.keys(options.functions) : [],

@@ -22,6 +22,13 @@ export interface Options {
    */
   functions?: Record<string, CustomFunction>;
   /**
+   * Don't report deprecation warnings raised inside dependencies: stylesheets
+   * reached through {@link loadPaths} or a custom importer, and whatever those
+   * load relatively. A dependency's own `@warn`/`@debug` still reaches the
+   * logger, as in dart-sass.
+   */
+  quietDeps?: boolean;
+  /**
    * Diagnostic handler for `@warn` / `@debug` / deprecation warnings. When
    * omitted, they print to stderr. Pass {@link Logger.silent} to discard them.
    */
