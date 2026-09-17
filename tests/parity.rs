@@ -2924,6 +2924,40 @@ fn a_modify_channel_is_unit_checked_however_it_is_written() {
 }
 
 #[test]
+fn a_unit_bearing_degenerate_calc_is_checked_by_the_modify_ops_too() {
+    // A degenerate `calc()` that carries a unit arrives as a plain number —
+    // the calculation only survives where the evaluator preserves one — so the
+    // modify ops unit-check it like any other channel, the alpha's bounds
+    // carrying that unit. Byte-matched to dart-sass 1.104.1. Offline.
+    let err = |call: &str| ours_err(&format!("@use \"sass:color\";\na {{ b: {call}; }}\n"));
+    for (call, want) in [
+        (
+            "color.change(red, $red: calc(infinity * 1px))",
+            "$red: Expected calc(infinity * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color.change(red, $red: calc(NaN * 1px))",
+            "$red: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color.adjust(red, $red: calc(NaN * 1px))",
+            "$red: Expected calc(NaN * 1px) to have unit \"%\" or no units.",
+        ),
+        (
+            "color.change(oklch(50% 0.1 20deg), $hue: calc(NaN * 1px))",
+            "$hue: Expected calc(NaN * 1px) to have an angle unit (deg, grad, rad, turn).",
+        ),
+        (
+            "color.change(red, $alpha: calc(NaN * 1px))",
+            "$alpha: Expected calc(NaN * 1px) to be within 0px and 1px.",
+        ),
+    ] {
+        let msg = err(call);
+        assert!(msg.contains(want), "{call}\n  want: {want}\n  got:  {msg}");
+    }
+}
+
+#[test]
 fn legacy_channels_non_number_channel_error() {
     // A one-argument channels list whose first channel is a non-`from`,
     // non-number value (a quoted `"from"` or a bare keyword like `c`) reports

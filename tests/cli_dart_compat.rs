@@ -1443,6 +1443,26 @@ fn directory_mode_skips_sources_inside_a_nested_output() {
 }
 
 #[test]
+fn directory_mode_skips_only_the_output_directory_itself() {
+    // The nested-output skip is a DESCENDANT test, not a string prefix: a
+    // sibling whose name merely starts with the destination's (`css2` beside
+    // `css`) is still a source. Measured against dart-sass 1.104.1.
+    let dir = scratch("nested_sibling");
+    write(&dir, "one.scss", "a { b: c }\n");
+    write(&dir, "css/inside.scss", "d { e: f }\n");
+    write(&dir, "css2/sibling.scss", "g { h: i }\n");
+    let r = sasso(&dir, &["--no-source-map", ".:css"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(read(&dir, "css/one.css"), "a {\n  b: c;\n}\n");
+    assert_eq!(read(&dir, "css/css2/sibling.css"), "g {\n  h: i;\n}\n");
+    assert!(
+        !dir.join("css/css").exists(),
+        "the output directory itself is still skipped"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn source_map_sources_name_imported_files_by_path() {
     // dart writes each imported file's path relative to the map, so two
     // partials sharing a basename are two sources; an entry that emits nothing
