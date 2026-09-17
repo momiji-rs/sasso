@@ -29,6 +29,12 @@ export interface Options {
    */
   quietDeps?: boolean;
   /**
+   * Render diagnostics with the Unicode box glyphs (`╷`/`│`/`╵`), default
+   * `true`; `false` selects the ASCII set, like the CLI's `--no-unicode`. A
+   * sasso extension — dart-sass exposes it on its command line only.
+   */
+  unicode?: boolean;
+  /**
    * Diagnostic handler for `@warn` / `@debug` / deprecation warnings. When
    * omitted, they print to stderr. Pass {@link Logger.silent} to discard them.
    */

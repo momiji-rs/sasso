@@ -475,5 +475,41 @@ writeFileSync(join(root, "fi.scss"), "$s: 10px;\n");
 
 console.log("ok: quietDeps — native and wasm agree on dart's provenance rule");
 
+// (o) `unicode: false` — the CLI's `--no-unicode` — selects the ASCII glyph set
+// for rendered diagnostics, on both engines. Same reason as quietDeps: one
+// shared type declaration, so neither engine may quietly ignore it.
+{
+  const render = (mod, unicode) => {
+    let out = "";
+    try {
+      mod.compileString(".d{color: lighten(#036, 10%)}", {
+        url: "file:///x.scss",
+        unicode,
+        logger: { warn: (m) => (out += m) },
+      });
+    } catch (e) {
+      out += e.message;
+    }
+    return out;
+  };
+  for (const [name, mod] of [["native", napi], ["wasm", wasm]]) {
+    // A rendered error carries the gutter whether or not a warning does.
+    const fail = (unicode) => {
+      try {
+        mod.compileString(".a{b: }", { url: "file:///x.scss", unicode });
+        return "";
+      } catch (e) {
+        return e.message;
+      }
+    };
+    assert.match(fail(true), /╷/, `unicode(${name}): the Unicode gutter by default`);
+    assert.ok(!/[╷│╵]/.test(fail(false)), `unicode(${name}): --no-unicode renders ASCII`);
+    assert.match(fail(false), /^\s*,$/m, `unicode(${name}): … opening with a comma, as dart does`);
+    render(mod, true); // exercises the warning path with the same option
+  }
+}
+
+console.log("ok: unicode — native and wasm render the same ASCII/Unicode gutters");
+
 console.log("ok: behavior guards — importers, errors, logger, functions, isolation, overlap, re-entrancy, valueOp");
 console.log("all sasso-napi native-addon tests passed");

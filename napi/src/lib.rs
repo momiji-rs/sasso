@@ -201,6 +201,8 @@ pub struct CompileConfig {
     /// stylesheet reached through a load path or a user importer (see
     /// `NapiChain::canonicalize`).
     pub quiet_deps: bool,
+    /// Render diagnostics with the Unicode box glyphs (dart-sass `--unicode`).
+    pub unicode: bool,
     pub load_paths: Vec<String>,
     /// Whether any user importers exist (routes canonicalize through JS first).
     pub has_user_importers: bool,
@@ -591,6 +593,7 @@ fn run_compile(
         })
         .with_syntax(syntax_from(cfg.syntax))
         .with_charset(cfg.charset)
+        .with_unicode(cfg.unicode)
         .with_importer(chain);
     if cfg.quiet_deps {
         // The record fills in as the chain resolves each load, so a deprecation

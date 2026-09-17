@@ -373,6 +373,8 @@ impl Importer for HostImporter {
 /// - `quiet_deps != 0` drops deprecation warnings raised inside the stylesheets
 ///   the host flagged as dependencies (dart-sass `quietDeps`); a dependency's
 ///   own `@warn`/`@debug` still reaches the logger, as in dart.
+/// - `unicode == 0` renders diagnostics with the ASCII glyph set (`,`/`|`/`'`
+///   instead of `╷`/`│`/`╵`), as dart-sass's `--no-unicode` does.
 /// - `want_map != 0` also produces a Source Map v3 — the result buffer is then
 ///   FRAMED: a little-endian `u32` CSS byte length, the CSS bytes, then the
 ///   source-map JSON bytes. `include_sources != 0` embeds source text in the
@@ -395,6 +397,7 @@ pub extern "C" fn sasso_compile2(
     include_sources: u8,
     charset: u8,
     quiet_deps: u8,
+    unicode: u8,
     out_len_ptr: *mut usize,
     ok_ptr: *mut u8,
 ) -> *mut u8 {
@@ -426,7 +429,8 @@ pub extern "C" fn sasso_compile2(
             let mut opts = Options::default()
                 .with_syntax(syntax)
                 .with_source_map_include_sources(include_sources != 0)
-                .with_charset(charset != 0);
+                .with_charset(charset != 0)
+                .with_unicode(unicode != 0);
             if compressed != 0 {
                 opts = opts.with_style(OutputStyle::Compressed);
             }
