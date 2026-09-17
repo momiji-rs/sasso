@@ -1251,6 +1251,10 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     );
     // `engineEnv` for the same reason as above: inheriting `SASSO_ENGINE=wasm`
     // would make the "default" run measure wasm and fail the comparison below.
+    // `undefined` means ONE thing: this platform has no prebuilt addon, which
+    // `loadEngine` reports by name. Any other failure is a failure — treating
+    // it as "no addon" would skip the default-engine assertions below and let
+    // the guard pass while the thing it guards is broken.
     const perCompile = (env) => {
       let best = Infinity;
       for (let k = 0; k < 3; k++) {
@@ -1259,7 +1263,14 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
           env: engineEnv(env),
           timeout: 60000,
         });
-        if (r.status !== 0) return undefined;
+        if (r.status !== 0) {
+          assert.match(
+            r.stderr,
+            /SASSO_ENGINE=native but the addon is unavailable/,
+            `cli: --loop failed for a reason other than a missing addon (status ${r.status}: ${r.stderr})`,
+          );
+          return undefined;
+        }
         const m = /=> ([\d.]+) ms\/compile/.exec(r.stderr);
         assert.ok(m, `cli: --loop reports a per-compile time (stderr: ${r.stderr})`);
         best = Math.min(best, Number(m[1]));
