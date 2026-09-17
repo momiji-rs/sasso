@@ -13,7 +13,7 @@ categories = ["compilers", "web-programming"]
 # Keep the published crate lean: ship only the library, binary, examples,
 # tests, licenses and README — not the conformance harness, benchmarks, or
 # analysis docs (those live in the git repo).
-exclude = ["/bench", "/spec", "/docs", "/.github", "/wasm", "/ffi"]
+exclude = ["/bench", "/spec", "/docs", "/.github", "/wasm", "/ffi", "/nix", "flake.nix", "flake.lock"]
 
 [lib]
 name = "sasso"

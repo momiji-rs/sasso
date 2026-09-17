@@ -21,6 +21,12 @@ bench/grass_runner/target/
 /spec/clone.err
 /spec/__pycache__/
 
+# The root flake's lock IS committed (it pins what CI checks against). The
+# NixOS smoke VM's is not: that flake deliberately floats to today's nixpkgs and
+# microvm.nix, and `nix/nixos-vm/run.sh` passes --no-write-lock-file so a run
+# leaves nothing behind — this only catches a hand-run `nix build` in there.
+/nix/nixos-vm/flake.lock
+
 # Claude Code session-local state (never commit).
 /.claude/
 

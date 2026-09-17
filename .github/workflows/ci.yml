@@ -169,6 +169,28 @@ jobs:
         run: python3 examples/importer.py
         working-directory: ffi
 
+  nix:
+    name: nix flake
+    # Both platform families `meta.platforms = unix` claims. The macOS leg is
+    # not redundant: `buildRustPackage`, the install checks and the sandbox
+    # itself differ enough there that a Linux-only check has let a broken
+    # darwin build through before in other projects.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cachix/install-nix-action@v31
+      # Builds nix/package.nix (full `cargo test` in the sandbox) and
+      # nix/ffi.nix (the C ABI's ctypes smoke test against the installed
+      # library), then the dart-compat check — issue #82's flag set, compared
+      # byte-for-byte against the dart-sass our flake.lock pins. Everything is
+      # pinned by flake.lock, so this job never goes red on someone else's bump.
+      - name: nix flake check
+        run: nix flake check -L --show-trace
+
   conformance:
     name: sass-spec ratchet
     runs-on: ubuntu-latest
