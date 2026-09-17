@@ -25,6 +25,24 @@ name: Publish wasm (npm)
 #   hand-tightened to `v[0-9]+…` so an `npm-v*` tag does NOT also fire the crate
 #   release. Re-running `dist init`/`dist generate` reverts that — re-apply the
 #   `v`-prefix tightening to release.yml after any cargo-dist regen.
+# • VERSION ALIGNMENT — the npm line and the crate line carry the SAME version
+#   number from 0.14.0 onward. They drifted apart because npm forbids
+#   republishing a version, so every packaging mistake burns one: npm went
+#   0.7.0→0.7.9 in a single day (2026-06-23) and 0.8.0→0.10.0 in another
+#   (2026-07-04) while the crate cut one release, which is the whole of the
+#   three-minor gap. npm cannot go back, so the CRATE skips forward: crate
+#   0.10.0 + npm 0.13.0 are the last mismatched pair, and the next release is
+#   0.14.0 on both. The `version-match` job below enforces it — an `npm-v*` tag
+#   whose version does not equal `Cargo.toml`'s fails before anything
+#   publishes. Consequences worth knowing:
+#     - a wasm-only fix now also cuts a crate release with no compiler changes.
+#       That is fine and has precedent (0.9.1 shipped with "No compiler
+#       changes"); a version number costs nothing, two different `sasso`
+#       versions cost every reader a double-take.
+#     - if a botched npm publish burns a number anyway, bump BOTH lines past
+#       it. Letting npm run ahead alone is exactly how the gap opened.
+#     - at stable, BOTH jump to 2.0.0 together (npm can never publish 1.x, see
+#       the version policy above), so they do not re-diverge at 1.0.
 
 on:
   push:
@@ -34,6 +52,30 @@ on:
 permissions: {}
 
 jobs:
+  # ── The npm version must equal the crate version ─────────────────────────
+  # See VERSION ALIGNMENT above. This runs first and gates both publish jobs,
+  # so a mismatched tag fails before anything reaches the registry — npm
+  # versions cannot be unpublished, so the check has to be BEFORE, not after.
+  version-match:
+    name: version matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: compare
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#npm-v}"
+          crate=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "npm tag version : $tag"
+          echo "Cargo.toml      : $crate"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::npm tag npm-v$tag does not match Cargo.toml $crate."
+            echo "::error::The two lines share one version number (see VERSION"
+            echo "::error::ALIGNMENT in this workflow). Cut the crate release"
+            echo "::error::first, or retag npm at $crate."
+            exit 1
+          fi
+
   # ── Native platform packages (sasso-native-<target>) ─────────────────────
   # One leg per prebuilt target; each publishes its own package at the tag's
   # version. `sasso/native` (wasm/npm/native.mjs) resolves these at runtime,
@@ -42,6 +84,7 @@ jobs:
   # npmjs.com trusted-publisher entry pointing at THIS workflow file.
   publish-native:
     name: native ${{ matrix.target }}
+    needs: version-match
     runs-on: ${{ matrix.runner }}
     permissions:
       id-token: write # npm provenance
