@@ -33,9 +33,14 @@ The one differing file in both styles is `learn.css`; see
 ## How to reproduce a row
 
 ```sh
+# Pin the oracle: a bare `sass` on PATH is whatever is installed, and a future
+# release would silently change every comparison below.
+npm install sass@1.104.1 --prefix /tmp/dart1104
+DART=/tmp/dart1104/node_modules/.bin/sass
+
 printf '@use "sass:color";\n.a { b: %s; }\n' '<expression>' > t.scss
-sass  --no-source-map t.scss   # dart-sass 1.104.1
-sasso --no-source-map t.scss
+"$DART" --no-source-map t.scss
+sasso   --no-source-map t.scss
 ```
 
 `tests/parity.rs` runs every expectation in this repo against a real dart-sass
@@ -111,12 +116,10 @@ A wrong value, or a missing error, rather than a wrong message.
 | input | dart-sass 1.104.1 | sasso |
 |---|---|---|
 | `rgb(1, 2, 3, $nope: 4)` ([#62](https://github.com/momiji-rs/sasso/issues/62)) | `No parameter named $nope.` | returns `rgb(1, 2, 3)` |
-| `color.change(hsl(240 none 50%), $alpha: 0.5)` | keeps the missing channel | fills it in |
 | `meta.inspect(33.333333333333336%)` | `33.333333333333336%` | `33.3333333333%` |
 | `meta.inspect(color.hwb(0, calc(-infinity * 1%), 40%, 0.5))` | `hwb(0 calc(-infinity)% 40% / 0.5)` | `hwb(0 -Infinity% 40% / 0.5)` |
 | `color.change(red, $red: calc(NaN))` | `hsl(0, 0%, 0%)` | `black` |
 | `color.change(red, $saturation: calc(infinity))` | `hsl(0, 0%, 0%)` | `hsl(0, calc(infinity * 1%), 50%)` |
-| comma-form `color.hwb()` diagnostics | three message differences vs the space form | — |
 
 The first row has the widest blast radius: an unknown **named** argument is
 silently ignored by every built-in, so a typo in an argument name compiles
@@ -129,6 +132,29 @@ The `meta.inspect` precision row is wide in a different way: it is every
 fractional number under `inspect`, and `inspect` output appears throughout the
 sass-spec expectations.
 
+### The comma form of `color.hwb()` reports three diagnostics differently
+
+The space form matches; only the legacy comma form diverges, and it does so in
+three distinct ways, so each is given its own input:
+
+```scss
+color.hwb((1 2), 10%, 20%)
+// dart:  Expected hue channel to be a number, was (1 2).
+// sasso: $channels: Expected hue channel to be a number, was (1 2).
+
+color.hwb(0, 10%, 20%, (1 2))
+// dart:  (1 2) is not a number.
+// sasso: $alpha: (1 2) is not a number.
+
+color.hwb(0, 10%)
+// dart:  Only 1 argument allowed, but 2 were passed.
+// sasso: $channels: The hwb color space has 3 channels but (0 / 10%) has 1.
+```
+
+The third is not a wording difference: with two arguments dart binds the call
+to the *modern* single-`$channels` overload and reports its arity, where sasso
+stays on the comma form and complains about the channel count.
+
 ## 3. Diagnostics
 
 Message text or span geometry. The compiler accepts and rejects the same
@@ -136,18 +162,49 @@ programs; only what it prints differs.
 
 | input | dart-sass 1.104.1 | sasso |
 |---|---|---|
-| `color.opacify(c, 0.1)` and the other eight removed `sass:color` members ([#65](https://github.com/momiji-rs/sasso/issues/65)) | names the member, recommends a replacement computed from the call's own arguments, links the docs | `Undefined function.` |
 | `red(#abcdef, 1)` | the arity error alone | the arity error **plus** a `[global-builtin]` deprecation |
 | `string.index("abc" "b", "x")` | `$string: ("abc" "b") is not a string.` | drops the parentheses |
 | a stray `}` | `unmatched "}".` | `unexpected "}"` |
-| `p > { &.x }` ([#66](https://github.com/momiji-rs/sasso/issues/66)) | draws two spans (`outer selector` / `parent selector`) | one span |
+| `p > { &.x { a: b } }` ([#66](https://github.com/momiji-rs/sasso/issues/66)) | draws two spans (`outer selector` / `parent selector`) | one span |
 | `Missing argument $x.` where the parameter was written with surrounding space | takes the name from the parameter's own span text | normalises it |
 | any `.sass` span crossing a CRLF line ending | correct | one byte short per CRLF |
 | every builtin arity/missing-argument error ([#66](https://github.com/momiji-rs/sasso/issues/66)) | two frames: the invocation, then the declaration | one frame |
 
-The last two rows share a cause worth naming: sasso has no dual-span diagnostic
-renderer, so any message dart draws with two frames is drawn with one. dart's
-`p > { &.x }` error, for instance:
+### The nine removed `sass:color` members ([#65](https://github.com/momiji-rs/sasso/issues/65))
+
+dart names the member and computes a replacement from the call's own arguments;
+sasso says only that the function is undefined:
+
+```scss
+@use "sass:color";
+.a { b: color.opacify(rgba(1, 2, 3, 0.5), 0.1); }
+```
+
+```
+dart-sass 1.104.1:
+Error: The function opacify() isn't in the sass:color module.
+
+Recommendation: color.adjust(rgba(1, 2, 3, 0.5), $alpha: 0.1)
+
+More info: https://sass-lang.com/documentation/functions/color#opacify
+
+sasso:
+Error: Undefined function.
+```
+
+The recommendation differs per member and per call, so this one example does
+not stand in for the rest: `opacify`/`fade-in` suggest `$alpha: <amount>`,
+`transparentize`/`fade-out` `$alpha: -<amount>`, `lighten`/`darken`
+`$lightness: ±<amount>`, `saturate`/`desaturate` `$saturation: ±<amount>`, and
+`adjust-hue` `$hue: <degrees>`. [#65](https://github.com/momiji-rs/sasso/issues/65)
+lists each with the exact shape, including the details that are easy to get
+wrong (the negation is textual, and no unit conversion happens).
+
+### Two-frame messages ([#66](https://github.com/momiji-rs/sasso/issues/66))
+
+The `p > { &.x }` row and the built-in arity row above share a cause: sasso has
+no dual-span diagnostic renderer, so any message dart draws with two frames is
+drawn with one. dart's `p > { &.x }` error, for instance:
 
 ```
 Error: Selector "p >" can't be used as a parent in a compound selector.

@@ -9,62 +9,55 @@ suite. Goal: 100% of sass-spec, raised over time.
 | | |
 |---|---|
 | repo | `https://github.com/sass/sass-spec.git` |
-| commit | **`1b03109a6205c8cff146defeae8488094b147c88`** |
-| upstream date | 2026-06-11 |
-| fetched | 2026-06-13 |
+| commit | **`b39c3276821a6dc3dd4a0f7e1f63c48cb15e269b`** |
+| upstream date | 2026-09-08 |
+| fetched | 2026-09-16 |
 
 Recorded in [`SPEC_VERSION.txt`](./SPEC_VERSION.txt). The upstream tree is
 `.gitignore`'d; re-fetch with `bash spec/fetch.sh`.
 
 ## Total case count
 
-**13,904 runnable conformance cases** (cases with either an `output.css` or an
-`error` expectation), extracted from **3,016 `.hrx` archives** (one archive
-holds many cases) plus a handful of loose directory-style cases. `js-api-spec/`
-(the JavaScript API tests) is excluded -- it tests the JS binding, not the
-SCSS->CSS language.
+**14,266 runnable conformance cases** (cases with either an
+`output.css` or an `error` expectation), plus a handful of loose
+directory-style cases. `js-api-spec/` (the JavaScript API tests) is excluded --
+it tests the JS binding, not the SCSS->CSS language.
+
+Of those, 14,258 are attempted (8 are tagged
+`:todo` for dart-sass itself) and **14,107 pass**
+(11,615 byte-exact CSS + 2,492 error specs correctly
+rejected), leaving 151 failures. Regenerate this section with
+`SASS_BIN=target/release/sasso python3 spec/run_spec.py`, which writes
+`spec/results.json`.
 
 ## Breakdown by top-level spec directory
 
-| Directory | Cases | of which error-specs | Notes |
-|-----------|------:|---------------------:|-------|
-| `core_functions`        | 8,647 | 1,202 | built-in functions; ~795 archives use `@use "sass:..."` |
-| `values`                | 1,227 |   482 | numbers, colors, strings, lists, maps |
-| `css`                   |   967 |   238 | plain-CSS passthrough, at-rules, comments |
-| `non_conformant`        |   941 |   107 | legacy pre-style-guide specs (still valid) |
-| `directives`            |   896 |   240 | `@if/@each/@for/@mixin/@extend/@at-root/@use/...` |
-| `libsass-closed-issues` |   595 |    94 | regression tests from libsass issues |
-| `expressions`           |   248 |    67 | operator/expression parsing & evaluation |
-| `libsass`               |   170 |    18 | libsass-originated tests |
-| `callable`              |   101 |    10 | function/mixin argument handling |
-| `operators`             |    37 |     2 | arithmetic/comparison operators |
-| `libsass-todo-issues`   |    29 |    19 | known-unfixed libsass issues |
-| `parser`                |    22 |     8 | parser edge cases |
-| `variables`             |    20 |     3 | variable scoping/defaults |
-| `libsass-todo-tests`    |     4 |     2 | |
-| **TOTAL**               | **13,904** | **2,560** | |
+| Directory | Cases | of which error-specs | failing | Notes |
+|-----------|------:|---------------------:|--------:|-------|
+| `core_functions`         |  8995 |  1202 |  150 | built-in functions |
+| `values`                 |  1236 |   482 |    0 | numbers, colors, strings, lists, maps |
+| `css`                    |   968 |   239 |    0 | plain-CSS passthrough, at-rules, comments |
+| `non_conformant`         |   941 |   107 |    0 | legacy pre-style-guide specs (still valid) |
+| `directives`             |   898 |   240 |    0 | `@if/@each/@for/@mixin/@extend/@at-root/@use/...` |
+| `libsass-closed-issues`  |   595 |    94 |    0 | regression tests from libsass issues |
+| `expressions`            |   250 |    67 |    0 | operator/expression parsing & evaluation |
+| `libsass`                |   170 |    18 |    1 | libsass-originated tests |
+| `callable`               |   101 |    10 |    0 | function/mixin argument handling |
+| `operators`              |    37 |     2 |    0 | arithmetic/comparison operators |
+| `libsass-todo-issues`    |    29 |    18 |    0 | known-unfixed libsass issues |
+| `parser`                 |    22 |     8 |    0 | parser edge cases |
+| `variables`              |    20 |     3 |    0 | variable scoping/defaults |
+| `libsass-todo-tests`     |     4 |     2 |    0 |  |
+| **TOTAL**                | **14266** | **2492** | **151** | |
 
-### Scope view: would-attempt vs. skipped (full suite)
+### What is skipped
 
-The runner tags out-of-scope features so we can see how much is reachable
-*today* vs. gated behind features sasso hasn't built yet. Projected over the
-whole suite with the default skip tags:
-
-| Skip tag | Cases | Why skipped |
-|----------|------:|-------------|
-| `use`              | 8,759 | input uses `@use` (incl. `@use "sass:math"` etc.) |
-| `indented-syntax`  |   414 | `.sass` indented syntax (`input.sass`) |
-| `extend`           |   105 | `@extend` / placeholder `%selectors` |
-| `forward`          |    92 | `@forward` |
-| `todo`             |     6 | upstream `options.yml :todo: [dart-sass]` |
-| **total skipped**  | **9,376** | |
-| **would-attempt**  | **4,528** | the reachable surface for our current scope |
-
-> The `@use` skip dominates because `core_functions` was migrated to call
-> built-ins through the module system (`@use "sass:color"; color.red(...)`).
-> As sasso gains `@use`, drop the tag with `--no-skip use` and the
-> attemptable surface jumps. The breakdown is regenerated on every run
-> (`skip_breakdown` in `results.json`), so it stays honest as scope changes.
+Only **8** of the 14,266 cases are skipped, all of them
+tagged `:todo` for dart-sass itself upstream. Everything else is attempted:
+the tags that once gated most of the suite (`use`, `extend`, `forward`,
+`indented-syntax`) no longer skip anything, because those features are
+implemented. The breakdown is regenerated on every run (`skip_breakdown` in
+`results.json`), so it stays honest as scope changes.
 
 ## dart-sass validation of the harness
 
@@ -73,7 +66,9 @@ To prove the harness + normalization are correct, we scored **real dart-sass**
 correct implementation must pass ~100% of the *attempted* (non-skipped) cases;
 any failure would mean our normalization is wrong, not the implementation.
 
-* **dart-sass version:** `1.101.0`
+* **dart-sass version:** `1.101.0` — this section validates the HARNESS,
+  not the current pin, and has not been re-run since; the numbers below are
+  from that run
 * npx cold-starts at ~1s/case, so we validated on representative slices.
 
 | Sample (`--filter`) | total | skip | attempted | PASS | ERROR_EXPECTED | FAIL | PASS% attempted |
