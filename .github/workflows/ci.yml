@@ -128,6 +128,15 @@ jobs:
         run: bash wasm/build.sh
       - name: build native addon
         run: bash napi/build.sh
+      # napi/ is its OWN workspace and its lockfile is tracked (the addon ships
+      # prebuilt binaries, so its dependency set is pinned like the root
+      # crate's). It pins the core crate BY PATH, so a release that bumps
+      # Cargo.toml leaves this lockfile stale and the build above quietly
+      # rewrites a tracked file — twice now, unnoticed both times. Fail instead:
+      # a version bump has to carry the refreshed lockfile.
+      # (wasm/Cargo.lock is deliberately untracked — see wasm/.gitignore.)
+      - name: napi/Cargo.lock is not stale
+        run: git diff --exit-code napi/Cargo.lock
       - name: node parity + behavior tests
         run: node napi/test.mjs
 
