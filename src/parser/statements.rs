@@ -313,8 +313,8 @@ impl Parser {
         let mut property = self.parse_template_mode(&[':'], CommentMode::DeclName)?;
         if colon_hack {
             match property.first_mut() {
-                Some(TplPiece::Lit(lit)) => lit.insert(0, ':'),
-                _ => property.insert(0, TplPiece::Lit(":".to_string())),
+                Some(TplPiece::Lit(lit)) => *lit = Rc::from(format!(":{lit}")),
+                _ => property.insert(0, TplPiece::Lit(":".into())),
             }
         }
         if !self.sc.eat(':') {

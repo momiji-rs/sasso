@@ -473,7 +473,11 @@ pub(crate) struct PropertySet {
 /// One piece of an interpolated template: literal text or an embedded
 /// expression (`#{...}`).
 pub(crate) enum TplPiece {
-    Lit(String),
+    /// Literal text, held as `Rc<str>` because a template that is a single
+    /// literal — which is what nearly every property name and unquoted value
+    /// keyword is — hands this buffer straight to the string it evaluates to
+    /// rather than copying it. The parser builds it once and never edits it.
+    Lit(Rc<str>),
     Interp(Expr),
 }
 

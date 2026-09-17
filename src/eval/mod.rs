@@ -39,6 +39,7 @@ mod plain_css;
 mod scope;
 
 use binop::*;
+use expr::InterpBounds;
 // `eval_div` is part of the crate-internal surface (`crate::eval::eval_div`,
 // called from `builtins::math`); re-export it so that path still resolves.
 pub(crate) use binop::eval_div;
@@ -329,7 +330,8 @@ pub(crate) enum OutNode {
     /// A bare declaration emitted directly inside an at-rule body (e.g.
     /// `@font-face { font-family: x; }`).
     AtDecl {
-        prop: String,
+        /// Shared, like [`OutItem::Decl`]'s — this node is repacked from one.
+        prop: Rc<str>,
         value: String,
         important: bool,
         /// A custom property (`--x`) whose value is emitted verbatim after the
@@ -434,7 +436,10 @@ enum MergeResult {
 #[derive(Clone)]
 pub(crate) enum OutItem {
     Decl {
-        prop: String,
+        /// The property name. Shared rather than owned, because a plain
+        /// property name (which is nearly all of them) is a single literal in
+        /// the AST and this is that literal.
+        prop: Rc<str>,
         value: String,
         important: bool,
         /// A custom property (`--x`) whose value is emitted verbatim after the
@@ -982,7 +987,7 @@ pub(crate) struct Evaluator<'a> {
     /// The current nested-property-set name prefix (e.g. `font` then `font-x`).
     /// Empty at the document root and inside ordinary rules; a child declaration
     /// emitted while this is non-empty is namespaced as `<prefix>-<name>`.
-    decl_prefix: Option<String>,
+    decl_prefix: Option<Rc<str>>,
     /// Whether we are evaluating the value of a `@supports` declaration. When
     /// set, `calc()` interiors are NOT simplified (dart-sass keeps
     /// `calc(1 + 2)` literal in `@supports (a: calc(1 + 2))`), matching
@@ -1822,7 +1827,7 @@ impl<'a> Evaluator<'a> {
         &self,
         rule: &Rule,
         sel_str: &str,
-        interp_bounds: &[(usize, usize)],
+        interp_bounds: &InterpBounds,
         at_idx: usize,
     ) -> Error {
         const MSG: &str = "expected selector.";
@@ -1830,6 +1835,7 @@ impl<'a> Evaluator<'a> {
         let single_line = !sel_str.contains('\n');
         // Inside an interpolation's output -> dual-span rendering, positioned
         // at the interpolation expression's start.
+        let interp_bounds = interp_bounds.as_slice();
         if spans.len() == interp_bounds.len() {
             for (k, &(start, len)) in interp_bounds.iter().enumerate() {
                 if at_idx >= start && at_idx < start + len {
@@ -3273,9 +3279,9 @@ impl<'a> Evaluator<'a> {
     }
 
     fn eval_decl(&mut self, d: &Declaration) -> Result<Option<OutItem>, Error> {
-        let name = trim_owned(self.eval_template(&d.property)?);
+        let name = trim_shared(self.eval_template_shared(&d.property)?);
         let prop = match &self.decl_prefix {
-            Some(prefix) => format!("{prefix}-{name}"),
+            Some(prefix) => Rc::from(format!("{prefix}-{name}")),
             None => name,
         };
         let value = self.eval_expr(&d.value)?;
@@ -3345,7 +3351,7 @@ impl<'a> Evaluator<'a> {
     /// emitted exactly as written (no SassScript evaluation). An empty value
     /// (`--x: ;`) still emits.
     fn eval_custom_decl(&mut self, d: &CustomDecl) -> Result<Option<OutItem>, Error> {
-        let prop = trim_owned(self.eval_template(&d.property)?);
+        let prop = trim_shared(self.eval_template_shared(&d.property)?);
         let value = self.eval_template(&d.value)?;
         // A custom property is serialized inside `_for(node.value, …)`
         // (serialize.dart:379) — the value's OWN span, never resolved through
@@ -3390,9 +3396,9 @@ impl<'a> Evaluator<'a> {
                 ps.pos,
             ));
         }
-        let name = trim_owned(self.eval_template(&ps.property)?);
+        let name = trim_shared(self.eval_template_shared(&ps.property)?);
         let full = match &self.decl_prefix {
-            Some(prefix) => format!("{prefix}-{name}"),
+            Some(prefix) => Rc::from(format!("{prefix}-{name}")),
             None => name,
         };
         // The leading value (`b: c { … }`) emits `<full>: c;` before children.
@@ -7070,15 +7076,16 @@ fn resolve_selectors_opt(
     Ok(result)
 }
 
-/// `s.trim().to_string()` without the allocation when `s` has no surrounding
-/// whitespace — the common case for an evaluated property name. Reuses the
-/// owned buffer in place (`trim` removed nothing → same length) instead of
-/// copying the bytes into a fresh `String`.
-fn trim_owned(s: String) -> String {
+/// `s.trim()` without an allocation when `s` has no surrounding whitespace —
+/// the common case for an evaluated property name, which is trimmed on every
+/// declaration and almost never has anything to lose. Hands back the same
+/// shared buffer (`trim` removed nothing → same length) instead of copying the
+/// bytes into a fresh one.
+fn trim_shared(s: Rc<str>) -> Rc<str> {
     if s.trim().len() == s.len() {
         s
     } else {
-        s.trim().to_string()
+        Rc::from(s.trim())
     }
 }
 
