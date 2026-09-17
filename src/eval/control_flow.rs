@@ -74,7 +74,7 @@ impl<'a> Evaluator<'a> {
             }
         };
         let start_i = to_int(start.value, start.clone())?;
-        let end_i = to_int(end_value, Number::with_unit(end_value, start.unit().to_string()))?;
+        let end_i = to_int(end_value, Number::with_unit(end_value, start.unit()))?;
         Ok((start_i, end_i, start.unit().to_string()))
     }
 
@@ -544,11 +544,7 @@ impl<'a> Evaluator<'a> {
                     let span = self.expression_node(from, *from_pos);
                     let mut result = Ok(None);
                     for i in for_indices(start_i, end_i, *inclusive) {
-                        self.set_local(
-                            var,
-                            Value::Number(Number::with_unit(i as f64, unit.clone())),
-                            span,
-                        );
+                        self.set_local(var, Value::Number(Number::with_unit(i as f64, &unit)), span);
                         result = self.run_fn_body(body);
                         if matches!(result, Ok(None)) {
                             continue;

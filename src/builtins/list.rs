@@ -440,7 +440,7 @@ mod tests {
     }
 
     fn num_unit(value: f64, unit: &str) -> Value {
-        Value::Number(Number::with_unit(value, unit.to_string()))
+        Value::Number(Number::with_unit(value, unit))
     }
 
     fn s(text: &str) -> Value {

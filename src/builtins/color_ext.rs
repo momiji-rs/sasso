@@ -401,7 +401,7 @@ fn fn_complement(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Res
     }
     // complement = adjust the hue by +180deg in the space. An explicit `$space`
     // enables the powerless-channel missing check.
-    let deg = Value::Number(Number::with_unit(180.0, "deg".to_string()));
+    let deg = Value::Number(Number::with_unit(180.0, "deg"));
     modify_in_space_opt(
         &c,
         space,
@@ -707,7 +707,7 @@ fn fn_hsl_getter(
         if let Some((i, unit)) = idx {
             return Ok(Value::Number(Number::with_unit(
                 m.channels[i].unwrap_or(0.0),
-                unit.to_string(),
+                unit,
             )));
         }
     }
@@ -720,7 +720,7 @@ fn fn_hsl_getter(
         // blackness
         _ => ((1.0 - c.r.max(c.g).max(c.b) / 255.0) * 100.0, "%"),
     };
-    Ok(Value::Number(Number::with_unit(value, unit.to_string())))
+    Ok(Value::Number(Number::with_unit(value, unit)))
 }
 
 /// `opacity($color)` returns the alpha; `opacity($number)` (CSS filter
@@ -1036,7 +1036,7 @@ mod tests {
     }
 
     fn n(v: f64, unit: &str) -> Value {
-        Value::Number(Number::with_unit(v, unit.to_string()))
+        Value::Number(Number::with_unit(v, unit))
     }
 
     fn css(name: &str, args: &[Value]) -> String {

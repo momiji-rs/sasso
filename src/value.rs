@@ -388,19 +388,23 @@ fn calc_number_css(n: &Number, compressed: bool) -> String {
 
 /// A number with its units (dart-sass `SassNumber`: a list of numerator units
 /// and a list of denominator units). The representation keeps the two
-/// overwhelmingly common cases — unitless and a single numerator unit —
-/// allocation-identical to a plain `String` field; multi-unit numbers
-/// (`px*px`, `px/s`) box their unit lists.
+/// overwhelmingly common cases — unitless and a single numerator unit — free of
+/// any unit list; multi-unit numbers (`px*px`, `px/s`) box their unit lists.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Number {
     pub value: f64,
     units: Units,
 }
 
+/// A unit name is held as `Rc<str>`, like [`SassStr`]'s text, so that cloning
+/// a number — which happens on every `$var` read, every operand copied out of
+/// an operation and every value handed to a builtin — is a refcount bump rather
+/// than a heap copy of `px`. Units are immutable: a number never edits its own
+/// unit name, it builds a new one, so the sharing is invisible.
 #[derive(Debug, Clone, PartialEq)]
 enum Units {
     None,
-    Single(String),
+    Single(Rc<str>),
     Complex(Box<ComplexUnits>),
 }
 
@@ -409,8 +413,8 @@ enum Units {
 /// denominator unit, or more than one numerator unit.
 #[derive(Debug, Clone, PartialEq)]
 struct ComplexUnits {
-    numer: Vec<String>,
-    denom: Vec<String>,
+    numer: Vec<Rc<str>>,
+    denom: Vec<Rc<str>>,
 }
 
 impl Number {
@@ -422,14 +426,32 @@ impl Number {
     }
 
     /// A number with zero or one numerator unit (`""` means unitless).
-    pub(crate) fn with_unit(value: f64, unit: impl Into<String>) -> Number {
-        let unit = unit.into();
+    ///
+    /// The unit comes in BORROWED: unitless is the common case and it must not
+    /// allocate, and a caller that has to spell the unit out (`"deg"`, a
+    /// literal's suffix) should pay for exactly one buffer, not a `String` it
+    /// then copies into an `Rc`.
+    pub(crate) fn with_unit(value: f64, unit: &str) -> Number {
         Number {
             value,
             units: if unit.is_empty() {
                 Units::None
             } else {
-                Units::Single(unit)
+                Units::Single(Rc::from(unit))
+            },
+        }
+    }
+
+    /// A number reusing an existing unit name — a numeric literal's, spelled
+    /// out once by the parser — so that evaluating the literal again costs a
+    /// refcount bump and nothing else.
+    pub(crate) fn with_shared_unit(value: f64, unit: &Rc<str>) -> Number {
+        Number {
+            value,
+            units: if unit.is_empty() {
+                Units::None
+            } else {
+                Units::Single(Rc::clone(unit))
             },
         }
     }
@@ -438,7 +460,7 @@ impl Number {
     /// compact representation when possible. No unit cancellation happens
     /// here — callers cancel before constructing (dart-sass keeps whatever
     /// lists arithmetic produces).
-    pub(crate) fn with_units(value: f64, mut numer: Vec<String>, denom: Vec<String>) -> Number {
+    pub(crate) fn with_units(value: f64, mut numer: Vec<Rc<str>>, denom: Vec<Rc<str>>) -> Number {
         let units = if denom.is_empty() && numer.len() <= 1 {
             match numer.pop() {
                 None => Units::None,
@@ -471,7 +493,7 @@ impl Number {
         match &self.units {
             Units::None => "",
             Units::Single(u) => u,
-            Units::Complex(c) => c.numer.first().map(String::as_str).unwrap_or(""),
+            Units::Complex(c) => c.numer.first().map(|u| &**u).unwrap_or(""),
         }
     }
 
@@ -479,7 +501,7 @@ impl Number {
         matches!(self.units, Units::Complex(_))
     }
 
-    pub(crate) fn numer_units(&self) -> &[String] {
+    pub(crate) fn numer_units(&self) -> &[Rc<str>] {
         match &self.units {
             Units::None => &[],
             Units::Single(u) => std::slice::from_ref(u),
@@ -487,7 +509,7 @@ impl Number {
         }
     }
 
-    pub(crate) fn denom_units(&self) -> &[String] {
+    pub(crate) fn denom_units(&self) -> &[Rc<str>] {
         match &self.units {
             Units::None | Units::Single(_) => &[],
             Units::Complex(c) => &c.denom,
@@ -1230,7 +1252,7 @@ impl Number {
     pub(crate) fn mul(&self, other: &Number) -> Number {
         // Fast path: a unitless operand has nothing to cancel or concatenate,
         // so the result carries the other side's units verbatim — no unit-list
-        // materialization (the general path builds four Vec<String>s).
+        // materialization (the general path builds four unit vectors).
         if matches!(other.units, Units::None) {
             return self.copy_units(self.value * other.value);
         }
@@ -1283,13 +1305,13 @@ fn cancel_factor(numerator: &str, denominator: &str) -> Option<f64> {
 /// distinct convertible `to` numerator (any order), and likewise for the
 /// denominators (a denominator's factor divides). Mirrors dart-sass's
 /// `coerce`/`convertValue` for multi-unit numbers.
-pub(crate) fn unit_lists_factor(from: (&[String], &[String]), to: (&[String], &[String])) -> Option<f64> {
-    fn match_lists(from: &[String], to: &[String]) -> Option<f64> {
+pub(crate) fn unit_lists_factor(from: (&[Rc<str>], &[Rc<str>]), to: (&[Rc<str>], &[Rc<str>])) -> Option<f64> {
+    fn match_lists(from: &[Rc<str>], to: &[Rc<str>]) -> Option<f64> {
         if from.len() != to.len() {
             return None;
         }
         let mut factor = 1.0;
-        let mut remaining: Vec<&String> = to.iter().collect();
+        let mut remaining: Vec<&str> = to.iter().map(|u| &**u).collect();
         for f in from {
             let i = remaining.iter().position(|t| cancel_factor(f, t).is_some())?;
             if let Some(fac) = cancel_factor(f, remaining[i]) {
@@ -1310,10 +1332,10 @@ pub(crate) fn unit_lists_factor(from: (&[String], &[String]), to: (&[String], &[
 /// `/ms` denominator scales by 1000), and concatenating what remains.
 fn multiply_units(
     mut value: f64,
-    numer1: Vec<String>,
-    denom1: Vec<String>,
-    numer2: Vec<String>,
-    denom2: Vec<String>,
+    numer1: Vec<Rc<str>>,
+    denom1: Vec<Rc<str>>,
+    numer2: Vec<Rc<str>>,
+    denom2: Vec<Rc<str>>,
 ) -> Number {
     let mut numer = Vec::new();
     let mut denom2 = denom2;
@@ -2091,7 +2113,7 @@ impl ModernColor {
     fn chan_pct(&self, i: usize, denom: f64, compressed: bool) -> String {
         match self.channels[i] {
             None => "none".to_string(),
-            Some(v) if !v.is_finite() => Number::with_unit(v, "%".to_string()).to_css(compressed),
+            Some(v) if !v.is_finite() => Number::with_unit(v, "%").to_css(compressed),
             Some(v) => format!("{}%", fmt_num(v / denom * 100.0, compressed)),
         }
     }
@@ -2101,7 +2123,7 @@ impl ModernColor {
     fn chan_hue(&self, i: usize, compressed: bool) -> String {
         match self.channels[i] {
             None => "none".to_string(),
-            Some(v) if !v.is_finite() => Number::with_unit(v, "deg".to_string()).to_css(compressed),
+            Some(v) if !v.is_finite() => Number::with_unit(v, "deg").to_css(compressed),
             Some(v) => format!("{}deg", fmt_num(v, compressed)),
         }
     }
@@ -2989,7 +3011,7 @@ mod tests {
     }
 
     fn num(value: f64, unit: &str) -> CalcNode {
-        CalcNode::Number(Number::with_unit(value, unit.to_string()))
+        CalcNode::Number(Number::with_unit(value, unit))
     }
 
     #[test]
@@ -3209,7 +3231,7 @@ mod tests {
     }
 
     fn numval(value: f64, unit: &str) -> Value {
-        Value::Number(Number::with_unit(value, unit.to_string()))
+        Value::Number(Number::with_unit(value, unit))
     }
 
     #[test]

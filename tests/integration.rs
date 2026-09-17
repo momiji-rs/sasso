@@ -160,6 +160,37 @@ fn unit_arithmetic() {
     assert_eq!(css(".a { margin: 2 * 3em; }"), ".a {\n  margin: 6em;\n}\n");
 }
 
+/// A numeric literal's unit is interned per stylesheet and shared by every
+/// value the literal evaluates to, so which spellings are the SAME unit is now
+/// load-bearing. Two units are the same exactly when their decoded names match
+/// character for character: an escape decodes first (`1\\65 m` is `em`), and
+/// case is part of the name (`PX` is not `px`). Every expectation below was
+/// measured against dart-sass 1.104.1.
+#[test]
+fn a_units_identity_is_its_decoded_spelling() {
+    // An escaped unit is the unit it decodes to, and adds to it.
+    assert_eq!(css("a { b: 1\\65 m + 1em; }"), "a {\n  b: 2em;\n}\n");
+    assert_eq!(css("a { b: 1rem + 1\\72 em; }"), "a {\n  b: 2rem;\n}\n");
+    // Case is part of the name: these are two different units, kept as
+    // written, and adding them is an error.
+    assert_eq!(css("a { b: 1PX; c: 1px; }"), "a {\n  b: 1PX;\n  c: 1px;\n}\n");
+    let err = compile("a { b: 1PX + 1px; }", &Options::default()).unwrap_err();
+    assert!(err.message.contains("incompatible units"), "{}", err.message);
+    // The decoded name is what `math.unit()` reports, escape or not.
+    assert_eq!(
+        css("@use \"sass:math\"; a { b: math.unit(1\\72 em); c: math.unit(1\\50 X); }"),
+        "a {\n  b: \"rem\";\n  c: \"PX\";\n}\n"
+    );
+    // `e`/`E` after the digits is an exponent, not a unit, in either case.
+    assert_eq!(css("a { b: 1e3; c: 1E3; }"), "a {\n  b: 1000;\n  c: 1000;\n}\n");
+    // The same literal evaluated many times keeps its unit; the sharing is
+    // invisible.
+    assert_eq!(
+        css("@for $i from 1 through 3 { .c-#{$i} { w: 2px * $i; } }"),
+        ".c-1 {\n  w: 2px;\n}\n\n.c-2 {\n  w: 4px;\n}\n\n.c-3 {\n  w: 6px;\n}\n"
+    );
+}
+
 #[test]
 fn lists_round_trip() {
     let out = css("$stack: \"Helvetica Neue\", Arial, sans-serif;\n.t { font-family: $stack; margin: 1px 2px 3px 4px; }\n");

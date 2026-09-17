@@ -526,8 +526,8 @@ pub(super) fn channel_number(space: ColorSpace, idx: usize, raw: f64) -> Number 
     // dart's channel() builds a `%` number via `value * 100 / channel.max` —
     // the round trip perturbs the last ulp on far-range values, and the spec
     // expectations carry it (a max of 100 is NOT a no-op in floating point).
-    let pct = |v: f64, max: f64| Number::with_unit(v * 100.0 / max, "%".to_string());
-    let deg = |v: f64| Number::with_unit(v, "deg".to_string());
+    let pct = |v: f64, max: f64| Number::with_unit(v * 100.0 / max, "%");
+    let deg = |v: f64| Number::with_unit(v, "deg");
     let plain = |v: f64| Number::unitless(v);
     match (space, cname) {
         (Hsl, "saturation") | (Hsl, "lightness") => pct(raw, 100.0),

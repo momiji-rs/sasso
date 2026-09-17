@@ -479,8 +479,10 @@ pub(crate) enum TplPiece {
 
 /// A value expression.
 pub(crate) enum Expr {
-    /// Numeric literal: value + unit (`""` for unitless).
-    Number(f64, String),
+    /// Numeric literal: value + unit (`""` for unitless). The unit is spelled
+    /// out once, here, and every evaluation of the literal shares it — a
+    /// `1px` inside a loop body allocates no unit at all.
+    Number(f64, Rc<str>),
     /// Color literal (hex or named), parsed eagerly.
     Color(Color),
     /// Quoted string, possibly with interpolation.

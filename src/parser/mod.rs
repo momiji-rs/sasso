@@ -160,6 +160,12 @@ fn range_ops_compatible(op1: &str, op2: &str) -> bool {
 
 struct Parser {
     sc: Scanner,
+    /// Interned unit names for numeric literals. A stylesheet spells a handful
+    /// of distinct units — `px`, `rem`, `%`, and the empty one — hundreds of
+    /// times each, and the AST hands its `Rc<str>` to every value the literal
+    /// evaluates to, so one buffer per distinct name serves the whole file.
+    /// Searched linearly: the list is a few entries long, never more.
+    unit_names: Vec<Rc<str>>,
     /// Depth of enclosing `calc()`/math-function contexts. Inside one, `/`
     /// is always real division (never a slash separator) and `+`/`-` must be
     /// surrounded by whitespace.
@@ -217,6 +223,7 @@ pub(crate) fn parse_indented(src: &str) -> Result<Stylesheet, Error> {
 fn parse_inner(src: &str, plain_css: bool, indented: bool) -> Result<Stylesheet, Error> {
     let mut p = Parser {
         sc: Scanner::new(src),
+        unit_names: Vec::new(),
         calc_depth: 0,
         pending_unicode_split: false,
         block_depth: 0,
