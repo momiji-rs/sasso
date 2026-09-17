@@ -14,7 +14,12 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { availableParallelism } from "node:os";
+// Default import, NOT a named one: `availableParallelism` only exists on
+// Node >= 18.14, and a missing named export fails ESM *linking* — this file is
+// the package's `bin`, so the CLI would not start at all on an older Node,
+// before any fallback could run. (`_loader.mjs` carries the same note for the
+// library entries.)
+import os from "node:os";
 import { isMainThread, workerData, parentPort, Worker } from "node:worker_threads";
 
 /**
@@ -951,7 +956,7 @@ async function main() {
  * `-j 1` asks for it.
  */
 async function runJobs(jobs, opts, common) {
-  const wanted = opts.jobs ?? availableParallelism();
+  const wanted = opts.jobs ?? (os.availableParallelism ? os.availableParallelism() : os.cpus().length);
   const workers = Math.min(jobs.length, Math.max(1, wanted));
   const usesStdin = jobs.some((j) => j.input === "-");
   if (workers < 2 || usesStdin) return compileSlice(jobs, opts, common, null);
