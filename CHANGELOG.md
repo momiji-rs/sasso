@@ -124,7 +124,7 @@ NixOS maintainer asked for. Five more rounds of allocation work ride along._
   | | change | instructions | allocations |
   |---|---|---|---|
   | #81 | a block gets `@function`/`@mixin` frames only when a declaration lands in one or a closure captures the chain, instead of ~14,400 empty tables per compile | 126.330M → 124.843M (-1.176%) | 275,297 → 260,895 (-5.23%) |
-  | #88 | a built-in call stops collecting argument spans nothing will read (source maps are off by default) and stops cloning a module's name on every `ns.member()` | 124.843M → 122.939M (-1.525%) | 260,895 → 244,093 (-6.44%) |
+  | #88 | a built-in call stops collecting argument spans nothing will read — a compile that is not building a source map — and stops cloning a module's name on every `ns.member()` | 124.843M → 122.939M (-1.525%) | 260,895 → 244,093 (-6.44%) |
   | #89 | the nested-selector resolver borrows segments instead of copying every character into a `Vec<String>`, and a comma-free selector skips the row-of-rows scaffolding | 122.939M → 117.993M (-4.023%) | 244,093 → 212,093 (-13.11%) |
   | #92 | a number's unit is an `Rc<str>` shared on clone and interned per file, so cloning a `Number` is a refcount bump | 117.993M → 113.883M (-3.483%) | 212,093 → 181,630 (-14.36%) |
   | #93 | an interpolation template hands back its literal text instead of rebuilding it, and a literal selector borrows the AST's text | 113.883M → 109.616M (-3.747%) | 181,630 → 155,656 (-14.30%) |
