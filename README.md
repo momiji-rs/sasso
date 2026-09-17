@@ -4,8 +4,8 @@
 [![docs.rs](https://img.shields.io/docsrs/sasso)](https://docs.rs/sasso)
 [![CI](https://github.com/momiji-rs/sasso/actions/workflows/ci.yml/badge.svg)](https://github.com/momiji-rs/sasso/actions/workflows/ci.yml)
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/momiji-rs/sasso?utm_source=badge)
-[![sass-spec](https://img.shields.io/badge/sass--spec-100%25_of_attempted-brightgreen)](#conformance)
-[![dart-sass](https://img.shields.io/badge/dart--sass-1.101_parity-blue)](#conformance)
+[![sass-spec](https://img.shields.io/badge/sass--spec-98.9%25_of_attempted-brightgreen)](#conformance)
+[![dart-sass](https://img.shields.io/badge/dart--sass-1.104.1_parity-blue)](#conformance)
 [![runtime deps](https://img.shields.io/badge/runtime_deps-0-brightgreen)](Cargo.toml)
 [![license](https://img.shields.io/crates/l/sasso.svg)](#license)
 
@@ -15,11 +15,13 @@ Zero runtime dependencies, wasm-friendly, usable as a **library** and a
 subset it implements.
 
 > Status: v0.x, maturing fast. Compiles real-world SCSS and indented `.sass`
-> byte-identically to dart-sass 1.101, and **passes 100% of the *attempted*
-> official [sass-spec](https://github.com/sass/sass-spec) suite
-> (13,896 / 13,896, zero failures)** — tracked as a ratchet (see
-> [Conformance](#conformance) for exactly what that denominator means). What
-> remains is real-world breadth and hardening, not spec coverage.
+> byte-identically to **dart-sass 1.104.1** — on a 148-entry-point production
+> corpus, 147/148 files match byte-for-byte in *both* output styles and
+> 148/148 source maps match exactly — and **passes 98.9% of the official
+> [sass-spec](https://github.com/sass/sass-spec) suite (14,107 / 14,258
+> attempted)**, tracked as a ratchet (see [Conformance](#conformance) for what
+> that denominator means). Every divergence we know about is listed in
+> [docs/dart-sass-divergences.md](docs/dart-sass-divergences.md).
 
 ## Why another Sass compiler?
 
@@ -48,7 +50,7 @@ zero-dependency, sandbox-friendly core. See
 - `@import` partial inlining through a pluggable [`Importer`] (CSS imports
   pass through)
 - `expanded` and `compressed` output styles
-- **Source maps (v3)** — byte-exact to dart-sass 1.101, on the library
+- **Source maps (v3)** — byte-exact to dart-sass 1.104.1, on the library
   (`compile_with_source_map`), the CLI (on by default when writing a file,
   like dart-sass; `--embed-source-map` inlines one), and wasm
   (`compile(scss, { sourceMap: true })`)
@@ -61,10 +63,11 @@ and `%placeholder`s, a `calc()` engine, the CSS unit system + math functions,
 full CSS Color 4 color spaces (`oklch`/`lab`/`color()`…), structured
 `@media`/`@supports`, maps, the `@use`/`@forward` module system (built-in
 `sass:*` modules + user files), and the indented `.sass` syntax. **The
-compiler now passes 100% of the attempted sass-spec suite (13,896 / 13,896,
-zero failures)** byte-for-byte against dart-sass 1.101 — 11,405 byte-exact CSS
-outputs plus 2,491 error specs it correctly rejects (see
-[Conformance](#conformance)).
+compiler passes 98.9% of the attempted sass-spec suite (14,107 / 14,258)**
+byte-for-byte against dart-sass 1.104.1 — 11,615 byte-exact CSS outputs plus
+2,492 error specs it correctly rejects (see [Conformance](#conformance)), and
+every known difference is written down in
+[docs/dart-sass-divergences.md](docs/dart-sass-divergences.md).
 
 ## Install
 
@@ -165,12 +168,12 @@ pass rate; we ratchet it upward over time.
 
 | Metric | Value |
 | --- | --- |
-| sass-spec commit | `1b03109a` (dart-sass 1.101.0) |
-| Total cases | 13,904 |
-| Attempted (excl. 8 dart-sass `:todo`) | 13,896 |
-| **Passing** | **13,896 — 100% of attempted · 0 failures** (99.94% of all 13,904) |
-| ↳ byte-exact CSS output | 11,405 |
-| ↳ error specs correctly rejected | 2,491 |
+| sass-spec commit | `b39c3276` (2026-09-08), reference dart-sass **1.104.1** |
+| Total cases | 14,266 |
+| Attempted (excl. 8 dart-sass `:todo`) | 14,258 |
+| **Passing** | **14,107 — 98.94% of attempted** (98.89% of all 14,266) |
+| ↳ byte-exact CSS output | 11,615 |
+| ↳ error specs correctly rejected | 2,492 |
 
 *Passing* = byte-exact CSS output match **plus** error specs the compiler
 correctly rejects — the standard sass-spec conformance metric (the harness
@@ -178,6 +181,19 @@ checks that an error spec errors; the error *message* is tracked separately as
 a non-gating metric). The 8 excluded cases are tagged `:todo` for **dart-sass
 itself** upstream — dart-sass doesn't pass them either; sasso matches
 dart-sass's actual behaviour on all 8 regardless.
+
+The rate is a ratchet, not a high-water mark: CI fails if it drops. It reads
+lower than it once did because the pinned suite moved forward — an earlier
+snapshot (`1b03109a`, dart-sass 1.101.0, 13,896 attempted) was passed in full,
+and re-pinning to a 2026-09-08 suite added cases we do not pass yet. Re-pinning
+is deliberate: a conformance number against a stale oracle measures the wrong
+thing.
+
+What the remaining cases are, and every other known difference from dart-sass,
+is written down in
+[docs/dart-sass-divergences.md](docs/dart-sass-divergences.md) — including the
+handful that affect compiled output, so the claim above has a checkable
+denominator.
 
 **Strict input validation, too.** Matching dart-sass means rejecting what
 dart-sass rejects, not just reproducing its output. sasso errors — rather than
