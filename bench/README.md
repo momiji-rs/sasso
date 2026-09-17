@@ -58,6 +58,13 @@ gate measures shapes that are in parity rather than shapes only sasso accepts.
 otherwise just report a faster number, which is exactly how three `@use`-graph
 measurements in `perf_audit_2026-09-15.md` came to be void.
 
+One more plan benchmark, `large_expanded_with_map_silent`, arrived on 2026-09-17
+without a corpus of its own: it compiles `generated/large.scss` through
+`compile_with_source_map`, so its ratio against `large_expanded_with_url_silent`
+is the source-map surcharge, in the same way the pair above measures the
+diagnostics surcharge. It deliberately does not serialize the map to JSON, which
+is string escaping rather than mapping arithmetic.
+
 One limit those deltas do not show. CodSpeed's simulation mode counts
 instructions, and the first CI run put the `@use`-graph benchmarks at 6.7 ms
 simulated against 3.5 ms of wall time here, where
@@ -67,6 +74,12 @@ of its time in the kernel, which instruction counting cannot see, so a lever tha
 saves syscalls will read smaller in CI than it does locally. That is the same
 caveat the plan's B3 records for A3; the corpus is still worth gating, but read
 its CI number as a floor.
+
+The landed lever then measured exactly that. On the `@use` graphs, A3 took
+**−13.7%** and **−17.0%** of wall time on Linux/x86_64 while moving instructions
+by **−0.9%** and **−1.2%** (2026-09-17), so CodSpeed reported the whole suite
+untouched for a change worth a sixth of the clock. "Read it as a floor" is not a
+hedge here; on this shape it is a factor of more than ten.
 
 There is also a **real-world corpus** harness in [`real-world/`](./real-world/):
 it sparse-clones pinned, vetted, currently-active OSS Sass codebases
