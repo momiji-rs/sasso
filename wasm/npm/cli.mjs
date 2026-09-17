@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-// sasso CLI — `npx sasso input.scss [output.css]`. Pure Node + wasm, no deps.
+// sasso CLI — `npx sasso input.scss [output.css]`. Pure Node, no dependencies
+// of its own: it compiles through the native addon when the platform package
+// is installed and the wasm build otherwise (see `loadEngine`), and spreads
+// independent jobs over `node:worker_threads`.
 // A subset of the dart-sass `sass` CLI flags, sharing the package's compiler.
 import {
   readFileSync,

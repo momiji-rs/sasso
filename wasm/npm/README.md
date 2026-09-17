@@ -1,9 +1,14 @@
 # sasso
 
 [sasso](https://github.com/momiji-rs/sasso) — a pure-Rust SCSS → CSS compiler
-(a dart-sass alternative) — as a tiny, **dependency-free** WebAssembly module.
-No wasm-bindgen, no native add-ons: one small `.wasm` plus a hand-written
-loader. It mirrors the **dart-sass *modern* JS API**, so it's a drop-in for the
+(a dart-sass alternative). The package is a tiny, **dependency-free**
+WebAssembly module: no wasm-bindgen, one small `.wasm` plus a hand-written
+loader, and it is all you need — nothing here requires a native build step. On
+macOS and Linux it additionally pulls a prebuilt **native addon**
+(`sasso-native-<platform>`) as an `optionalDependency`; the `sasso` command
+uses it when it is there, and importing the library reaches it through the
+`"sasso/native"` subpath. Both produce byte-identical output. It mirrors the
+**dart-sass *modern* JS API**, so it's a drop-in for the
 [`sass`](https://www.npmjs.com/package/sass) npm package in build tools.
 
 ```bash
