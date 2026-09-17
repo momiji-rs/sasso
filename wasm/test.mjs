@@ -1282,6 +1282,53 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // `-j` must actually run jobs AT THE SAME TIME. Correct output cannot show
+  // that, and neither can the "exactly once" guard below — a sequential run
+  // satisfies both — so a regression that ignored `-j` and kept the batch in
+  // this thread would pass the whole suite.
+  //
+  // The observable is WRITE ORDER, not a stopwatch: make the first job the
+  // slow one and the rest trivial. In order, its output is written first; with
+  // workers pulling from the shared index, the others overtake it and it is
+  // written last. Measured 2026-09-17, three runs each: `-j 1` wrote
+  // `0 1 2 3 4 5 6 7` every time, `-j 4` ended `… 0` every time.
+  {
+    const cdir = join(dir, "concurrent");
+    mkdirSync(cdir, { recursive: true });
+    writeFileSync(
+      join(cdir, "j0.scss"),
+      `@use "sass:math";\n@for $i from 1 through 30000 { .slow-#{$i} { width: math.div($i,3)*1px } }\n`,
+    );
+    for (let i = 1; i < 8; i++) writeFileSync(join(cdir, `j${i}.scss`), `.j${i}{a:${i}}\n`);
+    const writeTimes = (jobs) => {
+      for (let i = 0; i < 8; i++) rmSync(join(cdir, `j${i}.css`), { force: true });
+      const args = [cliPath, "--no-source-map", "--style=compressed", "-j", String(jobs)];
+      for (let i = 0; i < 8; i++) args.push(`${join(cdir, `j${i}.scss`)}:${join(cdir, `j${i}.css`)}`);
+      const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 60000 });
+      assert.equal(r.status, 0, `cli: the -j ${jobs} run compiles (stderr: ${r.stderr})`);
+      const times = [];
+      for (let i = 0; i < 8; i++) times.push(statSync(join(cdir, `j${i}.css`)).mtimeMs);
+      return times;
+    };
+
+    const seqTimes = writeTimes(1);
+    if (!(seqTimes[0] < seqTimes[7])) {
+      // A filesystem whose timestamps are too coarse to separate two writes
+      // milliseconds apart cannot answer this question either way.
+      console.log("  (file timestamps too coarse to order writes — concurrency not checked)");
+    } else {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const par = writeTimes(4);
+        const last = par.indexOf(Math.max(...par));
+        assert.equal(
+          last,
+          0,
+          `cli: -j 4 runs jobs at the same time — the slow FIRST job finishes last (attempt ${attempt}, write times ${par.map((t) => Math.round(t - Math.min(...par))).join(",")})`,
+        );
+      }
+    }
+  }
+
   // Each job must run EXACTLY once. Correct output does not prove that — a pool
   // where every worker walks the whole list from 0 produces the same files,
   // just N times over — so make the repetition audible: one `@warn` per
