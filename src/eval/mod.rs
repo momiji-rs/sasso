@@ -208,7 +208,11 @@ pub(crate) enum RuleSelectors {
     /// The already-resolved selector strings (`&`/interpolation substituted).
     /// Untouched by the extend pass — emit writes them verbatim. This is the
     /// zero-parse fast path: an extend-free stylesheet never leaves this form.
-    Raw(Vec<String>),
+    ///
+    /// Shared: a style rule resolves its list once, and the same list reaches
+    /// `current_selector`, every nested rule's `parents` and every block this
+    /// rule flushes. Nothing mutates it in place.
+    Raw(Rc<Vec<String>>),
     /// The typed selector list a rewrite produced. Rendered only at emit, via
     /// the same `Complex::render()` the engine used to materialize its strings.
     Parsed(Rc<[crate::selector::Complex]>),
@@ -231,7 +235,9 @@ impl RuleSelectors {
     /// that move a rule's selectors into an `OutItem`/joined parent shell.
     fn into_strings(self) -> Vec<String> {
         match self {
-            RuleSelectors::Raw(v) => v,
+            // The one owner is the common case (a rule flushes a single
+            // block); a shared list is copied here rather than at every flush.
+            RuleSelectors::Raw(v) => Rc::try_unwrap(v).unwrap_or_else(|rc| (*rc).clone()),
             RuleSelectors::Parsed(v) => v.iter().map(|c| c.render()).collect(),
         }
     }
@@ -350,7 +356,7 @@ impl OutNode {
     /// the call sites; the rest is shared boilerplate.
     pub(crate) fn plain_rule(selectors: Vec<String>, items: Vec<OutItem>, lines: SrcLines) -> OutNode {
         OutNode::Rule {
-            selectors: RuleSelectors::Raw(selectors),
+            selectors: RuleSelectors::Raw(Rc::new(selectors)),
             linebreaks: Vec::new(),
             items,
             lines,
@@ -473,6 +479,37 @@ enum MemberKind {
 /// declarations join the rule's block and nested rules bubble out after it.
 /// This is the seam that lets one block executor serve the top level, rule
 /// bodies, and every nested-block construct (conditionals, loops, mixins).
+/// The enclosing rule's selector list as a sink sees it. A style rule owns a
+/// shared handle it can hand to every block it flushes for the price of a
+/// refcount; a sink that only has the enclosing selectors as a slice copies
+/// them once per block instead.
+enum SinkSelectors<'a> {
+    Shared(&'a Rc<Vec<String>>),
+    Borrowed(&'a [String]),
+}
+
+impl<'a> SinkSelectors<'a> {
+    fn as_slice(&self) -> &'a [String] {
+        match self {
+            SinkSelectors::Shared(v) => v.as_slice(),
+            SinkSelectors::Borrowed(v) => v,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+
+    /// A handle to hand to an output node: free for a shared list, one copy for
+    /// a borrowed one.
+    fn to_shared(&self) -> Rc<Vec<String>> {
+        match self {
+            SinkSelectors::Shared(v) => Rc::clone(v),
+            SinkSelectors::Borrowed(v) => Rc::new(v.to_vec()),
+        }
+    }
+}
+
 enum Sink<'a> {
     Top(&'a mut Vec<OutNode>),
     /// Root-hoisted buffer. `group_ends` is set only for a true `@at-root`
@@ -483,7 +520,7 @@ enum Sink<'a> {
         /// The enclosing rule's resolved selector list, used to build a block
         /// node when the accumulated `items` must be flushed (i.e. when a nested
         /// rule or at-rule interrupts the parent's own declarations).
-        selectors: &'a [String],
+        selectors: SinkSelectors<'a>,
         /// Per-complex source line-break flags (parallel to `selectors`).
         linebreaks: &'a [bool],
         /// The source rule's brace/end lines, stamped onto every flushed block
@@ -596,7 +633,7 @@ impl Sink<'_> {
                     items,
                     lines,
                 } => body.push(OutNode::Rule {
-                    selectors: RuleSelectors::Raw(selectors),
+                    selectors: RuleSelectors::Raw(Rc::new(selectors)),
                     linebreaks,
                     items,
                     lines,
@@ -637,7 +674,7 @@ impl Sink<'_> {
                                 items,
                                 lines,
                             } => OutNode::Rule {
-                                selectors: RuleSelectors::Raw(selectors),
+                                selectors: RuleSelectors::Raw(Rc::new(selectors)),
                                 linebreaks,
                                 items,
                                 lines,
@@ -713,7 +750,7 @@ impl Sink<'_> {
                         // only ever records a flushed block fragment)
                     }
                     let rule = OutNode::Rule {
-                        selectors: RuleSelectors::Raw(selectors.to_vec()),
+                        selectors: RuleSelectors::Raw(selectors.to_shared()),
                         linebreaks: linebreaks.to_vec(),
                         items: std::mem::take(*items),
                         lines: *lines,
@@ -3125,7 +3162,13 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
-        let emitted: &[String] = if share_current { &current } else { &emit_selectors };
+        // One handle for the whole rule: shared with `current_selector` on the
+        // common shape, and cloned into every block this rule flushes.
+        let emitted: Rc<Vec<String>> = if share_current {
+            Rc::clone(&current)
+        } else {
+            Rc::new(emit_selectors)
+        };
         self.push_scope(false);
         let prev_selector = self.current_selector.replace(Rc::clone(&current));
         let prev_linebreaks = std::mem::replace(&mut self.current_linebreaks, full_lbs);
@@ -3166,7 +3209,7 @@ impl<'a> Evaluator<'a> {
         self.last_child_invisible = false;
         let result = {
             let mut child = Sink::Rule {
-                selectors: emitted,
+                selectors: SinkSelectors::Shared(&emitted),
                 linebreaks: &emit_linebreaks,
                 lines: rule_lines,
                 items: &mut items,
@@ -3903,12 +3946,12 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
                     });
                 } else {
                     rest.push(OutNode::Rule {
-                        selectors: RuleSelectors::Raw(
+                        selectors: RuleSelectors::Raw(Rc::new(
                             parents
                                 .iter()
                                 .flat_map(|p| selectors.iter().map(move |s| format!("{p} {s}")))
                                 .collect(),
-                        ),
+                        )),
                         linebreaks: Vec::new(),
                         items,
                         lines,

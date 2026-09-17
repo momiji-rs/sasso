@@ -132,9 +132,22 @@ impl<'a> Evaluator<'a> {
             } else {
                 Vec::new()
             };
+            // The wrap re-emits the enclosing selectors, and on the common shape
+            // those still ARE the enclosing rule's shared list — so the wrap can
+            // hand a refcount to every block it flushes instead of copying the
+            // list again. `Borrowed` is for the shapes where the rule replaced
+            // `current_selector` with a different list (`@at-root`, a plain-CSS
+            // shell) and the slice is all this body has.
+            let wrap_shared = self
+                .current_selector
+                .clone()
+                .filter(|sel| std::ptr::eq(sel.as_slice(), parents));
             let res = {
                 let mut child = Sink::Rule {
-                    selectors: parents,
+                    selectors: match &wrap_shared {
+                        Some(sel) => SinkSelectors::Shared(sel),
+                        None => SinkSelectors::Borrowed(parents),
+                    },
                     linebreaks: &wrap_linebreaks,
                     // The wrap re-uses the enclosing selectors, so it has no
                     // source rule of its own: `file`/`start`/`end` stay 0 to keep
