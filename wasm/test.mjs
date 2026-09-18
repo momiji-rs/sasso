@@ -1402,6 +1402,23 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     const asked = compileAll(join(dir, "quiet"), [], { SASSO_ENGINE: "wasm", SASSO_NATIVE_BINARY: blind });
     assert.equal(asked.status, 0, `cli: SASSO_ENGINE=wasm compiles (stderr: ${asked.stderr})`);
     assert.equal(asked.stderr, "", "cli: … silently, because wasm was the request");
+
+    // And `--quiet` silences it, like any other warning: the flag's contract is
+    // that stderr stays empty, and this CLI keeps it to the letter. Pinned here
+    // as well as by the @warn tests above, because a fallback only happens where
+    // no addon is installed — an environment the machine writing the code
+    // usually is not, which is exactly how this reached CI as a surprise once.
+    const hushed = compileAll(join(dir, "hushed"), ["-q"], { SASSO_NATIVE_BINARY: blind });
+    assert.equal(hushed.status, 0, `cli: --quiet compiles (stderr: ${hushed.stderr})`);
+    assert.equal(hushed.stderr, "", "cli: --quiet silences the fallback warning too");
+    // Which loses no observability: asking directly still answers under -q.
+    const askedQuiet = spawnSync(process.execPath, [cliPath, "--engine", "-q"], {
+      encoding: "utf8",
+      env: engineEnv({ SASSO_NATIVE_BINARY: blind }),
+      timeout: 20000,
+    });
+    assert.equal(askedQuiet.status, 0, `cli: --engine under -q (stderr: ${askedQuiet.stderr})`);
+    assert.match(askedQuiet.stdout, /^engine: +wasm /m, "cli: --engine reports even when warnings are off");
   }
 
   // `--help` and `--version` answer from the package alone, so they must work

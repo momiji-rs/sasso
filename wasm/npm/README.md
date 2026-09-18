@@ -250,10 +250,12 @@ sasso:    0.16.0
 
 Where an addon **is** prebuilt but did not load — `--omit=optional`, a partial
 lockfile, a broken install — the fallback is a silent halving of throughput, so
-every compile prints one line to stderr saying so. `--quiet` does not suppress
-it (it is about the install, not the stylesheet); `SASSO_ENGINE=wasm` does,
-because that says wasm was the intent. On platforms with no prebuild — musl and
-Windows today — wasm is the expected engine and nothing is printed.
+every compile warns about it on stderr (what happened, and what to do). It stays
+quiet in the three cases where it would be noise: under `--quiet`, which means
+"don't print warnings"; under `SASSO_ENGINE=wasm`, which says wasm was the
+intent; and on platforms with no prebuild — musl and Windows today — where wasm
+is the engine that is supposed to run. `sasso --engine` answers whatever the
+flags say.
 
 Importing the library selects nothing: `"sasso"` is always the size-optimised
 wasm build and ignores `SASSO_ENGINE`, and the addon is the `"sasso/native"`

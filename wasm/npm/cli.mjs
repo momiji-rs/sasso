@@ -65,9 +65,12 @@ async function loadEngine() {
     try {
       mod = await import("./native.mjs");
     } catch (e) {
+      // Through the same coerced string in both places: a `throw null` or a
+      // thrown string from anything native.mjs imports has no `.message`, and
+      // reading it would replace the load failure with a TypeError.
       engine.error = e && e.message ? String(e.message) : String(e);
       // `fail` writes synchronously, which matters because it exits at once.
-      if (want === "native") fail(`error: SASSO_ENGINE=native but the addon is unavailable: ${e.message}`);
+      if (want === "native") fail(`error: SASSO_ENGINE=native but the addon is unavailable: ${engine.error}`);
     }
   }
   if (!mod) {
@@ -106,17 +109,23 @@ function engineReport() {
 }
 
 /**
- * One stderr line when a platform that HAS a prebuilt addon compiled through
- * wasm anyway — an install accident (`--omit=optional`, a partial lockfile, an
- * unloadable addon), not a supported configuration, and worth roughly half the
- * throughput. Deliberately NOT suppressed by `--quiet`: that flag is about the
- * stylesheet's diagnostics, and this is about the CLI's own installation.
- * `SASSO_ENGINE=wasm` is how to say "wasm on purpose" and get silence.
+ * A two-line warning on stderr — what happened, then what to do about it — when
+ * a platform that HAS a prebuilt addon compiled through wasm anyway. That is an
+ * install accident (`--omit=optional`, a partial lockfile, an unloadable addon),
+ * not a supported configuration, and it costs roughly half the throughput.
  *
- * Main thread only: every worker loads its own engine, and one warning per core
- * would bury the compile's real output.
+ * Three ways it stays quiet, each for its own reason. `SASSO_ENGINE=wasm` states
+ * the intent, so a fallback is not news. A platform with no prebuild is RUNNING
+ * its supported engine, and a warning nobody can act on is noise. And `--quiet`
+ * means "don't print warnings" — dart's contract, which this CLI keeps to the
+ * letter (stderr is empty under `-q`, asserted); `--engine` is then the way to
+ * ask, and it answers whatever the flags say.
+ *
+ * Once per run, from the main thread: every worker loads its own engine, so
+ * warning there would print this per core.
  */
-function warnIfFellBack() {
+function warnIfFellBack(opts) {
+  if (opts.quiet) return;
   if (engine.kind !== "wasm" || engine.requested === "wasm" || !engine.addon) return;
   writeStderrSync(
     `sasso: WARNING: ${engine.addon} is prebuilt for this platform but did not load, so this run ` +
@@ -1054,7 +1063,7 @@ async function main() {
     return;
   }
   // Once, here: workers load their own engine and would each repeat this.
-  warnIfFellBack();
+  warnIfFellBack(opts);
   const common = commonOptions(opts);
 
   // --loop: recompile in-process and report throughput, never writing a file.

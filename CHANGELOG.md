@@ -45,13 +45,14 @@ Conformance is tracked separately as a ratchet against the official
   key the decision came from, and — when the addon was tried and failed — the
   reason it failed.
 
-  A compile that fell back on a platform that HAS a prebuilt addon also prints
-  one line to stderr. `--quiet` does not suppress it, because it is about the
-  installation and not the stylesheet; `SASSO_ENGINE=wasm` does, because that
-  states the intent. Where no addon is prebuilt (musl, Windows) wasm is the
-  expected engine and nothing is printed. The prebuilt-platform table now lives
-  in one module shared by the loader and the CLI, so the CLI's idea of which
-  engine is "expected" cannot drift from the list of prebuilds.
+  A compile that fell back on a platform that HAS a prebuilt addon also warns on
+  stderr, once per run. It stays quiet under `--quiet` (dart's contract: that
+  flag means "don't print warnings"), under `SASSO_ENGINE=wasm` (which states
+  the intent), and on platforms where no addon is prebuilt at all (musl,
+  Windows), since wasm is the engine that is supposed to run there. The
+  prebuilt-platform table now lives in one module shared by the loader and the
+  CLI, so the CLI's idea of which engine is "expected" cannot drift from the
+  list of prebuilds.
 
 ### Fixed
 
