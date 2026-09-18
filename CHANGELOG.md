@@ -11,6 +11,22 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-18
+
+_A warning for 45 rules that were vanishing from Lichess's CSS with nothing
+said, and everything a user asked for in #24, plus the bug that issue turned up
+on the way. `bogus-combinators` is now reported when a selector with a repeated
+or leading combinator run is dropped. dart's `--silence-deprecation` /
+`silenceDeprecations` on both CLIs, both engines and the JS API — Lichess moved
+off `--quiet` to it precisely so the deprecations they still mean to fix keep
+printing, and found sasso rejecting the flag. A Homebrew channel, and an npm CLI
+that hands the command line to a matching release binary when it finds one, so
+`npx sasso` is not paying for Node. `sasso --engine`, because which engine an
+install actually runs was unobservable, and a fallback to wasm costs roughly
+half the throughput without saying so. And a native addon whose version does not
+match the `sasso` loading it is now refused rather than used to silently ignore
+the options it does not know._
+
 ### Added
 
 - **`bogus-combinators` is now reported** when a selector with a repeated or
@@ -30,33 +46,6 @@ Conformance is tracked separately as a ratchet against the official
   that has declarations of its own — carries a second span labelling the
   offending child, which this renderer cannot draw yet, and stays silent. That
   shape does not occur in the Lichess corpus.
-
-### Fixed
-
-- **A native addon whose version does not match the `sasso` loading it is now
-  refused** instead of being used (#114). `sasso` pins the four
-  `sasso-native-*` packages as exact-version `optionalDependencies`, so a plain
-  install cannot drift; a consumer that also names them itself has a second
-  place to bump, and the two can fall out of step.
-
-  That was silent, and silently wrong: napi ignores config fields it does not
-  know without erroring, so an addon one release behind accepted every option
-  the newer JS sent and applied only the ones it recognised — the compile
-  succeeded and quietly did something else. A flag accepted that does nothing
-  is the bug that opened #24; this was the same bug with no flag to blame.
-
-  `sasso/native` now throws, naming both versions and the fix. The CLI, which
-  picks an engine itself, falls back to wasm — byte-identical output, so the
-  build stays correct — but says so on stderr, because replacing a wrong
-  compile with a silently slower one is not a fix. `SASSO_NATIVE_BINARY` and
-  the repo-local `napi/npm/sasso.node` are development paths with no manifest
-  to compare and stay unchecked.
-
-- `info` from `sasso/native` reported `napi/Cargo.toml`'s version (`0.1.0`) as
-  `(sasso-native <ver>)`, which reads as the sasso version and is not one. It
-  now reports the platform package's real version.
-
-### Added
 
 - **Homebrew**: `brew install momiji-rs/tap/sasso` installs the same prebuilt
   binary the release page serves, on macOS and Linux, arm64 and x86_64 (#24).
@@ -184,6 +173,29 @@ Conformance is tracked separately as a ratchet against the official
   list of prebuilds.
 
 ### Fixed
+
+- **A native addon whose version does not match the `sasso` loading it is now
+  refused** instead of being used (#114). `sasso` pins the four
+  `sasso-native-*` packages as exact-version `optionalDependencies`, so a plain
+  install cannot drift; a consumer that also names them itself has a second
+  place to bump, and the two can fall out of step.
+
+  That was silent, and silently wrong: napi ignores config fields it does not
+  know without erroring, so an addon one release behind accepted every option
+  the newer JS sent and applied only the ones it recognised — the compile
+  succeeded and quietly did something else. A flag accepted that does nothing
+  is the bug that opened #24; this was the same bug with no flag to blame.
+
+  `sasso/native` now throws, naming both versions and the fix. The CLI, which
+  picks an engine itself, falls back to wasm — byte-identical output, so the
+  build stays correct — but says so on stderr, because replacing a wrong
+  compile with a silently slower one is not a fix. `SASSO_NATIVE_BINARY` and
+  the repo-local `napi/npm/sasso.node` are development paths with no manifest
+  to compare and stay unchecked.
+
+- `info` from `sasso/native` reported `napi/Cargo.toml`'s version (`0.1.0`) as
+  `(sasso-native <ver>)`, which reads as the sasso version and is not one. It
+  now reports the platform package's real version.
 
 - **Compressed `color()` output was not a color** (#110). The predefined
   `color()` spaces separate their space name and channels with mandatory
@@ -1862,7 +1874,8 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/momiji-rs/sasso/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/momiji-rs/sasso/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/momiji-rs/sasso/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/momiji-rs/sasso/compare/v0.10.0...v0.14.0
