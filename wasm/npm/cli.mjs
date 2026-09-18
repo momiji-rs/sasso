@@ -19,8 +19,9 @@ import {
 import { basename, dirname, join, resolve, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isMainThread, workerData, parentPort, Worker } from "node:worker_threads";
-// The pool's default size — physical cores, not SMT threads. See _jobs.mjs for
-// the measurement behind that.
+// The pool's default size — physical cores rather than SMT threads on Linux,
+// where `/proc/cpuinfo` publishes the topology, and the CPU count everywhere
+// else. See _jobs.mjs for the measurement and for both fallbacks.
 import { defaultJobs } from "./_jobs.mjs";
 
 /**
@@ -1021,9 +1022,11 @@ async function main() {
  * Compile `jobs`, in this thread or across worker threads.
  *
  * The jobs are independent — each reads one input and writes one output — so
- * both CLIs give them one worker per physical core (see `_jobs.mjs`, and
- * `default_jobs` in `src/main.rs`, which agree on the rule and on why it is
- * not the CPU count), which is what `-j/--jobs` has always claimed.
+ * both CLIs give them one worker per physical core where the topology is
+ * known, and one per CPU where it is not — off Linux, and on a Linux that
+ * publishes none (see `_jobs.mjs`, and `default_jobs` in `src/main.rs`, which
+ * agree on the rule and on why it is not simply the CPU count). Either way it
+ * is one worker per job slot, which is what `-j/--jobs` has always claimed.
  * Sequentially, the difference is most of the gap between the two: the 138
  * lila stylesheets that build without npm dependencies take 704 ms through the
  * binary at `-j 1` and 138 ms at its default (measured 2026-09-17, the same

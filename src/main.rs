@@ -12,7 +12,8 @@
 //!
 //! The positional grammar is dart-sass's (`<input> [output]`); several files
 //! are compiled through `in:out` pairs, in parallel, one worker per physical
-//! core (`-j/--jobs N` to cap it), with diagnostics still reported in command-line
+//! core where the topology is known and one per CPU where it is not
+//! (`-j/--jobs N` to cap it), with diagnostics still reported in command-line
 //! order. Exit codes follow dart-sass too: `64` for a usage error, `65` for a
 //! compile error, `66` when an input cannot be read.
 

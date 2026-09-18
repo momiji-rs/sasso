@@ -195,16 +195,17 @@ $ echo '.a{color:red}' | sasso --stdin
 ```
 
 Several inputs (`in:out` pairs or a directory pair) compile in parallel, one
-worker per physical core (`-j N` caps it), with diagnostics reported in
-command-line order. Supported dart-sass flags: `--[no-]source-map`, `--source-map-urls`,
-`--[no-]embed-sources`, `--[no-]embed-source-map`, `--[no-]error-css`,
-`--[no-]charset`, `-q/--quiet`, `--quiet-deps`, `--stop-on-error`,
-`--[no-]unicode`, `--[no-]color` (accepted; sasso never colors), `--indented`,
-`--stdin`. Exit codes match too (64 usage, 65 compile error, 66 unreadable
-input). Not supported by the binary: `--watch`, `--update`, `--pkg-importer`,
-and the deprecation-selection flags — note that the **npm** CLI does have
-`--watch` and `--update`, so the two are not yet identical in that direction
-(#86). `sasso --help` lists everything.
+worker per physical core where the topology is known — Linux, via
+`/proc/cpuinfo` — and one per CPU where it is not (`-j N` caps either), with
+diagnostics reported in command-line order. Supported dart-sass flags:
+`--[no-]source-map`, `--source-map-urls`, `--[no-]embed-sources`,
+`--[no-]embed-source-map`, `--[no-]error-css`, `--[no-]charset`, `-q/--quiet`,
+`--quiet-deps`, `--stop-on-error`, `--[no-]unicode`, `--[no-]color` (accepted;
+sasso never colors), `--indented`, `--stdin`. Exit codes match too (64 usage,
+65 compile error, 66 unreadable input). Not supported by the binary: `--watch`,
+`--update`, `--pkg-importer`, and the deprecation-selection flags — note that
+the **npm** CLI does have `--watch` and `--update`, so the two are not yet
+identical in that direction (#86). `sasso --help` lists everything.
 
 ## Conformance
 

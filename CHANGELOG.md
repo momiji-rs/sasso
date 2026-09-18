@@ -14,7 +14,10 @@ Conformance is tracked separately as a ratchet against the official
 ### Changed
 
 - **`-j` defaults to physical cores, not SMT threads**, in both the binary and
-  the npm CLI. A compile is pure computation, so two hyperthreads on one core
+  the npm CLI, wherever the core count can be known — Linux, from
+  `/proc/cpuinfo`. Off Linux, and on a Linux that publishes no topology, the
+  default stays the CPU count, exactly as before. A compile is pure
+  computation, so two hyperthreads on one core
   contend for the same execution units rather than overlapping each other's
   stalls. On a Ryzen 7 8745HS (8 cores / 16 threads) over 138 Lichess
   stylesheets, at each CLI's own default: the binary goes 241 ms -> 219 ms and

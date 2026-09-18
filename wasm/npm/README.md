@@ -198,20 +198,22 @@ npx sasso --help
 ```
 
 Flags: `-s/--style <expanded|compressed>`, `-I/--load-path <dir>` (repeatable),
-`-o/--output <file>`, `--stdin`, `--indented`, `--[no-]source-map` (on by default
-when writing a file), `--source-map-urls <relative|absolute>`, `--embed-sources`,
-`--embed-source-map` (inline the map), `--[no-]charset`, `-q/--quiet` (silence
-`@warn`/`@debug`), `--[no-]quiet-deps`, `--[no-]unicode` (ASCII glyphs in
-diagnostics), `--[no-]stop-on-error`, `--no-css`, `--update` (skip outputs newer
-than their input), `-w/--watch` (re-compiles when the input or any dependency
-changes), `--loop <N>` (recompile N times and report throughput), `--help`,
-`--version`, and `-j/--jobs <N>` (how many files to compile at once; the
-default is one per physical core, which on an SMT machine is half the CPU
-count — two threads on one core contend for the same execution units). An input of `-` is standard input. Accepted for
-dart-sass compatibility: `-c/--[no-]color` (a no-op — sasso never colors its
-output) and `--[no-]error-css` (**not implemented**: a failing compile always
-behaves as `--no-error-css`, dropping a stale output file rather than
-describing the error in CSS).
+`-o/--output <file>`, `--stdin`, `--indented`, `--[no-]source-map` (on by
+default when writing a file), `--source-map-urls <relative|absolute>`,
+`--embed-sources`, `--embed-source-map` (inline the map), `--[no-]charset`,
+`-q/--quiet` (silence `@warn`/`@debug`), `--[no-]quiet-deps`, `--[no-]unicode`
+(ASCII glyphs in diagnostics), `--[no-]stop-on-error`, `--no-css`, `--update`
+(skip outputs newer than their input), `-w/--watch` (re-compiles when the input
+or any dependency changes), `--loop <N>` (recompile N times and report
+throughput), `--help`, `--version`, and `-j/--jobs <N>` (how many files to
+compile at once; the default is one per physical core on Linux, which on an SMT
+machine is half the CPU count — two threads on one core contend for the same
+execution units. Off Linux, and on a Linux that publishes no topology, it stays
+one per CPU). An input of `-` is standard input. Accepted for dart-sass
+compatibility: `-c/--[no-]color` (a no-op — sasso never colors its output) and
+`--[no-]error-css` (**not implemented**: a failing compile always behaves as
+`--no-error-css`, dropping a stale output file rather than describing the error
+in CSS).
 
 **Which engine the CLI uses.** It prefers the native addon — `npm install
 sasso` already fetched `sasso-native-<platform>` as an optionalDependency on
