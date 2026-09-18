@@ -11,6 +11,19 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Added
+
+- **A NUR entry point, `nix/nur.nix`** (#82). nixpkgs declined the CLI for the
+  time being on the maturity questions in its own `pkgs/README.md`
+  ([NixOS/nixpkgs#564362](https://github.com/NixOS/nixpkgs/pull/564362)) and
+  pointed at the [Nix User Repository](https://github.com/nix-community/NUR)
+  instead, so `nur.repos.momiji-rs.sasso` becomes the channel-shaped way in for
+  configurations that would rather name a package than a flake URL. It
+  re-exports the two derivations the flake already builds, which is why it
+  carries no hash and no version of its own: a release bumps `Cargo.toml` and
+  the channel follows. Registration against nix-community/NUR is open, not yet
+  merged — `nix/README.md` says what flips when it lands.
+
 ### Changed
 
 - **`-j` defaults to physical cores, not SMT threads**, in both the binary and

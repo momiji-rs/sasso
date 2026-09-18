@@ -8,6 +8,7 @@ and the notes for keeping it honest.
 | --- | --- |
 | `package.nix` | the `sasso` CLI derivation the root `flake.nix` builds |
 | `ffi.nix` | the C ABI as a package — `libsasso.{so,dylib}`, `libsasso.a`, `sasso.h`, a `.pc` file |
+| `nur.nix` | the NUR entry point — the two above, as `nur.repos.momiji-rs.*` |
 | `nixos-vm/` | a throwaway NixOS guest that installs sasso for real and says PASS or FAIL |
 
 The flake exposes both: `packages.sasso` (`default`) and `packages.sasso-ffi`,
@@ -74,10 +75,70 @@ submission. Not worth running for a code change — `nix flake check` covers tha
 
 [microvm.nix]: https://github.com/astro/microvm.nix
 
-## The nixpkgs copy
+## The NUR channel
 
-nixpkgs carries its own `pkgs/by-name/sa/sasso/package.nix`, and it differs from
-`package.nix` here on purpose:
+`nur.nix` is this repo's entry point for the [Nix User Repository][NUR], so that
+a configuration can name a package rather than a flake URL:
+
+```nix
+environment.systemPackages = [ pkgs.nur.repos.momiji-rs.sasso ];
+```
+
+**Registration is not merged yet**, so `nur.repos.momiji-rs` does not resolve for
+anyone but us — until it does, the flake above is the only way in, and the line
+here and in the top-level README should stay unadvertised. The entry asks NUR to
+point at **this repository** rather than at a separate `nur-packages` one:
+
+```json
+"momiji-rs": {
+    "url": "https://github.com/momiji-rs/sasso",
+    "file": "nix/nur.nix",
+    "github-contact": "linyiru"
+}
+```
+
+That is what keeps the channel from rotting. A `nur-packages` repo would have to
+carry the nixpkgs shape below — a tag, a literal version, a `cargoHash` — and so
+a second edit every release; `nur.nix` re-exports derivations that build the tree
+they live in, so a release bumps `Cargo.toml` and the channel follows. The
+`momiji-rs` key is a name NUR lets us pick rather than the repo owner (69 of its
+entries differ from theirs), so if a second package ever needs its own repo,
+that is a one-line change on their side and no user's
+`nur.repos.momiji-rs.sasso` breaks.
+
+NUR re-locks once a day on its own. To not wait, after pushing a release:
+
+```console
+$ curl -XPOST https://nur-update.nix-community.org/update?repo=momiji-rs
+```
+
+Before touching `nur.nix`, run NUR's own evaluation check from the repo root. It
+catches what `nix build` cannot, because it forbids eval-time network access —
+the failure NUR is most often asked about:
+
+```console
+$ nix-env -f nix/nur.nix -qa \* --meta --drv-path --show-trace \
+    --option restrict-eval true --option allow-import-from-derivation true \
+    -I nixpkgs=$(nix-instantiate --find-file nixpkgs) -I ./
+```
+
+It must list `sasso` and `sasso-ffi`. A red evaluation is silent by design: NUR
+keeps the last revision that evaluated, so users just quietly stay on an older
+sasso — which is why the `nix flake` CI job runs this same check on every push
+rather than leaving it to be remembered.
+
+[NUR]: https://github.com/nix-community/NUR
+
+## The nixpkgs submission
+
+nixpkgs does not carry sasso. [NixOS/nixpkgs#564362] added
+`pkgs/by-name/sa/sasso/package.nix` and was closed unmerged on the maturity
+questions in nixpkgs' own `pkgs/README.md` — ready for general use, a realistic
+chance of being used by other people — with NUR suggested for the time being,
+which is what `nur.nix` above is. Reopening is invited once the project has more
+of a track record, so these notes stay put.
+
+The derivation that PR carried differs from `package.nix` here on purpose:
 
 |  | here | nixpkgs |
 | --- | --- | --- |
@@ -91,7 +152,7 @@ our tags know how to rewrite exactly those fields, and a package they can update
 is one nobody has to remember. Keep the judgement calls — the license pair, the
 check story, `meta` — identical between the two.
 
-Refreshing it for a new release, from a nixpkgs checkout:
+Rebuilding it for a resubmission, from a nixpkgs checkout:
 
 ```console
 $ nix run nixpkgs#nix-update -- --version 0.14.1 sasso   # src hash + cargoHash + version
@@ -106,3 +167,5 @@ Two things nixpkgs asks for that are easy to miss:
   (`maintainers: add …`, validated by `nix-build lib/tests/maintainers.nix`);
 - anything LLM-assisted needs an `Assisted-by:` trailer naming the tool and
   model, per their CONTRIBUTING; `Co-authored-by:` explicitly does not count.
+
+[NixOS/nixpkgs#564362]: https://github.com/NixOS/nixpkgs/pull/564362
