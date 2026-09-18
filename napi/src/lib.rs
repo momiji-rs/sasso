@@ -572,6 +572,28 @@ fn json_str(v: &str, out: &mut String) {
     out.push('"');
 }
 
+/// Touch stdout/stderr once, before any compile scope can be entered.
+///
+/// std heap-allocates the stdio locks lazily on first use (a boxed
+/// `pthread_mutex_t` on macOS). If that first use happens INSIDE an arena
+/// scope — a deprecation warning mid-compile does it — the lock is allocated
+/// in the arena and freed by the scope reset, and the next print aborts with
+/// `failed to lock mutex: Invalid argument`. It is not a hypothetical: it is
+/// what installing the allocator without this does, on the first lila
+/// stylesheet that carries an `@import`.
+///
+/// `fn main` in the binary has done this since the arena landed. Here rather
+/// than in the two entry points because every compile funnels through
+/// `run_compile`, and it runs before `sasso::compile` opens the scope.
+fn warm_stdio() {
+    static WARM: std::sync::Once = std::sync::Once::new();
+    WARM.call_once(|| {
+        use std::io::Write;
+        let _ = std::io::stdout().lock().flush();
+        let _ = std::io::stderr().lock().flush();
+    });
+}
+
 // ------------------------------------------------------------ the compile core
 
 /// Run one compile with a fully-constructed chain/warn/functions environment.
@@ -585,6 +607,7 @@ fn run_compile(
     warn: Option<sasso::WarnHandler>,
     functions: Vec<(String, sasso::HostFunction)>,
 ) -> std::result::Result<NativeResult, String> {
+    warm_stdio();
     let mut opts = Options::new()
         .with_style(if cfg.compressed {
             OutputStyle::Compressed
@@ -905,6 +928,25 @@ pub fn compile_string_sync(
 thread_local! {
     static SYNC_BRIDGE: RefCell<Option<*const ()>> = const { RefCell::new(None) };
 }
+
+// ------------------------------------------------------------- the allocator
+//
+// The same bump arena the binary installs (`src/main.rs`) and the wasm module
+// uses. Without it `compile()`'s scope primitives are inert and the whole
+// compiler runs on the system allocator, which is what made this addon 1.6x
+// slower than the binary running the identical code (issue #83): 6.95 ms/file
+// against 5.00 on 138 Lichess stylesheets, measured by removing the arena from
+// the binary rather than by reasoning about it.
+//
+// Safe for the values that leave a compile. `compile()` deep-clones its result
+// out before resetting, and the library pauses the arena around importer,
+// warn-handler and host-function callbacks — see `eval/modules.rs`, "the
+// caller's importer runs OUTSIDE the arena scope" — which is what keeps the
+// chain's `loaded`/`owner` records and the dependency set alive past the
+// reset. Verified, not assumed: CSS and `loadedUrls` for all 138 stylesheets
+// are byte-identical with and without it.
+#[global_allocator]
+static GLOBAL: sasso::ScopedAlloc = sasso::ScopedAlloc;
 
 // -------------------------------------------------------------------- values
 
