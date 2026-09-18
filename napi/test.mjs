@@ -528,6 +528,80 @@ writeFileSync(join(root, "fi.scss"), "$s: 10px;\n");
 
 console.log("ok: quietDeps — native and wasm agree on dart's provenance rule");
 
+// (o) `silenceDeprecations`, native vs wasm. This is where it belongs rather
+// than in wasm/test.mjs: that suite runs in the CI job that builds no addon, so
+// its native leg skips there and the addon's copy of this option would be
+// covered nowhere. It has already been wrong once — mid-development the native
+// path accepted the option and ignored it, printing all six warnings while wasm
+// printed none — and the two entry points share one type declaration, so an
+// option one of them quietly drops is a promise the package does not keep.
+//
+// One entry raising THREE deprecations, so "silenced" can be told apart from
+// "warnings stopped": every case names some ids and asserts the rest survive.
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-napi-sd-"));
+  writeFileSync(join(dir, "dep.scss"), ".d { color: lighten(#036, 10%) }\n");
+  const entryUrl = pathToFileURL(join(dir, "entry.scss")).href;
+
+  const IMPORT = /@import rules are deprecated/;
+  const GLOBAL = /Global built-in functions are deprecated/;
+  const LIGHTEN = /lighten\(\) is deprecated/;
+
+  const collect = (mod, silenceDeprecations) => {
+    const seen = [];
+    mod.compileString('@import "dep";\n', {
+      url: entryUrl,
+      silenceDeprecations,
+      logger: { warn: (m) => seen.push(m.split("\n")[0]) },
+    });
+    return seen.join("\n");
+  };
+
+  const byEngine = {};
+  for (const [name, mod] of [["native", napi], ["wasm", wasm]]) {
+    const loud = collect(mod, undefined);
+    assert.match(loud, IMPORT, `silenceDeprecations(${name}): @import warns by default`);
+    assert.match(loud, GLOBAL, `silenceDeprecations(${name}): global-builtin warns by default`);
+    assert.match(loud, LIGHTEN, `silenceDeprecations(${name}): color-functions warns by default`);
+
+    const one = collect(mod, ["import"]);
+    assert.doesNotMatch(one, IMPORT, `silenceDeprecations(${name}): the named id is gone`);
+    assert.match(one, GLOBAL, `silenceDeprecations(${name}): the others are not`);
+
+    const two = collect(mod, ["global-builtin", "color-functions"]);
+    assert.doesNotMatch(two, GLOBAL, `silenceDeprecations(${name}): two ids, first gone`);
+    assert.doesNotMatch(two, LIGHTEN, `silenceDeprecations(${name}): two ids, second gone`);
+    assert.match(two, IMPORT, `silenceDeprecations(${name}): two ids, the third kept`);
+
+    // An id sasso never emits is accepted and does nothing, so a build written
+    // for `sass` does not fail for naming one.
+    assert.match(collect(mod, ["mixed-decls"]), IMPORT, `silenceDeprecations(${name}): an unemitted id is inert`);
+    assert.equal(collect(mod, []), loud, `silenceDeprecations(${name}): an empty list changes nothing`);
+
+    byEngine[name] = { loud, one, two };
+  }
+
+  // The engines must not merely each be self-consistent: byte-for-byte the same
+  // warnings, which is what caught the native path ignoring the option.
+  for (const key of ["loud", "one", "two"]) {
+    assert.equal(byEngine.native[key], byEngine.wasm[key], `silenceDeprecations: the engines agree (${key})`);
+  }
+
+  // The async API is a different code path in both engines.
+  for (const [name, mod] of [["native", napi], ["wasm", wasm]]) {
+    const seen = [];
+    await mod.compileStringAsync('@import "dep";\n', {
+      url: entryUrl,
+      silenceDeprecations: ["import"],
+      logger: { warn: (m) => seen.push(m.split("\n")[0]) },
+    });
+    const text = seen.join("\n");
+    assert.doesNotMatch(text, IMPORT, `silenceDeprecations(async ${name}): silenced`);
+    assert.match(text, GLOBAL, `silenceDeprecations(async ${name}): others kept`);
+  }
+}
+console.log("ok: silenceDeprecations — native and wasm agree, per id, sync + async");
+
 // (o) `unicode: false` — the CLI's `--no-unicode` — selects the ASCII glyph set
 // for rendered diagnostics, on both engines. Same reason as quietDeps: one
 // shared type declaration, so neither engine may quietly ignore it.
