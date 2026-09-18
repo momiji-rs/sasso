@@ -1,14 +1,17 @@
-# The `sasso` CLI as a Nix derivation — the one this repo's `flake.nix` builds.
+# The `sasso` CLI as a Nix derivation — the one this repo's `flake.nix` builds,
+# and the one `nur.nix` re-exports as `nur.repos.momiji-rs.sasso`.
 #
 # Two derivations describe sasso to Nix, and they differ on purpose:
 #
 #   * this one builds the tree it lives in and takes its dependency hashes from
 #     `Cargo.lock`, so it carries no hash of its own and cannot go stale: a
 #     release bumps `Cargo.toml` and nothing here needs a second edit;
-#   * nixpkgs' `pkgs/by-name/sa/sasso/package.nix` fetches a tagged tarball with
+#   * a nixpkgs `pkgs/by-name/sa/sasso/package.nix` fetches a tagged tarball with
 #     `fetchFromGitHub` and pins the vendored crates with a single `cargoHash`,
 #     because that is the shape nixpkgs' update tooling (`nix-update`, and the
-#     r-ryantm bot that follows our tags) knows how to rewrite.
+#     r-ryantm bot that would follow our tags) knows how to rewrite. That copy
+#     lives in a nixpkgs checkout, not here — README.md beside this file records
+#     where the submission stands.
 #
 # Keep the two in step on the parts that are judgement calls rather than
 # plumbing: the license pair, the check story, and `meta`.
