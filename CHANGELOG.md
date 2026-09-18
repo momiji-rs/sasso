@@ -11,6 +11,31 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Fixed
+
+- **A native addon whose version does not match the `sasso` loading it is now
+  refused** instead of being used (#114). `sasso` pins the four
+  `sasso-native-*` packages as exact-version `optionalDependencies`, so a plain
+  install cannot drift; a consumer that also names them itself has a second
+  place to bump, and the two can fall out of step.
+
+  That was silent, and silently wrong: napi ignores config fields it does not
+  know without erroring, so an addon one release behind accepted every option
+  the newer JS sent and applied only the ones it recognised — the compile
+  succeeded and quietly did something else. A flag accepted that does nothing
+  is the bug that opened #24; this was the same bug with no flag to blame.
+
+  `sasso/native` now throws, naming both versions and the fix. The CLI, which
+  picks an engine itself, falls back to wasm — byte-identical output, so the
+  build stays correct — but says so on stderr, because replacing a wrong
+  compile with a silently slower one is not a fix. `SASSO_NATIVE_BINARY` and
+  the repo-local `napi/npm/sasso.node` are development paths with no manifest
+  to compare and stay unchecked.
+
+- `info` from `sasso/native` reported `napi/Cargo.toml`'s version (`0.1.0`) as
+  `(sasso-native <ver>)`, which reads as the sasso version and is not one. It
+  now reports the platform package's real version.
+
 ### Added
 
 - **`--silence-deprecation=<ids>`**, on both CLIs and as `silenceDeprecations`

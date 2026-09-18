@@ -51,6 +51,14 @@ async function loadEngine() {
     } catch (e) {
       // `fail` writes synchronously, which matters because it exits at once.
       if (want === "native") fail(`error: SASSO_ENGINE=native but the addon is unavailable: ${e.message}`);
+      // An ABSENT addon is the ordinary case on the platforms with no prebuild,
+      // and falling back to wasm is the whole design — it says nothing. An
+      // addon that is present but version-skewed is a broken install: wasm
+      // keeps the OUTPUT correct, so the build still succeeds, but staying
+      // quiet would trade a wrong compile for a slow one with nothing to read.
+      if (e?.code === "SASSO_ADDON_VERSION_MISMATCH") {
+        writeStderrSync(`warning: ${e.message}\nwarning: falling back to the wasm engine, which is slower.\n`);
+      }
     }
   }
   if (!mod) {

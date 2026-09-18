@@ -31,42 +31,52 @@ import {
 import { Exception, Logger } from "./_loader.mjs";
 import { deserializeArgs, serializeValue, setEngine, valueApi } from "./_value.mjs";
 import { normalizeSilenced } from "./_deprecations.mjs";
+import { assertAddonVersion, platformKey, SUPPORTED } from "./_addon.mjs";
 
 const require_ = createRequire(import.meta.url);
 
-const SUPPORTED = {
-  "darwin-arm64": "sasso-native-darwin-arm64",
-  "darwin-x64": "sasso-native-darwin-x64",
-  "linux-x64-gnu": "sasso-native-linux-x64-gnu",
-  "linux-arm64-gnu": "sasso-native-linux-arm64-gnu",
-};
-
-function platformKey() {
-  const { platform, arch } = process;
-  if (platform === "linux") {
-    // glibc vs musl: the prebuilds are gnu-only for now.
-    const glibc = process.report?.getReport?.()?.header?.glibcVersionRuntime;
-    return `linux-${arch}-${glibc ? "gnu" : "musl"}`;
+// This package's own version, for the pairing check below. The published
+// package.json carries the release version (the publish workflow writes it
+// from the tag); a repo checkout's is stale, which is why a checkout has no
+// platform package to disagree with it.
+function ownVersion() {
+  try {
+    return JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version ?? null;
+  } catch {
+    return null;
   }
-  return `${platform}-${arch}`;
 }
 
+// Returns the binding plus where it came from: only the platform package is a
+// published pairing with a version to check. `SASSO_NATIVE_BINARY` and the
+// repo-local build are development paths and report `null`.
 function loadNativeBinding() {
   const override = process.env.SASSO_NATIVE_BINARY;
-  if (override) return require_(override);
+  if (override) return { binding: require_(override), version: null, pkg: null };
   const key = platformKey();
   const pkg = SUPPORTED[key];
   const tried = [];
   if (pkg) {
     try {
-      return require_(pkg);
+      const binding = require_(pkg);
+      let version = null;
+      try {
+        version = require_(`${pkg}/package.json`).version ?? null;
+      } catch {
+        // No readable manifest: nothing to compare, so nothing to refuse.
+      }
+      return { binding, version, pkg };
     } catch (e) {
       tried.push(`${pkg}: ${e.code ?? e.message}`);
     }
   }
   try {
     // Repo-checkout dev fallback (not part of the published package).
-    return require_(new URL("../../napi/npm/sasso.node", import.meta.url).pathname);
+    return {
+      binding: require_(new URL("../../napi/npm/sasso.node", import.meta.url).pathname),
+      version: null,
+      pkg: null,
+    };
   } catch (e) {
     tried.push(`repo build: ${e.code ?? e.message}`);
   }
@@ -78,7 +88,11 @@ function loadNativeBinding() {
   );
 }
 
-const native = loadNativeBinding();
+const { binding: native, version: addonVersion, pkg: addonPkg } = loadNativeBinding();
+// Before anything uses it: a mismatched addon compiles happily and drops the
+// options it does not recognise, so the failure has to happen here or not at
+// all. See _addon.mjs and #114.
+assertAddonVersion(ownVersion(), addonVersion, addonPkg);
 
 // Route the Value-method engine (SassNumber.convert, SassColor.toSpace, …)
 // through the native valueOp. Module-global by design (same caveat as the
@@ -93,7 +107,10 @@ setEngine((op, argsBytes) => {
 });
 
 export { Exception, Logger };
-export const info = `dart-sass\t1.101.0\t(sasso-native ${native.nativeVersion()})\t[Rust native]`;
+// The addon's own `nativeVersion()` is `napi/Cargo.toml`'s version, which is
+// not the released one and reads here as though it were; prefer the platform
+// package's, and keep the old field for a dev build that has no manifest.
+export const info = `dart-sass\t1.101.0\t(sasso-native ${addonVersion ?? native.nativeVersion()})\t[Rust native]`;
 
 function errMessage(e) {
   return e && e.message ? String(e.message) : String(e);

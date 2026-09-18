@@ -33,6 +33,7 @@
     "_immutable.mjs",
     "_jobs.mjs",
     "_deprecations.mjs",
+    "_addon.mjs",
     "cli.mjs",
     "sasso.mjs",
     "sasso.speed.mjs",
