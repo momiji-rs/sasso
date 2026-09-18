@@ -25,6 +25,16 @@ Conformance is tracked separately as a ratchet against the official
   said otherwise. Both now consult one predicate, so the deprecation cannot
   contradict the path the call actually took.
 
+  Two cases deliberately keep warning, both matching dart. A registered host
+  function of the same name is the implementation sasso selects, so the call
+  is that callback rather than a CSS filter and `with_function`'s contract
+  keeps the deprecation. And `grayscale(1, 2)` reports its arity error alone,
+  as dart does, rather than an arity error plus a deprecation.
+
+  The namespaced spelling (`color.grayscale(1)`) is unchanged: it produces the
+  same CSS filter dart produces. dart additionally raises
+  `color-module-compat` there, which sasso still does not emit — #124.
+
   On Lichess's tree this was 20 spurious warnings out of 55; sasso and
   dart-sass now report the same 35, and agree file-by-file across all 147
   entry points.
