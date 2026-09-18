@@ -33,7 +33,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 // =========================================================================
 // Process-global arena-region registry.
@@ -99,7 +99,14 @@ const MAX_ARENAS: usize = 128;
 /// unrelated System pointer as arena-owned, where freeing is a no-op and the
 /// allocation would leak.
 struct Region {
-    base: AtomicUsize,
+    /// The region's start, kept as a pointer rather than an address so that a
+    /// thread leasing a slot another thread created gets the pointer
+    /// `System.alloc` returned, provenance and all. Storing it as a `usize`
+    /// and casting back would be the `addr as *mut u8` this module's safety
+    /// strategy rules out: every allocation handed out is derived from this
+    /// with `add`, so a base without provenance makes each of them undefined
+    /// under strict provenance, and Miri's Stacked/Tree-Borrows would say so.
+    base: AtomicPtr<u8>,
     end: AtomicUsize,
     /// Held by a live thread. Readers ignore this: a region is a region
     /// whether or not anyone is bumping in it right now.
@@ -108,7 +115,7 @@ struct Region {
 
 #[allow(clippy::declare_interior_mutable_const)] // repeated-element array init (MSRV < 1.79)
 const ZERO_REGION: Region = Region {
-    base: AtomicUsize::new(0),
+    base: AtomicPtr::new(std::ptr::null_mut()),
     end: AtomicUsize::new(0),
     taken: AtomicBool::new(false),
 };
@@ -183,7 +190,10 @@ fn release_slot(idx: usize) {
 fn in_any_arena(p: usize) -> bool {
     let n = REGION_SLOTS.load(Ordering::Relaxed).min(MAX_ARENAS);
     for r in &REGIONS[..n] {
-        let base = r.base.load(Ordering::Acquire);
+        // Pointer to address for the comparison only. That direction is free:
+        // it is deriving a pointer FROM an address that loses provenance, and
+        // nothing here is dereferenced.
+        let base = r.base.load(Ordering::Acquire) as usize;
         if base != 0 && p >= base && p < r.end.load(Ordering::Relaxed) {
             return true;
         }
@@ -360,7 +370,7 @@ impl ThreadState {
         };
         let region = &REGIONS[slot];
         let mut base = region.base.load(Ordering::Acquire);
-        if base == 0 {
+        if base.is_null() {
             // First thread ever to hold this slot: give it a region, once.
             // Every later holder bumps in the same one.
             let Ok(layout) = Layout::from_size_align(size, 4096) else {
@@ -376,13 +386,13 @@ impl ThreadState {
             // `end` before `base`: `base` is what readers gate on, so writing
             // it last means a reader sees the whole region or skips the slot.
             region.end.store(p as usize + size, Ordering::Relaxed);
-            region.base.store(p as usize, Ordering::Release);
-            base = p as usize;
+            region.base.store(p, Ordering::Release);
+            base = p;
         }
         self.slot.set(slot);
-        self.base.set(base as *mut u8);
+        self.base.set(base);
         self.end.set(region.end.load(Ordering::Relaxed));
-        self.cursor.set(base);
+        self.cursor.set(base as usize);
         Reserved::Yes
     }
 }
@@ -834,10 +844,10 @@ mod tests {
     }
 
     // ---- ScopedAlloc routing (NOT under Miri: it doesn't run a
-    // #[global_allocator], so these exercise the routing directly. The
-    // thread-local backing is freed by its `Drop` when the thread ends; the
-    // harness threads that run these tests outlive them, which is why the
-    // lifetime tests below spawn their own.)
+    // #[global_allocator], so these exercise the routing directly. Each takes
+    // a lease for the length of its scope and gives it back at `reset`; the
+    // pooled region stays registered either way, which is why the tests below
+    // spawn their own threads to ask about leases rather than about memory.)
     // These call ScopedAlloc directly; the test thread's own allocations go to
     // the real (system) global allocator, so they don't perturb the arena. ----
 
