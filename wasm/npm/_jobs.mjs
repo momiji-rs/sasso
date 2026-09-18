@@ -30,10 +30,23 @@ import os from "node:os";
  * on a 16-thread machine it answers 16 where `availableParallelism()` answers
  * 4 (measured 2026-09-17). The package supports Node >= 16 and
  * `availableParallelism` arrived in 18.14, so on part of that range this is
- * the host count — `allowedCpusFromStatus` is what puts the floor back.
+ * the host count — `allowedCpusFromStatus` and the cgroup quota are what put
+ * the floor back.
+ *
+ * Run on the real runtimes rather than reasoned about, 2026-09-17, on a host
+ * with 8 physical cores and 16 threads. `defaultJobs()` in each case:
+ *
+ *                       unrestricted   --cpus=2   --cpuset-cpus=0,1,8,9
+ *     v16.20.2 (no API)        8           2                4
+ *     v18.20.8                 8           2                4
+ *     v22.23.2                 8           2                4
+ *
+ * Node 16 reaches the same answers with `logicalCpus()` reporting the host's
+ * 16 throughout, which is the point: the floor comes from the two files, not
+ * from the runtime.
  */
-export function logicalCpus() {
-  return os.availableParallelism ? os.availableParallelism() : os.cpus().length;
+export function logicalCpus(osApi = os) {
+  return osApi.availableParallelism ? osApi.availableParallelism() : osApi.cpus().length;
 }
 
 /**
@@ -161,8 +174,9 @@ export function defaultJobs({
   readCpuinfo = defaultReadCpuinfo,
   readStatus = defaultReadStatus,
   readCgroup = defaultReadCgroup,
+  reportedCpus = logicalCpus,
 } = {}) {
-  const reported = logicalCpus();
+  const reported = reportedCpus();
   if (platform !== "linux") return reported;
   const status = readStatus();
   const allowed = status === undefined ? undefined : allowedCpusFromStatus(status);

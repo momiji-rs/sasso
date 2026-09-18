@@ -1780,6 +1780,22 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       "cli: the tightest limit along the hierarchy wins",
     );
 
+    // `logicalCpus` has two branches and this suite runs on one Node, so the
+    // `os` it asks is injectable. The fallback is not dead code: it is what
+    // answers on Node 16 to 18.13, where `availableParallelism` does not exist
+    // — and `os.cpus().length` is the HOST's count, which is the whole reason
+    // the mask and quota are read separately.
+    assert.equal(
+      jobs.logicalCpus({ availableParallelism: () => 4, cpus: () => new Array(16) }),
+      4,
+      "cli: availableParallelism wins when it exists",
+    );
+    assert.equal(
+      jobs.logicalCpus({ cpus: () => new Array(16) }),
+      16,
+      "cli: without it, the host's CPU count is the starting point",
+    );
+
     // `Cpus_allowed_list` is the affinity mask this process actually has.
     assert.equal(jobs.allowedCpusFromStatus("Cpus_allowed_list:\t0-1,8-9\n"), 4, "cli: ranges and lists");
     assert.equal(jobs.allowedCpusFromStatus("Cpus_allowed_list:\t3\n"), 1, "cli: a single cpu");
@@ -1837,6 +1853,33 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       Math.min(8, logical),
       "cli: an unreadable /proc/self/status leaves the core count alone",
     );
+    // The whole Node 16 shape, end to end and independent of this host: the
+    // runtime reports the machine's 16, the process may use 4 of them, and the
+    // topology says 8 physical cores. The mask has to win.
+    assert.equal(
+      jobs.defaultJobs({
+        platform: "linux",
+        reportedCpus: () => 16,
+        readCpuinfo: readFake(eightCores),
+        readStatus: readFake("Cpus_allowed_list:\t0-1,8-9\n"),
+        readCgroup: () => [],
+      }),
+      4,
+      "cli: on a Node without availableParallelism the mask still caps the default",
+    );
+    // …and the same with a quota instead of a mask.
+    assert.equal(
+      jobs.defaultJobs({
+        platform: "linux",
+        reportedCpus: () => 16,
+        readCpuinfo: readFake(eightCores),
+        readStatus: readFake("Cpus_allowed_list:\t0-15\n"),
+        readCgroup: () => [{ v2: "200000 100000\n" }],
+      }),
+      2,
+      "cli: on a Node without availableParallelism the quota still caps the default",
+    );
+
     // The container shape that has no mask to find: quota only.
     assert.equal(
       jobs.defaultJobs({
