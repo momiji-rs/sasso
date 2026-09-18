@@ -259,7 +259,7 @@ export function cgroupQuotaFiles(procSelfCgroup) {
     return out.map((p) => (p === "/" ? "" : p));
   };
 
-  for (const line of procSelfCgroup.split("\n")) {
+  for (const line of (procSelfCgroup ?? "").split("\n")) {
     // "0::/a/b" for v2, "4:cpu,cpuacct:/a/b" for v1.
     const parts = line.split(":");
     if (parts.length < 3) continue;
@@ -278,10 +278,18 @@ export function cgroupQuotaFiles(procSelfCgroup) {
       }
     }
   }
-  // A cgroup file that says nothing about this process is still worth a look:
-  // if `/proc/self/cgroup` was unreadable, the root is the only guess left.
-  if (v2.length === 0) v2.push("/sys/fs/cgroup/cpu.max");
-  if (v1.length === 0) {
+  // The root is a guess for a file that could not be READ, not for one that
+  // was read and named no cpu hierarchy. Those are different answers: the
+  // second says this process is not in such a hierarchy, and probing the root
+  // anyway means reading a limit that belongs to someone else.
+  //
+  // In practice the v2 root carries no `cpu.max` at all — verified on a host,
+  // where the file does not exist, against a container, where the namespace
+  // root IS the container's own cgroup and the file is its limit — so the old
+  // shape was harmless. Not relying on that is still better than relying on
+  // it.
+  if (procSelfCgroup === undefined) {
+    v2.push("/sys/fs/cgroup/cpu.max");
     for (const dir of ["/sys/fs/cgroup/cpu", "/sys/fs/cgroup/cpu,cpuacct"]) {
       v1.push({ quota: `${dir}/cpu.cfs_quota_us`, period: `${dir}/cpu.cfs_period_us` });
     }
@@ -291,7 +299,9 @@ export function cgroupQuotaFiles(procSelfCgroup) {
 
 /** Each candidate's contents, for `tightestQuota`. */
 export function cgroupFiles(read) {
-  const { v2, v1 } = cgroupQuotaFiles(read("/proc/self/cgroup") ?? "");
+  // Passed through undefined-and-all: `cgroupQuotaFiles` distinguishes a file
+  // it could not read from one that named no cpu hierarchy.
+  const { v2, v1 } = cgroupQuotaFiles(read("/proc/self/cgroup"));
   return [
     ...v2.map((path) => ({ v2: read(path) })),
     ...v1.map(({ quota, period }) => ({ v1Quota: read(quota), v1Period: read(period) })),

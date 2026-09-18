@@ -1522,8 +1522,14 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       const parts = importer.includes("/") ? importer.slice(0, importer.lastIndexOf("/")).split("/") : [];
       for (const segment of spec.split("/")) {
         if (segment === "" || segment === ".") continue;
-        if (segment === "..") parts.pop();
-        else parts.push(segment);
+        if (segment === "..") {
+          // Climbing past the package root resolves outside the tarball
+          // entirely. Popping an empty path would quietly turn
+          // `cli.mjs` + `../sasso.mjs` into `sasso.mjs`, which IS shipped, so
+          // the guard would pass on an import Node resolves somewhere else.
+          assert.ok(parts.length > 0, `packaging: ${importer} imports ${spec}, which escapes the package`);
+          parts.pop();
+        } else parts.push(segment);
       }
       return parts.join("/");
     };
@@ -1534,6 +1540,13 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.equal(resolveFrom("sub/entry.mjs", "./dep.mjs"), "sub/dep.mjs");
     assert.equal(resolveFrom("sub/entry.mjs", "../dep.mjs"), "dep.mjs");
     assert.equal(resolveFrom("a/b/entry.mjs", "../c/dep.mjs"), "a/c/dep.mjs");
+    // Climbing out of the package must not resolve to a shipped basename:
+    // `cli.mjs` + `../sasso.mjs` is not `sasso.mjs`, it is outside the tarball.
+    assert.throws(
+      () => resolveFrom("cli.mjs", "../sasso.mjs"),
+      /escapes the package/,
+      "packaging: an import above the package root is rejected, not flattened",
+    );
 
     const seen = new Set();
     const queue = [...roots];
@@ -1724,6 +1737,34 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       2,
       "cli: the container shape still resolves to the root file",
     );
+
+    // An unreadable `/proc/self/cgroup` leaves the root as the only guess…
+    {
+      const files = jobs.cgroupQuotaFiles(undefined);
+      assert.ok(files.v2.includes("/sys/fs/cgroup/cpu.max"), "cli: v2 root is guessed");
+      assert.ok(
+        files.v1.some((f) => f.quota === "/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us"),
+        "cli: v1 roots are guessed",
+      );
+    }
+    // …but a file that WAS read and names no cpu hierarchy is an answer, not a
+    // gap: this process is in no such hierarchy, and the root's limit belongs
+    // to someone else.
+    {
+      const files = jobs.cgroupQuotaFiles("4:memory:/some/slice\n");
+      assert.deepEqual(files.v2, [], "cli: no v2 line, no v2 probe");
+      assert.deepEqual(files.v1, [], "cli: no cpu controller, no v1 probe");
+    }
+    // A v2 line names its own hierarchy, so the walk stays inside it.
+    {
+      const files = jobs.cgroupQuotaFiles("0::/a/b\n");
+      assert.deepEqual(
+        files.v2,
+        ["/sys/fs/cgroup/a/b/cpu.max", "/sys/fs/cgroup/a/cpu.max", "/sys/fs/cgroup/cpu.max"],
+        "cli: the v2 walk is the process's own path and its parents",
+      );
+      assert.deepEqual(files.v1, [], "cli: a v2-only process probes no v1 paths");
+    }
 
     // A parent slice's limit applies to everything under it, so the tightest
     // along the path wins rather than the first one found.
