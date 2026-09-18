@@ -101,10 +101,10 @@ That is what keeps the channel from rotting. A `nur-packages` repo would have to
 carry the nixpkgs shape below — a tag, a literal version, a `cargoHash` — and so
 a second edit every release; `nur.nix` re-exports derivations that build the tree
 they live in, so a release bumps `Cargo.toml` and the channel follows. The
-`momiji-rs` key is a name NUR lets us pick rather than the repo owner (69 of its
-entries differ from theirs), so if a second package ever needs its own repo,
-that is a one-line change on their side and no user's
-`nur.repos.momiji-rs.sasso` breaks.
+`momiji-rs` key is a name NUR lets us pick rather than the repo owner (92 of the
+574 entries in `repos.json` differ from theirs, counted 2026-09-17), so if a
+second package ever needs its own repo, that is a one-line change on their side
+and no user's `nur.repos.momiji-rs.sasso` breaks.
 
 NUR re-locks once a day on its own. To not wait, after pushing a release:
 
