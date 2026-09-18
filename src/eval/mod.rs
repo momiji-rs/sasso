@@ -3348,10 +3348,17 @@ impl<'a> Evaluator<'a> {
             r
         };
         // After the body, so a nested rule's own bogus selector is reported
-        // before its parent's — see `pending_bogus`.
-        for (pos, len, sel) in pending_bogus {
-            let dep = crate::deprecation::Deprecation::bogus_combinators(&sel);
-            self.emit_deprecation(&dep, pos, len);
+        // before its parent's — and only if the body COMPLETED. dart drops the
+        // warning when the rule it belongs to failed: an error inside
+        // `.a > + .b { color: $nope; }` gets the error alone, while an error in
+        // a LATER rule still leaves this one warning. Measured on 1.104.1;
+        // flushing unconditionally reported a deprecation for a rule that never
+        // finished.
+        if result.is_ok() {
+            for (pos, len, sel) in pending_bogus {
+                let dep = crate::deprecation::Deprecation::bogus_combinators(&sel);
+                self.emit_deprecation(&dep, pos, len);
+            }
         }
         self.current_selector = prev_selector;
         self.current_linebreaks = prev_linebreaks;

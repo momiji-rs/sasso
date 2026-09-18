@@ -61,6 +61,12 @@ const MATCHING: &[&str] = &[
     // characters, our Span length is source bytes), and got it wrong the first
     // time — twelve columns late on a CJK selector.
     "deprecation-bogus-combinators-non-ascii",
+    // The warning is delayed until after the rule body, so the error path is
+    // its own question: dart drops it when that body fails, and keeps it when
+    // a LATER rule fails. Both, because gating on success could otherwise be
+    // over-broad with nothing to notice.
+    "deprecation-bogus-combinators-body-error",
+    "deprecation-bogus-combinators-later-error",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {
