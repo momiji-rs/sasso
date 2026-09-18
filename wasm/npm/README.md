@@ -47,7 +47,8 @@ interface CompileResult { css: string; loadedUrls: URL[]; sourceMap?: object }
 
 - `options`: `{ style?: "expanded" | "compressed", sourceMap?: boolean,
   sourceMapIncludeSources?: boolean, loadPaths?: string[], importers?: [...],
-  functions?: {...}, charset?: boolean, quietDeps?: boolean, logger?: Logger }`.
+  functions?: {...}, charset?: boolean, quietDeps?: boolean,
+  silenceDeprecations?: string[], logger?: Logger }`.
   `compileString` also accepts `url?: string | URL` (the source's canonical URL,
   the base for its relative imports) and `syntax?: "scss" | "indented" | "css"`.
 - **Imports.** `@use` / `@forward` / `@import` resolve via `loadPaths`, relative
@@ -68,6 +69,13 @@ interface CompileResult { css: string; loadedUrls: URL[]; sourceMap?: object }
   it lives: one the entry loads relatively still warns, even from inside a load
   path. A dependency's own `@warn` / `@debug` still reaches the logger, as in
   dart-sass.
+- `silenceDeprecations: ["import", ...]` drops those deprecations by id, leaving
+  every other warning in place — dart-sass's flag of the same name, and the CLI's
+  `--silence-deprecation`. Silencing happens inside the compiler, beside
+  `quietDeps`, so a silenced id is not counted towards the `N repetitive
+  deprecation warnings omitted` footer either. Ids sasso never emits are accepted
+  and do nothing, so a build written for `sass` does not fail for naming one; an
+  id dart-sass does not know at all is rejected.
 - `charset: false` suppresses the `@charset` / BOM prefix for non-ASCII output.
 - `info` is exported for build-tool auto-detection; `initCompiler()` /
   `initAsyncCompiler()` implement the dart-sass Compiler API (Vite uses these).

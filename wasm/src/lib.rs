@@ -5,7 +5,8 @@
 //! (`npm/_loader.mjs`) marshals UTF-8 in and out of linear memory by hand.
 //!
 //! Protocol: JS calls `sasso_alloc(len)` for a buffer, writes the SCSS bytes,
-//! then calls `sasso_compile2(...)`. That returns a pointer to a UTF-8 result
+//! then calls `sasso_compile3(...)` (`sasso_compile2` where an older module
+//! does not export it). That returns a pointer to a UTF-8 result
 //! (the CSS — or, with `want_map`, a framed `[cssLen u32][css][sourceMap json]`
 //! — on success, or the error message on failure); the byte length is written
 //! to `*out_len_ptr` and a `1`/`0` ok flag to `*ok_ptr`. JS reads the bytes,
@@ -65,7 +66,7 @@ pub extern "C" fn sasso_alloc(len: usize) -> *mut u8 {
     }
 }
 
-/// Free a buffer returned by [`sasso_alloc`] or [`sasso_compile2`].
+/// Free a buffer returned by [`sasso_alloc`] or [`sasso_compile3`].
 ///
 /// `(ptr, len)` must be exactly a pair previously handed to JS by this module.
 #[no_mangle]
@@ -134,7 +135,7 @@ extern "C" {
 }
 
 // Custom-function signatures the host registers before a compile (cleared
-// after). `sasso_compile2` turns each into an `Options::with_function` whose
+// after). `sasso_compile3` turns each into an `Options::with_function` whose
 // callback bridges to `host_call_function` by index.
 thread_local! {
     static FUNCTIONS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -142,7 +143,7 @@ thread_local! {
 
 /// Register a custom-function signature (`"pow($base, $exponent)"`); returns its
 /// index, which the callback passes to `host_call_function`. Call before
-/// `sasso_compile2`; pair with `sasso_clear_functions`.
+/// `sasso_compile3`; pair with `sasso_clear_functions`.
 #[no_mangle]
 pub extern "C" fn sasso_register_function(sig_ptr: *const u8, sig_len: usize) -> u32 {
     let sig = if sig_ptr.is_null() || sig_len == 0 {
@@ -556,7 +557,7 @@ pub extern "C" fn sasso_compile2(
 
 /// Run an engine-routed `Value` method (e.g. `SassNumber.convert`,
 /// `SassColor.toSpace`) — forwards to [`sasso::host_value_op`]. `in` is the
-/// serialized operands; the result is returned like `sasso_compile2` (a pointer
+/// serialized operands; the result is returned like `sasso_compile3` (a pointer
 /// plus `*out_len_ptr`/`*ok_ptr`): on `ok` the buffer is the serialized result
 /// value, otherwise a UTF-8 error message. This is independent of any in-flight
 /// compile, so JS `Value` methods work standalone and re-entrantly.

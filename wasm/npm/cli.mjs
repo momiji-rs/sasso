@@ -133,18 +133,22 @@ function packageVersion() {
 }
 
 // Deprecation ids `--silence-deprecation` accepts, matching the native CLI's
-// list in `src/main.rs` — which was probed from dart-sass 1.104.1 one id at a
-// time rather than transcribed. Most name deprecations sasso never emits;
-// accepting them is the point, because a build script written for `sass` must
-// not fail here for naming one it has.
+// list in `src/main.rs`: the full `Deprecation` enum of dart-sass 1.104.1, in
+// its own declaration order. Taken from the enum, not from a guess — an
+// earlier version of this list was probed candidate-by-candidate and missed
+// seven ids, `if-function` among them, which sasso itself emits. Most of these
+// name deprecations sasso never emits; accepting them is the point, because a
+// build script written for `sass` must not fail here for naming one it has.
 const DEPRECATION_IDS = new Set([
-  "abs-percent", "bogus-combinators", "call-string", "color-4-api",
-  "color-functions", "color-module-compat", "css-function-mixin",
-  "duplicate-var-flags", "elseif", "feature-exists", "fs-importer-cwd",
-  "function-units", "global-builtin", "import", "legacy-js-api",
-  "mixed-decls", "moz-document", "new-global", "null-alpha",
-  "relative-canonical", "slash-div", "strict-unary", "type-function",
-  "user-authored",
+  "call-string", "elseif", "moz-document", "relative-canonical",
+  "new-global", "color-module-compat", "slash-div", "bogus-combinators",
+  "strict-unary", "function-units", "duplicate-var-flags", "null-alpha",
+  "abs-percent", "fs-importer-cwd", "css-function-mixin", "mixed-decls",
+  "feature-exists", "color-4-api", "color-functions", "legacy-js-api",
+  "import", "global-builtin", "type-function",
+  "compile-string-relative-url", "misplaced-rest", "with-private",
+  "if-function", "function-name", "adjacent-compounds", "user-authored",
+  "calc-interp",
 ]);
 
 function fail(msg) {
