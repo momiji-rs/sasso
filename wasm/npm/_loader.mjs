@@ -337,6 +337,12 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
         ? encoder.encode(opts.silenceDeprecations.join(","))
         : null;
     const silencedLen = silBytes ? silBytes.length : 0;
+    // Before the first allocation, deliberately: this throws for a list the
+    // module cannot apply, and nothing frees these buffers on the way out —
+    // `readResult` owns that and is only reached on a completed compile. A
+    // guard placed after the allocations traded a silently-ignored option for
+    // a leak on every attempt.
+    ensureSilenceSupported(typeof w.sasso_compile3 === "function", silencedLen);
     const inPtr = input.length ? w.sasso_alloc(input.length) : 0;
     const urlPtr = urlLen ? w.sasso_alloc(urlLen) : 0;
     const silencedPtr = silencedLen ? w.sasso_alloc(silencedLen) : 0;
@@ -362,9 +368,8 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
         m.scratch, m.scratch + 4,
       );
     }
-    // A module without `sasso_compile3` cannot apply the list; dropping it
-    // silently would rebuild the very bug this option was added to fix.
-    ensureSilenceSupported(false, m.silencedLen);
+    // Unreachable with a non-empty list: `marshalIn` has already refused that
+    // combination, before allocating anything there is to leak.
     return w.sasso_compile2(
       m.inPtr, m.inLen, opts.compressed ? 1 : 0, opts.syntax, 1,
       m.urlPtr, m.urlLen, opts.wantMap ? 1 : 0, opts.includeSources ? 1 : 0, opts.charset ? 1 : 0,

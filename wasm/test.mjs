@@ -659,12 +659,19 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     /sasso_compile3/,
     "a list against a compile2-only module fails rather than being dropped",
   );
-  // The loader must actually consult it on the fallback path, not just define it.
+  // The loader must consult it, and must do so BEFORE it allocates: nothing
+  // frees the marshalled buffers on a throw — `readResult` owns that and is
+  // only reached on a completed compile — so a guard after the allocations
+  // would trade a silently-ignored option for a leak on every attempt.
   const loaderSrc = readFileSync(new URL("./npm/_loader.mjs", import.meta.url), "utf8");
-  const fallback = loaderSrc.slice(loaderSrc.indexOf("function callCompile2"));
-  const guardAt = fallback.indexOf("ensureSilenceSupported");
-  const call2At = fallback.indexOf("w.sasso_compile2(");
-  assert.ok(guardAt > 0 && call2At > 0 && guardAt < call2At, "the guard runs before the compile2 fallback");
+  const marshal = loaderSrc.slice(
+    loaderSrc.indexOf("function marshalIn"),
+    loaderSrc.indexOf("function callCompile2"),
+  );
+  const guardAt = marshal.indexOf("ensureSilenceSupported");
+  const allocAt = marshal.indexOf("sasso_alloc");
+  assert.ok(guardAt > 0, "marshalIn consults the compile3 guard");
+  assert.ok(allocAt > 0 && guardAt < allocAt, "… before it allocates anything that would leak");
   assert.deepEqual([...ours].sort(), [...native].sort(), "cli: the two deprecation allowlists agree");
   for (const f of ["cli.mjs", "_loader.mjs", "native.mjs"]) {
     const text = readFileSync(new URL(`./npm/${f}`, import.meta.url), "utf8");
