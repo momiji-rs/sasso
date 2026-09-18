@@ -2943,10 +2943,13 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const binaryVersionOf = (p) => {
     const r = spawnSync(p, ["--version"], { encoding: "utf8", timeout: 10000 });
     if (r.status !== 0) return undefined;
-    // The binary prints `sasso <v>`; this CLI prints a bare `<v>`, dart's
-    // format. That prefix is what tells the two apart, so a `sasso` on PATH
-    // answering without it is the npm shim and not a binary at all.
-    const m = /^sasso (\S+)/.exec(String(r.stdout || "").trim());
+    // The binary prints `sasso <v>` and nothing else; this CLI prints a bare
+    // `<v>`, dart's format. Deliberately the same whole-output test `cli.mjs`
+    // applies, character for character: a helper that accepted more than the
+    // gate does would pick a candidate the gate then declines, and the
+    // end-to-end assertions below would be measuring the wrong executable —
+    // differently on each machine, depending on PATH.
+    const m = /^sasso (\S+)$/.exec(String(r.stdout || "").trim());
     return m ? m[1] : undefined;
   };
   const candidates = [];
