@@ -67,6 +67,10 @@ const MATCHING: &[&str] = &[
     // over-broad with nothing to notice.
     "deprecation-bogus-combinators-body-error",
     "deprecation-bogus-combinators-later-error",
+    // Four CSS filter calls that must stay silent beside one real Sass colour
+    // call that must still warn (#122). Both halves in one fixture on purpose:
+    // simply not warning would satisfy the first and fail the second.
+    "deprecation-global-builtin-css-filter",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {

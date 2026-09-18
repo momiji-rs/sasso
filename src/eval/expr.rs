@@ -751,7 +751,18 @@ impl<'a> Evaluator<'a> {
                     && pos_args
                         .iter()
                         .all(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.contains('=')));
-                if !ms_alpha_filter {
+                // Same reasoning for the four names that are BOTH a CSS filter
+                // function and a Sass global colour function: with a plain-CSS
+                // argument (`filter: grayscale(1)`) the call is the CSS filter
+                // and dart deprecates nothing. This asks the predicate the
+                // builtins themselves use, so the warning cannot disagree with
+                // which path the call actually took — it did, and told authors
+                // to rewrite CSS filters as `color.adjust` (#122).
+                // Global calls only: `color.grayscale(1)` through a
+                // namespace is a Sass call with a bad argument, not a filter.
+                let css_filter_call = via_star.is_none()
+                    && crate::builtins::is_plain_css_filter_call(canonical, &pos_args, &named);
+                if !ms_alpha_filter && !css_filter_call {
                     self.emit_call_deprecations(
                         canonical,
                         via_star.as_ref().map(|(owner, _)| owner.as_str()),
