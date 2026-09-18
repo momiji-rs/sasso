@@ -28,9 +28,10 @@ Conformance is tracked separately as a ratchet against the official
   process may actually use, so an affinity mask (`taskset`, a cpuset) or a
   cgroup CPU quota (`docker --cpus`, a Kubernetes CPU limit, a systemd
   `CPUQuota=`) still wins, whether the quota sits on the process's own cgroup
-  or on a slice above it. Node >= 18.14 and the binary get this from the
-  runtime; below that the npm CLI reads the standard `/sys/fs/cgroup` paths
-  itself, and a hierarchy mounted elsewhere falls back to the core count. It is
+  or on a slice above it. The binary and Node 22 get the quota from the
+  runtime — earlier Node does not, including the 18 and 20 LTS lines — so the
+  npm CLI reads the standard `/sys/fs/cgroup` paths itself on every version; a
+  hierarchy mounted elsewhere falls back to the core count. It is
   deliberately not the number of cores *inside* an affinity mask: SMT only
   stops paying once enough cores are in play, and restricted to two cores,
   using both SMT siblings measured 50% faster.

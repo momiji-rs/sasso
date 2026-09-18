@@ -1420,20 +1420,21 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // failure this guard exists to catch. Tolerating comments at the two
     // places they can appear cannot touch a string at all.
     const gap = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*\n)*`;
-    const statics = new RegExp(String.raw`\bfrom${gap}["'](\./[^"']+)["']`, "g");
+    const rel = String.raw`\.\.?/[^"']+`; // `./dep.mjs` and `../dep.mjs` both
+    const statics = new RegExp(String.raw`\bfrom${gap}["'](${rel})["']`, "g");
     // `import ("./x")` — whitespace before the parenthesis is legal too, and
     // so is a second argument: `import("./x", { with: { type: "json" } })`.
     // The closing parenthesis is still required, so `import("./x" + suffix)`
     // stays unmatched — that path is not the module, and demanding it be
     // shipped would be a false failure.
     const dynamics = new RegExp(
-      String.raw`\bimport${gap}\(${gap}["'](\./[^"']+)["']${gap}(?:,[^)]*)?\)`,
+      String.raw`\bimport${gap}\(${gap}["'](${rel})["']${gap}(?:,[^)]*)?\)`,
       "g",
     );
     // `import "./x.mjs"` has no `from` to key on. Nothing in the package does
     // this today, which is exactly why the matcher has to exist: the first one
     // added would otherwise be invisible here.
-    const sideEffects = new RegExp(String.raw`(?:^|[\s;}])import${gap}["'](\./[^"']+)["']`, "g");
+    const sideEffects = new RegExp(String.raw`(?:^|[\s;}])import${gap}["'](${rel})["']`, "g");
 
     // The matchers are the whole guard, so prove they see each shape rather
     // than trusting that they do. A matcher that silently matches nothing
@@ -1450,6 +1451,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         'import /* webpackIgnore: true */ "./eight.mjs";',
         'export { z } from /* a note */ "./nine.mjs";',
         'const h = await import("./ten.mjs", { with: { type: "json" } });',
+        'import { k } from "../eleven.mjs";',
         'import fs from "node:fs";', // must NOT match: bare specifier
         'const url = "https://example.com/not-an-import.mjs";', // nor a URL
       ].join("\n");
@@ -1460,6 +1462,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       assert.deepEqual(
         [...found].sort(),
         [
+          "../eleven.mjs",
           "./eight.mjs",
           "./five.mjs",
           "./four.mjs",
@@ -1484,6 +1487,13 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       }
       return parts.join("/");
     };
+    // Pinned directly, because the package is flat today and no real import
+    // exercises these: a branch nothing can reach is a branch nothing holds
+    // honest, and this one decides which file the guard checks.
+    assert.equal(resolveFrom("cli.mjs", "./_jobs.mjs"), "_jobs.mjs");
+    assert.equal(resolveFrom("sub/entry.mjs", "./dep.mjs"), "sub/dep.mjs");
+    assert.equal(resolveFrom("sub/entry.mjs", "../dep.mjs"), "dep.mjs");
+    assert.equal(resolveFrom("a/b/entry.mjs", "../c/dep.mjs"), "a/c/dep.mjs");
 
     const seen = new Set();
     const queue = [...roots];
@@ -1516,6 +1526,9 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
           // `x.d.ts` — following it literally would demand a file that neither
           // exists nor needs to, while skipping the declaration graph entirely.
           const spec = name.endsWith(".d.ts") ? m[1].replace(/\.js$/, ".d.ts") : m[1];
+          // `resolveFrom` handles `..` segments, so a parent-relative import
+          // from a subdirectory lands on the right file rather than being
+          // skipped for not starting with `./`.
           // Resolved against the importer's directory, not the package root.
           // Everything is flat today, so this changes nothing — but the day an
           // entry moves into a subdirectory, `./dep.mjs` stops meaning
@@ -1606,8 +1619,8 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // A cgroup CPU *quota* is not an affinity mask: `docker run --cpus=2`
     // leaves the mask at the whole machine and writes `cpu.max` instead
     // (verified 2026-09-17 — the container reported `Cpus_allowed_list: 0-15`
-    // and `cpu.max: 200000 100000`). Node >= 18.14 already answers 2 there;
-    // the pre-18.14 fallback answers 16, which is what this covers.
+    // and `cpu.max: 200000 100000`). Node 22 answers 2 there; 18 and 20 answer
+    // 16, so this covers two current LTS lines and not only the ancient ones.
     assert.equal(jobs.quotaCpusFromCgroup({ v2: "200000 100000\n" }), 2, "cli: v2 quota");
     assert.equal(jobs.quotaCpusFromCgroup({ v2: "max 100000\n" }), undefined, "cli: v2 unlimited");
     assert.equal(jobs.quotaCpusFromCgroup({ v2: "150000 100000\n" }), 2, "cli: a fraction rounds up");

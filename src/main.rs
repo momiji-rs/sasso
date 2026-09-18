@@ -205,8 +205,9 @@ fn jobs_from(logical: usize, cpuinfo: Option<&str>) -> usize {
     //
     // The middle row is the one that matters: the mask is the whole machine,
     // so the 2 can only have come from the quota. Nothing here needs to read
-    // either file. The npm CLI is not so lucky — its pre-18.14 fallback counts
-    // the host and sees neither — and reads both in `_jobs.mjs`.
+    // either file. The npm CLI is not so lucky: `availableParallelism()` has
+    // only accounted for the quota since Node 22, and below 18.14 there is no
+    // such API at all, so `_jobs.mjs` reads the mask and the quota itself.
     //
     // This is the host's core count capped by what the process may use, and
     // deliberately NOT the cores inside the mask, which measures much worse:

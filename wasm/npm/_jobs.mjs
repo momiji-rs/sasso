@@ -113,9 +113,19 @@ export function physicalCoresFromCpuinfo(text) {
  *
  * A quota is not an affinity mask: `docker run --cpus=2` leaves
  * `Cpus_allowed_list` at the whole machine and writes `200000 100000` to
- * `cpu.max` instead, so the mask says nothing about it. Node >= 18.14 already
- * accounts for both (`availableParallelism()` answers 2 in that container,
- * measured 2026-09-17) — this is for the older fallback, which answers 16.
+ * `cpu.max` instead, so the mask says nothing about it.
+ *
+ * `availableParallelism()` only started accounting for the quota in Node 22,
+ * which is later than it is natural to assume. In that container, measured
+ * 2026-09-17:
+ *
+ *     v18.20.8   availableParallelism 16      <- the quota allows 2
+ *     v20.20.8   availableParallelism 16
+ *     v22.23.2   availableParallelism 2
+ *     v24.21.0   availableParallelism 2
+ *
+ * So this is not a curiosity for Node versions nobody runs: without it, two
+ * current LTS lines start eight workers inside a two-CPU limit.
  *
  * `cgroupQuotaFiles` decides which files this reads, including the ones for
  * the process's own cgroup rather than only the root.
@@ -161,8 +171,19 @@ export function defaultJobs({
   // single one of them covers the others on every supported Node: what the
   // runtime reports, the affinity mask (`taskset`, a cpuset) and a cgroup CPU
   // quota (`docker --cpus`, a Kubernetes CPU limit, a systemd `CPUQuota=`).
-  // Node >= 18.14 folds the mask and the quota into `availableParallelism()`;
-  // below it neither, which is why both are read here.
+  //
+  // Measured rather than assumed, because the two halves arrived in different
+  // releases (2026-09-17, a 16-thread host):
+  //
+  //     Node        mask       quota
+  //     18.20.8     yes         no
+  //     20.20.2     yes         no
+  //     22.23.2     yes        yes
+  //     24.21.0     yes        yes
+  //
+  // `availableParallelism()` has folded the mask in since it appeared in
+  // 18.14, and the quota only since 22 — so the quota read below is what two
+  // current LTS lines depend on, not just the Nodes without the API at all.
   const logical = Math.min(reported, allowed ?? reported, quota ?? reported);
   const text = readCpuinfo();
   if (text === undefined) return logical;
@@ -210,8 +231,8 @@ function defaultReadStatus() {
  * reports something like `0::/user.slice/…/run-p166821.scope`, and there the
  * root `cpu.max` does not even exist while the scope's own does. Measured on
  * 2026-09-17 under `systemd-run -p CPUQuota=200%`: root unavailable, own
- * cgroup `200000 100000`. Both Node >= 18.14 and Rust walk this; the older
- * Node fallback is the one that needs it spelled out.
+ * cgroup `200000 100000`. Node 22 and later walk this, and so does Rust;
+ * everything earlier is why it is spelled out here.
  *
  * Parents are included because a limit anywhere along the path applies, and
  * the tightest of them is the effective one.
