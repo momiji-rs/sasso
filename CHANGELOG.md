@@ -62,6 +62,24 @@ Conformance is tracked separately as a ratchet against the official
   The wasm module gains `sasso_compile3` for it; `sasso_compile2` stays and
   delegates, so a host built against it keeps linking.
 
+- **`sasso --engine`**, and a loud wasm fallback, in the npm CLI (#24). The
+  engine the CLI picked was unobservable: an install whose native addon did not
+  land compiled through wasm at roughly half the throughput and said nothing
+  about it, so "which engine am I running?" was answerable only by bisecting the
+  install. `--engine` now prints the engine, why it is that one, the platform
+  key the decision came from, and — when the addon was tried and failed — the
+  reason it failed.
+
+  A compile that fell back on a platform that HAS a prebuilt addon also warns on
+  stderr, once per run. It stays quiet under `--quiet` (dart's contract: that
+  flag means "don't print warnings"), under `SASSO_ENGINE=wasm` (which states
+  the intent), on platforms where no addon is prebuilt at all (musl, Windows),
+  since wasm is the engine that is supposed to run there, and for an addon
+  refused over a version skew (above), which has already been reported in more
+  detail. The prebuilt-platform table the loader resolves from now answers the
+  CLI too, so the CLI's idea of which engine is "expected" cannot drift from the
+  list of prebuilds.
+
 ### Fixed
 
 - **Compressed `color()` output was not a color** (#110). The predefined

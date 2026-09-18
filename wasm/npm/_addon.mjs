@@ -45,9 +45,11 @@ export function assertAddonVersion(ours, theirs, pkg) {
 
 // Which prebuilt platform package this machine needs.
 //
-// Here rather than in native.mjs because the tests have to build the same name
-// to fabricate a skew, and a second copy of this is exactly the kind of thing
-// that drifts: the first version of the skew test spelled the key
+// Here rather than in native.mjs because three callers need it — the loader
+// resolves the addon from it, the CLI reports the engine it ended up on and
+// warns when a platform that HAS a prebuild compiled through wasm anyway, and
+// the tests have to build the same name to fabricate a skew. A second copy of
+// this is exactly the kind of thing that drifts: the first version of the skew test spelled the key
 // `${platform}-${arch}`, which is right on macOS and wrong on Linux — the
 // prebuilds carry a libc suffix there — so the fabricated package was never
 // resolved, the loader fell through to the repo-local build, and the test
@@ -67,4 +69,16 @@ export function platformKey() {
     return `linux-${arch}-${glibc ? "gnu" : "musl"}`;
   }
   return `${platform}-${arch}`;
+}
+
+/**
+ * The addon package prebuilt for this machine, or `null` where none is.
+ *
+ * The CLI asks this without loading anything: native.mjs throws at import time
+ * when no addon loads, so it cannot be the one to answer "was there supposed
+ * to be an addon here?" — which is what tells an ordinary wasm run apart from
+ * a fallback worth warning about.
+ */
+export function nativePackage() {
+  return SUPPORTED[platformKey()] ?? null;
 }

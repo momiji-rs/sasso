@@ -124,7 +124,10 @@ everywhere, including the browser — and pulls a **native addon**
 output is byte-identical either way.
 
 **The `sasso` command** prefers the addon when it is there and falls back to
-wasm when it is not; `SASSO_ENGINE=wasm|native` forces a choice.
+wasm when it is not; `SASSO_ENGINE=wasm|native` forces a choice, and
+`sasso --engine` prints which one an install actually runs (a fallback on a
+platform that has a prebuilt addon also says so on stderr — it costs roughly
+half the throughput).
 **Importing the library** selects nothing: `import … from "sasso"` is always
 the size-optimised wasm build and ignores `SASSO_ENGINE`, `"sasso/speed"` is
 the faster, larger wasm build, and the addon is the explicit `"sasso/native"`

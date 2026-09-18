@@ -25,6 +25,9 @@ import { isMainThread, workerData, parentPort, Worker } from "node:worker_thread
 import { defaultJobs } from "./_jobs.mjs";
 // The accepted deprecation ids, shared with the JS API so there is one copy.
 import { DEPRECATION_IDS } from "./_deprecations.mjs";
+// The prebuilt-addon rules, shared with native.mjs: which engine this platform
+// is SUPPOSED to run decides whether a wasm fallback is news (see `loadEngine`).
+import { nativePackage, platformKey } from "./_addon.mjs";
 
 /**
  * The engine, chosen at startup rather than imported statically.
@@ -41,23 +44,44 @@ import { DEPRECATION_IDS } from "./_deprecations.mjs";
  * both to the same output.
  */
 let compile, compileString, Exception, Logger;
+
+/**
+ * How this process chose its engine, for `--engine` and for the fallback
+ * warning. The choice was completely unobservable before: an install whose
+ * addon did not land compiled at roughly half the throughput and said nothing,
+ * so answering "which engine am I on?" took bisecting the install
+ * (momiji-rs/sasso#24).
+ */
+const engine = { kind: null, requested: undefined, platform: null, addon: null, error: null, refused: false };
+
 async function loadEngine() {
   const want = process.env.SASSO_ENGINE;
+  engine.requested = want;
+  engine.platform = platformKey();
+  engine.addon = nativePackage();
   let mod;
   let kind = "native";
   if (want !== "wasm") {
     try {
       mod = await import("./native.mjs");
     } catch (e) {
+      // Through the same coerced string in both places: a `throw null` or a
+      // thrown string from anything native.mjs imports has no `.message`, and
+      // reading it would replace the load failure with a TypeError.
+      engine.error = e && e.message ? String(e.message) : String(e);
       // `fail` writes synchronously, which matters because it exits at once.
-      if (want === "native") fail(`error: SASSO_ENGINE=native but the addon is unavailable: ${e.message}`);
+      // A refused addon is a different answer from a missing one: it WAS found
+      // and rejected. Kept apart so the report names which happened, and so
+      // the generic fallback warning does not repeat what is said just below.
+      engine.refused = e?.code === "SASSO_ADDON_VERSION_MISMATCH";
+      if (want === "native") fail(`error: SASSO_ENGINE=native but the addon is unavailable: ${engine.error}`);
       // An ABSENT addon is the ordinary case on the platforms with no prebuild,
       // and falling back to wasm is the whole design — it says nothing. An
       // addon that is present but version-skewed is a broken install: wasm
       // keeps the OUTPUT correct, so the build still succeeds, but staying
       // quiet would trade a wrong compile for a slow one with nothing to read.
-      if (e?.code === "SASSO_ADDON_VERSION_MISMATCH") {
-        writeStderrSync(`warning: ${e.message}\nwarning: falling back to the wasm engine, which is slower.\n`);
+      if (engine.refused) {
+        writeStderrSync(`warning: ${engine.error}\nwarning: falling back to the wasm engine, which is slower.\n`);
       }
     }
   }
@@ -66,7 +90,64 @@ async function loadEngine() {
     kind = "wasm";
   }
   ({ compile, compileString, Exception, Logger } = mod);
+  engine.kind = kind;
   return kind;
+}
+
+/** Why `engine.kind` and not the other one, in one clause. */
+function engineReason() {
+  if (engine.requested === "wasm" || engine.requested === "native") return `forced by SASSO_ENGINE=${engine.requested}`;
+  // "the native addon", not "the prebuilt addon": `SASSO_NATIVE_BINARY` and a
+  // repo checkout both load one that no platform package delivered.
+  if (engine.kind === "native") return "the default here: the native addon loaded";
+  if (engine.refused) return "FELL BACK: the prebuilt addon was refused (its version does not match sasso)";
+  if (engine.addon) return "FELL BACK: a prebuilt addon exists for this platform but did not load";
+  return "the default here: no addon is prebuilt for this platform";
+}
+
+/** `--engine`: the whole engine decision, in a form an issue can be pasted into. */
+function engineReport() {
+  const lines = [
+    `engine:   ${engine.kind === "native" ? "native (Node addon)" : "wasm (speed build)"} — ${engineReason()}`,
+    `platform: ${engine.platform}${engine.addon ? ` (prebuilt addon: ${engine.addon})` : " (no prebuilt addon)"}`,
+  ];
+  // Only ever set when loading the addon was TRIED and failed, so this is the
+  // one line that separates "never installed" from "installed but unloadable"
+  // — the question the silent fallback used to swallow. First line only: a
+  // `SASSO_NATIVE_BINARY` miss carries Node's whole require stack, and one
+  // `key: value` per line is what makes this output pasteable.
+  if (engine.error) lines.push(`addon:    did not load: ${engine.error.split("\n")[0]}`);
+  lines.push(`sasso:    ${packageVersion()}`);
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * A two-line warning on stderr — what happened, then what to do about it — when
+ * a platform that HAS a prebuilt addon compiled through wasm anyway. That is an
+ * install accident (`--omit=optional`, a partial lockfile, an unloadable addon),
+ * not a supported configuration, and it costs roughly half the throughput.
+ *
+ * Four ways it stays quiet, each for its own reason. `SASSO_ENGINE=wasm` states
+ * the intent, so a fallback is not news. A platform with no prebuild is RUNNING
+ * its supported engine, and a warning nobody can act on is noise. A refused
+ * addon has already been reported by `loadEngine`, in more detail and with the
+ * fix in it. And `--quiet` means "don't print warnings" — dart's contract,
+ * which this CLI keeps to the letter (stderr is empty under `-q`, asserted);
+ * `--engine` is then the way to ask, and it answers whatever the flags say.
+ *
+ * Once per run, from the main thread: every worker loads its own engine, so
+ * warning there would print this per core.
+ */
+function warnIfFellBack(opts) {
+  if (opts.quiet) return;
+  if (engine.kind !== "wasm" || engine.requested === "wasm" || !engine.addon) return;
+  // A version skew already printed the same fact with the fix in it (#115).
+  if (engine.refused) return;
+  writeStderrSync(
+    `sasso: WARNING: ${engine.addon} is prebuilt for this platform but did not load, so this run ` +
+      `compiles through wasm — roughly half the throughput.\n` +
+      `sasso: run \`sasso --engine\` for the reason, or set SASSO_ENGINE=wasm to choose wasm silently.\n`,
+  );
 }
 
 const HELP = `sasso — compile SCSS/Sass to CSS
@@ -125,6 +206,8 @@ Options:
                                      (default: on).
   -h, --help                         Print this help.
       --version                      Print the version.
+      --engine                       Print which compiler engine this install
+                                     uses (native addon or wasm) and why.
 
 An <in>:<out> pair may name DIRECTORIES: every .scss/.sass/.css file under
 <in> that is not a partial compiles to the matching path under <out>.
@@ -204,6 +287,7 @@ function parseArgs(argv) {
     unicode: true,
     loop: undefined,
     output: undefined,
+    printEngine: false,
     positionals: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -228,6 +312,12 @@ function parseArgs(argv) {
       // version — as if it were ours.
       process.stdout.write(`${packageVersion()}\n`);
       process.exit(0);
+    } else if (a === "--engine") {
+      // Not answered here, unlike `--version`: the answer IS which engine loads,
+      // so it is the one metadata question that has to load one. `main` prints
+      // it after `loadEngine`, so a demanded-but-missing engine still fails
+      // loudly there rather than reporting a fallback it did not take.
+      opts.printEngine = true;
     } else if (a === "--stdin") {
       opts.stdin = true;
     } else if (a === "--no-stdin") {
@@ -982,6 +1072,14 @@ async function main() {
   // machine without the addon printed the addon error instead of the version.
   const opts = parseArgs(process.argv.slice(2));
   await loadEngine();
+  // `--engine` is the answer to "which one did I get?", so it reports and stops
+  // — before the "no input file" check, since it needs no input.
+  if (opts.printEngine) {
+    process.stdout.write(engineReport());
+    return;
+  }
+  // Once, here: workers load their own engine and would each repeat this.
+  warnIfFellBack(opts);
   const common = commonOptions(opts);
 
   // --loop: recompile in-process and report throughput, never writing a file.
