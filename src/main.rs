@@ -149,7 +149,8 @@ struct Cli {
     stop_on_error: bool,
     /// Emit `@charset`/BOM for non-ASCII output (dart-sass `--charset`).
     charset: bool,
-    /// Worker-thread cap (`-j`); `None` = `default_jobs`, one per core.
+    /// Worker-thread cap (`-j`); `None` = `default_jobs` — one per physical
+    /// core where the topology is known, one per CPU where it is not.
     jobs: Option<usize>,
 }
 
