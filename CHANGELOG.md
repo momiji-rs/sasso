@@ -26,17 +26,17 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Changed
 
-- **The native addon compiles 16-30% faster**, closing the last of the three
+- **The native addon compiles 14-26% faster**, closing the last of the three
   gaps in #83. It was running the compiler on the system allocator: the binary
   installs sasso's bump arena as its `#[global_allocator]` and the addon never
   did, so `compile()`'s scope primitives were inert and every allocation in the
   compiler went to the system. Measured on 138 Lichess stylesheets through the
-  npm CLI, native engine: `-j 1` 1.11 s -> 0.85 s, `-j 4` 0.38 -> 0.32, `-j 12`
-  0.30 -> 0.21. Output is unchanged — CSS and `loadedUrls` for all 138 are
+  npm CLI, native engine: `-j 1` 1.05 s -> 0.86 s, `-j 4` 0.36 -> 0.31, `-j 12`
+  0.31 -> 0.23. Output is unchanged — CSS and `loadedUrls` for all 138 are
   byte-identical with and without it.
 
   The arena trades memory for speed and now does so here as it already does in
-  the binary: peak RSS at `-j 12` goes from 318 MB to 693 MB, against the
+  the binary: peak RSS at `-j 12` goes from 318 MB to 677 MB, against the
   binary's own 124 MB to 478 MB for the same corpus. `-j 1` costs 55 MB.
 
 - **`-j` defaults to physical cores, not SMT threads**, in both the binary and
