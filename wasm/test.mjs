@@ -703,6 +703,114 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   console.log(`ok: deprecation-id parity — ${native.length} ids, both CLIs, all accepted`);
 }
 
+// === Pairing `sasso` with its prebuilt addon (#114) ===
+//
+// `sasso` pins the four `sasso-native-*` packages as exact-version
+// optionalDependencies, so a plain install cannot drift. A consumer that names
+// them itself has a second place to bump — lichess-org/lila#21712 does — and a
+// drift there is invisible: napi ignores config fields it does not know without
+// erroring, so an addon one release behind accepts every option the newer JS
+// sends and applies only the ones it recognises. The compile succeeds and
+// quietly does something else.
+{
+  const { assertAddonVersion } = await import("./npm/_addon.mjs");
+  const P = "sasso-native-linux-x64-gnu";
+
+  assertAddonVersion("0.17.0", "0.17.0", P); // the normal case: identical
+  // No manifest to compare is not a mismatch: `SASSO_NATIVE_BINARY` and the
+  // repo-local build are dev paths and must keep working unchecked.
+  assertAddonVersion(null, "0.17.0", P);
+  assertAddonVersion("0.17.0", null, P);
+  assertAddonVersion(null, null, P);
+
+  let caught;
+  try {
+    assertAddonVersion("0.17.0", "0.16.0", P);
+  } catch (e) {
+    caught = e;
+  }
+  assert.ok(caught, "addon: a version skew is refused");
+  assert.equal(caught.code, "SASSO_ADDON_VERSION_MISMATCH", "addon: … with a code the CLI can branch on");
+  assert.match(caught.message, /0\.16\.0/, "addon: … naming the addon's version");
+  assert.match(caught.message, /0\.17\.0/, "addon: … and this package's");
+  assert.match(caught.message, new RegExp(P), "addon: … and the package to fix");
+
+  // A newer addon than the JS is refused too. It is the rarer direction and
+  // the less dangerous one, but "which side is ahead" is not something this
+  // can know the consequences of, so it does not guess.
+  assert.throws(() => assertAddonVersion("0.16.0", "0.17.0", P), /0\.17\.0/, "addon: skew either way");
+
+  // The unit tests above prove the RULE. They cannot prove it is wired in, and
+  // the first version of this block tried to with `nativeSrc.indexOf(...)` —
+  // which happily matched the call after it had been commented out. So the
+  // wiring is tested by running it: a fabricated platform package on NODE_PATH
+  // is what the loader actually resolves, so the skew is real rather than
+  // simulated, and nothing is written inside the repo.
+  const addonBin = fileURLToPath(new URL("../napi/npm/sasso.node", import.meta.url));
+  if (!existsSync(addonBin)) {
+    console.log("  (addon pairing: skipping the wiring test, no addon built here)");
+  } else {
+    const nodePath = mkdtempSync(join(tmpdir(), "sasso-skew-"));
+    const key = `${process.platform}-${process.arch}`;
+    const pkgDir = join(nodePath, `sasso-native-${key}`);
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(join(pkgDir, "sasso.node"), readFileSync(addonBin));
+    const manifest = (version) =>
+      writeFileSync(
+        join(pkgDir, "package.json"),
+        JSON.stringify({ name: `sasso-native-${key}`, version, main: "sasso.node" }),
+      );
+    const nativeUrl = new URL("./npm/native.mjs", import.meta.url).href;
+    const withPath = (extra) => ({ ...process.env, NODE_PATH: nodePath, ...extra });
+
+    manifest("9.9.9"); // not this package's version, whatever this package's is
+    const probe = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", `import(${JSON.stringify(nativeUrl)}).then(() => console.log("LOADED"), (e) => console.log(e.code))`],
+      { encoding: "utf8", env: withPath() },
+    );
+    assert.equal(
+      probe.stdout.trim(),
+      "SASSO_ADDON_VERSION_MISMATCH",
+      "addon: sasso/native refuses a skewed addon in a real load",
+    );
+
+    // The CLI tells a skew apart from a platform with no prebuild: the latter
+    // falls back silently by design, the former must say so — output stays
+    // correct either way, and silence would trade a wrong compile for a slow
+    // one with nothing to read.
+    const viaCli = spawnSync(process.execPath, [cliPath, "--stdin"], {
+      encoding: "utf8",
+      input: ".a{b: 1 + 1}\n",
+      env: withPath(),
+    });
+    assert.equal(viaCli.status, 0, "addon: the CLI still compiles with a skewed addon");
+    assert.match(viaCli.stdout, /b: 2/, "addon: … and its output is correct (wasm)");
+    assert.match(viaCli.stderr, /sasso-native-/, "addon: … having named the mismatch");
+    assert.match(viaCli.stderr, /wasm engine/, "addon: … and said what it fell back to");
+
+    // A demanded engine still fails rather than falling back.
+    const demanded = spawnSync(process.execPath, [cliPath, "--stdin"], {
+      encoding: "utf8",
+      input: ".a{b: 1 + 1}\n",
+      env: withPath({ SASSO_ENGINE: "native" }),
+    });
+    assert.notEqual(demanded.status, 0, "addon: SASSO_ENGINE=native with a skewed addon fails");
+
+    // And the matching version is accepted — otherwise the test above would
+    // pass just as well against a loader that refused every addon.
+    manifest(JSON.parse(readFileSync(new URL("./npm/package.json", import.meta.url), "utf8")).version);
+    const agreed = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", `import(${JSON.stringify(nativeUrl)}).then(() => console.log("LOADED"), (e) => console.log(e.code))`],
+      { encoding: "utf8", env: withPath() },
+    );
+    assert.equal(agreed.stdout.trim(), "LOADED", "addon: a matching version is accepted");
+    rmSync(nodePath, { recursive: true, force: true });
+  }
+  console.log("ok: addon pairing — a version skew is refused, both directions, dev paths exempt");
+}
+
 // === Phase 3c: directory pairs, --no-css, --stop-on-error ===
 {
   const dir = mkdtempSync(join(tmpdir(), "sasso-dir-"));
