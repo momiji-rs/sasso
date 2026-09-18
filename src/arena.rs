@@ -75,17 +75,61 @@ const ZERO_REGION: Region = Region {
 static REGION_SLOTS: AtomicUsize = AtomicUsize::new(0);
 static REGIONS: [Region; MAX_ARENAS] = [ZERO_REGION; MAX_ARENAS];
 
-/// Claim a slot and publish `[base, end)`. Returns `false` when the registry
-/// is full (the caller must then NOT use the region as an arena: `dealloc`
-/// would misroute its pointers to `System`).
-fn register_region(base: usize, end: usize) -> bool {
-    let idx = REGION_SLOTS.fetch_add(1, Ordering::Relaxed);
-    if idx >= MAX_ARENAS {
-        return false;
+/// Marks a slot as claimed but not yet published. No real pointer compares
+/// `>=` it, so a concurrent `in_any_arena` scanning a half-written slot simply
+/// finds nothing there.
+const CLAIMING: usize = usize::MAX;
+
+/// Claim a FREE slot and publish `[base, end)`, returning its index. `None`
+/// when the registry is full (the caller must then NOT use the region as an
+/// arena: `dealloc` would misroute its pointers to `System`).
+///
+/// Slots are claimed by CAS and given back by [`unregister_region`], rather
+/// than handed out by a counter that only goes up. A counter made the cap a
+/// one-way budget: the 129th thread that ever compiled found the registry
+/// full, gave up on the arena for good, and ran every later compile on the
+/// system allocator — silently, at the speed the arena exists to avoid.
+fn register_region(base: usize, end: usize) -> Option<usize> {
+    for (idx, region) in REGIONS.iter().enumerate() {
+        if region
+            .base
+            .compare_exchange(0, CLAIMING, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            continue;
+        }
+        // Publish `end` first: `base` is what readers gate on, so writing it
+        // last means a reader either skips the slot or sees both halves.
+        region.end.store(end, Ordering::Relaxed);
+        region.base.store(base, Ordering::Release);
+        // High-water mark for the scan bound. It never shrinks: a freed slot
+        // is skipped by its zero `base`, not by moving this.
+        REGION_SLOTS.fetch_max(idx + 1, Ordering::AcqRel);
+        return Some(idx);
     }
-    REGIONS[idx].base.store(base, Ordering::Relaxed);
-    REGIONS[idx].end.store(end, Ordering::Relaxed);
-    true
+    None
+}
+
+/// Give a slot back. The region MUST be unregistered before its memory is
+/// released: once freed, the address range can be handed to something else,
+/// and a stale registry entry would tell `dealloc` that a perfectly ordinary
+/// System pointer belongs to an arena — where freeing is a no-op, so it would
+/// leak instead.
+fn unregister_region(idx: usize) {
+    // `base` first, for the same reason it is published last.
+    REGIONS[idx].base.store(0, Ordering::Release);
+    REGIONS[idx].end.store(0, Ordering::Relaxed);
+}
+
+/// How many registry slots currently hold a live region. Test-only: whether a
+/// finished thread gave its region back is only observable as a count that
+/// comes back down.
+#[cfg(test)]
+fn live_regions() -> usize {
+    REGIONS
+        .iter()
+        .filter(|r| r.base.load(Ordering::Relaxed) != 0)
+        .count()
 }
 
 /// Whether `p` lies inside any registered arena region.
@@ -204,7 +248,13 @@ struct ThreadState {
     /// is disabled): the alloc path then forwards straight to System without
     /// retrying the `#[cold]` reservation on every allocation.
     reserve_failed: Cell<bool>,
+    /// Registry slot backing this thread's region, so [`Drop`] can give it
+    /// back. `NO_SLOT` until a region is reserved.
+    slot: Cell<usize>,
 }
+
+/// No registry slot held.
+const NO_SLOT: usize = usize::MAX;
 
 impl ThreadState {
     const fn new() -> ThreadState {
@@ -215,6 +265,7 @@ impl ThreadState {
             depth: Cell::new(0),
             paused: Cell::new(0),
             reserve_failed: Cell::new(false),
+            slot: Cell::new(NO_SLOT),
         }
     }
 
@@ -235,13 +286,14 @@ impl ThreadState {
         if p.is_null() {
             return false;
         }
-        if !register_region(p as usize, p as usize + size) {
+        let Some(slot) = register_region(p as usize, p as usize + size) else {
             // Registry full: this region must not serve as an arena (dealloc
             // wouldn't recognize its pointers). Hand it back and run without.
             // SAFETY: p came from System.alloc with this same layout.
             unsafe { System.dealloc(p, layout) };
             return false;
-        }
+        };
+        self.slot.set(slot);
         self.base.set(p);
         self.end.set(p as usize + size);
         self.cursor.set(p as usize);
@@ -249,9 +301,48 @@ impl ThreadState {
     }
 }
 
+impl Drop for ThreadState {
+    /// Give the region and its registry slot back when the thread ends.
+    ///
+    /// Without this a reservation outlives every thread that ever compiled.
+    /// On native that is 2 GiB of address space each, and an embedder with
+    /// short-lived threads — the napi addon spawns one per async compile —
+    /// accumulates them until the host cannot `fork()` any more.
+    ///
+    /// This runs during TLS teardown, which is why `alloc` reaches the state
+    /// through `try_with`: allocations happen while other thread-locals are
+    /// being dropped, and after this one is gone they must route to System
+    /// rather than panic on a destroyed TLS slot.
+    fn drop(&mut self) {
+        let base = self.base.get();
+        if base.is_null() {
+            return;
+        }
+        let size = self.end.get() - base as usize;
+        let slot = self.slot.get();
+        // Unregister BEFORE freeing: see `unregister_region`.
+        if slot != NO_SLOT {
+            unregister_region(slot);
+            self.slot.set(NO_SLOT);
+        }
+        self.base.set(std::ptr::null_mut());
+        self.end.set(0);
+        self.cursor.set(0);
+        if let Ok(layout) = Layout::from_size_align(size, 4096) {
+            // SAFETY: `base` came from `System.alloc` with exactly this layout
+            // in `reserve`, and nothing may still point into it — the arena's
+            // contract is that allocations do not outlive their scope, and
+            // every scope on this thread ended before the thread did.
+            unsafe { System.dealloc(base, layout) };
+        }
+    }
+}
+
 thread_local! {
-    // `const {}` init: no lazy allocation, and POD means no TLS destructor — so
-    // accessing this from inside the global allocator cannot re-enter it.
+    // `const {}` init: no lazy allocation, so reaching this from inside the
+    // global allocator cannot re-enter it. The destructor (above) means the
+    // state CAN be gone late in thread teardown, so the allocator uses
+    // `try_with` and falls back to System when it is.
     static TL: ThreadState = const { ThreadState::new() };
 }
 
@@ -270,7 +361,11 @@ pub struct ScopedAlloc;
 
 unsafe impl GlobalAlloc for ScopedAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        TL.with(|tl| {
+        // `try_with`, not `with`: freeing other thread-locals during teardown
+        // allocates, and by then this one may already be dropped. `with` would
+        // panic there — inside the global allocator, which aborts the process.
+        // No state means no scope, which means System, which is correct.
+        let Ok(p) = TL.try_with(|tl| {
             if tl.depth.get() == 0 || tl.paused.get() > 0 {
                 // SAFETY: forwarding an unchanged layout to the system allocator.
                 return unsafe { System.alloc(layout) };
@@ -299,7 +394,11 @@ unsafe impl GlobalAlloc for ScopedAlloc {
                 // SAFETY: forwarding an unchanged layout to the system allocator.
                 None => unsafe { System.alloc(layout) },
             }
-        })
+        }) else {
+            // SAFETY: forwarding an unchanged layout to the system allocator.
+            return unsafe { System.alloc(layout) };
+        };
+        p
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -321,7 +420,9 @@ unsafe impl GlobalAlloc for ScopedAlloc {
         // what makes a growing `Vec` leak arena space on every doubling
         // (4→8→16→…); this reclaims it for the common "grow the value just
         // allocated" pattern, the dominant case in the parser/evaluator.
-        let resized = TL.with(|tl| {
+        // `try_with` for the same reason as `alloc`: no state means no scope,
+        // so nothing can be resized in place and the copy path is correct.
+        let resized = TL.try_with(|tl| {
             if tl.depth.get() == 0 || tl.paused.get() > 0 {
                 return false;
             }
@@ -345,7 +446,7 @@ unsafe impl GlobalAlloc for ScopedAlloc {
                 _ => false,
             }
         });
-        if resized {
+        if resized.unwrap_or(false) {
             return ptr;
         }
         // Fallback: the stock `GlobalAlloc::realloc` (alloc new, copy the
@@ -510,6 +611,11 @@ impl Drop for Arena {
 mod tests {
     use super::*;
 
+    /// `live_regions()` is process-wide, so the tests that watch it have to
+    /// not run while another one is reserving. Only arena tests ever take a
+    /// region, so serialising them against each other is enough.
+    static REGION_COUNT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // ---- pure bump_compute (also covered by Miri) ----
 
     #[test]
@@ -627,6 +733,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn scoped_routes_to_system_when_inactive() {
+        let _serial = REGION_COUNT.lock().unwrap_or_else(|e| e.into_inner());
         // No scope entered: depth 0 → System. dealloc must round-trip.
         let l = layout(64, 8);
         let p = unsafe { ScopedAlloc.alloc(l) };
@@ -641,6 +748,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn scoped_bumps_inside_scope_and_resets() {
+        let _serial = REGION_COUNT.lock().unwrap_or_else(|e| e.into_inner());
         let l = layout(128, 16);
         let scope = Scope::enter();
         let p1 = unsafe { ScopedAlloc.alloc(l) };
@@ -676,6 +784,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn pause_routes_to_system_then_resumes() {
+        let _serial = REGION_COUNT.lock().unwrap_or_else(|e| e.into_inner());
         let l = layout(64, 8);
         let scope = Scope::enter();
         let paused = pause(); // routes to System, depth untouched
@@ -702,6 +811,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn nested_scope_while_paused_does_not_reset_outer_arena() {
+        let _serial = REGION_COUNT.lock().unwrap_or_else(|e| e.into_inner());
         let l = layout(64, 8);
         let outer = Scope::enter();
         let p_outer = unsafe { ScopedAlloc.alloc(l) };
@@ -725,6 +835,150 @@ mod tests {
         let _ = leave_no_reset();
         reset();
         std::mem::forget(outer);
+    }
+
+    /// A thread's arena region must not outlive the thread.
+    ///
+    /// The reservation is 2 GiB of address space on native. An embedder whose
+    /// threads are short-lived — the napi addon spawns one per async compile —
+    /// otherwise accumulates one reservation per thread that ever compiled,
+    /// forever: measured at +2048 MB of process virtual size per compile,
+    /// until Linux refuses the next `fork()` with ENOMEM and any child process
+    /// the host tries to spawn fails.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_thread_releases_its_region_when_it_exits() {
+        let _serial = REGION_COUNT.lock().unwrap_or_else(|e| e.into_inner());
+        let before = live_regions();
+        for _ in 0..8 {
+            std::thread::spawn(|| {
+                let scope = Scope::enter();
+                let p = unsafe { ScopedAlloc.alloc(layout(64, 8)) };
+                assert!(in_any_arena(p as usize), "the thread reserved a region");
+                let _ = leave_no_reset();
+                reset();
+                std::mem::forget(scope);
+            })
+            .join()
+            .unwrap();
+        }
+        assert_eq!(
+            live_regions(),
+            before,
+            "every region a finished thread reserved is still registered",
+        );
+    }
+
+    /// …and its registry slot must come back too, or the cap is the same bug
+    /// on a longer fuse: past `MAX_ARENAS` threads the claim fails, `reserve`
+    /// gives up for good on that thread, and every later compile there runs on
+    /// the system allocator — silently, at the speed this arena exists to fix.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn registry_slots_are_reusable_past_the_cap() {
+        let _serial = REGION_COUNT.lock().unwrap_or_else(|e| e.into_inner());
+        for _ in 0..(MAX_ARENAS + 8) {
+            std::thread::spawn(|| {
+                let scope = Scope::enter();
+                let p = unsafe { ScopedAlloc.alloc(layout(64, 8)) };
+                let arena = in_any_arena(p as usize);
+                let _ = leave_no_reset();
+                reset();
+                std::mem::forget(scope);
+                arena
+            })
+            .join()
+            .unwrap();
+        }
+        // The last thread past the cap must still get an arena.
+        let got = std::thread::spawn(|| {
+            let scope = Scope::enter();
+            let p = unsafe { ScopedAlloc.alloc(layout(64, 8)) };
+            let arena = in_any_arena(p as usize);
+            let _ = leave_no_reset();
+            reset();
+            std::mem::forget(scope);
+            arena
+        })
+        .join()
+        .unwrap();
+        assert!(got, "a thread past MAX_ARENAS still bump-allocates");
+    }
+
+    /// Slots are claimed by CAS, so the interesting case is threads racing for
+    /// them. Each writes a pattern through its own arena pointer and reads it
+    /// back: two threads handed the same region would corrupt each other.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn concurrent_threads_get_disjoint_regions_and_give_them_back() {
+        let _serial = REGION_COUNT.lock().unwrap_or_else(|e| e.into_inner());
+        let before = live_regions();
+        let threads: Vec<_> = (0..32u8)
+            .map(|id| {
+                std::thread::spawn(move || {
+                    let scope = Scope::enter();
+                    let l = layout(4096, 8);
+                    let p = unsafe { ScopedAlloc.alloc(l) };
+                    assert!(!p.is_null());
+                    // SAFETY: 4096 writable bytes from this thread's arena.
+                    unsafe { std::ptr::write_bytes(p, id, 4096) };
+                    std::thread::yield_now();
+                    // SAFETY: same allocation, still owned by this thread.
+                    let seen = unsafe { std::slice::from_raw_parts(p, 4096) };
+                    assert!(
+                        seen.iter().all(|&b| b == id),
+                        "another thread wrote into this thread's region",
+                    );
+                    let _ = leave_no_reset();
+                    reset();
+                    std::mem::forget(scope);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(live_regions(), before, "every region came back");
+    }
+
+    /// Allocating during TLS teardown must not panic.
+    ///
+    /// Dropping a thread-local frees whatever it owns, which allocates, and
+    /// the arena's own state may already be gone by then — `with` panics on a
+    /// destroyed slot, and a panic inside the global allocator aborts the
+    /// process. `try_with` routes those late allocations to System instead.
+    ///
+    /// The guard below is touched BEFORE the arena, so it is destroyed after
+    /// it: its `Drop` allocates with no arena state to find.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn allocating_while_the_thread_is_tearing_down_does_not_panic() {
+        // Reserves a region too, so it must not run while another test is
+        // watching the global count.
+        let _serial = REGION_COUNT.lock().unwrap_or_else(|e| e.into_inner());
+        struct AllocsOnDrop;
+        impl Drop for AllocsOnDrop {
+            fn drop(&mut self) {
+                // Any heap traffic routed through the installed allocator.
+                let v: Vec<u64> = (0..256).collect();
+                assert_eq!(v.len(), 256);
+            }
+        }
+        thread_local! {
+            static LATE: std::cell::RefCell<Option<AllocsOnDrop>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        std::thread::spawn(|| {
+            // Registered first => destroyed last, after the arena's state.
+            LATE.with(|l| *l.borrow_mut() = Some(AllocsOnDrop));
+            let scope = Scope::enter();
+            let _ = unsafe { ScopedAlloc.alloc(layout(64, 8)) };
+            let _ = leave_no_reset();
+            reset();
+            std::mem::forget(scope);
+        })
+        .join()
+        .expect("the thread tore down without panicking in the allocator");
     }
 
     /// A callback that panics must not leave the thread paused: the guard
