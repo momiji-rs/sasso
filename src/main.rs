@@ -184,12 +184,17 @@ fn default_jobs() -> usize {
     if !cfg!(target_os = "linux") {
         return logical;
     }
-    match std::fs::read_to_string("/proc/cpuinfo") {
-        // Never more than the kernel offers this process: a cgroup or `taskset`
-        // cap shows up in `available_parallelism`, not in `/proc/cpuinfo`.
-        Ok(text) => physical_cores(&text).map_or(logical, |p| p.min(logical).max(1)),
-        Err(_) => logical,
-    }
+    jobs_from(logical, std::fs::read_to_string("/proc/cpuinfo").ok().as_deref())
+}
+
+/// The decision itself, separated from the two host facts it reads so a test
+/// can hand it a machine this one is not.
+fn jobs_from(logical: usize, cpuinfo: Option<&str>) -> usize {
+    // Never more than the kernel offers this process: a cgroup or `taskset`
+    // cap shows up in `available_parallelism`, not in `/proc/cpuinfo`.
+    cpuinfo
+        .and_then(physical_cores)
+        .map_or(logical, |physical| physical.clamp(1, logical))
 }
 
 /// Physical cores in `/proc/cpuinfo` text, or `None` when it reports no
@@ -218,7 +223,7 @@ fn physical_cores(cpuinfo: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod default_jobs_tests {
-    use super::physical_cores;
+    use super::{jobs_from, physical_cores};
 
     #[test]
     fn eight_threads_on_four_cores_read_as_four() {
@@ -237,6 +242,17 @@ mod default_jobs_tests {
             }
         }
         assert_eq!(physical_cores(&text), Some(8));
+    }
+
+    #[test]
+    fn a_cgroup_cap_below_the_core_count_wins() {
+        // 8 physical cores on the host, but this process may use two of them.
+        let host: String = (0..16)
+            .map(|i| format!("physical id\t: 0\ncore id\t: {}\n\n", i / 2))
+            .collect();
+        assert_eq!(jobs_from(2, Some(&host)), 2);
+        assert_eq!(jobs_from(16, Some(&host)), 8);
+        assert_eq!(jobs_from(4, None), 4);
     }
 
     #[test]
