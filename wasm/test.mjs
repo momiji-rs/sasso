@@ -1401,7 +1401,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         for (const value of Object.values(node)) collect(value);
       }
     };
-    for (const field of ["bin", "main", "types", "exports"]) collect(pkg[field]);
+    for (const field of ["bin", "main", "module", "types", "exports"]) collect(pkg[field]);
     assert.ok(roots.has("cli.mjs") && roots.size >= 5, `packaging: found only ${[...roots]}`);
 
     // `from "./x"` rather than a whole import statement: an import clause may
@@ -1410,6 +1410,33 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // imports in `_loader.mjs` and `native.mjs`, went unchecked here.
     const statics = /\bfrom\s*["'](\.\/[^"']+)["']/g;
     const dynamics = /\bimport\(\s*["'](\.\/[^"']+)["']\s*\)/g;
+    // `import "./x.mjs"` has no `from` to key on. Nothing in the package does
+    // this today, which is exactly why the matcher has to exist: the first one
+    // added would otherwise be invisible here.
+    const sideEffects = /(?:^|[\s;}])import\s*["'](\.\/[^"']+)["']/g;
+
+    // The matchers are the whole guard, so prove they see each shape rather
+    // than trusting that they do. A matcher that silently matches nothing
+    // satisfies every assertion below it.
+    {
+      const sample = [
+        'import { a } from "./one.mjs";',
+        'import {\n  b,\n  c,\n} from "./two.mjs";',
+        'export * from "./three.mjs";',
+        'const d = await import("./four.mjs");',
+        'import "./five.mjs";',
+        'import fs from "node:fs";', // must NOT match: bare specifier
+      ].join("\n");
+      const found = new Set();
+      for (const re of [statics, dynamics, sideEffects]) {
+        for (const m of sample.matchAll(re)) found.add(m[1]);
+      }
+      assert.deepEqual(
+        [...found].sort(),
+        ["./five.mjs", "./four.mjs", "./one.mjs", "./three.mjs", "./two.mjs"],
+        "packaging: the import matchers miss a shape the package may legally use",
+      );
+    }
 
     const seen = new Set();
     const queue = [...roots];
@@ -1428,7 +1455,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       } catch {
         continue; // a .wasm or .d.ts leaf, nothing to follow
       }
-      for (const re of [statics, dynamics]) {
+      for (const re of [statics, dynamics, sideEffects]) {
         for (const m of text.matchAll(re)) {
           // Inside a `.d.ts`, TypeScript resolves a `./x.js` specifier to
           // `x.d.ts` — following it literally would demand a file that neither
