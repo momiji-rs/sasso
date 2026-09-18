@@ -397,6 +397,59 @@ writeFileSync(join(root, "fi.scss"), "$s: 10px;\n");
   assert.equal(n.value, 96, "SassNumber.convert via the native valueOp engine");
 }
 
+// (m-arena) The addon installs the bump arena as its global allocator, and the
+// arena resets at the end of every compile. std heap-allocates the stdio locks
+// lazily on FIRST USE: if that first use is inside a compile scope, the lock
+// lands in the arena, the reset frees it, and the next print dies with
+// `failed to lock mutex: Invalid argument` — taking the process with it.
+//
+// The library prints a diagnostic itself only when no warn handler is set.
+// `native.mjs` always sets one, so the shipped client does not take this path
+// today; the addon export is public and a future caller may. Driving the
+// export directly is the only way to reach it, which is why this is here and
+// not in wasm/test.mjs.
+//
+// A fresh process each time, because the hazard is about the FIRST use in the
+// process — a second compile in this one would find the locks already warm.
+{
+  const { execFileSync } = await import("node:child_process");
+  const addon = fileURLToPath(new URL("./npm/sasso.node", import.meta.url));
+  // `@import` is deprecated, so compiling this emits a diagnostic; with
+  // wantWarn false the library prints it from inside the compile scope.
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "sasso-arena-"));
+  writeFileSync(join(dir, "dep.scss"), ".d { color: red }\n");
+  // A real `url`: the deprecation carries a source span, and without one the
+  // library emits nothing at all — the first version of this test passed for
+  // that reason rather than because the addon was sound.
+  const entry = '@import "dep";\n.e { v: 1 + 1 }\n';
+  const code = `
+    const { createRequire } = require("node:module");
+    const addon = createRequire(${JSON.stringify(import.meta.url)})(${JSON.stringify(addon)});
+    const cfg = {
+      compressed: false, charset: true, unicode: true, quietDeps: false, syntax: 0,
+      url: ${JSON.stringify(join(dir, "entry.scss"))}, loadPaths: [${JSON.stringify(dir)}], hasUserImporters: false,
+      wantWarn: false, wantMap: false, includeSources: false, functionSignatures: [],
+    };
+    // Several times, and that is the whole point. The first compile's
+    // diagnostic ALLOCATES the stdio lock inside the arena scope; the reset
+    // rewinds the cursor over it. The lock only becomes unusable once a later
+    // compile's allocations overwrite that memory — measured here at the
+    // third. One compile proves nothing, two proved nothing either, and a JS
+    // console.log proves less still: V8's stdout is not the lock that was
+    // freed. The count is deliberately past the observed threshold.
+    let css = "";
+    for (let i = 0; i < 6; i++) {
+      css = addon.compileStringSync(${JSON.stringify(entry)}, cfg, undefined).css;
+    }
+    console.log(css.includes("v: 2") ? "ARENA-OK" : "BAD-CSS");
+  `;
+  const out = execFileSync(process.execPath, ["-e", code], { encoding: "utf8", stdio: "pipe" });
+  assert.ok(
+    out.includes("ARENA-OK"),
+    "a diagnostic printed from inside a compile scope must not poison the stdio locks",
+  );
+}
+
 // (m) binding resolution tiers of sasso/native (wasm/npm/native.mjs): the
 // SASSO_NATIVE_BINARY override wins, and an unresolvable setup fails with the
 // guidance error (not a bare MODULE_NOT_FOUND from some inner require).
