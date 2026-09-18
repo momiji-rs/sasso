@@ -131,7 +131,7 @@ the faster, larger wasm build, and the addon is the explicit `"sasso/native"`
 subpath. Compiling the 138 stylesheets above in one process, with lila's own
 flags, best of five, one run for the whole table — every figure measured against
 the **published** artifacts, the binary downloaded from the release page and the
-package from `npm install sasso` (2026-09-17, M2 Max):
+package from `npm install sasso` (2026-09-17, macOS / arm64):
 
 | | |
 |---|---|
