@@ -98,6 +98,45 @@ also stops counting SMT threads as cores, on both front ends._
   Only embedders that install `ScopedAlloc` are affected, which today means the
   binary, the wasm module and — as of this release — the native addon.
 
+### Performance
+
+- **Five more rounds of allocation work, and the campaign's close** (#96, #97,
+  #100, #101, #106), each verifying the sass-spec ratchet at delta +0 (14,107
+  passing throughout). Same corpus and the same two metrics as the rounds in
+  0.14.0 and 0.15.0 — instructions retired and allocation count on
+  `bench/corpus/generated/large.scss`. These rounds report their instruction
+  result as a percentage, because a round's two arms are built and measured
+  interleaved in one window rather than against a standing absolute:
+
+  | | change | instructions | allocations |
+  |---|---|---|---|
+  | #96 | every value serializes into the buffer it is destined for, instead of building a string per nested element, per color channel and per interpolation | -3.185% | 155,656 → 131,289 (-15.65%) |
+  | #97 | a block reuses a closed block's scope table, and rebinding a loop variable overwrites the value through the key the map already holds | -1.149% | 131,289 → 117,700 (-10.35%) |
+  | #100 | a color literal's authored spelling is a shared `Rc<str>`, and `Color` shrinks 64 → 56 bytes | -1.121% | 117,700 → 110,835 (-5.83%) |
+  | #101 | a declaration value serializes through one reused buffer, and a template reserves its literal bytes up front | -1.530% | 110,835 → 99,614 (-10.12%) |
+  | #106 | a `calc()` writes itself into the caller's buffer, retiring the last value that could not | -0.090% | unchanged — that corpus evaluates no calculation |
+
+  #106 is the round that pays elsewhere: a calc-heavy sheet goes **-19.28%
+  instructions and -28.40% allocations**, and it held the largest single
+  allocation site left in the compiler.
+
+  End to end that is **109.616M → 102.048M instructions (-6.90%)** and
+  **155,656 → 99,614 allocations (-36.0%)** on that corpus. Measured over the
+  whole campaign — one interleaved comparison of the tree before its first round
+  against this one — **133.839M → 102.048M (-23.75%)** and **377,761 → 99,614
+  (-73.63%)**, with `wrap` -31.15%, `calc` -27.20%, `modcalls` -19.63%,
+  `colors` -19.49%, `units` -17.09% and a `@use` graph -11.81% instructions.
+
+  **The campaign is closed**, and what closed it is worth recording. Building a
+  list literal's `Rc<[Value]>` in one allocation instead of two removed
+  allocations on five corpora and made every one of them *slower* (+0.010% to
+  +0.611% instructions): a compile runs on a bump arena, where an allocation is
+  a pointer bump, while moving 64-byte values into the slice one at a time
+  replaces a single bulk copy. It was measured and never committed.
+  `docs/PERF_PLAN_2026-09-16.md` Part D has that bisect, what an allocation
+  turned out to be worth (~17 to ~287 instructions, median ~103), and where the
+  remaining instructions are.
+
 ## [0.15.0] - 2026-09-17
 
 _The release that makes `npm install sasso` as fast as the binary the release
