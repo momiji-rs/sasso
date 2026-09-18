@@ -847,13 +847,22 @@ pub(crate) struct Color {
     pub b: f64,
     pub a: f64,
     /// The authored spelling (`"red"`, `"#336699"`). Used verbatim when
-    /// the color is emitted unchanged; `None` for computed colors.
-    pub repr: Option<String>,
+    /// the color is emitted unchanged; `None` for computed colors. SHARED
+    /// (`Rc<str>`) because a color literal lives in the AST and is cloned out
+    /// of it on every evaluation: the clone bumps a refcount instead of
+    /// copying the handful of bytes into a fresh allocation. Nothing ever
+    /// mutates a spelling in place — a color that changes gets a new spelling
+    /// or none at all — so no holder needs to unshare it. The thin handle is
+    /// also 8 bytes narrower than a `String`, which takes `Color` from 64
+    /// down to 56 bytes — `Value` itself stays 64 for now, its width set by
+    /// `Slash`'s own 56-byte payload.
+    pub repr: Option<Rc<str>>,
     /// Modern CSS Color 4 representation. `None` for plain legacy sRGB
     /// colors (the common case); `Some` once the color is space-aware. BOXED so
     /// the 72-byte `ModernColor` doesn't inflate every `Color` (and thus every
-    /// `Value`, since `Color` is the largest variant): `Color` shrinks 128 -> 64
-    /// bytes, halving every scope slot / `Vec<Value>` element / lookup clone.
+    /// `Value`, since `Color` is the widest variant): inline it would DOUBLE
+    /// `Value` to 128 bytes, and every scope slot / `Vec<Value>` element /
+    /// lookup clone with it.
     pub modern: Option<Box<ModernColor>>,
 }
 
@@ -1706,6 +1715,24 @@ impl List {
     }
 }
 
+/// `#` followed by ASCII hex `digits`, as a shared spelling. Built through a
+/// stack buffer rather than `format!` so the `Rc` allocates ONCE: a hex literal
+/// is parsed on every compile, and going through a `String` would copy the
+/// bytes twice for a spelling that is at most nine of them.
+fn hex_repr(digits: &[u8]) -> Rc<str> {
+    let mut buf = [b'#'; 9];
+    let end = 1 + digits.len();
+    if let Some(dst) = buf.get_mut(1..end) {
+        dst.copy_from_slice(digits);
+        if let Ok(text) = std::str::from_utf8(&buf[..end]) {
+            return Rc::from(text);
+        }
+    }
+    // Unreachable for a parsed literal (3/4/6/8 ASCII hex digits) or a
+    // canonicalized one (6): a correct fallback in place of a panic.
+    Rc::from(format!("#{}", String::from_utf8_lossy(digits)).as_str())
+}
+
 impl Color {
     pub(crate) fn rgb(r: f64, g: f64, b: f64, a: f64) -> Self {
         Color {
@@ -1763,15 +1790,19 @@ impl Color {
         // canonicalized: opaque ones round-trip as lowercase 6-digit hex
         // (`#abcf` -> `#aabbcc`), while partial-alpha ones fall back to a
         // computed `rgba()`.
-        let repr = if opaque {
+        let repr: Option<Rc<str>> = if opaque {
             match digits.len() {
-                3 | 6 => Some(format!("#{digits}")),
-                _ => Some(format!(
-                    "#{:02x}{:02x}{:02x}",
-                    r.round() as u8,
-                    g.round() as u8,
-                    b.round() as u8
-                )),
+                3 | 6 => Some(hex_repr(digits.as_bytes())),
+                _ => {
+                    const HEX: &[u8; 16] = b"0123456789abcdef";
+                    let mut six = [0u8; 6];
+                    for (i, channel) in [r, g, b].into_iter().enumerate() {
+                        let byte = channel.round() as u8;
+                        six[i * 2] = HEX[usize::from(byte >> 4)];
+                        six[i * 2 + 1] = HEX[usize::from(byte & 0xf)];
+                    }
+                    Some(hex_repr(&six))
+                }
             }
         } else {
             None
@@ -3067,7 +3098,7 @@ pub(crate) fn named_color(name: &str) -> Option<Color> {
         g: g as f64,
         b: b as f64,
         a,
-        repr: Some(name.to_string()),
+        repr: Some(name.into()),
         modern: None,
     })
 }
@@ -3243,6 +3274,46 @@ mod tests {
         assert_eq!(opaque4.to_css(false), "#336699");
         let partial = Color::from_hex("33669980").expect("valid hex");
         assert!(partial.to_css(false).starts_with("rgba("));
+    }
+
+    #[test]
+    fn an_authored_spelling_is_built_once_and_then_shared() {
+        // `hex_repr` assembles `#` + digits in a stack buffer instead of a
+        // `format!`, addressed from a fixed offset, so every legal literal
+        // length has to come out byte-identical to the formatted spelling —
+        // including the ones with alpha digits, where a slipped offset would
+        // truncate or over-copy.
+        for digits in [
+            "fff", "FFF", "abc", "0f0", "ffff", "369f", "336699", "FFAA00", "33669980",
+        ] {
+            assert_eq!(&*hex_repr(digits.as_bytes()), format!("#{digits}"), "{digits}");
+        }
+        // The 4-/8-digit forms are canonicalized rather than preserved, still
+        // lowercase and two digits per channel.
+        assert_eq!(
+            Color::from_hex("369f").expect("valid hex").repr.as_deref(),
+            Some("#336699")
+        );
+        assert_eq!(
+            Color::from_hex("ABCF").expect("valid hex").repr.as_deref(),
+            Some("#aabbcc")
+        );
+        // A partial-alpha literal has no authored spelling to keep.
+        assert!(Color::from_hex("33669980").expect("valid hex").repr.is_none());
+        // Cloning a literal — what evaluation does on every read of it — must
+        // share that one spelling, not copy the bytes into a new allocation.
+        let literal = Color::from_hex("336699").expect("valid hex");
+        let read = literal.clone();
+        assert_eq!(read.to_css(false), "#336699");
+        let (a, b) = (literal.repr.expect("kept"), read.repr.expect("kept"));
+        assert!(
+            Rc::ptr_eq(&a, &b),
+            "the clone copied the spelling instead of sharing it"
+        );
+        // A named literal shares the same way.
+        let named = named_color("rebeccapurple").expect("named");
+        let copy = named.clone();
+        assert!(Rc::ptr_eq(&named.repr.expect("kept"), &copy.repr.expect("kept")));
     }
 
     #[test]

@@ -527,7 +527,7 @@ mod tests {
             g: 0.0,
             b: 0.0,
             a: 1.0,
-            repr: Some("red".to_string()),
+            repr: Some("red".into()),
             modern: None,
         };
         assert_eq!(call("inspect", &[Value::Color(red)]).to_css(false), "red");
