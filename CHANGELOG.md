@@ -16,8 +16,9 @@ Conformance is tracked separately as a ratchet against the official
 _The release that closes #83. The npm CLI had three reasons to be slower than
 the binary running the same compiler; the last of them was that the addon ran
 it on the system allocator while the binary ran it on a bump arena. On the
-Lichess tree the npm CLI is now 10x dart-sass rather than 8.6x, and its
-remaining gap to the binary is Node start-up rather than compile work. `-j`
+Lichess tree the npm CLI is now 9.7x dart-sass rather than 8.5x — measured
+from the published packages, not a build tree — and its remaining gap to the
+binary is Node start-up rather than compile work. `-j`
 also stops counting SMT threads as cores, on both front ends._
 
 ### Added
