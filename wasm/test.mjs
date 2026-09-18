@@ -1409,7 +1409,8 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // those — which is how `_importer.mjs`, reached only through the multiline
     // imports in `_loader.mjs` and `native.mjs`, went unchecked here.
     const statics = /\bfrom\s*["'](\.\/[^"']+)["']/g;
-    const dynamics = /\bimport\(\s*["'](\.\/[^"']+)["']\s*\)/g;
+    // `import ("./x")` — whitespace before the parenthesis is legal.
+    const dynamics = /\bimport\s*\(\s*["'](\.\/[^"']+)["']\s*\)/g;
     // `import "./x.mjs"` has no `from` to key on. Nothing in the package does
     // this today, which is exactly why the matcher has to exist: the first one
     // added would otherwise be invisible here.
@@ -1425,6 +1426,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         'export * from "./three.mjs";',
         'const d = await import("./four.mjs");',
         'import "./five.mjs";',
+        'const e = await import ("./six.mjs");',
         'import fs from "node:fs";', // must NOT match: bare specifier
       ].join("\n");
       const found = new Set();
@@ -1433,7 +1435,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       }
       assert.deepEqual(
         [...found].sort(),
-        ["./five.mjs", "./four.mjs", "./one.mjs", "./three.mjs", "./two.mjs"],
+        ["./five.mjs", "./four.mjs", "./one.mjs", "./six.mjs", "./three.mjs", "./two.mjs"],
         "packaging: the import matchers miss a shape the package may legally use",
       );
     }
@@ -1453,7 +1455,15 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       try {
         text = readFileSync(new URL(name, pkgDir), "utf8");
       } catch {
-        continue; // a .wasm or .d.ts leaf, nothing to follow
+        // Listing a file in `files` does not make it exist. A `.wasm` is
+        // absent until something builds it, so an unreadable one is expected
+        // here — but an unreadable module is a package that cannot start, and
+        // swallowing that is how this guard would pass on a broken tree.
+        assert.ok(
+          !/\.(mjs|js|cjs|d\.ts)$/.test(name),
+          `packaging: ${name} is listed in "files" but cannot be read`,
+        );
+        continue;
       }
       for (const re of [statics, dynamics, sideEffects]) {
         for (const m of text.matchAll(re)) {
@@ -1549,6 +1559,20 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       "cli: v1 -1 is no limit",
     );
     assert.equal(jobs.quotaCpusFromCgroup({}), undefined, "cli: no cgroup files, no answer");
+
+    // cgroup v1 mounts the controller as `cpu` on some distributions and
+    // `cpu,cpuacct` on others; a quota only in the second place still counts.
+    const onlyCpuacct = (path) =>
+      path === "/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us"
+        ? "400000\n"
+        : path === "/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us"
+          ? "100000\n"
+          : undefined;
+    assert.equal(
+      jobs.quotaCpusFromCgroup(jobs.cgroupFiles(onlyCpuacct)),
+      4,
+      "cli: a v1 quota under cpu,cpuacct is found",
+    );
 
     // `Cpus_allowed_list` is the affinity mask this process actually has.
     assert.equal(jobs.allowedCpusFromStatus("Cpus_allowed_list:\t0-1,8-9\n"), 4, "cli: ranges and lists");

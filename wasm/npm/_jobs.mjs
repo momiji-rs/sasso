@@ -183,17 +183,33 @@ function defaultReadStatus() {
   }
 }
 
+/**
+ * Which cgroup files to look in, given a way to read one.
+ *
+ * cgroup v1 mounts the cpu controller under either name depending on the
+ * distribution, and `cpu,cpuacct` is the more common of the two — a layout
+ * this missed until review pointed it out, which is why the choice is a
+ * function that a test can drive rather than a path buried in an fs call.
+ *
+ * Neither name is resolved from `/proc/self/mountinfo`: that is the container
+ * case only, as documented on `quotaCpusFromCgroup`.
+ */
+export function cgroupFiles(read) {
+  const v1 = ["/sys/fs/cgroup/cpu", "/sys/fs/cgroup/cpu,cpuacct"];
+  const first = (name) => v1.map((dir) => read(`${dir}/${name}`)).find((t) => t !== undefined);
+  return {
+    v2: read("/sys/fs/cgroup/cpu.max"),
+    v1Quota: first("cpu.cfs_quota_us"),
+    v1Period: first("cpu.cfs_period_us"),
+  };
+}
+
 function defaultReadCgroup() {
-  const read = (path) => {
+  return cgroupFiles((path) => {
     try {
       return readFileSync(path, "utf8");
     } catch {
       return undefined;
     }
-  };
-  return {
-    v2: read("/sys/fs/cgroup/cpu.max"),
-    v1Quota: read("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
-    v1Period: read("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
-  };
+  });
 }
