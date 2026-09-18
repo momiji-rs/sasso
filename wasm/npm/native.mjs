@@ -30,6 +30,7 @@ import {
 } from "./_importer.mjs";
 import { Exception, Logger } from "./_loader.mjs";
 import { deserializeArgs, serializeValue, setEngine, valueApi } from "./_value.mjs";
+import { normalizeSilenced } from "./_deprecations.mjs";
 
 const require_ = createRequire(import.meta.url);
 
@@ -299,9 +300,16 @@ function buildCfg(options, syntax, urlForCore) {
     includeSources: !!options.sourceMapIncludeSources,
     charset: options.charset !== false,
     quietDeps: !!options.quietDeps,
-    silenceDeprecations: Array.isArray(options.silenceDeprecations)
-      ? options.silenceDeprecations.map(String)
-      : [],
+    // An id dart does not know warns through the caller's own logger and
+    // compiles anyway, as dart's JS API does — its CLI is the half that
+    // rejects. See _deprecations.mjs for the measurement.
+    silenceDeprecations: normalizeSilenced(options.silenceDeprecations, (message) => {
+      if (options.logger && typeof options.logger.warn === "function") {
+        options.logger.warn(message, { deprecation: false, deprecationType: undefined, span: undefined, stack: undefined });
+      } else {
+        process.stderr.write(`WARNING: ${message}\n`);
+      }
+    }),
     unicode: options.unicode !== false,
     loadPaths: (options.loadPaths || []).map(String),
     hasUserImporters: !!(options.importers && options.importers.length),

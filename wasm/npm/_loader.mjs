@@ -43,6 +43,7 @@ import {
   syntaxForPath,
 } from "./_importer.mjs";
 import { deserializeArgs, serializeValue, setEngine } from "./_value.mjs";
+import { normalizeSilenced } from "./_deprecations.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -783,10 +784,18 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       charset: options.charset !== false, // dart-sass default: true
       quietDeps: !!options.quietDeps,
       // dart-sass `silenceDeprecations`: ids dropped inside the compiler,
-      // beside quietDeps, so they never reach the per-id cap.
-      silenceDeprecations: Array.isArray(options.silenceDeprecations)
-        ? options.silenceDeprecations.map(String)
-        : [],
+      // beside quietDeps, so they never reach the per-id cap. An id dart does
+      // not know warns through the caller's own logger and compiles anyway,
+      // as dart's JS API does — its CLI is the half that rejects.
+      silenceDeprecations: normalizeSilenced(options.silenceDeprecations, (message) =>
+        dispatchWarn(options.logger ?? null, {
+          kind: 0,
+          message,
+          formatted: `WARNING: ${message}`,
+          deprecation: false,
+          deprecationId: "",
+        }),
+      ),
       unicode: options.unicode !== false, // sasso extension: the CLI's --no-unicode
     };
   }

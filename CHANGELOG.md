@@ -20,9 +20,14 @@ Conformance is tracked separately as a ratchet against the official
 
   The accepted ids are dart-sass 1.104.1's whole `Deprecation` enum — all 31,
   of which sasso emits six today. The rest are accepted and do nothing, so a
-  build script written for `sass` does not fail for naming one. An id dart does
-  not know is rejected, as there, so a typo is caught instead of quietly
-  leaving the warning in place.
+  build script written for `sass` does not fail for naming one.
+
+  An id dart does not know is handled as dart handles it, which differs between
+  the two front ends and is measured rather than assumed: the CLI rejects it
+  with `Invalid deprecation "nope".` (dart exits 64, so a typo is caught rather
+  than quietly leaving the warning in place), while the JS API warns with that
+  same text through the caller's own `logger` and compiles anyway. Throwing
+  from the API would be stricter than dart and would fail builds dart accepts.
 
   Silencing happens inside the compiler, beside `quietDeps`, not in a warn
   handler. Filtering further out drops the warnings but still counts them, and

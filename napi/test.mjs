@@ -599,6 +599,23 @@ console.log("ok: quietDeps — native and wasm agree on dart's provenance rule")
     assert.doesNotMatch(text, IMPORT, `silenceDeprecations(async ${name}): silenced`);
     assert.match(text, GLOBAL, `silenceDeprecations(async ${name}): others kept`);
   }
+
+  // An id dart does not know: its JS API warns and compiles, where its CLI
+  // exits 64. Both measured against 1.104.1; the addon builds its config in
+  // native.mjs rather than in the loader, so it needs its own proof.
+  for (const [name, mod] of [["native", napi], ["wasm", wasm]]) {
+    const seen = [];
+    const r = mod.compileString(".a{b:c}", {
+      silenceDeprecations: ["nope", "import", "nope"],
+      logger: { warn: (m, o) => seen.push([m, o?.deprecation]) },
+    });
+    assert.deepEqual(
+      seen,
+      [['Invalid deprecation "nope".', false], ['Invalid deprecation "nope".', false]],
+      `silenceDeprecations(${name}): one plain warning per unknown occurrence, known ids silent`,
+    );
+    assert.ok(r.css.includes("b: c"), `silenceDeprecations(${name}): an unknown id does not fail the compile`);
+  }
 }
 console.log("ok: silenceDeprecations — native and wasm agree, per id, sync + async");
 

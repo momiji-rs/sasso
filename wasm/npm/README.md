@@ -75,7 +75,9 @@ interface CompileResult { css: string; loadedUrls: URL[]; sourceMap?: object }
   `quietDeps`, so a silenced id is not counted towards the `N repetitive
   deprecation warnings omitted` footer either. Ids sasso never emits are accepted
   and do nothing, so a build written for `sass` does not fail for naming one; an
-  id dart-sass does not know at all is rejected.
+  id dart-sass does not know at all warns (`Invalid deprecation "nope".`, through
+  the `logger` if there is one) and the compile proceeds, as in dart's JS API —
+  it is the CLI that rejects an unknown id, with dart's exit 64.
 - `charset: false` suppresses the `@charset` / BOM prefix for non-ASCII output.
 - `info` is exported for build-tool auto-detection; `initCompiler()` /
   `initAsyncCompiler()` implement the dart-sass Compiler API (Vite uses these).

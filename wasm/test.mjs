@@ -640,12 +640,18 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.equal(native.length, Number(decl[1]), "drift: the Rust list's length matches its own count");
   assert.ok(native.length >= 31, `drift: extracted a plausible id set (got ${native.length})`);
 
-  const cliSrc = readFileSync(new URL("./npm/cli.mjs", import.meta.url), "utf8");
-  const jsDecl = /const DEPRECATION_IDS = new Set\(\[([\s\S]*?)\]\)/.exec(cliSrc);
-  assert.ok(jsDecl, "drift: found DEPRECATION_IDS in cli.mjs");
-  const ours = [...jsDecl[1].matchAll(/"([a-z0-9-]+)"/g)].map((m) => m[1]);
-
+  // The JS side keeps ONE copy, in _deprecations.mjs, shared by cli.mjs, the
+  // loader and native.mjs — so this compares two lists, not four.
+  const shared = await import("./npm/_deprecations.mjs");
+  const ours = [...shared.DEPRECATION_IDS];
   assert.deepEqual([...ours].sort(), [...native].sort(), "cli: the two deprecation allowlists agree");
+  for (const f of ["cli.mjs", "_loader.mjs", "native.mjs"]) {
+    const text = readFileSync(new URL(`./npm/${f}`, import.meta.url), "utf8");
+    assert.ok(
+      !/const DEPRECATION_IDS\s*=\s*new Set/.test(text),
+      `drift: ${f} declares its own id list again instead of importing the shared one`,
+    );
+  }
 
   // Not just the literal: the parser has to take every one of them, and still
   // refuse something that is not on the list.
@@ -2585,6 +2591,38 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   }
 
   console.log(`ok: silenceDeprecations — per-id on the JS API, ${engines.length} engines, sync + async + compileString`);
+
+  // An id dart-sass does not know. The CLI and the JS API deliberately differ,
+  // and both follow dart 1.104.1, measured: `sass` the command exits 64, while
+  // its JS API warns `Invalid deprecation "nope".` through the caller's own
+  // logger and compiles anyway. Throwing here would be stricter than dart and
+  // would break builds dart accepts; staying silent — what this did first —
+  // contradicts the documented option and leaves a typo doing nothing at all.
+  for (const [name, mod] of engines) {
+    const seen = [];
+    const r = mod.compileString(".a{b:c}", {
+      silenceDeprecations: ["nope"],
+      logger: { warn: (m, o) => seen.push({ m, dep: o?.deprecation, span: o?.span }) },
+    });
+    assert.equal(seen.length, 1, `silenceDeprecations(${name}): an unknown id warns exactly once`);
+    assert.equal(seen[0].m, 'Invalid deprecation "nope".', `silenceDeprecations(${name}): dart's wording`);
+    assert.equal(seen[0].dep, false, `silenceDeprecations(${name}): it is a plain warning, not a deprecation`);
+    assert.equal(seen[0].span, undefined, `silenceDeprecations(${name}): no span, as in dart`);
+    assert.ok(r.css.includes("b: c"), `silenceDeprecations(${name}): … and the compile still succeeds`);
+
+    // Once per occurrence, duplicates included, in the order given — dart's
+    // behaviour, not a de-duplicated set.
+    const dup = [];
+    mod.compileString(".a{b:c}", {
+      silenceDeprecations: ["nope", "import", "nope", ""],
+      logger: { warn: (m) => dup.push(m) },
+    });
+    assert.deepEqual(
+      dup,
+      ['Invalid deprecation "nope".', 'Invalid deprecation "nope".', 'Invalid deprecation "".'],
+      `silenceDeprecations(${name}): one warning per occurrence, known ids silent`,
+    );
+  }
 }
 
 // === Trailing-newline parity: the JS API omits it, the CLI appends one ===

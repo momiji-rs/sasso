@@ -32,6 +32,7 @@
     "_value.mjs",
     "_immutable.mjs",
     "_jobs.mjs",
+    "_deprecations.mjs",
     "cli.mjs",
     "sasso.mjs",
     "sasso.speed.mjs",

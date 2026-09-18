@@ -37,7 +37,9 @@ export interface Options {
    *
    * Ids sasso never emits are accepted and do nothing, so a build written for
    * `sass` does not fail here for naming one. An id dart-sass does not know at
-   * all is rejected.
+   * all warns — `Invalid deprecation "nope".`, through this {@link logger} if
+   * there is one, else to stderr — and the compile proceeds, which is what
+   * dart's JS API does; only its command line rejects the id outright.
    */
   silenceDeprecations?: string[];
   /**

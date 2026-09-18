@@ -23,6 +23,8 @@ import { isMainThread, workerData, parentPort, Worker } from "node:worker_thread
 // where `/proc/cpuinfo` publishes the topology, and the CPU count everywhere
 // else. See _jobs.mjs for the measurement and for both fallbacks.
 import { defaultJobs } from "./_jobs.mjs";
+// The accepted deprecation ids, shared with the JS API so there is one copy.
+import { DEPRECATION_IDS } from "./_deprecations.mjs";
 
 /**
  * The engine, chosen at startup rather than imported statically.
@@ -131,25 +133,6 @@ function packageVersion() {
     return "unknown";
   }
 }
-
-// Deprecation ids `--silence-deprecation` accepts, matching the native CLI's
-// list in `src/main.rs`: the full `Deprecation` enum of dart-sass 1.104.1, in
-// its own declaration order. Taken from the enum, not from a guess — an
-// earlier version of this list was probed candidate-by-candidate and missed
-// seven ids, `if-function` among them, which sasso itself emits. Most of these
-// name deprecations sasso never emits; accepting them is the point, because a
-// build script written for `sass` must not fail here for naming one it has.
-const DEPRECATION_IDS = new Set([
-  "call-string", "elseif", "moz-document", "relative-canonical",
-  "new-global", "color-module-compat", "slash-div", "bogus-combinators",
-  "strict-unary", "function-units", "duplicate-var-flags", "null-alpha",
-  "abs-percent", "fs-importer-cwd", "css-function-mixin", "mixed-decls",
-  "feature-exists", "color-4-api", "color-functions", "legacy-js-api",
-  "import", "global-builtin", "type-function",
-  "compile-string-relative-url", "misplaced-rest", "with-private",
-  "if-function", "function-name", "adjacent-compounds", "user-authored",
-  "calc-interp",
-]);
 
 function fail(msg) {
   writeStderrSync(String(msg).replace(/\n?$/, "\n"));
