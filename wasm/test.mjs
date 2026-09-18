@@ -1432,10 +1432,11 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // the package contains such text today, and the case below pins the
     // behaviour so a later reader does not quietly trade it the other way.
     const gap = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*\n)*`;
-    // `./dep.mjs` and `../dep.mjs` both. A `$` is allowed only when it is not
-    // opening an interpolation: `import(`./mod-${name}.mjs`)` names no single
-    // file, so matching it would demand a module that does not exist.
-    const rel = String.raw`\.\.?/(?:[^"'\`$]|\$(?!\{))+`;
+    // `./dep.mjs` and `../dep.mjs` both. `${` is left to the matcher loop
+    // rather than excluded here, because whether it interpolates depends on
+    // the delimiter: in a template it names no single file, in a quoted string
+    // it is an ordinary (if unhinged) filename.
+    const rel = String.raw`\.\.?/[^"'\`]+`;
     // The delimiter is captured and backreferenced so a template literal is
     // accepted on the same footing as a quote — `import(\`./x.mjs\`)` is a
     // perfectly ordinary dynamic import, and skipping it would be a silent
@@ -1448,10 +1449,12 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // The closing parenthesis is still required, so `import("./x" + suffix)`
     // stays unmatched — that path is not the module, and demanding it be
     // shipped would be a false failure.
-    const dynamics = new RegExp(
-      String.raw`\bimport${gap}\(${gap}${q}${spec}${gap}(?:,[^)]*)?\)`,
-      "g",
-    );
+    // What follows the specifier has to be the end of an argument — `)` or a
+    // comma — which accepts `import("./x", { with: … })` and
+    // `import("./x", makeOptions())` alike without this having to understand
+    // the options expression, and still rejects `import("./x" + suffix)`,
+    // whose path is not a module name.
+    const dynamics = new RegExp(String.raw`\bimport${gap}\(${gap}${q}${spec}${gap}(?=[,)])`, "g");
     // `import "./x.mjs"` has no `from` to key on. Nothing in the package does
     // this today, which is exactly why the matcher has to exist: the first one
     // added would otherwise be invisible here.
@@ -1459,6 +1462,10 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // list missed `/* banner */import "./dep.mjs";` and a BOM-prefixed file,
     // both of which are legal and both of which would have gone unchecked.
     const sideEffects = new RegExp(String.raw`(?<![\w$.])import${gap}${q}${spec}`, "g");
+
+    // A template literal with `${` in it names no single file, so there is
+    // nothing to check; the same characters inside quotes are just a filename.
+    const interpolated = (m) => m.groups.q === "`" && m.groups.spec.includes("${");
 
     // The matchers are the whole guard, so prove they see each shape rather
     // than trusting that they do. A matcher that silently matches nothing
@@ -1479,12 +1486,19 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         "const i = await import(`./twelve.mjs`);", // a template specifier
         '/* banner */import "./thirteen.mjs";', // a keyword straight after a comment
         "const j = await import(`./mod-${name}.mjs`);", // must NOT match: interpolated
+        // …but the same characters in quotes are a filename, not a template.
+        'import { p } from "./mod-${literal}.mjs";',
+        // An options argument this matcher deliberately does not parse.
+        'const q = await import("./fourteen.mjs", makeOptions());',
         'import fs from "node:fs";', // must NOT match: bare specifier
         'const url = "https://example.com/not-an-import.mjs";', // nor a URL
       ].join("\n");
       const found = new Set();
       for (const re of [statics, dynamics, sideEffects]) {
-        for (const m of sample.matchAll(re)) found.add(m.groups.spec);
+        for (const m of sample.matchAll(re)) {
+          if (interpolated(m)) continue;
+          found.add(m.groups.spec);
+        }
       }
       // Known limitation, pinned on purpose: import-shaped text inside a
       // string matches, because nothing here tracks lexical state. It is a
@@ -1504,6 +1518,8 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
           "./eight.mjs",
           "./five.mjs",
           "./four.mjs",
+          "./fourteen.mjs",
+          "./mod-${literal}.mjs",
           "./nine.mjs",
           "./one.mjs",
           "./seven.mjs",
@@ -1575,6 +1591,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       }
       for (const re of [statics, dynamics, sideEffects]) {
         for (const m of text.matchAll(re)) {
+          if (interpolated(m)) continue;
           // Inside a `.d.ts`, TypeScript resolves a `./x.js` specifier to
           // `x.d.ts` — following it literally would demand a file that neither
           // exists nor needs to, while skipping the declaration graph entirely.
