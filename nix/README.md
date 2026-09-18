@@ -124,7 +124,8 @@ $ nix-env -f nix/nur.nix -qa \* --meta --drv-path --show-trace \
 
 It must list `sasso` and `sasso-ffi`. A red evaluation is silent by design: NUR
 keeps the last revision that evaluated, so users just quietly stay on an older
-sasso.
+sasso — which is why the `nix flake` CI job runs this same check on every push
+rather than leaving it to be remembered.
 
 [NUR]: https://github.com/nix-community/NUR
 

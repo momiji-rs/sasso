@@ -191,6 +191,27 @@ jobs:
       - name: nix flake check
         run: nix flake check -L --show-trace
 
+      # NUR's own evaluation check, from nix-community/NUR's README. `nix flake
+      # check` cannot stand in for it: this one forbids eval-time network access,
+      # which is the single constraint nix/nur.nix exists to satisfy, and it
+      # resolves nixpkgs unstable rather than our flake.lock, which is what NUR
+      # evaluates against. Worth a job because the failure is silent — NUR keeps
+      # the last revision that evaluated, so a break would leave users quietly
+      # on an older sasso with nothing to read. Linux only: NUR's evaluator is.
+      - name: NUR evaluation check
+        if: runner.os == 'Linux'
+        run: |
+          nixpkgs=$(nix-instantiate --find-file nixpkgs 2>/dev/null \
+            || nix flake prefetch nixpkgs --json \
+               | python3 -c 'import json,sys; print(json.load(sys.stdin)["storePath"])')
+          echo "nixpkgs = $nixpkgs"
+          nix-env -f nix/nur.nix -qa '*' --meta --drv-path --show-trace \
+            --option restrict-eval true \
+            --option allow-import-from-derivation true \
+            -I nixpkgs="$nixpkgs" -I ./ | tee attrs.txt
+          grep -qE '^sasso-[0-9]' attrs.txt
+          grep -qE '^sasso-ffi-[0-9]' attrs.txt
+
   conformance:
     name: sass-spec ratchet
     runs-on: ubuntu-latest
