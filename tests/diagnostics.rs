@@ -56,6 +56,11 @@ const MATCHING: &[&str] = &[
     // message for a trailing combinator, which needs the two-span renderer and
     // stays out of this list.
     "deprecation-bogus-combinators-invalid",
+    // The same warning behind a multi-byte selector: the span helper mixes
+    // character columns with byte offsets by nature (dart's columns are
+    // characters, our Span length is source bytes), and got it wrong the first
+    // time — twelve columns late on a CJK selector.
+    "deprecation-bogus-combinators-non-ascii",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {

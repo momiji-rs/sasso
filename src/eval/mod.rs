@@ -3237,6 +3237,7 @@ impl<'a> Evaluator<'a> {
         // contains it second. Emitting where the selector is dropped gets the
         // set right and the order backwards.
         let mut pending_bogus: Vec<(Pos, usize, String)> = Vec::new();
+        let src_text = Rc::clone(&self.current_source);
         if share_current {
             for s in current.iter() {
                 self.note_placeholder_rule(s);
@@ -3257,7 +3258,8 @@ impl<'a> Evaluator<'a> {
                     // produced by part `i % own_parts` — the entry dart points
                     // at, while the message names the RESOLVED selector.
                     if complex_selector_is_bogus(s, false, false) {
-                        let (pos, len) = selector_part_span(rule, &sel_str, &interp_bounds, i % own_parts);
+                        let (pos, len) =
+                            selector_part_span(&src_text, rule, &sel_str, &interp_bounds, i % own_parts);
                         pending_bogus.push((pos, len, s.clone()));
                     }
                     // The omitted selector still participates in @extend target
@@ -7669,15 +7671,24 @@ fn complex_selector_is_bogus(s: &str, in_pseudo: bool, allow_leading: bool) -> b
 /// diagnostic that names that entry.
 ///
 /// `sel_str` is the rule's own selector with its interpolations already
-/// substituted, so an index into it is not a column in the source. The authored
-/// column is recovered by shifting across the interpolations that precede the
-/// entry on its line — the same correction `interp_selector_error` applies to a
-/// single column, extended to a list that may span lines (`a,\nb`).
+/// substituted, so an offset into it is not a position in the source. The
+/// authored one is recovered by shifting across the interpolations that
+/// precede the entry on its line — the same correction `interp_selector_error`
+/// applies to a single column, extended to a list that may span lines
+/// (`a,\nb`).
+///
+/// THREE UNITS MEET HERE and mixing them silently misplaces the caret:
+/// [`InterpBounds`] and [`Pos::col`] count CHARACTERS, [`crate::diag::Span`]
+/// takes its length in SOURCE BYTES, and `&str` indexing is in bytes. The
+/// first version of this used byte offsets throughout and drew the underline
+/// twelve columns late on `.日本語テスト, .a > + .b` — one column per
+/// multi-byte character before the entry.
 ///
 /// Returns the whole selector's start when the correction cannot be trusted
 /// (the interpolation spans do not line up with the bounds), which keeps the
-/// diagnostic pointing at the right rule even when the column is approximate.
+/// diagnostic on the right rule even when the column is approximate.
 fn selector_part_span(
+    src: &str,
     rule: &Rule,
     sel_str: &str,
     interp_bounds: &InterpBounds,
@@ -7685,18 +7696,18 @@ fn selector_part_span(
 ) -> (Pos, usize) {
     let fallback = (rule.selector_pos, sel_str.len());
     let base = sel_str.as_ptr() as usize;
-    let mut bounds: Option<(usize, usize)> = None;
+    let mut chosen: Option<(usize, usize)> = None;
     for (k, part) in split_commas(sel_str).iter().enumerate() {
         if k == part_index {
-            let start = part.as_ptr() as usize - base;
-            // The entry as dart highlights it: without the whitespace that a
-            // multi-line list leaves after the comma.
-            let lead = part.len() - part.trim_start().len();
-            bounds = Some((start + lead, part.trim().len()));
+            // `trim_selector_part`, not `trim`: a trailing space can be the
+            // terminator of a hex escape (`.a\9 `) and belongs to the selector.
+            let kept = trim_selector_part(part);
+            let byte_start = kept.as_ptr() as usize - base;
+            chosen = Some((byte_start, kept.chars().count()));
             break;
         }
     }
-    let Some((start, len)) = bounds else {
+    let Some((byte_start, part_chars)) = chosen else {
         return fallback;
     };
 
@@ -7706,10 +7717,14 @@ fn selector_part_span(
         return fallback;
     }
 
-    // Which resolved line the entry begins on, and where that line began.
-    let before = &sel_str[..start];
+    // Char offset of the entry, and of the start of the line it sits on.
+    let before = &sel_str[..byte_start];
+    let start = before.chars().count();
     let newlines = before.matches('\n').count();
-    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let line_start = match before.rfind('\n') {
+        Some(i) => sel_str[..i + 1].chars().count(),
+        None => 0,
+    };
 
     // `#{ … }` and what it produced are different widths, so every
     // interpolation shifts what follows it. One BEFORE the entry (on the same
@@ -7725,11 +7740,10 @@ fn selector_part_span(
         let delta = src_total - out_len as i64;
         if out_start >= line_start && out_start + out_len <= start {
             shift += delta;
-        } else if out_start >= start && out_start + out_len <= start + len {
+        } else if out_start >= start && out_start + out_len <= start + part_chars {
             inner += delta;
         }
     }
-    let len = (len as i64 + inner).max(1) as usize;
 
     let col = if newlines == 0 {
         rule.selector_pos.col as i64 + start as i64 + shift
@@ -7737,13 +7751,41 @@ fn selector_part_span(
         // A later line of the list starts at column 1 of the source line.
         1 + (start - line_start) as i64 + shift
     };
-    (
-        Pos {
-            line: rule.selector_pos.line + newlines,
-            col: col.max(1) as usize,
-        },
-        len,
-    )
+    let col = col.max(1) as usize;
+    let line = rule.selector_pos.line + newlines;
+    // The caret length is SOURCE BYTES; everything above is characters.
+    let authored_chars = (part_chars as i64 + inner).max(1) as usize;
+    let len = source_byte_len(src, line, col, authored_chars).unwrap_or(sel_str.len());
+    (Pos { line, col }, len)
+}
+
+/// Byte length of `chars` characters of `src` starting at 1-based `line`/`col`,
+/// for a [`crate::diag::Span`] length. `None` when the position is past the end
+/// of the source, which means the mapping above produced something the source
+/// cannot back.
+fn source_byte_len(src: &str, line: usize, col: usize, chars: usize) -> Option<usize> {
+    let mut cur_line = 1usize;
+    let mut cur_col = 1usize;
+    let mut start: Option<usize> = None;
+    let mut taken = 0usize;
+    for (i, ch) in src.char_indices() {
+        if start.is_none() && cur_line == line && cur_col == col {
+            start = Some(i);
+        }
+        if let Some(from) = start {
+            if taken == chars {
+                return Some(i - from);
+            }
+            taken += 1;
+        }
+        if ch == '\n' {
+            cur_line += 1;
+            cur_col = 1;
+        } else {
+            cur_col += 1;
+        }
+    }
+    start.map(|b| src.len() - b)
 }
 
 fn complex_selector_block_is_bogus(s: &str) -> bool {

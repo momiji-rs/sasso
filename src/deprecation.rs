@@ -99,11 +99,6 @@ impl Deprecation {
         }
     }
 
-    /// The `if-function` deprecation: the legacy `if($c, $t, $f)` in favour of
-    /// the modern CSS `if()`. `suggestion` is the rewritten call, present only
-    /// when the arguments are the three positional ones the rewrite needs —
-    /// dart omits the line entirely for a named, splatted or wrong-arity call
-    /// and still deprecates it.
     /// The `bogus-combinators` deprecation for a selector dart-sass drops:
     /// a repeated combinator run (`a > + b`) or a leading one outside a
     /// relative context. The rule is omitted from the CSS, and this warning is
@@ -129,6 +124,11 @@ impl Deprecation {
         }
     }
 
+    /// The `if-function` deprecation: the legacy `if($c, $t, $f)` in favour of
+    /// the modern CSS `if()`. `suggestion` is the rewritten call, present only
+    /// when the arguments are the three positional ones the rewrite needs —
+    /// dart omits the line entirely for a named, splatted or wrong-arity call
+    /// and still deprecates it.
     pub(crate) fn if_function(suggestion: Option<&str>) -> Self {
         let mut message = "The Sass if() syntax is deprecated in favor of the modern CSS syntax.".to_string();
         if let Some(s) = suggestion {
