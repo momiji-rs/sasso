@@ -281,18 +281,20 @@ function sassoOnPath() {
 }
 
 /**
- * The binary's version, or undefined if it will not say.
+ * The binary's version, or undefined if it does not identify itself as sasso.
  *
- * The two front ends print `--version` differently — the binary writes
- * `sasso 0.16.0` and this CLI writes `0.16.0`, which is dart's format — so the
- * last field of the first line is what gets compared, not the whole string.
+ * `sasso --version` prints exactly `sasso <version>` and nothing else
+ * (src/main.rs), where this CLI prints a bare `<version>`, dart's format. The
+ * whole first line has to match that shape: this is the gate that decides
+ * whether a stranger gets the project's command line, and something else
+ * installed as `sasso` can print a version too — reading only the last field
+ * would accept `some-other-tool 0.16.0` as a version-matched sasso.
  */
 function binaryVersion(path) {
   const r = spawnSync(path, ["--version"], { encoding: "utf8", timeout: 10000 });
   if (r.error || r.status !== 0) return undefined;
-  const first = String(r.stdout || "").split("\n", 1)[0].trim();
-  const fields = first.split(/\s+/);
-  return fields.length ? fields[fields.length - 1] : undefined;
+  const m = /^sasso (\S+)$/.exec(String(r.stdout || "").split("\n", 1)[0].trim());
+  return m ? m[1] : undefined;
 }
 
 /**
@@ -331,8 +333,11 @@ function pickBinary(opts) {
   const ours = packageVersion();
   // Silent by default: a mismatch is a normal state of the world, not a problem
   // to interrupt a build over. `--engine` is where to go and ask.
+  if (theirs === undefined) {
+    return compileInProcess(`${found} does not answer --version with \`sasso <version>\``);
+  }
   if (theirs !== ours) {
-    return compileInProcess(`${found} is ${theirs ?? "unreadable"}, this package is ${ours}`);
+    return compileInProcess(`${found} is ${theirs}, this package is ${ours}`);
   }
   return handTo(found, `the same version as this package, ${theirs}`);
 }

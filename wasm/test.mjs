@@ -2784,6 +2784,28 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     if (make) make(d);
     return d;
   };
+  // The automatic gate compares the binary's version against the PACKAGE's, and
+  // in a working tree they never agree: `wasm/npm/package.json` carries the npm
+  // line's last published version and `npm version` sets the real one from the
+  // tag at publish time (release-wasm.yml, whose `version-match` job is what
+  // guarantees a published package and a released binary agree). So the cases
+  // that need them equal run against a COPY of the package saying what a
+  // published one would. The wasm modules are symlinked rather than copied —
+  // megabytes each, and nothing here rewrites them.
+  const npmDir = fileURLToPath(new URL("./npm/", import.meta.url));
+  const pkgJson = JSON.parse(readFileSync(join(npmDir, "package.json"), "utf8"));
+  let pkgCopies = 0;
+  const packageSaying = (version) => {
+    const d = dirWith(`pkg-${++pkgCopies}`);
+    for (const entry of readdirSync(npmDir)) {
+      const from = join(npmDir, entry), to = join(d, entry);
+      if (!statSync(from).isFile()) continue;
+      if (entry === "package.json") writeFileSync(to, JSON.stringify({ ...pkgJson, version }, null, 2));
+      else if (entry.endsWith(".wasm")) symlinkSync(from, to);
+      else copyFileSync(from, to);
+    }
+    return join(d, "cli.mjs");
+  };
 
   // Nothing named sasso anywhere on PATH: the ordinary case, and the one that
   // must not become slower or louder for the sake of the others.
@@ -2896,13 +2918,23 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       "h.css",
     );
 
-    // A native `sasso` on PATH that is NOT this version is passed over, and
-    // silently: a mismatch is a normal state of the world (#114 is what happens
-    // when a version-skewed sasso gets used anyway), not a build-breaking one.
+    // A native `sasso` on PATH that is not sasso is passed over, and silently:
+    // another project's binary under that name is a normal state of the world,
+    // not a build-breaking one.
     const strangerDir = dirWith("stranger", (d) => symlinkSync(echo, join(d, "sasso")));
     const stranger = run(argv("i.css"), { PATH: strangerDir });
-    compiles("a native `sasso` on PATH that is not this version", stranger, "i.css");
-    assert.match(stranger.stderr, /compiling in-process/, "cli: … and the version it found is on the record");
+    compiles("a native `sasso` on PATH that is not sasso", stranger, "i.css");
+    assert.match(stranger.stderr, /compiling in-process/, "cli: … and what it asked is on the record");
+
+    // …and the version alone is NOT what identifies it. `sasso --version` prints
+    // exactly `sasso <version>`, so the whole line has to match that shape: a
+    // stranger whose version output happens to equal this package's version
+    // would otherwise be handed the project's command line. `echo` prints back
+    // whatever it is given, which makes it a stranger claiming to be any version
+    // asked for — here, the package's own.
+    const claimed = runWith(packageSaying("--version"), argv("i2.css"), { PATH: strangerDir });
+    compiles("a stranger whose --version output equals the package version", claimed, "i2.css");
+    assert.match(claimed.stderr, /does not answer --version with `sasso <version>`/, "cli: … declined on the shape of the line, not its last field");
   }
 
   // And now the real thing, wherever this machine keeps one: no stand-in can
@@ -2954,30 +2986,8 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.equal(piped.status, 0, `cli: a delegated --stdin run (stderr: ${piped.stderr})`);
     assert.equal(piped.stdout.trim(), CSS, "cli: … reads this process's stdin");
 
-    // The AUTOMATIC path needs the package's version to equal the binary's, and
-    // in a working tree it never does: `wasm/npm/package.json` carries the npm
-    // line's last published version and `npm version` sets the real one from the
-    // tag at publish time (release-wasm.yml, whose `version-match` job is what
-    // guarantees a published package and a released binary agree). So run these
-    // against a COPY of the package whose version says what a published one
-    // would. The wasm modules are symlinked rather than copied — megabytes each,
-    // and nothing here rewrites them.
-    const npmDir = fileURLToPath(new URL("./npm/", import.meta.url));
-    const pkgJson = JSON.parse(readFileSync(join(npmDir, "package.json"), "utf8"));
-    const packageSaying = (version) => {
-      const d = dirWith(`pkg-${version}`);
-      for (const entry of readdirSync(npmDir)) {
-        const from = join(npmDir, entry), to = join(d, entry);
-        if (!statSync(from).isFile()) continue;
-        if (entry === "package.json") writeFileSync(to, JSON.stringify({ ...pkgJson, version }, null, 2));
-        else if (entry.endsWith(".wasm")) symlinkSync(from, to);
-        else copyFileSync(from, to);
-      }
-      return join(d, "cli.mjs");
-    };
-
     // A version-matched `sasso` is the first thing on PATH and gets the job
-    // without being asked for.
+    // without being asked for. `packageSaying` is why it can be: see above.
     const autoDir = dirWith("auto", (d) => symlinkSync(binary, join(d, exe)));
     const matchedCli = packageSaying(binVersion);
     const auto = runWith(matchedCli, argv("k.css"), { PATH: autoDir });
