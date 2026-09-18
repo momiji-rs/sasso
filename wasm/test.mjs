@@ -1421,8 +1421,15 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // places they can appear cannot touch a string at all.
     const gap = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*\n)*`;
     const statics = new RegExp(String.raw`\bfrom${gap}["'](\./[^"']+)["']`, "g");
-    // `import ("./x")` — whitespace before the parenthesis is legal too.
-    const dynamics = new RegExp(String.raw`\bimport${gap}\(${gap}["'](\./[^"']+)["']${gap}\)`, "g");
+    // `import ("./x")` — whitespace before the parenthesis is legal too, and
+    // so is a second argument: `import("./x", { with: { type: "json" } })`.
+    // The closing parenthesis is still required, so `import("./x" + suffix)`
+    // stays unmatched — that path is not the module, and demanding it be
+    // shipped would be a false failure.
+    const dynamics = new RegExp(
+      String.raw`\bimport${gap}\(${gap}["'](\./[^"']+)["']${gap}(?:,[^)]*)?\)`,
+      "g",
+    );
     // `import "./x.mjs"` has no `from` to key on. Nothing in the package does
     // this today, which is exactly why the matcher has to exist: the first one
     // added would otherwise be invisible here.
@@ -1442,6 +1449,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         'const f = await import(/* webpackChunkName: "seven" */ "./seven.mjs");',
         'import /* webpackIgnore: true */ "./eight.mjs";',
         'export { z } from /* a note */ "./nine.mjs";',
+        'const h = await import("./ten.mjs", { with: { type: "json" } });',
         'import fs from "node:fs";', // must NOT match: bare specifier
         'const url = "https://example.com/not-an-import.mjs";', // nor a URL
       ].join("\n");
@@ -1459,12 +1467,23 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
           "./one.mjs",
           "./seven.mjs",
           "./six.mjs",
+          "./ten.mjs",
           "./three.mjs",
           "./two.mjs",
         ],
         "packaging: the import matchers miss a shape the package may legally use",
       );
     }
+
+    const resolveFrom = (importer, spec) => {
+      const parts = importer.includes("/") ? importer.slice(0, importer.lastIndexOf("/")).split("/") : [];
+      for (const segment of spec.split("/")) {
+        if (segment === "" || segment === ".") continue;
+        if (segment === "..") parts.pop();
+        else parts.push(segment);
+      }
+      return parts.join("/");
+    };
 
     const seen = new Set();
     const queue = [...roots];
@@ -1496,9 +1515,13 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
           // Inside a `.d.ts`, TypeScript resolves a `./x.js` specifier to
           // `x.d.ts` — following it literally would demand a file that neither
           // exists nor needs to, while skipping the declaration graph entirely.
-          const dep = name.endsWith(".d.ts")
-            ? m[1].slice(2).replace(/\.js$/, ".d.ts")
-            : m[1].slice(2);
+          const spec = name.endsWith(".d.ts") ? m[1].replace(/\.js$/, ".d.ts") : m[1];
+          // Resolved against the importer's directory, not the package root.
+          // Everything is flat today, so this changes nothing — but the day an
+          // entry moves into a subdirectory, `./dep.mjs` stops meaning
+          // `dep.mjs`, and a guard that looked at the root would check the
+          // wrong file or silently find nothing.
+          const dep = resolveFrom(name, spec);
           assert.ok(
             shipped.has(dep),
             `packaging: ${name} imports ./${dep}, which package.json's "files" does not ship`,
@@ -1560,6 +1583,18 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       2,
       "cli: the socket resets at each processor record",
     );
+    // Nothing promises `physical id` is printed before `core id`; two sockets
+    // of two cores written the other way round are still four cores.
+    {
+      let text = "";
+      for (const pkg of [0, 1]) {
+        for (const core of [0, 1]) {
+          text += `processor\t: 0\ncore id\t: ${core}\nphysical id\t: ${pkg}\n\n`;
+        }
+      }
+      assert.equal(jobs.physicalCoresFromCpuinfo(text), 4, "cli: either field order reads the same");
+    }
+
     // But a file that names no socket at all is still usable: every core lands
     // under one unnamed socket, which is what a single-socket VM reports.
     assert.equal(

@@ -17,21 +17,21 @@ Conformance is tracked separately as a ratchet against the official
   the npm CLI, wherever the core count can be known — Linux, from
   `/proc/cpuinfo`. Off Linux, and on a Linux that publishes no topology, the
   default stays the CPU count, exactly as before. A compile is pure
-  computation, so two hyperthreads on one core
-  contend for the same execution units rather than overlapping each other's
-  stalls. On a Ryzen 7 8745HS (8 cores / 16 threads) over 138 Lichess
-  stylesheets, at each CLI's own default: the binary goes 229 ms -> 207 ms and
-  the npm CLI 444 ms -> 364 ms, with byte-identical output (138 of 138). On a machine
-  without SMT the two counts are equal and nothing changes. `-j N` still means
-  exactly what it says.
+  computation, so two hyperthreads on one core contend for the same execution
+  units rather than overlapping each other's stalls. On a Ryzen 7 8745HS (8
+  cores / 16 threads) over 138 Lichess stylesheets, at each CLI's own default:
+  the binary goes 229 ms -> 207 ms and the npm CLI 444 ms -> 364 ms, with
+  byte-identical output (138 of 138). On a machine without SMT the two counts
+  are equal and nothing changes. `-j N` still means exactly what it says.
 
   The count comes from `/proc/cpuinfo` on Linux and is capped by what the
   process may actually use, so an affinity mask (`taskset`, a cpuset) or a
   cgroup CPU quota (`docker --cpus`, a Kubernetes CPU limit, a systemd
-  `CPUQuota=`) still wins — on every supported Node, including the versions
-  before `availableParallelism` existed to account for them, and whether the
-  quota sits on the process's own cgroup or on a slice above it. It
-  is deliberately not the number of cores *inside* an affinity mask: SMT only
+  `CPUQuota=`) still wins, whether the quota sits on the process's own cgroup
+  or on a slice above it. Node >= 18.14 and the binary get this from the
+  runtime; below that the npm CLI reads the standard `/sys/fs/cgroup` paths
+  itself, and a hierarchy mounted elsewhere falls back to the core count. It is
+  deliberately not the number of cores *inside* an affinity mask: SMT only
   stops paying once enough cores are in play, and restricted to two cores,
   using both SMT siblings measured 50% faster.
 

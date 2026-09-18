@@ -231,23 +231,42 @@ fn jobs_from(logical: usize, cpuinfo: Option<&str>) -> usize {
 /// sockets, so deduplicating on it halves a dual-socket machine.
 fn physical_cores(cpuinfo: &str) -> Option<usize> {
     let mut cores = std::collections::BTreeSet::new();
-    let mut package = "";
+    // Buffered per record rather than inserted on sight, for two reasons: a
+    // file may name the socket for some processors and not others, and nothing
+    // promises `physical id` is printed before `core id`. Either way, inserting
+    // early files the core under a socket the kernel never gave it.
+    let mut package: Option<&str> = None;
+    let mut core: Option<&str> = None;
+    let mut end_of_record = |package: &mut Option<&str>, core: &mut Option<&str>| {
+        if let Some(id) = core.take() {
+            cores.insert((package.take().unwrap_or("").to_string(), id.to_string()));
+        }
+        *package = None;
+    };
     for line in cpuinfo.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
         match key.trim() {
-            // The socket resets here rather than carrying over: a file that
-            // names it for some processors and not others must not file the
-            // later ones under whichever socket happened to come before.
-            "processor" => package = "",
-            "physical id" => package = value.trim(),
+            "processor" => end_of_record(&mut package, &mut core),
+            "physical id" => {
+                // Seeing a field this record already has means the previous
+                // record ended, whether or not a `processor` line said so.
+                if package.is_some() {
+                    end_of_record(&mut package, &mut core);
+                }
+                package = Some(value.trim());
+            }
             "core id" => {
-                cores.insert((package.to_string(), value.trim().to_string()));
+                if core.is_some() {
+                    end_of_record(&mut package, &mut core);
+                }
+                core = Some(value.trim());
             }
             _ => {}
         }
     }
+    end_of_record(&mut package, &mut core);
     (!cores.is_empty()).then_some(cores.len())
 }
 
@@ -295,6 +314,21 @@ mod default_jobs_tests {
         // giving-up: that is what a single-socket VM reports.
         let unnamed = "processor\t: 0\ncore id\t: 0\n\nprocessor\t: 1\ncore id\t: 0\n";
         assert_eq!(physical_cores(unnamed), Some(1));
+    }
+
+    #[test]
+    fn the_fields_may_come_in_either_order() {
+        // Nothing promises `physical id` is printed first. Two sockets of two
+        // cores, written the other way round, are still four cores.
+        let mut text = String::new();
+        for package in 0..2 {
+            for core in 0..2 {
+                text.push_str(&format!(
+                    "processor\t: 0\ncore id\t: {core}\nphysical id\t: {package}\n\n"
+                ));
+            }
+        }
+        assert_eq!(physical_cores(&text), Some(4));
     }
 
     #[test]

@@ -77,16 +77,34 @@ export function allowedCpusFromStatus(text) {
  */
 export function physicalCoresFromCpuinfo(text) {
   const cores = new Set();
-  let pkg = "";
+  // Buffered per record rather than inserted on sight: nothing promises that
+  // `physical id` is printed before `core id`, and inserting early would file
+  // the core under the wrong socket — or under none — if it is not.
+  let pkg;
+  let core;
+  const endOfRecord = () => {
+    if (core !== undefined) cores.add(`${pkg ?? ""}/${core}`);
+    pkg = undefined;
+    core = undefined;
+  };
   for (const line of text.split("\n")) {
     const at = line.indexOf(":");
     if (at < 0) continue;
     const key = line.slice(0, at).trim();
     const value = line.slice(at + 1).trim();
-    if (key === "processor") pkg = "";
-    else if (key === "physical id") pkg = value;
-    else if (key === "core id") cores.add(`${pkg}/${value}`);
+    // A record ends at `processor`, and also at a field the current record
+    // already has — a file that omits `processor` lines would otherwise fold
+    // into a single core.
+    if (key === "processor") endOfRecord();
+    else if (key === "physical id") {
+      if (pkg !== undefined) endOfRecord();
+      pkg = value;
+    } else if (key === "core id") {
+      if (core !== undefined) endOfRecord();
+      core = value;
+    }
   }
+  endOfRecord();
   return cores.size > 0 ? cores.size : undefined;
 }
 
@@ -200,6 +218,15 @@ function defaultReadStatus() {
  *
  * cgroup v1 mounts the cpu controller as `cpu` on some distributions and
  * `cpu,cpuacct` on others, so both names are tried.
+ *
+ * What this does NOT do is discover the mountpoint from
+ * `/proc/self/mountinfo`. A hierarchy mounted somewhere other than
+ * `/sys/fs/cgroup` — v2 under `/sys/fs/cgroup/unified` in hybrid mode, say —
+ * is not found, and the default then falls back to the core count, which is
+ * what it was before any of this existed rather than something worse. That
+ * trade is deliberate: mount discovery is a second parser whose failure mode
+ * is a silently wrong worker count on machines none of this was tested on,
+ * and `-j` is one flag away for anyone it matters to.
  */
 export function cgroupQuotaFiles(procSelfCgroup) {
   const v2 = [];
