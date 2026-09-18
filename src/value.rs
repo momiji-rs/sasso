@@ -290,16 +290,26 @@ impl CalcNode {
             CalcNode::Str(s) => out.push_str(s),
             CalcNode::Op { op, left, right } => {
                 self.write_operand(out, left, *op, false, compressed);
-                // A `+ -n` / `- -n` numeric right operand flips the operator
-                // (only for a finite negative; non-finite values keep their
-                // canonical `infinity`/`NaN` spelling).
-                if matches!(op, CalcOp::Add | CalcOp::Sub) && !compressed {
+                // A `+ -n` / `- -n` numeric right operand flips the operator,
+                // in every output style: dart-sass does this when it builds the
+                // operation (`SassCalculation._operateInternal`: `right.value <
+                // 0` → negate the operand and swap the operator), so the flip
+                // is already baked into the tree it serializes. The test is
+                // exactly `< 0`, which excludes `-0` and NaN but INCLUDES
+                // `-infinity` (`+ -infinity * 1em` → `- infinity * 1em`).
+                //
+                // `write_calc_number`, not `write_css`, because a non-finite or
+                // complex-unit operand renders as a `*`/`/` chain here rather
+                // than a `calc()` constant. It needs no parentheses under an
+                // add/sub parent: `write_operand` would only parenthesize a
+                // `Mul`-precedence child of a *higher*-precedence parent.
+                if matches!(op, CalcOp::Add | CalcOp::Sub) {
                     if let CalcNode::Number(n) = right.as_ref() {
-                        if n.value.is_finite() && n.value.is_sign_negative() && n.value != 0.0 {
+                        if n.value < 0.0 {
                             out.push(' ');
                             out.push_str(if *op == CalcOp::Add { "-" } else { "+" });
                             out.push(' ');
-                            n.copy_units(-n.value).write_css(out, compressed);
+                            write_calc_number(out, &n.copy_units(-n.value), compressed);
                             return;
                         }
                     }
@@ -2426,19 +2436,24 @@ impl ModernColor {
                 );
                 self.wrap_modern("oklch", &body, compressed)
             }
-            // Predefined color() spaces.
+            // Predefined color() spaces. The space name and the three channels
+            // are separated by MANDATORY whitespace — `color(display-p3 .5 .2
+            // .9)` is one identifier followed by three numbers, so dropping
+            // those spaces when compressed produced `color(display-p3.5.2.9)`,
+            // which is not a color at all. Only the `/` before the alpha may
+            // lose its spaces, so `sp` applies there and nowhere else.
             _ => {
-                let body = format!(
-                    "{}{sp}{}{sp}{}",
-                    self.chan(0, compressed),
-                    self.chan(1, compressed),
-                    self.chan(2, compressed),
-                );
                 let space = self.space.name();
+                let c0 = self.chan(0, compressed);
+                let c1 = self.chan(1, compressed);
+                let c2 = self.chan(2, compressed);
                 if self.is_opaque() {
-                    format!("color({space}{sp}{body})")
+                    format!("color({space} {c0} {c1} {c2})")
                 } else {
-                    format!("color({space}{sp}{body}{sp}/{sp}{})", self.alpha_str(compressed))
+                    format!(
+                        "color({space} {c0} {c1} {c2}{sp}/{sp}{})",
+                        self.alpha_str(compressed)
+                    )
                 }
             }
         }

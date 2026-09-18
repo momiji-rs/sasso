@@ -147,6 +147,58 @@ fn parity_compressed_color_shortest_form() {
     }
 }
 
+/// The predefined `color()` spaces separate the space name and the channels
+/// with mandatory whitespace, which compressed output must NOT eat. The
+/// conformance suite only runs expanded output, so this is the live guard.
+#[test]
+fn parity_compressed_color_function_spacing() {
+    for scss in [
+        "a { x: color(display-p3 0.5 0.2 0.9); }",
+        "a { x: color(display-p3 0.5 0.2 0.9 / 0.5); }",
+        "a { x: color(xyz 0.1 0.2 0.3); }",
+        "a { x: color(xyz-d50 -0.5 1.5 0.25 / 0); }",
+        "a { x: color(srgb-linear 0.1 0.2 0.3 / 0.25); }",
+        "a { x: color(a98-rgb 1 0.5 0); }",
+        "a { x: color(prophoto-rgb 0 0 0); }",
+        "a { x: color(display-p3 none 0.2 0.9); }",
+        "a { x: color(rec2020 0.5 none none / none); }",
+        "a { x: rgb(1 2 none); }",
+        "a { x: rgb(1 2 none / 0.5); }",
+    ] {
+        assert_parity_compressed(scss);
+        assert_parity(scss);
+    }
+}
+
+/// A calc's `+`/`-` flips for a negative numeric right operand in BOTH styles,
+/// and the sign test is exactly `< 0`: `-0` and NaN keep the operator,
+/// `-infinity` flips.
+#[test]
+fn parity_calc_negative_right_operand_flip() {
+    for scss in [
+        "a { x: calc(var(--a) + -2px); }",
+        "a { x: calc(var(--a) - -2px); }",
+        "a { x: calc(100% + -2px); }",
+        "a { x: calc(100% - -2px); }",
+        "a { x: calc(1px + -2em); }",
+        "a { x: calc(var(--a) + -0.5px); }",
+        "a { x: calc(var(--a) + -2); }",
+        "a { x: calc(var(--a) + -0px); }",
+        "a { x: calc((var(--a) + -2px) * 3); }",
+        "a { x: calc(var(--a) + -2px * 3); }",
+        "a { x: calc(var(--a) - -2px / 4); }",
+        "a { x: min(var(--a), -2px, calc(1px + -2px)); }",
+        "@use 'sass:math'; a { x: calc(1px + math.div(-1, 0) * 1em); }",
+        "@use 'sass:math'; a { x: calc(1px - math.div(-1, 0) * 1em); }",
+        "@use 'sass:math'; a { x: calc(var(--a) + math.div(-1, 0)); }",
+        "@use 'sass:math'; a { x: calc(1px + math.div(0, 0) * 1em); }",
+        "@use 'sass:math'; a { x: calc(1px - math.div(0, 0) * 1em); }",
+    ] {
+        assert_parity(scss);
+        assert_parity_compressed(scss);
+    }
+}
+
 #[test]
 fn parity_nesting_combinators() {
     assert_parity(".a, .b {\n  margin: 0;\n  > .c { padding: 1px; }\n  &.active { color: red; }\n  .d & { color: blue; }\n}\n.menu { li + li { margin-left: 5px; } }\n");
