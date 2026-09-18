@@ -11,6 +11,23 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Changed
+
+- **`-j` defaults to physical cores, not SMT threads**, in both the binary and
+  the npm CLI. A compile is pure computation, so two hyperthreads on one core
+  contend for the same execution units rather than overlapping each other's
+  stalls. On a Ryzen 7 8745HS (8 cores / 16 threads) over 138 Lichess
+  stylesheets, at each CLI's own default: the binary goes 241 ms -> 219 ms and
+  the npm CLI 451 ms -> 342 ms, with byte-identical output. On a machine
+  without SMT the two counts are equal and nothing changes. `-j N` still means
+  exactly what it says.
+
+  The count comes from `/proc/cpuinfo` on Linux and is capped by what the
+  process may actually use, so a `taskset` or cgroup restriction still wins. It
+  is deliberately not the number of cores *inside* an affinity mask: SMT only
+  stops paying once enough cores are in play, and restricted to two cores,
+  using both SMT siblings measured 50% faster.
+
 ## [0.15.0] - 2026-09-17
 
 _The release that makes `npm install sasso` as fast as the binary the release

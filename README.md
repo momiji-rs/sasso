@@ -195,8 +195,8 @@ $ echo '.a{color:red}' | sasso --stdin
 ```
 
 Several inputs (`in:out` pairs or a directory pair) compile in parallel, one
-worker per CPU (`-j N` caps it), with diagnostics reported in command-line
-order. Supported dart-sass flags: `--[no-]source-map`, `--source-map-urls`,
+worker per physical core (`-j N` caps it), with diagnostics reported in
+command-line order. Supported dart-sass flags: `--[no-]source-map`, `--source-map-urls`,
 `--[no-]embed-sources`, `--[no-]embed-source-map`, `--[no-]error-css`,
 `--[no-]charset`, `-q/--quiet`, `--quiet-deps`, `--stop-on-error`,
 `--[no-]unicode`, `--[no-]color` (accepted; sasso never colors), `--indented`,

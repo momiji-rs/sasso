@@ -102,7 +102,8 @@ Options:
   -w, --watch                        Recompile when the input or any dependency
                                      changes (requires <input> <output>).
   -j, --jobs <N>                     Compile at most N files at once
-                                     (default: one per CPU).
+                                     (default: one per core, or per CPU
+                                     where the core count is unknown).
       --loop <N>                     Recompile in-process N times and report
                                      throughput (stdout inputs only).
   -c, --[no-]color                   Accepted for compatibility (no-op: output is
@@ -1020,8 +1021,9 @@ async function main() {
  * Compile `jobs`, in this thread or across worker threads.
  *
  * The jobs are independent — each reads one input and writes one output — so
- * the native CLI gives them one worker per CPU (`available_parallelism`) and
- * this one now does the same, which is what `-j/--jobs` has always claimed.
+ * both CLIs give them one worker per physical core (see `_jobs.mjs`, and
+ * `default_jobs` in `src/main.rs`, which agree on the rule and on why it is
+ * not the CPU count), which is what `-j/--jobs` has always claimed.
  * Sequentially, the difference is most of the gap between the two: the 138
  * lila stylesheets that build without npm dependencies take 704 ms through the
  * binary at `-j 1` and 138 ms at its default (measured 2026-09-17, the same

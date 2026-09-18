@@ -11,8 +11,8 @@
 //! ```
 //!
 //! The positional grammar is dart-sass's (`<input> [output]`); several files
-//! are compiled through `in:out` pairs, in parallel, one worker per CPU
-//! (`-j/--jobs N` to cap it), with diagnostics still reported in command-line
+//! are compiled through `in:out` pairs, in parallel, one worker per physical
+//! core (`-j/--jobs N` to cap it), with diagnostics still reported in command-line
 //! order. Exit codes follow dart-sass too: `64` for a usage error, `65` for a
 //! compile error, `66` when an input cannot be read.
 
@@ -80,7 +80,8 @@ WARNINGS:
 
 OTHER:
     -j, --jobs <N>                      compile at most N files at once
-                                        (default: one per CPU)
+                                        (default: one per core, or per CPU
+                                        where the core count is unknown)
         --[no-]stop-on-error            don't start more files once one fails
     -c, --[no-]color                    accepted for dart-sass compatibility
                                         (no-op: sasso never colors output)
@@ -147,7 +148,7 @@ struct Cli {
     stop_on_error: bool,
     /// Emit `@charset`/BOM for non-ASCII output (dart-sass `--charset`).
     charset: bool,
-    /// Worker-thread cap (`-j`); `None` = one per CPU.
+    /// Worker-thread cap (`-j`); `None` = `default_jobs`, one per core.
     jobs: Option<usize>,
 }
 
