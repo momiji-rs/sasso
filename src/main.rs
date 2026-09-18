@@ -167,6 +167,85 @@ enum SourceMapUrls {
     Absolute,
 }
 
+/// How many files to compile at once when `-j` is not given.
+///
+/// `available_parallelism` counts SMT threads. A compile is pure computation,
+/// so two hyperthreads on one core contend for the same execution units rather
+/// than overlapping each other's stalls — past the core count, more workers is
+/// slower. Measured on a Ryzen 7 8745HS (8 cores / 16 threads) over 138
+/// Lichess stylesheets: 208 ms at `-j 8` against 235 ms at `-j 16`.
+///
+/// Linux publishes the topology in `/proc/cpuinfo`, which is a read rather
+/// than a process spawn. Apple silicon has no SMT, so the logical count is
+/// already right there; other platforms keep it rather than grow a dependency
+/// or an `unsafe` sysctl call for a number that is, at worst, the old default.
+fn default_jobs() -> usize {
+    let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    if !cfg!(target_os = "linux") {
+        return logical;
+    }
+    match std::fs::read_to_string("/proc/cpuinfo") {
+        // Never more than the kernel offers this process: a cgroup or `taskset`
+        // cap shows up in `available_parallelism`, not in `/proc/cpuinfo`.
+        Ok(text) => physical_cores(&text).map_or(logical, |p| p.min(logical).max(1)),
+        Err(_) => logical,
+    }
+}
+
+/// Physical cores in `/proc/cpuinfo` text, or `None` when it reports no
+/// topology — containers and VMs often do not, and a number derived from
+/// nothing is worse than the kernel's own count.
+///
+/// A core is a `(physical id, core id)` pair: `core id` alone repeats across
+/// sockets, so deduplicating on it halves a dual-socket machine.
+fn physical_cores(cpuinfo: &str) -> Option<usize> {
+    let mut cores = std::collections::BTreeSet::new();
+    let mut package = "";
+    for line in cpuinfo.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        match key.trim() {
+            "physical id" => package = value.trim(),
+            "core id" => {
+                cores.insert((package.to_string(), value.trim().to_string()));
+            }
+            _ => {}
+        }
+    }
+    (!cores.is_empty()).then_some(cores.len())
+}
+
+#[cfg(test)]
+mod default_jobs_tests {
+    use super::physical_cores;
+
+    #[test]
+    fn eight_threads_on_four_cores_read_as_four() {
+        let text: String = (0..8)
+            .map(|i| format!("processor\t: {i}\nphysical id\t: 0\ncore id\t: {}\n\n", i / 2))
+            .collect();
+        assert_eq!(physical_cores(&text), Some(4));
+    }
+
+    #[test]
+    fn two_sockets_of_four_read_as_eight_not_four() {
+        let mut text = String::new();
+        for package in 0..2 {
+            for core in 0..4 {
+                text.push_str(&format!("physical id\t: {package}\ncore id\t: {core}\n\n"));
+            }
+        }
+        assert_eq!(physical_cores(&text), Some(8));
+    }
+
+    #[test]
+    fn no_topology_reported_is_no_answer() {
+        assert_eq!(physical_cores("processor\t: 0\nmodel name\t: Whatever\n"), None);
+        assert_eq!(physical_cores(""), None);
+    }
+}
+
 fn main() -> ExitCode {
     // Touch stdout/stderr once before any compile scope: std lazily heap-
     // allocates their lock (a boxed pthread_mutex_t on macOS) on first use,
@@ -850,9 +929,7 @@ fn run(cli: Cli) -> ExitCode {
         return run_loop(&units, &shared, n);
     }
 
-    let jobs = cli
-        .jobs
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let jobs = cli.jobs.unwrap_or_else(default_jobs);
     let outcomes = compile_all(&units, &shared, jobs, cli.stop_on_error);
 
     // Report in command-line order: each unit's diagnostics, then its CSS.
