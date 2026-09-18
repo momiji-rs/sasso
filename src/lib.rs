@@ -133,6 +133,9 @@ pub struct Options<'a> {
     /// (a file this set marks, see [`FsImporter::dependencies`]) are dropped
     /// before they are counted or delivered.
     pub(crate) quiet_deps: Option<DependencySet>,
+    /// dart-sass `silenceDeprecations`: deprecation ids dropped before they
+    /// are counted or delivered. Empty means every deprecation is emitted.
+    pub(crate) silenced_deprecations: Vec<String>,
     /// Emit a `@charset "UTF-8";` (expanded) / U+FEFF BOM (compressed) prefix
     /// when the output contains non-ASCII (dart-sass `charset`, default `true`).
     /// `false` suppresses it.
@@ -204,6 +207,7 @@ impl Default for Options<'_> {
             functions: Vec::new(),
             warn: None,
             quiet_deps: None,
+            silenced_deprecations: Vec::new(),
             charset: true,
         }
     }
@@ -307,6 +311,27 @@ impl<'a> Options<'a> {
     #[must_use]
     pub fn with_quiet_deps(mut self, deps: DependencySet) -> Self {
         self.quiet_deps = Some(deps);
+        self
+    }
+
+    /// dart-sass `silenceDeprecations` / `--silence-deprecation`: drop these
+    /// deprecations by id, keeping every other warning.
+    ///
+    /// Applied where `quiet_deps` is, which is before the per-id cap — so a
+    /// silenced deprecation neither consumes one of the five printed slots nor
+    /// counts towards the "N repetitive deprecation warnings omitted" footer.
+    /// Filtering in a warn handler instead leaves that footer behind, counting
+    /// warnings the caller asked not to see (dart prints nothing at all).
+    ///
+    /// Ids sasso never emits are accepted and do nothing: a build script
+    /// written for `sass` should not fail here for naming one.
+    #[must_use]
+    pub fn with_silenced_deprecations<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.silenced_deprecations = ids.into_iter().map(Into::into).collect();
         self
     }
 
@@ -480,6 +505,7 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
         glyphs,
         warn: options.warn.as_ref(),
         quiet_deps: options.quiet_deps.as_ref(),
+        silenced_deprecations: &options.silenced_deprecations,
         plain_css: matches!(options.syntax, Syntax::Css),
         source_map: true,
     });
@@ -575,6 +601,7 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
         glyphs,
         warn: options.warn.as_ref(),
         quiet_deps: options.quiet_deps.as_ref(),
+        silenced_deprecations: &options.silenced_deprecations,
         plain_css: matches!(options.syntax, Syntax::Css),
         source_map: false,
     });

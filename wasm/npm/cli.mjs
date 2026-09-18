@@ -85,6 +85,8 @@ Options:
                                      How the map references its sources
                                      (default: relative).
   -q, --[no-]quiet                   Suppress @warn / @debug / deprecation output.
+      --silence-deprecation <IDS>    Don't print these deprecations
+                                     (comma-separated; repeatable).
       --[no-]quiet-deps              Drop deprecation warnings raised inside
                                      dependencies: stylesheets reached through
                                      a load path, and whatever those load
@@ -129,6 +131,21 @@ function packageVersion() {
     return "unknown";
   }
 }
+
+// Deprecation ids `--silence-deprecation` accepts, matching the native CLI's
+// list in `src/main.rs` — which was probed from dart-sass 1.104.1 one id at a
+// time rather than transcribed. Most name deprecations sasso never emits;
+// accepting them is the point, because a build script written for `sass` must
+// not fail here for naming one it has.
+const DEPRECATION_IDS = new Set([
+  "abs-percent", "bogus-combinators", "call-string", "color-4-api",
+  "color-functions", "color-module-compat", "css-function-mixin",
+  "duplicate-var-flags", "elseif", "feature-exists", "fs-importer-cwd",
+  "function-units", "global-builtin", "import", "legacy-js-api",
+  "mixed-decls", "moz-document", "new-global", "null-alpha",
+  "relative-canonical", "slash-div", "strict-unary", "type-function",
+  "user-authored",
+]);
 
 function fail(msg) {
   writeStderrSync(String(msg).replace(/\n?$/, "\n"));
@@ -180,6 +197,7 @@ function parseArgs(argv) {
     charset: true,
     quiet: false,
     quietDeps: false,
+    silenceDeprecations: [],
     stopOnError: false,
     noCss: false,
     // Tri-state: dart's default is "relative", but only an EXPLICIT
@@ -292,6 +310,17 @@ function parseArgs(argv) {
       const v = takeValue(inline);
       if (v !== "expanded" && v !== "compressed") fail(`error: unknown style "${v}"`);
       opts.style = v;
+    } else if (a === "--silence-deprecation" || a.startsWith("--silence-deprecation=")) {
+      const inline = a.startsWith("--silence-deprecation=") ? a.slice(22) : undefined;
+      const v = takeValue(inline);
+      if (!v) fail("error: --silence-deprecation requires a value");
+      for (const raw of v.split(",")) {
+        const id = raw.trim();
+        // dart rejects an unknown id rather than ignoring it, so a typo is
+        // caught instead of quietly leaving the warning in place.
+        if (!DEPRECATION_IDS.has(id)) fail(`error: Invalid deprecation "${id}".`);
+        if (!opts.silenceDeprecations.includes(id)) opts.silenceDeprecations.push(id);
+      }
     } else if (a === "-I" || a === "--load-path" || a.startsWith("--load-path=") || a.startsWith("-I")) {
       let inline;
       if (a.startsWith("--load-path=")) inline = a.slice(12);
@@ -941,6 +970,11 @@ function commonOptions(opts) {
     // where a file lives would silence the wrong ones and lose the formatted
     // diagnostic for the rest.
     quietDeps: opts.quietDeps,
+    // Also the compiler's job, and for the same reason: filtered out here it
+    // would silence the warnings but still tally them, and the run would end
+    // with "N repetitive deprecation warnings omitted" counting exactly the
+    // ones the caller silenced.
+    silenceDeprecations: opts.silenceDeprecations,
   };
   if (opts.quiet) common.logger = Logger.silent;
   return common;

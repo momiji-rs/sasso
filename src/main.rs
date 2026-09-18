@@ -78,6 +78,9 @@ WARNINGS:
         --[no-]quiet-deps               don't print compiler warnings from
                                         dependencies (stylesheets reached
                                         through load paths)
+        --silence-deprecation <IDS>     don't print these deprecations
+                                        (comma-separated; repeatable), e.g.
+                                        import,global-builtin
 
 OTHER:
     -j, --jobs <N>                      compile at most N files at once
@@ -116,6 +119,8 @@ struct Cli {
     entry: Option<Entry>,
     style: OutputStyle,
     load_paths: Vec<PathBuf>,
+    /// `--silence-deprecation` ids. Empty means every deprecation prints.
+    silenced: Vec<String>,
     /// Force the indented `.sass` syntax (otherwise inferred from the input
     /// path's extension; `--stdin` defaults to SCSS).
     indented: bool,
@@ -379,6 +384,61 @@ enum Action {
     Version,
 }
 
+/// Deprecation ids `--silence-deprecation` accepts.
+///
+/// Probed from dart-sass 1.104.1 one id at a time rather than transcribed:
+/// `--silence-deprecation=<id>` exits 0 for each of these and 64 for anything
+/// else. Most name deprecations sasso does not emit; accepting them anyway is
+/// the point, because a build script written for `sass` must not fail here
+/// just because we have nothing to silence. `deprecation.rs` says which ones
+/// actually reach a warning today.
+const DEPRECATION_IDS: [&str; 24] = [
+    "abs-percent",
+    "bogus-combinators",
+    "call-string",
+    "color-4-api",
+    "color-functions",
+    "color-module-compat",
+    "css-function-mixin",
+    "duplicate-var-flags",
+    "elseif",
+    "feature-exists",
+    "fs-importer-cwd",
+    "function-units",
+    "global-builtin",
+    "import",
+    "legacy-js-api",
+    "mixed-decls",
+    "moz-document",
+    "new-global",
+    "null-alpha",
+    "relative-canonical",
+    "slash-div",
+    "strict-unary",
+    "type-function",
+    "user-authored",
+];
+
+/// Split and validate one `--silence-deprecation` value. dart takes a
+/// comma-separated list, accepts the flag more than once, and rejects an
+/// unknown id with exit 64 — `Invalid deprecation "nope".` — rather than
+/// ignoring it, so a typo is caught instead of silently keeping a warning.
+fn parse_silenced(value: &str, into: &mut Vec<String>) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("--silence-deprecation requires a value".to_string());
+    }
+    for id in value.split(',') {
+        let id = id.trim();
+        if !DEPRECATION_IDS.contains(&id) {
+            return Err(format!("Invalid deprecation \"{id}\"."));
+        }
+        if !into.iter().any(|k| k == id) {
+            into.push(id.to_string());
+        }
+    }
+    Ok(())
+}
+
 fn parse_args(args: &[String]) -> Result<Action, String> {
     let mut cli = Cli {
         positionals: Vec::new(),
@@ -387,6 +447,7 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
         entry: None,
         style: OutputStyle::Expanded,
         load_paths: Vec::new(),
+        silenced: Vec::new(),
         indented: false,
         quiet: false,
         quiet_deps: false,
@@ -469,13 +530,20 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
                 let v = args.get(i).ok_or("--style requires a value")?;
                 cli.style = parse_style(v)?;
             }
+            "--silence-deprecation" => {
+                i += 1;
+                let v = args.get(i).ok_or("--silence-deprecation requires a value")?;
+                parse_silenced(v, &mut cli.silenced)?;
+            }
             "-I" | "--load-path" => {
                 i += 1;
                 let v = args.get(i).ok_or("--load-path requires a value")?;
                 cli.load_paths.push(PathBuf::from(v));
             }
             other => {
-                if let Some(v) = other.strip_prefix("--style=") {
+                if let Some(v) = other.strip_prefix("--silence-deprecation=") {
+                    parse_silenced(v, &mut cli.silenced)?;
+                } else if let Some(v) = other.strip_prefix("--style=") {
                     cli.style = parse_style(v)?;
                 } else if let Some(v) = other.strip_prefix("--load-path=") {
                     cli.load_paths.push(PathBuf::from(v));
@@ -749,6 +817,11 @@ struct Shared {
     charset: bool,
     quiet: bool,
     quiet_deps: bool,
+    /// `--silence-deprecation` ids. Applied where the handler runs rather than
+    /// inside the compiler: `--quiet-deps` is about where a file came FROM,
+    /// which only the importer knows, while this is about which deprecation
+    /// it is, which the event carries.
+    silenced: Vec<String>,
     no_css: bool,
     embed_sources: bool,
     embed_source_map: bool,
@@ -1008,6 +1081,7 @@ fn run(cli: Cli) -> ExitCode {
         charset: cli.charset,
         quiet: cli.quiet,
         quiet_deps: cli.quiet_deps,
+        silenced: cli.silenced.clone(),
         no_css: cli.no_css,
         embed_sources: cli.embed_sources,
         embed_source_map: cli.embed_source_map,
@@ -1177,6 +1251,15 @@ fn options_for<'a>(
         .with_charset(shared.charset)
         .with_source_map_include_sources(shared.embed_sources)
         .with_warn_handler(warn);
+    let opts = if shared.silenced.is_empty() {
+        opts
+    } else {
+        // Not filtered in the warn handler: silenced deprecations must not
+        // reach the per-id cap, or the run ends with "N repetitive deprecation
+        // warnings omitted" counting warnings the caller silenced. Measured
+        // against dart-sass 1.104.1, which prints nothing at all there.
+        opts.with_silenced_deprecations(shared.silenced.iter().cloned())
+    };
     if shared.quiet_deps {
         // dart's `--quiet-deps`: compiler warnings from dependencies —
         // stylesheets the importer reached through a load path, and whatever

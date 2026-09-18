@@ -429,6 +429,67 @@ const cli = (args, input) =>
   );
 }
 assert.ok(cli(["--help"]).includes("Usage: sasso"), "cli: --help");
+
+// --silence-deprecation: drop one deprecation and keep everything else, which
+// is the whole reason to reach for it instead of --quiet. lichess asked for it
+// (momiji-rs/sasso#24) after moving off --quiet precisely so the warnings they
+// still intend to fix keep printing.
+//
+// ON BOTH ENGINES. The CLI silently falls back to wasm where no native addon
+// is prebuilt — musl and Windows today — and a flag that works on one engine
+// and does nothing on the other is worse than one that does not exist,
+// because nothing says so. This caught exactly that while it was being
+// written: the native path ignored the option and printed all six lines.
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-silence-"));
+  // Twelve imports, so the per-id cap fires: dart prints five warnings and a
+  // "7 repetitive deprecation warnings omitted" footer.
+  for (let i = 0; i < 12; i++) writeFileSync(join(dir, `dep${i}.scss`), `.d${i} { color: red }\n`);
+  const entry = join(dir, "entry.scss");
+  writeFileSync(entry, Array.from({ length: 12 }, (_v, i) => `@import "dep${i}";`).join("\n") + "\n");
+
+  const stderrOf = (args, engine) =>
+    spawnSync(process.execPath, [cliPath, ...args], {
+      encoding: "utf8",
+      env: { ...process.env, SASSO_ENGINE: engine },
+    }).stderr;
+
+  for (const engine of ["native", "wasm"]) {
+    const loud = stderrOf([entry, "--no-css"], engine);
+    assert.ok(loud.includes("DEPRECATION WARNING [import]"), `cli: the deprecation prints (${engine})`);
+    assert.ok(loud.includes("omitted"), `cli: the repetition cap fires (${engine})`);
+
+    const quiet = stderrOf([entry, "--no-css", "--silence-deprecation=import"], engine);
+    // Not merely "no DEPRECATION line": the footer has to go too. Filtering in
+    // a warn handler instead silences the warnings and still counts them, so
+    // the run ends by reporting omissions the caller asked not to hear about —
+    // dart prints nothing at all here, and that is what this pins.
+    assert.equal(quiet.trim(), "", `cli: --silence-deprecation leaves no trace (${engine})`);
+
+    const other = stderrOf([entry, "--no-css", "--silence-deprecation=color-functions"], engine);
+    assert.ok(
+      other.includes("DEPRECATION WARNING [import]"),
+      `cli: silencing one id leaves the others (${engine})`,
+    );
+  }
+
+  // An id dart does not know is a usage error there, so a typo is caught
+  // rather than quietly leaving the warning in place.
+  const bad = spawnSync(process.execPath, [cliPath, entry, "--no-css", "--silence-deprecation=nope"], {
+    encoding: "utf8",
+  });
+  assert.notEqual(bad.status, 0, "cli: an unknown deprecation id is rejected");
+  assert.ok(bad.stderr.includes('Invalid deprecation "nope"'), "cli: … with dart's wording");
+  // dart exits 64 here and the native CLI matches it; this one exits 1 because
+  // every npm-CLI failure does (#91), which is a separate ticket.
+
+  // Ids sasso never emits are accepted and do nothing: a build script written
+  // for `sass` must not fail for naming one.
+  const unknownToUs = spawnSync(process.execPath, [cliPath, entry, "--no-css", "--silence-deprecation=mixed-decls"], {
+    encoding: "utf8",
+  });
+  assert.equal(unknownToUs.status, 0, "cli: an id we never emit is still accepted");
+}
 assert.equal(cli(["--stdin"], ".a{b: 1 + 2}\n").trim(), ".a {\n  b: 3;\n}", "cli: --stdin compile");
 assert.equal(cli(["--style=compressed", "--stdin"], ".a{b:1+2}\n").trim(), ".a{b:3}", "cli: --style=compressed");
 assert.ok(cli([mainRel]).includes("color: blue"), "cli: file compile resolves relative @use");

@@ -383,9 +383,17 @@ impl Importer for HostImporter {
 /// Writes the result byte length to `*out_len_ptr` and `1` (ok) / `0` (error)
 /// to `*ok_ptr`, and returns a pointer to the UTF-8 result (CSS / framed map on
 /// success, error message on failure). Free it with `sasso_free(ptr, *out_len_ptr)`.
+/// `sasso_compile2` with `silenceDeprecations` added: `silenced_ptr`/
+/// `silenced_len` are a comma-separated list of deprecation ids to drop
+/// (`import,global-builtin`), empty for none.
+///
+/// A new entry point rather than two more parameters on the old one, so a host
+/// built against `sasso_compile2` keeps linking — the same reason `compile2`
+/// exists beside the original. `compile2` now delegates here with an empty
+/// list, so there is one body to keep correct.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub extern "C" fn sasso_compile2(
+pub extern "C" fn sasso_compile3(
     input_ptr: *const u8,
     input_len: usize,
     compressed: u8,
@@ -398,6 +406,8 @@ pub extern "C" fn sasso_compile2(
     charset: u8,
     quiet_deps: u8,
     unicode: u8,
+    silenced_ptr: *const u8,
+    silenced_len: usize,
     out_len_ptr: *mut usize,
     ok_ptr: *mut u8,
 ) -> *mut u8 {
@@ -413,6 +423,15 @@ pub extern "C" fn sasso_compile2(
     } else {
         // SAFETY: JS guarantees [url_ptr, url_len) is a live UTF-8 buffer.
         std::str::from_utf8(unsafe { std::slice::from_raw_parts(url_ptr, url_len) }).ok()
+    };
+
+    // SAFETY: the host wrote `silenced_len` bytes at `silenced_ptr`, as for
+    // the url above. Invalid UTF-8 means "silence nothing" rather than an
+    // error: the ids are a filter, and losing one only prints more.
+    let silenced: &str = if silenced_ptr.is_null() || silenced_len == 0 {
+        ""
+    } else {
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(silenced_ptr, silenced_len) }).unwrap_or("")
     };
 
     let syntax = match syntax {
@@ -445,6 +464,12 @@ pub extern "C" fn sasso_compile2(
                 // compiler consults it when a deprecation fires — so a file is
                 // judged by how it was REACHED, not by where it sits.
                 opts = opts.with_quiet_deps(importer.deps.clone());
+            }
+            if !silenced.is_empty() {
+                // Dropped inside the compiler, like `quiet_deps`, so a
+                // silenced deprecation never reaches the per-id cap and the
+                // run cannot end by counting warnings the caller silenced.
+                opts = opts.with_silenced_deprecations(silenced.split(','));
             }
             // Register host custom functions (each bridges to host_call_function).
             let sigs: Vec<String> = FUNCTIONS.with(|f| f.borrow().clone());
@@ -487,6 +512,46 @@ pub extern "C" fn sasso_compile2(
     };
 
     into_result(bytes, ok, out_len_ptr, ok_ptr)
+}
+
+/// The pre-`silenceDeprecations` entry point, kept so a host built against it
+/// still links. Delegates with an empty id list.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn sasso_compile2(
+    input_ptr: *const u8,
+    input_len: usize,
+    compressed: u8,
+    syntax: u8,
+    use_importer: u8,
+    url_ptr: *const u8,
+    url_len: usize,
+    want_map: u8,
+    include_sources: u8,
+    charset: u8,
+    quiet_deps: u8,
+    unicode: u8,
+    out_len_ptr: *mut usize,
+    ok_ptr: *mut u8,
+) -> *mut u8 {
+    sasso_compile3(
+        input_ptr,
+        input_len,
+        compressed,
+        syntax,
+        use_importer,
+        url_ptr,
+        url_len,
+        want_map,
+        include_sources,
+        charset,
+        quiet_deps,
+        unicode,
+        std::ptr::null(),
+        0,
+        out_len_ptr,
+        ok_ptr,
+    )
 }
 
 /// Run an engine-routed `Value` method (e.g. `SassNumber.convert`,

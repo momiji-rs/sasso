@@ -952,6 +952,9 @@ pub(crate) struct EvalOptions<'a> {
     /// Diagnostic handler (dart-sass `logger`). When set, `@warn`/`@debug`/
     /// deprecation warnings are delivered here instead of printed to stderr.
     pub warn: Option<&'a crate::WarnHandler>,
+    /// Deprecation ids to drop (dart-sass `silenceDeprecations`), applied
+    /// beside `quiet_deps` so they never reach the per-id cap.
+    pub silenced_deprecations: &'a [String],
     /// dart-sass `quietDeps`: deprecations raised inside a file this set marks
     /// as a dependency are dropped before they are counted or delivered.
     pub quiet_deps: Option<&'a crate::DependencySet>,
@@ -2336,6 +2339,13 @@ impl<'a> Evaluator<'a> {
             if deps.is_dependency(self.current_path()) {
                 return;
             }
+        }
+        // `silenceDeprecations` drops by id, in the same place and for the
+        // same reason: filtering further out silences the warnings but still
+        // tallies them, so the footer reports omissions the caller asked not
+        // to hear about. dart prints nothing at all.
+        if self.options.silenced_deprecations.iter().any(|id| id == dep.id) {
+            return;
         }
         // Per-location dedup: the SAME warning at the same place fires once.
         // What makes it the same one is everything it SAYS, not just its id:
