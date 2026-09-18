@@ -274,38 +274,77 @@ impl CalcOp {
 }
 
 impl CalcNode {
-    /// Serialize this node's interior (without the enclosing `calc(`...`)`),
-    /// adding parentheses only where operator precedence/associativity
+    /// Serialize this node's interior (without the enclosing `calc(`...`)`) into
+    /// `out`, adding parentheses only where operator precedence/associativity
     /// requires them, matching dart-sass's canonical form.
-    pub(crate) fn to_calc_css(&self, compressed: bool) -> String {
+    ///
+    /// This is the primitive, and it allocates nothing: a calculation is a tree,
+    /// so building each node's text as a string of its own meant one allocation
+    /// per node plus one per operator gap, all of them immediately concatenated
+    /// into the parent's. Writing into the caller's buffer is the same walk
+    /// without the intermediate strings. [`CalcNode::to_calc_css`] wraps it for
+    /// callers that want a string.
+    pub(crate) fn write_calc_css(&self, out: &mut String, compressed: bool) {
         match self {
-            CalcNode::Number(n) => calc_number_css(n, compressed),
-            CalcNode::Str(s) => s.clone(),
+            CalcNode::Number(n) => write_calc_number(out, n, compressed),
+            CalcNode::Str(s) => out.push_str(s),
             CalcNode::Op { op, left, right } => {
-                let l = self.fmt_operand(left, *op, false, compressed);
-                let r = self.fmt_operand(right, *op, true, compressed);
-                let sep = match (op, compressed) {
-                    (CalcOp::Mul | CalcOp::Div, true) => op.symbol().to_string(),
-                    _ => format!(" {} ", op.symbol()),
-                };
+                self.write_operand(out, left, *op, false, compressed);
                 // A `+ -n` / `- -n` numeric right operand flips the operator
                 // (only for a finite negative; non-finite values keep their
                 // canonical `infinity`/`NaN` spelling).
                 if matches!(op, CalcOp::Add | CalcOp::Sub) && !compressed {
                     if let CalcNode::Number(n) = right.as_ref() {
                         if n.value.is_finite() && n.value.is_sign_negative() && n.value != 0.0 {
-                            let flipped = if *op == CalcOp::Add { "-" } else { "+" };
-                            let pos = n.copy_units(-n.value);
-                            return format!("{l} {flipped} {}", pos.to_css(compressed));
+                            out.push(' ');
+                            out.push_str(if *op == CalcOp::Add { "-" } else { "+" });
+                            out.push(' ');
+                            n.copy_units(-n.value).write_css(out, compressed);
+                            return;
                         }
                     }
                 }
-                format!("{l}{sep}{r}")
+                match (op, compressed) {
+                    (CalcOp::Mul | CalcOp::Div, true) => out.push_str(op.symbol()),
+                    _ => {
+                        out.push(' ');
+                        out.push_str(op.symbol());
+                        out.push(' ');
+                    }
+                }
+                self.write_operand(out, right, *op, true, compressed);
             }
             CalcNode::Func { name, args } => {
-                let parts: Vec<String> = args.iter().map(|a| a.to_calc_css(compressed)).collect();
-                let sep = if compressed { "," } else { ", " };
-                format!("{name}({})", parts.join(sep))
+                out.push_str(name);
+                out.push('(');
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(if compressed { "," } else { ", " });
+                    }
+                    arg.write_calc_css(out, compressed);
+                }
+                out.push(')');
+            }
+        }
+    }
+
+    /// Serialize this node's interior (without the enclosing `calc(`...`)`),
+    /// adding parentheses only where operator precedence/associativity
+    /// requires them, matching dart-sass's canonical form.
+    pub(crate) fn to_calc_css(&self, compressed: bool) -> String {
+        let mut out = String::new();
+        self.write_calc_css(&mut out, compressed);
+        out
+    }
+
+    /// [`CalcNode::to_calc_value_css`] into `out`.
+    pub(crate) fn write_calc_value_css(&self, out: &mut String, compressed: bool) {
+        match self {
+            CalcNode::Func { .. } => self.write_calc_css(out, compressed),
+            _ => {
+                out.push_str("calc(");
+                self.write_calc_css(out, compressed);
+                out.push(')');
             }
         }
     }
@@ -314,15 +353,21 @@ impl CalcNode {
     /// calculation-function node renders bare as `name(args)`, while any other
     /// node is wrapped in `calc(...)`.
     pub(crate) fn to_calc_value_css(&self, compressed: bool) -> String {
-        match self {
-            CalcNode::Func { .. } => self.to_calc_css(compressed),
-            _ => format!("calc({})", self.to_calc_css(compressed)),
-        }
+        let mut out = String::new();
+        self.write_calc_value_css(&mut out, compressed);
+        out
     }
 
-    /// Format `operand` as a child of a parent `op`, wrapping in parens when
+    /// Write `operand` as a child of a parent `op`, wrapping in parens when
     /// the child binds more loosely (or equally on the right of `-`/`/`).
-    fn fmt_operand(&self, operand: &CalcNode, parent: CalcOp, is_right: bool, compressed: bool) -> String {
+    fn write_operand(
+        &self,
+        out: &mut String,
+        operand: &CalcNode,
+        parent: CalcOp,
+        is_right: bool,
+        compressed: bool,
+    ) {
         // A unit-carrying non-finite number renders as a `*` operation
         // (`infinity * 1px`), so it parenthesizes like a `Mul`-precedence
         // child rather than a bare leaf number.
@@ -337,41 +382,44 @@ impl CalcNode {
                     && is_right
                     && matches!(parent, CalcOp::Sub | CalcOp::Div));
             if needs_paren {
-                return format!("({})", operand.to_calc_css(compressed));
+                out.push('(');
+                operand.write_calc_css(out, compressed);
+                out.push(')');
+                return;
             }
         }
-        operand.to_calc_css(compressed)
+        operand.write_calc_css(out, compressed);
     }
 }
 
-/// Render a number inside a `calc()` interior. Finite single-unit numbers use
-/// their ordinary CSS form. Non-finite numbers use dart-sass's canonical
-/// lowercase constants — `infinity` / `-infinity` / `NaN`, with units spelled
-/// out as operands (`infinity * 1px`). Multi-unit numbers spell every unit as
-/// an operand: a finite value attaches to the first numerator
+/// Write a number as it appears inside a `calc()` interior. Finite single-unit
+/// numbers use their ordinary CSS form. Non-finite numbers use dart-sass's
+/// canonical lowercase constants — `infinity` / `-infinity` / `NaN`, with units
+/// spelled out as operands (`infinity * 1px`). Multi-unit numbers spell every
+/// unit as an operand: a finite value attaches to the first numerator
 /// (`1000px * 1rad / 1Hz`), a numerator-less one stays bare (`1 / 1px`).
-fn calc_number_css(n: &Number, compressed: bool) -> String {
+fn write_calc_number(out: &mut String, n: &Number, compressed: bool) {
     if n.value.is_finite() && !n.has_complex_units() {
-        return n.to_css(compressed);
+        n.write_css(out, compressed);
+        return;
     }
     let star = if compressed { "*" } else { " * " };
     let slash = if compressed { "/" } else { " / " };
-    let mut out;
     let mut numer = n.numer_units().iter();
     if n.value.is_finite() {
         // A finite value rides on the first numerator unit when there is one.
-        out = match numer.next() {
-            Some(u) => format!("{}{u}", fmt_num(n.value, compressed)),
-            None => fmt_num(n.value, compressed),
-        };
+        push_num(out, n.value, compressed);
+        if let Some(u) = numer.next() {
+            out.push_str(u);
+        }
     } else {
-        out = if n.value.is_nan() {
-            "NaN".to_string()
+        out.push_str(if n.value.is_nan() {
+            "NaN"
         } else if n.value > 0.0 {
-            "infinity".to_string()
+            "infinity"
         } else {
-            "-infinity".to_string()
-        };
+            "-infinity"
+        });
     }
     for u in numer {
         out.push_str(star);
@@ -383,7 +431,6 @@ fn calc_number_css(n: &Number, compressed: bool) -> String {
         out.push('1');
         out.push_str(u);
     }
-    out
 }
 
 /// A number with its units (dart-sass `SassNumber`: a list of numerator units
@@ -988,9 +1035,11 @@ impl Value {
     /// This is the primitive for every caller that already has a buffer — a
     /// declaration's value, a list's elements, an interpolation — because the
     /// string a value serializes to is nearly always about to be copied into
-    /// one. The arms spelled out here are the ones a stylesheet writes in
-    /// bulk; the rest build a string of their own through [`Value::to_css`],
-    /// which is the full dispatch.
+    /// one. Every value a stylesheet can legally emit is written here without
+    /// allocating; what falls through to [`Value::to_css`] is a map or a
+    /// first-class function/mixin, none of which is a valid CSS value at all
+    /// (a declaration rejects them before serializing) — they reach this only
+    /// nested inside a list on an error path.
     pub(crate) fn write_css(&self, out: &mut String, compressed: bool) {
         match self {
             Value::Number(n) => n.write_css(out, compressed),
@@ -1006,28 +1055,9 @@ impl Value {
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
             // The authored spelling of `12px/1.5`, already a string.
             Value::Slash(_, repr) => out.push_str(repr),
+            Value::Calc(node) => node.write_calc_value_css(out, compressed),
             Value::Null => {}
             other => out.push_str(&other.to_css(compressed)),
-        }
-    }
-
-    /// Whether [`Value::write_css`] writes this value straight into the caller's
-    /// buffer. The variants it does not spell out build an owned string of their
-    /// own — a `calc()` interior is assembled recursively — so a caller that
-    /// wants an owned `String` should ask [`Value::to_css`] for it directly
-    /// instead of routing it through a buffer and copying it a second time.
-    /// Getting this wrong in either direction costs exactly one copy and can
-    /// never change a byte of output.
-    pub(crate) fn serializes_in_place(&self) -> bool {
-        match self {
-            Value::Number(_)
-            | Value::Color(_)
-            | Value::List(_)
-            | Value::Str(_)
-            | Value::Bool(_)
-            | Value::Slash(..)
-            | Value::Null => true,
-            Value::Map(_) | Value::Calc(_) | Value::Function(_) | Value::Mixin(_) => false,
         }
     }
 
@@ -1043,6 +1073,7 @@ impl Value {
             Value::Color(c) => c.write_css(out, false),
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
             Value::Slash(_, repr) => out.push_str(repr),
+            Value::Calc(node) => node.write_calc_value_css(out, false),
             other => out.push_str(&other.to_interp()),
         }
     }
@@ -1313,7 +1344,7 @@ impl Number {
         // interpolation, and error messages.
         if !self.value.is_finite() || self.has_complex_units() {
             out.push_str("calc(");
-            out.push_str(&calc_number_css(self, compressed));
+            write_calc_number(out, self, compressed);
             out.push(')');
             return;
         }
@@ -3540,6 +3571,122 @@ mod tests {
         assert!(frac.sass_eq(&Value::Color(Color::rgb(0.4, 0.0, 0.0, 1.0))));
         // Differing alpha is not equal.
         assert!(!purple.sass_eq(&Value::Color(Color::rgb(128.0, 0.0, 128.0, 0.5))));
+    }
+
+    /// A calculation is the one value whose serialization is recursive, so
+    /// writing it into the caller's buffer is the one place where a missed
+    /// `return`, a stale offset or a dropped parenthesis can lose or duplicate
+    /// text that no single-node case would show. Every shape that decides a
+    /// byte is listed — precedence parens on both sides, the `+ -n` operator
+    /// flip that returns early, a function with several arguments, a
+    /// unit-bearing non-finite number, an opaque operand — asserted against the
+    /// spelling dart-sass 1.104.1 produces for the same input, and asserted
+    /// again written after existing text.
+    #[test]
+    fn writing_a_calculation_appends_dart_sass_spelling() {
+        fn num(v: f64, unit: &str) -> Box<CalcNode> {
+            Box::new(CalcNode::Number(if unit.is_empty() {
+                Number::unitless(v)
+            } else {
+                Number::with_unit(v, unit)
+            }))
+        }
+        fn op(op: CalcOp, left: Box<CalcNode>, right: Box<CalcNode>) -> CalcNode {
+            CalcNode::Op { op, left, right }
+        }
+        let var_x = || Box::new(CalcNode::Str("var(--x)".to_string()));
+
+        // (node, expanded, compressed) — `None` where our compressed spelling
+        // is a known pre-existing divergence (the `+ -n` flip is skipped when
+        // compressed), which this change neither introduces nor fixes.
+        let cases: Vec<(CalcNode, &str, Option<&str>)> = vec![
+            (
+                op(CalcOp::Sub, num(100.0, "%"), num(16.0, "px")),
+                "calc(100% - 16px)",
+                Some("calc(100% - 16px)"),
+            ),
+            // The right operand's sign flips the operator, and returns early.
+            (
+                op(CalcOp::Add, var_x(), num(-16.0, "px")),
+                "calc(var(--x) - 16px)",
+                None,
+            ),
+            // A looser child parenthesizes on the left...
+            (
+                op(
+                    CalcOp::Mul,
+                    Box::new(op(CalcOp::Add, var_x(), num(2.0, "px"))),
+                    num(3.0, ""),
+                ),
+                "calc((var(--x) + 2px) * 3)",
+                Some("calc((var(--x) + 2px)*3)"),
+            ),
+            // ...and on the right, where equal precedence under `/` also does.
+            (
+                op(
+                    CalcOp::Div,
+                    num(1.0, "px"),
+                    Box::new(op(CalcOp::Mul, var_x(), num(3.0, ""))),
+                ),
+                "calc(1px / (var(--x) * 3))",
+                Some("calc(1px/(var(--x)*3))"),
+            ),
+            // A tighter child does not.
+            (
+                op(
+                    CalcOp::Add,
+                    num(1.0, "px"),
+                    Box::new(op(CalcOp::Mul, num(2.0, "px"), var_x())),
+                ),
+                "calc(1px + 2px * var(--x))",
+                Some("calc(1px + 2px*var(--x))"),
+            ),
+            (
+                CalcNode::Func {
+                    name: "min".to_string(),
+                    args: vec![
+                        CalcNode::Number(Number::with_unit(10.0, "px")),
+                        op(CalcOp::Add, var_x(), num(1.0, "px")),
+                        CalcNode::Number(Number::with_unit(2.0, "px")),
+                    ],
+                },
+                "min(10px, var(--x) + 1px, 2px)",
+                Some("min(10px,var(--x) + 1px,2px)"),
+            ),
+            // A unit-bearing infinity is itself an operation, so it
+            // parenthesizes like one — and it is written, not formatted.
+            (
+                CalcNode::Number(Number::with_unit(f64::INFINITY, "px")),
+                "calc(infinity * 1px)",
+                Some("calc(infinity*1px)"),
+            ),
+            (
+                op(
+                    CalcOp::Div,
+                    var_x(),
+                    CalcNode::Number(Number::with_unit(f64::NEG_INFINITY, "px")).into(),
+                ),
+                "calc(var(--x) / (-infinity * 1px))",
+                Some("calc(var(--x)/(-infinity*1px))"),
+            ),
+            (*var_x(), "calc(var(--x))", Some("calc(var(--x))")),
+        ];
+
+        for (node, expanded, compressed) in &cases {
+            for (style, expected) in [(false, Some(*expanded)), (true, *compressed)] {
+                let Some(expected) = expected else { continue };
+                assert_eq!(
+                    &node.to_calc_value_css(style),
+                    expected,
+                    "calc spelling (compressed = {style}) for {node:?}"
+                );
+                // The same bytes when there is already text in the buffer: the
+                // walk must append, never assume it starts at zero.
+                let mut buf = String::from("PREFIX:");
+                node.write_calc_value_css(&mut buf, style);
+                assert_eq!(buf, format!("PREFIX:{expected}"));
+            }
+        }
     }
 
     /// [`Value::write_css`] and [`Value::to_css`] are two spellings of one
