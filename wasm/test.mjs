@@ -1380,6 +1380,555 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
+  // `package.json`'s `files` is a WHITELIST: a module the CLI imports but the
+  // list omits is missing from the published tarball, and `npx sasso` dies on
+  // start with a resolution error that no test in this repo would see, because
+  // every test runs against the working tree where the file is present.
+  // Adding `_jobs.mjs` nearly shipped exactly that.
+  {
+    const pkgDir = new URL("./npm/", import.meta.url);
+    const pkg = JSON.parse(readFileSync(new URL("package.json", pkgDir), "utf8"));
+    const shipped = new Set(pkg.files);
+
+    // The roots come from the manifest rather than a list kept by hand, so a
+    // new export subpath is covered the day it is added: every `./…` the
+    // manifest points at is a file the installed package must contain.
+    const roots = new Set();
+    const collect = (node) => {
+      if (typeof node === "string") {
+        if (node.startsWith("./")) roots.add(node.slice(2));
+      } else if (node && typeof node === "object") {
+        for (const value of Object.values(node)) collect(value);
+      }
+    };
+    for (const field of ["bin", "main", "module", "types", "exports"]) collect(pkg[field]);
+    assert.ok(roots.has("cli.mjs") && roots.size >= 5, `packaging: found only ${[...roots]}`);
+
+    // `from "./x"` rather than a whole import statement: an import clause may
+    // span lines, and a matcher that stops at the first newline silently skips
+    // those — which is how `_importer.mjs`, reached only through the multiline
+    // imports in `_loader.mjs` and `native.mjs`, went unchecked here.
+    //
+    // `gap` is whatever may sit between the keyword and the specifier:
+    // whitespace, and comments, which are legal there and carry meaning to
+    // bundlers (`import(/* webpackChunkName: "x" */ "./dep.mjs")`).
+    //
+    // These run over raw source and track no lexical state, so import-shaped
+    // text inside a string or a comment matches too: `const s = 'from
+    // \"./x.mjs\"'` looks exactly like an import from here. That is a known
+    // limitation and a deliberate one.
+    //
+    // The two ways to be wrong are not equally bad. Matching text that is not
+    // an import is a FALSE POSITIVE: the guard fails, names the file and the
+    // specifier, and whoever wrote that string sees immediately what happened.
+    // Missing a real import is a FALSE NEGATIVE: the suite stays green and a
+    // package that cannot start is published — which is the failure this guard
+    // exists to catch, and which it has already let through twice.
+    //
+    // A tokenizer or an AST walk would remove the false positives and buy a
+    // new way to produce false negatives, because it has to know where strings
+    // and regex literals are (`/[\"']/` is a regex, not the start of a string)
+    // and it fails silently when it does not. So: loud over silent. No file in
+    // the package contains such text today, and the case below pins the
+    // behaviour so a later reader does not quietly trade it the other way.
+    const gap = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*\n)*`;
+    // `./dep.mjs` and `../dep.mjs` both. `${` is left to the matcher loop
+    // rather than excluded here, because whether it interpolates depends on
+    // the delimiter: in a template it names no single file, in a quoted string
+    // it is an ordinary (if unhinged) filename.
+    const rel = String.raw`\.\.?/[^"'\`]+`;
+    // The delimiter is captured and backreferenced so a template literal is
+    // accepted on the same footing as a quote — `import(\`./x.mjs\`)` is a
+    // perfectly ordinary dynamic import, and skipping it would be a silent
+    // miss, which is the one failure mode this guard cannot afford.
+    const q = String.raw`(?<q>["'\`])`;
+    const spec = String.raw`(?<spec>${rel})\k<q>`;
+    const statics = new RegExp(String.raw`\bfrom${gap}${q}${spec}`, "g");
+    // `import ("./x")` — whitespace before the parenthesis is legal too, and
+    // so is a second argument: `import("./x", { with: { type: "json" } })`.
+    // The closing parenthesis is still required, so `import("./x" + suffix)`
+    // stays unmatched — that path is not the module, and demanding it be
+    // shipped would be a false failure.
+    // What follows the specifier has to be the end of an argument — `)` or a
+    // comma — which accepts `import("./x", { with: … })` and
+    // `import("./x", makeOptions())` alike without this having to understand
+    // the options expression, and still rejects `import("./x" + suffix)`,
+    // whose path is not a module name.
+    const dynamics = new RegExp(String.raw`\bimport${gap}\(${gap}${q}${spec}${gap}(?=[,)])`, "g");
+    // `import "./x.mjs"` has no `from` to key on. Nothing in the package does
+    // this today, which is exactly why the matcher has to exist: the first one
+    // added would otherwise be invisible here.
+    // A lookbehind rather than a list of allowed preceding characters: the
+    // list missed `/* banner */import "./dep.mjs";` and a BOM-prefixed file,
+    // both of which are legal and both of which would have gone unchecked.
+    const sideEffects = new RegExp(String.raw`(?<![\w$.])import${gap}${q}${spec}`, "g");
+
+    // A template literal with `${` in it names no single file, so there is
+    // nothing to check; the same characters inside quotes are just a filename.
+    const interpolated = (m) => m.groups.q === "`" && m.groups.spec.includes("${");
+
+    // The matchers are the whole guard, so prove they see each shape rather
+    // than trusting that they do. A matcher that silently matches nothing
+    // satisfies every assertion below it.
+    {
+      const sample = [
+        'import { a } from "./one.mjs";',
+        'import {\n  b,\n  c,\n} from "./two.mjs";',
+        'export * from "./three.mjs";',
+        'const d = await import("./four.mjs");',
+        'import "./five.mjs";',
+        'const e = await import ("./six.mjs");',
+        'const f = await import(/* webpackChunkName: "seven" */ "./seven.mjs");',
+        'import /* webpackIgnore: true */ "./eight.mjs";',
+        'export { z } from /* a note */ "./nine.mjs";',
+        'const h = await import("./ten.mjs", { with: { type: "json" } });',
+        'import { k } from "../eleven.mjs";',
+        "const i = await import(`./twelve.mjs`);", // a template specifier
+        '/* banner */import "./thirteen.mjs";', // a keyword straight after a comment
+        "const j = await import(`./mod-${name}.mjs`);", // must NOT match: interpolated
+        // …but the same characters in quotes are a filename, not a template.
+        'import { p } from "./mod-${literal}.mjs";',
+        // An options argument this matcher deliberately does not parse.
+        'const q = await import("./fourteen.mjs", makeOptions());',
+        'import fs from "node:fs";', // must NOT match: bare specifier
+        'const url = "https://example.com/not-an-import.mjs";', // nor a URL
+      ].join("\n");
+      const found = new Set();
+      for (const re of [statics, dynamics, sideEffects]) {
+        for (const m of sample.matchAll(re)) {
+          if (interpolated(m)) continue;
+          found.add(m.groups.spec);
+        }
+      }
+      // Known limitation, pinned on purpose: import-shaped text inside a
+      // string matches, because nothing here tracks lexical state. It is a
+      // loud failure rather than a silent miss — see the note above.
+      const inAString = [...'const s = \'from "./in-a-string.mjs"\';'.matchAll(statics)];
+      assert.equal(
+        inAString.length,
+        1,
+        "packaging: the string case is a known false positive; if this ever stops matching, " +
+          "make sure it stopped by tracking lexical state and not by missing imports",
+      );
+
+      assert.deepEqual(
+        [...found].sort(),
+        [
+          "../eleven.mjs",
+          "./eight.mjs",
+          "./five.mjs",
+          "./four.mjs",
+          "./fourteen.mjs",
+          "./mod-${literal}.mjs",
+          "./nine.mjs",
+          "./one.mjs",
+          "./seven.mjs",
+          "./six.mjs",
+          "./ten.mjs",
+          "./thirteen.mjs",
+          "./three.mjs",
+          "./twelve.mjs",
+          "./two.mjs",
+        ],
+        "packaging: the import matchers miss a shape the package may legally use",
+      );
+    }
+
+    const resolveFrom = (importer, spec) => {
+      const parts = importer.includes("/") ? importer.slice(0, importer.lastIndexOf("/")).split("/") : [];
+      for (const segment of spec.split("/")) {
+        if (segment === "" || segment === ".") continue;
+        if (segment === "..") {
+          // Climbing past the package root resolves outside the tarball
+          // entirely. Popping an empty path would quietly turn
+          // `cli.mjs` + `../sasso.mjs` into `sasso.mjs`, which IS shipped, so
+          // the guard would pass on an import Node resolves somewhere else.
+          assert.ok(parts.length > 0, `packaging: ${importer} imports ${spec}, which escapes the package`);
+          parts.pop();
+        } else parts.push(segment);
+      }
+      return parts.join("/");
+    };
+    // Pinned directly, because the package is flat today and no real import
+    // exercises these: a branch nothing can reach is a branch nothing holds
+    // honest, and this one decides which file the guard checks.
+    assert.equal(resolveFrom("cli.mjs", "./_jobs.mjs"), "_jobs.mjs");
+    assert.equal(resolveFrom("sub/entry.mjs", "./dep.mjs"), "sub/dep.mjs");
+    assert.equal(resolveFrom("sub/entry.mjs", "../dep.mjs"), "dep.mjs");
+    assert.equal(resolveFrom("a/b/entry.mjs", "../c/dep.mjs"), "a/c/dep.mjs");
+    // Climbing out of the package must not resolve to a shipped basename:
+    // `cli.mjs` + `../sasso.mjs` is not `sasso.mjs`, it is outside the tarball.
+    assert.throws(
+      () => resolveFrom("cli.mjs", "../sasso.mjs"),
+      /escapes the package/,
+      "packaging: an import above the package root is rejected, not flattened",
+    );
+
+    const seen = new Set();
+    const queue = [...roots];
+    let checked = 0;
+    while (queue.length) {
+      const name = queue.pop();
+      if (seen.has(name)) continue;
+      seen.add(name);
+      assert.ok(
+        shipped.has(name),
+        `packaging: the package points at ./${name}, which package.json's "files" does not ship`,
+      );
+      let text;
+      try {
+        text = readFileSync(new URL(name, pkgDir), "utf8");
+      } catch {
+        // Listing a file in `files` does not make it exist. A `.wasm` is
+        // absent until something builds it, so an unreadable one is expected
+        // here — but an unreadable module is a package that cannot start, and
+        // swallowing that is how this guard would pass on a broken tree.
+        assert.ok(
+          !/\.(mjs|js|cjs|d\.ts)$/.test(name),
+          `packaging: ${name} is listed in "files" but cannot be read`,
+        );
+        continue;
+      }
+      for (const re of [statics, dynamics, sideEffects]) {
+        for (const m of text.matchAll(re)) {
+          if (interpolated(m)) continue;
+          // Inside a `.d.ts`, TypeScript resolves a `./x.js` specifier to
+          // `x.d.ts` — following it literally would demand a file that neither
+          // exists nor needs to, while skipping the declaration graph entirely.
+          const found = m.groups.spec;
+          const spec = name.endsWith(".d.ts") ? found.replace(/\.js$/, ".d.ts") : found;
+          // `resolveFrom` handles `..` segments, so a parent-relative import
+          // from a subdirectory lands on the right file rather than being
+          // skipped for not starting with `./`.
+          // Resolved against the importer's directory, not the package root.
+          // Everything is flat today, so this changes nothing — but the day an
+          // entry moves into a subdirectory, `./dep.mjs` stops meaning
+          // `dep.mjs`, and a guard that looked at the root would check the
+          // wrong file or silently find nothing.
+          const dep = resolveFrom(name, spec);
+          assert.ok(
+            shipped.has(dep),
+            `packaging: ${name} imports ./${dep}, which package.json's "files" does not ship`,
+          );
+          queue.push(dep);
+          checked += 1;
+        }
+      }
+    }
+    // The traversal is only a guard if it actually reached the module graph;
+    // a matcher that quietly matched nothing would pass every assertion above.
+    assert.ok(seen.has("_importer.mjs"), "packaging: the walk never reached _importer.mjs");
+    assert.ok(checked >= 10, `packaging: followed only ${checked} imports, the walk is not working`);
+  }
+
+  // The pool's default size is PHYSICAL cores, not SMT threads: a compile is
+  // pure computation, so two hyperthreads on one core contend for the same
+  // execution units instead of overlapping stalls. Measured on a Ryzen 7
+  // 8745HS (8 cores / 16 threads), 138 Lichess stylesheets: `-j 8` beat
+  // `-j 16` — 366 ms against 425 ms here, 208 against 235 through the native
+  // binary — and the default taking the core count moved that corpus from
+  // 444 ms to 364 ms. (Times, not percentages: "faster by" reads differently
+  // depending on which of the two you divide by.)
+  //
+  // The host's own topology cannot be asserted, so the detector is fed
+  // synthetic `/proc/cpuinfo` text instead — the shapes that matter are an SMT
+  // machine, a dual-socket one (where `core id` repeats per socket), and the
+  // containers that publish no topology at all.
+  {
+    const jobs = await import("./npm/_jobs.mjs");
+    const logical = jobs.logicalCpus();
+
+    const smt = Array.from({ length: 8 }, (_v, i) =>
+      `processor\t: ${i}\nphysical id\t: 0\ncore id\t: ${i >> 1}\n`,
+    ).join("\n");
+    assert.equal(jobs.physicalCoresFromCpuinfo(smt), 4, "cli: 8 threads on 4 cores reads as 4");
+
+    // Two sockets, four cores each: `core id` 0-3 appears twice and must not
+    // collapse into four.
+    const dual = [];
+    for (const pkg of [0, 1]) {
+      for (let c = 0; c < 4; c++) dual.push(`processor\t: ${pkg * 4 + c}\nphysical id\t: ${pkg}\ncore id\t: ${c}\n`);
+    }
+    assert.equal(jobs.physicalCoresFromCpuinfo(dual.join("\n")), 8, "cli: two sockets of 4 read as 8, not 4");
+
+    assert.equal(
+      jobs.physicalCoresFromCpuinfo("processor\t: 0\nmodel name\t: Whatever\n"),
+      undefined,
+      "cli: no topology reported means no answer, not zero",
+    );
+
+    // A file that names the socket for some processors and not others must not
+    // file the later ones under whichever socket happened to come before: two
+    // sockets' worth of `core id: 0` are two cores, however incomplete the file.
+    assert.equal(
+      jobs.physicalCoresFromCpuinfo(
+        "processor\t: 0\nphysical id\t: 0\ncore id\t: 0\n\nprocessor\t: 1\ncore id\t: 0\n",
+      ),
+      2,
+      "cli: the socket resets at each processor record",
+    );
+    // Nothing promises `physical id` is printed before `core id`; two sockets
+    // of two cores written the other way round are still four cores.
+    {
+      let text = "";
+      for (const pkg of [0, 1]) {
+        for (const core of [0, 1]) {
+          text += `processor\t: 0\ncore id\t: ${core}\nphysical id\t: ${pkg}\n\n`;
+        }
+      }
+      assert.equal(jobs.physicalCoresFromCpuinfo(text), 4, "cli: either field order reads the same");
+    }
+
+    // But a file that names no socket at all is still usable: every core lands
+    // under one unnamed socket, which is what a single-socket VM reports.
+    assert.equal(
+      jobs.physicalCoresFromCpuinfo("processor\t: 0\ncore id\t: 0\n\nprocessor\t: 1\ncore id\t: 0\n"),
+      1,
+      "cli: no socket named at all is one socket, not a giving-up",
+    );
+
+    // A cgroup CPU *quota* is not an affinity mask: `docker run --cpus=2`
+    // leaves the mask at the whole machine and writes `cpu.max` instead
+    // (verified 2026-09-17 — the container reported `Cpus_allowed_list: 0-15`
+    // and `cpu.max: 200000 100000`). Node 22 answers 2 there; 18 and 20 answer
+    // 16, so this covers two current LTS lines and not only the ancient ones.
+    assert.equal(jobs.quotaCpusFromCgroup({ v2: "200000 100000\n" }), 2, "cli: v2 quota");
+    assert.equal(jobs.quotaCpusFromCgroup({ v2: "max 100000\n" }), undefined, "cli: v2 unlimited");
+    assert.equal(jobs.quotaCpusFromCgroup({ v2: "150000 100000\n" }), 2, "cli: a fraction rounds up");
+    assert.equal(
+      jobs.quotaCpusFromCgroup({ v1Quota: "400000\n", v1Period: "100000\n" }),
+      4,
+      "cli: v1 quota",
+    );
+    assert.equal(
+      jobs.quotaCpusFromCgroup({ v1Quota: "-1\n", v1Period: "100000\n" }),
+      undefined,
+      "cli: v1 -1 is no limit",
+    );
+    assert.equal(jobs.quotaCpusFromCgroup({}), undefined, "cli: no cgroup files, no answer");
+
+    // cgroup v1 mounts the controller as `cpu` on some distributions and
+    // `cpu,cpuacct` on others; a quota only in the second place still counts.
+    const onlyCpuacct = (path) =>
+      path === "/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us"
+        ? "400000\n"
+        : path === "/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us"
+          ? "100000\n"
+          : undefined;
+    assert.equal(
+      jobs.tightestQuota(jobs.cgroupFiles(onlyCpuacct)),
+      4,
+      "cli: a v1 quota under cpu,cpuacct is found",
+    );
+
+    // The limit is not necessarily at the root. A systemd scope on a host puts
+    // it on the process's own cgroup, where the root file does not even exist
+    // — measured under `systemd-run -p CPUQuota=200%` on 2026-09-17:
+    //
+    //   /proc/self/cgroup   0::/user.slice/…/run-p166821.scope
+    //   root cpu.max        unavailable
+    //   own cgroup cpu.max  200000 100000
+    //
+    // Reading only the root answers "no limit" and starts the host's core
+    // count, which is what this pins.
+    const scope = "0::/user.slice/user-1000.slice/app.slice/run-p1.scope\n";
+    const own = "/sys/fs/cgroup/user.slice/user-1000.slice/app.slice/run-p1.scope/cpu.max";
+    const nested = (path) =>
+      path === "/proc/self/cgroup" ? scope : path === own ? "200000 100000\n" : undefined;
+    assert.equal(
+      jobs.tightestQuota(jobs.cgroupFiles(nested)),
+      2,
+      "cli: a quota on this process's own cgroup, not the root, is found",
+    );
+
+    // A container with its own cgroup namespace reports `0::/`, and then the
+    // root really is the answer — the shape verified against docker.
+    const container = (path) =>
+      path === "/proc/self/cgroup"
+        ? "0::/\n"
+        : path === "/sys/fs/cgroup/cpu.max"
+          ? "200000 100000\n"
+          : undefined;
+    assert.equal(
+      jobs.tightestQuota(jobs.cgroupFiles(container)),
+      2,
+      "cli: the container shape still resolves to the root file",
+    );
+
+    // An unreadable `/proc/self/cgroup` leaves the root as the only guess…
+    {
+      const files = jobs.cgroupQuotaFiles(undefined);
+      assert.ok(files.v2.includes("/sys/fs/cgroup/cpu.max"), "cli: v2 root is guessed");
+      assert.ok(
+        files.v1.some((f) => f.quota === "/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us"),
+        "cli: v1 roots are guessed",
+      );
+    }
+    // …but a file that WAS read and names no cpu hierarchy is an answer, not a
+    // gap: this process is in no such hierarchy, and the root's limit belongs
+    // to someone else.
+    {
+      const files = jobs.cgroupQuotaFiles("4:memory:/some/slice\n");
+      assert.deepEqual(files.v2, [], "cli: no v2 line, no v2 probe");
+      assert.deepEqual(files.v1, [], "cli: no cpu controller, no v1 probe");
+    }
+    // A v2 line names its own hierarchy, so the walk stays inside it.
+    {
+      const files = jobs.cgroupQuotaFiles("0::/a/b\n");
+      assert.deepEqual(
+        files.v2,
+        ["/sys/fs/cgroup/a/b/cpu.max", "/sys/fs/cgroup/a/cpu.max", "/sys/fs/cgroup/cpu.max"],
+        "cli: the v2 walk is the process's own path and its parents",
+      );
+      assert.deepEqual(files.v1, [], "cli: a v2-only process probes no v1 paths");
+    }
+
+    // A parent slice's limit applies to everything under it, so the tightest
+    // along the path wins rather than the first one found.
+    const parentTighter = (path) => {
+      if (path === "/proc/self/cgroup") return scope;
+      if (path === own) return "800000 100000\n"; // the leaf allows 8
+      if (path === "/sys/fs/cgroup/user.slice/cpu.max") return "200000 100000\n"; // a parent allows 2
+      return undefined;
+    };
+    assert.equal(
+      jobs.tightestQuota(jobs.cgroupFiles(parentTighter)),
+      2,
+      "cli: the tightest limit along the hierarchy wins",
+    );
+
+    // `logicalCpus` has two branches and this suite runs on one Node, so the
+    // `os` it asks is injectable. The fallback is not dead code: it is what
+    // answers on Node 16 to 18.13, where `availableParallelism` does not exist
+    // — and `os.cpus().length` is the HOST's count, which is the whole reason
+    // the mask and quota are read separately.
+    assert.equal(
+      jobs.logicalCpus({ availableParallelism: () => 4, cpus: () => new Array(16) }),
+      4,
+      "cli: availableParallelism wins when it exists",
+    );
+    assert.equal(
+      jobs.logicalCpus({ cpus: () => new Array(16) }),
+      16,
+      "cli: without it, the host's CPU count is the starting point",
+    );
+
+    // `Cpus_allowed_list` is the affinity mask this process actually has.
+    assert.equal(jobs.allowedCpusFromStatus("Cpus_allowed_list:\t0-1,8-9\n"), 4, "cli: ranges and lists");
+    assert.equal(jobs.allowedCpusFromStatus("Cpus_allowed_list:\t3\n"), 1, "cli: a single cpu");
+    assert.equal(jobs.allowedCpusFromStatus("Name:\tnode\n"), undefined, "cli: absent means no answer");
+    assert.equal(jobs.allowedCpusFromStatus("Cpus_allowed_list:\t9-3\n"), undefined, "cli: a backwards range");
+
+    // …and the default that is built on it.
+    const readFake = (text) => () => text;
+    // These tests are about the topology, so the rest of the host is held
+    // still: left real, they would read THIS machine's affinity mask and
+    // cgroup, and a run inside a restricted container would fail assertions
+    // that have nothing to do with what they are testing.
+    const unrestricted = {
+      readStatus: () => undefined,
+      readCgroup: () => [],
+    };
+    assert.equal(
+      jobs.defaultJobs({ platform: "linux", readCpuinfo: readFake(smt), ...unrestricted }),
+      Math.min(4, logical),
+      "cli: on Linux the default is the core count",
+    );
+    assert.equal(
+      jobs.defaultJobs({ platform: "linux", readCpuinfo: () => undefined, ...unrestricted }),
+      logical,
+      "cli: an unreadable /proc/cpuinfo falls back to the kernel's count",
+    );
+
+    // `os.availableParallelism` only exists on Node >= 18.14, and the package
+    // supports >= 16; below it `os.cpus().length` answers the HOST's count and
+    // knows nothing of the affinity mask (16 against 4 under `taskset -c
+    // 0,1,8,9`, measured 2026-09-17). `Cpus_allowed_list` is what makes the cap
+    // hold on every supported Node, so it has to bind even when the reported
+    // count is the whole machine.
+    const eightCores = Array.from(
+      { length: 16 },
+      (_v, i) => `processor\t: ${i}\nphysical id\t: 0\ncore id\t: ${i >> 1}\n`,
+    ).join("\n");
+    assert.equal(
+      jobs.defaultJobs({
+        platform: "linux",
+        readCpuinfo: readFake(eightCores),
+        readStatus: readFake("Cpus_allowed_list:\t0-1,8-9\n"),
+        readCgroup: () => [],
+      }),
+      Math.min(4, logical),
+      "cli: the affinity mask caps the default even when the CPU count does not",
+    );
+    assert.equal(
+      jobs.defaultJobs({
+        platform: "linux",
+        readCpuinfo: readFake(eightCores),
+        readStatus: () => undefined,
+        readCgroup: () => [],
+      }),
+      Math.min(8, logical),
+      "cli: an unreadable /proc/self/status leaves the core count alone",
+    );
+    // The whole Node 16 shape, end to end and independent of this host: the
+    // runtime reports the machine's 16, the process may use 4 of them, and the
+    // topology says 8 physical cores. The mask has to win.
+    assert.equal(
+      jobs.defaultJobs({
+        platform: "linux",
+        reportedCpus: () => 16,
+        readCpuinfo: readFake(eightCores),
+        readStatus: readFake("Cpus_allowed_list:\t0-1,8-9\n"),
+        readCgroup: () => [],
+      }),
+      4,
+      "cli: on a Node without availableParallelism the mask still caps the default",
+    );
+    // …and the same with a quota instead of a mask.
+    assert.equal(
+      jobs.defaultJobs({
+        platform: "linux",
+        reportedCpus: () => 16,
+        readCpuinfo: readFake(eightCores),
+        readStatus: readFake("Cpus_allowed_list:\t0-15\n"),
+        readCgroup: () => [{ v2: "200000 100000\n" }],
+      }),
+      2,
+      "cli: on a Node without availableParallelism the quota still caps the default",
+    );
+
+    // The container shape that has no mask to find: quota only.
+    assert.equal(
+      jobs.defaultJobs({
+        platform: "linux",
+        readCpuinfo: readFake(eightCores),
+        readStatus: readFake("Cpus_allowed_list:\t0-15\n"),
+        readCgroup: () => [{ v2: "200000 100000\n" }],
+      }),
+      Math.min(2, logical),
+      "cli: a cgroup quota caps the default even with the whole machine in the mask",
+    );
+    assert.equal(
+      jobs.defaultJobs({ platform: "darwin", readCpuinfo: readFake(smt), ...unrestricted }),
+      logical,
+      "cli: off Linux the logical count stands — Apple silicon has no SMT",
+    );
+    // A cgroup- or taskset-restricted process sees fewer CPUs than the machine
+    // has cores; the smaller number has to win.
+    // Sized from the host: a fixed number would stop being "more cores than
+    // this process may use" on a big enough machine, and the assertion would
+    // then be testing the opposite of what it says.
+    const many = Array.from(
+      { length: logical + 8 },
+      (_v, i) => `physical id\t: 0\ncore id\t: ${i}\n`,
+    ).join("\n");
+    assert.equal(
+      jobs.defaultJobs({ platform: "linux", readCpuinfo: readFake(many), ...unrestricted }),
+      logical,
+      "cli: never more workers than the kernel offers this process",
+    );
+  }
+
   // Each job must run EXACTLY once. Correct output does not prove that — a pool
   // where every worker walks the whole list from 0 produces the same files,
   // just N times over — so make the repetition audible: one `@warn` per

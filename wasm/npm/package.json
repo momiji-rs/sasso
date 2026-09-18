@@ -31,6 +31,7 @@
     "_importer.mjs",
     "_value.mjs",
     "_immutable.mjs",
+    "_jobs.mjs",
     "cli.mjs",
     "sasso.mjs",
     "sasso.speed.mjs",

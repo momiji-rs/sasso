@@ -11,7 +11,8 @@
 //! ```
 //!
 //! The positional grammar is dart-sass's (`<input> [output]`); several files
-//! are compiled through `in:out` pairs, in parallel, one worker per CPU
+//! are compiled through `in:out` pairs, in parallel, one worker per physical
+//! core where the topology is known and one per CPU where it is not
 //! (`-j/--jobs N` to cap it), with diagnostics still reported in command-line
 //! order. Exit codes follow dart-sass too: `64` for a usage error, `65` for a
 //! compile error, `66` when an input cannot be read.
@@ -80,7 +81,8 @@ WARNINGS:
 
 OTHER:
     -j, --jobs <N>                      compile at most N files at once
-                                        (default: one per CPU)
+                                        (default: one per core, or per CPU
+                                        where the core count is unknown)
         --[no-]stop-on-error            don't start more files once one fails
     -c, --[no-]color                    accepted for dart-sass compatibility
                                         (no-op: sasso never colors output)
@@ -147,7 +149,8 @@ struct Cli {
     stop_on_error: bool,
     /// Emit `@charset`/BOM for non-ASCII output (dart-sass `--charset`).
     charset: bool,
-    /// Worker-thread cap (`-j`); `None` = one per CPU.
+    /// Worker-thread cap (`-j`); `None` = `default_jobs` — one per physical
+    /// core where the topology is known, one per CPU where it is not.
     jobs: Option<usize>,
 }
 
@@ -165,6 +168,179 @@ enum SourceMapUrls {
     Relative,
     /// Absolute `file://` URL.
     Absolute,
+}
+
+/// How many files to compile at once when `-j` is not given.
+///
+/// `available_parallelism` counts SMT threads. A compile is pure computation,
+/// so two hyperthreads on one core contend for the same execution units rather
+/// than overlapping each other's stalls — past the core count, more workers is
+/// slower. Measured on a Ryzen 7 8745HS (8 cores / 16 threads) over 138
+/// Lichess stylesheets: 208 ms at `-j 8` against 235 ms at `-j 16`.
+///
+/// Linux publishes the topology in `/proc/cpuinfo`, which is a read rather
+/// than a process spawn. Apple silicon has no SMT, so the logical count is
+/// already right there; other platforms keep it rather than grow a dependency
+/// or an `unsafe` sysctl call for a number that is, at worst, the old default.
+fn default_jobs() -> usize {
+    let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    if !cfg!(target_os = "linux") {
+        return logical;
+    }
+    jobs_from(logical, std::fs::read_to_string("/proc/cpuinfo").ok().as_deref())
+}
+
+/// The decision itself, separated from the two host facts it reads so a test
+/// can hand it a machine this one is not.
+fn jobs_from(logical: usize, cpuinfo: Option<&str>) -> usize {
+    // Never more than the kernel offers this process: a cgroup or `taskset`
+    // cap shows up in `available_parallelism`, not in `/proc/cpuinfo`.
+    //
+    // Both kinds of cap, which is worth stating because it is easy to assume
+    // otherwise — measured in one process on a 16-thread host, 2026-09-17:
+    //
+    //     plain host        mask 0-15      no quota            answers 16
+    //     --cpus=2          mask 0-15      cpu.max 200000 …    answers 2
+    //     --cpuset-cpus=…   mask 0-1,8-9   no quota            answers 4
+    //
+    // The middle row is the one that matters: the mask is the whole machine,
+    // so the 2 can only have come from the quota. It is not an accident of
+    // this machine either — `std::sys::thread::available_parallelism` reads
+    // `cgroups::quota()` and returns `count.min(quota)`, and that module's own
+    // header lists what it skips ("cgroup v2 in non-standard mountpoints"),
+    // which is the same line `_jobs.mjs` draws. Nothing here needs to read
+    // either file. The npm CLI is not so lucky: `availableParallelism()` has
+    // only accounted for the quota since Node 22, and below 18.14 there is no
+    // such API at all, so `_jobs.mjs` reads the mask and the quota itself.
+    //
+    // This is the host's core count capped by what the process may use, and
+    // deliberately NOT the cores inside the mask, which measures much worse:
+    // SMT only stops paying once enough cores are in play. Same corpus, best
+    // of five, `taskset` masks of whole cores:
+    //
+    //     cores allowed   1     2     4     6     7     8
+    //     SMT is worth  +55%  +50%  +33%   -2%   -6%  -11%
+    //
+    // Counting cores within the mask would pick 2 where 4 is 50% faster, and
+    // 4 where 8 is 33% faster.
+    cpuinfo
+        .and_then(physical_cores)
+        .map_or(logical, |physical| physical.clamp(1, logical))
+}
+
+/// Physical cores in `/proc/cpuinfo` text, or `None` when it reports no
+/// topology — containers and VMs often do not, and a number derived from
+/// nothing is worse than the kernel's own count.
+///
+/// A core is a `(physical id, core id)` pair: `core id` alone repeats across
+/// sockets, so deduplicating on it halves a dual-socket machine.
+fn physical_cores(cpuinfo: &str) -> Option<usize> {
+    let mut cores = std::collections::BTreeSet::new();
+    // Buffered per record rather than inserted on sight, for two reasons: a
+    // file may name the socket for some processors and not others, and nothing
+    // promises `physical id` is printed before `core id`. Either way, inserting
+    // early files the core under a socket the kernel never gave it.
+    let mut package: Option<&str> = None;
+    let mut core: Option<&str> = None;
+    let mut end_of_record = |package: &mut Option<&str>, core: &mut Option<&str>| {
+        if let Some(id) = core.take() {
+            cores.insert((package.take().unwrap_or("").to_string(), id.to_string()));
+        }
+        *package = None;
+    };
+    for line in cpuinfo.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        match key.trim() {
+            "processor" => end_of_record(&mut package, &mut core),
+            "physical id" => {
+                // Seeing a field this record already has means the previous
+                // record ended, whether or not a `processor` line said so.
+                if package.is_some() {
+                    end_of_record(&mut package, &mut core);
+                }
+                package = Some(value.trim());
+            }
+            "core id" => {
+                if core.is_some() {
+                    end_of_record(&mut package, &mut core);
+                }
+                core = Some(value.trim());
+            }
+            _ => {}
+        }
+    }
+    end_of_record(&mut package, &mut core);
+    (!cores.is_empty()).then_some(cores.len())
+}
+
+#[cfg(test)]
+mod default_jobs_tests {
+    use super::{jobs_from, physical_cores};
+
+    #[test]
+    fn eight_threads_on_four_cores_read_as_four() {
+        let text: String = (0..8)
+            .map(|i| format!("processor\t: {i}\nphysical id\t: 0\ncore id\t: {}\n\n", i / 2))
+            .collect();
+        assert_eq!(physical_cores(&text), Some(4));
+    }
+
+    #[test]
+    fn two_sockets_of_four_read_as_eight_not_four() {
+        let mut text = String::new();
+        for package in 0..2 {
+            for core in 0..4 {
+                text.push_str(&format!("physical id\t: {package}\ncore id\t: {core}\n\n"));
+            }
+        }
+        assert_eq!(physical_cores(&text), Some(8));
+    }
+
+    #[test]
+    fn a_cgroup_cap_below_the_core_count_wins() {
+        // 8 physical cores on the host, but this process may use two of them.
+        let host: String = (0..16)
+            .map(|i| format!("physical id\t: 0\ncore id\t: {}\n\n", i / 2))
+            .collect();
+        assert_eq!(jobs_from(2, Some(&host)), 2);
+        assert_eq!(jobs_from(16, Some(&host)), 8);
+        assert_eq!(jobs_from(4, None), 4);
+    }
+
+    #[test]
+    fn the_socket_resets_at_each_processor_record() {
+        // Two sockets' worth of `core id: 0` are two cores, however incomplete
+        // the file is about saying so.
+        let partial = "processor\t: 0\nphysical id\t: 0\ncore id\t: 0\n\nprocessor\t: 1\ncore id\t: 0\n";
+        assert_eq!(physical_cores(partial), Some(2));
+        // But a file that names no socket at all is one socket, not a
+        // giving-up: that is what a single-socket VM reports.
+        let unnamed = "processor\t: 0\ncore id\t: 0\n\nprocessor\t: 1\ncore id\t: 0\n";
+        assert_eq!(physical_cores(unnamed), Some(1));
+    }
+
+    #[test]
+    fn the_fields_may_come_in_either_order() {
+        // Nothing promises `physical id` is printed first. Two sockets of two
+        // cores, written the other way round, are still four cores.
+        let mut text = String::new();
+        for package in 0..2 {
+            for core in 0..2 {
+                text.push_str(&format!(
+                    "processor\t: 0\ncore id\t: {core}\nphysical id\t: {package}\n\n"
+                ));
+            }
+        }
+        assert_eq!(physical_cores(&text), Some(4));
+    }
+
+    #[test]
+    fn no_topology_reported_is_no_answer() {
+        assert_eq!(physical_cores("processor\t: 0\nmodel name\t: Whatever\n"), None);
+        assert_eq!(physical_cores(""), None);
+    }
 }
 
 fn main() -> ExitCode {
@@ -850,9 +1026,7 @@ fn run(cli: Cli) -> ExitCode {
         return run_loop(&units, &shared, n);
     }
 
-    let jobs = cli
-        .jobs
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let jobs = cli.jobs.unwrap_or_else(default_jobs);
     let outcomes = compile_all(&units, &shared, jobs, cli.stop_on_error);
 
     // Report in command-line order: each unit's diagnostics, then its CSS.

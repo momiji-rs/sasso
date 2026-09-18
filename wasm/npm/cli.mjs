@@ -18,13 +18,11 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-// Default import, NOT a named one: `availableParallelism` only exists on
-// Node >= 18.14, and a missing named export fails ESM *linking* — this file is
-// the package's `bin`, so the CLI would not start at all on an older Node,
-// before any fallback could run. (`_loader.mjs` carries the same note for the
-// library entries.)
-import os from "node:os";
 import { isMainThread, workerData, parentPort, Worker } from "node:worker_threads";
+// The pool's default size — physical cores rather than SMT threads on Linux,
+// where `/proc/cpuinfo` publishes the topology, and the CPU count everywhere
+// else. See _jobs.mjs for the measurement and for both fallbacks.
+import { defaultJobs } from "./_jobs.mjs";
 
 /**
  * The engine, chosen at startup rather than imported statically.
@@ -105,7 +103,8 @@ Options:
   -w, --watch                        Recompile when the input or any dependency
                                      changes (requires <input> <output>).
   -j, --jobs <N>                     Compile at most N files at once
-                                     (default: one per CPU).
+                                     (default: one per core, or per CPU
+                                     where the core count is unknown).
       --loop <N>                     Recompile in-process N times and report
                                      throughput (stdout inputs only).
   -c, --[no-]color                   Accepted for compatibility (no-op: output is
@@ -1023,8 +1022,11 @@ async function main() {
  * Compile `jobs`, in this thread or across worker threads.
  *
  * The jobs are independent — each reads one input and writes one output — so
- * the native CLI gives them one worker per CPU (`available_parallelism`) and
- * this one now does the same, which is what `-j/--jobs` has always claimed.
+ * both CLIs give them one worker per physical core where the topology is
+ * known, and one per CPU where it is not — off Linux, and on a Linux that
+ * publishes none (see `_jobs.mjs`, and `default_jobs` in `src/main.rs`, which
+ * agree on the rule and on why it is not simply the CPU count). Either way it
+ * is one worker per job slot, which is what `-j/--jobs` has always claimed.
  * Sequentially, the difference is most of the gap between the two: the 138
  * lila stylesheets that build without npm dependencies take 704 ms through the
  * binary at `-j 1` and 138 ms at its default (measured 2026-09-17, the same
@@ -1041,7 +1043,7 @@ async function main() {
  * and an order needs a sequence.
  */
 async function runJobs(jobs, opts, common) {
-  const wanted = opts.jobs ?? (os.availableParallelism ? os.availableParallelism() : os.cpus().length);
+  const wanted = opts.jobs ?? defaultJobs();
   // Standard input is read ONCE, here, and handed to whoever needs it — as
   // SHARED bytes, because `workerData` copies what it carries and only the one
   // worker that claims the `-` job ever reads them. (It used to force the whole
