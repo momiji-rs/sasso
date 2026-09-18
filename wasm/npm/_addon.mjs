@@ -42,3 +42,29 @@ export function assertAddonVersion(ours, theirs, pkg) {
   err.code = "SASSO_ADDON_VERSION_MISMATCH";
   throw err;
 }
+
+// Which prebuilt platform package this machine needs.
+//
+// Here rather than in native.mjs because the tests have to build the same name
+// to fabricate a skew, and a second copy of this is exactly the kind of thing
+// that drifts: the first version of the skew test spelled the key
+// `${platform}-${arch}`, which is right on macOS and wrong on Linux — the
+// prebuilds carry a libc suffix there — so the fabricated package was never
+// resolved, the loader fell through to the repo-local build, and the test
+// passed locally while asserting nothing on CI.
+export const SUPPORTED = {
+  "darwin-arm64": "sasso-native-darwin-arm64",
+  "darwin-x64": "sasso-native-darwin-x64",
+  "linux-x64-gnu": "sasso-native-linux-x64-gnu",
+  "linux-arm64-gnu": "sasso-native-linux-arm64-gnu",
+};
+
+export function platformKey() {
+  const { platform, arch } = process;
+  if (platform === "linux") {
+    // glibc vs musl: the prebuilds are gnu-only for now.
+    const glibc = process.report?.getReport?.()?.header?.glibcVersionRuntime;
+    return `linux-${arch}-${glibc ? "gnu" : "musl"}`;
+  }
+  return `${platform}-${arch}`;
+}

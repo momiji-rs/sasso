@@ -403,10 +403,20 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   // (a drifted pair ships prebuilds the loader can never resolve).
   assert.ok(pkg.exports["./native"] && pkg.exports["./native"].import === "./native.mjs", "exports map has ./native");
   assert.ok(shipped.has("native.mjs") && shipped.has("native.d.ts"), "files array ships the native wrapper + types");
-  const nativeSrc = readFileSync(new URL("./npm/native.mjs", import.meta.url), "utf8");
   const genSrc = readFileSync(new URL("../napi/make-platform-package.mjs", import.meta.url), "utf8");
-  for (const target of ["darwin-arm64", "darwin-x64", "linux-x64-gnu", "linux-arm64-gnu"]) {
-    assert.ok(nativeSrc.includes(`"sasso-native-${target}"`), `native.mjs resolves sasso-native-${target}`);
+  // Against the loader's actual table rather than a substring of whichever
+  // file happens to hold it — the list moved to _addon.mjs when the tests
+  // needed to build the same names, and a grep of native.mjs would have gone
+  // quietly vacuous at that point instead of failing.
+  const { SUPPORTED: resolvable } = await import("./npm/_addon.mjs");
+  const targets = ["darwin-arm64", "darwin-x64", "linux-x64-gnu", "linux-arm64-gnu"];
+  assert.deepEqual(
+    Object.keys(resolvable).sort(),
+    [...targets].sort(),
+    "the loader's platform table is exactly the released target list",
+  );
+  for (const target of targets) {
+    assert.equal(resolvable[target], `sasso-native-${target}`, `the loader resolves sasso-native-${target}`);
     assert.ok(genSrc.includes(`"${target}"`), `make-platform-package.mjs stages ${target}`);
   }
   console.log("ok: packaging — wasm binaries + speed wiring + sasso/native subpath and platform-target consistency");
@@ -747,18 +757,26 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // is what the loader actually resolves, so the skew is real rather than
   // simulated, and nothing is written inside the repo.
   const addonBin = fileURLToPath(new URL("../napi/npm/sasso.node", import.meta.url));
-  if (!existsSync(addonBin)) {
-    console.log("  (addon pairing: skipping the wiring test, no addon built here)");
+  // The loader's own naming, not a second spelling of it: on Linux the
+  // prebuilds carry a libc suffix (`linux-x64-gnu`), so `platform-arch` names a
+  // package the loader never looks for — the fabricated skew is then simply
+  // not found, the loader falls through to the repo-local build, and the test
+  // passes while asserting nothing. That is what happened on CI while it passed
+  // on macOS. A platform with no prebuild at all (musl, Windows) has no name to
+  // fabricate, and skips rather than fails.
+  const { platformKey, SUPPORTED } = await import("./npm/_addon.mjs");
+  const pkgName = SUPPORTED[platformKey()];
+  if (!existsSync(addonBin) || !pkgName) {
+    console.log(`  (addon pairing: skipping the wiring test — ${pkgName ? "no addon built here" : "no prebuild for " + platformKey()})`);
   } else {
     const nodePath = mkdtempSync(join(tmpdir(), "sasso-skew-"));
-    const key = `${process.platform}-${process.arch}`;
-    const pkgDir = join(nodePath, `sasso-native-${key}`);
+    const pkgDir = join(nodePath, pkgName);
     mkdirSync(pkgDir, { recursive: true });
     writeFileSync(join(pkgDir, "sasso.node"), readFileSync(addonBin));
     const manifest = (version) =>
       writeFileSync(
         join(pkgDir, "package.json"),
-        JSON.stringify({ name: `sasso-native-${key}`, version, main: "sasso.node" }),
+        JSON.stringify({ name: pkgName, version, main: "sasso.node" }),
       );
     const nativeUrl = new URL("./npm/native.mjs", import.meta.url).href;
     const withPath = (extra) => ({ ...process.env, NODE_PATH: nodePath, ...extra });

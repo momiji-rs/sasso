@@ -662,15 +662,24 @@ console.log("ok: silenceDeprecations — native and wasm agree, per id, sync + a
 // quietly does something else.
 {
   const addonBin = fileURLToPath(new URL("./npm/sasso.node", import.meta.url));
+  // The loader's own naming. Spelling it `platform-arch` here is right on
+  // macOS and wrong on Linux, where the prebuilds carry a libc suffix, and the
+  // failure is silent: the loader never looks for that name, so it falls
+  // through to the repo build and loads happily. A platform with no prebuild
+  // (musl, Windows) has no name to fabricate and skips.
+  const { platformKey, SUPPORTED } = await import("../wasm/npm/_addon.mjs");
+  const pkgName = SUPPORTED[platformKey()];
+  if (!pkgName) {
+    console.log(`  (addon pairing: skipping — no prebuild for ${platformKey()})`);
+  } else {
   const nodePath = mkdtempSync(join(tmpdir(), "sasso-napi-skew-"));
-  const key = `${process.platform}-${process.arch}`;
-  const pkgDir = join(nodePath, `sasso-native-${key}`);
+  const pkgDir = join(nodePath, pkgName);
   mkdirSync(pkgDir, { recursive: true });
   writeFileSync(join(pkgDir, "sasso.node"), readFileSync(addonBin));
   const manifest = (version) =>
     writeFileSync(
       join(pkgDir, "package.json"),
-      JSON.stringify({ name: `sasso-native-${key}`, version, main: "sasso.node" }),
+      JSON.stringify({ name: pkgName, version, main: "sasso.node" }),
     );
 
   // A fabricated platform package on NODE_PATH is what the loader really
@@ -699,6 +708,7 @@ console.log("ok: silenceDeprecations — native and wasm agree, per id, sync + a
   assert.equal(load(), "LOADED", "addon skew: a matching addon is accepted");
 
   rmSync(nodePath, { recursive: true, force: true });
+  }
 }
 console.log("ok: addon pairing — a skewed addon is refused where an addon exists");
 

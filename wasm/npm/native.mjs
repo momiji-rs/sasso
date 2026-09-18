@@ -31,26 +31,9 @@ import {
 import { Exception, Logger } from "./_loader.mjs";
 import { deserializeArgs, serializeValue, setEngine, valueApi } from "./_value.mjs";
 import { normalizeSilenced } from "./_deprecations.mjs";
-import { assertAddonVersion } from "./_addon.mjs";
+import { assertAddonVersion, platformKey, SUPPORTED } from "./_addon.mjs";
 
 const require_ = createRequire(import.meta.url);
-
-const SUPPORTED = {
-  "darwin-arm64": "sasso-native-darwin-arm64",
-  "darwin-x64": "sasso-native-darwin-x64",
-  "linux-x64-gnu": "sasso-native-linux-x64-gnu",
-  "linux-arm64-gnu": "sasso-native-linux-arm64-gnu",
-};
-
-function platformKey() {
-  const { platform, arch } = process;
-  if (platform === "linux") {
-    // glibc vs musl: the prebuilds are gnu-only for now.
-    const glibc = process.report?.getReport?.()?.header?.glibcVersionRuntime;
-    return `linux-${arch}-${glibc ? "gnu" : "musl"}`;
-  }
-  return `${platform}-${arch}`;
-}
 
 // This package's own version, for the pairing check below. The published
 // package.json carries the release version (the publish workflow writes it
