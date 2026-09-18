@@ -16,7 +16,8 @@
 //
 // Run: bash napi/build.sh && node napi/test.mjs   (wasm/npm must be built too)
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, realpathSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -648,6 +649,58 @@ console.log("ok: quietDeps — native and wasm agree on dart's provenance rule")
   }
 }
 console.log("ok: silenceDeprecations — native and wasm agree, per id, sync + async");
+
+// (p) A version-skewed addon is refused (#114).
+//
+// Here rather than only in wasm/test.mjs for the same reason (o) is: that
+// suite runs in the CI job that builds no addon, so its copy of this skips
+// there and the check would be exercised nowhere. This job has an addon.
+//
+// The skew matters because napi ignores config fields it does not know without
+// erroring — an addon one release behind accepts every option the newer JS
+// sends and applies only the ones it recognises, so the compile succeeds and
+// quietly does something else.
+{
+  const addonBin = fileURLToPath(new URL("./npm/sasso.node", import.meta.url));
+  const nodePath = mkdtempSync(join(tmpdir(), "sasso-napi-skew-"));
+  const key = `${process.platform}-${process.arch}`;
+  const pkgDir = join(nodePath, `sasso-native-${key}`);
+  mkdirSync(pkgDir, { recursive: true });
+  writeFileSync(join(pkgDir, "sasso.node"), readFileSync(addonBin));
+  const manifest = (version) =>
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({ name: `sasso-native-${key}`, version, main: "sasso.node" }),
+    );
+
+  // A fabricated platform package on NODE_PATH is what the loader really
+  // resolves, so this exercises the wiring rather than the rule in isolation.
+  const nativeUrl = new URL("../wasm/npm/native.mjs", import.meta.url).href;
+  const load = () =>
+    spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import(${JSON.stringify(nativeUrl)}).then(() => console.log("LOADED"), (e) => console.log(e.code))`,
+      ],
+      { encoding: "utf8", env: { ...process.env, NODE_PATH: nodePath } },
+    ).stdout.trim();
+
+  manifest("9.9.9");
+  assert.equal(load(), "SASSO_ADDON_VERSION_MISMATCH", "addon skew: a mismatched addon is refused");
+
+  // The matching case, so the assertion above cannot pass against a loader
+  // that simply refuses every addon.
+  const ours = JSON.parse(
+    readFileSync(new URL("../wasm/npm/package.json", import.meta.url), "utf8"),
+  ).version;
+  manifest(ours);
+  assert.equal(load(), "LOADED", "addon skew: a matching addon is accepted");
+
+  rmSync(nodePath, { recursive: true, force: true });
+}
+console.log("ok: addon pairing — a skewed addon is refused where an addon exists");
 
 // (o) `unicode: false` — the CLI's `--no-unicode` — selects the ASCII glyph set
 // for rendered diagnostics, on both engines. Same reason as quietDeps: one
