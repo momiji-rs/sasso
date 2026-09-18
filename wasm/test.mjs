@@ -1623,8 +1623,8 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 
   // The pool's default size is PHYSICAL cores, not SMT threads: a compile is
   // pure computation, so two hyperthreads on one core contend for the same
-  // execution units instead of overlapping stalls. Measured on a Ryzen 7
-  // 8745HS (8 cores / 16 threads), 138 Lichess stylesheets: `-j 8` beat
+  // execution units instead of overlapping stalls. Measured on Linux / x86_64
+  // with 8 cores and 16 threads, 138 Lichess stylesheets: `-j 8` beat
   // `-j 16` — 366 ms against 425 ms here, 208 against 235 through the native
   // binary — and the default taking the core count moved that corpus from
   // 444 ms to 364 ms. (Times, not percentages: "faster by" reads differently
