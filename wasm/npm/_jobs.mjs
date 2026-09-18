@@ -5,10 +5,10 @@
 // than overlapping stalls: on a Ryzen 7 8745HS (8 cores / 16 threads) over 138
 // Lichess stylesheets, `-j 8` beat `-j 16` — 366 ms against 425 ms through this
 // CLI, 208 against 235 through the native binary — and defaulting to the core
-// count took that corpus from 444 ms to 364 ms. (Times rather than percentages
-// on purpose: "faster by" reads differently depending on which of the two you
-// divide by, and both readings appear in this file's history.) On a machine without SMT the two counts are equal and
-// nothing changes.
+// count took that corpus from 444 ms to 364 ms. (Times rather than
+// percentages on purpose: "faster by" reads differently depending on which of
+// the two you divide by, and both readings appear in this file's history.)
+// On a machine without SMT the two counts are equal and nothing changes.
 //
 // Linux publishes the topology in `/proc/cpuinfo`, which is a read rather than
 // a fork. Apple silicon has no SMT, so the logical count is already right
@@ -142,7 +142,10 @@ export function quotaCpusFromCgroup({ v2, v1Quota, v1Period }) {
   return undefined;
 }
 
-/** The default for `-j`, given a way to read `/proc/cpuinfo` and a platform. */
+/**
+ * The default for `-j`, given a platform and a way to read each of the three
+ * files that can lower it: the topology, the affinity mask, and the quota.
+ */
 export function defaultJobs({
   platform = process.platform,
   readCpuinfo = defaultReadCpuinfo,
@@ -154,20 +157,17 @@ export function defaultJobs({
   const status = readStatus();
   const allowed = status === undefined ? undefined : allowedCpusFromStatus(status);
   const quota = tightestQuota(readCgroup());
-  // The smallest of the three, because they answer different questions and
-  // only the first knows all of them: on Node >= 18.14 `availableParallelism`
-  // covers both the affinity mask and the cgroup quota, and below it neither.
+  // The smallest of the three, because they answer different questions and no
+  // single one of them covers the others on every supported Node: what the
+  // runtime reports, the affinity mask (`taskset`, a cpuset) and a cgroup CPU
+  // quota (`docker --cpus`, a Kubernetes CPU limit, a systemd `CPUQuota=`).
+  // Node >= 18.14 folds the mask and the quota into `availableParallelism()`;
+  // below it neither, which is why both are read here.
   const logical = Math.min(reported, allowed ?? reported, quota ?? reported);
   const text = readCpuinfo();
   if (text === undefined) return logical;
   const physical = physicalCoresFromCpuinfo(text);
   // The host's core count, capped by what this process may actually use.
-  // Three different limits, because no single number covers them on every
-  // supported Node: the affinity mask (`taskset`, a cpuset), a cgroup CPU
-  // quota (`docker --cpus`, a Kubernetes CPU limit), and whatever the runtime
-  // itself reports. Node >= 18.14 folds the first two into
-  // `availableParallelism()`; below it neither, which is why they are read
-  // here.
   //
   // It is deliberately NOT the number of physical cores inside the affinity
   // mask, which looks more correct and measures much worse. SMT only stops
@@ -249,7 +249,10 @@ export function cgroupQuotaFiles(procSelfCgroup) {
     } else if (controllers.split(",").includes("cpu")) {
       for (const dir of ["/sys/fs/cgroup/cpu", "/sys/fs/cgroup/cpu,cpuacct"]) {
         for (const at of ancestors(path)) {
-          v1.push({ quota: `${dir}${at}/cpu.cfs_quota_us`, period: `${dir}${at}/cpu.cfs_period_us` });
+          v1.push({
+            quota: `${dir}${at}/cpu.cfs_quota_us`,
+            period: `${dir}${at}/cpu.cfs_period_us`,
+          });
         }
       }
     }
