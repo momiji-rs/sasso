@@ -99,6 +99,31 @@ impl Deprecation {
         }
     }
 
+    /// The `bogus-combinators` deprecation for a selector dart-sass drops:
+    /// a repeated combinator run (`a > + b`) or a leading one outside a
+    /// relative context. The rule is omitted from the CSS, and this warning is
+    /// the only sign that it was — sasso dropped these silently until now
+    /// (#119), which on Lichess's tree was 45 rules vanishing with no notice.
+    ///
+    /// `selector` is the RESOLVED selector, parents included, because that is
+    /// what dart names: `.tview2 .inaccuracy > + lines`, not the `.#{$name} >
+    /// + lines` that produced it.
+    ///
+    /// dart's other `bogus-combinators` message — a TRAILING combinator on a
+    /// rule that has declarations of its own ("is only valid for nesting and
+    /// shouldn't have children other than style rules") — carries a second
+    /// span labelling the offending child, which this renderer has no way to
+    /// produce yet. Trailing combinators stay silent for now.
+    pub(crate) fn bogus_combinators(selector: &str) -> Self {
+        Deprecation {
+            id: "bogus-combinators",
+            message: format!(
+                "The selector \"{selector}\" is invalid CSS. It will be omitted from the generated CSS.\nThis will be an error in Dart Sass 2.0.0."
+            ),
+            more_info: Some("More info: https://sass-lang.com/d/bogus-combinators".to_string()),
+        }
+    }
+
     /// The `if-function` deprecation: the legacy `if($c, $t, $f)` in favour of
     /// the modern CSS `if()`. `suggestion` is the rewritten call, present only
     /// when the arguments are the three positional ones the rewrite needs —

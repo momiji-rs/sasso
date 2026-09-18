@@ -3231,6 +3231,13 @@ impl<'a> Evaluator<'a> {
             && !current.iter().any(|s| complex_selector_block_is_bogus(s));
         let mut emit_selectors: Vec<String> = Vec::new();
         let mut emit_linebreaks: Vec<bool> = Vec::new();
+        // Bogus-combinator warnings are raised AFTER this rule's body, because
+        // that is dart's order: on lila's `.#{$name} > + lines { & interrupt
+        // {…} }` dart reports the nested `… interrupt` first and the rule that
+        // contains it second. Emitting where the selector is dropped gets the
+        // set right and the order backwards.
+        let mut pending_bogus: Vec<(Pos, usize, String)> = Vec::new();
+        let src_text = Rc::clone(&self.current_source);
         if share_current {
             for s in current.iter() {
                 self.note_placeholder_rule(s);
@@ -3238,8 +3245,23 @@ impl<'a> Evaluator<'a> {
         } else {
             emit_selectors.reserve(current.len());
             emit_linebreaks.reserve(current.len());
+            let own_parts = split_commas(&sel_str).len().max(1);
             for (i, s) in current.iter().enumerate() {
                 if complex_selector_block_is_bogus(s) {
+                    // dart WARNS as it drops this rule, and the warning is the
+                    // only sign the CSS lost it (#119). Only the "invalid CSS"
+                    // shape is reported: a bare TRAILING combinator is dart's
+                    // other message, which carries a second span labelling the
+                    // offending child that this renderer cannot draw yet.
+                    //
+                    // `current` is `parents x parts`, so complex `i` was
+                    // produced by part `i % own_parts` — the entry dart points
+                    // at, while the message names the RESOLVED selector.
+                    if complex_selector_is_bogus(s, false, false) {
+                        let (pos, len) =
+                            selector_part_span(&src_text, rule, &sel_str, &interp_bounds, i % own_parts);
+                        pending_bogus.push((pos, len, s.clone()));
+                    }
                     // The omitted selector still participates in @extend target
                     // matching (dart keeps the rule in the extend graph and only
                     // omits it from the emitted CSS).
@@ -3325,6 +3347,19 @@ impl<'a> Evaluator<'a> {
             }
             r
         };
+        // After the body, so a nested rule's own bogus selector is reported
+        // before its parent's — and only if the body COMPLETED. dart drops the
+        // warning when the rule it belongs to failed: an error inside
+        // `.a > + .b { color: $nope; }` gets the error alone, while an error in
+        // a LATER rule still leaves this one warning. Measured on 1.104.1;
+        // flushing unconditionally reported a deprecation for a rule that never
+        // finished.
+        if result.is_ok() {
+            for (pos, len, sel) in pending_bogus {
+                let dep = crate::deprecation::Deprecation::bogus_combinators(&sel);
+                self.emit_deprecation(&dep, pos, len);
+            }
+        }
         self.current_selector = prev_selector;
         self.current_linebreaks = prev_linebreaks;
         self.at_root_excluding_style_rule = prev_at_root;
@@ -7639,6 +7674,127 @@ fn complex_selector_is_bogus(s: &str, in_pseudo: bool, allow_leading: bool) -> b
 /// pseudo leading/trailing combinators) PLUS a top-level trailing combinator
 /// (`a >`): a trailing combinator is valid only for nesting, so the leaf block
 /// it would head is omitted while the selector still serves as a parent.
+/// Source span of one comma-separated entry of a rule's selector list, for a
+/// diagnostic that names that entry.
+///
+/// `sel_str` is the rule's own selector with its interpolations already
+/// substituted, so an offset into it is not a position in the source. The
+/// authored one is recovered by shifting across the interpolations that
+/// precede the entry on its line — the same correction `interp_selector_error`
+/// applies to a single column, extended to a list that may span lines
+/// (`a,\nb`).
+///
+/// THREE UNITS MEET HERE and mixing them silently misplaces the caret:
+/// [`InterpBounds`] and [`Pos::col`] count CHARACTERS, [`crate::diag::Span`]
+/// takes its length in SOURCE BYTES, and `&str` indexing is in bytes. The
+/// first version of this used byte offsets throughout and drew the underline
+/// twelve columns late on `.日本語テスト, .a > + .b` — one column per
+/// multi-byte character before the entry.
+///
+/// Returns the whole selector's start when the correction cannot be trusted
+/// (the interpolation spans do not line up with the bounds), which keeps the
+/// diagnostic on the right rule even when the column is approximate.
+fn selector_part_span(
+    src: &str,
+    rule: &Rule,
+    sel_str: &str,
+    interp_bounds: &InterpBounds,
+    part_index: usize,
+) -> (Pos, usize) {
+    let fallback = (rule.selector_pos, sel_str.len());
+    let base = sel_str.as_ptr() as usize;
+    let mut chosen: Option<(usize, usize)> = None;
+    for (k, part) in split_commas(sel_str).iter().enumerate() {
+        if k == part_index {
+            // `trim_selector_part`, not `trim`: a trailing space can be the
+            // terminator of a hex escape (`.a\9 `) and belongs to the selector.
+            let kept = trim_selector_part(part);
+            let byte_start = kept.as_ptr() as usize - base;
+            chosen = Some((byte_start, kept.chars().count()));
+            break;
+        }
+    }
+    let Some((byte_start, part_chars)) = chosen else {
+        return fallback;
+    };
+
+    let spans = &rule.selector_interp_spans;
+    let interp = interp_bounds.as_slice();
+    if spans.len() != interp.len() {
+        return fallback;
+    }
+
+    // Char offset of the entry, and of the start of the line it sits on.
+    let before = &sel_str[..byte_start];
+    let start = before.chars().count();
+    let newlines = before.matches('\n').count();
+    let line_start = match before.rfind('\n') {
+        Some(i) => sel_str[..i + 1].chars().count(),
+        None => 0,
+    };
+
+    // `#{ … }` and what it produced are different widths, so every
+    // interpolation shifts what follows it. One BEFORE the entry (on the same
+    // line) moves its start column; one INSIDE it changes how wide the authored
+    // text is — the entry dart underlines is `.#{$name} > + lines`, not the
+    // `.inaccuracy > + lines` it resolved to.
+    let mut shift: i64 = 0;
+    let mut inner: i64 = 0;
+    for (k, &(out_start, out_len)) in interp.iter().enumerate() {
+        let (_, col_start, col_end) = spans[k];
+        // `#{ … }` runs from two columns before the expression to the `}`.
+        let src_total = (col_end as i64 + 1) - (col_start as i64 - 2);
+        let delta = src_total - out_len as i64;
+        if out_start >= line_start && out_start + out_len <= start {
+            shift += delta;
+        } else if out_start >= start && out_start + out_len <= start + part_chars {
+            inner += delta;
+        }
+    }
+
+    let col = if newlines == 0 {
+        rule.selector_pos.col as i64 + start as i64 + shift
+    } else {
+        // A later line of the list starts at column 1 of the source line.
+        1 + (start - line_start) as i64 + shift
+    };
+    let col = col.max(1) as usize;
+    let line = rule.selector_pos.line + newlines;
+    // The caret length is SOURCE BYTES; everything above is characters.
+    let authored_chars = (part_chars as i64 + inner).max(1) as usize;
+    let len = source_byte_len(src, line, col, authored_chars).unwrap_or(sel_str.len());
+    (Pos { line, col }, len)
+}
+
+/// Byte length of `chars` characters of `src` starting at 1-based `line`/`col`,
+/// for a [`crate::diag::Span`] length. `None` when the position is past the end
+/// of the source, which means the mapping above produced something the source
+/// cannot back.
+fn source_byte_len(src: &str, line: usize, col: usize, chars: usize) -> Option<usize> {
+    let mut cur_line = 1usize;
+    let mut cur_col = 1usize;
+    let mut start: Option<usize> = None;
+    let mut taken = 0usize;
+    for (i, ch) in src.char_indices() {
+        if start.is_none() && cur_line == line && cur_col == col {
+            start = Some(i);
+        }
+        if let Some(from) = start {
+            if taken == chars {
+                return Some(i - from);
+            }
+            taken += 1;
+        }
+        if ch == '\n' {
+            cur_line += 1;
+            cur_col = 1;
+        } else {
+            cur_col += 1;
+        }
+    }
+    start.map(|b| src.len() - b)
+}
+
 fn complex_selector_block_is_bogus(s: &str) -> bool {
     if !has_bogus_trigger(s) {
         return false;

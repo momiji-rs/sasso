@@ -49,6 +49,24 @@ const MATCHING: &[&str] = &[
     "deprecation-darken",
     // The legacy `if()`, whose suggestion is the arguments written back out.
     "deprecation-if-function",
+    // A dropped selector announcing itself: dart omits the rule from the CSS
+    // and this warning is the only sign it did. sasso dropped it silently
+    // until #119 — 45 rules disappeared from Lichess's build with no notice.
+    // Its sibling fixture `deprecation-bogus-combinators` is dart's OTHER
+    // message for a trailing combinator, which needs the two-span renderer and
+    // stays out of this list.
+    "deprecation-bogus-combinators-invalid",
+    // The same warning behind a multi-byte selector: the span helper mixes
+    // character columns with byte offsets by nature (dart's columns are
+    // characters, our Span length is source bytes), and got it wrong the first
+    // time — twelve columns late on a CJK selector.
+    "deprecation-bogus-combinators-non-ascii",
+    // The warning is delayed until after the rule body, so the error path is
+    // its own question: dart drops it when that body fails, and keeps it when
+    // a LATER rule fails. Both, because gating on success could otherwise be
+    // over-broad with nothing to notice.
+    "deprecation-bogus-combinators-body-error",
+    "deprecation-bogus-combinators-later-error",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {
