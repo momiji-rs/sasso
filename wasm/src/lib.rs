@@ -374,6 +374,10 @@ impl Importer for HostImporter {
 /// - `quiet_deps != 0` drops deprecation warnings raised inside the stylesheets
 ///   the host flagged as dependencies (dart-sass `quietDeps`); a dependency's
 ///   own `@warn`/`@debug` still reaches the logger, as in dart.
+/// - `(silenced_ptr, silenced_len)`: deprecation ids to drop, comma-separated
+///   (`import,global-builtin`), `0`/`0` for none (dart-sass
+///   `silenceDeprecations`). Dropped inside the compiler beside `quiet_deps`,
+///   so a silenced id never reaches the per-id repetition cap either.
 /// - `unicode == 0` renders diagnostics with the ASCII glyph set (`,`/`|`/`'`
 ///   instead of `╷`/`│`/`╵`), as dart-sass's `--no-unicode` does.
 /// - `want_map != 0` also produces a Source Map v3 — the result buffer is then
@@ -384,11 +388,9 @@ impl Importer for HostImporter {
 /// Writes the result byte length to `*out_len_ptr` and `1` (ok) / `0` (error)
 /// to `*ok_ptr`, and returns a pointer to the UTF-8 result (CSS / framed map on
 /// success, error message on failure). Free it with `sasso_free(ptr, *out_len_ptr)`.
-/// `sasso_compile2` with `silenceDeprecations` added: `silenced_ptr`/
-/// `silenced_len` are a comma-separated list of deprecation ids to drop
-/// (`import,global-builtin`), empty for none.
 ///
-/// A new entry point rather than two more parameters on the old one, so a host
+/// `sasso_compile3` is `sasso_compile2` plus `silenced_ptr`/`silenced_len`: a
+/// new entry point rather than two more parameters on the old one, so a host
 /// built against `sasso_compile2` keeps linking — the same reason `compile2`
 /// exists beside the original. `compile2` now delegates here with an empty
 /// list, so there is one body to keep correct.

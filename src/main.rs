@@ -831,10 +831,11 @@ struct Shared {
     charset: bool,
     quiet: bool,
     quiet_deps: bool,
-    /// `--silence-deprecation` ids. Applied where the handler runs rather than
-    /// inside the compiler: `--quiet-deps` is about where a file came FROM,
-    /// which only the importer knows, while this is about which deprecation
-    /// it is, which the event carries.
+    /// `--silence-deprecation` ids, applied inside the compiler beside
+    /// `--quiet-deps` rather than in the warn handler. Dropping the warning
+    /// further out still lets it reach the per-id cap, so the run ends
+    /// reporting "N repetitive deprecation warnings omitted" for exactly the
+    /// ones the caller asked not to hear about; dart prints nothing there.
     silenced: Vec<String>,
     no_css: bool,
     embed_sources: bool,
