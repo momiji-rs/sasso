@@ -109,9 +109,10 @@ Conformance is tracked separately as a ratchet against the official
   delegating to it would fork bomb: the candidate must be a native executable
   image (ELF / Mach-O / PE magic bytes), and the child is marked so that a
   second hop is refused whatever it turns out to be. Identity is the whole
-  `--version` line, `sasso <version>` and nothing else: comparing only the
-  version in it would let any other project's `sasso` that prints a matching
-  number take the command line. And `wasm/test.mjs` had to
+  `--version` output, `sasso <version>` and nothing else: reading only the
+  version out of it would let any other project's `sasso` that prints a matching
+  number take the command line, and reading only its first line would let
+  anything that leads with a plausible one. And `wasm/test.mjs` had to
   turn delegation off for itself — every CLI case there is about what `cli.mjs`
   does, and on a machine with a matching binary installed the flag-parity guard
   (which exists because the two CLIs drifted apart in the first place) would

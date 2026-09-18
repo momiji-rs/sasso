@@ -284,16 +284,18 @@ function sassoOnPath() {
  * The binary's version, or undefined if it does not identify itself as sasso.
  *
  * `sasso --version` prints exactly `sasso <version>` and nothing else
- * (src/main.rs), where this CLI prints a bare `<version>`, dart's format. The
- * whole first line has to match that shape: this is the gate that decides
- * whether a stranger gets the project's command line, and something else
- * installed as `sasso` can print a version too — reading only the last field
- * would accept `some-other-tool 0.16.0` as a version-matched sasso.
+ * (src/main.rs: one `println!`), where this CLI prints a bare `<version>`,
+ * dart's format. The WHOLE output has to be that line — not its last field, and
+ * not its first line either: this is the gate that decides whether a stranger
+ * gets the project's command line, and something else installed as `sasso` can
+ * print a version too. Reading only the last field would accept
+ * `some-other-tool 0.16.0`, and reading only the first line would accept
+ * anything that leads with a plausible one.
  */
 function binaryVersion(path) {
   const r = spawnSync(path, ["--version"], { encoding: "utf8", timeout: 10000 });
   if (r.error || r.status !== 0) return undefined;
-  const m = /^sasso (\S+)$/.exec(String(r.stdout || "").split("\n", 1)[0].trim());
+  const m = /^sasso (\S+)$/.exec(String(r.stdout || "").trim());
   return m ? m[1] : undefined;
 }
 
