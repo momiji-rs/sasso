@@ -303,13 +303,21 @@ function buildCfg(options, syntax, urlForCore) {
     // An id dart does not know warns through the caller's own logger and
     // compiles anyway, as dart's JS API does — its CLI is the half that
     // rejects. See _deprecations.mjs for the measurement.
-    silenceDeprecations: normalizeSilenced(options.silenceDeprecations, (message) => {
-      if (options.logger && typeof options.logger.warn === "function") {
-        options.logger.warn(message, { deprecation: false, deprecationType: undefined, span: undefined, stack: undefined });
-      } else {
-        process.stderr.write(`WARNING: ${message}\n`);
-      }
-    }),
+    //
+    // Through `dispatchWarn` rather than calling the logger here, so it lands
+    // on stderr the same way when there is no logger AND inherits the catch
+    // that keeps a throwing logger from failing the compile.
+    silenceDeprecations: normalizeSilenced(options.silenceDeprecations, (message) =>
+      dispatchWarn(options.logger ?? null, {
+        kind: 0,
+        message,
+        formatted: `WARNING: ${message}`,
+        deprecation: false,
+        deprecationId: "",
+        url: "",
+        line: 0,
+      }),
+    ),
     unicode: options.unicode !== false,
     loadPaths: (options.loadPaths || []).map(String),
     hasUserImporters: !!(options.importers && options.importers.length),

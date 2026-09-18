@@ -2622,6 +2622,35 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       ['Invalid deprecation "nope".', 'Invalid deprecation "nope".', 'Invalid deprecation "".'],
       `silenceDeprecations(${name}): one warning per occurrence, known ids silent`,
     );
+
+    // An unknown id that CONTAINS A COMMA. The wasm ABI carries this list as
+    // one comma-separated string and the core splits it again, so forwarding
+    // an invalid id let `["import,global-builtin"]` arrive as two valid ones
+    // and silence both — while native, which passes an array, silenced
+    // nothing. dart warns and silences nothing; unknown ids are now dropped
+    // before marshalling, so the two engines agree with it and each other.
+    const smuggled = [];
+    mod.compile(entry, {
+      silenceDeprecations: ["import,global-builtin"],
+      logger: { warn: (m) => smuggled.push(m.split("\n")[0]) },
+    });
+    assert.ok(
+      smuggled.some((w) => w === 'Invalid deprecation "import,global-builtin".'),
+      `silenceDeprecations(${name}): a comma inside one id is one invalid id`,
+    );
+    assert.ok(
+      smuggled.some((w) => IMPORT.test(w)) && smuggled.some((w) => GLOBAL.test(w)),
+      `silenceDeprecations(${name}): … and it silences neither of them`,
+    );
+
+    // A logger that throws must not fail the compile — the package's rule for
+    // every other diagnostic (`host_warn` swallows it), and this warning is
+    // raised before the compile reaches that guard.
+    const r2 = mod.compile(entry, {
+      silenceDeprecations: ["nope"],
+      logger: { warn: () => { throw new Error("logger exploded"); } },
+    });
+    assert.ok(r2.css.includes("color"), `silenceDeprecations(${name}): a throwing logger does not fail the compile`);
   }
 }
 

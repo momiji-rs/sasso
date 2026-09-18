@@ -615,6 +615,36 @@ console.log("ok: quietDeps — native and wasm agree on dart's provenance rule")
       `silenceDeprecations(${name}): one plain warning per unknown occurrence, known ids silent`,
     );
     assert.ok(r.css.includes("b: c"), `silenceDeprecations(${name}): an unknown id does not fail the compile`);
+
+    // An unknown id containing a comma. wasm marshals this list as one
+    // comma-separated string, so forwarding invalid ids let a single bad id
+    // split into two good ones there while native silenced nothing. Both now
+    // drop unknown ids, so the engines agree with each other and with dart.
+    const smuggled = [];
+    mod.compileString('@import "dep";\n', {
+      url: entryUrl,
+      silenceDeprecations: ["import,global-builtin"],
+      logger: { warn: (m) => smuggled.push(m.split("\n")[0]) },
+    });
+    assert.ok(
+      smuggled.includes('Invalid deprecation "import,global-builtin".'),
+      `silenceDeprecations(${name}): a comma inside one id is one invalid id`,
+    );
+    assert.ok(
+      smuggled.some((w) => IMPORT.test(w)) && smuggled.some((w) => GLOBAL.test(w)),
+      `silenceDeprecations(${name}): … and it silences neither of them`,
+    );
+
+    // A logger that throws must not fail the compile, as for every other
+    // diagnostic in this package.
+    const survived = mod.compileString(".a{b:c}", {
+      silenceDeprecations: ["nope"],
+      logger: { warn: () => { throw new Error("logger exploded"); } },
+    });
+    assert.ok(
+      survived.css.includes("b: c"),
+      `silenceDeprecations(${name}): a throwing logger does not fail the compile`,
+    );
   }
 }
 console.log("ok: silenceDeprecations — native and wasm agree, per id, sync + async");

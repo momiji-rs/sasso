@@ -39,13 +39,25 @@ export const DEPRECATION_IDS = new Set([
 // So throwing here would be stricter than dart and would break builds dart
 // accepts; staying silent, which is what this did first, contradicts the option
 // documented in `sasso.d.ts` and leaves a typo doing nothing with no trace.
-// Unknown ids stay in the returned list: they match no deprecation, so passing
-// them through costs nothing and keeps one behaviour instead of two.
+//
+// Unknown ids are then DROPPED rather than forwarded. Forwarding them looks
+// harmless — an id that matches no deprecation silences nothing — but the wasm
+// ABI carries this list as one comma-separated string, so the core splits it
+// again on the way in and `["import,global-builtin"]`, a single invalid id,
+// arrived as two valid ones. Measured against dart 1.104.1, which warns and
+// silences NOTHING for that input, as the native path already did:
+//
+//     ["import,global-builtin"]   dart   INVALID, then all 3 warnings
+//                                 native INVALID, then all 3 warnings
+//                                 wasm   INVALID, then 1  <- silenced both
+//
+// Dropping them here fixes that at the one place both engines share, instead
+// of teaching the marshalling not to trust its own input.
 export function normalizeSilenced(value, warn) {
   if (!Array.isArray(value)) return [];
   const ids = value.map(String);
   if (typeof warn === "function") {
     for (const id of ids) if (!DEPRECATION_IDS.has(id)) warn(`Invalid deprecation "${id}".`);
   }
-  return ids;
+  return ids.filter((id) => DEPRECATION_IDS.has(id));
 }

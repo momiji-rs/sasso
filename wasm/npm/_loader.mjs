@@ -787,15 +787,24 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       // beside quietDeps, so they never reach the per-id cap. An id dart does
       // not know warns through the caller's own logger and compiles anyway,
       // as dart's JS API does — its CLI is the half that rejects.
-      silenceDeprecations: normalizeSilenced(options.silenceDeprecations, (message) =>
-        dispatchWarn(options.logger ?? null, {
-          kind: 0,
-          message,
-          formatted: `WARNING: ${message}`,
-          deprecation: false,
-          deprecationId: "",
-        }),
-      ),
+      silenceDeprecations: normalizeSilenced(options.silenceDeprecations, (message) => {
+        // Guarded like every other diagnostic in this package: `host_warn`
+        // swallows a logger that throws so a broken logger cannot fail a
+        // compile, and this warning is raised before the compile reaches it.
+        // (dart propagates here, and for ordinary diagnostics too — the
+        // package's rule is deliberate and applies to both or to neither.)
+        try {
+          dispatchWarn(options.logger ?? null, {
+            kind: 0,
+            message,
+            formatted: `WARNING: ${message}`,
+            deprecation: false,
+            deprecationId: "",
+          });
+        } catch {
+          // A logging failure must never fail the compile.
+        }
+      }),
       unicode: options.unicode !== false, // sasso extension: the CLI's --no-unicode
     };
   }
