@@ -345,11 +345,20 @@ pub(crate) fn is_plain_css_filter_call(name: &str, pos_args: &[Value], named: &[
             .first()
             .or_else(|| named.iter().find(|(n, _)| n == param).map(|(_, v)| v))
     };
+    let one_arg = pos_args.len() + named.len() == 1;
     match name {
         // `saturate($amount)` is the CSS filter; `saturate($color, $amount)`
         // is the Sass function, so arity decides before the argument does.
-        "saturate" => pos_args.len() + named.len() == 1 && arg("amount").is_some_and(is_css_special),
-        "invert" | "grayscale" | "opacity" => arg("color").is_some_and(is_css_special),
+        "saturate" => one_arg && arg("amount").is_some_and(is_css_special),
+        // `grayscale`, `opacity` and `invert` do NOT take an arity guard, and
+        // that is measured rather than assumed. dart treats `grayscale(1, 2)`
+        // as the plain-CSS overload and reports only its arity error; adding
+        // `one_arg` here makes the call miss this branch, so the evaluator
+        // deprecates it as a global built-in and prints a warning dart never
+        // does. `invert` shows the same thing from the other side: its CSS
+        // branch is what raises "Only one argument may be passed to the
+        // plain-CSS invert() function."
+        "grayscale" | "opacity" | "invert" => arg("color").is_some_and(is_css_special),
         _ => false,
     }
 }

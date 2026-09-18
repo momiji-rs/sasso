@@ -71,6 +71,9 @@ const MATCHING: &[&str] = &[
     // call that must still warn (#122). Both halves in one fixture on purpose:
     // simply not warning would satisfy the first and fail the second.
     "deprecation-global-builtin-css-filter",
+    // The same rule reached through a function reference: fixing only the
+    // direct call left `meta.call(meta.get-function("grayscale"), 1)` warning.
+    "deprecation-global-builtin-call-ref",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {
@@ -2039,5 +2042,34 @@ fn a_span_inside_an_arms_range_writes_its_row_under_its_own_line() {
          \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}^\n\
          2 \u{2502} \u{2502}   $x: 1\n\
          3 \u{2502} \u{2502} ) { a: $x; }\n  \u{2502} \u{2514}\u{2500}^ declaration\n  \u{2575}"
+    );
+}
+
+/// `grayscale(1, 2)` is an arity error, and dart raises ONLY that — no
+/// `global-builtin` warning ahead of it.
+///
+/// Not a byte-exact fixture: dart renders this one as a two-span error
+/// (the invocation, plus the declaration inside `sass:color`), which this
+/// renderer cannot draw yet. The captured dart output is checked in beside the
+/// input for reference; what is asserted here is the narrower property the
+/// #122 fix turns on.
+///
+/// It is asserted because the review of #122 proposed requiring one argument
+/// in `is_plain_css_filter_call`, and doing so makes this call miss the
+/// plain-CSS branch, be deprecated as a global built-in, and print a warning
+/// dart never prints. Measured, not assumed.
+#[test]
+fn an_arity_error_on_a_css_filter_does_not_also_deprecate() {
+    let stderr = run_sasso_stderr("deprecation-global-builtin-filter-arity");
+    // `DEPRECATION WARNING`, not `global-builtin`: the fixture's own FILENAME
+    // contains that id and appears in the stack trace, so the obvious
+    // assertion passes for the wrong reason — it failed here first.
+    assert!(
+        !stderr.contains("DEPRECATION WARNING"),
+        "grayscale(1, 2) must report its arity error alone, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Error:"),
+        "…and it must still be an error, got:\n{stderr}"
     );
 }

@@ -758,8 +758,11 @@ impl<'a> Evaluator<'a> {
                 // builtins themselves use, so the warning cannot disagree with
                 // which path the call actually took — it did, and told authors
                 // to rewrite CSS filters as `color.adjust` (#122).
-                // Global calls only: `color.grayscale(1)` through a
-                // namespace is a Sass call with a bad argument, not a filter.
+                // Global calls only, for the DEPRECATION: a namespaced
+                // `color.grayscale(1)` is not a global built-in, so there is
+                // nothing to deprecate for being one. (What dart raises there
+                // instead is `color-module-compat`, which sasso does not
+                // implement yet — #124, a separate gap this does not touch.)
                 let css_filter_call = via_star.is_none()
                     && crate::builtins::is_plain_css_filter_call(canonical, &pos_args, &named);
                 if !ms_alpha_filter && !css_filter_call {

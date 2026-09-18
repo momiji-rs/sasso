@@ -630,7 +630,14 @@ impl<'a> Evaluator<'a> {
         // from is remembered. (A reference with no position is an internal
         // invocation — the user-overridden `calc()` hook — which reports
         // nothing.)
-        if f.user.is_none() && !f.css && pos.line > 0 {
+        // A reference resolves to the same built-in, so it takes the same
+        // plain-CSS path for a plain-CSS argument and deprecates as little:
+        // `meta.call(meta.get-function("grayscale"), 1)` is the CSS filter and
+        // dart says nothing. Fixing only the direct call left this one warning
+        // (#122).
+        let css_filter_ref =
+            f.module.is_none() && crate::builtins::is_plain_css_filter_call(&f.name, &pos_args, &named);
+        if f.user.is_none() && !f.css && pos.line > 0 && !css_filter_ref {
             self.emit_call_deprecations(&f.name, f.module.map(|m| m.name()), pos, length);
         }
         // A captured user `@function`: bind the evaluated args and run its
