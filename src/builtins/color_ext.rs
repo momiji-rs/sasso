@@ -71,7 +71,7 @@ pub(super) fn computed(r: f64, g: f64, b: f64, a: f64) -> Color {
 /// dart-sass's canonical name for each color (e.g. `aqua` not `cyan`, `gray`
 /// not `grey`). Returns `None` for translucent colors, non-integer channels,
 /// or colors with no name.
-pub(super) fn named_repr(r: f64, g: f64, b: f64, a: f64) -> Option<String> {
+pub(super) fn named_repr(r: f64, g: f64, b: f64, a: f64) -> Option<std::rc::Rc<str>> {
     if (a - 1.0).abs() >= f64::EPSILON {
         return None;
     }
@@ -228,7 +228,7 @@ pub(super) fn named_repr(r: f64, g: f64, b: f64, a: f64) -> Option<String> {
         (255, 255, 255) => "white",
         _ => return None,
     };
-    Some(name.to_string())
+    Some(name.into())
 }
 
 /// The names the `color_ext` family owns by name (the single source of truth,
