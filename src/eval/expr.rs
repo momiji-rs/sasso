@@ -770,13 +770,18 @@ impl<'a> Evaluator<'a> {
                 // a deprecated global's NAME warns whether or not one is
                 // registered. Suppressing it here would have made
                 // `with_function("grayscale($x)", …)` quietly exempt.
-                let host_override = !self.options.functions.is_empty() && {
-                    let norm = crate::host_fn::normalize_name(canonical);
-                    self.options.functions.iter().any(|f| f.name == norm)
-                };
+                // Order matters for cost, not just for correctness: the
+                // predicate is a match on four names and rejects almost every
+                // call outright, while the host-function check normalizes a
+                // name and scans the registry. Computing the second one first
+                // put that scan on EVERY call in a stylesheet that registers
+                // any host function at all.
                 let css_filter_call = via_star.is_none()
-                    && !host_override
-                    && crate::builtins::is_plain_css_filter_call(canonical, &pos_args, &named);
+                    && crate::builtins::is_plain_css_filter_call(canonical, &pos_args, &named)
+                    && !(!self.options.functions.is_empty() && {
+                        let norm = crate::host_fn::normalize_name(canonical);
+                        self.options.functions.iter().any(|f| f.name == norm)
+                    });
                 if !ms_alpha_filter && !css_filter_call {
                     self.emit_call_deprecations(
                         canonical,
