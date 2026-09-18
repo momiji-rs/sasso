@@ -192,6 +192,21 @@ fn default_jobs() -> usize {
 fn jobs_from(logical: usize, cpuinfo: Option<&str>) -> usize {
     // Never more than the kernel offers this process: a cgroup or `taskset`
     // cap shows up in `available_parallelism`, not in `/proc/cpuinfo`.
+    // Verified rather than assumed: under `taskset -c 0,1,8,9` on a 16-thread
+    // machine `available_parallelism` answers 4 (2026-09-17), so nothing here
+    // needs to read the affinity mask itself. The npm CLI is not so lucky —
+    // its pre-18.14 fallback counts the host — and reads it in `_jobs.mjs`.
+    //
+    // This is the host's core count capped by what the process may use, and
+    // deliberately NOT the cores inside the mask, which measures much worse:
+    // SMT only stops paying once enough cores are in play. Same corpus, best
+    // of five, `taskset` masks of whole cores:
+    //
+    //     cores allowed   1     2     4     6     7     8
+    //     SMT is worth  +55%  +50%  +33%   -2%   -6%  -11%
+    //
+    // Counting cores within the mask would pick 2 where 4 is 50% faster, and
+    // 4 where 8 is 33% faster.
     cpuinfo
         .and_then(physical_cores)
         .map_or(logical, |physical| physical.clamp(1, logical))
@@ -211,6 +226,10 @@ fn physical_cores(cpuinfo: &str) -> Option<usize> {
             continue;
         };
         match key.trim() {
+            // The socket resets here rather than carrying over: a file that
+            // names it for some processors and not others must not file the
+            // later ones under whichever socket happened to come before.
+            "processor" => package = "",
             "physical id" => package = value.trim(),
             "core id" => {
                 cores.insert((package.to_string(), value.trim().to_string()));
@@ -253,6 +272,18 @@ mod default_jobs_tests {
         assert_eq!(jobs_from(2, Some(&host)), 2);
         assert_eq!(jobs_from(16, Some(&host)), 8);
         assert_eq!(jobs_from(4, None), 4);
+    }
+
+    #[test]
+    fn the_socket_resets_at_each_processor_record() {
+        // Two sockets' worth of `core id: 0` are two cores, however incomplete
+        // the file is about saying so.
+        let partial = "processor\t: 0\nphysical id\t: 0\ncore id\t: 0\n\nprocessor\t: 1\ncore id\t: 0\n";
+        assert_eq!(physical_cores(partial), Some(2));
+        // But a file that names no socket at all is one socket, not a
+        // giving-up: that is what a single-socket VM reports.
+        let unnamed = "processor\t: 0\ncore id\t: 0\n\nprocessor\t: 1\ncore id\t: 0\n";
+        assert_eq!(physical_cores(unnamed), Some(1));
     }
 
     #[test]

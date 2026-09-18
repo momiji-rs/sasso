@@ -1485,6 +1485,30 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       "cli: no topology reported means no answer, not zero",
     );
 
+    // A file that names the socket for some processors and not others must not
+    // file the later ones under whichever socket happened to come before: two
+    // sockets' worth of `core id: 0` are two cores, however incomplete the file.
+    assert.equal(
+      jobs.physicalCoresFromCpuinfo(
+        "processor\t: 0\nphysical id\t: 0\ncore id\t: 0\n\nprocessor\t: 1\ncore id\t: 0\n",
+      ),
+      2,
+      "cli: the socket resets at each processor record",
+    );
+    // But a file that names no socket at all is still usable: every core lands
+    // under one unnamed socket, which is what a single-socket VM reports.
+    assert.equal(
+      jobs.physicalCoresFromCpuinfo("processor\t: 0\ncore id\t: 0\n\nprocessor\t: 1\ncore id\t: 0\n"),
+      1,
+      "cli: no socket named at all is one socket, not a giving-up",
+    );
+
+    // `Cpus_allowed_list` is the affinity mask this process actually has.
+    assert.equal(jobs.allowedCpusFromStatus("Cpus_allowed_list:\t0-1,8-9\n"), 4, "cli: ranges and lists");
+    assert.equal(jobs.allowedCpusFromStatus("Cpus_allowed_list:\t3\n"), 1, "cli: a single cpu");
+    assert.equal(jobs.allowedCpusFromStatus("Name:\tnode\n"), undefined, "cli: absent means no answer");
+    assert.equal(jobs.allowedCpusFromStatus("Cpus_allowed_list:\t9-3\n"), undefined, "cli: a backwards range");
+
     // …and the default that is built on it.
     const readFake = (text) => () => text;
     assert.equal(
@@ -1497,6 +1521,35 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       logical,
       "cli: an unreadable /proc/cpuinfo falls back to the kernel's count",
     );
+
+    // `os.availableParallelism` only exists on Node >= 18.14, and the package
+    // supports >= 16; below it `os.cpus().length` answers the HOST's count and
+    // knows nothing of the affinity mask (16 against 4 under `taskset -c
+    // 0,1,8,9`, measured 2026-09-17). `Cpus_allowed_list` is what makes the cap
+    // hold on every supported Node, so it has to bind even when the reported
+    // count is the whole machine.
+    const eightCores = Array.from(
+      { length: 16 },
+      (_v, i) => `processor\t: ${i}\nphysical id\t: 0\ncore id\t: ${i >> 1}\n`,
+    ).join("\n");
+    assert.equal(
+      jobs.defaultJobs({
+        platform: "linux",
+        readCpuinfo: readFake(eightCores),
+        readStatus: readFake("Cpus_allowed_list:\t0-1,8-9\n"),
+      }),
+      Math.min(4, logical),
+      "cli: the affinity mask caps the default even when the CPU count does not",
+    );
+    assert.equal(
+      jobs.defaultJobs({
+        platform: "linux",
+        readCpuinfo: readFake(eightCores),
+        readStatus: () => undefined,
+      }),
+      Math.min(8, logical),
+      "cli: an unreadable /proc/self/status leaves the core count alone",
+    );
     assert.equal(
       jobs.defaultJobs({ platform: "darwin", readCpuinfo: readFake(smt) }),
       logical,
@@ -1504,7 +1557,13 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     );
     // A cgroup- or taskset-restricted process sees fewer CPUs than the machine
     // has cores; the smaller number has to win.
-    const many = Array.from({ length: 512 }, (_v, i) => `physical id\t: 0\ncore id\t: ${i}\n`).join("\n");
+    // Sized from the host: a fixed number would stop being "more cores than
+    // this process may use" on a big enough machine, and the assertion would
+    // then be testing the opposite of what it says.
+    const many = Array.from(
+      { length: logical + 8 },
+      (_v, i) => `physical id\t: 0\ncore id\t: ${i}\n`,
+    ).join("\n");
     assert.equal(
       jobs.defaultJobs({ platform: "linux", readCpuinfo: readFake(many) }),
       logical,
