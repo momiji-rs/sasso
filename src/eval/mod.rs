@@ -3231,6 +3231,12 @@ impl<'a> Evaluator<'a> {
             && !current.iter().any(|s| complex_selector_block_is_bogus(s));
         let mut emit_selectors: Vec<String> = Vec::new();
         let mut emit_linebreaks: Vec<bool> = Vec::new();
+        // Bogus-combinator warnings are raised AFTER this rule's body, because
+        // that is dart's order: on lila's `.#{$name} > + lines { & interrupt
+        // {…} }` dart reports the nested `… interrupt` first and the rule that
+        // contains it second. Emitting where the selector is dropped gets the
+        // set right and the order backwards.
+        let mut pending_bogus: Vec<(Pos, usize, String)> = Vec::new();
         if share_current {
             for s in current.iter() {
                 self.note_placeholder_rule(s);
@@ -3238,8 +3244,22 @@ impl<'a> Evaluator<'a> {
         } else {
             emit_selectors.reserve(current.len());
             emit_linebreaks.reserve(current.len());
+            let own_parts = split_commas(&sel_str).len().max(1);
             for (i, s) in current.iter().enumerate() {
                 if complex_selector_block_is_bogus(s) {
+                    // dart WARNS as it drops this rule, and the warning is the
+                    // only sign the CSS lost it (#119). Only the "invalid CSS"
+                    // shape is reported: a bare TRAILING combinator is dart's
+                    // other message, which carries a second span labelling the
+                    // offending child that this renderer cannot draw yet.
+                    //
+                    // `current` is `parents x parts`, so complex `i` was
+                    // produced by part `i % own_parts` — the entry dart points
+                    // at, while the message names the RESOLVED selector.
+                    if complex_selector_is_bogus(s, false, false) {
+                        let (pos, len) = selector_part_span(rule, &sel_str, &interp_bounds, i % own_parts);
+                        pending_bogus.push((pos, len, s.clone()));
+                    }
                     // The omitted selector still participates in @extend target
                     // matching (dart keeps the rule in the extend graph and only
                     // omits it from the emitted CSS).
@@ -3325,6 +3345,12 @@ impl<'a> Evaluator<'a> {
             }
             r
         };
+        // After the body, so a nested rule's own bogus selector is reported
+        // before its parent's — see `pending_bogus`.
+        for (pos, len, sel) in pending_bogus {
+            let dep = crate::deprecation::Deprecation::bogus_combinators(&sel);
+            self.emit_deprecation(&dep, pos, len);
+        }
         self.current_selector = prev_selector;
         self.current_linebreaks = prev_linebreaks;
         self.at_root_excluding_style_rule = prev_at_root;
@@ -7639,6 +7665,87 @@ fn complex_selector_is_bogus(s: &str, in_pseudo: bool, allow_leading: bool) -> b
 /// pseudo leading/trailing combinators) PLUS a top-level trailing combinator
 /// (`a >`): a trailing combinator is valid only for nesting, so the leaf block
 /// it would head is omitted while the selector still serves as a parent.
+/// Source span of one comma-separated entry of a rule's selector list, for a
+/// diagnostic that names that entry.
+///
+/// `sel_str` is the rule's own selector with its interpolations already
+/// substituted, so an index into it is not a column in the source. The authored
+/// column is recovered by shifting across the interpolations that precede the
+/// entry on its line — the same correction `interp_selector_error` applies to a
+/// single column, extended to a list that may span lines (`a,\nb`).
+///
+/// Returns the whole selector's start when the correction cannot be trusted
+/// (the interpolation spans do not line up with the bounds), which keeps the
+/// diagnostic pointing at the right rule even when the column is approximate.
+fn selector_part_span(
+    rule: &Rule,
+    sel_str: &str,
+    interp_bounds: &InterpBounds,
+    part_index: usize,
+) -> (Pos, usize) {
+    let fallback = (rule.selector_pos, sel_str.len());
+    let base = sel_str.as_ptr() as usize;
+    let mut bounds: Option<(usize, usize)> = None;
+    for (k, part) in split_commas(sel_str).iter().enumerate() {
+        if k == part_index {
+            let start = part.as_ptr() as usize - base;
+            // The entry as dart highlights it: without the whitespace that a
+            // multi-line list leaves after the comma.
+            let lead = part.len() - part.trim_start().len();
+            bounds = Some((start + lead, part.trim().len()));
+            break;
+        }
+    }
+    let Some((start, len)) = bounds else {
+        return fallback;
+    };
+
+    let spans = &rule.selector_interp_spans;
+    let interp = interp_bounds.as_slice();
+    if spans.len() != interp.len() {
+        return fallback;
+    }
+
+    // Which resolved line the entry begins on, and where that line began.
+    let before = &sel_str[..start];
+    let newlines = before.matches('\n').count();
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+
+    // `#{ … }` and what it produced are different widths, so every
+    // interpolation shifts what follows it. One BEFORE the entry (on the same
+    // line) moves its start column; one INSIDE it changes how wide the authored
+    // text is — the entry dart underlines is `.#{$name} > + lines`, not the
+    // `.inaccuracy > + lines` it resolved to.
+    let mut shift: i64 = 0;
+    let mut inner: i64 = 0;
+    for (k, &(out_start, out_len)) in interp.iter().enumerate() {
+        let (_, col_start, col_end) = spans[k];
+        // `#{ … }` runs from two columns before the expression to the `}`.
+        let src_total = (col_end as i64 + 1) - (col_start as i64 - 2);
+        let delta = src_total - out_len as i64;
+        if out_start >= line_start && out_start + out_len <= start {
+            shift += delta;
+        } else if out_start >= start && out_start + out_len <= start + len {
+            inner += delta;
+        }
+    }
+    let len = (len as i64 + inner).max(1) as usize;
+
+    let col = if newlines == 0 {
+        rule.selector_pos.col as i64 + start as i64 + shift
+    } else {
+        // A later line of the list starts at column 1 of the source line.
+        1 + (start - line_start) as i64 + shift
+    };
+    (
+        Pos {
+            line: rule.selector_pos.line + newlines,
+            col: col.max(1) as usize,
+        },
+        len,
+    )
+}
+
 fn complex_selector_block_is_bogus(s: &str) -> bool {
     if !has_bogus_trigger(s) {
         return false;

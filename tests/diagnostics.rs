@@ -49,6 +49,13 @@ const MATCHING: &[&str] = &[
     "deprecation-darken",
     // The legacy `if()`, whose suggestion is the arguments written back out.
     "deprecation-if-function",
+    // A dropped selector announcing itself: dart omits the rule from the CSS
+    // and this warning is the only sign it did. sasso dropped it silently
+    // until #119 — 45 rules disappeared from Lichess's build with no notice.
+    // Its sibling fixture `deprecation-bogus-combinators` is dart's OTHER
+    // message for a trailing combinator, which needs the two-span renderer and
+    // stays out of this list.
+    "deprecation-bogus-combinators-invalid",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {

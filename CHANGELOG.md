@@ -11,6 +11,26 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Added
+
+- **`bogus-combinators` is now reported** when a selector with a repeated or
+  leading combinator run (`a > + b`) is dropped (#119). sasso already omitted
+  those rules, the way dart-sass does — it just never said so, and the warning
+  is the only sign the CSS lost them. On Lichess's tree that was **45 rules
+  disappearing with no notice**; sasso now reports the same 45, in dart's
+  order, byte-for-byte.
+
+  dart raises these AFTER the rule's body, so a nested rule's own bogus
+  selector is reported before its parent's. The message names the RESOLVED
+  selector (`.tview2 .inaccuracy > + lines`) while the span points at the
+  authored one (`.#{$name} > + lines`), which means mapping back across the
+  interpolations that sit before and inside the entry.
+
+  dart's other `bogus-combinators` message — a TRAILING combinator on a rule
+  that has declarations of its own — carries a second span labelling the
+  offending child, which this renderer cannot draw yet, and stays silent. That
+  shape does not occur in the Lichess corpus.
+
 ### Fixed
 
 - **A native addon whose version does not match the `sasso` loading it is now
