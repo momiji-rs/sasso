@@ -11,6 +11,7 @@
 
 mod color;
 mod color_ext;
+pub(crate) use color_ext::is_plain_css_filter_call;
 mod colorspace;
 mod list;
 mod map;

@@ -67,6 +67,13 @@ const MATCHING: &[&str] = &[
     // over-broad with nothing to notice.
     "deprecation-bogus-combinators-body-error",
     "deprecation-bogus-combinators-later-error",
+    // Four CSS filter calls that must stay silent beside one real Sass colour
+    // call that must still warn (#122). Both halves in one fixture on purpose:
+    // simply not warning would satisfy the first and fail the second.
+    "deprecation-global-builtin-css-filter",
+    // The same rule reached through a function reference: fixing only the
+    // direct call left `meta.call(meta.get-function("grayscale"), 1)` warning.
+    "deprecation-global-builtin-call-ref",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {
@@ -2036,4 +2043,73 @@ fn a_span_inside_an_arms_range_writes_its_row_under_its_own_line() {
          2 \u{2502} \u{2502}   $x: 1\n\
          3 \u{2502} \u{2502} ) { a: $x; }\n  \u{2502} \u{2514}\u{2500}^ declaration\n  \u{2575}"
     );
+}
+
+/// `grayscale(1, 2)` is an arity error, and dart raises ONLY that — no
+/// `global-builtin` warning ahead of it.
+///
+/// Not a byte-exact fixture: dart renders this one as a two-span error
+/// (the invocation, plus the declaration inside `sass:color`), which this
+/// renderer cannot draw yet. The captured dart output is checked in beside the
+/// input for reference; what is asserted here is the narrower property the
+/// #122 fix turns on.
+///
+/// It is asserted because the review of #122 proposed requiring one argument
+/// in `is_plain_css_filter_call`, and doing so makes this call miss the
+/// plain-CSS branch, be deprecated as a global built-in, and print a warning
+/// dart never prints. Measured, not assumed.
+#[test]
+fn an_arity_error_on_a_css_filter_does_not_also_deprecate() {
+    let stderr = run_sasso_stderr("deprecation-global-builtin-filter-arity");
+    // `DEPRECATION WARNING`, not `global-builtin`: the fixture's own FILENAME
+    // contains that id and appears in the stack trace, so the obvious
+    // assertion passes for the wrong reason — it failed here first.
+    assert!(
+        !stderr.contains("DEPRECATION WARNING"),
+        "grayscale(1, 2) must report its arity error alone, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Error:"),
+        "…and it must still be an error, got:\n{stderr}"
+    );
+}
+
+/// A registered host function is the implementation sasso selects, so a call
+/// to it is not the plain-CSS filter overload and must still be deprecated.
+///
+/// The #122 suppression runs before host dispatch, which is exactly where it
+/// could go wrong: `grayscale(1)` looks like the CSS filter right up until you
+/// notice a callback is registered under that name and is what actually runs.
+/// `with_function`'s contract (src/lib.rs) is that writing a deprecated
+/// global's name warns whether or not a custom function of that name exists —
+/// the callback taking precedence is sasso's deliberate divergence from dart,
+/// and the warning is not part of that divergence.
+///
+/// The sibling test above covers the same contract for a name with no CSS
+/// overload (`type-of`); this one covers a name that has one.
+#[test]
+fn a_host_override_of_a_filter_name_still_warns() {
+    use std::rc::Rc;
+    let called: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+    let flag = Rc::clone(&called);
+    let cb: sasso::HostFunction = Rc::new(move |_args: &[u8]| {
+        flag.set(true);
+        Ok(Vec::new())
+    });
+    let seen: Rc<std::cell::RefCell<Vec<String>>> = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = Rc::clone(&seen);
+    let opts = Options::default()
+        .with_url("in.scss")
+        .with_function("grayscale($x)", cb)
+        .with_warn_handler(Rc::new(move |ev: &sasso::WarnEvent<'_>| {
+            sink.borrow_mut().push(ev.formatted.to_string());
+        }));
+    let _ = compile(".a { filter: grayscale(1); }\n", &opts);
+    let w = seen.borrow().clone();
+    assert!(
+        called.get(),
+        "the registered callback is the implementation that runs"
+    );
+    assert_eq!(w.len(), 1, "the deprecated global name still warns: {w:?}");
+    assert!(w[0].contains("global-builtin"), "{}", w[0]);
 }

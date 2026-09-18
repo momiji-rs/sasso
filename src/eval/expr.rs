@@ -751,7 +751,38 @@ impl<'a> Evaluator<'a> {
                     && pos_args
                         .iter()
                         .all(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.contains('=')));
-                if !ms_alpha_filter {
+                // Same reasoning for the four names that are BOTH a CSS filter
+                // function and a Sass global colour function: with a plain-CSS
+                // argument (`filter: grayscale(1)`) the call is the CSS filter
+                // and dart deprecates nothing. This asks the predicate the
+                // builtins themselves use, so the warning cannot disagree with
+                // which path the call actually took — it did, and told authors
+                // to rewrite CSS filters as `color.adjust` (#122).
+                // Global calls only, for the DEPRECATION: a namespaced
+                // `color.grayscale(1)` is not a global built-in, so there is
+                // nothing to deprecate for being one. (What dart raises there
+                // instead is `color-module-compat`, which sasso does not
+                // implement yet — #124, a separate gap this does not touch.)
+                // ...and only when the built-in is what runs. A registered
+                // host function of the same name takes precedence in sasso
+                // (see `Options::with_function`), so the call is that
+                // callback, not a CSS filter — and the contract there is that
+                // a deprecated global's NAME warns whether or not one is
+                // registered. Suppressing it here would have made
+                // `with_function("grayscale($x)", …)` quietly exempt.
+                // Order matters for cost, not just for correctness: the
+                // predicate is a match on four names and rejects almost every
+                // call outright, while the host-function check normalizes a
+                // name and scans the registry. Computing the second one first
+                // put that scan on EVERY call in a stylesheet that registers
+                // any host function at all.
+                let css_filter_call = via_star.is_none()
+                    && crate::builtins::is_plain_css_filter_call(canonical, &pos_args, &named)
+                    && !(!self.options.functions.is_empty() && {
+                        let norm = crate::host_fn::normalize_name(canonical);
+                        self.options.functions.iter().any(|f| f.name == norm)
+                    });
+                if !ms_alpha_filter && !css_filter_call {
                     self.emit_call_deprecations(
                         canonical,
                         via_star.as_ref().map(|(owner, _)| owner.as_str()),

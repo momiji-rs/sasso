@@ -330,6 +330,39 @@ fn is_css_special(v: &Value) -> bool {
     }
 }
 
+/// Whether a call to one of the four filter-overloaded names takes the
+/// plain-CSS path rather than the Sass one.
+///
+/// ONE definition, consulted by the functions below AND by the evaluator's
+/// deprecation check. They were separate once and disagreed: the call was
+/// correctly passed through as CSS while `global-builtin` was deprecated
+/// anyway, so `filter: grayscale(1)` told the author to rewrite a CSS filter
+/// as `color.grayscale` (#122). dart warns only on the Sass path, and the two
+/// decisions have to come from the same place to stay that way.
+pub(crate) fn is_plain_css_filter_call(name: &str, pos_args: &[Value], named: &[(String, Value)]) -> bool {
+    let arg = |param: &str| {
+        pos_args
+            .first()
+            .or_else(|| named.iter().find(|(n, _)| n == param).map(|(_, v)| v))
+    };
+    let one_arg = pos_args.len() + named.len() == 1;
+    match name {
+        // `saturate($amount)` is the CSS filter; `saturate($color, $amount)`
+        // is the Sass function, so arity decides before the argument does.
+        "saturate" => one_arg && arg("amount").is_some_and(is_css_special),
+        // `grayscale`, `opacity` and `invert` do NOT take an arity guard, and
+        // that is measured rather than assumed. dart treats `grayscale(1, 2)`
+        // as the plain-CSS overload and reports only its arity error; adding
+        // `one_arg` here makes the call miss this branch, so the evaluator
+        // deprecates it as a global built-in and prints a warning dart never
+        // does. `invert` shows the same thing from the other side: its CSS
+        // branch is what raises "Only one argument may be passed to the
+        // plain-CSS invert() function."
+        "grayscale" | "opacity" | "invert" => arg("color").is_some_and(is_css_special),
+        _ => false,
+    }
+}
+
 /// Preserve a one-argument filter overload verbatim (`invert(10%)`,
 /// `grayscale(var(--c))`).
 fn plain_filter(name: &str, arg: &Value) -> Value {
@@ -434,7 +467,7 @@ fn fn_invert(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option<
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    if is_css_special(color) {
+    if is_plain_css_filter_call("invert", pos_args, named) {
         if pos_args.len() + named.len() > 1 {
             return Some(Err(Error::at(
                 "Only one argument may be passed to the plain-CSS invert() function.".to_string(),
@@ -515,7 +548,7 @@ fn fn_grayscale(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Opti
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    if is_css_special(color) {
+    if is_plain_css_filter_call("grayscale", pos_args, named) {
         return Some(Ok(plain_filter("grayscale", color)));
     }
     Some((|| {
@@ -555,15 +588,12 @@ fn fn_saturate(
     sign: f64,
 ) -> Option<Result<Value, Error>> {
     // One argument that is a plain-CSS special value → CSS `saturate()` filter.
-    if pos_args.len() + named.len() == 1 {
-        let arg0 = pos_args
+    if is_plain_css_filter_call("saturate", pos_args, named) {
+        let v = pos_args
             .first()
-            .or_else(|| named.iter().find(|(n, _)| n == "amount").map(|(_, v)| v));
-        if let Some(v) = arg0 {
-            if is_css_special(v) {
-                return Some(Ok(plain_filter("saturate", v)));
-            }
-        }
+            .or_else(|| named.iter().find(|(n, _)| n == "amount").map(|(_, v)| v))
+            .expect("the predicate matched an argument");
+        return Some(Ok(plain_filter("saturate", v)));
     }
     Some(fn_saturate_two(name, pos_args, named, pos, sign))
 }
@@ -734,7 +764,7 @@ fn fn_opacity(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Option
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    if is_css_special(color) {
+    if is_plain_css_filter_call("opacity", pos_args, named) {
         return Some(Ok(plain_filter("opacity", color)));
     }
     Some((|| {

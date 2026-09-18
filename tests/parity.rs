@@ -11206,3 +11206,31 @@ fn interpolated_at_rule_joins_a_trailing_comment_like_dart() {
     assert_parity("@#{\"media\"} screen { /* t */\n  a { b: c; }\n}\n");
     assert_parity("@#{\"font-face\"} {\n  a: b;\n} /* after */\n");
 }
+
+/// The filter overload applies to the NAMESPACED spelling too, and that is
+/// dart's behaviour rather than an accident of sharing one implementation.
+///
+/// Reviewers of #122 proposed three times that `color.grayscale(1)` should
+/// reject its numeric `$color` instead, on the ground that the overload is
+/// global-only. dart disagrees: it produces the CSS filter and deprecates
+/// having done so (`color-module-compat`, which sasso does not emit yet —
+/// #124). Restricting the overload to global dispatch would change our OUTPUT
+/// in three places where it currently matches.
+///
+/// This lives in the live-parity suite on purpose: it asks dart rather than
+/// encoding what I believe dart does.
+#[test]
+fn parity_namespaced_filter_overload() {
+    assert_parity_compressed(
+        "@use \"sass:color\";\n.a {\n  filter: color.grayscale(1);\n  filter: color.invert(0.5);\n  filter: color.opacity(0.5);\n}\n",
+    );
+}
+
+/// The global spelling of the same overload, beside a real colour call that
+/// must still resolve as Sass (#122).
+#[test]
+fn parity_global_filter_overload() {
+    assert_parity_compressed(
+        ".a {\n  filter: grayscale(1);\n  filter: invert(0.5);\n  filter: opacity(0.5);\n  filter: saturate(50%);\n  color: grayscale(#abc);\n}\n",
+    );
+}
