@@ -195,10 +195,18 @@ fn default_jobs() -> usize {
 fn jobs_from(logical: usize, cpuinfo: Option<&str>) -> usize {
     // Never more than the kernel offers this process: a cgroup or `taskset`
     // cap shows up in `available_parallelism`, not in `/proc/cpuinfo`.
-    // Verified rather than assumed: under `taskset -c 0,1,8,9` on a 16-thread
-    // machine `available_parallelism` answers 4 (2026-09-17), so nothing here
-    // needs to read the affinity mask itself. The npm CLI is not so lucky —
-    // its pre-18.14 fallback counts the host — and reads it in `_jobs.mjs`.
+    //
+    // Both kinds of cap, which is worth stating because it is easy to assume
+    // otherwise — measured in one process on a 16-thread host, 2026-09-17:
+    //
+    //     plain host        mask 0-15      no quota            answers 16
+    //     --cpus=2          mask 0-15      cpu.max 200000 …    answers 2
+    //     --cpuset-cpus=…   mask 0-1,8-9   no quota            answers 4
+    //
+    // The middle row is the one that matters: the mask is the whole machine,
+    // so the 2 can only have come from the quota. Nothing here needs to read
+    // either file. The npm CLI is not so lucky — its pre-18.14 fallback counts
+    // the host and sees neither — and reads both in `_jobs.mjs`.
     //
     // This is the host's core count capped by what the process may use, and
     // deliberately NOT the cores inside the mask, which measures much worse:
