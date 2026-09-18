@@ -1408,13 +1408,25 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // span lines, and a matcher that stops at the first newline silently skips
     // those — which is how `_importer.mjs`, reached only through the multiline
     // imports in `_loader.mjs` and `native.mjs`, went unchecked here.
-    const statics = /\bfrom\s*["'](\.\/[^"']+)["']/g;
-    // `import ("./x")` — whitespace before the parenthesis is legal.
-    const dynamics = /\bimport\s*\(\s*["'](\.\/[^"']+)["']\s*\)/g;
+    //
+    // `gap` is whatever may sit between the keyword and the specifier:
+    // whitespace, and comments, which are legal there and carry meaning to
+    // bundlers (`import(/* webpackChunkName: "x" */ "./dep.mjs")`).
+    //
+    // Deliberately not a comment-stripping pass over the whole file first.
+    // Stripping has to know where strings and regex literals are — `/["']/`
+    // is a regex, not the start of a string — and when it gets that wrong it
+    // swallows code and the walk silently misses an import, which is the
+    // failure this guard exists to catch. Tolerating comments at the two
+    // places they can appear cannot touch a string at all.
+    const gap = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*\n)*`;
+    const statics = new RegExp(String.raw`\bfrom${gap}["'](\./[^"']+)["']`, "g");
+    // `import ("./x")` — whitespace before the parenthesis is legal too.
+    const dynamics = new RegExp(String.raw`\bimport${gap}\(${gap}["'](\./[^"']+)["']${gap}\)`, "g");
     // `import "./x.mjs"` has no `from` to key on. Nothing in the package does
     // this today, which is exactly why the matcher has to exist: the first one
     // added would otherwise be invisible here.
-    const sideEffects = /(?:^|[\s;}])import\s*["'](\.\/[^"']+)["']/g;
+    const sideEffects = new RegExp(String.raw`(?:^|[\s;}])import${gap}["'](\./[^"']+)["']`, "g");
 
     // The matchers are the whole guard, so prove they see each shape rather
     // than trusting that they do. A matcher that silently matches nothing
@@ -1427,7 +1439,11 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         'const d = await import("./four.mjs");',
         'import "./five.mjs";',
         'const e = await import ("./six.mjs");',
+        'const f = await import(/* webpackChunkName: "seven" */ "./seven.mjs");',
+        'import /* webpackIgnore: true */ "./eight.mjs";',
+        'export { z } from /* a note */ "./nine.mjs";',
         'import fs from "node:fs";', // must NOT match: bare specifier
+        'const url = "https://example.com/not-an-import.mjs";', // nor a URL
       ].join("\n");
       const found = new Set();
       for (const re of [statics, dynamics, sideEffects]) {
@@ -1435,7 +1451,17 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       }
       assert.deepEqual(
         [...found].sort(),
-        ["./five.mjs", "./four.mjs", "./one.mjs", "./six.mjs", "./three.mjs", "./two.mjs"],
+        [
+          "./eight.mjs",
+          "./five.mjs",
+          "./four.mjs",
+          "./nine.mjs",
+          "./one.mjs",
+          "./seven.mjs",
+          "./six.mjs",
+          "./three.mjs",
+          "./two.mjs",
+        ],
         "packaging: the import matchers miss a shape the package may legally use",
       );
     }
