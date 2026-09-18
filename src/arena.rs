@@ -13,10 +13,14 @@
 //!   alignment / boundary / overflow, no `unsafe`).
 //! - Pointers are derived via `base.add(..)` (never `addr as *mut u8`) so they
 //!   keep provenance — required for Miri's Stacked/Tree-Borrows checks.
-//! - The thread-local [`ThreadState`] is POD (no `Drop`): the first TLS access
-//!   must not register a destructor, because a destructor would allocate and
-//!   re-enter the allocator. Its backing region is therefore leaked at thread
-//!   exit (virtual, lazily committed; compile threads are few).
+//! - The thread-local [`ThreadState`] gives its region and registry slot back
+//!   when the thread ends. It used to be POD so that the first TLS access
+//!   registered no destructor — but leaving the 2 GiB reservation behind cost
+//!   an embedder with short-lived threads one per compile, until the host
+//!   could no longer `fork()`. The destructor frees rather than allocates, and
+//!   `alloc`/`realloc` reach the state through `try_with` so allocations made
+//!   while other thread-locals are being dropped route to System instead of
+//!   panicking on a destroyed slot.
 //! - [`Arena`] (test-only) is a standalone, `Drop`-ing twin of the same bump +
 //!   provenance logic, run under `cargo miri test` for UB detection without
 //!   leaking (Miri does not execute `#[global_allocator]`, so the live
@@ -36,10 +40,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 //
 // `dealloc` only needs to answer "is this pointer inside SOME thread's arena
 // region?" — an in-arena free is a no-op (reclaimed wholesale on scope reset),
-// anything else forwards to System. Arena regions are never freed (they leak
-// at thread exit by design), so the set of regions only grows, and a global
-// table of `[base, end)` ranges can answer that question with two atomic loads
-// per registered region — no thread-local access. This halves the macOS
+// anything else forwards to System. A global table of `[base, end)` ranges
+// answers that with two atomic loads per registered region and no thread-local
+// access. Regions come and go with their threads, so a slot is claimed by CAS
+// and cleared on the way out; `REGION_SLOTS` bounds the scan and never
+// shrinks, while the slots under it are recycled. This halves the macOS
 // `_tlv_get_addr` dynamic-TLS traffic, which `alloc` (which genuinely needs
 // the per-thread cursor) still pays.
 //
@@ -133,16 +138,26 @@ fn unregister_region(idx: usize) {
 
 /// Whether `p` lies inside any registered arena region.
 ///
-/// `base` is read first and gates the rest, which is what makes a slot safe
-/// to publish and to release concurrently: a claimant writes `end` before
-/// `base`, and a leaver clears `base` and writes nothing after, so this either
-/// sees a whole region or skips the slot. A slot mid-claim reads `usize::MAX`,
-/// which no real pointer reaches.
+/// `base` is read first and gates the rest, which is what makes a slot safe to
+/// publish and to release concurrently: a claimant writes `end` before `base`,
+/// and a leaver clears `base` and writes nothing after, so this sees a whole
+/// region or skips the slot. A slot mid-claim reads `usize::MAX`, which no
+/// real pointer reaches.
+///
+/// That argument needs the ACQUIRE below to hold. `base` is published with
+/// `Release`, and release pairs with acquire or with nothing at all: read
+/// relaxed, there is no happens-before edge, and a weakly ordered target —
+/// aarch64, which this ships on — may hand back the new `base` alongside the
+/// previous `end`. A pointer inside the new region then compares outside it,
+/// `dealloc` calls it a System pointer, and frees something System never
+/// allocated. The scan is short (the high-water mark is the number of threads
+/// that have ever compiled, not `MAX_ARENAS`), so the acquire costs little and
+/// buys the guarantee this comment claims.
 #[inline]
 fn in_any_arena(p: usize) -> bool {
     let n = REGION_SLOTS.load(Ordering::Relaxed).min(MAX_ARENAS);
     for r in &REGIONS[..n] {
-        let base = r.base.load(Ordering::Relaxed);
+        let base = r.base.load(Ordering::Acquire);
         if base != 0 && p >= base && p < r.end.load(Ordering::Relaxed) {
             return true;
         }
@@ -236,8 +251,9 @@ fn effective_arena_size() -> usize {
     2 * 1024 * 1024 * 1024 // 2 GiB virtual; the runtime override is wasm-only
 }
 
-/// Per-thread bump state. POD only (no `Drop`) — see the module-level safety
-/// note. The backing region leaks at thread exit (virtual + lazily committed).
+/// Per-thread bump state. Its `Drop` returns the region and the registry slot
+/// when the thread ends — see the module-level safety note for why the
+/// allocator reaches this through `try_with`.
 struct ThreadState {
     base: Cell<*mut u8>,
     end: Cell<usize>,
@@ -764,7 +780,10 @@ mod tests {
     }
 
     // ---- ScopedAlloc routing (NOT under Miri: it doesn't run a
-    // #[global_allocator], and the thread-local backing intentionally leaks).
+    // #[global_allocator], so these exercise the routing directly. The
+    // thread-local backing is freed by its `Drop` when the thread ends; the
+    // harness threads that run these tests outlive them, which is why the
+    // lifetime tests below spawn their own.)
     // These call ScopedAlloc directly; the test thread's own allocations go to
     // the real (system) global allocator, so they don't perturb the arena. ----
 
