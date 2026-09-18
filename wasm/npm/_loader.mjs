@@ -43,6 +43,7 @@ import {
   syntaxForPath,
 } from "./_importer.mjs";
 import { deserializeArgs, serializeValue, setEngine } from "./_value.mjs";
+import { normalizeSilenced, ensureSilenceSupported } from "./_deprecations.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -282,13 +283,15 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
 
   // Read the result buffer after a sasso_compile2 call, free scratch, and throw
   // on a Sass error. Shared by the sync and async drivers.
-  function readResult(w, outPtr, scratch, inPtr, inLen, urlPtr, urlLen, wantMap) {
+  function readResult(w, outPtr, m, wantMap) {
+    const { scratch, inPtr, inLen, urlPtr, urlLen, silencedPtr, silencedLen } = m;
     const view = new DataView(w.memory.buffer);
     const outLen = view.getUint32(scratch, true);
     const ok = view.getUint8(scratch + 4);
     const out = new Uint8Array(w.memory.buffer, outPtr, outLen).slice();
     if (inLen) w.sasso_free(inPtr, inLen);
     if (urlLen) w.sasso_free(urlPtr, urlLen);
+    if (silencedLen) w.sasso_free(silencedPtr, silencedLen);
     w.sasso_free(scratch, 8);
     w.sasso_free(outPtr, outLen);
     if (!ok) {
@@ -320,21 +323,53 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     };
   }
 
-  // Allocate input + url + scratch and write them in. Returns the handles the
-  // driver passes to sasso_compile2 and on to readResult.
+  // Allocate input + url + silenced ids + scratch and write them in. Returns
+  // the handles the driver passes to the compile entry and on to readResult.
   function marshalIn(w, scss, opts) {
     const input = encoder.encode(scss);
     const urlBytes = opts.url ? encoder.encode(opts.url) : null;
     const urlLen = urlBytes ? urlBytes.length : 0;
+    // One comma-joined string rather than a vector across the boundary: the
+    // ABI is positional scalars, and the list is short and never contains a
+    // comma (the ids are validated against a fixed set).
+    const silBytes =
+      opts.silenceDeprecations && opts.silenceDeprecations.length
+        ? encoder.encode(opts.silenceDeprecations.join(","))
+        : null;
+    const silencedLen = silBytes ? silBytes.length : 0;
+    // Before the first allocation, deliberately: this throws for a list the
+    // module cannot apply, and nothing frees these buffers on the way out —
+    // `readResult` owns that and is only reached on a completed compile. A
+    // guard placed after the allocations traded a silently-ignored option for
+    // a leak on every attempt.
+    ensureSilenceSupported(typeof w.sasso_compile3 === "function", silencedLen);
     const inPtr = input.length ? w.sasso_alloc(input.length) : 0;
     const urlPtr = urlLen ? w.sasso_alloc(urlLen) : 0;
+    const silencedPtr = silencedLen ? w.sasso_alloc(silencedLen) : 0;
     const scratch = w.sasso_alloc(8);
     if (input.length) new Uint8Array(w.memory.buffer, inPtr, input.length).set(input);
     if (urlLen) new Uint8Array(w.memory.buffer, urlPtr, urlLen).set(urlBytes);
-    return { inPtr, inLen: input.length, urlPtr, urlLen, scratch };
+    if (silencedLen) new Uint8Array(w.memory.buffer, silencedPtr, silencedLen).set(silBytes);
+    return { inPtr, inLen: input.length, urlPtr, urlLen, silencedPtr, silencedLen, scratch };
   }
 
   function callCompile2(w, m, opts) {
+    // `sasso_compile3` when the module has it — it takes the
+    // `silenceDeprecations` list that `compile2` has no parameter for. Older
+    // modules keep working through `compile2`, which is why the export is
+    // checked rather than assumed: the .wasm files are build artifacts and a
+    // stale one next to a new loader would otherwise fail on an undefined call.
+    if (typeof w.sasso_compile3 === "function") {
+      return w.sasso_compile3(
+        m.inPtr, m.inLen, opts.compressed ? 1 : 0, opts.syntax, 1,
+        m.urlPtr, m.urlLen, opts.wantMap ? 1 : 0, opts.includeSources ? 1 : 0, opts.charset ? 1 : 0,
+        opts.quietDeps ? 1 : 0, opts.unicode ? 1 : 0,
+        m.silencedPtr, m.silencedLen,
+        m.scratch, m.scratch + 4,
+      );
+    }
+    // Unreachable with a non-empty list: `marshalIn` has already refused that
+    // combination, before allocating anything there is to leak.
     return w.sasso_compile2(
       m.inPtr, m.inLen, opts.compressed ? 1 : 0, opts.syntax, 1,
       m.urlPtr, m.urlLen, opts.wantMap ? 1 : 0, opts.includeSources ? 1 : 0, opts.charset ? 1 : 0,
@@ -494,7 +529,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     const w = syncInstance();
     const m = marshalIn(w, scss, opts);
     const outPtr = callCompile2(w, m, opts);
-    return readResult(w, outPtr, m.scratch, m.inPtr, m.inLen, m.urlPtr, m.urlLen, opts.wantMap);
+    return readResult(w, outPtr, m, opts.wantMap);
   }
 
   // Engine for routed Value methods (SassNumber.convert, SassColor.toSpace, …):
@@ -744,7 +779,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
         outPtr = callCompile2(w, m, opts);
       }
     }
-    return readResult(w, outPtr, m.scratch, m.inPtr, m.inLen, m.urlPtr, m.urlLen, opts.wantMap);
+    return readResult(w, outPtr, m, opts.wantMap);
   }
 
   function rawOpts(options, syntax) {
@@ -756,6 +791,28 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       includeSources: !!options.sourceMapIncludeSources,
       charset: options.charset !== false, // dart-sass default: true
       quietDeps: !!options.quietDeps,
+      // dart-sass `silenceDeprecations`: ids dropped inside the compiler,
+      // beside quietDeps, so they never reach the per-id cap. An id dart does
+      // not know warns through the caller's own logger and compiles anyway,
+      // as dart's JS API does — its CLI is the half that rejects.
+      silenceDeprecations: normalizeSilenced(options.silenceDeprecations, (message) => {
+        // Guarded like every other diagnostic in this package: `host_warn`
+        // swallows a logger that throws so a broken logger cannot fail a
+        // compile, and this warning is raised before the compile reaches it.
+        // (dart propagates here, and for ordinary diagnostics too — the
+        // package's rule is deliberate and applies to both or to neither.)
+        try {
+          dispatchWarn(options.logger ?? null, {
+            kind: 0,
+            message,
+            formatted: `WARNING: ${message}`,
+            deprecation: false,
+            deprecationId: "",
+          });
+        } catch {
+          // A logging failure must never fail the compile.
+        }
+      }),
       unicode: options.unicode !== false, // sasso extension: the CLI's --no-unicode
     };
   }

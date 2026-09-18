@@ -5,7 +5,8 @@
 //! (`npm/_loader.mjs`) marshals UTF-8 in and out of linear memory by hand.
 //!
 //! Protocol: JS calls `sasso_alloc(len)` for a buffer, writes the SCSS bytes,
-//! then calls `sasso_compile2(...)`. That returns a pointer to a UTF-8 result
+//! then calls `sasso_compile3(...)` (`sasso_compile2` where an older module
+//! does not export it). That returns a pointer to a UTF-8 result
 //! (the CSS — or, with `want_map`, a framed `[cssLen u32][css][sourceMap json]`
 //! — on success, or the error message on failure); the byte length is written
 //! to `*out_len_ptr` and a `1`/`0` ok flag to `*ok_ptr`. JS reads the bytes,
@@ -65,7 +66,7 @@ pub extern "C" fn sasso_alloc(len: usize) -> *mut u8 {
     }
 }
 
-/// Free a buffer returned by [`sasso_alloc`] or [`sasso_compile2`].
+/// Free a buffer returned by [`sasso_alloc`] or [`sasso_compile3`].
 ///
 /// `(ptr, len)` must be exactly a pair previously handed to JS by this module.
 #[no_mangle]
@@ -134,7 +135,7 @@ extern "C" {
 }
 
 // Custom-function signatures the host registers before a compile (cleared
-// after). `sasso_compile2` turns each into an `Options::with_function` whose
+// after). `sasso_compile3` turns each into an `Options::with_function` whose
 // callback bridges to `host_call_function` by index.
 thread_local! {
     static FUNCTIONS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -142,7 +143,7 @@ thread_local! {
 
 /// Register a custom-function signature (`"pow($base, $exponent)"`); returns its
 /// index, which the callback passes to `host_call_function`. Call before
-/// `sasso_compile2`; pair with `sasso_clear_functions`.
+/// `sasso_compile3`; pair with `sasso_clear_functions`.
 #[no_mangle]
 pub extern "C" fn sasso_register_function(sig_ptr: *const u8, sig_len: usize) -> u32 {
     let sig = if sig_ptr.is_null() || sig_len == 0 {
@@ -373,6 +374,10 @@ impl Importer for HostImporter {
 /// - `quiet_deps != 0` drops deprecation warnings raised inside the stylesheets
 ///   the host flagged as dependencies (dart-sass `quietDeps`); a dependency's
 ///   own `@warn`/`@debug` still reaches the logger, as in dart.
+/// - `(silenced_ptr, silenced_len)`: deprecation ids to drop, comma-separated
+///   (`import,global-builtin`), `0`/`0` for none (dart-sass
+///   `silenceDeprecations`). Dropped inside the compiler beside `quiet_deps`,
+///   so a silenced id never reaches the per-id repetition cap either.
 /// - `unicode == 0` renders diagnostics with the ASCII glyph set (`,`/`|`/`'`
 ///   instead of `╷`/`│`/`╵`), as dart-sass's `--no-unicode` does.
 /// - `want_map != 0` also produces a Source Map v3 — the result buffer is then
@@ -383,9 +388,15 @@ impl Importer for HostImporter {
 /// Writes the result byte length to `*out_len_ptr` and `1` (ok) / `0` (error)
 /// to `*ok_ptr`, and returns a pointer to the UTF-8 result (CSS / framed map on
 /// success, error message on failure). Free it with `sasso_free(ptr, *out_len_ptr)`.
+///
+/// `sasso_compile3` is `sasso_compile2` plus `silenced_ptr`/`silenced_len`: a
+/// new entry point rather than two more parameters on the old one, so a host
+/// built against `sasso_compile2` keeps linking — the same reason `compile2`
+/// exists beside the original. `compile2` now delegates here with an empty
+/// list, so there is one body to keep correct.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub extern "C" fn sasso_compile2(
+pub extern "C" fn sasso_compile3(
     input_ptr: *const u8,
     input_len: usize,
     compressed: u8,
@@ -398,6 +409,8 @@ pub extern "C" fn sasso_compile2(
     charset: u8,
     quiet_deps: u8,
     unicode: u8,
+    silenced_ptr: *const u8,
+    silenced_len: usize,
     out_len_ptr: *mut usize,
     ok_ptr: *mut u8,
 ) -> *mut u8 {
@@ -413,6 +426,15 @@ pub extern "C" fn sasso_compile2(
     } else {
         // SAFETY: JS guarantees [url_ptr, url_len) is a live UTF-8 buffer.
         std::str::from_utf8(unsafe { std::slice::from_raw_parts(url_ptr, url_len) }).ok()
+    };
+
+    // SAFETY: the host wrote `silenced_len` bytes at `silenced_ptr`, as for
+    // the url above. Invalid UTF-8 means "silence nothing" rather than an
+    // error: the ids are a filter, and losing one only prints more.
+    let silenced: &str = if silenced_ptr.is_null() || silenced_len == 0 {
+        ""
+    } else {
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(silenced_ptr, silenced_len) }).unwrap_or("")
     };
 
     let syntax = match syntax {
@@ -445,6 +467,12 @@ pub extern "C" fn sasso_compile2(
                 // compiler consults it when a deprecation fires — so a file is
                 // judged by how it was REACHED, not by where it sits.
                 opts = opts.with_quiet_deps(importer.deps.clone());
+            }
+            if !silenced.is_empty() {
+                // Dropped inside the compiler, like `quiet_deps`, so a
+                // silenced deprecation never reaches the per-id cap and the
+                // run cannot end by counting warnings the caller silenced.
+                opts = opts.with_silenced_deprecations(silenced.split(','));
             }
             // Register host custom functions (each bridges to host_call_function).
             let sigs: Vec<String> = FUNCTIONS.with(|f| f.borrow().clone());
@@ -489,9 +517,49 @@ pub extern "C" fn sasso_compile2(
     into_result(bytes, ok, out_len_ptr, ok_ptr)
 }
 
+/// The pre-`silenceDeprecations` entry point, kept so a host built against it
+/// still links. Delegates with an empty id list.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn sasso_compile2(
+    input_ptr: *const u8,
+    input_len: usize,
+    compressed: u8,
+    syntax: u8,
+    use_importer: u8,
+    url_ptr: *const u8,
+    url_len: usize,
+    want_map: u8,
+    include_sources: u8,
+    charset: u8,
+    quiet_deps: u8,
+    unicode: u8,
+    out_len_ptr: *mut usize,
+    ok_ptr: *mut u8,
+) -> *mut u8 {
+    sasso_compile3(
+        input_ptr,
+        input_len,
+        compressed,
+        syntax,
+        use_importer,
+        url_ptr,
+        url_len,
+        want_map,
+        include_sources,
+        charset,
+        quiet_deps,
+        unicode,
+        std::ptr::null(),
+        0,
+        out_len_ptr,
+        ok_ptr,
+    )
+}
+
 /// Run an engine-routed `Value` method (e.g. `SassNumber.convert`,
 /// `SassColor.toSpace`) — forwards to [`sasso::host_value_op`]. `in` is the
-/// serialized operands; the result is returned like `sasso_compile2` (a pointer
+/// serialized operands; the result is returned like `sasso_compile3` (a pointer
 /// plus `*out_len_ptr`/`*ok_ptr`): on `ok` the buffer is the serialized result
 /// value, otherwise a UTF-8 error message. This is independent of any in-flight
 /// compile, so JS `Value` methods work standalone and re-entrantly.

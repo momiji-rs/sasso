@@ -201,6 +201,15 @@ pub struct CompileConfig {
     /// stylesheet reached through a load path or a user importer (see
     /// `NapiChain::canonicalize`).
     pub quiet_deps: bool,
+    /// dart-sass `silenceDeprecations`: deprecation ids to drop. Applied
+    /// inside the compiler, beside `quietDeps`, so a silenced deprecation
+    /// never reaches the per-id cap and cannot leave the run reporting "N
+    /// repetitive deprecation warnings omitted" for warnings the caller
+    /// asked not to see.
+    ///
+    /// Optional: the addon export is public and a caller that predates this
+    /// option — or builds a config by hand — should not have to name it.
+    pub silence_deprecations: Option<Vec<String>>,
     /// Render diagnostics with the Unicode box glyphs (dart-sass `--unicode`).
     pub unicode: bool,
     pub load_paths: Vec<String>,
@@ -618,6 +627,9 @@ fn run_compile(
         .with_charset(cfg.charset)
         .with_unicode(cfg.unicode)
         .with_importer(chain);
+    if let Some(ids) = cfg.silence_deprecations.as_ref().filter(|v| !v.is_empty()) {
+        opts = opts.with_silenced_deprecations(ids.iter().cloned());
+    }
     if cfg.quiet_deps {
         // The record fills in as the chain resolves each load, so a deprecation
         // is judged by how its file was REACHED, not by where it sits.

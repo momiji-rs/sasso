@@ -23,6 +23,8 @@ import { isMainThread, workerData, parentPort, Worker } from "node:worker_thread
 // where `/proc/cpuinfo` publishes the topology, and the CPU count everywhere
 // else. See _jobs.mjs for the measurement and for both fallbacks.
 import { defaultJobs } from "./_jobs.mjs";
+// The accepted deprecation ids, shared with the JS API so there is one copy.
+import { DEPRECATION_IDS } from "./_deprecations.mjs";
 
 /**
  * The engine, chosen at startup rather than imported statically.
@@ -85,6 +87,8 @@ Options:
                                      How the map references its sources
                                      (default: relative).
   -q, --[no-]quiet                   Suppress @warn / @debug / deprecation output.
+      --silence-deprecation <IDS>    Don't print these deprecations
+                                     (comma-separated; repeatable).
       --[no-]quiet-deps              Drop deprecation warnings raised inside
                                      dependencies: stylesheets reached through
                                      a load path, and whatever those load
@@ -180,6 +184,7 @@ function parseArgs(argv) {
     charset: true,
     quiet: false,
     quietDeps: false,
+    silenceDeprecations: [],
     stopOnError: false,
     noCss: false,
     // Tri-state: dart's default is "relative", but only an EXPLICIT
@@ -292,6 +297,17 @@ function parseArgs(argv) {
       const v = takeValue(inline);
       if (v !== "expanded" && v !== "compressed") fail(`error: unknown style "${v}"`);
       opts.style = v;
+    } else if (a === "--silence-deprecation" || a.startsWith("--silence-deprecation=")) {
+      const inline = a.startsWith("--silence-deprecation=") ? a.slice(22) : undefined;
+      const v = takeValue(inline);
+      if (!v) fail("error: --silence-deprecation requires a value");
+      for (const raw of v.split(",")) {
+        const id = raw.trim();
+        // dart rejects an unknown id rather than ignoring it, so a typo is
+        // caught instead of quietly leaving the warning in place.
+        if (!DEPRECATION_IDS.has(id)) fail(`error: Invalid deprecation "${id}".`);
+        if (!opts.silenceDeprecations.includes(id)) opts.silenceDeprecations.push(id);
+      }
     } else if (a === "-I" || a === "--load-path" || a.startsWith("--load-path=") || a.startsWith("-I")) {
       let inline;
       if (a.startsWith("--load-path=")) inline = a.slice(12);
@@ -941,6 +957,11 @@ function commonOptions(opts) {
     // where a file lives would silence the wrong ones and lose the formatted
     // diagnostic for the rest.
     quietDeps: opts.quietDeps,
+    // Also the compiler's job, and for the same reason: filtered out here it
+    // would silence the warnings but still tally them, and the run would end
+    // with "N repetitive deprecation warnings omitted" counting exactly the
+    // ones the caller silenced.
+    silenceDeprecations: opts.silenceDeprecations,
   };
   if (opts.quiet) common.logger = Logger.silent;
   return common;

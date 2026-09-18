@@ -29,6 +29,20 @@ export interface Options {
    */
   quietDeps?: boolean;
   /**
+   * Deprecation ids whose warnings are dropped, as dart-sass's
+   * `silenceDeprecations` — `["import", "global-builtin"]`. Silencing happens
+   * inside the compiler, beside {@link quietDeps}, so a silenced id is not
+   * counted towards the "N repetitive deprecation warnings omitted" footer
+   * either; filtering in a {@link logger} instead leaves that footer behind.
+   *
+   * Ids sasso never emits are accepted and do nothing, so a build written for
+   * `sass` does not fail here for naming one. An id dart-sass does not know at
+   * all warns — `Invalid deprecation "nope".`, through this {@link logger} if
+   * there is one, else to stderr — and the compile proceeds, which is what
+   * dart's JS API does; only its command line rejects the id outright.
+   */
+  silenceDeprecations?: string[];
+  /**
    * Render diagnostics with the Unicode box glyphs (`╷`/`│`/`╵`), default
    * `true`; `false` selects the ASCII set, like the CLI's `--no-unicode`. A
    * sasso extension — dart-sass exposes it on its command line only.

@@ -429,6 +429,82 @@ const cli = (args, input) =>
   );
 }
 assert.ok(cli(["--help"]).includes("Usage: sasso"), "cli: --help");
+
+// --silence-deprecation: drop one deprecation and keep everything else, which
+// is the whole reason to reach for it instead of --quiet. lichess asked for it
+// (momiji-rs/sasso#24) after moving off --quiet precisely so the warnings they
+// still intend to fix keep printing.
+//
+// ON BOTH ENGINES. The CLI silently falls back to wasm where no native addon
+// is prebuilt — musl and Windows today — and a flag that works on one engine
+// and does nothing on the other is worse than one that does not exist,
+// because nothing says so. This caught exactly that while it was being
+// written: the native path ignored the option and printed all six lines.
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-silence-"));
+  // Twelve imports, so the per-id cap fires: dart prints five warnings and a
+  // "7 repetitive deprecation warnings omitted" footer.
+  for (let i = 0; i < 12; i++) writeFileSync(join(dir, `dep${i}.scss`), `.d${i} { color: red }\n`);
+  const entry = join(dir, "entry.scss");
+  writeFileSync(entry, Array.from({ length: 12 }, (_v, i) => `@import "dep${i}";`).join("\n") + "\n");
+
+  const runOf = (args, engine) =>
+    spawnSync(process.execPath, [cliPath, ...args], {
+      encoding: "utf8",
+      env: { ...process.env, SASSO_ENGINE: engine },
+    });
+  const stderrOf = (args, engine) => runOf(args, engine).stderr;
+
+  // The addon is prebuilt for four targets only, and the wasm-package CI job
+  // builds none at all, so the native leg runs where there is one to run and
+  // announces itself where there is not. The wasm leg is never optional: a
+  // silent skip of both would leave this whole block asserting nothing.
+  const engines = ["native", "wasm"].filter((engine) => {
+    if (engine === "wasm") return true;
+    const probe = runOf([entry, "--no-css"], engine);
+    if (probe.status === 0) return true;
+    assert.match(probe.stderr, /SASSO_ENGINE=native/, "cli: a demanded engine that is missing says so");
+    console.log("  (--silence-deprecation: skipping the native leg, no addon here)");
+    return false;
+  });
+  assert.ok(engines.includes("wasm"), "cli: the wasm leg of --silence-deprecation is not optional");
+
+  for (const engine of engines) {
+    const loud = stderrOf([entry, "--no-css"], engine);
+    assert.ok(loud.includes("DEPRECATION WARNING [import]"), `cli: the deprecation prints (${engine})`);
+    assert.ok(loud.includes("omitted"), `cli: the repetition cap fires (${engine})`);
+
+    const quiet = stderrOf([entry, "--no-css", "--silence-deprecation=import"], engine);
+    // Not merely "no DEPRECATION line": the footer has to go too. Filtering in
+    // a warn handler instead silences the warnings and still counts them, so
+    // the run ends by reporting omissions the caller asked not to hear about —
+    // dart prints nothing at all here, and that is what this pins.
+    assert.equal(quiet.trim(), "", `cli: --silence-deprecation leaves no trace (${engine})`);
+
+    const other = stderrOf([entry, "--no-css", "--silence-deprecation=color-functions"], engine);
+    assert.ok(
+      other.includes("DEPRECATION WARNING [import]"),
+      `cli: silencing one id leaves the others (${engine})`,
+    );
+  }
+
+  // An id dart does not know is a usage error there, so a typo is caught
+  // rather than quietly leaving the warning in place.
+  const bad = spawnSync(process.execPath, [cliPath, entry, "--no-css", "--silence-deprecation=nope"], {
+    encoding: "utf8",
+  });
+  assert.notEqual(bad.status, 0, "cli: an unknown deprecation id is rejected");
+  assert.ok(bad.stderr.includes('Invalid deprecation "nope"'), "cli: … with dart's wording");
+  // dart exits 64 here and the native CLI matches it; this one exits 1 because
+  // every npm-CLI failure does (#91), which is a separate ticket.
+
+  // Ids sasso never emits are accepted and do nothing: a build script written
+  // for `sass` must not fail for naming one.
+  const unknownToUs = spawnSync(process.execPath, [cliPath, entry, "--no-css", "--silence-deprecation=mixed-decls"], {
+    encoding: "utf8",
+  });
+  assert.equal(unknownToUs.status, 0, "cli: an id we never emit is still accepted");
+}
 assert.equal(cli(["--stdin"], ".a{b: 1 + 2}\n").trim(), ".a {\n  b: 3;\n}", "cli: --stdin compile");
 assert.equal(cli(["--style=compressed", "--stdin"], ".a{b:1+2}\n").trim(), ".a{b:3}", "cli: --style=compressed");
 assert.ok(cli([mainRel]).includes("color: blue"), "cli: file compile resolves relative @use");
@@ -549,6 +625,82 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.equal(readFileSync(join(dir, "a.css"), "utf8").trim(), ".a{x:1}", "cli: dart flag set output a");
   assert.equal(readFileSync(join(dir, "b.css"), "utf8").trim(), ".b{y:2}", "cli: dart flag set output b");
   console.log(`ok: cli flag parity — ${flags.length} native flags, none rejected + a dart-sass build's flag set`);
+}
+
+// The two `--silence-deprecation` allowlists are the same list written twice,
+// so derive this one's from the Rust one rather than comparing two hand-kept
+// copies. The first version of BOTH was probed candidate-by-candidate against
+// dart and missed seven ids — `if-function` among them, which sasso emits —
+// so what matters here is only that they cannot now drift apart.
+{
+  const mainRs = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+  const decl = /const DEPRECATION_IDS: \[&str; (\d+)\] = \[([^\]]*)\]/.exec(mainRs);
+  assert.ok(decl, "drift: found DEPRECATION_IDS in src/main.rs");
+  const native = [...decl[2].matchAll(/"([a-z0-9-]+)"/g)].map((m) => m[1]);
+  assert.equal(native.length, Number(decl[1]), "drift: the Rust list's length matches its own count");
+  assert.ok(native.length >= 31, `drift: extracted a plausible id set (got ${native.length})`);
+
+  // The JS side keeps ONE copy, in _deprecations.mjs, shared by cli.mjs, the
+  // loader and native.mjs — so this compares two lists, not four.
+  const shared = await import("./npm/_deprecations.mjs");
+  const ours = [...shared.DEPRECATION_IDS];
+
+  // The wasm ABI's older entry point cannot carry this list, and a .wasm is a
+  // build artifact that can be older than the loader beside it. Dropping the
+  // list there would recreate the bug the option was added to fix — a flag
+  // accepted that does nothing — so it fails instead, loudly enough to name
+  // the cause. An empty list is not a request and must still fall back, which
+  // is every caller who never passed the option.
+  assert.doesNotThrow(() => shared.ensureSilenceSupported(true, 42), "compile3 present: fine");
+  assert.doesNotThrow(() => shared.ensureSilenceSupported(false, 0), "no list: still falls back to compile2");
+  assert.doesNotThrow(() => shared.ensureSilenceSupported(true, 0), "neither: fine");
+  assert.throws(
+    () => shared.ensureSilenceSupported(false, 42),
+    /sasso_compile3/,
+    "a list against a compile2-only module fails rather than being dropped",
+  );
+  // The loader must consult it, and must do so BEFORE it allocates: nothing
+  // frees the marshalled buffers on a throw — `readResult` owns that and is
+  // only reached on a completed compile — so a guard after the allocations
+  // would trade a silently-ignored option for a leak on every attempt.
+  const loaderSrc = readFileSync(new URL("./npm/_loader.mjs", import.meta.url), "utf8");
+  const marshal = loaderSrc.slice(
+    loaderSrc.indexOf("function marshalIn"),
+    loaderSrc.indexOf("function callCompile2"),
+  );
+  const guardAt = marshal.indexOf("ensureSilenceSupported");
+  const allocAt = marshal.indexOf("sasso_alloc");
+  assert.ok(guardAt > 0, "marshalIn consults the compile3 guard");
+  assert.ok(allocAt > 0 && guardAt < allocAt, "… before it allocates anything that would leak");
+  assert.deepEqual([...ours].sort(), [...native].sort(), "cli: the two deprecation allowlists agree");
+  for (const f of ["cli.mjs", "_loader.mjs", "native.mjs"]) {
+    const text = readFileSync(new URL(`./npm/${f}`, import.meta.url), "utf8");
+    assert.ok(
+      !/const DEPRECATION_IDS\s*=\s*new Set/.test(text),
+      `drift: ${f} declares its own id list again instead of importing the shared one`,
+    );
+  }
+
+  // Not just the literal: the parser has to take every one of them, and still
+  // refuse something that is not on the list.
+  const dir = mkdtempSync(join(tmpdir(), "sasso-depids-"));
+  const one = join(dir, "in.scss");
+  writeFileSync(one, ".a{b:1}\n");
+  const refused = native.filter((id) => {
+    const r = spawnSync(process.execPath, [cliPath, "--no-source-map", "--silence-deprecation", id, "--stdin"], {
+      encoding: "utf8",
+      input: ".a{b:1}\n",
+    });
+    return r.status !== 0;
+  });
+  assert.deepEqual(refused, [], `cli: these ids are on the list but refused: ${refused.join(" ")}`);
+
+  const bogus = spawnSync(process.execPath, [cliPath, "--silence-deprecation", "not-a-deprecation", "--stdin"], {
+    encoding: "utf8",
+    input: ".a{b:1}\n",
+  });
+  assert.notEqual(bogus.status, 0, "cli: an id on neither list is still refused");
+  console.log(`ok: deprecation-id parity — ${native.length} ids, both CLIs, all accepted`);
 }
 
 // === Phase 3c: directory pairs, --no-css, --stop-on-error ===
@@ -2379,6 +2531,155 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.ok(seen.some((w) => w.includes("dep-warn")), "quietDeps(async): @warn kept");
   }
   console.log("ok: quietDeps — dependencies silenced, @warn kept, sync + async engines");
+}
+
+// === `silenceDeprecations`, on the JS API and on every engine ===
+//
+// The CLI block above covers the flag; this covers the option behind it, which
+// is what a build tool (Vite, webpack) actually passes. One entry raising THREE
+// deprecations, so "silenced" can be told apart from "warnings stopped": each
+// case names one id and the other two must survive.
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-silence-api-"));
+  writeFileSync(join(dir, "dep.scss"), ".d { color: lighten(#036, 10%) }\n");
+  const entry = join(dir, "entry.scss");
+  writeFileSync(entry, '@import "dep";\n');
+
+  const IMPORT = /@import rules are deprecated/;
+  const GLOBAL = /Global built-in functions are deprecated/;
+  const LIGHTEN = /lighten\(\) is deprecated/;
+
+  const collect = (mod, silenceDeprecations) => {
+    const seen = [];
+    mod.compile(entry, {
+      silenceDeprecations,
+      logger: { warn: (m, o) => seen.push(`${o.deprecation ? "DEP" : "WARN"}|${m.split("\n")[0]}`) },
+    });
+    return seen.join("\n");
+  };
+
+  const engines = [["size", size], ["speed", speed]];
+  // The addon is prebuilt for four targets only; cover its JS API too where
+  // there is one, since it is a different implementation of the same option.
+  try {
+    engines.push(["native", await import("./npm/native.mjs")]);
+  } catch {
+    console.log("  (silenceDeprecations: skipping the native engine, no addon here)");
+  }
+
+  for (const [name, mod] of engines) {
+    const loud = collect(mod, undefined);
+    assert.match(loud, IMPORT, `silenceDeprecations(${name}): @import warns by default`);
+    assert.match(loud, GLOBAL, `silenceDeprecations(${name}): global-builtin warns by default`);
+    assert.match(loud, LIGHTEN, `silenceDeprecations(${name}): color-functions warns by default`);
+
+    const noImport = collect(mod, ["import"]);
+    assert.doesNotMatch(noImport, IMPORT, `silenceDeprecations(${name}): the named id is gone`);
+    assert.match(noImport, GLOBAL, `silenceDeprecations(${name}): … and the others are not`);
+    assert.match(noImport, LIGHTEN, `silenceDeprecations(${name}): … either of them`);
+
+    // Two ids at once, and the leftover proves it is not silencing everything.
+    const noColor = collect(mod, ["global-builtin", "color-functions"]);
+    assert.doesNotMatch(noColor, GLOBAL, `silenceDeprecations(${name}): two ids, first gone`);
+    assert.doesNotMatch(noColor, LIGHTEN, `silenceDeprecations(${name}): two ids, second gone`);
+    assert.match(noColor, IMPORT, `silenceDeprecations(${name}): two ids, the third kept`);
+
+    // An id we never emit is accepted and changes nothing — a build written
+    // for `sass` must not fail here for naming one.
+    const inert = collect(mod, ["mixed-decls"]);
+    assert.match(inert, IMPORT, `silenceDeprecations(${name}): an id we never emit is inert`);
+
+    assert.equal(collect(mod, []), loud, `silenceDeprecations(${name}): an empty list changes nothing`);
+  }
+
+  // The async API is a separate wasm instance (asyncify) and a separate code
+  // path in the addon, so it gets the option proved on it rather than assumed.
+  for (const [name, mod] of engines) {
+    const seen = [];
+    await mod.compileAsync(entry, {
+      silenceDeprecations: ["import"],
+      logger: { warn: (m) => seen.push(m.split("\n")[0]) },
+    });
+    const text = seen.join("\n");
+    assert.doesNotMatch(text, IMPORT, `silenceDeprecations(async ${name}): silenced`);
+    assert.match(text, GLOBAL, `silenceDeprecations(async ${name}): others kept`);
+  }
+
+  // compileString takes the same option, via a different entry point.
+  {
+    const seen = [];
+    size.compileString('@import "dep";\n', {
+      url: pathToFileURL(entry).href,
+      silenceDeprecations: ["import"],
+      logger: { warn: (m) => seen.push(m.split("\n")[0]) },
+    });
+    const text = seen.join("\n");
+    assert.doesNotMatch(text, IMPORT, "silenceDeprecations(compileString): silenced");
+    assert.match(text, GLOBAL, "silenceDeprecations(compileString): others kept");
+  }
+
+  console.log(`ok: silenceDeprecations — per-id on the JS API, ${engines.length} engines, sync + async + compileString`);
+
+  // An id dart-sass does not know. The CLI and the JS API deliberately differ,
+  // and both follow dart 1.104.1, measured: `sass` the command exits 64, while
+  // its JS API warns `Invalid deprecation "nope".` through the caller's own
+  // logger and compiles anyway. Throwing here would be stricter than dart and
+  // would break builds dart accepts; staying silent — what this did first —
+  // contradicts the documented option and leaves a typo doing nothing at all.
+  for (const [name, mod] of engines) {
+    const seen = [];
+    const r = mod.compileString(".a{b:c}", {
+      silenceDeprecations: ["nope"],
+      logger: { warn: (m, o) => seen.push({ m, dep: o?.deprecation, span: o?.span }) },
+    });
+    assert.equal(seen.length, 1, `silenceDeprecations(${name}): an unknown id warns exactly once`);
+    assert.equal(seen[0].m, 'Invalid deprecation "nope".', `silenceDeprecations(${name}): dart's wording`);
+    assert.equal(seen[0].dep, false, `silenceDeprecations(${name}): it is a plain warning, not a deprecation`);
+    assert.equal(seen[0].span, undefined, `silenceDeprecations(${name}): no span, as in dart`);
+    assert.ok(r.css.includes("b: c"), `silenceDeprecations(${name}): … and the compile still succeeds`);
+
+    // Once per occurrence, duplicates included, in the order given — dart's
+    // behaviour, not a de-duplicated set.
+    const dup = [];
+    mod.compileString(".a{b:c}", {
+      silenceDeprecations: ["nope", "import", "nope", ""],
+      logger: { warn: (m) => dup.push(m) },
+    });
+    assert.deepEqual(
+      dup,
+      ['Invalid deprecation "nope".', 'Invalid deprecation "nope".', 'Invalid deprecation "".'],
+      `silenceDeprecations(${name}): one warning per occurrence, known ids silent`,
+    );
+
+    // An unknown id that CONTAINS A COMMA. The wasm ABI carries this list as
+    // one comma-separated string and the core splits it again, so forwarding
+    // an invalid id let `["import,global-builtin"]` arrive as two valid ones
+    // and silence both — while native, which passes an array, silenced
+    // nothing. dart warns and silences nothing; unknown ids are now dropped
+    // before marshalling, so the two engines agree with it and each other.
+    const smuggled = [];
+    mod.compile(entry, {
+      silenceDeprecations: ["import,global-builtin"],
+      logger: { warn: (m) => smuggled.push(m.split("\n")[0]) },
+    });
+    assert.ok(
+      smuggled.some((w) => w === 'Invalid deprecation "import,global-builtin".'),
+      `silenceDeprecations(${name}): a comma inside one id is one invalid id`,
+    );
+    assert.ok(
+      smuggled.some((w) => IMPORT.test(w)) && smuggled.some((w) => GLOBAL.test(w)),
+      `silenceDeprecations(${name}): … and it silences neither of them`,
+    );
+
+    // A logger that throws must not fail the compile — the package's rule for
+    // every other diagnostic (`host_warn` swallows it), and this warning is
+    // raised before the compile reaches that guard.
+    const r2 = mod.compile(entry, {
+      silenceDeprecations: ["nope"],
+      logger: { warn: () => { throw new Error("logger exploded"); } },
+    });
+    assert.ok(r2.css.includes("color"), `silenceDeprecations(${name}): a throwing logger does not fail the compile`);
+  }
 }
 
 // === Trailing-newline parity: the JS API omits it, the CLI appends one ===
