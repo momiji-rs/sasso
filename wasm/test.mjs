@@ -9,13 +9,25 @@
 // asyncify refactors must preserve (docs/HANDOFF_ASYNC_IMPORTER_PERF.md).
 // Run after build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, existsSync, statSync, symlinkSync, rmSync, openSync, closeSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, symlinkSync, rmSync, openSync, closeSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, delimiter } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import * as size from "./npm/sasso.mjs";
 import * as speed from "./npm/sasso.speed.mjs";
+
+// Every CLI case below is about what `cli.mjs` ITSELF does, so delegation to a
+// release binary is off for all of them and switched back on only by the cases
+// that are about delegation. Without this, a machine with a version-matched
+// `sasso` on PATH — a `brew install`, a `cargo install`, this repo's own
+// `target/release` — would have `cli.mjs` hand the whole command line to the
+// binary, and every assertion here would pass while testing the other program.
+// The flag-parity guard is the one that matters most: it exists because the two
+// CLIs drifted apart (#24), and it cannot notice that by interrogating one of
+// them twice. Children inherit this; `engineEnv` below deliberately does not
+// strip it.
+process.env.SASSO_BINARY = "0";
 
 const SCSS = ".a {\n  color: red;\n  .b { width: 10px; }\n}\n";
 
@@ -2714,6 +2726,302 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.equal(broken.status, 1, "cli: a job that fails in a worker exits non-zero");
   assert.match(broken.stderr, /Error: /, "cli: … and its diagnostic reaches stderr");
   console.log("ok: cli — engine selection (wasm/native agree) and the worker pool");
+}
+
+// === Phase 3m: handing the whole command line to the release binary ===
+// The fastest engine this CLI can reach is not one: on 40 entry points the
+// release binary takes 15.1 ms where this package needs 104.1 ms on the native
+// addon and 48.2 ms handing the command line over (macOS/arm64, published
+// artifacts, 2026-09-18). So when a `sasso` on PATH reports EXACTLY this
+// package's version, `cli.mjs` execs it and ends with its exit code
+// (momiji-rs/sasso#24 asked for this).
+//
+// None of that is visible in the CSS — the two front ends are byte-identical on
+// purpose — so most of these cases run against STAND-IN binaries chosen for what
+// they make observable: `echo` prints the argv it was handed, so the command line
+// can be pinned exactly; `env` exits 127 on a command it cannot find, so the
+// child's status can be told apart from this CLI's own exit 1 (#91); and a
+// `#!/usr/bin/env node` script that is really this file is the `npm install -g
+// sasso` shape, whose fork bomb is the reason the check reads magic bytes rather
+// than trusting the name. A real binary, where this machine has one, then
+// confirms the whole path end to end.
+{
+  const dir = mkdtempSync(join(tmpdir(), "sasso-deleg-"));
+  const src = join(dir, "in.scss");
+  writeFileSync(src, ".a{b: 1 + 2}\n");
+  const CSS = ".a{b:3}";
+  const pkgVersion = JSON.parse(readFileSync(new URL("./npm/package.json", import.meta.url), "utf8")).version;
+
+  // Delegation is off for this whole file (top of it); every case here turns it
+  // back on deliberately. The engine variables are cleared for the reason Phase
+  // 3l clears them, and here it is sharper: an exported `SASSO_ENGINE` disables
+  // delegation outright, so inheriting one would leave every assertion below
+  // passing while testing nothing at all. `SASSO_DEBUG_ENGINE` is on throughout
+  // — the decisions are silent by design, and this is the only way to read them.
+  const env = (extra) => {
+    const base = { ...process.env };
+    delete base.SASSO_BINARY;
+    delete base.SASSO_ENGINE;
+    delete base.SASSO_NATIVE_BINARY;
+    delete base.SASSO_CLI_DELEGATED;
+    return { ...base, SASSO_DEBUG_ENGINE: "1", ...extra };
+  };
+  const runWith = (cli, argv, extra, input) =>
+    spawnSync(process.execPath, [cli, ...argv], { encoding: "utf8", env: env(extra), input, timeout: 60000 });
+  const run = (argv, extra, input) => runWith(cliPath, argv, extra, input);
+  const argv = (name, ...rest) => ["--no-source-map", "--style=compressed", ...rest, `${src}:${join(dir, name)}`];
+  const compiles = (label, r, name) => {
+    assert.equal(r.status, 0, `cli: ${label} — exits 0 (stderr: ${r.stderr})`);
+    // Existence first: a run that delegated when it should not have leaves NO
+    // output at all (the stand-ins write none), and reading a missing file
+    // reports that as an ENOENT stack trace instead of as this assertion.
+    assert.ok(existsSync(join(dir, name)), `cli: ${label} — wrote ${name} (stderr: ${r.stderr})`);
+    assert.equal(readFileSync(join(dir, name), "utf8").trim(), CSS, `cli: ${label} — compiled here, in-process`);
+  };
+  const dirWith = (name, make) => {
+    const d = join(dir, name);
+    mkdirSync(d, { recursive: true });
+    if (make) make(d);
+    return d;
+  };
+
+  // Nothing named sasso anywhere on PATH: the ordinary case, and the one that
+  // must not become slower or louder for the sake of the others.
+  compiles("no sasso on PATH", run(argv("a.css"), { PATH: dirWith("empty") }), "a.css");
+  {
+    // …and `--engine` says so, rather than reporting an engine as if nothing had
+    // been looked for: "why am I not getting the fast path?" is the question that
+    // follows the answer, so it is answered in the same breath.
+    const r = run(["--engine"], { PATH: dirWith("empty") });
+    assert.equal(r.status, 0, `cli: --engine with nothing on PATH (stderr: ${r.stderr})`);
+    assert.match(r.stdout, /^binary: +not used — no sasso binary on PATH$/m, `cli: … says what it looked for (stdout: ${r.stdout})`);
+  }
+
+  // `npm install -g sasso` puts a `sasso` on PATH that IS this file behind a
+  // `#!/usr/bin/env node` line. Handing it the command line would fork bomb, so
+  // it has to be passed over — and passed over silently, because a global
+  // install of this package is a perfectly normal thing to have.
+  const shim = join(dirWith("shim"), "sasso");
+  writeFileSync(shim, `#!/usr/bin/env node\nimport(${JSON.stringify(pathToFileURL(cliPath).href)});\n`);
+  chmodSync(shim, 0o755);
+  {
+    const r = run(argv("b.css"), { PATH: dirWith("shim") });
+    compiles("a JS shim named sasso on PATH", r, "b.css");
+    assert.ok(!/handing the command line to/.test(r.stderr), `cli: … and nothing was handed the command line (stderr: ${r.stderr})`);
+  }
+
+  // An explicit `SASSO_BINARY` that is not an executable image is an error, not
+  // a quiet fallback: a build that configured a binary and got the in-process
+  // engine instead would be measuring something other than what it asked for.
+  {
+    const r = run(argv("c.css"), { SASSO_BINARY: shim });
+    assert.notEqual(r.status, 0, "cli: SASSO_BINARY pointing at a script fails");
+    assert.match(r.stderr, /is not an executable sasso binary/, "cli: … naming what is wrong with it");
+    assert.ok(!existsSync(join(dir, "c.css")), "cli: … and it did not quietly compile instead");
+  }
+
+  // `0/off/false/no` is the way out for a machine where the binary on PATH is
+  // wrong for the project, and it is read before anything else is looked at.
+  {
+    const r = run(argv("d.css"), { SASSO_BINARY: "off", PATH: dirWith("empty") });
+    compiles("SASSO_BINARY=off", r, "d.css");
+    assert.match(r.stderr, /SASSO_BINARY declines the binary/, "cli: … and says so under SASSO_DEBUG_ENGINE");
+  }
+
+  // The POSIX stand-ins. Both are native images (so they get past the magic-byte
+  // check) and neither is sasso, which is exactly what makes them useful.
+  const firstOf = (paths) => paths.find((p) => existsSync(p));
+  const echo = firstOf(["/bin/echo", "/usr/bin/echo"]);
+  const envBin = firstOf(["/usr/bin/env", "/bin/env"]);
+  if (!echo || !envBin) {
+    console.log("  (no /bin/echo or /usr/bin/env here — the stand-in delegation cases are skipped)");
+  } else {
+    // THE WHOLE command line, in order, and not a byte of it interpreted here:
+    // `echo` prints its argv and writes no CSS, so both halves are pinned at
+    // once. A binary that received a rewritten command line would compile the
+    // right stylesheet with the wrong options, which no output test would catch.
+    const line = argv("e.css");
+    const r = run(line, { SASSO_BINARY: echo });
+    assert.equal(r.status, 0, `cli: a delegated run exits with the child's status (stderr: ${r.stderr})`);
+    assert.equal(r.stdout.trim(), line.join(" "), "cli: the binary got the whole command line, in order");
+    assert.ok(!existsSync(join(dir, "e.css")), "cli: … and this process compiled nothing itself");
+
+    // Every failure in this CLI exits 1 (#91). A delegated failure must NOT be
+    // flattened into that: 127 is what `env` returns for a command it cannot
+    // find, so reading it here means the status came from the child untouched.
+    const code = run(["/no/such/file.scss"], { SASSO_BINARY: envBin });
+    assert.equal(code.status, 127, `cli: the child's exit code is this process's (got ${code.status})`);
+
+    // The binary has neither flag (#86), so a command line carrying one must
+    // stay here. Delegating would hand `echo` a working build and get nothing
+    // compiled — which is what the file check below would catch.
+    {
+      const upd = run(argv("f.css", "--update"), { SASSO_BINARY: echo });
+      compiles("--update with a binary configured", upd, "f.css");
+      assert.match(upd.stderr, /--update is not in the binary/, "cli: … and the reason is readable");
+    }
+    {
+      // `--watch <input>` with no output: the guard runs before the engine, so
+      // the error that comes back proves whose argument grammar was in force.
+      const w = run(["--watch", src], { SASSO_BINARY: echo });
+      assert.notEqual(w.status, 0, "cli: --watch still needs an output file");
+      assert.match(w.stderr, /--watch requires <input> <output>/, "cli: … in this CLI's words, not a child's");
+      assert.match(w.stderr, /--watch is not in the binary/, "cli: … because --watch never delegates");
+    }
+
+    // Metadata answers from this file alone, as it does when no engine can load
+    // at all (Phase 3l): `echo` would print the flag back, and the version the
+    // binary prints is not even formatted the same way (`sasso 0.16.0` against
+    // dart's bare `0.16.0`).
+    assert.equal(run(["--version"], { SASSO_BINARY: echo }).stdout.trim(), pkgVersion, "cli: --version never delegates");
+    assert.ok(run(["--help"], { SASSO_BINARY: echo }).stdout.includes("Usage: sasso"), "cli: --help never delegates");
+
+    // A demanded in-process engine is a demand for an engine, and a subprocess
+    // is not one.
+    for (const engine of ["wasm", "native"]) {
+      const r2 = run(argv(`g-${engine}.css`), { SASSO_BINARY: echo, SASSO_ENGINE: engine });
+      if (engine === "native" && r2.status !== 0) {
+        assert.match(r2.stderr, /SASSO_ENGINE=native/, "cli: a demanded engine that is missing says so");
+        continue;
+      }
+      compiles(`SASSO_ENGINE=${engine} keeps the compile in-process`, r2, `g-${engine}.css`);
+    }
+
+    // The mark the child is started with. The magic-byte check is what stops the
+    // `npm i -g sasso` loop, but a wrapper reached some other way would slip
+    // past it, so a second hop is refused outright.
+    compiles(
+      "the delegation mark stops a second hop",
+      run(argv("h.css"), { SASSO_BINARY: echo, SASSO_CLI_DELEGATED: "1" }),
+      "h.css",
+    );
+
+    // A native `sasso` on PATH that is NOT this version is passed over, and
+    // silently: a mismatch is a normal state of the world (#114 is what happens
+    // when a version-skewed sasso gets used anyway), not a build-breaking one.
+    const strangerDir = dirWith("stranger", (d) => symlinkSync(echo, join(d, "sasso")));
+    const stranger = run(argv("i.css"), { PATH: strangerDir });
+    compiles("a native `sasso` on PATH that is not this version", stranger, "i.css");
+    assert.match(stranger.stderr, /compiling in-process/, "cli: … and the version it found is on the record");
+  }
+
+  // And now the real thing, wherever this machine keeps one: no stand-in can
+  // show that the CSS is the same CSS.
+  const exe = process.platform === "win32" ? "sasso.exe" : "sasso";
+  const binaryVersionOf = (p) => {
+    const r = spawnSync(p, ["--version"], { encoding: "utf8", timeout: 10000 });
+    if (r.status !== 0) return undefined;
+    // The binary prints `sasso <v>`; this CLI prints a bare `<v>`, dart's
+    // format. That prefix is what tells the two apart, so a `sasso` on PATH
+    // answering without it is the npm shim and not a binary at all.
+    const m = /^sasso (\S+)/.exec(String(r.stdout || "").trim());
+    return m ? m[1] : undefined;
+  };
+  const candidates = [];
+  if (process.env.SASSO_TEST_BINARY) candidates.push(process.env.SASSO_TEST_BINARY);
+  for (const root of [process.env.CARGO_TARGET_DIR, fileURLToPath(new URL("../target/", import.meta.url))]) {
+    if (root) for (const profile of ["release", "debug"]) candidates.push(join(root, profile, exe));
+  }
+  for (const d of (process.env.PATH || "").split(delimiter)) if (d) candidates.push(join(d, exe));
+  const binary = candidates.find((p) => existsSync(p) && binaryVersionOf(p) !== undefined);
+
+  if (!binary) {
+    // Normal in CI: no job in the wasm workflow builds the Rust CLI. Point
+    // `SASSO_TEST_BINARY` at one, or have one on PATH, to run these.
+    console.log("  (no sasso binary here — delegation checked with stand-ins only)");
+  } else {
+    const binVersion = binaryVersionOf(binary);
+
+    // Explicit and version-unchecked, which is how an unreleased build gets
+    // driven.
+    const exp = run(argv("j.css"), { SASSO_BINARY: binary });
+    assert.equal(exp.status, 0, `cli: SASSO_BINARY=<binary> compiles (stderr: ${exp.stderr})`);
+    assert.equal(readFileSync(join(dir, "j.css"), "utf8").trim(), CSS, "cli: … and the binary wrote the CSS this CLI would have");
+    assert.ok(exp.stderr.includes(`SASSO_BINARY=${binary}`), `cli: … on the record (stderr: ${exp.stderr})`);
+
+    // Delegating fixes the exit codes on the way: dart exits 65 on a compile
+    // error and the binary matches it (README, "CLI usage"), where this CLI
+    // exits 1 for everything (#91). A run that came back 1 here would mean the
+    // child's status was thrown away, or that nothing was delegated to at all.
+    const bad = join(dir, "bad.scss");
+    writeFileSync(bad, ".a{color:}\n");
+    const failed = run([bad], { SASSO_BINARY: binary });
+    assert.equal(failed.status, 65, `cli: a delegated compile error exits 65, dart's code (got ${failed.status})`);
+
+    // stdin is INHERITED, not read here and forwarded: the binary reads the
+    // same pipe this process was handed.
+    const piped = run(["--style=compressed", "--stdin"], { SASSO_BINARY: binary }, ".a{b:1+2}\n");
+    assert.equal(piped.status, 0, `cli: a delegated --stdin run (stderr: ${piped.stderr})`);
+    assert.equal(piped.stdout.trim(), CSS, "cli: … reads this process's stdin");
+
+    // The AUTOMATIC path needs the package's version to equal the binary's, and
+    // in a working tree it never does: `wasm/npm/package.json` carries the npm
+    // line's last published version and `npm version` sets the real one from the
+    // tag at publish time (release-wasm.yml, whose `version-match` job is what
+    // guarantees a published package and a released binary agree). So run these
+    // against a COPY of the package whose version says what a published one
+    // would. The wasm modules are symlinked rather than copied — megabytes each,
+    // and nothing here rewrites them.
+    const npmDir = fileURLToPath(new URL("./npm/", import.meta.url));
+    const pkgJson = JSON.parse(readFileSync(join(npmDir, "package.json"), "utf8"));
+    const packageSaying = (version) => {
+      const d = dirWith(`pkg-${version}`);
+      for (const entry of readdirSync(npmDir)) {
+        const from = join(npmDir, entry), to = join(d, entry);
+        if (!statSync(from).isFile()) continue;
+        if (entry === "package.json") writeFileSync(to, JSON.stringify({ ...pkgJson, version }, null, 2));
+        else if (entry.endsWith(".wasm")) symlinkSync(from, to);
+        else copyFileSync(from, to);
+      }
+      return join(d, "cli.mjs");
+    };
+
+    // A version-matched `sasso` is the first thing on PATH and gets the job
+    // without being asked for.
+    const autoDir = dirWith("auto", (d) => symlinkSync(binary, join(d, exe)));
+    const matchedCli = packageSaying(binVersion);
+    const auto = runWith(matchedCli, argv("k.css"), { PATH: autoDir });
+    assert.equal(auto.status, 0, `cli: a version-matched sasso on PATH compiles (stderr: ${auto.stderr})`);
+    assert.equal(readFileSync(join(dir, "k.css"), "utf8").trim(), CSS, "cli: … byte for byte what this CLI compiles");
+    assert.match(auto.stderr, /handing the command line to/, "cli: … and it was the binary that did it");
+
+    // `--engine` REPORTS the hand-off instead of taking it, and this is the one
+    // place it can be checked against a binary that would really have been used:
+    // the binary has no `--engine` at all, so a delegated one would either fail
+    // or answer about something else.
+    const asked = runWith(matchedCli, ["--engine"], { PATH: autoDir });
+    assert.equal(asked.status, 0, `cli: --engine with a matched binary on PATH (stderr: ${asked.stderr})`);
+    assert.match(asked.stdout, /^binary: +.*every compile is handed to it/m, `cli: … names the binary it would hand to (stdout: ${asked.stdout})`);
+    assert.match(asked.stdout, /^engine: .*unused while the binary above is there/m, "cli: … and says the engine it loaded is idle");
+
+    // The exit code again, this time on the path nobody asked for: the automatic
+    // hand-off has to be as faithful as the explicit one.
+    const autoFailed = runWith(matchedCli, [bad], { PATH: autoDir });
+    assert.equal(autoFailed.status, 65, `cli: an automatic hand-off keeps the binary's exit code (got ${autoFailed.status})`);
+
+    // The escape hatch and the mark, against a binary that really would have
+    // been used — the `echo` cases above cannot show that, because `echo` was
+    // never going to be picked up automatically in the first place.
+    compiles(
+      "SASSO_BINARY=0 with a matched binary right there",
+      runWith(matchedCli, argv("l.css"), { PATH: autoDir, SASSO_BINARY: "0" }),
+      "l.css",
+    );
+    compiles(
+      "the mark, against a matched binary",
+      runWith(matchedCli, argv("m.css"), { PATH: autoDir, SASSO_CLI_DELEGATED: "1" }),
+      "m.css",
+    );
+
+    // And the gate itself, against the real binary rather than a stranger: one
+    // patch version apart is exactly the case that must be declined, because
+    // this is #114 (a version-skewed engine used anyway, quietly dropping
+    // options it could not apply) one process further out.
+    const skewed = runWith(packageSaying(`${binVersion}-not`), argv("n.css"), { PATH: autoDir });
+    compiles("a real sasso on PATH that is a version apart", skewed, "n.css");
+    assert.match(skewed.stderr, /compiling in-process/, "cli: … and the versions it compared are on the record");
+  }
+  console.log("ok: cli — delegating to the release binary (version gate, argv, exit codes, no recursion)");
 }
 
 // === The `quietDeps` option, on the JS API and on both engines ===

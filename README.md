@@ -91,6 +91,19 @@ $ cargo binstall sasso        # fetch the prebuilt binary
 $ cargo install sasso         # build from source (needs a Rust toolchain)
 ```
 
+**CLI — Homebrew.** macOS and Linux, arm64 and x86_64. It installs the same
+prebuilt binary as above, from
+[momiji-rs/homebrew-tap](https://github.com/momiji-rs/homebrew-tap):
+
+```console
+$ brew trust --formula momiji-rs/tap/sasso
+$ brew install momiji-rs/tap/sasso
+```
+
+`brew trust --formula` grants the narrowest trust there is — this formula, not
+the tap — and is what lets `brew info sasso` and `brew upgrade sasso` work by
+short name afterwards.
+
 **CLI — Nix.** This repo is a flake, so nothing has to be packaged first:
 
 ```console
@@ -127,7 +140,19 @@ output is byte-identical either way.
 wasm when it is not; `SASSO_ENGINE=wasm|native` forces a choice, and
 `sasso --engine` prints which one an install actually runs (a fallback on a
 platform that has a prebuilt addon also says so on stderr — it costs roughly
-half the throughput).
+half the throughput). It prefers
+neither when there is something better: if a `sasso` **binary** is on `PATH` and
+its version matches the package **exactly**, the command line is handed to it
+and the run ends with its exit code — so `brew install momiji-rs/tap/sasso`
+speeds up the `npx sasso` in a project's scripts without touching them
+(momiji-rs/sasso#24). The version has to match because a package pinned in
+`devDependencies` must not silently compile with whatever sasso a developer
+happens to have; a mismatch is passed over in silence. `SASSO_BINARY=<path>`
+names a binary explicitly, version unchecked, and `SASSO_BINARY=0` turns the
+hand-off off. `SASSO_DEBUG_ENGINE=1` prints which of these happened and why.
+`--watch` and `--update` always stay in-process, because the binary has neither
+(#86), and `sasso --engine` reports the hand-off rather than taking it.
+
 **Importing the library** selects nothing: `import … from "sasso"` is always
 the size-optimised wasm build and ignores `SASSO_ENGINE`, `"sasso/speed"` is
 the faster, larger wasm build, and the addon is the explicit `"sasso/native"`
@@ -142,6 +167,15 @@ package from `npm install sasso` (2026-09-17, macOS / arm64):
 | `npx sasso` (wasm engine) | 610 ms |
 | the `sasso` 0.15.0 binary | 137 ms |
 | dart-sass 1.104.1 | 2268 ms |
+
+What the hand-off is worth, on 40 entry points with `--style=compressed
+--no-source-map` and the same published artifacts (2026-09-18, macOS / arm64,
+one run for all three): the 0.16.0 binary **15.1 ms**, `npx sasso` on the native
+addon **104.1 ms**, and `npx sasso` handing the command line to that same binary
+**48.2 ms** — identical CSS in all 40 files. The 33 ms it does not recover is
+Node: starting it and spawning a child costs 35.0 ms of the 48.2 on a single
+tiny file. Nothing about a stylesheet makes that cheaper, which is why the
+binary is worth installing on its own.
 
 ```js
 import { compileString } from "sasso";
