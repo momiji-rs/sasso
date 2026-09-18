@@ -71,7 +71,10 @@ const ZERO_REGION: Region = Region {
     base: AtomicUsize::new(0),
     end: AtomicUsize::new(0),
 };
-/// Claim counter: slots `0..REGION_SLOTS` are claimed (possibly unpublished).
+/// High-water mark: slots `0..REGION_SLOTS` have been used at some point and
+/// are what [`in_any_arena`] scans. It never shrinks — a slot given back is
+/// skipped by its zero `base`, not by moving this — so the scan bound stays
+/// monotonic while the slots beneath it are recycled.
 static REGION_SLOTS: AtomicUsize = AtomicUsize::new(0);
 static REGIONS: [Region; MAX_ARENAS] = [ZERO_REGION; MAX_ARENAS];
 
@@ -129,6 +132,12 @@ fn unregister_region(idx: usize) {
 }
 
 /// Whether `p` lies inside any registered arena region.
+///
+/// `base` is read first and gates the rest, which is what makes a slot safe
+/// to publish and to release concurrently: a claimant writes `end` before
+/// `base`, and a leaver clears `base` and writes nothing after, so this either
+/// sees a whole region or skips the slot. A slot mid-claim reads `usize::MAX`,
+/// which no real pointer reaches.
 #[inline]
 fn in_any_arena(p: usize) -> bool {
     let n = REGION_SLOTS.load(Ordering::Relaxed).min(MAX_ARENAS);
