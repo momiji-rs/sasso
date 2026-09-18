@@ -1003,8 +1003,31 @@ impl Value {
                     push_unquoted(out, &s.text);
                 }
             }
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            // The authored spelling of `12px/1.5`, already a string.
+            Value::Slash(_, repr) => out.push_str(repr),
             Value::Null => {}
             other => out.push_str(&other.to_css(compressed)),
+        }
+    }
+
+    /// Whether [`Value::write_css`] writes this value straight into the caller's
+    /// buffer. The variants it does not spell out build an owned string of their
+    /// own — a `calc()` interior is assembled recursively — so a caller that
+    /// wants an owned `String` should ask [`Value::to_css`] for it directly
+    /// instead of routing it through a buffer and copying it a second time.
+    /// Getting this wrong in either direction costs exactly one copy and can
+    /// never change a byte of output.
+    pub(crate) fn serializes_in_place(&self) -> bool {
+        match self {
+            Value::Number(_)
+            | Value::Color(_)
+            | Value::List(_)
+            | Value::Str(_)
+            | Value::Bool(_)
+            | Value::Slash(..)
+            | Value::Null => true,
+            Value::Map(_) | Value::Calc(_) | Value::Function(_) | Value::Mixin(_) => false,
         }
     }
 
@@ -1018,6 +1041,8 @@ impl Value {
             Value::List(l) => l.write_interp(out),
             Value::Number(n) => n.write_css(out, false),
             Value::Color(c) => c.write_css(out, false),
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Slash(_, repr) => out.push_str(repr),
             other => out.push_str(&other.to_interp()),
         }
     }
@@ -3515,5 +3540,89 @@ mod tests {
         assert!(frac.sass_eq(&Value::Color(Color::rgb(0.4, 0.0, 0.0, 1.0))));
         // Differing alpha is not equal.
         assert!(!purple.sass_eq(&Value::Color(Color::rgb(128.0, 0.0, 128.0, 0.5))));
+    }
+
+    /// [`Value::write_css`] and [`Value::to_css`] are two spellings of one
+    /// serialization, and callers pick between them by whether they already hold
+    /// a buffer — so a variant spelled out in one and not the other must still
+    /// produce the same bytes. Every variant is listed, in both output styles,
+    /// because the way this breaks is a new in-place arm that formats slightly
+    /// differently from the owned one it was copied from and only shows up in the
+    /// two places (declarations, interpolation) that take the buffer path.
+    #[test]
+    fn writing_a_value_in_place_matches_serializing_it_to_a_string() {
+        let values = vec![
+            Value::Number(Number::with_unit(12.5, "px")),
+            Value::Color(Color::rgb(51.0, 102.0, 153.0, 1.0)),
+            Value::Str(SassStr {
+                text: "a b".into(),
+                quoted: true,
+            }),
+            Value::Str(SassStr {
+                text: "solid".into(),
+                quoted: false,
+            }),
+            Value::List(List::new(
+                vec![
+                    Value::Number(Number::with_unit(1.0, "px")),
+                    Value::Color(Color::rgb(0.0, 0.0, 0.0, 0.5)),
+                ],
+                ListSep::Space,
+                false,
+            )),
+            Value::Map(Map::new(vec![(
+                Value::Str(SassStr {
+                    text: "k".into(),
+                    quoted: false,
+                }),
+                Value::Number(Number::unitless(1.0)),
+            )])),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Null,
+            Value::Slash(Number::unitless(0.5), "1/2".to_string()),
+            Value::Calc(CalcNode::Op {
+                op: CalcOp::Sub,
+                left: Box::new(CalcNode::Number(Number::with_unit(100.0, "%"))),
+                right: Box::new(CalcNode::Number(Number::with_unit(16.0, "px"))),
+            }),
+            Value::Function(SassFunction {
+                name: "f".to_string(),
+                css: false,
+                module: None,
+                user: None,
+            }),
+            Value::Mixin(Box::new(SassMixin {
+                name: "m".to_string(),
+                user: None,
+                module: None,
+            })),
+        ];
+        // The list above is the whole enum, so a new variant cannot be added
+        // without being written down here.
+        let variants: std::collections::HashSet<_> = values.iter().map(std::mem::discriminant).collect();
+        assert_eq!(variants.len(), 11, "one case per `Value` variant");
+
+        for compressed in [false, true] {
+            for v in &values {
+                let mut buf = String::from("PREFIX:");
+                v.write_css(&mut buf, compressed);
+                assert_eq!(
+                    buf,
+                    format!("PREFIX:{}", v.to_css(compressed)),
+                    "write_css disagrees with to_css (compressed = {compressed}) for {v:?}"
+                );
+            }
+        }
+        // The same for the interpolation pair, which shares the fall-through.
+        for v in &values {
+            let mut buf = String::new();
+            v.write_interp(&mut buf);
+            assert_eq!(
+                buf,
+                v.to_interp(),
+                "write_interp disagrees with to_interp for {v:?}"
+            );
+        }
     }
 }

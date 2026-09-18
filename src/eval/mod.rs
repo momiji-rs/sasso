@@ -993,7 +993,8 @@ pub(crate) struct Evaluator<'a> {
     /// this buffer keeps whatever capacity the widest value so far needed, so
     /// the out item's own exactly-sized copy is the only allocation left. One
     /// buffer suffices because serializing a value never re-enters the
-    /// evaluator — see [`Evaluator::declared_css`].
+    /// evaluator; the values it does NOT serve are the ones that build an owned
+    /// string anyway — see [`Evaluator::declared_css`].
     css_buf: String,
     options: EvalOptions<'a>,
     /// Import paths currently being loaded, deepest last. Re-entering one is a
@@ -3349,6 +3350,14 @@ impl<'a> Evaluator<'a> {
     /// observed missing.
     fn declared_css(&mut self, value: &Value) -> String {
         let compressed = self.compressed();
+        // A value that cannot be written in place — a `calc()`, whose interior is
+        // assembled recursively — already produces an owned string of the right
+        // size, so it is asked for that directly: through the buffer it would be
+        // copied a second time, which is one allocation MORE than not having a
+        // buffer at all.
+        if !value.serializes_in_place() {
+            return value.to_css(compressed);
+        }
         let mut buf = std::mem::take(&mut self.css_buf);
         buf.clear();
         value.write_css(&mut buf, compressed);
