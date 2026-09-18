@@ -15,10 +15,17 @@ import {
   mkdirSync,
   realpathSync,
   rmSync,
+  openSync,
+  readSync,
+  closeSync,
+  accessSync,
+  constants as fsConstants,
 } from "node:fs";
-import { basename, dirname, join, resolve, relative, sep } from "node:path";
+import { basename, dirname, join, resolve, relative, sep, delimiter } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isMainThread, workerData, parentPort, Worker } from "node:worker_threads";
+import { spawnSync } from "node:child_process";
+import { constants as osConstants } from "node:os";
 // The pool's default size — physical cores rather than SMT threads on Linux,
 // where `/proc/cpuinfo` publishes the topology, and the CPU count everywhere
 // else. See _jobs.mjs for the measurement and for both fallbacks.
@@ -107,10 +114,17 @@ function engineReason() {
 
 /** `--engine`: the whole engine decision, in a form an issue can be pasted into. */
 function engineReport() {
-  const lines = [
-    `engine:   ${engine.kind === "native" ? "native (Node addon)" : "wasm (speed build)"} — ${engineReason()}`,
+  const lines = [];
+  // The hand-off first, because with a release binary on PATH the honest answer
+  // to "which engine am I on?" is "none of them" — and when there is no binary,
+  // `handoff.why` says what was in the way, which is the question that follows.
+  if (handoff.path) lines.push(`binary:   ${handoff.path} — every compile is handed to it (${handoff.why})`);
+  else if (handoff.why) lines.push(`binary:   not used — ${handoff.why}`);
+  lines.push(
+    `engine:   ${engine.kind === "native" ? "native (Node addon)" : "wasm (speed build)"} — ${engineReason()}` +
+      (handoff.path ? " (unused while the binary above is there)" : ""),
     `platform: ${engine.platform}${engine.addon ? ` (prebuilt addon: ${engine.addon})` : " (no prebuilt addon)"}`,
-  ];
+  );
   // Only ever set when loading the addon was TRIED and failed, so this is the
   // one line that separates "never installed" from "installed but unloadable"
   // — the question the silent fallback used to swallow. First line only: a
@@ -148,6 +162,213 @@ function warnIfFellBack(opts) {
       `compiles through wasm — roughly half the throughput.\n` +
       `sasso: run \`sasso --engine\` for the reason, or set SASSO_ENGINE=wasm to choose wasm silently.\n`,
   );
+}
+
+/**
+ * The release binary, when this CLI should hand it the whole command line
+ * rather than compile in-process.
+ *
+ * Same compiler, same flags, byte-identical output — but this package pays
+ * Node's start-up and then moves every file's source and CSS across the napi
+ * boundary, and the binary pays neither. Measured on 40 entry points with
+ * `--style=compressed --no-source-map`, published artifacts, macOS/arm64, one
+ * run for the whole set (2026-09-18): the binary 15.1 ms, this CLI on the
+ * native addon 104.1 ms, this CLI delegating 48.2 ms. So a `brew install`ed
+ * sasso sitting beside `npm install sasso` was ~7x the throughput of the one
+ * npm reached for, which is what momiji-rs/sasso#24 asked us to stop wasting,
+ * and handing it the command line recovers 2.2x of it. What is left is Node
+ * itself: 35.0 ms of the 48.2 is start-up and the spawn (the same delegated
+ * command line on ONE tiny file), which is why this is a hand-off and not a
+ * faster engine.
+ *
+ * `SASSO_BINARY`:
+ *   - unset                  auto: a `sasso` on PATH whose version matches
+ *                            this package EXACTLY is used, and anything else
+ *                            is passed over silently.
+ *   - a path                 use that binary, version unchecked — explicit is
+ *                            explicit, and it is how you drive an unreleased
+ *                            build.
+ *   - 0 / off / false / no   never delegate. Empty counts as unset.
+ * `SASSO_ENGINE=wasm|native` also turns delegation off: it demands a specific
+ * in-process engine, and a subprocess is not one.
+ *
+ * The version gate is the whole safety story for the automatic case. Without
+ * it, a project pinning `sasso` in its devDependencies would silently compile
+ * with whatever sasso happens to be on a developer's PATH. That is #114 —
+ * a version-skewed addon loaded anyway, quietly dropping options it could not
+ * apply — one process further out, where it is harder to see.
+ */
+const NEVER_DELEGATE = new Set(["0", "off", "false", "no"]);
+
+/** Set on the child, so a `sasso` on PATH that is really this CLI cannot loop. */
+const DELEGATE_MARK = "SASSO_CLI_DELEGATED";
+
+/**
+ * What `pickBinary` decided, in the same words twice: `SASSO_DEBUG_ENGINE`
+ * prints it as it happens and `--engine` reports it afterwards. One string, so
+ * the two can never disagree about why a binary was or was not used.
+ */
+const handoff = { path: null, why: null };
+
+function engineDebug(msg) {
+  if (process.env.SASSO_DEBUG_ENGINE) writeStderrSync(`sasso: ${msg}\n`);
+}
+
+/** Compile here, and remember what was in the way. */
+function compileInProcess(why) {
+  handoff.why = why;
+  engineDebug(`compiling in-process: ${why}`);
+  return undefined;
+}
+
+/** Hand `path` the command line, and remember why it was the right one. */
+function handTo(path, why) {
+  handoff.path = path;
+  handoff.why = why;
+  engineDebug(`handing the command line to ${path}: ${why}`);
+  return path;
+}
+
+/**
+ * True for a real executable image, false for a script.
+ *
+ * `npm install -g sasso` puts a `sasso` on PATH that IS this file behind a
+ * `#!/usr/bin/env node` line, so a PATH lookup finds it and delegating to it
+ * would fork bomb. Refusing anything that is not a native image rules that out
+ * structurally rather than by guessing from the path, and also declines shell
+ * wrappers, whose exit codes and stdio we would not control.
+ * (`DELEGATE_MARK` still backs this up for a wrapper reached some other way.)
+ */
+function isNativeImage(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const head = Buffer.alloc(4);
+    if (readSync(fd, head, 0, 4, 0) < 4) return false;
+    const magic = head.readUInt32BE(0);
+    return (
+      magic === 0x7f454c46 || // ELF
+      magic === 0xcffaedfe || // Mach-O 64, little-endian (arm64/x86_64 macOS)
+      magic === 0xcefaedfe || // Mach-O 32
+      magic === 0xcafebabe || // Mach-O universal
+      magic === 0xcafebabf || // Mach-O universal, 64-bit
+      // PE/COFF ("MZ"). Untested: no CI job has ever run on Windows (#85).
+      head.readUInt16BE(0) === 0x4d5a
+    );
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * The first executable native `sasso` on PATH, or undefined.
+ *
+ * An empty `PATH` entry means the current directory to a POSIX shell, and is
+ * skipped here on purpose: this lookup decides who receives the project's whole
+ * command line, and honouring it would let a checkout with a `sasso` beside its
+ * `package.json` be handed it. The divergence only ever finds FEWER binaries
+ * than the shell would, and not finding one costs nothing but speed — the
+ * in-process engine compiles the same bytes. `SASSO_BINARY=./sasso` is how to
+ * ask for one there deliberately.
+ */
+function sassoOnPath() {
+  const names = process.platform === "win32" ? ["sasso.exe", "sasso"] : ["sasso"];
+  for (const dir of (process.env.PATH || "").split(delimiter)) {
+    if (!dir) continue;
+    for (const name of names) {
+      const candidate = join(dir, name);
+      try {
+        accessSync(candidate, fsConstants.X_OK);
+      } catch {
+        continue;
+      }
+      if (isNativeImage(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The binary's version, or undefined if it does not identify itself as sasso.
+ *
+ * `sasso --version` prints exactly `sasso <version>` and nothing else
+ * (src/main.rs: one `println!`), where this CLI prints a bare `<version>`,
+ * dart's format. The WHOLE output has to be that line — not its last field, and
+ * not its first line either: this is the gate that decides whether a stranger
+ * gets the project's command line, and something else installed as `sasso` can
+ * print a version too. Reading only the last field would accept
+ * `some-other-tool 0.16.0`, and reading only the first line would accept
+ * anything that leads with a plausible one.
+ */
+function binaryVersion(path) {
+  const r = spawnSync(path, ["--version"], { encoding: "utf8", timeout: 10000 });
+  if (r.error || r.status !== 0) return undefined;
+  const m = /^sasso (\S+)$/.exec(String(r.stdout || "").trim());
+  return m ? m[1] : undefined;
+}
+
+/**
+ * The binary to hand this command line to, or undefined to compile in-process.
+ *
+ * `opts` is already parsed, so `--help`/`--version` have exited in `parseArgs`
+ * and still answer from this file alone: a metadata question must not start
+ * depending on a subprocess any more than it depended on a compiler.
+ */
+function pickBinary(opts) {
+  if (process.env[DELEGATE_MARK]) return compileInProcess(`${DELEGATE_MARK} is set: this process IS the hand-off`);
+
+  const wantEngine = process.env.SASSO_ENGINE;
+  if (wantEngine === "wasm" || wantEngine === "native") {
+    return compileInProcess(`SASSO_ENGINE=${wantEngine} demands an in-process engine`);
+  }
+
+  const want = process.env.SASSO_BINARY;
+  if (want !== undefined && want !== "" && NEVER_DELEGATE.has(want.toLowerCase())) {
+    return compileInProcess("SASSO_BINARY declines the binary");
+  }
+
+  // The binary has neither flag (#86), so these two must stay in-process or
+  // delegating would take a working command line and break it.
+  if (opts.watch) return compileInProcess("--watch is not in the binary (#86)");
+  if (opts.update) return compileInProcess("--update is not in the binary (#86)");
+
+  if (want !== undefined && want !== "") {
+    if (!isNativeImage(want)) fail(`error: SASSO_BINARY=${want} is not an executable sasso binary`);
+    return handTo(want, `SASSO_BINARY=${want}, version unchecked`);
+  }
+
+  const found = sassoOnPath();
+  if (!found) return compileInProcess("no sasso binary on PATH");
+  const theirs = binaryVersion(found);
+  const ours = packageVersion();
+  // Silent by default: a mismatch is a normal state of the world, not a problem
+  // to interrupt a build over. `--engine` is where to go and ask.
+  if (theirs === undefined) {
+    return compileInProcess(`${found} does not answer --version with \`sasso <version>\``);
+  }
+  if (theirs !== ours) {
+    return compileInProcess(`${found} is ${theirs}, this package is ${ours}`);
+  }
+  return handTo(found, `the same version as this package, ${theirs}`);
+}
+
+/** Run the binary in our place. Never returns. */
+function delegate(path) {
+  const r = spawnSync(path, process.argv.slice(2), {
+    stdio: "inherit",
+    env: { ...process.env, [DELEGATE_MARK]: "1" },
+  });
+  if (r.error) fail(`error: could not run ${path}: ${r.error.message}`);
+  if (r.signal) {
+    // Report a killed child the way a shell does, rather than flattening every
+    // signal into 1: ^C during a big build should read as 130, not as a
+    // compile failure.
+    const n = osConstants.signals[r.signal];
+    process.exit(n ? 128 + n : 1);
+  }
+  process.exit(r.status === null ? 1 : r.status);
 }
 
 const HELP = `sasso — compile SCSS/Sass to CSS
@@ -206,8 +427,10 @@ Options:
                                      (default: on).
   -h, --help                         Print this help.
       --version                      Print the version.
-      --engine                       Print which compiler engine this install
-                                     uses (native addon or wasm) and why.
+      --engine                       Print what this install compiles with and
+                                     why: a sasso binary it hands the command
+                                     line to, or its own engine (native addon
+                                     or wasm).
 
 An <in>:<out> pair may name DIRECTORIES: every .scss/.sass/.css file under
 <in> that is not a partial compiles to the matching path under <out>.
@@ -1071,6 +1294,14 @@ async function main() {
   // question depend on a compiler — `SASSO_ENGINE=native sasso --version` on a
   // machine without the addon printed the addon error instead of the version.
   const opts = parseArgs(process.argv.slice(2));
+  // Before the engine, because the fastest engine here is not one: a
+  // version-matched release binary on PATH gets the whole command line and
+  // this process ends with its exit code. See `pickBinary`.
+  // `--engine` REPORTS the hand-off instead of taking it: the question it asks is
+  // what THIS install does, and delegating would answer with the binary's own
+  // idea of `--engine`, which it does not have at all.
+  const binary = pickBinary(opts);
+  if (binary && !opts.printEngine) delegate(binary);
   await loadEngine();
   // `--engine` is the answer to "which one did I get?", so it reports and stops
   // — before the "no input file" check, since it needs no input.

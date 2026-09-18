@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.74"
 license = "MIT OR Apache-2.0"
 description = "A pure-Rust SCSS to CSS compiler (a dart-sass alternative). Zero dependencies, wasm-friendly, embeddable as a library and usable as a CLI."
+homepage = "https://github.com/momiji-rs/sasso"
 repository = "https://github.com/momiji-rs/sasso"
 documentation = "https://docs.rs/sasso"
 readme = "README.md"
@@ -69,7 +70,17 @@ cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "powershell"]
+installers = ["shell", "powershell", "homebrew"]
+# The tap the generated formula names in its download URLs and is destined for.
+# `publish-jobs` deliberately does NOT include "homebrew": that job pushes the
+# formula into the tap from here, which needs a cross-repo write token
+# (`HOMEBREW_TAP_TOKEN`) held as a secret in this repo. Setting `tap` alone is
+# enough to make `dist` emit `sasso.rb` as a release artifact, checksums filled
+# in; momiji-rs/homebrew-tap then PULLS that artifact from the public release
+# API and commits it with its own built-in GITHUB_TOKEN. Same formula, no
+# cross-repo secret anywhere. `dist plan` warns about the disabled publish job
+# — that warning is this choice, not a misconfiguration.
+tap = "momiji-rs/homebrew-tap"
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
 # Which actions to run on pull requests

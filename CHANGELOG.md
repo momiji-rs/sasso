@@ -38,6 +38,89 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Added
 
+- **Homebrew**: `brew install momiji-rs/tap/sasso` installs the same prebuilt
+  binary the release page serves, on macOS and Linux, arm64 and x86_64 (#24).
+
+  The formula is generated here and PULLED from there. `installers` gains
+  `"homebrew"` and `tap = "momiji-rs/homebrew-tap"` is set, which is enough to
+  make `dist` emit `sasso.rb` as a release artifact with the four target
+  checksums already in it; a scheduled workflow in
+  [momiji-rs/homebrew-tap](https://github.com/momiji-rs/homebrew-tap) reads the
+  latest release, verifies what it downloaded (the class name, the version
+  against the tag, exactly four `sha256` lines) and commits it with its own
+  built-in `GITHUB_TOKEN`. `publish-jobs` deliberately does **not** include
+  `"homebrew"`: that job pushes the formula from this repo into the tap, which
+  needs a cross-repo write token held here as a secret. Inverting the direction
+  means neither repo holds one. `dist plan` warns about the disabled publish
+  job — that warning is this choice, not a misconfiguration.
+
+  homebrew-core is the endpoint that would need no workflow at all, since
+  BrewTestBot autobumps it, but its Notability rule asks 225 stars / 90 forks /
+  90 watchers of an owner submitting their own project and sasso has 5 / 2 / 1
+  (2026-09-18). An upstream tap is the route Homebrew documents until then.
+
+  Verified end to end on macOS/arm64, Homebrew 7.0.4, 2026-09-18: the published
+  tarball's checksum against the release's own `sha256.sum`, then a clean
+  `brew install momiji-rs/tap/sasso` landing `sasso 0.16.0` and compiling a real
+  stylesheet. The README leads with `brew trust --formula momiji-rs/tap/sasso` —
+  the narrowest trust Homebrew has, this formula rather than the whole tap, and
+  what makes `brew info sasso` and `brew upgrade sasso` work by short name
+  afterwards.
+
+- **The npm CLI hands the whole command line to a release binary when it finds
+  one of exactly its own version** (#24), and exits with that process's status.
+  So `brew install momiji-rs/tap/sasso` — or a `cargo install`, or a binary
+  already on the box — speeds up the `sasso` in a project's npm scripts without
+  editing any of them.
+
+  Measured on 40 entry points with `--style=compressed --no-source-map`,
+  published artifacts, macOS/arm64, one run for all three (2026-09-18): the
+  binary **15.1 ms**, this CLI on the native addon **104.1 ms**, this CLI
+  delegating **48.2 ms**, with identical CSS in all 40 files. That also corrects
+  0.16.0's summary above, which put the remaining gap down to Node start-up:
+  start-up plus the spawn is 35.0 ms of the 48.2 (the same delegated command
+  line on one tiny file), so of the 89 ms the binary was ahead by, roughly a
+  third is Node starting and the rest is work the binary does not do at all —
+  moving every file's source and CSS across the napi boundary, and the
+  per-file JS around it. What is left after the hand-off is Node itself, which
+  no stylesheet makes cheaper.
+
+  The version has to match EXACTLY. A `sasso` pinned in `devDependencies` must
+  not quietly compile with whatever is on a developer's `PATH`, which is #114 —
+  a version-skewed engine used anyway, silently dropping options it could not
+  apply — one process further out. A mismatch is passed over in silence, because
+  it is an ordinary state of the world and not something to interrupt a build
+  over. `SASSO_BINARY=<path>` names a binary explicitly, version unchecked
+  (which is how an unreleased build gets driven); `SASSO_BINARY=0` turns the
+  hand-off off; `SASSO_ENGINE=wasm|native` turns it off too, because it demands
+  an in-process engine and a subprocess is not one. `--watch` and `--update`
+  never delegate — the binary has neither (#86) — and `--help`/`--version` still
+  answer from the package alone.
+
+  Whichever way it went is one string, so the two things that report it cannot
+  disagree: `SASSO_DEBUG_ENGINE=1` prints it as it happens, and `sasso --engine`
+  reports it afterwards, on a `binary:` line above the engine it loaded and did
+  not use — including, when there is no hand-off, what was in the way, which is
+  the question that follows. `--engine` reports the hand-off rather than taking
+  it: it asks what THIS install does, and the binary has no `--engine`.
+
+  Two hazards were not guessable from a path. `npm install -g sasso` puts a
+  `sasso` on `PATH` that IS this CLI behind a `#!/usr/bin/env node` line, so
+  delegating to it would fork bomb: the candidate must be a native executable
+  image (ELF / Mach-O / PE magic bytes), and the child is marked so that a
+  second hop is refused whatever it turns out to be. Identity is the whole
+  `--version` output, `sasso <version>` and nothing else: reading only the
+  version out of it would let any other project's `sasso` that prints a matching
+  number take the command line, and reading only its first line would let
+  anything that leads with a plausible one. And `wasm/test.mjs` had to
+  turn delegation off for itself — every CLI case there is about what `cli.mjs`
+  does, and on a machine with a matching binary installed the flag-parity guard
+  (which exists because the two CLIs drifted apart in the first place) would
+  have interrogated the binary twice and agreed with itself.
+
+  One thing comes out better than it went in: a delegated compile error exits
+  65, as dart does, where this CLI exits 1 for everything (#91).
+
 - **`--silence-deprecation=<ids>`**, on both CLIs and as `silenceDeprecations`
   in the JS API (#24). dart's flag for dropping named deprecations while every
   other warning still prints — which is the point of it over `--quiet`, and
