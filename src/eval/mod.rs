@@ -3347,17 +3347,12 @@ impl<'a> Evaluator<'a> {
     /// evaluator is borrowed mutably; the borrow is returned before this
     /// returns, and serialization cannot re-enter the evaluator (a `Value` is
     /// fully evaluated by the time it gets here), so the buffer is never
-    /// observed missing.
+    /// observed missing. Every value that can legally reach this point writes
+    /// itself into the buffer without allocating — the ones that cannot are
+    /// rejected as invalid CSS values above — so the copy is the only cost the
+    /// buffer adds.
     fn declared_css(&mut self, value: &Value) -> String {
         let compressed = self.compressed();
-        // A value that cannot be written in place — a `calc()`, whose interior is
-        // assembled recursively — already produces an owned string of the right
-        // size, so it is asked for that directly: through the buffer it would be
-        // copied a second time, which is one allocation MORE than not having a
-        // buffer at all.
-        if !value.serializes_in_place() {
-            return value.to_css(compressed);
-        }
         let mut buf = std::mem::take(&mut self.css_buf);
         buf.clear();
         value.write_css(&mut buf, compressed);
