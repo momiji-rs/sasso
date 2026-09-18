@@ -192,7 +192,17 @@ pub struct WarnEvent<'a> {
 }
 
 /// An embedder's diagnostic handler (dart-sass `logger`). Receives every
-/// `@warn` / `@debug` / deprecation warning; if unset, they print to stderr.
+/// `@warn` / `@debug` / deprecation warning that the options do not suppress;
+/// if unset, they print to stderr.
+///
+/// Two options suppress before this point, because both decide what is worth
+/// reporting rather than how to report it, and dart-sass applies them in the
+/// compiler for the same reason: [`Options::with_quiet_deps`] drops
+/// deprecations raised inside dependencies, and
+/// [`Options::with_silenced_deprecations`] drops the ids it names. A
+/// suppressed deprecation is not merely withheld from the handler — it is not
+/// counted either, so it cannot turn up in the "N repetitive deprecation
+/// warnings omitted" tally.
 pub type WarnHandler = std::rc::Rc<dyn Fn(&WarnEvent<'_>)>;
 
 impl Default for Options<'_> {
@@ -293,9 +303,14 @@ impl<'a> Options<'a> {
         self
     }
 
-    /// Set the diagnostic handler (dart-sass `logger`). Every `@warn`/`@debug`/
+    /// Set the diagnostic handler (dart-sass `logger`). Each `@warn`/`@debug`/
     /// deprecation warning is delivered to `handler` instead of being printed to
     /// stderr (the default when unset).
+    ///
+    /// Deprecations suppressed by [`Options::with_quiet_deps`] or
+    /// [`Options::with_silenced_deprecations`] never reach `handler`: both are
+    /// applied in the compiler, ahead of the repetition cap, so a suppressed
+    /// deprecation is not counted either. See [`WarnHandler`].
     #[must_use]
     pub fn with_warn_handler(mut self, handler: WarnHandler) -> Self {
         self.warn = Some(handler);
