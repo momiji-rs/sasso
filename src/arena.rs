@@ -33,7 +33,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 // =========================================================================
 // Process-global arena-region registry.
@@ -42,39 +42,70 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // region?" — an in-arena free is a no-op (reclaimed wholesale on scope reset),
 // anything else forwards to System. A global table of `[base, end)` ranges
 // answers that with two atomic loads per registered region and no thread-local
-// access. Regions come and go with their threads, so a slot is claimed by CAS
-// and cleared on the way out; `REGION_SLOTS` bounds the scan and never
-// shrinks, while the slots under it are recycled. This halves the macOS
-// `_tlv_get_addr` dynamic-TLS traffic, which `alloc` (which genuinely needs
-// the per-thread cursor) still pays.
+// access. This halves the macOS `_tlv_get_addr` dynamic-TLS traffic, which
+// `alloc` (which genuinely needs the per-thread cursor) still pays.
 //
-// Memory ordering: everything is Relaxed, and that is sufficient because the
-// slots are WRITE-ONCE. A false "in arena" needs `base != 0 && p >= base &&
-// p < end` — both loads nonzero — and a nonzero load of a write-once slot is
-// its final value, so the containment is real. A false "not in arena" (a
-// stale 0) could only misroute a pointer that genuinely lives in the
-// unobserved region — but a thread always sees its own claim/publication, and
+// What a slot holds and what it lends are different things. `base`/`end` are
+// WRITE-ONCE: a slot's region is created the first time anyone uses that slot
+// and lives for the rest of the process. What threads take and give back is
+// the RIGHT to bump inside it — `taken`, claimed by CAS, cleared on the way
+// out. `REGION_SLOTS` bounds the scan and never shrinks.
+//
+// Write-once is the whole safety argument, and it is why the region is pooled
+// rather than freed. Freeing it would let a slot point at one range and then
+// another, and `in_any_arena` reads `base` and `end` separately: a reader can
+// take `base` from the old region, lose the slot to a new owner, and take
+// `end` from the new one. That pair describes a range neither region ever had,
+// and a System pointer inside it would be called arena-owned — where freeing
+// is a no-op, so it would leak. Pooling removes the question instead of
+// synchronising around it; no epoch or reader guard is needed because nothing
+// a reader can observe ever changes.
+//
+// Memory ordering: `base` is published with Release and read with ACQUIRE,
+// which is what makes the preceding `end` store visible. Relaxed on both would
+// let a weakly ordered target (aarch64, which this ships on) hand back a
+// freshly published `base` with the `end` that preceded it — zero — and call a
+// live arena pointer a System one. Everything after the acquire is relaxed:
+// a nonzero `base` from a write-once slot is its final value, so containment
+// is real. A false "not in arena" (a stale 0) could only misroute a pointer in
+// the unobserved region, and a thread always sees its own publication, while
 // any pointer legitimately handed to another thread rides that channel's
-// happens-before edge, which makes the registry writes visible to relaxed
-// loads too. A thread with no such edge cannot legitimately hold the pointer.
+// happens-before edge. A thread with no such edge cannot hold the pointer.
 // (The old per-thread check misclassified cross-thread frees of arena
 // pointers as System allocations — the registry handles them correctly.)
 // =========================================================================
 
-/// Max registered arena regions (one per thread that ever compiles). A thread
-/// past the cap simply runs without an arena.
+/// Max arena regions, and so the most threads that can bump at once. Regions
+/// are pooled, not per-thread: this caps CONCURRENT compiling threads, not
+/// how many have ever run. A thread arriving when all of them are held runs
+/// without an arena and tries again on its next compile.
 const MAX_ARENAS: usize = 128;
 
-/// A `[base, end)` region; the pair sits in one cache line per slot.
+/// A `[base, end)` region plus whether a thread currently holds it.
+///
+/// `base` and `end` are written ONCE, the first time a slot is used, and never
+/// again — the region outlives every thread that borrows it. That is what lets
+/// `in_any_arena` read the pair without synchronising against reuse: there is
+/// no reuse of the *range* to synchronise against, only of the right to bump
+/// within it. A design that freed the region and re-pointed the slot would
+/// have to make the two loads atomic with respect to each other, since a
+/// reader can load `base`, lose the slot to a new owner, and then load that
+/// owner's `end` — pairing a stale base with a fresh end and classifying an
+/// unrelated System pointer as arena-owned, where freeing is a no-op and the
+/// allocation would leak.
 struct Region {
     base: AtomicUsize,
     end: AtomicUsize,
+    /// Held by a live thread. Readers ignore this: a region is a region
+    /// whether or not anyone is bumping in it right now.
+    taken: AtomicBool,
 }
 
 #[allow(clippy::declare_interior_mutable_const)] // repeated-element array init (MSRV < 1.79)
 const ZERO_REGION: Region = Region {
     base: AtomicUsize::new(0),
     end: AtomicUsize::new(0),
+    taken: AtomicBool::new(false),
 };
 /// High-water mark: slots `0..REGION_SLOTS` have been used at some point and
 /// are what [`in_any_arena`] scans. It never shrinks — a slot given back is
@@ -83,57 +114,30 @@ const ZERO_REGION: Region = Region {
 static REGION_SLOTS: AtomicUsize = AtomicUsize::new(0);
 static REGIONS: [Region; MAX_ARENAS] = [ZERO_REGION; MAX_ARENAS];
 
-/// Marks a slot as claimed but not yet published. No real pointer compares
-/// `>=` it, so a concurrent `in_any_arena` scanning a half-written slot simply
-/// finds nothing there.
-const CLAIMING: usize = usize::MAX;
-
-/// Claim a FREE slot and publish `[base, end)`, returning its index. `None`
-/// when the registry is full (the caller must then NOT use the region as an
-/// arena: `dealloc` would misroute its pointers to `System`).
-///
-/// Slots are claimed by CAS and given back by [`unregister_region`], rather
-/// than handed out by a counter that only goes up. A counter made the cap a
-/// one-way budget: the 129th thread that ever compiled found the registry
-/// full, gave up on the arena for good, and ran every later compile on the
-/// system allocator — silently, at the speed the arena exists to avoid.
-fn register_region(base: usize, end: usize) -> Option<usize> {
+/// Borrow a free slot. `None` when every slot is held right now — which is a
+/// moment, not a verdict: the holders are compiling and will give theirs back.
+fn claim_slot() -> Option<usize> {
     for (idx, region) in REGIONS.iter().enumerate() {
         if region
-            .base
-            .compare_exchange(0, CLAIMING, Ordering::AcqRel, Ordering::Relaxed)
-            .is_err()
+            .taken
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
         {
-            continue;
+            // Scan bound for `in_any_arena`. Raised on claim rather than on
+            // publication; a slot whose region does not exist yet reads
+            // `base == 0` and is skipped.
+            REGION_SLOTS.fetch_max(idx + 1, Ordering::AcqRel);
+            return Some(idx);
         }
-        // Publish `end` first: `base` is what readers gate on, so writing it
-        // last means a reader either skips the slot or sees both halves.
-        region.end.store(end, Ordering::Relaxed);
-        region.base.store(base, Ordering::Release);
-        // High-water mark for the scan bound. It never shrinks: a freed slot
-        // is skipped by its zero `base`, not by moving this.
-        REGION_SLOTS.fetch_max(idx + 1, Ordering::AcqRel);
-        return Some(idx);
     }
     None
 }
 
-/// Give a slot back. The region MUST be unregistered before its memory is
-/// released: once freed, the address range can be handed to something else,
-/// and a stale registry entry would tell `dealloc` that a perfectly ordinary
-/// System pointer belongs to an arena — where freeing is a no-op, so it would
-/// leak instead.
-fn unregister_region(idx: usize) {
-    // Only `base`, and nothing after it. Clearing `end` as well would race
-    // with reuse: the moment `base` reads 0 the slot is claimable, so another
-    // thread can CAS it, publish its own `end` and `base`, and then this
-    // thread's trailing `end = 0` would erase the NEW region's bound. Readers
-    // would then place that arena's live pointers outside it, and `dealloc`
-    // would hand them to `System` — freeing pointers System never allocated.
-    //
-    // `base == 0` already gates every reader, and the next claimant writes
-    // `end` before publishing `base`, so a stale `end` is never observable.
-    REGIONS[idx].base.store(0, Ordering::Release);
+/// Give the slot back. The REGION stays registered — see [`Region`]. Nothing
+/// else may be written here: the moment `taken` reads false another thread can
+/// take the slot, and this one has no business touching it afterwards.
+fn release_slot(idx: usize) {
+    REGIONS[idx].taken.store(false, Ordering::Release);
 }
 
 /// Whether `p` lies inside any registered arena region.
@@ -309,74 +313,75 @@ impl ThreadState {
         }
     }
 
-    /// Reserve the backing region on first use. Returns `false` on failure (the
-    /// caller then forwards the request to the system allocator) — including
-    /// when the arena is disabled (size 0) by the runtime override.
+    /// Take a pooled region for this thread, creating it if this slot has
+    /// never been used. The caller forwards the request to the system
+    /// allocator on anything but [`Reserved::Yes`] — and the two failures
+    /// differ: [`Reserved::Never`] is disabled or out of memory and is
+    /// remembered, [`Reserved::NotNow`] is every slot busy and is retried when
+    /// the next scope opens.
     #[cold]
     fn reserve(&self) -> Reserved {
         let size = effective_arena_size();
         if size == 0 {
             return Reserved::Never; // disabled: run on the system allocator
         }
-        let Ok(layout) = Layout::from_size_align(size, 4096) else {
-            return Reserved::Never;
+        let Some(slot) = claim_slot() else {
+            return Reserved::NotNow; // every slot held; a holder will finish
         };
-        // SAFETY: non-zero size, 4096 is a valid power-of-two alignment.
-        let p = unsafe { System.alloc(layout) };
-        if p.is_null() {
-            return Reserved::Never;
+        let region = &REGIONS[slot];
+        let mut base = region.base.load(Ordering::Acquire);
+        if base == 0 {
+            // First thread ever to hold this slot: give it a region, once.
+            // Every later holder bumps in the same one.
+            let Ok(layout) = Layout::from_size_align(size, 4096) else {
+                release_slot(slot);
+                return Reserved::Never;
+            };
+            // SAFETY: non-zero size, 4096 is a valid power-of-two alignment.
+            let p = unsafe { System.alloc(layout) };
+            if p.is_null() {
+                release_slot(slot);
+                return Reserved::Never;
+            }
+            // `end` before `base`: `base` is what readers gate on, so writing
+            // it last means a reader sees the whole region or skips the slot.
+            region.end.store(p as usize + size, Ordering::Relaxed);
+            region.base.store(p as usize, Ordering::Release);
+            base = p as usize;
         }
-        let Some(slot) = register_region(p as usize, p as usize + size) else {
-            // Every slot busy: this region must not serve as an arena (dealloc
-            // wouldn't recognize its pointers). Hand it back and run without —
-            // but say so, because a slot may come back before this thread's
-            // next compile.
-            // SAFETY: p came from System.alloc with this same layout.
-            unsafe { System.dealloc(p, layout) };
-            return Reserved::NotNow;
-        };
         self.slot.set(slot);
-        self.base.set(p);
-        self.end.set(p as usize + size);
-        self.cursor.set(p as usize);
+        self.base.set(base as *mut u8);
+        self.end.set(region.end.load(Ordering::Relaxed));
+        self.cursor.set(base);
         Reserved::Yes
     }
 }
 
 impl Drop for ThreadState {
-    /// Give the region and its registry slot back when the thread ends.
+    /// Give the slot back when the thread ends.
     ///
-    /// Without this a reservation outlives every thread that ever compiled.
-    /// On native that is 2 GiB of address space each, and an embedder with
-    /// short-lived threads — the napi addon spawns one per async compile —
-    /// accumulates them until the host cannot `fork()` any more.
+    /// The region stays — it is pooled, and the next thread to hold this slot
+    /// bumps in the same memory. What must not happen is what happened before
+    /// any of this: a reservation per thread that ever compiled, 2 GiB of
+    /// address space each, until an embedder with short-lived threads (the
+    /// napi addon spawns one per async compile) leaves the host unable to
+    /// `fork()`. Pooling bounds that by the number of threads compiling AT
+    /// ONCE, which is the number the machine has to hold anyway.
     ///
     /// This runs during TLS teardown, which is why `alloc` reaches the state
     /// through `try_with`: allocations happen while other thread-locals are
     /// being dropped, and after this one is gone they must route to System
     /// rather than panic on a destroyed TLS slot.
     fn drop(&mut self) {
-        let base = self.base.get();
-        if base.is_null() {
+        let slot = self.slot.get();
+        if slot == NO_SLOT {
             return;
         }
-        let size = self.end.get() - base as usize;
-        let slot = self.slot.get();
-        // Unregister BEFORE freeing: see `unregister_region`.
-        if slot != NO_SLOT {
-            unregister_region(slot);
-            self.slot.set(NO_SLOT);
-        }
+        self.slot.set(NO_SLOT);
         self.base.set(std::ptr::null_mut());
         self.end.set(0);
         self.cursor.set(0);
-        if let Ok(layout) = Layout::from_size_align(size, 4096) {
-            // SAFETY: `base` came from `System.alloc` with exactly this layout
-            // in `reserve`, and nothing may still point into it — the arena's
-            // contract is that allocations do not outlive their scope, and
-            // every scope on this thread ended before the thread did.
-            unsafe { System.dealloc(base, layout) };
-        }
+        release_slot(slot);
     }
 }
 
@@ -413,9 +418,11 @@ unsafe impl GlobalAlloc for ScopedAlloc {
                 return unsafe { System.alloc(layout) };
             }
             if tl.base.get().is_null() {
-                // Reserve once; if it fails (OOM / registry full / disabled),
-                // remember that and forward to System on every later alloc
-                // instead of re-running the cold reservation.
+                // Take a region once. A permanent failure (disabled, out of
+                // memory) is remembered for the life of the thread; a busy
+                // registry is remembered only until the next scope opens, so
+                // this does not re-run the cold path per allocation either
+                // way.
                 if tl.reserve_failed.get() || tl.registry_full.get() {
                     return unsafe { System.alloc(layout) };
                 }
@@ -894,41 +901,40 @@ mod tests {
         std::mem::forget(outer);
     }
 
-    /// A thread's arena region must not outlive the thread.
+    /// Threads that run one after another must share one region, not take a
+    /// new 2 GiB reservation each.
     ///
-    /// The reservation is 2 GiB of address space on native. An embedder whose
-    /// threads are short-lived — the napi addon spawns one per async compile —
-    /// otherwise accumulates one reservation per thread that ever compiled,
-    /// forever: measured at +2048 MB of process virtual size per compile,
-    /// until Linux refuses the next `fork()` with ENOMEM and any child process
-    /// the host tries to spawn fails.
+    /// This is the shape that broke: the napi addon spawns a thread per async
+    /// compile, and a reservation per thread grew the process by 2 GiB per
+    /// compile — measured — until Linux refused the next `fork()` with ENOMEM
+    /// and the host could not spawn a child at all.
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn a_thread_releases_its_region_when_it_exits() {
+    fn threads_that_follow_one_another_share_one_region() {
         let _serial = REGION_COUNT.lock().unwrap_or_else(|e| e.into_inner());
-        let mut theirs = Vec::new();
+        let mut bases = Vec::new();
         for _ in 0..8 {
-            theirs.push(
+            bases.push(
                 std::thread::spawn(|| {
                     let scope = Scope::enter();
                     let p = unsafe { ScopedAlloc.alloc(layout(64, 8)) };
-                    assert!(in_any_arena(p as usize), "the thread reserved a region");
+                    assert!(in_any_arena(p as usize), "the thread got an arena");
+                    let base = TL.with(|tl| tl.base.get() as usize);
                     let _ = leave_no_reset();
                     reset();
                     std::mem::forget(scope);
-                    p as usize
+                    base
                 })
                 .join()
                 .unwrap(),
             );
         }
-        // Not a count of live regions: that is process-wide, and a harness
-        // thread retiring mid-test moves it for unrelated reasons. Ask the
-        // question the test is actually about — is THIS thread's region still
-        // registered, now that the thread is gone?
-        for p in theirs {
-            assert!(!in_any_arena(p), "a finished thread's region is still registered");
-        }
+        bases.dedup();
+        assert_eq!(
+            bases.len(),
+            1,
+            "each thread took a fresh region instead of reusing the free one",
+        );
     }
 
     /// …and its registry slot must come back too, or the cap is the same bug
@@ -970,12 +976,19 @@ mod tests {
     /// Slots are claimed by CAS, so the interesting case is threads racing for
     /// them. Each writes a pattern through its own arena pointer and reads it
     /// back: two threads handed the same region would corrupt each other.
+    /// Afterwards the regions must be free to take again.
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn concurrent_threads_get_disjoint_regions_and_give_them_back() {
+    fn concurrent_threads_get_disjoint_regions_and_release_them() {
         let _serial = REGION_COUNT.lock().unwrap_or_else(|e| e.into_inner());
+        // A barrier, because `spawn` does not mean "all at once": without one
+        // an early finisher hands its region to a late starter, they are never
+        // live together, and sharing is correct rather than a bug. Holding
+        // them all at the same instant is what makes disjointness the question.
+        let all_holding = std::sync::Arc::new(std::sync::Barrier::new(32));
         let threads: Vec<_> = (0..32u8)
             .map(|id| {
+                let all_holding = all_holding.clone();
                 std::thread::spawn(move || {
                     let scope = Scope::enter();
                     let l = layout(4096, 8);
@@ -990,21 +1003,35 @@ mod tests {
                         seen.iter().all(|&b| b == id),
                         "another thread wrote into this thread's region",
                     );
+                    let base = TL.with(|tl| tl.base.get() as usize);
+                    all_holding.wait(); // nobody leaves until everyone is here
                     let _ = leave_no_reset();
                     reset();
                     std::mem::forget(scope);
-                    p as usize
+                    base
                 })
             })
             .collect();
-        // Join them ALL before asking. Checking as they finish would be a race
-        // of the test's own making: a freed 2 GiB region is routinely handed
-        // straight back at the same address, so a still-running thread can be
-        // holding the very bytes a finished one just released.
-        let theirs: Vec<usize> = threads.into_iter().map(|t| t.join().unwrap()).collect();
-        for p in theirs {
-            assert!(!in_any_arena(p), "a finished thread's region is still registered");
-        }
+        let mut bases: Vec<usize> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let held = bases.len();
+        bases.sort_unstable();
+        bases.dedup();
+        assert_eq!(bases.len(), held, "two live threads shared a region");
+
+        // And every one of them is available again: a thread now gets a region
+        // that was held a moment ago rather than a thirty-third.
+        let after = std::thread::spawn(|| {
+            let scope = Scope::enter();
+            let _ = unsafe { ScopedAlloc.alloc(layout(64, 8)) };
+            let base = TL.with(|tl| tl.base.get() as usize);
+            let _ = leave_no_reset();
+            reset();
+            std::mem::forget(scope);
+            base
+        })
+        .join()
+        .unwrap();
+        assert!(bases.contains(&after), "the released regions were not reused");
     }
 
     /// Allocating during TLS teardown must not panic.
@@ -1025,9 +1052,17 @@ mod tests {
         struct AllocsOnDrop;
         impl Drop for AllocsOnDrop {
             fn drop(&mut self) {
-                // Any heap traffic routed through the installed allocator.
-                let v: Vec<u64> = (0..256).collect();
-                assert_eq!(v.len(), 256);
+                // Straight through `ScopedAlloc`, NOT a `Vec`. These unit tests
+                // do not install it as the global allocator, so a `Vec` here
+                // would go to System and never reach the code under test — the
+                // first version of this test passed just as happily with the
+                // `TL.with` it was written to rule out.
+                let l = layout(64, 8);
+                // SAFETY: freed immediately below with the same layout.
+                let p = unsafe { ScopedAlloc.alloc(l) };
+                assert!(!p.is_null(), "a teardown allocation must still succeed");
+                // SAFETY: from the call above, with the same layout.
+                unsafe { ScopedAlloc.dealloc(p, l) };
             }
         }
         thread_local! {
