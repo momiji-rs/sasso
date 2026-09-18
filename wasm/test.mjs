@@ -644,6 +644,27 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // loader and native.mjs — so this compares two lists, not four.
   const shared = await import("./npm/_deprecations.mjs");
   const ours = [...shared.DEPRECATION_IDS];
+
+  // The wasm ABI's older entry point cannot carry this list, and a .wasm is a
+  // build artifact that can be older than the loader beside it. Dropping the
+  // list there would recreate the bug the option was added to fix — a flag
+  // accepted that does nothing — so it fails instead, loudly enough to name
+  // the cause. An empty list is not a request and must still fall back, which
+  // is every caller who never passed the option.
+  assert.doesNotThrow(() => shared.ensureSilenceSupported(true, 42), "compile3 present: fine");
+  assert.doesNotThrow(() => shared.ensureSilenceSupported(false, 0), "no list: still falls back to compile2");
+  assert.doesNotThrow(() => shared.ensureSilenceSupported(true, 0), "neither: fine");
+  assert.throws(
+    () => shared.ensureSilenceSupported(false, 42),
+    /sasso_compile3/,
+    "a list against a compile2-only module fails rather than being dropped",
+  );
+  // The loader must actually consult it on the fallback path, not just define it.
+  const loaderSrc = readFileSync(new URL("./npm/_loader.mjs", import.meta.url), "utf8");
+  const fallback = loaderSrc.slice(loaderSrc.indexOf("function callCompile2"));
+  const guardAt = fallback.indexOf("ensureSilenceSupported");
+  const call2At = fallback.indexOf("w.sasso_compile2(");
+  assert.ok(guardAt > 0 && call2At > 0 && guardAt < call2At, "the guard runs before the compile2 fallback");
   assert.deepEqual([...ours].sort(), [...native].sort(), "cli: the two deprecation allowlists agree");
   for (const f of ["cli.mjs", "_loader.mjs", "native.mjs"]) {
     const text = readFileSync(new URL(`./npm/${f}`, import.meta.url), "utf8");

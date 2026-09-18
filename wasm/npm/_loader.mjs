@@ -43,7 +43,7 @@ import {
   syntaxForPath,
 } from "./_importer.mjs";
 import { deserializeArgs, serializeValue, setEngine } from "./_value.mjs";
-import { normalizeSilenced } from "./_deprecations.mjs";
+import { normalizeSilenced, ensureSilenceSupported } from "./_deprecations.mjs";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -362,6 +362,9 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
         m.scratch, m.scratch + 4,
       );
     }
+    // A module without `sasso_compile3` cannot apply the list; dropping it
+    // silently would rebuild the very bug this option was added to fix.
+    ensureSilenceSupported(false, m.silencedLen);
     return w.sasso_compile2(
       m.inPtr, m.inLen, opts.compressed ? 1 : 0, opts.syntax, 1,
       m.urlPtr, m.urlLen, opts.wantMap ? 1 : 0, opts.includeSources ? 1 : 0, opts.charset ? 1 : 0,

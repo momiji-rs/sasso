@@ -61,3 +61,25 @@ export function normalizeSilenced(value, warn) {
   }
   return ids.filter((id) => DEPRECATION_IDS.has(id));
 }
+
+// Guard the wasm ABI's older entry point.
+//
+// `sasso_compile2` has no parameter for this list, so a module that predates
+// `sasso_compile3` cannot honour a non-empty one. Failing is the point: this
+// option exists because lichess found a deprecation flag that was accepted and
+// did nothing (momiji-rs/sasso#24), and quietly dropping the list against a
+// stale artifact would rebuild exactly that — a caller asking for silence,
+// getting warnings, and nothing anywhere saying why.
+//
+// An empty list is not a request, so it still falls back: that is every caller
+// who never passed the option, and they must keep working against an older
+// .wasm. Lives here rather than inline in the loader so it can be tested
+// without fabricating a wasm module that lacks the export.
+export function ensureSilenceSupported(hasCompile3, silencedLen) {
+  if (hasCompile3 || !silencedLen) return;
+  throw new Error(
+    "sasso: silenceDeprecations needs a wasm module exporting sasso_compile3, " +
+      "but this one only has sasso_compile2 — it is older than the option. " +
+      "Reinstall sasso so the .wasm and the loader come from the same build.",
+  );
+}
