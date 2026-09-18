@@ -1432,21 +1432,33 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // the package contains such text today, and the case below pins the
     // behaviour so a later reader does not quietly trade it the other way.
     const gap = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*\n)*`;
-    const rel = String.raw`\.\.?/[^"']+`; // `./dep.mjs` and `../dep.mjs` both
-    const statics = new RegExp(String.raw`\bfrom${gap}["'](${rel})["']`, "g");
+    // `./dep.mjs` and `../dep.mjs` both. A `$` is allowed only when it is not
+    // opening an interpolation: `import(`./mod-${name}.mjs`)` names no single
+    // file, so matching it would demand a module that does not exist.
+    const rel = String.raw`\.\.?/(?:[^"'\`$]|\$(?!\{))+`;
+    // The delimiter is captured and backreferenced so a template literal is
+    // accepted on the same footing as a quote — `import(\`./x.mjs\`)` is a
+    // perfectly ordinary dynamic import, and skipping it would be a silent
+    // miss, which is the one failure mode this guard cannot afford.
+    const q = String.raw`(?<q>["'\`])`;
+    const spec = String.raw`(?<spec>${rel})\k<q>`;
+    const statics = new RegExp(String.raw`\bfrom${gap}${q}${spec}`, "g");
     // `import ("./x")` — whitespace before the parenthesis is legal too, and
     // so is a second argument: `import("./x", { with: { type: "json" } })`.
     // The closing parenthesis is still required, so `import("./x" + suffix)`
     // stays unmatched — that path is not the module, and demanding it be
     // shipped would be a false failure.
     const dynamics = new RegExp(
-      String.raw`\bimport${gap}\(${gap}["'](${rel})["']${gap}(?:,[^)]*)?\)`,
+      String.raw`\bimport${gap}\(${gap}${q}${spec}${gap}(?:,[^)]*)?\)`,
       "g",
     );
     // `import "./x.mjs"` has no `from` to key on. Nothing in the package does
     // this today, which is exactly why the matcher has to exist: the first one
     // added would otherwise be invisible here.
-    const sideEffects = new RegExp(String.raw`(?:^|[\s;}])import${gap}["'](${rel})["']`, "g");
+    // A lookbehind rather than a list of allowed preceding characters: the
+    // list missed `/* banner */import "./dep.mjs";` and a BOM-prefixed file,
+    // both of which are legal and both of which would have gone unchecked.
+    const sideEffects = new RegExp(String.raw`(?<![\w$.])import${gap}${q}${spec}`, "g");
 
     // The matchers are the whole guard, so prove they see each shape rather
     // than trusting that they do. A matcher that silently matches nothing
@@ -1464,12 +1476,15 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         'export { z } from /* a note */ "./nine.mjs";',
         'const h = await import("./ten.mjs", { with: { type: "json" } });',
         'import { k } from "../eleven.mjs";',
+        "const i = await import(`./twelve.mjs`);", // a template specifier
+        '/* banner */import "./thirteen.mjs";', // a keyword straight after a comment
+        "const j = await import(`./mod-${name}.mjs`);", // must NOT match: interpolated
         'import fs from "node:fs";', // must NOT match: bare specifier
         'const url = "https://example.com/not-an-import.mjs";', // nor a URL
       ].join("\n");
       const found = new Set();
       for (const re of [statics, dynamics, sideEffects]) {
-        for (const m of sample.matchAll(re)) found.add(m[1]);
+        for (const m of sample.matchAll(re)) found.add(m.groups.spec);
       }
       // Known limitation, pinned on purpose: import-shaped text inside a
       // string matches, because nothing here tracks lexical state. It is a
@@ -1494,7 +1509,9 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
           "./seven.mjs",
           "./six.mjs",
           "./ten.mjs",
+          "./thirteen.mjs",
           "./three.mjs",
+          "./twelve.mjs",
           "./two.mjs",
         ],
         "packaging: the import matchers miss a shape the package may legally use",
@@ -1548,7 +1565,8 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
           // Inside a `.d.ts`, TypeScript resolves a `./x.js` specifier to
           // `x.d.ts` — following it literally would demand a file that neither
           // exists nor needs to, while skipping the declaration graph entirely.
-          const spec = name.endsWith(".d.ts") ? m[1].replace(/\.js$/, ".d.ts") : m[1];
+          const found = m.groups.spec;
+          const spec = name.endsWith(".d.ts") ? found.replace(/\.js$/, ".d.ts") : found;
           // `resolveFrom` handles `..` segments, so a parent-relative import
           // from a subdirectory lands on the right file rather than being
           // skipped for not starting with `./`.

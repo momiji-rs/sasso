@@ -210,12 +210,14 @@ compile at once; the default is at most one per physical core on Linux — the
 cores `/proc/cpuinfo` reports, which on an SMT machine is fewer than the CPU
 count, because threads sharing a core contend for the same execution units. An
 affinity mask (`taskset`, a cpuset) or a cgroup CPU quota (`docker --cpus`, a
-Kubernetes CPU limit) lowers it further. Off Linux, and on a Linux that
-publishes no topology, it stays one per CPU). An input of `-` is standard
-input. Accepted for dart-sass compatibility: `-c/--[no-]color` (a no-op — sasso
-never colors its output) and `--[no-]error-css` (**not implemented**: a failing
-compile always behaves as `--no-error-css`, dropping a stale output file rather
-than describing the error in CSS).
+Kubernetes CPU limit) lowers it further. On a Linux that publishes no topology
+the core count is unknown, so the default is one per CPU the process may
+actually use — still under those caps. Off Linux it is one per CPU the runtime
+reports). An input of `-` is standard input. Accepted for dart-sass
+compatibility: `-c/--[no-]color` (a no-op — sasso never colors its output) and
+`--[no-]error-css` (**not implemented**: a failing compile always behaves as
+`--no-error-css`, dropping a stale output file rather than describing the error
+in CSS).
 
 **Which engine the CLI uses.** It prefers the native addon — `npm install
 sasso` already fetched `sasso-native-<platform>` as an optionalDependency on
