@@ -47,9 +47,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 //
 // What a slot holds and what it lends are different things. `base`/`end` are
 // WRITE-ONCE: a slot's region is created the first time anyone uses that slot
-// and lives for the rest of the process. What threads take and give back is
-// the RIGHT to bump inside it — `taken`, claimed by CAS, cleared on the way
-// out. `REGION_SLOTS` bounds the scan and never shrinks.
+// and lives for the rest of the process. What a thread takes and gives back is
+// the RIGHT to bump inside it — `taken`, claimed by CAS at the start of a
+// compile and released when the outermost scope ends, not when the thread
+// does. `REGION_SLOTS` bounds the scan and never shrinks.
 //
 // Write-once is the whole safety argument, and it is why the region is pooled
 // rather than freed. Freeing it would let a slot point at one range and then
@@ -75,10 +76,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 // pointers as System allocations — the registry handles them correctly.)
 // =========================================================================
 
-/// Max arena regions, and so the most threads that can bump at once. Regions
-/// are pooled, not per-thread: this caps CONCURRENT compiling threads, not
-/// how many have ever run. A thread arriving when all of them are held runs
-/// without an arena and tries again on its next compile.
+/// Max arena regions, and so the most compiles that can bump at once.
+///
+/// Regions are pooled and leased for the length of one compile, so this caps
+/// CONCURRENT compiles — not threads, and not history. A thread that finishes
+/// compiling gives its lease back while staying alive, so a worker pool larger
+/// than this is fine as long as they are not all inside `compile()` together.
+/// A thread arriving when every region is leased runs without an arena and
+/// tries again on its next compile.
 const MAX_ARENAS: usize = 128;
 
 /// A `[base, end)` region plus whether a thread currently holds it.
@@ -116,7 +121,18 @@ static REGIONS: [Region; MAX_ARENAS] = [ZERO_REGION; MAX_ARENAS];
 
 /// Borrow a free slot. `None` when every slot is held right now — which is a
 /// moment, not a verdict: the holders are compiling and will give theirs back.
-fn claim_slot() -> Option<usize> {
+fn claim_slot(preferred: usize) -> Option<usize> {
+    // The slot this thread held for its previous compile, if it is still free:
+    // the region is then already warm in cache and TLB. Leases are given back
+    // between compiles, so without this a busy thread would wander the array.
+    if preferred != NO_SLOT
+        && REGIONS[preferred]
+            .taken
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    {
+        return Some(preferred);
+    }
     for (idx, region) in REGIONS.iter().enumerate() {
         if region
             .taken
@@ -142,21 +158,27 @@ fn release_slot(idx: usize) {
 
 /// Whether `p` lies inside any registered arena region.
 ///
-/// `base` is read first and gates the rest, which is what makes a slot safe to
-/// publish and to release concurrently: a claimant writes `end` before `base`,
-/// and a leaver clears `base` and writes nothing after, so this sees a whole
-/// region or skips the slot. A slot mid-claim reads `usize::MAX`, which no
-/// real pointer reaches.
+/// This reads `base` and `end` and ignores `taken` entirely: the question is
+/// whether the ADDRESS belongs to an arena, not whether anyone is bumping in
+/// it at this instant. A region that no thread currently leases still holds
+/// pointers handed out moments ago, and they must keep routing here.
 ///
-/// That argument needs the ACQUIRE below to hold. `base` is published with
-/// `Release`, and release pairs with acquire or with nothing at all: read
-/// relaxed, there is no happens-before edge, and a weakly ordered target —
-/// aarch64, which this ships on — may hand back the new `base` alongside the
-/// previous `end`. A pointer inside the new region then compares outside it,
-/// `dealloc` calls it a System pointer, and frees something System never
-/// allocated. The scan is short (the high-water mark is the number of threads
-/// that have ever compiled, not `MAX_ARENAS`), so the acquire costs little and
-/// buys the guarantee this comment claims.
+/// There is exactly one transition to synchronise with — the first time a
+/// slot is ever used, when its region is created. `end` is written, then
+/// `base` with `Release`, and `base` gates every reader; a slot whose region
+/// does not exist yet reads `base == 0` and is skipped. After that neither
+/// value ever changes again, which is what makes the two separate loads safe.
+/// Leasing writes only `taken`, which nothing here reads.
+///
+/// The ACQUIRE is what makes that one transition hold. `base` is published
+/// with `Release`, and release pairs with acquire or with nothing at all: read
+/// relaxed there is no happens-before edge, and a weakly ordered target —
+/// aarch64, which this ships on — may hand back a freshly published `base`
+/// alongside the `end` that preceded it, which is zero. A live arena pointer
+/// then compares outside its own region, `dealloc` calls it a System pointer,
+/// and frees something System never allocated. The scan is short — the
+/// high-water mark is how many slots have ever been leased, not `MAX_ARENAS`
+/// — so the acquire costs little and buys the guarantee this comment makes.
 #[inline]
 fn in_any_arena(p: usize) -> bool {
     let n = REGION_SLOTS.load(Ordering::Relaxed).min(MAX_ARENAS);
@@ -281,9 +303,16 @@ struct ThreadState {
     /// when a scope opens, so each compile gets one fresh attempt — and not
     /// per allocation, which would mean a 2 GiB reserve-and-free apiece.
     registry_full: Cell<bool>,
-    /// Registry slot backing this thread's region, so [`Drop`] can give it
-    /// back. `NO_SLOT` until a region is reserved.
+    /// Registry slot this thread is currently leasing. `NO_SLOT` between
+    /// compiles — the lease is given back when the outermost scope ends, so
+    /// the cap is on threads compiling AT ONCE rather than on threads that
+    /// have ever compiled. Holding it for the life of the thread would leave
+    /// a pool of 128 long-lived workers permanently full, and everyone who
+    /// arrived later on the system allocator, silently and for good.
     slot: Cell<usize>,
+    /// The slot leased for the previous compile, tried first next time so a
+    /// busy thread keeps the same warm region.
+    last_slot: Cell<usize>,
 }
 
 /// No registry slot held.
@@ -310,6 +339,7 @@ impl ThreadState {
             reserve_failed: Cell::new(false),
             registry_full: Cell::new(false),
             slot: Cell::new(NO_SLOT),
+            last_slot: Cell::new(NO_SLOT),
         }
     }
 
@@ -325,7 +355,7 @@ impl ThreadState {
         if size == 0 {
             return Reserved::Never; // disabled: run on the system allocator
         }
-        let Some(slot) = claim_slot() else {
+        let Some(slot) = claim_slot(self.last_slot.get()) else {
             return Reserved::NotNow; // every slot held; a holder will finish
         };
         let region = &REGIONS[slot];
@@ -358,15 +388,18 @@ impl ThreadState {
 }
 
 impl Drop for ThreadState {
-    /// Give the slot back when the thread ends.
+    /// Give back a lease the thread still holds.
     ///
-    /// The region stays — it is pooled, and the next thread to hold this slot
-    /// bumps in the same memory. What must not happen is what happened before
-    /// any of this: a reservation per thread that ever compiled, 2 GiB of
-    /// address space each, until an embedder with short-lived threads (the
-    /// napi addon spawns one per async compile) leaves the host unable to
-    /// `fork()`. Pooling bounds that by the number of threads compiling AT
-    /// ONCE, which is the number the machine has to hold anyway.
+    /// Normally there is none: [`reset`] hands it back when the compile ends.
+    /// This catches the paths that do not get there — a thread unwinding out
+    /// of a compile, or one that reserved and then died.
+    ///
+    /// The region itself stays. It is pooled, and the next thread to lease
+    /// this slot bumps in the same memory. What must not happen is what
+    /// happened before any of this: a reservation per thread that ever
+    /// compiled, 2 GiB of address space each, until an embedder with
+    /// short-lived threads (the napi addon spawns one per async compile)
+    /// leaves the host unable to `fork()`.
     ///
     /// This runs during TLS teardown, which is why `alloc` reaches the state
     /// through `try_with`: allocations happen while other thread-locals are
@@ -562,9 +595,23 @@ pub(crate) fn leave_no_reset() -> bool {
 /// scope can't free an outer scope's allocations).
 pub(crate) fn reset() {
     TL.with(|tl| {
-        if tl.depth.get() == 0 {
-            tl.cursor.set(tl.base.get() as usize);
+        if tl.depth.get() != 0 {
+            return;
         }
+        // The compile is over and `compile()` has already copied its result
+        // out to the system allocator, so nothing points in here any more:
+        // hand the lease back for the next thread that needs one.
+        let slot = tl.slot.get();
+        if slot == NO_SLOT {
+            tl.cursor.set(tl.base.get() as usize);
+            return;
+        }
+        tl.last_slot.set(slot);
+        tl.slot.set(NO_SLOT);
+        tl.base.set(std::ptr::null_mut());
+        tl.end.set(0);
+        tl.cursor.set(0);
+        release_slot(slot);
     });
 }
 
@@ -1080,6 +1127,52 @@ mod tests {
         })
         .join()
         .expect("the thread tore down without panicking in the allocator");
+    }
+
+    /// More long-lived threads than there are slots must all get an arena, so
+    /// long as they are not compiling at the same time.
+    ///
+    /// The lease is per COMPILE, not per thread. Held for the life of the
+    /// thread — which is what `Drop` alone gave — a pool of `MAX_ARENAS`
+    /// workers that had each compiled once would hold every slot forever, and
+    /// every thread that arrived afterwards would run on the system allocator
+    /// permanently, while all 128 of them sat idle. Silent, and for good.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn more_live_threads_than_slots_all_get_an_arena_in_turn() {
+        let _serial = REGION_COUNT.lock().unwrap_or_else(|e| e.into_inner());
+        let n = MAX_ARENAS + 2;
+        // One compiles at a time; all of them stay alive to the end, which is
+        // the shape a worker pool has.
+        let turn = std::sync::Arc::new(std::sync::Mutex::new(()));
+        let done = std::sync::Arc::new(std::sync::Barrier::new(n + 1));
+        let threads: Vec<_> = (0..n)
+            .map(|_| {
+                let turn = turn.clone();
+                let done = done.clone();
+                std::thread::spawn(move || {
+                    let got = {
+                        let _one_at_a_time = turn.lock().unwrap_or_else(|e| e.into_inner());
+                        let scope = Scope::enter();
+                        let p = unsafe { ScopedAlloc.alloc(layout(64, 8)) };
+                        let got = in_any_arena(p as usize);
+                        let _ = leave_no_reset();
+                        reset();
+                        std::mem::forget(scope);
+                        got
+                    };
+                    done.wait(); // stay alive until every thread has compiled
+                    got
+                })
+            })
+            .collect();
+        done.wait();
+        let got: Vec<bool> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(
+            got.iter().filter(|&&g| g).count(),
+            n,
+            "a live thread that had finished compiling was still holding its slot",
+        );
     }
 
     /// A thread that arrives while every slot is taken must get the arena back
