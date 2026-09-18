@@ -262,7 +262,17 @@ function isNativeImage(path) {
   }
 }
 
-/** The first executable native `sasso` on PATH, or undefined. */
+/**
+ * The first executable native `sasso` on PATH, or undefined.
+ *
+ * An empty `PATH` entry means the current directory to a POSIX shell, and is
+ * skipped here on purpose: this lookup decides who receives the project's whole
+ * command line, and honouring it would let a checkout with a `sasso` beside its
+ * `package.json` be handed it. The divergence only ever finds FEWER binaries
+ * than the shell would, and not finding one costs nothing but speed — the
+ * in-process engine compiles the same bytes. `SASSO_BINARY=./sasso` is how to
+ * ask for one there deliberately.
+ */
 function sassoOnPath() {
   const names = process.platform === "win32" ? ["sasso.exe", "sasso"] : ["sasso"];
   for (const dir of (process.env.PATH || "").split(delimiter)) {
