@@ -987,6 +987,14 @@ pub(crate) struct Evaluator<'a> {
     /// The same for the definition-span frames, which are pushed in lockstep
     /// with `scopes` when a source map is being built.
     span_pool: Vec<SpanScope>,
+    /// Scratch buffer for serializing one declaration value. Serializing into
+    /// a fresh `String` starts at the allocator's minimum block and regrows
+    /// once or twice for a value as ordinary as `0 1px 2px rgba(0, 0, 0, .2)`;
+    /// this buffer keeps whatever capacity the widest value so far needed, so
+    /// the out item's own exactly-sized copy is the only allocation left. One
+    /// buffer suffices because serializing a value never re-enters the
+    /// evaluator — see [`Evaluator::declared_css`].
+    css_buf: String,
     options: EvalOptions<'a>,
     /// Import paths currently being loaded, deepest last. Re-entering one is a
     /// load cycle (dart-sass "This file is already being loaded."); a path that
@@ -1581,6 +1589,7 @@ impl<'a> Evaluator<'a> {
             scope_semi_global: vec![true],
             scope_pool: Vec::new(),
             span_pool: Vec::new(),
+            css_buf: String::new(),
             options,
             loading: Vec::new(),
             import_cache: HashMap::default(),
@@ -3326,6 +3335,28 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
+    /// The CSS text of a declaration's value, serialized through the reusable
+    /// `css_buf` and then handed over as an exactly-sized `String`.
+    ///
+    /// The copy at the end is deliberate: the out item outlives the buffer, and
+    /// a value's serialized length is not known before it is written, so the
+    /// choice is between one regrown allocation per declaration or one buffer
+    /// reused for all of them plus a copy that is already right-sized. Taking
+    /// the buffer out of `self` is what lets `write_css` borrow it while the
+    /// evaluator is borrowed mutably; the borrow is returned before this
+    /// returns, and serialization cannot re-enter the evaluator (a `Value` is
+    /// fully evaluated by the time it gets here), so the buffer is never
+    /// observed missing.
+    fn declared_css(&mut self, value: &Value) -> String {
+        let compressed = self.compressed();
+        let mut buf = std::mem::take(&mut self.css_buf);
+        buf.clear();
+        value.write_css(&mut buf, compressed);
+        let text = String::from(buf.as_str());
+        self.css_buf = buf;
+        text
+    }
+
     fn eval_decl(&mut self, d: &Declaration) -> Result<Option<OutItem>, Error> {
         let name = trim_shared(self.eval_template_shared(&d.property)?);
         let prop = match &self.decl_prefix {
@@ -3365,7 +3396,7 @@ impl<'a> Evaluator<'a> {
                 return Err(Error::at("() isn't a valid CSS value.", d.pos));
             }
         }
-        let vstr = value.to_css(self.compressed());
+        let vstr = self.declared_css(&value);
         // A value that serializes to nothing (an empty unquoted string, an
         // all-`null` list) drops the whole declaration, like a `null` value.
         if vstr.is_empty() {
@@ -3459,7 +3490,7 @@ impl<'a> Evaluator<'a> {
                         ps.pos,
                     ));
                 }
-                let vstr = value.to_css(self.compressed());
+                let vstr = self.declared_css(&value);
                 sink.push_item(OutItem::Decl {
                     prop: full.clone(),
                     value: vstr,
@@ -8453,5 +8484,38 @@ mod tests {
             .map(std::mem::discriminant)
             .collect();
         assert_eq!(variants.len(), 11, "one case per `Value` variant");
+    }
+
+    /// What the reused serialization buffer must never do: leak the tail of the
+    /// value before it. Every declaration is written into the same `String`, so a
+    /// missing `clear()` — or a later serializer that appends where it means to
+    /// overwrite — surfaces as one declaration wearing the end of its
+    /// predecessor. This sheet therefore steps DOWN in length twice, and covers
+    /// both declaration paths: ordinary declarations and a property set's
+    /// leading value (`border: 1px solid #abcdef { radius: 4px; }`), which
+    /// serializes through the same buffer while a nested block is being built.
+    #[test]
+    fn the_reused_value_buffer_never_leaks_the_previous_value() {
+        let src = concat!(
+            ".a {\n",
+            "  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35), inset 0 1px 0 #ffffff;\n",
+            "  color: #abc;\n",
+            "  z-index: 1;\n",
+            "  border: 1px solid #abcdef { radius: 4px; }\n",
+            "  outline: 0;\n",
+            "}\n",
+        );
+        let css = crate::compile(src, &crate::Options::default()).expect("compiles");
+        let expected = concat!(
+            ".a {\n",
+            "  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35), inset 0 1px 0 #ffffff;\n",
+            "  color: #abc;\n",
+            "  z-index: 1;\n",
+            "  border: 1px solid #abcdef;\n",
+            "  border-radius: 4px;\n",
+            "  outline: 0;\n",
+            "}",
+        );
+        assert_eq!(css.trim_end(), expected);
     }
 }
