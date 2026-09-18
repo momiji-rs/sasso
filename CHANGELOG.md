@@ -34,8 +34,8 @@ Conformance is tracked separately as a ratchet against the official
   to 18.13 is a change in its own right, since the old fallback counted the
   host and ignored both an affinity mask and a CPU quota. A compile is pure
   computation, so two hyperthreads on one core contend for the same execution
-  units rather than overlapping each other's stalls. On a Ryzen 7 8745HS (8
-  cores / 16 threads) over 138 Lichess stylesheets, at each CLI's own default:
+  units rather than overlapping each other's stalls. On Linux / x86_64, 8 cores
+  and 16 threads, over 138 Lichess stylesheets, at each CLI's own default:
   the binary goes 229 ms -> 207 ms and the npm CLI 444 ms -> 364 ms, with
   byte-identical output (138 of 138). On a machine without SMT the two counts
   are equal and nothing changes. `-j N` still means exactly what it says.

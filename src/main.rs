@@ -175,7 +175,7 @@ enum SourceMapUrls {
 /// `available_parallelism` counts SMT threads. A compile is pure computation,
 /// so two hyperthreads on one core contend for the same execution units rather
 /// than overlapping each other's stalls — past the core count, more workers is
-/// slower. Measured on a Ryzen 7 8745HS (8 cores / 16 threads) over 138
+/// slower. Measured on Linux / x86_64 with 8 cores and 16 threads, over 138
 /// Lichess stylesheets: 208 ms at `-j 8` against 235 ms at `-j 16`.
 ///
 /// Linux publishes the topology in `/proc/cpuinfo`, which is a read rather
