@@ -25,9 +25,9 @@ import { isMainThread, workerData, parentPort, Worker } from "node:worker_thread
 import { defaultJobs } from "./_jobs.mjs";
 // The accepted deprecation ids, shared with the JS API so there is one copy.
 import { DEPRECATION_IDS } from "./_deprecations.mjs";
-// The prebuilt-addon table, shared with native.mjs: which engine this platform
+// The prebuilt-addon rules, shared with native.mjs: which engine this platform
 // is SUPPOSED to run decides whether a wasm fallback is news (see `loadEngine`).
-import { nativePackage, platformKey } from "./_native_platform.mjs";
+import { nativePackage, platformKey } from "./_addon.mjs";
 
 /**
  * The engine, chosen at startup rather than imported statically.
@@ -52,7 +52,7 @@ let compile, compileString, Exception, Logger;
  * so answering "which engine am I on?" took bisecting the install
  * (momiji-rs/sasso#24).
  */
-const engine = { kind: null, requested: undefined, platform: null, addon: null, error: null };
+const engine = { kind: null, requested: undefined, platform: null, addon: null, error: null, refused: false };
 
 async function loadEngine() {
   const want = process.env.SASSO_ENGINE;
@@ -70,7 +70,19 @@ async function loadEngine() {
       // reading it would replace the load failure with a TypeError.
       engine.error = e && e.message ? String(e.message) : String(e);
       // `fail` writes synchronously, which matters because it exits at once.
+      // A refused addon is a different answer from a missing one: it WAS found
+      // and rejected. Kept apart so the report names which happened, and so
+      // the generic fallback warning does not repeat what is said just below.
+      engine.refused = e?.code === "SASSO_ADDON_VERSION_MISMATCH";
       if (want === "native") fail(`error: SASSO_ENGINE=native but the addon is unavailable: ${engine.error}`);
+      // An ABSENT addon is the ordinary case on the platforms with no prebuild,
+      // and falling back to wasm is the whole design — it says nothing. An
+      // addon that is present but version-skewed is a broken install: wasm
+      // keeps the OUTPUT correct, so the build still succeeds, but staying
+      // quiet would trade a wrong compile for a slow one with nothing to read.
+      if (engine.refused) {
+        writeStderrSync(`warning: ${engine.error}\nwarning: falling back to the wasm engine, which is slower.\n`);
+      }
     }
   }
   if (!mod) {
@@ -88,6 +100,7 @@ function engineReason() {
   // "the native addon", not "the prebuilt addon": `SASSO_NATIVE_BINARY` and a
   // repo checkout both load one that no platform package delivered.
   if (engine.kind === "native") return "the default here: the native addon loaded";
+  if (engine.refused) return "FELL BACK: the prebuilt addon was refused (its version does not match sasso)";
   if (engine.addon) return "FELL BACK: a prebuilt addon exists for this platform but did not load";
   return "the default here: no addon is prebuilt for this platform";
 }
@@ -114,12 +127,13 @@ function engineReport() {
  * install accident (`--omit=optional`, a partial lockfile, an unloadable addon),
  * not a supported configuration, and it costs roughly half the throughput.
  *
- * Three ways it stays quiet, each for its own reason. `SASSO_ENGINE=wasm` states
+ * Four ways it stays quiet, each for its own reason. `SASSO_ENGINE=wasm` states
  * the intent, so a fallback is not news. A platform with no prebuild is RUNNING
- * its supported engine, and a warning nobody can act on is noise. And `--quiet`
- * means "don't print warnings" — dart's contract, which this CLI keeps to the
- * letter (stderr is empty under `-q`, asserted); `--engine` is then the way to
- * ask, and it answers whatever the flags say.
+ * its supported engine, and a warning nobody can act on is noise. A refused
+ * addon has already been reported by `loadEngine`, in more detail and with the
+ * fix in it. And `--quiet` means "don't print warnings" — dart's contract,
+ * which this CLI keeps to the letter (stderr is empty under `-q`, asserted);
+ * `--engine` is then the way to ask, and it answers whatever the flags say.
  *
  * Once per run, from the main thread: every worker loads its own engine, so
  * warning there would print this per core.
@@ -127,6 +141,8 @@ function engineReport() {
 function warnIfFellBack(opts) {
   if (opts.quiet) return;
   if (engine.kind !== "wasm" || engine.requested === "wasm" || !engine.addon) return;
+  // A version skew already printed the same fact with the fix in it (#115).
+  if (engine.refused) return;
   writeStderrSync(
     `sasso: WARNING: ${engine.addon} is prebuilt for this platform but did not load, so this run ` +
       `compiles through wasm — roughly half the throughput.\n` +
