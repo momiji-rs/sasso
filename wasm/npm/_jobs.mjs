@@ -88,25 +88,67 @@ export function physicalCoresFromCpuinfo(text) {
   return cores.size > 0 ? cores.size : undefined;
 }
 
+/**
+ * CPUs' worth of cgroup CPU *quota*, or `undefined` when there is no limit.
+ *
+ * A quota is not an affinity mask: `docker run --cpus=2` leaves
+ * `Cpus_allowed_list` at the whole machine and writes `200000 100000` to
+ * `cpu.max` instead, so the mask says nothing about it. Node >= 18.14 already
+ * accounts for both (`availableParallelism()` answers 2 in that container,
+ * measured 2026-09-17) — this is for the older fallback, which answers 16.
+ *
+ * Deliberately only the cgroup at the root of this process's namespace, which
+ * is the container case: a quota applied to a slice deeper in a host's
+ * hierarchy is not walked, exactly as before.
+ */
+export function quotaCpusFromCgroup({ v2, v1Quota, v1Period }) {
+  const cpus = (quota, period) => {
+    const q = Number(quota);
+    const p = Number(period);
+    if (!Number.isFinite(q) || !Number.isFinite(p) || q <= 0 || p <= 0) return undefined;
+    // Round up: half a CPU of quota is still a reason to run one worker, and
+    // rounding down could reach zero.
+    return Math.max(1, Math.ceil(q / p));
+  };
+  if (v2 !== undefined) {
+    const [quota, period] = v2.trim().split(/\s+/);
+    return quota === "max" ? undefined : cpus(quota, period);
+  }
+  if (v1Quota !== undefined && v1Period !== undefined) {
+    // cgroup v1 writes -1 for "no limit", which the `q <= 0` rejection above
+    // already turns into `undefined` — no separate branch for it, because a
+    // branch no input can distinguish is a branch no test can hold honest.
+    return cpus(v1Quota, v1Period);
+  }
+  return undefined;
+}
+
 /** The default for `-j`, given a way to read `/proc/cpuinfo` and a platform. */
 export function defaultJobs({
   platform = process.platform,
   readCpuinfo = defaultReadCpuinfo,
   readStatus = defaultReadStatus,
+  readCgroup = defaultReadCgroup,
 } = {}) {
   const reported = logicalCpus();
   if (platform !== "linux") return reported;
   const status = readStatus();
   const allowed = status === undefined ? undefined : allowedCpusFromStatus(status);
-  // Whichever of the two knows about the affinity mask; on Node >= 18.14 they
-  // agree, below it only the second one does.
-  const logical = allowed === undefined ? reported : Math.min(reported, allowed);
+  const quota = quotaCpusFromCgroup(readCgroup());
+  // The smallest of the three, because they answer different questions and
+  // only the first knows all of them: on Node >= 18.14 `availableParallelism`
+  // covers both the affinity mask and the cgroup quota, and below it neither.
+  const logical = Math.min(reported, allowed ?? reported, quota ?? reported);
   const text = readCpuinfo();
   if (text === undefined) return logical;
   const physical = physicalCoresFromCpuinfo(text);
-  // The host's core count, capped by what this process may actually use: a
-  // `taskset`-restricted or cgroup-capped process sees fewer logical CPUs than
-  // the machine has cores.
+  // The host's core count, capped by what this process may actually use.
+  // Three different limits, because no single number covers them on every
+  // supported Node: the affinity mask (`taskset`, a cpuset), a cgroup CPU
+  // quota (`docker --cpus`, a Kubernetes CPU limit), and whatever the runtime
+  // itself reports. Node >= 18.14 folds the first two into
+  // `availableParallelism()`; below it neither, which is why they are read
+  // here.
   //
   // It is deliberately NOT the number of physical cores inside the affinity
   // mask, which looks more correct and measures much worse. SMT only stops
@@ -137,4 +179,19 @@ function defaultReadStatus() {
   } catch {
     return undefined;
   }
+}
+
+function defaultReadCgroup() {
+  const read = (path) => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    v2: read("/sys/fs/cgroup/cpu.max"),
+    v1Quota: read("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
+    v1Period: read("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
+  };
 }

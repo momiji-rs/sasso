@@ -1530,6 +1530,26 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       "cli: no socket named at all is one socket, not a giving-up",
     );
 
+    // A cgroup CPU *quota* is not an affinity mask: `docker run --cpus=2`
+    // leaves the mask at the whole machine and writes `cpu.max` instead
+    // (verified 2026-09-17 — the container reported `Cpus_allowed_list: 0-15`
+    // and `cpu.max: 200000 100000`). Node >= 18.14 already answers 2 there;
+    // the pre-18.14 fallback answers 16, which is what this covers.
+    assert.equal(jobs.quotaCpusFromCgroup({ v2: "200000 100000\n" }), 2, "cli: v2 quota");
+    assert.equal(jobs.quotaCpusFromCgroup({ v2: "max 100000\n" }), undefined, "cli: v2 unlimited");
+    assert.equal(jobs.quotaCpusFromCgroup({ v2: "150000 100000\n" }), 2, "cli: a fraction rounds up");
+    assert.equal(
+      jobs.quotaCpusFromCgroup({ v1Quota: "400000\n", v1Period: "100000\n" }),
+      4,
+      "cli: v1 quota",
+    );
+    assert.equal(
+      jobs.quotaCpusFromCgroup({ v1Quota: "-1\n", v1Period: "100000\n" }),
+      undefined,
+      "cli: v1 -1 is no limit",
+    );
+    assert.equal(jobs.quotaCpusFromCgroup({}), undefined, "cli: no cgroup files, no answer");
+
     // `Cpus_allowed_list` is the affinity mask this process actually has.
     assert.equal(jobs.allowedCpusFromStatus("Cpus_allowed_list:\t0-1,8-9\n"), 4, "cli: ranges and lists");
     assert.equal(jobs.allowedCpusFromStatus("Cpus_allowed_list:\t3\n"), 1, "cli: a single cpu");
@@ -1538,13 +1558,21 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 
     // …and the default that is built on it.
     const readFake = (text) => () => text;
+    // These tests are about the topology, so the rest of the host is held
+    // still: left real, they would read THIS machine's affinity mask and
+    // cgroup, and a run inside a restricted container would fail assertions
+    // that have nothing to do with what they are testing.
+    const unrestricted = {
+      readStatus: () => undefined,
+      readCgroup: () => ({}),
+    };
     assert.equal(
-      jobs.defaultJobs({ platform: "linux", readCpuinfo: readFake(smt) }),
+      jobs.defaultJobs({ platform: "linux", readCpuinfo: readFake(smt), ...unrestricted }),
       Math.min(4, logical),
       "cli: on Linux the default is the core count",
     );
     assert.equal(
-      jobs.defaultJobs({ platform: "linux", readCpuinfo: () => undefined }),
+      jobs.defaultJobs({ platform: "linux", readCpuinfo: () => undefined, ...unrestricted }),
       logical,
       "cli: an unreadable /proc/cpuinfo falls back to the kernel's count",
     );
@@ -1564,6 +1592,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         platform: "linux",
         readCpuinfo: readFake(eightCores),
         readStatus: readFake("Cpus_allowed_list:\t0-1,8-9\n"),
+        readCgroup: () => ({}),
       }),
       Math.min(4, logical),
       "cli: the affinity mask caps the default even when the CPU count does not",
@@ -1573,12 +1602,24 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         platform: "linux",
         readCpuinfo: readFake(eightCores),
         readStatus: () => undefined,
+        readCgroup: () => ({}),
       }),
       Math.min(8, logical),
       "cli: an unreadable /proc/self/status leaves the core count alone",
     );
+    // The container shape that has no mask to find: quota only.
     assert.equal(
-      jobs.defaultJobs({ platform: "darwin", readCpuinfo: readFake(smt) }),
+      jobs.defaultJobs({
+        platform: "linux",
+        readCpuinfo: readFake(eightCores),
+        readStatus: readFake("Cpus_allowed_list:\t0-15\n"),
+        readCgroup: () => ({ v2: "200000 100000\n" }),
+      }),
+      Math.min(2, logical),
+      "cli: a cgroup quota caps the default even with the whole machine in the mask",
+    );
+    assert.equal(
+      jobs.defaultJobs({ platform: "darwin", readCpuinfo: readFake(smt), ...unrestricted }),
       logical,
       "cli: off Linux the logical count stands — Apple silicon has no SMT",
     );
@@ -1592,7 +1633,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       (_v, i) => `physical id\t: 0\ncore id\t: ${i}\n`,
     ).join("\n");
     assert.equal(
-      jobs.defaultJobs({ platform: "linux", readCpuinfo: readFake(many) }),
+      jobs.defaultJobs({ platform: "linux", readCpuinfo: readFake(many), ...unrestricted }),
       logical,
       "cli: never more workers than the kernel offers this process",
     );
