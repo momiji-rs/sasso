@@ -37,6 +37,32 @@ Conformance is tracked separately as a ratchet against the official
   The wasm module gains `sasso_compile3` for it; `sasso_compile2` stays and
   delegates, so a host built against it keeps linking.
 
+### Fixed
+
+- **Compressed `color()` output was not a color** (#110). The predefined
+  `color()` spaces separate their space name and channels with mandatory
+  whitespace, but compressed mode ran that separator through the same variable
+  that strips the spaces around `/`, so `color(display-p3 0.5 0.2 0.9)` came out
+  as `color(display-p3.5.2.9)` — one token no browser resolves, which drops the
+  declaration. Expanded output was always correct, so this only ever hit
+  production builds. Legacy spaces reaching the modern space-separated form
+  through a missing channel (`rgb(1 2 none)`) were unaffected.
+
+- **A calc's `+ -n` operator flip is not an expanded-mode courtesy** (#110).
+  dart-sass performs it while it builds the operation
+  (`SassCalculation._operateInternal` negates the operand and swaps the
+  operator when `right.value < 0`), so the flipped form is what its serializer
+  receives in every output style. sasso did it at serialization time and only
+  when expanded, so compressed builds kept `calc(var(--a) + -2px)` where dart
+  writes `calc(var(--a) - 2px)`. The condition is now exactly dart's `< 0`,
+  which also fixes the other half: `-infinity` flips
+  (`calc(1px + -infinity * 1em)` → `calc(1px - infinity * 1em)`) in both styles,
+  while `-0` and `NaN` correctly keep their operator.
+
+  Neither divergence is covered by a spec the ratchet counts as passing
+  (conformance runs expanded output only), so both now have offline goldens in
+  `tests/integration.rs` and live dart cross-checks in `tests/parity.rs`.
+
 ## [0.16.0] - 2026-09-18
 
 _The release that closes #83. The npm CLI had three reasons to be slower than

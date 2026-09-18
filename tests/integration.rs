@@ -554,6 +554,101 @@ fn compressed_keeps_the_zero_on_a_negative_decimal() {
     assert_eq!(v("-0"), "a{x:-0}");
 }
 
+/// `color()`'s space name and its three channels are separated by MANDATORY
+/// whitespace — `color(display-p3 .5 .2 .9)` is an identifier followed by three
+/// numbers, so compressing those spaces away yields `color(display-p3.5.2.9)`,
+/// which no browser parses as a color. Only the `/` before the alpha may lose
+/// its spaces. Measured against dart-sass 1.104.1 (`--style=compressed`).
+#[test]
+fn compressed_color_function_keeps_its_mandatory_spaces() {
+    let v = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
+    assert_eq!(
+        v("color(display-p3 0.5 0.2 0.9)"),
+        "a{x:color(display-p3 .5 .2 .9)}"
+    );
+    assert_eq!(
+        v("color(display-p3 0.5 0.2 0.9 / 0.5)"),
+        "a{x:color(display-p3 .5 .2 .9/.5)}"
+    );
+    assert_eq!(v("color(xyz 0.1 0.2 0.3)"), "a{x:color(xyz .1 .2 .3)}");
+    assert_eq!(
+        v("color(srgb-linear 0.1 0.2 0.3 / 0.25)"),
+        "a{x:color(srgb-linear .1 .2 .3/.25)}"
+    );
+    assert_eq!(v("color(a98-rgb 1 0.5 0)"), "a{x:color(a98-rgb 1 .5 0)}");
+    assert_eq!(v("color(prophoto-rgb 0 0 0)"), "a{x:color(prophoto-rgb 0 0 0)}");
+    // A missing channel is the literal `none`, which needs its spaces just as
+    // much as a number does.
+    assert_eq!(
+        v("color(display-p3 none 0.2 0.9)"),
+        "a{x:color(display-p3 none .2 .9)}"
+    );
+    assert_eq!(
+        v("color(rec2020 0.5 none none / none)"),
+        "a{x:color(rec2020 .5 none none/none)}"
+    );
+    // The legacy spaces reach the modern space-separated form only through a
+    // missing channel, and they already spelled their separators correctly.
+    assert_eq!(v("rgb(1 2 none)"), "a{x:rgb(1 2 none)}");
+    assert_eq!(v("rgb(1 2 none / 0.5)"), "a{x:rgb(1 2 none/.5)}");
+}
+
+/// A negative numeric right operand flips a calc's `+`/`-`, in EVERY output
+/// style: dart-sass performs the flip when it builds the operation
+/// (`SassCalculation._operateInternal` negates the operand and swaps the
+/// operator when `right.value < 0`), so serialization never sees the `+ -n`
+/// form. `< 0` is the whole test — it excludes `-0` and NaN, and includes
+/// `-infinity`. Measured against dart-sass 1.104.1.
+#[test]
+fn calc_flips_a_negative_right_operand_in_every_style() {
+    let v = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
+    let e = |scss: &str| css(&format!("a {{ x: {scss}; }}"));
+    // `@use` has to lead the stylesheet, so the math cases get their own pair.
+    let vm = |scss: &str| css_compressed(&format!("@use 'sass:math';a{{x:{scss}}}"));
+    let em = |scss: &str| css(&format!("@use 'sass:math';\na {{ x: {scss}; }}\n"));
+
+    // Compressed used to skip the flip entirely.
+    assert_eq!(v("calc(var(--a) + -2px)"), "a{x:calc(var(--a) - 2px)}");
+    assert_eq!(v("calc(var(--a) - -2px)"), "a{x:calc(var(--a) + 2px)}");
+    assert_eq!(v("calc(100% + -2px)"), "a{x:calc(100% - 2px)}");
+    assert_eq!(v("calc(var(--a) + -0.5px)"), "a{x:calc(var(--a) - .5px)}");
+    assert_eq!(v("calc(var(--a) + -2)"), "a{x:calc(var(--a) - 2)}");
+    assert_eq!(e("calc(var(--a) + -2px)"), "a {\n  x: calc(var(--a) - 2px);\n}\n");
+
+    // `-0` keeps its sign and its operator: dart tests `< 0`, which `-0` fails.
+    assert_eq!(v("calc(var(--a) + -0px)"), "a{x:calc(var(--a) + -0px)}");
+    assert_eq!(
+        e("calc(var(--a) + -0px)"),
+        "a {\n  x: calc(var(--a) + -0px);\n}\n"
+    );
+
+    // `-infinity` DOES flip, and inside a calculation it renders as a `*` chain
+    // rather than a `calc()` constant — with no parentheses, because a
+    // `*`-precedence child of `+`/`-` never needs them.
+    assert_eq!(
+        em("calc(1px + math.div(-1, 0) * 1em)"),
+        "a {\n  x: calc(1px - infinity * 1em);\n}\n"
+    );
+    assert_eq!(
+        em("calc(1px - math.div(-1, 0) * 1em)"),
+        "a {\n  x: calc(1px + infinity * 1em);\n}\n"
+    );
+    assert_eq!(
+        vm("calc(1px + math.div(-1, 0) * 1em)"),
+        "a{x:calc(1px - infinity*1em)}"
+    );
+    assert_eq!(
+        em("calc(var(--a) + math.div(-1, 0))"),
+        "a {\n  x: calc(var(--a) - infinity);\n}\n"
+    );
+    // NaN never compares `< 0`, so it never flips.
+    assert_eq!(
+        em("calc(1px + math.div(0, 0) * 1em)"),
+        "a {\n  x: calc(1px + NaN * 1em);\n}\n"
+    );
+    assert_eq!(vm("calc(1px + math.div(0, 0) * 1em)"), "a{x:calc(1px + NaN*1em)}");
+}
+
 /// Compressed style drops comments — except the LOUD ones, which open `/*!`
 /// and are how a stylesheet keeps its licence header. Measured against
 /// dart-sass 1.103.1.
