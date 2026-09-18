@@ -206,14 +206,14 @@ default when writing a file), `--source-map-urls <relative|absolute>`,
 (skip outputs newer than their input), `-w/--watch` (re-compiles when the input
 or any dependency changes), `--loop <N>` (recompile N times and report
 throughput), `--help`, `--version`, and `-j/--jobs <N>` (how many files to
-compile at once; the default is one per physical core on Linux, which on an SMT
-machine is half the CPU count — two threads on one core contend for the same
-execution units. Off Linux, and on a Linux that publishes no topology, it stays
-one per CPU). An input of `-` is standard input. Accepted for dart-sass
-compatibility: `-c/--[no-]color` (a no-op — sasso never colors its output) and
-`--[no-]error-css` (**not implemented**: a failing compile always behaves as
-`--no-error-css`, dropping a stale output file rather than describing the error
-in CSS).
+compile at once; the default is one per physical core on Linux — the cores
+`/proc/cpuinfo` reports, which on an SMT machine is fewer than the CPU count,
+because threads sharing a core contend for the same execution units. Off Linux,
+and on a Linux that publishes no topology, it stays one per CPU). An input of
+`-` is standard input. Accepted for dart-sass compatibility: `-c/--[no-]color`
+(a no-op — sasso never colors its output) and `--[no-]error-css` (**not
+implemented**: a failing compile always behaves as `--no-error-css`, dropping a
+stale output file rather than describing the error in CSS).
 
 **Which engine the CLI uses.** It prefers the native addon — `npm install
 sasso` already fetched `sasso-native-<platform>` as an optionalDependency on

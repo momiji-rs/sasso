@@ -99,9 +99,8 @@ export function physicalCoresFromCpuinfo(text) {
  * accounts for both (`availableParallelism()` answers 2 in that container,
  * measured 2026-09-17) — this is for the older fallback, which answers 16.
  *
- * Deliberately only the cgroup at the root of this process's namespace, which
- * is the container case: a quota applied to a slice deeper in a host's
- * hierarchy is not walked, exactly as before.
+ * `cgroupQuotaFiles` decides which files this reads, including the ones for
+ * the process's own cgroup rather than only the root.
  */
 export function quotaCpusFromCgroup({ v2, v1Quota, v1Period }) {
   const cpus = (quota, period) => {
@@ -136,7 +135,7 @@ export function defaultJobs({
   if (platform !== "linux") return reported;
   const status = readStatus();
   const allowed = status === undefined ? undefined : allowedCpusFromStatus(status);
-  const quota = quotaCpusFromCgroup(readCgroup());
+  const quota = tightestQuota(readCgroup());
   // The smallest of the three, because they answer different questions and
   // only the first knows all of them: on Node >= 18.14 `availableParallelism`
   // covers both the affinity mask and the cgroup quota, and below it neither.
@@ -184,24 +183,77 @@ function defaultReadStatus() {
 }
 
 /**
- * Which cgroup files to look in, given a way to read one.
+ * Every cgroup file worth reading for a quota, deepest first, given the text
+ * of `/proc/self/cgroup`.
  *
- * cgroup v1 mounts the cpu controller under either name depending on the
- * distribution, and `cpu,cpuacct` is the more common of the two — a layout
- * this missed until review pointed it out, which is why the choice is a
- * function that a test can drive rather than a path buried in an fs call.
+ * The limit is not necessarily at the root. A container with its own cgroup
+ * namespace reports `0::/` and the root file is the answer, which is why
+ * reading only the root appeared to work — but a systemd scope on a host
+ * reports something like `0::/user.slice/…/run-p166821.scope`, and there the
+ * root `cpu.max` does not even exist while the scope's own does. Measured on
+ * 2026-09-17 under `systemd-run -p CPUQuota=200%`: root unavailable, own
+ * cgroup `200000 100000`. Both Node >= 18.14 and Rust walk this; the older
+ * Node fallback is the one that needs it spelled out.
  *
- * Neither name is resolved from `/proc/self/mountinfo`: that is the container
- * case only, as documented on `quotaCpusFromCgroup`.
+ * Parents are included because a limit anywhere along the path applies, and
+ * the tightest of them is the effective one.
+ *
+ * cgroup v1 mounts the cpu controller as `cpu` on some distributions and
+ * `cpu,cpuacct` on others, so both names are tried.
  */
-export function cgroupFiles(read) {
-  const v1 = ["/sys/fs/cgroup/cpu", "/sys/fs/cgroup/cpu,cpuacct"];
-  const first = (name) => v1.map((dir) => read(`${dir}/${name}`)).find((t) => t !== undefined);
-  return {
-    v2: read("/sys/fs/cgroup/cpu.max"),
-    v1Quota: first("cpu.cfs_quota_us"),
-    v1Period: first("cpu.cfs_period_us"),
+export function cgroupQuotaFiles(procSelfCgroup) {
+  const v2 = [];
+  const v1 = [];
+  const ancestors = (path) => {
+    const parts = path.split("/").filter(Boolean);
+    const out = [];
+    for (let i = parts.length; i >= 0; i--) out.push("/" + parts.slice(0, i).join("/"));
+    return out.map((p) => (p === "/" ? "" : p));
   };
+
+  for (const line of procSelfCgroup.split("\n")) {
+    // "0::/a/b" for v2, "4:cpu,cpuacct:/a/b" for v1.
+    const parts = line.split(":");
+    if (parts.length < 3) continue;
+    const controllers = parts[1];
+    const path = parts.slice(2).join(":");
+    if (controllers === "") {
+      for (const at of ancestors(path)) v2.push(`/sys/fs/cgroup${at}/cpu.max`);
+    } else if (controllers.split(",").includes("cpu")) {
+      for (const dir of ["/sys/fs/cgroup/cpu", "/sys/fs/cgroup/cpu,cpuacct"]) {
+        for (const at of ancestors(path)) {
+          v1.push({ quota: `${dir}${at}/cpu.cfs_quota_us`, period: `${dir}${at}/cpu.cfs_period_us` });
+        }
+      }
+    }
+  }
+  // A cgroup file that says nothing about this process is still worth a look:
+  // if `/proc/self/cgroup` was unreadable, the root is the only guess left.
+  if (v2.length === 0) v2.push("/sys/fs/cgroup/cpu.max");
+  if (v1.length === 0) {
+    for (const dir of ["/sys/fs/cgroup/cpu", "/sys/fs/cgroup/cpu,cpuacct"]) {
+      v1.push({ quota: `${dir}/cpu.cfs_quota_us`, period: `${dir}/cpu.cfs_period_us` });
+    }
+  }
+  return { v2, v1 };
+}
+
+/** Each candidate's contents, for `tightestQuota`. */
+export function cgroupFiles(read) {
+  const { v2, v1 } = cgroupQuotaFiles(read("/proc/self/cgroup") ?? "");
+  return [
+    ...v2.map((path) => ({ v2: read(path) })),
+    ...v1.map(({ quota, period }) => ({ v1Quota: read(quota), v1Period: read(period) })),
+  ];
+}
+
+/**
+ * The smallest quota found anywhere along the hierarchy, because a limit on a
+ * parent slice applies just as much as one on the leaf.
+ */
+export function tightestQuota(readings) {
+  const found = readings.map(quotaCpusFromCgroup).filter((n) => n !== undefined);
+  return found.length === 0 ? undefined : Math.min(...found);
 }
 
 function defaultReadCgroup() {

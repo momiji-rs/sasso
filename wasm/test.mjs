@@ -1492,8 +1492,10 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // pure computation, so two hyperthreads on one core contend for the same
   // execution units instead of overlapping stalls. Measured on a Ryzen 7
   // 8745HS (8 cores / 16 threads), 138 Lichess stylesheets: `-j 8` beat
-  // `-j 16` by 16% here and 13% through the native binary, and the default
-  // taking the core count moved that corpus from 444 ms to 364 ms.
+  // `-j 16` — 366 ms against 425 ms here, 208 against 235 through the native
+  // binary — and the default taking the core count moved that corpus from
+  // 444 ms to 364 ms. (Times, not percentages: "faster by" reads differently
+  // depending on which of the two you divide by.)
   //
   // The host's own topology cannot be asserted, so the detector is fed
   // synthetic `/proc/cpuinfo` text instead — the shapes that matter are an SMT
@@ -1569,9 +1571,57 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
           ? "100000\n"
           : undefined;
     assert.equal(
-      jobs.quotaCpusFromCgroup(jobs.cgroupFiles(onlyCpuacct)),
+      jobs.tightestQuota(jobs.cgroupFiles(onlyCpuacct)),
       4,
       "cli: a v1 quota under cpu,cpuacct is found",
+    );
+
+    // The limit is not necessarily at the root. A systemd scope on a host puts
+    // it on the process's own cgroup, where the root file does not even exist
+    // — measured under `systemd-run -p CPUQuota=200%` on 2026-09-17:
+    //
+    //   /proc/self/cgroup   0::/user.slice/…/run-p166821.scope
+    //   root cpu.max        unavailable
+    //   own cgroup cpu.max  200000 100000
+    //
+    // Reading only the root answers "no limit" and starts the host's core
+    // count, which is what this pins.
+    const scope = "0::/user.slice/user-1000.slice/app.slice/run-p1.scope\n";
+    const own = "/sys/fs/cgroup/user.slice/user-1000.slice/app.slice/run-p1.scope/cpu.max";
+    const nested = (path) =>
+      path === "/proc/self/cgroup" ? scope : path === own ? "200000 100000\n" : undefined;
+    assert.equal(
+      jobs.tightestQuota(jobs.cgroupFiles(nested)),
+      2,
+      "cli: a quota on this process's own cgroup, not the root, is found",
+    );
+
+    // A container with its own cgroup namespace reports `0::/`, and then the
+    // root really is the answer — the shape verified against docker.
+    const container = (path) =>
+      path === "/proc/self/cgroup"
+        ? "0::/\n"
+        : path === "/sys/fs/cgroup/cpu.max"
+          ? "200000 100000\n"
+          : undefined;
+    assert.equal(
+      jobs.tightestQuota(jobs.cgroupFiles(container)),
+      2,
+      "cli: the container shape still resolves to the root file",
+    );
+
+    // A parent slice's limit applies to everything under it, so the tightest
+    // along the path wins rather than the first one found.
+    const parentTighter = (path) => {
+      if (path === "/proc/self/cgroup") return scope;
+      if (path === own) return "800000 100000\n"; // the leaf allows 8
+      if (path === "/sys/fs/cgroup/user.slice/cpu.max") return "200000 100000\n"; // a parent allows 2
+      return undefined;
+    };
+    assert.equal(
+      jobs.tightestQuota(jobs.cgroupFiles(parentTighter)),
+      2,
+      "cli: the tightest limit along the hierarchy wins",
     );
 
     // `Cpus_allowed_list` is the affinity mask this process actually has.
@@ -1588,7 +1638,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // that have nothing to do with what they are testing.
     const unrestricted = {
       readStatus: () => undefined,
-      readCgroup: () => ({}),
+      readCgroup: () => [],
     };
     assert.equal(
       jobs.defaultJobs({ platform: "linux", readCpuinfo: readFake(smt), ...unrestricted }),
@@ -1616,7 +1666,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         platform: "linux",
         readCpuinfo: readFake(eightCores),
         readStatus: readFake("Cpus_allowed_list:\t0-1,8-9\n"),
-        readCgroup: () => ({}),
+        readCgroup: () => [],
       }),
       Math.min(4, logical),
       "cli: the affinity mask caps the default even when the CPU count does not",
@@ -1626,7 +1676,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         platform: "linux",
         readCpuinfo: readFake(eightCores),
         readStatus: () => undefined,
-        readCgroup: () => ({}),
+        readCgroup: () => [],
       }),
       Math.min(8, logical),
       "cli: an unreadable /proc/self/status leaves the core count alone",
@@ -1637,7 +1687,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         platform: "linux",
         readCpuinfo: readFake(eightCores),
         readStatus: readFake("Cpus_allowed_list:\t0-15\n"),
-        readCgroup: () => ({ v2: "200000 100000\n" }),
+        readCgroup: () => [{ v2: "200000 100000\n" }],
       }),
       Math.min(2, logical),
       "cli: a cgroup quota caps the default even with the whole machine in the mask",

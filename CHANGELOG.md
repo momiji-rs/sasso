@@ -27,9 +27,10 @@ Conformance is tracked separately as a ratchet against the official
 
   The count comes from `/proc/cpuinfo` on Linux and is capped by what the
   process may actually use, so an affinity mask (`taskset`, a cpuset) or a
-  cgroup CPU quota (`docker --cpus`, a Kubernetes CPU limit) still wins — on
-  every supported Node, including the versions before `availableParallelism`
-  existed to account for them. It
+  cgroup CPU quota (`docker --cpus`, a Kubernetes CPU limit, a systemd
+  `CPUQuota=`) still wins — on every supported Node, including the versions
+  before `availableParallelism` existed to account for them, and whether the
+  quota sits on the process's own cgroup or on a slice above it. It
   is deliberately not the number of cores *inside* an affinity mask: SMT only
   stops paying once enough cores are in play, and restricted to two cores,
   using both SMT siblings measured 50% faster.
