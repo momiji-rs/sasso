@@ -31,25 +31,10 @@ import {
 import { Exception, Logger } from "./_loader.mjs";
 import { deserializeArgs, serializeValue, setEngine, valueApi } from "./_value.mjs";
 import { normalizeSilenced } from "./_deprecations.mjs";
+// The prebuilt-platform table, shared with the CLI (which reports the engine).
+import { SUPPORTED, platformKey } from "./_native_platform.mjs";
 
 const require_ = createRequire(import.meta.url);
-
-const SUPPORTED = {
-  "darwin-arm64": "sasso-native-darwin-arm64",
-  "darwin-x64": "sasso-native-darwin-x64",
-  "linux-x64-gnu": "sasso-native-linux-x64-gnu",
-  "linux-arm64-gnu": "sasso-native-linux-arm64-gnu",
-};
-
-function platformKey() {
-  const { platform, arch } = process;
-  if (platform === "linux") {
-    // glibc vs musl: the prebuilds are gnu-only for now.
-    const glibc = process.report?.getReport?.()?.header?.glibcVersionRuntime;
-    return `linux-${arch}-${glibc ? "gnu" : "musl"}`;
-  }
-  return `${platform}-${arch}`;
-}
 
 function loadNativeBinding() {
   const override = process.env.SASSO_NATIVE_BINARY;

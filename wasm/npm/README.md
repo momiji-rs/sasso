@@ -238,6 +238,23 @@ machine, that tree's own flags, best of five, measured against the published
 package (2026-09-17): **266 ms** on the native engine, 610 ms on wasm, against
 dart-sass 1.104.1's 2268 ms.
 
+`sasso --engine` prints which one this install runs and why, which is the thing
+to paste into a bug report about speed:
+
+```
+$ sasso --engine
+engine:   native (Node addon) — the default here: the prebuilt addon loaded
+platform: darwin-arm64 (prebuilt addon: sasso-native-darwin-arm64)
+sasso:    0.16.0
+```
+
+Where an addon **is** prebuilt but did not load — `--omit=optional`, a partial
+lockfile, a broken install — the fallback is a silent halving of throughput, so
+every compile prints one line to stderr saying so. `--quiet` does not suppress
+it (it is about the install, not the stylesheet); `SASSO_ENGINE=wasm` does,
+because that says wasm was the intent. On platforms with no prebuild — musl and
+Windows today — wasm is the expected engine and nothing is printed.
+
 Importing the library selects nothing: `"sasso"` is always the size-optimised
 wasm build and ignores `SASSO_ENGINE`, and the addon is the `"sasso/native"`
 subpath below.

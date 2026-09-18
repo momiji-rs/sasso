@@ -403,10 +403,17 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   // (a drifted pair ships prebuilds the loader can never resolve).
   assert.ok(pkg.exports["./native"] && pkg.exports["./native"].import === "./native.mjs", "exports map has ./native");
   assert.ok(shipped.has("native.mjs") && shipped.has("native.d.ts"), "files array ships the native wrapper + types");
+  // The table lives in `_native_platform.mjs` because the CLI needs it too (to
+  // tell an expected wasm run from a fallback), so THAT is the file this guard
+  // reads — and native.mjs must still be the module importing it, or a second
+  // copy could drift back in unnoticed.
   const nativeSrc = readFileSync(new URL("./npm/native.mjs", import.meta.url), "utf8");
+  const platformSrc = readFileSync(new URL("./npm/_native_platform.mjs", import.meta.url), "utf8");
+  assert.match(nativeSrc, /from "\.\/_native_platform\.mjs"/, "native.mjs resolves from the shared platform table");
+  assert.ok(shipped.has("_native_platform.mjs"), "files array ships the shared platform table");
   const genSrc = readFileSync(new URL("../napi/make-platform-package.mjs", import.meta.url), "utf8");
   for (const target of ["darwin-arm64", "darwin-x64", "linux-x64-gnu", "linux-arm64-gnu"]) {
-    assert.ok(nativeSrc.includes(`"sasso-native-${target}"`), `native.mjs resolves sasso-native-${target}`);
+    assert.ok(platformSrc.includes(`"sasso-native-${target}"`), `the platform table resolves sasso-native-${target}`);
     assert.ok(genSrc.includes(`"${target}"`), `make-platform-package.mjs stages ${target}`);
   }
   console.log("ok: packaging — wasm binaries + speed wiring + sasso/native subpath and platform-target consistency");
@@ -1316,8 +1323,8 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   }
   // The same path, forced on EVERY platform: `SASSO_NATIVE_BINARY` is
   // native.mjs's own override, so pointing it at nothing makes the addon
-  // unloadable here too. A DEMANDED engine must fail loudly; only the default
-  // falls back quietly.
+  // unloadable here too. A DEMANDED engine must fail loudly; the default falls
+  // back and compiles, and says on stderr that it did (see below).
   const demanded = compileAll(join(dir, "nope"), [], {
     SASSO_ENGINE: "native",
     SASSO_NATIVE_BINARY: join(dir, "no-such-addon.node"),
@@ -1328,6 +1335,74 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   check("the default engine falls back to wasm", fellBack, compileAll(fellBack, [], {
     SASSO_NATIVE_BINARY: join(dir, "no-such-addon.node"),
   }));
+
+  // Which engine a run used was completely unobservable: the fallback above
+  // costs roughly half the throughput and printed nothing, so "am I on wasm?"
+  // was answerable only by bisecting an install (momiji-rs/sasso#24). Two
+  // surfaces, tested here against the SAME table native.mjs resolves from, so
+  // a new prebuilt target cannot make the CLI's idea of "expected" stale.
+  {
+    const { nativePackage, platformKey } = await import("./npm/_native_platform.mjs");
+    const key = platformKey();
+    const prebuilt = nativePackage();
+    const blind = join(dir, "no-such-addon.node");
+    const engineOf = (env) =>
+      spawnSync(process.execPath, [cliPath, "--engine"], { encoding: "utf8", env: engineEnv(env), timeout: 20000 });
+
+    // The report names the engine, why it is that one, and this platform.
+    const def = engineOf({});
+    assert.equal(def.status, 0, `cli: --engine reports (stderr: ${def.stderr})`);
+    assert.match(def.stdout, /^engine: +(native \(Node addon\)|wasm \(speed build\)) — /m, "cli: --engine names the engine");
+    assert.match(def.stdout, new RegExp(`^platform: +${key}( |$)`, "m"), "cli: … and the platform key it decided from");
+    assert.match(def.stdout, /^sasso: +\d+\.\d+\.\d+/m, "cli: … and the package version");
+
+    // A forced engine reports as forced rather than as a default or a fallback:
+    // the distinction is the whole point when a CI pipeline sets the variable.
+    const forced = engineOf({ SASSO_ENGINE: "wasm" });
+    assert.match(forced.stdout, /^engine: +wasm .*SASSO_ENGINE=wasm/m, "cli: --engine says when the engine was forced");
+    assert.doesNotMatch(forced.stdout, /FELL BACK/, "cli: … and an asked-for engine is not a fallback");
+
+    // The unloadable-addon case, which is the one worth reporting.
+    const broken = engineOf({ SASSO_NATIVE_BINARY: blind });
+    assert.equal(broken.status, 0, "cli: --engine reports a fallback rather than failing");
+    assert.match(broken.stdout, /^engine: +wasm /m, "cli: … as wasm");
+    if (prebuilt) {
+      assert.match(broken.stdout, /FELL BACK/, "cli: … calling it a fallback where a prebuild exists");
+      assert.match(broken.stdout, new RegExp(`^platform: .*${prebuilt}`, "m"), "cli: … naming the addon package");
+      assert.match(broken.stdout, /^addon: +did not load: /m, "cli: … and why the addon did not load");
+      // One line, however deep Node's require stack was: a pasteable report.
+      assert.equal(
+        broken.stdout.split("\n").filter((l) => l.startsWith("addon:")).length,
+        1,
+        "cli: … on one line",
+      );
+    } else {
+      assert.match(broken.stdout, /no addon is prebuilt/, "cli: … the expected engine where none is prebuilt");
+    }
+
+    // And a DEMANDED engine still fails instead of reporting, even here.
+    const demandedReport = engineOf({ SASSO_ENGINE: "native", SASSO_NATIVE_BINARY: blind });
+    assert.equal(demandedReport.status, 1, "cli: --engine does not paper over SASSO_ENGINE=native failing");
+
+    // Surface two: a compile that fell back says so on stderr, ONCE — every
+    // worker loads its own engine, and one warning per core would bury the
+    // output. Only where a prebuild exists: on musl or Windows wasm is the
+    // supported engine, and a warning nobody can act on is noise.
+    const warned = compileAll(join(dir, "loud"), ["-j", "4"], { SASSO_NATIVE_BINARY: blind });
+    assert.equal(warned.status, 0, `cli: the fallback still compiles (stderr: ${warned.stderr})`);
+    const hits = warned.stderr.split("\n").filter((l) => l.includes("did not load")).length;
+    if (prebuilt) {
+      assert.equal(hits, 1, `cli: the wasm fallback warns exactly once (stderr: ${warned.stderr})`);
+      assert.match(warned.stderr, /roughly half the throughput/, "cli: … saying what it costs");
+      assert.match(warned.stderr, /--engine|SASSO_ENGINE=wasm/, "cli: … and how to diagnose or accept it");
+    } else {
+      assert.equal(hits, 0, "cli: the expected engine does not warn");
+    }
+    // An engine the caller ASKED for is never news, prebuilt addon or not.
+    const asked = compileAll(join(dir, "quiet"), [], { SASSO_ENGINE: "wasm", SASSO_NATIVE_BINARY: blind });
+    assert.equal(asked.status, 0, `cli: SASSO_ENGINE=wasm compiles (stderr: ${asked.stderr})`);
+    assert.equal(asked.stderr, "", "cli: … silently, because wasm was the request");
+  }
 
   // `--help` and `--version` answer from the package alone, so they must work
   // where no engine can be loaded at all — a metadata question must not need a
