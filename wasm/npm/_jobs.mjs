@@ -3,9 +3,11 @@
 // `availableParallelism()` counts SMT threads. A compile is pure computation,
 // so two hyperthreads on one core contend for the same execution units rather
 // than overlapping stalls: on a Ryzen 7 8745HS (8 cores / 16 threads) over 138
-// Lichess stylesheets, `-j 8` beat `-j 16` by 16% through this CLI and by 13%
-// through the native binary, and defaulting to the core count took that corpus
-// from 451 ms to 342 ms. On a machine without SMT the two counts are equal and
+// Lichess stylesheets, `-j 8` beat `-j 16` — 366 ms against 425 ms through this
+// CLI, 208 against 235 through the native binary — and defaulting to the core
+// count took that corpus from 444 ms to 364 ms. (Times rather than percentages
+// on purpose: "faster by" reads differently depending on which of the two you
+// divide by, and both readings appear in this file's history.) On a machine without SMT the two counts are equal and
 // nothing changes.
 //
 // Linux publishes the topology in `/proc/cpuinfo`, which is a read rather than

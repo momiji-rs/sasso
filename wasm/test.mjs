@@ -1483,7 +1483,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // execution units instead of overlapping stalls. Measured on a Ryzen 7
   // 8745HS (8 cores / 16 threads), 138 Lichess stylesheets: `-j 8` beat
   // `-j 16` by 16% here and 13% through the native binary, and the default
-  // taking the core count moved that corpus from 451 ms to 342 ms.
+  // taking the core count moved that corpus from 444 ms to 364 ms.
   //
   // The host's own topology cannot be asserted, so the detector is fed
   // synthetic `/proc/cpuinfo` text instead — the shapes that matter are an SMT

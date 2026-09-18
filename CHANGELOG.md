@@ -20,8 +20,8 @@ Conformance is tracked separately as a ratchet against the official
   computation, so two hyperthreads on one core
   contend for the same execution units rather than overlapping each other's
   stalls. On a Ryzen 7 8745HS (8 cores / 16 threads) over 138 Lichess
-  stylesheets, at each CLI's own default: the binary goes 241 ms -> 219 ms and
-  the npm CLI 451 ms -> 342 ms, with byte-identical output. On a machine
+  stylesheets, at each CLI's own default: the binary goes 229 ms -> 207 ms and
+  the npm CLI 444 ms -> 364 ms, with byte-identical output (138 of 138). On a machine
   without SMT the two counts are equal and nothing changes. `-j N` still means
   exactly what it says.
 
