@@ -196,9 +196,10 @@ $ echo '.a{color:red}' | sasso --stdin
 
 Several inputs (`in:out` pairs or a directory pair) compile in parallel, one
 worker per physical core where the topology is known — Linux, via
-`/proc/cpuinfo` — and one per CPU where it is not (`-j N` caps either), with
-diagnostics reported in command-line order. Supported dart-sass flags:
-`--[no-]source-map`, `--source-map-urls`, `--[no-]embed-sources`,
+`/proc/cpuinfo` — and one per CPU where it is not. That is an upper bound: an
+affinity mask or a cgroup CPU quota lowers it, and `-j N` overrides it
+outright. Diagnostics are reported in command-line order. Supported dart-sass
+flags: `--[no-]source-map`, `--source-map-urls`, `--[no-]embed-sources`,
 `--[no-]embed-source-map`, `--[no-]error-css`, `--[no-]charset`, `-q/--quiet`,
 `--quiet-deps`, `--stop-on-error`, `--[no-]unicode`, `--[no-]color` (accepted;
 sasso never colors), `--indented`, `--stdin`. Exit codes match too (64 usage,

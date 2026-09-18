@@ -1413,12 +1413,24 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     // whitespace, and comments, which are legal there and carry meaning to
     // bundlers (`import(/* webpackChunkName: "x" */ "./dep.mjs")`).
     //
-    // Deliberately not a comment-stripping pass over the whole file first.
-    // Stripping has to know where strings and regex literals are — `/["']/`
-    // is a regex, not the start of a string — and when it gets that wrong it
-    // swallows code and the walk silently misses an import, which is the
-    // failure this guard exists to catch. Tolerating comments at the two
-    // places they can appear cannot touch a string at all.
+    // These run over raw source and track no lexical state, so import-shaped
+    // text inside a string or a comment matches too: `const s = 'from
+    // \"./x.mjs\"'` looks exactly like an import from here. That is a known
+    // limitation and a deliberate one.
+    //
+    // The two ways to be wrong are not equally bad. Matching text that is not
+    // an import is a FALSE POSITIVE: the guard fails, names the file and the
+    // specifier, and whoever wrote that string sees immediately what happened.
+    // Missing a real import is a FALSE NEGATIVE: the suite stays green and a
+    // package that cannot start is published — which is the failure this guard
+    // exists to catch, and which it has already let through twice.
+    //
+    // A tokenizer or an AST walk would remove the false positives and buy a
+    // new way to produce false negatives, because it has to know where strings
+    // and regex literals are (`/[\"']/` is a regex, not the start of a string)
+    // and it fails silently when it does not. So: loud over silent. No file in
+    // the package contains such text today, and the case below pins the
+    // behaviour so a later reader does not quietly trade it the other way.
     const gap = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*\n)*`;
     const rel = String.raw`\.\.?/[^"']+`; // `./dep.mjs` and `../dep.mjs` both
     const statics = new RegExp(String.raw`\bfrom${gap}["'](${rel})["']`, "g");
@@ -1459,6 +1471,17 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       for (const re of [statics, dynamics, sideEffects]) {
         for (const m of sample.matchAll(re)) found.add(m[1]);
       }
+      // Known limitation, pinned on purpose: import-shaped text inside a
+      // string matches, because nothing here tracks lexical state. It is a
+      // loud failure rather than a silent miss — see the note above.
+      const inAString = [...'const s = \'from "./in-a-string.mjs"\';'.matchAll(statics)];
+      assert.equal(
+        inAString.length,
+        1,
+        "packaging: the string case is a known false positive; if this ever stops matching, " +
+          "make sure it stopped by tracking lexical state and not by missing imports",
+      );
+
       assert.deepEqual(
         [...found].sort(),
         [

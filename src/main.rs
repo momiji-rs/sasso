@@ -204,7 +204,11 @@ fn jobs_from(logical: usize, cpuinfo: Option<&str>) -> usize {
     //     --cpuset-cpus=…   mask 0-1,8-9   no quota            answers 4
     //
     // The middle row is the one that matters: the mask is the whole machine,
-    // so the 2 can only have come from the quota. Nothing here needs to read
+    // so the 2 can only have come from the quota. It is not an accident of
+    // this machine either — `std::sys::thread::available_parallelism` reads
+    // `cgroups::quota()` and returns `count.min(quota)`, and that module's own
+    // header lists what it skips ("cgroup v2 in non-standard mountpoints"),
+    // which is the same line `_jobs.mjs` draws. Nothing here needs to read
     // either file. The npm CLI is not so lucky: `availableParallelism()` has
     // only accounted for the quota since Node 22, and below 18.14 there is no
     // such API at all, so `_jobs.mjs` reads the mask and the quota itself.
