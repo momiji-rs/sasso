@@ -1389,36 +1389,66 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     const pkgDir = new URL("./npm/", import.meta.url);
     const pkg = JSON.parse(readFileSync(new URL("package.json", pkgDir), "utf8"));
     const shipped = new Set(pkg.files);
-    const entries = ["cli.mjs", "sasso.mjs", "sasso.speed.mjs", "native.mjs"];
+
+    // The roots come from the manifest rather than a list kept by hand, so a
+    // new export subpath is covered the day it is added: every `./…` the
+    // manifest points at is a file the installed package must contain.
+    const roots = new Set();
+    const collect = (node) => {
+      if (typeof node === "string") {
+        if (node.startsWith("./")) roots.add(node.slice(2));
+      } else if (node && typeof node === "object") {
+        for (const value of Object.values(node)) collect(value);
+      }
+    };
+    for (const field of ["bin", "main", "types", "exports"]) collect(pkg[field]);
+    assert.ok(roots.has("cli.mjs") && roots.size >= 5, `packaging: found only ${[...roots]}`);
+
+    // `from "./x"` rather than a whole import statement: an import clause may
+    // span lines, and a matcher that stops at the first newline silently skips
+    // those — which is how `_importer.mjs`, reached only through the multiline
+    // imports in `_loader.mjs` and `native.mjs`, went unchecked here.
+    const statics = /\bfrom\s*["'](\.\/[^"']+)["']/g;
+    const dynamics = /\bimport\(\s*["'](\.\/[^"']+)["']\s*\)/g;
+
     const seen = new Set();
-    const queue = [...entries];
+    const queue = [...roots];
+    let checked = 0;
     while (queue.length) {
       const name = queue.pop();
       if (seen.has(name)) continue;
       seen.add(name);
+      assert.ok(
+        shipped.has(name),
+        `packaging: the package points at ./${name}, which package.json's "files" does not ship`,
+      );
       let text;
       try {
         text = readFileSync(new URL(name, pkgDir), "utf8");
       } catch {
-        continue; // a .wasm or other non-JS entry
+        continue; // a .wasm or .d.ts leaf, nothing to follow
       }
-      for (const m of text.matchAll(/(?:^|\s)(?:import|export)[^;\n]*?from\s+["'](\.\/[^"']+)["']/g)) {
-        const dep = m[1].slice(2);
-        assert.ok(
-          shipped.has(dep),
-          `packaging: ${name} imports ./${dep}, which package.json's "files" does not ship`,
-        );
-        queue.push(dep);
-      }
-      for (const m of text.matchAll(/import\(\s*["'](\.\/[^"']+)["']\s*\)/g)) {
-        const dep = m[1].slice(2);
-        assert.ok(
-          shipped.has(dep),
-          `packaging: ${name} dynamically imports ./${dep}, which package.json's "files" does not ship`,
-        );
-        queue.push(dep);
+      for (const re of [statics, dynamics]) {
+        for (const m of text.matchAll(re)) {
+          // Inside a `.d.ts`, TypeScript resolves a `./x.js` specifier to
+          // `x.d.ts` — following it literally would demand a file that neither
+          // exists nor needs to, while skipping the declaration graph entirely.
+          const dep = name.endsWith(".d.ts")
+            ? m[1].slice(2).replace(/\.js$/, ".d.ts")
+            : m[1].slice(2);
+          assert.ok(
+            shipped.has(dep),
+            `packaging: ${name} imports ./${dep}, which package.json's "files" does not ship`,
+          );
+          queue.push(dep);
+          checked += 1;
+        }
       }
     }
+    // The traversal is only a guard if it actually reached the module graph;
+    // a matcher that quietly matched nothing would pass every assertion above.
+    assert.ok(seen.has("_importer.mjs"), "packaging: the walk never reached _importer.mjs");
+    assert.ok(checked >= 10, `packaging: followed only ${checked} imports, the walk is not working`);
   }
 
   // The pool's default size is PHYSICAL cores, not SMT threads: a compile is
