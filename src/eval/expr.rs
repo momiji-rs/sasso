@@ -763,7 +763,19 @@ impl<'a> Evaluator<'a> {
                 // nothing to deprecate for being one. (What dart raises there
                 // instead is `color-module-compat`, which sasso does not
                 // implement yet — #124, a separate gap this does not touch.)
+                // ...and only when the built-in is what runs. A registered
+                // host function of the same name takes precedence in sasso
+                // (see `Options::with_function`), so the call is that
+                // callback, not a CSS filter — and the contract there is that
+                // a deprecated global's NAME warns whether or not one is
+                // registered. Suppressing it here would have made
+                // `with_function("grayscale($x)", …)` quietly exempt.
+                let host_override = !self.options.functions.is_empty() && {
+                    let norm = crate::host_fn::normalize_name(canonical);
+                    self.options.functions.iter().any(|f| f.name == norm)
+                };
                 let css_filter_call = via_star.is_none()
+                    && !host_override
                     && crate::builtins::is_plain_css_filter_call(canonical, &pos_args, &named);
                 if !ms_alpha_filter && !css_filter_call {
                     self.emit_call_deprecations(
