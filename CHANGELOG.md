@@ -11,6 +11,15 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-18
+
+_The release that closes #83. The npm CLI had three reasons to be slower than
+the binary running the same compiler; the last of them was that the addon ran
+it on the system allocator while the binary ran it on a bump arena. On the
+Lichess tree the npm CLI is now 10x dart-sass rather than 8.6x, and its
+remaining gap to the binary is Node start-up rather than compile work. `-j`
+also stops counting SMT threads as cores, on both front ends._
+
 ### Added
 
 - **A NUR entry point, `nix/nur.nix`** (#82). nixpkgs declined the CLI for the
@@ -64,6 +73,30 @@ Conformance is tracked separately as a ratchet against the official
   not the number of cores *inside* an affinity mask: SMT only stops paying once
   enough cores are in play, and restricted to two cores, using both SMT
   siblings measured 50% faster.
+
+### Fixed
+
+- **The bump arena no longer leaks a reservation per thread** (#107). A
+  thread's region was never given back — on native that is 2 GiB of address
+  space each — so an embedder whose threads are short-lived accumulated one per
+  thread that had ever compiled. The binary never noticed, with its fixed pool
+  for the process lifetime; the napi addon spawns a thread per async compile,
+  and grew the process by a full reservation per compile until Linux refused
+  the next `fork()` with `ENOMEM` and the host could not spawn a child at all.
+  Regions are pooled now and leased for the length of one compile.
+
+  Two consequences beyond the leak. `MAX_ARENAS` caps *concurrent compiles*
+  rather than threads that have ever run: the registry handed slots out from a
+  counter that only went up, so past 128 threads a slot claim failed
+  permanently and every later compile on that thread ran on the system
+  allocator — silently, at the speed the arena exists to avoid. And
+  `in_any_arena` reads the published `base` with `Acquire`; relaxed paired with
+  a `Release` store is no pairing at all, and a weakly ordered target (aarch64,
+  which this ships on) could see a fresh `base` beside the `end` that preceded
+  it and hand a live arena pointer to `System` to free.
+
+  Only embedders that install `ScopedAlloc` are affected, which today means the
+  binary, the wasm module and — as of this release — the native addon.
 
 ## [0.15.0] - 2026-09-17
 
@@ -1591,7 +1624,8 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/momiji-rs/sasso/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/momiji-rs/sasso/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/momiji-rs/sasso/compare/v0.10.0...v0.14.0
 [0.10.0]: https://github.com/momiji-rs/sasso/compare/v0.9.1...v0.10.0
