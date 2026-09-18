@@ -427,8 +427,10 @@ Options:
                                      (default: on).
   -h, --help                         Print this help.
       --version                      Print the version.
-      --engine                       Print which compiler engine this install
-                                     uses (native addon or wasm) and why.
+      --engine                       Print what this install compiles with and
+                                     why: a sasso binary it hands the command
+                                     line to, or its own engine (native addon
+                                     or wasm).
 
 An <in>:<out> pair may name DIRECTORIES: every .scss/.sass/.css file under
 <in> that is not a partial compiles to the matching path under <out>.
