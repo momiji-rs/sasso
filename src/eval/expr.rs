@@ -29,11 +29,33 @@ impl InterpBounds {
     }
 }
 
+/// How many bytes one `#{…}` is assumed to contribute when a template's buffer
+/// is sized: what a serialized value usually is — a short identifier, a number
+/// with a unit, a hex color. Only an estimate; the buffer still grows if an
+/// interpolation turns out longer.
+const INTERP_ALLOWANCE: usize = 8;
+
+/// Room for a template's output: every literal byte, plus an allowance for each
+/// interpolation. A template is built by pushing onto a `String`, and one that
+/// starts empty takes the allocator's minimum block and then regrows — twice for
+/// a selector or a value list of any length. Sizing it up front trades a walk
+/// over a handful of pieces for those copies, on a path that runs for every
+/// selector, property name and interpolated value in the sheet.
+fn template_capacity(pieces: &[TplPiece]) -> usize {
+    pieces
+        .iter()
+        .map(|piece| match piece {
+            TplPiece::Lit(t) => t.len(),
+            TplPiece::Interp(_) => INTERP_ALLOWANCE,
+        })
+        .sum()
+}
+
 impl<'a> Evaluator<'a> {
     // ---- templates & expressions ------------------------------------
 
     pub(super) fn eval_template(&mut self, pieces: &[TplPiece]) -> Result<String, Error> {
-        let mut s = String::new();
+        let mut s = String::with_capacity(template_capacity(pieces));
         for piece in pieces {
             match piece {
                 TplPiece::Lit(t) => s.push_str(t),
@@ -75,10 +97,21 @@ impl<'a> Evaluator<'a> {
         if let [TplPiece::Lit(t)] = pieces {
             return Ok((Cow::Borrowed(t), InterpBounds::None));
         }
-        // Sized up front so the ranges are recorded without a single reallocation:
-        // a generated selector can carry a dozen interpolations.
-        let interps = pieces.iter().filter(|p| matches!(p, TplPiece::Interp(_))).count();
-        let mut s = String::new();
+        // One walk sizes both buffers up front, so neither the text nor the
+        // ranges reallocate: a generated selector can carry a dozen
+        // interpolations. See [`template_capacity`] for the text estimate.
+        let mut interps = 0usize;
+        let mut capacity = 0usize;
+        for piece in pieces {
+            match piece {
+                TplPiece::Lit(t) => capacity += t.len(),
+                TplPiece::Interp(_) => {
+                    interps += 1;
+                    capacity += INTERP_ALLOWANCE;
+                }
+            }
+        }
+        let mut s = String::with_capacity(capacity);
         let mut chars = 0usize;
         let mut bounds = if interps > 1 {
             InterpBounds::Many(Vec::with_capacity(interps))
