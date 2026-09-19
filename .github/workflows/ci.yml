@@ -33,6 +33,39 @@ jobs:
       - name: localtime — the whole tz database vs python zoneinfo
         run: cargo test --release --bin sasso -- --ignored --nocapture
 
+  # We ship Windows binaries and carry Windows-only code paths, and until
+  # now no job had ever compiled one (#85). `src/localtime` made that
+  # concrete: its `#[cfg(not(unix))]` arm had never been type-checked, let
+  # alone run. This job is deliberately the WHOLE suite rather than a
+  # smoke test — a narrower one would answer only the question we already
+  # knew to ask.
+  windows:
+    name: windows (build + test)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release
+      - name: test
+        run: cargo test --release
+      # The one behaviour that differs by platform rather than merely
+      # needing to work on it: with no tz database to read, the compile
+      # line keeps its text and drops its timestamp.
+      - name: --update narrates without a timestamp
+        shell: pwsh
+        run: |
+          Set-Content -Path one.scss -Value 'a {b: c}'
+          $out = & ./target/release/sasso.exe --no-source-map --update one.scss:one.css
+          Write-Host "stdout: $out"
+          if ($out -notmatch 'Compiled one\.scss to one\.css\.$') {
+            throw "expected dart's wording, got: $out"
+          }
+          if ($out -match '^\[') {
+            throw "no tz database is readable here, so there should be no stamp: $out"
+          }
+
   parity:
     name: dart-sass parity
     runs-on: ubuntu-latest
