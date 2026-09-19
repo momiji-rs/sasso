@@ -13,10 +13,13 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [0.18.0] - 2026-09-18
 
-_One fix: sasso told authors to rewrite CSS filters as Sass colour functions.
-`filter: grayscale(1)` is a CSS filter, not a deprecated global built-in, and
-sasso compiled it correctly while deprecating it anyway — 20 spurious warnings
-on Lichess's tree, where it now reports exactly what dart-sass reports._
+_A smaller, slightly faster binary, and one fix. `panic = "abort"` and `strip`
+take 24% off the shipped binary and ~1.2% off every compile, with byte-identical
+output. And sasso no longer tells authors to rewrite CSS filters as Sass colour
+functions: `filter: grayscale(1)` is a CSS filter, not a deprecated global
+built-in, and sasso compiled it correctly while deprecating it anyway — 20
+spurious warnings on Lichess's tree, where it now reports exactly what dart-sass
+reports._
 
 ### Fixed
 
