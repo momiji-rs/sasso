@@ -9,6 +9,10 @@
       "bytes": 758,
       "sha256": "59840c35d807da91"
     },
+    "selector_lists.scss": {
+      "bytes": 25046,
+      "sha256": "a82e26fd0323bb6b"
+    },
     "use_graph/_mixins.scss": {
       "bytes": 559,
       "sha256": "8e096421c270b512"
@@ -183,5 +187,5 @@
     }
   },
   "generator": "bench/scripts/gen_gate_corpora.py",
-  "generatorVersion": 1
+  "generatorVersion": 2
 }

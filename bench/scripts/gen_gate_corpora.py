@@ -19,6 +19,11 @@ in CI:
   gate/use_graph/**              a multi-file `@use` graph, plus a second entry
                                  that reaches every module through two paths
                                  (the redundant-`@use` case).
+  gate/selector_lists.scss       multi-line comma selector lists, which is the
+                                 ONLY way to reach `eval_style_rule`'s
+                                 `share_current == false` branch -- the one
+                                 every other corpus, `large.scss` included,
+                                 leaves at zero.
 
 Deterministic by construction -- no PRNG, no clock, no environment -- so
 re-running rewrites byte-identical files. The output is checked into git, like
@@ -42,7 +47,7 @@ import json
 import sys
 from pathlib import Path
 
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = REPO_ROOT / "bench" / "corpus" / "gate"
 
@@ -265,6 +270,81 @@ USE_SECTIONS = 6
 USE_COMPONENTS_PER_SECTION = 5
 
 
+SELECTOR_LIST_GROUPS = 120
+SELECTOR_LIST_WIDTH = 4
+
+
+def selector_lists() -> str:
+    """Multi-line comma selector lists, and a few selectors dart-sass drops.
+
+    This corpus exists because of a gap, not because of a lever. `share_current`
+    in `eval_style_rule` is the fast path that skips the per-complex rebuild,
+    and it is false whenever the rule carries per-complex line-break flags --
+    which is to say whenever the author wrote a comma selector list across
+    lines, the normal shape of hand-written CSS. Every other corpus here, and
+    `large.scss`, has exactly ZERO of those, so the slow branch was never
+    benchmarked: work added to it was not merely unmeasured but unmeasurable.
+
+    Three properties, each for a reason:
+
+    * **The lists span lines.** A single-line `a, b {` does not set the flags;
+      the newline is what does.
+    * **The lists are nested.** `current_linebreaks` is handed to every
+      descendant rule, so a nested body inherits the branch from its parent --
+      the poisoning chain, and the reason one list at the top of a file is
+      enough to move a whole sheet onto it.
+    * **A few of them are bogus.** A repeated combinator run (`> +`) is dropped
+      from the output with a `bogus-combinators` warning, which is the only
+      shape that reaches the span-mapping added for #119/#120. Kept rare, the
+      way it is in real sheets, so the corpus measures the common branch and
+      merely visits the rare one.
+    """
+    out = [HEADER]
+
+    for g in range(1, SELECTOR_LIST_GROUPS + 1):
+        names = ",\n".join(
+            "  .grp-%d-%d .item" % (g, k) for k in range(1, SELECTOR_LIST_WIDTH + 1)
+        )
+        out.append(
+            """%s {
+  color: #%02x%02x%02x;
+  margin-block: %dpx;
+
+  .nested-a,
+  .nested-b {
+    padding-inline: %dpx;
+    &:hover { opacity: 0.%d; }
+  }
+}
+"""
+            % (
+                names.lstrip(),
+                (g * 7) % 256,
+                (g * 13) % 256,
+                (g * 29) % 256,
+                g % 12,
+                g % 9,
+                g % 9 + 1,
+            )
+        )
+
+    # The dropped shape, at roughly the density a real sheet carries it.
+    for g in range(1, SELECTOR_LIST_GROUPS // 20 + 1):
+        out.append(
+            """.bogus-%d >  + .tail,
+.bogus-%d >  + .tail .inner {
+  border-width: %dpx;
+}
+"""
+            % (g, g, g % 4 + 1)
+        )
+
+    # `corpora_still_compile` asserts on this: a corpus that silently stopped
+    # compiling would otherwise be timed as a fast failure.
+    out.append("%s { --generated: true; }\n" % MARKER)
+    return "".join(out)
+
+
 def use_graph() -> dict[str, str]:
     """A multi-file `@use` graph, and the same graph reached twice over.
 
@@ -404,6 +484,7 @@ def build() -> dict[str, str]:
     files = {
         "legacy_deprecations.scss": legacy_deprecations(),
         "extend_heavy.scss": extend_heavy(),
+        "selector_lists.scss": selector_lists(),
     }
     for rel, text in use_graph().items():
         files["use_graph/" + rel] = text
