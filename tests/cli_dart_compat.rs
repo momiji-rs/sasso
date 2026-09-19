@@ -1657,12 +1657,43 @@ fn stack_frames_show_loaded_files_relative_to_the_working_directory() {
 /// which relativises to an absolute path and hides whatever the test meant to
 /// assert. Windows' verbatim prefix is dropped: `canonicalize` adds one,
 /// nothing a user types has it, and it is not part of a root's identity.
+///
+/// `\\?\UNC\server\share` is unwrapped to `\\server\share` rather than cut at
+/// the prefix, which would leave a RELATIVE `UNC\server\share` — the same
+/// silent nothing-is-asserted failure this helper exists to prevent, for a
+/// scratch directory that lives on a share.
 fn resolved(dir: &Path) -> PathBuf {
     let real = std::fs::canonicalize(dir).expect("canonicalize scratch dir");
-    match real.to_string_lossy().strip_prefix(r"\\?\") {
-        Some(bare) => PathBuf::from(bare),
-        None => real,
+    let unwrapped = without_verbatim_prefix(&real.to_string_lossy());
+    unwrapped.map_or(real, PathBuf::from)
+}
+
+/// `\\?\C:\x` -> `C:\x`, `\\?\UNC\server\share\x` -> `\\server\share\x`, and
+/// `None` when there is no wrapper to remove — which is every path on a POSIX
+/// host, where the original is kept byte for byte.
+fn without_verbatim_prefix(p: &str) -> Option<String> {
+    match p.strip_prefix(r"\\?\UNC\") {
+        Some(share) => Some(format!(r"\\{share}")),
+        None => p.strip_prefix(r"\\?\").map(str::to_string),
     }
+}
+
+/// The Windows-only half of [`resolved`], which a POSIX run would never reach:
+/// the UNC form is not a `\\?\` with a usable path behind it, so cutting the
+/// four characters off leaves something relative.
+#[test]
+fn a_verbatim_prefix_unwraps_to_a_path_that_is_still_absolute() {
+    assert_eq!(
+        without_verbatim_prefix(r"\\?\C:\Users\you\scratch").as_deref(),
+        Some(r"C:\Users\you\scratch")
+    );
+    assert_eq!(
+        without_verbatim_prefix(r"\\?\UNC\nas\share\scratch").as_deref(),
+        Some(r"\\nas\share\scratch")
+    );
+    // Nothing to unwrap: the caller keeps what `canonicalize` gave it.
+    assert_eq!(without_verbatim_prefix(r"C:\Users\you\scratch"), None);
+    assert_eq!(without_verbatim_prefix("/private/tmp/scratch"), None);
 }
 
 #[test]
