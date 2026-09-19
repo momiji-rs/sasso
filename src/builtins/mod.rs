@@ -28,9 +28,9 @@ use crate::error::Error;
 use crate::scanner::Pos;
 use crate::value::{Color, Number, SassStr, Value};
 
-// dart-sass `inspect()` serialization, reused by `@error` (the inspected
-// argument keeps quotes; an unbracketed multi-element list is parenthesized).
-pub(crate) use meta::{inspect_element, inspect_value};
+// dart-sass `inspect()` serialization. The one-rule-wider form a diagnostic
+// embeds (`Value::to_inspect_message`) is built on it.
+pub(crate) use meta::inspect_value;
 
 // Color-space conversion, needed by `ModernColor::to_css` for the
 // out-of-range `color-mix(in …, color(xyz …) 100%, black)` fallback.
@@ -651,6 +651,15 @@ pub(crate) fn module_has_member(module: &str, member: &str) -> bool {
     if module == "color" && matches!(member, "hwb" | "whiteness" | "blackness") {
         return true;
     }
+    // The nine adjusters CSS Color 4 removed are members that always FAIL, and
+    // that distinction is what this predicate answers: they are found by
+    // `meta.function-exists`, captured by `meta.get-function`, re-exported by
+    // `@forward "sass:color"`, and — the visible half — SHADOW the global of the
+    // same name under `@use "sass:color" as *`, where dart reports the removal
+    // instead of running the deprecated global. See [`color::removed`].
+    if module == "color" && color::removed::is_member(member) {
+        return true;
+    }
     module_member_to_global(module, member).is_some()
 }
 
@@ -709,6 +718,12 @@ pub(crate) fn call_module(
     // `sass:color` members without a global alias (the comma-form `hwb`, and
     // the deprecated HWB getters `whiteness`/`blackness`).
     if module == "color" {
+        // The removed adjusters go first: they own their names outright on this
+        // module (the surviving implementations of those names are GLOBAL only),
+        // and their message is the whole point of the member existing.
+        if let Some(r) = color::removed::call_module_member(member, pos_args, named, pos) {
+            return r;
+        }
         if let Some(r) = color::call_module_member(member, pos_args, named, pos) {
             return r;
         }

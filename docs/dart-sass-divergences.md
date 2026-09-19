@@ -14,7 +14,6 @@ design work or affect compiled output are tracked as issues
 ([#62](https://github.com/momiji-rs/sasso/issues/62),
 [#63](https://github.com/momiji-rs/sasso/issues/63),
 [#64](https://github.com/momiji-rs/sasso/issues/64),
-[#65](https://github.com/momiji-rs/sasso/issues/65),
 [#66](https://github.com/momiji-rs/sasso/issues/66),
 [#139](https://github.com/momiji-rs/sasso/issues/139)); the rest live here, and
 are fixed as they come up.
@@ -154,39 +153,12 @@ programs; only what it prints differs.
 | `red(#abcdef, 1)` | `Only 1 argument allowed, but 2 were passed.` | the same error, preceded by a `[global-builtin]` deprecation warning |
 | `@mixin m($x )` included with no argument | `Missing argument $x .` — dart takes the name from the parameter's own span text, which swallowed the trailing space | `Missing argument $x.` |
 | `color.grayscale(null)` ([#139](https://github.com/momiji-rs/sasso/issues/139)) | `$color: null is not a color.` | ` is not a color.` — the `$param: ` prefix is missing, and `null` prints as nothing. The same for `true`, a map, and a quoted string; a list additionally needs dart's parenthesized spelling (`$color: (1 2) is not a color.`), which is the row above's root cause too. The prefix alone accounts for 46 byte-mismatching sass-spec cases. Measured 2026-09-18, re-measured 2026-09-19 |
+| a built-in called with a name it has no parameter for — `color.mix(red, blue, $x: 1)`, `string.index("abc", "b", $x: 1)`, `math.max(1, 2, $x: 1)` | `No parameter named $x.` | the name is ignored and the call succeeds. Every built-in family, so a typo'd keyword argument compiles. Measured 2026-09-19 |
+| a built-in argument passed twice — `color.mix(red, blue, 10%, $color1: green)` | `Argument $color1 was passed both by position and by name.` | the positional wins and the call succeeds. For a USER function sasso does reject it, but as `No parameter named $a.` Measured 2026-09-19 |
+| `meta.function-exists("rgb", $module: "m")` where `m` is a user module that forwards nothing | `true` — dart resolves the name in the module's scope and then GLOBALLY, so every global built-in "exists" in every module | `false`. Affects compiled output, not just text; `$module:` on a BUILT-IN module (`"color"`, `"map"`) matches. Measured 2026-09-19 |
 
-The three below are classes rather than single inputs, so each gets its own
+The two below are classes rather than single inputs, so each gets its own
 example.
-
-### The nine removed `sass:color` members ([#65](https://github.com/momiji-rs/sasso/issues/65))
-
-dart names the member and computes a replacement from the call's own arguments;
-sasso says only that the function is undefined:
-
-```scss
-@use "sass:color";
-.a { b: color.opacify(rgba(1, 2, 3, 0.5), 0.1); }
-```
-
-```
-dart-sass 1.104.1:
-Error: The function opacify() isn't in the sass:color module.
-
-Recommendation: color.adjust(rgba(1, 2, 3, 0.5), $alpha: 0.1)
-
-More info: https://sass-lang.com/documentation/functions/color#opacify
-
-sasso:
-Error: Undefined function.
-```
-
-The recommendation differs per member and per call, so this one example does
-not stand in for the rest: `opacify`/`fade-in` suggest `$alpha: <amount>`,
-`transparentize`/`fade-out` `$alpha: -<amount>`, `lighten`/`darken`
-`$lightness: ±<amount>`, `saturate`/`desaturate` `$saturation: ±<amount>`, and
-`adjust-hue` `$hue: <degrees>`. [#65](https://github.com/momiji-rs/sasso/issues/65)
-lists each with the exact shape, including the details that are easy to get
-wrong (the negation is textual, and no unit conversion happens).
 
 ### Two-span messages ([#66](https://github.com/momiji-rs/sasso/issues/66))
 
@@ -235,7 +207,9 @@ Error: Missing argument $amount.
 sasso: the first frame only.
 ```
 
-The message text itself matches (#56, #58).
+The message text itself matches (#56, #58); re-measured 2026-09-19, when
+`lighten` became a real `sass:color` member that reports its arity (#65) rather
+than an undefined function.
 
 ### A multi-line span in a CRLF `.sass` file is one column long
 

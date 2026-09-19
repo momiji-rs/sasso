@@ -44,7 +44,7 @@ pub(super) fn fn_rgb(
         // the channels passthrough below, which re-serializes the call.
         if !is_var(color) && !is_var(alpha) {
             return Err(Error::at(
-                format!("$color: {} is not a color.", color_arg_css(color)),
+                format!("$color: {} is not a color.", color.to_inspect_message()),
                 pos,
             ));
         }
@@ -134,20 +134,6 @@ fn legacy_color_alpha<'a>(
     let color = pos_args.first().or_else(|| by_name("color"))?;
     let alpha = pos_args.get(1).or_else(|| by_name("alpha"))?;
     Some((color, alpha))
-}
-
-/// Serialize a `$color` argument for the legacy-overload "is not a color"
-/// error, matching dart's inspect form: an unbracketed multi-element list is
-/// parenthesized (`(1 2 3)`, `(1, 2, 3)`); every other value (a bracketed
-/// list, a single-element list, a map, a quoted string, a number) uses its
-/// plain inspect spelling.
-fn color_arg_css(v: &Value) -> String {
-    match v {
-        Value::List(l) if !l.bracketed && l.items.len() >= 2 => {
-            format!("({})", crate::builtins::inspect_value(v))
-        }
-        _ => crate::builtins::inspect_value(v),
-    }
 }
 
 /// Read an rgb channel value (`0..=255`): a `%` is taken as a fraction of

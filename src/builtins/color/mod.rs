@@ -12,6 +12,7 @@ pub(crate) mod deprecate;
 pub(crate) mod legacy;
 mod math;
 mod modern;
+pub(crate) mod removed;
 
 // Shared imports. These are private to `color`, but Rust makes them visible to
 // the child submodules, which pull them in with `use super::*;`.
