@@ -32,6 +32,9 @@ import { constants as osConstants } from "node:os";
 import { defaultJobs } from "./_jobs.mjs";
 // The accepted deprecation ids, shared with the JS API so there is one copy.
 import { DEPRECATION_IDS } from "./_deprecations.mjs";
+import { triggersRecompile } from "./_watchfilter.mjs";
+import { coalesce } from "./_coalesce.mjs";
+import { makeProbe } from "./_probe.mjs";
 // The prebuilt-addon rules, shared with native.mjs: which engine this platform
 // is SUPPOSED to run decides whether a wasm fallback is news (see `loadEngine`).
 import { nativePackage, platformKey } from "./_addon.mjs";
@@ -1210,25 +1213,160 @@ function isFresh(output, input, deps) {
 function runWatch(input, output, common, opts) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
   let watchers = [];
-  let timer = null;
-
-  const rewatch = (loadedUrls) => {
-    for (const w of watchers) w.close();
-    watchers = [];
-    const files = new Set([resolve(input)]);
-    for (const u of loadedUrls || []) {
+  // The last set of files a compile actually loaded, seeded with the entry.
+  // Kept across a FAILED compile: a failure has no `loadedUrls`, and the
+  // first version of this narrowed the set to the entry alone when one
+  // happened. The directory watcher stayed in place, but the filename
+  // filter below no longer recognised the dependency, so fixing the file
+  // you had just broken did nothing — measured, and dart recovers.
+  let known = new Set([pathKey(input)]);
+  // While a compile is failing, anything in a watched directory may be the
+  // fix: the file you broke, or a file that was missing and has just been
+  // created. Filtering by `known` cannot see the second of those.
+  let failing = false;
+  // Except our own output, which lands in a watched directory and would
+  // otherwise retrigger the compile that wrote it, forever.
+  // `pathKey`, not `resolve`: it lowercases on Windows, where `SRC/a.scss`
+  // and `src/a.scss` are one file. Comparing raw `resolve()` strings meant
+  // a differently-cased spelling missed `ours`, and while `failing` the
+  // output's own removal could then retrigger the watch.
+  const ours = new Set([pathKey(output), `${pathKey(output)}.map`]);
+  // Load paths are watched whether or not anything has been loaded from
+  // them, because the interesting case is a file that is NOT there yet:
+  // `@use "viaload"` fails, `known` holds only the entry, and the file
+  // created later in `inc/` is in a directory nobody is watching. Widening
+  // the filter cannot help — there is no watcher on that directory at all.
+  // dart watches load paths too (measured: it sees this, we did not).
+  const loadPathDirs = (common.loadPaths || []).map((d) => resolve(d));
+  const aliasesASource = () => {
+    const dest = pathKey(output);
+    return dest === pathKey(input) || known.has(dest);
+  };
+  // One per absent load path, keyed so re-arming replaces rather than adds
+  // — see `_probe.mjs` for what happened when it did not.
+  const probes = makeProbe({
+    watch,
+    exists: existsSync,
+    dirname,
+    onAppear: () => schedule(),
+  });
+  // Snapshots for events that arrive with no filename — and NOTHING else
+  // reads them, so they are not taken until such an event is actually
+  // seen. macOS and Linux always name their events, so on the platforms
+  // most people develop on these stay empty forever.
+  //
+  // Taking them eagerly cost what a survey of a directory costs, on every
+  // compile. Measured against the number of files on a load path:
+  //
+  //     10 files -> 13.7ms      2000 files -> 22.7ms
+  //    500 files -> 16.2ms      5000 files -> 37.6ms
+  //
+  // which is most of the latency this whole change exists to remove.
+  let sawNameless = false;
+  let stamps = new Map();
+  // And the same for everything else in the watched directories, minus
+  // our own output: what tells a user's fix apart from the removal this
+  // watch performed itself, when the platform does not say which file
+  // moved. Listing is cheap and happens only on nameless events, which
+  // macOS and Linux never send.
+  let neighbours = new Map();
+  const surveyNeighbours = (dirs) => {
+    const seen = new Map();
+    for (const d of dirs) {
+      let names = [];
       try {
-        files.add(fileURLToPath(u));
+        names = readdirSync(d);
       } catch {
-        // non-file URL (a virtual importer) — nothing to watch
+        continue; // vanished; the next event will notice
+      }
+      for (const n of names) {
+        const full = pathKey(join(d, n));
+        if (ours.has(full)) continue;
+        seen.set(full, mtime(full));
       }
     }
-    const dirs = new Set([...files].map((f) => dirname(f)));
+    return seen;
+  };
+  const anythingElseChanged = () => {
+    const now = surveyNeighbours(new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]));
+    if (now.size !== neighbours.size) return true;
+    for (const [f, m] of now) if (neighbours.get(f) !== m) return true;
+    return false;
+  };
+  const watchedDirs = () => new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]);
+  const takeSnapshots = () => {
+    stamps = new Map([...known].map((f) => [f, mtime(f)]));
+    neighbours = surveyNeighbours(watchedDirs());
+  };
+  const mtime = (f) => {
+    try {
+      return statSync(f).mtimeMs;
+    } catch {
+      return null;
+    }
+  };
+
+  /** Re-arm the watchers. `loadedUrls` omitted = keep the last known set. */
+  const rewatch = (loadedUrls) => {
+    if (loadedUrls) {
+      const files = new Set([pathKey(input)]);
+      for (const u of loadedUrls) {
+        try {
+          files.add(pathKey(fileURLToPath(u)));
+        } catch {
+          // non-file URL (a virtual importer) — nothing to watch
+        }
+      }
+      known = files;
+    }
+    if (sawNameless) takeSnapshots();
+    for (const w of watchers) w.close();
+    watchers = [];
+    probes.closeAll();
+
+    // A load path that does not exist YET cannot be watched — `fs.watch`
+    // throws and the directory is dropped, so `-I generated` before
+    // `generated/` exists means the file created there later produces no
+    // event anywhere and the watch never recovers. dart handles this
+    // (measured: it compiles, we did not), and its own suite has a case
+    // named "on a load path that was created".
+    //
+    // So watch the nearest ancestor that DOES exist and wait for the
+    // directory to appear. If what appears is only the next link in the
+    // chain — `-I a/b/c` with only `a` there — the probe re-arms deeper
+    // rather than giving up, which is why this is a function and not a
+    // single `watch`.
+    const dirs = new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]);
+    for (const lp of loadPathDirs) {
+      if (!existsSync(lp)) probes.arm(lp);
+    }
     for (const d of dirs) {
       try {
         watchers.push(
           watch(d, (_event, fn) => {
-            if (!fn || files.has(join(d, fn))) schedule();
+            // The first nameless event cannot be judged — there is no
+            // snapshot to compare against, because taking one before
+            // ever seeing such an event is what made every compile pay
+            // for a directory survey. Compile once, start snapshotting,
+            // and every nameless event after this one is answerable.
+            if (!fn && !sawNameless) {
+              sawNameless = true;
+              takeSnapshots();
+              schedule();
+              return;
+            }
+            if (
+              triggersRecompile({
+                path: fn ? pathKey(join(d, fn)) : null,
+                known,
+                ours,
+                failing,
+                anyKnownMoved: () => [...known].some((f) => stamps.get(f) !== mtime(f)),
+                anythingElseChanged,
+              })
+            ) {
+              schedule();
+            }
           }),
         );
       } catch {
@@ -1237,32 +1375,93 @@ function runWatch(input, output, common, opts) {
     }
   };
 
-  const recompile = () => {
+  /**
+   * Compile once and emit. Returns whether it succeeded.
+   *
+   * `provisional` marks the speculative compile at the head of a burst
+   * (see `schedule`): a failure there is not reported and removes
+   * nothing, because the likeliest cause is a file still being written
+   * rather than anything the user did wrong. The catch-up compile that
+   * follows is never provisional, so an error that is real still reaches
+   * the terminal — one window later.
+   */
+  const recompile = (provisional) => {
     try {
       const result = compile(input, common);
       // Watch before emitting: once the output file is visible, dependency
       // watchers are guaranteed live (a change saved right after the output
       // appears must not fall between emit and watcher registration).
       rewatch(result.loadedUrls);
+      // Never write over a file this compile READ. `sasso a.scss a.scss`
+      // and `sasso main.scss _v.scss` both replace a source with its own
+      // CSS — measured, and dart does that too for a one-shot compile, so
+      // it is not ours to change there. Under `--watch` dart declines:
+      // the transcript is the banner and nothing else, and the source is
+      // untouched. We compiled and destroyed it, once at startup and
+      // again on every save.
+      //
+      // Silent, because dart is silent. A watch that overwrites your
+      // stylesheet every time you save it is the one outcome worth
+      // ruling out even at the cost of saying nothing.
+      if (aliasesASource()) {
+        failing = false;
+        return true;
+      }
       const writeError = emit(result, output, common.sourceMap, opts);
       if (writeError) process.stderr.write(`${writeError}\n`);
       else if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
+      failing = false;
     } catch (e) {
+      if (provisional) return false;
       const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(msg.replace(/\n?$/, "\n"));
-      const removeError = discardStaleOutput(output, opts);
-      if (removeError) process.stderr.write(`${removeError}\n`);
-      // keep watching at least the entry so a fix re-triggers a compile
-      rewatch([pathToFileURL(resolve(input))]);
+      // Not when the destination is a source. The success path already
+      // refuses to WRITE over one; deleting it here would be the same
+      // mistake with a worse outcome — and it is only unreachable today
+      // because an aliased watch never recompiles, which is one filter
+      // change away from being false.
+      if (!aliasesASource()) {
+        const removeError = discardStaleOutput(output, opts);
+        if (removeError) process.stderr.write(`${removeError}\n`);
+      }
+      // Keep the set we already had — a failure reports no `loadedUrls`,
+      // and throwing away what we knew is what broke recovery — and accept
+      // anything in those directories until a compile succeeds again.
+      failing = true;
+      rewatch();
+      return false;
     }
+    return true;
   };
 
-  const schedule = () => {
-    clearTimeout(timer);
-    timer = setTimeout(recompile, 50);
-  };
+  /**
+   * Compile on the FIRST event of a burst, not 50 ms after the last one.
+   *
+   * The window is still 50 ms and still coalesces — it just no longer sits
+   * in front of the common case, which is one save with nothing after it.
+   * Median edit-to-correct-CSS by `bench/scripts/watch_latency.mjs`,
+   * 2026-09-19, all three runs back to back on one machine:
+   *
+   *              trailing 50   this    dart 1.104.1
+   *   atomic          63.7ms  12.4ms    82.4ms
+   *   quick           63.6ms  12.4ms    83.7ms
+   *   slow           113.4ms  63.0ms   107.5ms
+   *
+   * The catch is that a leading edge reads the file the instant it moves,
+   * and an editor that saves in place can be caught mid-write. Compiling
+   * then fails, and the first three attempts at this printed a parse error
+   * and deleted the output on EVERY slow save — faster and much worse.
+   *
+   * So the first compile of a burst is PROVISIONAL: a failure is silent,
+   * removes nothing, and forces a catch-up at the end of the window, which
+   * is not provisional and reports whatever it finds. A half-written file
+   * costs one wasted compile; a real error is reported 50 ms later than it
+   * used to be, which nobody can perceive. Zero spurious errors across all
+   * three save styles, where the naive leading edge had 15 out of 15.
+   */
+  const schedule = coalesce({ windowMs: 50, run: recompile });
 
-  recompile();
+  recompile(false);
   // dart's wording, and on stdout beside the compile lines. `--quiet`
   // silences those but NOT this: measured 2026-09-19, `sass --quiet --watch`
   // still prints the banner, which is the only sign the process is alive.

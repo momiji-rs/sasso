@@ -9,7 +9,7 @@
 // asyncify refactors must preserve (docs/HANDOFF_ASYNC_IMPORTER_PERF.md).
 // Run after build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, symlinkSync, rmSync, openSync, closeSync, chmodSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, symlinkSync, renameSync, rmSync, openSync, closeSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -3613,6 +3613,518 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     `cli --watch --quiet: the banner still prints: ${quiet.stdout}`,
   );
   console.log("ok: cli --watch — stdout, dart's banner and stamp, --quiet keeps the banner");
+}
+
+// === the watch event filter, including the branch this platform cannot reach ===
+//
+// `fs.watch` may call back with no filename. macOS and Linux always name
+// their events, so no amount of writing files here reaches that branch —
+// which is exactly why the decision lives in its own pure module and is
+// tested as a table rather than through a subprocess.
+//
+// The case that matters: a nameless event must NOT bypass the self-output
+// check, or the compile that writes out.css triggers the compile that
+// writes out.css.
+{
+  const { triggersRecompile } = await import("./npm/_watchfilter.mjs");
+  const known = new Set(["/p/main.scss", "/p/_v.scss"]);
+  const ours = new Set(["/p/out.css", "/p/out.css.map"]);
+  const ask = (path, { failing = false, moved = false, elseChanged = moved } = {}) =>
+    triggersRecompile({
+      path,
+      known,
+      ours,
+      failing,
+      anyKnownMoved: () => moved,
+      anythingElseChanged: () => elseChanged,
+    });
+
+  // Named events, compiling normally.
+  assert.equal(ask("/p/_v.scss"), true, "filter: a dependency changed");
+  assert.equal(ask("/p/main.scss"), true, "filter: the entry changed");
+  assert.equal(ask("/p/unrelated.txt"), false, "filter: something else in the directory");
+  assert.equal(ask("/p/out.css"), false, "filter: our own output never retriggers");
+  assert.equal(ask("/p/out.css.map"), false, "filter: nor its source map");
+
+  // Named events while the last compile failed: the fix may be a file
+  // that did not exist when `known` was taken.
+  assert.equal(ask("/p/_new.scss", { failing: true }), true, "filter: any file may be the fix");
+  assert.equal(ask("/p/out.css", { failing: true }), false, "filter: except still not ours");
+
+  // Nameless events — the branch no test on this platform can provoke.
+  assert.equal(ask(null, { moved: false }), false, "filter: nameless and nothing moved — do not loop");
+  assert.equal(ask(null, { moved: true }), true, "filter: nameless but a dependency moved");
+  assert.equal(
+    ask(null, { failing: true, elseChanged: true }),
+    true,
+    "filter: nameless while failing, and a neighbour moved — that may be the fix",
+  );
+  // The one that loops: the error path DELETES the output, and on a
+  // platform reporting that removal without a filename, `failing` alone
+  // would take it for the user's fix — recompile, fail, delete, repeat.
+  assert.equal(
+    ask(null, { failing: true, elseChanged: false }),
+    false,
+    "filter: nameless while failing with nothing but ours changed — do not chase our own removal",
+  );
+
+  console.log("ok: watch event filter — named, nameless, ours, and failing");
+}
+
+// === waiting for a directory that does not exist yet ===
+//
+// The invariant is one open handle per target however many times the
+// probe re-arms. Breaking it is not a slow leak: each new watcher also
+// sees the events that spawned it, so twenty unrelated writes in the
+// ancestor directory produced `EMFILE: too many open files, watch`. No
+// --watch test provokes that without becoming a stress test, and a
+// stress test that passes at nineteen writes says nothing.
+{
+  const { makeProbe } = await import("./npm/_probe.mjs");
+
+  /** A filesystem the test decides the contents of. */
+  const fake = (present) => {
+    const handles = [];
+    const watchers = new Map(); // dir -> callbacks
+    const watch = (dir, cb) => {
+      const h = { dir, cb, closed: false, close: () => (h.closed = true) };
+      handles.push(h);
+      const list = watchers.get(dir) ?? [];
+      list.push(h);
+      watchers.set(dir, list);
+      return h;
+    };
+    return {
+      handles,
+      open: () => handles.filter((h) => !h.closed).length,
+      fire: (dir) => (watchers.get(dir) ?? []).filter((h) => !h.closed).forEach((h) => h.cb()),
+      watch,
+      exists: (p) => present.has(p),
+      dirname: (p) => p.slice(0, p.lastIndexOf("/")) || "/",
+    };
+  };
+
+  // The ancestor is busy and the target never appears.
+  {
+    const present = new Set(["/", "/p"]);
+    const appeared = [];
+    const fs = fake(present);
+    const probe = makeProbe({ ...fs, onAppear: (t) => appeared.push(t) });
+    probe.arm("/p/a/b/generated");
+    assert.equal(probe.size, 1, "probe: one handle to start");
+    for (let i = 0; i < 20; i++) fs.fire("/p");
+    assert.equal(probe.size, 1, `probe: still one handle after 20 events (had ${probe.size})`);
+    assert.equal(fs.open(), 1, `probe: and only one is left open (had ${fs.open()})`);
+    assert.deepEqual(appeared, [], "probe: the target never appeared, so nothing fired");
+  }
+
+  // The chain fills in one level at a time: re-arm deeper each time,
+  // still one handle, and fire only when the target itself exists.
+  {
+    const present = new Set(["/", "/p"]);
+    const appeared = [];
+    const fs = fake(present);
+    const probe = makeProbe({ ...fs, onAppear: (t) => appeared.push(t) });
+    probe.arm("/p/a/b");
+    present.add("/p/a");
+    fs.fire("/p");
+    assert.equal(probe.size, 1, "probe: one handle after re-arming deeper");
+    assert.deepEqual(appeared, [], "probe: /p/a is not the target");
+    present.add("/p/a/b");
+    fs.fire("/p/a");
+    assert.deepEqual(appeared, ["/p/a/b"], "probe: the target appeared");
+  }
+
+  // closeAll leaves nothing behind — rewatch calls it on every compile.
+  {
+    const fs = fake(new Set(["/", "/p"]));
+    const probe = makeProbe({ ...fs, onAppear: () => {} });
+    probe.arm("/p/x/one");
+    probe.arm("/p/y/two");
+    assert.equal(probe.size, 2, "probe: one per target");
+    probe.closeAll();
+    assert.equal(probe.size, 0, "probe: closeAll forgets them");
+    assert.equal(fs.open(), 0, "probe: and actually closes them");
+  }
+
+  console.log("ok: probe — one handle per target, re-arms deeper, closes cleanly");
+}
+
+// === the coalescing rule, on a fake clock ===
+//
+// How many compiles a burst costs cannot be asserted from a --watch test.
+// Measured on this machine, 8 saves at a given spacing:
+//
+//   10ms apart, WITH coalescing   -> 3 compiles
+//   10ms apart, WITHOUT it        -> 6 or 7
+//   0ms apart, either way         -> 1  (the OS coalesces the events)
+//
+// There is no bound that both catches the regression and survives a
+// loaded CI machine stretching those gaps — the first version of the
+// burst test asserted `< 8` and did not notice coalescing being removed
+// entirely. With a fake clock there is no gap to stretch.
+{
+  const { coalesce } = await import("./npm/_coalesce.mjs");
+
+  /** A clock the test drives by hand. */
+  const clock = () => {
+    const queued = [];
+    const setTimer = (fn) => {
+      queued.push(fn);
+      return queued.length;
+    };
+    return { setTimer, tick: () => queued.splice(0).forEach((fn) => fn()) };
+  };
+
+  // Eight events inside one window: one run at the head, one catch-up.
+  {
+    const { setTimer, tick } = clock();
+    const calls = [];
+    const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), true), setTimer });
+    for (let i = 0; i < 8; i++) on();
+    assert.deepEqual(calls, [true], "coalesce: the head of a burst runs at once, alone");
+    tick();
+    assert.deepEqual(calls, [true, false], "coalesce: one catch-up for the other seven");
+    tick();
+    assert.deepEqual(calls, [true, false], "coalesce: and then it stops");
+  }
+
+  // One event, nothing after it: one run, no catch-up. This is the case
+  // the old trailing debounce made wait 50ms for a window that stayed
+  // empty.
+  {
+    const { setTimer, tick } = clock();
+    const calls = [];
+    const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), true), setTimer });
+    on();
+    tick();
+    tick();
+    assert.deepEqual(calls, [true], "coalesce: a lone save costs exactly one run");
+  }
+
+  // Separate windows are separate bursts.
+  {
+    const { setTimer, tick } = clock();
+    const calls = [];
+    const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), true), setTimer });
+    on();
+    tick();
+    on();
+    tick();
+    assert.deepEqual(calls, [true, true], "coalesce: two lone saves are two heads, not a catch-up");
+  }
+
+  // A PROVISIONAL failure asks for a catch-up even with no further
+  // events — the finishing write usually sends one, but "usually" is not
+  // something the user's output should rest on.
+  {
+    const { setTimer, tick } = clock();
+    const calls = [];
+    const on = coalesce({
+      windowMs: 50,
+      run: (p) => (calls.push(p), calls.length > 1),
+      setTimer,
+    });
+    on();
+    assert.deepEqual(calls, [true], "coalesce: the provisional run happened");
+    tick();
+    assert.deepEqual(calls, [true, false], "coalesce: it failed, so a catch-up follows unasked");
+    tick();
+    assert.deepEqual(calls, [true, false], "coalesce: the catch-up succeeded, so it ends");
+  }
+
+  // An AUTHORITATIVE failure must not ask for another. When it did, the
+  // error was reported, re-run, reported again, forever.
+  {
+    const { setTimer, tick } = clock();
+    const calls = [];
+    const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), false), setTimer });
+    on();
+    tick();
+    tick();
+    tick();
+    assert.deepEqual(
+      calls,
+      [true, false],
+      "coalesce: a persistent error is reported once, not on a loop",
+    );
+  }
+
+  console.log("ok: coalesce — one head per burst, one catch-up, and no loop on a real error");
+}
+
+// === Phase 3c: CLI --watch, what it SURVIVES ===
+//
+// The functional test above proves a recompile happens; the one before
+// this proves what it says. Neither covered what a watch has to live
+// through, and two of these were broken in the shipped CLI:
+//
+//   a compile FAILS, then the dependency is fixed   -> never recovered
+//   a missing dependency is created                 -> never noticed
+//
+// Both for one reason. A failed compile reports no `loadedUrls`, and the
+// error path re-watched `[entry]` alone, so the directory watcher stayed
+// but the filename filter stopped recognising the dependency. You broke a
+// partial, saw the error, fixed it, and nothing happened — with the output
+// file already deleted. dart recovers from both (measured 2026-09-19).
+{
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /** Start a watch in a fresh directory, run `body`, always kill it. */
+  const withWatch = async (setup, body, extra = [], entry = "main.scss") => {
+    const dir = mkdtempSync(join(tmpdir(), "sasso-watchcase-"));
+    setup(dir);
+    const proc = spawn(
+      process.execPath,
+      [cliPath, "--no-source-map", ...extra, "--watch", entry, "out.css"],
+      { cwd: dir, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const css = () => {
+      try {
+        return readFileSync(join(dir, "out.css"), "utf8");
+      } catch {
+        return "";
+      }
+    };
+    const until = async (pred, ms = 20000) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        try {
+          if (pred()) return true;
+        } catch {}
+        await sleep(20);
+      }
+      return false;
+    };
+    try {
+      return await body({ dir, css, until, log: () => log, clear: () => (log = "") });
+    } finally {
+      proc.kill();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  const withDep = (d) => {
+    writeFileSync(join(d, "main.scss"), '@use "v";\n.a { color: v.$c; }\n');
+    writeFileSync(join(d, "_v.scss"), "$c: red;\n");
+  };
+
+  // A burst: the LAST save must win, and it must not cost one compile per
+  // save. Checking only the final colour — which is all the first version
+  // of this did — would pass at eight compiles, leaving the coalescing
+  // this whole change rests on unguarded.
+  //
+  // Measured on this machine, 8 saves at a given spacing:
+  //
+  //             with coalescing   without it
+  //   0ms apart       1               1     (the OS coalesces the events)
+  //   5ms apart       2               4
+  //  10ms apart       3             6 or 7
+  //  25ms apart       5               6
+  //
+  // Which is why the REAL guard is the fake-clock table against
+  // `_coalesce.mjs` above, not this: there is no bound here that both
+  // catches the regression and survives a loaded CI machine stretching
+  // those gaps. `< 8` is a smoke check that the rule is wired into the
+  // watch at all — removing coalescing entirely yields 6 or 7 and slips
+  // past it, and the unit test is what notices.
+  await withWatch(withDep, async ({ dir, css, until, log, clear }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(300);
+    clear();
+    for (let i = 1; i <= 8; i++) {
+      writeFileSync(join(dir, "_v.scss"), `$c: #0000${String(i).padStart(2, "0")};\n`);
+      await sleep(10);
+    }
+    assert.ok(await until(() => css().includes("000008")), "watch: a burst settles on the last save");
+    await sleep(400); // let any trailing catch-up land before counting
+    const compiles = (log().match(/Compiled/g) || []).length;
+    assert.ok(compiles >= 1, "watch: the burst compiled at all");
+    assert.ok(
+      compiles < 8,
+      `watch: a burst of 8 saves must coalesce, not compile once each (saw ${compiles})`,
+    );
+  });
+
+  // An atomic save replaces the inode, which is why the watcher watches
+  // DIRECTORIES: a file watch would follow the file that was renamed away.
+  await withWatch(withDep, async ({ dir, css, until }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(300);
+    writeFileSync(join(dir, ".v.tmp"), "$c: blue;\n");
+    renameSync(join(dir, ".v.tmp"), join(dir, "_v.scss"));
+    assert.ok(await until(() => css().includes("blue")), "watch: an atomic save is seen");
+  });
+
+  // Break the dependency, then fix it. This is the one that was broken.
+  await withWatch(withDep, async ({ dir, css, until, log, clear }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(300);
+    clear();
+    writeFileSync(join(dir, "_v.scss"), "$c: ;\n");
+    assert.ok(await until(() => /Error/i.test(log())), "watch: a broken dependency is reported");
+    await sleep(300);
+    writeFileSync(join(dir, "_v.scss"), "$c: teal;\n");
+    assert.ok(
+      await until(() => css().includes("teal")),
+      "watch: fixing the dependency you broke brings the output back",
+    );
+  });
+
+  // A dependency that does not exist yet: the first compile fails, so
+  // there is no `loadedUrls` naming the file to wait for.
+  await withWatch(
+    (d) => writeFileSync(join(d, "main.scss"), '@use "later";\n.a { color: later.$c; }\n'),
+    async ({ dir, css, until, log }) => {
+      assert.ok(await until(() => /Error/i.test(log())), "watch: a missing dependency is reported");
+      await sleep(300);
+      writeFileSync(join(dir, "_later.scss"), "$c: green;\n");
+      assert.ok(await until(() => css().includes("green")), "watch: creating it compiles");
+    },
+  );
+
+  // Deleted, then restored.
+  await withWatch(withDep, async ({ dir, css, until, log, clear }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(300);
+    clear();
+    rmSync(join(dir, "_v.scss"));
+    assert.ok(await until(() => /Error/i.test(log())), "watch: a deleted dependency is reported");
+    await sleep(300);
+    writeFileSync(join(dir, "_v.scss"), "$c: olive;\n");
+    assert.ok(await until(() => css().includes("olive")), "watch: restoring it compiles");
+  });
+
+  // The output lands in a watched directory. If it retriggers the compile
+  // that wrote it, the watch spins forever — and the permissive filter the
+  // error path now uses makes that easier to get wrong.
+  await withWatch(
+    (d) => writeFileSync(join(d, "main.scss"), ".a { color: red; }\n"),
+    async ({ css, until, log, clear }) => {
+      assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+      await sleep(500);
+      clear();
+      await sleep(1500);
+      const again = (log().match(/Compiled/g) || []).length;
+      assert.equal(again, 0, `watch: the output must not retrigger itself (saw ${again} more compiles)`);
+    },
+  );
+
+  // A missing dependency that resolves through a LOAD PATH rather than
+  // beside the entry. The first compile fails, so `known` holds only the
+  // entry and only the entry's directory would be watched — the file
+  // created later in `inc/` lands where nobody is looking. Widening the
+  // filter while failing cannot help: there is no watcher on that
+  // directory at all. dart watches load paths whether or not anything has
+  // been loaded from them, and so do we now.
+  await withWatch(
+    (d) => {
+      mkdirSync(join(d, "inc"));
+      writeFileSync(join(d, "main.scss"), '@use "viaload";\n.a { color: viaload.$c; }\n');
+    },
+    async ({ dir, css, until, log }) => {
+      assert.ok(await until(() => /Error/i.test(log())), "watch: a missing load-path dependency is reported");
+      await sleep(300);
+      writeFileSync(join(dir, "inc", "_viaload.scss"), "$c: fuchsia;\n");
+      assert.ok(
+        await until(() => css().includes("fuchsia")),
+        "watch: creating it on the load path compiles",
+      );
+    },
+    ["-I", "inc"],
+  );
+
+  // A load path that does not EXIST yet. `fs.watch` throws for it, so it
+  // is dropped and nothing re-arms — the file created there later
+  // produces no event anywhere. dart handles this; we did not.
+  await withWatch(
+    (d) => {
+      mkdirSync(join(d, "src"));
+      writeFileSync(join(d, "src", "main.scss"), '@use "gen";\n.a { color: gen.$c; }\n');
+    },
+    async ({ dir, css, until, log }) => {
+      assert.ok(await until(() => /Error/i.test(log())), "watch: a load path that does not exist yet");
+      await sleep(300);
+      // One level at a time, so the probe has to re-arm deeper rather
+      // than waiting on an ancestor that never becomes the target.
+      mkdirSync(join(dir, "a"));
+      await sleep(200);
+      mkdirSync(join(dir, "a", "b"));
+      await sleep(200);
+      writeFileSync(join(dir, "a", "b", "_gen.scss"), "$c: olive;\n");
+      assert.ok(
+        await until(() => css().includes("olive")),
+        "watch: creating the load path, one level at a time, compiles",
+      );
+    },
+    ["-I", "a/b"],
+    "src/main.scss",
+  );
+
+  // A destination that IS a source. `sasso --watch a.scss a.scss` and
+  // `--watch main.scss _v.scss` both replaced a stylesheet with its own
+  // CSS — at startup and then on every save. dart declines: its
+  // transcript is the banner and nothing else, and the file is untouched.
+  //
+  // A one-shot compile overwrites it on all three engines including dart,
+  // so that is not ours to change; this is the watch, where the same
+  // mistake repeats for as long as the process lives.
+  for (const [label, args, setup, victim, intact] of [
+    [
+      "the input is the output",
+      ["a.scss", "a.scss"],
+      (d) => writeFileSync(join(d, "a.scss"), "$c: red;\n.a { color: $c; }\n"),
+      "a.scss",
+      "$c: red",
+    ],
+    [
+      "the output is a dependency",
+      ["main.scss", "_v.scss"],
+      (d) => {
+        writeFileSync(join(d, "main.scss"), '@use "v";\n.a { color: v.$c; }\n');
+        writeFileSync(join(d, "_v.scss"), "$c: red;\n");
+      },
+      "_v.scss",
+      "$c: red",
+    ],
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), "sasso-alias-"));
+    setup(dir);
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--watch", ...args], {
+      cwd: dir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    try {
+      await sleep(2000);
+      assert.ok(
+        readFileSync(join(dir, victim), "utf8").includes(intact),
+        `watch: ${label} — the source must survive, found ${JSON.stringify(readFileSync(join(dir, victim), "utf8").slice(0, 40))}`,
+      );
+      assert.ok(!log.includes("Compiled"), `watch: ${label} — and nothing is announced: ${log}`);
+      // Break it. The success path refuses to WRITE over a source; the
+      // error path must not DELETE one either. Unreachable today —
+      // an aliased watch never recompiles, in dart as in ours — and one
+      // filter change away from being reachable, with worse consequences
+      // than the overwrite it sits beside.
+      writeFileSync(join(dir, victim), "$c: ;\n");
+      await sleep(1200);
+      assert.ok(
+        existsSync(join(dir, victim)),
+        `watch: ${label} — a failing compile must not delete the source either`,
+      );
+    } finally {
+      proc.kill();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  console.log("ok: cli --watch — burst, atomic save, break/fix, missing dep (local, load path, absent load path), delete/restore, no self-trigger, no writing over a source");
 }
 
 // === Phase 4: custom functions — full Value coverage (sync + async) ===
