@@ -64,10 +64,13 @@ impl Style {
         };
         let rest = &p[skip..];
         let b = rest.as_bytes();
-        // A drive letter, plus the separator after it when there is one.
+        // A drive letter is a root only with a separator after it. `C:foo` is
+        // DRIVE-RELATIVE — the current directory on C:, which a process tracks
+        // per drive — so it has no root at all and nothing can be measured
+        // from it.
         if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
-            let sep = rest[2..].chars().next().is_some_and(|c| self.is_sep(c));
-            return skip + 2 + usize::from(sep);
+            let sep = b.get(2).is_some_and(|&c| self.is_sep(c as char));
+            return if sep { skip + 3 } else { 0 };
         }
         // A UNC share: two separators, a server, a separator, a share. The
         // share is part of the root — `\\a\b` and `\\a\c` share no directory.
@@ -105,20 +108,32 @@ impl Style {
     /// emits one where `current_dir` does not, so the two sides of a comparison
     /// routinely disagree about it.
     ///
+    /// A trailing separator is not part of the identity either: a share is
+    /// spelled `\\server\share` when it is the whole path and
+    /// `\\server\share\` when something follows, so the two sides of a
+    /// comparison disagree about it whenever the working directory IS the
+    /// share.
+    ///
     /// The verbatim UNC form (`\\?\UNC\server\share`) is NOT unwrapped —
     /// nothing here produces it.
     fn roots_eq(self, a: &str, b: &str) -> bool {
         if self == Style::Posix {
             return a == b;
         }
-        fn unwrap(style: Style, r: &str) -> &str {
-            match r.strip_prefix(r"\\?\").or_else(|| r.strip_prefix(r"\\.\")) {
+        fn bare(style: Style, r: &str) -> &str {
+            let r = match r.strip_prefix(r"\\?\").or_else(|| r.strip_prefix(r"\\.\")) {
                 // Only a drive root survives the unwrap: see the note above.
                 Some(inner) if style.root_len(inner) == inner.len() => inner,
                 _ => r,
+            };
+            // `> 0` keeps the current drive's root, which is nothing BUT a
+            // separator, from being trimmed away to the empty string.
+            match r.char_indices().next_back() {
+                Some((i, c)) if i > 0 && style.is_sep(c) => &r[..i],
+                _ => r,
             }
         }
-        self.same(unwrap(self, a), unwrap(self, b))
+        self.same(bare(self, a), bare(self, b))
     }
 
     /// Whether two segments (or two roots) name the same thing.
@@ -272,6 +287,37 @@ mod tests {
             .as_deref(),
             Some(r"..\src\a.scss")
         );
+    }
+
+    /// A drive letter without a separator after it is DRIVE-RELATIVE: `C:foo`
+    /// means "foo in whatever directory this process is in on C:", which is
+    /// not something a relative path can be measured from or to.
+    #[test]
+    fn a_drive_without_a_separator_is_not_a_root() {
+        assert_eq!(rel(Style::Windows, r"C:\dev\app", "C:foo"), None);
+        assert_eq!(rel(Style::Windows, "C:foo", r"C:\dev\app\a.scss"), None);
+        // Both drive-relative: still nothing to measure, even though the two
+        // spellings share a drive letter.
+        assert_eq!(rel(Style::Windows, "C:foo", "C:bar"), None);
+        // The drive alone is the same case.
+        assert_eq!(rel(Style::Windows, "C:", r"C:\a.scss"), None);
+    }
+
+    /// A share is spelled `\\server\share` when it is the whole path and
+    /// `\\server\share\` when something follows it, so a working directory
+    /// that IS the share used to match nothing under it.
+    #[test]
+    fn a_root_matches_with_or_without_its_trailing_separator() {
+        assert_eq!(
+            rel(Style::Windows, r"\\nas\share", r"\\nas\share\app\a.scss").as_deref(),
+            Some(r"app\a.scss")
+        );
+        assert_eq!(
+            rel(Style::Windows, r"\\nas\share\", r"\\nas\share\app\a.scss").as_deref(),
+            Some(r"app\a.scss")
+        );
+        // A different share still does not match, trailing separator or not.
+        assert_eq!(rel(Style::Windows, r"\\nas\share", r"\\nas\other\a.scss"), None);
     }
 
     /// `std::fs::canonicalize` returns a verbatim path and `current_dir` does
