@@ -1605,10 +1605,9 @@ impl<'a> Evaluator<'a> {
     /// `p.prettyUri`). Any other canonical URL (a custom importer's key) shows
     /// its last segment, falling back to the `@use` url when the key has none.
     pub(super) fn module_diag_url(&self, url: &str, key: &str) -> String {
-        let path = std::path::Path::new(key);
-        if path.is_absolute() {
+        if std::path::Path::new(key).is_absolute() {
             let cwd = self.cwd_cache.get_or_init(|| std::env::current_dir().ok());
-            return pretty_path(path, cwd.as_deref());
+            return pretty_path(key, cwd.as_deref());
         }
         let base = key.rsplit(['/', '\\']).next().unwrap_or(key);
         if base.is_empty() {
@@ -1734,30 +1733,95 @@ fn regroup_load_css_copy(nodes: Vec<OutNode>, prev_rule: &mut bool) -> Vec<OutNo
 /// `cwd` is passed in rather than read here because the caller memoizes it for
 /// the compile (`Evaluator::cwd_cache`); `None` is "the process has no readable
 /// current directory", the same case the `getcwd` failure took before.
-fn pretty_path(abs: &std::path::Path, cwd: Option<&std::path::Path>) -> String {
+fn pretty_path(abs: &str, cwd: Option<&std::path::Path>) -> String {
     let Some(cwd) = cwd else {
-        return abs.to_string_lossy().into_owned();
+        return abs.to_string();
     };
-    let target: Vec<std::path::Component<'_>> = abs.components().collect();
-    let base: Vec<std::path::Component<'_>> = cwd.components().collect();
-    let common = target.iter().zip(&base).take_while(|(a, b)| a == b).count();
-    let mut rel = std::path::PathBuf::new();
-    for _ in common..base.len() {
-        rel.push("..");
+    pretty_path_in(crate::pathstyle::HOST, abs, &cwd.to_string_lossy())
+}
+
+/// [`pretty_path`] with the platform's rules passed in rather than read from
+/// `#[cfg]`, so the Windows ones can be checked on any host. #146 was a
+/// Windows-only relativisation failure that no test off Windows could reach.
+fn pretty_path_in(style: crate::pathstyle::Style, abs: &str, cwd: &str) -> String {
+    let Some(parts) = crate::pathstyle::relative_parts(style, cwd, abs) else {
+        // No relative spelling exists — a different drive or share, or a
+        // current directory that is not absolute. dart's `p.relative` hands
+        // the target back unchanged there.
+        return abs.to_string();
+    };
+    // dart keeps the relative spelling only while it is no longer, in segments,
+    // than the absolute one; its `p.split` counts the root (`/`, `C:\`,
+    // `\\server\share`) as one segment, which `segments` excludes.
+    if parts.len() > 1 + style.segments(abs).count() {
+        return abs.to_string();
     }
-    for comp in &target[common..] {
-        rel.push(comp.as_os_str());
+    parts.join(style.sep())
+}
+
+#[cfg(test)]
+mod pretty_path_tests {
+    use super::pretty_path_in;
+    use crate::pathstyle::Style;
+
+    /// The #146 case, as the first Windows CI run reported it: the canonical key
+    /// is lowercased and the working directory is not, and the display used to
+    /// fall all the way through to the absolute temp path.
+    #[test]
+    fn a_loaded_file_under_a_mixed_case_windows_cwd_is_relative() {
+        assert_eq!(
+            pretty_path_in(
+                Style::Windows,
+                r"c:\users\runner~1\appdata\local\temp\sasso_frames\src\sub\_warnme.scss",
+                r"C:\Users\RUNNER~1\AppData\Local\Temp\sasso_frames",
+            ),
+            r"src\sub\_warnme.scss"
+        );
     }
-    // dart's `p.split` counts a Windows drive or UNC root (`C:\`) as one
-    // segment; `components()` yields it as `Prefix` + `RootDir`, so leave the
-    // prefix out of the absolute count.
-    let target_segments = target
-        .iter()
-        .filter(|c| !matches!(c, std::path::Component::Prefix(_)))
-        .count();
-    if rel.components().count() > target_segments {
-        abs.to_string_lossy().into_owned()
-    } else {
-        rel.to_string_lossy().into_owned()
+
+    /// dart writes the relative spelling in the platform's style, so a loaded
+    /// file is `\`-separated on Windows and `/`-separated everywhere else.
+    #[test]
+    fn the_separator_is_the_platforms() {
+        assert_eq!(
+            pretty_path_in(Style::Posix, "/dev/app/src/sub/a.scss", "/dev/app"),
+            "src/sub/a.scss"
+        );
+        assert_eq!(
+            pretty_path_in(Style::Windows, r"C:\dev\app\src\sub\a.scss", r"C:\dev\app"),
+            r"src\sub\a.scss"
+        );
+    }
+
+    /// dart's `p.prettyUri` prefers the ABSOLUTE path once the relative one
+    /// would have more segments — a file far outside the tree reads better as
+    /// itself than as a stack of `..`. The root counts as one segment, so a
+    /// path one level out of the tree is a tie and the relative form wins it.
+    #[test]
+    fn a_file_far_outside_the_tree_stays_absolute() {
+        // 5 `..` + 2 segments = 7 against 1 + 2 = 3: absolute.
+        assert_eq!(
+            pretty_path_in(
+                Style::Posix,
+                "/tmp/scratch/a.scss",
+                "/dev/app/deep/deeper/deepest"
+            ),
+            "/tmp/scratch/a.scss"
+        );
+        // 1 `..` + 2 segments = 3 against 1 + 3 = 4: relative.
+        assert_eq!(
+            pretty_path_in(Style::Posix, "/dev/src/a.scss", "/dev/app"),
+            "../src/a.scss"
+        );
+    }
+
+    /// A different drive has no relative spelling, so it is shown as it is
+    /// rather than as a `..` chain that would resolve somewhere else entirely.
+    #[test]
+    fn another_drive_is_shown_absolute() {
+        assert_eq!(
+            pretty_path_in(Style::Windows, r"D:\lib\a.scss", r"C:\dev\app"),
+            r"D:\lib\a.scss"
+        );
     }
 }

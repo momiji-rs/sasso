@@ -47,6 +47,10 @@ mod host_fn;
 mod importer;
 mod musl_math;
 mod parser;
+// Path spelling by platform, as a value rather than a `#[cfg]`: the binary
+// includes this same file (see `main.rs`) so both relativisations share one
+// set of rules.
+mod pathstyle;
 mod ryu;
 mod sass_parser;
 mod scanner;
