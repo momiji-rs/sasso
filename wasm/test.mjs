@@ -4107,6 +4107,17 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         `watch: ${label} — the source must survive, found ${JSON.stringify(readFileSync(join(dir, victim), "utf8").slice(0, 40))}`,
       );
       assert.ok(!log.includes("Compiled"), `watch: ${label} — and nothing is announced: ${log}`);
+      // Break it. The success path refuses to WRITE over a source; the
+      // error path must not DELETE one either. Unreachable today —
+      // an aliased watch never recompiles, in dart as in ours — and one
+      // filter change away from being reachable, with worse consequences
+      // than the overwrite it sits beside.
+      writeFileSync(join(dir, victim), "$c: ;\n");
+      await sleep(1200);
+      assert.ok(
+        existsSync(join(dir, victim)),
+        `watch: ${label} — a failing compile must not delete the source either`,
+      );
     } finally {
       proc.kill();
       rmSync(dir, { recursive: true, force: true });

@@ -1219,14 +1219,18 @@ function runWatch(input, output, common, opts) {
   // happened. The directory watcher stayed in place, but the filename
   // filter below no longer recognised the dependency, so fixing the file
   // you had just broken did nothing — measured, and dart recovers.
-  let known = new Set([resolve(input)]);
+  let known = new Set([pathKey(input)]);
   // While a compile is failing, anything in a watched directory may be the
   // fix: the file you broke, or a file that was missing and has just been
   // created. Filtering by `known` cannot see the second of those.
   let failing = false;
   // Except our own output, which lands in a watched directory and would
   // otherwise retrigger the compile that wrote it, forever.
-  const ours = new Set([resolve(output), `${resolve(output)}.map`]);
+  // `pathKey`, not `resolve`: it lowercases on Windows, where `SRC/a.scss`
+  // and `src/a.scss` are one file. Comparing raw `resolve()` strings meant
+  // a differently-cased spelling missed `ours`, and while `failing` the
+  // output's own removal could then retrigger the watch.
+  const ours = new Set([pathKey(output), `${pathKey(output)}.map`]);
   // Load paths are watched whether or not anything has been loaded from
   // them, because the interesting case is a file that is NOT there yet:
   // `@use "viaload"` fails, `known` holds only the entry, and the file
@@ -1234,6 +1238,10 @@ function runWatch(input, output, common, opts) {
   // the filter cannot help — there is no watcher on that directory at all.
   // dart watches load paths too (measured: it sees this, we did not).
   const loadPathDirs = (common.loadPaths || []).map((d) => resolve(d));
+  const aliasesASource = () => {
+    const dest = pathKey(output);
+    return dest === pathKey(input) || known.has(dest);
+  };
   // One per absent load path, keyed so re-arming replaces rather than adds
   // — see `_probe.mjs` for what happened when it did not.
   const probes = makeProbe({
@@ -1272,7 +1280,7 @@ function runWatch(input, output, common, opts) {
         continue; // vanished; the next event will notice
       }
       for (const n of names) {
-        const full = join(d, n);
+        const full = pathKey(join(d, n));
         if (ours.has(full)) continue;
         seen.set(full, mtime(full));
       }
@@ -1301,10 +1309,10 @@ function runWatch(input, output, common, opts) {
   /** Re-arm the watchers. `loadedUrls` omitted = keep the last known set. */
   const rewatch = (loadedUrls) => {
     if (loadedUrls) {
-      const files = new Set([resolve(input)]);
+      const files = new Set([pathKey(input)]);
       for (const u of loadedUrls) {
         try {
-          files.add(fileURLToPath(u));
+          files.add(pathKey(fileURLToPath(u)));
         } catch {
           // non-file URL (a virtual importer) — nothing to watch
         }
@@ -1349,7 +1357,7 @@ function runWatch(input, output, common, opts) {
             }
             if (
               triggersRecompile({
-                path: fn ? join(d, fn) : null,
+                path: fn ? pathKey(join(d, fn)) : null,
                 known,
                 ours,
                 failing,
@@ -1395,8 +1403,7 @@ function runWatch(input, output, common, opts) {
       // Silent, because dart is silent. A watch that overwrites your
       // stylesheet every time you save it is the one outcome worth
       // ruling out even at the cost of saying nothing.
-      const dest = resolve(output);
-      if (dest === resolve(input) || known.has(dest)) {
+      if (aliasesASource()) {
         failing = false;
         return true;
       }
@@ -1408,8 +1415,15 @@ function runWatch(input, output, common, opts) {
       if (provisional) return false;
       const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(msg.replace(/\n?$/, "\n"));
-      const removeError = discardStaleOutput(output, opts);
-      if (removeError) process.stderr.write(`${removeError}\n`);
+      // Not when the destination is a source. The success path already
+      // refuses to WRITE over one; deleting it here would be the same
+      // mistake with a worse outcome — and it is only unreachable today
+      // because an aliased watch never recompiles, which is one filter
+      // change away from being false.
+      if (!aliasesASource()) {
+        const removeError = discardStaleOutput(output, opts);
+        if (removeError) process.stderr.write(`${removeError}\n`);
+      }
       // Keep the set we already had — a failure reports no `loadedUrls`,
       // and throwing away what we knew is what broke recovery — and accept
       // anything in those directories until a compile succeeds again.
