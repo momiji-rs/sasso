@@ -11,6 +11,44 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Performance
+
+- **Selectors with a plain pseudo-class skip the normalizer entirely.** A
+  compile of a stylesheet whose selectors look like `.button:hover` or
+  `.card::before` retires **3.9% fewer instructions** (3.3% compressed), with
+  byte-identical CSS. sasso's selector normalizer has a fast path for selectors
+  that are already in canonical form; `:` was missing from the set of bytes that
+  path accepts, so every pseudo-class fell into the slow path — which, on this
+  input, does an exact amount of nothing: it materializes two `Vec<char>`
+  buffers and three or four `String`s, copies the selector through them
+  character by character, and returns the same bytes it was given.
+
+  The fast path now accepts `:`, which is sound rather than merely plausible.
+  On paren-free, escape-free pseudo input the slow path is provably the
+  identity: the whitespace-collapse pass has nothing to collapse, pseudo
+  bodies are copied verbatim and both `nth`/argument rewrites bail at their
+  opening `text.find('(')?`, and the adjacent-compound rewrite cannot fire
+  because `.`, `#`, `%` and `:` are all excluded from the name-character set.
+  The combinators `>`, `+` and `~` are deliberately *not* admitted — the slow
+  path really does rewrite `>a` into `> a` — and neither are `:not(…)`,
+  `:is(…)` or attribute selectors, which keep taking the slow path.
+
+  `[measured]` macOS / arm64, interleaved arms with a byte-identical copy of
+  the old binary as a control: marginal instructions per compile of
+  `bench/corpus/generated/large.scss` 99.2697M → 95.4463M (**−3.852%**,
+  negative in 6 of 6 paired rounds, against a control that read 0.044%), and
+  112.0030M → 108.2545M compressed (−3.347%, 4 of 4, control 0.000%); marginal
+  cycles −2.60% and −3.67%. That is ~3,150 instructions saved per pseudo
+  selector emitted, so the gain scales with how many of them a stylesheet has:
+  −0.179% on the `@extend` corpus and unmeasurably zero on a corpus with no
+  pseudo selectors at all.
+
+  A `debug_assert_eq!` now asserts, on every accepted selector, that the slow
+  normalizer would have returned it unchanged. It compiles out of release
+  builds and ran against the full 14,258-case sass-spec suite in a debug build
+  without firing; output was compared over 118 corpus/style pairs and is
+  byte-identical, as are the diagnostics and the exit codes.
+
 ## [0.18.0] - 2026-09-18
 
 _One fix: sasso told authors to rewrite CSS filters as Sass colour functions.
