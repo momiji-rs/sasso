@@ -103,8 +103,16 @@ async function measure(style) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let log = "";
+  let died = null;
   proc.stdout.on("data", (b) => (log += b));
   proc.stderr.on("data", (b) => (log += b));
+  proc.on("error", (e) => (died = `could not start: ${e.message}`));
+  proc.on("exit", (code, signal) => {
+    // A watch that exits on its own has failed, whatever its code — it is
+    // supposed to sit there until killed.
+    if (!killed) died = `exited early (code ${code}, signal ${signal})`;
+  });
+  let killed = false;
 
   const css = () => {
     try {
@@ -116,8 +124,23 @@ async function measure(style) {
 
   const samples = [];
   let errored = 0;
+  const fail = (why) => {
+    const tail = log.trim().split("\n").slice(-12).join("\n    ");
+    console.error(`\nwatch_latency: ${style}: ${why}`);
+    console.error(`  command: ${[cmd, ...pre].join(" ")}`);
+    if (tail) console.error(`  the engine said:\n    ${tail}`);
+    process.exitCode = 1;
+    throw new Error(why);
+  };
+
   try {
-    for (let i = 0; i < 400 && !css().includes("000000"); i++) await sleep(50);
+    let ready = false;
+    for (let i = 0; i < 400 && !ready; i++) {
+      if (died) fail(died);
+      ready = css().includes("000000");
+      if (!ready) await sleep(50);
+    }
+    if (!ready) fail("the first compile never produced out.css");
     await sleep(400);
 
     for (let i = 1; i <= ITERATIONS; i++) {
@@ -134,10 +157,7 @@ async function measure(style) {
         }
         await sleep(1);
       }
-      if (t1 === null) {
-        console.error(`  ${style}: iteration ${i} timed out`);
-        break;
-      }
+      if (t1 === null) fail(`iteration ${i} never produced the new CSS`);
       samples.push(t1 - t0);
       // Long enough that the next save is a fresh burst, not a tail of
       // this one — otherwise the measurement measures the debounce twice.
@@ -145,6 +165,7 @@ async function measure(style) {
       if (/error/i.test(log)) errored++;
     }
   } finally {
+    killed = true;
     proc.kill();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -158,7 +179,13 @@ console.log(`watch latency: ${[cmd, ...pre].join(" ")}`);
 console.log(`  ${ITERATIONS} saves per style, slow gap ${SLOW_GAP_MS}ms\n`);
 console.log("  style   n    min     med     p90     saves that printed an error");
 for (const style of ["atomic", "quick", "slow"]) {
-  const r = await measure(style);
+  let r;
+  try {
+    r = await measure(style);
+  } catch {
+    // `measure` has already said what went wrong and set exitCode.
+    process.exit(1);
+  }
   const f = (x) => (x === undefined ? "  n/a" : `${x.toFixed(1)}ms`.padStart(7));
   console.log(
     `  ${style.padEnd(7)} ${String(r.n).padEnd(4)}${f(r.min)} ${f(r.med)} ${f(r.p90)}` +
