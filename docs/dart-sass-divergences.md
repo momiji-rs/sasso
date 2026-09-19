@@ -8,8 +8,9 @@ meaning rather than being a number without a denominator.
 running both compilers on the same input. Where a row says "dart", that is the
 observed output of 1.104.1 — not a reading of the specification.
 
-Last verified: 2026-09-17. The ones that need design work or affect compiled
-output are tracked as issues
+Last verified in bulk: 2026-09-17; a row added or re-measured after that carries
+its own date, and the bulk date is not a claim about it. The ones that need
+design work or affect compiled output are tracked as issues
 ([#62](https://github.com/momiji-rs/sasso/issues/62),
 [#63](https://github.com/momiji-rs/sasso/issues/63),
 [#64](https://github.com/momiji-rs/sasso/issues/64),
