@@ -601,6 +601,72 @@ assert.ok(
   );
 }
 {
+  // `--update` narrates each WRITTEN file on stdout, stamped with the local
+  // time — dart's shape, measured 2026-09-19. Same table as the binary's
+  // test: written announces, skipped and failed are silent, --quiet
+  // suppresses, several pairs report in COMMAND-LINE order (they finish in
+  // whatever order the worker pool finishes them).
+  const d = mkdtempSync(join(tmpdir(), "sasso-narrate-"));
+  writeFileSync(join(d, "one.scss"), "a {b: c}\n");
+  writeFileSync(join(d, "two.scss"), "x {y: z}\n");
+  const run = (...args) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { encoding: "utf8", cwd: d });
+  const STAMP = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] /;
+
+  const first = run("--update", "one.scss:one.css");
+  assert.equal(first.status, 0, `cli: ${first.stderr}`);
+  // Not `stderr === ""`: an engine-fallback warning legitimately shares
+  // that stream, and asserting an empty one failed CI on a runner where
+  // the native addon did not load. What matters is that the compile line
+  // is not there.
+  assert.ok(!first.stderr.includes("Compiled"), `cli: the line belongs on stdout: ${first.stderr}`);
+  // A stamp, when present, must be well formed — this CLI gets local time
+  // from JS `Date`, so unlike the binary it has one everywhere.
+  assert.match(first.stdout, STAMP, "cli: a [YYYY-MM-DD HH:MM] stamp");
+  assert.match(first.stdout, /Compiled one\.scss to one\.css\.\n$/, "cli: dart's wording");
+
+  const again = run("--update", "one.scss:one.css");
+  assert.equal(again.stdout, "", "cli: a skip says nothing");
+
+  rmSync(join(d, "one.css"), { force: true });
+  const both = run("--update", "one.scss:one.css", "two.scss:two.css");
+  const lines = both.stdout.trim().split("\n");
+  assert.equal(lines.length, 2, `cli: one line per file: ${both.stdout}`);
+  assert.ok(lines[0].endsWith("Compiled one.scss to one.css."), `cli: ${lines[0]}`);
+  assert.ok(lines[1].endsWith("Compiled two.scss to two.css."), `cli: ${lines[1]}`);
+
+  rmSync(join(d, "one.css"), { force: true });
+  assert.equal(run("--quiet", "--update", "one.scss:one.css").stdout, "", "cli: --quiet means quiet");
+
+  writeFileSync(join(d, "bad.scss"), '@use "nope";\n');
+  const failed = run("--update", "bad.scss:bad.css");
+  assert.notEqual(failed.status, 0, "cli: a missing module is an error");
+  assert.ok(!failed.stdout.includes("Compiled"), "cli: a failure is not announced as a compile");
+
+  // A stdin source is named `stdin`, not `-`. This CLI formats the line
+  // itself rather than sharing the binary's code, so the binary's test of
+  // the same rule does not cover it.
+  rmSync(join(d, "o.css"), { force: true });
+  const viaStdin = spawnSync(process.execPath, [cliPath, "--no-source-map", "--update", "-:o.css"], {
+    encoding: "utf8",
+    input: "a {b: c}\n",
+    cwd: d,
+  });
+  assert.equal(viaStdin.status, 0, `cli: ${viaStdin.stderr}`);
+  assert.match(
+    viaStdin.stdout,
+    /Compiled stdin to o\.css\.\n$/,
+    `cli: dart names standard input \`stdin\`, not \`-\`: ${viaStdin.stdout}`,
+  );
+
+  // --no-css writes nothing, so it announces nothing.
+  rmSync(join(d, "one.css"), { force: true });
+  const noCss = run("--no-css", "--update", "one.scss:one.css");
+  assert.equal(noCss.status, 0, `cli: ${noCss.stderr}`);
+  assert.equal(noCss.stdout, "", `cli: --no-css wrote nothing, so it says nothing: ${noCss.stdout}`);
+  assert.ok(!existsSync(join(d, "one.css")), "cli: --no-css really wrote nothing");
+}
+{
   // dart's other `--update` usage error: nowhere to write means nothing to
   // compare, so the flag cannot do anything and dart refuses rather than
   // compile to the terminal (exit 64, measured 2026-09-19). Every shape that
@@ -3473,6 +3539,80 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   } finally {
     proc.kill();
   }
+}
+
+// === Phase 3b: CLI --watch, what it SAYS ===
+//
+// The functional watch test above starts the child with `stdio: "ignore"`
+// and only waits for the output file, so every property of the narration
+// was untested: a regression to stderr, to the old wording, to no
+// timestamp, or to suppressing the banner under --quiet would all have
+// passed. #141 changed all four, so all four are pinned here.
+{
+  const wdir = mkdtempSync(join(tmpdir(), "sasso-watchsay-"));
+  const src = join(wdir, "one.scss");
+  const out = join(wdir, "one.css");
+  writeFileSync(src, ".a { color: red; }\n");
+
+  const capture = async (extra) => {
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", ...extra, "--watch", src, out], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "", stderr = "";
+    proc.stdout.on("data", (b) => (stdout += b));
+    proc.stderr.on("data", (b) => (stderr += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      await until(() => stdout.includes("watching for changes"), 15000);
+      writeFileSync(src, ".a { color: blue; }\n"); // one recompile
+      await until(() => readFileSync(out, "utf8").includes("blue"), 15000);
+      await new Promise((r) => setTimeout(r, 250)); // let the line land
+    } finally {
+      proc.kill();
+    }
+    return { stdout, stderr };
+  };
+
+  const STAMPED = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] Compiled .*one\.scss to .*one\.css\.$/;
+  const loud = await capture([]);
+  const lines = loud.stdout.split("\n");
+  assert.ok(STAMPED.test(lines[0]), `cli --watch: the first compile is stamped: ${lines[0]}`);
+  assert.equal(
+    lines[1],
+    "Sass is watching for changes. Press Ctrl-C to stop.",
+    "cli --watch: dart's banner, word for word",
+  );
+  assert.equal(lines[2], "", "cli --watch: dart leaves one blank line after the banner");
+  assert.ok(
+    lines.slice(3).some((l) => STAMPED.test(l)),
+    `cli --watch: the recompile is announced too: ${loud.stdout}`,
+  );
+  assert.ok(
+    !loud.stderr.includes("Compiled") && !loud.stderr.includes("watching"),
+    `cli --watch: none of it belongs on stderr: ${loud.stderr}`,
+  );
+
+  // --quiet silences the compile lines and keeps the banner, which is the
+  // only sign the process is alive — dart's behaviour, measured.
+  writeFileSync(src, ".a { color: red; }\n");
+  rmSync(out, { force: true });
+  const quiet = await capture(["--quiet"]);
+  assert.ok(
+    !quiet.stdout.includes("Compiled"),
+    `cli --watch --quiet: no compile lines: ${quiet.stdout}`,
+  );
+  assert.ok(
+    quiet.stdout.includes("Sass is watching for changes. Press Ctrl-C to stop."),
+    `cli --watch --quiet: the banner still prints: ${quiet.stdout}`,
+  );
+  console.log("ok: cli --watch — stdout, dart's banner and stamp, --quiet keeps the banner");
 }
 
 // === Phase 4: custom functions — full Value coverage (sync + async) ===
