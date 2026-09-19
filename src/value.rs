@@ -2337,21 +2337,36 @@ impl ModernColor {
     /// Serialize a channel as a percentage of `denom` (e.g. lab lightness over
     /// 100, oklab lightness over 1). Missing → `none`; non-finite → a `%`-unit
     /// `calc()` constant (`calc(infinity * 1%)`).
+    ///
+    /// Compressed output drops the `%` and writes the channel's own stored
+    /// value instead, which is the same number for lab/lch (0–100) but the
+    /// unscaled one for oklab/oklch (0–1). dart-sass writes the unit-less form
+    /// unconditionally here rather than picking the shorter of the two:
+    /// `[measured]` against dart-sass 1.104.1, `oklab(33.333333% .1 -0.1)`
+    /// compresses to `oklab(.33333333 .1 -0.1)` — the same length — and
+    /// `oklab(1% 0 0)` to `oklab(.01 0 0)`, which is longer.
     fn chan_pct(&self, i: usize, denom: f64, compressed: bool) -> String {
         match self.channels[i] {
             None => "none".to_string(),
             Some(v) if !v.is_finite() => Number::with_unit(v, "%").to_css(compressed),
-            Some(v) => format!("{}%", fmt_num(v / denom * 100.0, compressed)),
+            Some(v) if compressed => fmt_num(v, true),
+            Some(v) => format!("{}%", fmt_num(v / denom * 100.0, false)),
         }
     }
 
     /// Serialize a hue channel with the `deg` suffix. Missing → `none`;
     /// non-finite → a `deg`-unit `calc()` constant (`calc(NaN * 1deg)`).
+    ///
+    /// Compressed output drops `deg`: an unadorned number means degrees in
+    /// every function that takes a hue, so the suffix is three bytes of
+    /// nothing. This applies to the modern form of hsl/hwb as well as to
+    /// lch/oklch.
     fn chan_hue(&self, i: usize, compressed: bool) -> String {
         match self.channels[i] {
             None => "none".to_string(),
             Some(v) if !v.is_finite() => Number::with_unit(v, "deg").to_css(compressed),
-            Some(v) => format!("{}deg", fmt_num(v, compressed)),
+            Some(v) if compressed => fmt_num(v, true),
+            Some(v) => format!("{}deg", fmt_num(v, false)),
         }
     }
 
@@ -2841,19 +2856,44 @@ pub(crate) fn push_num(out: &mut String, n: f64, compressed: bool) {
     // `2154.15598416745` (true value …44978) still rounds UP to
     // `…1675` because its shortest form ends in a literal `5`.
     push_ecma_shortest(out, n);
-    round_decimal_in_place(out, start);
+    // Which of dart's two writers handles this spelling. `_writeNumber` emits
+    // anything shorter than `precision + 2` = 12 characters (sign included)
+    // directly, because `0.` plus ten digits cannot overflow the precision;
+    // everything longer goes to `_writeRounded`. The two disagree about the
+    // leading zero when compressed, so the choice has to be made on the
+    // UNROUNDED spelling, before `round_decimal_in_place` shortens it.
+    let direct = out.len() - start < 12;
+    let rounded = round_decimal_in_place(out, start);
     // A tiny negative ROUNDS to `-0` at the string level; dart prints `0` for
     // it. A true negative zero never reaches here — it returned above.
     if &out[start..] == "-0" {
         out.truncate(start);
         out.push('0');
     }
-    // Compressed style drops a leading zero — but only from a POSITIVE number.
-    // dart tests the rendered string for a literal `0.` prefix, which a minus
-    // sign has already pushed out of the way, so `-0.5` keeps its zero where
-    // `0.5` loses it. Mirrored rather than tidied: it is what dart writes.
-    if compressed && out[start..].starts_with("0.") {
-        out.remove(start);
+    // Compressed style drops the leading zero of a fraction, and which
+    // fractions lose it depends on the writer — `[measured]` against dart-sass
+    // 1.104.1 over `0.1` … `0.1234567891234` and their negations:
+    //
+    //   * the direct writer tests the rendered string for a literal `0.`
+    //     prefix, which a minus sign has already pushed out of the way, so
+    //     `0.5` loses its zero and `-0.5` keeps it;
+    //   * `_writeRounded` only reaches the digit-by-digit path when it
+    //     actually has digits to drop, and there it omits the integer `0` for
+    //     either sign: `-0.00123456789` compresses to `-.0012345679`;
+    //   * a long spelling that needs no rounding passes through verbatim, so
+    //     it keeps the zero even when positive: `0.0123456789` stays as it is,
+    //     one character longer than it has to be.
+    if compressed {
+        if direct {
+            if out[start..].starts_with("0.") {
+                out.remove(start);
+            }
+        } else if rounded {
+            let zero_at = start + usize::from(out.as_bytes()[start] == b'-');
+            if out[zero_at..].starts_with("0.") {
+                out.remove(zero_at);
+            }
+        }
     }
 }
 
@@ -2985,18 +3025,25 @@ fn expand_exponent(sci: &str) -> String {
 /// starts at `start` to 10 fractional digits by inspecting ONLY the 11th
 /// digit (>= '5' carries up), then trim trailing fractional zeros. Ten or
 /// fewer fractional digits pass verbatim.
-fn round_decimal_in_place(out: &mut String, start: usize) {
+///
+/// Returns whether any digit was actually dropped, which is what decides
+/// whether compressed output loses the leading zero of a negative fraction
+/// (see [`push_num`]).
+fn round_decimal_in_place(out: &mut String, start: usize) -> bool {
     let Some(dot) = out[start..].find('.').map(|i| start + i) else {
-        return;
+        return false;
     };
+    let mut dropped = false;
     if out.len() - dot - 1 > 10 {
         let round_up = out.as_bytes()[dot + 11] >= b'5';
         out.truncate(dot + 11);
         if round_up {
             carry_one(out, start);
         }
+        dropped = true;
     }
     trim_fraction_in_place(out, start);
+    dropped
 }
 
 /// Add one to the last digit of the decimal spelling at `start..`, carrying
@@ -3253,6 +3300,41 @@ mod tests {
         // against dart-sass 1.103.1, 2026-09-15).
         assert_eq!(fmt_num(-0.25, true), "-0.25");
         assert_eq!(fmt_num(2.0, true), "2");
+    }
+
+    #[test]
+    fn fmt_num_compressed_leading_zero_follows_the_writer() {
+        // Which fractions lose the leading zero depends on which of dart's two
+        // number writers renders them, so the rule has three regimes rather
+        // than one. Every expectation here was measured against dart-sass
+        // 1.104.1 on 2026-09-19, sweeping `0.1` … `0.1234567891234` and their
+        // negations.
+        //
+        // 1. Shorter than `precision + 2` = 12 characters, sign included: the
+        //    direct writer, which tests for a literal `0.` prefix.
+        assert_eq!(fmt_num(0.123456789, true), ".123456789");
+        assert_eq!(fmt_num(-0.123456789, true), "-0.123456789");
+        // 2. Long enough for `_writeRounded`, but with nothing to round away:
+        //    the spelling passes through verbatim and keeps its zero even when
+        //    positive, one character longer than it needs to be.
+        assert_eq!(fmt_num(0.1234567891, true), "0.1234567891");
+        assert_eq!(fmt_num(-0.1234567891, true), "-0.1234567891");
+        assert_eq!(fmt_num(0.0123456789, true), "0.0123456789");
+        assert_eq!(fmt_num(0.0000000001, true), "0.0000000001");
+        // 3. `_writeRounded` with digits to drop: the integer `0` goes for
+        //    EITHER sign.
+        assert_eq!(fmt_num(0.12345678912, true), ".1234567891");
+        assert_eq!(fmt_num(-0.12345678912, true), "-.1234567891");
+        assert_eq!(fmt_num(-0.00123456789, true), "-.0012345679");
+        assert_eq!(fmt_num(0.00000000005, true), ".0000000001");
+        // A carry out of the fraction removes the leading zero the other way;
+        // a tiny negative that rounds to zero is still `0`, never `-.0`.
+        assert_eq!(fmt_num(-0.99999999995, true), "-1");
+        assert_eq!(fmt_num(-1e-11, true), "0");
+        // Expanded output keeps every leading zero in all three regimes.
+        assert_eq!(fmt_num(0.123456789, false), "0.123456789");
+        assert_eq!(fmt_num(0.12345678912, false), "0.1234567891");
+        assert_eq!(fmt_num(-0.12345678912, false), "-0.1234567891");
     }
 
     #[test]
