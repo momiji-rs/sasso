@@ -284,6 +284,26 @@ is written down in
 handful that affect compiled output, so the claim above has a checkable
 denominator.
 
+**The numbers above are `expanded` output.** sass-spec ships one expectation per
+case and dart-sass generated every one of them in the default `expanded` style,
+so for most of this project's life no gate looked at compressed CSS at all. A
+second ratchet now does, against a committed manifest of per-case digests of
+dart-sass 1.104.1's **compressed** output for the same cases
+(`spec/COMPRESSED_EXPECT.txt`, see [spec/REPORT.md](spec/REPORT.md)):
+
+| Metric | Value |
+| --- | --- |
+| **Passing, compressed** | **12,579 — 88.22% of attempted** |
+| ↳ byte-exact compressed CSS | 10,087 |
+| ↳ error specs correctly rejected (style-independent) | 2,492 |
+
+1,528 cases compile to byte-exact `expanded` CSS and to compressed CSS that is
+not byte-exact. Everything characterised so far is byte-shortening rather than
+meaning: a negative number keeps its leading zero (`-0.1` where dart writes
+`-.1`), or a redundant `%`/`deg` inside a colour function is kept where dart
+drops it. Roughly half is not yet characterised. This is a ratchet like the
+other one — it can only go up.
+
 **Strict input validation, too.** Matching dart-sass means rejecting what
 dart-sass rejects, not just reproducing its output. sasso errors — rather than
 silently accepting — on an invalid hex literal (`#00000`), out-of-grammar
@@ -299,6 +319,8 @@ Run it yourself:
 $ spec/fetch.sh                                      # clone the suite
 $ cargo build --release
 $ SASS_BIN=target/release/sasso python3 spec/run_spec.py
+$ python3 spec/check_baseline.py                     # expanded ratchet
+$ python3 spec/check_baseline.py --style compressed  # compressed ratchet
 ```
 
 ## Performance
