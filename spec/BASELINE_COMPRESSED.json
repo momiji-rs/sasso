@@ -1,0 +1,9 @@
+{
+  "spec_commit": "b39c3276821a6dc3dd4a0f7e1f63c48cb15e269b",
+  "dart_sass": "1.104.1",
+  "attempted": 14258,
+  "pass": 10087,
+  "error_expected": 2492,
+  "passing": 12579,
+  "note": "The COMPRESSED-style ratchet. sass-spec ships dart-sass's expanded output as a case's only expectation, so `pass` here is measured against spec/COMPRESSED_EXPECT.txt instead: per-case digests of the compressed CSS dart-sass 1.104.1 emits for the same cases (spec/gen_compressed.py). error_expected is style-independent and matches spec/BASELINE.json exactly. The gap to that file's pass count -- 10087 vs 11615 -- is 1528 cases whose expanded CSS is byte-exact and whose compressed CSS is not: real compressed-serialization divergences, mostly inside color functions, which no gate has ever scored. Raise this number, never lower it; bump this file in the same commit as the fix."
+}
