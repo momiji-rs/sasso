@@ -615,7 +615,13 @@ assert.ok(
 
   const first = run("--update", "one.scss:one.css");
   assert.equal(first.status, 0, `cli: ${first.stderr}`);
-  assert.equal(first.stderr, "", "cli: the line belongs on stdout");
+  // Not `stderr === ""`: an engine-fallback warning legitimately shares
+  // that stream, and asserting an empty one failed CI on a runner where
+  // the native addon did not load. What matters is that the compile line
+  // is not there.
+  assert.ok(!first.stderr.includes("Compiled"), `cli: the line belongs on stdout: ${first.stderr}`);
+  // A stamp, when present, must be well formed — this CLI gets local time
+  // from JS `Date`, so unlike the binary it has one everywhere.
   assert.match(first.stdout, STAMP, "cli: a [YYYY-MM-DD HH:MM] stamp");
   assert.match(first.stdout, /Compiled one\.scss to one\.css\.\n$/, "cli: dart's wording");
 
