@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generator for the three corpora the CI performance gate was missing.
+"""Generator for the four corpora the CI performance gate was missing.
 
 `benches/compile.rs` protects only the shapes that happen to be in
 `bench/corpus/generated/`, and three planned improvements measure *zero* there
