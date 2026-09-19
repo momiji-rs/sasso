@@ -61,15 +61,23 @@ Conformance is tracked separately as a ratchet against the official
   moved by only −0.94%. Output was compared over 286 corpus/style pairs and is
   byte-identical, as are the diagnostics and the exit codes.
 
+  `[measured]` confirmed on Linux / x86_64, 12 interleaved rounds on an idle
+  machine, where it reads slightly larger: 103.358M → 101.907M marginal
+  instructions (**−1.404%**, both arms identical to three decimals in all 12
+  rounds), marginal cycles −4.0% in 12 of 12 paired rounds, file 3,730,352 →
+  2,969,192 (−20.4%), `.text` 2,872,078 → 2,626,910 (−8.5%).
+
   Nothing in the crate unwinds outside `#[cfg(test)]` — its only
   `catch_unwind` is in the arena's test module — and Cargo ignores the `panic`
   setting for the `test` and `bench` profiles, so the test suite and the
   CodSpeed benchmarks are unaffected (`cargo test --release` still passes
   153/153 in the lib, including the unwinding arena test). `ffi/` deliberately
   keeps `panic = "unwind"`, because its C boundary relies on `catch_unwind`,
-  and `wasm/` already used `abort`: the core crate was the only one of the
-  three silent on the question. Cargo profiles apply to their own workspace
-  only, so a crate that depends on `sasso` as a library is unaffected, and
+  and `wasm/` already used `abort`; `napi/` keeps `unwind` because napi-rs
+  turns a panic into a thrown JS error by catching it at the boundary. Of the
+  four manifests the core was the one that had never said. Cargo profiles
+  apply to their own workspace only, so a crate that depends on `sasso` as a
+  library is unaffected, and
   `strip` costs only a symbolized panic backtrace, which no user-facing error
   path uses.
 
