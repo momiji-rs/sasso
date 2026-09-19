@@ -41,7 +41,7 @@ export function coalesce({ windowMs, run, setTimer = setTimeout }) {
         dirty = false;
         // Never provisional. When it was, every run in the chain declined
         // to report and each failure asked for another, so a genuinely
-        // broken file span forever in silence.
+        // broken file spin forever in silence.
         fire(false);
       }
     }, windowMs);

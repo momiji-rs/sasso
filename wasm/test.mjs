@@ -3773,12 +3773,12 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /** Start a watch in a fresh directory, run `body`, always kill it. */
-  const withWatch = async (setup, body, extra = []) => {
+  const withWatch = async (setup, body, extra = [], entry = "main.scss") => {
     const dir = mkdtempSync(join(tmpdir(), "sasso-watchcase-"));
     setup(dir);
     const proc = spawn(
       process.execPath,
-      [cliPath, "--no-source-map", ...extra, "--watch", "main.scss", "out.css"],
+      [cliPath, "--no-source-map", ...extra, "--watch", entry, "out.css"],
       { cwd: dir, stdio: ["ignore", "pipe", "pipe"] },
     );
     let log = "";
@@ -3939,7 +3939,34 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     ["-I", "inc"],
   );
 
-  console.log("ok: cli --watch — burst, atomic save, break/fix, missing dep (local + load path), delete/restore, no self-trigger");
+  // A load path that does not EXIST yet. `fs.watch` throws for it, so it
+  // is dropped and nothing re-arms — the file created there later
+  // produces no event anywhere. dart handles this; we did not.
+  await withWatch(
+    (d) => {
+      mkdirSync(join(d, "src"));
+      writeFileSync(join(d, "src", "main.scss"), '@use "gen";\n.a { color: gen.$c; }\n');
+    },
+    async ({ dir, css, until, log }) => {
+      assert.ok(await until(() => /Error/i.test(log())), "watch: a load path that does not exist yet");
+      await sleep(300);
+      // One level at a time, so the probe has to re-arm deeper rather
+      // than waiting on an ancestor that never becomes the target.
+      mkdirSync(join(dir, "a"));
+      await sleep(200);
+      mkdirSync(join(dir, "a", "b"));
+      await sleep(200);
+      writeFileSync(join(dir, "a", "b", "_gen.scss"), "$c: olive;\n");
+      assert.ok(
+        await until(() => css().includes("olive")),
+        "watch: creating the load path, one level at a time, compiles",
+      );
+    },
+    ["-I", "a/b"],
+    "src/main.scss",
+  );
+
+  console.log("ok: cli --watch — burst, atomic save, break/fix, missing dep (local, load path, absent load path), delete/restore, no self-trigger");
 }
 
 // === Phase 4: custom functions — full Value coverage (sync + async) ===

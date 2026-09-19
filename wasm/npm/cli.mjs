@@ -1259,7 +1259,42 @@ function runWatch(input, output, common, opts) {
     }
     for (const w of watchers) w.close();
     watchers = [];
+
+    // A load path that does not exist YET cannot be watched — `fs.watch`
+    // throws and the directory is dropped, so `-I generated` before
+    // `generated/` exists means the file created there later produces no
+    // event anywhere and the watch never recovers. dart handles this
+    // (measured: it compiles, we did not), and its own suite has a case
+    // named "on a load path that was created".
+    //
+    // So watch the nearest ancestor that DOES exist and wait for the
+    // directory to appear. If what appears is only the next link in the
+    // chain — `-I a/b/c` with only `a` there — the probe re-arms deeper
+    // rather than giving up, which is why this is a function and not a
+    // single `watch`.
+    const probe = (target) => {
+      let at = dirname(target);
+      while (!existsSync(at)) {
+        const up = dirname(at);
+        if (up === at) return; // reached the root without finding one
+        at = up;
+      }
+      try {
+        watchers.push(
+          watch(at, () => {
+            if (existsSync(target)) schedule();
+            else probe(target); // a link in the chain appeared; go deeper
+          }),
+        );
+      } catch {
+        // it vanished between the check and the watch — nothing to do
+      }
+    };
+
     const dirs = new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]);
+    for (const lp of loadPathDirs) {
+      if (!existsSync(lp)) probe(lp);
+    }
     for (const d of dirs) {
       try {
         watchers.push(
