@@ -115,6 +115,43 @@ Conformance is tracked separately as a ratchet against the official
   points dart's `--update` takes 1.19s to decide nothing changed and sasso
   takes 0.57s having compiled everything.
 
+- **On Windows, an imported file is named by its path again, not by an absolute
+  one** (#146). Every file reached through the importer printed in full —
+
+  ```
+  WARNING: b
+      C:\Users\you\app\src\sub\_dep.scss 2:1  @use
+      src/rel.scss 2:1                        root stylesheet
+  ```
+
+  where dart prints `src\sub\_dep.scss`, and a relative source map named the
+  same files through a seven-deep `../../../..` chain. Stack frames, warn
+  events, `--quiet-deps` provenance, dependency tracking and source maps were
+  all affected, because all of them relativise the same way.
+
+  The canonical key a resolved file is stored under is lowercased on Windows,
+  mirroring dart's `p.canonicalize`; both relativisations then compared it
+  against the working directory, which keeps the filesystem's spelling. On
+  `std::path::Component` the drive letter compares case-insensitively and a
+  name does not, so the common prefix was the drive and nothing more. Any
+  uppercase letter in any segment was enough — and a Windows user profile is
+  always `C:\Users\…`, so this was every project, not a CI artifact.
+
+  Path spelling is now a value rather than a `#[cfg]`, the way dart's `path`
+  package takes an explicit `Context`: one relativisation, shared by the
+  library and the CLI, that folds ASCII case and accepts either separator under
+  Windows rules, treats a drive or UNC share as the root, and ignores a
+  verbatim `\\?\` marker when comparing roots. A path with no relative
+  spelling at all — another drive, another share — now falls back the way dart
+  does instead of emitting a `..` chain that resolves somewhere else; that was
+  a second, silent bug. The Windows rules are unit-tested on every platform,
+  which is where this bug hid: `std::path` splits by the host's rules, so off
+  Windows `c:\a\b` is a single component and the Windows branch was
+  unreachable.
+
+  The suite now runs on Windows in CI (#143), with a by-name ledger of what
+  still fails there.
+
 ### Performance
 
 - **Selectors with a plain pseudo-class skip the normalizer entirely.** A
