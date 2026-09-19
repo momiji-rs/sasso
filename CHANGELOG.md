@@ -39,6 +39,48 @@ Conformance is tracked separately as a ratchet against the official
   dart-sass now report the same 35, and agree file-by-file across all 147
   entry points.
 
+### Performance
+
+- **`panic = "abort"` and `strip` on the release and dist profiles.** The
+  shipped binary is **24% smaller** and every compile retires **~1.2% fewer
+  instructions**, with byte-identical CSS. Rust emits a landing pad per
+  potentially-panicking call so a panic can unwind and run destructors; a
+  compiler that never catches one pays for all of them. `abort` deletes that
+  machinery, which shrinks the code *and* speeds it up — an unusual pairing,
+  and the reason this is filed under Performance rather than a size note.
+
+  `[measured]` macOS / arm64, four interleaved ABBA rounds on
+  `bench/corpus/generated/large.scss`: marginal instructions per compile
+  100.464M → 99.278M (**−1.18%**, within-arm spread ≤0.04%, against a
+  control-vs-control noise band of ±0.03%), `__text` 2,285,104 → 2,101,408
+  (−8.0%), file 3,122,816 → 2,377,984 (−23.9%, of which −15.4% is `abort`
+  dropping landing pads and the remainder is the symbol table). The win holds
+  across corpus shapes and is largest where allocation traffic is: −1.16%
+  compressed, −1.47% on the deprecation corpus, and **−2.39% on
+  `extend_heavy`** — the one corpus the whole 16-batch allocation campaign
+  moved by only −0.94%. Output was compared over 286 corpus/style pairs and is
+  byte-identical, as are the diagnostics and the exit codes.
+
+  `[measured]` confirmed on Linux / x86_64, 12 interleaved rounds on an idle
+  machine, where it reads slightly larger: 103.358M → 101.907M marginal
+  instructions (**−1.404%**, both arms identical to three decimals in all 12
+  rounds), marginal cycles −4.0% in 12 of 12 paired rounds, file 3,730,352 →
+  2,969,192 (−20.4%), `.text` 2,872,078 → 2,626,910 (−8.5%).
+
+  Nothing in the crate unwinds outside `#[cfg(test)]` — its only
+  `catch_unwind` is in the arena's test module — and Cargo ignores the `panic`
+  setting for the `test` and `bench` profiles, so the test suite and the
+  CodSpeed benchmarks are unaffected (`cargo test --release` still passes
+  153/153 in the lib, including the unwinding arena test). `ffi/` deliberately
+  keeps `panic = "unwind"`, because its C boundary relies on `catch_unwind`,
+  and `wasm/` already used `abort`; `napi/` keeps `unwind` because napi-rs
+  turns a panic into a thrown JS error by catching it at the boundary. Of the
+  four manifests the core was the one that had never said. Cargo profiles
+  apply to their own workspace only, so a crate that depends on `sasso` as a
+  library is unaffected, and
+  `strip` costs only a symbolized panic backtrace, which no user-facing error
+  path uses.
+
 ## [0.17.0] - 2026-09-18
 
 _A warning for 45 rules that were vanishing from Lichess's CSS with nothing

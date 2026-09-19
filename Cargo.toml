@@ -36,11 +36,28 @@ path = "src/main.rs"
 default = []
 
 [profile.release]
+# `panic = "abort"` is set EXPLICITLY, the way `ffi/` sets `unwind` and `wasm/`
+# sets `abort`: of the four manifests in this repo the core was the one that had
+# never said, and that silence was an inconsistency rather than a decision (the
+# fourth, `napi/`, now records why it keeps unwinding). Nothing outside
+# `#[cfg(test)]` unwinds — the crate's only `catch_unwind` is in `arena`'s test
+# module — and Cargo ignores the `panic` setting for the `test` and `bench`
+# profiles, so `cargo test --release` and the CodSpeed benches keep unwinding
+# and `arena::tests::pause_guard_lifts_on_unwind` still works. Profiles apply
+# to this workspace only, so a crate that depends on `sasso` is unaffected.
+panic = "abort"
 lto = "thin"
 codegen-units = 1
+# The release binary carries no debug info to begin with, so this only drops
+# the symbol table: it is a download-size change, not a speed one, and `ffi/`
+# and `wasm/` already do it. Costs a symbolized panic backtrace, which the CLI
+# never relies on (every user-facing error goes through `Display`).
+strip = true
 
 # The profile that 'dist' will build with
 [profile.dist]
+# `panic`, `strip` and `codegen-units` come from `release` above by
+# inheritance; `lto` is restated so this profile reads on its own.
 inherits = "release"
 lto = "thin"
 
