@@ -71,6 +71,13 @@ pub(crate) fn tz_source(tz: Option<&str>) -> Source {
 }
 
 /// What the machine has to offer.
+///
+/// `#[cfg(unix)]` along with the only function that builds one: on a
+/// platform with no tz database there is nothing to distinguish, and a
+/// three-variant enum where two are unreachable is dead code the build
+/// rightly refuses (`-D warnings` caught exactly that on the first
+/// Windows run after this type appeared).
+#[cfg(unix)]
 #[derive(Debug)]
 pub(crate) enum Loaded {
     /// A fixed zero offset.
@@ -100,20 +107,17 @@ pub(crate) fn load() -> Loaded {
     }
 }
 
-/// Windows keeps its zone in the registry, not in a TZif file, so there is
-/// nothing for this reader to read. Reaching it needs either FFI — which
-/// this module has none of, deliberately — or an embedded copy of the whole
-/// tz database, which is how `jiff` does it at a measured cost of ~427 KB.
-///
-/// Not [`Loaded::Utc`]: unlike a bare container, a Windows machine HAS a
-/// local zone and we simply cannot see it, so claiming UTC would be
-/// confidently wrong. The caller drops the timestamp and prints the rest.
-/// See the module docs for the plan to revisit this once there is Windows
-/// CI to test it on (#85).
-#[cfg(not(unix))]
-pub(crate) fn load() -> Loaded {
-    Loaded::Nothing
-}
+// Windows keeps its zone in the registry, not in a TZif file, so there is
+// nothing for this reader to read, and no `load` to write. Reaching it
+// needs either FFI — which this module has none of, deliberately — or an
+// embedded copy of the whole tz database, which is how `jiff` does it at a
+// measured cost of ~427 KB.
+//
+// The caller's `local_offset_at` is `None` there rather than UTC: unlike a
+// bare container, a Windows machine HAS a local zone and we simply cannot
+// see it, so claiming UTC would be confidently wrong rather than merely
+// absent. See the module docs for the plan to revisit this once there is
+// Windows CI to test it on (#85).
 
 #[cfg(all(test, unix))]
 mod tests {

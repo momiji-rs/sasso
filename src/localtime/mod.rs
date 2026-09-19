@@ -73,11 +73,20 @@
 //! tzdata on the host, and give the same answer in five years when these
 //! zones' rules have moved on.
 
+// All four are `#[cfg(unix)]`, along with everything that uses them: on a
+// platform with no tz database to read, a calendar and a TZif parser are
+// dead code, and `-D warnings` is right to say so. The whole module
+// collapses to `now()` and a `local_stamp` that returns None.
+#[cfg(unix)]
 pub(crate) mod civil;
+#[cfg(unix)]
 pub(crate) mod posix;
+#[cfg(unix)]
 pub(crate) mod sys;
+#[cfg(unix)]
 pub(crate) mod tzif;
 
+#[cfg(unix)]
 use std::sync::OnceLock;
 
 /// What the machine says about its zone, resolved at most once per process.
@@ -91,6 +100,7 @@ use std::sync::OnceLock;
 ///
 /// The consequence worth stating: a change to the machine's timezone, or to
 /// `TZ`, is not picked up by a running `--watch`. Neither is it by dart.
+#[cfg(unix)]
 fn loaded() -> &'static sys::Loaded {
     static CACHE: OnceLock<sys::Loaded> = OnceLock::new();
     CACHE.get_or_init(sys::load)
@@ -103,6 +113,7 @@ fn loaded() -> &'static sys::Loaded {
 /// point: `TZ=` asks for UTC and gets it, while a machine that has a local
 /// zone we cannot read (Windows) gets nothing, so the caller prints no
 /// time rather than a confident wrong one.
+#[cfg(unix)]
 pub(crate) fn local_offset_at(unix_secs: i64) -> Option<i64> {
     match loaded() {
         sys::Loaded::Utc => Some(0),
@@ -111,9 +122,22 @@ pub(crate) fn local_offset_at(unix_secs: i64) -> Option<i64> {
     }
 }
 
+/// No tz database exists to read here, so there is no time to report.
+///
+/// `None` rather than a UTC stamp: unlike a bare container, a Windows
+/// machine HAS a local zone and we simply cannot see it without FFI or an
+/// embedded copy of the whole database (~427 KB, the way `jiff` does it).
+/// Claiming UTC would be confidently wrong; printing the line without its
+/// bracket is merely less. See #85.
+#[cfg(not(unix))]
+pub(crate) fn local_stamp(_unix_secs: i64) -> Option<String> {
+    None
+}
+
 /// dart-sass's stamp for `unix_secs`: `[YYYY-MM-DD HH:MM]`, local time to
 /// the minute. `None` when the local offset cannot be determined, which the
 /// caller renders as no stamp at all rather than as a wrong one.
+#[cfg(unix)]
 pub(crate) fn local_stamp(unix_secs: i64) -> Option<String> {
     let c = civil::civil_from_unix(unix_secs + local_offset_at(unix_secs)?);
     Some(format!(
@@ -130,7 +154,7 @@ pub(crate) fn now() -> i64 {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
