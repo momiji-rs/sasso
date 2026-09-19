@@ -3189,26 +3189,35 @@ impl<'a> Evaluator<'a> {
         // all-false. Keyframe selector lists always take it (dart re-serializes
         // the stops joined with ", ", dropping author line breaks that
         // style-rule selectors preserve).
-        let (current, full_lbs): (Vec<String>, Vec<bool>) = if self.in_keyframes {
-            (
-                split_commas(&sel_str)
-                    .iter()
-                    .map(|p| p.trim().to_string())
-                    .filter(|p| !p.is_empty())
-                    .collect(),
-                Vec::new(),
-            )
-        } else {
-            let resolved = resolve_selectors_opt(
-                &sel_str,
-                parents,
-                !self.at_root_excluding_style_rule,
-                &part_lbs,
-                parent_lbs,
-                !lbs_fast,
-            )?;
-            (resolved.sels, resolved.lbs)
-        };
+        // `maybe_bogus` / `any_percent` are the resolver's aggregate answers to
+        // the two questions the block below would otherwise ask per selector, one
+        // full byte scan each. A keyframe list is resolved here rather than by
+        // `resolve_selectors_opt`, so it gets the conservative answer — and a
+        // keyframe stop really does carry a `%`.
+        let (current, full_lbs, maybe_bogus, any_percent): (Vec<String>, Vec<bool>, bool, bool) =
+            if self.in_keyframes {
+                (
+                    split_commas(&sel_str)
+                        .iter()
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect(),
+                    Vec::new(),
+                    true,
+                    true,
+                )
+            } else {
+                let resolved = resolve_selectors_opt(
+                    &sel_str,
+                    parents,
+                    !self.at_root_excluding_style_rule,
+                    &part_lbs,
+                    parent_lbs,
+                    !lbs_fast,
+                )?;
+                let (maybe_bogus, any_percent) = (resolved.maybe_bogus, resolved.any_percent);
+                (resolved.sels, resolved.lbs, maybe_bogus, any_percent)
+            };
         // Drop "bogus combinator" complex selectors from the emitted block;
         // dart-sass omits them from the generated CSS. A top-level TRAILING
         // combinator (`a >`) is bogus as a leaf (its own declaration block is
@@ -3226,9 +3235,14 @@ impl<'a> Evaluator<'a> {
         // line-break flags to filter in step: the emitted list is `current`
         // itself, and copying every string to say so is pure waste on the shape
         // almost every rule has. The placeholder bookkeeping below still runs.
+        // `complex_selector_block_is_bogus` opens by looking for `> + ~ (`, so on
+        // the no-trigger shape it is one full byte scan per selector with no early
+        // exit. `!maybe_bogus` already proves no selector holds one of those
+        // bytes, so the whole probe is skipped rather than run to a foregone
+        // conclusion; when the proof is unavailable it runs exactly as before.
         let share_current = !self.in_keyframes
             && full_lbs.is_empty()
-            && !current.iter().any(|s| complex_selector_block_is_bogus(s));
+            && (!maybe_bogus || !current.iter().any(|s| complex_selector_block_is_bogus(s)));
         let mut emit_selectors: Vec<String> = Vec::new();
         let mut emit_linebreaks: Vec<bool> = Vec::new();
         // Bogus-combinator warnings are raised AFTER this rule's body, because
@@ -3239,8 +3253,12 @@ impl<'a> Evaluator<'a> {
         let mut pending_bogus: Vec<(Pos, usize, String)> = Vec::new();
         let src_text = Rc::clone(&self.current_source);
         if share_current {
-            for s in current.iter() {
-                self.note_placeholder_rule(s);
+            // Only a `%`-bearing selector can be a placeholder rule, and the
+            // resolver's scan already answered that for the whole list.
+            if any_percent {
+                for s in current.iter() {
+                    self.note_placeholder_rule(s);
+                }
             }
         } else {
             emit_selectors.reserve(current.len());
@@ -6585,14 +6603,19 @@ fn extend_selector_list(
     scope: &str,
     extend_base: usize,
 ) -> SelectorRewrite {
-    let has_placeholder = match selectors {
-        RuleSelectors::Raw(v) => v.iter().any(|s| s.contains('%')),
-        RuleSelectors::Parsed(v) => v.iter().any(crate::selector::complex_has_placeholder),
-    };
     // Fast path: no extensions and no placeholder → the selector is untouched.
     // Crucially this leaves selectors we don't model (keyframe stops are handled
     // separately, but also unusual selectors) byte-for-byte intact.
-    if plan.is_empty() && !has_placeholder {
+    //
+    // The placeholder probe is a full `%` scan of every selector of the rule, and
+    // it is only ever read here — so it runs only when `plan.is_empty()` has
+    // already said the answer can matter. With extensions in scope this pass has
+    // to parse and extend regardless, and the scan was pure waste.
+    let has_placeholder = || match selectors {
+        RuleSelectors::Raw(v) => v.iter().any(|s| s.contains('%')),
+        RuleSelectors::Parsed(v) => v.iter().any(crate::selector::complex_has_placeholder),
+    };
+    if plan.is_empty() && !has_placeholder() {
         return SelectorRewrite::Unchanged;
     }
     // Parse the rule's selectors into the typed model exactly once. A `Raw`
@@ -6852,6 +6875,18 @@ struct ResolvedSelectors {
     /// Empty unless `flags`; parallel to `sels` when collected.
     lbs: Vec<bool>,
     flags: bool,
+    /// True unless **every** selector in `sels` was proved canonical by
+    /// [`canonical_plain`]. Because that predicate's byte set is disjoint from
+    /// `has_bogus_trigger`'s `> + ~ (`, `false` *proves* no selector in the
+    /// list can be a bogus-combinator complex — which is what lets the emitter
+    /// skip `complex_selector_block_is_bogus` for the whole list instead of
+    /// scanning every byte of every selector. `true` means "not proved", never
+    /// "has one".
+    maybe_bogus: bool,
+    /// True if any selector in `sels` contains a `%`. Only a `%`-bearing
+    /// selector can be a placeholder rule, so `false` lets the emitter skip its
+    /// per-selector placeholder bookkeeping outright.
+    any_percent: bool,
 }
 
 impl ResolvedSelectors {
@@ -6860,6 +6895,8 @@ impl ResolvedSelectors {
             sels: Vec::new(),
             lbs: Vec::new(),
             flags,
+            maybe_bogus: false,
+            any_percent: false,
         }
     }
 
@@ -6874,11 +6911,43 @@ impl ResolvedSelectors {
         }
     }
 
-    fn push(&mut self, sel: String, lb: bool) {
+    /// Push a selector that is already normalized and whose facts are already
+    /// accounted for — the row-of-rows merge, where the strings move across
+    /// from rows whose flags arrive via [`ResolvedSelectors::absorb`]. Every
+    /// other caller goes through [`ResolvedSelectors::push_owned`] or
+    /// [`ResolvedSelectors::push_ref`], which is what keeps the flags honest:
+    /// normalizing inside the push is the only way they stay free.
+    fn push_merged(&mut self, sel: String, lb: bool) {
         self.sels.push(sel);
         if self.flags {
             self.lbs.push(lb);
         }
+    }
+
+    /// Normalize an owned selector and push it, recording what its canonical
+    /// scan saw.
+    fn push_owned(&mut self, sel: String, lb: bool) {
+        self.push_normalized(normalize_selector_owned_facts(sel), lb);
+    }
+
+    /// Normalize a borrowed selector and push it, recording what its canonical
+    /// scan saw.
+    fn push_ref(&mut self, sel: &str, lb: bool) {
+        self.push_normalized(normalize_selector_facts(sel), lb);
+    }
+
+    fn push_normalized(&mut self, n: Normalized, lb: bool) {
+        self.maybe_bogus |= !n.canonical;
+        self.any_percent |= n.percent;
+        self.push_merged(n.sel, lb);
+    }
+
+    /// OR another list's facts into this one. Used by the row-of-rows merge,
+    /// whose selectors are pushed with [`ResolvedSelectors::push_merged`] and so
+    /// carry no facts of their own.
+    fn absorb(&mut self, other: &ResolvedSelectors) {
+        self.maybe_bogus |= other.maybe_bogus;
+        self.any_percent |= other.any_percent;
     }
 }
 
@@ -7079,7 +7148,7 @@ fn resolve_selectors_opt(
             // The combo's flag ORs its chosen parents' flags (mastodon's
             // adjacent-state selectors break per combo, not per template).
             let flag = idx.iter().any(|&pi| parent_lbs.get(pi).copied().unwrap_or(false));
-            result.push(normalize_selector_owned(s), flag);
+            result.push_owned(s, flag);
             // Increment with the LAST ref fastest (dart's order).
             let mut j = k;
             loop {
@@ -7103,17 +7172,14 @@ fn resolve_selectors_opt(
         // such as `&foo` is rejected earlier by `validate_selector`.)
         result.reserve(parts.len());
         for (pi, part) in parts.iter().enumerate() {
-            result.push(
-                normalize_selector(part),
-                part_lbs.get(pi).copied().unwrap_or(false),
-            );
+            result.push_ref(part, part_lbs.get(pi).copied().unwrap_or(false));
         }
     } else if !implicit_parent {
         // dart resolves per complex: a part with `&` expands across the
         // parents; a part without stays at the root exactly once.
         for (part_i, part) in parts.iter().enumerate() {
             if let Some(s) = substitute_pseudo_refs(part) {
-                result.push(normalize_selector_owned(s), false);
+                result.push_owned(s, false);
             } else if let Some(segments) = split_parent_refs(part) {
                 for parent in parents {
                     check_compound_parent(part, parent)?;
@@ -7122,16 +7188,13 @@ fn resolve_selectors_opt(
             } else if part_has_parent_ref(part) {
                 for (pi, parent) in parents.iter().enumerate() {
                     check_compound_parent(part, parent)?;
-                    result.push(
-                        normalize_selector_owned(replace_parent_refs(part, parent)),
+                    result.push_owned(
+                        replace_parent_refs(part, parent),
                         parent_lbs.get(pi).copied().unwrap_or(false),
                     );
                 }
             } else {
-                result.push(
-                    normalize_selector(part),
-                    part_lbs.get(part_i).copied().unwrap_or(false),
-                );
+                result.push_ref(part, part_lbs.get(part_i).copied().unwrap_or(false));
             }
         }
     } else {
@@ -7147,7 +7210,7 @@ fn resolve_selectors_opt(
             // A pseudo-only `&` part resolves ONCE (whole parent list in
             // place): a single-entry row.
             if let Some(s) = substitute_pseudo_refs(part) {
-                out.push(normalize_selector_owned(s), false);
+                out.push_owned(s, false);
                 return Ok(());
             }
             if let Some(segments) = split_parent_refs(part) {
@@ -7178,7 +7241,7 @@ fn resolve_selectors_opt(
                         part_lbs.get(part_i).copied().unwrap_or(false) || parent_lb,
                     )
                 };
-                out.push(normalize_selector_owned(combined), flag);
+                out.push_owned(combined, flag);
             }
             Ok(())
         };
@@ -7198,6 +7261,11 @@ fn resolve_selectors_opt(
             }
             let longest = rows.iter().map(|r| r.len()).max().unwrap_or(0);
             result.reserve(rows.iter().map(|r| r.len()).sum());
+            // The strings move across already normalized, so their facts come
+            // from the rows that normalized them.
+            for row in &rows {
+                result.absorb(row);
+            }
             for j in 0..longest {
                 // Each slot is read exactly once, so the string moves out instead
                 // of being cloned; what stays behind is an empty `String`, which
@@ -7205,7 +7273,7 @@ fn resolve_selectors_opt(
                 for row in rows.iter_mut() {
                     if let Some(sel) = row.sels.get_mut(j) {
                         let lb = row.lbs.get(j).copied().unwrap_or(false);
-                        result.push(std::mem::take(sel), lb);
+                        result.push_merged(std::mem::take(sel), lb);
                     }
                 }
             }
@@ -7292,25 +7360,79 @@ fn split_commas(s: &str) -> Segments<'_> {
 /// preceding simple with a descendant combinator (`[a] b`), matching
 /// dart-sass's `[adjacent-compounds]` normalization.
 pub(crate) fn normalize_selector(s: &str) -> String {
+    normalize_selector_facts(s).sel
+}
+
+/// A normalized selector plus the two facts its canonical scan yielded **for
+/// free**. `canonical` is a *proof* that the selector carries no
+/// bogus-combinator trigger, because [`canonical_plain`]'s byte set is disjoint
+/// from `has_bogus_trigger`'s `> + ~ (`; `percent` is the placeholder probe the
+/// emitter would otherwise repeat per selector. Both fall out of a loop that had
+/// to run anyway to decide the fast path, which is the entire reason they are
+/// collected here instead of scanned for downstream.
+struct Normalized {
+    sel: String,
+    /// The selector was *proved* canonical. `false` means "not proved" — it
+    /// says nothing about whether a trigger byte is actually present.
+    canonical: bool,
+    /// The normalized selector contains a `%`.
+    percent: bool,
+}
+
+/// [`normalize_selector`], reporting what the canonical scan saw.
+fn normalize_selector_facts(s: &str) -> Normalized {
     // Fast path: already-canonical selectors skip the two char-vector
-    // materializations below. The `debug_assert` IS the proof of that: every
+    // materializations below. The `debug_assert`s ARE the proof of that: every
     // debug-built test run and every debug spec run re-checks fast == slow on
     // every call, which is the harness this fast path was originally validated
     // against and is cheaper to keep than to rebuild.
-    if is_canonical_plain(s) {
-        debug_assert_eq!(
-            normalize_selector_slow(s),
-            s,
-            "is_canonical_plain accepted a selector the normalizer would rewrite"
-        );
-        return s.to_string();
+    match canonical_plain(s) {
+        Some(percent) => {
+            debug_assert_canonical(s, percent);
+            Normalized {
+                sel: s.to_string(),
+                canonical: true,
+                percent,
+            }
+        }
+        None => {
+            let sel = normalize_selector_slow(s);
+            let percent = sel.contains('%');
+            Normalized {
+                sel,
+                canonical: false,
+                percent,
+            }
+        }
     }
-    normalize_selector_slow(s)
+}
+
+/// The three invariants the canonical fast path rests on, checked on every call
+/// in a debug build and compiled out of release: the normalizer would have
+/// returned the selector unchanged, the scan's `%` answer matches a plain
+/// search, and the accepted byte set really is disjoint from the
+/// bogus-combinator triggers — the last one so that widening
+/// [`canonical_plain`] cannot silently break `ResolvedSelectors::maybe_bogus`.
+#[inline]
+fn debug_assert_canonical(s: &str, percent: bool) {
+    debug_assert_eq!(
+        normalize_selector_slow(s),
+        s,
+        "canonical_plain accepted a selector the normalizer would rewrite"
+    );
+    debug_assert_eq!(percent, s.contains('%'), "canonical scan missed a `%`");
+    debug_assert!(
+        !has_bogus_trigger(s),
+        "the canonical byte set overlaps a bogus-combinator trigger"
+    );
 }
 
 /// Whether `s` is already in canonical form without running the normalizer:
 /// only plain compound characters (ASCII letters/digits, `_-.#%:`) separated
-/// by single descendant spaces, with no leading/trailing space. Every rewrite
+/// by single descendant spaces, with no leading/trailing space. `None` means
+/// not canonical; `Some(percent)` means canonical, and reports whether the scan
+/// passed a `%` — the same loop over the same bytes answers both questions,
+/// which is what makes [`ResolvedSelectors::any_percent`] free. Every rewrite
 /// `normalize_selector` performs — whitespace collapse, hex-escape handling,
 /// attribute/pseudo/combinator canonicalization — is triggered by a character
 /// outside this set.
@@ -7339,28 +7461,35 @@ pub(crate) fn normalize_selector(s: &str) -> String {
 /// path rewrites `>a` to `> a`, so those need a separate proof about spacing
 /// and the trailing-combinator case. The set is also deliberately disjoint from
 /// `has_bogus_trigger`'s `> + ~ (`, so passing this predicate proves a selector
-/// carries no bogus-combinator trigger.
-fn is_canonical_plain(s: &str) -> bool {
+/// carries no bogus-combinator trigger — an invariant
+/// [`ResolvedSelectors::maybe_bogus`] now depends on and
+/// [`debug_assert_canonical`] pins.
+fn canonical_plain(s: &str) -> Option<bool> {
     let b = s.as_bytes();
     if b.is_empty() || b[0] == b' ' || b[b.len() - 1] == b' ' {
-        return false;
+        return None;
     }
     let mut prev_space = false;
+    let mut percent = false;
     for &c in b {
         match c {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'#' | b'%' | b':' => {
+            b'%' => {
+                percent = true;
+                prev_space = false;
+            }
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'#' | b':' => {
                 prev_space = false;
             }
             b' ' => {
                 if prev_space {
-                    return false;
+                    return None;
                 }
                 prev_space = true;
             }
-            _ => return false,
+            _ => return None,
         }
     }
-    true
+    Some(percent)
 }
 
 /// [`normalize_selector`] for a string the caller already owns: hands the
@@ -7368,16 +7497,26 @@ fn is_canonical_plain(s: &str) -> bool {
 /// bytes into a fresh `String`. Every selector this module builds by
 /// substituting a parent (`format!("{parent} {part}")`, `replace_parent_refs`)
 /// is owned and canonical, which is the common shape of a nested rule.
-fn normalize_selector_owned(s: String) -> String {
-    if is_canonical_plain(&s) {
-        debug_assert_eq!(
-            normalize_selector_slow(&s),
-            s,
-            "is_canonical_plain accepted a selector the normalizer would rewrite"
-        );
-        return s;
+fn normalize_selector_owned_facts(s: String) -> Normalized {
+    match canonical_plain(&s) {
+        Some(percent) => {
+            debug_assert_canonical(&s, percent);
+            Normalized {
+                sel: s,
+                canonical: true,
+                percent,
+            }
+        }
+        None => {
+            let sel = normalize_selector_slow(&s);
+            let percent = sel.contains('%');
+            Normalized {
+                sel,
+                canonical: false,
+                percent,
+            }
+        }
     }
-    normalize_selector_slow(&s)
 }
 
 fn normalize_selector_slow(s: &str) -> String {
