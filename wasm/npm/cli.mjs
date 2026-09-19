@@ -413,7 +413,8 @@ Options:
       --no-css                       Compile but discard the CSS: no output
                                      file, no stdout, and an existing output is
                                      left exactly as it was.
-      --update                       Skip outputs already newer than their input.
+      --update                       Leave outputs already newer than their input
+                                     and every stylesheet it loads.
   -w, --watch                        Recompile when the input or any dependency
                                      changes (requires <input> <output>).
   -j, --jobs <N>                     Compile at most N files at once
@@ -1093,10 +1094,48 @@ function parseJobs(positionals, output) {
   }
   return [{ input, output: out }];
 }
-/** `--update`: true when `output` already exists and is newer than `input`. */
-function isFresh(output, input) {
+/**
+ * `--update`: true when `output` is at least as new as `input` AND every
+ * stylesheet the compile loaded.
+ *
+ * `deps` is a compile's `loadedUrls`. Checking the entry alone is what this
+ * did first, and it left stale CSS on disk whenever a partial changed —
+ * silently, which is worse than a slow build (#133). dart-sass walks the
+ * graph; so does this now.
+ *
+ * The graph is known only AFTER a compile, which looks like the wrong order
+ * for a flag whose job is to avoid compiling. It is the right order here:
+ * `[measured]` on Lichess's 147 entry points, dart's `--update` takes 1.18s to
+ * decide that nothing changed, while sasso compiles the whole tree from
+ * scratch in 0.48s. Skipping the compile is worth less than the walk costs,
+ * and reimplementing `@use`/`@import` resolution in JS to get the graph early
+ * would be a second copy of rules that already exist in the compiler. So the
+ * compile always runs and `--update` decides whether to WRITE — which is what
+ * keeps an unchanged output's mtime stable, the property downstream watchers
+ * actually key on.
+ */
+function isFresh(output, input, deps) {
   try {
-    return existsSync(output) && statSync(output).mtimeMs >= statSync(input).mtimeMs;
+    if (!existsSync(output)) return false;
+    const out = statSync(output).mtimeMs;
+    if (out < statSync(input).mtimeMs) return false;
+    for (const u of deps || []) {
+      let f;
+      try {
+        f = fileURLToPath(u);
+      } catch {
+        // A non-file URL (a virtual importer) has no mtime to compare; it
+        // cannot be shown unchanged, so it is not treated as fresh.
+        return false;
+      }
+      try {
+        if (out < statSync(f).mtimeMs) return false;
+      } catch {
+        // A dependency that has vanished since the compile: not fresh.
+        return false;
+      }
+    }
+    return true;
   } catch {
     return false;
   }
@@ -1708,8 +1747,6 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics) {
     if (i >= jobs.length) break;
     const { input, output } = jobs.at(i);
     const wantMap = wantSourceMap(opts, output);
-    // --update: leave outputs that are already newer than their input untouched.
-    if (opts.update && output && isFresh(output, input)) continue;
     // Warnings and deprecations belong to THIS job, wherever it ran.
     const run = captureStderr(() =>
       input === "-"
@@ -1765,6 +1802,10 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics) {
         diagnostics.delete(i);
       }
     }
+    // --update: the compile has run, so its `loadedUrls` is what says whether
+    // the output on disk is still current. Leave it alone if it is — including
+    // its mtime, which is the point.
+    if (opts.update && output && isFresh(output, input, result.loadedUrls)) continue;
     const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource() : undefined);
     if (writeError) {
       note(i, `${writeError}\n`);
