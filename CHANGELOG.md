@@ -28,6 +28,51 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **The nine members dart removed from `sass:color` exist, and say what
+  replaced them** (#65). `opacify`, `fade-in`, `transparentize`, `fade-out`,
+  `lighten`, `darken`, `saturate`, `desaturate` and `adjust-hue` are gone from
+  the module but not *unknown*: dart keeps each as a member that always fails,
+  with a three-part message naming the `color.adjust` that replaces it. sasso
+  said `Undefined function.`, which sends the reader looking for a typo instead
+  of at a migration:
+
+  ```
+  Error: The function opacify() isn't in the sass:color module.
+
+  Recommendation: color.adjust(rgba(1, 2, 3, 0.5), $alpha: 0.1)
+
+  More info: https://sass-lang.com/documentation/functions/color#opacify
+  ```
+
+  The recommendation is built from the call's OWN arguments, which is what
+  separates it from the global `[color-functions]` deprecation next to it: that
+  one prints a `$color` placeholder, negates arithmetically and folds `turn`/
+  `rad` to degrees. Here nothing is converted and nothing is validated — the
+  amount is negated *textually* (`-10%` suggests `--10%`), `0.5turn` stays
+  `0.5turn`, and a non-colour first argument is quoted back as written, because
+  the line is a suggestion rather than a call. Arity is still checked first, so
+  a call that could not have worked is reported as the wrong call it is.
+
+  Making them members rather than a special case in one call path is what makes
+  every spelling agree: `meta.function-exists`, `meta.get-function` and
+  `meta.call` see them, `@forward` re-exports and re-prefixes them (reached as
+  `c-lighten`, the message still says `lighten()`), and — the visible half — a
+  `@use "sass:color" as *` binds them OVER the global of the same name, so
+  `saturate(#abcdef, 10%)` fails there while the bare global still computes a
+  colour.
+
+  Two pre-existing bugs found while measuring this and fixed with it. dart's
+  `Value.toString()` — the spelling a diagnostic gives a value it embeds whole —
+  had three drifting copies in sasso, which disagreed on a one-element space
+  list: `@error list.append((), 1)` printed `1` where dart prints `(1)`, and
+  `rgb(list.append((), 1), 0.5)` said `$color: 1 is not a color.` for dart's
+  `$color: (1) is not a color.` There is now one serializer. And a member
+  reached through `@use … as *` drew a one-column caret instead of spanning the
+  invocation, which was visible for every starred built-in, not just these
+  (`@use "sass:string" as *; b: index(1, 2, 3)`).
+
+  Against dart-sass 1.104.1 the CSS ratchet is unchanged at 14,107/14,258.
+
 - **`color-module-compat` is emitted, and the filter overload has one rule**
   (#124). A `sass:color` member used in its plain-CSS *filter* sense —
   `color.grayscale(1)`, `color.invert(0.5)`, `color.opacity(0.5)`,

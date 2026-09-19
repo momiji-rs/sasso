@@ -32,6 +32,14 @@ const MATCHING: &[&str] = &[
     "error-stack-nested",
     "error-in-function",
     "error-cross-file",
+    // The nine members dart REMOVED from `sass:color` (#65): a three-part
+    // message whose `Recommendation:` line is built from the call's own
+    // arguments. Two fixtures because the paths differ in what they can get
+    // wrong — the namespaced one is the message itself, and the one reached
+    // through `@use "sass:color" as *` also locks the frame trace and the
+    // caret, which spanned a single column for a starred member until #65.
+    "error-color-removed-member",
+    "error-color-removed-member-star",
     // Compile errors with a positioned span (undefined variable).
     "compile-undefined-variable",
     "compile-undefined-variable-stack",

@@ -841,7 +841,13 @@ impl<'a> Evaluator<'a> {
                             return r;
                         }
                     }
-                    let v = crate::builtins::call_module(&owner, &bare, &pos_args, &named, *pos)?;
+                    // The caret spans the INVOCATION, as it does for the same
+                    // member written with its namespace (which sizes the error
+                    // the same way). Without this a member reached through the
+                    // star drew a one-column caret under the opening `i` of
+                    // `index(1, 2, 3)`.
+                    let v = crate::builtins::call_module(&owner, &bare, &pos_args, &named, *pos)
+                        .map_err(|e| e.with_length_at(*pos, *length))?;
                     self.emit_color_function_deprecation(
                         &bare,
                         Some(&owner),

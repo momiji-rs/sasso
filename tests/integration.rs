@@ -1743,6 +1743,13 @@ fn rgb_hsl_argument_validation_matches_dart() {
     // A 2-arg comma call is the legacy `rgb($color, $alpha)` — $color must be a
     // color, so a space-list (modern channels shape) is rejected.
     assert_eq!(err("a{color:rgb(1 2 3, 0.5)}"), "$color: (1 2 3) is not a color.");
+    // Parenthesized by the LIST, not by its length: a one-element space list
+    // is `(1)` too, so the separator can never be read as the sentence's own
+    // punctuation. See `a_value_embedded_in_a_message_is_parenthesized`.
+    assert_eq!(
+        err("@use \"sass:list\";a{color:rgb(list.append((), 1), 0.5)}"),
+        "$color: (1) is not a color."
+    );
     assert_eq!(err("a{color:hsl(1 2% 3%, 0.5)}"), "Missing argument $lightness.");
 
     // Valid forms still compile (legacy, modern space-list, slash-alpha, var()).
@@ -2537,4 +2544,251 @@ fn a_reference_invoked_by_name_is_looked_up_canonically() {
         css("@use \"sass:string\" as *; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"to_upper_case\")); }"),
         "a {\n  b: get-function(\"to-upper-case\");\n}\n"
     );
+}
+
+/// The message of a compile error that must happen, under the default options.
+fn compile_err(src: &str) -> String {
+    err_message(compile(src, &Options::default()).expect_err("expected a compile error"))
+}
+
+/// A compile error's MESSAGE. The library's `Display` appends the
+/// ` (line:column)` the CLI draws as a snippet instead; it is dropped here so a
+/// multi-line message can be compared whole (the spans themselves are pinned
+/// byte-for-byte by `tests/diagnostics.rs`).
+fn err_message(err: impl std::fmt::Display) -> String {
+    let rendered = err.to_string();
+    let Some(open) = rendered.rfind(" (") else {
+        return rendered;
+    };
+    let tail = &rendered[open + 2..];
+    let is_position = tail.ends_with(')')
+        && tail[..tail.len() - 1].split_once(':').is_some_and(|(l, c)| {
+            !l.is_empty() && !c.is_empty() && l.bytes().chain(c.bytes()).all(|b| b.is_ascii_digit())
+        });
+    if is_position {
+        rendered[..open].to_string()
+    } else {
+        rendered
+    }
+}
+
+#[test]
+fn a_value_embedded_in_a_message_is_parenthesized() {
+    // dart's `Value.toString()` — the spelling a diagnostic gives a value it
+    // embeds whole — is `inspect()` plus one rule: an unbracketed, non-empty
+    // list is wrapped in parentheses, so its separator is never read as the
+    // sentence's own punctuation. `inspect()` already parenthesizes the
+    // one-element comma and slash forms, which must not be wrapped twice; a
+    // bracketed list carries its own delimiters; and the empty list is `()`
+    // either way. Measured against dart-sass 1.104.1.
+    let cases = [
+        // the shape that used to differ per message: a one-element SPACE list
+        ("@use \"sass:list\"; @error list.append((), 1);", "(1)"),
+        ("@error (1,);", "(1,)"),
+        ("@error (1 2);", "(1 2)"),
+        ("@error (1, 2);", "(1, 2)"),
+        ("@error [1];", "[1]"),
+        ("@error [1 2];", "[1 2]"),
+        ("@error ();", "()"),
+        // a string keeps its quotes, as `inspect()` gives them
+        ("@error \"q\";", "\"q\""),
+        ("@error a;", "a"),
+        ("@error (a: 1);", "(a: 1)"),
+        ("@error null;", "null"),
+    ];
+    for (src, wanted) in cases {
+        assert_eq!(compile_err(src), format!("Error: {wanted}"), "{src}");
+    }
+}
+
+#[test]
+fn a_removed_sass_color_member_recommends_color_adjust() {
+    // dart REMOVED nine members from `sass:color`, but did not make them
+    // unknown: each still exists as a member, and calling it reports a
+    // three-part message naming the `color.adjust` that replaces it. The
+    // channel and the sign are per member, and the `Recommendation:` line is
+    // built from the call's OWN arguments (the global `[color-functions]`
+    // deprecation prints a `$color` placeholder instead). Measured against
+    // dart-sass 1.104.1.
+    let members = [
+        ("adjust-hue", "$hue: 10%"),
+        ("darken", "$lightness: -10%"),
+        ("desaturate", "$saturation: -10%"),
+        ("fade-in", "$alpha: 10%"),
+        ("fade-out", "$alpha: -10%"),
+        ("lighten", "$lightness: 10%"),
+        ("opacify", "$alpha: 10%"),
+        ("saturate", "$saturation: 10%"),
+        ("transparentize", "$alpha: -10%"),
+    ];
+    for (member, channel) in members {
+        assert_eq!(
+            compile_err(&format!(
+                "@use \"sass:color\";\n.a {{ b: color.{member}(#abcdef, 10%); }}"
+            )),
+            format!(
+                "Error: The function {member}() isn't in the sass:color module.\n\n\
+                 Recommendation: color.adjust(#abcdef, {channel})\n\n\
+                 More info: https://sass-lang.com/documentation/functions/color#{member}"
+            )
+        );
+    }
+}
+
+#[test]
+fn a_removed_sass_color_member_is_reached_by_every_dispatch_path() {
+    // The members have to be real members, not a special case in one call
+    // path: they answer to the `sass:meta` predicates, and — the visible half —
+    // a `@use "sass:color" as *` binds them OVER the global of the same name,
+    // so `saturate(…)` stops working where the global still warns and
+    // succeeds. Measured against dart-sass 1.104.1.
+    let wanted = "Error: The function lighten() isn't in the sass:color module.\n\n\
+                  Recommendation: color.adjust(#abcdef, $lightness: 10%)\n\n\
+                  More info: https://sass-lang.com/documentation/functions/color#lighten";
+    for src in [
+        // namespaced
+        "@use \"sass:color\";\n.a { b: color.lighten(#abcdef, 10%); }",
+        // named arguments, in either order
+        "@use \"sass:color\";\n.a { b: color.lighten($amount: 10%, $color: #abcdef); }",
+        // through the star import, where the member shadows the global
+        "@use \"sass:color\" as *;\n.a { b: lighten(#abcdef, 10%); }",
+        // and through a reference, which is what `meta.call` dispatches
+        "@use \"sass:color\"; @use \"sass:meta\";\n\
+         .a { b: meta.call(meta.get-function(\"lighten\", $module: \"color\"), #abcdef, 10%); }",
+    ] {
+        assert_eq!(compile_err(src), wanted, "{src}");
+    }
+    // A member is visible to the predicates before it is called, both under
+    // its module and through the star, and its reference carries its own name.
+    assert_eq!(
+        css("@use \"sass:color\"; @use \"sass:meta\";\na { b: meta.function-exists(\"lighten\", $module: \"color\"); }"),
+        "a {\n  b: true;\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:color\" as *; @use \"sass:meta\";\na { b: meta.function-exists(\"lighten\"); }"),
+        "a {\n  b: true;\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:color\"; @use \"sass:meta\";\na { b: meta.inspect(meta.get-function(\"lighten\", $module: \"color\")); }"),
+        "a {\n  b: get-function(\"lighten\");\n}\n"
+    );
+    // The GLOBAL spellings are untouched: they still compute a color (behind
+    // the `global-builtin` and `color-functions` deprecations).
+    assert_eq!(css("a { b: saturate(#abcdef, 10%); }"), "a {\n  b: #a6cdf4;\n}\n");
+    // The same name under the star is the module member, so the call fails.
+    assert!(
+        compile_err("@use \"sass:color\" as *;\n.a { b: saturate(#abcdef, 10%); }")
+            .starts_with("Error: The function saturate() isn't in the sass:color module.\n")
+    );
+}
+
+#[test]
+fn a_forwarded_removed_sass_color_member_keeps_its_own_name() {
+    // A `@forward` re-exports the removed members like any other, and a prefix
+    // renames the way one is CALLED without renaming what the message is
+    // about: the member reached as `c-lighten` still reports `lighten()`.
+    // Measured against dart-sass 1.104.1.
+    let mut files = HashMap::new();
+    files.insert("fwd".to_string(), "@forward \"sass:color\";".to_string());
+    files.insert("pre".to_string(), "@forward \"sass:color\" as c-*;".to_string());
+    files.insert(
+        "shown".to_string(),
+        "@forward \"sass:color\" show lighten;".to_string(),
+    );
+    let importer = MemImporter(files);
+    let opts = Options::default().with_importer(&importer);
+    for src in [
+        "@use \"fwd\" as f;\n.a { b: f.lighten(#abcdef, 10%); }",
+        "@use \"fwd\" as *;\n.a { b: lighten(#abcdef, 10%); }",
+        "@use \"pre\" as f;\n.a { b: f.c-lighten(#abcdef, 10%); }",
+        "@use \"shown\" as f;\n.a { b: f.lighten(#abcdef, 10%); }",
+    ] {
+        let err = err_message(compile(src, &opts).expect_err("a forwarded member must fail"));
+        assert_eq!(
+            err,
+            "Error: The function lighten() isn't in the sass:color module.\n\n\
+             Recommendation: color.adjust(#abcdef, $lightness: 10%)\n\n\
+             More info: https://sass-lang.com/documentation/functions/color#lighten",
+            "{src}"
+        );
+    }
+    // A prefix renames a removed member like any other…
+    let err = err_message(
+        compile("@use \"pre\" as f;\n.a { b: f.c-darken(#abcdef, 10%); }", &opts)
+            .expect_err("a prefixed member must fail"),
+    );
+    assert!(
+        err.starts_with("Error: The function darken() isn't in the sass:color module.\n"),
+        "{err}"
+    );
+    // …and `show` filters one out like any other, leaving it undefined.
+    let err = err_message(
+        compile("@use \"shown\" as f;\n.a { b: f.darken(#abcdef, 10%); }", &opts)
+            .expect_err("a hidden member is undefined"),
+    );
+    assert_eq!(err, "Error: Undefined function.");
+}
+
+#[test]
+fn a_removed_sass_color_member_checks_its_arity_before_it_reports() {
+    // Arity comes first, so a call that could not have worked anyway is
+    // reported as the wrong call it is — with the member's own parameter names,
+    // which are `$color, $amount` for all nine. (The GLOBAL `adjust-hue` binds
+    // `$degrees`; it is a different function and is not touched here.)
+    // Measured against dart-sass 1.104.1.
+    let cases = [
+        ("color.lighten(#abcdef)", "Missing argument $amount."),
+        ("color.adjust-hue(#abcdef)", "Missing argument $amount."),
+        ("color.lighten()", "Missing argument $color."),
+        ("color.lighten($amount: 10%)", "Missing argument $color."),
+        (
+            "color.lighten(#abcdef, 1, 2)",
+            "Only 2 arguments allowed, but 3 were passed.",
+        ),
+        (
+            "color.lighten(#abcdef, 1, 2, $x: 3)",
+            "Only 2 positional arguments allowed, but 3 were passed.",
+        ),
+    ];
+    for (call, wanted) in cases {
+        assert_eq!(
+            compile_err(&format!("@use \"sass:color\";\n.a {{ b: {call}; }}")),
+            format!("Error: {wanted}"),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn a_removed_sass_color_member_spells_its_arguments_as_a_diagnostic_does() {
+    // Neither argument is VALIDATED — the recommendation is a suggestion, not
+    // a call — and the amount is negated TEXTUALLY, without arithmetic and
+    // without converting a unit the `color-functions` deprecation folds to
+    // degrees. Both values are spelled the way a diagnostic spells a whole
+    // value, so an unbracketed list is parenthesized. Measured against
+    // dart-sass 1.104.1.
+    let cases = [
+        // a `-` written in front of what was there, not `10%` negated
+        ("color.darken(#abcdef, -10%)", "#abcdef, $lightness: --10%"),
+        // the evaluated value, though: `1 + 1` is `2` before the `-`
+        ("color.darken(#abcdef, 1 + 1)", "#abcdef, $lightness: -2"),
+        // no unit conversion: `0.5turn` stays `0.5turn`, never `180deg`
+        ("color.adjust-hue(#abcdef, 0.5turn)", "#abcdef, $hue: 0.5turn"),
+        // no type checking either, on either argument
+        ("color.lighten(\"nope\", foo)", "\"nope\", $lightness: foo"),
+        // and a list is parenthesized, including a one-element space list
+        (
+            "color.lighten(list.append((), 1), (1, 2))",
+            "(1), $lightness: (1, 2)",
+        ),
+    ];
+    for (call, wanted) in cases {
+        let err = compile_err(&format!(
+            "@use \"sass:color\"; @use \"sass:list\";\n.a {{ b: {call}; }}"
+        ));
+        assert!(
+            err.contains(&format!("\nRecommendation: color.adjust({wanted})\n")),
+            "{call}: {err}"
+        );
+    }
 }

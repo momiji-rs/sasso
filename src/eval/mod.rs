@@ -2853,7 +2853,7 @@ impl<'a> Evaluator<'a> {
     /// "unspanned exception attaches at the boundary" rule.
     fn build_error(&mut self, value: &Expr, pos: Pos, length: usize) -> Error {
         let msg = match self.eval_expr(value) {
-            Ok(v) => v.to_error_message(),
+            Ok(v) => v.to_inspect_message(),
             Err(e) => return e,
         };
         if !self.diag_enabled() {

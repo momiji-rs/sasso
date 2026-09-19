@@ -1142,11 +1142,31 @@ impl Value {
         }
     }
 
-    /// The message text for `@error`: the dart-sass `inspect()` serialization
-    /// of the argument, additionally wrapping an unbracketed multi-element list
-    /// in parentheses (`(a b c)`, `(a, b)`). A string keeps its quotes.
-    pub(crate) fn to_error_message(&self) -> String {
-        crate::builtins::inspect_element(self, ListSep::Space)
+    /// dart-sass's `Value.toString()`: the spelling a value gets when a
+    /// DIAGNOSTIC embeds it whole. It is `inspect()` plus one rule — an
+    /// unbracketed, non-empty list is parenthesized, so the list's separator is
+    /// never read as the sentence's own punctuation (`(1 2) is not a color.`).
+    /// A string keeps its quotes. `inspect()` already parenthesizes the
+    /// single-element comma and slash forms (`(1,)`, `(1/)`), which must not be
+    /// wrapped a second time.
+    ///
+    /// Every message that embeds a whole value reads it from here, so the
+    /// spellings cannot drift apart: `@error`, the legacy colour overloads'
+    /// `$color: … is not a color.`, and the `Recommendation:` line of the
+    /// removed `sass:color` members. Verified against dart-sass 1.104.1
+    /// (2026-09-19), including the shapes where the three used to disagree: a
+    /// one-element space list is `(1)`, not `1`.
+    pub(crate) fn to_inspect_message(&self) -> String {
+        match self {
+            Value::List(l) if !l.bracketed && !l.items.is_empty() => {
+                if l.items.len() == 1 && matches!(l.sep, ListSep::Comma | ListSep::Slash) {
+                    crate::builtins::inspect_value(self)
+                } else {
+                    format!("({})", crate::builtins::inspect_value(self))
+                }
+            }
+            other => crate::builtins::inspect_value(other),
+        }
     }
 
     pub(crate) fn type_name(&self) -> &'static str {
