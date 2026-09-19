@@ -74,6 +74,17 @@ const MATCHING: &[&str] = &[
     // The same rule reached through a function reference: fixing only the
     // direct call left `meta.call(meta.get-function("grayscale"), 1)` warning.
     "deprecation-global-builtin-call-ref",
+    // `color-module-compat`, which sasso never emitted before #124: all five
+    // of dart's shapes in one fixture — a number to `color.grayscale` (through
+    // `@use "sass:color" as *`), `color.invert` and `color.opacity`, and a
+    // Microsoft filter argument to `color.alpha` in either overload. Two calls
+    // that must stay silent ride along, because emitting nothing would satisfy
+    // neither half. Byte parity includes dart's missing closing parenthesis in
+    // the `opacity` message, which sass-spec locks.
+    "deprecation-color-module-compat",
+    // The same rule reached through a function reference, the path that stayed
+    // silent when only the direct call was fixed for `global-builtin` above.
+    "deprecation-color-module-compat-call-ref",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {

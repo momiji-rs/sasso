@@ -99,6 +99,42 @@ impl Deprecation {
         }
     }
 
+    /// The `color-module-compat` deprecation for a `sass:color` member reached
+    /// in its plain-CSS *filter* sense: `color.grayscale(1)` is going away as a
+    /// way to write `filter: grayscale(1)`. `number` is the argument as Sass
+    /// writes it and `filter` the plain-CSS call dart recommends instead —
+    /// which is also the value the call returns, so both come from
+    /// `plain_filter_text`.
+    ///
+    /// The GLOBAL spelling carries no deprecation at all: `grayscale(1)` IS the
+    /// CSS filter there, and warning about it was #122.
+    ///
+    /// ⚠ dart's `opacity` message is missing the closing parenthesis after the
+    /// number — `Passing a number (1 to color.opacity()` — where `grayscale`
+    /// and `invert` have it (its string constant starts at `" to "`). That is
+    /// not a transcription slip here: sass-spec locks the typo
+    /// (`spec/core_functions/modules/color/css_overloads.hrx`), so byte parity
+    /// means reproducing it.
+    pub(crate) fn color_module_compat_number(member: &str, number: &str, filter: &str) -> Self {
+        let close = if member == "opacity" { "" } else { ")" };
+        Deprecation {
+            id: "color-module-compat",
+            message: format!("Passing a number ({number}{close} to color.{member}() is deprecated."),
+            more_info: Some(format!("Recommendation: {filter}")),
+        }
+    }
+
+    /// The same id for the other shape it has: `color.alpha()` used as the
+    /// proprietary Microsoft filter (`color.alpha(opacity=20)`), in either of
+    /// dart's two overloads. `filter` is the passed-through CSS call.
+    pub(crate) fn color_module_compat_ms_filter(filter: &str) -> Self {
+        Deprecation {
+            id: "color-module-compat",
+            message: "Using color.alpha() for a Microsoft filter is deprecated.".to_string(),
+            more_info: Some(format!("Recommendation: {filter}")),
+        }
+    }
+
     /// The `bogus-combinators` deprecation for a selector dart-sass drops:
     /// a repeated combinator run (`a > + b`) or a leading one outside a
     /// relative context. The rule is omitted from the CSS, and this warning is

@@ -340,11 +340,7 @@ fn is_css_special(v: &Value) -> bool {
 /// as `color.grayscale` (#122). dart warns only on the Sass path, and the two
 /// decisions have to come from the same place to stay that way.
 pub(crate) fn is_plain_css_filter_call(name: &str, pos_args: &[Value], named: &[(String, Value)]) -> bool {
-    let arg = |param: &str| {
-        pos_args
-            .first()
-            .or_else(|| named.iter().find(|(n, _)| n == param).map(|(_, v)| v))
-    };
+    let arg = |param: &str| bound_arg(pos_args, named, param);
     let one_arg = pos_args.len() + named.len() == 1;
     match name {
         // `saturate($amount)` is the CSS filter; `saturate($color, $amount)`
@@ -363,11 +359,80 @@ pub(crate) fn is_plain_css_filter_call(name: &str, pos_args: &[Value], named: &[
     }
 }
 
+/// The argument bound to `$param`, positionally or by name — the same binding
+/// the function itself will use.
+fn bound_arg<'a>(pos_args: &'a [Value], named: &'a [(String, Value)], param: &str) -> Option<&'a Value> {
+    pos_args
+        .first()
+        .or_else(|| named.iter().find(|(n, _)| n == param).map(|(_, v)| v))
+}
+
+/// What a `sass:color` MEMBER call does with an argument that the GLOBAL
+/// spelling of the same name would have passed through as a plain-CSS filter.
+pub(crate) enum ModuleFilterArg {
+    /// A number: the filter overload, which the module path still takes and
+    /// dart deprecates there (`color-module-compat`).
+    Filter,
+    /// Any other plain-CSS token — `var(--c)`, `env(…)`, an unsimplifiable
+    /// `calc()`, or a bare identifier like `c`. The module path does NOT take
+    /// the overload for these; they are colour arguments, and fail as ones.
+    NotAColor,
+}
+
+/// Which of those two a `color.grayscale`/`color.invert`/`color.opacity` call
+/// is, or `None` when the argument is not plain-CSS-special at all (an ordinary
+/// colour argument, handled by the function itself).
+///
+/// The module rule is NARROWER than [`is_plain_css_filter_call`]'s global one,
+/// measured against dart-sass 1.104.1: `invert(var(--c))` is a CSS filter,
+/// `color.invert(var(--c))` is `$color: var(--c) is not a color.`. Both readers
+/// of that rule — the dispatcher, which must raise the error, and the
+/// evaluator, which must deprecate exactly the calls that do take the overload
+/// — ask this one function, because a disagreement between them would put the
+/// warning where dart puts an error (#124; the same shape as #122/#123 one
+/// layer up).
+///
+/// A `calc()` that simplifies to a number IS a number by the time it arrives,
+/// so `color.grayscale(calc(1px))` is the filter overload and warns, while
+/// `calc(1px + 1em)` is not and does not.
+///
+/// [`ModuleFilterArg::NotAColor`] covers every UNQUOTED string, not just the
+/// `var(…)`-shaped ones [`is_css_special`] recognizes, because that is the only
+/// place dart's `$color: ` message prefix is reproduced today: a bare
+/// `color.grayscale(c)` reaches it too, and dropping to the generic colour
+/// assertion loses the prefix. (That assertion is missing the prefix for every
+/// other argument type as well — `null`, `true`, a map, a list — which is a
+/// separate gap across the colour and math members, not this rule's.)
+pub(crate) fn module_filter_arg<'a>(
+    member: &str,
+    pos_args: &'a [Value],
+    named: &'a [(String, Value)],
+) -> Option<(ModuleFilterArg, &'a Value)> {
+    if !matches!(member, "grayscale" | "invert" | "opacity") {
+        return None;
+    }
+    let arg = bound_arg(pos_args, named, "color")?;
+    if matches!(arg, Value::Number(_)) {
+        return Some((ModuleFilterArg::Filter, arg));
+    }
+    let unquoted_str = matches!(arg, Value::Str(s) if !s.quoted);
+    (is_css_special(arg) || unquoted_str).then_some((ModuleFilterArg::NotAColor, arg))
+}
+
+/// The CSS text a one-argument filter overload passes through as
+/// (`invert(10%)`, `grayscale(var(--c))`) — dart's `_functionString`. Also the
+/// `Recommendation:` line of the `color-module-compat` deprecation, from here
+/// so that the recommendation cannot spell the call differently from the value
+/// the call returns.
+pub(crate) fn plain_filter_text(name: &str, arg: &Value) -> String {
+    format!("{name}({})", arg.to_css(false))
+}
+
 /// Preserve a one-argument filter overload verbatim (`invert(10%)`,
 /// `grayscale(var(--c))`).
 fn plain_filter(name: &str, arg: &Value) -> Value {
     Value::Str(SassStr {
-        text: format!("{name}({})", arg.to_css(false)).into(),
+        text: plain_filter_text(name, arg).into(),
         quoted: false,
     })
 }

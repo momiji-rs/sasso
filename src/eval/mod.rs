@@ -2054,7 +2054,7 @@ impl<'a> Evaluator<'a> {
     /// (`tests/diagnostics.rs`, `a_legacy_color_function_suggests_its_replacement`).
     fn probe_already_done(
         &mut self,
-        color_path: bool,
+        probe: DepProbePath,
         name: &str,
         module: Option<&str>,
         pos: Pos,
@@ -2096,7 +2096,7 @@ impl<'a> Evaluator<'a> {
             h.write(n.as_bytes());
             Self::fingerprint_value(&mut h, v);
         }
-        let key = (color_path as u32, pos.line as u32, pos.col as u32, h.finish());
+        let key = (probe as u32, pos.line as u32, pos.col as u32, h.finish());
         if let Some(prev) = self.dep_memo.get(&key) {
             return prev.url == self.current_url
                 && prev.name == name
@@ -2255,7 +2255,7 @@ impl<'a> Evaluator<'a> {
         if self.deprecation_quieted() {
             return;
         }
-        if self.probe_already_done(false, name, module, pos, &[], &[]) {
+        if self.probe_already_done(DepProbePath::Call, name, module, pos, &[], &[]) {
             return;
         }
         if let Some(replacement) = replacement {
@@ -2296,13 +2296,22 @@ impl<'a> Evaluator<'a> {
         if !self.diag_enabled() {
             return;
         }
+        // `[color-module-compat]` shares this entry point because it shares the
+        // precondition — a `sass:color` call that SUCCEEDED, judged by its
+        // argument values — and because every dispatch site that can reach a
+        // module member already calls here. The two ids never both fire: their
+        // name sets are disjoint (`grayscale`/`invert`/`opacity`/`alpha` against
+        // the channel getters and legacy adjusters).
+        if let Some(module) = module {
+            self.emit_color_module_compat(name, module, pos, len, pos_args, named);
+        }
         if !crate::builtins::color_function_deprecates(name) {
             return;
         }
         if self.deprecation_quieted() {
             return;
         }
-        if self.probe_already_done(true, name, module, pos, pos_args, named) {
+        if self.probe_already_done(DepProbePath::ColorFunction, name, module, pos, pos_args, named) {
             return;
         }
         // And a bare name that is no global built-in dispatched as a plain CSS
@@ -2324,6 +2333,71 @@ impl<'a> Evaluator<'a> {
             name.to_string()
         };
         let dep = crate::deprecation::Deprecation::color_functions(&qualified, &suggestions);
+        self.emit_deprecation(&dep, pos, len);
+    }
+
+    /// Emit `[color-module-compat]` for a `sass:color` MEMBER call that has just
+    /// succeeded by taking a plain-CSS filter path: `color.grayscale(1)` is
+    /// `filter: grayscale(1)` written the long way, and dart is removing that
+    /// spelling from the module. The global `grayscale(1)` is not deprecated at
+    /// all — there the CSS filter is the whole meaning of the call (#122) — so
+    /// the caller passes the module it was reached through, and `@use
+    /// "sass:color" as *` counts: the member shadows the global, so the warning
+    /// follows the member, not the syntax.
+    ///
+    /// Which calls took that path is not re-decided here: `module_filter_arg`
+    /// and `ms_filter_args` are the dispatcher's own predicates. Keying on the
+    /// RESULT would have been wrong in a way that is easy to miss —
+    /// `color.ie-hex-str()` also returns an unquoted string and deprecates
+    /// nothing.
+    fn emit_color_module_compat(
+        &mut self,
+        name: &str,
+        module: &str,
+        pos: Pos,
+        len: usize,
+        pos_args: &[Value],
+        named: &[(String, Value)],
+    ) {
+        if module != "color" || !matches!(name, "grayscale" | "invert" | "opacity" | "alpha") {
+            return;
+        }
+        // The gates that can take a lock or hash the arguments, above the two
+        // allocations a message costs and in the same order as the sibling's. A
+        // call of one of these four names that turns out not to be a filter call
+        // is memoised too, and says nothing either way.
+        if self.deprecation_quieted() {
+            return;
+        }
+        if self.probe_already_done(
+            DepProbePath::ColorModuleCompat,
+            name,
+            Some(module),
+            pos,
+            pos_args,
+            named,
+        ) {
+            return;
+        }
+        let dep = if name == "alpha" {
+            let Some(args) = crate::builtins::ms_filter_args(pos_args, named) else {
+                return;
+            };
+            crate::deprecation::Deprecation::color_module_compat_ms_filter(&crate::builtins::ms_filter_text(
+                &args,
+            ))
+        } else {
+            let Some((crate::builtins::ModuleFilterArg::Filter, arg)) =
+                crate::builtins::module_filter_arg(name, pos_args, named)
+            else {
+                return;
+            };
+            crate::deprecation::Deprecation::color_module_compat_number(
+                name,
+                &arg.to_css(false),
+                &crate::builtins::plain_filter_text(name, arg),
+            )
+        };
         self.emit_deprecation(&dep, pos, len);
     }
 
@@ -8622,6 +8696,23 @@ struct DepProbe {
     module: Option<String>,
     pos_args: Vec<Value>,
     named: Vec<(String, Value)>,
+}
+
+/// Which question a [`DepProbe`] answered. Part of the memo's key, because two
+/// probes made at one span from the same arguments still ask different things —
+/// `color.grayscale(1)` is asked about `[global-builtin]`, about
+/// `[color-functions]` and about `[color-module-compat]`, and one answering for
+/// another would silently drop a warning.
+#[derive(Clone, Copy)]
+enum DepProbePath {
+    /// [`Evaluator::emit_call_deprecations`] — the name-only ids.
+    Call = 0,
+    /// [`Evaluator::emit_color_function_deprecation`]'s `[color-functions]`
+    /// half, whose suggestions come from the argument VALUES.
+    ColorFunction = 1,
+    /// Its `[color-module-compat]` half, gated on which overload the argument
+    /// took.
+    ColorModuleCompat = 2,
 }
 
 #[cfg(test)]

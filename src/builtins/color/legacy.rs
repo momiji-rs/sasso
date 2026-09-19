@@ -1856,29 +1856,62 @@ fn is_ms_filter_arg(text: &str) -> bool {
     matches!(chars.peek(), Some(&(_, '=')))
 }
 
+/// The arguments of a proprietary Microsoft `alpha()` filter call, in the order
+/// dart writes them back out, or `None` when the call is not that overload.
+///
+/// Each argument must be an unquoted string matching `<identifier>=…` (an IE
+/// `alpha(opacity=80)` hack, produced by the single-`=` operator); the whole
+/// call is then passed through verbatim as a CSS function instead of the
+/// argument being read as a colour. `1=c` is not one, so it stays a non-colour
+/// error.
+///
+/// dart declares `alpha` TWICE — `alpha($color)` beside the variadic
+/// `alpha($args...)` — and takes this path from either, so the single argument
+/// may also arrive by name: `alpha($color: opacity=20)` passes through just as
+/// `alpha(opacity=20)` does. The variadic form binds positional arguments only.
+///
+/// ONE definition, for the same reason the four filter names have one: the
+/// dispatcher passes the call through here, the evaluator must not deprecate
+/// what it passed through, and on `sass:color` it must deprecate exactly this
+/// (`color-module-compat`, #124).
+pub(crate) fn ms_filter_args<'a>(
+    pos_args: &'a [Value],
+    named: &'a [(String, Value)],
+) -> Option<Vec<&'a Value>> {
+    let args: Vec<&Value> = if named.is_empty() {
+        if pos_args.is_empty() {
+            return None;
+        }
+        pos_args.iter().collect()
+    } else if pos_args.is_empty() && named.len() == 1 && named[0].0 == "color" {
+        vec![&named[0].1]
+    } else {
+        return None;
+    };
+    args.iter()
+        .all(|v| matches!(v, Value::Str(s) if !s.quoted && is_ms_filter_arg(&s.text)))
+        .then_some(args)
+}
+
+/// The CSS text such a call passes through as — dart's `_functionString`, and
+/// also the `Recommendation:` line of its deprecation.
+pub(crate) fn ms_filter_text(args: &[&Value]) -> String {
+    let inner = args
+        .iter()
+        .map(|v| v.to_css(false))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("alpha({inner})")
+}
+
 pub(super) fn fn_alpha(pos_args: &[Value], named: &[(String, Value)], pos: Pos) -> Result<Value, Error> {
     let params = ["color"];
-    // The proprietary Microsoft `alpha()` filter overload: one or more
-    // unquoted-string positional arguments that each match `<identifier>=…`
-    // (an IE `alpha(opacity=80)` hack, produced by the single-`=` operator) are
-    // passed through verbatim as a CSS function instead of being treated as a
-    // color. dart-sass accepts this for `color.alpha()` too (with a deprecation
-    // warning to stderr) rather than enforcing the one-argument count. The part
-    // before the `=` must be ASCII letters (optionally followed by whitespace),
-    // so e.g. `1=c` is rejected as a non-color.
-    if named.is_empty()
-        && !pos_args.is_empty()
-        && pos_args
-            .iter()
-            .all(|v| matches!(v, Value::Str(s) if !s.quoted && is_ms_filter_arg(&s.text)))
-    {
-        let inner = pos_args
-            .iter()
-            .map(|v| v.to_css(false))
-            .collect::<Vec<_>>()
-            .join(", ");
+    // The Microsoft filter overload. dart-sass accepts it for `color.alpha()`
+    // too (with a `color-module-compat` deprecation to stderr) rather than
+    // enforcing the one-argument count.
+    if let Some(args) = ms_filter_args(pos_args, named) {
         return Ok(Value::Str(crate::value::SassStr {
-            text: format!("alpha({inner})").into(),
+            text: ms_filter_text(&args).into(),
             quoted: false,
         }));
     }

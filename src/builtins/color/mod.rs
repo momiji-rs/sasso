@@ -9,7 +9,7 @@
 //! preserved via the re-exports at the bottom of this file.
 
 pub(crate) mod deprecate;
-mod legacy;
+pub(crate) mod legacy;
 mod math;
 mod modern;
 

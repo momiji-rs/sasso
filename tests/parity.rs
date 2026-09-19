@@ -7641,17 +7641,26 @@ fn parity_meta_exists_global_module_conflict() {
 }
 
 #[test]
-fn parity_color_module_grayscale_opacity_strict() {
-    // The module `color.grayscale`/`color.opacity` reject a CSS-special string
-    // argument ("$color: var(--c) is not a color."), while a number still
-    // passes through the deprecated filter overload and a color is computed.
+fn parity_color_module_filter_overload_strict() {
+    // On the MODULE spelling the filter overload is narrower than the global
+    // one: only a number takes it. Every other CSS-special argument is a colour
+    // argument and errors ("$color: var(--c) is not a color."), including an
+    // `env()` and a `calc()` that cannot fold to a number. A number — literal
+    // or folded out of a `calc()` — still passes through the deprecated
+    // overload, and a real colour still computes (#124).
     if !enabled() {
         return;
     }
     let err_cases = [
         "@use \"sass:color\";\na {b: color.grayscale(var(--c))}\n",
         "@use \"sass:color\";\na {b: color.opacity(var(--c))}\n",
+        "@use \"sass:color\";\na {b: color.invert(var(--c))}\n",
         "@use \"sass:color\";\na {b: color.grayscale($color: var(--c))}\n",
+        "@use \"sass:color\";\na {b: color.invert(env(--c))}\n",
+        "@use \"sass:color\";\na {b: color.grayscale(calc(1px + 1em))}\n",
+        "@use \"sass:color\";\na {b: color.invert(calc(1px + 1em))}\n",
+        "@use \"sass:color\";\na {b: color.opacity(calc(1px + 1em))}\n",
+        "@use \"sass:color\";\na {b: color.grayscale(min(1px, 2em))}\n",
     ];
     for scss in err_cases {
         let ours = compile(scss, &Options::default()).err().map(|e| e.to_string());
@@ -7664,12 +7673,16 @@ fn parity_color_module_grayscale_opacity_strict() {
                     "\n--- scss ---\n{scss}\n--- ours ---\n{ours}\n--- dart ---\n{theirs}\n"
                 );
             }
-            None => eprintln!("skipping grayscale/opacity strict parity case: dart-sass unavailable"),
+            None => eprintln!("skipping module filter overload strict parity case: dart-sass unavailable"),
         }
     }
     // A number passes through; a color is computed.
     assert_parity("@use \"sass:color\";\na {b: color.grayscale(50%)}\n");
     assert_parity("@use \"sass:color\";\na {b: color.opacity(red)}\n");
+    // A `calc()` that folds to a number IS a number: the overload applies, and
+    // the filter is written with the folded value rather than the calculation.
+    assert_parity("@use \"sass:color\";\na {b: color.grayscale(calc(1 + 1))}\n");
+    assert_parity("@use \"sass:color\";\na {b: color.invert(clamp(0.1, 0.5, 0.9))}\n");
 }
 
 #[test]
@@ -11213,9 +11226,10 @@ fn interpolated_at_rule_joins_a_trailing_comment_like_dart() {
 /// Reviewers of #122 proposed three times that `color.grayscale(1)` should
 /// reject its numeric `$color` instead, on the ground that the overload is
 /// global-only. dart disagrees: it produces the CSS filter and deprecates
-/// having done so (`color-module-compat`, which sasso does not emit yet —
-/// #124). Restricting the overload to global dispatch would change our OUTPUT
-/// in three places where it currently matches.
+/// having done so (`color-module-compat`, emitted since #124 — the warning text
+/// is locked by `tests/fixtures/diagnostics/deprecation-color-module-compat`).
+/// Restricting the overload to global dispatch would change our OUTPUT in three
+/// places where it currently matches.
 ///
 /// This lives in the live-parity suite on purpose: it asks dart rather than
 /// encoding what I believe dart does.
@@ -11232,5 +11246,31 @@ fn parity_namespaced_filter_overload() {
 fn parity_global_filter_overload() {
     assert_parity_compressed(
         ".a {\n  filter: grayscale(1);\n  filter: invert(0.5);\n  filter: opacity(0.5);\n  filter: saturate(50%);\n  color: grayscale(#abc);\n}\n",
+    );
+}
+
+/// `color.alpha`'s Microsoft-filter overload, which the namespaced spelling
+/// takes as well: every argument an `<identifier>=<value>` unquoted string, and
+/// the whole call passed through verbatim. The single-argument form is also
+/// reachable by name, because `$color` is what that parameter is called — and
+/// dart takes the filter branch there too rather than asking for a colour.
+#[test]
+fn parity_namespaced_ms_filter_overload() {
+    assert_parity_compressed(
+        "@use \"sass:color\";\n.a {\n  filter: color.alpha(opacity=20);\n  filter: color.alpha(a=b, c=d);\n  filter: color.alpha($color: opacity=20);\n}\n",
+    );
+    // A real colour argument is still the channel getter.
+    assert_parity_compressed("@use \"sass:color\";\n.a {\n  b: color.alpha(#abc);\n}\n");
+}
+
+/// Both halves of the module filter overload reached through a function
+/// reference instead of a direct call: `meta.get-function($module: "color")`
+/// hands back the same member, and dart applies the overload — and the
+/// deprecation — to it. (The warning texts are locked by
+/// `deprecation-color-module-compat-call-ref`.)
+#[test]
+fn parity_module_filter_overload_via_function_reference() {
+    assert_parity_compressed(
+        "@use \"sass:color\";\n@use \"sass:meta\";\n.a {\n  a: meta.call(meta.get-function(\"grayscale\", $module: \"color\"), 1);\n  b: meta.call(meta.get-function(\"alpha\", $module: \"color\"), opacity=20);\n  c: meta.call(meta.get-function(\"grayscale\", $module: \"color\"), #abc);\n}\n",
     );
 }

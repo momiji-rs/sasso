@@ -745,12 +745,8 @@ impl<'a> Evaluator<'a> {
                 // The proprietary Microsoft `alpha()` filter overload (below)
                 // is not a call to the global `alpha()` at all — dart passes it
                 // through as a CSS function and deprecates nothing.
-                let ms_alpha_filter = canonical == "alpha"
-                    && named.is_empty()
-                    && !pos_args.is_empty()
-                    && pos_args
-                        .iter()
-                        .all(|v| matches!(v, Value::Str(s) if !s.quoted && s.text.contains('=')));
+                let ms_alpha_filter =
+                    canonical == "alpha" && crate::builtins::ms_filter_args(&pos_args, &named).is_some();
                 // Same reasoning for the four names that are BOTH a CSS filter
                 // function and a Sass global colour function: with a plain-CSS
                 // argument (`filter: grayscale(1)`) the call is the CSS filter
@@ -805,22 +801,18 @@ impl<'a> Evaluator<'a> {
                         return r;
                     }
                 }
-                // The proprietary Microsoft `alpha()` filter overload: when the
-                // global `alpha()` is called with one or more unquoted-string
-                // arguments that each contain a `=` (an IE `alpha(opacity=80)`
-                // hack, produced by the single-`=` operator), dart-sass passes
-                // the call through verbatim as a CSS function instead of
-                // treating the argument as a color.
+                // The proprietary Microsoft `alpha()` filter overload (see
+                // `ms_filter_args`): dart-sass passes the call through verbatim
+                // as a CSS function instead of treating the argument as a
+                // color. Returned from here, ahead of the dispatcher, because
+                // the global spelling must not deprecate on the way.
                 if ms_alpha_filter {
-                    let inner = pos_args
-                        .iter()
-                        .map(|v| v.to_css(false))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    return Ok(Value::Str(SassStr {
-                        text: format!("alpha({inner})").into(),
-                        quoted: false,
-                    }));
+                    if let Some(args) = crate::builtins::ms_filter_args(&pos_args, &named) {
+                        return Ok(Value::Str(SassStr {
+                            text: crate::builtins::ms_filter_text(&args).into(),
+                            quoted: false,
+                        }));
+                    }
                 }
                 // A member exposed unprefixed via `@use "sass:<mod>" as *` is
                 // that module's, and it SHADOWS the global of the same name:
