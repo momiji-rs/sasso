@@ -3518,6 +3518,80 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   }
 }
 
+// === Phase 3b: CLI --watch, what it SAYS ===
+//
+// The functional watch test above starts the child with `stdio: "ignore"`
+// and only waits for the output file, so every property of the narration
+// was untested: a regression to stderr, to the old wording, to no
+// timestamp, or to suppressing the banner under --quiet would all have
+// passed. #141 changed all four, so all four are pinned here.
+{
+  const wdir = mkdtempSync(join(tmpdir(), "sasso-watchsay-"));
+  const src = join(wdir, "one.scss");
+  const out = join(wdir, "one.css");
+  writeFileSync(src, ".a { color: red; }\n");
+
+  const capture = async (extra) => {
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", ...extra, "--watch", src, out], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "", stderr = "";
+    proc.stdout.on("data", (b) => (stdout += b));
+    proc.stderr.on("data", (b) => (stderr += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      await until(() => stdout.includes("watching for changes"), 15000);
+      writeFileSync(src, ".a { color: blue; }\n"); // one recompile
+      await until(() => readFileSync(out, "utf8").includes("blue"), 15000);
+      await new Promise((r) => setTimeout(r, 250)); // let the line land
+    } finally {
+      proc.kill();
+    }
+    return { stdout, stderr };
+  };
+
+  const STAMPED = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] Compiled .*one\.scss to .*one\.css\.$/;
+  const loud = await capture([]);
+  const lines = loud.stdout.split("\n");
+  assert.ok(STAMPED.test(lines[0]), `cli --watch: the first compile is stamped: ${lines[0]}`);
+  assert.equal(
+    lines[1],
+    "Sass is watching for changes. Press Ctrl-C to stop.",
+    "cli --watch: dart's banner, word for word",
+  );
+  assert.equal(lines[2], "", "cli --watch: dart leaves one blank line after the banner");
+  assert.ok(
+    lines.slice(3).some((l) => STAMPED.test(l)),
+    `cli --watch: the recompile is announced too: ${loud.stdout}`,
+  );
+  assert.ok(
+    !loud.stderr.includes("Compiled") && !loud.stderr.includes("watching"),
+    `cli --watch: none of it belongs on stderr: ${loud.stderr}`,
+  );
+
+  // --quiet silences the compile lines and keeps the banner, which is the
+  // only sign the process is alive — dart's behaviour, measured.
+  writeFileSync(src, ".a { color: red; }\n");
+  rmSync(out, { force: true });
+  const quiet = await capture(["--quiet"]);
+  assert.ok(
+    !quiet.stdout.includes("Compiled"),
+    `cli --watch --quiet: no compile lines: ${quiet.stdout}`,
+  );
+  assert.ok(
+    quiet.stdout.includes("Sass is watching for changes. Press Ctrl-C to stop."),
+    `cli --watch --quiet: the banner still prints: ${quiet.stdout}`,
+  );
+  console.log("ok: cli --watch — stdout, dart's banner and stamp, --quiet keeps the banner");
+}
+
 // === Phase 4: custom functions — full Value coverage (sync + async) ===
 {
   const { SassNumber, SassString, SassColor, SassList, SassMap, sassTrue, sassFalse, sassNull } = size;

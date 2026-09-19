@@ -1266,7 +1266,10 @@ function runWatch(input, output, common, opts) {
   // dart's wording, and on stdout beside the compile lines. `--quiet`
   // silences those but NOT this: measured 2026-09-19, `sass --quiet --watch`
   // still prints the banner, which is the only sign the process is alive.
-  process.stdout.write("Sass is watching for changes. Press Ctrl-C to stop.\n");
+  //
+  // The trailing blank line is dart's too, and it is once — after the
+  // banner, not between later recompiles (measured over three rebuilds).
+  process.stdout.write("Sass is watching for changes. Press Ctrl-C to stop.\n\n");
 }
 
 /**

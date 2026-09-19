@@ -2479,6 +2479,35 @@ fn update_narrates_each_written_file() {
     );
 }
 
+/// A stdin source is announced as `stdin`, not as `-`.
+///
+/// The `Compiled …` line names `unit.source_path()`, which is `None` for
+/// standard input, and the `None` arm substitutes the word dart uses. The
+/// dash tests either side of this one check CSS and mtimes, and the
+/// narration test uses file inputs, so nothing here would have noticed the
+/// line printing `-` — measured against dart-sass 1.104.1 on 2026-09-19,
+/// which prints `Compiled stdin to o.css.`
+#[test]
+fn update_narrates_a_stdin_source_as_stdin() {
+    let dir = scratch("update-narrate-stdin");
+    let r = run_bin(
+        BIN,
+        &dir,
+        &["--no-source-map", "--update", "-:o.css"],
+        Some("a {b: c}\n"),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let line = r.stdout.trim_end();
+    assert!(
+        line.ends_with("Compiled stdin to o.css."),
+        "dart names standard input `stdin`, not `-`: {line:?}"
+    );
+    assert!(
+        !line.contains("Compiled - to"),
+        "the source path leaked as a dash: {line:?}"
+    );
+}
+
 /// `[YYYY-MM-DD HH:MM] ` at the start of a line, without pulling in a regex
 /// engine for one shape. A wrong-but-plausible stamp is caught by
 /// `src/localtime`'s own tests against the tz database; what matters here is
