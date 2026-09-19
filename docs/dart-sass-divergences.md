@@ -15,7 +15,9 @@ design work or affect compiled output are tracked as issues
 [#63](https://github.com/momiji-rs/sasso/issues/63),
 [#64](https://github.com/momiji-rs/sasso/issues/64),
 [#66](https://github.com/momiji-rs/sasso/issues/66),
-[#139](https://github.com/momiji-rs/sasso/issues/139)); the rest live here, and
+[#139](https://github.com/momiji-rs/sasso/issues/139),
+[#147](https://github.com/momiji-rs/sasso/issues/147),
+[#148](https://github.com/momiji-rs/sasso/issues/148)); the rest live here, and
 are fixed as they come up.
 
 ## Where we stand
@@ -102,6 +104,9 @@ A wrong value, or a missing error, rather than a wrong message.
 | input | dart-sass 1.104.1 | sasso |
 |---|---|---|
 | `rgb(1, 2, 3, $nope: 4)` ([#62](https://github.com/momiji-rs/sasso/issues/62)) | `No parameter named $nope.` | returns `rgb(1, 2, 3)` |
+| a built-in argument passed twice — `color.mix(red, blue, 10%, $color1: green)` ([#147](https://github.com/momiji-rs/sasso/issues/147)) | `Argument $color1 was passed both by position and by name.` | the positional wins and the call succeeds, so a stylesheet dart rejects compiles. Every family bar one: `map.remove` alone is checked, by hand, and names the wrong parameter (§3). dart raises this from its per-parameter loop, before `Missing argument`, before the positional-count error and before an unknown name, and raises it even when the declaration has a rest parameter. A *user* callable is rejected, with the wrong message (§3) — unless it declares a rest parameter, where the call compiles here too. Measured 2026-09-19 |
+| `meta.function-exists("rgb", $module: "m")`, `m` being any module ([#148](https://github.com/momiji-rs/sasso/issues/148)) | `true` — a name the module does not have still resolves against the *global* built-ins, in a user module and a built-in one alike (`quote` with `$module: "color"` is `true` too) | `false`. A module-only member (`channel`) and a user global (`local`) are `false` in both, so it is the globals table specifically. Measured 2026-09-19 |
+| `meta.function-exists("unique_id")` ([#148](https://github.com/momiji-rs/sasso/issues/148)) | `false` — dart matches a *built-in* name against the string exactly as given | `true`. sasso normalizes `_` to `-` for the built-in half as well as the user half; dart normalizes only the user half, where both spellings do resolve in both. Adjacent: a user `@function my_under` captured by `meta.get-function("my_under")` inspects as `get-function("my-under")` in dart (the callable's own name) and `get-function("my_under")` in sasso. Measured 2026-09-19 |
 | `meta.inspect(33.333333333333336%)` | `33.333333333333336%` | `33.3333333333%` |
 | `meta.inspect(color.hwb(0, calc(-infinity * 1%), 40%, 0.5))` | `hwb(0 calc(-infinity)% 40% / 0.5)` | `hwb(0 -Infinity% 40% / 0.5)` |
 | `color.change(red, $red: calc(NaN))` | `hsl(0, 0%, 0%)` | `black` |
@@ -153,9 +158,8 @@ programs; only what it prints differs.
 | `red(#abcdef, 1)` | `Only 1 argument allowed, but 2 were passed.` | the same error, preceded by a `[global-builtin]` deprecation warning |
 | `@mixin m($x )` included with no argument | `Missing argument $x .` — dart takes the name from the parameter's own span text, which swallowed the trailing space | `Missing argument $x.` |
 | `color.grayscale(null)` ([#139](https://github.com/momiji-rs/sasso/issues/139)) | `$color: null is not a color.` | ` is not a color.` — the `$param: ` prefix is missing, and `null` prints as nothing. The same for `true`, a map, and a quoted string; a list additionally needs dart's parenthesized spelling (`$color: (1 2) is not a color.`), which is the row above's root cause too. The prefix alone accounts for 46 byte-mismatching sass-spec cases. Measured 2026-09-18, re-measured 2026-09-19 |
-| a built-in called with a name it has no parameter for — `color.mix(red, blue, $x: 1)`, `string.index("abc", "b", $x: 1)`, `math.max(1, 2, $x: 1)` | `No parameter named $x.` | the name is ignored and the call succeeds. Every built-in family, so a typo'd keyword argument compiles. Measured 2026-09-19 |
-| a built-in argument passed twice — `color.mix(red, blue, 10%, $color1: green)` | `Argument $color1 was passed both by position and by name.` | the positional wins and the call succeeds. For a USER function sasso does reject it, but as `No parameter named $a.` Measured 2026-09-19 |
-| `meta.function-exists("rgb", $module: "m")` where `m` is a user module that forwards nothing | `true` — dart resolves the name in the module's scope and then GLOBALLY, so every global built-in "exists" in every module | `false`. Affects compiled output, not just text; `$module:` on a BUILT-IN module (`"color"`, `"map"`) matches. Measured 2026-09-19 |
+| a user callable given one argument twice — `@function f($a, $b)` called as `f(1, 2, $a: 3)` ([#147](https://github.com/momiji-rs/sasso/issues/147)) | `Argument $a was passed both by position and by name.`, as a single span | `No parameter named $a.`, with the two-span `declaration`/`invocation` frame. The built-in half of #147 is in §2, because there the call compiles. Measured 2026-09-19 |
+| `map.remove((c: d, e: f), c, $key: e)` ([#147](https://github.com/momiji-rs/sasso/issues/147)) | `Argument $key was passed both by position and by name.` — the parameter bound positionally | `Argument $keys was passed both by position and by name.` — the name of the `$keys...` rest. The one place sasso implements this check at all, hand-rolled in `map.rs`. Measured 2026-09-19 |
 
 The two below are classes rather than single inputs, so each gets its own
 example.
