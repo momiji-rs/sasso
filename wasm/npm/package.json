@@ -35,6 +35,7 @@
     "_deprecations.mjs",
     "_addon.mjs",
     "_watchfilter.mjs",
+    "_coalesce.mjs",
     "cli.mjs",
     "sasso.mjs",
     "sasso.speed.mjs",

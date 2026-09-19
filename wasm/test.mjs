@@ -3652,6 +3652,109 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   console.log("ok: watch event filter — named, nameless, ours, and failing");
 }
 
+// === the coalescing rule, on a fake clock ===
+//
+// How many compiles a burst costs cannot be asserted from a --watch test.
+// Measured on this machine, 8 saves at a given spacing:
+//
+//   10ms apart, WITH coalescing   -> 3 compiles
+//   10ms apart, WITHOUT it        -> 6 or 7
+//   0ms apart, either way         -> 1  (the OS coalesces the events)
+//
+// There is no bound that both catches the regression and survives a
+// loaded CI machine stretching those gaps — the first version of the
+// burst test asserted `< 8` and did not notice coalescing being removed
+// entirely. With a fake clock there is no gap to stretch.
+{
+  const { coalesce } = await import("./npm/_coalesce.mjs");
+
+  /** A clock the test drives by hand. */
+  const clock = () => {
+    const queued = [];
+    const setTimer = (fn) => {
+      queued.push(fn);
+      return queued.length;
+    };
+    return { setTimer, tick: () => queued.splice(0).forEach((fn) => fn()) };
+  };
+
+  // Eight events inside one window: one run at the head, one catch-up.
+  {
+    const { setTimer, tick } = clock();
+    const calls = [];
+    const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), true), setTimer });
+    for (let i = 0; i < 8; i++) on();
+    assert.deepEqual(calls, [true], "coalesce: the head of a burst runs at once, alone");
+    tick();
+    assert.deepEqual(calls, [true, false], "coalesce: one catch-up for the other seven");
+    tick();
+    assert.deepEqual(calls, [true, false], "coalesce: and then it stops");
+  }
+
+  // One event, nothing after it: one run, no catch-up. This is the case
+  // the old trailing debounce made wait 50ms for a window that stayed
+  // empty.
+  {
+    const { setTimer, tick } = clock();
+    const calls = [];
+    const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), true), setTimer });
+    on();
+    tick();
+    tick();
+    assert.deepEqual(calls, [true], "coalesce: a lone save costs exactly one run");
+  }
+
+  // Separate windows are separate bursts.
+  {
+    const { setTimer, tick } = clock();
+    const calls = [];
+    const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), true), setTimer });
+    on();
+    tick();
+    on();
+    tick();
+    assert.deepEqual(calls, [true, true], "coalesce: two lone saves are two heads, not a catch-up");
+  }
+
+  // A PROVISIONAL failure asks for a catch-up even with no further
+  // events — the finishing write usually sends one, but "usually" is not
+  // something the user's output should rest on.
+  {
+    const { setTimer, tick } = clock();
+    const calls = [];
+    const on = coalesce({
+      windowMs: 50,
+      run: (p) => (calls.push(p), calls.length > 1),
+      setTimer,
+    });
+    on();
+    assert.deepEqual(calls, [true], "coalesce: the provisional run happened");
+    tick();
+    assert.deepEqual(calls, [true, false], "coalesce: it failed, so a catch-up follows unasked");
+    tick();
+    assert.deepEqual(calls, [true, false], "coalesce: the catch-up succeeded, so it ends");
+  }
+
+  // An AUTHORITATIVE failure must not ask for another. When it did, the
+  // error was reported, re-run, reported again, forever.
+  {
+    const { setTimer, tick } = clock();
+    const calls = [];
+    const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), false), setTimer });
+    on();
+    tick();
+    tick();
+    tick();
+    assert.deepEqual(
+      calls,
+      [true, false],
+      "coalesce: a persistent error is reported once, not on a loop",
+    );
+  }
+
+  console.log("ok: coalesce — one head per burst, one catch-up, and no loop on a real error");
+}
+
 // === Phase 3c: CLI --watch, what it SURVIVES ===
 //
 // The functional test above proves a recompile happens; the one before
@@ -3711,16 +3814,41 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     writeFileSync(join(d, "_v.scss"), "$c: red;\n");
   };
 
-  // A burst: the LAST save must win. Without coalescing this is eight
-  // compiles; with it, one or two.
-  await withWatch(withDep, async ({ dir, css, until }) => {
+  // A burst: the LAST save must win, and it must not cost one compile per
+  // save. Checking only the final colour — which is all the first version
+  // of this did — would pass at eight compiles, leaving the coalescing
+  // this whole change rests on unguarded.
+  //
+  // Measured on this machine, 8 saves at a given spacing:
+  //
+  //             with coalescing   without it
+  //   0ms apart       1               1     (the OS coalesces the events)
+  //   5ms apart       2               4
+  //  10ms apart       3             6 or 7
+  //  25ms apart       5               6
+  //
+  // Which is why the REAL guard is the fake-clock table against
+  // `_coalesce.mjs` above, not this: there is no bound here that both
+  // catches the regression and survives a loaded CI machine stretching
+  // those gaps. `< 8` is a smoke check that the rule is wired into the
+  // watch at all — removing coalescing entirely yields 6 or 7 and slips
+  // past it, and the unit test is what notices.
+  await withWatch(withDep, async ({ dir, css, until, log, clear }) => {
     assert.ok(await until(() => css().includes("red")), "watch: initial compile");
     await sleep(300);
+    clear();
     for (let i = 1; i <= 8; i++) {
       writeFileSync(join(dir, "_v.scss"), `$c: #0000${String(i).padStart(2, "0")};\n`);
       await sleep(10);
     }
     assert.ok(await until(() => css().includes("000008")), "watch: a burst settles on the last save");
+    await sleep(400); // let any trailing catch-up land before counting
+    const compiles = (log().match(/Compiled/g) || []).length;
+    assert.ok(compiles >= 1, "watch: the burst compiled at all");
+    assert.ok(
+      compiles < 8,
+      `watch: a burst of 8 saves must coalesce, not compile once each (saw ${compiles})`,
+    );
   });
 
   // An atomic save replaces the inode, which is why the watcher watches

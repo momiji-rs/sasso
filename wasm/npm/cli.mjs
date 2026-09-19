@@ -33,6 +33,7 @@ import { defaultJobs } from "./_jobs.mjs";
 // The accepted deprecation ids, shared with the JS API so there is one copy.
 import { DEPRECATION_IDS } from "./_deprecations.mjs";
 import { triggersRecompile } from "./_watchfilter.mjs";
+import { coalesce } from "./_coalesce.mjs";
 // The prebuilt-addon rules, shared with native.mjs: which engine this platform
 // is SUPPOSED to run decides whether a wasm fallback is news (see `loadEngine`).
 import { nativePackage, platformKey } from "./_addon.mjs";
@@ -1211,8 +1212,6 @@ function isFresh(output, input, deps) {
 function runWatch(input, output, common, opts) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
   let watchers = [];
-  let cooling = null;
-  let dirty = false;
   // The last set of files a compile actually loaded, seeded with the entry.
   // Kept across a FAILED compile: a failure has no `loadedUrls`, and the
   // first version of this narrowed the set to the entry alone when one
@@ -1343,32 +1342,7 @@ function runWatch(input, output, common, opts) {
    * used to be, which nobody can perceive. Zero spurious errors across all
    * three save styles, where the naive leading edge had 15 out of 15.
    */
-  const fire = (provisional) => {
-    cooling = setTimeout(() => {
-      cooling = null;
-      if (dirty) {
-        dirty = false;
-        // The catch-up is never provisional. Making it so was the first
-        // version of this and it silenced errors completely: every compile
-        // in the chain declined to report, and each failure asked for
-        // another, so a genuinely broken file span forever saying nothing.
-        fire(false);
-      }
-    }, 50);
-    // Re-run only after a PROVISIONAL failure — "that was probably a
-    // half-written file, try again properly". An authoritative failure has
-    // already been reported, and asking for another would report it again,
-    // and again.
-    if (!recompile(provisional) && provisional) dirty = true;
-  };
-
-  const schedule = () => {
-    if (cooling !== null) {
-      dirty = true;
-      return;
-    }
-    fire(true);
-  };
+  const schedule = coalesce({ windowMs: 50, run: recompile });
 
   recompile(false);
   // dart's wording, and on stdout beside the compile lines. `--quiet`
