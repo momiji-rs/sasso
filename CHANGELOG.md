@@ -93,6 +93,41 @@ Conformance is tracked separately as a ratchet against the official
   without firing; output was compared over 118 corpus/style pairs and is
   byte-identical, as are the diagnostics and the exit codes.
 
+- **A rule's selector list is scanned once, not three times.** Another **1.4%**
+  fewer instructions per compile (1.3% compressed), byte-identical CSS. After
+  resolving a selector list, sasso asked two more questions of every selector in
+  it, each a full byte scan: could this be a "bogus combinator" selector that
+  CSS drops, and does it contain a `%` placeholder? Both answers were already
+  determined by the scan that had just run — the one that decides whether the
+  selector is canonical — because its accepted byte set (`[a-zA-Z0-9_\-.#%:]`
+  plus single spaces) contains no combinator, and it passes the `%` on the way.
+  The resolved list now carries the two aggregate answers out of that one pass.
+
+  So the saving is not a faster scan, it is two scans that no longer happen. It
+  applies to every canonical selector rather than only the pseudo-class shape of
+  the entry above, which is why it shows up on stylesheets that entry did not
+  move at all: `[measured]` marginal instructions per compile of
+  `bench/corpus/generated/large.scss` 95.4362M → 94.0820M (**−1.419%**, 6 of 6
+  paired rounds, control 0.019%), 108.2085M → 106.8357M compressed (−1.269%, 4
+  of 4, control 0.004%), and 116.1350M → 115.8636M on a deprecation-heavy sheet
+  (−0.234%, 3 of 3, control 0.006%). That is ~226 instructions per emitted
+  selector; together with the pseudo-class fast path above, `large.scss` is
+  **−5.2%** on the same measure.
+
+  The placeholder probe in the `@extend` pass is also no longer computed when
+  extensions are in scope, where its answer was never read. On its own that is
+  too small to measure (−0.047% on the `@extend` corpus, inside a 0.028%
+  control band), and it is reported here only because it is part of the same
+  change.
+
+  A debug-only assertion pins the invariant the flags rest on — that the
+  canonical byte set really is disjoint from the combinator triggers — and
+  checks the `%` answer against a plain search, alongside the existing
+  fast-versus-slow normalizer oracle. All three ran over the full 14,258-case
+  sass-spec suite in a debug build without firing; output was compared over 118
+  corpus/style pairs and is byte-identical, as are the diagnostics and the exit
+  codes.
+
 ## [0.18.0] - 2026-09-18
 
 _A smaller, slightly faster binary, and one fix. `panic = "abort"` and `strip`
