@@ -70,6 +70,8 @@ def check_manifest_is_current(expect_path, baseline, style):
     Every header these checks read is REQUIRED, not merely checked when
     present: a comparison that is skipped because its header is absent is not a
     guard, it is a line an edit can delete to turn the guard off.
+
+    Returns the parsed header on success and None on failure.
     """
     header = {}
     entries = 0
@@ -130,14 +132,54 @@ def check_manifest_is_current(expect_path, baseline, style):
     elif want_commit != got_commit:
         problems.append(f"sass-spec {got_commit[:12]} in the manifest vs "
                         f"{want_commit[:12]} in SPEC_VERSION.txt")
+
+    # How many eligible cases the reference itself could not compile, and so
+    # legitimately have no digest. main() uses it as the exact allowance for
+    # `no-reference-digest` SKIPs; see check_manifest_covers_run().
+    got_errors = header.get("reference_errors")
+    if got_errors is None:
+        problems.append("it has no `reference_errors:` header")
+    elif not got_errors.isdigit():
+        problems.append("its `reference_errors:` header is not a number "
+                        f"({got_errors!r})")
     if problems:
         name = os.path.relpath(expect_path, ROOT)
         print(f"error: {name} is not a usable oracle — "
               + "; ".join(problems), file=sys.stderr)
         print("Regenerate it: python3 spec/gen_compressed.py --jobs 10",
               file=sys.stderr)
-        return False
-    return True
+        return None
+    return header
+
+
+def check_manifest_covers_run(header, skip_breakdown, expect_path):
+    """The manifest must cover every case this run was eligible to score.
+
+    `attempted` not falling is not enough. Because a missing entry is a SKIP,
+    growing the scorer's eligible set -- retiring a skip tag, a case that stops
+    being an error spec, anything that makes run_spec.py ask about a case the
+    manifest predates -- leaves `attempted` exactly where the baseline expects
+    it while the new cases are not scored at all in this style.
+
+    run_spec.py counts precisely those cases as `no-reference-digest` SKIPs, and
+    the only ones allowed to be missing are the ones the reference compiler
+    could not compile, which the manifest records in its own header. So the
+    coverage check is an equality, not a heuristic.
+    """
+    missing = skip_breakdown.get("no-reference-digest", 0)
+    allowed = int(header["reference_errors"])
+    if missing <= allowed:
+        return True
+    name = os.path.relpath(expect_path, ROOT)
+    print(f"error: {name} does not cover this run — {missing} eligible case(s) "
+          f"had no digest, but the manifest records only {allowed} the "
+          "reference could not compile.", file=sys.stderr)
+    print("Those cases were SKIPped, so nothing about them was scored. This is "
+          "what happens when the eligible set grows (a skip tag retired, a case "
+          "reclassified): regenerate the manifest and bump the baseline in the "
+          "same commit.", file=sys.stderr)
+    print("  python3 spec/gen_compressed.py --jobs 10", file=sys.stderr)
+    return False
 
 
 def main() -> int:
@@ -157,13 +199,16 @@ def main() -> int:
         return 2
 
     extra = []
+    manifest_header = None
     if "expect" in cfg:
         expect = os.path.join(HERE, cfg["expect"])
         if not os.path.exists(expect):
             print(f"error: {expect} not found — generate it with "
                   "`python3 spec/gen_compressed.py`", file=sys.stderr)
             return 2
-        if not check_manifest_is_current(expect, baseline, args.style):
+        manifest_header = check_manifest_is_current(expect, baseline,
+                                                    args.style)
+        if manifest_header is None:
             return 2
         extra = [f"--style={args.style}", "--expect-file", expect]
 
@@ -186,7 +231,12 @@ def main() -> int:
     if not os.path.exists(out):
         print(f"error: run_spec.py wrote no results to {out}", file=sys.stderr)
         return 2
-    cases = json.load(open(out))["cases"]
+    scored = json.load(open(out))
+    cases = scored["cases"]
+    if manifest_header is not None:
+        skips = scored.get("summary", {}).get("skip_breakdown", {})
+        if not check_manifest_covers_run(manifest_header, skips, expect):
+            return 2
     c = Counter(x["status"] for x in cases)
     passes, err, fail = c.get("PASS", 0), c.get("ERROR_EXPECTED", 0), c.get("FAIL", 0)
     passing = passes + err

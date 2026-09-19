@@ -143,14 +143,14 @@ neither node nor the network, and
 `python3 spec/check_baseline.py --style compressed` is a plain offline ratchet
 like the expanded one.
 
-All four headers are **required**, and each is checked before a single case is
+Every header is **required**, and each is checked before a single case is
 scored: `style` must be the style being scored, `dart_sass` must equal
-`BASELINE_COMPRESSED.json`'s, `spec_commit` must equal `SPEC_VERSION.txt`'s, and
-`cases` must be a number equal to the number of digest lines. A header that is
-merely *checked when present* is not a guard -- deleting the line would turn it
-off -- so a missing one fails exactly like a wrong one. `run_spec.py` enforces
-the `style` header itself as well, since it is usable directly with
-`--expect-file`.
+`BASELINE_COMPRESSED.json`'s, `spec_commit` must equal `SPEC_VERSION.txt`'s,
+`cases` must be a number equal to the number of digest lines, and
+`reference_errors` must be a number. A header that is merely *checked when
+present* is not a guard -- deleting the line would turn it off -- so a missing
+one fails exactly like a wrong one. `run_spec.py` enforces the `style` header
+itself as well, since it is usable directly with `--expect-file`.
 
 Regenerate it only when one of those pins moves -- the diff then reads as
 exactly which compressed outputs changed:
@@ -171,15 +171,29 @@ whatever npx resolves today. Moving the pin is therefore explicit:
 commit.
 
 A case with no manifest entry is `SKIP`ped, never failed -- a gap in the oracle
-must not read as a sasso regression. That choice has a cost, so the ratchet pays
-it in two places: the manifest's own `cases:` header must match the number of
-digest lines, and **`attempted` may not fall below the baseline's**. Without the
-second check, deleting exactly the failing digests would leave `passing`
-untouched while those cases stopped being scored -- `[measured]` dropping 5
-failing entries gives `delta +0` and a pass% that *rises* to 88.26%, and now
-exits 1 instead of printing `ratchet OK`. Error specs are excluded from the
-manifest entirely: their verdict is the exit status, which is style-independent,
-so the compressed run scores them exactly as the expanded one does.
+must not read as a sasso regression. That choice has a cost, and the ratchet
+pays it in three places:
+
+1. the manifest's own `cases:` header must match the number of digest lines;
+2. **`attempted` may not fall below the baseline's** -- without this, deleting
+   exactly the failing digests leaves `passing` untouched while those cases stop
+   being scored (`[measured]` dropping 5 failing entries gives `delta +0` and a
+   pass% that *rises* to 88.26%);
+3. **the manifest must cover every case the run was eligible to score.** Every
+   eligible non-error case with no digest is counted as a `no-reference-digest`
+   SKIP, and the only ones allowed to be missing are the ones the reference
+   compiler could not compile, which the manifest records in
+   `reference_errors:`. So the coverage check is an equality.
+
+The third is not implied by the second. If the eligible set *grows* -- a skip
+tag retired, a case that stops being an error spec, a suite that adds cases --
+`attempted` lands back exactly where the baseline expects it while the new cases
+are not scored in this style at all. `[measured]` on a synthesised run of that
+shape the previous code printed `ratchet OK` and read the gap as **+5 passing**.
+
+Error specs are excluded from the manifest entirely: their verdict is the exit
+status, which is style-independent, so the compressed run scores them exactly as
+the expanded one does.
 
 ### Triaging a compressed FAIL
 
