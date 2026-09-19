@@ -44,6 +44,17 @@ Conformance is tracked separately as a ratchet against the official
   reproducing it. Against dart-sass 1.104.1 the CSS ratchet is unchanged and
   the stderr-conformance metric gains 12 cases.
 
+- **`--update` now looks at the stylesheets the entry imports** (#133). It
+  compared the output's mtime against the entry alone, so editing a partial
+  left the old CSS on disk and said nothing — on an `@import`-heavy tree the
+  common case rather than a corner. dart-sass walks the graph; so does this.
+
+  The compile always runs and `--update` decides whether to *write*, which
+  keeps an unchanged output's mtime stable — the property downstream watchers
+  key on. That ordering is measured, not conceded: on Lichess's 147 entry
+  points dart's `--update` takes 1.19s to decide nothing changed and sasso
+  takes 0.57s having compiled everything.
+
 ### Performance
 
 - **Selectors with a plain pseudo-class skip the normalizer entirely.** A

@@ -213,8 +213,8 @@ default when writing a file), `--source-map-urls <relative|absolute>`,
 `--embed-sources`, `--embed-source-map` (inline the map), `--[no-]charset`,
 `-q/--quiet` (silence `@warn`/`@debug`), `--[no-]quiet-deps`, `--[no-]unicode`
 (ASCII glyphs in diagnostics), `--[no-]stop-on-error`, `--no-css`, `--update`
-(skip outputs newer than their input), `-w/--watch` (re-compiles when the input
-or any dependency changes), `--loop <N>` (recompile N times and report
+(leave outputs newer than their input *and* every stylesheet it imports),
+`-w/--watch` (re-compiles when the input or any dependency changes), `--loop <N>` (recompile N times and report
 throughput), `--help`, `--version`, and `-j/--jobs <N>` (how many files to
 compile at once; the default is at most one per physical core on Linux — the
 cores `/proc/cpuinfo` reports, which on an SMT machine is fewer than the CPU

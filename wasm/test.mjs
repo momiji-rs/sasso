@@ -567,6 +567,39 @@ assert.ok(
   cli(["--quiet", "--update", `${ina}:${outa}`]);
   assert.equal(statSync(outa).mtimeMs, before, "cli: --update leaves a fresh output untouched");
 }
+{
+  // `--update` and the dependency graph (#133). Checking only the ENTRY's
+  // mtime left stale CSS on disk whenever a PARTIAL changed — silently, which
+  // is worse than a slow build, and on an `@import`-heavy tree it is the
+  // common case rather than the corner. dart-sass walks the graph; the test
+  // goes two levels deep because one level can pass by accident.
+  const dir = mkdtempSync(join(tmpdir(), "sasso-upd-"));
+  const deep = join(dir, "_deep.scss");
+  const base = join(dir, "_base.scss");
+  const entry = join(dir, "entry.scss");
+  const out = join(dir, "out.css");
+  writeFileSync(deep, "$c: #111;\n");
+  writeFileSync(base, '@import "deep";\n.base { color: $c; }\n');
+  writeFileSync(entry, '@import "base";\n');
+
+  cli(["--quiet", "--no-source-map", `${entry}:${out}`]);
+  assert.match(readFileSync(out, "utf8"), /#111/, "cli: --update fixture compiled");
+
+  // Nothing changed: the output must keep its mtime, which is what downstream
+  // watchers key on and the whole reason the flag exists.
+  const stamp = statSync(out).mtimeMs;
+  cli(["--quiet", "--no-source-map", "--update", `${entry}:${out}`]);
+  assert.equal(statSync(out).mtimeMs, stamp, "cli: --update leaves an up-to-date output alone");
+
+  // A partial TWO levels down changes: the output is stale and must be rebuilt.
+  writeFileSync(deep, "$c: #444;\n");
+  cli(["--quiet", "--no-source-map", "--update", `${entry}:${out}`]);
+  assert.match(
+    readFileSync(out, "utf8"),
+    /#444/,
+    "cli: --update rebuilds when a transitively imported partial changes",
+  );
+}
 console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + embed-map/quiet/multi-IO/update");
 
 // === Phase 3b: the npm CLI must accept every flag the NATIVE CLI accepts ===
