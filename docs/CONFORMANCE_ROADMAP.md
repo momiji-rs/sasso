@@ -1,5 +1,17 @@
 # sasso conformance roadmap (sass-spec)
 
+> ⚠️ **Historical document, kept for its reasoning and its rankings — not for its
+> facts.** Every count, and every "sasso does not support X" below, describes the
+> tree at the 24.5% baseline in the next paragraph. The suite now passes
+> **14,107 / 14,258 attempted (98.94%)** against sass-spec `b39c3276` and
+> dart-sass 1.104.1, so a statement here about what sasso cannot do is very
+> likely no longer true. For one, the appendix still says `/` outside `calc()`
+> parse-errors and produces no numeric result, where today the values are right
+> and only the `slash-div` warning is missing
+> ([#119](https://github.com/momiji-rs/sasso/issues/119)). For what actually
+> diverges today read [`dart-sass-divergences.md`](./dart-sass-divergences.md),
+> which is measured per row and dated. Noted 2026-09-19.
+
 > Evidence-based, ROI-ranked plan from bucketing every failing official
 > sass-spec case (commit `1b03109a`, dart-sass 1.101) by the language
 > feature sasso is missing. 11 parallel read-only analysis agents + synthesis.
