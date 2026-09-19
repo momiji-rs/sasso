@@ -2321,3 +2321,128 @@ fn update_without_a_destination_is_a_usage_error() {
         assert!(read(&dir, "out.css").contains("b: c"), "{args:?} wrote no CSS");
     }
 }
+
+/// `--update` narrates: one line per file WRITTEN, on stdout, stamped with
+/// the local time to the minute.
+///
+/// Measured against dart-sass 1.104.1 on 2026-09-19. Everything in this
+/// test is a row of that table, and each row is a way the first attempt
+/// could have been wrong:
+///
+///   written          `[YYYY-MM-DD HH:MM] Compiled <src> to <dest>.`
+///   skipped          silent — so a no-op `--update` says nothing at all
+///   failed           silent — the error is the output, not a compile line
+///   --quiet          suppressed
+///   several pairs    one line each, in COMMAND-LINE order, not finish order
+///   stream           stdout, never stderr: a build script greps for it
+///
+/// The stamp itself comes from `src/localtime`, which is tested against the
+/// whole tz database separately; here only its SHAPE is asserted, because a
+/// test that recomputed the expected time would be testing itself.
+#[test]
+fn update_narrates_each_written_file() {
+    let dir = scratch("update-narrate");
+    write(&dir, "one.scss", "a {b: c}\n");
+    write(&dir, "two.scss", "x {y: z}\n");
+
+    let stamp = regex_lite_stamp; // see the helper below
+
+    // A written file is announced, on stdout.
+    let first = sasso(&dir, &["--no-source-map", "--update", "one.scss:one.css"]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert!(
+        !first.stderr.contains("Compiled"),
+        "the line belongs on stdout: {}",
+        first.stderr
+    );
+    let line = first.stdout.trim_end();
+    assert!(
+        line.ends_with("Compiled one.scss to one.css."),
+        "dart's wording: {line:?}"
+    );
+    // Whether there is a stamp is a RUNTIME question, not `cfg!(unix)`.
+    // Windows has no tz database to read, and neither does a nix build
+    // sandbox, a scratch container, or a distroless image — all Unix, all
+    // without `/etc/localtime`. The first version of this asserted a stamp
+    // on every unix and was failed by nix, correctly.
+    //
+    // So the contract is what gets asserted: the text is always dart's, and
+    // a stamp is either absent or well-formed — never malformed, never
+    // wrong-shaped, never swallowing the message.
+    if line.starts_with('[') {
+        assert!(stamp(line), "a stamp must be [YYYY-MM-DD HH:MM]: {line:?}");
+    } else {
+        assert!(
+            line.starts_with("Compiled"),
+            "with no local offset the line drops its stamp, not its content: {line:?}"
+        );
+    }
+
+    // A skipped file is silent — this is what makes a no-op build quiet.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let again = sasso(&dir, &["--no-source-map", "--update", "one.scss:one.css"]);
+    assert_eq!(again.code, 0, "{}", again.stderr);
+    assert_eq!(again.stdout, "", "a skip must say nothing: {:?}", again.stdout);
+
+    // Several pairs: one line each, in the order the arguments were given.
+    // Jobs finish in whatever order threads finish them in, so this is a
+    // real assertion and not a tautology.
+    std::fs::remove_file(dir.join("one.css")).ok();
+    let both = sasso(
+        &dir,
+        &[
+            "--no-source-map",
+            "--update",
+            "one.scss:one.css",
+            "two.scss:two.css",
+        ],
+    );
+    assert_eq!(both.code, 0, "{}", both.stderr);
+    let lines: Vec<&str> = both.stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "one line per file: {:?}", both.stdout);
+    assert!(
+        lines[0].ends_with("Compiled one.scss to one.css."),
+        "{:?}",
+        lines[0]
+    );
+    assert!(
+        lines[1].ends_with("Compiled two.scss to two.css."),
+        "{:?}",
+        lines[1]
+    );
+
+    // --quiet suppresses it.
+    std::fs::remove_file(dir.join("one.css")).ok();
+    let quiet = sasso(
+        &dir,
+        &["--no-source-map", "--quiet", "--update", "one.scss:one.css"],
+    );
+    assert_eq!(quiet.code, 0, "{}", quiet.stderr);
+    assert_eq!(quiet.stdout, "", "--quiet means quiet: {:?}", quiet.stdout);
+    assert!(read(&dir, "one.css").contains("b: c"), "but it still compiles");
+
+    // A failure is not announced as a compile.
+    write(&dir, "bad.scss", "@use \"nope\";\n");
+    let failed = sasso(&dir, &["--no-source-map", "--update", "bad.scss:bad.css"]);
+    assert_ne!(failed.code, 0, "a missing module is an error");
+    assert!(
+        !failed.stdout.contains("Compiled"),
+        "a failed compile must not claim success: {:?}",
+        failed.stdout
+    );
+}
+
+/// `[YYYY-MM-DD HH:MM] ` at the start of a line, without pulling in a regex
+/// engine for one shape. A wrong-but-plausible stamp is caught by
+/// `src/localtime`'s own tests against the tz database; what matters here is
+/// that a stamp is present and correctly shaped.
+fn regex_lite_stamp(line: &str) -> bool {
+    let b = line.as_bytes();
+    // `[2026-09-19 13:29] ` — the bracket closes at 17, the space follows.
+    if b.len() < 19 || b[0] != b'[' || b[17] != b']' || b[18] != b' ' {
+        return false;
+    }
+    let digits = [1, 2, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16];
+    let punct = [(5, b'-'), (8, b'-'), (11, b' '), (14, b':')];
+    digits.iter().all(|&i| b[i].is_ascii_digit()) && punct.iter().all(|&(i, c)| b[i] == c)
+}

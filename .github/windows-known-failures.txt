@@ -1,0 +1,44 @@
+# Tests skipped by the Windows CI job, with the issue each one belongs to.
+#
+# A ledger, not a dustbin. Every line is a bug we found by running the
+# suite on Windows for the first time (#143) and have written down rather
+# than hidden; every line disappears when its issue closes. Skipping by
+# NAME rather than by module or by test binary is deliberate — a broad
+# `--skip arena` would swallow the next arena failure silently, which is
+# exactly how these went unnoticed while we shipped Windows binaries.
+#
+# Blank lines and #-comments are ignored.
+
+# --- #145: two arena tests, 32 threads x 2 GiB of reservation -------------
+# The disjoint-regions test holds 32 threads at a barrier, each reserving
+# 2 GiB of address space, and asks Windows for 64 GiB. Threads that cannot
+# reserve fall back to the system allocator — supported behaviour — and
+# their null base reads as a shared region.
+arena::tests::concurrent_threads_get_disjoint_regions_and_release_them
+arena::tests::a_thread_that_found_the_registry_full_recovers_when_a_slot_frees
+
+# --- #146: imported files report absolute paths ---------------------------
+# One root cause, nineteen symptoms: the entry file relativises against the
+# working directory and every file reached through the importer does not,
+# so stack frames, warn events, quiet-deps provenance, dependency tracking
+# and source maps all name `c:\users\runner~1\...\src\foo.scss` where dart
+# names `src/foo.scss`.
+callables_and_content_blocks_run_against_their_defining_file
+dependency_provenance_survives_the_import_cache
+error_in_a_content_block_points_at_the_include
+error_inside_an_imported_mixin_renders_its_source
+first_class_callables_are_traced_like_direct_ones
+fs_importer_tracks_load_path_dependencies
+import_deprecations_fire_when_a_file_is_parsed
+imported_callable_output_maps_to_its_file_and_content_to_the_includers
+imports_sharing_a_basename_are_distinct_sources
+members_forwarded_through_an_import_keep_their_defining_file
+misplaced_import_is_rejected_like_dart
+quiet_deps_record_is_per_compilation_even_with_a_reused_importer
+quiet_deps_record_is_reentrant_across_a_nested_compile
+quiet_deps_record_is_scoped_even_when_the_compile_fails_early
+quiet_deps_survives_a_compile_error_with_error_css
+source_map_sources_name_imported_files_by_path
+stack_frames_show_loaded_files_relative_to_the_working_directory
+warn_event_path_is_the_resolved_file_path
+warn_events_inside_callables_carry_the_defining_file

@@ -284,6 +284,11 @@ fn physical_cores(cpuinfo: &str) -> Option<usize> {
     (!cores.is_empty()).then_some(cores.len())
 }
 
+/// Local wall-clock time for `--update`'s one-line report, with no
+/// dependencies and no `unsafe`. Self-contained on purpose — see its module
+/// docs for why it reads the tz database rather than calling libc.
+mod localtime;
+
 #[cfg(test)]
 mod default_jobs_tests {
     use super::{jobs_from, physical_cores};
@@ -1584,6 +1589,29 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
                     outcome.stderr.push_str(&msg);
                     outcome.stderr.push('\n');
                     outcome.status = Status::IoError;
+                } else if shared.update && !shared.quiet {
+                    // dart narrates `--update`, and only `--update`: one line
+                    // per file actually WRITTEN, on stdout, timestamped to the
+                    // minute in local time (measured 2026-09-19). A skipped
+                    // output and a failed compile are both silent, which is
+                    // why this sits on the success arm after the write rather
+                    // than beside the freshness check.
+                    //
+                    // `outcome.stdout` is flushed in command-line order, so a
+                    // parallel build reports in argument order like dart's.
+                    // Nothing else can be in it here: `--update` with a stdout
+                    // destination is a usage error.
+                    let stamp = localtime::local_stamp(localtime::now());
+                    let source = unit
+                        .source_path()
+                        .map_or_else(|| "stdin".to_string(), |p| p.display().to_string());
+                    if let Some(stamp) = stamp {
+                        outcome.stdout.push_str(&stamp);
+                        outcome.stdout.push(' ');
+                    }
+                    outcome
+                        .stdout
+                        .push_str(&format!("Compiled {source} to {}.\n", output.display()));
                 }
             }
         },

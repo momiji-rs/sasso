@@ -601,6 +601,49 @@ assert.ok(
   );
 }
 {
+  // `--update` narrates each WRITTEN file on stdout, stamped with the local
+  // time — dart's shape, measured 2026-09-19. Same table as the binary's
+  // test: written announces, skipped and failed are silent, --quiet
+  // suppresses, several pairs report in COMMAND-LINE order (they finish in
+  // whatever order the worker pool finishes them).
+  const d = mkdtempSync(join(tmpdir(), "sasso-narrate-"));
+  writeFileSync(join(d, "one.scss"), "a {b: c}\n");
+  writeFileSync(join(d, "two.scss"), "x {y: z}\n");
+  const run = (...args) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { encoding: "utf8", cwd: d });
+  const STAMP = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] /;
+
+  const first = run("--update", "one.scss:one.css");
+  assert.equal(first.status, 0, `cli: ${first.stderr}`);
+  // Not `stderr === ""`: an engine-fallback warning legitimately shares
+  // that stream, and asserting an empty one failed CI on a runner where
+  // the native addon did not load. What matters is that the compile line
+  // is not there.
+  assert.ok(!first.stderr.includes("Compiled"), `cli: the line belongs on stdout: ${first.stderr}`);
+  // A stamp, when present, must be well formed — this CLI gets local time
+  // from JS `Date`, so unlike the binary it has one everywhere.
+  assert.match(first.stdout, STAMP, "cli: a [YYYY-MM-DD HH:MM] stamp");
+  assert.match(first.stdout, /Compiled one\.scss to one\.css\.\n$/, "cli: dart's wording");
+
+  const again = run("--update", "one.scss:one.css");
+  assert.equal(again.stdout, "", "cli: a skip says nothing");
+
+  rmSync(join(d, "one.css"), { force: true });
+  const both = run("--update", "one.scss:one.css", "two.scss:two.css");
+  const lines = both.stdout.trim().split("\n");
+  assert.equal(lines.length, 2, `cli: one line per file: ${both.stdout}`);
+  assert.ok(lines[0].endsWith("Compiled one.scss to one.css."), `cli: ${lines[0]}`);
+  assert.ok(lines[1].endsWith("Compiled two.scss to two.css."), `cli: ${lines[1]}`);
+
+  rmSync(join(d, "one.css"), { force: true });
+  assert.equal(run("--quiet", "--update", "one.scss:one.css").stdout, "", "cli: --quiet means quiet");
+
+  writeFileSync(join(d, "bad.scss"), '@use "nope";\n');
+  const failed = run("--update", "bad.scss:bad.css");
+  assert.notEqual(failed.status, 0, "cli: a missing module is an error");
+  assert.ok(!failed.stdout.includes("Compiled"), "cli: a failure is not announced as a compile");
+}
+{
   // dart's other `--update` usage error: nowhere to write means nothing to
   // compare, so the flag cannot do anything and dart refuses rather than
   // compile to the terminal (exit 64, measured 2026-09-19). Every shape that
