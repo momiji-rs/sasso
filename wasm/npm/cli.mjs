@@ -1423,6 +1423,16 @@ async function main() {
     return;
   }
 
+  // dart's second `--update` usage error, alongside the `--stdin` one above:
+  // `--update is not allowed when printing to stdout.`, measured 2026-09-19.
+  // With no destination there is no mtime to compare, so the flag would do
+  // nothing at all. `parseJobs` only produces an output-less job from a lone
+  // positional, which is exactly that case; `-o` and a bare directory both
+  // come back with an output and are allowed, as they are in the binary.
+  if (opts.update && jobs.some((j) => j.output === undefined)) {
+    fail("error: --update is not allowed when printing to stdout.");
+  }
+
   if (opts.watch) {
     if (jobs.length !== 1 || !jobs[0].output) fail("error: --watch requires <input> <output>");
     const wantMap = opts.noCss ? false : opts.sourceMap === undefined ? true : opts.sourceMap;

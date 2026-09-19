@@ -693,7 +693,22 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
                 .to_string(),
         );
     }
+    // dart has TWO usage errors for `--update`, not one:
+    // `--update is not allowed when printing to stdout.`, also exit 64. A run
+    // with no destination has nothing whose mtime could be compared, so the
+    // flag would silently do nothing — dart refuses rather than pretend.
+    // Measured 2026-09-19: `sass --update t.scss` exits 64, and every shape
+    // that HAS a destination is accepted (`t.scss out.css`, `t.scss:out.css`,
+    // several pairs, even `t.scss:-`, a file named `-`).
+    //
+    // `to_stdout` is the same condition this CLI already computes for source
+    // maps, and it is the right one: `-o` and a bare directory positional are
+    // destinations too. Neither exists in dart, so neither has a dart answer
+    // to copy — but both write files, which is what the rule is about.
     let to_stdout = cli.pairs.is_empty() && cli.output.is_none() && !entry_is_dir;
+    if cli.update && to_stdout {
+        return Err("--update is not allowed when printing to stdout.".to_string());
+    }
     if to_stdout {
         // A stdout map can only be embedded, and its sources are always
         // absolute `file://` URLs.

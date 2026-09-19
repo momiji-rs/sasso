@@ -601,6 +601,37 @@ assert.ok(
   );
 }
 {
+  // dart's other `--update` usage error: nowhere to write means nothing to
+  // compare, so the flag cannot do anything and dart refuses rather than
+  // compile to the terminal (exit 64, measured 2026-09-19). Every shape that
+  // names a destination stays allowed, `-o` included — this CLI's own
+  // spelling, with no dart equivalent.
+  const d = mkdtempSync(join(tmpdir(), "sasso-updout-"));
+  writeFileSync(join(d, "t.scss"), "a {b: c}\n");
+  const at = (...args) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { encoding: "utf8", cwd: d });
+
+  const bare = at("--update", "t.scss");
+  assert.notEqual(bare.status, 0, "cli: --update with no destination is refused");
+  assert.match(
+    bare.stderr,
+    /--update is not allowed when printing to stdout\./,
+    "cli: … in dart's words",
+  );
+  assert.equal(bare.stdout, "", "cli: … and nothing is compiled to the terminal");
+
+  for (const args of [
+    ["--update", "t.scss", "out.css"],
+    ["--update", "t.scss:out.css"],
+    ["--update", "-o", "out.css", "t.scss"],
+  ]) {
+    rmSync(join(d, "out.css"), { force: true });
+    const ok = at(...args);
+    assert.equal(ok.status, 0, `cli: ${args.join(" ")} names a destination: ${ok.stderr}`);
+    assert.match(readFileSync(join(d, "out.css"), "utf8"), /b: c/, `cli: ${args.join(" ")} wrote no CSS`);
+  }
+}
+{
   // A `-` INPUT is standard input too, and dart ACCEPTS it with --update
   // (measured 2026-09-19: `sass --update - out.css` and `sass --update
   // -:out.css` both exit 0 and compile stdin). Only the --stdin FLAG is
@@ -758,33 +789,40 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     [],
     `cli: these flags are accepted by the npm CLI and rejected by the binary: ${onlyNpm.join(" ")}`,
   );
-  // Neither list may contain a flag that is not a real difference, in either
-  // direction, or the guard reports parity it has not checked.
+  // Every entry in BOTH lists claims the same shape of fact — "the npm CLI
+  // has this flag and the binary does not" — and differs only in why, which
+  // is prose. So both are checked the same way, in a loop, rather than by
+  // hand-written assertions per list. Writing them by hand is precisely how
+  // this went wrong twice: `onlyNpm` filters both lists OUT, so an entry that
+  // has stopped being true is invisible unless something looks for it, and
+  // each list ended up with a different subset of the two checks.
   //
-  // `byDesign` says "this will never exist on the other side". Nothing used
-  // to hold it to that: `onlyNpm` filters byDesign OUT, so if the binary ever
-  // grew `--engine` every assertion here would still pass while the stated
-  // reason had become false. It had already gone wrong the other way — the
-  // list carried `--pkg-importer`, which is a DART flag that neither of ours
-  // has, with a description claiming the npm CLI resolves `pkg:` URLs. An
-  // exception for a difference that does not exist is worse than no entry:
-  // it reads as a checked, deliberate divergence.
-  const phantom = [...byDesign.keys()].filter((f) => !npmFlags.has(f));
-  assert.deepEqual(
-    phantom,
-    [],
-    `cli: byDesign names flags the npm CLI does not have: ${phantom.join(" ")}`,
-  );
-  const crossed = [...byDesign.keys()].filter((f) => flags.includes(f));
-  assert.deepEqual(
-    crossed,
-    [],
-    `cli: byDesign says these never cross, and the binary now has them: ${crossed.join(" ")}`,
-  );
-  // And the same for `gaps`: a gap that has since been closed must be removed
-  // from the list, or it hides the next one.
-  const closed = [...gaps.keys()].filter((f) => flags.includes(f));
-  assert.deepEqual(closed, [], `cli: these are listed as gaps but the binary now has them: ${closed.join(" ")}`);
+  // What the two checks catch, in the two ways an entry rots:
+  //   - the npm CLI no longer has the flag: the entry describes no difference
+  //     at all. `byDesign` carried `--pkg-importer` this way — a DART flag
+  //     neither of ours has, with a description claiming the npm CLI resolves
+  //     `pkg:` URLs. That is worse than a missing entry: it reads as a
+  //     checked, deliberate divergence.
+  //   - the binary has GAINED the flag: for `gaps` the work has landed and
+  //     the reminder must go, or it hides the next gap; for `byDesign` the
+  //     stated reason ("the binary IS the engine") has become false.
+  for (const [label, list] of [
+    ["byDesign", byDesign],
+    ["gaps", gaps],
+  ]) {
+    const absent = [...list.keys()].filter((f) => !npmFlags.has(f));
+    assert.deepEqual(
+      absent,
+      [],
+      `cli: ${label} names flags the npm CLI does not have: ${absent.join(" ")}`,
+    );
+    const gained = [...list.keys()].filter((f) => flags.includes(f));
+    assert.deepEqual(
+      gained,
+      [],
+      `cli: ${label} names flags the binary now has: ${gained.join(" ")}`,
+    );
+  }
 
   console.log(
     `ok: cli flag parity — ${flags.length} native flags and ${npmFlags.size} npm flags, neither side ahead`,

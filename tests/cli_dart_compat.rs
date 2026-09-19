@@ -2274,3 +2274,50 @@ fn update_with_a_directory_output_matches_dart() {
     let stale = sasso(&dir, &["--no-source-map", "--update", "e.scss:od"]);
     assert_eq!(stale.code, 66, "dart exits 66 here: {}", stale.stderr);
 }
+
+/// `--update` with nowhere to write is dart's OTHER usage error, and the one
+/// this CLI shipped without: `--update is not allowed when printing to
+/// stdout.`, exit 64.
+///
+/// Found by reading dart's own `test/cli/shared/update.dart`, which has it
+/// right next to the `--stdin` case. A run with no destination has no
+/// output mtime to compare, so the flag cannot do anything; dart refuses
+/// rather than quietly compile to the terminal as if `--update` were absent.
+///
+/// The boundary matters more than the message. Measured 2026-09-19 against
+/// dart-sass 1.104.1: every shape that HAS a destination is accepted —
+/// `t.scss out.css`, `t.scss:out.css`, several pairs at once, and even
+/// `t.scss:-`, which is a file named `-`. Only the lone positional is
+/// refused. `-o` and a bare directory are this CLI's own spellings of a
+/// destination, have no dart equivalent to copy, and must stay allowed.
+#[test]
+fn update_without_a_destination_is_a_usage_error() {
+    let dir = scratch("update-no-dest");
+    write(&dir, "t.scss", "a {b: c}\n");
+
+    let r = sasso(&dir, &["--no-source-map", "--update", "t.scss"]);
+    assert_eq!(r.code, 64, "dart exits 64 here: {}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("--update is not allowed when printing to stdout."),
+        "dart's wording: {}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.is_empty(),
+        "nothing should have been compiled: {}",
+        r.stdout
+    );
+
+    // Everything that names somewhere to write still works.
+    for args in [
+        vec!["--no-source-map", "--update", "t.scss", "out.css"],
+        vec!["--no-source-map", "--update", "t.scss:out.css"],
+        vec!["--no-source-map", "--update", "-o", "out.css", "t.scss"],
+    ] {
+        std::fs::remove_file(dir.join("out.css")).ok();
+        let ok = sasso(&dir, &args);
+        assert_eq!(ok.code, 0, "{args:?} names a destination: {}", ok.stderr);
+        assert!(read(&dir, "out.css").contains("b: c"), "{args:?} wrote no CSS");
+    }
+}
