@@ -26,6 +26,59 @@ jobs:
       - name: test
         run: cargo test --all-features
 
+  windows:
+    name: windows (build + test)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release
+      # The oracle for the one thing these tests must assume rather than
+      # derive: dart spells a LOADED file's frame with the platform separator
+      # (`src\_dep.scss`) while echoing the entry as it was typed. Non-blocking
+      # and printed in full, so a download hiccup does not fail the build and a
+      # disagreement is visible without one.
+      - name: dart-sass frame-separator probe (informational)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # Pinned with the parity job's `npm install -g sass@…`; bump together.
+          $ver = '1.104.1'
+          $url = "https://github.com/sass/dart-sass/releases/download/$ver/dart-sass-$ver-windows-x64.zip"
+          Invoke-WebRequest -Uri $url -OutFile dart-sass.zip
+          Expand-Archive -Path dart-sass.zip -DestinationPath dart-sass-dist -Force
+          New-Item -ItemType Directory -Force -Path probe/src | Out-Null
+          Set-Content -Path probe/src/_dep.scss -Value '@warn "from the dependency";'
+          Set-Content -Path probe/src/entry.scss -Value '@use "dep";'
+          Push-Location probe
+          $out = & ../dart-sass-dist/dart-sass/sass.bat --no-source-map src/entry.scss 2>&1 | Out-String
+          Pop-Location
+          Write-Host "--- dart-sass $ver, cwd = the project root ---"
+          Write-Host $out
+          if ($out -match 'src\\_dep\.scss') {
+            Write-Host 'dart spells a loaded file with `\` -- what this suite expects'
+          } elseif ($out -match 'src/_dep\.scss') {
+            Write-Host 'dart spells a loaded file with `/` -- flip Style::sep and with_loaded_paths'
+          } else {
+            Write-Host 'neither spelling in the transcript -- read it above'
+          }
+      # `--no-fail-fast` because the first Windows run stopped at the library
+      # unit tests and never reached a single integration suite, on a platform
+      # where none of them had ever run. The ledger it reads names every test
+      # still known to fail here and the issue it belongs to; a line leaves the
+      # file when its issue closes.
+      - name: test
+        shell: pwsh
+        run: |
+          $skips = Get-Content .github/windows-known-failures.txt |
+            Where-Object { $_.Trim() -and -not $_.StartsWith('#') } |
+            ForEach-Object { '--skip'; $_.Trim() }
+          Write-Host "skipping $($skips.Count / 2) known failures"
+          cargo test --release --no-fail-fast -- @skips
+          if ($LASTEXITCODE -ne 0) { throw "cargo test failed" }
+
   parity:
     name: dart-sass parity
     runs-on: ubuntu-latest
