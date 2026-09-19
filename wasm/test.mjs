@@ -642,6 +642,29 @@ assert.ok(
   const failed = run("--update", "bad.scss:bad.css");
   assert.notEqual(failed.status, 0, "cli: a missing module is an error");
   assert.ok(!failed.stdout.includes("Compiled"), "cli: a failure is not announced as a compile");
+
+  // A stdin source is named `stdin`, not `-`. This CLI formats the line
+  // itself rather than sharing the binary's code, so the binary's test of
+  // the same rule does not cover it.
+  rmSync(join(d, "o.css"), { force: true });
+  const viaStdin = spawnSync(process.execPath, [cliPath, "--no-source-map", "--update", "-:o.css"], {
+    encoding: "utf8",
+    input: "a {b: c}\n",
+    cwd: d,
+  });
+  assert.equal(viaStdin.status, 0, `cli: ${viaStdin.stderr}`);
+  assert.match(
+    viaStdin.stdout,
+    /Compiled stdin to o\.css\.\n$/,
+    `cli: dart names standard input \`stdin\`, not \`-\`: ${viaStdin.stdout}`,
+  );
+
+  // --no-css writes nothing, so it announces nothing.
+  rmSync(join(d, "one.css"), { force: true });
+  const noCss = run("--no-css", "--update", "one.scss:one.css");
+  assert.equal(noCss.status, 0, `cli: ${noCss.stderr}`);
+  assert.equal(noCss.stdout, "", `cli: --no-css wrote nothing, so it says nothing: ${noCss.stdout}`);
+  assert.ok(!existsSync(join(d, "one.css")), "cli: --no-css really wrote nothing");
 }
 {
   // dart's other `--update` usage error: nowhere to write means nothing to

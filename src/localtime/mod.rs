@@ -80,7 +80,7 @@ pub(crate) mod tzif;
 
 use std::sync::OnceLock;
 
-/// The system's tz database bytes, read at most once per process.
+/// What the machine says about its zone, resolved at most once per process.
 ///
 /// A directory build asks for a timestamp once per written file — thousands
 /// of times for a large tree — and re-reading `/etc/localtime` each time
@@ -91,15 +91,24 @@ use std::sync::OnceLock;
 ///
 /// The consequence worth stating: a change to the machine's timezone, or to
 /// `TZ`, is not picked up by a running `--watch`. Neither is it by dart.
-fn tzdata() -> Option<&'static [u8]> {
-    static CACHE: OnceLock<Option<Vec<u8>>> = OnceLock::new();
-    CACHE.get_or_init(sys::tzdata).as_deref()
+fn loaded() -> &'static sys::Loaded {
+    static CACHE: OnceLock<sys::Loaded> = OnceLock::new();
+    CACHE.get_or_init(sys::load)
 }
 
 /// The UTC offset in seconds east of Greenwich at `unix_secs`, or `None`
-/// when the machine has no readable tz database.
+/// when no zone can be determined at all.
+///
+/// `Some(0)` and `None` are different answers and the distinction is the
+/// point: `TZ=` asks for UTC and gets it, while a machine that has a local
+/// zone we cannot read (Windows) gets nothing, so the caller prints no
+/// time rather than a confident wrong one.
 pub(crate) fn local_offset_at(unix_secs: i64) -> Option<i64> {
-    tzif::TimeZone::parse(tzdata()?)?.offset_at(unix_secs)
+    match loaded() {
+        sys::Loaded::Utc => Some(0),
+        sys::Loaded::Tzif(bytes) => tzif::TimeZone::parse(bytes)?.offset_at(unix_secs),
+        sys::Loaded::Nothing => None,
+    }
 }
 
 /// dart-sass's stamp for `unix_secs`: `[YYYY-MM-DD HH:MM]`, local time to

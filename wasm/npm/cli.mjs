@@ -1896,7 +1896,11 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
     // its mtime, which is the point.
     if (opts.update && output && isFresh(output, input, result.loadedUrls)) continue;
     const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource() : undefined);
-    if (!writeError && opts.update && output && !opts.quiet) {
+    // `!opts.noCss` because `emit` returns undefined immediately under
+    // it — no file is written, so there is nothing to announce, and
+    // without this the line claimed a write that never happened. The
+    // binary was already right here; this CLI was not.
+    if (!writeError && opts.update && output && !opts.quiet && !opts.noCss) {
       compiled.set(i, compiledLine(input, output));
     }
     if (writeError) {
