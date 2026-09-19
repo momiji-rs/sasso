@@ -3629,8 +3629,15 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const { triggersRecompile } = await import("./npm/_watchfilter.mjs");
   const known = new Set(["/p/main.scss", "/p/_v.scss"]);
   const ours = new Set(["/p/out.css", "/p/out.css.map"]);
-  const ask = (path, { failing = false, moved = false } = {}) =>
-    triggersRecompile({ path, known, ours, failing, anyKnownMoved: () => moved });
+  const ask = (path, { failing = false, moved = false, elseChanged = moved } = {}) =>
+    triggersRecompile({
+      path,
+      known,
+      ours,
+      failing,
+      anyKnownMoved: () => moved,
+      anythingElseChanged: () => elseChanged,
+    });
 
   // Named events, compiling normally.
   assert.equal(ask("/p/_v.scss"), true, "filter: a dependency changed");
@@ -3647,9 +3654,100 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // Nameless events — the branch no test on this platform can provoke.
   assert.equal(ask(null, { moved: false }), false, "filter: nameless and nothing moved — do not loop");
   assert.equal(ask(null, { moved: true }), true, "filter: nameless but a dependency moved");
-  assert.equal(ask(null, { failing: true, moved: false }), true, "filter: nameless while failing — try anything");
+  assert.equal(
+    ask(null, { failing: true, elseChanged: true }),
+    true,
+    "filter: nameless while failing, and a neighbour moved — that may be the fix",
+  );
+  // The one that loops: the error path DELETES the output, and on a
+  // platform reporting that removal without a filename, `failing` alone
+  // would take it for the user's fix — recompile, fail, delete, repeat.
+  assert.equal(
+    ask(null, { failing: true, elseChanged: false }),
+    false,
+    "filter: nameless while failing with nothing but ours changed — do not chase our own removal",
+  );
 
   console.log("ok: watch event filter — named, nameless, ours, and failing");
+}
+
+// === waiting for a directory that does not exist yet ===
+//
+// The invariant is one open handle per target however many times the
+// probe re-arms. Breaking it is not a slow leak: each new watcher also
+// sees the events that spawned it, so twenty unrelated writes in the
+// ancestor directory produced `EMFILE: too many open files, watch`. No
+// --watch test provokes that without becoming a stress test, and a
+// stress test that passes at nineteen writes says nothing.
+{
+  const { makeProbe } = await import("./npm/_probe.mjs");
+
+  /** A filesystem the test decides the contents of. */
+  const fake = (present) => {
+    const handles = [];
+    const watchers = new Map(); // dir -> callbacks
+    const watch = (dir, cb) => {
+      const h = { dir, cb, closed: false, close: () => (h.closed = true) };
+      handles.push(h);
+      const list = watchers.get(dir) ?? [];
+      list.push(h);
+      watchers.set(dir, list);
+      return h;
+    };
+    return {
+      handles,
+      open: () => handles.filter((h) => !h.closed).length,
+      fire: (dir) => (watchers.get(dir) ?? []).filter((h) => !h.closed).forEach((h) => h.cb()),
+      watch,
+      exists: (p) => present.has(p),
+      dirname: (p) => p.slice(0, p.lastIndexOf("/")) || "/",
+    };
+  };
+
+  // The ancestor is busy and the target never appears.
+  {
+    const present = new Set(["/", "/p"]);
+    const appeared = [];
+    const fs = fake(present);
+    const probe = makeProbe({ ...fs, onAppear: (t) => appeared.push(t) });
+    probe.arm("/p/a/b/generated");
+    assert.equal(probe.size, 1, "probe: one handle to start");
+    for (let i = 0; i < 20; i++) fs.fire("/p");
+    assert.equal(probe.size, 1, `probe: still one handle after 20 events (had ${probe.size})`);
+    assert.equal(fs.open(), 1, `probe: and only one is left open (had ${fs.open()})`);
+    assert.deepEqual(appeared, [], "probe: the target never appeared, so nothing fired");
+  }
+
+  // The chain fills in one level at a time: re-arm deeper each time,
+  // still one handle, and fire only when the target itself exists.
+  {
+    const present = new Set(["/", "/p"]);
+    const appeared = [];
+    const fs = fake(present);
+    const probe = makeProbe({ ...fs, onAppear: (t) => appeared.push(t) });
+    probe.arm("/p/a/b");
+    present.add("/p/a");
+    fs.fire("/p");
+    assert.equal(probe.size, 1, "probe: one handle after re-arming deeper");
+    assert.deepEqual(appeared, [], "probe: /p/a is not the target");
+    present.add("/p/a/b");
+    fs.fire("/p/a");
+    assert.deepEqual(appeared, ["/p/a/b"], "probe: the target appeared");
+  }
+
+  // closeAll leaves nothing behind — rewatch calls it on every compile.
+  {
+    const fs = fake(new Set(["/", "/p"]));
+    const probe = makeProbe({ ...fs, onAppear: () => {} });
+    probe.arm("/p/x/one");
+    probe.arm("/p/y/two");
+    assert.equal(probe.size, 2, "probe: one per target");
+    probe.closeAll();
+    assert.equal(probe.size, 0, "probe: closeAll forgets them");
+    assert.equal(fs.open(), 0, "probe: and actually closes them");
+  }
+
+  console.log("ok: probe — one handle per target, re-arms deeper, closes cleanly");
 }
 
 // === the coalescing rule, on a fake clock ===

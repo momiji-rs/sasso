@@ -34,6 +34,7 @@ import { defaultJobs } from "./_jobs.mjs";
 import { DEPRECATION_IDS } from "./_deprecations.mjs";
 import { triggersRecompile } from "./_watchfilter.mjs";
 import { coalesce } from "./_coalesce.mjs";
+import { makeProbe } from "./_probe.mjs";
 // The prebuilt-addon rules, shared with native.mjs: which engine this platform
 // is SUPPOSED to run decides whether a wasm fallback is news (see `loadEngine`).
 import { nativePackage, platformKey } from "./_addon.mjs";
@@ -1233,8 +1234,45 @@ function runWatch(input, output, common, opts) {
   // the filter cannot help — there is no watcher on that directory at all.
   // dart watches load paths too (measured: it sees this, we did not).
   const loadPathDirs = (common.loadPaths || []).map((d) => resolve(d));
+  // One per absent load path, keyed so re-arming replaces rather than adds
+  // — see `_probe.mjs` for what happened when it did not.
+  const probes = makeProbe({
+    watch,
+    exists: existsSync,
+    dirname,
+    onAppear: () => schedule(),
+  });
   // Last known mtimes of `known`, for events that arrive with no filename.
   let stamps = new Map();
+  // And the same for everything else in the watched directories, minus
+  // our own output: what tells a user's fix apart from the removal this
+  // watch performed itself, when the platform does not say which file
+  // moved. Listing is cheap and happens only on nameless events, which
+  // macOS and Linux never send.
+  let neighbours = new Map();
+  const surveyNeighbours = (dirs) => {
+    const seen = new Map();
+    for (const d of dirs) {
+      let names = [];
+      try {
+        names = readdirSync(d);
+      } catch {
+        continue; // vanished; the next event will notice
+      }
+      for (const n of names) {
+        const full = join(d, n);
+        if (ours.has(full)) continue;
+        seen.set(full, mtime(full));
+      }
+    }
+    return seen;
+  };
+  const anythingElseChanged = () => {
+    const now = surveyNeighbours(new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]));
+    if (now.size !== neighbours.size) return true;
+    for (const [f, m] of now) if (neighbours.get(f) !== m) return true;
+    return false;
+  };
   const mtime = (f) => {
     try {
       return statSync(f).mtimeMs;
@@ -1257,8 +1295,10 @@ function runWatch(input, output, common, opts) {
       known = files;
       stamps = new Map([...known].map((f) => [f, mtime(f)]));
     }
+    neighbours = surveyNeighbours(new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]));
     for (const w of watchers) w.close();
     watchers = [];
+    probes.closeAll();
 
     // A load path that does not exist YET cannot be watched — `fs.watch`
     // throws and the directory is dropped, so `-I generated` before
@@ -1272,41 +1312,26 @@ function runWatch(input, output, common, opts) {
     // chain — `-I a/b/c` with only `a` there — the probe re-arms deeper
     // rather than giving up, which is why this is a function and not a
     // single `watch`.
-    const probe = (target) => {
-      let at = dirname(target);
-      while (!existsSync(at)) {
-        const up = dirname(at);
-        if (up === at) return; // reached the root without finding one
-        at = up;
-      }
-      try {
-        watchers.push(
-          watch(at, () => {
-            if (existsSync(target)) schedule();
-            else probe(target); // a link in the chain appeared; go deeper
-          }),
-        );
-      } catch {
-        // it vanished between the check and the watch — nothing to do
-      }
-    };
-
     const dirs = new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]);
     for (const lp of loadPathDirs) {
-      if (!existsSync(lp)) probe(lp);
+      if (!existsSync(lp)) probes.arm(lp);
     }
     for (const d of dirs) {
       try {
         watchers.push(
           watch(d, (_event, fn) => {
-            const decide = {
-              path: fn ? join(d, fn) : null,
-              known,
-              ours,
-              failing,
-              anyKnownMoved: () => [...known].some((f) => stamps.get(f) !== mtime(f)),
-            };
-            if (triggersRecompile(decide)) schedule();
+            if (
+              triggersRecompile({
+                path: fn ? join(d, fn) : null,
+                known,
+                ours,
+                failing,
+                anyKnownMoved: () => [...known].some((f) => stamps.get(f) !== mtime(f)),
+                anythingElseChanged,
+              })
+            ) {
+              schedule();
+            }
           }),
         );
       } catch {

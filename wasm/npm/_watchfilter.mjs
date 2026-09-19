@@ -26,14 +26,19 @@
  * @param {() => boolean} event.anyKnownMoved  did any file in `known`
  *   change mtime since the last compile? Called only when there is no
  *   filename, because it stats every dependency.
+ * @param {() => boolean} event.anythingElseChanged  did anything in the
+ *   watched directories OTHER than `ours` appear, vanish or move? Also
+ *   nameless-only, and the reason a failing watch does not chase its own
+ *   tail: the error path DELETES the output, and on a platform that
+ *   reports that removal without a filename, `failing` alone would take
+ *   it for the user's fix, recompile, fail, delete again.
  */
-export function triggersRecompile({ path, known, ours, failing, anyKnownMoved }) {
+export function triggersRecompile({ path, known, ours, failing, anyKnownMoved, anythingElseChanged }) {
   if (path === null) {
-    // No name to judge by, so ask the files. While failing there is
-    // nothing of ours on disk to cause a loop, and the fix may be a
-    // brand-new file with no earlier mtime to differ from — so anything
-    // is worth a try.
-    return failing || anyKnownMoved();
+    // No name to judge by, so ask the files. While failing the fix may be
+    // a brand-new file with no earlier mtime to differ from, so `known`
+    // is not enough — but it still has to be something that is not ours.
+    return failing ? anythingElseChanged() : anyKnownMoved();
   }
   if (ours.has(path)) return false;
   return failing || known.has(path);
