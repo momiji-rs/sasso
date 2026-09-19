@@ -25,6 +25,13 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test --all-features
+      # The timezone reader's differential sweep is #[ignore]d because it
+      # needs the host's /usr/share/zoneinfo and a Python to disagree with —
+      # neither of which `cargo test` should depend on. CI has both, so it
+      # opts in: 598 zones x 12 instants against python's zoneinfo, which is
+      # what stands in for Miri on a module that has no unsafe to verify.
+      - name: localtime — the whole tz database vs python zoneinfo
+        run: cargo test --release --bin sasso -- --ignored --nocapture
 
   parity:
     name: dart-sass parity

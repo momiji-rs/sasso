@@ -1129,6 +1129,45 @@ function parseJobs(positionals, output) {
  * keeps an unchanged output's mtime stable, the property downstream watchers
  * actually key on.
  */
+/**
+ * dart's one-line report for `--update` and `--watch`, the only thing either
+ * flag says back to a person who leaves it running:
+ *
+ *     [2026-09-19 12:58] Compiled src/one.scss to out/one.css.
+ *
+ * Measured against dart-sass 1.104.1 on 2026-09-19 — local time to the
+ * minute, on STDOUT, one line per file actually written. A skipped output
+ * and a failed compile are both silent, and `--quiet` suppresses it (though
+ * NOT `--watch`'s banner, which prints either way). It appears under these
+ * two flags only: a plain `sass a.scss:a.css` says nothing, and neither do
+ * we.
+ *
+ * Writing it to stderr, as this CLI's `--watch` used to, breaks both halves
+ * of the contract at once: a build script grepping stdout for `Compiled`
+ * finds nothing, and one treating stderr as a failure signal sees noise on
+ * every success.
+ */
+function compiledLine(input, output) {
+  const d = new Date();
+  const p2 = (n) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  return `[${stamp}] Compiled ${input === "-" ? "stdin" : input} to ${output}.\n`;
+}
+
+/**
+ * The lines in COMMAND-LINE order, like `flushDiagnostics` and for the same
+ * reason: jobs finish in whatever order a dozen threads finish them in, and
+ * dart reports one line per job in the order the arguments were given. The
+ * timestamp is taken when the file is written, not when this runs, so
+ * buffering does not move it.
+ */
+function flushCompiled(compiled, count) {
+  for (let i = 0; i < count; i++) {
+    const line = compiled.get(i);
+    if (line) process.stdout.write(line);
+  }
+}
+
 function isFresh(output, input, deps) {
   // `-` is STANDARD INPUT, not a file named `-`. Two separate reasons it can
   // never be fresh, and the first one bites in practice: with a real file
@@ -1207,7 +1246,7 @@ function runWatch(input, output, common, opts) {
       rewatch(result.loadedUrls);
       const writeError = emit(result, output, common.sourceMap, opts);
       if (writeError) process.stderr.write(`${writeError}\n`);
-      else if (!opts.noCss) process.stderr.write(`Compiled ${input} to ${output}.\n`);
+      else if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
     } catch (e) {
       const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(msg.replace(/\n?$/, "\n"));
@@ -1224,7 +1263,10 @@ function runWatch(input, output, common, opts) {
   };
 
   recompile();
-  process.stderr.write("Watching for changes... (press Ctrl-C to stop)\n");
+  // dart's wording, and on stdout beside the compile lines. `--quiet`
+  // silences those but NOT this: measured 2026-09-19, `sass --quiet --watch`
+  // still prints the banner, which is the only sign the process is alive.
+  process.stdout.write("Sass is watching for changes. Press Ctrl-C to stop.\n");
 }
 
 /**
@@ -1321,8 +1363,9 @@ async function runWorker() {
   // Only the jobs THIS worker took are in the map; the parent merges by index,
   // so the batch reports in command-line order however the threads interleaved.
   const diagnostics = new Map();
-  const failed = compileSlice(sharedList(shared), opts, common, ctl, stdinBytes, diagnostics);
-  parentPort.postMessage({ failed, diagnostics: [...diagnostics] });
+  const compiled = new Map();
+  const failed = compileSlice(sharedList(shared), opts, common, ctl, stdinBytes, diagnostics, compiled);
+  parentPort.postMessage({ failed, diagnostics: [...diagnostics], compiled: [...compiled] });
 }
 
 /** The compile options every job shares, rebuilt per thread (a logger cannot be cloned). */
@@ -1573,10 +1616,15 @@ async function runJobs(jobs, opts, common) {
   // there, with a dozen threads writing at once. Sparse — most jobs say
   // nothing, and a directory build can have thousands.
   const diagnostics = new Map();
+  // `--update`'s one-line report per written file, collected the same way and
+  // for the same reason. Separate from `diagnostics` because it is a
+  // different stream: these go to stdout, diagnostics to stderr.
+  const compiled = new Map();
 
   if (workers < 2 || collides) {
-    const failed = compileSlice(listOf(jobs), opts, common, null, stdinBytes, diagnostics);
+    const failed = compileSlice(listOf(jobs), opts, common, null, stdinBytes, diagnostics, compiled);
     flushDiagnostics(diagnostics, jobs.length);
+    flushCompiled(compiled, jobs.length);
     return failed;
   }
 
@@ -1603,7 +1651,9 @@ async function runJobs(jobs, opts, common) {
         worker.on("message", resolve);
         worker.on("error", reject);
         worker.on("exit", (code) =>
-          code === 0 ? resolve({ failed: 0, diagnostics: [] }) : resolve({ failed: 1, diagnostics: [] }),
+          code === 0
+            ? resolve({ failed: 0, diagnostics: [], compiled: [] })
+            : resolve({ failed: 1, diagnostics: [], compiled: [] }),
         );
       });
     }),
@@ -1612,8 +1662,10 @@ async function runJobs(jobs, opts, common) {
   for (const result of results) {
     failed += result?.failed ?? 0;
     for (const [i, text] of result?.diagnostics ?? []) diagnostics.set(i, text);
+    for (const [i, line] of result?.compiled ?? []) compiled.set(i, line);
   }
   flushDiagnostics(diagnostics, jobs.length);
+  flushCompiled(compiled, jobs.length);
   return failed;
 }
 
@@ -1757,7 +1809,7 @@ function captureStderr(fn) {
  * Returns the number that failed; it never exits the process, so a worker can
  * report back and the parent can decide.
  */
-function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics) {
+function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled) {
   const note = (i, text) => diagnostics.set(i, (diagnostics.get(i) ?? "") + text);
   // Decoded on first use, so a worker that never claims the `-` job never
   // touches the bytes; there is at most one such job, so at most one decode.
@@ -1841,6 +1893,9 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics) {
     // its mtime, which is the point.
     if (opts.update && output && isFresh(output, input, result.loadedUrls)) continue;
     const writeError = emit(result, output, wantMap, opts, input === "-" ? stdinSource() : undefined);
+    if (!writeError && opts.update && output && !opts.quiet) {
+      compiled.set(i, compiledLine(input, output));
+    }
     if (writeError) {
       note(i, `${writeError}\n`);
       failed++;
