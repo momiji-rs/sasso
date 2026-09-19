@@ -9,7 +9,7 @@
 // asyncify refactors must preserve (docs/HANDOFF_ASYNC_IMPORTER_PERF.md).
 // Run after build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, symlinkSync, rmSync, openSync, closeSync, chmodSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, symlinkSync, renameSync, rmSync, openSync, closeSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -3613,6 +3613,143 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     `cli --watch --quiet: the banner still prints: ${quiet.stdout}`,
   );
   console.log("ok: cli --watch — stdout, dart's banner and stamp, --quiet keeps the banner");
+}
+
+// === Phase 3c: CLI --watch, what it SURVIVES ===
+//
+// The functional test above proves a recompile happens; the one before
+// this proves what it says. Neither covered what a watch has to live
+// through, and two of these were broken in the shipped CLI:
+//
+//   a compile FAILS, then the dependency is fixed   -> never recovered
+//   a missing dependency is created                 -> never noticed
+//
+// Both for one reason. A failed compile reports no `loadedUrls`, and the
+// error path re-watched `[entry]` alone, so the directory watcher stayed
+// but the filename filter stopped recognising the dependency. You broke a
+// partial, saw the error, fixed it, and nothing happened — with the output
+// file already deleted. dart recovers from both (measured 2026-09-19).
+{
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /** Start a watch in a fresh directory, run `body`, always kill it. */
+  const withWatch = async (setup, body) => {
+    const dir = mkdtempSync(join(tmpdir(), "sasso-watchcase-"));
+    setup(dir);
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--watch", "main.scss", "out.css"], {
+      cwd: dir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const css = () => {
+      try {
+        return readFileSync(join(dir, "out.css"), "utf8");
+      } catch {
+        return "";
+      }
+    };
+    const until = async (pred, ms = 20000) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        try {
+          if (pred()) return true;
+        } catch {}
+        await sleep(20);
+      }
+      return false;
+    };
+    try {
+      return await body({ dir, css, until, log: () => log, clear: () => (log = "") });
+    } finally {
+      proc.kill();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  const withDep = (d) => {
+    writeFileSync(join(d, "main.scss"), '@use "v";\n.a { color: v.$c; }\n');
+    writeFileSync(join(d, "_v.scss"), "$c: red;\n");
+  };
+
+  // A burst: the LAST save must win. Without coalescing this is eight
+  // compiles; with it, one or two.
+  await withWatch(withDep, async ({ dir, css, until }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(300);
+    for (let i = 1; i <= 8; i++) {
+      writeFileSync(join(dir, "_v.scss"), `$c: #0000${String(i).padStart(2, "0")};\n`);
+      await sleep(10);
+    }
+    assert.ok(await until(() => css().includes("000008")), "watch: a burst settles on the last save");
+  });
+
+  // An atomic save replaces the inode, which is why the watcher watches
+  // DIRECTORIES: a file watch would follow the file that was renamed away.
+  await withWatch(withDep, async ({ dir, css, until }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(300);
+    writeFileSync(join(dir, ".v.tmp"), "$c: blue;\n");
+    renameSync(join(dir, ".v.tmp"), join(dir, "_v.scss"));
+    assert.ok(await until(() => css().includes("blue")), "watch: an atomic save is seen");
+  });
+
+  // Break the dependency, then fix it. This is the one that was broken.
+  await withWatch(withDep, async ({ dir, css, until, log, clear }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(300);
+    clear();
+    writeFileSync(join(dir, "_v.scss"), "$c: ;\n");
+    assert.ok(await until(() => /Error/i.test(log())), "watch: a broken dependency is reported");
+    await sleep(300);
+    writeFileSync(join(dir, "_v.scss"), "$c: teal;\n");
+    assert.ok(
+      await until(() => css().includes("teal")),
+      "watch: fixing the dependency you broke brings the output back",
+    );
+  });
+
+  // A dependency that does not exist yet: the first compile fails, so
+  // there is no `loadedUrls` naming the file to wait for.
+  await withWatch(
+    (d) => writeFileSync(join(d, "main.scss"), '@use "later";\n.a { color: later.$c; }\n'),
+    async ({ dir, css, until, log }) => {
+      assert.ok(await until(() => /Error/i.test(log())), "watch: a missing dependency is reported");
+      await sleep(300);
+      writeFileSync(join(dir, "_later.scss"), "$c: green;\n");
+      assert.ok(await until(() => css().includes("green")), "watch: creating it compiles");
+    },
+  );
+
+  // Deleted, then restored.
+  await withWatch(withDep, async ({ dir, css, until, log, clear }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(300);
+    clear();
+    rmSync(join(dir, "_v.scss"));
+    assert.ok(await until(() => /Error/i.test(log())), "watch: a deleted dependency is reported");
+    await sleep(300);
+    writeFileSync(join(dir, "_v.scss"), "$c: olive;\n");
+    assert.ok(await until(() => css().includes("olive")), "watch: restoring it compiles");
+  });
+
+  // The output lands in a watched directory. If it retriggers the compile
+  // that wrote it, the watch spins forever — and the permissive filter the
+  // error path now uses makes that easier to get wrong.
+  await withWatch(
+    (d) => writeFileSync(join(d, "main.scss"), ".a { color: red; }\n"),
+    async ({ css, until, log, clear }) => {
+      assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+      await sleep(500);
+      clear();
+      await sleep(1500);
+      const again = (log().match(/Compiled/g) || []).length;
+      assert.equal(again, 0, `watch: the output must not retrigger itself (saw ${again} more compiles)`);
+    },
+  );
+
+  console.log("ok: cli --watch — burst, atomic save, break/fix, missing dep, delete/restore, no self-trigger");
 }
 
 // === Phase 4: custom functions — full Value coverage (sync + async) ===

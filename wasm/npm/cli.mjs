@@ -1211,24 +1211,45 @@ function runWatch(input, output, common, opts) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
   let watchers = [];
   let timer = null;
+  // The last set of files a compile actually loaded, seeded with the entry.
+  // Kept across a FAILED compile: a failure has no `loadedUrls`, and the
+  // first version of this narrowed the set to the entry alone when one
+  // happened. The directory watcher stayed in place, but the filename
+  // filter below no longer recognised the dependency, so fixing the file
+  // you had just broken did nothing — measured, and dart recovers.
+  let known = new Set([resolve(input)]);
+  // While a compile is failing, anything in a watched directory may be the
+  // fix: the file you broke, or a file that was missing and has just been
+  // created. Filtering by `known` cannot see the second of those.
+  let failing = false;
+  // Except our own output, which lands in a watched directory and would
+  // otherwise retrigger the compile that wrote it, forever.
+  const ours = new Set([resolve(output), `${resolve(output)}.map`]);
 
+  /** Re-arm the watchers. `loadedUrls` omitted = keep the last known set. */
   const rewatch = (loadedUrls) => {
+    if (loadedUrls) {
+      const files = new Set([resolve(input)]);
+      for (const u of loadedUrls) {
+        try {
+          files.add(fileURLToPath(u));
+        } catch {
+          // non-file URL (a virtual importer) — nothing to watch
+        }
+      }
+      known = files;
+    }
     for (const w of watchers) w.close();
     watchers = [];
-    const files = new Set([resolve(input)]);
-    for (const u of loadedUrls || []) {
-      try {
-        files.add(fileURLToPath(u));
-      } catch {
-        // non-file URL (a virtual importer) — nothing to watch
-      }
-    }
-    const dirs = new Set([...files].map((f) => dirname(f)));
+    const dirs = new Set([...known].map((f) => dirname(f)));
     for (const d of dirs) {
       try {
         watchers.push(
           watch(d, (_event, fn) => {
-            if (!fn || files.has(join(d, fn))) schedule();
+            if (!fn) return schedule();
+            const path = join(d, fn);
+            if (ours.has(path)) return;
+            if (failing || known.has(path)) schedule();
           }),
         );
       } catch {
@@ -1247,13 +1268,17 @@ function runWatch(input, output, common, opts) {
       const writeError = emit(result, output, common.sourceMap, opts);
       if (writeError) process.stderr.write(`${writeError}\n`);
       else if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
+      failing = false;
     } catch (e) {
       const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(msg.replace(/\n?$/, "\n"));
       const removeError = discardStaleOutput(output, opts);
       if (removeError) process.stderr.write(`${removeError}\n`);
-      // keep watching at least the entry so a fix re-triggers a compile
-      rewatch([pathToFileURL(resolve(input))]);
+      // Keep the set we already had — a failure reports no `loadedUrls`,
+      // and throwing away what we knew is what broke recovery — and accept
+      // anything in those directories until a compile succeeds again.
+      failing = true;
+      rewatch();
     }
   };
 
