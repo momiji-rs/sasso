@@ -534,9 +534,13 @@ fn compressed_color_picks_shortest_form() {
     assert_eq!(case("hsl(0,0%,50%)"), "a{x:hsl(0,0%,50%)}");
 }
 
-/// Compressed style drops a leading zero from a POSITIVE number only — dart
-/// looks for a literal `0.` prefix on the rendered string, which a minus sign
-/// has already pushed out of the way. Measured against dart-sass 1.103.1.
+/// Compressed style drops a leading zero from a POSITIVE number whose spelling
+/// is short enough for dart's direct number writer — it looks for a literal
+/// `0.` prefix on the rendered string, which a minus sign has already pushed
+/// out of the way. A spelling long enough to go through `_writeRounded` follows
+/// a different rule; `fmt_num_compressed_leading_zero_follows_the_writer` in
+/// `src/value.rs` covers all three regimes. Measured against dart-sass 1.103.1,
+/// re-measured against 1.104.1 on 2026-09-19.
 #[test]
 fn compressed_keeps_the_zero_on_a_negative_decimal() {
     let v = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
@@ -552,6 +556,46 @@ fn compressed_keeps_the_zero_on_a_negative_decimal() {
     assert_eq!(v("0px"), "a{x:0px}");
     assert_eq!(v("-0.0px"), "a{x:-0px}");
     assert_eq!(v("-0"), "a{x:-0}");
+    // A spelling that `_writeRounded` has to shorten loses the zero either way.
+    assert_eq!(v("-0.00123456789px"), "a{x:-.0012345679px}");
+    // One that it merely passes through keeps the zero either way.
+    assert_eq!(v("0.0123456789px"), "a{x:0.0123456789px}");
+}
+
+/// The lightness of a `lab()`/`lch()`/`oklab()`/`oklch()` color is written as a
+/// percentage in expanded output and as the channel's own stored number when
+/// compressed — the same digits for lab/lch, whose lightness runs 0–100, and
+/// the unscaled 0–1 value for oklab/oklch. A hue drops its `deg` for the same
+/// reason: an unadorned number already means degrees everywhere a hue is
+/// accepted. Measured against dart-sass 1.104.1 on 2026-09-19.
+#[test]
+fn compressed_color_channels_drop_percent_and_deg() {
+    let v = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
+    assert_eq!(v("lab(50% 10 -20)"), "a{x:lab(50 10 -20)}");
+    assert_eq!(v("lab(0% 0 0)"), "a{x:lab(0 0 0)}");
+    assert_eq!(v("lab(0.5% 0 0)"), "a{x:lab(.5 0 0)}");
+    assert_eq!(v("lch(50% 30 120deg)"), "a{x:lch(50 30 120)}");
+    assert_eq!(v("lch(50% 30 400)"), "a{x:lch(50 30 40)}");
+    // oklab/oklch lightness is stored 0–1, so dropping the `%` also divides by
+    // a hundred — which can make the compressed form LONGER, and dart-sass
+    // writes it anyway rather than picking the shorter spelling.
+    assert_eq!(v("oklab(50% 0.1 -0.1)"), "a{x:oklab(.5 .1 -0.1)}");
+    assert_eq!(v("oklab(1% 0 0)"), "a{x:oklab(.01 0 0)}");
+    assert_eq!(v("oklch(70% 0.1 200)"), "a{x:oklch(.7 .1 200)}");
+    assert_eq!(v("oklch(100% 0 0)"), "a{x:oklch(1 0 0)}");
+    // With an alpha, and with a missing channel (`none` is not a number and
+    // has no unit to drop).
+    assert_eq!(v("lab(50% 10 -20 / 0.5)"), "a{x:lab(50 10 -20/.5)}");
+    assert_eq!(v("lch(50% 30 none)"), "a{x:lch(50 30 none)}");
+    assert_eq!(v("oklch(none 0.1 200)"), "a{x:oklch(none .1 200)}");
+    // A legacy space reaches the modern form only through a missing channel;
+    // there its hue drops `deg` too, while saturation/whiteness keep their `%`.
+    assert_eq!(v("hsl(120deg none 50%)"), "a{x:hsl(120 none 50%)}");
+    assert_eq!(v("hwb(120deg 20% none)"), "a{x:hwb(120 20% none)}");
+    // Expanded output keeps every unit.
+    let e = |scss: &str| css(&format!("a{{x:{scss}}}"));
+    assert_eq!(e("lab(50% 10 -20)"), "a {\n  x: lab(50% 10 -20);\n}\n");
+    assert_eq!(e("oklch(70% 0.1 200)"), "a {\n  x: oklch(70% 0.1 200deg);\n}\n");
 }
 
 /// `color()`'s space name and its three channels are separated by MANDATORY

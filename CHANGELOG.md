@@ -28,6 +28,31 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **Compressed output serializes colors and long fractions the way dart-sass
+  does** (#142's gate made this measurable). The compressed ratchet landed
+  scoring 12,579 of 14,258 cases, and 1,528 of those 1,679 failures were cases
+  whose *expanded* CSS is byte-exact, so the expanded gate could not see them
+  at all. Two rules account for 1,396 of the 1,528:
+
+  - A `lab()`/`lch()`/`oklab()`/`oklch()` lightness is written as the
+    channel's own stored number with no `%` — the same digits for lab and lch,
+    whose lightness runs 0-100, and the unscaled 0-1 value for oklab and oklch,
+    so `oklab(1% 0 0)` compresses to `oklab(.01 0 0)`, which is *longer*. A hue
+    drops its `deg` in every function that takes one, including the modern form
+    of `hsl()` and `hwb()`.
+  - Whether a fraction loses its leading zero depends on which of dart's two
+    number writers renders it, and sasso implemented only the first rule of
+    three: the direct writer tests for a literal `0.` prefix, so `-0.5` keeps
+    its zero; `_writeRounded` drops the integer `0` for either sign once it has
+    digits to round away (`-0.00123456789` -> `-.0012345679`); and a spelling
+    long enough for `_writeRounded` but with nothing to round passes through
+    verbatim, keeping the zero even when positive (`0.0123456789`).
+
+  Compressed conformance goes from 12,579 to 13,975 of 14,258 (88.22% ->
+  98.02%); expanded is unchanged at 14,107. Of the 132 cases still diverging,
+  62 are ones where dart-sass 1.104.1's own expanded output no longer matches
+  the expectation sass-spec ships.
+
 - **The nine members dart removed from `sass:color` exist, and say what
   replaced them** (#65). `opacify`, `fade-in`, `transparentize`, `fade-out`,
   `lighten`, `darken`, `saturate`, `desaturate` and `adjust-hue` are gone from
