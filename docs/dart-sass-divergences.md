@@ -15,7 +15,8 @@ design work or affect compiled output are tracked as issues
 [#63](https://github.com/momiji-rs/sasso/issues/63),
 [#64](https://github.com/momiji-rs/sasso/issues/64),
 [#65](https://github.com/momiji-rs/sasso/issues/65),
-[#66](https://github.com/momiji-rs/sasso/issues/66)); the rest live here, and
+[#66](https://github.com/momiji-rs/sasso/issues/66),
+[#139](https://github.com/momiji-rs/sasso/issues/139)); the rest live here, and
 are fixed as they come up.
 
 ## Where we stand
@@ -148,11 +149,11 @@ programs; only what it prints differs.
 
 | input | dart-sass 1.104.1 | sasso |
 |---|---|---|
-| `string.index("abc" "b", "x")` | `$string: ("abc" "b") is not a string.` | `$string: "abc" "b" is not a string.` |
+| `string.index("abc" "b", "x")` ([#139](https://github.com/momiji-rs/sasso/issues/139)) | `$string: ("abc" "b") is not a string.` | `$string: "abc" "b" is not a string.` |
 | a stray `}` after a complete rule | `unmatched "}".` | `unexpected "}"` |
 | `red(#abcdef, 1)` | `Only 1 argument allowed, but 2 were passed.` | the same error, preceded by a `[global-builtin]` deprecation warning |
 | `@mixin m($x )` included with no argument | `Missing argument $x .` — dart takes the name from the parameter's own span text, which swallowed the trailing space | `Missing argument $x.` |
-| `color.grayscale(null)` | `$color: null is not a color.` | ` is not a color.` — the `$param: ` prefix is missing, and `null` prints as nothing. The same for `true`, a map, and a quoted string; a list additionally needs dart's parenthesized spelling (`$color: (1 2) is not a color.`). Measured 2026-09-18 |
+| `color.grayscale(null)` ([#139](https://github.com/momiji-rs/sasso/issues/139)) | `$color: null is not a color.` | ` is not a color.` — the `$param: ` prefix is missing, and `null` prints as nothing. The same for `true`, a map, and a quoted string; a list additionally needs dart's parenthesized spelling (`$color: (1 2) is not a color.`), which is the row above's root cause too. The prefix alone accounts for 46 byte-mismatching sass-spec cases. Measured 2026-09-18, re-measured 2026-09-19 |
 
 The three below are classes rather than single inputs, so each gets its own
 example.
