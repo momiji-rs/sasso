@@ -1242,7 +1242,19 @@ function runWatch(input, output, common, opts) {
     dirname,
     onAppear: () => schedule(),
   });
-  // Last known mtimes of `known`, for events that arrive with no filename.
+  // Snapshots for events that arrive with no filename — and NOTHING else
+  // reads them, so they are not taken until such an event is actually
+  // seen. macOS and Linux always name their events, so on the platforms
+  // most people develop on these stay empty forever.
+  //
+  // Taking them eagerly cost what a survey of a directory costs, on every
+  // compile. Measured against the number of files on a load path:
+  //
+  //     10 files -> 13.7ms      2000 files -> 22.7ms
+  //    500 files -> 16.2ms      5000 files -> 37.6ms
+  //
+  // which is most of the latency this whole change exists to remove.
+  let sawNameless = false;
   let stamps = new Map();
   // And the same for everything else in the watched directories, minus
   // our own output: what tells a user's fix apart from the removal this
@@ -1273,6 +1285,11 @@ function runWatch(input, output, common, opts) {
     for (const [f, m] of now) if (neighbours.get(f) !== m) return true;
     return false;
   };
+  const watchedDirs = () => new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]);
+  const takeSnapshots = () => {
+    stamps = new Map([...known].map((f) => [f, mtime(f)]));
+    neighbours = surveyNeighbours(watchedDirs());
+  };
   const mtime = (f) => {
     try {
       return statSync(f).mtimeMs;
@@ -1293,9 +1310,8 @@ function runWatch(input, output, common, opts) {
         }
       }
       known = files;
-      stamps = new Map([...known].map((f) => [f, mtime(f)]));
     }
-    neighbours = surveyNeighbours(new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]));
+    if (sawNameless) takeSnapshots();
     for (const w of watchers) w.close();
     watchers = [];
     probes.closeAll();
@@ -1320,6 +1336,17 @@ function runWatch(input, output, common, opts) {
       try {
         watchers.push(
           watch(d, (_event, fn) => {
+            // The first nameless event cannot be judged — there is no
+            // snapshot to compare against, because taking one before
+            // ever seeing such an event is what made every compile pay
+            // for a directory survey. Compile once, start snapshotting,
+            // and every nameless event after this one is answerable.
+            if (!fn && !sawNameless) {
+              sawNameless = true;
+              takeSnapshots();
+              schedule();
+              return;
+            }
             if (
               triggersRecompile({
                 path: fn ? join(d, fn) : null,

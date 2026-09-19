@@ -56,6 +56,28 @@ a catch-up at the end of the window. The catch-up is authoritative. A
 half-written file costs one wasted compile; a real error arrives 50 ms later
 than it used to.
 
+## The survey that is not taken
+
+`--watch` keeps two snapshots — the mtimes of everything loaded, and a
+listing of the watched directories minus our own output — for events that
+`fs.watch` delivers without a filename. macOS and Linux always name their
+events, so on both those platforms the snapshots are never taken at all.
+
+That laziness is not a micro-optimisation. Taking them on every compile,
+which is how they first shipped, costs a directory survey per edit:
+
+| files on the load path | eager | lazy |
+|---|---|---|
+| 10 | 13.7 ms | 13.4 ms |
+| 500 | 16.2 ms | — |
+| 2000 | 22.7 ms | 13.4 ms |
+| 5000 | 37.6 ms | 13.4 ms |
+
+A big `-I` directory would have eaten most of the improvement above. The
+first nameless event a platform does send compiles unconditionally — there
+is nothing to compare it against yet — and turns snapshotting on from
+then.
+
 ## A difference from dart worth knowing
 
 dart's `--watch` **does not follow a dependency into another directory.**
