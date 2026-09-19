@@ -1210,7 +1210,8 @@ function isFresh(output, input, deps) {
 function runWatch(input, output, common, opts) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
   let watchers = [];
-  let timer = null;
+  let cooling = null;
+  let dirty = false;
   // The last set of files a compile actually loaded, seeded with the entry.
   // Kept across a FAILED compile: a failure has no `loadedUrls`, and the
   // first version of this narrowed the set to the entry alone when one
@@ -1258,7 +1259,17 @@ function runWatch(input, output, common, opts) {
     }
   };
 
-  const recompile = () => {
+  /**
+   * Compile once and emit. Returns whether it succeeded.
+   *
+   * `provisional` marks the speculative compile at the head of a burst
+   * (see `schedule`): a failure there is not reported and removes
+   * nothing, because the likeliest cause is a file still being written
+   * rather than anything the user did wrong. The catch-up compile that
+   * follows is never provisional, so an error that is real still reaches
+   * the terminal — one window later.
+   */
+  const recompile = (provisional) => {
     try {
       const result = compile(input, common);
       // Watch before emitting: once the output file is visible, dependency
@@ -1270,6 +1281,7 @@ function runWatch(input, output, common, opts) {
       else if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
       failing = false;
     } catch (e) {
+      if (provisional) return false;
       const msg = e instanceof Exception ? e.message : `error: ${e && e.message ? e.message : e}`;
       process.stderr.write(msg.replace(/\n?$/, "\n"));
       const removeError = discardStaleOutput(output, opts);
@@ -1279,15 +1291,64 @@ function runWatch(input, output, common, opts) {
       // anything in those directories until a compile succeeds again.
       failing = true;
       rewatch();
+      return false;
     }
+    return true;
+  };
+
+  /**
+   * Compile on the FIRST event of a burst, not 50 ms after the last one.
+   *
+   * The window is still 50 ms and still coalesces — it just no longer sits
+   * in front of the common case, which is one save with nothing after it.
+   * Median edit-to-correct-CSS by `bench/scripts/watch_latency.mjs`,
+   * 2026-09-19, all three runs back to back on one machine:
+   *
+   *              trailing 50   this    dart 1.104.1
+   *   atomic          63.7ms  12.4ms    82.4ms
+   *   quick           63.6ms  12.4ms    83.7ms
+   *   slow           113.4ms  63.0ms   107.5ms
+   *
+   * The catch is that a leading edge reads the file the instant it moves,
+   * and an editor that saves in place can be caught mid-write. Compiling
+   * then fails, and the first three attempts at this printed a parse error
+   * and deleted the output on EVERY slow save — faster and much worse.
+   *
+   * So the first compile of a burst is PROVISIONAL: a failure is silent,
+   * removes nothing, and forces a catch-up at the end of the window, which
+   * is not provisional and reports whatever it finds. A half-written file
+   * costs one wasted compile; a real error is reported 50 ms later than it
+   * used to be, which nobody can perceive. Zero spurious errors across all
+   * three save styles, where the naive leading edge had 15 out of 15.
+   */
+  const fire = (provisional) => {
+    cooling = setTimeout(() => {
+      cooling = null;
+      if (dirty) {
+        dirty = false;
+        // The catch-up is never provisional. Making it so was the first
+        // version of this and it silenced errors completely: every compile
+        // in the chain declined to report, and each failure asked for
+        // another, so a genuinely broken file span forever saying nothing.
+        fire(false);
+      }
+    }, 50);
+    // Re-run only after a PROVISIONAL failure — "that was probably a
+    // half-written file, try again properly". An authoritative failure has
+    // already been reported, and asking for another would report it again,
+    // and again.
+    if (!recompile(provisional) && provisional) dirty = true;
   };
 
   const schedule = () => {
-    clearTimeout(timer);
-    timer = setTimeout(recompile, 50);
+    if (cooling !== null) {
+      dirty = true;
+      return;
+    }
+    fire(true);
   };
 
-  recompile();
+  recompile(false);
   // dart's wording, and on stdout beside the compile lines. `--quiet`
   // silences those but NOT this: measured 2026-09-19, `sass --quiet --watch`
   // still prints the banner, which is the only sign the process is alive.
