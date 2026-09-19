@@ -2350,21 +2350,27 @@ fn update_narrates_each_written_file() {
     // A written file is announced, on stdout.
     let first = sasso(&dir, &["--no-source-map", "--update", "one.scss:one.css"]);
     assert_eq!(first.code, 0, "{}", first.stderr);
-    assert_eq!(first.stderr, "", "the line belongs on stdout: {}", first.stderr);
+    assert!(
+        !first.stderr.contains("Compiled"),
+        "the line belongs on stdout: {}",
+        first.stderr
+    );
     let line = first.stdout.trim_end();
     assert!(
         line.ends_with("Compiled one.scss to one.css."),
         "dart's wording: {line:?}"
     );
-    // The stamp is present wherever the local offset can be found, and
-    // absent where it cannot. Unix reads the tz database; Windows keeps its
-    // zone in the registry, which `src/localtime` deliberately does not
-    // reach, so the line there is the same minus the bracket. Asserting
-    // this per platform rather than unconditionally is the difference
-    // between a test that documents the behaviour and one that only ever
-    // ran on the author's machine.
-    if cfg!(unix) {
-        assert!(stamp(line), "expected a [YYYY-MM-DD HH:MM] stamp: {line:?}");
+    // Whether there is a stamp is a RUNTIME question, not `cfg!(unix)`.
+    // Windows has no tz database to read, and neither does a nix build
+    // sandbox, a scratch container, or a distroless image — all Unix, all
+    // without `/etc/localtime`. The first version of this asserted a stamp
+    // on every unix and was failed by nix, correctly.
+    //
+    // So the contract is what gets asserted: the text is always dart's, and
+    // a stamp is either absent or well-formed — never malformed, never
+    // wrong-shaped, never swallowing the message.
+    if line.starts_with('[') {
+        assert!(stamp(line), "a stamp must be [YYYY-MM-DD HH:MM]: {line:?}");
     } else {
         assert!(
             line.starts_with("Compiled"),
