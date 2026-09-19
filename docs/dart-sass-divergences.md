@@ -8,13 +8,15 @@ meaning rather than being a number without a denominator.
 running both compilers on the same input. Where a row says "dart", that is the
 observed output of 1.104.1 — not a reading of the specification.
 
-Last verified: 2026-09-17. The ones that need design work or affect compiled
-output are tracked as issues
+Last verified in bulk: 2026-09-17; a row added or re-measured after that carries
+its own date, and the bulk date is not a claim about it. The ones that need
+design work or affect compiled output are tracked as issues
 ([#62](https://github.com/momiji-rs/sasso/issues/62),
 [#63](https://github.com/momiji-rs/sasso/issues/63),
 [#64](https://github.com/momiji-rs/sasso/issues/64),
 [#65](https://github.com/momiji-rs/sasso/issues/65),
-[#66](https://github.com/momiji-rs/sasso/issues/66)); the rest live here, and
+[#66](https://github.com/momiji-rs/sasso/issues/66),
+[#124](https://github.com/momiji-rs/sasso/issues/124)); the rest live here, and
 are fixed as they come up.
 
 ## Where we stand
@@ -94,6 +96,23 @@ dart parses the body of a custom-property-named function as SassScript.
 // sasso: emits `nope()` into the CSS, no error
 ```
 
+### 1.5 A `sass:color` filter overload accepts a CSS-special argument instead of erroring ([#124](https://github.com/momiji-rs/sasso/issues/124))
+
+```scss
+@use "sass:color";
+.a { b: color.invert(var(--c)); c: color.grayscale(calc(1px + 1em)); }
+// dart:  Error: $color: var(--c) is not a color.
+// sasso: emits `invert(var(--c))` and `grayscale(calc(1px + 1em))`
+```
+
+Through the *namespaced* spelling only the plain-CSS overload of
+`grayscale`/`invert`/`opacity` is narrower than the global one: dart takes it
+for a number and nothing else, so a `var()`, an `env()` or an unsimplifiable
+`calc()` falls through to the colour path and fails there. (`calc(1px)` folds to
+a number first, and does compile.) sasso rejects an unquoted string for
+`grayscale` and `opacity`, which leaves `invert` and every calculation
+passing through. Measured 2026-09-18.
+
 ## 2. Values and built-in semantics
 
 A wrong value, or a missing error, rather than a wrong message.
@@ -152,7 +171,7 @@ programs; only what it prints differs.
 | `red(#abcdef, 1)` | `Only 1 argument allowed, but 2 were passed.` | the same error, preceded by a `[global-builtin]` deprecation warning |
 | `@mixin m($x )` included with no argument | `Missing argument $x .` — dart takes the name from the parameter's own span text, which swallowed the trailing space | `Missing argument $x.` |
 
-The three below are classes rather than single inputs, so each gets its own
+The four below are classes rather than single inputs, so each gets its own
 example.
 
 ### The nine removed `sass:color` members ([#65](https://github.com/momiji-rs/sasso/issues/65))
@@ -184,6 +203,36 @@ not stand in for the rest: `opacify`/`fade-in` suggest `$alpha: <amount>`,
 `adjust-hue` `$hue: <degrees>`. [#65](https://github.com/momiji-rs/sasso/issues/65)
 lists each with the exact shape, including the details that are easy to get
 wrong (the negation is textual, and no unit conversion happens).
+
+### `color-module-compat` is never emitted ([#124](https://github.com/momiji-rs/sasso/issues/124))
+
+Using a `sass:color` member in its plain-CSS filter sense is deprecated in dart;
+sasso compiles the identical CSS and says nothing:
+
+```scss
+@use "sass:color";
+.a { b: color.grayscale(1); }
+```
+
+```
+dart-sass 1.104.1:
+DEPRECATION WARNING [color-module-compat]: Passing a number (1) to color.grayscale() is deprecated.
+
+Recommendation: grayscale(1)
+
+sasso:
+(silent)
+```
+
+Five inputs are affected, all of them on `sass:color` and all of them also
+reached through `@use "sass:color" as *`: a number to `grayscale`, `invert` or
+`opacity`, and a Microsoft filter argument to `alpha` in either of its two
+overloads (`color.alpha(opacity=20)`, `color.alpha(a=b, c=d)`). Note that dart's
+`opacity` message is missing its closing parenthesis — `Passing a number (1 to
+color.opacity()` — and sass-spec locks the typo, so parity means reproducing it.
+Unlike the rest of section 3 this one is gated on the same rule as
+[1.5](#15-a-sasscolor-filter-overload-accepts-a-css-special-argument-instead-of-erroring-124),
+which is why the two are one issue. Measured 2026-09-18.
 
 ### Two-span messages ([#66](https://github.com/momiji-rs/sasso/issues/66))
 
