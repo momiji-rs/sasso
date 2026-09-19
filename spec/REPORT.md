@@ -99,7 +99,11 @@ cargo build --release                                              # owned by sr
 SASS_BIN=target/release/sasso python3 spec/run_spec.py         # whole suite
 SASS_BIN=target/release/sasso python3 spec/run_spec.py --filter 'operators/'
 SASS_BIN=target/release/sasso python3 spec/run_spec.py --no-skip use   # widen scope
-SASS_BIN=target/release/sasso python3 spec/run_spec.py --style compressed
+
+# compressed needs its own oracle -- see "Scoring compressed output" below.
+# `--style=compressed` WITHOUT `--expect-file` measures nothing.
+SASS_BIN=target/release/sasso python3 spec/run_spec.py \
+    --style=compressed --expect-file spec/COMPRESSED_EXPECT.txt
 ```
 
 The runner exits non-zero if any case is a real `FAIL`, so it drops straight
@@ -110,6 +114,79 @@ into CI. It writes `spec/results.json` with per-case status.
 `run_spec.py` invokes `sasso --style=<expanded|compressed> <input-file>`,
 reads **stdout** for CSS, and treats a **non-zero exit** as "errored" (matched
 against error specs). Warnings/deprecations should go to stderr.
+
+## Scoring compressed output
+
+sass-spec ships **one** expectation per case and dart-sass generated all of
+them in the default `expanded` style. There is no compressed expectation
+anywhere in the suite. So `--style=compressed` scored against `output.css`
+fails nearly every success case on whitespace alone -- `[measured 2026-09-19]`
+58 PASS out of the 497 non-error cases in the first 600. That is why the
+ratchet has only ever scored `expanded`, and why a compressed-only
+serialization divergence has never been able to fail CI.
+
+Scoring compressed output needs a second oracle: the compressed CSS a
+**reference dart-sass** emits for the same case. Keeping all of it would be
+several megabytes, so `spec/COMPRESSED_EXPECT.txt` keeps a 12-hex-char sha256
+of each case's *normalized* compressed output -- the same normalization the
+byte-exact comparison applies -- one case per line:
+
+```
+# style: compressed
+# dart_sass: 1.104.1
+# spec_commit: b39c3276821a6dc3dd4a0f7e1f63c48cb15e269b
+<digest> <case name>
+```
+
+That file is **committed**, which is the whole point: the gate then needs
+neither node nor the network, and
+`python3 spec/check_baseline.py --style compressed` is a plain offline ratchet
+like the expanded one. `check_baseline.py` refuses to run if the manifest's
+`dart_sass` disagrees with `BASELINE_COMPRESSED.json` or its `spec_commit`
+disagrees with `SPEC_VERSION.txt`, so a stale oracle cannot silently score the
+wrong thing after a pin bump. `run_spec.py` separately refuses a manifest whose
+`style` header is not the `--style` being scored, since nothing about a digest
+says which style produced it.
+
+Regenerate it only when one of those pins moves -- the diff then reads as
+exactly which compressed outputs changed:
+
+```sh
+# via npx (one node start per case; slow but needs nothing installed)
+python3 spec/gen_compressed.py --jobs 10
+
+# against a local dart-sass of the pinned version (much faster)
+DART_SASS=/path/to/sass-wrapper python3 spec/gen_compressed.py --jobs 10
+```
+
+The generator reads the pinned version from the baselines and **refuses to
+write a manifest from any other one**; `spec/dartsass.sh` honours
+`DART_SASS_VERSION`, so the default path is `npx sass@<pin>` rather than
+whatever npx resolves today. Moving the pin is therefore explicit:
+`--allow-version-mismatch`, and bump `dart_sass` in both baselines in the same
+commit.
+
+A case with no manifest entry is `SKIP`ped, never failed -- a gap in the oracle
+must not read as a sasso regression. That choice has a cost, so the ratchet pays
+it in two places: the manifest's own `cases:` header must match the number of
+digest lines, and **`attempted` may not fall below the baseline's**. Without the
+second check, deleting exactly the failing digests would leave `passing`
+untouched while those cases stopped being scored -- `[measured]` dropping 5
+failing entries gives `delta +0` and a pass% that *rises* to 88.26%, and now
+exits 1 instead of printing `ratchet OK`. Error specs are excluded from the
+manifest entirely: their verdict is the exit status, which is style-independent,
+so the compressed run scores them exactly as the expanded one does.
+
+### Triaging a compressed FAIL
+
+The manifest holds digests, not text, so turn one back into a diff with:
+
+```sh
+SASS_BIN=target/release/sasso DART_SASS=spec/dartsass.sh \
+    python3 spec/gen_compressed.py --show 'core_functions/color/adjust/lab:a/above_max'
+```
+
+which prints the reference CSS and ours side by side.
 
 ## Ratchet plan
 

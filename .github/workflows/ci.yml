@@ -225,26 +225,36 @@ jobs:
         run: cargo build --release
       - name: pass-rate ratchet (must not regress below spec/BASELINE.json)
         run: python3 spec/check_baseline.py
+      # sass-spec ships dart-sass's EXPANDED output as the only expectation, so
+      # the run above has never scored compressed CSS. This one does, against
+      # spec/COMPRESSED_EXPECT.txt — committed per-case digests of a pinned
+      # dart-sass's compressed output. No node, no network.
+      - name: compressed ratchet (must not regress below spec/BASELINE_COMPRESSED.json)
+        run: python3 spec/check_baseline.py --style compressed
       - name: failure summary by bucket (informational)
         if: always()
         run: |
           python3 - <<'PYEOF'
           import json, os
           from collections import Counter
-          path = os.path.join('spec', 'results.json')
-          if not os.path.exists(path):
-              print('no results.json'); raise SystemExit(0)
-          cases = json.load(open(path))['cases']
-          fails = [c['name'] for c in cases if c['status'] == 'FAIL']
-          print(f"FAIL total: {len(fails)}")
-          buckets = Counter('/'.join(n.replace(':', '/').split('/')[:3]) for n in fails)
-          for k, v in buckets.most_common(30):
-              print(f"{v:5} {k}")
+          for style, path in (('expanded', 'results.json'),
+                              ('compressed', 'results-compressed.json')):
+              path = os.path.join('spec', path)
+              if not os.path.exists(path):
+                  print(f'no {path}'); continue
+              cases = json.load(open(path))['cases']
+              fails = [c['name'] for c in cases if c['status'] == 'FAIL']
+              print(f"=== {style}: FAIL total {len(fails)}")
+              buckets = Counter('/'.join(n.replace(':', '/').split('/')[:3]) for n in fails)
+              for k, v in buckets.most_common(30):
+                  print(f"{v:5} {k}")
           PYEOF
       - name: upload results.json
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sass-spec-results-linux
-          path: spec/results.json
+          path: |
+            spec/results.json
+            spec/results-compressed.json
           if-no-files-found: ignore
