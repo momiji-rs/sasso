@@ -3325,7 +3325,12 @@ impl<'a> Evaluator<'a> {
         // contains it second. Emitting where the selector is dropped gets the
         // set right and the order backwards.
         let mut pending_bogus: Vec<(Pos, usize, String)> = Vec::new();
-        let src_text = Rc::clone(&self.current_source);
+        // Both of these are read ONLY inside the bogus branch below, which
+        // almost no rule takes, and `eval_style_rule` is the hottest function
+        // in the compiler. Taking the `Rc` unconditionally put a clone+drop on
+        // every style rule in every stylesheet to serve a branch that fires on
+        // a handful; it is taken on first need instead.
+        let mut src_text: Option<Rc<str>> = None;
         if share_current {
             // Only a `%`-bearing selector can be a placeholder rule, and the
             // resolver's scan already answered that for the whole list.
@@ -3337,7 +3342,7 @@ impl<'a> Evaluator<'a> {
         } else {
             emit_selectors.reserve(current.len());
             emit_linebreaks.reserve(current.len());
-            let own_parts = split_commas(&sel_str).len().max(1);
+            let mut own_parts: Option<usize> = None;
             for (i, s) in current.iter().enumerate() {
                 if complex_selector_block_is_bogus(s) {
                     // dart WARNS as it drops this rule, and the warning is the
@@ -3350,8 +3355,9 @@ impl<'a> Evaluator<'a> {
                     // produced by part `i % own_parts` — the entry dart points
                     // at, while the message names the RESOLVED selector.
                     if complex_selector_is_bogus(s, false, false) {
-                        let (pos, len) =
-                            selector_part_span(&src_text, rule, &sel_str, &interp_bounds, i % own_parts);
+                        let parts = *own_parts.get_or_insert_with(|| split_commas(&sel_str).len().max(1));
+                        let src = src_text.get_or_insert_with(|| Rc::clone(&self.current_source));
+                        let (pos, len) = selector_part_span(src, rule, &sel_str, &interp_bounds, i % parts);
                         pending_bogus.push((pos, len, s.clone()));
                     }
                     // The omitted selector still participates in @extend target

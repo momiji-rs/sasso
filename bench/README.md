@@ -37,8 +37,9 @@ deliberate pair, and their ratio is the signal.
 `corpus/gate/` exists because that suite protected only the shapes that
 happened to be in `corpus/generated/`, while three of the improvements in
 `../docs/PERF_PLAN_2026-09-16.md` measure ~0.00% there. Landing one and later
-regressing it would have looked identical in CI. Each corpus was verified to
-show its lever, byte-identical output in both arms, on macOS/arm64 2026-09-16:
+regressing it would have looked identical in CI. The first four were verified to
+show their lever, byte-identical output in both arms, on macOS/arm64 2026-09-16;
+the fifth is coverage rather than a lever, and is explained under the table:
 
 | Corpus | Protects | Delta on this corpus | On `large.scss` |
 | --- | --- | --- | --- |
@@ -46,17 +47,34 @@ show its lever, byte-identical output in both arms, on macOS/arm64 2026-09-16:
 | `gate/extend_heavy.scss` | `@extend` (A2) | **−49.7%** | −0.2% |
 | `gate/use_graph/entry.scss` | the module cache (A3) | **−39.5%** | −2.1% |
 | `gate/use_graph/redundant.scss` | ditto, redundant `@use` | **−42.2%** | — |
+| `gate/selector_lists.scss` | `eval_style_rule`'s `share_current == false` branch, and the #119/#120 span mapping | — (coverage, no lever) | — |
 
-All four are compiled through the `diagnostics_live()` helper in
+All five are compiled through the `diagnostics_live()` helper in
 `../benches/compile.rs`, which is the only place the URL-and-silent-handler
 pairing lives: a corpus wired up with a bare `Options::default()` would leave
-`diag_enabled()` false and protect half of what it was added for. All four also
-produce output byte-identical to dart-sass 1.103.1 (verified 2026-09-16), so the
-gate measures shapes that are in parity rather than shapes only sasso accepts.
-`corpora_still_compile()` runs before divan and asserts the marker rule
-`.sasso-gate-corpus` in each — a corpus that stops resolving its imports would
-otherwise just report a faster number, which is exactly how three `@use`-graph
-measurements in `perf_audit_2026-09-15.md` came to be void.
+`diag_enabled()` false and protect half of what it was added for. All five also
+produce output byte-identical to dart-sass — the first four against 1.103.1
+(verified 2026-09-16), `selector_lists.scss` against 1.104.1 (verified
+2026-09-19: expanded 76,624 bytes and compressed 70,978 bytes, plus stderr, the
+five `bogus-combinators` warnings it prints and the seven its repetition cap
+omits) — so the gate measures shapes that are in parity rather than shapes only
+sasso accepts. `corpora_still_compile()` runs before divan and asserts the
+marker rule `.sasso-gate-corpus` in each — a corpus that stops resolving its
+imports would otherwise just report a faster number, which is exactly how three
+`@use`-graph measurements in `perf_audit_2026-09-15.md` came to be void.
+
+`selector_lists.scss` (added 2026-09-18) is the one entry whose column reads "—"
+on purpose. `share_current == false` is the branch `eval_style_rule` takes when
+a rule's selector is a comma list written across lines — the normal shape of
+hand-written CSS — and the flags are handed to every descendant, so one such
+list puts the rest of the sheet on it. Every corpus above it, and `large.scss`,
+contains exactly **zero** of that shape, so work added to the branch was not
+merely unmeasured but unmeasurable. The corpus carries 246 multi-line lists,
+nested so the inheritance path runs too, and six dropped `> +` rules at the
+density a real sheet has them, so the span mapping behind `bogus-combinators` is
+visited rather than dominant. No speed claim attaches to it: an ABBA on this
+corpus put the two arms inside each other's spread. A corpus that makes a future
+regression visible is worth gating even when nothing is trying to make it faster.
 
 One more plan benchmark, `large_expanded_with_map_silent`, arrived on 2026-09-17
 without a corpus of its own: it compiles `generated/large.scss` through
@@ -106,6 +124,7 @@ bench/
 │   └── gate/                 # the CI gate's corpora (gen_gate_corpora.py):
 │       ├── legacy_deprecations.scss   #   deprecation-dense (protects A1)
 │       ├── extend_heavy.scss          #   @extend-heavy (protects A2)
+│       ├── selector_lists.scss        #   multi-line comma lists (coverage corpus)
 │       ├── use_graph/                 #   43-file @use graph + a redundant entry
 │       └── MANIFEST.json              #   generator version, bytes, sha256
 ├── grass_runner/             # tiny Rust crate: grass CLI wrapper (build --release)
