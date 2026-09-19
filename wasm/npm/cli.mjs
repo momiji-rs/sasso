@@ -329,13 +329,22 @@ function pickBinary(opts) {
     return compileInProcess("SASSO_BINARY declines the binary");
   }
 
-  // The binary has neither flag (#86), so these two must stay in-process or
+  // The binary has no watcher (#86), so `--watch` must stay in-process or
   // delegating would take a working command line and break it.
   if (opts.watch) return compileInProcess("--watch is not in the binary (#86)");
-  if (opts.update) return compileInProcess("--update is not in the binary (#86)");
+  // `--update` is no longer on that list: the binary has it, and walks the
+  // same dependency graph this CLI does. It is still held back from the
+  // EXPLICIT `SASSO_BINARY=<path>` hand-off below, which is documented as
+  // version-unchecked and may well name a binary from before the flag
+  // existed; the version-matched hand-off further down cannot, because a
+  // binary of this version has it by construction.
+  const updateNeedsMatch = opts.update;
 
   if (want !== undefined && want !== "") {
     if (!isNativeImage(want)) fail(`error: SASSO_BINARY=${want} is not an executable sasso binary`);
+    if (updateNeedsMatch) {
+      return compileInProcess(`--update with SASSO_BINARY=${want}, whose version is unchecked`);
+    }
     return handTo(want, `SASSO_BINARY=${want}, version unchecked`);
   }
 
@@ -688,6 +697,12 @@ function validate(opts) {
     if (opts.embedSources) fail("error: --embed-sources isn't allowed with --no-source-map.");
     if (opts.sourceMapUrls !== undefined) fail("error: --source-map-urls isn't allowed with --no-source-map.");
   }
+  // dart: `--update is not allowed with --stdin.` Standard input has no mtime,
+  // so "is the output newer than its input" has no honest answer. This CLI
+  // happened to do the safe thing (statting `-` throws, so nothing looked
+  // fresh) while the binary did the dangerous one; refusing the pair is what
+  // dart does and leaves neither to luck.
+  if (opts.update && opts.stdin) fail("error: --update is not allowed with --stdin.");
   if (pairs) {
     if (!operands.every((a) => colonIndex(a) >= 0)) {
       fail('error: Positional and ":" arguments may not both be used.');
@@ -1115,6 +1130,15 @@ function parseJobs(positionals, output) {
  * actually key on.
  */
 function isFresh(output, input, deps) {
+  // `-` is STANDARD INPUT, not a file named `-`. Two separate reasons it can
+  // never be fresh, and the first one bites in practice: with a real file
+  // called `-` in the working directory — which `sass - out.css` does not
+  // create but a shell redirect easily can — `statSync("-")` succeeds, an
+  // output newer than that unrelated file reports FRESH, and the run keeps
+  // stale CSS. Even without one, standard input has no mtime, so there is no
+  // honest comparison to make. Same rule as the binary, where the entry's
+  // `source_path()` is `None` and `output_is_fresh` returns false.
+  if (input === "-") return false;
   try {
     if (!existsSync(output)) return false;
     const out = statSync(output).mtimeMs;
@@ -1397,6 +1421,16 @@ async function main() {
       fail("error: no input file (pass a path, an <in>:<out> pair, or --stdin)");
     }
     return;
+  }
+
+  // dart's second `--update` usage error, alongside the `--stdin` one above:
+  // `--update is not allowed when printing to stdout.`, measured 2026-09-19.
+  // With no destination there is no mtime to compare, so the flag would do
+  // nothing at all. `parseJobs` only produces an output-less job from a lone
+  // positional, which is exactly that case; `-o` and a bare directory both
+  // come back with an output and are allowed, as they are in the binary.
+  if (opts.update && jobs.some((j) => j.output === undefined)) {
+    fail("error: --update is not allowed when printing to stdout.");
   }
 
   if (opts.watch) {

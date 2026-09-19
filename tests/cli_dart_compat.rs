@@ -2126,3 +2126,198 @@ fn plain_css_entry_passes_its_imports_through() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `--update` leaves an up-to-date output alone and rebuilds when anything it
+/// imports changes (#86, the binary half of #133).
+///
+/// The partial is two levels down on purpose: one level can pass by accident,
+/// and the first version of this passed the "nothing changed" half while
+/// failing this one — `FsImporter`'s canonical form is the absolute PATH, not
+/// a `file://` URL, so every dependency was dropped on the way to the stat and
+/// the list arrived empty.
+#[test]
+fn update_skips_a_fresh_output_and_rebuilds_on_a_deep_partial() {
+    let dir = scratch("update-deps");
+    write(&dir, "_deep.scss", "$c: #111;\n");
+    write(&dir, "_base.scss", "@import \"deep\";\n.base { color: $c; }\n");
+    write(&dir, "entry.scss", "@import \"base\";\n");
+
+    let first = sasso(&dir, &["--no-source-map", "entry.scss:out.css"]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert!(read(&dir, "out.css").contains("#111"), "first compile");
+
+    // Nothing changed: the output keeps its mtime, which is what downstream
+    // watchers key on and the reason the flag exists.
+    let stamp = std::fs::metadata(dir.join("out.css"))
+        .and_then(|m| m.modified())
+        .expect("stat out.css");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = sasso(&dir, &["--no-source-map", "--update", "entry.scss:out.css"]);
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    let after = std::fs::metadata(dir.join("out.css"))
+        .and_then(|m| m.modified())
+        .expect("stat out.css");
+    assert_eq!(stamp, after, "--update rewrote an already-current output");
+
+    // A partial two levels down changes: the output is stale and must be built.
+    write(&dir, "_deep.scss", "$c: #444;\n");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let third = sasso(&dir, &["--no-source-map", "--update", "entry.scss:out.css"]);
+    assert_eq!(third.code, 0, "{}", third.stderr);
+    assert!(
+        read(&dir, "out.css").contains("#444"),
+        "--update ignored a transitively imported partial: {}",
+        read(&dir, "out.css")
+    );
+}
+
+/// `--update` with `--stdin` is a usage error, as in dart-sass.
+///
+/// Standard input has no mtime, so "is the output newer than its input" has no
+/// honest answer — and the silent answer is the dangerous one. Before this,
+/// the freshness loop simply skipped a `None` input, so a stdin unit with no
+/// imports had an EMPTY loop, reported fresh, and left the previous run's CSS
+/// on disk.
+#[test]
+fn update_with_stdin_is_a_usage_error() {
+    let dir = scratch("update-stdin");
+    let r = run_bin(
+        BIN,
+        &dir,
+        &["--stdin", "--update", "out.css"],
+        Some(".a { color: red }\n"),
+    );
+    assert_eq!(r.code, 64, "dart exits 64 here: {}", r.stderr);
+    assert!(
+        r.stderr.contains("--update is not allowed with --stdin."),
+        "dart's wording: {}",
+        r.stderr
+    );
+    assert!(!dir.join("out.css").exists(), "nothing should have been written");
+}
+
+/// A `-` INPUT is standard input too, and `--update` accepts it. Only the
+/// `--stdin` FLAG is refused.
+///
+/// That asymmetry looks arbitrary until it is measured: dart-sass 1.104.1
+/// exits 64 on `--stdin --update out.css`, and exits 0 on both
+/// `--update - out.css` and `--update -:out.css`, compiling standard input
+/// each time (2026-09-19). So the answer for a `-` input is not a refusal —
+/// it is that the output can never be called fresh, because there is no
+/// input mtime to compare it against, so every run rewrites. What makes that
+/// true is `output_is_fresh` returning false for a `None` input; a version
+/// that skipped the missing input instead looped over an empty dependency
+/// list and reported FRESH.
+#[test]
+fn update_with_a_dash_input_compiles_stdin_every_run() {
+    for (tag, args) in [
+        ("positional", vec!["--no-source-map", "--update", "-", "out.css"]),
+        ("pair", vec!["--no-source-map", "--update", "-:out.css"]),
+    ] {
+        let dir = scratch(&format!("update-dash-{tag}"));
+        let first = run_bin(BIN, &dir, &args, Some(".a { color: #111; }\n"));
+        assert_eq!(first.code, 0, "{tag}: dart accepts a `-` input: {}", first.stderr);
+        assert!(read(&dir, "out.css").contains("#111"), "{tag}: first compile");
+
+        // No input mtime means no honest "fresh": the second run must write
+        // again even though nothing on disk changed.
+        let stamp = std::fs::metadata(dir.join("out.css"))
+            .and_then(|m| m.modified())
+            .expect("stat out.css");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = run_bin(BIN, &dir, &args, Some(".a { color: #222; }\n"));
+        assert_eq!(second.code, 0, "{tag}: {}", second.stderr);
+        assert!(
+            read(&dir, "out.css").contains("#222"),
+            "{tag}: --update kept stale CSS for a stdin input: {}",
+            read(&dir, "out.css")
+        );
+        let after = std::fs::metadata(dir.join("out.css"))
+            .and_then(|m| m.modified())
+            .expect("stat out.css");
+        assert_ne!(
+            stamp, after,
+            "{tag}: --update claimed a stdin-fed output was fresh"
+        );
+    }
+}
+
+/// An output that is an existing DIRECTORY: `--update` skips it silently
+/// where a plain compile fails with 66, and that is dart's behaviour, not an
+/// oversight in the freshness check.
+///
+/// Measured 2026-09-19 against dart-sass 1.104.1: `sass --update e.scss:od`
+/// exits 0 and writes nothing when `od` is newer than `e.scss`, and exits 66
+/// with "Error reading od: illegal operation on a directory." when `od` is
+/// older. Both of ours match in both directions, so dart is running the same
+/// mtime comparison on the directory that we are. Requiring a regular file
+/// before trusting the mtime would be a nicer CLI and a divergence.
+#[test]
+fn update_with_a_directory_output_matches_dart() {
+    // Directory NEWER than the source: nothing is written and the run succeeds.
+    let dir = scratch("update-dirout-new");
+    write(&dir, "e.scss", ".a { color: red; }\n");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::create_dir_all(dir.join("od")).expect("mkdir od");
+    let fresh = sasso(&dir, &["--no-source-map", "--update", "e.scss:od"]);
+    assert_eq!(fresh.code, 0, "dart exits 0 here: {}", fresh.stderr);
+    assert!(
+        dir.join("od").is_dir() && std::fs::read_dir(dir.join("od")).into_iter().flatten().count() == 0,
+        "the directory should be untouched and empty"
+    );
+
+    // Directory OLDER than the source: the write is attempted, and fails.
+    let dir = scratch("update-dirout-old");
+    std::fs::create_dir_all(dir.join("od")).expect("mkdir od");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write(&dir, "e.scss", ".a { color: red; }\n");
+    let stale = sasso(&dir, &["--no-source-map", "--update", "e.scss:od"]);
+    assert_eq!(stale.code, 66, "dart exits 66 here: {}", stale.stderr);
+}
+
+/// `--update` with nowhere to write is dart's OTHER usage error, and the one
+/// this CLI shipped without: `--update is not allowed when printing to
+/// stdout.`, exit 64.
+///
+/// Found by reading dart's own `test/cli/shared/update.dart`, which has it
+/// right next to the `--stdin` case. A run with no destination has no
+/// output mtime to compare, so the flag cannot do anything; dart refuses
+/// rather than quietly compile to the terminal as if `--update` were absent.
+///
+/// The boundary matters more than the message. Measured 2026-09-19 against
+/// dart-sass 1.104.1: every shape that HAS a destination is accepted —
+/// `t.scss out.css`, `t.scss:out.css`, several pairs at once, and even
+/// `t.scss:-`, which is a file named `-`. Only the lone positional is
+/// refused. `-o` and a bare directory are this CLI's own spellings of a
+/// destination, have no dart equivalent to copy, and must stay allowed.
+#[test]
+fn update_without_a_destination_is_a_usage_error() {
+    let dir = scratch("update-no-dest");
+    write(&dir, "t.scss", "a {b: c}\n");
+
+    let r = sasso(&dir, &["--no-source-map", "--update", "t.scss"]);
+    assert_eq!(r.code, 64, "dart exits 64 here: {}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("--update is not allowed when printing to stdout."),
+        "dart's wording: {}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.is_empty(),
+        "nothing should have been compiled: {}",
+        r.stdout
+    );
+
+    // Everything that names somewhere to write still works.
+    for args in [
+        vec!["--no-source-map", "--update", "t.scss", "out.css"],
+        vec!["--no-source-map", "--update", "t.scss:out.css"],
+        vec!["--no-source-map", "--update", "-o", "out.css", "t.scss"],
+    ] {
+        std::fs::remove_file(dir.join("out.css")).ok();
+        let ok = sasso(&dir, &args);
+        assert_eq!(ok.code, 0, "{args:?} names a destination: {}", ok.stderr);
+        assert!(read(&dir, "out.css").contains("b: c"), "{args:?} wrote no CSS");
+    }
+}

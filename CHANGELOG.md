@@ -11,6 +11,21 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Added
+
+- **`--update` in the binary** (#86). It was npm-only, so a build script
+  written for `sass` worked under `npm install sasso` and failed with the
+  binary — the mirror image of #24. It walks the dependency graph like
+  dart-sass and like the npm CLI, so a changed partial rebuilds and an
+  unchanged output keeps its mtime.
+
+  The flag-parity guard now checks **both** directions. It only ever asserted
+  that the npm CLI accepts every native flag, which is how the binary fell two
+  behind unnoticed; differences are now split into ones that will never cross
+  and ones that are gaps, and a gap that has since been closed fails the build
+  so the list cannot go stale. `--watch` remains npm-only: it needs a file
+  watcher, and this crate's `[dependencies]` is empty.
+
 ### Fixed
 
 - **`color-module-compat` is emitted, and the filter overload has one rule**

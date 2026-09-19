@@ -600,6 +600,79 @@ assert.ok(
     "cli: --update rebuilds when a transitively imported partial changes",
   );
 }
+{
+  // dart's other `--update` usage error: nowhere to write means nothing to
+  // compare, so the flag cannot do anything and dart refuses rather than
+  // compile to the terminal (exit 64, measured 2026-09-19). Every shape that
+  // names a destination stays allowed, `-o` included — this CLI's own
+  // spelling, with no dart equivalent.
+  const d = mkdtempSync(join(tmpdir(), "sasso-updout-"));
+  writeFileSync(join(d, "t.scss"), "a {b: c}\n");
+  const at = (...args) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { encoding: "utf8", cwd: d });
+
+  const bare = at("--update", "t.scss");
+  assert.notEqual(bare.status, 0, "cli: --update with no destination is refused");
+  assert.match(
+    bare.stderr,
+    /--update is not allowed when printing to stdout\./,
+    "cli: … in dart's words",
+  );
+  assert.equal(bare.stdout, "", "cli: … and nothing is compiled to the terminal");
+
+  for (const args of [
+    ["--update", "t.scss", "out.css"],
+    ["--update", "t.scss:out.css"],
+    ["--update", "-o", "out.css", "t.scss"],
+  ]) {
+    rmSync(join(d, "out.css"), { force: true });
+    const ok = at(...args);
+    assert.equal(ok.status, 0, `cli: ${args.join(" ")} names a destination: ${ok.stderr}`);
+    assert.match(readFileSync(join(d, "out.css"), "utf8"), /b: c/, `cli: ${args.join(" ")} wrote no CSS`);
+  }
+}
+{
+  // A `-` INPUT is standard input too, and dart ACCEPTS it with --update
+  // (measured 2026-09-19: `sass --update - out.css` and `sass --update
+  // -:out.css` both exit 0 and compile stdin). Only the --stdin FLAG is
+  // refused. The safety here is not a refusal: with no input mtime nothing
+  // can be called fresh, so every run must rewrite.
+  for (const form of [["--update", "-", "out.css"], ["--update", "-:out.css"]]) {
+    const d = mkdtempSync(join(tmpdir(), "sasso-dash-"));
+    const at = (css) =>
+      spawnSync(process.execPath, [cliPath, "--no-source-map", ...form], {
+        encoding: "utf8",
+        input: css,
+        cwd: d,
+      });
+    // A REAL file named `-` next to the output: `statSync("-")` succeeds on
+    // it, so a freshness check that stats the string instead of recognising
+    // standard input calls an output newer than this decoy fresh.
+    writeFileSync(join(d, "-"), ".decoy { color: green; }\n");
+    const first = at(".a { color: #111; }\n");
+    assert.equal(first.status, 0, `cli: --update accepts a \`-\` input (${form.join(" ")}): ${first.stderr}`);
+    assert.match(readFileSync(join(d, "out.css"), "utf8"), /#111/, "cli: first compile");
+    const second = at(".a { color: #222; }\n");
+    assert.equal(second.status, 0, `cli: ${second.stderr}`);
+    assert.match(
+      readFileSync(join(d, "out.css"), "utf8"),
+      /#222/,
+      "cli: --update kept stale CSS for a stdin input",
+    );
+  }
+}
+{
+  // `--update` with `--stdin` is a usage error in dart, and now in both of
+  // ours. This CLI happened to be safe already (statting `-` throws, so
+  // nothing looked fresh) while the binary silently kept stale CSS; refusing
+  // the pair is what dart does and leaves neither to luck.
+  const r = spawnSync(process.execPath, [cliPath, "--stdin", "--update", "out.css"], {
+    encoding: "utf8",
+    input: ".a { color: red }\n",
+  });
+  assert.notEqual(r.status, 0, "cli: --update with --stdin is refused");
+  assert.match(r.stderr, /--update is not allowed with --stdin\./, "cli: … in dart's words");
+}
 console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + embed-map/quiet/multi-IO/update");
 
 // === Phase 3b: the npm CLI must accept every flag the NATIVE CLI accepts ===
@@ -680,7 +753,80 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.equal(r.status, 0, `cli: a dart-sass build's flag set compiles (stderr: ${r.stderr})`);
   assert.equal(readFileSync(join(dir, "a.css"), "utf8").trim(), ".a{x:1}", "cli: dart flag set output a");
   assert.equal(readFileSync(join(dir, "b.css"), "utf8").trim(), ".b{y:2}", "cli: dart flag set output b");
-  console.log(`ok: cli flag parity — ${flags.length} native flags, none rejected + a dart-sass build's flag set`);
+  // ...and the REVERSE, which is how #86 happened. This guard only ever
+  // checked that the npm CLI accepts what the binary does; the binary quietly
+  // grew two flags behind — `--watch` and `--update` — so a build script
+  // written for `sass` worked under `npm install sasso` and failed with the
+  // binary, the mirror image of the #24 report and just as surprising.
+  //
+  // The npm CLI's own flags come from its parser the same way the native ones
+  // do, so neither list is hand-kept. `known` names the differences that are
+  // deliberate, each with its reason; anything else fails.
+  const cliSrc2 = readFileSync(new URL("./npm/cli.mjs", import.meta.url), "utf8");
+  const npmFlags = new Set();
+  // `A-Za-z`, not `a-z`: the parser accepts `-I` and would accept a future
+  // `-X`, and a lowercase-only pattern drops them from this set silently —
+  // which is the failure mode this whole guard exists to prevent.
+  for (const m of cliSrc2.matchAll(/a === "(--?[A-Za-z-]+)"/g)) npmFlags.add(m[1]);
+  for (const m of cliSrc2.matchAll(/a\.startsWith\("(--?[A-Za-z-]+)=/g)) npmFlags.add(m[1]);
+  assert.ok(npmFlags.size > 20, `drift: extracted a plausible npm flag set (got ${npmFlags.size})`);
+
+  // Two lists, not one, because they mean different things. A flag in
+  // `byDesign` will never exist on the other side; a flag in `gaps` is one the
+  // binary should have and does not, and the entry is a reminder rather than
+  // a blessing — deleting it is how the guard starts failing again once the
+  // work lands.
+  const byDesign = new Map([
+    ["--engine", "reports which engine the npm CLI chose; the binary IS the engine"],
+  ]);
+  const gaps = new Map([
+    ["-w", "#86: the binary has no watcher yet"],
+    ["--watch", "#86: the binary has no watcher yet — a file-watching dependency in a crate whose [dependencies] section is empty is a deliberate decision, not a default"],
+  ]);
+  const onlyNpm = [...npmFlags].filter((f) => !flags.includes(f) && !byDesign.has(f) && !gaps.has(f));
+  assert.deepEqual(
+    onlyNpm,
+    [],
+    `cli: these flags are accepted by the npm CLI and rejected by the binary: ${onlyNpm.join(" ")}`,
+  );
+  // Every entry in BOTH lists claims the same shape of fact — "the npm CLI
+  // has this flag and the binary does not" — and differs only in why, which
+  // is prose. So both are checked the same way, in a loop, rather than by
+  // hand-written assertions per list. Writing them by hand is precisely how
+  // this went wrong twice: `onlyNpm` filters both lists OUT, so an entry that
+  // has stopped being true is invisible unless something looks for it, and
+  // each list ended up with a different subset of the two checks.
+  //
+  // What the two checks catch, in the two ways an entry rots:
+  //   - the npm CLI no longer has the flag: the entry describes no difference
+  //     at all. `byDesign` carried `--pkg-importer` this way — a DART flag
+  //     neither of ours has, with a description claiming the npm CLI resolves
+  //     `pkg:` URLs. That is worse than a missing entry: it reads as a
+  //     checked, deliberate divergence.
+  //   - the binary has GAINED the flag: for `gaps` the work has landed and
+  //     the reminder must go, or it hides the next gap; for `byDesign` the
+  //     stated reason ("the binary IS the engine") has become false.
+  for (const [label, list] of [
+    ["byDesign", byDesign],
+    ["gaps", gaps],
+  ]) {
+    const absent = [...list.keys()].filter((f) => !npmFlags.has(f));
+    assert.deepEqual(
+      absent,
+      [],
+      `cli: ${label} names flags the npm CLI does not have: ${absent.join(" ")}`,
+    );
+    const gained = [...list.keys()].filter((f) => flags.includes(f));
+    assert.deepEqual(
+      gained,
+      [],
+      `cli: ${label} names flags the binary now has: ${gained.join(" ")}`,
+    );
+  }
+
+  console.log(
+    `ok: cli flag parity — ${flags.length} native flags and ${npmFlags.size} npm flags, neither side ahead`,
+  );
 }
 
 // The two `--silence-deprecation` allowlists are the same list written twice,
@@ -2907,13 +3053,16 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     const code = run(["/no/such/file.scss"], { SASSO_BINARY: envBin });
     assert.equal(code.status, 127, `cli: the child's exit code is this process's (got ${code.status})`);
 
-    // The binary has neither flag (#86), so a command line carrying one must
-    // stay here. Delegating would hand `echo` a working build and get nothing
-    // compiled — which is what the file check below would catch.
+    // `--watch` is still not in the binary (#86), and `--update` now is — but
+    // only in a binary of THIS version, and `SASSO_BINARY` is documented as
+    // version-unchecked. So a command line carrying either must stay here
+    // rather than be handed to whatever that variable names. Delegating would
+    // give `echo` a working build and compile nothing — which is what the
+    // file check below would catch.
     {
       const upd = run(argv("f.css", "--update"), { SASSO_BINARY: echo });
       compiles("--update with a binary configured", upd, "f.css");
-      assert.match(upd.stderr, /--update is not in the binary/, "cli: … and the reason is readable");
+      assert.match(upd.stderr, /version is unchecked/, "cli: … and the reason is readable");
     }
     {
       // `--watch <input>` with no output: the guard runs before the engine, so
