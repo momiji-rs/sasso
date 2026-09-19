@@ -43,9 +43,10 @@ jobs:
       - name: build
         run: cargo build --release
       # The oracle for the one thing these tests must assume rather than
-      # derive: dart spells a LOADED file's frame with the platform separator
-      # (`src\_dep.scss`) while echoing the entry as it was typed. Non-blocking
-      # and printed in full, so a download hiccup does not fail the build and a
+      # derive: dart spells EVERY frame's path with the platform separator
+      # (`src\_dep.scss`), the entry stylesheet's included — `src/entry.scss` on
+      # the command line is reported `src\entry.scss` (#151). Non-blocking and
+      # printed in full, so a download hiccup does not fail the build and a
       # disagreement is visible without one.
       - name: dart-sass frame-separator probe (informational)
         continue-on-error: true
@@ -64,12 +65,20 @@ jobs:
           Pop-Location
           Write-Host "--- dart-sass $ver, cwd = the project root ---"
           Write-Host $out
-          if ($out -match 'src\\_dep\.scss') {
-            Write-Host 'dart spells a loaded file with `\` -- what this suite expects'
-          } elseif ($out -match 'src/_dep\.scss') {
-            Write-Host 'dart spells a loaded file with `/` -- flip Style::sep and with_loaded_paths'
-          } else {
-            Write-Host 'neither spelling in the transcript -- read it above'
+          # Both frames are checked: they are produced by different code paths
+          # here (`pathstyle::pretty` via the module graph for the loaded file,
+          # via `entry_display_url` for the entry) even though dart runs both
+          # through the one `p.prettyUri`.
+          foreach ($f in 'src\_dep.scss', 'src\entry.scss') {
+            $win = [regex]::Escape($f)
+            $posix = [regex]::Escape($f.Replace('\', '/'))
+            if ($out -match $win) {
+              Write-Host "dart spells $f with a backslash -- what this suite expects"
+            } elseif ($out -match $posix) {
+              Write-Host "dart spells $f with a forward slash -- flip Style::sep and with_frame_paths"
+            } else {
+              Write-Host "neither spelling of $f in the transcript -- read it above"
+            }
           }
       # `--no-fail-fast` because the first Windows run stopped at the library
       # unit tests and never reached a single integration suite, on a platform

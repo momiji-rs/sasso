@@ -190,9 +190,38 @@ pub(crate) fn relative_parts<'a>(style: Style, base: &str, target: &'a str) -> O
     Some(parts)
 }
 
+/// dart's `p.prettyUri` for a filesystem path: `abs` spelled relative to the
+/// directory `cwd`, unless that would take more segments than `abs` itself (a
+/// file far outside the tree reads better as itself than as a stack of `..`).
+///
+/// Both arguments must already be absolute and lexically normalized — this
+/// decides a SPELLING, it does not resolve `.` or `..`. dart renders every
+/// stack frame through it, the entry stylesheet's included (#151), which is
+/// why it lives here rather than beside one caller.
+pub(crate) fn pretty(style: Style, abs: &str, cwd: &str) -> String {
+    let Some(parts) = relative_parts(style, cwd, abs) else {
+        // No relative spelling exists — a different drive or share, or a
+        // current directory that is not absolute. dart's `p.relative` hands
+        // the target back unchanged there.
+        return abs.to_string();
+    };
+    // dart keeps the relative spelling only while it is no longer, in segments,
+    // than the absolute one; its `p.split` counts the root (`/`, `C:\`,
+    // `\\server\share`) as one segment, which `segments` excludes.
+    if parts.len() > 1 + style.segments(abs).count() {
+        return abs.to_string();
+    }
+    if parts.is_empty() {
+        // `abs` IS `cwd`: dart's `p.relative(x, from: x)` is `.`, and one
+        // segment never loses the comparison above.
+        return ".".to_string();
+    }
+    parts.join(style.sep())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{relative_parts, Style};
+    use super::{pretty, relative_parts, Style};
 
     /// Joined with the style's own separator, which is what a diagnostic path
     /// uses. `None` is "no relative spelling exists".
@@ -384,5 +413,78 @@ mod tests {
             Some(r"..\ärger\a.scss"),
             "the non-ASCII segment does not fold, so the walk leaves the directory"
         );
+    }
+
+    /// #146, as the first Windows CI run reported it: the canonical key is
+    /// lowercased and the working directory is not, and the display used to
+    /// fall all the way through to the absolute temp path.
+    #[test]
+    fn a_loaded_file_under_a_mixed_case_windows_cwd_is_relative() {
+        assert_eq!(
+            pretty(
+                Style::Windows,
+                r"c:\users\runner~1\appdata\local\temp\sasso_frames\src\sub\_warnme.scss",
+                r"C:\Users\RUNNER~1\AppData\Local\Temp\sasso_frames",
+            ),
+            r"src\sub\_warnme.scss"
+        );
+    }
+
+    /// dart writes the relative spelling in the platform's style, so a frame is
+    /// `\`-separated on Windows and `/`-separated everywhere else — and that is
+    /// true of the entry stylesheet's frame too, however it was typed on the
+    /// command line (#151).
+    #[test]
+    fn the_separator_is_the_platforms() {
+        assert_eq!(
+            pretty(Style::Posix, "/dev/app/src/sub/a.scss", "/dev/app"),
+            "src/sub/a.scss"
+        );
+        assert_eq!(
+            pretty(Style::Windows, r"C:\dev\app\src\sub\a.scss", r"C:\dev\app"),
+            r"src\sub\a.scss"
+        );
+    }
+
+    /// dart's `p.prettyUri` prefers the ABSOLUTE path once the relative one
+    /// would have more segments — a file far outside the tree reads better as
+    /// itself than as a stack of `..`. The root counts as one segment, so a
+    /// path one level out of the tree is a tie and the relative form wins it.
+    #[test]
+    fn a_file_far_outside_the_tree_stays_absolute() {
+        // 5 `..` + 2 segments = 7 against 1 + 2 = 3: absolute.
+        assert_eq!(
+            pretty(
+                Style::Posix,
+                "/tmp/scratch/a.scss",
+                "/dev/app/deep/deeper/deepest"
+            ),
+            "/tmp/scratch/a.scss"
+        );
+        // 1 `..` + 2 segments = 3 against 1 + 3 = 4: relative.
+        assert_eq!(
+            pretty(Style::Posix, "/dev/src/a.scss", "/dev/app"),
+            "../src/a.scss"
+        );
+    }
+
+    /// A different drive has no relative spelling, so it is shown as it is
+    /// rather than as a `..` chain that would resolve somewhere else entirely.
+    #[test]
+    fn another_drive_is_shown_absolute() {
+        assert_eq!(
+            pretty(Style::Windows, r"D:\lib\a.scss", r"C:\dev\app"),
+            r"D:\lib\a.scss"
+        );
+    }
+
+    /// dart's `p.relative(x, from: x)` is `.`, not the empty string — which is
+    /// what joining no segments at all would produce.
+    #[test]
+    fn a_path_that_is_the_working_directory_is_a_dot() {
+        assert_eq!(pretty(Style::Posix, "/dev/app", "/dev/app"), ".");
+        assert_eq!(pretty(Style::Windows, r"C:\dev\app", r"c:\dev\app"), ".");
+        // The root itself, where there are no segments on either side.
+        assert_eq!(pretty(Style::Posix, "/", "/"), ".");
     }
 }

@@ -177,6 +177,40 @@ Conformance is tracked separately as a ratchet against the official
   The suite now runs on Windows in CI (#143), with a by-name ledger of what
   still fails there.
 
+- **The entry stylesheet's frame is spelled the way dart spells it, not the way
+  it was typed** (#151). Every file reached through the importer went through
+  dart's `p.prettyUri` — lexically normalize, then take the path relative to the
+  working directory in the platform's separator, unless the absolute spelling is
+  the shorter of the two in segments — while the entry's path was echoed
+  verbatim from the command line. dart makes no exception for the entry, so one
+  file named five ways produced five transcripts where dart produces one:
+
+  ```
+  $ sasso ./src/entry.scss
+  WARNING: dep
+      src/_dep.scss 1:1     @use
+      ./src/entry.scss 1:1  root stylesheet
+  ```
+
+  `src/entry.scss`, `./src/entry.scss`, `src//entry.scss`,
+  `src/../src/entry.scss` and an absolute path now all report `src/entry.scss`,
+  and an entry above the working directory reports `../src/entry.scss` instead
+  of an absolute path sitting beside relative dependency frames — one warning
+  block in two spellings, which dart never emits. The location column is padded
+  to the longest frame, so the whole block shifted with the argument rather than
+  just the one line.
+
+  On Windows the same bug put two separators in one block: the entry stayed
+  `/`-separated as typed while every loaded file beside it was `\`-separated.
+  That is where it was noticed, but neither the bug nor the fix is
+  Windows-specific — the entry's display path is now decided in one place, from
+  the working directory, on every platform, by the same function the module
+  graph uses. `-` for stdin is left alone, being a marker rather than a path.
+
+  The gated dart-sass differential asserts the whole transcript for each of
+  those spellings and for a directory pair, so the rule is checked against dart
+  rather than against our reading of it.
+
 ### Changed
 
 - **CI now scores compressed output against dart-sass, not only expanded.** The
