@@ -948,9 +948,19 @@ def main():
             sys.exit(2)
         expect_digests, expect_header = read_expect_file(ef)
         # A digest is only an expectation for the style it was generated in, and
-        # nothing about the digests themselves says which. The header does.
+        # nothing about the digests themselves says which. The header does — so
+        # a manifest without one is refused rather than trusted: otherwise
+        # deleting that line would be enough to score compressed digests
+        # against expanded output.
         manifest_style = expect_header.get("style")
-        if manifest_style and manifest_style != args.style:
+        if manifest_style is None:
+            print(f"ERROR: {ef} has no `# style:` header, so there is nothing "
+                  "to say which style its digests are expectations for",
+                  file=sys.stderr)
+            print("Regenerate it with spec/gen_compressed.py.",
+                  file=sys.stderr)
+            sys.exit(2)
+        if manifest_style != args.style:
             print(f"ERROR: {ef} holds {manifest_style} expectations but "
                   f"--style={args.style} was requested", file=sys.stderr)
             sys.exit(2)

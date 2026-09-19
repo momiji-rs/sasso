@@ -141,12 +141,16 @@ byte-exact comparison applies -- one case per line:
 That file is **committed**, which is the whole point: the gate then needs
 neither node nor the network, and
 `python3 spec/check_baseline.py --style compressed` is a plain offline ratchet
-like the expanded one. `check_baseline.py` refuses to run if the manifest's
-`dart_sass` disagrees with `BASELINE_COMPRESSED.json` or its `spec_commit`
-disagrees with `SPEC_VERSION.txt`, so a stale oracle cannot silently score the
-wrong thing after a pin bump. `run_spec.py` separately refuses a manifest whose
-`style` header is not the `--style` being scored, since nothing about a digest
-says which style produced it.
+like the expanded one.
+
+All four headers are **required**, and each is checked before a single case is
+scored: `style` must be the style being scored, `dart_sass` must equal
+`BASELINE_COMPRESSED.json`'s, `spec_commit` must equal `SPEC_VERSION.txt`'s, and
+`cases` must be a number equal to the number of digest lines. A header that is
+merely *checked when present* is not a guard -- deleting the line would turn it
+off -- so a missing one fails exactly like a wrong one. `run_spec.py` enforces
+the `style` header itself as well, since it is usable directly with
+`--expect-file`.
 
 Regenerate it only when one of those pins moves -- the diff then reads as
 exactly which compressed outputs changed:

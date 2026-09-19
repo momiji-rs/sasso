@@ -60,12 +60,16 @@ def pinned_spec_commit():
     return None
 
 
-def check_manifest_is_current(expect_path, baseline):
+def check_manifest_is_current(expect_path, baseline, style):
     """A digest manifest is only an oracle for the pins it was generated from.
 
     Scoring against a manifest built from a different dart-sass, or a different
     sass-spec commit, silently measures the wrong thing — so refuse instead.
     Regenerating is a documented one-liner.
+
+    Every header these checks read is REQUIRED, not merely checked when
+    present: a comparison that is skipped because its header is absent is not a
+    guard, it is a line an edit can delete to turn the guard off.
     """
     header = {}
     entries = 0
@@ -86,23 +90,49 @@ def check_manifest_is_current(expect_path, baseline):
     got_commit = header.get("spec_commit")
 
     problems = []
+
+    # The style the digests were generated in. Nothing about a digest says
+    # which, and run_spec.py refuses a mismatch too — this one just fails
+    # before a three-minute run rather than after one.
+    got_style = header.get("style")
+    if got_style is None:
+        problems.append("it has no `style:` header")
+    elif got_style != style:
+        problems.append(f"{got_style} expectations, but the {style} ratchet "
+                        "is scoring them")
+
     # A missing entry is a SKIP, by design: a manifest gap must not read as a
     # sasso regression. The cost of that choice is that dropping entries also
     # drops cases out of the denominator, so a truncated manifest could hide
     # the very failures it omits. Two things stop that: the header's own count
     # must match the body, and main() refuses a shrunken `attempted`.
-    want_cases = header.get("cases")
-    if want_cases and want_cases.isdigit() and int(want_cases) != entries:
+    got_cases = header.get("cases")
+    if got_cases is None:
+        problems.append("it has no `cases:` header")
+    elif not got_cases.isdigit():
+        problems.append(f"its `cases:` header is not a number ({got_cases!r})")
+    elif int(got_cases) != entries:
         problems.append(f"{entries} digest lines but its header says "
-                        f"{want_cases} cases")
-    if want_dart and got_dart and want_dart != got_dart:
+                        f"{got_cases} cases")
+
+    if not want_dart:
+        problems.append("the baseline records no `dart_sass` to check against")
+    elif got_dart is None:
+        problems.append("it has no `dart_sass:` header")
+    elif want_dart != got_dart:
         problems.append(f"dart-sass {got_dart} in the manifest vs "
                         f"{want_dart} in the baseline")
-    if want_commit and got_commit and want_commit != got_commit:
+
+    if not want_commit:
+        problems.append("SPEC_VERSION.txt records no commit to check against")
+    elif got_commit is None:
+        problems.append("it has no `spec_commit:` header")
+    elif want_commit != got_commit:
         problems.append(f"sass-spec {got_commit[:12]} in the manifest vs "
                         f"{want_commit[:12]} in SPEC_VERSION.txt")
     if problems:
-        print("error: spec/COMPRESSED_EXPECT.txt is stale — "
+        name = os.path.relpath(expect_path, ROOT)
+        print(f"error: {name} is not a usable oracle — "
               + "; ".join(problems), file=sys.stderr)
         print("Regenerate it: python3 spec/gen_compressed.py --jobs 10",
               file=sys.stderr)
@@ -133,7 +163,7 @@ def main() -> int:
             print(f"error: {expect} not found — generate it with "
                   "`python3 spec/gen_compressed.py`", file=sys.stderr)
             return 2
-        if not check_manifest_is_current(expect, baseline):
+        if not check_manifest_is_current(expect, baseline, args.style):
             return 2
         extra = [f"--style={args.style}", "--expect-file", expect]
 
