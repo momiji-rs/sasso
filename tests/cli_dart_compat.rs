@@ -2195,3 +2195,82 @@ fn update_with_stdin_is_a_usage_error() {
     );
     assert!(!dir.join("out.css").exists(), "nothing should have been written");
 }
+
+/// A `-` INPUT is standard input too, and `--update` accepts it. Only the
+/// `--stdin` FLAG is refused.
+///
+/// That asymmetry looks arbitrary until it is measured: dart-sass 1.104.1
+/// exits 64 on `--stdin --update out.css`, and exits 0 on both
+/// `--update - out.css` and `--update -:out.css`, compiling standard input
+/// each time (2026-09-19). So the answer for a `-` input is not a refusal —
+/// it is that the output can never be called fresh, because there is no
+/// input mtime to compare it against, so every run rewrites. What makes that
+/// true is `output_is_fresh` returning false for a `None` input; a version
+/// that skipped the missing input instead looped over an empty dependency
+/// list and reported FRESH.
+#[test]
+fn update_with_a_dash_input_compiles_stdin_every_run() {
+    for (tag, args) in [
+        ("positional", vec!["--no-source-map", "--update", "-", "out.css"]),
+        ("pair", vec!["--no-source-map", "--update", "-:out.css"]),
+    ] {
+        let dir = scratch(&format!("update-dash-{tag}"));
+        let first = run_bin(BIN, &dir, &args, Some(".a { color: #111; }\n"));
+        assert_eq!(first.code, 0, "{tag}: dart accepts a `-` input: {}", first.stderr);
+        assert!(read(&dir, "out.css").contains("#111"), "{tag}: first compile");
+
+        // No input mtime means no honest "fresh": the second run must write
+        // again even though nothing on disk changed.
+        let stamp = std::fs::metadata(dir.join("out.css"))
+            .and_then(|m| m.modified())
+            .expect("stat out.css");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = run_bin(BIN, &dir, &args, Some(".a { color: #222; }\n"));
+        assert_eq!(second.code, 0, "{tag}: {}", second.stderr);
+        assert!(
+            read(&dir, "out.css").contains("#222"),
+            "{tag}: --update kept stale CSS for a stdin input: {}",
+            read(&dir, "out.css")
+        );
+        let after = std::fs::metadata(dir.join("out.css"))
+            .and_then(|m| m.modified())
+            .expect("stat out.css");
+        assert_ne!(
+            stamp, after,
+            "{tag}: --update claimed a stdin-fed output was fresh"
+        );
+    }
+}
+
+/// An output that is an existing DIRECTORY: `--update` skips it silently
+/// where a plain compile fails with 66, and that is dart's behaviour, not an
+/// oversight in the freshness check.
+///
+/// Measured 2026-09-19 against dart-sass 1.104.1: `sass --update e.scss:od`
+/// exits 0 and writes nothing when `od` is newer than `e.scss`, and exits 66
+/// with "Error reading od: illegal operation on a directory." when `od` is
+/// older. Both of ours match in both directions, so dart is running the same
+/// mtime comparison on the directory that we are. Requiring a regular file
+/// before trusting the mtime would be a nicer CLI and a divergence.
+#[test]
+fn update_with_a_directory_output_matches_dart() {
+    // Directory NEWER than the source: nothing is written and the run succeeds.
+    let dir = scratch("update-dirout-new");
+    write(&dir, "e.scss", ".a { color: red; }\n");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::create_dir_all(dir.join("od")).expect("mkdir od");
+    let fresh = sasso(&dir, &["--no-source-map", "--update", "e.scss:od"]);
+    assert_eq!(fresh.code, 0, "dart exits 0 here: {}", fresh.stderr);
+    assert!(
+        dir.join("od").is_dir() && std::fs::read_dir(dir.join("od")).into_iter().flatten().count() == 0,
+        "the directory should be untouched and empty"
+    );
+
+    // Directory OLDER than the source: the write is attempted, and fails.
+    let dir = scratch("update-dirout-old");
+    std::fs::create_dir_all(dir.join("od")).expect("mkdir od");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write(&dir, "e.scss", ".a { color: red; }\n");
+    let stale = sasso(&dir, &["--no-source-map", "--update", "e.scss:od"]);
+    assert_eq!(stale.code, 66, "dart exits 66 here: {}", stale.stderr);
+}

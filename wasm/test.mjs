@@ -601,6 +601,32 @@ assert.ok(
   );
 }
 {
+  // A `-` INPUT is standard input too, and dart ACCEPTS it with --update
+  // (measured 2026-09-19: `sass --update - out.css` and `sass --update
+  // -:out.css` both exit 0 and compile stdin). Only the --stdin FLAG is
+  // refused. The safety here is not a refusal: with no input mtime nothing
+  // can be called fresh, so every run must rewrite.
+  for (const form of [["--update", "-", "out.css"], ["--update", "-:out.css"]]) {
+    const d = mkdtempSync(join(tmpdir(), "sasso-dash-"));
+    const at = (css) =>
+      spawnSync(process.execPath, [cliPath, "--no-source-map", ...form], {
+        encoding: "utf8",
+        input: css,
+        cwd: d,
+      });
+    const first = at(".a { color: #111; }\n");
+    assert.equal(first.status, 0, `cli: --update accepts a \`-\` input (${form.join(" ")}): ${first.stderr}`);
+    assert.match(readFileSync(join(d, "out.css"), "utf8"), /#111/, "cli: first compile");
+    const second = at(".a { color: #222; }\n");
+    assert.equal(second.status, 0, `cli: ${second.stderr}`);
+    assert.match(
+      readFileSync(join(d, "out.css"), "utf8"),
+      /#222/,
+      "cli: --update kept stale CSS for a stdin input",
+    );
+  }
+}
+{
   // `--update` with `--stdin` is a usage error in dart, and now in both of
   // ours. This CLI happened to be safe already (statting `-` throws, so
   // nothing looked fresh) while the binary silently kept stale CSS; refusing
