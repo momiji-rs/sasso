@@ -16,6 +16,11 @@ use sasso::{compile, FsImporter, Options, WarnEvent};
 /// on Windows (dart's `Style.windows` canonicalizes each part, and that
 /// filesystem is case-insensitive).
 fn canon_key(p: std::path::PathBuf) -> String {
+    // `PathBuf::push` does not respell `/` as the platform separator, so a
+    // `join("lp/_dep.scss")` keeps its `/` on Windows while the importer's key,
+    // built from the real path, uses `\`. Re-collecting the components respells
+    // it the way the platform does.
+    let p: std::path::PathBuf = p.components().collect();
     let s = p.to_string_lossy().into_owned();
     #[cfg(windows)]
     let s = s.to_lowercase();

@@ -31,6 +31,15 @@ use sasso::{
     WarnHandler,
 };
 
+// The library's path rules, compiled into the binary rather than exported:
+// `sasso`'s public API is a documented surface and this is not part of it. Both
+// relativisations — a diagnostic path in the library, a source-map URL here —
+// have to agree about when two spellings name one file, which is #146. The
+// binary needs only a subset, hence the `dead_code` allow.
+#[path = "pathstyle.rs"]
+#[allow(dead_code)]
+mod pathstyle;
+
 // Install the scoped bump-arena allocator (perf #5). Inside each `compile`
 // scope every allocation is a pointer bump from a per-thread arena that is
 // freed wholesale when the scope ends; outside a scope (startup, arg parsing,
@@ -1986,8 +1995,14 @@ fn adjust_sources(
                 SourceMapUrls::Absolute => file_url(&abs),
                 SourceMapUrls::Relative => {
                     let map_dir = normalize_path(&cwd.join(map_path.parent().unwrap_or(Path::new(""))));
-                    let rel = relative_path(&map_dir, &abs);
-                    encode_url_path(&rel)
+                    match relative_path(&map_dir, &abs) {
+                        Some(rel) => encode_url_path(&rel),
+                        // A source on another drive or share: dart's `p.relative`
+                        // returns the absolute path there and `p.toUri` spells it
+                        // as a `file:` URL. A `..` chain across roots would name
+                        // nothing at all.
+                        None => file_url(&abs),
+                    }
                 }
             }
         })
@@ -2039,19 +2054,15 @@ fn normalize_path(p: &Path) -> PathBuf {
 /// The relative path from directory `base` to `target`, as forward-slash
 /// segments (dart emits `/`-separated source URLs on every platform). Both must
 /// be normalized absolute paths.
-fn relative_path(base: &Path, target: &Path) -> String {
-    use std::path::Component;
-    let base: Vec<Component<'_>> = base.components().collect();
-    let target: Vec<Component<'_>> = target.components().collect();
-    let common = base.iter().zip(target.iter()).take_while(|(a, b)| a == b).count();
-    let mut parts: Vec<String> = Vec::new();
-    for _ in common..base.len() {
-        parts.push("..".to_string());
-    }
-    for c in &target[common..] {
-        parts.push(c.as_os_str().to_string_lossy().into_owned());
-    }
-    parts.join("/")
+///
+/// `None` when the two have no relative spelling: different Windows drives or
+/// shares. The comparison is the platform's, not the string's — a canonical key
+/// is lowercased on Windows while the working directory is not, and comparing
+/// those literally is #146.
+fn relative_path(base: &Path, target: &Path) -> Option<String> {
+    let base = base.to_string_lossy();
+    let target = target.to_string_lossy();
+    pathstyle::relative_parts(pathstyle::HOST, &base, &target).map(|parts| parts.join("/"))
 }
 
 /// A `file://` URL for an absolute path, percent-encoding each segment the way

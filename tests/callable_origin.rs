@@ -29,6 +29,11 @@ fn scratch(tag: &str) -> PathBuf {
 /// on Windows (dart's `Style.windows` canonicalizes each part, and that
 /// filesystem is case-insensitive).
 fn canon_key(p: std::path::PathBuf) -> String {
+    // `PathBuf::push` does not respell `/` as the platform separator, so a
+    // `join("src/imp.scss")` keeps its `/` on Windows while the importer's key,
+    // built from the real path, uses `\`. Re-collecting the components respells
+    // it the way the platform does.
+    let p: std::path::PathBuf = p.components().collect();
     let s = p.to_string_lossy().into_owned();
     #[cfg(windows)]
     let s = s.to_lowercase();
@@ -37,6 +42,18 @@ fn canon_key(p: std::path::PathBuf) -> String {
 
 fn canon(dir: &std::path::Path, rel: &str) -> String {
     canon_key(dir.join(rel))
+}
+
+/// A path fragment as a LOADED file's frame spells it: the importer reached the
+/// file through the filesystem, so on Windows it is `\`-separated. An ENTRY is
+/// echoed as it was given instead — the urls here are built with a `/` and keep
+/// it — so entry fragments are deliberately NOT respelled.
+fn loaded(frag: &str) -> String {
+    if cfg!(windows) {
+        frag.replace('/', "\\")
+    } else {
+        frag.to_string()
+    }
 }
 
 #[test]
@@ -97,7 +114,7 @@ fn warn_events_inside_callables_carry_the_defining_file() {
         content.3
     );
     assert!(
-        content.3.contains("src/_dep.scss 3:3") && content.3.contains("  m()\n"),
+        content.3.contains(&loaded("src/_dep.scss 3:3")) && content.3.contains("  m()\n"),
         "{}",
         content.3
     );
@@ -111,7 +128,7 @@ fn warn_events_inside_callables_carry_the_defining_file() {
         f.1
     );
     assert!(
-        f.3.contains("src/_dep.scss 7:3") && f.3.contains("  f()\n"),
+        f.3.contains(&loaded("src/_dep.scss 7:3")) && f.3.contains("  f()\n"),
         "{}",
         f.3
     );
@@ -134,7 +151,7 @@ fn error_inside_an_imported_mixin_renders_its_source() {
     assert!(err.starts_with("Error: Undefined variable.\n"), "{err}");
     assert!(err.contains("11 │   q: $nope;\n"), "{err}");
     assert!(
-        err.contains("src/_dep.scss 11:6") && err.contains("  undef()\n"),
+        err.contains(&loaded("src/_dep.scss 11:6")) && err.contains("  undef()\n"),
         "{err}"
     );
     assert!(
