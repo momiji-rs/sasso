@@ -150,8 +150,9 @@ speeds up the `npx sasso` in a project's scripts without touching them
 happens to have; a mismatch is passed over in silence. `SASSO_BINARY=<path>`
 names a binary explicitly, version unchecked, and `SASSO_BINARY=0` turns the
 hand-off off. `SASSO_DEBUG_ENGINE=1` prints which of these happened and why.
-`--watch` and `--update` always stay in-process, because the binary has neither
-(#86), and `sasso --engine` reports the hand-off rather than taking it.
+`--watch` always stays in-process, because the binary has no watcher yet
+(#86); `--update` hands off like anything else now that the binary has it, and
+`sasso --engine` reports the hand-off rather than taking it.
 
 **Importing the library** selects nothing: `import … from "sasso"` is always
 the size-optimised wasm build and ignores `SASSO_ENGINE`, `"sasso/speed"` is
@@ -241,9 +242,10 @@ flags: `--[no-]source-map`, `--source-map-urls`, `--[no-]embed-sources`,
 `--quiet-deps`, `--stop-on-error`, `--[no-]unicode`, `--[no-]color` (accepted;
 sasso never colors), `--indented`, `--stdin`. Exit codes match too (64 usage,
 65 compile error, 66 unreadable input). Not supported by the binary: `--watch`,
-`--update`, `--pkg-importer`, and the deprecation-selection flags — note that
-the **npm** CLI does have `--watch` and `--update`, so the two are not yet
-identical in that direction (#86). `sasso --help` lists everything.
+`--pkg-importer`, and the deprecation-selection flags — the **npm** CLI does
+have `--watch`, so the two are not yet identical in that direction (#86).
+`--update` is on both, and on both it compares the output against the entry
+*and* every stylesheet the entry loads, as dart-sass does. `sasso --help` lists everything.
 
 ## Conformance
 

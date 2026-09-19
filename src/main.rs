@@ -86,6 +86,9 @@ OTHER:
     -j, --jobs <N>                      compile at most N files at once
                                         (default: one per core, or per CPU
                                         where the core count is unknown)
+        --update                        skip writing an output that is already
+                                        newer than its input and every
+                                        stylesheet that input loads
         --[no-]stop-on-error            don't start more files once one fails
     -c, --[no-]color                    accepted for dart-sass compatibility
                                         (no-op: sasso never colors output)
@@ -129,6 +132,7 @@ struct Cli {
     /// Don't print compiler (deprecation) warnings from dependencies —
     /// stylesheets reached through a load path (dart-sass `--quiet-deps`).
     quiet_deps: bool,
+    update: bool,
     /// Compile but discard the CSS (timing-only runs).
     no_css: bool,
     /// Recompile the input in-process this many times and report throughput.
@@ -465,6 +469,7 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
         indented: false,
         quiet: false,
         quiet_deps: false,
+        update: false,
         no_css: false,
         loop_n: None,
         no_unicode: false,
@@ -511,6 +516,7 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
             "--no-charset" => cli.charset = false,
             "-q" | "--quiet" => cli.quiet = true,
             "--no-quiet" => cli.quiet = false,
+            "--update" => cli.update = true,
             "--quiet-deps" => cli.quiet_deps = true,
             "--no-quiet-deps" => cli.quiet_deps = false,
             "--stop-on-error" => cli.stop_on_error = true,
@@ -820,6 +826,19 @@ struct Unit {
     target: Target,
 }
 
+impl Unit {
+    /// The entry's own file, when it has one. The importer never sees it — the
+    /// entry is read directly — so `--update` stats it separately from the
+    /// files the compile pulled in. A stdin unit has no path and no mtime, and
+    /// `--update` treats it as always out of date.
+    fn source_path(&self) -> Option<&Path> {
+        match &self.source {
+            Source::File(p) => Some(p.as_path()),
+            Source::Text(_) | Source::InvalidUtf8 => None,
+        }
+    }
+}
+
 /// Settings shared by every unit (read-only across worker threads).
 struct Shared {
     /// `-I` directories. Each unit builds its own `FsImporter` from them: the
@@ -831,6 +850,7 @@ struct Shared {
     charset: bool,
     quiet: bool,
     quiet_deps: bool,
+    update: bool,
     /// `--silence-deprecation` ids, applied inside the compiler beside
     /// `--quiet-deps` rather than in the warn handler. Dropping the warning
     /// further out still lets it reach the per-id cap, so the run ends
@@ -1096,6 +1116,7 @@ fn run(cli: Cli) -> ExitCode {
         charset: cli.charset,
         quiet: cli.quiet,
         quiet_deps: cli.quiet_deps,
+        update: cli.update,
         silenced: cli.silenced.clone(),
         no_css: cli.no_css,
         embed_sources: cli.embed_sources,
@@ -1248,12 +1269,100 @@ fn read_source<'u>(unit: &'u Unit) -> Result<Cow<'u, str>, Outcome> {
     }
 }
 
+/// An [`Importer`] that delegates to [`FsImporter`] and remembers every file
+/// it loaded.
+///
+/// `--update` has to compare the output against the entry AND everything the
+/// entry pulls in; editing a partial with the entry untouched is the common
+/// case on an `@import`-heavy tree, and comparing the entry alone leaves stale
+/// CSS on disk saying nothing (#133, fixed the same way in the npm CLI).
+///
+/// The list cannot come from `FsImporter::dependencies`: that set exists for
+/// `--quiet-deps` and deliberately holds only files reached THROUGH A LOAD
+/// PATH, so a tree with no `-I` — Lichess's, for one — records nothing at all.
+/// Nor from the source map's `sources`, which would mean generating a map
+/// under `--no-source-map` just to learn the file list.
+///
+/// `RefCell`, not a lock: each unit builds its own importer, so nothing here
+/// is shared between the pool's threads.
+struct RecordingImporter {
+    inner: FsImporter,
+    loaded: RefCell<Vec<String>>,
+}
+
+impl RecordingImporter {
+    fn new(load_paths: Vec<PathBuf>) -> Self {
+        RecordingImporter {
+            inner: FsImporter::new(load_paths),
+            loaded: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The wrapped importer's `--quiet-deps` provenance set. Different thing
+    /// from `loaded_paths`: this one holds only what came through a load path,
+    /// which is what dart's rule is about.
+    fn dependencies(&self) -> sasso::DependencySet {
+        self.inner.dependencies()
+    }
+
+    /// The files loaded so far, as filesystem paths. A canonical URL that is
+    /// not a `file:` URL has no path to stat and is dropped by the caller's
+    /// freshness test, which treats an unknowable input as "not fresh".
+    fn loaded_paths(&self) -> Vec<PathBuf> {
+        self.loaded
+            .borrow()
+            .iter()
+            .filter_map(|u| url_to_path(u))
+            .collect()
+    }
+}
+
+impl sasso::Importer for RecordingImporter {
+    fn canonicalize(
+        &self,
+        url: &str,
+        ctx: &sasso::CanonicalizeContext<'_>,
+    ) -> Result<Option<sasso::CanonicalUrl>, sasso::ImporterError> {
+        self.inner.canonicalize(url, ctx)
+    }
+
+    fn load(
+        &self,
+        canonical: &sasso::CanonicalUrl,
+    ) -> Result<Option<sasso::ImporterResult>, sasso::ImporterError> {
+        let out = self.inner.load(canonical)?;
+        if out.is_some() {
+            self.loaded.borrow_mut().push(canonical.as_str().to_string());
+        }
+        Ok(out)
+    }
+}
+
+/// `--update`: is `output` at least as new as `input` and every file in
+/// `deps`? A missing output, or an input that cannot be stat'd, is not fresh.
+fn output_is_fresh(output: &Path, input: Option<&Path>, deps: &[PathBuf]) -> bool {
+    let Ok(out) = std::fs::metadata(output).and_then(|m| m.modified()) else {
+        return false;
+    };
+    for src in input.into_iter().chain(deps.iter().map(|p| p.as_path())) {
+        match std::fs::metadata(src).and_then(|m| m.modified()) {
+            Ok(t) if t <= out => {}
+            // Newer than the output, or gone: rebuild.
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// Build the per-unit options. A helper fn (not a closure) so the returned
 /// `Options` can borrow `unit`/`shared` for the caller's lifetime.
 fn options_for<'a>(
     unit: &'a Unit,
     shared: &'a Shared,
-    importer: &'a FsImporter,
+    importer: &'a dyn sasso::Importer,
+    // Passed rather than pulled off `importer`: the trait has no dependency
+    // set, and the CLI now wraps `FsImporter` to record loads for `--update`.
+    deps: sasso::DependencySet,
     unicode: bool,
     warn: WarnHandler,
 ) -> Options<'a> {
@@ -1280,7 +1389,7 @@ fn options_for<'a>(
         // stylesheets the importer reached through a load path, and whatever
         // those load relatively — are dropped inside the compiler, ahead of its
         // repetition cap. A dependency's own `@warn` still prints.
-        opts.with_quiet_deps(importer.dependencies())
+        opts.with_quiet_deps(deps)
     } else {
         opts
     }
@@ -1365,12 +1474,13 @@ fn finish_compile_error(unit: &Unit, shared: &Shared, rendered: &str, ascii: &st
 
 /// [`compile_unit`] for an already-read `source`.
 fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
-    let importer = FsImporter::new(shared.load_paths.clone());
+    let importer = RecordingImporter::new(shared.load_paths.clone());
     let warnings = Rc::new(RefCell::new(String::new()));
     let opts = options_for(
         unit,
         shared,
         &importer,
+        importer.dependencies(),
         shared.unicode,
         buffered_warn_handler(shared, Rc::clone(&warnings)),
     );
@@ -1424,6 +1534,21 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
                     None => format!("{css}\n"),
                 };
             }
+            // `--update`: the compile has run, so the importer knows every
+            // file that fed it. If the output on disk is at least as new as
+            // all of them, leave it alone — including its mtime, which is
+            // what downstream watchers key on and the point of the flag.
+            //
+            // Compiling first looks like the wrong order for a flag whose job
+            // is to avoid compiling, and is the right one here: `[measured]`
+            // on Lichess's 147 entry points, dart's `--update` takes 1.19s to
+            // decide nothing changed where sasso compiles the whole tree in
+            // 0.48s. Learning the graph any earlier would mean resolving
+            // `@use`/`@import` a second time, outside the compiler that
+            // already does it.
+            Target::File(output)
+                if shared.update && output_is_fresh(output, unit.source_path(), &importer.loaded_paths()) => {
+            }
             Target::File(output) => {
                 if let Err(msg) = write_css_file(output, &css, map.as_ref(), &unit.url, stdin_text, shared) {
                     outcome.stderr.push_str(&msg);
@@ -1445,7 +1570,14 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
             // non-ASCII there so the file needs no @charset); re-render the
             // error that way when the terminal rendering was Unicode.
             let ascii = if want_error_css && shared.unicode {
-                let ascii_opts = options_for(unit, shared, &importer, false, silent_warn_handler());
+                let ascii_opts = options_for(
+                    unit,
+                    shared,
+                    &importer,
+                    importer.dependencies(),
+                    false,
+                    silent_warn_handler(),
+                );
                 compile(source, &ascii_opts)
                     .err()
                     .map(|e| e.to_string())
@@ -1492,7 +1624,14 @@ fn run_loop(units: &[Unit], shared: &Shared, n: u32) -> ExitCode {
     let start = Instant::now();
     for _ in 0..n {
         for (unit, source) in units.iter().zip(&sources) {
-            let opts = options_for(unit, shared, &importer, shared.unicode, silent_warn_handler());
+            let opts = options_for(
+                unit,
+                shared,
+                &importer,
+                importer.dependencies(),
+                shared.unicode,
+                silent_warn_handler(),
+            );
             match compile(source, &opts) {
                 Ok(css) => last = css,
                 Err(e) => {
@@ -1922,6 +2061,65 @@ fn file_url(abs: &Path) -> String {
         }
     }
     s
+}
+
+/// The local path a `file://` URL names, or `None` when this cannot say.
+///
+/// The inverse of [`file_url`], deliberately partial. `None` is returned for
+/// anything that is not a plain absolute local path — a non-`file:` URL from a
+/// custom importer, or a UNC form — and the only caller, `--update`'s
+/// freshness test, reads `None` as "cannot be shown unchanged, rebuild". That
+/// is the safe direction to be wrong in: the cost of guessing `None` is one
+/// extra write, and the cost of guessing a path wrong is stale CSS.
+fn url_to_path(url: &str) -> Option<PathBuf> {
+    // `FsImporter`'s canonical form IS the absolute filesystem path (see its
+    // `canonicalize`), so the common case never reaches the URL branch below.
+    // Taking it for a URL was this function's first bug: every dependency
+    // parsed as `None`, the list came back empty, and `--update` reported a
+    // stale output as fresh — passing the "nothing changed" test while
+    // failing the one the flag exists for.
+    if !url.starts_with("file:") {
+        let p = Path::new(url);
+        return p.is_absolute().then(|| p.to_path_buf());
+    }
+    let rest = url.strip_prefix("file://")?;
+    // `file://server/share/…` (UNC): no leading slash, and reconstructing it
+    // is not worth the risk here.
+    let rest = rest.strip_prefix('/')?;
+    let decoded = percent_decode(rest)?;
+    // `file:///C:/x` decodes to `/C:/x`, whose real path drops the slash.
+    let is_drive = {
+        let b = decoded.as_bytes();
+        b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+    };
+    Some(PathBuf::from(if is_drive {
+        decoded
+    } else {
+        format!("/{decoded}")
+    }))
+}
+
+/// Percent-decode a URL path, or `None` on a malformed escape.
+fn percent_decode(s: &str) -> Option<String> {
+    if !s.contains('%') {
+        return Some(s.to_string());
+    }
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            let hi = (hex[0] as char).to_digit(16)?;
+            let lo = (hex[1] as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Percent-encode a forward-slash-separated relative URL path (keeping the `/`).

@@ -2126,3 +2126,47 @@ fn plain_css_entry_passes_its_imports_through() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `--update` leaves an up-to-date output alone and rebuilds when anything it
+/// imports changes (#86, the binary half of #133).
+///
+/// The partial is two levels down on purpose: one level can pass by accident,
+/// and the first version of this passed the "nothing changed" half while
+/// failing this one — `FsImporter`'s canonical form is the absolute PATH, not
+/// a `file://` URL, so every dependency was dropped on the way to the stat and
+/// the list arrived empty.
+#[test]
+fn update_skips_a_fresh_output_and_rebuilds_on_a_deep_partial() {
+    let dir = scratch("update-deps");
+    write(&dir, "_deep.scss", "$c: #111;\n");
+    write(&dir, "_base.scss", "@import \"deep\";\n.base { color: $c; }\n");
+    write(&dir, "entry.scss", "@import \"base\";\n");
+
+    let first = sasso(&dir, &["--no-source-map", "entry.scss:out.css"]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert!(read(&dir, "out.css").contains("#111"), "first compile");
+
+    // Nothing changed: the output keeps its mtime, which is what downstream
+    // watchers key on and the reason the flag exists.
+    let stamp = std::fs::metadata(dir.join("out.css"))
+        .and_then(|m| m.modified())
+        .expect("stat out.css");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = sasso(&dir, &["--no-source-map", "--update", "entry.scss:out.css"]);
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    let after = std::fs::metadata(dir.join("out.css"))
+        .and_then(|m| m.modified())
+        .expect("stat out.css");
+    assert_eq!(stamp, after, "--update rewrote an already-current output");
+
+    // A partial two levels down changes: the output is stale and must be built.
+    write(&dir, "_deep.scss", "$c: #444;\n");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let third = sasso(&dir, &["--no-source-map", "--update", "entry.scss:out.css"]);
+    assert_eq!(third.code, 0, "{}", third.stderr);
+    assert!(
+        read(&dir, "out.css").contains("#444"),
+        "--update ignored a transitively imported partial: {}",
+        read(&dir, "out.css")
+    );
+}

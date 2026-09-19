@@ -680,7 +680,48 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.equal(r.status, 0, `cli: a dart-sass build's flag set compiles (stderr: ${r.stderr})`);
   assert.equal(readFileSync(join(dir, "a.css"), "utf8").trim(), ".a{x:1}", "cli: dart flag set output a");
   assert.equal(readFileSync(join(dir, "b.css"), "utf8").trim(), ".b{y:2}", "cli: dart flag set output b");
-  console.log(`ok: cli flag parity — ${flags.length} native flags, none rejected + a dart-sass build's flag set`);
+  // ...and the REVERSE, which is how #86 happened. This guard only ever
+  // checked that the npm CLI accepts what the binary does; the binary quietly
+  // grew two flags behind — `--watch` and `--update` — so a build script
+  // written for `sass` worked under `npm install sasso` and failed with the
+  // binary, the mirror image of the #24 report and just as surprising.
+  //
+  // The npm CLI's own flags come from its parser the same way the native ones
+  // do, so neither list is hand-kept. `known` names the differences that are
+  // deliberate, each with its reason; anything else fails.
+  const cliSrc2 = readFileSync(new URL("./npm/cli.mjs", import.meta.url), "utf8");
+  const npmFlags = new Set();
+  for (const m of cliSrc2.matchAll(/a === "(--?[a-z-]+)"/g)) npmFlags.add(m[1]);
+  for (const m of cliSrc2.matchAll(/a\.startsWith\("(--[a-z-]+)=/g)) npmFlags.add(m[1]);
+  assert.ok(npmFlags.size > 20, `drift: extracted a plausible npm flag set (got ${npmFlags.size})`);
+
+  // Two lists, not one, because they mean different things. A flag in
+  // `byDesign` will never exist on the other side; a flag in `gaps` is one the
+  // binary should have and does not, and the entry is a reminder rather than
+  // a blessing — deleting it is how the guard starts failing again once the
+  // work lands.
+  const byDesign = new Map([
+    ["--engine", "reports which engine the npm CLI chose; the binary IS the engine"],
+    ["--pkg-importer", "resolves `pkg:` URLs through Node's resolver"],
+  ]);
+  const gaps = new Map([
+    ["-w", "#86: the binary has no watcher yet"],
+    ["--watch", "#86: the binary has no watcher yet — a file-watching dependency in a crate whose [dependencies] section is empty is a deliberate decision, not a default"],
+  ]);
+  const onlyNpm = [...npmFlags].filter((f) => !flags.includes(f) && !byDesign.has(f) && !gaps.has(f));
+  assert.deepEqual(
+    onlyNpm,
+    [],
+    `cli: these flags are accepted by the npm CLI and rejected by the binary: ${onlyNpm.join(" ")}`,
+  );
+  // The reverse direction of the same check: a gap that has since been closed
+  // must be removed from the list, or it hides the next one.
+  const closed = [...gaps.keys()].filter((f) => flags.includes(f));
+  assert.deepEqual(closed, [], `cli: these are listed as gaps but the binary now has them: ${closed.join(" ")}`);
+
+  console.log(
+    `ok: cli flag parity — ${flags.length} native flags and ${npmFlags.size} npm flags, neither side ahead`,
+  );
 }
 
 // The two `--silence-deprecation` allowlists are the same list written twice,
@@ -2907,13 +2948,16 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     const code = run(["/no/such/file.scss"], { SASSO_BINARY: envBin });
     assert.equal(code.status, 127, `cli: the child's exit code is this process's (got ${code.status})`);
 
-    // The binary has neither flag (#86), so a command line carrying one must
-    // stay here. Delegating would hand `echo` a working build and get nothing
-    // compiled — which is what the file check below would catch.
+    // `--watch` is still not in the binary (#86), and `--update` now is — but
+    // only in a binary of THIS version, and `SASSO_BINARY` is documented as
+    // version-unchecked. So a command line carrying either must stay here
+    // rather than be handed to whatever that variable names. Delegating would
+    // give `echo` a working build and compile nothing — which is what the
+    // file check below would catch.
     {
       const upd = run(argv("f.css", "--update"), { SASSO_BINARY: echo });
       compiles("--update with a binary configured", upd, "f.css");
-      assert.match(upd.stderr, /--update is not in the binary/, "cli: … and the reason is readable");
+      assert.match(upd.stderr, /version is unchecked/, "cli: … and the reason is readable");
     }
     {
       // `--watch <input>` with no output: the guard runs before the engine, so
