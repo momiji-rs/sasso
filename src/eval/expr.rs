@@ -745,8 +745,16 @@ impl<'a> Evaluator<'a> {
                 // The proprietary Microsoft `alpha()` filter overload (below)
                 // is not a call to the global `alpha()` at all — dart passes it
                 // through as a CSS function and deprecates nothing.
-                let ms_alpha_filter =
-                    canonical == "alpha" && crate::builtins::ms_filter_args(&pos_args, &named).is_some();
+                //
+                // GLOBAL calls only, like `css_filter_call` below: after `@use
+                // "sass:color" as *` the bare `alpha(opacity=20)` is
+                // `color.alpha`, which dart passes through AND deprecates as
+                // `color-module-compat`. Returning it from here would skip the
+                // star branch that dispatches to the module and emits that
+                // warning, so the star path must fall through to it (#124).
+                let ms_alpha_filter = via_star.is_none()
+                    && canonical == "alpha"
+                    && crate::builtins::ms_filter_args(&pos_args, &named).is_some();
                 // Same reasoning for the four names that are BOTH a CSS filter
                 // function and a Sass global colour function: with a plain-CSS
                 // argument (`filter: grayscale(1)`) the call is the CSS filter

@@ -11261,6 +11261,12 @@ fn parity_namespaced_ms_filter_overload() {
     );
     // A real colour argument is still the channel getter.
     assert_parity_compressed("@use \"sass:color\";\n.a {\n  b: color.alpha(#abc);\n}\n");
+    // The bare name a star import binds is the MODULE member, and takes the
+    // same overload. The global spelling returns such a call verbatim before
+    // dispatch; this one must not, or it never reaches the module (#124).
+    assert_parity_compressed(
+        "@use \"sass:color\" as *;\n.a {\n  filter: alpha(opacity=20);\n  filter: alpha(a=b, c=d);\n  b: alpha(#abc);\n}\n",
+    );
 }
 
 /// Both halves of the module filter overload reached through a function

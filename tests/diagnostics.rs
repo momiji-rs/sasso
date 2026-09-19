@@ -85,6 +85,12 @@ const MATCHING: &[&str] = &[
     // The same rule reached through a function reference, the path that stayed
     // silent when only the direct call was fixed for `global-builtin` above.
     "deprecation-color-module-compat-call-ref",
+    // And through `@use "sass:color" as *`, where the MICROSOFT half is the one
+    // at risk: the global spelling returns that call verbatim before dispatch
+    // (dart deprecates nothing for it), and doing the same for the bare name a
+    // star import binds skipped the module member this rule belongs to. The
+    // star `grayscale` in the fixture above covers the numeric half.
+    "deprecation-color-module-compat-star",
 ];
 
 fn fixtures_dir() -> std::path::PathBuf {
