@@ -1272,15 +1272,29 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const twoWays = spawnSync(process.execPath, [cliPath, "-o", first, src, second], { encoding: "utf8" });
   assert.equal(twoWays.status, 1, "cli: but --output plus a positional output is still rejected");
 
-  // A failed compile drops a stale output (this CLI is always --no-error-css,
-  // and dart removes the file rather than leave the last good build in place).
+  // A failed compile REPLACES the output with a stylesheet describing the
+  // error, as dart does by default. This asserted the opposite until
+  // --error-css was implemented — the test pinned the divergence, which
+  // is how it survived being documented as NOT IMPLEMENTED in --help.
   const stale = join(dir, "stale.css");
   cli(["--no-source-map", src, stale]);
   assert.ok(existsSync(stale), "cli: the first build wrote an output");
   writeFileSync(src, ".a{b:}\n");
   const failed = spawnSync(process.execPath, [cliPath, "--no-source-map", src, stale], { encoding: "utf8" });
   assert.equal(failed.status, 1, "cli: the second build fails");
-  assert.ok(!existsSync(stale), "cli: a failed compile removes the stale output");
+  assert.match(
+    readFileSync(stale, "utf8"),
+    /^\/\* Error: /,
+    "cli: a failed compile leaves error CSS where the stale output was",
+  );
+  // …and --no-error-css is how you ask for the old behaviour: rebuild
+  // from a good source, break it again, and the output goes rather than
+  // being replaced.
+  writeFileSync(src, ".a{b:1}\n");
+  cli(["--no-source-map", src, stale]);
+  writeFileSync(src, ".a{b:}\n");
+  spawnSync(process.execPath, [cliPath, "--no-source-map", "--no-error-css", src, stale], { encoding: "utf8" });
+  assert.ok(!existsSync(stale), "cli: --no-error-css removes it instead");
 
   // ... unless --no-css, which means no output-side effects at all.
   const kept = join(dir, "kept.css");
@@ -3613,6 +3627,91 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     `cli --watch --quiet: the banner still prints: ${quiet.stdout}`,
   );
   console.log("ok: cli --watch — stdout, dart's banner and stamp, --quiet keeps the banner");
+}
+
+// === --error-css: what a failure leaves behind ===
+//
+// This CLI accepted `--error-css` and ignored it, so a failing compile
+// always removed the output where dart replaces it with a stylesheet
+// describing the error. In a --watch loop that is the whole mechanism
+// for seeing the error: the page went unstyled instead of saying why.
+//
+// Measured against dart-sass 1.104.1 and the native binary, which agree
+// on all four:
+//
+//   a compile error, default   -> the output becomes error CSS
+//   the same, --no-error-css   -> the output is removed
+//   a file that cannot be READ -> the output is left exactly as it was
+//   --no-css                   -> the output is left exactly as it was
+//
+// The third is the one this CLI also had wrong in the other direction:
+// an unreadable entry is not a compile error, there is nothing to
+// render, and the previous build stays.
+{
+  const { asciiGutter, errorCss } = await import("./npm/_errorcss.mjs");
+
+  // The gutter swap, which is how the ASCII half of the comment is
+  // derived from the Unicode message the engine hands over.
+  {
+    const unicode = 'Error: oops\n  ╷\n1 │ .a { b: c; }\n  │        ^\n  ╵\n  x.scss 1:8  root stylesheet';
+    assert.equal(
+      asciiGutter(unicode),
+      "Error: oops\n  ,\n1 | .a { b: c; }\n  |        ^\n  '\n  x.scss 1:8  root stylesheet",
+      "error-css: the gutter becomes , | '",
+    );
+    // Anchored to the gutter, NOT a blanket replace: a stylesheet that
+    // contains a box-drawing character keeps it when the diagnostic
+    // quotes the line back.
+    assert.equal(
+      asciiGutter('  ╷\n1 │ .a { content: "│"; }\n  ╵'),
+      '  ,\n1 | .a { content: "│"; }\n  \'',
+      "error-css: a box character in the SOURCE line is left alone",
+    );
+  }
+
+  // `*/` in the message would close the comment; dart swaps the slash.
+  assert.match(errorCss("Error: a */ b"), /\* Error: a \*∕ b \*\//, "error-css: */ cannot close the comment");
+  // Non-ASCII in `content:` is escaped as `\hex `.
+  assert.match(errorCss("Error: x\n  ╷"), /\\2577 /, "error-css: the box character is escaped for content");
+
+  // And end to end, all four rules.
+  const dir = mkdtempSync(join(tmpdir(), "sasso-errcss-"));
+  writeFileSync(join(dir, "good.scss"), ".ok { a: b; }\n");
+  writeFileSync(join(dir, "bad.scss"), '@use "nope";\n');
+  const out = join(dir, "o.css");
+  const run = (...args) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { encoding: "utf8", cwd: dir });
+  const rebuild = () => {
+    rmSync(out, { force: true });
+    run("good.scss", "o.css");
+  };
+
+  rebuild();
+  run("bad.scss", "o.css");
+  const css = readFileSync(out, "utf8");
+  assert.match(css, /^\/\* Error: Can't find stylesheet to import\./, "error-css: the comment leads");
+  assert.match(css, /^ \* +,$/m, "error-css: the comment's gutter is ASCII");
+  assert.match(css, /body::before \{/, "error-css: and the rule follows");
+  assert.match(css, /content: "Error: [^"]*\\2577 /, "error-css: content keeps the Unicode gutter, escaped");
+
+  rebuild();
+  run("--no-error-css", "bad.scss", "o.css");
+  assert.ok(!existsSync(out), "error-css: --no-error-css removes the output instead");
+
+  rebuild();
+  run("/no/such/file.scss", "o.css");
+  assert.equal(
+    readFileSync(out, "utf8"),
+    ".ok {\n  a: b;\n}\n",
+    "error-css: an unreadable entry is not a compile error — the last build stays",
+  );
+
+  rebuild();
+  run("--no-css", "bad.scss", "o.css");
+  assert.equal(readFileSync(out, "utf8"), ".ok {\n  a: b;\n}\n", "error-css: --no-css touches nothing");
+
+  rmSync(dir, { recursive: true, force: true });
+  console.log("ok: --error-css — written, removed, or left alone, as dart does");
 }
 
 // === the watch event filter, including the branch this platform cannot reach ===

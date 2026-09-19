@@ -35,6 +35,7 @@ import { DEPRECATION_IDS } from "./_deprecations.mjs";
 import { triggersRecompile } from "./_watchfilter.mjs";
 import { coalesce } from "./_coalesce.mjs";
 import { makeProbe } from "./_probe.mjs";
+import { errorCss } from "./_errorcss.mjs";
 // The prebuilt-addon rules, shared with native.mjs: which engine this platform
 // is SUPPOSED to run decides whether a wasm fallback is news (see `loadEngine`).
 import { nativePackage, platformKey } from "./_addon.mjs";
@@ -419,9 +420,8 @@ Options:
       --[no-]stop-on-error           Don't compile more files once an error is
                                      encountered.
       --[no-]error-css               On a compile error, write a stylesheet
-                                     describing it. NOT IMPLEMENTED in this CLI:
-                                     the flag is accepted, and a failing compile
-                                     always behaves as --no-error-css.
+                                     describing it instead of removing the
+                                     output (default on, as in dart-sass).
       --no-css                       Compile but discard the CSS: no output
                                      file, no stdout, and an existing output is
                                      left exactly as it was.
@@ -509,6 +509,7 @@ function parseArgs(argv) {
     embedSources: false,
     embedSourceMap: false,
     charset: true,
+    errorCss: true,
     quiet: false,
     quietDeps: false,
     silenceDeprecations: [],
@@ -600,8 +601,10 @@ function parseArgs(argv) {
       // feature this CLI does not implement (see HELP), and `--color` is a
       // no-op in the native CLI too. (`--jobs` is no longer in this company:
       // it caps the worker pool — see `runJobs`.)
-    } else if (a === "--error-css" || a === "--no-error-css") {
-      // no-op: a failing compile always behaves as --no-error-css here
+    } else if (a === "--error-css") {
+      opts.errorCss = true;
+    } else if (a === "--no-error-css") {
+      opts.errorCss = false;
     } else if (a === "-c" || a === "--color" || a === "--no-color") {
       // no-op: output is never colored
     } else if (a === "--unicode") {
@@ -920,20 +923,34 @@ function emit(result, outPath, wantMap, opts, stdinText) {
 }
 
 /**
- * A compile failed: this CLI always behaves as `--no-error-css`, and dart then
- * REMOVES a stale output file so nothing keeps consuming the CSS of an earlier
- * successful build (the `.map`, if any, is left alone). `--no-css` means no
- * output-side effects at all, so it leaves the file be.
+ * A COMPILE failed: replace the output with a stylesheet describing the
+ * error, so the page shows what broke instead of the CSS of an earlier
+ * build. `--no-error-css` removes the output instead, and `--no-css`
+ * means no output-side effects at all.
+ *
+ * Measured against dart-sass 1.104.1 and the native binary, which agree:
+ *
+ *   a compile error, default   -> the output becomes error CSS
+ *   the same, --no-error-css   -> the output is removed
+ *   a file that cannot be READ -> the output is left exactly as it was
+ *   --no-css                   -> the output is left exactly as it was
+ *
+ * The third is the reason `message` is required rather than optional: an
+ * unreadable entry is not a compile error, there is no diagnostic to
+ * render, and the previous build stays. This CLI used to remove the
+ * output for that case too.
  */
-function discardStaleOutput(outPath, opts) {
+function reportFailure(outPath, opts, message) {
   if (!outPath || opts.noCss) return undefined;
   try {
-    rmSync(outPath, { force: true });
+    if (opts.errorCss !== false) writeFileSync(outPath, errorCss(message));
+    else rmSync(outPath, { force: true });
     return undefined;
   } catch (e) {
     // Returned rather than printed: this belongs to one job's diagnostics, and
     // the caller decides when that job's block reaches stderr.
-    return `error: cannot remove ${outPath}: ${e && e.message ? e.message : e}`;
+    const what = opts.errorCss !== false ? "write" : "remove";
+    return `error: cannot ${what} ${outPath}: ${e && e.message ? e.message : e}`;
   }
 }
 
@@ -1420,9 +1437,9 @@ function runWatch(input, output, common, opts) {
       // mistake with a worse outcome — and it is only unreachable today
       // because an aliased watch never recompiles, which is one filter
       // change away from being false.
-      if (!aliasesASource()) {
-        const removeError = discardStaleOutput(output, opts);
-        if (removeError) process.stderr.write(`${removeError}\n`);
+      if (!aliasesASource() && e instanceof Exception) {
+        const writeError = reportFailure(output, opts, e.message);
+        if (writeError) process.stderr.write(`${writeError}\n`);
       }
       // Keep the set we already had — a failure reports no `loadedUrls`,
       // and throwing away what we knew is what broke recovery — and accept
@@ -1648,9 +1665,13 @@ async function main() {
       if (run.error) throw run.error;
       result = run.value;
     } catch (e) {
-      const removeError = discardStaleOutput(output, opts);
-      if (removeError) writeStderrSync(`${removeError}\n`);
-      if (e instanceof Exception) fail(e.message);
+      if (e instanceof Exception) {
+        const writeError = reportFailure(output, opts, e.message);
+        if (writeError) writeStderrSync(`${writeError}\n`);
+        fail(e.message);
+      }
+      // Not a compile error — an unreadable file, say. dart leaves the
+      // previous output exactly as it was.
       fail(`error: ${e && e.message ? e.message : e}`);
     }
     const writeError = emit(result, output, wantMap, opts, source);
@@ -2061,10 +2082,12 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
             : `error: ${e && e.message ? e.message : e}`;
       note(i, String(msg).replace(/\n?$/, "\n"));
       failed++;
-      // This CLI always behaves as --no-error-css, and dart then drops a stale
-      // output rather than leaving the last good build in place.
-      const removeError = discardStaleOutput(output, opts);
-      if (removeError) note(i, `${removeError}\n`);
+      // Only a COMPILE error touches the output; an unreadable entry
+      // leaves the previous build in place, as dart does.
+      if (e instanceof Exception) {
+        const writeError = reportFailure(output, opts, e.message);
+        if (writeError) note(i, `${writeError}\n`);
+      }
       if (opts.stopOnError || jobs.length === 1) {
         if (ctl) Atomics.store(ctl, 1, 1);
         break;
