@@ -31,5 +31,12 @@ sasso = { path = ".." }
 napi-build = "2"
 
 [profile.release]
+# No `panic` key, i.e. `unwind`, and deliberately so — the core crate sets
+# `abort` and `ffi/` sets `unwind` with its own reason, so this is the last of
+# the four manifests that would otherwise be silent on the question. napi-rs
+# turns a Rust panic into a thrown JS error by catching the unwind at the
+# boundary; under `abort` that becomes a hard process exit, which would take
+# down the host Node process (and every other worker in a CLI run) instead of
+# failing one compile.
 lto = true
 codegen-units = 1
