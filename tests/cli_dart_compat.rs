@@ -2403,7 +2403,21 @@ fn update_narrates_each_written_file() {
         line.ends_with("Compiled one.scss to one.css."),
         "dart's wording: {line:?}"
     );
-    assert!(stamp(line), "expected a [YYYY-MM-DD HH:MM] stamp: {line:?}");
+    // The stamp is present wherever the local offset can be found, and
+    // absent where it cannot. Unix reads the tz database; Windows keeps its
+    // zone in the registry, which `src/localtime` deliberately does not
+    // reach, so the line there is the same minus the bracket. Asserting
+    // this per platform rather than unconditionally is the difference
+    // between a test that documents the behaviour and one that only ever
+    // ran on the author's machine.
+    if cfg!(unix) {
+        assert!(stamp(line), "expected a [YYYY-MM-DD HH:MM] stamp: {line:?}");
+    } else {
+        assert!(
+            line.starts_with("Compiled"),
+            "with no local offset the line drops its stamp, not its content: {line:?}"
+        );
+    }
 
     // A skipped file is silent — this is what makes a no-op build quiet.
     std::thread::sleep(std::time::Duration::from_millis(1100));

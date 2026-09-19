@@ -85,6 +85,23 @@ jobs:
           Write-Host "skipping $($skips.Count / 2) known failures"
           cargo test --release --no-fail-fast -- @skips
           if ($LASTEXITCODE -ne 0) { throw "cargo test failed" }
+      # The one behaviour that differs by platform rather than merely needing
+      # to work on it: with no tz database to read, the compile line keeps its
+      # text and drops its timestamp. Asserting the ABSENCE is a pin — adding
+      # a Windows clock (#85, #86) must fail here rather than change output
+      # quietly.
+      - name: --update narrates without a timestamp
+        shell: pwsh
+        run: |
+          Set-Content -Path one.scss -Value 'a {b: c}'
+          $out = & ./target/release/sasso.exe --no-source-map --update one.scss:one.css
+          Write-Host "stdout: $out"
+          if ($out -notmatch 'Compiled one\.scss to one\.css\.$') {
+            throw "expected dart's wording, got: $out"
+          }
+          if ($out -match '^\[') {
+            throw "no tz database is readable here, so there should be no stamp: $out"
+          }
 
   parity:
     name: dart-sass parity
