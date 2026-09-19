@@ -24,6 +24,7 @@
 import { spawn } from "node:child_process";
 import {
   closeSync,
+  existsSync,
   ftruncateSync,
   mkdtempSync,
   openSync,
@@ -34,13 +35,28 @@ import {
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
-const [cmd, ...pre] = process.argv.slice(2);
-if (!cmd) {
+const given = process.argv.slice(2);
+if (given.length === 0) {
   console.error("usage: node bench/scripts/watch_latency.mjs <cmd> [args...]");
   process.exit(64);
 }
+
+// Each measurement runs in a fresh temp directory, so the child's cwd is
+// NOT the one the harness was invoked from — and `node wasm/npm/cli.mjs`,
+// the invocation this file's own usage line recommends, then looks for
+// `<temp>/wasm/npm/cli.mjs` and dies before the first sample. (Shipped
+// exactly that way, because every run during development passed absolute
+// paths.) Anything that names a real file here is pinned to an absolute
+// path now; `node`, `sass` and bare flags are left for the PATH lookup.
+const [cmd, ...pre] = given.map((a) => {
+  try {
+    return existsSync(a) ? resolve(a) : a;
+  } catch {
+    return a;
+  }
+});
 
 const ITERATIONS = Number(process.env.WATCH_BENCH_ITERATIONS ?? 15);
 const SLOW_GAP_MS = Number(process.env.WATCH_BENCH_SLOW_GAP ?? 25);

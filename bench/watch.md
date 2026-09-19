@@ -10,6 +10,11 @@ node bench/scripts/watch_latency.mjs node wasm/npm/cli.mjs
 node bench/scripts/watch_latency.mjs path/to/sass
 ```
 
+Each measurement runs in its own temp directory, so the harness pins any
+argument that names a real file to an absolute path before spawning —
+otherwise the invocation above looks for `<temp>/wasm/npm/cli.mjs` and dies
+before the first sample, which is how it shipped the first time.
+
 ## Current state (measured 2026-09-19, macOS, M2 Max)
 
 Median edit-to-correct-CSS, 15 saves per style, three runs back to back on
