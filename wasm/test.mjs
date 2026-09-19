@@ -614,6 +614,10 @@ assert.ok(
         input: css,
         cwd: d,
       });
+    // A REAL file named `-` next to the output: `statSync("-")` succeeds on
+    // it, so a freshness check that stats the string instead of recognising
+    // standard input calls an output newer than this decoy fresh.
+    writeFileSync(join(d, "-"), ".decoy { color: green; }\n");
     const first = at(".a { color: #111; }\n");
     assert.equal(first.status, 0, `cli: --update accepts a \`-\` input (${form.join(" ")}): ${first.stderr}`);
     assert.match(readFileSync(join(d, "out.css"), "utf8"), /#111/, "cli: first compile");
@@ -743,7 +747,6 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // work lands.
   const byDesign = new Map([
     ["--engine", "reports which engine the npm CLI chose; the binary IS the engine"],
-    ["--pkg-importer", "resolves `pkg:` URLs through Node's resolver"],
   ]);
   const gaps = new Map([
     ["-w", "#86: the binary has no watcher yet"],
@@ -755,8 +758,31 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     [],
     `cli: these flags are accepted by the npm CLI and rejected by the binary: ${onlyNpm.join(" ")}`,
   );
-  // The reverse direction of the same check: a gap that has since been closed
-  // must be removed from the list, or it hides the next one.
+  // Neither list may contain a flag that is not a real difference, in either
+  // direction, or the guard reports parity it has not checked.
+  //
+  // `byDesign` says "this will never exist on the other side". Nothing used
+  // to hold it to that: `onlyNpm` filters byDesign OUT, so if the binary ever
+  // grew `--engine` every assertion here would still pass while the stated
+  // reason had become false. It had already gone wrong the other way — the
+  // list carried `--pkg-importer`, which is a DART flag that neither of ours
+  // has, with a description claiming the npm CLI resolves `pkg:` URLs. An
+  // exception for a difference that does not exist is worse than no entry:
+  // it reads as a checked, deliberate divergence.
+  const phantom = [...byDesign.keys()].filter((f) => !npmFlags.has(f));
+  assert.deepEqual(
+    phantom,
+    [],
+    `cli: byDesign names flags the npm CLI does not have: ${phantom.join(" ")}`,
+  );
+  const crossed = [...byDesign.keys()].filter((f) => flags.includes(f));
+  assert.deepEqual(
+    crossed,
+    [],
+    `cli: byDesign says these never cross, and the binary now has them: ${crossed.join(" ")}`,
+  );
+  // And the same for `gaps`: a gap that has since been closed must be removed
+  // from the list, or it hides the next one.
   const closed = [...gaps.keys()].filter((f) => flags.includes(f));
   assert.deepEqual(closed, [], `cli: these are listed as gaps but the binary now has them: ${closed.join(" ")}`);
 

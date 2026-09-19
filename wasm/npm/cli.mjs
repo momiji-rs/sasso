@@ -1130,6 +1130,15 @@ function parseJobs(positionals, output) {
  * actually key on.
  */
 function isFresh(output, input, deps) {
+  // `-` is STANDARD INPUT, not a file named `-`. Two separate reasons it can
+  // never be fresh, and the first one bites in practice: with a real file
+  // called `-` in the working directory — which `sass - out.css` does not
+  // create but a shell redirect easily can — `statSync("-")` succeeds, an
+  // output newer than that unrelated file reports FRESH, and the run keeps
+  // stale CSS. Even without one, standard input has no mtime, so there is no
+  // honest comparison to make. Same rule as the binary, where the entry's
+  // `source_path()` is `None` and `output_is_fresh` returns false.
+  if (input === "-") return false;
   try {
     if (!existsSync(output)) return false;
     const out = statSync(output).mtimeMs;
