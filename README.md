@@ -151,8 +151,10 @@ happens to have; a mismatch is passed over in silence. `SASSO_BINARY=<path>`
 names a binary explicitly, version unchecked, and `SASSO_BINARY=0` turns the
 hand-off off. `SASSO_DEBUG_ENGINE=1` prints which of these happened and why.
 `--watch` always stays in-process, because the binary has no watcher yet
-(#86); `--update` hands off like anything else now that the binary has it, and
-`sasso --engine` reports the hand-off rather than taking it.
+(#86). `--update` hands off only on the version-MATCHED path: the binary has
+the flag now, but `SASSO_BINARY` is unchecked by design and may name one from
+before it, so that route stays in-process too. `sasso --engine` reports the
+hand-off rather than taking it.
 
 **Importing the library** selects nothing: `import … from "sasso"` is always
 the size-optimised wasm build and ignores `SASSO_ENGINE`, `"sasso/speed"` is

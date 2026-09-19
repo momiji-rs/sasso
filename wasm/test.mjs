@@ -600,6 +600,18 @@ assert.ok(
     "cli: --update rebuilds when a transitively imported partial changes",
   );
 }
+{
+  // `--update` with `--stdin` is a usage error in dart, and now in both of
+  // ours. This CLI happened to be safe already (statting `-` throws, so
+  // nothing looked fresh) while the binary silently kept stale CSS; refusing
+  // the pair is what dart does and leaves neither to luck.
+  const r = spawnSync(process.execPath, [cliPath, "--stdin", "--update", "out.css"], {
+    encoding: "utf8",
+    input: ".a { color: red }\n",
+  });
+  assert.notEqual(r.status, 0, "cli: --update with --stdin is refused");
+  assert.match(r.stderr, /--update is not allowed with --stdin\./, "cli: … in dart's words");
+}
 console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + embed-map/quiet/multi-IO/update");
 
 // === Phase 3b: the npm CLI must accept every flag the NATIVE CLI accepts ===
@@ -691,8 +703,11 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // deliberate, each with its reason; anything else fails.
   const cliSrc2 = readFileSync(new URL("./npm/cli.mjs", import.meta.url), "utf8");
   const npmFlags = new Set();
-  for (const m of cliSrc2.matchAll(/a === "(--?[a-z-]+)"/g)) npmFlags.add(m[1]);
-  for (const m of cliSrc2.matchAll(/a\.startsWith\("(--[a-z-]+)=/g)) npmFlags.add(m[1]);
+  // `A-Za-z`, not `a-z`: the parser accepts `-I` and would accept a future
+  // `-X`, and a lowercase-only pattern drops them from this set silently —
+  // which is the failure mode this whole guard exists to prevent.
+  for (const m of cliSrc2.matchAll(/a === "(--?[A-Za-z-]+)"/g)) npmFlags.add(m[1]);
+  for (const m of cliSrc2.matchAll(/a\.startsWith\("(--?[A-Za-z-]+)=/g)) npmFlags.add(m[1]);
   assert.ok(npmFlags.size > 20, `drift: extracted a plausible npm flag set (got ${npmFlags.size})`);
 
   // Two lists, not one, because they mean different things. A flag in

@@ -594,6 +594,15 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
     if cli.source_map_urls.is_some() && cli.source_map == Some(false) {
         return Err("--source-map-urls isn't allowed with --no-source-map.".to_string());
     }
+    // dart: `--update is not allowed with --stdin.`, exit 64. Standard input
+    // has no mtime to compare, so there is no honest answer to "is the output
+    // newer than its input" — and the silent one is the dangerous one. An
+    // earlier version of this let the check fall through to the dependency
+    // loop, which for a stdin unit with no imports is empty and reports
+    // FRESH, leaving the previous run's CSS on disk.
+    if cli.update && cli.stdin_flag {
+        return Err("--update is not allowed with --stdin.".to_string());
+    }
     if !cli.pairs.is_empty() {
         if !cli.positionals.is_empty() {
             return Err("Positional and \":\" arguments may not both be used.".to_string());
@@ -829,8 +838,9 @@ struct Unit {
 impl Unit {
     /// The entry's own file, when it has one. The importer never sees it — the
     /// entry is read directly — so `--update` stats it separately from the
-    /// files the compile pulled in. A stdin unit has no path and no mtime, and
-    /// `--update` treats it as always out of date.
+    /// files the compile pulled in. A stdin unit has no path, and rather than
+    /// invent an answer for it `--update` with `--stdin` is refused in
+    /// `parse_args`, as dart refuses it.
     fn source_path(&self) -> Option<&Path> {
         match &self.source {
             Source::File(p) => Some(p.as_path()),
@@ -1344,7 +1354,12 @@ fn output_is_fresh(output: &Path, input: Option<&Path>, deps: &[PathBuf]) -> boo
     let Ok(out) = std::fs::metadata(output).and_then(|m| m.modified()) else {
         return false;
     };
-    for src in input.into_iter().chain(deps.iter().map(|p| p.as_path())) {
+    // A `None` input is an entry with no file behind it. `parse_args` refuses
+    // the one way that can happen with `--update`, and this stays defensive
+    // anyway: `into_iter()` on `None` yields nothing, so a missing input would
+    // otherwise leave a no-import unit with an EMPTY loop, which reports fresh.
+    let Some(input) = input else { return false };
+    for src in std::iter::once(input).chain(deps.iter().map(|p| p.as_path())) {
         match std::fs::metadata(src).and_then(|m| m.modified()) {
             Ok(t) if t <= out => {}
             // Newer than the output, or gone: rebuild.

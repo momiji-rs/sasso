@@ -2170,3 +2170,28 @@ fn update_skips_a_fresh_output_and_rebuilds_on_a_deep_partial() {
         read(&dir, "out.css")
     );
 }
+
+/// `--update` with `--stdin` is a usage error, as in dart-sass.
+///
+/// Standard input has no mtime, so "is the output newer than its input" has no
+/// honest answer — and the silent answer is the dangerous one. Before this,
+/// the freshness loop simply skipped a `None` input, so a stdin unit with no
+/// imports had an EMPTY loop, reported fresh, and left the previous run's CSS
+/// on disk.
+#[test]
+fn update_with_stdin_is_a_usage_error() {
+    let dir = scratch("update-stdin");
+    let r = run_bin(
+        BIN,
+        &dir,
+        &["--stdin", "--update", "out.css"],
+        Some(".a { color: red }\n"),
+    );
+    assert_eq!(r.code, 64, "dart exits 64 here: {}", r.stderr);
+    assert!(
+        r.stderr.contains("--update is not allowed with --stdin."),
+        "dart's wording: {}",
+        r.stderr
+    );
+    assert!(!dir.join("out.css").exists(), "nothing should have been written");
+}

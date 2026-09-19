@@ -697,6 +697,12 @@ function validate(opts) {
     if (opts.embedSources) fail("error: --embed-sources isn't allowed with --no-source-map.");
     if (opts.sourceMapUrls !== undefined) fail("error: --source-map-urls isn't allowed with --no-source-map.");
   }
+  // dart: `--update is not allowed with --stdin.` Standard input has no mtime,
+  // so "is the output newer than its input" has no honest answer. This CLI
+  // happened to do the safe thing (statting `-` throws, so nothing looked
+  // fresh) while the binary did the dangerous one; refusing the pair is what
+  // dart does and leaves neither to luck.
+  if (opts.update && opts.stdin) fail("error: --update is not allowed with --stdin.");
   if (pairs) {
     if (!operands.every((a) => colonIndex(a) >= 0)) {
       fail('error: Positional and ":" arguments may not both be used.');
