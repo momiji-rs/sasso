@@ -30,9 +30,9 @@ Conformance is tracked separately as a ratchet against the official
 
 - **Compressed output serializes colors and long fractions the way dart-sass
   does** (#142's gate made this measurable). The compressed ratchet landed
-  scoring 12,579 of 14,258 cases; two rules account for 1,396 of the 1,679
-  failures, and both were invisible to the expanded gate because they only
-  change what `--style=compressed` writes:
+  scoring 12,579 of 14,258 cases, and 1,528 of those 1,679 failures were cases
+  whose *expanded* CSS is byte-exact, so the expanded gate could not see them
+  at all. Two rules account for 1,396 of the 1,528:
 
   - A `lab()`/`lch()`/`oklab()`/`oklch()` lightness is written as the
     channel's own stored number with no `%` — the same digits for lab and lch,

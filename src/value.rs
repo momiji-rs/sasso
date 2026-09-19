@@ -2338,9 +2338,11 @@ impl ModernColor {
     /// 100, oklab lightness over 1). Missing → `none`; non-finite → a `%`-unit
     /// `calc()` constant (`calc(infinity * 1%)`).
     ///
-    /// Compressed output drops the `%` and writes the channel's own stored
-    /// value instead, which is the same number for lab/lch (0–100) but the
-    /// unscaled one for oklab/oklch (0–1). dart-sass writes the unit-less form
+    /// Compressed output drops the `%` of a *finite* channel and writes the
+    /// channel's own stored value instead, which is the same number for lab/lch
+    /// (0–100) but the unscaled one for oklab/oklch (0–1). A non-finite channel
+    /// keeps its `%` in either style, because the unit is what makes the
+    /// `calc()` constant a percentage. dart-sass writes the unit-less form
     /// unconditionally here rather than picking the shorter of the two:
     /// `[measured]` against dart-sass 1.104.1, `oklab(33.333333% .1 -0.1)`
     /// compresses to `oklab(.33333333 .1 -0.1)` — the same length — and
@@ -2357,10 +2359,11 @@ impl ModernColor {
     /// Serialize a hue channel with the `deg` suffix. Missing → `none`;
     /// non-finite → a `deg`-unit `calc()` constant (`calc(NaN * 1deg)`).
     ///
-    /// Compressed output drops `deg`: an unadorned number means degrees in
-    /// every function that takes a hue, so the suffix is three bytes of
-    /// nothing. This applies to the modern form of hsl/hwb as well as to
-    /// lch/oklch.
+    /// Compressed output drops the `deg` of a *finite* hue: an unadorned number
+    /// means degrees in every function that takes one, so the suffix is three
+    /// bytes of nothing. This applies to the modern form of hsl/hwb as well as
+    /// to lch/oklch. A non-finite hue keeps its `deg` in either style, since
+    /// the unit is part of the `calc()` constant.
     fn chan_hue(&self, i: usize, compressed: bool) -> String {
         match self.channels[i] {
             None => "none".to_string(),
