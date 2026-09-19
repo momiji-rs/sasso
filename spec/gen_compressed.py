@@ -45,6 +45,7 @@ The reference binary must honour the same contract as SASS_BIN:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -71,6 +72,29 @@ def reference_version(dart_bin: str) -> str:
         return "unknown"
     m = re.match(r"(\d+\.\d+\.\d+)", text)
     return m.group(1) if m else (text.splitlines()[0] if text else "unknown")
+
+
+def pinned_dart_sass() -> str | None:
+    """The dart-sass version this repo's oracle is defined against.
+
+    The ratchet refuses a manifest whose `dart_sass` header disagrees with the
+    baseline, so generating from an unpinned `npx sass` would produce a
+    manifest that is either rejected later or -- worse, if someone bumps the
+    baseline to match -- silently redefines the oracle. The pin is read from
+    the baselines rather than duplicated here.
+    """
+    for name in ("BASELINE_COMPRESSED.json", "BASELINE.json"):
+        path = HERE / name
+        if not path.exists():
+            continue
+        try:
+            version = json.loads(path.read_text(encoding="utf-8")).get(
+                "dart_sass")
+        except ValueError:
+            continue
+        if version:
+            return str(version)
+    return None
 
 
 def spec_commit() -> str:
@@ -162,6 +186,10 @@ def main() -> int:
     ap.add_argument("--filter", default=None,
                     help="only cases whose name contains this substring")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--allow-version-mismatch", action="store_true",
+                    help="generate even though the reference compiler is not "
+                         "the pinned version (use when deliberately moving "
+                         "the pin, and bump the baselines in the same commit)")
     ap.add_argument("--show", default=None, metavar="CASE",
                     help="print the reference compressed CSS for one case "
                          "(and ours, when SASS_BIN is set) instead of "
@@ -169,6 +197,12 @@ def main() -> int:
     args = ap.parse_args()
 
     dart_bin = os.environ.get("DART_SASS", str(DEFAULT_DART))
+    pin = pinned_dart_sass()
+    if pin and "DART_SASS_VERSION" not in os.environ:
+        # Read by spec/dartsass.sh, so the default path is `npx sass@<pin>`
+        # rather than whatever npx resolves today. A custom DART_SASS that
+        # ignores it is caught by the version check below instead.
+        os.environ["DART_SASS_VERSION"] = pin
     suite = resolve_suite(args.suite)
     if not suite.exists():
         print(f"ERROR: suite not found: {suite} — run spec/fetch.sh first",
@@ -182,6 +216,20 @@ def main() -> int:
     commit = spec_commit()
     print(f"reference : {dart_bin}  (dart-sass {version})")
     print(f"suite     : {suite}  (pinned {commit[:12]})")
+    if pin and version != pin:
+        tag = "WARNING" if args.allow_version_mismatch else "ERROR"
+        print(f"{tag}: the reference is dart-sass {version} but this repo's "
+              f"oracle is pinned to {pin}.", file=sys.stderr)
+        if not args.allow_version_mismatch:
+            print("A manifest generated from another version is not the "
+                  "oracle the ratchet checks: it would be rejected as stale, "
+                  "or -- if the baselines were bumped to match -- it would "
+                  "quietly redefine parity. Point DART_SASS at "
+                  f"dart-sass {pin}, or pass --allow-version-mismatch and "
+                  "bump the baselines in the same commit.", file=sys.stderr)
+            return 2
+        print("writing the manifest anyway; bump `dart_sass` in both "
+              "baselines in the same commit.", file=sys.stderr)
 
     cases = eligible_cases(suite, args.filter, args.limit)
     print(f"cases     : {len(cases)} non-error, non-skipped")
