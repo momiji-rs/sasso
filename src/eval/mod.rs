@@ -7293,20 +7293,53 @@ fn split_commas(s: &str) -> Segments<'_> {
 /// dart-sass's `[adjacent-compounds]` normalization.
 pub(crate) fn normalize_selector(s: &str) -> String {
     // Fast path: already-canonical selectors skip the two char-vector
-    // materializations below. Equivalence was proven by a check build that
-    // asserted fast == slow on every call across the full sass-spec suite.
+    // materializations below. The `debug_assert` IS the proof of that: every
+    // debug-built test run and every debug spec run re-checks fast == slow on
+    // every call, which is the harness this fast path was originally validated
+    // against and is cheaper to keep than to rebuild.
     if is_canonical_plain(s) {
+        debug_assert_eq!(
+            normalize_selector_slow(s),
+            s,
+            "is_canonical_plain accepted a selector the normalizer would rewrite"
+        );
         return s.to_string();
     }
     normalize_selector_slow(s)
 }
 
 /// Whether `s` is already in canonical form without running the normalizer:
-/// only plain compound characters (ASCII letters/digits, `_-.#%`) separated
+/// only plain compound characters (ASCII letters/digits, `_-.#%:`) separated
 /// by single descendant spaces, with no leading/trailing space. Every rewrite
 /// `normalize_selector` performs — whitespace collapse, hex-escape handling,
 /// attribute/pseudo/combinator canonicalization — is triggered by a character
 /// outside this set.
+///
+/// `:` is in the set, which is what admits the overwhelmingly common
+/// `.btn:hover` / `a::before` shape, and it is sound for a reason worth writing
+/// down because the set cannot be widened by eye. On input drawn from this set
+/// the slow path is the *identity*, in three steps:
+///
+/// 1. The whitespace-collapse pass rewrites nothing: there is no `\`, no
+///    whitespace other than single interior spaces, and no leading or trailing
+///    space to trim.
+/// 2. A `:` is consumed by `copy_pseudo`, which copies the colon(s) and then
+///    the name via `copy_name` — verbatim, since `has_escape` is false — and
+///    skips its argument branch entirely because there is no `(`. Both canon
+///    probes then decline on their first line: `normalize_nth` and
+///    `normalize_pseudo_arg` each open with `text.find('(')?`.
+/// 3. The adjacent-compound rewrite (the one that inserts a descendant space
+///    mid-compound) cannot fire. It needs `type_selector_starts_at` to be true
+///    while `mid_compound` is set, and every boundary character in this set
+///    consumes its own name through `copy_name`, whose `is_name_char` excludes
+///    `. # % :` — so after any simple selector the next character is one of
+///    `. # % :` or a space, and none of those starts a type selector.
+///
+/// Do **not** add `> + ~` here on the strength of the same argument: the slow
+/// path rewrites `>a` to `> a`, so those need a separate proof about spacing
+/// and the trailing-combinator case. The set is also deliberately disjoint from
+/// `has_bogus_trigger`'s `> + ~ (`, so passing this predicate proves a selector
+/// carries no bogus-combinator trigger.
 fn is_canonical_plain(s: &str) -> bool {
     let b = s.as_bytes();
     if b.is_empty() || b[0] == b' ' || b[b.len() - 1] == b' ' {
@@ -7315,7 +7348,7 @@ fn is_canonical_plain(s: &str) -> bool {
     let mut prev_space = false;
     for &c in b {
         match c {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'#' | b'%' => {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'#' | b'%' | b':' => {
                 prev_space = false;
             }
             b' ' => {
@@ -7337,6 +7370,11 @@ fn is_canonical_plain(s: &str) -> bool {
 /// is owned and canonical, which is the common shape of a nested rule.
 fn normalize_selector_owned(s: String) -> String {
     if is_canonical_plain(&s) {
+        debug_assert_eq!(
+            normalize_selector_slow(&s),
+            s,
+            "is_canonical_plain accepted a selector the normalizer would rewrite"
+        );
         return s;
     }
     normalize_selector_slow(&s)
