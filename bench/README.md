@@ -14,6 +14,11 @@ and **grass** (Rust, in-process via `grass_runner`).
 Latest results: [`three_way.md`](./three_way.md) (sasso vs dart-sass vs grass).
 The older two-way report is [`dart_vs_grass.md`](./dart_vs_grass.md).
 
+A different axis, and the one a person actually feels: [`watch.md`](./watch.md)
+measures how long a SAVE takes to become CSS under `--watch`, across the three
+ways editors write files. It reports spurious errors beside the milliseconds,
+because a watcher that compiles a half-written file looks faster and is worse.
+
 For **why sasso costs what it costs**, rather than how it compares, read
 [`perf_audit_2026-09-15.md`](./perf_audit_2026-09-15.md): a stage split of a
 compile, the levers with measured deltas, and the dead ends not to re-propose.
