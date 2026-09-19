@@ -1384,6 +1384,22 @@ function runWatch(input, output, common, opts) {
       // watchers are guaranteed live (a change saved right after the output
       // appears must not fall between emit and watcher registration).
       rewatch(result.loadedUrls);
+      // Never write over a file this compile READ. `sasso a.scss a.scss`
+      // and `sasso main.scss _v.scss` both replace a source with its own
+      // CSS — measured, and dart does that too for a one-shot compile, so
+      // it is not ours to change there. Under `--watch` dart declines:
+      // the transcript is the banner and nothing else, and the source is
+      // untouched. We compiled and destroyed it, once at startup and
+      // again on every save.
+      //
+      // Silent, because dart is silent. A watch that overwrites your
+      // stylesheet every time you save it is the one outcome worth
+      // ruling out even at the cost of saying nothing.
+      const dest = resolve(output);
+      if (dest === resolve(input) || known.has(dest)) {
+        failing = false;
+        return true;
+      }
       const writeError = emit(result, output, common.sourceMap, opts);
       if (writeError) process.stderr.write(`${writeError}\n`);
       else if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));

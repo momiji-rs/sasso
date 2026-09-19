@@ -4064,7 +4064,56 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     "src/main.scss",
   );
 
-  console.log("ok: cli --watch — burst, atomic save, break/fix, missing dep (local, load path, absent load path), delete/restore, no self-trigger");
+  // A destination that IS a source. `sasso --watch a.scss a.scss` and
+  // `--watch main.scss _v.scss` both replaced a stylesheet with its own
+  // CSS — at startup and then on every save. dart declines: its
+  // transcript is the banner and nothing else, and the file is untouched.
+  //
+  // A one-shot compile overwrites it on all three engines including dart,
+  // so that is not ours to change; this is the watch, where the same
+  // mistake repeats for as long as the process lives.
+  for (const [label, args, setup, victim, intact] of [
+    [
+      "the input is the output",
+      ["a.scss", "a.scss"],
+      (d) => writeFileSync(join(d, "a.scss"), "$c: red;\n.a { color: $c; }\n"),
+      "a.scss",
+      "$c: red",
+    ],
+    [
+      "the output is a dependency",
+      ["main.scss", "_v.scss"],
+      (d) => {
+        writeFileSync(join(d, "main.scss"), '@use "v";\n.a { color: v.$c; }\n');
+        writeFileSync(join(d, "_v.scss"), "$c: red;\n");
+      },
+      "_v.scss",
+      "$c: red",
+    ],
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), "sasso-alias-"));
+    setup(dir);
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--watch", ...args], {
+      cwd: dir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    try {
+      await sleep(2000);
+      assert.ok(
+        readFileSync(join(dir, victim), "utf8").includes(intact),
+        `watch: ${label} — the source must survive, found ${JSON.stringify(readFileSync(join(dir, victim), "utf8").slice(0, 40))}`,
+      );
+      assert.ok(!log.includes("Compiled"), `watch: ${label} — and nothing is announced: ${log}`);
+    } finally {
+      proc.kill();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  console.log("ok: cli --watch — burst, atomic save, break/fix, missing dep (local, load path, absent load path), delete/restore, no self-trigger, no writing over a source");
 }
 
 // === Phase 4: custom functions — full Value coverage (sync + async) ===
