@@ -1244,6 +1244,65 @@ fn compressed_drops_what_writes_nothing() {
     assert_eq!(expanded(".a {\n  /* c */\n}"), ".a {\n  /* c */\n}");
 }
 
+/// ...but an at-rule that is NOT `@media`/`@supports` survives an empty block.
+/// dart-sass `_isInvisible` returns false for a `CssAtRule` on purpose —
+/// "because we don't know the semantics of unknown rules, we can't guarantee
+/// that (for example) `@foo {}` isn't meaningful" — while `@media`/`@supports`
+/// have their own AST classes and are invisible when every child is. Measured
+/// against dart-sass 1.104.1.
+#[test]
+fn compressed_keeps_an_empty_at_rule_that_is_not_media_or_supports() {
+    // Authored empty, and unchanged by compression apart from the space.
+    for scss in [
+        "@foo {}",
+        "@font-face {}",
+        "@page {}",
+        "@page :first {}",
+        "@keyframes {}",
+        "@keyframes k {}",
+        "@layer a {}",
+        "@container c {}",
+        "@a b {}",
+    ] {
+        assert_eq!(css_compressed(scss), scss.replace(" {}", "{}"), "{scss}");
+    }
+    // Emptied by compression: the comment goes, the at-rule stays.
+    assert_eq!(css_compressed("@foo { /* c */ }"), "@foo{}");
+    assert_eq!(
+        css_compressed("@keyframes k { 10% { /* c */ } }"),
+        "@keyframes k{}"
+    );
+    assert_eq!(css_compressed("@foo { .a { /* c */ } }"), "@foo{}");
+    // Emptied by `@extend`, which moves the only rule's content into the
+    // earlier block (sass-spec `198_test_extend_within_disparate_...`).
+    assert_eq!(
+        css_compressed(
+            "@foo {.a {b: c}}
+@foo {.d {@extend .a}}"
+        ),
+        "@foo{.a,.d{b:c}}@foo{}"
+    );
+    // A surviving at-rule keeps its `@media` parent alive with it; an at-rule
+    // child that writes nothing does not.
+    assert_eq!(
+        css_compressed("@media (a: b) { @foo { /* c */ } }"),
+        "@media(a: b){@foo{}}"
+    );
+    assert_eq!(css_compressed("@media (a: b) { @media print { /* c */ } }"), "");
+    assert_eq!(
+        css_compressed("@supports (a: b) { @foo { /* c */ } }"),
+        "@supports(a: b){@foo{}}"
+    );
+    // The name is matched as written, so a capitalized one is the generic
+    // at-rule dart parses it as, and survives.
+    assert_eq!(css_compressed("@MEDIA screen { /* c */ }"), "@MEDIA screen{}");
+    // Separators: an empty at-rule ends in `}`, which separates it from
+    // whatever follows, and it leaves no trailing `;` behind.
+    assert_eq!(css_compressed(".a { b: c } @foo {}"), ".a{b:c}@foo{}");
+    assert_eq!(css_compressed("@foo {} .a { b: c }"), "@foo{}.a{b:c}");
+    assert_eq!(css_compressed("@foo { .a { /* c */ } } @bar {}"), "@foo{}@bar{}");
+}
+
 /// A value is verbatim text and can end in a `;` of its own, which dart keeps
 /// — so what may be dropped is decided by the NODE that wrote the last byte,
 /// never by the byte. Measured against dart-sass 1.103.1.
@@ -1455,6 +1514,30 @@ fn compressed_preserved_calculations_drop_the_argument_space() {
     assert_eq!(
         v("calc(1px + clamp(1px, var(--y), 2px))"),
         "a{x:calc(1px + clamp(1px,var(--y),2px))}"
+    );
+    // `round()` preserved because its operands' UNITS cannot combine is a
+    // calculation like any other, not an unquoted string carrying one spelling
+    // for both styles: `[measured]` against dart-sass 1.104.1, including the
+    // strategy keyword, which the implicit-`nearest` two-argument form omits.
+    assert_eq!(v("round(1px, 2bar)"), "a{x:round(1px,2bar)}");
+    assert_eq!(v("round(1px, 10%)"), "a{x:round(1px,10%)}");
+    assert_eq!(v("round(nearest, 1px, 10%)"), "a{x:round(nearest,1px,10%)}");
+    assert_eq!(v("round(up, 1px, 2bar)"), "a{x:round(up,1px,2bar)}");
+    assert_eq!(v("round(to-zero, 1foo, 2bar)"), "a{x:round(to-zero,1foo,2bar)}");
+    assert_eq!(v("round(1px, var(--y))"), "a{x:round(1px,var(--y))}");
+    assert_eq!(
+        v("calc(1px + round(1px, 2bar))"),
+        "a{x:calc(1px + round(1px,2bar))}"
+    );
+    // Expanded keeps every space, and the value's TYPE is what dart reports.
+    let expanded = |scss: &str| compile(scss, &Options::default()).expect("compile");
+    assert_eq!(
+        expanded("a { x: round(nearest, 1px, 10%) }"),
+        "a {\n  x: round(nearest, 1px, 10%);\n}"
+    );
+    assert_eq!(
+        expanded("@use \"sass:meta\"; a { x: meta.type-of(round(1px, 2bar)) }"),
+        "a {\n  x: calculation;\n}"
     );
     // A `@supports` declaration is not a value: dart writes it verbatim, space
     // and all, in both styles.

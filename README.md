@@ -293,15 +293,17 @@ dart-sass 1.104.1's **compressed** output for the same cases
 
 | Metric | Value |
 | --- | --- |
-| **Passing, compressed** | **13,975 — 98.02% of attempted** |
-| ↳ byte-exact compressed CSS | 11,483 |
+| **Passing, compressed** | **14,001 — 98.20% of attempted** |
+| ↳ byte-exact compressed CSS | 11,509 |
 | ↳ error specs correctly rejected (style-independent) | 2,492 |
 
 The gate found 1,528 cases that compile to byte-exact `expanded` CSS and to
 compressed CSS that is not byte-exact — every one of them byte-shortening
-rather than meaning. Two rules accounted for 1,396: the `%`/`deg` a colour
-function's lightness and hue keep when compressed, and which of dart's two
-number writers decides whether a fraction loses its leading zero. 132 cases
+rather than meaning. Three mechanisms have accounted for 1,422 of them: the
+`%`/`deg` a colour function's lightness and hue keep when compressed, which of
+dart's two number writers decides whether a fraction loses its leading zero,
+and which nodes survive compression empty (`@media {}` goes, `@font-face {}`
+stays — dart keeps an at-rule it does not know the semantics of). 106 cases
 remain, 62 of which are ones where dart-sass 1.104.1's own expanded output no
 longer matches the expectation sass-spec ships. This is a ratchet like the
 other one — it can only go up.

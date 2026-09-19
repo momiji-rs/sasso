@@ -707,9 +707,15 @@ fn writes_compressed_output(node: &OutNode) -> bool {
         // contents — `meta.load-css` of a stylesheet that is all comments
         // writes nothing and must not hide the node before it.
         OutNode::ModuleScope { nodes, .. } => nodes.iter().any(writes_compressed_output),
-        // An at-rule WITH a block is as visible as that block; a childless one
-        // (`@namespace "x";`) is always written.
-        OutNode::AtRule { body, has_block, .. } => !has_block || body.iter().any(writes_compressed_output),
+        // A childless at-rule (`@namespace "x";`) is always written, and so is
+        // a plain one with a block, empty or not; only `@media`/`@supports` are
+        // as visible as their contents.
+        OutNode::AtRule {
+            name,
+            body,
+            has_block,
+            ..
+        } => !has_block || !at_rule_drops_when_empty(name) || body.iter().any(writes_compressed_output),
         n => !n.is_inert_marker(),
     }
 }
@@ -822,17 +828,40 @@ fn is_loud_comment(text: &str) -> bool {
 }
 
 /// Whether an item writes anything at all in compressed output. A dropped
-/// comment writes nothing, and so does a nested rule or at-rule holding only
-/// such items — however deep that goes, a plain-CSS `.a { .b { /* c */ } }`
-/// leaves dart with nothing to print at either level.
+/// comment writes nothing, and so does a nested RULE holding only such items —
+/// however deep that goes, a plain-CSS `.a { .b { /* c */ } }` leaves dart with
+/// nothing to print at either level. A nested at-rule follows
+/// [`at_rule_drops_when_empty`].
 fn item_writes_compressed(item: &OutItem) -> bool {
     match item {
         OutItem::Comment(text, _) => is_loud_comment(text),
-        OutItem::NestedRule { items, .. } | OutItem::NestedAtRule { items, .. } => {
-            items.iter().any(item_writes_compressed)
+        OutItem::NestedRule { items, .. } => items.iter().any(item_writes_compressed),
+        OutItem::NestedAtRule { name, items, .. } => {
+            !at_rule_drops_when_empty(name) || items.iter().any(item_writes_compressed)
         }
         _ => true,
     }
+}
+
+/// Whether an at-rule goes away when its block writes nothing.
+///
+/// Only `@media` and `@supports` do. dart-sass keeps every other at-rule,
+/// deliberately: `_isInvisible` short-circuits on `CssAtRule` with the comment
+/// "an unknown at-rule is never invisible. Because we don't know the semantics
+/// of unknown rules, we can't guarantee that (for example) `@foo {}` isn't
+/// meaningful." `@media` and `@supports` have their own AST classes and so fall
+/// through to "invisible when every child is", which is why
+/// `@media print { a { /* c */ } }` compresses to nothing while
+/// `@keyframes k { 10% { /* c */ } }` compresses to `@keyframes k{}`.
+///
+/// `[measured]` against dart-sass 1.104.1, the test is the PARSED rule, not the
+/// spelling: `@MEDIA screen { /* c */ }` and `@#{"media"} screen { /* c */ }`
+/// are both generic at-rules there and both survive. Our AST does not keep that
+/// distinction — an interpolated name arrives here already resolved — so a
+/// `@#{"media"}` block still goes away; that is the same gap our EXPANDED output
+/// has (it drops `@#{"media"} screen {}`, which dart keeps), not a new one.
+fn at_rule_drops_when_empty(name: &str) -> bool {
+    matches!(name, "media" | "supports")
 }
 
 /// Write a loud comment for compressed output — verbatim, newlines and all,
@@ -1018,9 +1047,11 @@ fn emit_node_compressed(out: &mut String, node: &OutNode, collector: &mut Option
             has_block,
             lines,
         } => {
-            // A block that writes nothing leaves dart nothing to print: the
-            // at-rule goes with it, exactly as a rule of dropped comments does.
-            if *has_block && !body.iter().any(writes_compressed_output) {
+            // A `@media`/`@supports` block that writes nothing leaves dart
+            // nothing to print: the at-rule goes with it, exactly as a rule of
+            // dropped comments does. Every other at-rule stays — see
+            // `at_rule_drops_when_empty`.
+            if *has_block && at_rule_drops_when_empty(name) && !body.iter().any(writes_compressed_output) {
                 return;
             }
             // Source-map: the at-rule's `@` keyword.

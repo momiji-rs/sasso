@@ -28,6 +28,30 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **An empty at-rule survives compression, and a preserved `round()` is a
+  calculation.** Two more of the compressed ratchet's divergences, both
+  measured against dart-sass 1.104.1.
+
+  dart drops a node from compressed output when everything inside it does —
+  which is why `@media x { /* c */ }` compresses to nothing — but
+  `_isInvisible` short-circuits on an unknown at-rule on purpose: "because we
+  don't know the semantics of unknown rules, we can't guarantee that (for
+  example) `@foo {}` isn't meaningful". `@media` and `@supports` have their own
+  AST classes and so keep the all-children-invisible rule; every other at-rule
+  stays, empty block and all. sasso dropped them all, so `@font-face {}`,
+  `@keyframes k { 10% { /* c */ } }`, `@page {}` and an `@flooblehoof {}` left
+  empty by `@extend` all vanished. `[measured]` **+22 cases**.
+
+  A `round()` whose operands' units keep it from folding (`round(1px, 2bar)`,
+  `round(nearest, 1px, 10%)`) was preserved as an unquoted STRING built with
+  expanded spacing, which carries one spelling for both styles; it is now a
+  calculation like every other preserved call, so compressed drops the space
+  after each comma and `meta.type-of` reports `calculation` rather than
+  `string`, both as dart does. `[measured]` **+4 cases**.
+
+  Compressed passing 13,975 → **14,001** of 14,258 (98.02% → 98.20%); expanded
+  unchanged at 14,107 `+0`.
+
 - **Compressed output serializes colors and long fractions the way dart-sass
   does** (#142's gate made this measurable). The compressed ratchet landed
   scoring 12,579 of 14,258 cases, and 1,528 of those 1,679 failures were cases
