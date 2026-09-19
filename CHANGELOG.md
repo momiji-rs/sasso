@@ -11,6 +11,13 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-18
+
+_One fix: sasso told authors to rewrite CSS filters as Sass colour functions.
+`filter: grayscale(1)` is a CSS filter, not a deprecated global built-in, and
+sasso compiled it correctly while deprecating it anyway — 20 spurious warnings
+on Lichess's tree, where it now reports exactly what dart-sass reports._
+
 ### Fixed
 
 - **No more `global-builtin` deprecation for CSS filter functions** (#122).
@@ -1902,7 +1909,8 @@ real-world SCSS byte-identically to dart-sass.
 - Distribution: CLI binary (prebuilt via cargo-dist), library crate, and a
   zero-dependency WebAssembly build published to npm as `@momiji-rs/sasso`.
 
-[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/momiji-rs/sasso/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/momiji-rs/sasso/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/momiji-rs/sasso/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/momiji-rs/sasso/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/momiji-rs/sasso/compare/v0.14.0...v0.15.0
