@@ -1119,11 +1119,18 @@ fn run(cli: Cli) -> ExitCode {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut keys: Vec<PathBuf> = Vec::new();
         let mut kept: Vec<Unit> = Vec::new();
-        for unit in units {
+        for mut unit in units {
             let key = match &unit.source {
                 Source::File(path) => path_key(&normalize_path(&cwd.join(path))),
                 Source::Text(_) | Source::InvalidUtf8 => PathBuf::from("-"),
             };
+            // A stdin unit's `-` is not a path and is left alone; every other
+            // unit's display path is decided here rather than taken from the
+            // command line (#151).
+            if let Some(path) = unit.source_path() {
+                let url = entry_display_url(&cwd, path);
+                unit.url = url;
+            }
             match keys.iter().position(|k| *k == key) {
                 Some(i) => kept[i].target = unit.target,
                 None => {
@@ -2087,6 +2094,27 @@ fn normalize_path(p: &Path) -> PathBuf {
 /// shares. The comparison is the platform's, not the string's — a canonical key
 /// is lowercased on Windows while the working directory is not, and comparing
 /// those literally is #146.
+/// The entry stylesheet's path as dart spells it in a stack frame: lexically
+/// normalized, then relative to the working directory in the platform's
+/// separator — `p.prettyUri`, the same rule every LOADED file's frame goes
+/// through.
+///
+/// dart makes no exception for the entry, so the spelling on the command line
+/// does not survive into a diagnostic: `./src/a.scss`, `src/../src/a.scss`,
+/// `src//a.scss` and an absolute path all report `src/a.scss` from that
+/// directory. We used to echo the argument verbatim (#151), which on Windows
+/// also left the entry `/`-separated while every loaded file beside it was
+/// `\`-separated — one warning block, two spellings.
+///
+/// The value also reaches `adjust_sources` as the source map's entry, which is
+/// safe in both of its uses: it re-derives each url from `cwd.join(src)`, so a
+/// respelling normalizes to the same absolute path, and its stdin test compares
+/// against `-`, which never gets here.
+fn entry_display_url(cwd: &Path, path: &Path) -> String {
+    let abs = normalize_path(&cwd.join(path));
+    pathstyle::pretty(pathstyle::HOST, &abs.to_string_lossy(), &cwd.to_string_lossy())
+}
+
 fn relative_path(base: &Path, target: &Path) -> Option<String> {
     let base = base.to_string_lossy();
     let target = target.to_string_lossy();
