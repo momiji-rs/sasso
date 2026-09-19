@@ -68,14 +68,17 @@ def check_manifest_is_current(expect_path, baseline):
     Regenerating is a documented one-liner.
     """
     header = {}
+    entries = 0
     for line in open(expect_path, encoding="utf-8"):
-        if not line.startswith("#"):
-            break
-        body = line[1:].strip()
-        if ":" in body:
-            k, v = body.split(":", 1)
-            if " " not in k:
-                header[k.strip()] = v.strip()
+        if line.startswith("#"):
+            body = line[1:].strip()
+            if ":" in body:
+                k, v = body.split(":", 1)
+                if " " not in k:
+                    header[k.strip()] = v.strip()
+            continue
+        if line.strip():
+            entries += 1
 
     want_dart = baseline.get("dart_sass")
     got_dart = header.get("dart_sass")
@@ -83,6 +86,15 @@ def check_manifest_is_current(expect_path, baseline):
     got_commit = header.get("spec_commit")
 
     problems = []
+    # A missing entry is a SKIP, by design: a manifest gap must not read as a
+    # sasso regression. The cost of that choice is that dropping entries also
+    # drops cases out of the denominator, so a truncated manifest could hide
+    # the very failures it omits. Two things stop that: the header's own count
+    # must match the body, and main() refuses a shrunken `attempted`.
+    want_cases = header.get("cases")
+    if want_cases and want_cases.isdigit() and int(want_cases) != entries:
+        problems.append(f"{entries} digest lines but its header says "
+                        f"{want_cases} cases")
     if want_dart and got_dart and want_dart != got_dart:
         problems.append(f"dart-sass {got_dart} in the manifest vs "
                         f"{want_dart} in the baseline")
@@ -126,11 +138,24 @@ def main() -> int:
         extra = [f"--style={args.style}", "--expect-file", expect]
 
     out = os.path.join(HERE, cfg["results"])
+    # The harness exits 1 whenever any case fails, which is the normal state of
+    # a ratchet run, so its status cannot simply be trusted. But 2 means it
+    # never scored anything (bad flags, a style/manifest mismatch, a missing
+    # suite) and an earlier run's results file must not be read as this run's.
+    if os.path.exists(out):
+        os.remove(out)
     env = {**os.environ, "SASS_BIN": sass_bin}
-    subprocess.run(
+    proc = subprocess.run(
         [sys.executable, os.path.join(HERE, "run_spec.py"), "--quiet", "--out", out] + extra,
         cwd=ROOT, env=env, check=False,
     )
+    if proc.returncode not in (0, 1):
+        print(f"error: run_spec.py exited {proc.returncode} without scoring "
+              "the suite — see its message above", file=sys.stderr)
+        return 2
+    if not os.path.exists(out):
+        print(f"error: run_spec.py wrote no results to {out}", file=sys.stderr)
+        return 2
     cases = json.load(open(out))["cases"]
     c = Counter(x["status"] for x in cases)
     passes, err, fail = c.get("PASS", 0), c.get("ERROR_EXPECTED", 0), c.get("FAIL", 0)
@@ -143,6 +168,15 @@ def main() -> int:
     delta = passing - baseline["passing"]
     print(f"delta       : {delta:+d} passing")
 
+    want_attempted = baseline.get("attempted")
+    if want_attempted is not None and attempted < want_attempted:
+        print(f"REGRESSION: {want_attempted - attempted} case(s) left the "
+              f"denominator — attempted {attempted} vs {want_attempted} in the "
+              f"baseline.", file=sys.stderr)
+        print("A case that stops being scored cannot be seen to fail. If the "
+              "drop is intended (suite pin moved), bump "
+              f"spec/{cfg['baseline']} in the same commit.", file=sys.stderr)
+        return 1
     if passing < baseline["passing"] or passes < baseline["pass"]:
         print("REGRESSION: pass count dropped below the committed baseline.", file=sys.stderr)
         return 1

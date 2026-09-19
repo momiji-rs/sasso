@@ -159,10 +159,23 @@ python3 spec/gen_compressed.py --jobs 10
 DART_SASS=/path/to/sass-wrapper python3 spec/gen_compressed.py --jobs 10
 ```
 
+The generator reads the pinned version from the baselines and **refuses to
+write a manifest from any other one**; `spec/dartsass.sh` honours
+`DART_SASS_VERSION`, so the default path is `npx sass@<pin>` rather than
+whatever npx resolves today. Moving the pin is therefore explicit:
+`--allow-version-mismatch`, and bump `dart_sass` in both baselines in the same
+commit.
+
 A case with no manifest entry is `SKIP`ped, never failed -- a gap in the oracle
-must not read as a sasso regression. Error specs are excluded from the manifest
-entirely: their verdict is the exit status, which is style-independent, so the
-compressed run scores them exactly as the expanded one does.
+must not read as a sasso regression. That choice has a cost, so the ratchet pays
+it in two places: the manifest's own `cases:` header must match the number of
+digest lines, and **`attempted` may not fall below the baseline's**. Without the
+second check, deleting exactly the failing digests would leave `passing`
+untouched while those cases stopped being scored -- `[measured]` dropping 5
+failing entries gives `delta +0` and a pass% that *rises* to 88.26%, and now
+exits 1 instead of printing `ratchet OK`. Error specs are excluded from the
+manifest entirely: their verdict is the exit status, which is style-independent,
+so the compressed run scores them exactly as the expanded one does.
 
 ### Triaging a compressed FAIL
 
