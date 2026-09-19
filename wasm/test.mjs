@@ -3615,6 +3615,43 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   console.log("ok: cli --watch — stdout, dart's banner and stamp, --quiet keeps the banner");
 }
 
+// === the watch event filter, including the branch this platform cannot reach ===
+//
+// `fs.watch` may call back with no filename. macOS and Linux always name
+// their events, so no amount of writing files here reaches that branch —
+// which is exactly why the decision lives in its own pure module and is
+// tested as a table rather than through a subprocess.
+//
+// The case that matters: a nameless event must NOT bypass the self-output
+// check, or the compile that writes out.css triggers the compile that
+// writes out.css.
+{
+  const { triggersRecompile } = await import("./npm/_watchfilter.mjs");
+  const known = new Set(["/p/main.scss", "/p/_v.scss"]);
+  const ours = new Set(["/p/out.css", "/p/out.css.map"]);
+  const ask = (path, { failing = false, moved = false } = {}) =>
+    triggersRecompile({ path, known, ours, failing, anyKnownMoved: () => moved });
+
+  // Named events, compiling normally.
+  assert.equal(ask("/p/_v.scss"), true, "filter: a dependency changed");
+  assert.equal(ask("/p/main.scss"), true, "filter: the entry changed");
+  assert.equal(ask("/p/unrelated.txt"), false, "filter: something else in the directory");
+  assert.equal(ask("/p/out.css"), false, "filter: our own output never retriggers");
+  assert.equal(ask("/p/out.css.map"), false, "filter: nor its source map");
+
+  // Named events while the last compile failed: the fix may be a file
+  // that did not exist when `known` was taken.
+  assert.equal(ask("/p/_new.scss", { failing: true }), true, "filter: any file may be the fix");
+  assert.equal(ask("/p/out.css", { failing: true }), false, "filter: except still not ours");
+
+  // Nameless events — the branch no test on this platform can provoke.
+  assert.equal(ask(null, { moved: false }), false, "filter: nameless and nothing moved — do not loop");
+  assert.equal(ask(null, { moved: true }), true, "filter: nameless but a dependency moved");
+  assert.equal(ask(null, { failing: true, moved: false }), true, "filter: nameless while failing — try anything");
+
+  console.log("ok: watch event filter — named, nameless, ours, and failing");
+}
+
 // === Phase 3c: CLI --watch, what it SURVIVES ===
 //
 // The functional test above proves a recompile happens; the one before
@@ -3633,13 +3670,14 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /** Start a watch in a fresh directory, run `body`, always kill it. */
-  const withWatch = async (setup, body) => {
+  const withWatch = async (setup, body, extra = []) => {
     const dir = mkdtempSync(join(tmpdir(), "sasso-watchcase-"));
     setup(dir);
-    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--watch", "main.scss", "out.css"], {
-      cwd: dir,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const proc = spawn(
+      process.execPath,
+      [cliPath, "--no-source-map", ...extra, "--watch", "main.scss", "out.css"],
+      { cwd: dir, stdio: ["ignore", "pipe", "pipe"] },
+    );
     let log = "";
     proc.stdout.on("data", (b) => (log += b));
     proc.stderr.on("data", (b) => (log += b));
@@ -3749,7 +3787,31 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     },
   );
 
-  console.log("ok: cli --watch — burst, atomic save, break/fix, missing dep, delete/restore, no self-trigger");
+  // A missing dependency that resolves through a LOAD PATH rather than
+  // beside the entry. The first compile fails, so `known` holds only the
+  // entry and only the entry's directory would be watched — the file
+  // created later in `inc/` lands where nobody is looking. Widening the
+  // filter while failing cannot help: there is no watcher on that
+  // directory at all. dart watches load paths whether or not anything has
+  // been loaded from them, and so do we now.
+  await withWatch(
+    (d) => {
+      mkdirSync(join(d, "inc"));
+      writeFileSync(join(d, "main.scss"), '@use "viaload";\n.a { color: viaload.$c; }\n');
+    },
+    async ({ dir, css, until, log }) => {
+      assert.ok(await until(() => /Error/i.test(log())), "watch: a missing load-path dependency is reported");
+      await sleep(300);
+      writeFileSync(join(dir, "inc", "_viaload.scss"), "$c: fuchsia;\n");
+      assert.ok(
+        await until(() => css().includes("fuchsia")),
+        "watch: creating it on the load path compiles",
+      );
+    },
+    ["-I", "inc"],
+  );
+
+  console.log("ok: cli --watch — burst, atomic save, break/fix, missing dep (local + load path), delete/restore, no self-trigger");
 }
 
 // === Phase 4: custom functions — full Value coverage (sync + async) ===

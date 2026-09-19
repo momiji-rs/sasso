@@ -32,6 +32,7 @@ import { constants as osConstants } from "node:os";
 import { defaultJobs } from "./_jobs.mjs";
 // The accepted deprecation ids, shared with the JS API so there is one copy.
 import { DEPRECATION_IDS } from "./_deprecations.mjs";
+import { triggersRecompile } from "./_watchfilter.mjs";
 // The prebuilt-addon rules, shared with native.mjs: which engine this platform
 // is SUPPOSED to run decides whether a wasm fallback is news (see `loadEngine`).
 import { nativePackage, platformKey } from "./_addon.mjs";
@@ -1226,6 +1227,22 @@ function runWatch(input, output, common, opts) {
   // Except our own output, which lands in a watched directory and would
   // otherwise retrigger the compile that wrote it, forever.
   const ours = new Set([resolve(output), `${resolve(output)}.map`]);
+  // Load paths are watched whether or not anything has been loaded from
+  // them, because the interesting case is a file that is NOT there yet:
+  // `@use "viaload"` fails, `known` holds only the entry, and the file
+  // created later in `inc/` is in a directory nobody is watching. Widening
+  // the filter cannot help — there is no watcher on that directory at all.
+  // dart watches load paths too (measured: it sees this, we did not).
+  const loadPathDirs = (common.loadPaths || []).map((d) => resolve(d));
+  // Last known mtimes of `known`, for events that arrive with no filename.
+  let stamps = new Map();
+  const mtime = (f) => {
+    try {
+      return statSync(f).mtimeMs;
+    } catch {
+      return null;
+    }
+  };
 
   /** Re-arm the watchers. `loadedUrls` omitted = keep the last known set. */
   const rewatch = (loadedUrls) => {
@@ -1239,18 +1256,23 @@ function runWatch(input, output, common, opts) {
         }
       }
       known = files;
+      stamps = new Map([...known].map((f) => [f, mtime(f)]));
     }
     for (const w of watchers) w.close();
     watchers = [];
-    const dirs = new Set([...known].map((f) => dirname(f)));
+    const dirs = new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]);
     for (const d of dirs) {
       try {
         watchers.push(
           watch(d, (_event, fn) => {
-            if (!fn) return schedule();
-            const path = join(d, fn);
-            if (ours.has(path)) return;
-            if (failing || known.has(path)) schedule();
+            const decide = {
+              path: fn ? join(d, fn) : null,
+              known,
+              ours,
+              failing,
+              anyKnownMoved: () => [...known].some((f) => stamps.get(f) !== mtime(f)),
+            };
+            if (triggersRecompile(decide)) schedule();
           }),
         );
       } catch {
