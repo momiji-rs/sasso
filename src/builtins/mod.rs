@@ -11,7 +11,11 @@
 
 mod color;
 mod color_ext;
-pub(crate) use color_ext::is_plain_css_filter_call;
+// The plain-CSS filter overloads, in the one spelling both the dispatcher and
+// the evaluator's deprecations read them from: the global rule, the narrower
+// module rule, and the Microsoft `alpha()` form.
+pub(crate) use color::legacy::{ms_filter_args, ms_filter_text};
+pub(crate) use color_ext::{is_plain_css_filter_call, module_filter_arg, plain_filter_text, ModuleFilterArg};
 mod colorspace;
 mod list;
 mod map;
@@ -711,22 +715,18 @@ pub(crate) fn call_module(
         if let Some(r) = color_ext::call_module_member(member, pos_args, named, pos) {
             return r;
         }
-        // The module `color.grayscale`/`color.opacity` keep the global filter
-        // overload only for a number (passed through, deprecated); a CSS-special
-        // *string* argument (`var(--c)`, `env(...)`) is rejected as not a color,
-        // unlike the global functions which pass it through verbatim.
-        if matches!(member, "grayscale" | "opacity") {
-            let arg = pos_args
-                .first()
-                .or_else(|| named.iter().find(|(n, _)| n == "color").map(|(_, v)| v));
-            if let Some(v @ Value::Str(s)) = arg {
-                if !s.quoted {
-                    return Err(Error::at(
-                        format!("$color: {} is not a color.", v.to_css(false)),
-                        pos,
-                    ));
-                }
-            }
+        // `color.grayscale`/`color.invert`/`color.opacity` keep the global
+        // filter overload only for a NUMBER (passed through, and deprecated by
+        // the evaluator). Every other plain-CSS-special argument — `var(--c)`,
+        // `env(…)`, an unsimplifiable `calc()`, a slash-separated list — is a
+        // colour argument here and fails as one, where the global spelling
+        // passes it through verbatim. `module_filter_arg` is that rule, and the
+        // deprecation asks it too, so the two cannot disagree (#124).
+        if let Some((ModuleFilterArg::NotAColor, v)) = module_filter_arg(member, pos_args, named) {
+            return Err(Error::at(
+                format!("$color: {} is not a color.", v.to_css(false)),
+                pos,
+            ));
         }
     }
     match module_member_to_global(module, member) {

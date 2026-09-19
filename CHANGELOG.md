@@ -11,6 +11,39 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Fixed
+
+- **`color-module-compat` is emitted, and the filter overload has one rule**
+  (#124). A `sass:color` member used in its plain-CSS *filter* sense —
+  `color.grayscale(1)`, `color.invert(0.5)`, `color.opacity(0.5)`,
+  `color.alpha(opacity=20)` — is deprecated by dart-sass. sasso took the
+  overload and produced the same CSS, but said nothing in any of dart's five
+  shapes.
+
+  The module rule is narrower than the global one, so this was more than a
+  missing warning. On `sass:color` only a NUMBER takes the filter overload:
+  `var(--c)`, `env(…)` and a `calc()` that cannot fold to a number are colour
+  arguments there and fail as ones, where the global spelling passes them
+  through verbatim. sasso rejected only an unquoted string, and only for
+  `grayscale`/`opacity`, so `color.invert(var(--c))` compiled to a CSS filter
+  dart-sass refuses to produce.
+
+  Both halves now come from one predicate each, read by the dispatcher that
+  raises the error and by the evaluator that deprecates exactly the calls that
+  did take the overload — the same fix shape as #122, where those two decisions
+  lived apart and drifted.
+
+  Two adjacent divergences the shared predicate settles: `alpha($color:
+  opacity=20)`, the Microsoft filter overload reached by name, which dart takes
+  on both paths while sasso errored (and globally also warned
+  `global-builtin`); and `color.invert(c)`, which now carries dart's `$color: `
+  message prefix that only `grayscale`/`opacity` had.
+
+  dart's `opacity` message is missing its closing parenthesis (`Passing a
+  number (1 to color.opacity()`) and sass-spec locks that text, so parity means
+  reproducing it. Against dart-sass 1.104.1 the CSS ratchet is unchanged and
+  the stderr-conformance metric gains 12 cases.
+
 ### Performance
 
 - **Selectors with a plain pseudo-class skip the normalizer entirely.** A
