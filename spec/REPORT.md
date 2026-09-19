@@ -99,7 +99,11 @@ cargo build --release                                              # owned by sr
 SASS_BIN=target/release/sasso python3 spec/run_spec.py         # whole suite
 SASS_BIN=target/release/sasso python3 spec/run_spec.py --filter 'operators/'
 SASS_BIN=target/release/sasso python3 spec/run_spec.py --no-skip use   # widen scope
-SASS_BIN=target/release/sasso python3 spec/run_spec.py --style compressed
+
+# compressed needs its own oracle -- see "Scoring compressed output" below.
+# `--style=compressed` WITHOUT `--expect-file` measures nothing.
+SASS_BIN=target/release/sasso python3 spec/run_spec.py \
+    --style=compressed --expect-file spec/COMPRESSED_EXPECT.txt
 ```
 
 The runner exits non-zero if any case is a real `FAIL`, so it drops straight
@@ -110,6 +114,97 @@ into CI. It writes `spec/results.json` with per-case status.
 `run_spec.py` invokes `sasso --style=<expanded|compressed> <input-file>`,
 reads **stdout** for CSS, and treats a **non-zero exit** as "errored" (matched
 against error specs). Warnings/deprecations should go to stderr.
+
+## Scoring compressed output
+
+sass-spec ships **one** expectation per case and dart-sass generated all of
+them in the default `expanded` style. There is no compressed expectation
+anywhere in the suite. So `--style=compressed` scored against `output.css`
+fails nearly every success case on whitespace alone -- `[measured 2026-09-19]`
+58 PASS out of the 497 non-error cases in the first 600. That is why the
+ratchet has only ever scored `expanded`, and why a compressed-only
+serialization divergence has never been able to fail CI.
+
+Scoring compressed output needs a second oracle: the compressed CSS a
+**reference dart-sass** emits for the same case. Keeping all of it would be
+several megabytes, so `spec/COMPRESSED_EXPECT.txt` keeps a 12-hex-char sha256
+of each case's *normalized* compressed output -- the same normalization the
+byte-exact comparison applies -- one case per line:
+
+```
+# style: compressed
+# dart_sass: 1.104.1
+# spec_commit: b39c3276821a6dc3dd4a0f7e1f63c48cb15e269b
+<digest> <case name>
+```
+
+That file is **committed**, which is the whole point: the gate then needs
+neither node nor the network, and
+`python3 spec/check_baseline.py --style compressed` is a plain offline ratchet
+like the expanded one.
+
+Every header is **required**, and each is checked before a single case is
+scored: `style` must be the style being scored, `dart_sass` must equal
+`BASELINE_COMPRESSED.json`'s, `spec_commit` must equal `SPEC_VERSION.txt`'s,
+`cases` must be a number equal to the number of digest lines, and
+`reference_errors` must be a number. A header that is merely *checked when
+present* is not a guard -- deleting the line would turn it off -- so a missing
+one fails exactly like a wrong one. `run_spec.py` enforces the `style` header
+itself as well, since it is usable directly with `--expect-file`.
+
+Regenerate it only when one of those pins moves -- the diff then reads as
+exactly which compressed outputs changed:
+
+```sh
+# via npx (one node start per case; slow but needs nothing installed)
+python3 spec/gen_compressed.py --jobs 10
+
+# against a local dart-sass of the pinned version (much faster)
+DART_SASS=/path/to/sass-wrapper python3 spec/gen_compressed.py --jobs 10
+```
+
+The generator reads the pinned version from the baselines and **refuses to
+write a manifest from any other one**; `spec/dartsass.sh` honours
+`DART_SASS_VERSION`, so the default path is `npx sass@<pin>` rather than
+whatever npx resolves today. Moving the pin is therefore explicit:
+`--allow-version-mismatch`, and bump `dart_sass` in both baselines in the same
+commit.
+
+A case with no manifest entry is `SKIP`ped, never failed -- a gap in the oracle
+must not read as a sasso regression. That choice has a cost, and the ratchet
+pays it in three places:
+
+1. the manifest's own `cases:` header must match the number of digest lines;
+2. **`attempted` may not fall below the baseline's** -- without this, deleting
+   exactly the failing digests leaves `passing` untouched while those cases stop
+   being scored (`[measured]` dropping 5 failing entries gives `delta +0` and a
+   pass% that *rises* to 88.26%);
+3. **the manifest must cover every case the run was eligible to score.** Every
+   eligible non-error case with no digest is counted as a `no-reference-digest`
+   SKIP, and the only ones allowed to be missing are the ones the reference
+   compiler could not compile, which the manifest records in
+   `reference_errors:`. So the coverage check is an equality.
+
+The third is not implied by the second. If the eligible set *grows* -- a skip
+tag retired, a case that stops being an error spec, a suite that adds cases --
+`attempted` lands back exactly where the baseline expects it while the new cases
+are not scored in this style at all. `[measured]` on a synthesised run of that
+shape the previous code printed `ratchet OK` and read the gap as **+5 passing**.
+
+Error specs are excluded from the manifest entirely: their verdict is the exit
+status, which is style-independent, so the compressed run scores them exactly as
+the expanded one does.
+
+### Triaging a compressed FAIL
+
+The manifest holds digests, not text, so turn one back into a diff with:
+
+```sh
+SASS_BIN=target/release/sasso DART_SASS=spec/dartsass.sh \
+    python3 spec/gen_compressed.py --show 'core_functions/color/adjust/lab:a/above_max'
+```
+
+which prints the reference CSS and ours side by side.
 
 ## Ratchet plan
 
