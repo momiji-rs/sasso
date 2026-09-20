@@ -35,6 +35,7 @@ import { DEPRECATION_IDS } from "./_deprecations.mjs";
 import { triggersRecompile } from "./_watchfilter.mjs";
 import { coalesce } from "./_coalesce.mjs";
 import { makeProbe } from "./_probe.mjs";
+import { makeWatchers } from "./_watchers.mjs";
 import { errorCss } from "./_errorcss.mjs";
 // The prebuilt-addon rules, shared with native.mjs: which engine this platform
 // is SUPPOSED to run decides whether a wasm fallback is news (see `loadEngine`).
@@ -1268,7 +1269,11 @@ function isFresh(output, input, deps) {
 // all involved files (so editor atomic-saves are caught) and debounces bursts.
 function runWatch(input, output, common, opts) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
-  let watchers = new Map();
+  const watchers = makeWatchers({
+    watch,
+    onEvent: (d, _event, fn) => onDirEvent(d, fn),
+    report: (line) => writeStderrSync(line + "\n"),
+  });
   // What is on disk, so the catch-up writes nothing when nothing
   // changed. The MAP counts too: a whitespace-only edit leaves the CSS
   // identical and moves every mapping, and comparing the CSS alone left
@@ -1403,77 +1408,37 @@ function runWatch(input, output, common, opts) {
     for (const lp of loadPathDirs) {
       if (!existsSync(lp)) probes.arm(lp);
     }
-    // Close only what is no longer needed and open only what is new.
-    //
-    // Tearing every watcher down and rebuilding it — which is what this
-    // did — leaves a gap on EVERY compile in which a save is simply not
-    // seen. Measured at 1 save in 30 going stale forever, and it got
-    // worse, not better, when a change doubled the number of rewatch
-    // cycles: more teardowns, more gaps. In the common case the set of
-    // directories does not change between compiles and nothing is
-    // touched here at all.
-    for (const [d, w] of watchers) {
-      if (!dirs.has(d)) {
-        w.close();
-        watchers.delete(d);
-      }
+    // Close only what is no longer needed and open only what is new,
+    // re-arm a watcher that fails, and say so when one cannot be
+    // recovered. All of that lives in `_watchers.mjs`, where a fake
+    // `watch` can produce the failures this machine will not.
+    watchers.sync(dirs);
+  };
+
+  /** One event from one watched directory. */
+  const onDirEvent = (d, fn) => {
+    // The first nameless event cannot be judged — there is no snapshot
+    // to compare against, because taking one before ever seeing such an
+    // event is what made every compile pay for a directory survey.
+    // Compile once, start snapshotting, and every nameless event after
+    // this one is answerable.
+    if (!fn && !sawNameless) {
+      sawNameless = true;
+      takeSnapshots();
+      schedule();
+      return;
     }
-    for (const d of dirs) {
-      if (watchers.has(d)) continue;
-      try {
-        const handle = watch(d, (_event, fn) => {
-          // The first nameless event cannot be judged — there is no
-          // snapshot to compare against, because taking one before
-          // ever seeing such an event is what made every compile pay
-          // for a directory survey. Compile once, start snapshotting,
-          // and every nameless event after this one is answerable.
-          if (!fn && !sawNameless) {
-            sawNameless = true;
-            takeSnapshots();
-            schedule();
-            return;
-          }
-          if (
-            triggersRecompile({
-              path: fn ? pathKey(join(d, fn)) : null,
-              known,
-              ours,
-              failing,
-              anyKnownMoved: () => [...known].some((f) => stamps.get(f) !== mtime(f)),
-              anythingElseChanged,
-            })
-          ) {
-            schedule();
-          }
-        });
-        // A handle that stops on its own — the directory was deleted, on
-        // the platforms where that ends the watch — would otherwise keep
-        // its slot, and `watchers.has(d)` would claim the directory is
-        // covered when nothing is watching it. Giving up the slot lets
-        // the next rewatch open a live handle for it.
-        //
-        // The `error` listener is the load-bearing half. An FSWatcher
-        // `error` event with nobody listening throws, and out of this
-        // callback that is an uncaught exception: one failed watcher
-        // would take down the whole `--watch` session. Measured on
-        // node 22.22.3, macOS: no listener THREW, a listener survives.
-        //
-        // Deleting only our own handle matters. The teardown above
-        // already drops what it closes, so by the time that `close`
-        // arrives the slot may hold a NEWER handle for the same
-        // directory, and evicting that one would reopen the teardown gap
-        // `0be1e8b` closed. The identity check is what keeps this from
-        // being a regression: 40/40 recompiled over three runs of the
-        // race probe with these listeners, the same as without.
-        const forget = () => {
-          if (watchers.get(d) === handle) watchers.delete(d);
-        };
-        handle.on("close", forget);
-        handle.on("error", forget);
-        watchers.set(d, handle);
-      } catch {
-        // directory vanished — ignore
-      }
+    if (
+      triggersRecompile({
+        path: fn ? pathKey(join(d, fn)) : null,
+        known,
+        ours,
+        failing,
+        anyKnownMoved: () => [...known].some((f) => stamps.get(f) !== mtime(f)),
+        anythingElseChanged,
+      })
+    ) {
+      schedule();
     }
   };
 

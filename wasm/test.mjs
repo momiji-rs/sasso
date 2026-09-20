@@ -3885,6 +3885,217 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   console.log("ok: probe — one handle per target, re-arms deeper, closes cleanly");
 }
 
+// === one live handle per directory, and what happens when one dies ===
+//
+// None of this is reachable from a --watch test on a healthy machine:
+// an fs.watch handle does not fail to order. The failures are real
+// though, and the way they present is silence — the session keeps
+// running and stops noticing saves in one directory.
+//
+// The fake copies node's actual behaviour, from `internal/fs/watchers`
+// in the runtime this suite runs on (v22.22.3): before emitting `error`
+// node closes and nulls the handle and deliberately does NOT emit
+// `close`, and a watch that cannot be STARTED throws synchronously
+// instead.
+{
+  const { makeWatchers } = await import("./npm/_watchers.mjs");
+
+  /** A `watch` the test decides the fate of. */
+  const fake = ({ startError = null } = {}) => {
+    const all = [];
+    const watch = (dir, cb) => {
+      if (startError && startError.dir === dir) {
+        const e = new Error(startError.message);
+        e.code = startError.code;
+        throw e;
+      }
+      const listeners = new Map();
+      const h = {
+        dir,
+        cb,
+        closed: false,
+        close() {
+          h.closed = true;
+          // A real `close` event does not have to arrive before the
+          // next statement. `deferClose` lets a test hold it back.
+          if (!h.deferClose) h.emit("close");
+        },
+        emit: (name, ...args) => (listeners.get(name) ?? []).forEach((f) => f(...args)),
+        on: (name, f) => {
+          const list = listeners.get(name) ?? [];
+          list.push(f);
+          listeners.set(name, list);
+          return h;
+        },
+        /** What node does: close, null the handle, emit only `error`. */
+        die(message = "EPERM") {
+          h.closed = true;
+          h.emit("error", new Error(message));
+        },
+      };
+      all.push(h);
+      return h;
+    };
+    return {
+      watch,
+      all,
+      openHandles: () => all.filter((h) => !h.closed),
+      of: (dir) => all.filter((h) => h.dir === dir),
+      liveOf: (dir) => all.filter((h) => h.dir === dir && !h.closed),
+    };
+  };
+
+  const setup = (opts) => {
+    const fs = fake(opts);
+    const events = [];
+    const said = [];
+    const w = makeWatchers({
+      watch: fs.watch,
+      onEvent: (d, _e, fn) => events.push(`${d}/${fn}`),
+      report: (line) => said.push(line),
+      retries: opts?.retries ?? 3,
+    });
+    return { fs, w, events, said };
+  };
+
+  // Steady state: syncing the same set again must touch nothing. This is
+  // the 1-in-30 lost save — rebuilding every watcher on every compile
+  // leaves a gap in which a save is not seen.
+  {
+    const { fs, w } = setup();
+    w.sync(new Set(["/a", "/b"]));
+    assert.equal(w.size, 2, "watchers: one per directory");
+    const first = [...fs.all];
+    w.sync(new Set(["/a", "/b"]));
+    w.sync(new Set(["/a", "/b"]));
+    assert.deepEqual(fs.all, first, "watchers: an unchanged set opens nothing new");
+    assert.equal(fs.openHandles().length, 2, "watchers: and closes nothing");
+  }
+
+  // A directory that leaves is closed; one that arrives is opened.
+  {
+    const { fs, w } = setup();
+    w.sync(new Set(["/a", "/b"]));
+    w.sync(new Set(["/b", "/c"]));
+    assert.equal(w.size, 2, "watchers: the set is what was asked for");
+    assert.equal(fs.liveOf("/a").length, 0, "watchers: the departed one is closed");
+    assert.equal(fs.liveOf("/b").length, 1, "watchers: the kept one is untouched");
+    assert.equal(fs.of("/b").length, 1, "watchers: … not reopened");
+    assert.equal(fs.liveOf("/c").length, 1, "watchers: the new one is open");
+  }
+
+  // A handle that errors is REPLACED, not merely forgotten. Forgetting
+  // it is what the first version of this did: the directory is then
+  // unwatched for the life of the session and nothing says so.
+  {
+    const { fs, w, events } = setup();
+    w.sync(new Set(["/a"]));
+    fs.of("/a")[0].die("EPERM");
+    assert.equal(w.size, 1, "watchers: still watching after an error");
+    assert.equal(fs.liveOf("/a").length, 1, "watchers: with a live handle, not a dead one");
+    assert.notEqual(fs.of("/a")[1], fs.of("/a")[0], "watchers: a NEW handle, re-armed");
+    fs.liveOf("/a")[0].cb("change", "x.scss");
+    assert.deepEqual(events, ["/a/x.scss"], "watchers: and the new one delivers");
+  }
+
+  // node does not fire `close` on the error path, so the `error`
+  // listener cannot be left to the `close` one. Without its own
+  // listener the entry is never dropped AND the event throws.
+  {
+    const { fs, w } = setup();
+    w.sync(new Set(["/a"]));
+    const h = fs.of("/a")[0];
+    let closeFired = false;
+    h.on("close", () => (closeFired = true));
+    h.die();
+    assert.equal(closeFired, false, "watchers: node's error path fires no close (the fake copies it)");
+    assert.equal(w.size, 1, "watchers: the error listener is what re-armed it");
+  }
+
+  // A directory that fails forever is given up on — once, out loud,
+  // naming the directory — rather than re-armed in a hot loop.
+  {
+    const { fs, w, said } = setup({ retries: 3 });
+    w.sync(new Set(["/bad"]));
+    for (let i = 0; i < 25; i++) fs.liveOf("/bad")[0]?.die("EPERM");
+    assert.equal(fs.of("/bad").length, 4, `watchers: 1 + 3 re-arms and no more (opened ${fs.of("/bad").length})`);
+    assert.equal(w.size, 0, "watchers: the dead directory is not claimed as covered");
+    assert.equal(said.length, 1, `watchers: said once, not ${said.length} times`);
+    assert.match(said[0], /gave up watching \/bad/, "watchers: … and named the directory");
+    assert.match(said[0], /will be missed/, "watchers: … and what it costs");
+  }
+
+  // A rewatch is a fresh chance — the next compile reopens a directory
+  // that was given up on — but a directory that is simply broken must
+  // not produce a line per compile for the rest of the session.
+  {
+    const { fs, w, said } = setup({ retries: 1 });
+    const kill = () => {
+      let h;
+      while ((h = fs.liveOf("/bad")[0])) h.die("EPERM");
+    };
+    w.sync(new Set(["/bad"]));
+    kill();
+    assert.equal(said.length, 1, "watchers: the first give-up is said");
+    for (let compile = 0; compile < 5; compile++) {
+      w.sync(new Set(["/bad"])); // every later compile tries again
+      assert.ok(fs.liveOf("/bad").length > 0, "watchers: a rewatch does retry it");
+      kill();
+    }
+    assert.equal(said.length, 1, `watchers: and still said once, not ${said.length} times`);
+  }
+
+  // The budget is for a burst, not for the life of the process: a
+  // delivered event proves the watcher works.
+  {
+    const { fs, w, said } = setup({ retries: 2 });
+    w.sync(new Set(["/a"]));
+    fs.liveOf("/a")[0].die();
+    fs.liveOf("/a")[0].cb("change", "ok.scss"); // it works again
+    fs.liveOf("/a")[0].die();
+    fs.liveOf("/a")[0].die();
+    assert.equal(w.size, 1, "watchers: an event reset the failure budget");
+    assert.deepEqual(said, [], "watchers: and nothing was given up on");
+  }
+
+  // A late `close` from OUR teardown must not evict a newer handle for
+  // the same directory — that is the teardown gap coming back.
+  {
+    const { fs, w } = setup();
+    w.sync(new Set(["/a"]));
+    const first = fs.of("/a")[0];
+    first.deferClose = true; // its close event lands later, as a real one can
+    w.sync(new Set([])); // drops /a, closing the first handle
+    w.sync(new Set(["/a"])); // and immediately wants it back
+    const second = fs.liveOf("/a")[0];
+    assert.notEqual(second, first, "watchers: a new handle for the reopened directory");
+    first.emit("close"); // the old handle's close finally lands
+    assert.equal(w.size, 1, "watchers: the late close did not evict the new handle");
+    assert.equal(fs.liveOf("/a")[0], second, "watchers: … and it is still the live one");
+  }
+
+  // A directory that is not there is not a fault — the probe waits for
+  // it. ENOSPC is, and swallowing it means a watch that looks fine and
+  // sees nothing.
+  {
+    const { w, said } = setup({ startError: { dir: "/gone", code: "ENOENT", message: "ENOENT" } });
+    w.sync(new Set(["/gone"]));
+    assert.equal(w.size, 0, "watchers: a missing directory is simply not watched");
+    assert.deepEqual(said, [], "watchers: … and is not worth a warning");
+  }
+  {
+    const { w, said } = setup({
+      startError: { dir: "/full", code: "ENOSPC", message: "System limit for number of file watchers reached" },
+    });
+    w.sync(new Set(["/full"]));
+    assert.equal(w.size, 0, "watchers: a directory that cannot be watched is not claimed");
+    assert.equal(said.length, 1, "watchers: ENOSPC is said out loud");
+    assert.match(said[0], /System limit/, "watchers: … with the reason the user can act on");
+  }
+
+  console.log("ok: watchers — steady state, re-arm on error, give up once, ENOSPC is not ENOENT");
+}
+
 // === the coalescing rule, on a fake clock ===
 //
 // How many compiles a burst costs cannot be asserted from a --watch test.
