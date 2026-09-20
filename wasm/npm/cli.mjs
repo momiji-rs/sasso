@@ -483,11 +483,24 @@ const idle = new Int32Array(new SharedArrayBuffer(4));
  * moment and continue. EPIPE means there is no reader left to tell.
  */
 function writeStderrSync(text) {
+  writeFdSync(2, text);
+}
+
+/**
+ * The same, to an arbitrary descriptor. Used for the error stylesheet on
+ * stdout, which `fail()` follows with `process.exit` — and an
+ * asynchronous write to a pipe has no promise of draining first. It does
+ * not truncate here (measured: 480 KB through a pipe, twelve runs,
+ * complete every time, so Node is flushing), which makes this insurance
+ * rather than a fix. It costs nothing and it makes both streams behave
+ * the same way, which is the reason `writeStderrSync` exists at all.
+ */
+function writeFdSync(fd, text) {
   const bytes = Buffer.from(text, "utf8");
   let at = 0;
   while (at < bytes.length) {
     try {
-      at += writeSync(2, bytes, at, bytes.length - at);
+      at += writeSync(fd, bytes, at, bytes.length - at);
     } catch (e) {
       if (e.code === "EAGAIN") {
         Atomics.wait(idle, 0, 0, 1);
@@ -955,7 +968,7 @@ function reportFailure(outPath, opts, message) {
   if (!outPath) {
     // No file: only an EXPLICIT --error-css puts the stylesheet on
     // stdout. Silent by default, as dart is.
-    if (opts.errorCss === true) process.stdout.write(errorCss(message));
+    if (opts.errorCss === true) writeFdSync(1, errorCss(message));
     return undefined;
   }
   try {
