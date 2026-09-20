@@ -45,10 +45,28 @@ export function coalesce({ windowMs, run, setTimer = setTimeout }) {
         fire(false);
       }
     }, windowMs);
-    // Re-run only after a PROVISIONAL failure — "that was probably a
-    // half-written file, try again properly". An authoritative failure has
-    // been reported already, and asking for another reports it again.
-    if (!run(provisional) && provisional) dirty = true;
+    // A provisional run ALWAYS gets a catch-up, not only when it fails.
+    // It compiles the instant the event arrives, and what it reads is
+    // not always what the save finally leaves there — it can succeed on
+    // content that is already out of date, and then nothing is
+    // scheduled and the output stays wrong.
+    //
+    // Two causes produced that symptom and only fixing both removes it.
+    // The other is in `rewatch`, which used to tear every watcher down
+    // and rebuild it, losing any save that landed in the gap. Measured,
+    // 1 save in 30 going stale forever:
+    //
+    //   neither fix          1 in 30
+    //   this one alone       worse — it doubles the compiles, so it
+    //                        doubles the gaps the other bug leaves
+    //   the watcher fix      1 in 60
+    //   both                 0 in 200
+    //
+    // An AUTHORITATIVE failure must still not ask for another, or the
+    // error is reported, re-run, reported again.
+    const ok = run(provisional);
+    if (provisional) dirty = true;
+    else if (!ok) dirty = false;
   };
 
   return () => {

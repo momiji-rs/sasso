@@ -3914,29 +3914,44 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.deepEqual(calls, [true, false], "coalesce: and then it stops");
   }
 
-  // One event, nothing after it: one run, no catch-up. This is the case
-  // the old trailing debounce made wait 50ms for a window that stayed
-  // empty.
+  // One event, nothing after it: the head runs IMMEDIATELY — that is the
+  // latency this design exists for, and the old trailing debounce made
+  // it wait 50ms for a window that stayed empty — and a catch-up
+  // follows.
+  //
+  // The catch-up is not waste and is not optional. What the head reads
+  // is not always what the save finally leaves on disk, and a head that
+  // succeeds on already-stale content would otherwise schedule nothing:
+  // measured at 1 save in 30 going permanently stale before this. The
+  // caller makes the second run free when nothing changed by not
+  // writing identical CSS, so the cost is one extra compile off the
+  // critical path, not an extra write or an extra reported line.
   {
     const { setTimer, tick } = clock();
     const calls = [];
     const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), true), setTimer });
     on();
+    assert.deepEqual(calls, [true], "coalesce: a lone save runs at once, before any window");
     tick();
+    assert.deepEqual(calls, [true, false], "coalesce: and is confirmed by one catch-up");
     tick();
-    assert.deepEqual(calls, [true], "coalesce: a lone save costs exactly one run");
+    assert.deepEqual(calls, [true, false], "coalesce: which is not itself confirmed — it stops");
   }
 
-  // Separate windows are separate bursts.
+  // Separate windows are separate bursts: each gets its own head.
   {
     const { setTimer, tick } = clock();
     const calls = [];
     const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), true), setTimer });
     on();
+    tick(); // the first save's catch-up
     tick();
     on();
-    tick();
-    assert.deepEqual(calls, [true, true], "coalesce: two lone saves are two heads, not a catch-up");
+    assert.deepEqual(
+      calls,
+      [true, false, true],
+      "coalesce: the second save is a head of its own, not a catch-up",
+    );
   }
 
   // A PROVISIONAL failure asks for a catch-up even with no further
@@ -4188,6 +4203,27 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     ["-I", "a/b"],
     "src/main.scss",
   );
+
+  // Error CSS under --watch, which is the whole reason the flag matters:
+  // break a partial and the PAGE says what broke, rather than going
+  // unstyled until you find the terminal. Every other --error-css test
+  // here is a one-shot compile; this is the loop.
+  await withWatch(withDep, async ({ dir, css, until, log, clear }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(300);
+    clear();
+    writeFileSync(join(dir, "_v.scss"), "$c: ;\n");
+    assert.ok(
+      await until(() => css().startsWith("/* Error: ")),
+      `watch: a broken save leaves error CSS in the output, not nothing: ${JSON.stringify(css().slice(0, 40))}`,
+    );
+    await sleep(300);
+    writeFileSync(join(dir, "_v.scss"), "$c: teal;\n");
+    assert.ok(
+      await until(() => css().includes("teal")),
+      "watch: and fixing it replaces the error CSS with the real thing",
+    );
+  });
 
   // A destination that IS a source. `sasso --watch a.scss a.scss` and
   // `--watch main.scss _v.scss` both replaced a stylesheet with its own

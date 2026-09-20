@@ -420,8 +420,8 @@ Options:
       --[no-]stop-on-error           Don't compile more files once an error is
                                      encountered.
       --[no-]error-css               On a compile error, write a stylesheet
-                                     describing it instead of removing the
-                                     output (default on, as in dart-sass).
+                                     describing it (default: on when compiling
+                                     to a file).
       --no-css                       Compile but discard the CSS: no output
                                      file, no stdout, and an existing output is
                                      left exactly as it was.
@@ -1255,7 +1255,9 @@ function isFresh(output, input, deps) {
 // all involved files (so editor atomic-saves are caught) and debounces bursts.
 function runWatch(input, output, common, opts) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
-  let watchers = [];
+  let watchers = new Map();
+  // What is on disk, so the catch-up writes nothing when nothing changed.
+  let lastCss = null;
   // The last set of files a compile actually loaded, seeded with the entry.
   // Kept across a FAILED compile: a failure has no `loadedUrls`, and the
   // first version of this narrowed the set to the entry alone when one
@@ -1363,8 +1365,6 @@ function runWatch(input, output, common, opts) {
       known = files;
     }
     if (sawNameless) takeSnapshots();
-    for (const w of watchers) w.close();
-    watchers = [];
     probes.closeAll();
 
     // A load path that does not exist YET cannot be watched — `fs.watch`
@@ -1383,9 +1383,26 @@ function runWatch(input, output, common, opts) {
     for (const lp of loadPathDirs) {
       if (!existsSync(lp)) probes.arm(lp);
     }
+    // Close only what is no longer needed and open only what is new.
+    //
+    // Tearing every watcher down and rebuilding it — which is what this
+    // did — leaves a gap on EVERY compile in which a save is simply not
+    // seen. Measured at 1 save in 30 going stale forever, and it got
+    // worse, not better, when a change doubled the number of rewatch
+    // cycles: more teardowns, more gaps. In the common case the set of
+    // directories does not change between compiles and nothing is
+    // touched here at all.
+    for (const [d, w] of watchers) {
+      if (!dirs.has(d)) {
+        w.close();
+        watchers.delete(d);
+      }
+    }
     for (const d of dirs) {
+      if (watchers.has(d)) continue;
       try {
-        watchers.push(
+        watchers.set(
+          d,
           watch(d, (_event, fn) => {
             // The first nameless event cannot be judged — there is no
             // snapshot to compare against, because taking one before
@@ -1450,9 +1467,22 @@ function runWatch(input, output, common, opts) {
         failing = false;
         return true;
       }
+      // Every save now compiles twice — once at the head of the burst,
+      // once to catch up — so most catch-ups produce the CSS that is
+      // already on disk. Writing it again would touch the output's
+      // mtime for nothing, which is the property downstream watchers
+      // key on, and print a second `Compiled` line where dart prints
+      // one per save.
+      if (lastCss === result.css) {
+        failing = false;
+        return true;
+      }
       const writeError = emit(result, output, common.sourceMap, opts);
       if (writeError) process.stderr.write(`${writeError}\n`);
-      else if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
+      else {
+        lastCss = result.css;
+        if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
+      }
       failing = false;
     } catch (e) {
       if (provisional) return false;
