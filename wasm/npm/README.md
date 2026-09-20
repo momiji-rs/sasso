@@ -224,10 +224,15 @@ Kubernetes CPU limit) lowers it further. On a Linux that publishes no topology
 the core count is unknown, so the default is one per CPU the process may
 actually use — still under those caps. Off Linux it is one per CPU the runtime
 reports). An input of `-` is standard input. Accepted for dart-sass
-compatibility: `-c/--[no-]color` (a no-op — sasso never colors its output) and
-`--[no-]error-css` (**not implemented**: a failing compile always behaves as
-`--no-error-css`, dropping a stale output file rather than describing the error
-in CSS).
+compatibility: `-c/--[no-]color` (a no-op — sasso never colors its output).
+
+**When a compile fails**, `--[no-]error-css` decides what happens to the
+output, following dart-sass in each case: by default the file is replaced by a
+stylesheet describing the error, so the page says what broke instead of showing
+the CSS of an earlier build; `--no-error-css` removes it instead; `--no-css`
+leaves it exactly as it was, as does a failure to READ the entry, which is not
+a compile error. Writing to stdout rather than a file, the stylesheet is
+printed only when `--error-css` is given explicitly.
 
 **Which engine the CLI uses.** It prefers the native addon — `npm install
 sasso` already fetched `sasso-native-<platform>` as an optionalDependency on

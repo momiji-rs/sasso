@@ -509,7 +509,7 @@ function parseArgs(argv) {
     embedSources: false,
     embedSourceMap: false,
     charset: true,
-    errorCss: true,
+    errorCss: undefined,
     quiet: false,
     quietDeps: false,
     silenceDeprecations: [],
@@ -938,9 +938,26 @@ function emit(result, outPath, wantMap, opts, stdinText) {
  * unreadable entry is not a compile error, there is no diagnostic to
  * render, and the previous build stays. This CLI used to remove the
  * output for that case too.
+ *
+ * `opts.errorCss` is THREE-valued, which the first version of this
+ * missed. To a file, the default and an explicit `--error-css` both
+ * write. To STDOUT they differ — measured:
+ *
+ *   sass bad.scss                 stdout 0B
+ *   sass --error-css bad.scss     stdout 546B
+ *   sass --no-error-css bad.scss  stdout 0B
+ *
+ * so "on by default" and "asked for" are not the same state, and
+ * `undefined` is the default rather than `true`.
  */
 function reportFailure(outPath, opts, message) {
-  if (!outPath || opts.noCss) return undefined;
+  if (opts.noCss) return undefined;
+  if (!outPath) {
+    // No file: only an EXPLICIT --error-css puts the stylesheet on
+    // stdout. Silent by default, as dart is.
+    if (opts.errorCss === true) process.stdout.write(errorCss(message));
+    return undefined;
+  }
   try {
     if (opts.errorCss !== false) {
       // Same as `emit`: the destination tree may not exist yet, and a

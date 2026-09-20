@@ -3723,6 +3723,19 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   run("--no-css", "bad.scss", "o.css");
   assert.equal(readFileSync(out, "utf8"), ".ok {\n  a: b;\n}\n", "error-css: --no-css touches nothing");
 
+  // Writing to STDOUT rather than a file, the flag is three-valued: the
+  // default is silent and only an explicit --error-css prints. Measured:
+  //   sass bad.scss                 stdout 0B
+  //   sass --error-css bad.scss     stdout 546B
+  //   sass --no-error-css bad.scss  stdout 0B
+  assert.equal(run("bad.scss").stdout, "", "error-css: to stdout, the default is silent");
+  assert.match(
+    run("--error-css", "bad.scss").stdout,
+    /^\/\* Error: /,
+    "error-css: …and an explicit --error-css prints the stylesheet",
+  );
+  assert.equal(run("--no-error-css", "bad.scss").stdout, "", "error-css: --no-error-css stays silent");
+
   rmSync(dir, { recursive: true, force: true });
   console.log("ok: --error-css — written, removed, or left alone, as dart does");
 }
