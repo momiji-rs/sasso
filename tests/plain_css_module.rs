@@ -129,6 +129,17 @@ fn compile_compressed_in(dir: &std::path::Path, name: &str, src: &str) -> String
     compile(src, &opts).expect("compile")
 }
 
+/// Compile `src` as an entry in `dir` expecting failure, and return the error's
+/// message.
+fn compile_err_in(dir: &std::path::Path, name: &str, src: &str) -> String {
+    let entry = dir.join(name);
+    std::fs::write(&entry, src).unwrap();
+    let url = entry.to_string_lossy().into_owned();
+    let imp = FsImporter::new(Vec::new());
+    let opts = Options::default().with_importer(&imp).with_url(&url);
+    compile(src, &opts).expect_err("compile should fail").message
+}
+
 /// A value in a loaded `.css` file is a VALUE, not frozen text: dart parses it
 /// and re-serializes it for the output style, so compressing shortens its
 /// numbers, its hex colours and its list separators. Every expectation below
@@ -413,6 +424,96 @@ fn a_loaded_files_nested_keyframes_is_kept() {
         "@foo {\n  @keyframes k {\n    from {\n      a: b;\n    }\n  }\n}",
         "@foo{@keyframes k{from{a:b}}}",
     );
+
+    // A FRAME is not a style rule, and nothing inside one bubbles: dart keeps
+    // every at-rule where the frame put it. Hoisting out of a frame moved it out
+    // of the animation and wrapped the frame selector around its body.
+    case(
+        "framegeneric",
+        "@keyframes k { from { @foo { a: b } } }\n",
+        "@keyframes k {\n  from {\n    @foo {\n      a: b;\n    }\n  }\n}",
+        "@keyframes k{from{@foo{a:b}}}",
+    );
+    case(
+        "frameempty",
+        "@keyframes k { from { @foo {} } }\n",
+        "@keyframes k {\n  from {\n    @foo {}\n  }\n}",
+        "@keyframes k{from{@foo{}}}",
+    );
+    case(
+        "framemedia",
+        "@keyframes k { from { @media x { a: b } } }\n",
+        "@keyframes k {\n  from {\n    @media x {\n      a: b;\n    }\n  }\n}",
+        "@keyframes k{from{@media x{a:b}}}",
+    );
+    case(
+        "framekf",
+        "@keyframes k { from { @keyframes j { to { a: b } } } }\n",
+        "@keyframes k {\n  from {\n    @keyframes j {\n      to {\n        a: b;\n      }\n    }\n  }\n}",
+        "@keyframes k{from{@keyframes j{to{a:b}}}}",
+    );
+    case(
+        "framefn",
+        "@keyframes k { from { @function --f(--a) { result: 1 } } }\n",
+        "@keyframes k {\n  from {\n    @function --f(--a) {\n      result: 1 ;\n    }\n  }\n}",
+        "@keyframes k{from{@function --f(--a){result: 1 }}}",
+    );
+    // A declaration before it is not split away from it either.
+    case(
+        "framesplit",
+        "@keyframes k { from { a: b; @foo { c: d } } }\n",
+        "@keyframes k {\n  from {\n    a: b;\n    @foo {\n      c: d;\n    }\n  }\n}",
+        "@keyframes k{from{a:b;@foo{c:d}}}",
+    );
+    case(
+        "framepct",
+        "@keyframes k { 50% { @foo { a: b } } }\n",
+        "@keyframes k {\n  50% {\n    @foo {\n      a: b;\n    }\n  }\n}",
+        "@keyframes k{50%{@foo{a:b}}}",
+    );
+    case(
+        "framelist",
+        "@keyframes k { from, to { @foo { a: b } } }\n",
+        "@keyframes k {\n  from, to {\n    @foo {\n      a: b;\n    }\n  }\n}",
+        "@keyframes k{from,to{@foo{a:b}}}",
+    );
+    // Inside an at-rule body, and below the bubbling level, the frame is read by
+    // the other two dispatchers -- same answer.
+    case(
+        "framemediaouter",
+        "@media p { @keyframes k { from { @foo { a: b } } } }\n",
+        "@media p {\n  @keyframes k {\n    from {\n      @foo {\n        a: b;\n      }\n    }\n  }\n}",
+        "@media p{@keyframes k{from{@foo{a:b}}}}",
+    );
+    case(
+        "framedeep",
+        ".a { .b { @keyframes k { from { @foo { a: b } } } } }\n",
+        ".a {\n  .b {\n    @keyframes k {\n      from {\n        @foo {\n          a: b;\n        }\n      }\n    }\n  }\n}",
+        ".a{.b{@keyframes k{from{@foo{a:b}}}}}",
+    );
+}
+
+/// A style rule inside a keyframe block is an error, in a loaded `.css` file
+/// exactly as in SCSS -- dart's plain-CSS parser refuses it, so producing output
+/// for it was wrong at every depth. Measured against dart-sass 1.104.1.
+#[test]
+fn a_loaded_files_style_rule_in_a_keyframe_block_is_an_error() {
+    let dir = scratch("framerule");
+    let case = |file: &str, css: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), css).unwrap();
+        let entry = format!("@use \"{file}\";\n");
+        assert_eq!(
+            compile_err_in(&dir, &format!("e_{file}.scss"), &entry),
+            "Style rules may not be used within keyframe blocks.",
+            "source: {css}"
+        );
+    };
+    case("top", "@keyframes k { from { .x { a: b } } }\n");
+    // A frame selector in the inner position is still a style rule there.
+    case("frame", "@keyframes k { from { to { a: b } } }\n");
+    case("inrule", ".a { @keyframes k { from { .x { a: b } } } }\n");
+    case("deep", ".a { .b { @keyframes k { from { .x { a: b } } } } }\n");
+    case("inat", "@media p { @keyframes k { from { .x { a: b } } } }\n");
 }
 
 /// A plain-CSS custom `@function` has its own statement too, and every one of

@@ -136,7 +136,7 @@ impl<'a> Evaluator<'a> {
                 Stmt::Media { query, body, lines } => {
                     let queries = self.resolve_media_queries(query)?;
                     let prelude = serialize_media_queries(&queries, self.compressed());
-                    let out_body = self.css_at_body(body)?;
+                    let out_body = self.css_at_body(body, false)?;
                     if !out_body.is_empty() {
                         let lines = self.stamp(*lines);
                         sink.push_at_rule(OutNode::AtRule {
@@ -154,7 +154,7 @@ impl<'a> Evaluator<'a> {
                     lines,
                 } => {
                     let prelude = self.serialize_supports_condition(condition)?;
-                    let out_body = self.css_at_body(body)?;
+                    let out_body = self.css_at_body(body, false)?;
                     if !out_body.is_empty() {
                         sink.push_at_rule(OutNode::AtRule {
                             name: "supports".to_string(),
@@ -189,7 +189,7 @@ impl<'a> Evaluator<'a> {
                             lines,
                         }),
                         Some(b) => {
-                            let out_body = self.css_at_body(b)?;
+                            let out_body = self.css_at_body(b, false)?;
                             sink.push_at_rule(OutNode::AtRule {
                                 name: name.clone(),
                                 prelude: prelude_s,
@@ -207,7 +207,7 @@ impl<'a> Evaluator<'a> {
                     lines,
                 } => {
                     let prelude_s = self.eval_template(prelude)?.trim().to_string();
-                    let out_body = self.css_at_body(body)?;
+                    let out_body = self.css_at_body(body, true)?;
                     let lines = self.stamp(*lines);
                     sink.push_at_rule(OutNode::AtRule {
                         name: name.clone(),
@@ -231,13 +231,26 @@ impl<'a> Evaluator<'a> {
     /// Build the body of a top-level plain-CSS at-rule: style rules (with their
     /// own first-level bubbling), bare declarations, comments, and nested
     /// at-rules.
-    fn css_at_body(&mut self, stmts: &[Stmt]) -> Result<Vec<OutNode>, Error> {
+    fn css_at_body(&mut self, stmts: &[Stmt], frames: bool) -> Result<Vec<OutNode>, Error> {
+        if frames {
+            check_keyframes_body(stmts)?;
+        }
         let mut out: Vec<OutNode> = Vec::new();
         for stmt in stmts {
             match stmt {
                 Stmt::Rule(r) => {
                     let (selectors, linebreaks) = self.css_selectors(&r.selector, false)?;
-                    let (items, bubbled) = self.css_rule_children(&r.body, &selectors)?;
+                    // Inside `@keyframes` this rule is a FRAME, and nothing in
+                    // it bubbles: dart keeps a nested at-rule where it is
+                    // (`@keyframes k {from {@foo {a: b}}}`), while hoisting it
+                    // would move it out of the frame and wrap the frame
+                    // selector around its body. A frame body is therefore read
+                    // the way any deeper level is, with no hoisting.
+                    let (items, bubbled) = if frames {
+                        (self.css_body(&r.body)?, Vec::new())
+                    } else {
+                        self.css_rule_children(&r.body, &selectors)?
+                    };
                     if !items.is_empty() {
                         out.push(OutNode::Rule {
                             selectors: RuleSelectors::Raw(Rc::new(selectors)),
@@ -310,7 +323,7 @@ impl<'a> Evaluator<'a> {
                 Stmt::Media { query, body, lines } => {
                     let queries = self.resolve_media_queries(query)?;
                     let prelude = serialize_media_queries(&queries, self.compressed());
-                    let inner = self.css_at_body(body)?;
+                    let inner = self.css_at_body(body, false)?;
                     if !inner.is_empty() {
                         let lines = self.stamp(*lines);
                         out.push(OutNode::AtRule {
@@ -328,7 +341,7 @@ impl<'a> Evaluator<'a> {
                     lines,
                 } => {
                     let prelude = self.serialize_supports_condition(condition)?;
-                    let inner = self.css_at_body(body)?;
+                    let inner = self.css_at_body(body, false)?;
                     if !inner.is_empty() {
                         out.push(OutNode::AtRule {
                             name: "supports".to_string(),
@@ -356,7 +369,7 @@ impl<'a> Evaluator<'a> {
                             lines,
                         }),
                         Some(b) => {
-                            let inner = self.css_at_body(b)?;
+                            let inner = self.css_at_body(b, false)?;
                             out.push(OutNode::AtRule {
                                 name: name.clone(),
                                 prelude: prelude_s,
@@ -394,7 +407,7 @@ impl<'a> Evaluator<'a> {
                     lines,
                 } => {
                     let prelude_s = self.eval_template(prelude)?.trim().to_string();
-                    let out_body = self.css_at_body(body)?;
+                    let out_body = self.css_at_body(body, true)?;
                     let lines = self.stamp(*lines);
                     out.push(OutNode::AtRule {
                         name: name.clone(),
@@ -493,7 +506,7 @@ impl<'a> Evaluator<'a> {
                     lines,
                 } => {
                     let prelude_s = self.eval_template(prelude)?.trim().to_string();
-                    let out_body = self.css_at_body(body)?;
+                    let out_body = self.css_at_body(body, true)?;
                     let lines = self.stamp(*lines);
                     bubbled.push(OutNode::AtRule {
                         name: name.clone(),
@@ -740,6 +753,7 @@ impl<'a> Evaluator<'a> {
                 body,
                 lines,
             } => {
+                check_keyframes_body(body)?;
                 let prelude_s = self.eval_template(prelude)?.trim().to_string();
                 let inner = self.css_body(body)?;
                 let lines = self.stamp(*lines);
@@ -767,4 +781,25 @@ impl<'a> Evaluator<'a> {
         }
         Ok(())
     }
+}
+
+/// A style rule inside a keyframe block is invalid, and dart rejects it in plain
+/// CSS exactly as it does in SCSS: `@keyframes k {from {.x {a: b}}}` is an
+/// error, not output. A frame may hold declarations, comments and at-rules --
+/// nothing that needs a selector of its own. Both evaluators check here, so the
+/// message and the span they blame cannot drift apart.
+pub(super) fn check_keyframes_body(body: &[Stmt]) -> Result<(), Error> {
+    for stmt in body {
+        if let Stmt::Rule(frame) = stmt {
+            for inner in &frame.body {
+                if let Stmt::Rule(inner) = inner {
+                    return Err(Error::at(
+                        "Style rules may not be used within keyframe blocks.",
+                        inner.selector_pos,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }

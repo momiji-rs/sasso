@@ -727,18 +727,10 @@ impl<'a> Evaluator<'a> {
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         // A style rule nested inside a keyframe block is invalid; each frame
-        // (a top-level rule in the body) may only hold declarations.
-        for stmt in body {
-            if let Stmt::Rule(frame) = stmt {
-                for inner in &frame.body {
-                    if matches!(inner, Stmt::Rule(_)) {
-                        return Err(Error::unpositioned(
-                            "Style rules may not be used within keyframe blocks.",
-                        ));
-                    }
-                }
-            }
-        }
+        // (a top-level rule in the body) may only hold declarations. The
+        // plain-CSS evaluator checks the same thing on the same statements, so
+        // the check itself lives in one place.
+        super::plain_css::check_keyframes_body(body)?;
         let prelude = self.eval_template(prelude)?;
         let saved_kf = std::mem::replace(&mut self.in_keyframes, true);
         let own_depth = self.at_rule_ctx.len();

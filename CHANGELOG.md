@@ -59,8 +59,20 @@ Conformance is tracked separately as a ratchet against the official
   A custom `@function` in a style rule now bubbles out with a copy of the parent
   selectors wrapped around its declarations — `@function --f(--a) {.a {result: 1
   }}` — and stays where it is one level deeper, as dart does in both places.
-  `[measured]` against dart-sass 1.104.1 in both styles; no sass-spec case
-  covers any of these shapes, so neither gate number moves.
+
+  A `@keyframes` **frame** is not a style rule, and nothing inside one bubbles:
+  the same dispatcher was reached for `from`/`50%` blocks, so every at-rule in a
+  frame was hoisted out of the animation with the frame selector wrapped round
+  its body — `@keyframes k {from {@foo {a: b}}}` came out
+  `@keyframes k{@foo{from{a:b}}}`, and a nested `@keyframes` lost its frame
+  entirely. A frame body is now read the way any deeper level is, with no
+  hoisting. A **style rule** inside a frame is meanwhile an error, as dart's
+  plain-CSS parser makes it (`@keyframes k {from {.x {a: b}}}`), where this
+  evaluator produced output for it at every depth; both evaluators now raise
+  that error from one place, and it points at the offending rule instead of
+  carrying no position at all. `[measured]` against dart-sass 1.104.1 in both
+  styles; no sass-spec case covers any of these shapes, so neither gate number
+  moves.
 
   Compressed passing 13,975 → **14,001** of 14,258 (98.02% → 98.20%); expanded
   unchanged at 14,107 `+0`.
