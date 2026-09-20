@@ -479,6 +479,12 @@ fn emit_item_expanded(
                 out.push_str(prelude);
             }
             continue_span(out, from, mapped, collector);
+            // An empty block goes on one line, as a top-level at-rule's does.
+            if items.is_empty() {
+                out.push_str(" {}\n");
+                *prev = SrcLines::default();
+                return false;
+            }
             out.push_str(" {\n");
             let mut inner = SrcLines::default();
             let mut joined = false;
@@ -860,7 +866,7 @@ fn item_writes_compressed(item: &OutItem) -> bool {
 /// distinction — an interpolated name arrives here already resolved — so a
 /// `@#{"media"}` block still goes away; that is the same gap our EXPANDED output
 /// has (it drops `@#{"media"} screen {}`, which dart keeps), not a new one.
-fn at_rule_drops_when_empty(name: &str) -> bool {
+pub(crate) fn at_rule_drops_when_empty(name: &str) -> bool {
     matches!(name, "media" | "supports")
 }
 

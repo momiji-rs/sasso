@@ -49,6 +49,13 @@ Conformance is tracked separately as a ratchet against the official
   after each comma and `meta.type-of` reports `calculation` rather than
   `string`, both as dart does. `[measured]` **+4 cases**.
 
+  The rule has to hold in the **plain-CSS** evaluator too, which builds its own
+  output nodes: a `.css` file reached through `@use`/`@import` dropped
+  `.a {@foo {}}` in *both* styles, and dropped a nested `@keyframes` —
+  contents and all — because that statement had no rule-body arm at all.
+  `[measured]` against dart-sass 1.104.1 in both styles; no sass-spec case
+  covers either shape, so neither gate number moves.
+
   Compressed passing 13,975 → **14,001** of 14,258 (98.02% → 98.20%); expanded
   unchanged at 14,107 `+0`.
 

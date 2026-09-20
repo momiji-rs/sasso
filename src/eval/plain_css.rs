@@ -1,4 +1,5 @@
 use super::*;
+use crate::emit::at_rule_drops_when_empty;
 
 impl<'a> Evaluator<'a> {
     /// Emit a plain-CSS (`.css`) module's statements, preserving nesting (no
@@ -401,17 +402,26 @@ impl<'a> Evaluator<'a> {
         let mut items = Vec::new();
         let mut bubbled: Vec<OutNode> = Vec::new();
         let bubble = |name: &str, prelude: String, inner: Vec<OutItem>, bubbled: &mut Vec<OutNode>| {
-            if inner.is_empty() {
-                return;
-            }
-            bubbled.push(OutNode::AtRule {
-                name: name.to_string(),
-                prelude,
-                body: vec![OutNode::plain_rule(
+            // Nothing to wrap means no copy of the parent rule, but the at-rule
+            // itself still survives unless it is one of the two that go away
+            // when their block is empty: `.a {@foo {}}` is `@foo {}`, while
+            // `.a {@media b {}}` is nothing (see `at_rule_drops_when_empty`).
+            let body = if inner.is_empty() {
+                if at_rule_drops_when_empty(name) {
+                    return;
+                }
+                Vec::new()
+            } else {
+                vec![OutNode::plain_rule(
                     parent_selectors.to_vec(),
                     inner,
                     SrcLines::default(),
-                )],
+                )]
+            };
+            bubbled.push(OutNode::AtRule {
+                name: name.to_string(),
+                prelude,
+                body,
                 has_block: true,
                 lines: SrcLines::default(),
             });
@@ -442,6 +452,27 @@ impl<'a> Evaluator<'a> {
                     let prelude_s = self.eval_template(prelude)?.trim().to_string();
                     let inner = self.css_body(b)?;
                     bubble(name, prelude_s, inner, &mut bubbled);
+                }
+                // `@keyframes` hoists out like any other block at-rule, but
+                // takes no copy of the parent selectors with it: its block holds
+                // keyframe selectors, not declarations. Dropping it here lost
+                // the whole rule.
+                Stmt::Keyframes {
+                    name,
+                    prelude,
+                    body,
+                    lines,
+                } => {
+                    let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let out_body = self.css_at_body(body)?;
+                    let lines = self.stamp(*lines);
+                    bubbled.push(OutNode::AtRule {
+                        name: name.clone(),
+                        prelude: prelude_s,
+                        body: out_body,
+                        has_block: true,
+                        lines,
+                    });
                 }
                 other => self.css_body_stmt(other, &mut items)?,
             }
@@ -631,7 +662,9 @@ impl<'a> Evaluator<'a> {
                     }
                     Some(b) => {
                         let inner = self.css_body(b)?;
-                        if !inner.is_empty() {
+                        // An empty block below the bubbling level stays where it
+                        // is, on the same terms as above.
+                        if !inner.is_empty() || !at_rule_drops_when_empty(name) {
                             let lines = self.stamp(*lines);
                             items.push(OutItem::NestedAtRule {
                                 name: name.clone(),
@@ -642,6 +675,23 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                 }
+            }
+            // Below the bubbling level it stays put, like any other at-rule.
+            Stmt::Keyframes {
+                name,
+                prelude,
+                body,
+                lines,
+            } => {
+                let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                let inner = self.css_body(body)?;
+                let lines = self.stamp(*lines);
+                items.push(OutItem::NestedAtRule {
+                    name: name.clone(),
+                    prelude: prelude_s,
+                    items: inner,
+                    lines,
+                });
             }
             _ => {}
         }

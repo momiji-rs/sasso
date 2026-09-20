@@ -299,14 +299,16 @@ dart-sass 1.104.1's **compressed** output for the same cases
 
 The gate found 1,528 cases that compile to byte-exact `expanded` CSS and to
 compressed CSS that is not byte-exact — every one of them byte-shortening
-rather than meaning. Three mechanisms have accounted for 1,422 of them: the
+rather than meaning. Four mechanisms have accounted for 1,422 of them: the
 `%`/`deg` a colour function's lightness and hue keep when compressed, which of
 dart's two number writers decides whether a fraction loses its leading zero,
-and which nodes survive compression empty (`@media {}` goes, `@font-face {}`
-stays — dart keeps an at-rule it does not know the semantics of). 106 cases
-remain, 62 of which are ones where dart-sass 1.104.1's own expanded output no
-longer matches the expectation sass-spec ships. This is a ratchet like the
-other one — it can only go up.
+which nodes survive compression empty (`@media {}` goes, `@font-face {}` stays
+— dart keeps an at-rule it does not know the semantics of), and whether a
+preserved call is a calculation or a string (a string carries one spelling for
+both styles, so `round(1px, 2bar)` could not lose its space). 106 cases remain,
+62 of which are ones where dart-sass 1.104.1's own expanded output no longer
+matches the expectation sass-spec ships. This is a ratchet like the other one —
+it can only go up.
 
 **Strict input validation, too.** Matching dart-sass means rejecting what
 dart-sass rejects, not just reproducing its output. sasso errors — rather than

@@ -274,6 +274,115 @@ fn a_loaded_files_comment_only_rule_vanishes_when_compressed() {
     case("loud", ".a {\n  .b {\n    /*! c */\n  }\n}\n", ".a{.b{/*! c */}}");
 }
 
+/// An at-rule is not invisible just because its block writes nothing: dart's
+/// `_isInvisible` short-circuits on an unknown at-rule on purpose ("we can't
+/// guarantee that (for example) `@foo {}` isn't meaningful"), so only `@media`
+/// and `@supports` — which have their own AST classes — go away. The plain-CSS
+/// path builds its own nodes and so needs the rule of its own. Every
+/// expectation measured against dart-sass 1.104.1.
+#[test]
+fn a_loaded_files_empty_at_rule_survives_unless_it_is_media_or_supports() {
+    let dir = scratch("emptyat");
+    let case = |file: &str, css: &str, expanded: &str, compressed: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), css).unwrap();
+        let entry = format!("@use \"{file}\";\n");
+        assert_eq!(
+            compile_in(&dir, &format!("e_{file}.scss"), &entry),
+            expanded,
+            "expanded: {css}"
+        );
+        assert_eq!(
+            compile_compressed_in(&dir, &format!("c_{file}.scss"), &entry),
+            compressed,
+            "compressed: {css}"
+        );
+    };
+    // The first level bubbles out, and an empty block takes no copy of its
+    // parent selectors with it.
+    case("bub", ".a { @foo {} }\n", "@foo {}", "@foo{}");
+    case("media", ".b { @media x {} }\n", "", "");
+    case("supports", ".c { @supports (a: b) {} }\n", "", "");
+    case("layer", ".l { @layer a {} }\n", "@layer a {}", "@layer a{}");
+    // Deeper levels keep native CSS nesting, so the at-rule stays in place.
+    case(
+        "deep",
+        ".d { .e { @foo {} } }\n",
+        ".d {\n  .e {\n    @foo {}\n  }\n}",
+        ".d{.e{@foo{}}}",
+    );
+    case("deepmedia", ".d { .e { @media x {} } }\n", "", "");
+    case(
+        "two",
+        ".i { @foo {} @bar {} }\n",
+        "@foo {}\n@bar {}",
+        "@foo{}@bar{}",
+    );
+    // A block emptied by compression is still written when compressed, and
+    // still holds its contents when expanded.
+    case(
+        "cmt",
+        ".g { @foo { /* c */ } }\n",
+        // KNOWN GAP: dart writes the one-child rule on one line here
+        // (`.g { /* c */ }`); the copy of the parent this path synthesizes has
+        // no source lines, which is what that join is decided on.
+        "@foo {\n  .g {\n    /* c */\n  }\n}",
+        "@foo{}",
+    );
+    // KNOWN GAP: dart splits the parent rule around a bubbled at-rule, keeping
+    // its source position (`@foo {}` then `.f { color: red }`); this path emits
+    // the whole parent first and the bubbled at-rules after it. Pre-existing,
+    // and visible with a non-empty block too.
+    case(
+        "sibling",
+        ".f { @foo {} color: red }\n",
+        ".f {\n  color: red;\n}\n\n@foo {}",
+        ".f{color:red}@foo{}",
+    );
+}
+
+/// `@keyframes` has its own statement in the AST, and the plain-CSS rule-body
+/// paths used to drop it — losing the whole at-rule, contents and all. It
+/// hoists out of the first level like any other block at-rule (with no copy of
+/// the parent selectors, since its block holds keyframe selectors rather than
+/// declarations) and stays in place below that. Measured against dart-sass
+/// 1.104.1.
+#[test]
+fn a_loaded_files_nested_keyframes_is_kept() {
+    let dir = scratch("nestedkf");
+    let case = |file: &str, css: &str, expanded: &str, compressed: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), css).unwrap();
+        let entry = format!("@use \"{file}\";\n");
+        assert_eq!(
+            compile_in(&dir, &format!("e_{file}.scss"), &entry),
+            expanded,
+            "expanded: {css}"
+        );
+        assert_eq!(
+            compile_compressed_in(&dir, &format!("c_{file}.scss"), &entry),
+            compressed,
+            "compressed: {css}"
+        );
+    };
+    case(
+        "kf",
+        ".h { @keyframes k { from { a: b } } }\n",
+        "@keyframes k {\n  from {\n    a: b;\n  }\n}",
+        "@keyframes k{from{a:b}}",
+    );
+    case(
+        "empty",
+        ".h { @keyframes k {} }\n",
+        "@keyframes k {}",
+        "@keyframes k{}",
+    );
+    case(
+        "deep",
+        ".h { .j { @keyframes k { from { a: b } } } }\n",
+        ".h {\n  .j {\n    @keyframes k {\n      from {\n        a: b;\n      }\n    }\n  }\n}",
+        ".h{.j{@keyframes k{from{a:b}}}}",
+    );
+}
+
 /// A loaded `.css` file reaches the same selector scanners: its list is cut by
 /// the comma split, and whether a rule keeps NATIVE CSS NESTING is decided by
 /// asking whether the part references its parent. An escaped delimiter must
