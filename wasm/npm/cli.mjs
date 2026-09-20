@@ -597,10 +597,9 @@ function parseArgs(argv) {
       opts.charset = true;
     } else if (a === "--no-charset") {
       opts.charset = false;
-      // Accepted for dart-sass compatibility. `--error-css` is a real dart
-      // feature this CLI does not implement (see HELP), and `--color` is a
-      // no-op in the native CLI too. (`--jobs` is no longer in this company:
-      // it caps the worker pool — see `runJobs`.)
+      // `--error-css` is implemented (see `reportFailure`); `--color` is a
+      // no-op in the native CLI too, so it is one here. (`--jobs` is no
+      // longer in this company: it caps the worker pool — see `runJobs`.)
     } else if (a === "--error-css") {
       opts.errorCss = true;
     } else if (a === "--no-error-css") {
@@ -943,8 +942,18 @@ function emit(result, outPath, wantMap, opts, stdinText) {
 function reportFailure(outPath, opts, message) {
   if (!outPath || opts.noCss) return undefined;
   try {
-    if (opts.errorCss !== false) writeFileSync(outPath, errorCss(message));
-    else rmSync(outPath, { force: true });
+    if (opts.errorCss !== false) {
+      // Same as `emit`: the destination tree may not exist yet, and a
+      // FIRST compile that fails is exactly when it does not. dart and
+      // the binary both write 547 bytes of error CSS into `dist/css/`
+      // that was never there; without this we reported ENOENT and left
+      // nothing at all — the one case where the error stylesheet is the
+      // only thing the browser would have had.
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, errorCss(message));
+    } else {
+      rmSync(outPath, { force: true });
+    }
     return undefined;
   } catch (e) {
     // Returned rather than printed: this belongs to one job's diagnostics, and

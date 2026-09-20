@@ -3694,6 +3694,19 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.match(css, /body::before \{/, "error-css: and the rule follows");
   assert.match(css, /content: "Error: [^"]*\\2577 /, "error-css: content keeps the Unicode gutter, escaped");
 
+  // A FIRST failure into a tree that does not exist yet. `emit` creates
+  // parents for a successful write; this branch did not, so the one case
+  // where the error stylesheet is the only thing the browser would have
+  // had reported ENOENT and wrote nothing. dart and the binary both
+  // create the directory.
+  rmSync(join(dir, "dist"), { recursive: true, force: true });
+  run("bad.scss", "dist/css/out.css");
+  assert.match(
+    readFileSync(join(dir, "dist", "css", "out.css"), "utf8"),
+    /^\/\* Error: /,
+    "error-css: a nested destination is created, as it is for a successful write",
+  );
+
   rebuild();
   run("--no-error-css", "bad.scss", "o.css");
   assert.ok(!existsSync(out), "error-css: --no-error-css removes the output instead");
