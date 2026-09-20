@@ -30,13 +30,31 @@
  *     reached". That one must not be swallowed with the directory that
  *     merely does not exist.
  *
+ * And one the platforms disagree about, measured rather than assumed —
+ * the same probe on both, deleting a watched directory and recreating
+ * it at the same path:
+ *
+ *              handle after the delete   recreated: still delivers?
+ *   macOS      alive (FSEvents is by     YES
+ *              path, not inode)
+ *   Linux      dead                      NO
+ *
+ * On neither platform does it emit `error` OR `close`. So on Linux a
+ * live-looking entry can be a dead handle, nothing will ever say so,
+ * and `live.has(d)` claims the directory is covered for the rest of the
+ * session. Only a look at the filesystem can tell, which is why `sync`
+ * takes one: it is per DIRECTORY (a handful) and not per file, unlike
+ * the snapshot survey that had to be made lazy.
+ *
  * @param {object} o
  * @param {(dir: string, cb: (event: string, filename: string | null) => void) => object} o.watch
  * @param {(dir: string, event: string, filename: string | null) => void} o.onEvent
+ * @param {(dir: string) => boolean} o.exists
+ * @param {(dir: string) => void} o.onMissing  wait for this one to come back
  * @param {(line: string) => void} o.report  a warning for the user, one line
  * @param {number} [o.retries]  re-arms allowed per directory before giving up
  */
-export function makeWatchers({ watch, onEvent, report, retries = 3 }) {
+export function makeWatchers({ watch, onEvent, exists, onMissing, report, retries = 3 }) {
   /** directory -> the single live handle watching it. */
   const live = new Map();
   /** Consecutive failures since this directory last delivered an event. */
@@ -64,12 +82,14 @@ export function makeWatchers({ watch, onEvent, report, retries = 3 }) {
         onEvent(d, event, filename);
       });
     } catch (e) {
-      // A directory that is not there is not a fault — the probe waits
-      // for it and the next rewatch tries again. Anything else means
-      // this directory is NOT watched and nobody would ever know.
-      if (e?.code !== "ENOENT") {
-        sayOnce(d, `sasso: cannot watch ${d}: ${e?.message ?? e}`);
-      }
+      // A directory that is not there is not a fault — but something
+      // has to wait for it. Only configured load paths were probed, so
+      // a dependency directory that was deleted and put back was never
+      // watched again, and on Linux nothing else notices. Anything that
+      // is NOT simply absent means this directory is unwatched and
+      // nobody would ever know.
+      if (e?.code === "ENOENT") onMissing(d);
+      else sayOnce(d, `sasso: cannot watch ${d}: ${e?.message ?? e}`);
       return;
     }
 
@@ -81,7 +101,13 @@ export function makeWatchers({ watch, onEvent, report, retries = 3 }) {
       if (live.get(d) === handle) live.delete(d);
     });
     handle.on("error", (e) => {
-      if (live.get(d) === handle) live.delete(d);
+      // Stale: `sync` has already dropped or replaced this handle. The
+      // `close` path returns here and so must this one — re-arming on
+      // behalf of a handle nobody holds either resurrects a directory
+      // that was dropped, or opens a SECOND watcher beside the
+      // replacement and leaks the first.
+      if (live.get(d) !== handle) return;
+      live.delete(d);
       const n = (failures.get(d) ?? 0) + 1;
       failures.set(d, n);
       if (n > retries) {
@@ -108,7 +134,12 @@ export function makeWatchers({ watch, onEvent, report, retries = 3 }) {
      */
     sync(dirs) {
       for (const [d, handle] of live) {
-        if (!dirs.has(d)) {
+        // Wanted no more, or gone from disk. The second is the one that
+        // is easy to miss: a deleted directory leaves a handle that is
+        // dead on Linux and silent on both platforms, so without this
+        // the entry would claim it forever. Dropping it here lets the
+        // open loop below reopen it, or hand it to the probe.
+        if (!dirs.has(d) || !exists(d)) {
           live.delete(d);
           handle.close();
         }

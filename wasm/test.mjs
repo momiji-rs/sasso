@@ -3897,16 +3897,34 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 // node closes and nulls the handle and deliberately does NOT emit
 // `close`, and a watch that cannot be STARTED throws synchronously
 // instead.
+//
+// It also copies what the platforms do to a watched directory that is
+// deleted, measured with the same probe on both:
+//
+//              handle after the delete   recreated: still delivers?
+//   macOS      alive (FSEvents is by     YES
+//              path, not inode)
+//   Linux      dead                      NO
+//
+// and on NEITHER an `error` or a `close`. So the fake's handle for a
+// deleted directory goes quiet without announcing anything, which is
+// the case that makes `sync` look at the filesystem.
 {
   const { makeWatchers } = await import("./npm/_watchers.mjs");
 
-  /** A `watch` the test decides the fate of. */
-  const fake = ({ startError = null } = {}) => {
+  /** A `watch` the test decides the fate of, over a filesystem it owns. */
+  const fake = ({ startError = null, present = null } = {}) => {
     const all = [];
+    const exists = (dir) => present === null || present.has(dir);
     const watch = (dir, cb) => {
       if (startError && startError.dir === dir) {
         const e = new Error(startError.message);
         e.code = startError.code;
+        throw e;
+      }
+      if (!exists(dir)) {
+        const e = new Error(`ENOENT: no such file or directory, watch '${dir}'`);
+        e.code = "ENOENT";
         throw e;
       }
       const listeners = new Map();
@@ -3938,6 +3956,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     };
     return {
       watch,
+      exists,
       all,
       openHandles: () => all.filter((h) => !h.closed),
       of: (dir) => all.filter((h) => h.dir === dir),
@@ -3949,13 +3968,16 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     const fs = fake(opts);
     const events = [];
     const said = [];
+    const missing = [];
     const w = makeWatchers({
       watch: fs.watch,
+      exists: fs.exists,
       onEvent: (d, _e, fn) => events.push(`${d}/${fn}`),
+      onMissing: (d) => missing.push(d),
       report: (line) => said.push(line),
       retries: opts?.retries ?? 3,
     });
-    return { fs, w, events, said };
+    return { fs, w, events, said, missing };
   };
 
   // Steady state: syncing the same set again must touch nothing. This is
@@ -4091,6 +4113,62 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.equal(w.size, 0, "watchers: a directory that cannot be watched is not claimed");
     assert.equal(said.length, 1, "watchers: ENOSPC is said out loud");
     assert.match(said[0], /System limit/, "watchers: … with the reason the user can act on");
+  }
+
+  // A watched directory deleted out from under a live handle. On Linux
+  // that handle is dead; on macOS it still works; on neither does it
+  // say so. Without a look at the filesystem the entry claims the
+  // directory is covered for the rest of the session.
+  {
+    const present = new Set(["/a", "/b"]);
+    const { fs, w, missing } = setup({ present });
+    w.sync(new Set(["/a", "/b"]));
+    const doomed = fs.of("/a")[0];
+    present.delete("/a"); // rm -rf a
+
+    w.sync(new Set(["/a", "/b"])); // the next compile
+    assert.equal(w.size, 1, "watchers: the vanished directory is no longer claimed");
+    assert.equal(doomed.closed, true, "watchers: and its handle is let go");
+    assert.deepEqual(missing, ["/a"], "watchers: something is now waiting for it to come back");
+
+    present.add("/a"); // and it is back
+    w.sync(new Set(["/a", "/b"]));
+    assert.equal(w.size, 2, "watchers: the recreated directory is watched again");
+    assert.equal(fs.liveOf("/a").length, 1, "watchers: with exactly one live handle");
+    fs.liveOf("/a")[0].cb("change", "v.scss");
+    assert.equal(fs.liveOf("/a").length, 1, "watchers: … that delivers");
+  }
+
+  // An `error` from a handle `sync` has already dropped must not put
+  // the directory back. Re-arming for a handle nobody holds resurrects
+  // a directory that was deliberately let go.
+  {
+    const { fs, w, missing } = setup();
+    w.sync(new Set(["/a"]));
+    const dropped = fs.of("/a")[0];
+    w.sync(new Set([])); // /a is no longer wanted
+    assert.equal(w.size, 0, "watchers: dropped");
+    dropped.die("EPERM"); // its error lands afterwards
+    assert.equal(w.size, 0, "watchers: a stale error did not resurrect it");
+    assert.equal(fs.of("/a").length, 1, "watchers: and opened no new handle");
+    assert.deepEqual(missing, [], "watchers: nor asked anyone to wait for it");
+  }
+
+  // The same, when the directory has been REOPENED in the meantime:
+  // re-arming here would leave two live handles on one directory, every
+  // event delivered twice, and the replacement leaked.
+  {
+    const { fs, w } = setup();
+    w.sync(new Set(["/a"]));
+    const first = fs.of("/a")[0];
+    first.deferClose = true;
+    w.sync(new Set([]));
+    w.sync(new Set(["/a"]));
+    const second = fs.liveOf("/a")[0];
+    first.die("EPERM"); // the old handle's error, long after it was replaced
+    assert.equal(fs.liveOf("/a").length, 1, `watchers: one live handle, not ${fs.liveOf("/a").length}`);
+    assert.equal(fs.liveOf("/a")[0], second, "watchers: and it is the replacement");
+    assert.equal(w.size, 1, "watchers: still exactly one entry");
   }
 
   console.log("ok: watchers — steady state, re-arm on error, give up once, ENOSPC is not ENOENT");

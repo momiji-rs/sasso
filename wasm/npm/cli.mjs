@@ -1271,7 +1271,13 @@ function runWatch(input, output, common, opts) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
   const watchers = makeWatchers({
     watch,
+    exists: existsSync,
     onEvent: (d, _event, fn) => onDirEvent(d, fn),
+    // A watched directory that has gone waits for its return the same
+    // way an absent load path does. Only load paths were probed, so a
+    // dependency directory deleted and put back was never watched
+    // again — and on Linux the dead handle says nothing at all.
+    onMissing: (d) => probes.arm(d),
     report: (line) => writeStderrSync(line + "\n"),
   });
   // What is on disk, so the catch-up writes nothing when nothing
