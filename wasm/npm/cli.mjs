@@ -2154,6 +2154,30 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
           : e && e.code === "ENOENT"
             ? `Error reading ${input}: Cannot open file.`
             : `error: ${e && e.message ? e.message : e}`;
+      // An output-less job with `--error-css` is about to put the
+      // stylesheet on stdout, which under `2>&1` is the pipe the
+      // warnings are on. The success path above already flushes for
+      // this reason; the failure path did not, so a warning the compile
+      // had ALREADY printed came out behind the stylesheet.
+      //
+      // Only the warnings, though. Measured against dart-sass 1.104.1,
+      // one file that warns and then fails, merged with `2>&1`:
+      //
+      //   dart    warn -> css -> error
+      //   npm     css -> warn -> error   (before this)
+      //   binary  warn -> error -> css   (#160)
+      //
+      // Flushing the whole block here — the warnings AND the error —
+      // would give the binary's order, moving this CLI away from the
+      // one front end that agrees with dart. So flush what the compile
+      // already said, and let the error follow the stylesheet.
+      if (output === undefined && opts.errorCss === true) {
+        const said = diagnostics.get(i);
+        if (said) {
+          writeStderrSync(said);
+          diagnostics.delete(i);
+        }
+      }
       note(i, String(msg).replace(/\n?$/, "\n"));
       failed++;
       // Only a COMPILE error touches the output; an unreadable entry

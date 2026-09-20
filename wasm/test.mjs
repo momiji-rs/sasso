@@ -1887,6 +1887,42 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     );
   }
 
+  // The same job, but it FAILS after warning. Three things now share the
+  // one descriptor, and dart puts them in this order (measured against
+  // 1.104.1, one file that warns then fails, `2>&1`):
+  //
+  //   dart    warn -> css -> error
+  //   binary  warn -> error -> css   (#160: the binary is the odd one)
+  //
+  // The success path above flushes a job's diagnostics before its CSS;
+  // the failure path has to flush only the WARNINGS, because the error
+  // belongs after the stylesheet. Flushing the whole block instead is
+  // the plausible fix that quietly adopts the binary's order.
+  {
+    const fodir = join(dir, "stdout-order-fail");
+    mkdirSync(fodir, { recursive: true });
+    const src = join(fodir, "warns-then-fails.scss");
+    writeFileSync(src, `@warn "said-during-the-compile";\n.a { width: 1px + 1em; }\n`);
+    const merged = join(fodir, "merged.log");
+    const fd = openSync(merged, "w");
+    const r = spawnSync(process.execPath, [cliPath, "--no-source-map", "--error-css", src], {
+      stdio: ["ignore", fd, fd],
+      timeout: 20000,
+    });
+    closeSync(fd);
+    const text = readFileSync(merged, "utf8");
+    assert.notEqual(r.status, 0, `cli: the job failed (output: ${text})`);
+    const atWarn = text.indexOf("said-during-the-compile");
+    const atCss = text.indexOf("/* Error:");
+    const atError = text.search(/^Error: /m);
+    assert.ok(atWarn >= 0 && atCss >= 0 && atError >= 0, `cli: all three reached the terminal (${text})`);
+    assert.ok(atWarn < atCss, `cli: the warning comes before the error stylesheet (got: ${text})`);
+    assert.ok(
+      atCss < atError,
+      `cli: … and the stylesheet before the diagnostic, as dart does and the binary does not (got: ${text})`,
+    );
+  }
+
   // The headline of the engine work is that the DEFAULT picks the addon. No
   // output test can see that — the two engines are byte-identical on purpose,
   // which is the point — so the only honest observable is throughput, and
