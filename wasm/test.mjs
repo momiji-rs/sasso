@@ -4011,12 +4011,14 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /** Start a watch in a fresh directory, run `body`, always kill it. */
-  const withWatch = async (setup, body, extra = [], entry = "main.scss") => {
+  // `maps` because one case needs them ON: the watch default is source
+  // maps, and the bug it covers is invisible without the sidecar.
+  const withWatch = async (setup, body, extra = [], entry = "main.scss", maps = false) => {
     const dir = mkdtempSync(join(tmpdir(), "sasso-watchcase-"));
     setup(dir);
     const proc = spawn(
       process.execPath,
-      [cliPath, "--no-source-map", ...extra, "--watch", entry, "out.css"],
+      [cliPath, ...(maps ? [] : ["--no-source-map"]), ...extra, "--watch", entry, "out.css"],
       { cwd: dir, stdio: ["ignore", "pipe", "pipe"] },
     );
     let log = "";
@@ -4223,7 +4225,44 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       await until(() => css().includes("teal")),
       "watch: and fixing it replaces the error CSS with the real thing",
     );
+
+    // Fixing it back to EXACTLY what it was before the failure. The
+    // "skip an unchanged write" shortcut remembers the last CSS it
+    // wrote; if a failure does not clear that, this compile matches and
+    // is skipped, and the error stylesheet stays on the page forever.
+    await sleep(300);
+    writeFileSync(join(dir, "_v.scss"), "$c: ;\n");
+    assert.ok(await until(() => css().startsWith("/* Error: ")), "watch: broken again");
+    await sleep(300);
+    writeFileSync(join(dir, "_v.scss"), "$c: teal;\n");
+    assert.ok(
+      await until(() => css().includes("teal")),
+      "watch: fixing it BACK to what it was must write again, not match a stale memory",
+    );
   });
+
+  // A whitespace-only edit: the CSS is identical and every mapping
+  // moves. Comparing the CSS alone skipped the write and left the
+  // sidecar wrong — with source maps ON, which is the watch default.
+  await withWatch(withDep, async ({ dir, css, until }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(400);
+    const mapOf = () => {
+      try {
+        return readFileSync(join(dir, "out.css.map"), "utf8");
+      } catch {
+        return "";
+      }
+    };
+    const before = mapOf();
+    assert.ok(before.length > 0, "watch: a source map was written to begin with");
+    writeFileSync(join(dir, "main.scss"), '@use "v";\n\n\n.a { color: v.$c; }\n');
+    assert.ok(
+      await until(() => mapOf() !== before),
+      "watch: a whitespace-only edit still rewrites the map",
+    );
+    assert.ok(css().includes("red"), "watch: …and the CSS is unchanged, which is the point");
+  }, [], "main.scss", true);
 
   // A destination that IS a source. `sasso --watch a.scss a.scss` and
   // `--watch main.scss _v.scss` both replaced a stylesheet with its own

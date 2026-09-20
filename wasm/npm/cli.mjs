@@ -1256,8 +1256,15 @@ function isFresh(output, input, deps) {
 function runWatch(input, output, common, opts) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
   let watchers = new Map();
-  // What is on disk, so the catch-up writes nothing when nothing changed.
-  let lastCss = null;
+  // What is on disk, so the catch-up writes nothing when nothing
+  // changed. The MAP counts too: a whitespace-only edit leaves the CSS
+  // identical and moves every mapping, and comparing the CSS alone left
+  // the sidecar stale. `null` means "unknown" — see the failure path,
+  // which must clear it or fixing a typo back to what it was would find
+  // the CSS unchanged and leave the error stylesheet on disk forever.
+  let onDisk = null;
+  const artifacts = (result) =>
+    `${result.css}\u0000${result.sourceMap ? JSON.stringify(result.sourceMap) : ""}`;
   // The last set of files a compile actually loaded, seeded with the entry.
   // Kept across a FAILED compile: a failure has no `loadedUrls`, and the
   // first version of this narrowed the set to the entry alone when one
@@ -1467,20 +1474,20 @@ function runWatch(input, output, common, opts) {
         failing = false;
         return true;
       }
-      // Every save now compiles twice — once at the head of the burst,
-      // once to catch up — so most catch-ups produce the CSS that is
-      // already on disk. Writing it again would touch the output's
-      // mtime for nothing, which is the property downstream watchers
-      // key on, and print a second `Compiled` line where dart prints
-      // one per save.
-      if (lastCss === result.css) {
+      // Every save compiles twice — once at the head of the burst, once
+      // to catch up — so most catch-ups produce exactly what is already
+      // on disk. Writing it again would touch the output's mtime for
+      // nothing, which is the property downstream watchers key on, and
+      // print a second `Compiled` line where dart prints one per save.
+      const produced = artifacts(result);
+      if (onDisk !== null && onDisk === produced) {
         failing = false;
         return true;
       }
       const writeError = emit(result, output, common.sourceMap, opts);
       if (writeError) process.stderr.write(`${writeError}\n`);
       else {
-        lastCss = result.css;
+        onDisk = produced;
         if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
       }
       failing = false;
@@ -1496,6 +1503,11 @@ function runWatch(input, output, common, opts) {
       if (!aliasesASource() && e instanceof Exception) {
         const writeError = reportFailure(output, opts, e.message);
         if (writeError) process.stderr.write(`${writeError}\n`);
+        // The destination is no longer the CSS we last wrote — it is the
+        // error stylesheet, or gone. Forgetting that is how "fix the typo
+        // back to what it was" left the error on the page forever: the
+        // next compile matched the remembered CSS and skipped the write.
+        onDisk = null;
       }
       // Keep the set we already had — a failure reports no `loadedUrls`,
       // and throwing away what we knew is what broke recovery — and accept
