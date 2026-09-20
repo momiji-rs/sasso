@@ -381,6 +381,79 @@ fn a_loaded_files_nested_keyframes_is_kept() {
         ".h {\n  .j {\n    @keyframes k {\n      from {\n        a: b;\n      }\n    }\n  }\n}",
         ".h{.j{@keyframes k{from{a:b}}}}",
     );
+    // And inside another at-rule's body, which is a third dispatcher: dropping
+    // it there emptied the enclosing `@media`, so the whole rule vanished.
+    case(
+        "media",
+        "@media screen { @keyframes k { from { a: b } } }\n",
+        "@media screen {\n  @keyframes k {\n    from {\n      a: b;\n    }\n  }\n}",
+        "@media screen{@keyframes k{from{a:b}}}",
+    );
+    case(
+        "mediaempty",
+        "@media screen { @keyframes k {} }\n",
+        "@media screen {\n  @keyframes k {}\n}",
+        "@media screen{@keyframes k{}}",
+    );
+    case(
+        "supports",
+        "@supports (a: b) { @keyframes k { from { a: b } } }\n",
+        "@supports (a: b) {\n  @keyframes k {\n    from {\n      a: b;\n    }\n  }\n}",
+        "@supports(a: b){@keyframes k{from{a:b}}}",
+    );
+    case(
+        "generic",
+        "@foo { @keyframes k { from { a: b } } }\n",
+        "@foo {\n  @keyframes k {\n    from {\n      a: b;\n    }\n  }\n}",
+        "@foo{@keyframes k{from{a:b}}}",
+    );
+    case(
+        "genericdeep",
+        "@foo { .a { @keyframes k { from { a: b } } } }\n",
+        "@foo {\n  @keyframes k {\n    from {\n      a: b;\n    }\n  }\n}",
+        "@foo{@keyframes k{from{a:b}}}",
+    );
+}
+
+/// A plain-CSS custom `@function` has its own statement too, and the same
+/// dispatcher dropped it for the same reason. Its body is raw text, spacing and
+/// all, which is why `result: 1 ;` keeps that gap. Measured against dart-sass
+/// 1.104.1.
+#[test]
+fn a_loaded_files_custom_function_inside_an_at_rule_is_kept() {
+    let dir = scratch("customfn");
+    let case = |file: &str, css: &str, expanded: &str, compressed: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), css).unwrap();
+        let entry = format!("@use \"{file}\";\n");
+        assert_eq!(
+            compile_in(&dir, &format!("e_{file}.scss"), &entry),
+            expanded,
+            "expanded: {css}"
+        );
+        assert_eq!(
+            compile_compressed_in(&dir, &format!("c_{file}.scss"), &entry),
+            compressed,
+            "compressed: {css}"
+        );
+    };
+    case(
+        "top",
+        "@function --f(--a) { result: 1 }\n",
+        "@function --f(--a) {\n  result: 1 ;\n}",
+        "@function --f(--a){result: 1 }",
+    );
+    case(
+        "media",
+        "@media screen { @function --f(--a) { result: 1 } }\n",
+        "@media screen {\n  @function --f(--a) {\n    result: 1 ;\n  }\n}",
+        "@media screen{@function --f(--a){result: 1 }}",
+    );
+    case(
+        "generic",
+        "@foo { @function --f(--a) { result: 1 } }\n",
+        "@foo {\n  @function --f(--a) {\n    result: 1 ;\n  }\n}",
+        "@foo{@function --f(--a){result: 1 }}",
+    );
 }
 
 /// A loaded `.css` file reaches the same selector scanners: its list is cut by

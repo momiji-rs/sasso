@@ -382,6 +382,35 @@ impl<'a> Evaluator<'a> {
                         ));
                     }
                 }
+                // `@keyframes` and a plain-CSS custom `@function` have
+                // statements of their own, so they need arms of their own here:
+                // falling through to `_` dropped them, and with them everything
+                // they held (`@media screen {@keyframes k {from {a: b}}}` came
+                // out empty, which then took the `@media` with it).
+                Stmt::Keyframes {
+                    name,
+                    prelude,
+                    body,
+                    lines,
+                } => {
+                    let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let out_body = self.css_at_body(body)?;
+                    let lines = self.stamp(*lines);
+                    out.push(OutNode::AtRule {
+                        name: name.clone(),
+                        prelude: prelude_s,
+                        body: out_body,
+                        has_block: true,
+                        lines,
+                    });
+                }
+                Stmt::CssCustomAtRule { name, prelude, body } => {
+                    let mut sink = Sink::AtRoot {
+                        body: &mut out,
+                        group_ends: false,
+                    };
+                    self.eval_css_custom_at_rule(name, prelude, body, &mut sink)?;
+                }
                 _ => {}
             }
         }
