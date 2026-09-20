@@ -4239,20 +4239,47 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // this case cannot tell a missed relativisation from an impossible one.
   const real = realpathSync(fdir);
 
-  const frames = (engine, entry) => {
-    const r = spawnSync(process.execPath, [cliPath, "--no-source-map", entry, "out.css"], {
+  const run = (engine, entry) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", entry, "out.css"], {
       cwd: real,
       encoding: "utf8",
       env: { ...process.env, SASSO_ENGINE: engine },
       timeout: 30000,
     });
-    return `${r.stdout}${r.stderr}`
+  const framesOf = (r) =>
+    `${r.stdout}${r.stderr}`
       .split("\n")
       .filter((l) => /\.scss \d+:\d+/.test(l))
       .map((l) => l.trim().replace(/\s+/g, " "));
-  };
+  const frames = (engine, entry) => framesOf(run(engine, entry));
 
-  for (const engine of ["wasm", "native"]) {
+  // The prebuilt addon is not there in every job — the wasm package's own CI
+  // builds no addon — and demanding an engine that cannot load is a refusal,
+  // not a fallback: the run exits non-zero with NO frames at all, which
+  // reads as "the rule is broken" rather than "there was nothing to test".
+  // Same shape as the jobs cases above: run it, and if it could not, assert
+  // WHY before skipping.
+  const engines = ["wasm"];
+  // A stylesheet that COMPILES, because the fixture above is a deliberate
+  // error: a non-zero exit there says nothing about whether the engine
+  // loaded.
+  const nativeProbe = spawnSync(process.execPath, [cliPath, "--stdin"], {
+    input: ".a{b:1}\n",
+    encoding: "utf8",
+    env: { ...process.env, SASSO_ENGINE: "native" },
+    timeout: 30000,
+  });
+  if (nativeProbe.status === 0) {
+    engines.push("native");
+  } else {
+    assert.match(
+      nativeProbe.stderr,
+      /SASSO_ENGINE=native/,
+      `frames: native was skipped, and the reason must be a missing addon (stderr: ${nativeProbe.stderr})`,
+    );
+  }
+
+  for (const engine of engines) {
     const rel = frames(engine, join("src", "main.scss"));
     assert.deepEqual(
       rel.map((l) => l.split(" ")[0]),
@@ -4280,14 +4307,18 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 
   // The two engines are the pair that drifted. Compare them to each other as
   // well as to the expectation: that is the assertion no existing test made.
-  assert.deepEqual(
-    frames("wasm", "src/main.scss"),
-    frames("native", "src/main.scss"),
-    "frames: the wasm and native engines name files identically",
-  );
+  if (engines.includes("native")) {
+    assert.deepEqual(
+      frames("wasm", join("src", "main.scss")),
+      frames("native", join("src", "main.scss")),
+      "frames: the wasm and native engines name files identically",
+    );
+  }
 
   rmSync(fdir, { recursive: true, force: true });
-  console.log("ok: stack frames — paths not file:// URLs, relative entry or absolute, both engines");
+  console.log(
+    `ok: stack frames — paths not file:// URLs, relative entry or absolute (${engines.join(" + ")})`,
+  );
 }
 
 // === a compile whose working directory has been deleted ===
@@ -4331,7 +4362,25 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     wasm: new URL("./npm/sasso.mjs", import.meta.url).href,
     native: new URL("./npm/native.mjs", import.meta.url).href,
   };
+  // The prebuilt addon is not there in every job, and importing
+  // `sasso/native` without one throws by design ("no native binding for
+  // …"). Ask first, and assert the REASON, so a skip cannot hide a break.
   for (const [engine, mod] of Object.entries(modules)) {
+    if (engine === "native") {
+      const probe = spawnSync(
+        process.execPath,
+        ["--input-type=module", "-e", `await import(${JSON.stringify(mod)});`],
+        { encoding: "utf8", timeout: 60000 },
+      );
+      if (probe.status !== 0) {
+        assert.match(
+          probe.stderr,
+          /no native binding/,
+          `deleted cwd: native was skipped, and the reason must be a missing addon (${probe.stderr.slice(0, 200)})`,
+        );
+        continue;
+      }
+    }
     const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
       encoding: "utf8",
       env: { ...process.env, SASSO_TEST_MODULE: mod },

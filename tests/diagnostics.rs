@@ -2139,6 +2139,21 @@ fn a_host_override_of_a_filter_name_still_warns() {
     assert!(w[0].contains("global-builtin"), "{}", w[0]);
 }
 
+/// A frame path spelled the way the platform spells it.
+///
+/// dart writes every frame with the PLATFORM's separator, the entry's
+/// included (#151), and so do we — so `src/main.scss` is the right answer on
+/// POSIX and `src\main.scss` on Windows. Four tests here hard-coded the
+/// POSIX one and passed everywhere except the platform half of this rule
+/// exists for.
+fn frame_path(rel: &str) -> String {
+    if cfg!(windows) {
+        rel.replace('/', "\\")
+    } else {
+        rel.to_string()
+    }
+}
+
 /// A frame names a file the same way whichever spelling the host handed over.
 ///
 /// The binary passes a path and the JS API passes a `file://` URL — it has to,
@@ -2271,15 +2286,15 @@ fn a_custom_importers_relative_key_shows_its_last_segment() {
     let e = compile("@use \"foo\";\n.a { @include foo.m; }\n", &opts).unwrap_err();
     let rendered = e.to_string();
     assert!(
-        rendered.contains("foo.scss 2:6"),
+        rendered.contains(&frame_path("foo.scss 2:6")),
         "the key's last segment, as dart shows it: {rendered}",
     );
     assert!(
-        !rendered.contains("virtual/foo.scss"),
+        !rendered.contains(&frame_path("virtual/foo.scss")),
         "the whole key is not a frame name: {rendered}",
     );
     // …and the entry is still relativised beside it.
-    assert!(rendered.contains("src/main.scss"), "{rendered}");
+    assert!(rendered.contains(&frame_path("src/main.scss")), "{rendered}");
 }
 
 /// The "error in interpolated output" block prints the file in a header of
@@ -2299,7 +2314,7 @@ fn the_interpolated_output_header_names_the_file_like_the_trace() {
     );
     assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
     assert_eq!(
-        rendered.matches("src/main.scss").count(),
+        rendered.matches(&frame_path("src/main.scss")).count(),
         2,
         "the header and the trace should both name it: {rendered}",
     );
@@ -2371,8 +2386,8 @@ fn a_labelled_snippets_headers_name_files_like_the_trace() {
         "not the labelled block: {rendered}",
     );
     assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
-    assert!(rendered.contains("src/main.scss"), "{rendered}");
-    assert!(rendered.contains("src/_dep.scss"), "{rendered}");
+    assert!(rendered.contains(&frame_path("src/main.scss")), "{rendered}");
+    assert!(rendered.contains(&frame_path("src/_dep.scss")), "{rendered}");
 }
 
 /// The same block, reached through the OTHER of the two call sites.
@@ -2420,8 +2435,8 @@ fn the_pre_entry_declaration_block_names_files_like_the_trace() {
         "not the pre-entry two-span block: {rendered}",
     );
     assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
-    assert!(rendered.contains("src/main.scss"), "{rendered}");
-    assert!(rendered.contains("src/_dep.scss"), "{rendered}");
+    assert!(rendered.contains(&frame_path("src/main.scss")), "{rendered}");
+    assert!(rendered.contains(&frame_path("src/_dep.scss")), "{rendered}");
 }
 
 /// Both spans in the ENTRY file, where the declaration has no module of its
