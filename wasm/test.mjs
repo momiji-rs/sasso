@@ -1037,7 +1037,17 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         JSON.stringify({ name: pkgName, version, main: "sasso.node" }),
       );
     const nativeUrl = new URL("./npm/native.mjs", import.meta.url).href;
-    const withPath = (extra) => ({ ...process.env, NODE_PATH: nodePath, ...extra });
+    // An exported SASSO_ENGINE decides for the child exactly what these
+    // cases exist to observe. The skew case below must be free to fall
+    // back to wasm, and the demanded case sets the variable itself; with
+    // `SASSO_ENGINE=native` in the environment the first one is pinned to
+    // the engine it is supposed to be abandoning and exits 1. The same
+    // scrub the jobs cases already do.
+    const withPath = (extra) => {
+      const base = { ...process.env, NODE_PATH: nodePath };
+      delete base.SASSO_ENGINE;
+      return { ...base, ...extra };
+    };
 
     manifest("9.9.9"); // not this package's version, whatever this package's is
     const probe = spawnSync(
@@ -1272,15 +1282,29 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const twoWays = spawnSync(process.execPath, [cliPath, "-o", first, src, second], { encoding: "utf8" });
   assert.equal(twoWays.status, 1, "cli: but --output plus a positional output is still rejected");
 
-  // A failed compile drops a stale output (this CLI is always --no-error-css,
-  // and dart removes the file rather than leave the last good build in place).
+  // A failed compile REPLACES the output with a stylesheet describing the
+  // error, as dart does by default. This asserted the opposite until
+  // --error-css was implemented — the test pinned the divergence, which
+  // is how it survived being documented as NOT IMPLEMENTED in --help.
   const stale = join(dir, "stale.css");
   cli(["--no-source-map", src, stale]);
   assert.ok(existsSync(stale), "cli: the first build wrote an output");
   writeFileSync(src, ".a{b:}\n");
   const failed = spawnSync(process.execPath, [cliPath, "--no-source-map", src, stale], { encoding: "utf8" });
   assert.equal(failed.status, 1, "cli: the second build fails");
-  assert.ok(!existsSync(stale), "cli: a failed compile removes the stale output");
+  assert.match(
+    readFileSync(stale, "utf8"),
+    /^\/\* Error: /,
+    "cli: a failed compile leaves error CSS where the stale output was",
+  );
+  // …and --no-error-css is how you ask for the old behaviour: rebuild
+  // from a good source, break it again, and the output goes rather than
+  // being replaced.
+  writeFileSync(src, ".a{b:1}\n");
+  cli(["--no-source-map", src, stale]);
+  writeFileSync(src, ".a{b:}\n");
+  spawnSync(process.execPath, [cliPath, "--no-source-map", "--no-error-css", src, stale], { encoding: "utf8" });
+  assert.ok(!existsSync(stale), "cli: --no-error-css removes it instead");
 
   // ... unless --no-css, which means no output-side effects at all.
   const kept = join(dir, "kept.css");
@@ -1860,6 +1884,42 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.ok(
       text.indexOf("before-the-css") < text.indexOf(".a{x:1}"),
       `cli: a stdout job's warning is written before its CSS (got: ${text})`,
+    );
+  }
+
+  // The same job, but it FAILS after warning. Three things now share the
+  // one descriptor, and dart puts them in this order (measured against
+  // 1.104.1, one file that warns then fails, `2>&1`):
+  //
+  //   dart    warn -> css -> error
+  //   binary  warn -> error -> css   (#160: the binary is the odd one)
+  //
+  // The success path above flushes a job's diagnostics before its CSS;
+  // the failure path has to flush only the WARNINGS, because the error
+  // belongs after the stylesheet. Flushing the whole block instead is
+  // the plausible fix that quietly adopts the binary's order.
+  {
+    const fodir = join(dir, "stdout-order-fail");
+    mkdirSync(fodir, { recursive: true });
+    const src = join(fodir, "warns-then-fails.scss");
+    writeFileSync(src, `@warn "said-during-the-compile";\n.a { width: 1px + 1em; }\n`);
+    const merged = join(fodir, "merged.log");
+    const fd = openSync(merged, "w");
+    const r = spawnSync(process.execPath, [cliPath, "--no-source-map", "--error-css", src], {
+      stdio: ["ignore", fd, fd],
+      timeout: 20000,
+    });
+    closeSync(fd);
+    const text = readFileSync(merged, "utf8");
+    assert.notEqual(r.status, 0, `cli: the job failed (output: ${text})`);
+    const atWarn = text.indexOf("said-during-the-compile");
+    const atCss = text.indexOf("/* Error:");
+    const atError = text.search(/^Error: /m);
+    assert.ok(atWarn >= 0 && atCss >= 0 && atError >= 0, `cli: all three reached the terminal (${text})`);
+    assert.ok(atWarn < atCss, `cli: the warning comes before the error stylesheet (got: ${text})`);
+    assert.ok(
+      atCss < atError,
+      `cli: … and the stylesheet before the diagnostic, as dart does and the binary does not (got: ${text})`,
     );
   }
 
@@ -3615,6 +3675,117 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   console.log("ok: cli --watch — stdout, dart's banner and stamp, --quiet keeps the banner");
 }
 
+// === --error-css: what a failure leaves behind ===
+//
+// This CLI accepted `--error-css` and ignored it, so a failing compile
+// always removed the output where dart replaces it with a stylesheet
+// describing the error. In a --watch loop that is the whole mechanism
+// for seeing the error: the page went unstyled instead of saying why.
+//
+// Measured against dart-sass 1.104.1 and the native binary, which agree
+// on all four:
+//
+//   a compile error, default   -> the output becomes error CSS
+//   the same, --no-error-css   -> the output is removed
+//   a file that cannot be READ -> the output is left exactly as it was
+//   --no-css                   -> the output is left exactly as it was
+//
+// The third is the one this CLI also had wrong in the other direction:
+// an unreadable entry is not a compile error, there is nothing to
+// render, and the previous build stays.
+{
+  const { asciiGutter, errorCss } = await import("./npm/_errorcss.mjs");
+
+  // The gutter swap, which is how the ASCII half of the comment is
+  // derived from the Unicode message the engine hands over.
+  {
+    const unicode = 'Error: oops\n  ╷\n1 │ .a { b: c; }\n  │        ^\n  ╵\n  x.scss 1:8  root stylesheet';
+    assert.equal(
+      asciiGutter(unicode),
+      "Error: oops\n  ,\n1 | .a { b: c; }\n  |        ^\n  '\n  x.scss 1:8  root stylesheet",
+      "error-css: the gutter becomes , | '",
+    );
+    // Anchored to the gutter, NOT a blanket replace: a stylesheet that
+    // contains a box-drawing character keeps it when the diagnostic
+    // quotes the line back.
+    assert.equal(
+      asciiGutter('  ╷\n1 │ .a { content: "│"; }\n  ╵'),
+      '  ,\n1 | .a { content: "│"; }\n  \'',
+      "error-css: a box character in the SOURCE line is left alone",
+    );
+  }
+
+  // `*/` in the message would close the comment; dart swaps the slash.
+  assert.match(errorCss("Error: a */ b"), /\* Error: a \*∕ b \*\//, "error-css: */ cannot close the comment");
+  // Non-ASCII in `content:` is escaped as `\hex `.
+  assert.match(errorCss("Error: x\n  ╷"), /\\2577 /, "error-css: the box character is escaped for content");
+
+  // And end to end, all four rules.
+  const dir = mkdtempSync(join(tmpdir(), "sasso-errcss-"));
+  writeFileSync(join(dir, "good.scss"), ".ok { a: b; }\n");
+  writeFileSync(join(dir, "bad.scss"), '@use "nope";\n');
+  const out = join(dir, "o.css");
+  const run = (...args) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { encoding: "utf8", cwd: dir });
+  const rebuild = () => {
+    rmSync(out, { force: true });
+    run("good.scss", "o.css");
+  };
+
+  rebuild();
+  run("bad.scss", "o.css");
+  const css = readFileSync(out, "utf8");
+  assert.match(css, /^\/\* Error: Can't find stylesheet to import\./, "error-css: the comment leads");
+  assert.match(css, /^ \* +,$/m, "error-css: the comment's gutter is ASCII");
+  assert.match(css, /body::before \{/, "error-css: and the rule follows");
+  assert.match(css, /content: "Error: [^"]*\\2577 /, "error-css: content keeps the Unicode gutter, escaped");
+
+  // A FIRST failure into a tree that does not exist yet. `emit` creates
+  // parents for a successful write; this branch did not, so the one case
+  // where the error stylesheet is the only thing the browser would have
+  // had reported ENOENT and wrote nothing. dart and the binary both
+  // create the directory.
+  rmSync(join(dir, "dist"), { recursive: true, force: true });
+  run("bad.scss", "dist/css/out.css");
+  assert.match(
+    readFileSync(join(dir, "dist", "css", "out.css"), "utf8"),
+    /^\/\* Error: /,
+    "error-css: a nested destination is created, as it is for a successful write",
+  );
+
+  rebuild();
+  run("--no-error-css", "bad.scss", "o.css");
+  assert.ok(!existsSync(out), "error-css: --no-error-css removes the output instead");
+
+  rebuild();
+  run("/no/such/file.scss", "o.css");
+  assert.equal(
+    readFileSync(out, "utf8"),
+    ".ok {\n  a: b;\n}\n",
+    "error-css: an unreadable entry is not a compile error — the last build stays",
+  );
+
+  rebuild();
+  run("--no-css", "bad.scss", "o.css");
+  assert.equal(readFileSync(out, "utf8"), ".ok {\n  a: b;\n}\n", "error-css: --no-css touches nothing");
+
+  // Writing to STDOUT rather than a file, the flag is three-valued: the
+  // default is silent and only an explicit --error-css prints. Measured:
+  //   sass bad.scss                 stdout 0B
+  //   sass --error-css bad.scss     stdout 546B
+  //   sass --no-error-css bad.scss  stdout 0B
+  assert.equal(run("bad.scss").stdout, "", "error-css: to stdout, the default is silent");
+  assert.match(
+    run("--error-css", "bad.scss").stdout,
+    /^\/\* Error: /,
+    "error-css: …and an explicit --error-css prints the stylesheet",
+  );
+  assert.equal(run("--no-error-css", "bad.scss").stdout, "", "error-css: --no-error-css stays silent");
+
+  rmSync(dir, { recursive: true, force: true });
+  console.log("ok: --error-css — written, removed, or left alone, as dart does");
+}
+
 // === the watch event filter, including the branch this platform cannot reach ===
 //
 // `fs.watch` may call back with no filename. macOS and Linux always name
@@ -3750,6 +3921,295 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   console.log("ok: probe — one handle per target, re-arms deeper, closes cleanly");
 }
 
+// === one live handle per directory, and what happens when one dies ===
+//
+// None of this is reachable from a --watch test on a healthy machine:
+// an fs.watch handle does not fail to order. The failures are real
+// though, and the way they present is silence — the session keeps
+// running and stops noticing saves in one directory.
+//
+// The fake copies node's actual behaviour, from `internal/fs/watchers`
+// in the runtime this suite runs on (v22.22.3): before emitting `error`
+// node closes and nulls the handle and deliberately does NOT emit
+// `close`, and a watch that cannot be STARTED throws synchronously
+// instead.
+//
+// It also copies what the platforms do to a watched directory that is
+// deleted, measured with the same probe on both:
+//
+//              handle after the delete   recreated: still delivers?
+//   macOS      alive (FSEvents is by     YES
+//              path, not inode)
+//   Linux      dead                      NO
+//
+// and on NEITHER an `error` or a `close`. So the fake's handle for a
+// deleted directory goes quiet without announcing anything, which is
+// the case that makes `sync` look at the filesystem.
+{
+  const { makeWatchers } = await import("./npm/_watchers.mjs");
+
+  /** A `watch` the test decides the fate of, over a filesystem it owns. */
+  const fake = ({ startError = null, present = null } = {}) => {
+    const all = [];
+    const exists = (dir) => present === null || present.has(dir);
+    const watch = (dir, cb) => {
+      if (startError && startError.dir === dir) {
+        const e = new Error(startError.message);
+        e.code = startError.code;
+        throw e;
+      }
+      if (!exists(dir)) {
+        const e = new Error(`ENOENT: no such file or directory, watch '${dir}'`);
+        e.code = "ENOENT";
+        throw e;
+      }
+      const listeners = new Map();
+      const h = {
+        dir,
+        cb,
+        closed: false,
+        close() {
+          h.closed = true;
+          // A real `close` event does not have to arrive before the
+          // next statement. `deferClose` lets a test hold it back.
+          if (!h.deferClose) h.emit("close");
+        },
+        emit: (name, ...args) => (listeners.get(name) ?? []).forEach((f) => f(...args)),
+        on: (name, f) => {
+          const list = listeners.get(name) ?? [];
+          list.push(f);
+          listeners.set(name, list);
+          return h;
+        },
+        /** What node does: close, null the handle, emit only `error`. */
+        die(message = "EPERM") {
+          h.closed = true;
+          h.emit("error", new Error(message));
+        },
+      };
+      all.push(h);
+      return h;
+    };
+    return {
+      watch,
+      exists,
+      all,
+      openHandles: () => all.filter((h) => !h.closed),
+      of: (dir) => all.filter((h) => h.dir === dir),
+      liveOf: (dir) => all.filter((h) => h.dir === dir && !h.closed),
+    };
+  };
+
+  const setup = (opts) => {
+    const fs = fake(opts);
+    const events = [];
+    const said = [];
+    const missing = [];
+    const w = makeWatchers({
+      watch: fs.watch,
+      exists: fs.exists,
+      onEvent: (d, _e, fn) => events.push(`${d}/${fn}`),
+      onMissing: (d) => missing.push(d),
+      report: (line) => said.push(line),
+      retries: opts?.retries ?? 3,
+    });
+    return { fs, w, events, said, missing };
+  };
+
+  // Steady state: syncing the same set again must touch nothing. This is
+  // the 1-in-30 lost save — rebuilding every watcher on every compile
+  // leaves a gap in which a save is not seen.
+  {
+    const { fs, w } = setup();
+    w.sync(new Set(["/a", "/b"]));
+    assert.equal(w.size, 2, "watchers: one per directory");
+    const first = [...fs.all];
+    w.sync(new Set(["/a", "/b"]));
+    w.sync(new Set(["/a", "/b"]));
+    assert.deepEqual(fs.all, first, "watchers: an unchanged set opens nothing new");
+    assert.equal(fs.openHandles().length, 2, "watchers: and closes nothing");
+  }
+
+  // A directory that leaves is closed; one that arrives is opened.
+  {
+    const { fs, w } = setup();
+    w.sync(new Set(["/a", "/b"]));
+    w.sync(new Set(["/b", "/c"]));
+    assert.equal(w.size, 2, "watchers: the set is what was asked for");
+    assert.equal(fs.liveOf("/a").length, 0, "watchers: the departed one is closed");
+    assert.equal(fs.liveOf("/b").length, 1, "watchers: the kept one is untouched");
+    assert.equal(fs.of("/b").length, 1, "watchers: … not reopened");
+    assert.equal(fs.liveOf("/c").length, 1, "watchers: the new one is open");
+  }
+
+  // A handle that errors is REPLACED, not merely forgotten. Forgetting
+  // it is what the first version of this did: the directory is then
+  // unwatched for the life of the session and nothing says so.
+  {
+    const { fs, w, events } = setup();
+    w.sync(new Set(["/a"]));
+    fs.of("/a")[0].die("EPERM");
+    assert.equal(w.size, 1, "watchers: still watching after an error");
+    assert.equal(fs.liveOf("/a").length, 1, "watchers: with a live handle, not a dead one");
+    assert.notEqual(fs.of("/a")[1], fs.of("/a")[0], "watchers: a NEW handle, re-armed");
+    fs.liveOf("/a")[0].cb("change", "x.scss");
+    assert.deepEqual(events, ["/a/x.scss"], "watchers: and the new one delivers");
+  }
+
+  // node does not fire `close` on the error path, so the `error`
+  // listener cannot be left to the `close` one. Without its own
+  // listener the entry is never dropped AND the event throws.
+  {
+    const { fs, w } = setup();
+    w.sync(new Set(["/a"]));
+    const h = fs.of("/a")[0];
+    let closeFired = false;
+    h.on("close", () => (closeFired = true));
+    h.die();
+    assert.equal(closeFired, false, "watchers: node's error path fires no close (the fake copies it)");
+    assert.equal(w.size, 1, "watchers: the error listener is what re-armed it");
+  }
+
+  // A directory that fails forever is given up on — once, out loud,
+  // naming the directory — rather than re-armed in a hot loop.
+  {
+    const { fs, w, said } = setup({ retries: 3 });
+    w.sync(new Set(["/bad"]));
+    for (let i = 0; i < 25; i++) fs.liveOf("/bad")[0]?.die("EPERM");
+    assert.equal(fs.of("/bad").length, 4, `watchers: 1 + 3 re-arms and no more (opened ${fs.of("/bad").length})`);
+    assert.equal(w.size, 0, "watchers: the dead directory is not claimed as covered");
+    assert.equal(said.length, 1, `watchers: said once, not ${said.length} times`);
+    assert.match(said[0], /gave up watching \/bad/, "watchers: … and named the directory");
+    assert.match(said[0], /will be missed/, "watchers: … and what it costs");
+  }
+
+  // A rewatch is a fresh chance — the next compile reopens a directory
+  // that was given up on — but a directory that is simply broken must
+  // not produce a line per compile for the rest of the session.
+  {
+    const { fs, w, said } = setup({ retries: 1 });
+    const kill = () => {
+      let h;
+      while ((h = fs.liveOf("/bad")[0])) h.die("EPERM");
+    };
+    w.sync(new Set(["/bad"]));
+    kill();
+    assert.equal(said.length, 1, "watchers: the first give-up is said");
+    for (let compile = 0; compile < 5; compile++) {
+      w.sync(new Set(["/bad"])); // every later compile tries again
+      assert.ok(fs.liveOf("/bad").length > 0, "watchers: a rewatch does retry it");
+      kill();
+    }
+    assert.equal(said.length, 1, `watchers: and still said once, not ${said.length} times`);
+  }
+
+  // The budget is for a burst, not for the life of the process: a
+  // delivered event proves the watcher works.
+  {
+    const { fs, w, said } = setup({ retries: 2 });
+    w.sync(new Set(["/a"]));
+    fs.liveOf("/a")[0].die();
+    fs.liveOf("/a")[0].cb("change", "ok.scss"); // it works again
+    fs.liveOf("/a")[0].die();
+    fs.liveOf("/a")[0].die();
+    assert.equal(w.size, 1, "watchers: an event reset the failure budget");
+    assert.deepEqual(said, [], "watchers: and nothing was given up on");
+  }
+
+  // A late `close` from OUR teardown must not evict a newer handle for
+  // the same directory — that is the teardown gap coming back.
+  {
+    const { fs, w } = setup();
+    w.sync(new Set(["/a"]));
+    const first = fs.of("/a")[0];
+    first.deferClose = true; // its close event lands later, as a real one can
+    w.sync(new Set([])); // drops /a, closing the first handle
+    w.sync(new Set(["/a"])); // and immediately wants it back
+    const second = fs.liveOf("/a")[0];
+    assert.notEqual(second, first, "watchers: a new handle for the reopened directory");
+    first.emit("close"); // the old handle's close finally lands
+    assert.equal(w.size, 1, "watchers: the late close did not evict the new handle");
+    assert.equal(fs.liveOf("/a")[0], second, "watchers: … and it is still the live one");
+  }
+
+  // A directory that is not there is not a fault — the probe waits for
+  // it. ENOSPC is, and swallowing it means a watch that looks fine and
+  // sees nothing.
+  {
+    const { w, said } = setup({ startError: { dir: "/gone", code: "ENOENT", message: "ENOENT" } });
+    w.sync(new Set(["/gone"]));
+    assert.equal(w.size, 0, "watchers: a missing directory is simply not watched");
+    assert.deepEqual(said, [], "watchers: … and is not worth a warning");
+  }
+  {
+    const { w, said } = setup({
+      startError: { dir: "/full", code: "ENOSPC", message: "System limit for number of file watchers reached" },
+    });
+    w.sync(new Set(["/full"]));
+    assert.equal(w.size, 0, "watchers: a directory that cannot be watched is not claimed");
+    assert.equal(said.length, 1, "watchers: ENOSPC is said out loud");
+    assert.match(said[0], /System limit/, "watchers: … with the reason the user can act on");
+  }
+
+  // A watched directory deleted out from under a live handle. On Linux
+  // that handle is dead; on macOS it still works; on neither does it
+  // say so. Without a look at the filesystem the entry claims the
+  // directory is covered for the rest of the session.
+  {
+    const present = new Set(["/a", "/b"]);
+    const { fs, w, missing } = setup({ present });
+    w.sync(new Set(["/a", "/b"]));
+    const doomed = fs.of("/a")[0];
+    present.delete("/a"); // rm -rf a
+
+    w.sync(new Set(["/a", "/b"])); // the next compile
+    assert.equal(w.size, 1, "watchers: the vanished directory is no longer claimed");
+    assert.equal(doomed.closed, true, "watchers: and its handle is let go");
+    assert.deepEqual(missing, ["/a"], "watchers: something is now waiting for it to come back");
+
+    present.add("/a"); // and it is back
+    w.sync(new Set(["/a", "/b"]));
+    assert.equal(w.size, 2, "watchers: the recreated directory is watched again");
+    assert.equal(fs.liveOf("/a").length, 1, "watchers: with exactly one live handle");
+    fs.liveOf("/a")[0].cb("change", "v.scss");
+    assert.equal(fs.liveOf("/a").length, 1, "watchers: … that delivers");
+  }
+
+  // An `error` from a handle `sync` has already dropped must not put
+  // the directory back. Re-arming for a handle nobody holds resurrects
+  // a directory that was deliberately let go.
+  {
+    const { fs, w, missing } = setup();
+    w.sync(new Set(["/a"]));
+    const dropped = fs.of("/a")[0];
+    w.sync(new Set([])); // /a is no longer wanted
+    assert.equal(w.size, 0, "watchers: dropped");
+    dropped.die("EPERM"); // its error lands afterwards
+    assert.equal(w.size, 0, "watchers: a stale error did not resurrect it");
+    assert.equal(fs.of("/a").length, 1, "watchers: and opened no new handle");
+    assert.deepEqual(missing, [], "watchers: nor asked anyone to wait for it");
+  }
+
+  // The same, when the directory has been REOPENED in the meantime:
+  // re-arming here would leave two live handles on one directory, every
+  // event delivered twice, and the replacement leaked.
+  {
+    const { fs, w } = setup();
+    w.sync(new Set(["/a"]));
+    const first = fs.of("/a")[0];
+    first.deferClose = true;
+    w.sync(new Set([]));
+    w.sync(new Set(["/a"]));
+    const second = fs.liveOf("/a")[0];
+    first.die("EPERM"); // the old handle's error, long after it was replaced
+    assert.equal(fs.liveOf("/a").length, 1, `watchers: one live handle, not ${fs.liveOf("/a").length}`);
+    assert.equal(fs.liveOf("/a")[0], second, "watchers: and it is the replacement");
+    assert.equal(w.size, 1, "watchers: still exactly one entry");
+  }
+
+  console.log("ok: watchers — steady state, re-arm on error, give up once, ENOSPC is not ENOENT");
+}
+
 // === the coalescing rule, on a fake clock ===
 //
 // How many compiles a burst costs cannot be asserted from a --watch test.
@@ -3789,29 +4249,44 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     assert.deepEqual(calls, [true, false], "coalesce: and then it stops");
   }
 
-  // One event, nothing after it: one run, no catch-up. This is the case
-  // the old trailing debounce made wait 50ms for a window that stayed
-  // empty.
+  // One event, nothing after it: the head runs IMMEDIATELY — that is the
+  // latency this design exists for, and the old trailing debounce made
+  // it wait 50ms for a window that stayed empty — and a catch-up
+  // follows.
+  //
+  // The catch-up is not waste and is not optional. What the head reads
+  // is not always what the save finally leaves on disk, and a head that
+  // succeeds on already-stale content would otherwise schedule nothing:
+  // measured at 1 save in 30 going permanently stale before this. The
+  // caller makes the second run free when nothing changed by not
+  // writing identical CSS, so the cost is one extra compile off the
+  // critical path, not an extra write or an extra reported line.
   {
     const { setTimer, tick } = clock();
     const calls = [];
     const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), true), setTimer });
     on();
+    assert.deepEqual(calls, [true], "coalesce: a lone save runs at once, before any window");
     tick();
+    assert.deepEqual(calls, [true, false], "coalesce: and is confirmed by one catch-up");
     tick();
-    assert.deepEqual(calls, [true], "coalesce: a lone save costs exactly one run");
+    assert.deepEqual(calls, [true, false], "coalesce: which is not itself confirmed — it stops");
   }
 
-  // Separate windows are separate bursts.
+  // Separate windows are separate bursts: each gets its own head.
   {
     const { setTimer, tick } = clock();
     const calls = [];
     const on = coalesce({ windowMs: 50, run: (p) => (calls.push(p), true), setTimer });
     on();
+    tick(); // the first save's catch-up
     tick();
     on();
-    tick();
-    assert.deepEqual(calls, [true, true], "coalesce: two lone saves are two heads, not a catch-up");
+    assert.deepEqual(
+      calls,
+      [true, false, true],
+      "coalesce: the second save is a head of its own, not a catch-up",
+    );
   }
 
   // A PROVISIONAL failure asks for a catch-up even with no further
@@ -3871,12 +4346,14 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /** Start a watch in a fresh directory, run `body`, always kill it. */
-  const withWatch = async (setup, body, extra = [], entry = "main.scss") => {
+  // `maps` because one case needs them ON: the watch default is source
+  // maps, and the bug it covers is invisible without the sidecar.
+  const withWatch = async (setup, body, extra = [], entry = "main.scss", maps = false) => {
     const dir = mkdtempSync(join(tmpdir(), "sasso-watchcase-"));
     setup(dir);
     const proc = spawn(
       process.execPath,
-      [cliPath, "--no-source-map", ...extra, "--watch", entry, "out.css"],
+      [cliPath, ...(maps ? [] : ["--no-source-map"]), ...extra, "--watch", entry, "out.css"],
       { cwd: dir, stdio: ["ignore", "pipe", "pipe"] },
     );
     let log = "";
@@ -4063,6 +4540,64 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     ["-I", "a/b"],
     "src/main.scss",
   );
+
+  // Error CSS under --watch, which is the whole reason the flag matters:
+  // break a partial and the PAGE says what broke, rather than going
+  // unstyled until you find the terminal. Every other --error-css test
+  // here is a one-shot compile; this is the loop.
+  await withWatch(withDep, async ({ dir, css, until, log, clear }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(300);
+    clear();
+    writeFileSync(join(dir, "_v.scss"), "$c: ;\n");
+    assert.ok(
+      await until(() => css().startsWith("/* Error: ")),
+      `watch: a broken save leaves error CSS in the output, not nothing: ${JSON.stringify(css().slice(0, 40))}`,
+    );
+    await sleep(300);
+    writeFileSync(join(dir, "_v.scss"), "$c: teal;\n");
+    assert.ok(
+      await until(() => css().includes("teal")),
+      "watch: and fixing it replaces the error CSS with the real thing",
+    );
+
+    // Fixing it back to EXACTLY what it was before the failure. The
+    // "skip an unchanged write" shortcut remembers the last CSS it
+    // wrote; if a failure does not clear that, this compile matches and
+    // is skipped, and the error stylesheet stays on the page forever.
+    await sleep(300);
+    writeFileSync(join(dir, "_v.scss"), "$c: ;\n");
+    assert.ok(await until(() => css().startsWith("/* Error: ")), "watch: broken again");
+    await sleep(300);
+    writeFileSync(join(dir, "_v.scss"), "$c: teal;\n");
+    assert.ok(
+      await until(() => css().includes("teal")),
+      "watch: fixing it BACK to what it was must write again, not match a stale memory",
+    );
+  });
+
+  // A whitespace-only edit: the CSS is identical and every mapping
+  // moves. Comparing the CSS alone skipped the write and left the
+  // sidecar wrong — with source maps ON, which is the watch default.
+  await withWatch(withDep, async ({ dir, css, until }) => {
+    assert.ok(await until(() => css().includes("red")), "watch: initial compile");
+    await sleep(400);
+    const mapOf = () => {
+      try {
+        return readFileSync(join(dir, "out.css.map"), "utf8");
+      } catch {
+        return "";
+      }
+    };
+    const before = mapOf();
+    assert.ok(before.length > 0, "watch: a source map was written to begin with");
+    writeFileSync(join(dir, "main.scss"), '@use "v";\n\n\n.a { color: v.$c; }\n');
+    assert.ok(
+      await until(() => mapOf() !== before),
+      "watch: a whitespace-only edit still rewrites the map",
+    );
+    assert.ok(css().includes("red"), "watch: …and the CSS is unchanged, which is the point");
+  }, [], "main.scss", true);
 
   // A destination that IS a source. `sasso --watch a.scss a.scss` and
   // `--watch main.scss _v.scss` both replaced a stylesheet with its own

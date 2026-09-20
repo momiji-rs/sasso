@@ -37,6 +37,8 @@
     "_watchfilter.mjs",
     "_coalesce.mjs",
     "_probe.mjs",
+    "_watchers.mjs",
+    "_errorcss.mjs",
     "cli.mjs",
     "sasso.mjs",
     "sasso.speed.mjs",

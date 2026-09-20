@@ -35,6 +35,8 @@ import { DEPRECATION_IDS } from "./_deprecations.mjs";
 import { triggersRecompile } from "./_watchfilter.mjs";
 import { coalesce } from "./_coalesce.mjs";
 import { makeProbe } from "./_probe.mjs";
+import { makeWatchers } from "./_watchers.mjs";
+import { errorCss } from "./_errorcss.mjs";
 // The prebuilt-addon rules, shared with native.mjs: which engine this platform
 // is SUPPOSED to run decides whether a wasm fallback is news (see `loadEngine`).
 import { nativePackage, platformKey } from "./_addon.mjs";
@@ -419,9 +421,8 @@ Options:
       --[no-]stop-on-error           Don't compile more files once an error is
                                      encountered.
       --[no-]error-css               On a compile error, write a stylesheet
-                                     describing it. NOT IMPLEMENTED in this CLI:
-                                     the flag is accepted, and a failing compile
-                                     always behaves as --no-error-css.
+                                     describing it (default: on when compiling
+                                     to a file).
       --no-css                       Compile but discard the CSS: no output
                                      file, no stdout, and an existing output is
                                      left exactly as it was.
@@ -483,11 +484,24 @@ const idle = new Int32Array(new SharedArrayBuffer(4));
  * moment and continue. EPIPE means there is no reader left to tell.
  */
 function writeStderrSync(text) {
+  writeFdSync(2, text);
+}
+
+/**
+ * The same, to an arbitrary descriptor. Used for the error stylesheet on
+ * stdout, which `fail()` follows with `process.exit` — and an
+ * asynchronous write to a pipe has no promise of draining first. It does
+ * not truncate here (measured: 480 KB through a pipe, twelve runs,
+ * complete every time, so Node is flushing), which makes this insurance
+ * rather than a fix. It costs nothing and it makes both streams behave
+ * the same way, which is the reason `writeStderrSync` exists at all.
+ */
+function writeFdSync(fd, text) {
   const bytes = Buffer.from(text, "utf8");
   let at = 0;
   while (at < bytes.length) {
     try {
-      at += writeSync(2, bytes, at, bytes.length - at);
+      at += writeSync(fd, bytes, at, bytes.length - at);
     } catch (e) {
       if (e.code === "EAGAIN") {
         Atomics.wait(idle, 0, 0, 1);
@@ -509,6 +523,7 @@ function parseArgs(argv) {
     embedSources: false,
     embedSourceMap: false,
     charset: true,
+    errorCss: undefined,
     quiet: false,
     quietDeps: false,
     silenceDeprecations: [],
@@ -596,12 +611,13 @@ function parseArgs(argv) {
       opts.charset = true;
     } else if (a === "--no-charset") {
       opts.charset = false;
-      // Accepted for dart-sass compatibility. `--error-css` is a real dart
-      // feature this CLI does not implement (see HELP), and `--color` is a
-      // no-op in the native CLI too. (`--jobs` is no longer in this company:
-      // it caps the worker pool — see `runJobs`.)
-    } else if (a === "--error-css" || a === "--no-error-css") {
-      // no-op: a failing compile always behaves as --no-error-css here
+      // `--error-css` is implemented (see `reportFailure`); `--color` is a
+      // no-op in the native CLI too, so it is one here. (`--jobs` is no
+      // longer in this company: it caps the worker pool — see `runJobs`.)
+    } else if (a === "--error-css") {
+      opts.errorCss = true;
+    } else if (a === "--no-error-css") {
+      opts.errorCss = false;
     } else if (a === "-c" || a === "--color" || a === "--no-color") {
       // no-op: output is never colored
     } else if (a === "--unicode") {
@@ -920,20 +936,61 @@ function emit(result, outPath, wantMap, opts, stdinText) {
 }
 
 /**
- * A compile failed: this CLI always behaves as `--no-error-css`, and dart then
- * REMOVES a stale output file so nothing keeps consuming the CSS of an earlier
- * successful build (the `.map`, if any, is left alone). `--no-css` means no
- * output-side effects at all, so it leaves the file be.
+ * A COMPILE failed: replace the output with a stylesheet describing the
+ * error, so the page shows what broke instead of the CSS of an earlier
+ * build. `--no-error-css` removes the output instead, and `--no-css`
+ * means no output-side effects at all.
+ *
+ * Measured against dart-sass 1.104.1 and the native binary, which agree:
+ *
+ *   a compile error, default   -> the output becomes error CSS
+ *   the same, --no-error-css   -> the output is removed
+ *   a file that cannot be READ -> the output is left exactly as it was
+ *   --no-css                   -> the output is left exactly as it was
+ *
+ * The third is the reason `message` is required rather than optional: an
+ * unreadable entry is not a compile error, there is no diagnostic to
+ * render, and the previous build stays. This CLI used to remove the
+ * output for that case too.
+ *
+ * `opts.errorCss` is THREE-valued, which the first version of this
+ * missed. To a file, the default and an explicit `--error-css` both
+ * write. To STDOUT they differ — measured:
+ *
+ *   sass bad.scss                 stdout 0B
+ *   sass --error-css bad.scss     stdout 546B
+ *   sass --no-error-css bad.scss  stdout 0B
+ *
+ * so "on by default" and "asked for" are not the same state, and
+ * `undefined` is the default rather than `true`.
  */
-function discardStaleOutput(outPath, opts) {
-  if (!outPath || opts.noCss) return undefined;
+function reportFailure(outPath, opts, message) {
+  if (opts.noCss) return undefined;
+  if (!outPath) {
+    // No file: only an EXPLICIT --error-css puts the stylesheet on
+    // stdout. Silent by default, as dart is.
+    if (opts.errorCss === true) writeFdSync(1, errorCss(message));
+    return undefined;
+  }
   try {
-    rmSync(outPath, { force: true });
+    if (opts.errorCss !== false) {
+      // Same as `emit`: the destination tree may not exist yet, and a
+      // FIRST compile that fails is exactly when it does not. dart and
+      // the binary both write 547 bytes of error CSS into `dist/css/`
+      // that was never there; without this we reported ENOENT and left
+      // nothing at all — the one case where the error stylesheet is the
+      // only thing the browser would have had.
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, errorCss(message));
+    } else {
+      rmSync(outPath, { force: true });
+    }
     return undefined;
   } catch (e) {
     // Returned rather than printed: this belongs to one job's diagnostics, and
     // the caller decides when that job's block reaches stderr.
-    return `error: cannot remove ${outPath}: ${e && e.message ? e.message : e}`;
+    const what = opts.errorCss !== false ? "write" : "remove";
+    return `error: cannot ${what} ${outPath}: ${e && e.message ? e.message : e}`;
   }
 }
 
@@ -1212,7 +1269,26 @@ function isFresh(output, input, deps) {
 // all involved files (so editor atomic-saves are caught) and debounces bursts.
 function runWatch(input, output, common, opts) {
   if (!output) fail("error: --watch requires an output file (sasso --watch in.scss out.css)");
-  let watchers = [];
+  const watchers = makeWatchers({
+    watch,
+    exists: existsSync,
+    onEvent: (d, _event, fn) => onDirEvent(d, fn),
+    // A watched directory that has gone waits for its return the same
+    // way an absent load path does. Only load paths were probed, so a
+    // dependency directory deleted and put back was never watched
+    // again — and on Linux the dead handle says nothing at all.
+    onMissing: (d) => probes.arm(d),
+    report: (line) => writeStderrSync(line + "\n"),
+  });
+  // What is on disk, so the catch-up writes nothing when nothing
+  // changed. The MAP counts too: a whitespace-only edit leaves the CSS
+  // identical and moves every mapping, and comparing the CSS alone left
+  // the sidecar stale. `null` means "unknown" — see the failure path,
+  // which must clear it or fixing a typo back to what it was would find
+  // the CSS unchanged and leave the error stylesheet on disk forever.
+  let onDisk = null;
+  const artifacts = (result) =>
+    `${result.css}\u0000${result.sourceMap ? JSON.stringify(result.sourceMap) : ""}`;
   // The last set of files a compile actually loaded, seeded with the entry.
   // Kept across a FAILED compile: a failure has no `loadedUrls`, and the
   // first version of this narrowed the set to the entry alone when one
@@ -1320,8 +1396,6 @@ function runWatch(input, output, common, opts) {
       known = files;
     }
     if (sawNameless) takeSnapshots();
-    for (const w of watchers) w.close();
-    watchers = [];
     probes.closeAll();
 
     // A load path that does not exist YET cannot be watched — `fs.watch`
@@ -1340,38 +1414,37 @@ function runWatch(input, output, common, opts) {
     for (const lp of loadPathDirs) {
       if (!existsSync(lp)) probes.arm(lp);
     }
-    for (const d of dirs) {
-      try {
-        watchers.push(
-          watch(d, (_event, fn) => {
-            // The first nameless event cannot be judged — there is no
-            // snapshot to compare against, because taking one before
-            // ever seeing such an event is what made every compile pay
-            // for a directory survey. Compile once, start snapshotting,
-            // and every nameless event after this one is answerable.
-            if (!fn && !sawNameless) {
-              sawNameless = true;
-              takeSnapshots();
-              schedule();
-              return;
-            }
-            if (
-              triggersRecompile({
-                path: fn ? pathKey(join(d, fn)) : null,
-                known,
-                ours,
-                failing,
-                anyKnownMoved: () => [...known].some((f) => stamps.get(f) !== mtime(f)),
-                anythingElseChanged,
-              })
-            ) {
-              schedule();
-            }
-          }),
-        );
-      } catch {
-        // directory vanished — ignore
-      }
+    // Close only what is no longer needed and open only what is new,
+    // re-arm a watcher that fails, and say so when one cannot be
+    // recovered. All of that lives in `_watchers.mjs`, where a fake
+    // `watch` can produce the failures this machine will not.
+    watchers.sync(dirs);
+  };
+
+  /** One event from one watched directory. */
+  const onDirEvent = (d, fn) => {
+    // The first nameless event cannot be judged — there is no snapshot
+    // to compare against, because taking one before ever seeing such an
+    // event is what made every compile pay for a directory survey.
+    // Compile once, start snapshotting, and every nameless event after
+    // this one is answerable.
+    if (!fn && !sawNameless) {
+      sawNameless = true;
+      takeSnapshots();
+      schedule();
+      return;
+    }
+    if (
+      triggersRecompile({
+        path: fn ? pathKey(join(d, fn)) : null,
+        known,
+        ours,
+        failing,
+        anyKnownMoved: () => [...known].some((f) => stamps.get(f) !== mtime(f)),
+        anythingElseChanged,
+      })
+    ) {
+      schedule();
     }
   };
 
@@ -1407,9 +1480,22 @@ function runWatch(input, output, common, opts) {
         failing = false;
         return true;
       }
+      // Every save compiles twice — once at the head of the burst, once
+      // to catch up — so most catch-ups produce exactly what is already
+      // on disk. Writing it again would touch the output's mtime for
+      // nothing, which is the property downstream watchers key on, and
+      // print a second `Compiled` line where dart prints one per save.
+      const produced = artifacts(result);
+      if (onDisk !== null && onDisk === produced) {
+        failing = false;
+        return true;
+      }
       const writeError = emit(result, output, common.sourceMap, opts);
       if (writeError) process.stderr.write(`${writeError}\n`);
-      else if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
+      else {
+        onDisk = produced;
+        if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
+      }
       failing = false;
     } catch (e) {
       if (provisional) return false;
@@ -1420,9 +1506,14 @@ function runWatch(input, output, common, opts) {
       // mistake with a worse outcome — and it is only unreachable today
       // because an aliased watch never recompiles, which is one filter
       // change away from being false.
-      if (!aliasesASource()) {
-        const removeError = discardStaleOutput(output, opts);
-        if (removeError) process.stderr.write(`${removeError}\n`);
+      if (!aliasesASource() && e instanceof Exception) {
+        const writeError = reportFailure(output, opts, e.message);
+        if (writeError) process.stderr.write(`${writeError}\n`);
+        // The destination is no longer the CSS we last wrote — it is the
+        // error stylesheet, or gone. Forgetting that is how "fix the typo
+        // back to what it was" left the error on the page forever: the
+        // next compile matched the remembered CSS and skipped the write.
+        onDisk = null;
       }
       // Keep the set we already had — a failure reports no `loadedUrls`,
       // and throwing away what we knew is what broke recovery — and accept
@@ -1648,9 +1739,13 @@ async function main() {
       if (run.error) throw run.error;
       result = run.value;
     } catch (e) {
-      const removeError = discardStaleOutput(output, opts);
-      if (removeError) writeStderrSync(`${removeError}\n`);
-      if (e instanceof Exception) fail(e.message);
+      if (e instanceof Exception) {
+        const writeError = reportFailure(output, opts, e.message);
+        if (writeError) writeStderrSync(`${writeError}\n`);
+        fail(e.message);
+      }
+      // Not a compile error — an unreadable file, say. dart leaves the
+      // previous output exactly as it was.
       fail(`error: ${e && e.message ? e.message : e}`);
     }
     const writeError = emit(result, output, wantMap, opts, source);
@@ -2059,12 +2154,38 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
           : e && e.code === "ENOENT"
             ? `Error reading ${input}: Cannot open file.`
             : `error: ${e && e.message ? e.message : e}`;
+      // An output-less job with `--error-css` is about to put the
+      // stylesheet on stdout, which under `2>&1` is the pipe the
+      // warnings are on. The success path above already flushes for
+      // this reason; the failure path did not, so a warning the compile
+      // had ALREADY printed came out behind the stylesheet.
+      //
+      // Only the warnings, though. Measured against dart-sass 1.104.1,
+      // one file that warns and then fails, merged with `2>&1`:
+      //
+      //   dart    warn -> css -> error
+      //   npm     css -> warn -> error   (before this)
+      //   binary  warn -> error -> css   (#160)
+      //
+      // Flushing the whole block here — the warnings AND the error —
+      // would give the binary's order, moving this CLI away from the
+      // one front end that agrees with dart. So flush what the compile
+      // already said, and let the error follow the stylesheet.
+      if (output === undefined && opts.errorCss === true) {
+        const said = diagnostics.get(i);
+        if (said) {
+          writeStderrSync(said);
+          diagnostics.delete(i);
+        }
+      }
       note(i, String(msg).replace(/\n?$/, "\n"));
       failed++;
-      // This CLI always behaves as --no-error-css, and dart then drops a stale
-      // output rather than leaving the last good build in place.
-      const removeError = discardStaleOutput(output, opts);
-      if (removeError) note(i, `${removeError}\n`);
+      // Only a COMPILE error touches the output; an unreadable entry
+      // leaves the previous build in place, as dart does.
+      if (e instanceof Exception) {
+        const writeError = reportFailure(output, opts, e.message);
+        if (writeError) note(i, `${writeError}\n`);
+      }
       if (opts.stopOnError || jobs.length === 1) {
         if (ctl) Atomics.store(ctl, 1, 1);
         break;
