@@ -503,10 +503,38 @@ impl<'a> Evaluator<'a> {
                         lines,
                     });
                 }
+                // A custom `@function` bubbles like the at-rules above, parent
+                // copy included: `.a {@function --f(--a) {result: 1}}` is
+                // `@function --f(--a) {.a {result: 1 }}`. Its body holds
+                // declarations rather than statements, so it is built here from
+                // the same `(property, value)` pairs the at-root path uses.
+                Stmt::CssCustomAtRule { name, prelude, body } => {
+                    let prelude_s = self.eval_template(prelude)?;
+                    let inner = self.css_custom_decl_items(body)?;
+                    bubble(name, prelude_s, inner, &mut bubbled);
+                }
                 other => self.css_body_stmt(other, &mut items)?,
             }
         }
         Ok((items, bubbled))
+    }
+
+    /// Build a plain-CSS custom at-rule's body as nested output items: each
+    /// declaration is a custom property, which emits its value verbatim right
+    /// after the colon, exactly as [`Self::eval_css_custom_at_rule`] writes it.
+    fn css_custom_decl_items(&mut self, body: &[CssCustomItem]) -> Result<Vec<OutItem>, Error> {
+        Ok(self
+            .css_custom_at_rule_decls(body)?
+            .into_iter()
+            .map(|(prop, value)| OutItem::Decl {
+                prop: prop.into(),
+                value,
+                important: false,
+                custom: true,
+                lines: SrcLines::default(),
+                value_span: VarSpan::default(),
+            })
+            .collect())
     }
 
     /// Resolve a plain-CSS selector to its comma-separated parts, keeping `&`
@@ -720,6 +748,19 @@ impl<'a> Evaluator<'a> {
                     prelude: prelude_s,
                     items: inner,
                     lines,
+                });
+            }
+            // Below the bubbling level it stays put, with no copy of the
+            // parent selectors: `.a {.b {@function --f(--a) {result: 1}}}` is
+            // `.a {.b {@function --f(--a) {result: 1 }}}`.
+            Stmt::CssCustomAtRule { name, prelude, body } => {
+                let prelude_s = self.eval_template(prelude)?;
+                let inner = self.css_custom_decl_items(body)?;
+                items.push(OutItem::NestedAtRule {
+                    name: name.clone(),
+                    prelude: prelude_s,
+                    items: inner,
+                    lines: SrcLines::default(),
                 });
             }
             _ => {}

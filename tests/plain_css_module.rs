@@ -415,12 +415,14 @@ fn a_loaded_files_nested_keyframes_is_kept() {
     );
 }
 
-/// A plain-CSS custom `@function` has its own statement too, and the same
-/// dispatcher dropped it for the same reason. Its body is raw text, spacing and
-/// all, which is why `result: 1 ;` keeps that gap. Measured against dart-sass
-/// 1.104.1.
+/// A plain-CSS custom `@function` has its own statement too, and every one of
+/// the three body dispatchers dropped it for the same reason. In a style rule
+/// it bubbles out with a copy of the parent selectors, like the block at-rules
+/// do; deeper down it stays where it is, with no copy. Its body is raw text,
+/// spacing and all, which is why `result: 1 ;` keeps that gap. Measured against
+/// dart-sass 1.104.1.
 #[test]
-fn a_loaded_files_custom_function_inside_an_at_rule_is_kept() {
+fn a_loaded_files_custom_function_is_kept_in_every_body() {
     let dir = scratch("customfn");
     let case = |file: &str, css: &str, expanded: &str, compressed: &str| {
         std::fs::write(dir.join(format!("_{file}.css")), css).unwrap();
@@ -453,6 +455,75 @@ fn a_loaded_files_custom_function_inside_an_at_rule_is_kept() {
         "@foo { @function --f(--a) { result: 1 } }\n",
         "@foo {\n  @function --f(--a) {\n    result: 1 ;\n  }\n}",
         "@foo{@function --f(--a){result: 1 }}",
+    );
+
+    // In a style rule it bubbles to where the rule was, taking a copy of the
+    // parent selectors: the body holds declarations, so they need a rule to
+    // live in.
+    case(
+        "rule",
+        ".a { @function --f(--a) { result: 1 } }\n",
+        "@function --f(--a) {\n  .a {\n    result: 1 ;\n  }\n}",
+        "@function --f(--a){.a{result: 1 }}",
+    );
+    case(
+        "rulevar",
+        ".a { @function --f(--a) { result: var(--a) } }\n",
+        "@function --f(--a) {\n  .a {\n    result: var(--a) ;\n  }\n}",
+        "@function --f(--a){.a{result: var(--a) }}",
+    );
+    // Nothing to wrap means no copy of the parent, but the at-rule survives:
+    // `@function` is not one of the two that vanish on an empty block.
+    case(
+        "ruleempty",
+        ".a { @function --f(--a) {} }\n",
+        "@function --f(--a) {}",
+        "@function --f(--a){}",
+    );
+    case(
+        "ruletwo",
+        ".a { @function --f(--a) { result: 1 } @function --g(--b) { result: 2 } }\n",
+        "@function --f(--a) {\n  .a {\n    result: 1 ;\n  }\n}\n@function --g(--b) {\n  .a {\n    result: 2 ;\n  }\n}",
+        "@function --f(--a){.a{result: 1 }}@function --g(--b){.a{result: 2 }}",
+    );
+    // One level deeper it is native CSS nesting: it stays put, and takes no
+    // copy of anything.
+    case(
+        "ruledeep",
+        ".a { .b { @function --f(--a) { result: 1 } } }\n",
+        ".a {\n  .b {\n    @function --f(--a) {\n      result: 1 ;\n    }\n  }\n}",
+        ".a{.b{@function --f(--a){result: 1 }}}",
+    );
+    case(
+        "ruledeepempty",
+        ".a { .b { @function --f(--a) {} } }\n",
+        ".a {\n  .b {\n    @function --f(--a) {}\n  }\n}",
+        ".a{.b{@function --f(--a){}}}",
+    );
+    // Bubbling inside an at-rule body stops at that body.
+    case(
+        "mediarule",
+        "@media x { .a { @function --f(--a) { result: 1 } } }\n",
+        "@media x {\n  @function --f(--a) {\n    .a {\n      result: 1 ;\n    }\n  }\n}",
+        "@media x{@function --f(--a){.a{result: 1 }}}",
+    );
+    case(
+        "genericrule",
+        "@foo { .a { @function --f(--a) { result: 1 } } }\n",
+        "@foo {\n  @function --f(--a) {\n    .a {\n      result: 1 ;\n    }\n  }\n}",
+        "@foo{@function --f(--a){.a{result: 1 }}}",
+    );
+    // KNOWN GAP: bubbling out of a first-level rule loses the at-rule's source
+    // position, so a following declaration does not split the parent. dart
+    // emits `@function --f(--a){.a{result: 1 }}.a{color:red}` -- the same gap
+    // the `sibling` case in
+    // `a_loaded_files_empty_at_rule_survives_unless_it_is_media_or_supports`
+    // pins, and it is not specific to `@function`.
+    case(
+        "rulesibling",
+        ".a { @function --f(--a) { result: 1 } color: red }\n",
+        ".a {\n  color: red;\n}\n\n@function --f(--a) {\n  .a {\n    result: 1 ;\n  }\n}",
+        ".a{color:red}@function --f(--a){.a{result: 1 }}",
     );
 }
 
