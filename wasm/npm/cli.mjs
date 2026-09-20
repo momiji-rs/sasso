@@ -1421,34 +1421,56 @@ function runWatch(input, output, common, opts) {
     for (const d of dirs) {
       if (watchers.has(d)) continue;
       try {
-        watchers.set(
-          d,
-          watch(d, (_event, fn) => {
-            // The first nameless event cannot be judged — there is no
-            // snapshot to compare against, because taking one before
-            // ever seeing such an event is what made every compile pay
-            // for a directory survey. Compile once, start snapshotting,
-            // and every nameless event after this one is answerable.
-            if (!fn && !sawNameless) {
-              sawNameless = true;
-              takeSnapshots();
-              schedule();
-              return;
-            }
-            if (
-              triggersRecompile({
-                path: fn ? pathKey(join(d, fn)) : null,
-                known,
-                ours,
-                failing,
-                anyKnownMoved: () => [...known].some((f) => stamps.get(f) !== mtime(f)),
-                anythingElseChanged,
-              })
-            ) {
-              schedule();
-            }
-          }),
-        );
+        const handle = watch(d, (_event, fn) => {
+          // The first nameless event cannot be judged — there is no
+          // snapshot to compare against, because taking one before
+          // ever seeing such an event is what made every compile pay
+          // for a directory survey. Compile once, start snapshotting,
+          // and every nameless event after this one is answerable.
+          if (!fn && !sawNameless) {
+            sawNameless = true;
+            takeSnapshots();
+            schedule();
+            return;
+          }
+          if (
+            triggersRecompile({
+              path: fn ? pathKey(join(d, fn)) : null,
+              known,
+              ours,
+              failing,
+              anyKnownMoved: () => [...known].some((f) => stamps.get(f) !== mtime(f)),
+              anythingElseChanged,
+            })
+          ) {
+            schedule();
+          }
+        });
+        // A handle that stops on its own — the directory was deleted, on
+        // the platforms where that ends the watch — would otherwise keep
+        // its slot, and `watchers.has(d)` would claim the directory is
+        // covered when nothing is watching it. Giving up the slot lets
+        // the next rewatch open a live handle for it.
+        //
+        // The `error` listener is the load-bearing half. An FSWatcher
+        // `error` event with nobody listening throws, and out of this
+        // callback that is an uncaught exception: one failed watcher
+        // would take down the whole `--watch` session. Measured on
+        // node 22.22.3, macOS: no listener THREW, a listener survives.
+        //
+        // Deleting only our own handle matters. The teardown above
+        // already drops what it closes, so by the time that `close`
+        // arrives the slot may hold a NEWER handle for the same
+        // directory, and evicting that one would reopen the teardown gap
+        // `0be1e8b` closed. The identity check is what keeps this from
+        // being a regression: 40/40 recompiled over three runs of the
+        // race probe with these listeners, the same as without.
+        const forget = () => {
+          if (watchers.get(d) === handle) watchers.delete(d);
+        };
+        handle.on("close", forget);
+        handle.on("error", forget);
+        watchers.set(d, handle);
       } catch {
         // directory vanished — ignore
       }
