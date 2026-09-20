@@ -226,7 +226,7 @@ fn hue_to_rgb(m1: f64, m2: f64, mut hue: f64) -> f64 {
 }
 
 /// hsl [hue-deg, sat-%, light-%] -> srgb [0..1].
-pub(super) fn hsl_to_srgb(hsl: [f64; 3]) -> [f64; 3] {
+pub(crate) fn hsl_to_srgb(hsl: [f64; 3]) -> [f64; 3] {
     let scaled_hue = (hsl[0] / 360.0).rem_euclid(1.0);
     let scaled_saturation = hsl[1] / 100.0;
     let scaled_lightness = hsl[2] / 100.0;

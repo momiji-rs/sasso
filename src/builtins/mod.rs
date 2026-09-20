@@ -39,9 +39,10 @@ pub(crate) use color::convert_modern;
 // (src/host_fn.rs) to serialize/reconstruct colors across the embedder boundary.
 pub(crate) use color::{legacy_to_modern, make_modern_in};
 
-// The engine's srgb -> hsl (dart's exact formula), used by the legacy
-// out-of-gamut rgb serialization in `value.rs`.
-pub(crate) use colorspace::{hwb_to_srgb, srgb_to_hsl};
+// The engine's srgb <-> hsl and hwb -> srgb (dart's exact formulas): the
+// legacy out-of-gamut rgb serialization in `value.rs` converts one way, and
+// the degenerate-channel `hsl()` constructor the other.
+pub(crate) use colorspace::{hsl_to_srgb, hwb_to_srgb, srgb_to_hsl};
 
 /// Dispatch a function call by name across the builtin families.
 pub(crate) fn call(

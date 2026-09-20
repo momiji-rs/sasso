@@ -2500,9 +2500,10 @@ impl ModernColor {
     /// The `meta.inspect`/`@debug` serialization (dart `_writeLegacyColor`
     /// with `inspect: true`): an hwb color with no missing channels prints
     /// its own `hwb(H W% B%[ / A])` form (hue without `deg`), and an
-    /// out-of-gamut legacy rgb skips the hsl reroute, falling to the plain
-    /// `rgb(...)` comma form (named/hex only apply in-gamut). Everything
-    /// else serializes exactly like CSS output.
+    /// out-of-gamut legacy rgb skips the hsl reroute, falling to the
+    /// `rgb(...)` comma form (named/hex only apply in-gamut) written with the
+    /// same channel rules CSS output uses. Everything else serializes exactly
+    /// like CSS output.
     pub(crate) fn inspect_css(&self) -> String {
         if self.space.is_legacy() && !self.has_missing() {
             let a = self.alpha.unwrap_or(0.0);
@@ -2522,14 +2523,28 @@ impl ModernColor {
                     let in_gamut =
                         |i: usize| (-1e-9..=255.0 + 1e-9).contains(&self.channels[i].unwrap_or(0.0));
                     if !(in_gamut(0) && in_gamut(1) && in_gamut(2)) {
-                        let r = fmt_num(self.channels[0].unwrap_or(0.0), false);
-                        let g = fmt_num(self.channels[1].unwrap_or(0.0), false);
-                        let b = fmt_num(self.channels[2].unwrap_or(0.0), false);
-                        return if opaque {
-                            format!("rgb({r}, {g}, {b})")
-                        } else {
-                            format!("rgba({r}, {g}, {b}, {})", fmt_num(a, false))
-                        };
+                        // Through the SHARED channel writer, so the rules CSS
+                        // output applies to a legacy triple apply here too: a
+                        // non-integral channel re-spells all three as
+                        // percentages, and a non-finite one — what converting
+                        // an infinite channel produces — becomes a `%`-unit
+                        // `calc()` constant.
+                        let mut out = String::new();
+                        out.push_str(if opaque { "rgb(" } else { "rgba(" });
+                        push_rgb_channels(
+                            &mut out,
+                            self.channels[0].unwrap_or(0.0),
+                            self.channels[1].unwrap_or(0.0),
+                            self.channels[2].unwrap_or(0.0),
+                            false,
+                            ", ",
+                        );
+                        if !opaque {
+                            out.push_str(", ");
+                            push_num(&mut out, a, false);
+                        }
+                        out.push(')');
+                        return out;
                     }
                 }
                 _ => {}
@@ -2602,16 +2617,18 @@ impl ModernColor {
                 let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
                 if !(in_gamut(r) && in_gamut(g) && in_gamut(b)) {
                     let hsl = crate::builtins::srgb_to_hsl([r / 255.0, g / 255.0, b / 255.0]);
-                    let hh = fmt_num(hsl[0], compressed);
-                    let ss = fmt_num(hsl[1], compressed);
-                    let ll = fmt_num(hsl[2], compressed);
-                    let comma = if compressed { "," } else { ", " };
-                    return if opaque {
-                        format!("hsl({hh}{comma}{ss}%{comma}{ll}%)")
-                    } else {
-                        let aa = fmt_num(a, compressed);
-                        format!("hsla({hh}{comma}{ss}%{comma}{ll}%{comma}{aa})")
-                    };
+                    // The same hue-nulling the compressed rgb/hsl choice
+                    // applies: dart's srgb -> hsl conversion hands back a
+                    // MISSING hue when the saturation is fuzzy-zero, and a
+                    // missing hue writes as 0, so an out-of-gamut gray must not
+                    // leak a phantom hue. `[measured]` against dart-sass
+                    // 1.104.1: `color.to-space(color(srgb 2 0 0.5), rgb)` is
+                    // `hsl(0, 0%, 100%)`, not `hsl(345, 0%, 100%)`.
+                    let hue = if hsl[1].abs() < 1e-11 { 0.0 } else { hsl[0] };
+                    // Through the shared hsl writer, so a NaN channel — which
+                    // an infinite one converts to — becomes 0 here exactly as
+                    // it does for a color stored in the hsl space.
+                    return self.hsl_comma_css(hue, hsl[1], hsl[2], a, opaque, compressed);
                 }
                 Color {
                     r,
@@ -2783,10 +2800,16 @@ impl ModernColor {
 /// integer by as little as 1e-10, and the ~7e-15 dust an hsl round trip leaves
 /// behind is enough to flip it.
 fn push_rgb_channels(out: &mut String, r: f64, g: f64, b: f64, compressed: bool, sep: &str) {
-    // dart `_tryIntegerRgbChannels` -> `_asInt`: fuzzyIsInt AND in [0, 256).
-    // An out-of-gamut or non-integral channel sends the WHOLE triple to
-    // percentages (serialize.dart:869-886).
-    let as_int = |v: f64| (v - v.round()).abs() < 1e-11 && (0.0..256.0).contains(&v);
+    // dart `_tryIntegerRgbChannels` -> `_asInt`: a non-integral channel sends
+    // the WHOLE triple to percentages (serialize.dart:869-886). Integrality
+    // alone decides it — there is no gamut bound, which only the INSPECT form
+    // can observe, since CSS output writes an out-of-gamut legacy rgb through
+    // its hsl spelling instead. `[measured]` against dart-sass 1.104.1:
+    // `meta.inspect(color.to-space(color(srgb 2 0 0), rgb))` — channels
+    // (510, 0, 0) — is `rgb(510, 0, 0)`, while `color(srgb 2 0 0.5)` —
+    // (510, 0, 127.5) — is `rgb(200%, 0%, 50%)`. A non-finite channel is never
+    // an integer (`inf - inf` is NaN), so it always takes the branch below.
+    let as_int = |v: f64| (v - v.round()).abs() < 1e-11;
     let ints = as_int(r) && as_int(g) && as_int(b);
     for (i, v) in [r, g, b].into_iter().enumerate() {
         if i > 0 {
@@ -2794,6 +2817,13 @@ fn push_rgb_channels(out: &mut String, r: f64, g: f64, b: f64, compressed: bool,
         }
         if ints {
             push_num(out, v, compressed);
+        } else if !v.is_finite() {
+            // A non-finite channel — which converting an infinite one produces
+            // — is written as a `%`-unit `calc()` constant, `calc(NaN * 1%)`,
+            // exactly as `ModernColor::chan_pct` writes one. `as_int` already
+            // rejected it, so this IS the percentage branch; scaling a
+            // non-finite number would change nothing.
+            out.push_str(&Number::with_unit(v, "%").to_css(compressed));
         } else {
             // `v * 100 / 255`, in dart's operand order — `v / 255.0 * 100.0`
             // differs in the last bit.
