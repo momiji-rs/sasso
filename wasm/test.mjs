@@ -9,7 +9,7 @@
 // asyncify refactors must preserve (docs/HANDOFF_ASYNC_IMPORTER_PERF.md).
 // Run after build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, symlinkSync, renameSync, rmSync, openSync, closeSync, chmodSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, symlinkSync, renameSync, rmSync, openSync, closeSync, chmodSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -4208,6 +4208,195 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   }
 
   console.log("ok: watchers — steady state, re-arm on error, give up once, ENOSPC is not ENOENT");
+}
+
+// === how a stack frame names a file, on BOTH engines ===
+//
+// The entry reached the compiler as a `file://` URL — it has to, because the
+// importer bridge resolves relative `@use` against it — and went straight into
+// the frame, scheme and all. Measured against dart-sass 1.104.1 before the fix
+// (#153), one error with a dependency frame and an entry frame:
+//
+//   dart         src/_dep.scss 2:10  m()      src/main.scss 2:6  root stylesheet
+//   binary       src/_dep.scss 2:14  m()      src/main.scss 2:6  root stylesheet
+//   npm native   src/_dep.scss 2:14  m()      file:///…/src/main.scss 2:6
+//   npm wasm     _dep.scss 2:14      m()      file:///…/src/main.scss 2:6
+//
+// Two npm engines, two different answers, neither dart's. The wasm one had no
+// `getcwd` to relativise against (wasm32-unknown-unknown, not wasip1) and fell
+// back to the bare filename, so the bridges hand it the directory now.
+//
+// (`2:10` vs `2:14` is #157 — dart underlines the whole expression and we
+// underline the operator. The column is not what this case is about.)
+{
+  const fdir = mkdtempSync(join(tmpdir(), "sasso-frames-"));
+  mkdirSync(join(fdir, "src"), { recursive: true });
+  writeFileSync(join(fdir, "src", "_dep.scss"), "@mixin m {\n  width: 1px + 1em;\n}\n");
+  writeFileSync(join(fdir, "src", "main.scss"), '@use "dep";\n.a { @include dep.m; }\n');
+  // The temp root can be reached through a symlink (/var -> /private/var on
+  // macOS), and then no spelling of the entry matches the working directory.
+  // That is a property of the fixture, not of the compiler: resolve it, or
+  // this case cannot tell a missed relativisation from an impossible one.
+  const real = realpathSync(fdir);
+
+  const run = (engine, entry) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", entry, "out.css"], {
+      cwd: real,
+      encoding: "utf8",
+      env: { ...process.env, SASSO_ENGINE: engine },
+      timeout: 30000,
+    });
+  const framesOf = (r) =>
+    `${r.stdout}${r.stderr}`
+      .split("\n")
+      .filter((l) => /\.scss \d+:\d+/.test(l))
+      .map((l) => l.trim().replace(/\s+/g, " "));
+  const frames = (engine, entry) => framesOf(run(engine, entry));
+
+  // The prebuilt addon is not there in every job — the wasm package's own CI
+  // builds no addon — and demanding an engine that cannot load is a refusal,
+  // not a fallback: the run exits non-zero with NO frames at all, which
+  // reads as "the rule is broken" rather than "there was nothing to test".
+  // Same shape as the jobs cases above: run it, and if it could not, assert
+  // WHY before skipping.
+  const engines = ["wasm"];
+  // A stylesheet that COMPILES, because the fixture above is a deliberate
+  // error: a non-zero exit there says nothing about whether the engine
+  // loaded.
+  const nativeProbe = spawnSync(process.execPath, [cliPath, "--stdin"], {
+    input: ".a{b:1}\n",
+    encoding: "utf8",
+    env: { ...process.env, SASSO_ENGINE: "native" },
+    timeout: 30000,
+  });
+  if (nativeProbe.status === 0) {
+    engines.push("native");
+  } else {
+    assert.match(
+      nativeProbe.stderr,
+      /SASSO_ENGINE=native/,
+      `frames: native was skipped, and the reason must be a missing addon (stderr: ${nativeProbe.stderr})`,
+    );
+  }
+
+  for (const engine of engines) {
+    const rel = frames(engine, join("src", "main.scss"));
+    assert.deepEqual(
+      rel.map((l) => l.split(" ")[0]),
+      // `join`, not a literal: the compiler spells a frame with the
+      // PLATFORM's separator, as dart does (#151), so `src\_dep.scss` is the
+      // right answer on Windows and hard-coding `/` would fail there the
+      // first time this suite runs on it.
+      [join("src", "_dep.scss"), join("src", "main.scss")],
+      `frames (${engine}): both files named as paths relative to the cwd, got ${JSON.stringify(rel)}`,
+    );
+    assert.ok(
+      !rel.some((l) => l.includes("file://")),
+      `frames (${engine}): no frame shows a URL scheme, got ${JSON.stringify(rel)}`,
+    );
+
+    // dart relativises an ABSOLUTE entry too — the frame names a file, not the
+    // spelling the user typed.
+    const abs = frames(engine, join(real, "src", "main.scss"));
+    assert.deepEqual(
+      abs,
+      rel,
+      `frames (${engine}): an absolute entry names the same file as a relative one`,
+    );
+  }
+
+  // The two engines are the pair that drifted. Compare them to each other as
+  // well as to the expectation: that is the assertion no existing test made.
+  if (engines.includes("native")) {
+    assert.deepEqual(
+      frames("wasm", join("src", "main.scss")),
+      frames("native", join("src", "main.scss")),
+      "frames: the wasm and native engines name files identically",
+    );
+  }
+
+  rmSync(fdir, { recursive: true, force: true });
+  console.log(
+    `ok: stack frames — paths not file:// URLs, relative entry or absolute (${engines.join(" + ")})`,
+  );
+}
+
+// === a compile whose working directory has been deleted ===
+//
+// `process.cwd()` THROWS `ENOENT` once the directory the process started in
+// is gone — a build script that cleans up its own temp directory, a watcher
+// that outlives a `git clean`. Asking for it before every compile, to tell
+// the core what diagnostic paths are relative to, turned that into a total
+// failure on both engines:
+//
+//   compileString (wasm):   FAILED ENOENT: no such file or directory, uv_cwd
+//   compileString (native): FAILED ENOENT: no such file or directory, uv_cwd
+//
+// …for `compileString`, which touches no files at all. `null` is a supported
+// answer all the way down, so a lost directory costs a nicer frame and
+// nothing else.
+//
+// One child process PER ENGINE: the suite cannot delete its own working
+// directory and carry on. And which engine runs is decided by WHICH MODULE
+// is imported, not by `SASSO_ENGINE` — that variable is the CLI's. Setting
+// it and importing `sasso.mjs` twice runs wasm twice and leaves the native
+// bridge untested, which is exactly what the first version of this did:
+// reverting only the native half kept the case green.
+{
+  const script = `
+    import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+    import { tmpdir } from "node:os";
+    import { join } from "node:path";
+    const base = mkdtempSync(join(tmpdir(), "sasso-deadcwd-"));
+    const doomed = join(base, "gone");
+    mkdirSync(doomed);
+    process.chdir(doomed);
+    rmSync(doomed, { recursive: true, force: true });
+    const api = await import(process.env.SASSO_TEST_MODULE);
+    const css = api.compileString(".a { b: 1 + 1 }").css;
+    process.chdir(tmpdir());
+    rmSync(base, { recursive: true, force: true });
+    console.log(JSON.stringify(css));
+  `;
+  const modules = {
+    wasm: new URL("./npm/sasso.mjs", import.meta.url).href,
+    native: new URL("./npm/native.mjs", import.meta.url).href,
+  };
+  // The prebuilt addon is not there in every job, and importing
+  // `sasso/native` without one throws by design ("no native binding for
+  // …"). Ask first, and assert the REASON, so a skip cannot hide a break.
+  for (const [engine, mod] of Object.entries(modules)) {
+    if (engine === "native") {
+      const probe = spawnSync(
+        process.execPath,
+        ["--input-type=module", "-e", `await import(${JSON.stringify(mod)});`],
+        { encoding: "utf8", timeout: 60000 },
+      );
+      if (probe.status !== 0) {
+        assert.match(
+          probe.stderr,
+          /no native binding/,
+          `deleted cwd: native was skipped, and the reason must be a missing addon (${probe.stderr.slice(0, 200)})`,
+        );
+        continue;
+      }
+    }
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      env: { ...process.env, SASSO_TEST_MODULE: mod },
+      timeout: 60000,
+    });
+    assert.equal(
+      r.status,
+      0,
+      `deleted cwd (${engine}): a compile must survive it (stderr: ${r.stderr.slice(0, 300)})`,
+    );
+    // Normalised HERE: `\s` inside the child's template literal is just `s`.
+    const css = JSON.parse(r.stdout.trim().split("\n").at(-1)).replace(/\s+/g, " ").trim();
+    assert.equal(css, ".a { b: 2; }", `deleted cwd (${engine}): and compile correctly (${r.stdout})`);
+  }
+
+  console.log("ok: a deleted working directory costs a nicer frame, not the compile");
 }
 
 // === the coalescing rule, on a fake clock ===

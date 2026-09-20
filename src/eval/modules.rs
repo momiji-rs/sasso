@@ -1605,9 +1605,12 @@ impl<'a> Evaluator<'a> {
     /// `p.prettyUri`). Any other canonical URL (a custom importer's key) shows
     /// its last segment, falling back to the `@use` url when the key has none.
     pub(super) fn module_diag_url(&self, url: &str, key: &str) -> String {
-        if std::path::Path::new(key).is_absolute() {
-            let cwd = self.cwd_cache.get_or_init(|| std::env::current_dir().ok());
-            return pretty_path(key, cwd.as_deref());
+        // `pretty_name` answers only for a key that names a file absolutely —
+        // a path or a `file://` URL. A custom importer's key is neither, and
+        // `virtual/foo.scss` must keep showing as `foo.scss` rather than
+        // whole.
+        if let Some(named) = self.pretty_name(key) {
+            return named;
         }
         let base = key.rsplit(['/', '\\']).next().unwrap_or(key);
         if base.is_empty() {
@@ -1615,6 +1618,29 @@ impl<'a> Evaluator<'a> {
         } else {
             base.to_string()
         }
+    }
+
+    /// How a stack frame names `key`, when `key` names a file at all.
+    ///
+    /// A path and a `file://` URL are two spellings the two front ends
+    /// arrive with — the binary passes paths, the JS API passes URLs because
+    /// its importer bridge resolves relative `@use` against them — and both
+    /// must produce the frame dart produces. `None` is "not a file": a
+    /// `data:` URL, or a custom importer's key, which keep their own rule.
+    pub(crate) fn pretty_name(&self, key: &str) -> Option<String> {
+        let cwd = self
+            .cwd_cache
+            .get_or_init(|| match self.options.cwd {
+                Some(c) => Some(std::path::PathBuf::from(c)),
+                None => std::env::current_dir().ok(),
+            })
+            .as_deref()
+            .map(|c| c.to_string_lossy().into_owned());
+        let cwd = cwd.as_deref();
+        // The style the DATA is in, not the one this build was compiled for:
+        // the wasm module is always `Posix` by that measure and still has to
+        // read `C:\work` on Windows node. See `pathstyle::style_for`.
+        crate::pathstyle::pretty_name(crate::pathstyle::style_for(cwd, key), key, cwd)
     }
 
     /// Install `module`'s environment for a cross-module member invocation,
@@ -1724,18 +1750,4 @@ fn regroup_load_css_copy(nodes: Vec<OutNode>, prev_rule: &mut bool) -> Vec<OutNo
         }
     }
     out
-}
-
-/// dart's `p.prettyUri` for a filesystem path: the path relative to the
-/// current directory, unless that has more segments than the absolute path
-/// (a file far outside the tree), in which case the absolute path.
-///
-/// `cwd` is passed in rather than read here because the caller memoizes it for
-/// the compile (`Evaluator::cwd_cache`); `None` is "the process has no readable
-/// current directory", the same case the `getcwd` failure took before.
-fn pretty_path(abs: &str, cwd: Option<&std::path::Path>) -> String {
-    let Some(cwd) = cwd else {
-        return abs.to_string();
-    };
-    crate::pathstyle::pretty(crate::pathstyle::HOST, abs, &cwd.to_string_lossy())
 }

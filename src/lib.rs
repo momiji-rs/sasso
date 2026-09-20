@@ -116,7 +116,21 @@ pub struct Options<'a> {
     /// The input's path/URL as it should appear in diagnostics (e.g.
     /// `input.scss`). `None` disables byte-exact diagnostic snippets (errors
     /// then render as the legacy `Error: <msg> (line:col)` one-liner).
+    ///
+    /// A `file://` URL is accepted and SHOWN as a path — the JS API passes
+    /// one because its importer bridge resolves relative `@use` against it,
+    /// and a frame reading `file:///Users/…/src/a.scss` names a file nobody
+    /// can paste into an editor. See [`Options::cwd`] for what it is spelled
+    /// relative to.
     pub url: Option<&'a str>,
+    /// The directory diagnostic paths are spelled relative to, as dart's
+    /// `p.prettyUri` does. `None` asks the operating system.
+    ///
+    /// It exists because one target cannot be asked: `wasm32-unknown-unknown`
+    /// has no `getcwd`, so `std::env::current_dir()` there always fails and
+    /// every frame kept an absolute path — or, for a `file://` key, only the
+    /// file's own name. A host that knows better says so.
+    pub cwd: Option<&'a str>,
     /// Whether to draw diagnostic snippets with Unicode box-drawing glyphs
     /// (`true`, the default) or the ASCII fallback (`false`, dart's
     /// `--no-unicode`).
@@ -209,6 +223,28 @@ pub struct WarnEvent<'a> {
 /// warnings omitted" tally.
 pub type WarnHandler = std::rc::Rc<dyn Fn(&WarnEvent<'_>)>;
 
+/// How the entry names itself in a parse error's lone `root stylesheet`
+/// frame. A parse error never reaches the evaluator, so it cannot use the
+/// evaluator's rule and needs the same one applied here — see
+/// [`Options::url`] for why a `file://` URL arrives at all.
+fn entry_frame_name(url: &str, cwd: Option<&str>) -> String {
+    let from_os;
+    let cwd = match cwd {
+        Some(c) => Some(c),
+        None => {
+            // Lossily, as the evaluator's own lookup does. `to_str` would
+            // hand back `None` for a directory with one non-UTF-8 component
+            // and leave a PARSE error absolute while an evaluation error in
+            // the same file came out relative.
+            from_os = std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned());
+            from_os.as_deref()
+        }
+    };
+    pathstyle::pretty_name(pathstyle::style_for(cwd, url), url, cwd).unwrap_or_else(|| url.to_string())
+}
+
 impl Default for Options<'_> {
     fn default() -> Self {
         Options {
@@ -216,6 +252,7 @@ impl Default for Options<'_> {
             syntax: Syntax::default(),
             importer: None,
             url: None,
+            cwd: None,
             unicode: true,
             source_map_include_sources: false,
             functions: Vec::new(),
@@ -258,6 +295,17 @@ impl<'a> Options<'a> {
     #[must_use]
     pub fn with_url(mut self, url: &'a str) -> Self {
         self.url = Some(url);
+        self
+    }
+
+    /// Builder: the directory diagnostic paths are spelled relative to.
+    ///
+    /// Only a host that knows better than `getcwd` needs this — see
+    /// [`Options::cwd`]. On `wasm32-unknown-unknown` there is no `getcwd` at
+    /// all, so without it every frame keeps an absolute path.
+    #[must_use]
+    pub fn with_cwd(mut self, cwd: &'a str) -> Self {
+        self.cwd = Some(cwd);
         self
     }
 
@@ -501,7 +549,13 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
                     );
                     e.line = span.line;
                     e.col = span.col;
-                    e.rendered = Some(diag::render_error(&e.message, source, url, span, glyphs));
+                    e.rendered = Some(diag::render_error(
+                        &e.message,
+                        source,
+                        &entry_frame_name(url, options.cwd),
+                        span,
+                        glyphs,
+                    ));
                 }
             }
             return Err(e);
@@ -519,6 +573,7 @@ fn compile_inner_sm(source: &str, options: &Options<'_>) -> Result<CompileResult
         style: options.style,
         importer: options.importer,
         functions: &options.functions,
+        cwd: options.cwd,
         source,
         url: entry_name,
         glyphs,
@@ -593,7 +648,13 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
                     );
                     e.line = span.line;
                     e.col = span.col;
-                    e.rendered = Some(diag::render_error(&e.message, source, url, span, glyphs_for()));
+                    e.rendered = Some(diag::render_error(
+                        &e.message,
+                        source,
+                        &entry_frame_name(url, options.cwd),
+                        span,
+                        glyphs_for(),
+                    ));
                 }
             }
             return Err(e);
@@ -615,6 +676,7 @@ fn compile_inner(source: &str, options: &Options<'_>) -> Result<String, Error> {
         style: options.style,
         importer: options.importer,
         functions: &options.functions,
+        cwd: options.cwd,
         source: diag_source,
         url: diag_url,
         glyphs,

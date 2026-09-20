@@ -947,6 +947,9 @@ pub(crate) struct EvalOptions<'a> {
     /// The entrypoint's file path/URL as it should appear in diagnostics
     /// (e.g. `input.scss`).
     pub url: &'a str,
+    /// The directory diagnostic paths are relative to, or `None` to ask the
+    /// operating system (see [`crate::Options::cwd`]).
+    pub cwd: Option<&'a str>,
     /// The glyph set for snippet/gutter decoration (ASCII under `--no-unicode`).
     pub glyphs: crate::diag::GlyphSet,
     /// Diagnostic handler (dart-sass `logger`). When set, `@warn`/`@debug`/
@@ -1127,12 +1130,13 @@ pub(crate) struct Evaluator<'a> {
     /// and `enter_origin_file`. (The two are kept separate rather than derived
     /// because `current_file_dir` is also the `@import` cache key.)
     current_canonical: Option<CanonicalUrl>,
-    /// The process's current directory, resolved at most once per compile.
-    /// Only `pretty_path` in `modules.rs` reads it, and only to build a
-    /// display string, but `getcwd` is a real syscall -- ~10-19 us on macOS
-    /// against ~0.5 us on Linux -- and it was being made once per module
-    /// loaded. `None` means the call failed, which `pretty_path` already had a
-    /// fallback for.
+    /// The current directory diagnostics are spelled against, resolved at
+    /// most once per compile. Only the frame-naming rule in `modules.rs`
+    /// reads it, and only to build a display string, but `getcwd` is a real
+    /// syscall -- ~10-19 us on macOS against ~0.5 us on Linux -- and it was
+    /// being made once per module loaded. `None` means nobody knows one:
+    /// either the call failed, or this is a target without `getcwd` and the
+    /// host passed nothing.
     cwd_cache: std::cell::OnceCell<Option<std::path::PathBuf>>,
     /// Whether evaluation is inside a `@keyframes` body: frame blocks are not
     /// style rules in dart-sass, so nested at-rules do not bubble out of them
@@ -1827,11 +1831,16 @@ impl<'a> Evaluator<'a> {
     /// Render the stack-frame list into the column-aligned block dart-sass
     /// appends under a snippet/warning. `indent` is 2 (errors) or 4
     /// (warnings/deprecations).
-    fn render_frame_block(frames: &[DiagFrame], indent: usize) -> String {
+    fn render_frame_block(&self, frames: &[DiagFrame], indent: usize) -> String {
         // Column-align: pad each `<url> <line>:<col>` field to the longest.
+        // The name goes through the frame-naming rule HERE, at the one place
+        // a frame becomes text, rather than at each of the places a frame is
+        // built: the entry's is whatever the host passed as `Options::url`,
+        // which is a path from the binary and a `file://` URL from the JS
+        // API, and both have to read as the path dart prints.
         let fields: Vec<String> = frames
             .iter()
-            .map(|f| format!("{} {}:{}", f.url, f.pos.line, f.pos.col))
+            .map(|f| format!("{} {}:{}", self.frame_name(&f.url), f.pos.line, f.pos.col))
             .collect();
         let width = fields.iter().map(String::len).max().unwrap_or(0);
         let pad: String = " ".repeat(indent);
@@ -1917,11 +1926,16 @@ impl<'a> Evaluator<'a> {
                             col_end as usize,
                             sel_str,
                             at_idx + 1,
-                            &frames[0].url,
+                            // This snippet prints the file in its own header,
+                            // so it is a second place a frame becomes text and
+                            // needs the same rule. Left out, one message
+                            // contradicted itself: a `file://` URL in the
+                            // header above the path in the trace below.
+                            &self.frame_name(&frames[0].url),
                             self.options.glyphs,
                         ));
                         rendered.push('\n');
-                        rendered.push_str(&Self::render_frame_block(&frames, 2));
+                        rendered.push_str(&self.render_frame_block(&frames, 2));
                         e.rendered = Some(rendered);
                     }
                     return e;
@@ -1958,6 +1972,14 @@ impl<'a> Evaluator<'a> {
         Error::at(MSG, rule.selector_pos)
     }
 
+    /// How a frame names its file: a path relative to the working directory,
+    /// whether the host handed over a path or a `file://` URL. Anything that
+    /// does not name a file — a `data:` URL, a custom importer's key — keeps
+    /// the display string it already has.
+    fn frame_name(&self, url: &str) -> String {
+        self.pretty_name(url).unwrap_or_else(|| url.to_string())
+    }
+
     /// Render `Error: <msg>` + the snippet pointing at the innermost frame +
     /// the 2-space-indented frame trace.
     fn render_error_with_frames(&self, e: &Error, frames: &[DiagFrame]) -> String {
@@ -1991,7 +2013,7 @@ impl<'a> Evaluator<'a> {
             self.options.glyphs,
         ));
         out.push('\n');
-        out.push_str(&Self::render_frame_block(frames, 2));
+        out.push_str(&self.render_frame_block(frames, 2));
         out
     }
 
@@ -2460,7 +2482,7 @@ impl<'a> Evaluator<'a> {
             self.options.glyphs,
         ));
         block.push('\n');
-        block.push_str(&Self::render_frame_block(&frames, 4));
+        block.push_str(&self.render_frame_block(&frames, 4));
         let formatted = format!("{block}\n");
         self.emit_diag(crate::WarnEvent {
             kind: crate::WarnKind::Warn,
@@ -2561,7 +2583,7 @@ impl<'a> Evaluator<'a> {
                     self.options.glyphs,
                 ));
                 block.push('\n');
-                block.push_str(&Self::render_frame_block(&frames, 2));
+                block.push_str(&self.render_frame_block(&frames, 2));
                 Some(block)
             }
             None => None,
@@ -2606,13 +2628,19 @@ impl<'a> Evaluator<'a> {
             return None;
         }
         let mut rendered = format!("Error: {message}\n");
+        // A third and fourth place a frame becomes text: this snippet prints
+        // a header per file group. The SOURCE stays part of the grouping key
+        // (see `render_labelled_snippet`), so naming the groups for display
+        // cannot draw one file's span against another's lines.
+        let call_name = self.frame_name(&frames[0].url);
+        let decl_name = self.frame_name(&decl_url);
         rendered.push_str(&crate::diag::render_labelled_snippet(
-            &frames[0].url,
+            &call_name,
             &frames[0].source,
             call_span,
             "invocation",
             &[crate::diag::Secondary {
-                url: &decl_url,
+                url: &decl_name,
                 source: &decl_source,
                 span: decl_span,
                 label: "declaration",
@@ -2621,7 +2649,7 @@ impl<'a> Evaluator<'a> {
             self.options.glyphs,
         ));
         rendered.push('\n');
-        rendered.push_str(&Self::render_frame_block(frames, 2));
+        rendered.push_str(&self.render_frame_block(frames, 2));
         Some(rendered)
     }
 
@@ -2674,13 +2702,15 @@ impl<'a> Evaluator<'a> {
         });
         frames.extend(self.call_stack.iter().rev().cloned());
         let mut rendered = format!("Error: {message}\n");
+        let call_name = self.frame_name(&frame.url);
+        let decl_name = self.frame_name(&decl_url);
         rendered.push_str(&crate::diag::render_labelled_snippet(
-            &frame.url,
+            &call_name,
             &frame.source,
             call_span,
             "invocation",
             &[crate::diag::Secondary {
-                url: &decl_url,
+                url: &decl_name,
                 source: &decl_source,
                 span: decl_span,
                 label: "declaration",
@@ -2689,7 +2719,7 @@ impl<'a> Evaluator<'a> {
             self.options.glyphs,
         ));
         rendered.push('\n');
-        rendered.push_str(&Self::render_frame_block(&frames, 2));
+        rendered.push_str(&self.render_frame_block(&frames, 2));
         e.rendered = Some(rendered);
         e
     }
@@ -2805,7 +2835,7 @@ impl<'a> Evaluator<'a> {
         let msg = v.to_message();
         let formatted = if self.diag_enabled() {
             let frames = self.frames_for(pos);
-            format!("WARNING: {}\n{}\n", msg, Self::render_frame_block(&frames, 4))
+            format!("WARNING: {}\n{}\n", msg, self.render_frame_block(&frames, 4))
         } else {
             format!("WARNING: {msg}")
         };

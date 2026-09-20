@@ -307,12 +307,30 @@ const sliceReply = (r) => [r[0], r[1], r[2] ?? null, r[3] ?? null, r[4] ?? null]
 
 // ------------------------------------------------------------- option mapping
 
+/**
+ * `process.cwd()` throws `ENOENT` once the process's directory is gone, and
+ * this runs before EVERY compile — so reading it unguarded turned a deleted
+ * working directory into a total failure, `compileString` included. `null`
+ * is a supported answer: the core then leaves a frame's path absolute.
+ */
+function currentDirectory() {
+  try {
+    return process.cwd();
+  } catch {
+    return undefined; // napi Option<String>: `null` is a type error
+  }
+}
+
 function buildCfg(options, syntax, urlForCore) {
   return {
     syntax,
     compressed: options.style === "compressed",
     // napi Option<String> maps `undefined` to None; `null` is a type error.
     url: urlForCore ?? undefined,
+    // The wasm engine has no `getcwd` (wasm32-unknown-unknown), so a frame
+    // would keep an absolute path there and a relative one under the addon.
+    // Both are told the same directory instead.
+    cwd: currentDirectory(),
     wantMap: !!options.sourceMap,
     includeSources: !!options.sourceMapIncludeSources,
     charset: options.charset !== false,

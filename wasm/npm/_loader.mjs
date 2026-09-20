@@ -284,7 +284,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
   // Read the result buffer after a sasso_compile2 call, free scratch, and throw
   // on a Sass error. Shared by the sync and async drivers.
   function readResult(w, outPtr, m, wantMap) {
-    const { scratch, inPtr, inLen, urlPtr, urlLen, silencedPtr, silencedLen } = m;
+    const { scratch, inPtr, inLen, urlPtr, urlLen, silencedPtr, silencedLen, cwdPtr, cwdLen } = m;
     const view = new DataView(w.memory.buffer);
     const outLen = view.getUint32(scratch, true);
     const ok = view.getUint8(scratch + 4);
@@ -292,6 +292,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     if (inLen) w.sasso_free(inPtr, inLen);
     if (urlLen) w.sasso_free(urlPtr, urlLen);
     if (silencedLen) w.sasso_free(silencedPtr, silencedLen);
+    if (cwdLen) w.sasso_free(cwdPtr, cwdLen);
     w.sasso_free(scratch, 8);
     w.sasso_free(outPtr, outLen);
     if (!ok) {
@@ -337,6 +338,12 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
         ? encoder.encode(opts.silenceDeprecations.join(","))
         : null;
     const silencedLen = silBytes ? silBytes.length : 0;
+    // This target has no `getcwd` — it is wasm32-unknown-unknown, not wasip1 —
+    // so a diagnostic path has nothing to be relative to unless we say. Left
+    // unsaid, a stack frame kept the absolute path here while the native addon
+    // printed a relative one: the same error, two answers (#153).
+    const cwdBytes = opts.cwd ? encoder.encode(opts.cwd) : null;
+    const cwdLen = cwdBytes ? cwdBytes.length : 0;
     // Before the first allocation, deliberately: this throws for a list the
     // module cannot apply, and nothing frees these buffers on the way out —
     // `readResult` owns that and is only reached on a completed compile. A
@@ -346,11 +353,13 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     const inPtr = input.length ? w.sasso_alloc(input.length) : 0;
     const urlPtr = urlLen ? w.sasso_alloc(urlLen) : 0;
     const silencedPtr = silencedLen ? w.sasso_alloc(silencedLen) : 0;
+    const cwdPtr = cwdLen ? w.sasso_alloc(cwdLen) : 0;
     const scratch = w.sasso_alloc(8);
     if (input.length) new Uint8Array(w.memory.buffer, inPtr, input.length).set(input);
     if (urlLen) new Uint8Array(w.memory.buffer, urlPtr, urlLen).set(urlBytes);
     if (silencedLen) new Uint8Array(w.memory.buffer, silencedPtr, silencedLen).set(silBytes);
-    return { inPtr, inLen: input.length, urlPtr, urlLen, silencedPtr, silencedLen, scratch };
+    if (cwdLen) new Uint8Array(w.memory.buffer, cwdPtr, cwdLen).set(cwdBytes);
+    return { inPtr, inLen: input.length, urlPtr, urlLen, silencedPtr, silencedLen, cwdPtr, cwdLen, scratch };
   }
 
   function callCompile2(w, m, opts) {
@@ -359,6 +368,21 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     // modules keep working through `compile2`, which is why the export is
     // checked rather than assumed: the .wasm files are build artifacts and a
     // stale one next to a new loader would otherwise fail on an undefined call.
+    // `sasso_compile4` takes the working directory; `compile3` has no
+    // parameter for it and a frame there keeps the absolute path, which is
+    // what this build did before. A stale .wasm beside a new loader is the
+    // reason each generation is checked rather than assumed — they are build
+    // artifacts, not shipped in step with the JS.
+    if (typeof w.sasso_compile4 === "function") {
+      return w.sasso_compile4(
+        m.inPtr, m.inLen, opts.compressed ? 1 : 0, opts.syntax, 1,
+        m.urlPtr, m.urlLen, opts.wantMap ? 1 : 0, opts.includeSources ? 1 : 0, opts.charset ? 1 : 0,
+        opts.quietDeps ? 1 : 0, opts.unicode ? 1 : 0,
+        m.silencedPtr, m.silencedLen,
+        m.cwdPtr, m.cwdLen,
+        m.scratch, m.scratch + 4,
+      );
+    }
     if (typeof w.sasso_compile3 === "function") {
       return w.sasso_compile3(
         m.inPtr, m.inLen, opts.compressed ? 1 : 0, opts.syntax, 1,
@@ -782,11 +806,33 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     return readResult(w, outPtr, m, opts.wantMap);
   }
 
+  /**
+   * `process.cwd()` THROWS `ENOENT` when the directory the process started in
+   * has been deleted — a build script that removes its own temp directory, a
+   * watcher outliving a `git clean`. Reading it unguarded made every compile
+   * fail there, `compileString` included, which touches no files at all.
+   * Measured: `ENOENT: no such file or directory, uv_cwd`.
+   *
+   * `null` is a supported answer all the way down — the core falls back to an
+   * absolute path in a frame — so a lost directory costs a nicer diagnostic
+   * and nothing else.
+   */
+  function currentDirectory() {
+    try {
+      return typeof process !== "undefined" && process.cwd ? process.cwd() : null;
+    } catch {
+      return null;
+    }
+  }
+
   function rawOpts(options, syntax) {
     return {
       compressed: options.style === "compressed",
       syntax,
       url: options.url ? toFileUrl(options.url).href : null,
+      // What that url is SHOWN relative to. It has to be handed over: this
+      // module is wasm32-unknown-unknown and has no getcwd of its own.
+      cwd: currentDirectory(),
       wantMap: !!options.sourceMap,
       includeSources: !!options.sourceMapIncludeSources,
       charset: options.charset !== false, // dart-sass default: true

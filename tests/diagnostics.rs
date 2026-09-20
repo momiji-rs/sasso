@@ -2138,3 +2138,334 @@ fn a_host_override_of_a_filter_name_still_warns() {
     assert_eq!(w.len(), 1, "the deprecated global name still warns: {w:?}");
     assert!(w[0].contains("global-builtin"), "{}", w[0]);
 }
+
+/// A frame path spelled the way the platform spells it.
+///
+/// dart writes every frame with the PLATFORM's separator, the entry's
+/// included (#151), and so do we — so `src/main.scss` is the right answer on
+/// POSIX and `src\main.scss` on Windows. Four tests here hard-coded the
+/// POSIX one and passed everywhere except the platform half of this rule
+/// exists for.
+fn frame_path(rel: &str) -> String {
+    if cfg!(windows) {
+        rel.replace('/', "\\")
+    } else {
+        rel.to_string()
+    }
+}
+
+/// A frame names a file the same way whichever spelling the host handed over.
+///
+/// The binary passes a path and the JS API passes a `file://` URL — it has to,
+/// because its importer bridge resolves relative `@use` against the entry URL —
+/// and for three releases the URL went straight into the frame, scheme and all
+/// (#153). The two front ends printed different things for the same error, and
+/// `file:///Users/…/src/a.scss` is neither pasteable into an editor nor
+/// meaningful on anyone else's machine.
+///
+/// `cwd` is passed explicitly rather than leaning on the process's: this is
+/// what the JS bridges do, because `wasm32-unknown-unknown` has no `getcwd` and
+/// nothing to relativise against otherwise.
+#[test]
+fn a_frame_names_a_file_the_same_way_from_either_front_end() {
+    let cwd = if cfg!(windows) {
+        r"C:\work\proj"
+    } else {
+        "/work/proj"
+    };
+    let as_url = "file:///work/proj/src/a.scss";
+    let as_path = if cfg!(windows) {
+        r"C:\work\proj\src\a.scss"
+    } else {
+        "/work/proj/src/a.scss"
+    };
+    let expected = if cfg!(windows) {
+        r"src\a.scss 1:8"
+    } else {
+        "src/a.scss 1:8"
+    };
+
+    // On Windows the URL names the C: drive, so both spellings are the same
+    // file and the comparison is the point of the test.
+    let url = if cfg!(windows) {
+        "file:///C:/work/proj/src/a.scss"
+    } else {
+        as_url
+    };
+
+    let from_url = compile("a { b: $x }", &Options::new().with_url(url).with_cwd(cwd)).unwrap_err();
+    let from_path = compile("a { b: $x }", &Options::new().with_url(as_path).with_cwd(cwd)).unwrap_err();
+
+    // `Display` prints the rendered block when there is one.
+    let rendered = |e: &sasso::Error| e.to_string();
+    assert!(
+        rendered(&from_url).contains(expected),
+        "a file:// url should name a path: {}",
+        rendered(&from_url),
+    );
+    assert_eq!(
+        rendered(&from_url),
+        rendered(&from_path),
+        "the two front ends' spellings must render identically",
+    );
+    assert!(
+        !rendered(&from_url).contains("file://"),
+        "no frame should show a scheme: {}",
+        rendered(&from_url),
+    );
+}
+
+/// Without a `cwd` the host knows of, a frame still shows a PATH — just not a
+/// relative one. That is the wasm case before the bridges were taught to pass
+/// one, and it must degrade to "absolute" rather than back to a URL.
+#[test]
+fn a_file_url_without_a_cwd_degrades_to_an_absolute_path() {
+    let e = compile(
+        "a { b: $x }",
+        &Options::new().with_url("file:///nowhere/deep/a.scss"),
+    )
+    .unwrap_err();
+    let rendered = e.to_string();
+    assert!(!rendered.contains("file://"), "still a URL: {rendered}");
+    let expected = if cfg!(windows) {
+        r"\nowhere\deep\a.scss"
+    } else {
+        "/nowhere/deep/a.scss"
+    };
+    assert!(rendered.contains(expected), "not the path: {rendered}");
+}
+
+/// A custom importer's key is not a filesystem path and is not ours to
+/// rewrite: dart shows it as it is.
+#[test]
+fn a_non_file_url_keeps_its_own_spelling() {
+    let e = compile(
+        "a { b: $x }",
+        &Options::new().with_url("data:;charset=utf-8,a").with_cwd("/work"),
+    )
+    .unwrap_err();
+    let rendered = e.to_string();
+    assert!(rendered.contains("data:;charset=utf-8,a 1:8"), "{rendered}");
+}
+
+/// A custom importer's canonical key is its own identity, not a path. dart
+/// shows its last segment, and so did this — until the frame-naming rule was
+/// applied to every key rather than to the ones that name a file.
+///
+/// A RELATIVE key is the case that slipped through: `virtual/foo.scss` has no
+/// scheme to decline it by and no root to relativise, so handing it back
+/// whole looked like a no-op and was a changed frame.
+#[test]
+fn a_custom_importers_relative_key_shows_its_last_segment() {
+    struct Virtual;
+    impl sasso::Importer for Virtual {
+        fn canonicalize(
+            &self,
+            url: &str,
+            _ctx: &sasso::CanonicalizeContext<'_>,
+        ) -> Result<Option<sasso::CanonicalUrl>, sasso::ImporterError> {
+            Ok(Some(sasso::CanonicalUrl::new(format!("virtual/{url}.scss"))))
+        }
+        fn load(
+            &self,
+            _canonical: &sasso::CanonicalUrl,
+        ) -> Result<Option<sasso::ImporterResult>, sasso::ImporterError> {
+            Ok(Some(sasso::ImporterResult {
+                contents: "@mixin m {\n  a: $nope;\n}\n".to_string(),
+                syntax: sasso::Syntax::Scss,
+                source_map_url: None,
+            }))
+        }
+    }
+
+    let importer = Virtual;
+    let opts = Options::new()
+        .with_url("file:///work/proj/src/main.scss")
+        .with_cwd("/work/proj")
+        .with_importer(&importer);
+    let e = compile("@use \"foo\";\n.a { @include foo.m; }\n", &opts).unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains(&frame_path("foo.scss 2:6")),
+        "the key's last segment, as dart shows it: {rendered}",
+    );
+    assert!(
+        !rendered.contains(&frame_path("virtual/foo.scss")),
+        "the whole key is not a frame name: {rendered}",
+    );
+    // …and the entry is still relativised beside it.
+    assert!(rendered.contains(&frame_path("src/main.scss")), "{rendered}");
+}
+
+/// The "error in interpolated output" block prints the file in a header of
+/// its OWN, so it is a second place a frame becomes text. Left out of the
+/// rule, one message contradicted itself: a `file://` URL in the header above
+/// the path in the trace below.
+#[test]
+fn the_interpolated_output_header_names_the_file_like_the_trace() {
+    let opts = Options::new()
+        .with_url("file:///work/proj/src/main.scss")
+        .with_cwd("/work/proj");
+    let e = compile("$x: \"y@z\";\n.a#{$x} { c: d; }\n", &opts).unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains("error in interpolated output"),
+        "not the dual-span block: {rendered}",
+    );
+    assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
+    assert_eq!(
+        rendered.matches(&frame_path("src/main.scss")).count(),
+        2,
+        "the header and the trace should both name it: {rendered}",
+    );
+}
+
+/// The Windows rule, exercised from whatever host runs this.
+///
+/// The wasm module is built for `wasm32-unknown-unknown`, so the compile-time
+/// host style is POSIX in it no matter where node is running — and on Windows
+/// node it is handed `C:\work\proj` and `file:///C:/work/proj/…`. Reading
+/// those by POSIX rules leaves `/C:/work/proj/src/main.scss` in the frame:
+/// not the path, and not what the addon on the same machine prints.
+///
+/// Nothing on a POSIX developer machine can reach that through the CLI, which
+/// is exactly the blind spot `pathstyle` exists for (#146). Here the
+/// Windows spelling is handed to the compiler directly, so the rule is
+/// checked wherever this test runs.
+#[test]
+fn a_windows_spelling_is_read_by_windows_rules_on_any_host() {
+    let opts = Options::new()
+        .with_url("file:///C:/work/proj/src/main.scss")
+        .with_cwd(r"C:\work\proj");
+    let e = compile("a { b: $x }", &opts).unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains(r"src\main.scss 1:8"),
+        "a Windows cwd and a Windows file URL should give a Windows path: {rendered}",
+    );
+    assert!(!rendered.contains("/C:/"), "read as a POSIX path: {rendered}");
+    assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
+}
+
+/// A cross-file `invocation`/`declaration` error draws one header PER FILE,
+/// through a third snippet function. Left out of the rule, a single message
+/// named the same kind of thing three ways: a URL in the first header, a path
+/// in the second, and paths in the trace.
+#[test]
+fn a_labelled_snippets_headers_name_files_like_the_trace() {
+    struct Dep;
+    impl sasso::Importer for Dep {
+        fn canonicalize(
+            &self,
+            _url: &str,
+            _ctx: &sasso::CanonicalizeContext<'_>,
+        ) -> Result<Option<sasso::CanonicalUrl>, sasso::ImporterError> {
+            Ok(Some(sasso::CanonicalUrl::new("file:///work/proj/src/_dep.scss")))
+        }
+        fn load(
+            &self,
+            _canonical: &sasso::CanonicalUrl,
+        ) -> Result<Option<sasso::ImporterResult>, sasso::ImporterError> {
+            Ok(Some(sasso::ImporterResult {
+                contents: "@mixin m($a) {\n  width: $a;\n}\n".to_string(),
+                syntax: sasso::Syntax::Scss,
+                source_map_url: None,
+            }))
+        }
+    }
+
+    let importer = Dep;
+    let opts = Options::new()
+        .with_url("file:///work/proj/src/main.scss")
+        .with_cwd("/work/proj")
+        .with_importer(&importer);
+    let e = compile("@use \"dep\";\n.a { @include dep.m(1, 2); }\n", &opts).unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains("invocation") && rendered.contains("declaration"),
+        "not the labelled block: {rendered}",
+    );
+    assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
+    assert!(rendered.contains(&frame_path("src/main.scss")), "{rendered}");
+    assert!(rendered.contains(&frame_path("src/_dep.scss")), "{rendered}");
+}
+
+/// The same block, reached through the OTHER of the two call sites.
+///
+/// `error_with_declaration_at` renders before the callable is entered — a
+/// content block handed to a mixin that has no `@content` — so it builds its
+/// own two-span block rather than going through `error_at_call`. One test
+/// could not cover both: reverting only this site left the first case green.
+#[test]
+fn the_pre_entry_declaration_block_names_files_like_the_trace() {
+    struct Dep;
+    impl sasso::Importer for Dep {
+        fn canonicalize(
+            &self,
+            _url: &str,
+            _ctx: &sasso::CanonicalizeContext<'_>,
+        ) -> Result<Option<sasso::CanonicalUrl>, sasso::ImporterError> {
+            Ok(Some(sasso::CanonicalUrl::new("file:///work/proj/src/_dep.scss")))
+        }
+        fn load(
+            &self,
+            _canonical: &sasso::CanonicalUrl,
+        ) -> Result<Option<sasso::ImporterResult>, sasso::ImporterError> {
+            Ok(Some(sasso::ImporterResult {
+                contents: "@mixin plain {\n  width: 1px;\n}\n".to_string(),
+                syntax: sasso::Syntax::Scss,
+                source_map_url: None,
+            }))
+        }
+    }
+
+    let importer = Dep;
+    let opts = Options::new()
+        .with_url("file:///work/proj/src/main.scss")
+        .with_cwd("/work/proj")
+        .with_importer(&importer);
+    let e = compile(
+        "@use \"dep\";\n.a { @include dep.plain { color: red; } }\n",
+        &opts,
+    )
+    .unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains("content block") && rendered.contains("declaration"),
+        "not the pre-entry two-span block: {rendered}",
+    );
+    assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
+    assert!(rendered.contains(&frame_path("src/main.scss")), "{rendered}");
+    assert!(rendered.contains(&frame_path("src/_dep.scss")), "{rendered}");
+}
+
+/// Both spans in the ENTRY file, where the declaration has no module of its
+/// own and falls back to the frame's url — the raw one the host passed.
+///
+/// `render_labelled_snippet` groups by `(url, source)`, so naming the primary
+/// group and not the secondary splits one file into two groups and prints its
+/// header twice. The rule has to reach both sides of the pair or neither.
+#[test]
+fn one_file_gets_one_header_when_both_spans_are_the_entrys() {
+    let opts = Options::new()
+        .with_url("file:///work/proj/src/main.scss")
+        .with_cwd("/work/proj");
+    let e = compile(
+        "@mixin plain {\n  width: 1px;\n}\n.a { @include plain { color: red; } }\n",
+        &opts,
+    )
+    .unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains("content block"),
+        "not the expected error: {rendered}",
+    );
+    assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
+    // One file, one header. The frame trace names it too, so count headers
+    // rather than mentions.
+    let headers = rendered.matches("┌──>").count() + rendered.matches(",-->").count();
+    assert!(
+        headers <= 1,
+        "one file should get one header, got {headers}: {rendered}"
+    );
+}
