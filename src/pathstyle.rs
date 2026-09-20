@@ -355,6 +355,19 @@ pub(crate) fn pretty_name(style: Style, name: &str, cwd: Option<&str>) -> Option
 /// letter or a UNC root, so this cannot change what a native build does.
 pub(crate) fn style_for(cwd: Option<&str>, name: &str) -> Style {
     let windows_shaped = |s: &str| {
+        // An authority that is not the local machine is a UNC share, and only
+        // Windows has a spelling for one — so such a URL says which platform
+        // it came from even when nothing else does. Without this the no-cwd
+        // fallback declined `file://server/share/a.scss` and printed it.
+        if let Some(auth) = s.strip_prefix("file://") {
+            if !auth.is_empty()
+                && !auth.starts_with('/')
+                && auth != "localhost"
+                && !auth.starts_with("localhost/")
+            {
+                return true;
+            }
+        }
         let s = s.strip_prefix("file:///").unwrap_or(s);
         // A drive letter or a UNC root. NOT a lone leading backslash: a POSIX
         // file name may contain one, and `process.cwd()` on Windows is always
@@ -843,5 +856,27 @@ mod tests {
             .as_deref(),
             Some(r"src\a.scss"),
         );
+    }
+
+    /// A UNC file URL carries its platform in the authority, and that is the
+    /// only clue when no working directory was supplied — the legacy no-cwd
+    /// wasm ABI, or an embedder that sets none. Read as POSIX it has no
+    /// spelling at all, so the frame printed the URL.
+    #[test]
+    fn a_unc_url_is_windows_even_with_no_cwd() {
+        assert_eq!(style_for(None, "file://server/share/a.scss"), Style::Windows);
+        assert_eq!(
+            pretty_name(
+                style_for(None, "file://server/share/a.scss"),
+                "file://server/share/a.scss",
+                None,
+            )
+            .as_deref(),
+            Some(r"\\server\share\a.scss"),
+        );
+        // `localhost` is the local machine, not a share: it must NOT flip the
+        // style, or every plain file URL on POSIX would be read as Windows.
+        assert_eq!(style_for(None, "file://localhost/a/b.scss"), HOST);
+        assert_eq!(style_for(None, "file:///a/b.scss"), HOST);
     }
 }

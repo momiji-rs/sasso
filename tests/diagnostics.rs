@@ -2331,3 +2331,126 @@ fn a_windows_spelling_is_read_by_windows_rules_on_any_host() {
     assert!(!rendered.contains("/C:/"), "read as a POSIX path: {rendered}");
     assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
 }
+
+/// A cross-file `invocation`/`declaration` error draws one header PER FILE,
+/// through a third snippet function. Left out of the rule, a single message
+/// named the same kind of thing three ways: a URL in the first header, a path
+/// in the second, and paths in the trace.
+#[test]
+fn a_labelled_snippets_headers_name_files_like_the_trace() {
+    struct Dep;
+    impl sasso::Importer for Dep {
+        fn canonicalize(
+            &self,
+            _url: &str,
+            _ctx: &sasso::CanonicalizeContext<'_>,
+        ) -> Result<Option<sasso::CanonicalUrl>, sasso::ImporterError> {
+            Ok(Some(sasso::CanonicalUrl::new("file:///work/proj/src/_dep.scss")))
+        }
+        fn load(
+            &self,
+            _canonical: &sasso::CanonicalUrl,
+        ) -> Result<Option<sasso::ImporterResult>, sasso::ImporterError> {
+            Ok(Some(sasso::ImporterResult {
+                contents: "@mixin m($a) {\n  width: $a;\n}\n".to_string(),
+                syntax: sasso::Syntax::Scss,
+                source_map_url: None,
+            }))
+        }
+    }
+
+    let importer = Dep;
+    let opts = Options::new()
+        .with_url("file:///work/proj/src/main.scss")
+        .with_cwd("/work/proj")
+        .with_importer(&importer);
+    let e = compile("@use \"dep\";\n.a { @include dep.m(1, 2); }\n", &opts).unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains("invocation") && rendered.contains("declaration"),
+        "not the labelled block: {rendered}",
+    );
+    assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
+    assert!(rendered.contains("src/main.scss"), "{rendered}");
+    assert!(rendered.contains("src/_dep.scss"), "{rendered}");
+}
+
+/// The same block, reached through the OTHER of the two call sites.
+///
+/// `error_with_declaration_at` renders before the callable is entered — a
+/// content block handed to a mixin that has no `@content` — so it builds its
+/// own two-span block rather than going through `error_at_call`. One test
+/// could not cover both: reverting only this site left the first case green.
+#[test]
+fn the_pre_entry_declaration_block_names_files_like_the_trace() {
+    struct Dep;
+    impl sasso::Importer for Dep {
+        fn canonicalize(
+            &self,
+            _url: &str,
+            _ctx: &sasso::CanonicalizeContext<'_>,
+        ) -> Result<Option<sasso::CanonicalUrl>, sasso::ImporterError> {
+            Ok(Some(sasso::CanonicalUrl::new("file:///work/proj/src/_dep.scss")))
+        }
+        fn load(
+            &self,
+            _canonical: &sasso::CanonicalUrl,
+        ) -> Result<Option<sasso::ImporterResult>, sasso::ImporterError> {
+            Ok(Some(sasso::ImporterResult {
+                contents: "@mixin plain {\n  width: 1px;\n}\n".to_string(),
+                syntax: sasso::Syntax::Scss,
+                source_map_url: None,
+            }))
+        }
+    }
+
+    let importer = Dep;
+    let opts = Options::new()
+        .with_url("file:///work/proj/src/main.scss")
+        .with_cwd("/work/proj")
+        .with_importer(&importer);
+    let e = compile(
+        "@use \"dep\";\n.a { @include dep.plain { color: red; } }\n",
+        &opts,
+    )
+    .unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains("content block") && rendered.contains("declaration"),
+        "not the pre-entry two-span block: {rendered}",
+    );
+    assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
+    assert!(rendered.contains("src/main.scss"), "{rendered}");
+    assert!(rendered.contains("src/_dep.scss"), "{rendered}");
+}
+
+/// Both spans in the ENTRY file, where the declaration has no module of its
+/// own and falls back to the frame's url — the raw one the host passed.
+///
+/// `render_labelled_snippet` groups by `(url, source)`, so naming the primary
+/// group and not the secondary splits one file into two groups and prints its
+/// header twice. The rule has to reach both sides of the pair or neither.
+#[test]
+fn one_file_gets_one_header_when_both_spans_are_the_entrys() {
+    let opts = Options::new()
+        .with_url("file:///work/proj/src/main.scss")
+        .with_cwd("/work/proj");
+    let e = compile(
+        "@mixin plain {\n  width: 1px;\n}\n.a { @include plain { color: red; } }\n",
+        &opts,
+    )
+    .unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains("content block"),
+        "not the expected error: {rendered}",
+    );
+    assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
+    // One file, one header. The frame trace names it too, so count headers
+    // rather than mentions.
+    let headers = rendered.matches("┌──>").count() + rendered.matches(",-->").count();
+    assert!(
+        headers <= 1,
+        "one file should get one header, got {headers}: {rendered}"
+    );
+}

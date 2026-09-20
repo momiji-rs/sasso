@@ -2628,13 +2628,19 @@ impl<'a> Evaluator<'a> {
             return None;
         }
         let mut rendered = format!("Error: {message}\n");
+        // A third and fourth place a frame becomes text: this snippet prints
+        // a header per file group. The SOURCE stays part of the grouping key
+        // (see `render_labelled_snippet`), so naming the groups for display
+        // cannot draw one file's span against another's lines.
+        let call_name = self.frame_name(&frames[0].url);
+        let decl_name = self.frame_name(&decl_url);
         rendered.push_str(&crate::diag::render_labelled_snippet(
-            &frames[0].url,
+            &call_name,
             &frames[0].source,
             call_span,
             "invocation",
             &[crate::diag::Secondary {
-                url: &decl_url,
+                url: &decl_name,
                 source: &decl_source,
                 span: decl_span,
                 label: "declaration",
@@ -2696,13 +2702,15 @@ impl<'a> Evaluator<'a> {
         });
         frames.extend(self.call_stack.iter().rev().cloned());
         let mut rendered = format!("Error: {message}\n");
+        let call_name = self.frame_name(&frame.url);
+        let decl_name = self.frame_name(&decl_url);
         rendered.push_str(&crate::diag::render_labelled_snippet(
-            &frame.url,
+            &call_name,
             &frame.source,
             call_span,
             "invocation",
             &[crate::diag::Secondary {
-                url: &decl_url,
+                url: &decl_name,
                 source: &decl_source,
                 span: decl_span,
                 label: "declaration",
