@@ -3367,8 +3367,8 @@ impl<'a> Evaluator<'a> {
                     continue;
                 }
                 self.note_placeholder_rule(s);
-                // A keyframe selector's percentage normalizes its exponent marker
-                // to lowercase (`130E-1%` -> `130e-1%`), digits untouched.
+                // A keyframe stop is re-serialized: `FROM` -> `from`, and a
+                // percentage's exponent marker `130E-1%` -> `130e-1%`.
                 let s = if self.in_keyframes {
                     normalize_keyframe_selector(s)
                 } else {
@@ -5571,14 +5571,18 @@ impl AtRootQuery {
     }
 }
 
-/// Normalize a keyframe selector: a percentage stop's scientific-notation
-/// marker is lowercased (`130E-1%` -> `130e-1%`); everything else (including
-/// the digits and `from`/`to`) is left verbatim.
-fn normalize_keyframe_selector(s: &str) -> String {
+/// Normalize a keyframe selector the way dart re-serializes a stop: the
+/// `from`/`to` keywords are lowercased (`FROM` -> `from`), and so is a
+/// percentage stop's scientific-notation marker (`130E-1%` -> `130e-1%`);
+/// the digits are left verbatim.
+pub(super) fn normalize_keyframe_selector(s: &str) -> String {
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("from") || t.eq_ignore_ascii_case("to") {
+        return t.to_ascii_lowercase();
+    }
     if !s.contains('E') {
         return s.to_string();
     }
-    let t = s.trim();
     let is_pct = t.ends_with('%')
         && t[..t.len() - 1]
             .chars()

@@ -70,9 +70,22 @@ Conformance is tracked separately as a ratchet against the official
   plain-CSS parser makes it (`@keyframes k {from {.x {a: b}}}`), where this
   evaluator produced output for it at every depth; both evaluators now raise
   that error from one place, and it points at the offending rule instead of
-  carrying no position at all. `[measured]` against dart-sass 1.104.1 in both
-  styles; no sass-spec case covers any of these shapes, so neither gate number
-  moves.
+  carrying no position at all.
+
+  A frame's selector is a list of keyframe **stops**, not of CSS selectors, and
+  dart re-serializes the stops joined with `", "`. The plain-CSS evaluator ran
+  them through ordinary selector normalization instead, so a line break between
+  stops survived (`0%,\n50%` stayed on two lines where dart writes
+  `0%, 50%`), `+5%` gained a space as though `+` were a sibling combinator, and
+  an exponent marker kept its case (`130E-1%`). The `from`/`to` keywords were
+  left verbatim on **both** paths, where dart lowercases them (`FROM` ->
+  `from`); that normalization now lives in one function both evaluators use.
+  What neither checks yet is the stop *grammar* — dart rejects anything but
+  `from`, `to` and `<number>%` in a frame, so `@keyframes k {foo {a: b}}` is an
+  error there and output here.
+
+  All of it `[measured]` against dart-sass 1.104.1 in both styles; no sass-spec
+  case covers any of these shapes, so neither gate number moves.
 
   Compressed passing 13,975 → **14,001** of 14,258 (98.02% → 98.20%); expanded
   unchanged at 14,107 `+0`.

@@ -9120,8 +9120,15 @@ fn keyframes_nested_at_rules_and_selector_normalization() {
         ours("@keyframes a {\n  130E-1% {c: d}\n}\n"),
         "@keyframes a {\n  130e-1% {\n    c: d;\n  }\n}\n"
     );
+    // The `from`/`to` keywords are re-serialized lowercase, whatever their
+    // case in the source.
+    assert_eq!(
+        ours("@keyframes a {\n  FROM, tO {c: d}\n}\n"),
+        "@keyframes a {\n  from, to {\n    c: d;\n  }\n}\n"
+    );
     assert_parity("@keyframes a {\n  13E+1% {c: d}\n}\n");
     assert_parity("@keyframes a {\n  from {c: d}\n  50.5% {e: f}\n}\n");
+    assert_parity("@keyframes a {\n  FROM, tO {c: d}\n}\n");
 }
 
 #[test]

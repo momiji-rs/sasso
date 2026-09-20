@@ -493,6 +493,91 @@ fn a_loaded_files_nested_keyframes_is_kept() {
     );
 }
 
+/// A `@keyframes` frame's selector is a list of keyframe STOPS, not of CSS
+/// selectors: dart re-serializes the stops joined with `", "`, which drops the
+/// author's line breaks, lowercases `from`/`to` and a percentage's exponent
+/// marker, and leaves `+5%` alone instead of reading `+` as a combinator.
+#[test]
+fn a_loaded_files_keyframe_stops_serialize_as_stops() {
+    let dir = scratch("kfstops");
+
+    // A line break between stops does not survive, at every depth.
+    std::fs::write(dir.join("_p.css"), "@keyframes k { 0%,\n50% { a: b } }\n").unwrap();
+    assert_eq!(
+        compile_in(&dir, "list", "@use \"p\";"),
+        "@keyframes k {\n  0%, 50% {\n    a: b;\n  }\n}"
+    );
+    std::fs::write(
+        dir.join("_deep.css"),
+        ".a { .b { @keyframes k { 0%,\n50% { a: b } } } }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile_in(&dir, "deep", "@use \"deep\";"),
+        ".a {\n  .b {\n    @keyframes k {\n      0%, 50% {\n        a: b;\n      }\n    }\n  }\n}"
+    );
+
+    // `from`/`to` and the exponent marker lowercase; the digits do not change.
+    std::fs::write(dir.join("_case.css"), "@keyframes k { FROM, tO { a: b } }\n").unwrap();
+    assert_eq!(
+        compile_in(&dir, "case", "@use \"case\";"),
+        "@keyframes k {\n  from, to {\n    a: b;\n  }\n}"
+    );
+    std::fs::write(dir.join("_exp.css"), "@keyframes k { 130E-1%, 1E+1% { a: b } }\n").unwrap();
+    assert_eq!(
+        compile_in(&dir, "exp", "@use \"exp\";"),
+        "@keyframes k {\n  130e-1%, 1e+1% {\n    a: b;\n  }\n}"
+    );
+    std::fs::write(dir.join("_keep.css"), "@keyframes k { 1.0% { a: b } }\n").unwrap();
+    assert_eq!(
+        compile_in(&dir, "keep", "@use \"keep\";"),
+        "@keyframes k {\n  1.0% {\n    a: b;\n  }\n}"
+    );
+
+    // `+5%` is a stop, not a sibling combinator: no space is inserted.
+    std::fs::write(dir.join("_plus.css"), "@keyframes k { +5% { a: b } }\n").unwrap();
+    assert_eq!(
+        compile_in(&dir, "plus", "@use \"plus\";"),
+        "@keyframes k {\n  +5% {\n    a: b;\n  }\n}"
+    );
+
+    // Same in a bubbled `@keyframes`, in a nested one, and in compressed.
+    std::fs::write(
+        dir.join("_bubble.css"),
+        ".a { @keyframes k { TO,\n130E-1% { a: b } } }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile_in(&dir, "bubble", "@use \"bubble\";"),
+        "@keyframes k {\n  to, 130e-1% {\n    a: b;\n  }\n}"
+    );
+    std::fs::write(
+        dir.join("_media.css"),
+        "@media p { @keyframes k { From,\nTO { a: b } } }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile_in(&dir, "media", "@use \"media\";"),
+        "@media p {\n  @keyframes k {\n    from, to {\n      a: b;\n    }\n  }\n}"
+    );
+    assert_eq!(
+        compile_compressed_in(&dir, "mediac", "@use \"media\";"),
+        "@media p{@keyframes k{from,to{a:b}}}"
+    );
+
+    // KNOWN GAP: the stop grammar is `from` | `to` | `<number>%`, and dart
+    // rejects anything else in a frame (`@keyframes k {foo {a: b}}` is
+    // `Expected "to" or "from".`, `&` and `[a=b]` are `Expected number.`,
+    // `50 %` is `expected "%".`). Neither evaluator checks that yet; the
+    // plain-CSS side rejects only the Sass-only selector forms, with its own
+    // message.
+    std::fs::write(dir.join("_bogus.css"), "@keyframes k { foo { a: b } }\n").unwrap();
+    assert_eq!(
+        compile_in(&dir, "bogus", "@use \"bogus\";"),
+        "@keyframes k {\n  foo {\n    a: b;\n  }\n}"
+    );
+}
+
 /// A style rule inside a keyframe block is an error, in a loaded `.css` file
 /// exactly as in SCSS -- dart's plain-CSS parser refuses it, so producing output
 /// for it was wrong at every depth. Measured against dart-sass 1.104.1.

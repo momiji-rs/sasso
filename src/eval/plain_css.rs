@@ -239,7 +239,11 @@ impl<'a> Evaluator<'a> {
         for stmt in stmts {
             match stmt {
                 Stmt::Rule(r) => {
-                    let (selectors, linebreaks) = self.css_selectors(&r.selector, false)?;
+                    let (selectors, linebreaks) = if frames {
+                        (self.css_frame_selectors(&r.selector)?, Vec::new())
+                    } else {
+                        self.css_selectors(&r.selector, false)?
+                    };
                     // Inside `@keyframes` this rule is a FRAME, and nothing in
                     // it bubbles: dart keeps a nested at-rule where it is
                     // (`@keyframes k {from {@foo {a: b}}}`), while hoisting it
@@ -579,6 +583,58 @@ impl<'a> Evaluator<'a> {
         Ok((normalized, linebreaks))
     }
 
+    /// Convert a `@keyframes` frame's selector list. A frame selector is a list
+    /// of keyframe STOPS (`from`, `50%`), not of CSS selectors, and dart
+    /// re-serializes the stops joined with `", "`: the author's line breaks do
+    /// not survive it, none of the selector normalization applies (`+5%` is a
+    /// stop, not a sibling combinator), and `from`/`to` and a percentage's
+    /// exponent marker come back lowercased.
+    fn css_frame_selectors(&mut self, sel: &[crate::ast::TplPiece]) -> Result<Vec<String>, Error> {
+        let s = self.eval_template(sel)?;
+        let mut stops = Vec::new();
+        for part in split_commas(&s).iter() {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            // The stop grammar is `from` | `to` | `<number>%`, stricter than
+            // this: dart rejects `foo`, `&` and `50 %` in a frame, where the
+            // checks below only catch the Sass-only selector forms. The
+            // remaining strictness gap is recorded in the plan.
+            validate_plain_css_selector(part, false)?;
+            stops.push(normalize_keyframe_selector(part));
+        }
+        Ok(stops)
+    }
+
+    /// Build the body of a `@keyframes` below the bubbling level: as
+    /// [`Evaluator::css_body`], except that a rule at this level is a FRAME —
+    /// its selector is a stop list, and its own body nests natively.
+    fn css_frames_body(&mut self, stmts: &[Stmt]) -> Result<Vec<OutItem>, Error> {
+        check_keyframes_body(stmts)?;
+        let mut items = Vec::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Rule(r) => {
+                    let selectors = self.css_frame_selectors(&r.selector)?;
+                    let inner = self.css_body(&r.body)?;
+                    // An (recursively) empty frame is invisible, like any rule.
+                    if !inner.is_empty() {
+                        let lines = self.map_only_lines(r.selector_pos);
+                        items.push(OutItem::NestedRule {
+                            selectors,
+                            linebreaks: Vec::new(),
+                            items: inner,
+                            lines,
+                        });
+                    }
+                }
+                other => self.css_body_stmt(other, &mut items)?,
+            }
+        }
+        Ok(items)
+    }
+
     /// Build a plain-CSS rule body below the first nesting level: declarations
     /// and nested style rules with nesting preserved (`OutItem::NestedRule`),
     /// and block at-rules kept in place (`OutItem::NestedAtRule`) — dart-sass
@@ -753,9 +809,8 @@ impl<'a> Evaluator<'a> {
                 body,
                 lines,
             } => {
-                check_keyframes_body(body)?;
                 let prelude_s = self.eval_template(prelude)?.trim().to_string();
-                let inner = self.css_body(body)?;
+                let inner = self.css_frames_body(body)?;
                 let lines = self.stamp(*lines);
                 items.push(OutItem::NestedAtRule {
                     name: name.clone(),
