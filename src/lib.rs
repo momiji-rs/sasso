@@ -236,7 +236,7 @@ fn entry_frame_name(url: &str, cwd: Option<&str>) -> String {
             from_os.as_deref().and_then(std::path::Path::to_str)
         }
     };
-    pathstyle::pretty_name(pathstyle::HOST, url, cwd).unwrap_or_else(|| url.to_string())
+    pathstyle::pretty_name(pathstyle::style_for(cwd, url), url, cwd).unwrap_or_else(|| url.to_string())
 }
 
 impl Default for Options<'_> {

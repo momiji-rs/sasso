@@ -1605,6 +1605,10 @@ impl<'a> Evaluator<'a> {
     /// `p.prettyUri`). Any other canonical URL (a custom importer's key) shows
     /// its last segment, falling back to the `@use` url when the key has none.
     pub(super) fn module_diag_url(&self, url: &str, key: &str) -> String {
+        // `pretty_name` answers only for a key that names a file absolutely —
+        // a path or a `file://` URL. A custom importer's key is neither, and
+        // `virtual/foo.scss` must keep showing as `foo.scss` rather than
+        // whole.
         if let Some(named) = self.pretty_name(key) {
             return named;
         }
@@ -1632,7 +1636,11 @@ impl<'a> Evaluator<'a> {
             })
             .as_deref()
             .map(|c| c.to_string_lossy().into_owned());
-        crate::pathstyle::pretty_name(crate::pathstyle::HOST, key, cwd.as_deref())
+        let cwd = cwd.as_deref();
+        // The style the DATA is in, not the one this build was compiled for:
+        // the wasm module is always `Posix` by that measure and still has to
+        // read `C:\work` on Windows node. See `pathstyle::style_for`.
+        crate::pathstyle::pretty_name(crate::pathstyle::style_for(cwd, key), key, cwd)
     }
 
     /// Install `module`'s environment for a cross-module member invocation,

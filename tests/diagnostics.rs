@@ -2232,3 +2232,102 @@ fn a_non_file_url_keeps_its_own_spelling() {
     let rendered = e.to_string();
     assert!(rendered.contains("data:;charset=utf-8,a 1:8"), "{rendered}");
 }
+
+/// A custom importer's canonical key is its own identity, not a path. dart
+/// shows its last segment, and so did this — until the frame-naming rule was
+/// applied to every key rather than to the ones that name a file.
+///
+/// A RELATIVE key is the case that slipped through: `virtual/foo.scss` has no
+/// scheme to decline it by and no root to relativise, so handing it back
+/// whole looked like a no-op and was a changed frame.
+#[test]
+fn a_custom_importers_relative_key_shows_its_last_segment() {
+    struct Virtual;
+    impl sasso::Importer for Virtual {
+        fn canonicalize(
+            &self,
+            url: &str,
+            _ctx: &sasso::CanonicalizeContext<'_>,
+        ) -> Result<Option<sasso::CanonicalUrl>, sasso::ImporterError> {
+            Ok(Some(sasso::CanonicalUrl::new(format!("virtual/{url}.scss"))))
+        }
+        fn load(
+            &self,
+            _canonical: &sasso::CanonicalUrl,
+        ) -> Result<Option<sasso::ImporterResult>, sasso::ImporterError> {
+            Ok(Some(sasso::ImporterResult {
+                contents: "@mixin m {\n  a: $nope;\n}\n".to_string(),
+                syntax: sasso::Syntax::Scss,
+                source_map_url: None,
+            }))
+        }
+    }
+
+    let importer = Virtual;
+    let opts = Options::new()
+        .with_url("file:///work/proj/src/main.scss")
+        .with_cwd("/work/proj")
+        .with_importer(&importer);
+    let e = compile("@use \"foo\";\n.a { @include foo.m; }\n", &opts).unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains("foo.scss 2:6"),
+        "the key's last segment, as dart shows it: {rendered}",
+    );
+    assert!(
+        !rendered.contains("virtual/foo.scss"),
+        "the whole key is not a frame name: {rendered}",
+    );
+    // …and the entry is still relativised beside it.
+    assert!(rendered.contains("src/main.scss"), "{rendered}");
+}
+
+/// The "error in interpolated output" block prints the file in a header of
+/// its OWN, so it is a second place a frame becomes text. Left out of the
+/// rule, one message contradicted itself: a `file://` URL in the header above
+/// the path in the trace below.
+#[test]
+fn the_interpolated_output_header_names_the_file_like_the_trace() {
+    let opts = Options::new()
+        .with_url("file:///work/proj/src/main.scss")
+        .with_cwd("/work/proj");
+    let e = compile("$x: \"y@z\";\n.a#{$x} { c: d; }\n", &opts).unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains("error in interpolated output"),
+        "not the dual-span block: {rendered}",
+    );
+    assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
+    assert_eq!(
+        rendered.matches("src/main.scss").count(),
+        2,
+        "the header and the trace should both name it: {rendered}",
+    );
+}
+
+/// The Windows rule, exercised from whatever host runs this.
+///
+/// The wasm module is built for `wasm32-unknown-unknown`, so the compile-time
+/// host style is POSIX in it no matter where node is running — and on Windows
+/// node it is handed `C:\work\proj` and `file:///C:/work/proj/…`. Reading
+/// those by POSIX rules leaves `/C:/work/proj/src/main.scss` in the frame:
+/// not the path, and not what the addon on the same machine prints.
+///
+/// Nothing on a POSIX developer machine can reach that through the CLI, which
+/// is exactly the blind spot `pathstyle` exists for (#146). Here the
+/// Windows spelling is handed to the compiler directly, so the rule is
+/// checked wherever this test runs.
+#[test]
+fn a_windows_spelling_is_read_by_windows_rules_on_any_host() {
+    let opts = Options::new()
+        .with_url("file:///C:/work/proj/src/main.scss")
+        .with_cwd(r"C:\work\proj");
+    let e = compile("a { b: $x }", &opts).unwrap_err();
+    let rendered = e.to_string();
+    assert!(
+        rendered.contains(r"src\main.scss 1:8"),
+        "a Windows cwd and a Windows file URL should give a Windows path: {rendered}",
+    );
+    assert!(!rendered.contains("/C:/"), "read as a POSIX path: {rendered}");
+    assert!(!rendered.contains("file://"), "a URL survived: {rendered}");
+}

@@ -1926,7 +1926,12 @@ impl<'a> Evaluator<'a> {
                             col_end as usize,
                             sel_str,
                             at_idx + 1,
-                            &frames[0].url,
+                            // This snippet prints the file in its own header,
+                            // so it is a second place a frame becomes text and
+                            // needs the same rule. Left out, one message
+                            // contradicted itself: a `file://` URL in the
+                            // header above the path in the trace below.
+                            &self.frame_name(&frames[0].url),
                             self.options.glyphs,
                         ));
                         rendered.push('\n');
