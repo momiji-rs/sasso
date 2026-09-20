@@ -4253,10 +4253,14 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   };
 
   for (const engine of ["wasm", "native"]) {
-    const rel = frames(engine, "src/main.scss");
+    const rel = frames(engine, join("src", "main.scss"));
     assert.deepEqual(
       rel.map((l) => l.split(" ")[0]),
-      ["src/_dep.scss", "src/main.scss"],
+      // `join`, not a literal: the compiler spells a frame with the
+      // PLATFORM's separator, as dart does (#151), so `src\_dep.scss` is the
+      // right answer on Windows and hard-coding `/` would fail there the
+      // first time this suite runs on it.
+      [join("src", "_dep.scss"), join("src", "main.scss")],
       `frames (${engine}): both files named as paths relative to the cwd, got ${JSON.stringify(rel)}`,
     );
     assert.ok(
@@ -4284,6 +4288,66 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 
   rmSync(fdir, { recursive: true, force: true });
   console.log("ok: stack frames — paths not file:// URLs, relative entry or absolute, both engines");
+}
+
+// === a compile whose working directory has been deleted ===
+//
+// `process.cwd()` THROWS `ENOENT` once the directory the process started in
+// is gone — a build script that cleans up its own temp directory, a watcher
+// that outlives a `git clean`. Asking for it before every compile, to tell
+// the core what diagnostic paths are relative to, turned that into a total
+// failure on both engines:
+//
+//   compileString (wasm):   FAILED ENOENT: no such file or directory, uv_cwd
+//   compileString (native): FAILED ENOENT: no such file or directory, uv_cwd
+//
+// …for `compileString`, which touches no files at all. `null` is a supported
+// answer all the way down, so a lost directory costs a nicer frame and
+// nothing else.
+//
+// One child process PER ENGINE: the suite cannot delete its own working
+// directory and carry on. And which engine runs is decided by WHICH MODULE
+// is imported, not by `SASSO_ENGINE` — that variable is the CLI's. Setting
+// it and importing `sasso.mjs` twice runs wasm twice and leaves the native
+// bridge untested, which is exactly what the first version of this did:
+// reverting only the native half kept the case green.
+{
+  const script = `
+    import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+    import { tmpdir } from "node:os";
+    import { join } from "node:path";
+    const base = mkdtempSync(join(tmpdir(), "sasso-deadcwd-"));
+    const doomed = join(base, "gone");
+    mkdirSync(doomed);
+    process.chdir(doomed);
+    rmSync(doomed, { recursive: true, force: true });
+    const api = await import(process.env.SASSO_TEST_MODULE);
+    const css = api.compileString(".a { b: 1 + 1 }").css;
+    process.chdir(tmpdir());
+    rmSync(base, { recursive: true, force: true });
+    console.log(JSON.stringify(css));
+  `;
+  const modules = {
+    wasm: new URL("./npm/sasso.mjs", import.meta.url).href,
+    native: new URL("./npm/native.mjs", import.meta.url).href,
+  };
+  for (const [engine, mod] of Object.entries(modules)) {
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      env: { ...process.env, SASSO_TEST_MODULE: mod },
+      timeout: 60000,
+    });
+    assert.equal(
+      r.status,
+      0,
+      `deleted cwd (${engine}): a compile must survive it (stderr: ${r.stderr.slice(0, 300)})`,
+    );
+    // Normalised HERE: `\s` inside the child's template literal is just `s`.
+    const css = JSON.parse(r.stdout.trim().split("\n").at(-1)).replace(/\s+/g, " ").trim();
+    assert.equal(css, ".a { b: 2; }", `deleted cwd (${engine}): and compile correctly (${r.stdout})`);
+  }
+
+  console.log("ok: a deleted working directory costs a nicer frame, not the compile");
 }
 
 // === the coalescing rule, on a fake clock ===

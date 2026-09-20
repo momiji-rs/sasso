@@ -368,7 +368,17 @@ pub(crate) fn style_for(cwd: Option<&str>, name: &str) -> Style {
                 return true;
             }
         }
-        let s = s.strip_prefix("file:///").unwrap_or(s);
+        // Decoded first, because `file_url_path` decodes and these two have
+        // to agree: `file:///C%3A/work/a.scss` is a drive, and reading it
+        // raw makes it a POSIX path called `C%3A`.
+        let decoded;
+        let s = match s.strip_prefix("file:///") {
+            Some(rest) => {
+                decoded = percent_decode(rest);
+                decoded.as_str()
+            }
+            None => s,
+        };
         // A drive letter or a UNC root. NOT a lone leading backslash: a POSIX
         // file name may contain one, and `process.cwd()` on Windows is always
         // drive-rooted, so nothing is lost by declining the ambiguous case.
@@ -878,5 +888,23 @@ mod tests {
         // style, or every plain file URL on POSIX would be read as Windows.
         assert_eq!(style_for(None, "file://localhost/a/b.scss"), HOST);
         assert_eq!(style_for(None, "file:///a/b.scss"), HOST);
+    }
+
+    /// The drive letter can arrive percent-encoded, and `file_url_path`
+    /// decodes — so inferring the style from the RAW text disagreed with the
+    /// function it was choosing the style for: `file:///C%3A/work/a.scss`
+    /// came out as the POSIX path `/C:/work/a.scss`.
+    #[test]
+    fn an_encoded_drive_letter_is_still_a_drive() {
+        assert_eq!(style_for(None, "file:///C%3A/work/a.scss"), Style::Windows);
+        assert_eq!(
+            pretty_name(
+                style_for(None, "file:///C%3A/work/a.scss"),
+                "file:///C%3A/work/a.scss",
+                None,
+            )
+            .as_deref(),
+            Some(r"C:\work\a.scss"),
+        );
     }
 }

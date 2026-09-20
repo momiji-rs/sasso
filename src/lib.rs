@@ -232,8 +232,14 @@ fn entry_frame_name(url: &str, cwd: Option<&str>) -> String {
     let cwd = match cwd {
         Some(c) => Some(c),
         None => {
-            from_os = std::env::current_dir().ok();
-            from_os.as_deref().and_then(std::path::Path::to_str)
+            // Lossily, as the evaluator's own lookup does. `to_str` would
+            // hand back `None` for a directory with one non-UTF-8 component
+            // and leave a PARSE error absolute while an evaluation error in
+            // the same file came out relative.
+            from_os = std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned());
+            from_os.as_deref()
         }
     };
     pathstyle::pretty_name(pathstyle::style_for(cwd, url), url, cwd).unwrap_or_else(|| url.to_string())

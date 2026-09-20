@@ -806,6 +806,25 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
     return readResult(w, outPtr, m, opts.wantMap);
   }
 
+  /**
+   * `process.cwd()` THROWS `ENOENT` when the directory the process started in
+   * has been deleted — a build script that removes its own temp directory, a
+   * watcher outliving a `git clean`. Reading it unguarded made every compile
+   * fail there, `compileString` included, which touches no files at all.
+   * Measured: `ENOENT: no such file or directory, uv_cwd`.
+   *
+   * `null` is a supported answer all the way down — the core falls back to an
+   * absolute path in a frame — so a lost directory costs a nicer diagnostic
+   * and nothing else.
+   */
+  function currentDirectory() {
+    try {
+      return typeof process !== "undefined" && process.cwd ? process.cwd() : null;
+    } catch {
+      return null;
+    }
+  }
+
   function rawOpts(options, syntax) {
     return {
       compressed: options.style === "compressed",
@@ -813,7 +832,7 @@ export function makeApi(syncWasmUrl, asyncWasmUrl) {
       url: options.url ? toFileUrl(options.url).href : null,
       // What that url is SHOWN relative to. It has to be handed over: this
       // module is wasm32-unknown-unknown and has no getcwd of its own.
-      cwd: typeof process !== "undefined" && process.cwd ? process.cwd() : null,
+      cwd: currentDirectory(),
       wantMap: !!options.sourceMap,
       includeSources: !!options.sourceMapIncludeSources,
       charset: options.charset !== false, // dart-sass default: true
