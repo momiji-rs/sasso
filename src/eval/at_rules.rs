@@ -67,32 +67,11 @@ impl<'a> Evaluator<'a> {
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         let prelude = self.eval_template(prelude)?;
-        let mut out_body: Vec<OutNode> = Vec::new();
-        for item in body {
-            let prop = self.eval_template(&item.property)?;
-            match &item.value {
-                CssCustomValue::Raw(tpl) => {
-                    let raw = self.eval_template(tpl)?;
-                    out_body.push(OutNode::Raw(format!("{prop}:{raw};"), SrcLines::default()));
-                }
-                CssCustomValue::Script(expr) => {
-                    let value = self.eval_expr(expr)?.to_css(self.compressed());
-                    out_body.push(OutNode::Raw(format!("{prop}: {value};"), SrcLines::default()));
-                }
-                // A nested property set on an interpolated property: each
-                // child emits as `property-suffix: value`.
-                CssCustomValue::Set(children) => {
-                    for (suffix, expr) in children {
-                        let sfx = self.eval_template(suffix)?;
-                        let value = self.eval_expr(expr)?.to_css(self.compressed());
-                        out_body.push(OutNode::Raw(
-                            format!("{prop}-{sfx}: {value};"),
-                            SrcLines::default(),
-                        ));
-                    }
-                }
-            }
-        }
+        let out_body = self
+            .css_custom_at_rule_decls(body)?
+            .into_iter()
+            .map(|(prop, value)| OutNode::Raw(format!("{prop}:{value};"), SrcLines::default()))
+            .collect();
         sink.push_at_rule(OutNode::AtRule {
             name: name.to_string(),
             prelude,
@@ -101,6 +80,46 @@ impl<'a> Evaluator<'a> {
             lines: SrcLines::default(),
         });
         Ok(())
+    }
+
+    /// Resolve a plain CSS custom `@function`/`@mixin` body into
+    /// `(property, everything after the colon)` pairs: a verbatim value keeps
+    /// its literal text, including the whitespace the source put after the
+    /// colon, while an interpolated-property declaration evaluates as
+    /// SassScript and takes the canonical single space.
+    ///
+    /// Both the at-root path above and the plain-CSS evaluator's nested paths
+    /// (`OutItem::Decl` with `custom: true`, which also emits its value
+    /// verbatim after the colon) build their nodes from these pairs, so the
+    /// bytes cannot drift between them.
+    pub(super) fn css_custom_at_rule_decls(
+        &mut self,
+        body: &[CssCustomItem],
+    ) -> Result<Vec<(String, String)>, Error> {
+        let mut decls: Vec<(String, String)> = Vec::new();
+        for item in body {
+            let prop = self.eval_template(&item.property)?;
+            match &item.value {
+                CssCustomValue::Raw(tpl) => {
+                    let raw = self.eval_template(tpl)?;
+                    decls.push((prop, raw));
+                }
+                CssCustomValue::Script(expr) => {
+                    let value = self.eval_expr(expr)?.to_css(self.compressed());
+                    decls.push((prop, format!(" {value}")));
+                }
+                // A nested property set on an interpolated property: each
+                // child emits as `property-suffix: value`.
+                CssCustomValue::Set(children) => {
+                    for (suffix, expr) in children {
+                        let sfx = self.eval_template(suffix)?;
+                        let value = self.eval_expr(expr)?.to_css(self.compressed());
+                        decls.push((format!("{prop}-{sfx}"), format!(" {value}")));
+                    }
+                }
+            }
+        }
+        Ok(decls)
     }
 
     /// Run an at-rule body, producing its output node list. When the at-rule
@@ -708,18 +727,10 @@ impl<'a> Evaluator<'a> {
         sink: &mut Sink<'_>,
     ) -> Result<(), Error> {
         // A style rule nested inside a keyframe block is invalid; each frame
-        // (a top-level rule in the body) may only hold declarations.
-        for stmt in body {
-            if let Stmt::Rule(frame) = stmt {
-                for inner in &frame.body {
-                    if matches!(inner, Stmt::Rule(_)) {
-                        return Err(Error::unpositioned(
-                            "Style rules may not be used within keyframe blocks.",
-                        ));
-                    }
-                }
-            }
-        }
+        // (a top-level rule in the body) may only hold declarations. The
+        // plain-CSS evaluator checks the same thing on the same statements, so
+        // the check itself lives in one place.
+        super::plain_css::check_keyframes_body(body)?;
         let prelude = self.eval_template(prelude)?;
         let saved_kf = std::mem::replace(&mut self.in_keyframes, true);
         let own_depth = self.at_rule_ctx.len();

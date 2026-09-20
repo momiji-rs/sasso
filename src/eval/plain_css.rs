@@ -1,4 +1,5 @@
 use super::*;
+use crate::emit::at_rule_drops_when_empty;
 
 impl<'a> Evaluator<'a> {
     /// Emit a plain-CSS (`.css`) module's statements, preserving nesting (no
@@ -135,7 +136,7 @@ impl<'a> Evaluator<'a> {
                 Stmt::Media { query, body, lines } => {
                     let queries = self.resolve_media_queries(query)?;
                     let prelude = serialize_media_queries(&queries, self.compressed());
-                    let out_body = self.css_at_body(body)?;
+                    let out_body = self.css_at_body(body, false)?;
                     if !out_body.is_empty() {
                         let lines = self.stamp(*lines);
                         sink.push_at_rule(OutNode::AtRule {
@@ -153,7 +154,7 @@ impl<'a> Evaluator<'a> {
                     lines,
                 } => {
                     let prelude = self.serialize_supports_condition(condition)?;
-                    let out_body = self.css_at_body(body)?;
+                    let out_body = self.css_at_body(body, false)?;
                     if !out_body.is_empty() {
                         sink.push_at_rule(OutNode::AtRule {
                             name: "supports".to_string(),
@@ -188,7 +189,7 @@ impl<'a> Evaluator<'a> {
                             lines,
                         }),
                         Some(b) => {
-                            let out_body = self.css_at_body(b)?;
+                            let out_body = self.css_at_body(b, false)?;
                             sink.push_at_rule(OutNode::AtRule {
                                 name: name.clone(),
                                 prelude: prelude_s,
@@ -206,7 +207,7 @@ impl<'a> Evaluator<'a> {
                     lines,
                 } => {
                     let prelude_s = self.eval_template(prelude)?.trim().to_string();
-                    let out_body = self.css_at_body(body)?;
+                    let out_body = self.css_at_body(body, true)?;
                     let lines = self.stamp(*lines);
                     sink.push_at_rule(OutNode::AtRule {
                         name: name.clone(),
@@ -230,13 +231,30 @@ impl<'a> Evaluator<'a> {
     /// Build the body of a top-level plain-CSS at-rule: style rules (with their
     /// own first-level bubbling), bare declarations, comments, and nested
     /// at-rules.
-    fn css_at_body(&mut self, stmts: &[Stmt]) -> Result<Vec<OutNode>, Error> {
+    fn css_at_body(&mut self, stmts: &[Stmt], frames: bool) -> Result<Vec<OutNode>, Error> {
+        if frames {
+            check_keyframes_body(stmts)?;
+        }
         let mut out: Vec<OutNode> = Vec::new();
         for stmt in stmts {
             match stmt {
                 Stmt::Rule(r) => {
-                    let (selectors, linebreaks) = self.css_selectors(&r.selector, false)?;
-                    let (items, bubbled) = self.css_rule_children(&r.body, &selectors)?;
+                    let (selectors, linebreaks) = if frames {
+                        (self.css_frame_selectors(&r.selector)?, Vec::new())
+                    } else {
+                        self.css_selectors(&r.selector, false)?
+                    };
+                    // Inside `@keyframes` this rule is a FRAME, and nothing in
+                    // it bubbles: dart keeps a nested at-rule where it is
+                    // (`@keyframes k {from {@foo {a: b}}}`), while hoisting it
+                    // would move it out of the frame and wrap the frame
+                    // selector around its body. A frame body is therefore read
+                    // the way any deeper level is, with no hoisting.
+                    let (items, bubbled) = if frames {
+                        (self.css_body(&r.body)?, Vec::new())
+                    } else {
+                        self.css_rule_children(&r.body, &selectors)?
+                    };
                     if !items.is_empty() {
                         out.push(OutNode::Rule {
                             selectors: RuleSelectors::Raw(Rc::new(selectors)),
@@ -309,7 +327,7 @@ impl<'a> Evaluator<'a> {
                 Stmt::Media { query, body, lines } => {
                     let queries = self.resolve_media_queries(query)?;
                     let prelude = serialize_media_queries(&queries, self.compressed());
-                    let inner = self.css_at_body(body)?;
+                    let inner = self.css_at_body(body, false)?;
                     if !inner.is_empty() {
                         let lines = self.stamp(*lines);
                         out.push(OutNode::AtRule {
@@ -327,7 +345,7 @@ impl<'a> Evaluator<'a> {
                     lines,
                 } => {
                     let prelude = self.serialize_supports_condition(condition)?;
-                    let inner = self.css_at_body(body)?;
+                    let inner = self.css_at_body(body, false)?;
                     if !inner.is_empty() {
                         out.push(OutNode::AtRule {
                             name: "supports".to_string(),
@@ -355,7 +373,7 @@ impl<'a> Evaluator<'a> {
                             lines,
                         }),
                         Some(b) => {
-                            let inner = self.css_at_body(b)?;
+                            let inner = self.css_at_body(b, false)?;
                             out.push(OutNode::AtRule {
                                 name: name.clone(),
                                 prelude: prelude_s,
@@ -381,6 +399,35 @@ impl<'a> Evaluator<'a> {
                         ));
                     }
                 }
+                // `@keyframes` and a plain-CSS custom `@function` have
+                // statements of their own, so they need arms of their own here:
+                // falling through to `_` dropped them, and with them everything
+                // they held (`@media screen {@keyframes k {from {a: b}}}` came
+                // out empty, which then took the `@media` with it).
+                Stmt::Keyframes {
+                    name,
+                    prelude,
+                    body,
+                    lines,
+                } => {
+                    let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let out_body = self.css_at_body(body, true)?;
+                    let lines = self.stamp(*lines);
+                    out.push(OutNode::AtRule {
+                        name: name.clone(),
+                        prelude: prelude_s,
+                        body: out_body,
+                        has_block: true,
+                        lines,
+                    });
+                }
+                Stmt::CssCustomAtRule { name, prelude, body } => {
+                    let mut sink = Sink::AtRoot {
+                        body: &mut out,
+                        group_ends: false,
+                    };
+                    self.eval_css_custom_at_rule(name, prelude, body, &mut sink)?;
+                }
                 _ => {}
             }
         }
@@ -401,17 +448,26 @@ impl<'a> Evaluator<'a> {
         let mut items = Vec::new();
         let mut bubbled: Vec<OutNode> = Vec::new();
         let bubble = |name: &str, prelude: String, inner: Vec<OutItem>, bubbled: &mut Vec<OutNode>| {
-            if inner.is_empty() {
-                return;
-            }
-            bubbled.push(OutNode::AtRule {
-                name: name.to_string(),
-                prelude,
-                body: vec![OutNode::plain_rule(
+            // Nothing to wrap means no copy of the parent rule, but the at-rule
+            // itself still survives unless it is one of the two that go away
+            // when their block is empty: `.a {@foo {}}` is `@foo {}`, while
+            // `.a {@media b {}}` is nothing (see `at_rule_drops_when_empty`).
+            let body = if inner.is_empty() {
+                if at_rule_drops_when_empty(name) {
+                    return;
+                }
+                Vec::new()
+            } else {
+                vec![OutNode::plain_rule(
                     parent_selectors.to_vec(),
                     inner,
                     SrcLines::default(),
-                )],
+                )]
+            };
+            bubbled.push(OutNode::AtRule {
+                name: name.to_string(),
+                prelude,
+                body,
                 has_block: true,
                 lines: SrcLines::default(),
             });
@@ -443,10 +499,59 @@ impl<'a> Evaluator<'a> {
                     let inner = self.css_body(b)?;
                     bubble(name, prelude_s, inner, &mut bubbled);
                 }
+                // `@keyframes` hoists out like any other block at-rule, but
+                // takes no copy of the parent selectors with it: its block holds
+                // keyframe selectors, not declarations. Dropping it here lost
+                // the whole rule.
+                Stmt::Keyframes {
+                    name,
+                    prelude,
+                    body,
+                    lines,
+                } => {
+                    let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                    let out_body = self.css_at_body(body, true)?;
+                    let lines = self.stamp(*lines);
+                    bubbled.push(OutNode::AtRule {
+                        name: name.clone(),
+                        prelude: prelude_s,
+                        body: out_body,
+                        has_block: true,
+                        lines,
+                    });
+                }
+                // A custom `@function` bubbles like the at-rules above, parent
+                // copy included: `.a {@function --f(--a) {result: 1}}` is
+                // `@function --f(--a) {.a {result: 1 }}`. Its body holds
+                // declarations rather than statements, so it is built here from
+                // the same `(property, value)` pairs the at-root path uses.
+                Stmt::CssCustomAtRule { name, prelude, body } => {
+                    let prelude_s = self.eval_template(prelude)?;
+                    let inner = self.css_custom_decl_items(body)?;
+                    bubble(name, prelude_s, inner, &mut bubbled);
+                }
                 other => self.css_body_stmt(other, &mut items)?,
             }
         }
         Ok((items, bubbled))
+    }
+
+    /// Build a plain-CSS custom at-rule's body as nested output items: each
+    /// declaration is a custom property, which emits its value verbatim right
+    /// after the colon, exactly as [`Self::eval_css_custom_at_rule`] writes it.
+    fn css_custom_decl_items(&mut self, body: &[CssCustomItem]) -> Result<Vec<OutItem>, Error> {
+        Ok(self
+            .css_custom_at_rule_decls(body)?
+            .into_iter()
+            .map(|(prop, value)| OutItem::Decl {
+                prop: prop.into(),
+                value,
+                important: false,
+                custom: true,
+                lines: SrcLines::default(),
+                value_span: VarSpan::default(),
+            })
+            .collect())
     }
 
     /// Resolve a plain-CSS selector to its comma-separated parts, keeping `&`
@@ -476,6 +581,58 @@ impl<'a> Evaluator<'a> {
             Vec::new()
         };
         Ok((normalized, linebreaks))
+    }
+
+    /// Convert a `@keyframes` frame's selector list. A frame selector is a list
+    /// of keyframe STOPS (`from`, `50%`), not of CSS selectors, and dart
+    /// re-serializes the stops joined with `", "`: the author's line breaks do
+    /// not survive it, none of the selector normalization applies (`+5%` is a
+    /// stop, not a sibling combinator), and `from`/`to` and a percentage's
+    /// exponent marker come back lowercased.
+    fn css_frame_selectors(&mut self, sel: &[crate::ast::TplPiece]) -> Result<Vec<String>, Error> {
+        let s = self.eval_template(sel)?;
+        let mut stops = Vec::new();
+        for part in split_commas(&s).iter() {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            // The stop grammar is `from` | `to` | `<number>%`, stricter than
+            // this: dart rejects `foo`, `&` and `50 %` in a frame, where the
+            // checks below only catch the Sass-only selector forms. The
+            // remaining strictness gap is recorded in the plan.
+            validate_plain_css_selector(part, false)?;
+            stops.push(normalize_keyframe_selector(part));
+        }
+        Ok(stops)
+    }
+
+    /// Build the body of a `@keyframes` below the bubbling level: as
+    /// [`Evaluator::css_body`], except that a rule at this level is a FRAME —
+    /// its selector is a stop list, and its own body nests natively.
+    fn css_frames_body(&mut self, stmts: &[Stmt]) -> Result<Vec<OutItem>, Error> {
+        check_keyframes_body(stmts)?;
+        let mut items = Vec::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Rule(r) => {
+                    let selectors = self.css_frame_selectors(&r.selector)?;
+                    let inner = self.css_body(&r.body)?;
+                    // An (recursively) empty frame is invisible, like any rule.
+                    if !inner.is_empty() {
+                        let lines = self.map_only_lines(r.selector_pos);
+                        items.push(OutItem::NestedRule {
+                            selectors,
+                            linebreaks: Vec::new(),
+                            items: inner,
+                            lines,
+                        });
+                    }
+                }
+                other => self.css_body_stmt(other, &mut items)?,
+            }
+        }
+        Ok(items)
     }
 
     /// Build a plain-CSS rule body below the first nesting level: declarations
@@ -631,7 +788,9 @@ impl<'a> Evaluator<'a> {
                     }
                     Some(b) => {
                         let inner = self.css_body(b)?;
-                        if !inner.is_empty() {
+                        // An empty block below the bubbling level stays where it
+                        // is, on the same terms as above.
+                        if !inner.is_empty() || !at_rule_drops_when_empty(name) {
                             let lines = self.stamp(*lines);
                             items.push(OutItem::NestedAtRule {
                                 name: name.clone(),
@@ -643,8 +802,59 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
+            // Below the bubbling level it stays put, like any other at-rule.
+            Stmt::Keyframes {
+                name,
+                prelude,
+                body,
+                lines,
+            } => {
+                let prelude_s = self.eval_template(prelude)?.trim().to_string();
+                let inner = self.css_frames_body(body)?;
+                let lines = self.stamp(*lines);
+                items.push(OutItem::NestedAtRule {
+                    name: name.clone(),
+                    prelude: prelude_s,
+                    items: inner,
+                    lines,
+                });
+            }
+            // Below the bubbling level it stays put, with no copy of the
+            // parent selectors: `.a {.b {@function --f(--a) {result: 1}}}` is
+            // `.a {.b {@function --f(--a) {result: 1 }}}`.
+            Stmt::CssCustomAtRule { name, prelude, body } => {
+                let prelude_s = self.eval_template(prelude)?;
+                let inner = self.css_custom_decl_items(body)?;
+                items.push(OutItem::NestedAtRule {
+                    name: name.clone(),
+                    prelude: prelude_s,
+                    items: inner,
+                    lines: SrcLines::default(),
+                });
+            }
             _ => {}
         }
         Ok(())
     }
+}
+
+/// A style rule inside a keyframe block is invalid, and dart rejects it in plain
+/// CSS exactly as it does in SCSS: `@keyframes k {from {.x {a: b}}}` is an
+/// error, not output. A frame may hold declarations, comments and at-rules --
+/// nothing that needs a selector of its own. Both evaluators check here, so the
+/// message and the span they blame cannot drift apart.
+pub(super) fn check_keyframes_body(body: &[Stmt]) -> Result<(), Error> {
+    for stmt in body {
+        if let Stmt::Rule(frame) = stmt {
+            for inner in &frame.body {
+                if let Stmt::Rule(inner) = inner {
+                    return Err(Error::at(
+                        "Style rules may not be used within keyframe blocks.",
+                        inner.selector_pos,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }

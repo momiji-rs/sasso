@@ -17,7 +17,7 @@
 
 use crate::error::Error;
 use crate::scanner::Pos;
-use crate::value::{convert_factor, CalcNode, Number, SassStr, Value};
+use crate::value::{convert_factor, CalcNode, Number, Value};
 
 /// The names the math family owns (the single source of truth, mirroring the
 /// `unary_op` set plus the `try_call` match arms below). The math family
@@ -464,6 +464,12 @@ fn preserved_round(args: &[Value]) -> Value {
 /// keyword is emitted whenever it was authored explicitly (the three-argument
 /// form), or for any non-`nearest` strategy; the implicit-`nearest`
 /// two-argument form preserves as `round(number, step)`, matching dart-sass.
+///
+/// The result is a CALCULATION, like every other preserved call: `[measured]`
+/// against dart-sass 1.104.1, `meta.type-of(round(1px, 2bar))` is
+/// `calculation`, and compressed output drops the space after each comma
+/// (`round(1px,2bar)`) — which a preserved unquoted string could not do,
+/// because it carries one spelling for both styles.
 fn preserved_round_nums(strategy: RoundStrategy, number: &Number, step: &Number, explicit: bool) -> Value {
     let kw = match strategy {
         RoundStrategy::Nearest => "nearest",
@@ -471,14 +477,15 @@ fn preserved_round_nums(strategy: RoundStrategy, number: &Number, step: &Number,
         RoundStrategy::Down => "down",
         RoundStrategy::ToZero => "to-zero",
     };
-    let text = if strategy == RoundStrategy::Nearest && !explicit {
-        format!("round({}, {})", number.to_css(false), step.to_css(false))
-    } else {
-        format!("round({kw}, {}, {})", number.to_css(false), step.to_css(false))
-    };
-    Value::Str(SassStr {
-        text: text.into(),
-        quoted: false,
+    let mut args = Vec::with_capacity(3);
+    if strategy != RoundStrategy::Nearest || explicit {
+        args.push(CalcNode::Str(kw.to_string()));
+    }
+    args.push(CalcNode::Number(number.clone()));
+    args.push(CalcNode::Number(step.clone()));
+    Value::Calc(CalcNode::Func {
+        name: "round".to_string(),
+        args,
     })
 }
 
@@ -1281,6 +1288,7 @@ fn value_to_calc_node(v: &Value) -> CalcNode {
 mod tests {
     use super::*;
     use crate::scanner::Pos;
+    use crate::value::SassStr;
 
     fn pos() -> Pos {
         Pos { line: 1, col: 1 }

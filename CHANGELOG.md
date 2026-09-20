@@ -28,6 +28,68 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **An empty at-rule survives compression, and a preserved `round()` is a
+  calculation.** Two more of the compressed ratchet's divergences, both
+  measured against dart-sass 1.104.1.
+
+  dart drops a node from compressed output when everything inside it does —
+  which is why `@media x { /* c */ }` compresses to nothing — but
+  `_isInvisible` short-circuits on an unknown at-rule on purpose: "because we
+  don't know the semantics of unknown rules, we can't guarantee that (for
+  example) `@foo {}` isn't meaningful". `@media` and `@supports` have their own
+  AST classes and so keep the all-children-invisible rule; every other at-rule
+  stays, empty block and all. sasso dropped them all, so `@font-face {}`,
+  `@keyframes k { 10% { /* c */ } }`, `@page {}` and an `@flooblehoof {}` left
+  empty by `@extend` all vanished. `[measured]` **+22 cases**.
+
+  A `round()` whose operands' units keep it from folding (`round(1px, 2bar)`,
+  `round(nearest, 1px, 10%)`) was preserved as an unquoted STRING built with
+  expanded spacing, which carries one spelling for both styles; it is now a
+  calculation like every other preserved call, so compressed drops the space
+  after each comma and `meta.type-of` reports `calculation` rather than
+  `string`, both as dart does. `[measured]` **+4 cases**.
+
+  The rule has to hold in the **plain-CSS** evaluator too, which builds its own
+  output nodes: a `.css` file reached through `@use`/`@import` dropped
+  `.a {@foo {}}` in *both* styles. None of that evaluator's three body
+  dispatchers had an arm for `@keyframes` or for a plain-CSS custom `@function`
+  either, so both were dropped outright, contents and all: `@media screen
+  {@keyframes k {from {a: b}}}` came out empty, which then took the `@media`
+  with it, and `.a {@function --f(--a) {result: 1}}` produced nothing at all.
+  A custom `@function` in a style rule now bubbles out with a copy of the parent
+  selectors wrapped around its declarations — `@function --f(--a) {.a {result: 1
+  }}` — and stays where it is one level deeper, as dart does in both places.
+
+  A `@keyframes` **frame** is not a style rule, and nothing inside one bubbles:
+  the same dispatcher was reached for `from`/`50%` blocks, so every at-rule in a
+  frame was hoisted out of the animation with the frame selector wrapped round
+  its body — `@keyframes k {from {@foo {a: b}}}` came out
+  `@keyframes k{@foo{from{a:b}}}`, and a nested `@keyframes` lost its frame
+  entirely. A frame body is now read the way any deeper level is, with no
+  hoisting. A **style rule** inside a frame is meanwhile an error, as dart's
+  plain-CSS parser makes it (`@keyframes k {from {.x {a: b}}}`), where this
+  evaluator produced output for it at every depth; both evaluators now raise
+  that error from one place, and it points at the offending rule instead of
+  carrying no position at all.
+
+  A frame's selector is a list of keyframe **stops**, not of CSS selectors, and
+  dart re-serializes the stops joined with `", "`. The plain-CSS evaluator ran
+  them through ordinary selector normalization instead, so a line break between
+  stops survived (`0%,\n50%` stayed on two lines where dart writes
+  `0%, 50%`), `+5%` gained a space as though `+` were a sibling combinator, and
+  an exponent marker kept its case (`130E-1%`). The `from`/`to` keywords were
+  left verbatim on **both** paths, where dart lowercases them (`FROM` ->
+  `from`); that normalization now lives in one function both evaluators use.
+  What neither checks yet is the stop *grammar* — dart rejects anything but
+  `from`, `to` and `<number>%` in a frame, so `@keyframes k {foo {a: b}}` is an
+  error there and output here.
+
+  All of it `[measured]` against dart-sass 1.104.1 in both styles; no sass-spec
+  case covers any of these shapes, so neither gate number moves.
+
+  Compressed passing 13,975 → **14,001** of 14,258 (98.02% → 98.20%); expanded
+  unchanged at 14,107 `+0`.
+
 - **Compressed output serializes colors and long fractions the way dart-sass
   does** (#142's gate made this measurable). The compressed ratchet landed
   scoring 12,579 of 14,258 cases, and 1,528 of those 1,679 failures were cases
