@@ -194,6 +194,11 @@ pub struct CompileConfig {
     /// are converted to plain paths by the JS wrapper (the native fs importer's
     /// canonical form); other schemes pass through untouched.
     pub url: Option<String>,
+    /// The directory diagnostic paths are spelled relative to. The JS wrapper
+    /// passes `process.cwd()`: the addon's own `getcwd` is the same one, but
+    /// the wasm engine has none, and a frame must not depend on which engine
+    /// happened to run (they disagreed — #153).
+    pub cwd: Option<String>,
     pub want_map: bool,
     pub include_sources: bool,
     pub charset: bool,
@@ -637,6 +642,9 @@ fn run_compile(
     }
     if let Some(u) = cfg.url.as_deref() {
         opts = opts.with_url(u);
+    }
+    if let Some(c) = cfg.cwd.as_deref().filter(|c| !c.is_empty()) {
+        opts = opts.with_cwd(c);
     }
     if cfg.want_map {
         opts = opts.with_source_map_include_sources(cfg.include_sources);

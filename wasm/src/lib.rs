@@ -389,14 +389,15 @@ impl Importer for HostImporter {
 /// to `*ok_ptr`, and returns a pointer to the UTF-8 result (CSS / framed map on
 /// success, error message on failure). Free it with `sasso_free(ptr, *out_len_ptr)`.
 ///
-/// `sasso_compile3` is `sasso_compile2` plus `silenced_ptr`/`silenced_len`: a
-/// new entry point rather than two more parameters on the old one, so a host
-/// built against `sasso_compile2` keeps linking — the same reason `compile2`
-/// exists beside the original. `compile2` now delegates here with an empty
-/// list, so there is one body to keep correct.
+/// Each generation is a NEW entry point rather than more parameters on the old
+/// one, so a host built against an older signature keeps linking, and the older
+/// ones delegate here so there is a single body to keep correct.
+/// `compile3` added `silenced_ptr`/`silenced_len`; `compile4` adds
+/// `cwd_ptr`/`cwd_len`, because this target has no `getcwd` and a diagnostic
+/// path has to be relative to something the host knows (#153).
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub extern "C" fn sasso_compile3(
+pub extern "C" fn sasso_compile4(
     input_ptr: *const u8,
     input_len: usize,
     compressed: u8,
@@ -411,6 +412,8 @@ pub extern "C" fn sasso_compile3(
     unicode: u8,
     silenced_ptr: *const u8,
     silenced_len: usize,
+    cwd_ptr: *const u8,
+    cwd_len: usize,
     out_len_ptr: *mut usize,
     ok_ptr: *mut u8,
 ) -> *mut u8 {
@@ -437,6 +440,17 @@ pub extern "C" fn sasso_compile3(
         std::str::from_utf8(unsafe { std::slice::from_raw_parts(silenced_ptr, silenced_len) }).unwrap_or("")
     };
 
+    // There is no `getcwd` on this target, so the host says what diagnostic
+    // paths are relative to. Empty means "nothing known", and a frame then
+    // keeps the absolute path rather than guessing.
+    //
+    // SAFETY: the host wrote `cwd_len` bytes at `cwd_ptr`, as for the url.
+    let cwd: &str = if cwd_ptr.is_null() || cwd_len == 0 {
+        ""
+    } else {
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(cwd_ptr, cwd_len) }).unwrap_or("")
+    };
+
     let syntax = match syntax {
         1 => Syntax::Sass,
         2 => Syntax::Css,
@@ -458,6 +472,9 @@ pub extern "C" fn sasso_compile3(
             }
             if let Some(u) = url {
                 opts = opts.with_url(u);
+            }
+            if !cwd.is_empty() {
+                opts = opts.with_cwd(cwd);
             }
             if use_importer != 0 {
                 opts = opts.with_importer(&importer);
@@ -515,6 +532,50 @@ pub extern "C" fn sasso_compile3(
     };
 
     into_result(bytes, ok, out_len_ptr, ok_ptr)
+}
+
+/// The pre-`cwd` entry point, kept so a host built against it still links.
+/// Delegates with no working directory, which is what it always had.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn sasso_compile3(
+    input_ptr: *const u8,
+    input_len: usize,
+    compressed: u8,
+    syntax: u8,
+    use_importer: u8,
+    url_ptr: *const u8,
+    url_len: usize,
+    want_map: u8,
+    include_sources: u8,
+    charset: u8,
+    quiet_deps: u8,
+    unicode: u8,
+    silenced_ptr: *const u8,
+    silenced_len: usize,
+    out_len_ptr: *mut usize,
+    ok_ptr: *mut u8,
+) -> *mut u8 {
+    sasso_compile4(
+        input_ptr,
+        input_len,
+        compressed,
+        syntax,
+        use_importer,
+        url_ptr,
+        url_len,
+        want_map,
+        include_sources,
+        charset,
+        quiet_deps,
+        unicode,
+        silenced_ptr,
+        silenced_len,
+        std::ptr::null(),
+        0,
+        out_len_ptr,
+        ok_ptr,
+    )
 }
 
 /// The pre-`silenceDeprecations` entry point, kept so a host built against it

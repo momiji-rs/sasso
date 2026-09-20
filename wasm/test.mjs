@@ -9,7 +9,7 @@
 // asyncify refactors must preserve (docs/HANDOFF_ASYNC_IMPORTER_PERF.md).
 // Run after build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, symlinkSync, renameSync, rmSync, openSync, closeSync, chmodSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, symlinkSync, renameSync, rmSync, openSync, closeSync, chmodSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -4208,6 +4208,82 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   }
 
   console.log("ok: watchers — steady state, re-arm on error, give up once, ENOSPC is not ENOENT");
+}
+
+// === how a stack frame names a file, on BOTH engines ===
+//
+// The entry reached the compiler as a `file://` URL — it has to, because the
+// importer bridge resolves relative `@use` against it — and went straight into
+// the frame, scheme and all. Measured against dart-sass 1.104.1 before the fix
+// (#153), one error with a dependency frame and an entry frame:
+//
+//   dart         src/_dep.scss 2:10  m()      src/main.scss 2:6  root stylesheet
+//   binary       src/_dep.scss 2:14  m()      src/main.scss 2:6  root stylesheet
+//   npm native   src/_dep.scss 2:14  m()      file:///…/src/main.scss 2:6
+//   npm wasm     _dep.scss 2:14      m()      file:///…/src/main.scss 2:6
+//
+// Two npm engines, two different answers, neither dart's. The wasm one had no
+// `getcwd` to relativise against (wasm32-unknown-unknown, not wasip1) and fell
+// back to the bare filename, so the bridges hand it the directory now.
+//
+// (`2:10` vs `2:14` is #157 — dart underlines the whole expression and we
+// underline the operator. The column is not what this case is about.)
+{
+  const fdir = mkdtempSync(join(tmpdir(), "sasso-frames-"));
+  mkdirSync(join(fdir, "src"), { recursive: true });
+  writeFileSync(join(fdir, "src", "_dep.scss"), "@mixin m {\n  width: 1px + 1em;\n}\n");
+  writeFileSync(join(fdir, "src", "main.scss"), '@use "dep";\n.a { @include dep.m; }\n');
+  // The temp root can be reached through a symlink (/var -> /private/var on
+  // macOS), and then no spelling of the entry matches the working directory.
+  // That is a property of the fixture, not of the compiler: resolve it, or
+  // this case cannot tell a missed relativisation from an impossible one.
+  const real = realpathSync(fdir);
+
+  const frames = (engine, entry) => {
+    const r = spawnSync(process.execPath, [cliPath, "--no-source-map", entry, "out.css"], {
+      cwd: real,
+      encoding: "utf8",
+      env: { ...process.env, SASSO_ENGINE: engine },
+      timeout: 30000,
+    });
+    return `${r.stdout}${r.stderr}`
+      .split("\n")
+      .filter((l) => /\.scss \d+:\d+/.test(l))
+      .map((l) => l.trim().replace(/\s+/g, " "));
+  };
+
+  for (const engine of ["wasm", "native"]) {
+    const rel = frames(engine, "src/main.scss");
+    assert.deepEqual(
+      rel.map((l) => l.split(" ")[0]),
+      ["src/_dep.scss", "src/main.scss"],
+      `frames (${engine}): both files named as paths relative to the cwd, got ${JSON.stringify(rel)}`,
+    );
+    assert.ok(
+      !rel.some((l) => l.includes("file://")),
+      `frames (${engine}): no frame shows a URL scheme, got ${JSON.stringify(rel)}`,
+    );
+
+    // dart relativises an ABSOLUTE entry too — the frame names a file, not the
+    // spelling the user typed.
+    const abs = frames(engine, join(real, "src", "main.scss"));
+    assert.deepEqual(
+      abs,
+      rel,
+      `frames (${engine}): an absolute entry names the same file as a relative one`,
+    );
+  }
+
+  // The two engines are the pair that drifted. Compare them to each other as
+  // well as to the expectation: that is the assertion no existing test made.
+  assert.deepEqual(
+    frames("wasm", "src/main.scss"),
+    frames("native", "src/main.scss"),
+    "frames: the wasm and native engines name files identically",
+  );
+
+  rmSync(fdir, { recursive: true, force: true });
+  console.log("ok: stack frames — paths not file:// URLs, relative entry or absolute, both engines");
 }
 
 // === the coalescing rule, on a fake clock ===

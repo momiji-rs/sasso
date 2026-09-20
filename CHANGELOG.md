@@ -73,6 +73,43 @@ Conformance is tracked separately as a ratchet against the official
   Compressed passing 14,001 → **14,009** of 14,258 (98.20% → 98.25%); expanded
   unchanged at 14,107 `+0`.
 
+- **A stack frame names the file, not a `file://` URL** (#153). The npm CLI
+  printed `file:///Users/you/proj/src/main.scss 1:1  root stylesheet` where
+  dart-sass and the binary print `src/main.scss 1:1`. A frame is the line a
+  person reads to find what they broke and the line a build log carries to
+  someone else's machine; a URL is neither pasteable into an editor nor
+  meaningful anywhere but the machine that produced it.
+
+  It could not be repaired in the JS layer, which is where it looked like it
+  came from. The entry URL is load-bearing — the importer bridge resolves a
+  relative `@use` against it, so handing the compiler a path instead makes
+  imports stop resolving — and the wasm engine could not relativise anything
+  even if it wanted to: the target is `wasm32-unknown-unknown`, not wasip1, so
+  `getcwd` does not exist. That second half had its own symptom, measured on
+  the way: the two npm engines disagreed with **each other**, wasm naming a
+  dependency `_dep.scss` where the native addon named it `src/_dep.scss`.
+
+  So `Options` gained the directory diagnostics are spelled against
+  (`Options::cwd`, `None` = ask the OS, which is what the binary keeps doing),
+  the wasm ABI gained `sasso_compile4` beside the `compile3` that stays for
+  hosts built against it, and both JS bridges pass `process.cwd()`. One rule
+  now names a file wherever a frame does — a path or a `file://` URL, shown
+  relative to that directory, with percent escapes decoded and a Windows drive
+  letter kept out of the scheme's way — so the entry frame and a dependency
+  frame cannot drift apart again.
+
+  Measured against dart-sass 1.104.1, one error with two frames, before:
+
+  ```
+  dart         src/_dep.scss 2:10  m()   src/main.scss 2:6  root stylesheet
+  binary       src/_dep.scss 2:14  m()   src/main.scss 2:6  root stylesheet
+  npm native   src/_dep.scss 2:14  m()   file:///…/src/main.scss 2:6
+  npm wasm     _dep.scss 2:14      m()   file:///…/src/main.scss 2:6
+  ```
+
+  and after, all four agree on every name. (The `2:10` against `2:14` is #157,
+  which is about where the caret goes, not what the file is called.)
+
 - **An empty at-rule survives compression, and a preserved `round()` is a
   calculation.** Two more of the compressed ratchet's divergences, both
   measured against dart-sass 1.104.1.

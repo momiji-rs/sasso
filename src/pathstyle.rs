@@ -219,9 +219,123 @@ pub(crate) fn pretty(style: Style, abs: &str, cwd: &str) -> String {
     parts.join(style.sep())
 }
 
+/// The filesystem path a `file://` URL names, or `None` for anything else —
+/// a `data:` URL, a custom importer's key, a bare path.
+///
+/// Only the shapes a stylesheet URL actually takes are handled, and the rest
+/// are declined rather than guessed at. `file:///a/b` is `/a/b`;
+/// `file://server/share/a` is a UNC path under [`Style::Windows`] and nothing
+/// under [`Style::Posix`], which has no spelling for it. Percent escapes are
+/// decoded, because a directory called `my docs` arrives as `my%20docs` and a
+/// frame that said so would name a file nobody has.
+pub(crate) fn file_url_path(style: Style, url: &str) -> Option<String> {
+    let rest = url.strip_prefix("file://")?;
+    // `file:///a` (empty authority, the usual spelling) vs `file://host/share`.
+    let path = if let Some(local) = rest.strip_prefix('/') {
+        let decoded = percent_decode(local);
+        match style {
+            // A drive letter arrives as `/C:/a`, and the leading slash is the
+            // URL's, not the path's.
+            Style::Windows if is_drive_start(&decoded) => decoded.replace('/', "\\"),
+            Style::Windows => format!("\\{}", decoded.replace('/', "\\")),
+            Style::Posix => format!("/{decoded}"),
+        }
+    } else if rest.is_empty() {
+        return None;
+    } else {
+        // An authority. Only Windows can spell it.
+        if style == Style::Posix {
+            return None;
+        }
+        format!("\\\\{}", percent_decode(rest).replace('/', "\\"))
+    };
+    Some(path)
+}
+
+/// Whether `name` begins with a URL scheme.
+///
+/// A scheme of ONE letter is read as a Windows drive instead (`C:\a`), which
+/// is the rule dart's `package:path` and every browser use; without it every
+/// Windows path would look like a URL. `data:` has no `//`, so looking for
+/// one is not enough.
+fn has_scheme(name: &str) -> bool {
+    let Some(colon) = name.find(':') else { return false };
+    if colon < 2 {
+        return false;
+    }
+    let mut chars = name[..colon].chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// Whether `p` starts with a drive letter (`C:` or `C:/`).
+fn is_drive_start(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+/// `%XX` escapes decoded, everything else left alone. A stray `%` that is not
+/// followed by two hex digits is a literal `%`, which is what browsers and
+/// dart's `Uri.toFilePath` both do.
+fn percent_decode(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        match (
+            b.get(i),
+            b.get(i + 1).copied().and_then(hex),
+            b.get(i + 2).copied().and_then(hex),
+        ) {
+            (Some(b'%'), Some(hi), Some(lo)) => {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            }
+            _ => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// How a stack frame names a file, given whatever the compiler was handed:
+/// a path or a `file://` URL, absolute or not.
+///
+/// The two front ends arrive here with different spellings of the same thing —
+/// the binary passes paths, the JS API passes `file://` URLs because its
+/// importer bridge resolves relative `@use` against them — and dart shows both
+/// as a path relative to the working directory. `cwd` is `None` when the
+/// process has no readable one, which for `wasm32-unknown-unknown` is always:
+/// there is no `getcwd` to call, so the host has to say.
+///
+/// Returns `None` when `name` does not name a file at all (a `data:` URL, a
+/// custom importer's key), leaving the caller its own rule for those.
+pub(crate) fn pretty_name(style: Style, name: &str, cwd: Option<&str>) -> Option<String> {
+    let abs = match file_url_path(style, name) {
+        Some(p) => p,
+        None if has_scheme(name) => return None, // an importer's URL, not a file
+        None => name.to_string(),
+    };
+    if style.root_len(&abs) == 0 {
+        // Already relative — the binary hands one over pre-spelled. There is
+        // nothing to relativise and nothing to gain by trying.
+        return Some(abs);
+    }
+    Some(match cwd {
+        Some(cwd) => pretty(style, &abs, cwd),
+        None => abs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{pretty, relative_parts, Style};
+    use super::{file_url_path, has_scheme, pretty, pretty_name, relative_parts, Style};
 
     /// Joined with the style's own separator, which is what a diagnostic path
     /// uses. `None` is "no relative spelling exists".
@@ -486,5 +600,128 @@ mod tests {
         assert_eq!(pretty(Style::Windows, r"C:\dev\app", r"c:\dev\app"), ".");
         // The root itself, where there are no segments on either side.
         assert_eq!(pretty(Style::Posix, "/", "/"), ".");
+    }
+
+    /// A `file://` URL is what the JS API hands the compiler, because its
+    /// importer bridge resolves relative `@use` against it. Every frame it
+    /// appears in used to print it verbatim, scheme and all.
+    #[test]
+    fn a_file_url_names_the_path_it_points_at() {
+        assert_eq!(
+            file_url_path(Style::Posix, "file:///a/b/c.scss").as_deref(),
+            Some("/a/b/c.scss")
+        );
+        assert_eq!(
+            file_url_path(Style::Windows, "file:///C:/a/b.scss").as_deref(),
+            Some(r"C:\a\b.scss")
+        );
+        // A UNC share has no POSIX spelling, so POSIX declines rather than
+        // inventing one.
+        assert_eq!(
+            file_url_path(Style::Windows, "file://server/share/a.scss").as_deref(),
+            Some(r"\\server\share\a.scss")
+        );
+        assert_eq!(file_url_path(Style::Posix, "file://server/share/a.scss"), None);
+        // Not a file URL at all.
+        assert_eq!(file_url_path(Style::Posix, "data:;base64,YQ=="), None);
+        assert_eq!(file_url_path(Style::Posix, "/a/b.scss"), None);
+    }
+
+    /// A directory with a space arrives percent-encoded. A frame naming
+    /// `my%20docs` names a file nobody has.
+    #[test]
+    fn percent_escapes_are_decoded() {
+        assert_eq!(
+            file_url_path(Style::Posix, "file:///my%20docs/a%2Bb.scss").as_deref(),
+            Some("/my docs/a+b.scss"),
+        );
+        // A stray `%` is a literal one, as `Uri.toFilePath` treats it.
+        assert_eq!(
+            file_url_path(Style::Posix, "file:///100%/a.scss").as_deref(),
+            Some("/100%/a.scss")
+        );
+        // Multi-byte UTF-8 survives being split across escapes.
+        assert_eq!(
+            file_url_path(Style::Posix, "file:///%E6%A8%A3/a.scss").as_deref(),
+            Some("/樣/a.scss")
+        );
+    }
+
+    /// The whole point: both front ends' spellings of one file produce the
+    /// same frame. The binary passes a path, the JS API passes a URL.
+    #[test]
+    fn both_front_ends_name_a_file_the_same_way() {
+        let cwd = "/work/proj";
+        assert_eq!(
+            pretty_name(Style::Posix, "file:///work/proj/src/a.scss", Some(cwd)).as_deref(),
+            Some("src/a.scss"),
+        );
+        assert_eq!(
+            pretty_name(Style::Posix, "/work/proj/src/a.scss", Some(cwd)).as_deref(),
+            Some("src/a.scss"),
+        );
+        // And on Windows, where the drive letter is the root.
+        assert_eq!(
+            pretty_name(
+                Style::Windows,
+                "file:///C:/work/proj/src/a.scss",
+                Some(r"C:\work\proj")
+            )
+            .as_deref(),
+            Some(r"src\a.scss"),
+        );
+    }
+
+    /// `wasm32-unknown-unknown` has no `getcwd`, so the host may have nothing
+    /// to offer. An absolute path is better than a URL even unrelativised.
+    #[test]
+    fn without_a_cwd_it_is_still_a_path_not_a_url() {
+        assert_eq!(
+            pretty_name(Style::Posix, "file:///work/proj/src/a.scss", None).as_deref(),
+            Some("/work/proj/src/a.scss"),
+        );
+    }
+
+    /// A name that is already relative is the binary's pre-spelled one; a
+    /// name with some other scheme belongs to an importer and is not ours to
+    /// rewrite.
+    #[test]
+    fn relative_names_pass_through_and_other_schemes_decline() {
+        assert_eq!(
+            pretty_name(Style::Posix, "src/a.scss", Some("/work")).as_deref(),
+            Some("src/a.scss")
+        );
+        assert_eq!(
+            pretty_name(Style::Posix, "data:;base64,YQ==", Some("/work")),
+            None
+        );
+        assert_eq!(pretty_name(Style::Posix, "npm:foo/bar.scss", Some("/work")), None);
+    }
+
+    /// A one-letter "scheme" is a Windows drive. Read the other way, every
+    /// Windows path is a URL and no frame on Windows names a file.
+    #[test]
+    fn a_drive_letter_is_not_a_scheme() {
+        assert!(!has_scheme(r"C:\work\a.scss"));
+        assert!(!has_scheme("C:/work/a.scss"));
+        assert!(has_scheme("data:;base64,YQ=="));
+        assert!(has_scheme("file:///a"));
+        assert!(has_scheme("npm:foo"));
+        assert_eq!(
+            pretty_name(Style::Windows, r"C:\work\proj\src\a.scss", Some(r"C:\work\proj")).as_deref(),
+            Some(r"src\a.scss"),
+        );
+    }
+
+    /// dart keeps the absolute spelling once the relative one costs more
+    /// segments — `pretty` already does this, and a URL must not escape it.
+    #[test]
+    fn a_url_far_outside_the_tree_stays_absolute() {
+        let far = pretty_name(Style::Posix, "file:///a.scss", Some("/work/proj/deep/deeper"));
+        assert_eq!(far.as_deref(), Some("/a.scss"));
+        assert_eq!(
+            pretty(Style::Posix, "/a.scss", "/work/proj/deep/deeper"),
+            "/a.scss"
+        );
     }
 }

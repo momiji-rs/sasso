@@ -313,6 +313,10 @@ function buildCfg(options, syntax, urlForCore) {
     compressed: options.style === "compressed",
     // napi Option<String> maps `undefined` to None; `null` is a type error.
     url: urlForCore ?? undefined,
+    // The wasm engine has no `getcwd` (wasm32-unknown-unknown), so a frame
+    // would keep an absolute path there and a relative one under the addon.
+    // Both are told the same directory instead.
+    cwd: process.cwd(),
     wantMap: !!options.sourceMap,
     includeSources: !!options.sourceMapIncludeSources,
     charset: options.charset !== false,

@@ -2138,3 +2138,97 @@ fn a_host_override_of_a_filter_name_still_warns() {
     assert_eq!(w.len(), 1, "the deprecated global name still warns: {w:?}");
     assert!(w[0].contains("global-builtin"), "{}", w[0]);
 }
+
+/// A frame names a file the same way whichever spelling the host handed over.
+///
+/// The binary passes a path and the JS API passes a `file://` URL — it has to,
+/// because its importer bridge resolves relative `@use` against the entry URL —
+/// and for three releases the URL went straight into the frame, scheme and all
+/// (#153). The two front ends printed different things for the same error, and
+/// `file:///Users/…/src/a.scss` is neither pasteable into an editor nor
+/// meaningful on anyone else's machine.
+///
+/// `cwd` is passed explicitly rather than leaning on the process's: this is
+/// what the JS bridges do, because `wasm32-unknown-unknown` has no `getcwd` and
+/// nothing to relativise against otherwise.
+#[test]
+fn a_frame_names_a_file_the_same_way_from_either_front_end() {
+    let cwd = if cfg!(windows) {
+        r"C:\work\proj"
+    } else {
+        "/work/proj"
+    };
+    let as_url = "file:///work/proj/src/a.scss";
+    let as_path = if cfg!(windows) {
+        r"C:\work\proj\src\a.scss"
+    } else {
+        "/work/proj/src/a.scss"
+    };
+    let expected = if cfg!(windows) {
+        r"src\a.scss 1:8"
+    } else {
+        "src/a.scss 1:8"
+    };
+
+    // On Windows the URL names the C: drive, so both spellings are the same
+    // file and the comparison is the point of the test.
+    let url = if cfg!(windows) {
+        "file:///C:/work/proj/src/a.scss"
+    } else {
+        as_url
+    };
+
+    let from_url = compile("a { b: $x }", &Options::new().with_url(url).with_cwd(cwd)).unwrap_err();
+    let from_path = compile("a { b: $x }", &Options::new().with_url(as_path).with_cwd(cwd)).unwrap_err();
+
+    // `Display` prints the rendered block when there is one.
+    let rendered = |e: &sasso::Error| e.to_string();
+    assert!(
+        rendered(&from_url).contains(expected),
+        "a file:// url should name a path: {}",
+        rendered(&from_url),
+    );
+    assert_eq!(
+        rendered(&from_url),
+        rendered(&from_path),
+        "the two front ends' spellings must render identically",
+    );
+    assert!(
+        !rendered(&from_url).contains("file://"),
+        "no frame should show a scheme: {}",
+        rendered(&from_url),
+    );
+}
+
+/// Without a `cwd` the host knows of, a frame still shows a PATH — just not a
+/// relative one. That is the wasm case before the bridges were taught to pass
+/// one, and it must degrade to "absolute" rather than back to a URL.
+#[test]
+fn a_file_url_without_a_cwd_degrades_to_an_absolute_path() {
+    let e = compile(
+        "a { b: $x }",
+        &Options::new().with_url("file:///nowhere/deep/a.scss"),
+    )
+    .unwrap_err();
+    let rendered = e.to_string();
+    assert!(!rendered.contains("file://"), "still a URL: {rendered}");
+    let expected = if cfg!(windows) {
+        r"\nowhere\deep\a.scss"
+    } else {
+        "/nowhere/deep/a.scss"
+    };
+    assert!(rendered.contains(expected), "not the path: {rendered}");
+}
+
+/// A custom importer's key is not a filesystem path and is not ours to
+/// rewrite: dart shows it as it is.
+#[test]
+fn a_non_file_url_keeps_its_own_spelling() {
+    let e = compile(
+        "a { b: $x }",
+        &Options::new().with_url("data:;charset=utf-8,a").with_cwd("/work"),
+    )
+    .unwrap_err();
+    let rendered = e.to_string();
+    assert!(rendered.contains("data:;charset=utf-8,a 1:8"), "{rendered}");
+}
