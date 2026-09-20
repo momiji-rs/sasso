@@ -1037,7 +1037,17 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         JSON.stringify({ name: pkgName, version, main: "sasso.node" }),
       );
     const nativeUrl = new URL("./npm/native.mjs", import.meta.url).href;
-    const withPath = (extra) => ({ ...process.env, NODE_PATH: nodePath, ...extra });
+    // An exported SASSO_ENGINE decides for the child exactly what these
+    // cases exist to observe. The skew case below must be free to fall
+    // back to wasm, and the demanded case sets the variable itself; with
+    // `SASSO_ENGINE=native` in the environment the first one is pinned to
+    // the engine it is supposed to be abandoning and exits 1. The same
+    // scrub the jobs cases already do.
+    const withPath = (extra) => {
+      const base = { ...process.env, NODE_PATH: nodePath };
+      delete base.SASSO_ENGINE;
+      return { ...base, ...extra };
+    };
 
     manifest("9.9.9"); // not this package's version, whatever this package's is
     const probe = spawnSync(
