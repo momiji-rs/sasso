@@ -598,6 +598,136 @@ fn compressed_color_channels_drop_percent_and_deg() {
     assert_eq!(e("oklch(70% 0.1 200)"), "a {\n  x: oklch(70% 0.1 200deg);\n}\n");
 }
 
+/// A degenerate color CHANNEL — an infinity that survives parsing — builds a
+/// real color, not a verbatim string: dart-sass stores the infinity in the
+/// channel and serializes it from there. So `meta.type-of` answers `color`,
+/// `color.channel` hands the infinity back, and compressed output drops the
+/// spaces around the `*` and the `/` the way it does for every other value.
+/// Measured against dart-sass 1.104.1.
+#[test]
+fn degenerate_color_channels_build_a_real_color() {
+    let v = |scss: &str| css_compressed(&format!("a{{x:{scss}}}"));
+    let e = |scss: &str| css(&format!("a{{x:{scss}}}"));
+    // hsl(): the infinity lives in the saturation or lightness channel, and
+    // the legacy comma form carries the channel's `%` into the calc() constant.
+    assert_eq!(
+        e("hsl(0, 100%, calc(-infinity * 1%))"),
+        "a {\n  x: hsl(0, 100%, calc(-infinity * 1%));\n}\n"
+    );
+    assert_eq!(
+        v("hsl(0, 100%, calc(-infinity * 1%))"),
+        "a{x:hsl(0,100%,calc(-infinity*1%))}"
+    );
+    assert_eq!(
+        v("hsl(0, calc(infinity * 1%), 50%)"),
+        "a{x:hsl(0,calc(infinity*1%),50%)}"
+    );
+    // A NEGATIVE infinite saturation floors at 0, which leaves an ordinary
+    // color behind — so compressed output picks the shortest legacy spelling
+    // for it, as for any other color.
+    assert_eq!(v("hsl(0, calc(-infinity * 1%), 50%)"), "a{x:hsl(0,0%,50%)}");
+    // An alpha keeps the `hsla()` spelling; an OPAQUE one is still dropped.
+    assert_eq!(
+        v("hsla(0, 100%, calc(infinity * 1%), 0.5)"),
+        "a{x:hsla(0,100%,calc(infinity*1%),.5)}"
+    );
+    assert_eq!(
+        v("hsl(0, 100%, calc(infinity * 1%), 1)"),
+        "a{x:hsl(0,100%,calc(infinity*1%))}"
+    );
+    // The hue still reduces modulo 360, and the modern space-separated call
+    // builds the same color as the comma one.
+    assert_eq!(
+        v("hsl(400, 100%, calc(infinity * 1%))"),
+        "a{x:hsl(40,100%,calc(infinity*1%))}"
+    );
+    assert_eq!(
+        v("hsl(0 100% calc(-infinity * 1%) / 0.25)"),
+        "a{x:hsla(0,100%,calc(-infinity*1%),.25)}"
+    );
+    // color(): the channel keeps its `calc(infinity)`, only the `/` compresses.
+    assert_eq!(
+        v("color(srgb 0 0 calc(infinity) / 0.5)"),
+        "a{x:color(srgb 0 0 calc(infinity)/.5)}"
+    );
+    // A `%` channel is a percentage OF the channel's 0–1 range, and a
+    // percentage of an infinity is still infinite — the unit does not survive.
+    assert_eq!(
+        e("color(srgb calc(infinity * 1%) 0 0)"),
+        "a {\n  x: color(srgb calc(infinity) 0 0);\n}\n"
+    );
+    // A degenerate ALPHA folds to a number: `NaN` and `-infinity` to 0.
+    assert_eq!(v("color(srgb 0 0 0 / calc(NaN))"), "a{x:color(srgb 0 0 0/0)}");
+    // Being colors, they answer the color module rather than the string one.
+    assert_eq!(
+        css("@use \"sass:meta\";\na {x: meta.type-of(hsl(0, 100%, calc(-infinity * 1%)))}"),
+        "a {\n  x: color;\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:color\";\na {x: color.channel(hsl(0, 100%, calc(-infinity * 1%)), \"lightness\")}"),
+        "a {\n  x: calc(-infinity * 1%);\n}\n"
+    );
+    assert_eq!(
+        css("@use \"sass:color\";\na {x: color.space(hsl(0, 100%, calc(-infinity * 1%)))}"),
+        "a {\n  x: hsl;\n}\n"
+    );
+    // Mixing one keeps the infinity in the rgb channel the conversion left it
+    // in and NaN in the two its arithmetic wiped out; an out-of-gamut rgb
+    // result is written through its hsl form, where a non-finite channel reads
+    // as 0.
+    assert_eq!(
+        css("@use \"sass:color\";\na {x: color.mix(hsl(0, 100%, calc(-infinity * 1%)), red)}"),
+        "a {\n  x: hsl(0, 0%, 0%);\n}\n"
+    );
+}
+
+/// `meta.inspect` of an OUT-OF-GAMUT legacy rgb color skips the hsl reroute
+/// CSS output takes, and writes the channels by the rules CSS output uses for
+/// a legacy triple: plain numbers while all three are integers — in gamut or
+/// not — percentages as soon as one is not, and a non-finite channel, which
+/// converting an infinite one produces, as a `%`-unit `calc()` constant.
+/// Measured against dart-sass 1.104.1.
+#[test]
+fn inspecting_an_out_of_gamut_legacy_rgb_color() {
+    let i = |scss: &str| {
+        css(&format!(
+            "@use \"sass:color\";\n@use \"sass:meta\";\na {{x: meta.inspect({scss})}}"
+        ))
+    };
+    let rgb = |scss: &str| format!("color.to-space({scss}, rgb)");
+    assert_eq!(i(&rgb("color(srgb 2 0 0)")), "a {\n  x: rgb(510, 0, 0);\n}\n");
+    assert_eq!(
+        i(&rgb("color(srgb 2 0 0.5)")),
+        "a {\n  x: rgb(200%, 0%, 50%);\n}\n"
+    );
+    assert_eq!(
+        i(&rgb("color(srgb -0.5 0 0)")),
+        "a {\n  x: rgb(-50%, 0%, 0%);\n}\n"
+    );
+    // The alpha of an `rgba()` form is a plain number either way.
+    assert_eq!(
+        i(&format!("rgba({}, 0.5)", rgb("color(srgb 2 0 0.5)"))),
+        "a {\n  x: rgba(200%, 0%, 50%, 0.5);\n}\n"
+    );
+    // A non-finite channel alongside two finite ones: the `calc()` constant
+    // carries the `%` the percentage spelling gives the others.
+    assert_eq!(
+        i(&rgb("color(srgb calc(infinity) 0.5 0)")),
+        "a {\n  x: rgb(calc(infinity * 1%), 50%, 0%);\n}\n"
+    );
+    assert_eq!(
+        i("color.mix(hsl(0, 100%, calc(-infinity * 1%)), red)"),
+        "a {\n  x: rgb(calc(-infinity * 1%), calc(NaN * 1%), calc(NaN * 1%));\n}\n"
+    );
+    // CSS output of the same color takes the hsl reroute, where a fuzzy-zero
+    // saturation nulls the hue instead of leaking the one an out-of-gamut gray
+    // converts to (`hsl(345, 0%, 100%)`).
+    assert_eq!(
+        css("@use \"sass:color\";\na {x: color.to-space(color(srgb 2 0 0.5), rgb)}"),
+        "a {\n  x: hsl(0, 0%, 100%);\n}\n"
+    );
+}
+
 /// `color()`'s space name and its three channels are separated by MANDATORY
 /// whitespace — `color(display-p3 .5 .2 .9)` is an identifier followed by three
 /// numbers, so compressing those spaces away yields `color(display-p3.5.2.9)`,

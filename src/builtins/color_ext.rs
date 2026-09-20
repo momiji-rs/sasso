@@ -63,7 +63,21 @@ fn modify_with_space(
 /// None`.
 pub(super) fn computed(r: f64, g: f64, b: f64, a: f64) -> Color {
     let mut c = Color::rgb(r, g, b, a);
-    c.repr = named_repr(r, g, b, a);
+    // dart has no untagged color: an rgb RESULT that left the [0, 255] gamut —
+    // a NaN channel included, which is what mixing an infinite channel
+    // produces — is written through its hsl form. That rule lives in
+    // `ModernColor::legacy_css`, so tag the color to reach it; an in-gamut
+    // result keeps the plain hex/rgb/name spelling.
+    let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
+    if in_gamut(r) && in_gamut(g) && in_gamut(b) {
+        c.repr = named_repr(r, g, b, a);
+    } else {
+        c.modern = Some(Box::new(crate::value::ModernColor {
+            space: ColorSpace::Rgb,
+            channels: [Some(r), Some(g), Some(b)],
+            alpha: Some(a),
+        }));
+    }
     c
 }
 

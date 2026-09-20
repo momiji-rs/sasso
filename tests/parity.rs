@@ -1248,6 +1248,80 @@ fn hsl_degenerate_calc_channels() {
 }
 
 #[test]
+fn degenerate_channel_colors_are_colors() {
+    // An hsl()/color() call whose infinite channel SURVIVES parsing is a real
+    // color: dart-sass stores the infinity, so the color module answers for
+    // it, `meta.type-of` says `color` (and `string.length` rejects it), and
+    // both output styles serialize the stored channel.
+    for scss in [
+        "a { b: hsl(0, 100%, calc(-infinity * 1%)); }\n",
+        "a { b: hsl(0, 100%, calc(infinity * 1%)); }\n",
+        "a { b: hsl(0, calc(infinity * 1%), 50%); }\n",
+        "a { b: hsl(0, calc(-infinity * 1%), 50%); }\n",
+        "a { b: hsl(0, calc(infinity * 1%), calc(-infinity * 1%)); }\n",
+        "a { b: hsl(400, 250%, calc(infinity * 1%)); }\n",
+        "a { b: hsl(0.5turn, -250%, calc(infinity * 1%)); }\n",
+        "a { b: hsla(0, 100%, calc(infinity * 1%), 0.5); }\n",
+        "a { b: hsl(0, 100%, calc(infinity * 1%), 1); }\n",
+        "a { b: hsl(0 100% calc(-infinity * 1%) / 0.25); }\n",
+        "a { b: color(srgb 0 0 calc(infinity) / 0.5); }\n",
+        "a { b: color(srgb 0 0 calc(-infinity) / 0.5); }\n",
+        "a { b: color(srgb calc(infinity * 1%) 0 0); }\n",
+        "a { b: color(srgb 50% 0 calc(1/0)); }\n",
+        "a { b: color(srgb 0 0 0 / calc(NaN)); }\n",
+        "a { b: color(xyz 0 0 calc(infinity) / 0.5); }\n",
+        "@use \"sass:meta\"; a { b: meta.type-of(hsl(0, 100%, calc(-infinity * 1%))); }\n",
+        "@use \"sass:meta\"; a { b: meta.inspect(hsl(0, 100%, calc(-infinity * 1%))); }\n",
+        "@use \"sass:color\"; a { b: color.space(hsl(0, 100%, calc(-infinity * 1%))); }\n",
+        "@use \"sass:color\"; a { b: color.channel(hsl(0, 100%, calc(-infinity * 1%)), \"lightness\"); }\n",
+        "@use \"sass:color\"; a { b: color.channel(hsl(0, 100%, calc(-infinity * 1%)), \"saturation\"); }\n",
+        "@use \"sass:color\"; a { b: color.channel(color(srgb 0 0 calc(infinity) / 0.5), \"blue\"); }\n",
+        "@use \"sass:color\"; a { b: color.is-in-gamut(hsl(0, 100%, calc(-infinity * 1%)), $space: srgb); }\n",
+        "@use \"sass:color\"; a { b: color.to-space(hsl(0, 100%, calc(-infinity * 1%)), srgb); }\n",
+        "@use \"sass:color\"; a { b: color.grayscale(hsl(0, 100%, calc(-infinity * 1%))); }\n",
+        "@use \"sass:color\"; a { b: color.change(hsl(0, 100%, calc(-infinity * 1%)), $lightness: 50%); }\n",
+        // Mixing one leaves the infinity in the rgb channel the conversion
+        // left it in and NaN in the two its arithmetic wiped out. An
+        // out-of-gamut rgb result is written through its hsl form, reading a
+        // non-finite channel as 0 — but its INSPECT form keeps the channels.
+        "@use \"sass:color\"; a { b: color.mix(hsl(0, 100%, calc(-infinity * 1%)), red); }\n",
+        "@use \"sass:color\"; @use \"sass:meta\"; a { b: meta.inspect(color.mix(hsl(0, 100%, calc(-infinity * 1%)), red)); }\n",
+        "a { b: hsl(0, 100%, calc(-infinity * 1%)) == hsl(0, 100%, calc(-infinity * 1%)); }\n",
+        "a { b: hsl(0, 100%, calc(-infinity * 1%)) == hsl(0, 100%, 0%); }\n",
+    ] {
+        assert_parity(scss);
+        assert_parity_compressed(scss);
+    }
+    // A color is not a string, and it has no arithmetic with a number.
+    assert_error_parity(
+        "@use \"sass:string\"; a { b: string.length(hsl(0, 100%, calc(-infinity * 1%))); }\n",
+    );
+    assert_error_parity("a { b: 1px + hsl(0, 100%, calc(-infinity * 1%)); }\n");
+}
+
+#[test]
+fn out_of_gamut_legacy_rgb_serialization() {
+    // A legacy rgb color outside the [0, 255] gamut — which only a color-space
+    // conversion can produce — is written through its hsl form in CSS output
+    // and as `rgb()` in its inspect form, and the two disagree about more than
+    // the function name: the inspect form re-spells all three channels as
+    // percentages as soon as one is non-integral.
+    for scss in [
+        "@use \"sass:color\"; a { b: color.to-space(color(srgb 2 0 0), rgb); }\n",
+        "@use \"sass:color\"; a { b: color.to-space(color(srgb 2 0 0.5), rgb); }\n",
+        "@use \"sass:color\"; a { b: color.to-space(color(srgb -0.5 0 0), rgb); }\n",
+        "@use \"sass:color\"; @use \"sass:meta\"; a { b: meta.inspect(color.to-space(color(srgb 2 0 0), rgb)); }\n",
+        "@use \"sass:color\"; @use \"sass:meta\"; a { b: meta.inspect(color.to-space(color(srgb 2 0 0.5), rgb)); }\n",
+        "@use \"sass:color\"; @use \"sass:meta\"; a { b: meta.inspect(color.to-space(color(srgb -0.5 0 0), rgb)); }\n",
+        "@use \"sass:color\"; @use \"sass:meta\"; a { b: meta.inspect(rgba(color.to-space(color(srgb 2 0 0.5), rgb), 0.5)); }\n",
+        "@use \"sass:color\"; @use \"sass:meta\"; a { b: meta.inspect(color.to-space(color(srgb calc(infinity) 0.5 0), rgb)); }\n",
+    ] {
+        assert_parity(scss);
+        assert_parity_compressed(scss);
+    }
+}
+
+#[test]
 fn mix_srgb_method_matches_legacy() {
     // The `srgb`/`rgb` interpolation methods reproduce the legacy mix this
     // build computes, and must byte-match dart-sass (other spaces require

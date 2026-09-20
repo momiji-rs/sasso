@@ -28,6 +28,51 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **A degenerate legacy color is a color, not a string**, and an out-of-gamut
+  one serializes the way dart-sass serializes it. All of it `[measured]`
+  against dart-sass 1.104.1 in both styles.
+
+  `hsl(0, 100%, calc(-infinity * 1%))` — a channel whose `calc()` folds to an
+  infinity or a NaN — was preserved as an unquoted string, so `meta.type-of`
+  answered `string`, the color module rejected it as "not a color",
+  `string.length()` succeeded on it and `1px + $it` concatenated. dart stores
+  the infinity in the channel and serializes it from there, which is what
+  `hsl()`/`hsla()` now do: the hue reduces modulo 360, a negative saturation
+  floors at 0, a NaN channel reads as 0, a degenerate alpha folds (`infinity`
+  is opaque, `-infinity` and NaN are transparent), and the surviving infinity
+  stays in its channel, where the legacy serializer writes it back as
+  `calc(-infinity * 1%)`. `color()` needed no special case at all once its own
+  string early-return was removed. `[measured]` **+8 cases**.
+
+  Being colors, they reach the color module — and their out-of-gamut channels
+  reach three serialization rules with them, each a divergence of its own:
+
+  - An out-of-gamut legacy rgb color is written through its hsl form, and a
+    COMPUTED one never was, because it carried no space tag to reach that rule:
+    `color.mix(hsl(0, 100%, calc(-infinity * 1%)), red)` was
+    `rgb(NaN%, NaN%, NaN%)` against dart's `hsl(0, 0%, 0%)`. The degenerate
+    color's own rgb channels are now the plain hsl -> sRGB conversion,
+    unclamped, so mixing one mixes the channels dart mixes rather than NaN
+    throughout.
+  - That hsl form nulls the hue when the saturation is fuzzy-zero, the way the
+    compressed rgb-or-hsl choice already did: an out-of-gamut gray was
+    `hsl(345, 0%, 100%)` here and `hsl(0, 0%, 100%)` in dart.
+  - `meta.inspect` of the same color skips the hsl form and writes `rgb()`, but
+    with the channel rules CSS output uses, which it did not: one non-integral
+    channel re-spells all three as percentages (`rgb(510, 0, 127.5)` ->
+    `rgb(200%, 0%, 50%)`), and a non-finite channel is a `%`-unit `calc()`
+    constant — where a bare `NaN` or `-Infinity` used to reach the stylesheet.
+
+  One rule still differs, in the other direction: dart converts a NaN channel
+  to 0 when a color is CONSTRUCTED and not when one is CONVERTED, while sasso
+  normalizes in both places, so
+  `color.to-space(hsl(0, 100%, calc(-infinity * 1%)), lab)` is `lab(0% 0 0)`
+  here and `lab(calc(NaN)% calc(NaN) calc(NaN))` in dart. No sass-spec case
+  covers it.
+
+  Compressed passing 14,001 → **14,009** of 14,258 (98.20% → 98.25%); expanded
+  unchanged at 14,107 `+0`.
+
 - **An empty at-rule survives compression, and a preserved `round()` is a
   calculation.** Two more of the compressed ratchet's divergences, both
   measured against dart-sass 1.104.1.

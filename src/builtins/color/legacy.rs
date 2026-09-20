@@ -748,8 +748,8 @@ pub(super) fn fn_hsl(
     }
     channels.comps = normalize_channels(&channels.comps, Some(0));
     // A degenerate channel that SURVIVED normalization — an infinite
-    // saturation or lightness — keeps the whole call as a special hsl()
-    // spelling, with each channel coerced per dart-sass's modern parsing (see
+    // saturation or lightness — builds an hsl color that CARRIES the infinity,
+    // with each channel coerced per dart-sass's modern parsing (see
     // `hsl_degenerate`). A NaN channel and a non-finite hue are 0 by now.
     if channels.comps.len() == 3 && channels.comps.iter().any(is_degenerate_calc) {
         return hsl_degenerate(&channels, pos);
@@ -838,57 +838,61 @@ fn fold_degenerate(v: &Value) -> Value {
     v.clone()
 }
 
-/// Serialize an `hsl()`/`hsla()` call that carries an infinite saturation or
-/// lightness. dart-sass keeps the legacy comma spelling and coerces each
-/// channel: the hue is reduced modulo 360; saturation/lightness gain an
-/// implicit `%` (`calc(X * 1%)`), with saturation additionally clamped at 0
-/// (so `-infinity` → `0%`). Every channel has already passed through
-/// [`normalize_channel`], so none of them is NaN.
+/// Build an `hsl()`/`hsla()` color that carries an infinite saturation or
+/// lightness. dart-sass parses this into a REAL color — `meta.type-of` says
+/// `color`, `color.channel($c, "lightness")` hands the infinity back — so the
+/// channels are STORED rather than spelled out: the hue is reduced modulo 360,
+/// saturation is floored at 0 (so `-infinity` → `0%`), and the surviving
+/// infinity stays in its channel, where `ModernColor`'s legacy serialization
+/// renders it as `calc(infinity * 1%)` in either output style. A NaN channel
+/// reaches here too (`hsl(0, 100%, calc(NaN * 1%))`) and is stored as it is:
+/// that same serialization writes a NaN as `0%`, which is what dart prints for
+/// it.
 fn hsl_degenerate(channels: &Channels, pos: Pos) -> Result<Value, Error> {
-    let hue = fmt_num(hsl_hue(&channels.comps[0], pos)?.rem_euclid(360.0), false);
-    let sat = hsl_degenerate_pct(&channels.comps[1], true, pos)?;
-    let light = hsl_degenerate_pct(&channels.comps[2], false, pos)?;
-    let name = match &channels.alpha {
-        Some(a) => {
-            let av = alpha_value(a, pos)?;
-            // An OPAQUE alpha is dropped, exactly as the ordinary hsl path and
-            // `color()` drop theirs: `hsl(0 50% calc(infinity) / 1)` is an
-            // `hsl()`, not an `hsla(…, 1)`.
-            if (av - 1.0).abs() >= f64::EPSILON {
-                return Ok(Value::Str(crate::value::SassStr {
-                    text: format!("hsla({hue}, {sat}, {light}, {})", fmt_num(av, false)).into(),
-                    quoted: false,
-                }));
-            }
-            "hsl"
-        }
-        None => "hsl",
+    let h = crate::value::without_negative_zero(hsl_hue(&channels.comps[0], pos)?.rem_euclid(360.0));
+    let s = hsl_degenerate_chan(&channels.comps[1], true, pos)?;
+    let l = hsl_degenerate_chan(&channels.comps[2], false, pos)?;
+    let a = match &channels.alpha {
+        Some(v) => alpha_value(v, pos)?,
+        None => 1.0,
     };
-    Ok(Value::Str(crate::value::SassStr {
-        text: format!("{name}({hue}, {sat}, {light})").into(),
-        quoted: false,
-    }))
+    // The legacy rgb shadow is the plain hsl -> sRGB conversion, unclamped, so
+    // it keeps the infinity and whatever NaN that conversion's own arithmetic
+    // makes of it. dart's legacy rgb view of the color is the same conversion,
+    // and both properties matter: `color.mix()` of two legacy colors mixes
+    // these very channels, and a shadow clamped to the gamut edge — black for
+    // `-infinity`, white for `infinity` — would make the cross-space
+    // `hsl(0, 100%, calc(-infinity * 1%)) == rgb(0, 0, 0)` true, where dart
+    // says false. Nothing serializes the shadow: the modern tag below carries
+    // the infinity, and a non-finite channel is out of gamut, so even
+    // compressed output — which otherwise prefers the rgb spelling — keeps the
+    // hsl form.
+    let srgb = crate::builtins::hsl_to_srgb([h, s, l]);
+    let mut c = Color::rgb(srgb[0] * 255.0, srgb[1] * 255.0, srgb[2] * 255.0, a);
+    c.modern = Some(Box::new(ModernColor {
+        space: ColorSpace::Hsl,
+        channels: [Some(h), Some(s), Some(l)],
+        alpha: Some(a),
+    }));
+    Ok(Value::Color(c))
 }
 
-/// Serialize a saturation/lightness channel of a degenerate hsl() call. An
-/// infinite channel is treated as a `%` value: saturation clamps a negative
-/// one to `0%`, otherwise both emit `calc(infinity * 1%)`. A plain number
-/// keeps its literal `%` spelling (saturation floored at 0).
-fn hsl_degenerate_pct(v: &Value, is_saturation: bool, pos: Pos) -> Result<String, Error> {
-    if let Some(c) = degenerate_value(v) {
-        if is_saturation && c <= 0.0 {
-            return Ok("0%".to_string());
-        }
-        let token = if c.is_sign_negative() {
-            "-infinity"
-        } else {
-            "infinity"
-        };
-        return Ok(format!("calc({token} * 1%)"));
-    }
-    let raw = channel_value(v, pos)?;
-    let pct = if is_saturation { raw.max(0.0) } else { raw };
-    Ok(format!("{}%", fmt_num(pct, false)))
+/// The stored value of a saturation/lightness channel of a degenerate hsl()
+/// call. An infinite channel is a `%` value like a written one, so it is kept
+/// as its bare number; saturation floors a negative channel (infinite or not)
+/// at 0, lightness keeps its sign.
+fn hsl_degenerate_chan(v: &Value, is_saturation: bool, pos: Pos) -> Result<f64, Error> {
+    let raw = match degenerate_value(v) {
+        Some(c) => c,
+        None => channel_value(v, pos)?,
+    };
+    // `f64::max` returns the non-NaN side, so a NaN saturation floors to 0 the
+    // way the ordinary path's does.
+    Ok(crate::value::without_negative_zero(if is_saturation {
+        raw.max(0.0)
+    } else {
+        raw
+    }))
 }
 
 /// The global `hwb()` function. It takes a single channels argument
@@ -1486,18 +1490,14 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
         Some(s) => s,
         None => return Ok(verbatim_call("color", &desc)),
     };
-    // A degenerate `calc()` channel (`calc(infinity)`/`calc(-infinity)`/
-    // `calc(NaN)`) is preserved verbatim in `color()`'s channels (dart-sass
-    // keeps the `calc(...)` text), while a degenerate alpha is folded.
-    let degenerate =
-        channels.iter().any(is_degenerate_calc) || alpha.as_ref().is_some_and(is_degenerate_calc);
-    if degenerate {
-        // The CANONICAL space name, like every other `color()` output:
-        // `color(SRGB calc(infinity) 0 0)` is `color(srgb …)`.
-        return Ok(modern_color(&space_lower, channels, alpha.as_ref(), pos));
-    }
     // Compute the color: predefined `color()` spaces store red/green/blue (and
-    // xyz x/y/z) channels in 0..1 with no clamping.
+    // xyz x/y/z) channels in 0..1 with no clamping. A degenerate `calc()`
+    // channel (`calc(infinity)`, `calc(1/0)`) folds to its bare infinity and
+    // is stored like any other channel — a `%` one included, since a
+    // percentage of an infinity is still infinite — because dart-sass builds
+    // the color and serializes its channels rather than echoing the call.
+    // `ModernColor::chan` renders it back as `calc(infinity)`. A degenerate
+    // ALPHA folds to a number (`infinity` → 1 = opaque, `-infinity`/`NaN` → 0).
     let ch = [
         modern_channel(&channels[0], 1.0),
         modern_channel(&channels[1], 1.0),
@@ -1509,46 +1509,6 @@ pub(super) fn fn_color(pos_args: &[Value], named: &[(String, Value)], pos: Pos) 
         alpha: modern_alpha(alpha.as_ref()),
     };
     Ok(Value::Color(make_modern(mc)))
-}
-
-/// Serialize a `color()` whose channels contain a degenerate `calc()` constant
-/// preserved verbatim: the space name, each channel via `to_css`, and—if the
-/// (folded) alpha is not fully opaque—a space-padded `/ alpha`. A degenerate
-/// `calc()` alpha folds (`infinity` → 1 = opaque, `-infinity`/`NaN` → 0).
-fn modern_color(space: &str, channels: &[Value], alpha: Option<&Value>, pos: Pos) -> Value {
-    let a = match alpha {
-        Some(v) if is_none_keyword(v) => 1.0,
-        Some(v) => alpha_value(v, pos).unwrap_or(1.0),
-        None => 1.0,
-    };
-    // Only the NON-FINITE channel keeps its `calc(...)` spelling. Every other
-    // one is converted exactly as the ordinary path converts it — `50%` is 0.5
-    // of a `color()` space's 0..1 range, and a slash-division prints its
-    // quotient — because dart builds the color and serializes its channels,
-    // rather than echoing what the caller wrote.
-    let body: Vec<String> = channels
-        .iter()
-        .map(|v| match (degenerate_value(v), v) {
-            // A non-finite channel keeps its `calc(...)` spelling — which for
-            // a slash-division is the QUOTIENT's, not the `1/0` written.
-            (Some(_), Value::Slash(n, _)) => n.to_css(false),
-            (Some(_), _) => v.to_css(false),
-            (None, _) => match modern_channel(v, 1.0) {
-                Some(n) => fmt_num(n, false),
-                None => v.to_css(false),
-            },
-        })
-        .collect();
-    let body = body.join(" ");
-    let text = if (a - 1.0).abs() < f64::EPSILON {
-        format!("color({space} {body})")
-    } else {
-        format!("color({space} {body} / {})", fmt_num(a, false))
-    };
-    Value::Str(crate::value::SassStr {
-        text: text.into(),
-        quoted: false,
-    })
 }
 
 /// Serialize a `color()` description for its channel-count error message:
