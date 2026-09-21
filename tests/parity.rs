@@ -11569,3 +11569,30 @@ fn parity_custom_function_declaration_space() {
         assert_parity_compressed(scss);
     }
 }
+
+/// A private-use character: escaped by the unquoted writer in every style but
+/// compressed, where it goes out as its own bytes and earns the BOM — while
+/// `inspect` escapes it whatever the style, because it serializes in the
+/// default one.
+#[test]
+fn parity_unquoted_private_use_character() {
+    for scss in [
+        "a { b: unquote(\"\\e000\"); }\n",
+        "a { b: unquote(\"\\f8ff\"); }\n",
+        "a { b: unquote(\"\\f0000\"); }\n",
+        "a { b: unquote(\"\\10fffd\"); }\n",
+        "a { b: \\f0000; }\n",
+        "a { b: unquote(\"\\e000\") x; }\n",
+        "a { b: (unquote(\"\\e000\"), x); }\n",
+        "a#{unquote(\"\\e000\")} { b: c; }\n",
+        "a { --x: unquote(\"\\e000\"); }\n",
+        "@use \"sass:meta\";\na { b: meta.inspect((unquote(\"\\e000\"), x)); }\n",
+        "@use \"sass:string\";\na { b: string.length(inspect(unquote(\"\\e000\"))); }\n",
+        "@use \"sass:string\";\na { b: string.length(inspect(unquote(\"\\e000\") x)); }\n",
+        // Not private use: raw in both styles already, and still non-ASCII.
+        "a { b: unquote(\"\\4e2d\"); }\n",
+    ] {
+        assert_parity(scss);
+        assert_parity_compressed(scss);
+    }
+}

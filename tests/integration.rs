@@ -1879,7 +1879,8 @@ fn compressed_output_never_ends_with_a_semicolon() {
 
 /// A private-use character is escaped in expanded output and written RAW when
 /// compressing — dart trades the escape for the character once bytes are what
-/// matter. Measured against dart-sass 1.103.1.
+/// matter. Measured against dart-sass 1.103.1; the UNQUOTED writer and the
+/// `inspect` string were measured against 1.104.1 on 2026-09-21.
 #[test]
 fn compressed_writes_private_use_characters_raw() {
     let expanded = |scss: &str| compile(scss, &Options::default()).expect("compile");
@@ -1937,6 +1938,29 @@ fn compressed_writes_private_use_characters_raw() {
     assert_eq!(
         css_compressed(".a { b: inspect(\"\\e028\"); }"),
         ".a{b:\"\\e028\"}"
+    );
+    // The UNQUOTED writer follows the same rule as the quoted one, in both the
+    // BMP range and the supplementary planes.
+    assert_eq!(expanded("a { b: unquote(\"\\e000\"); }"), "a {\n  b: \\e000;\n}");
+    assert_eq!(
+        css_compressed("a { b: unquote(\"\\e000\"); }"),
+        "\u{feff}a{b:\u{e000}}"
+    );
+    assert_eq!(css_compressed("a { b: \\f0000; }"), "\u{feff}a{b:\u{f0000}}");
+    assert_eq!(
+        css_compressed("a { b: unquote(\"\\e000\") x; }"),
+        "\u{feff}a{b:\u{e000} x}"
+    );
+    // `inspect` escapes INSIDE the string it hands back, because it serializes
+    // in the default style wherever it is called from. So the value written
+    // here is ASCII — no BOM — and it is five characters long, not one.
+    assert_eq!(
+        css_compressed("@use \"sass:meta\";\na { b: meta.inspect((unquote(\"\\e000\"), x)); }"),
+        "a{b:\\e000, x}"
+    );
+    assert_eq!(
+        css_compressed("@use \"sass:string\";\na { b: string.length(inspect(unquote(\"\\e000\"))); }"),
+        "a{b:5}"
     );
 }
 
