@@ -2948,12 +2948,18 @@ fn watch_recovers_when_a_missing_dependency_arrives_in_a_subdirectory() {
 ///
 /// Reproducing that race needs a compile slow enough to write into and an
 /// offset inside it, and neither survives a machine of a different speed. So
-/// the test asserts the RULE instead, with no race in it: push the output's
-/// mtime into the future, which is what a freshness check still in force
-/// would read as "nothing to do", and change a dependency.
+/// the test asserts the RULE instead, with no race and no clock in it.
+///
+/// Overwrite the OUTPUT, which makes it the newest file in the tree and so
+/// exactly what a freshness check still in force reads as "nothing to do",
+/// and then provoke a compile with something the check does not look at: a
+/// new file in a watched directory. Nothing here needs a timestamp set by
+/// hand — `File::set_modified` is 1.75 and this crate's MSRV is 1.74 — and
+/// the two steps cannot race, because overwriting an existing file does not
+/// move its directory's mtime and so provokes nothing on its own.
 #[test]
 fn watch_stops_applying_update_after_the_first_compile() {
-    use std::time::{Duration, Instant, SystemTime};
+    use std::time::{Duration, Instant};
 
     let dir = scratch("watch_update");
     write(&dir, "main.scss", "@use \"v\";\n.a { color: v.$c; }\n");
@@ -2984,19 +2990,17 @@ fn watch_stops_applying_update_after_the_first_compile() {
         assert!(until(&|| css().contains("red")), "the first compile never landed");
         std::thread::sleep(Duration::from_millis(300));
 
-        // An hour in the future: newer than anything the user can save, so a
-        // freshness check still in force can only answer "up to date".
-        let ahead = SystemTime::now() + Duration::from_secs(3600);
-        std::fs::File::options()
-            .write(true)
-            .open(&out)
-            .expect("open the output")
-            .set_modified(ahead)
-            .expect("push the output's mtime forward");
+        // Junk, written LAST, so the output is now newer than every input —
+        // the state a freshness check can only read as "up to date".
+        std::fs::write(&out, "/* stale */\n").unwrap();
+        // …and a reason to compile that the freshness check does not look
+        // at. A new file in a watched directory moves that directory's
+        // mtime; overwriting `out.css` above moved nothing, so these two
+        // steps cannot arrive in the wrong order.
+        std::fs::write(dir.join("newcomer.scss"), "// hello\n").unwrap();
 
-        std::fs::write(dir.join("_v.scss"), "$c: navy;\n").unwrap();
         assert!(
-            until(&|| css().contains("navy")),
+            until(&|| css().contains("red")),
             "--update's freshness check is still deciding, against an output \
              this watch wrote itself: {:?}",
             css(),
