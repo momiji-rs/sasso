@@ -28,6 +28,61 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **The legacy `rgb()`/`hsl()` form choice follows dart's two rules**, which
+  closes the largest remaining family behind the compressed conformance gate.
+  All of it `[measured]` against dart-sass 1.104.1 in both styles.
+
+  Whether a legacy triple is written as numbers or as percentages turns on when
+  a channel counts as an integer, and dart tests that **exactly** for CSS output
+  and **fuzzily** for `meta.inspect` — so one color has two spellings.
+  `color.to-space(hsl(180, 60%, 50%, 0.4), rgb)`, whose channels are
+  50.999999999999986, 203.99999999999997 and 204, is `rgba(20%, 80%, 80%, 0.4)`
+  as CSS and `rgba(51, 204, 204, 0.4)` under inspect; sasso applied one fuzzy
+  rule in both places, so the dust an hsl conversion leaves behind was invisible
+  where dart shows it. The fuzzy side needs both clauses of dart's
+  `fuzzyEquals` — a channel 5e-12 short of 20 is *not* an integer to dart — and
+  the same exactness governs the `[0, 256)` bound on the hex form.
+
+  An out-of-gamut legacy color is written as `hsl()`, and how out-of-gamut is
+  measured was wrong: dart tests each channel against **its own space's**
+  bounds, so hsl and hwb are bounded to `[0, 100]` on channels 1 and 2, not to
+  the `[0, 255]` of the rgb conversion compressed output would otherwise write.
+  `color.to-space(oklch(0.5 0.2 200), hsl)` carries a 655% saturation over a
+  shadow that is ordinary black, and measuring the shadow printed `#000`.
+
+  Making the first rule exact exposed a third divergence, in the arithmetic
+  rather than the serializer: a modified color is built in the working space,
+  and dart reduces a polar hue into `[0, 360)` *before* the conversion back
+  reads it.
+  Only a conversion can see it — `(390 % 360) / 360` is exactly `1/12` while
+  `(390 / 360) % 1` is an ulp short — and one ulp is the difference between
+  `color.complement(rgba(10, 20, 30, 0.4))` writing `rgba(30, 20, 10, 0.4)` and
+  writing a percentage triple.
+
+  Every OTHER decision in that form choice runs through the same comparison,
+  and each was a bare epsilon or a looser tolerance of its own. A `0` hue now
+  survives the 180° offset a negative saturation asks for, because dart matches
+  `0` before it shifts — `color.change(hsl(120, 50%, 50%), $hue: 0,
+  $saturation: -50%)` is `hsl(0, 50%, 50%)`, where a shift-then-reduce turns red
+  into cyan. Whether that saturation counts as negative, whether a channel is
+  past its bound, whether a triple matches a named color (dart looks it up in a
+  map, so `fuzzyHashCode` — the same rounding — has to agree), whether a
+  conversion leaves a powerless hue, and whether an alpha is opaque are all the
+  one rule now: `color.change(red, $red: 255.000000000006)` is
+  `hsl(0, 100%, 50%)` rather than `red`, `color.change(red, $red:
+  254.9999999999)` is `rgb(100%, 0%, 0%)`, and
+  `color.change(red, $alpha: 0.9999999999999)` is `red` rather than an
+  `rgba()` whose alpha prints as `1`.
+
+  One rule still differs: inspect mode writes numbers at full precision, with no
+  10-decimal rounding, so dart's inspect of the first color above is
+  `rgba(3.9215686274500006%, …)` where sasso rounds each channel. That is a
+  number-writer change with a blast radius well beyond colors.
+
+  Compressed passing 14,009 → **14,037** of 14,258 (98.25% → 98.45%); expanded
+  14,107 → **14,114**, the 7 being cases where exact integrality is what dart
+  writes in expanded output too.
+
 - **A degenerate legacy color is a color, not a string**, and an out-of-gamut
   one serializes the way dart-sass serializes it. All of it `[measured]`
   against dart-sass 1.104.1 in both styles.

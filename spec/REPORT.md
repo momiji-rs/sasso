@@ -24,9 +24,9 @@ directory-style cases. `js-api-spec/` (the JavaScript API tests) is excluded --
 it tests the JS binding, not the SCSS->CSS language.
 
 Of those, 14,258 are attempted (8 are tagged
-`:todo` for dart-sass itself) and **14,107 pass**
-(11,615 byte-exact CSS + 2,492 error specs correctly
-rejected), leaving 151 failures. Regenerate this section with
+`:todo` for dart-sass itself) and **14,114 pass**
+(11,622 byte-exact CSS + 2,492 error specs correctly
+rejected), leaving 144 failures. Regenerate this section with
 `SASS_BIN=target/release/sasso python3 spec/run_spec.py`, which writes
 `spec/results.json`.
 

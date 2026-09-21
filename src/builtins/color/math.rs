@@ -109,7 +109,12 @@ pub(crate) fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColo
     // at fuzzy-zero saturation, and hwb when whiteness+blackness covers
     // everything. (The legacy result fill then turns a missing hsl/hwb hue
     // into 0.)
-    if matches!(target, ColorSpace::Lch | ColorSpace::Oklch) && out[1].abs() < 1e-10 {
+    // Each of these is dart's `fuzzyEquals(channel, 0)`, with the 1e11 rounding
+    // clause that makes 6e-12 NOT zero. `[measured]` against dart-sass 1.104.1:
+    // `color.is-missing(color.to-space(lab(50% 0.000000000006 0), lch), "hue")`
+    // is false.
+    let fz = crate::value::fuzzy_eq;
+    if matches!(target, ColorSpace::Lch | ColorSpace::Oklch) && fz(out[1], 0.0) {
         channels[2] = None;
     }
     // dart's lch → lab conversion marks a/b POWERLESS when the lightness is
@@ -118,16 +123,16 @@ pub(crate) fn convert_modern(mc: &ModernColor, target: ColorSpace) -> ModernColo
     // rule (`oklch(none 20% 30deg)` keeps its computed a/b), and a same-space
     // conversion is an identity shortcut that never reaches here.
     let lch_to_lab = mc.space == ColorSpace::Lch && target == ColorSpace::Lab;
-    if lch_to_lab && (channels[0].is_none() || out[0].abs() < 1e-11) {
+    if lch_to_lab && (channels[0].is_none() || fz(out[0], 0.0)) {
         channels[1] = None;
         channels[2] = None;
     }
-    if target == ColorSpace::Hsl && out[1].abs() < 1e-11 {
+    if target == ColorSpace::Hsl && fz(out[1], 0.0) {
         channels[0] = None;
     }
     if target == ColorSpace::Hwb {
         let sum = out[1] + out[2];
-        if sum > 100.0 || (sum - 100.0).abs() < 1e-11 {
+        if sum > 100.0 || fz(sum, 100.0) {
             channels[0] = None;
         }
     }
@@ -221,7 +226,17 @@ pub(super) fn make_modern(mc: ModernColor) -> Color {
 /// % 360`. The EXACT fmod sequence matters bit-for-bit — adding 360 and
 /// reducing again perturbs the last ulp vs a single euclidean remainder, and
 /// sass-spec expectations carry that perturbation.
+///
+/// dart pattern-matches `0` and any non-finite hue BEFORE the invert shift,
+/// which is not the same as shifting and reducing: a 0 hue stays 0 even when a
+/// negative saturation asks for the 180° offset. `[measured]` against dart-sass
+/// 1.104.1: `color.change(hsl(120, 50%, 50%), $hue: 0, $saturation: -50%)` is
+/// `hsl(0, 50%, 50%)`, and `color.change(lch(50% 20 0), $chroma: -20)` keeps
+/// `0deg`.
 fn normalize_hue(hue: f64, invert: bool) -> f64 {
+    if hue == 0.0 || !hue.is_finite() {
+        return 0.0;
+    }
     let shift = if invert { 180.0 } else { 0.0 };
     (hue % 360.0 + 360.0 + shift) % 360.0
 }
@@ -231,8 +246,11 @@ fn normalize_hue(hue: f64, invert: bool) -> f64 {
 /// saturation/chroma, inverting the hue by 180° when it was negative beyond
 /// fuzz; every legacy/polar hue reduces through [`normalize_hue`]'s fmod
 /// sequence. Other spaces are returned unchanged.
-fn normalize_polar(mut mc: ModernColor) -> ModernColor {
-    let fuzzy_zero = |v: f64| v.abs() < 1e-11;
+pub(super) fn normalize_polar(mut mc: ModernColor) -> ModernColor {
+    // dart `fuzzyLessThan(channel1, 0)`: below zero and not `fuzzyEquals` to
+    // it, with both clauses of that comparison — a saturation of -6e-12 is NOT
+    // zero to dart (scaling by 1e11 rounds to -1), so it inverts the hue.
+    let fuzzy_less_than_zero = |v: f64| v < 0.0 && !crate::value::fuzzy_eq(v, 0.0);
     let (hue_idx, mag_idx) = match mc.space {
         ColorSpace::Hsl => (0, Some(1)),
         ColorSpace::Hwb => (0, None),
@@ -242,7 +260,7 @@ fn normalize_polar(mut mc: ModernColor) -> ModernColor {
     let mut invert = false;
     if let Some(i) = mag_idx {
         if let Some(c) = mc.channels[i] {
-            invert = c < 0.0 && !fuzzy_zero(c);
+            invert = fuzzy_less_than_zero(c);
             mc.channels[i] = Some(c.abs());
         }
     }
@@ -434,7 +452,16 @@ pub(crate) fn make_modern_in(mc: ModernColor, _space: ColorSpace) -> Color {
         // Out-of-gamut legacy rgb serializes via hsl; attach modern so the
         // serializer can apply that rule. Otherwise a computed in-gamut rgb
         // uses its CSS named-color spelling when it matches one.
-        let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
+        //
+        // The bound is dart's `_isChannelInGamut`, fuzzily — a channel 6e-12
+        // past 255 is out of gamut to dart, and a looser tolerance here decides
+        // the form before the serializer's own exact rules ever run.
+        // `[measured]`: `color.change(red, $red: 255.000000000006)` is
+        // `hsl(0, 100%, 50%)`, not `red`.
+        let in_gamut = |v: f64| {
+            let fz = crate::value::fuzzy_eq;
+            (v > 0.0 || fz(v, 0.0)) && (v < 255.0 || fz(v, 255.0))
+        };
         if !(in_gamut(r) && in_gamut(g) && in_gamut(b)) {
             c.modern = Some(Box::new(mc));
         } else {

@@ -728,6 +728,234 @@ fn inspecting_an_out_of_gamut_legacy_rgb_color() {
     );
 }
 
+/// dart tests a legacy rgb triple's integrality EXACTLY for CSS output and
+/// FUZZILY for `meta.inspect` (`_asInt`, serialize.dart), so one color has two
+/// spellings: `color.to-space(hsl(180, 60%, 50%, 0.4), rgb)` has channels
+/// 50.999999999999986, 203.99999999999997 and 204 — percentages as CSS,
+/// integers under inspect. Measured against dart-sass 1.104.1.
+#[test]
+fn a_legacy_rgb_triple_is_integral_exactly_for_css_and_fuzzily_for_inspect() {
+    let c = "color.to-space(hsl(180, 60%, 50%, 0.4), rgb)";
+    assert_eq!(
+        css(&format!("@use \"sass:color\";\na {{x: {c}}}")),
+        "a {\n  x: rgba(20%, 80%, 80%, 0.4);\n}\n"
+    );
+    assert_eq!(
+        css(&format!(
+            "@use \"sass:color\";\n@use \"sass:meta\";\na {{x: meta.inspect({c})}}"
+        )),
+        "a {\n  x: rgba(51, 204, 204, 0.4);\n}\n"
+    );
+    // Compressed output applies the exact rule too: the dust keeps this color
+    // off hex, so the percentage form wins on length.
+    assert_eq!(
+        css_compressed(&format!("@use \"sass:color\";\na{{x:{c}}}")),
+        "a{x:rgba(20%,80%,80%,.4)}"
+    );
+    // The same color authored as hsl(): compressed serializes it through the
+    // very same conversion, so it reaches the very same spelling.
+    assert_eq!(
+        css_compressed("a{x:hsl(180, 60%, 50%, 0.4)}"),
+        "a{x:rgba(20%,80%,80%,.4)}"
+    );
+    // A channel that is EXACTLY integral needs no fuzz to stay a plain number.
+    assert_eq!(
+        css("a {x: rgba(10, 20, 30, 0.4)}"),
+        "a {\n  x: rgba(10, 20, 30, 0.4);\n}\n"
+    );
+    assert_eq!(css_compressed("a{x:hsl(120, 50%, 0%)}"), "a{x:#000}");
+}
+
+/// The reroute to `hsl()` that an out-of-gamut legacy color takes measures the
+/// color in ITS OWN space (dart `SassColor.isInGamut`: hsl and hwb bound
+/// channels 1 and 2 to [0, 100], rgb bounds all three to [0, 255]), not in the
+/// sRGB shadow the compressed writer would otherwise serialize. An oklch color
+/// converted to hsl carries a 655% saturation over a shadow that is ordinary
+/// black, so measuring the shadow would print `#000`. Measured against
+/// dart-sass 1.104.1 (`--style=compressed`).
+#[test]
+fn an_out_of_gamut_legacy_color_is_measured_in_its_own_space() {
+    let v = |scss: &str| css_compressed(&format!("@use \"sass:color\";\na{{x:{scss}}}"));
+    assert_eq!(
+        v("hsl(17.5913578322, 6051.6428880588%, 0%)"),
+        "a{x:hsl(17.5913578322,6051.6428880588%,0%)}"
+    );
+    assert_eq!(
+        v("color.to-space(oklch(0.5 0.2 200), hsl)"),
+        "a{x:hsl(183.9676958721,655.5972854828%,7.4482455068%)}"
+    );
+    // hwb is bounded the same way, and writes through hsl once it is out.
+    assert_eq!(
+        v("color.to-space(oklch(0.5 0.2 200), hwb)"),
+        "a{x:hsl(183.9676958721,655.5972854828%,7.4482455068%)}"
+    );
+    assert_eq!(v("hwb(120 -20% 30%)"), "a{x:hsl(120,180%,25%)}");
+    assert_eq!(v("color.adjust(red, $lightness: 200%)"), "a{x:hsl(0,100%,250%)}");
+    // An IN-gamut hwb still serializes through rgb, alpha and all.
+    assert_eq!(v("hwb(200 20% 30%)"), "a{x:rgb(20%,53.3333333333%,70%)}");
+    assert_eq!(
+        v("color.change(hwb(200 20% 30%), $alpha: 0.5)"),
+        "a{x:rgba(20%,53.3333333333%,70%,.5)}"
+    );
+    // An rgb color is bounded by [0, 255], and a fuzzy-zero saturation nulls
+    // the hue the conversion hands back.
+    assert_eq!(
+        v("color.to-space(color(srgb 2 0 0.5), rgb)"),
+        "a{x:hsl(0,0%,100%)}"
+    );
+}
+
+/// dart's serializer opens with `fuzzyEquals(color.alpha, 1)`, so the opacity
+/// test is the same fuzzy comparison as every other legacy-form decision: an
+/// alpha 1e-13 short of 1 is opaque, and one 6e-12 short is not. Measured
+/// against dart-sass 1.104.1.
+#[test]
+fn the_opacity_test_is_dart_s_fuzzy_comparison() {
+    let v = |scss: &str| css(&format!("@use \"sass:color\";\na {{x: {scss}}}"));
+    assert_eq!(
+        v("color.change(red, $alpha: 0.9999999999999)"),
+        "a {\n  x: red;\n}\n"
+    );
+    assert_eq!(
+        v("color.change(hsl(120, 50%, 50%), $alpha: 0.9999999999999)"),
+        "a {\n  x: hsl(120, 50%, 50%);\n}\n"
+    );
+    // 6e-12 short: the 1e11 rounding disagrees, so the color is translucent --
+    // and its alpha still PRINTS as 1, which is dart's output too.
+    assert_eq!(
+        v("color.change(red, $alpha: 0.999999999994)"),
+        "a {\n  x: rgba(255, 0, 0, 1);\n}\n"
+    );
+}
+
+/// A hue is powerless -- a missing channel -- when the saturation or chroma a
+/// conversion produced is `fuzzyEquals` to zero, which is not the same as being
+/// within the epsilon of it. Measured against dart-sass 1.104.1.
+#[test]
+fn a_powerless_hue_is_decided_by_dart_s_fuzz_not_by_an_epsilon() {
+    let v = |scss: &str| css(&format!("@use \"sass:color\";\na {{x: {scss}}}"));
+    let missing = |c: &str| v(&format!("color.is-missing(color.to-space({c}), \"hue\")"));
+    for c in [
+        "lab(50% 0.000000000006 0), lch",
+        "lab(50% 0.00000000006 0), lch",
+        "oklab(0.5 0.000000000006 0), oklch",
+    ] {
+        assert_eq!(missing(c), "a {\n  x: false;\n}\n", "{c}");
+    }
+    assert_eq!(missing("lab(50% 0.0000000000004 0), lch"), "a {\n  x: true;\n}\n");
+    // The hue the compressed writer derives for its hsl bid follows the same
+    // rule, and keeping it is what makes the rgb form the shorter one.
+    assert_eq!(
+        css_compressed(
+            "@use \"sass:color\";\na {x: color.change(hsl(90, 50%, 50%), $saturation: -0.000000000006%)}"
+        ),
+        "a{x:rgb(50%,50%,50%)}"
+    );
+}
+
+/// dart's `_normalizeHue` pattern-matches a `0` hue (and any non-finite one)
+/// BEFORE applying the 180 degrees a negative saturation or chroma asks for, so
+/// the invert leaves a zero hue alone -- reducing `0 + 360 + 180` instead would
+/// turn red into cyan. Whether the magnitude counts as negative is dart's
+/// `fuzzyLessThan(channel1, 0)`, which needs both clauses of `fuzzyEquals`: a
+/// saturation of -6e-12 is not zero to dart, so it DOES invert. Measured
+/// against dart-sass 1.104.1.
+#[test]
+fn a_zero_hue_survives_the_invert_a_negative_saturation_asks_for() {
+    let v = |scss: &str| css(&format!("@use \"sass:color\";\na {{x: {scss}}}"));
+    assert_eq!(
+        v("color.change(hsl(120, 50%, 50%), $hue: 0, $saturation: -50%)"),
+        "a {\n  x: hsl(0, 50%, 50%);\n}\n"
+    );
+    assert_eq!(
+        v("color.adjust(hsl(0, 50%, 50%), $saturation: -100%)"),
+        "a {\n  x: hsl(0, 0%, 50%);\n}\n"
+    );
+    assert_eq!(
+        v("color.change(lch(50% 20 0), $chroma: -20)"),
+        "a {\n  x: lch(50% 20 0deg);\n}\n"
+    );
+    // A hue that is NOT zero takes the offset, as it always did.
+    assert_eq!(
+        v("color.change(hsl(120, 50%, 50%), $saturation: -50%)"),
+        "a {\n  x: hsl(300, 50%, 50%);\n}\n"
+    );
+    // Inside the epsilon but not inside the 1e11 rounding: still negative.
+    assert_eq!(
+        v("color.change(hsl(90, 50%, 50%), $saturation: -0.000000000006%)"),
+        "a {\n  x: hsl(270, 0%, 50%);\n}\n"
+    );
+    // Below the rounding, and for a negative zero: not negative at all.
+    assert_eq!(
+        v("color.change(hsl(90, 50%, 50%), $saturation: -0.0000000000004%)"),
+        "a {\n  x: hsl(90, 0%, 50%);\n}\n"
+    );
+    assert_eq!(
+        v("color.change(hsl(90, 50%, 50%), $saturation: -0%)"),
+        "a {\n  x: hsl(90, 0%, 50%);\n}\n"
+    );
+}
+
+/// Every legacy-form decision is made with dart's `fuzzyEquals`, so a channel
+/// 6e-12 past 255 is OUT of gamut (and writes hsl), and one 1e-10 short of 255
+/// is neither integral nor named (and writes percentages). A looser tolerance
+/// anywhere upstream decides the form before the serializer's exact rules run.
+/// Measured against dart-sass 1.104.1.
+#[test]
+fn a_channel_inside_the_fuzz_but_past_the_bound_is_out_of_gamut() {
+    let v = |scss: &str| css(&format!("@use \"sass:color\";\na {{x: {scss}}}"));
+    assert_eq!(
+        v("color.change(red, $red: 255.000000000006)"),
+        "a {\n  x: hsl(0, 100%, 50%);\n}\n"
+    );
+    assert_eq!(
+        v("color.change(blue, $red: 255.000000000006, $blue: 0)"),
+        "a {\n  x: hsl(0, 100%, 50%);\n}\n"
+    );
+    assert_eq!(
+        v("color.change(red, $red: 254.9999999999)"),
+        "a {\n  x: rgb(100%, 0%, 0%);\n}\n"
+    );
+    assert_eq!(
+        v("color.change(red, $green: -0.0000000001)"),
+        "a {\n  x: hsl(360, 100.0000000001%, 50%);\n}\n"
+    );
+    // A triple that IS exactly the named color still gets the name.
+    assert_eq!(
+        v("color.change(blue, $red: 255, $blue: 0)"),
+        "a {\n  x: red;\n}\n"
+    );
+    assert_eq!(v("color.adjust(#ff0001, $blue: -1)"), "a {\n  x: red;\n}\n");
+}
+
+/// A modified color is built in the WORKING space before it converts back, and
+/// dart's construction reduces a polar hue into `[0, 360)` on the way (dart
+/// `SassColor.forSpaceInternal` -> `_normalizeHue`). Only the conversion can
+/// observe it -- `(390 % 360) / 360` is exactly `1/12` where `(390 / 360) % 1`
+/// is an ulp short -- and one ulp in a channel is the whole difference between
+/// an integer triple and a percentage one. Measured against dart-sass 1.104.1.
+#[test]
+fn a_modified_hue_is_reduced_before_the_conversion_back() {
+    let v = |scss: &str| css(&format!("@use \"sass:color\";\na {{x: {scss}}}"));
+    for c in [
+        "color.complement(rgba(10, 20, 30, 0.4))",
+        "color.adjust(rgba(10, 20, 30, 0.4), $hue: 180)",
+        "color.adjust(rgba(10, 20, 30, 0.4), $hue: -180)",
+        "color.adjust(rgba(10, 20, 30, 0.4), $hue: 540)",
+    ] {
+        assert_eq!(v(c), "a {\n  x: rgba(30, 20, 10, 0.4);\n}\n", "{c}");
+    }
+    // The hue a polar RESULT keeps is reduced too, as it always was.
+    assert_eq!(
+        v("color.adjust(hsl(210, 50%, 40%), $hue: 180)"),
+        "a {\n  x: hsl(30, 50%, 40%);\n}\n"
+    );
+    assert_eq!(
+        v("color.adjust(oklch(0.5 0.2 200), $hue: 400)"),
+        "a {\n  x: oklch(50% 0.2 240deg);\n}\n"
+    );
+}
+
 /// `color()`'s space name and its three channels are separated by MANDATORY
 /// whitespace — `color(display-p3 .5 .2 .9)` is an identifier followed by three
 /// numbers, so compressing those spaces away yields `color(display-p3.5.2.9)`,

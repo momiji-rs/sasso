@@ -3,7 +3,7 @@
 > ⚠️ **Historical document, kept for its reasoning and its rankings — not for its
 > facts.** Every count, and every "sasso does not support X" below, describes the
 > tree at the 24.5% baseline in the next paragraph. The suite now passes
-> **14,107 / 14,258 attempted (98.94%)** against sass-spec `b39c3276` and
+> **14,114 / 14,258 attempted (98.99%)** against sass-spec `b39c3276` and
 > dart-sass 1.104.1, so a statement here about what sasso cannot do is very
 > likely no longer true. For one, the appendix still says `/` outside `calc()`
 > parse-errors and produces no numeric result, where today the values are right

@@ -7882,6 +7882,116 @@ fn parity_legacy_modify_gamut_serialization() {
 }
 
 #[test]
+fn parity_legacy_color_form_choice() {
+    // Two rules pick a legacy color's spelling, and both are measured here in
+    // each style. (1) A channel counts as an integer EXACTLY for CSS output and
+    // fuzzily for `meta.inspect`, so the dust an hsl conversion leaves behind
+    // sends the whole triple to percentages in CSS while inspect still shows
+    // integers. (2) The reroute to hsl() that an out-of-gamut color takes
+    // measures the color in its own space, where hsl/hwb channels 1 and 2 are
+    // bounded to [0, 100] — not in the sRGB shadow compressed output would
+    // otherwise write.
+    for c in [
+        "color.to-space(hsl(180, 60%, 50%, 0.4), rgb)",
+        "hsl(180, 60%, 50%, 0.4)",
+        "color.to-space(hsl(210, 50%, 30%), rgb)",
+        "color.to-space(hsl(25, 100%, 40%, 0.8), rgb)",
+        "hsl(120, 50%, 0%)",
+        "hsl(17.5913578322, 6051.6428880588%, 0%)",
+        "color.to-space(oklch(0.5 0.2 200), hsl)",
+        "color.to-space(oklch(0.5 0.2 200), hwb)",
+        "color.to-space(oklab(0.5 0.2 -0.3), hsl)",
+        "hwb(120 -20% 30%)",
+        "hwb(200 20% 30%)",
+        "color.change(hwb(200 20% 30%), $alpha: 0.5)",
+        "color.adjust(red, $lightness: 200%)",
+        "color.to-space(color(srgb 2 0 0.5), rgb)",
+        "color.to-space(color(srgb 2 0 0), rgb)",
+    ] {
+        let src = format!("@use \"sass:color\";\na {{b: {c}}}\n");
+        assert_parity(&src);
+        assert_parity_compressed(&src);
+    }
+    // The inspect spelling of the same colors, where the integrality test is
+    // the fuzzy one.
+    for c in [
+        "color.to-space(hsl(180, 60%, 50%, 0.4), rgb)",
+        "color.to-space(hsl(25, 100%, 40%, 0.8), rgb)",
+        "color.to-space(hsl(180, 60%, 50%), rgb)",
+        "color.to-space(color(srgb 2 0 0), rgb)",
+    ] {
+        assert_parity(&format!(
+            "@use \"sass:color\";\n@use \"sass:meta\";\na {{b: meta.inspect({c})}}\n"
+        ));
+    }
+}
+
+#[test]
+fn parity_fuzz_boundary_legacy_form() {
+    // Every legacy-form decision runs through dart's `fuzzyEquals`, whose 1e11
+    // rounding clause is what separates these from an ordinary integer: a `0`
+    // hue survives the invert a negative saturation asks for, a channel 6e-12
+    // past 255 is out of gamut, and one 1e-10 short of it is neither integral
+    // nor named.
+    for c in [
+        "color.change(hsl(120, 50%, 50%), $hue: 0, $saturation: -50%)",
+        "color.adjust(hsl(0, 50%, 50%), $saturation: -100%)",
+        "color.change(lch(50% 20 0), $chroma: -20)",
+        "color.change(oklch(0.5 0.2 0), $chroma: -0.2)",
+        "color.change(hsl(120, 50%, 50%), $saturation: -50%)",
+        "color.change(hsl(90, 50%, 50%), $saturation: -0.000000000006%)",
+        "color.change(hsl(90, 50%, 50%), $saturation: -0.0000000000004%)",
+        "color.change(hsl(90, 50%, 50%), $saturation: -0%)",
+        "color.change(red, $red: 255.000000000006)",
+        "color.change(blue, $red: 255.000000000006, $blue: 0)",
+        "color.change(red, $red: 254.9999999999)",
+        "color.change(red, $red: 255.0000000001)",
+        "color.change(red, $green: -0.0000000001)",
+        "color.change(blue, $red: 255, $blue: 0)",
+        "color.adjust(#ff0001, $blue: -1)",
+        "color.change(red, $alpha: 0.9999999999999)",
+        "color.change(red, $alpha: 0.999999999994)",
+        "color.change(hsl(120, 50%, 50%), $alpha: 0.9999999999999)",
+        "color.change(hwb(120 20% 30%), $alpha: 0.9999999999999)",
+        "color.to-space(lab(50% 0.000000000006 0), lch)",
+        "color.to-space(lab(50% 0.00000000006 0), lch)",
+        "color.to-space(lab(50% 0.0000000000004 0), lch)",
+        "color.to-space(oklab(0.5 0.000000000006 0), oklch)",
+        "color.to-space(lch(0.000000000006% 20 90), lab)",
+        "color.to-space(hsl(270, 0.000000000006%, 50%), rgb)",
+    ] {
+        let src = format!("@use \"sass:color\";\na {{b: {c}}}\n");
+        assert_parity(&src);
+        assert_parity_compressed(&src);
+    }
+}
+
+#[test]
+fn parity_modified_hue_reduced_before_conversion() {
+    // dart builds the modified color in the working space through
+    // `SassColor.forSpaceInternal`, which reduces a polar hue into `[0, 360)`
+    // before the conversion back reads it. The ulp that separates
+    // `(390 % 360) / 360` from `(390 / 360) % 1` decides whether a legacy rgb
+    // result is an integer triple or a percentage one.
+    for c in [
+        "color.complement(rgba(10, 20, 30, 0.4))",
+        "color.complement(rgba(turquoise, 0.7))",
+        "color.adjust(rgba(10, 20, 30, 0.4), $hue: 180)",
+        "color.adjust(rgba(10, 20, 30, 0.4), $hue: -180)",
+        "color.adjust(rgba(10, 20, 30, 0.4), $hue: 540)",
+        "color.adjust(hsl(210, 50%, 40%), $hue: 180)",
+        "color.adjust(oklch(0.5 0.2 200), $hue: 400)",
+        "color.adjust(lch(50% 20 200), $hue: -400)",
+        "color.adjust(hwb(200 20% 30%), $hue: 400)",
+        "color.change(hsl(120, 50%, 50%), $saturation: -100%)",
+    ] {
+        let src = format!("@use \"sass:color\";\na {{b: {c}}}\n");
+        assert_parity(&src);
+        assert_parity_compressed(&src);
+    }
+}
+
+#[test]
 fn parity_modify_color_named_first_arg() {
     // `$color` passed by name (e.g. with a non-legacy color and an explicit
     // working space) must not be treated as a channel.
