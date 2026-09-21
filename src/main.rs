@@ -949,9 +949,16 @@ struct Shared {
     /// emitted from the unit that wrote it, like `--update`'s.
     watch: bool,
     /// This compile is the speculative one at the head of a burst (see
-    /// `watch.rs`). The likeliest cause of a failure here is a file still
-    /// being written, so it reports nothing and touches no output — the
-    /// authoritative run that always follows does both.
+    /// `watch.rs`). The likeliest cause of a FAILURE here is a file still
+    /// being written, so it reports nothing and leaves the output exactly as
+    /// it was — no error stylesheet, no removal — and the authoritative run
+    /// that always follows does both.
+    ///
+    /// A SUCCESS still writes, and deliberately: that write is the whole
+    /// latency win, and it is what puts CSS on disk in 13 ms rather than 50.
+    /// It can be wrong — the save may not have finished — which is why the
+    /// authoritative run is guaranteed and why `--update`'s freshness check
+    /// is off for every run after the first (see `run_watch`).
     provisional: bool,
     file_error_css: bool,
     /// Print an error stylesheet to stdout on failure (`--error-css`, explicit).
@@ -1789,9 +1796,31 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
     }
 
     // A provisional run differs from an authoritative one in what it is
-    // ALLOWED to do, not in how it compiles, so it is the same `Shared` with
-    // one flag flipped rather than a second code path.
-    let quiet_shared = Shared {
+    // ALLOWED to do, not in how it compiles, so these are the same `Shared`
+    // with a flag flipped rather than a second code path. (`..*shared` moves
+    // only `Copy` fields — the two `Vec`s are listed above it — so the
+    // borrow is never moved out of.)
+    //
+    // `--update` is honoured for the FIRST compile and never again, and that
+    // is a correctness fix rather than an optimisation. Its freshness check
+    // asks whether the output is newer than every input, and after the first
+    // compile the output is one THIS SESSION wrote — so a provisional run
+    // that caught a save half-written, succeeded, and wrote the wrong CSS
+    // makes its own output look up to date, and the authoritative run behind
+    // it skips the write that would have corrected it. Measured, writing
+    // `$c: bl` and finishing `ue;` 400 ms into a 680 ms compile: 6 of 6 runs
+    // stuck on `color: bl` forever. dart's own `--watch --update` is worse
+    // here — it left the first change uncompiled entirely — so there is no
+    // behaviour of its to copy.
+    let live = Shared {
+        update: false,
+        provisional: false,
+        load_paths: shared.load_paths.clone(),
+        silenced: shared.silenced.clone(),
+        ..*shared
+    };
+    let live_provisional = Shared {
+        update: false,
         provisional: true,
         load_paths: shared.load_paths.clone(),
         silenced: shared.silenced.clone(),
@@ -1805,10 +1834,18 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
     // The first compile is authoritative: nothing is half-written yet, and a
     // watch that started against a broken stylesheet has to say so.
     let mut step = watch::Step::Run { provisional: false };
+    let mut started_once = false;
 
     loop {
         if let watch::Step::Run { provisional } = step {
-            let run_shared = if provisional { &quiet_shared } else { shared };
+            let run_shared = match (started_once, provisional) {
+                // The very first compile is the only one `--update` applies
+                // to; it is also never provisional.
+                (false, _) => shared,
+                (true, true) => &live_provisional,
+                (true, false) => &live,
+            };
+            started_once = true;
             let outcomes = compile_all(units, run_shared, jobs, stop_on_error);
             let mut ok = true;
             let mut followed: Vec<PathBuf> = Vec::new();

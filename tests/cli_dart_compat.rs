@@ -2935,3 +2935,78 @@ fn watch_recovers_when_a_missing_dependency_arrives_in_a_subdirectory() {
         std::panic::resume_unwind(e);
     }
 }
+
+/// `--watch --update`: the freshness check applies to the first compile and
+/// never again.
+///
+/// After that, the output it compares against is one this session wrote — so
+/// a provisional run that caught a save half-written, succeeded, and wrote
+/// the wrong CSS makes its own output look up to date, and the authoritative
+/// run behind it skips the write that would have fixed it. Measured before
+/// this: writing `$c: bl` and finishing `ue;` 400 ms into a 680 ms compile
+/// left 6 of 6 runs stuck on `color: bl` forever.
+///
+/// Reproducing that race needs a compile slow enough to write into and an
+/// offset inside it, and neither survives a machine of a different speed. So
+/// the test asserts the RULE instead, with no race in it: push the output's
+/// mtime into the future, which is what a freshness check still in force
+/// would read as "nothing to do", and change a dependency.
+#[test]
+fn watch_stops_applying_update_after_the_first_compile() {
+    use std::time::{Duration, Instant, SystemTime};
+
+    let dir = scratch("watch_update");
+    write(&dir, "main.scss", "@use \"v\";\n.a { color: v.$c; }\n");
+    write(&dir, "_v.scss", "$c: red;\n");
+
+    let mut child = std::process::Command::new(BIN)
+        .args(["--no-source-map", "--watch", "--update", "main.scss", "out.css"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn --watch --update");
+
+    let out = dir.join("out.css");
+    let css = || std::fs::read_to_string(&out).unwrap_or_default();
+    let until = |pred: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(until(&|| css().contains("red")), "the first compile never landed");
+        std::thread::sleep(Duration::from_millis(300));
+
+        // An hour in the future: newer than anything the user can save, so a
+        // freshness check still in force can only answer "up to date".
+        let ahead = SystemTime::now() + Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&out)
+            .expect("open the output")
+            .set_modified(ahead)
+            .expect("push the output's mtime forward");
+
+        std::fs::write(dir.join("_v.scss"), "$c: navy;\n").unwrap();
+        assert!(
+            until(&|| css().contains("navy")),
+            "--update's freshness check is still deciding, against an output \
+             this watch wrote itself: {:?}",
+            css(),
+        );
+    }));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}

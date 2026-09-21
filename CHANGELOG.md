@@ -47,9 +47,13 @@ Conformance is tracked separately as a ratchet against the official
   always has node's watcher.
 
   A burst of saves costs two compiles, not one per event: a provisional run
-  at the head, which reports nothing and touches no output because the
-  likeliest cause of a failure there is a file still being written, and an
-  authoritative one behind it. The same rule as the npm CLI's `_coalesce.mjs`,
+  at the head and an authoritative one behind it. A provisional FAILURE is
+  silent and leaves the output alone, because the likeliest cause of one is
+  a file still being written; a provisional SUCCESS writes, which is the
+  whole latency win. Because that write can be wrong, the authoritative run
+  is guaranteed — and `--update`'s freshness check is off for every run
+  after the first, since otherwise the output it measures against is one
+  this session just wrote. The same rule as the npm CLI's `_coalesce.mjs`,
   and tested the same way — against a clock the test supplies, because the
   spacing of real writes cannot be pinned on a loaded machine.
 
