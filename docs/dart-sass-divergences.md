@@ -24,7 +24,7 @@ are fixed as they come up.
 
 | measurement | result |
 |---|---|
-| [sass-spec](https://github.com/sass/sass-spec) suite | **14,107 / 14,258 attempted (98.94%)**, ratcheted in CI — 98.89% of all 14,266, the other 8 being cases tagged `:todo` for dart-sass itself |
+| [sass-spec](https://github.com/sass/sass-spec) suite | **14,114 / 14,258 attempted (98.99%)**, ratcheted in CI — 98.93% of all 14,266, the other 8 being cases tagged `:todo` for dart-sass itself |
 | Lichess (lila) corpus, 148 entry points, `--style=expanded` | **147 / 148 byte-identical** |
 | the same corpus, `--style=compressed` | **147 / 148 byte-identical** |
 | the same corpus, source maps (`--embed-sources`) | **148 / 148 byte-identical** |

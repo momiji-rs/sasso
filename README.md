@@ -4,7 +4,7 @@
 [![docs.rs](https://img.shields.io/docsrs/sasso)](https://docs.rs/sasso)
 [![CI](https://github.com/momiji-rs/sasso/actions/workflows/ci.yml/badge.svg)](https://github.com/momiji-rs/sasso/actions/workflows/ci.yml)
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/momiji-rs/sasso?utm_source=badge)
-[![sass-spec](https://img.shields.io/badge/sass--spec-98.9%25_of_attempted-brightgreen)](#conformance)
+[![sass-spec](https://img.shields.io/badge/sass--spec-99.0%25_of_attempted-brightgreen)](#conformance)
 [![dart-sass](https://img.shields.io/badge/dart--sass-1.104.1_parity-blue)](#conformance)
 [![runtime deps](https://img.shields.io/badge/runtime_deps-0-brightgreen)](Cargo.toml)
 [![license](https://img.shields.io/crates/l/sasso.svg)](#license)
@@ -17,8 +17,8 @@ subset it implements.
 > Status: v0.x, maturing fast. Compiles real-world SCSS and indented `.sass`
 > byte-identically to **dart-sass 1.104.1** — on a 148-entry-point production
 > corpus, 147/148 files match byte-for-byte in *both* output styles and
-> 148/148 source maps match exactly — and **passes 98.9% of the official
-> [sass-spec](https://github.com/sass/sass-spec) suite (14,107 / 14,258
+> 148/148 source maps match exactly — and **passes 99.0% of the official
+> [sass-spec](https://github.com/sass/sass-spec) suite (14,114 / 14,258
 > attempted)**, tracked as a ratchet (see [Conformance](#conformance) for what
 > that denominator means). Every divergence we know about is listed in
 > [docs/dart-sass-divergences.md](docs/dart-sass-divergences.md).
@@ -72,8 +72,8 @@ and `%placeholder`s, a `calc()` engine, the CSS unit system + math functions,
 full CSS Color 4 color spaces (`oklch`/`lab`/`color()`…), structured
 `@media`/`@supports`, maps, the `@use`/`@forward` module system (built-in
 `sass:*` modules + user files), and the indented `.sass` syntax. **The
-compiler passes 98.9% of the attempted sass-spec suite (14,107 / 14,258)**
-byte-for-byte against dart-sass 1.104.1 — 11,615 byte-exact CSS outputs plus
+compiler passes 99.0% of the attempted sass-spec suite (14,114 / 14,258)**
+byte-for-byte against dart-sass 1.104.1 — 11,622 byte-exact CSS outputs plus
 2,492 error specs it correctly rejects (see [Conformance](#conformance)), and
 every known difference is written down in
 [docs/dart-sass-divergences.md](docs/dart-sass-divergences.md).
@@ -260,8 +260,8 @@ pass rate; we ratchet it upward over time.
 | sass-spec commit | `b39c3276` (2026-09-08), reference dart-sass **1.104.1** |
 | Total cases | 14,266 |
 | Attempted (excl. 8 dart-sass `:todo`) | 14,258 |
-| **Passing** | **14,107 — 98.94% of attempted** (98.89% of all 14,266) |
-| ↳ byte-exact CSS output | 11,615 |
+| **Passing** | **14,114 — 98.99% of attempted** (98.93% of all 14,266) |
+| ↳ byte-exact CSS output | 11,622 |
 | ↳ error specs correctly rejected | 2,492 |
 
 *Passing* = byte-exact CSS output match **plus** error specs the compiler
@@ -293,8 +293,8 @@ dart-sass 1.104.1's **compressed** output for the same cases
 
 | Metric | Value |
 | --- | --- |
-| **Passing, compressed** | **14,001 — 98.20% of attempted** |
-| ↳ byte-exact compressed CSS | 11,509 |
+| **Passing, compressed** | **14,037 — 98.45% of attempted** |
+| ↳ byte-exact compressed CSS | 11,545 |
 | ↳ error specs correctly rejected (style-independent) | 2,492 |
 
 The gate found 1,528 cases that compile to byte-exact `expanded` CSS and to
@@ -305,10 +305,11 @@ dart's two number writers decides whether a fraction loses its leading zero,
 which nodes survive compression empty (`@media {}` goes, `@font-face {}` stays
 — dart keeps an at-rule it does not know the semantics of), and whether a
 preserved call is a calculation or a string (a string carries one spelling for
-both styles, so `round(1px, 2bar)` could not lose its space). 106 cases remain,
-62 of which are ones where dart-sass 1.104.1's own expanded output no longer
-matches the expectation sass-spec ships. This is a ratchet like the other one —
-it can only go up.
+both styles, so `round(1px, 2bar)` could not lose its space). A fifth, which of
+the legacy `rgb()`/`hsl()` forms a colour is written in, accounted for 28 more.
+77 cases remain, 62 of which are ones where dart-sass 1.104.1's own expanded
+output no longer matches the expectation sass-spec ships. This is a ratchet like
+the other one — it can only go up.
 
 **Strict input validation, too.** Matching dart-sass means rejecting what
 dart-sass rejects, not just reproducing its output. sasso errors — rather than
