@@ -3182,3 +3182,50 @@ fn watch_declines_to_write_over_a_source_reached_through_a_symlink() {
         "nothing was written, so nothing is narrated: {stdout:?}"
     );
 }
+
+/// The alias guard on the FAILURE path: a broken save when the output is
+/// one of the sources.
+///
+/// The success arm declined to write there; `finish_compile_error` did not,
+/// so the error stylesheet — or, under `--no-error-css`, a deletion — landed
+/// on the entry. Measured before this: `--watch main.scss main.scss`, then
+/// break a dependency, and the stylesheet is gone. Skipping the successful
+/// write and then destroying the file on the next typo is worse than either
+/// alone.
+#[test]
+fn watch_declines_to_write_error_css_over_a_source() {
+    use std::time::Duration;
+
+    for extra in [None, Some("--no-error-css")] {
+        let dir = scratch("watch_errorcss_alias");
+        const SRC: &str = "@use \"v\";\n.a { color: v.$c; }\n";
+        write(&dir, "main.scss", SRC);
+        write(&dir, "_v.scss", "$c: red;\n");
+
+        let mut args = vec!["--no-source-map"];
+        args.extend(extra);
+        args.extend(["--watch", "main.scss", "main.scss"]);
+        let mut child = std::process::Command::new(BIN)
+            .args(&args)
+            .current_dir(&dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn --watch");
+
+        std::thread::sleep(Duration::from_millis(700));
+        // Break it: the compile now fails, and the failure path used to
+        // write the error stylesheet at the output — which is the entry.
+        std::fs::write(dir.join("_v.scss"), "$c: ;\n").unwrap();
+        std::thread::sleep(Duration::from_millis(1200));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let now = read(&dir, "main.scss");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            now, SRC,
+            "{args:?}: the entry was overwritten by the failure path"
+        );
+    }
+}

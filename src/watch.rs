@@ -195,16 +195,22 @@ impl Snapshot {
     ///   into a 680 ms compile, and 3 in 5 lost writing into the FIRST
     ///   compile, where every file is new and there is no earlier stamp to
     ///   keep.
-    /// - a `dir` is always re-stamped, because the compile's own output
-    ///   moves it. Creating a file changes its directory's mtime, so
-    ///   keeping the old stamp would make every first write look like a
-    ///   change and the watch would answer itself.
+    /// - a `dir` keeps its stamp too, for the same reason and one more: a
+    ///   dependency CREATED while the compile was running changes the
+    ///   directory that was waiting for it, and re-stamping would record
+    ///   that arrival as the baseline — the watch would sit on the failed
+    ///   result with the fix already on disk.
+    /// - a directory in `ours` — one this compile WROTE into — is always
+    ///   re-stamped, because creating a file changes its directory's mtime
+    ///   and keeping the old stamp would make the watch answer its own
+    ///   output forever.
     ///
     /// `stamp` is injected so a test can drive this without a filesystem.
     pub(crate) fn follow<F>(
         &mut self,
         files: impl IntoIterator<Item = (PathBuf, Stamp)>,
         dirs: impl IntoIterator<Item = PathBuf>,
+        ours: &[PathBuf],
         mut stamp: F,
     ) where
         F: FnMut(&Path) -> Stamp,
@@ -215,7 +221,11 @@ impl Snapshot {
             next.insert(p, s);
         }
         for d in dirs {
-            let s = stamp(&d);
+            let s = if ours.contains(&d) {
+                stamp(&d)
+            } else {
+                self.files.get(&d).copied().unwrap_or_else(|| stamp(&d))
+            };
             next.insert(d, s);
         }
         self.files = next;
@@ -412,7 +422,7 @@ mod tests {
     #[test]
     fn a_file_that_stays_missing_is_not_a_change() {
         let mut s = Snapshot::default();
-        s.follow([(PathBuf::from("/gone.scss"), Stamp::MISSING)], [], |_| {
+        s.follow([(PathBuf::from("/gone.scss"), Stamp::MISSING)], [], &[], |_| {
             Stamp::MISSING
         });
         assert!(!s.changed(|_| Stamp::MISSING));
@@ -431,7 +441,7 @@ mod tests {
             len,
             digest: 0,
         };
-        s.follow([(PathBuf::from("/a.scss"), coarse(10))], [], |_| coarse(10));
+        s.follow([(PathBuf::from("/a.scss"), coarse(10))], [], &[], |_| coarse(10));
         assert!(s.changed(|_| coarse(11)));
     }
 
@@ -442,8 +452,8 @@ mod tests {
     fn following_again_does_not_invent_a_change() {
         let mut s = Snapshot::default();
         let at = |p: &str| (PathBuf::from(p), stamp_of(1));
-        s.follow([at("/a.scss"), at("/b.scss")], [], |_| stamp_of(1));
-        s.follow([at("/a.scss"), at("/c.scss")], [], |_| stamp_of(1));
+        s.follow([at("/a.scss"), at("/b.scss")], [], &[], |_| stamp_of(1));
+        s.follow([at("/a.scss"), at("/c.scss")], [], &[], |_| stamp_of(1));
         assert_eq!(s.len(), 2);
         assert!(!s.changed(|_| stamp_of(1)));
     }
@@ -480,10 +490,10 @@ mod tests {
     fn a_file_changed_during_the_compile_is_still_a_change() {
         let mut s = Snapshot::default();
         let f = PathBuf::from("/a.scss");
-        s.follow([(f.clone(), stamp_of(1))], [], |_| stamp_of(1));
+        s.follow([(f.clone(), stamp_of(1))], [], &[], |_| stamp_of(1));
         // The compile runs; the file is saved again; the watcher follows the
         // same set afterwards and must NOT adopt the new stamp.
-        s.follow([(f.clone(), stamp_of(2))], [], |_| stamp_of(2));
+        s.follow([(f.clone(), stamp_of(2))], [], &[], |_| stamp_of(2));
         assert!(s.changed(|_| stamp_of(2)), "the mid-compile save was absorbed");
     }
 
@@ -493,9 +503,9 @@ mod tests {
     fn a_directory_is_restamped_because_our_own_writes_move_it() {
         let mut s = Snapshot::default();
         let d = PathBuf::from("/out");
-        s.follow([], [d.clone()], |_| stamp_of(1));
+        s.follow([], [d.clone()], std::slice::from_ref(&d), |_| stamp_of(1));
         // The compile created a file in it, moving its mtime.
-        s.follow([], [d.clone()], |_| stamp_of(2));
+        s.follow([], [d.clone()], std::slice::from_ref(&d), |_| stamp_of(2));
         assert!(!s.changed(|_| stamp_of(2)), "our own write looked like a change");
     }
 
@@ -511,7 +521,7 @@ mod tests {
         let f = PathBuf::from("/new.scss");
         // Read at 1; saved again during the compile, so it is 2 by the time
         // the watcher follows it.
-        s.follow([(f.clone(), stamp_of(1))], [], |_| stamp_of(2));
+        s.follow([(f.clone(), stamp_of(1))], [], &[], |_| stamp_of(2));
         assert!(
             s.changed(|_| stamp_of(2)),
             "the save during the first compile was absorbed",
@@ -529,7 +539,7 @@ mod tests {
             digest,
         };
         let mut s = Snapshot::default();
-        s.follow([(PathBuf::from("/a.scss"), whole_second(111))], [], |_| {
+        s.follow([(PathBuf::from("/a.scss"), whole_second(111))], [], &[], |_| {
             whole_second(111)
         });
         assert!(
@@ -630,5 +640,23 @@ mod tests {
         assert_eq!(two, after_edit, "editing a file is not a directory change");
         // Reading a directory as a file is where this started.
         assert_eq!(digest_of(&std::env::temp_dir(), false), 0);
+    }
+
+    /// A directory we did NOT write into keeps its stamp, so a dependency
+    /// created while the compile was running is still a change. Without
+    /// this the watch records the arrival as the baseline and sits on the
+    /// failed result with the fix already on disk.
+    #[test]
+    fn a_directory_changed_during_the_compile_is_still_a_change() {
+        let mut s = Snapshot::default();
+        let d = PathBuf::from("/sub");
+        s.follow([], [d.clone()], &[], |_| stamp_of(1));
+        // The compile ran; `_new.scss` appeared in it; we wrote nothing
+        // there ourselves.
+        s.follow([], [d.clone()], &[], |_| stamp_of(2));
+        assert!(
+            s.changed(|_| stamp_of(2)),
+            "the arrival during the compile was absorbed"
+        );
     }
 }

@@ -1630,7 +1630,8 @@ fn compile_unit(unit: &Unit, shared: &Shared) -> Outcome {
             // stale CSS). There is no source span to render here.
             if outcome.status == Status::CompileError {
                 let message = outcome.stderr.trim_end_matches('\n').to_string();
-                finish_compile_error(unit, shared, &message, &message, &mut outcome);
+                // Nothing was read, so there are no dependencies to alias.
+                finish_compile_error(unit, shared, &[], &message, &message, &mut outcome);
             }
             outcome
         }
@@ -1649,7 +1650,14 @@ fn compile_unit(unit: &Unit, shared: &Shared) -> Outcome {
 /// consumes the CSS of an earlier successful build (dart deletes it too; the
 /// `.map`, if any, is left alone). `rendered` is the diagnostic as printed to
 /// the terminal, `ascii` the same rendered with the ASCII glyph set.
-fn finish_compile_error(unit: &Unit, shared: &Shared, rendered: &str, ascii: &str, outcome: &mut Outcome) {
+fn finish_compile_error(
+    unit: &Unit,
+    shared: &Shared,
+    deps: &[PathBuf],
+    rendered: &str,
+    ascii: &str,
+    outcome: &mut Outcome,
+) {
     // `--no-css` means no output-side effects at all: no error stylesheet, and
     // an existing output is left exactly as it was.
     //
@@ -1660,6 +1668,19 @@ fn finish_compile_error(unit: &Unit, shared: &Shared, rendered: &str, ascii: &st
     // sequence look like the user breaking their stylesheet.
     if shared.no_css || shared.provisional {
         return;
+    }
+    // …and the same for an output that IS one of this compile's sources.
+    // The success arm declines to write there; this one used to write the
+    // error stylesheet, or delete the file outright under `--no-error-css`.
+    // Measured before this: `--watch main.scss main.scss`, then break a
+    // dependency, and the entry is gone. Skipping a successful write and
+    // then destroying the file on the next typo is worse than either.
+    if shared.watch {
+        if let Target::File(output) = &unit.target {
+            if aliases_a_source(output, unit, deps) {
+                return;
+            }
+        }
     }
     match &unit.target {
         Target::Stdout => {
@@ -1849,7 +1870,14 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
             } else {
                 rendered.clone()
             };
-            finish_compile_error(unit, shared, &rendered, &ascii, &mut outcome);
+            finish_compile_error(
+                unit,
+                shared,
+                &importer.loaded_paths(),
+                &rendered,
+                &ascii,
+                &mut outcome,
+            );
         }
     }
     outcome
@@ -2006,7 +2034,18 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
                     dirs.push(base.join(within));
                 }
             }
-            snapshot.follow(followed, dirs, watch::Stamp::of);
+            // The directories this compile WROTE into: their mtimes moved
+            // because of us, so only they are re-stamped. Every other
+            // directory keeps what it had, or a dependency created while
+            // the compile was running would become the baseline.
+            let ours: Vec<PathBuf> = units
+                .iter()
+                .filter_map(|u| match &u.target {
+                    Target::File(out) => out.parent().map(Path::to_path_buf),
+                    Target::Stdout => None,
+                })
+                .collect();
+            snapshot.follow(followed, dirs, &ours, watch::Stamp::of);
             coalesce.finished(provisional, ok);
         }
 
