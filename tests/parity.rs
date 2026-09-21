@@ -11552,3 +11552,20 @@ fn parity_css_import_media_spelling() {
         assert_parity_compressed(&scss);
     }
 }
+
+/// A plain-CSS custom callable's SassScript declaration takes the optional
+/// space; a verbatim one keeps its source text. Both kinds, in both styles.
+#[test]
+fn parity_custom_function_declaration_space() {
+    for scss in [
+        "@function --a() { #{result}: 1 + 1; }\n",
+        "@function --a() { #{result}: { b: c; } }\n",
+        "@function --a() { #{result}: { b: 1 + 1; c: 2 * 3; } }\n",
+        "@function --a() { result: 1 + 1; }\n",
+        "@function --a() { result:1 + 1; }\n",
+        "@function --a() { result: ; }\n",
+    ] {
+        assert_parity(scss);
+        assert_parity_compressed(scss);
+    }
+}

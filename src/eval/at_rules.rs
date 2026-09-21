@@ -86,7 +86,10 @@ impl<'a> Evaluator<'a> {
     /// `(property, everything after the colon)` pairs: a verbatim value keeps
     /// its literal text, including the whitespace the source put after the
     /// colon, while an interpolated-property declaration evaluates as
-    /// SassScript and takes the canonical single space.
+    /// SassScript and takes dart's OPTIONAL space — which is the whole
+    /// difference between the two kinds of value here, since compressed output
+    /// writes none of it (`#{result}: 1 + 1` compresses to `result:2` where
+    /// `result: 1 + 1` keeps the space it was written with).
     ///
     /// Both the at-root path above and the plain-CSS evaluator's nested paths
     /// (`OutItem::Decl` with `custom: true`, which also emits its value
@@ -105,16 +108,18 @@ impl<'a> Evaluator<'a> {
                     decls.push((prop, raw));
                 }
                 CssCustomValue::Script(expr) => {
+                    let gap = self.optional_space();
                     let value = self.eval_expr(expr)?.to_css(self.compressed());
-                    decls.push((prop, format!(" {value}")));
+                    decls.push((prop, format!("{gap}{value}")));
                 }
                 // A nested property set on an interpolated property: each
                 // child emits as `property-suffix: value`.
                 CssCustomValue::Set(children) => {
+                    let gap = self.optional_space();
                     for (suffix, expr) in children {
                         let sfx = self.eval_template(suffix)?;
                         let value = self.eval_expr(expr)?.to_css(self.compressed());
-                        decls.push((format!("{prop}-{sfx}"), format!(" {value}")));
+                        decls.push((format!("{prop}-{sfx}"), format!("{gap}{value}")));
                     }
                 }
             }
@@ -664,6 +669,16 @@ impl<'a> Evaluator<'a> {
             }
         }
         Ok(out)
+    }
+
+    /// dart-sass `_writeOptionalSpace`: a single space in every style but
+    /// compressed, where it is exactly the byte a minifier exists to drop.
+    pub(super) fn optional_space(&self) -> &'static str {
+        if self.compressed() {
+            ""
+        } else {
+            " "
+        }
     }
 
     /// The space between an at-rule's name and its prelude, which compressed

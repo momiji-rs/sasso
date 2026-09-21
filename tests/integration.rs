@@ -2916,6 +2916,36 @@ fn interpolation_resolves_inside_a_quoted_verbatim_value() {
         "@supports (--a: \"x\\ y\") {\n  .a {\n    b: c;\n  }\n}\n"
     );
 }
+/// A plain-CSS custom `@function`'s declaration takes dart's OPTIONAL space
+/// after the colon when its value is SassScript — the one byte a minifier
+/// exists to drop — while a VERBATIM value keeps whatever the source wrote, in
+/// both styles. Measured against dart-sass 1.104.1 on 2026-09-21.
+#[test]
+fn a_custom_functions_script_value_takes_the_optional_space() {
+    let both = |scss: &str, expanded: &str, compressed: &str| {
+        assert_eq!(css(scss), format!("{expanded}\n"), "{scss}");
+        assert_eq!(css_compressed(scss), compressed, "{scss}");
+    };
+    // An interpolated property makes the value SassScript.
+    both(
+        "@function --a() { #{result}: 1 + 1; }\n",
+        "@function --a() {\n  result: 2;\n}",
+        "@function --a(){result:2}",
+    );
+    both(
+        "@function --a() { #{result}: { b: c; } }\n",
+        "@function --a() {\n  result-b: c;\n}",
+        "@function --a(){result-b:c}",
+    );
+    // A verbatim value is source text: the space after its colon is not dart's
+    // to drop.
+    both(
+        "@function --a() { result: 1 + 1; }\n",
+        "@function --a() {\n  result: 1 + 1;\n}",
+        "@function --a(){result: 1 + 1}",
+    );
+}
+
 #[test]
 fn a_form_feed_is_a_newline_to_the_escape_reader() {
     // dart's `isNewline` counts U+000C, so a backslash cannot escape it — in a
