@@ -1510,11 +1510,20 @@ fn aliases_a_source(output: &Path, unit: &Unit, deps: &[PathBuf]) -> bool {
     // equal only once both are.
     let cwd = std::env::current_dir().unwrap_or_default();
     let key = |p: &Path| path_key(&normalize_path(&cwd.join(p)));
+    // …and through any symlink, because two names for one file is the other
+    // way to reach it. `out.css -> main.scss` passes a lexical comparison and
+    // then overwrites the stylesheet. `canonicalize` answers only for a path
+    // that EXISTS, which is why it is a second opinion rather than the rule:
+    // an output that is not there yet cannot alias anything.
+    let real = |p: &Path| std::fs::canonicalize(cwd.join(p)).ok().map(|c| path_key(&c));
     let dest = key(output);
-    if unit.source_path().is_some_and(|p| key(p) == dest) {
+    let dest_real = real(output);
+    let same =
+        |p: &Path| key(p) == dest || (dest_real.is_some() && real(p).is_some() && real(p) == dest_real);
+    if unit.source_path().is_some_and(same) {
         return true;
     }
-    deps.iter().any(|d| key(d) == dest)
+    deps.iter().any(|d| same(d))
 }
 
 /// `--update`: is `output` at least as new as `input` and every file in

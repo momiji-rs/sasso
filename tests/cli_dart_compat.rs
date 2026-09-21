@@ -3123,3 +3123,58 @@ fn watch_declines_to_write_over_a_source() {
         );
     }
 }
+
+/// The output is a SYMLINK to a source: two names, one file, and a lexical
+/// comparison sees only the names.
+///
+/// This is a DELIBERATE divergence from dart, which is why it is here with
+/// the measurement rather than folded into the case above. 2.5 seconds of
+/// `--watch main.scss out.css` with `out.css -> main.scss`:
+///
+///   dart     Compiled x1   the source is DESTROYED
+///   npm      Compiled x1   the source is DESTROYED
+///   binary   Compiled x23  the source is DESTROYED   (before)
+///
+/// Nobody protects it. We do two things differently: the loop was ours
+/// alone and is plainly a defect, and destroying a stylesheet with no
+/// warning is not worth matching for its own sake. #168 carries the npm
+/// half.
+#[test]
+fn watch_declines_to_write_over_a_source_reached_through_a_symlink() {
+    use std::time::Duration;
+
+    let dir = scratch("watch_symlink_out");
+    const SRC: &str = "@use \"v\";\n.a { color: v.$c; }\n";
+    write(&dir, "main.scss", SRC);
+    write(&dir, "_v.scss", "$c: red;\n");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.join("main.scss"), dir.join("out.css")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(dir.join("main.scss"), dir.join("out.css")).unwrap();
+
+    let mut child = std::process::Command::new(BIN)
+        .args(["--no-source-map", "--watch", "main.scss", "out.css"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn --watch");
+
+    std::thread::sleep(Duration::from_millis(1500));
+    let _ = child.kill();
+    let mut stdout = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        use std::io::Read;
+        let _ = pipe.read_to_string(&mut stdout);
+    }
+    let _ = child.wait();
+
+    let now = read(&dir, "main.scss");
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(now, SRC, "the stylesheet was overwritten through the symlink");
+    let compiled = stdout.lines().filter(|l| l.contains("Compiled")).count();
+    assert_eq!(
+        compiled, 0,
+        "nothing was written, so nothing is narrated: {stdout:?}"
+    );
+}
