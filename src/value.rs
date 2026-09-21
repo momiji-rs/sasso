@@ -1275,6 +1275,29 @@ fn fuzzy_eq(a: f64, b: f64) -> bool {
     a == b || (a - b).abs() < FUZZY_EPSILON
 }
 
+/// `1 / FUZZY_EPSILON`, the scale dart-sass's `fuzzyEquals` rounds at.
+const INVERSE_FUZZY_EPSILON: f64 = 1e11;
+
+/// dart-sass `fuzzyIsInt`: whether a value is `fuzzyEquals` to its own
+/// rounding — with BOTH clauses of that comparison, which [`fuzzy_eq`]
+/// simplifies away. The second one decides real cases here: the green channel
+/// of `color.to-space(hsl(210, 50%, 7.8431372549%), rgb)` is
+/// 19.999999999994987, within the epsilon of 20, and dart still calls it
+/// non-integral because scaling both by 1e11 and rounding disagrees
+/// (1999999999999 against 2000000000000). `[measured]` against dart-sass
+/// 1.104.1: `meta.inspect` of that color is
+/// `rgba(3.9215686274500006%, 7.843137254899995%, 11.764705882349999%, 0.4)`,
+/// not `rgba(10, 20, 30, 0.4)`.
+fn fuzzy_is_int(v: f64) -> bool {
+    if !v.is_finite() {
+        return false;
+    }
+    let rounded = v.round();
+    v == rounded
+        || ((v - rounded).abs() <= FUZZY_EPSILON
+            && (v * INVERSE_FUZZY_EPSILON).round() == (rounded * INVERSE_FUZZY_EPSILON).round())
+}
+
 /// Sass `==` for two colors (dart-sass). Legacy colors with no missing channel
 /// compare by their sRGB bytes, so they're space-agnostic
 /// (`rgb(255 0 0) == hsl(0 100% 50%)`). Otherwise — a non-legacy space on either
@@ -1964,9 +1987,16 @@ impl Color {
         Color::rgb((r1 + m) * 255.0, (g1 + m) * 255.0, (b1 + m) * 255.0, a)
     }
 
-    fn channels_are_int(&self) -> bool {
-        let int = |v: f64| (v - v.round()).abs() < 1e-9;
-        int(self.r) && int(self.g) && int(self.b)
+    /// dart `_canUseHex` (serialize.dart:860): every channel a FUZZY integer
+    /// inside `[0, 256)`. The bound is part of the rule — an out-of-gamut
+    /// channel has no two-digit hex spelling, and clamping one into range would
+    /// print a different color — and `meta.inspect`, which does not reroute an
+    /// out-of-gamut color through hsl, is where a color can reach here with
+    /// one.
+    fn can_use_hex(&self) -> bool {
+        let ok =
+            |v: f64| fuzzy_is_int(v) && (v > 0.0 || fuzzy_eq(v, 0.0)) && v < 256.0 && !fuzzy_eq(v, 256.0);
+        ok(self.r) && ok(self.g) && ok(self.b)
     }
 
     pub(crate) fn to_css(&self, compressed: bool) -> String {
@@ -1979,8 +2009,15 @@ impl Color {
     /// spelling a literal keeps, a hex triple, and the `rgb()`/`rgba()` form all
     /// go straight into the caller's buffer, digits included.
     pub(crate) fn write_css(&self, out: &mut String, compressed: bool) {
+        self.write_css_mode(out, compressed, false);
+    }
+
+    /// [`write_css`] with dart's `_inspect` flag, which changes one rule: a
+    /// channel's integrality is tested fuzzily for `meta.inspect` and exactly
+    /// for CSS output (see [`push_rgb_channels`]).
+    fn write_css_mode(&self, out: &mut String, compressed: bool, inspect: bool) {
         if let Some(m) = &self.modern {
-            out.push_str(&m.to_css(compressed));
+            out.push_str(&m.to_css_mode(compressed, inspect));
             return;
         }
         if !compressed {
@@ -1990,7 +2027,7 @@ impl Color {
             }
         }
         let opaque = (self.a - 1.0).abs() < f64::EPSILON;
-        if opaque && self.channels_are_int() {
+        if opaque && self.can_use_hex() {
             let r = self.r.round().clamp(0.0, 255.0) as u8;
             let g = self.g.round().clamp(0.0, 255.0) as u8;
             let b = self.b.round().clamp(0.0, 255.0) as u8;
@@ -2034,7 +2071,7 @@ impl Color {
         let start = out.len();
         let sep = if compressed { "," } else { ", " };
         out.push_str(if opaque { "rgb(" } else { "rgba(" });
-        push_rgb_channels(out, self.r, self.g, self.b, compressed, sep);
+        push_rgb_channels(out, self.r, self.g, self.b, compressed, sep, inspect);
         if !opaque {
             out.push_str(sep);
             push_num(out, self.a, compressed);
@@ -2094,7 +2131,11 @@ impl Color {
     pub(crate) fn inspect_css(&self) -> String {
         match &self.modern {
             Some(m) => m.inspect_css(),
-            None => self.to_css(false),
+            None => {
+                let mut out = String::new();
+                self.write_css_mode(&mut out, false, true);
+                out
+            }
         }
     }
 }
@@ -2381,12 +2422,15 @@ impl ModernColor {
         }
     }
 
-    pub(crate) fn to_css(&self, compressed: bool) -> String {
+    /// Serialize with dart's `_inspect` flag, which the legacy writer needs:
+    /// inspect output shows an out-of-gamut color in its own space and tests a
+    /// channel's integrality fuzzily, CSS output does neither.
+    fn to_css_mode(&self, compressed: bool, inspect: bool) -> String {
         use ColorSpace::*;
         let sp = if compressed { "" } else { " " };
         // Legacy spaces with no missing channel use the comma legacy form.
         if self.space.is_legacy() && !self.has_missing() {
-            return self.legacy_css(compressed);
+            return self.legacy_css(compressed, inspect);
         }
         // A lab/lch/oklab/oklch lightness outside [0, 100%] cannot round-trip
         // through the space's own function syntax (the CSS parser clamps it),
@@ -2505,52 +2549,25 @@ impl ModernColor {
     /// same channel rules CSS output uses. Everything else serializes exactly
     /// like CSS output.
     pub(crate) fn inspect_css(&self) -> String {
-        if self.space.is_legacy() && !self.has_missing() {
+        // dart writes an hwb color as `hwb()` in inspect output and through
+        // its sRGB form in CSS output (`_writeLegacyColor`: the `_inspect &&
+        // color.space == .hwb` branch comes before the format and hex rules).
+        if matches!(self.space, ColorSpace::Hwb) && !self.has_missing() {
             let a = self.alpha.unwrap_or(0.0);
             let opaque = (a - 1.0).abs() < 1e-11;
-            match self.space {
-                ColorSpace::Hwb => {
-                    let h = fmt_num(self.channels[0].unwrap_or(0.0), false);
-                    let w = fmt_num(self.channels[1].unwrap_or(0.0), false);
-                    let b = fmt_num(self.channels[2].unwrap_or(0.0), false);
-                    return if opaque {
-                        format!("hwb({h} {w}% {b}%)")
-                    } else {
-                        format!("hwb({h} {w}% {b}% / {})", fmt_num(a, false))
-                    };
-                }
-                ColorSpace::Rgb => {
-                    let in_gamut =
-                        |i: usize| (-1e-9..=255.0 + 1e-9).contains(&self.channels[i].unwrap_or(0.0));
-                    if !(in_gamut(0) && in_gamut(1) && in_gamut(2)) {
-                        // Through the SHARED channel writer, so the rules CSS
-                        // output applies to a legacy triple apply here too: a
-                        // non-integral channel re-spells all three as
-                        // percentages, and a non-finite one — what converting
-                        // an infinite channel produces — becomes a `%`-unit
-                        // `calc()` constant.
-                        let mut out = String::new();
-                        out.push_str(if opaque { "rgb(" } else { "rgba(" });
-                        push_rgb_channels(
-                            &mut out,
-                            self.channels[0].unwrap_or(0.0),
-                            self.channels[1].unwrap_or(0.0),
-                            self.channels[2].unwrap_or(0.0),
-                            false,
-                            ", ",
-                        );
-                        if !opaque {
-                            out.push_str(", ");
-                            push_num(&mut out, a, false);
-                        }
-                        out.push(')');
-                        return out;
-                    }
-                }
-                _ => {}
-            }
+            let h = fmt_num(self.channels[0].unwrap_or(0.0), false);
+            let w = fmt_num(self.channels[1].unwrap_or(0.0), false);
+            let b = fmt_num(self.channels[2].unwrap_or(0.0), false);
+            return if opaque {
+                format!("hwb({h} {w}% {b}%)")
+            } else {
+                format!("hwb({h} {w}% {b}% / {})", fmt_num(a, false))
+            };
         }
-        self.to_css(false)
+        // Everything else — including an OUT-OF-GAMUT legacy rgb color, which
+        // inspect output shows as `rgb()` rather than rerouting through hsl —
+        // goes through the shared writer in inspect mode.
+        self.to_css_mode(false, true)
     }
 
     /// Serialize an out-of-range lab/lch/oklab/oklch color as
@@ -2604,41 +2621,30 @@ impl ModernColor {
 
     /// Serialize a legacy color (rgb/hsl/hwb) with no missing channels in the
     /// classic comma form. rgb may collapse to hex; hwb routes through hsl.
-    fn legacy_css(&self, compressed: bool) -> String {
+    fn legacy_css(&self, compressed: bool, inspect: bool) -> String {
         let a = self.alpha.unwrap_or(1.0);
         let opaque = (a - 1.0).abs() < f64::EPSILON;
+        // dart `_writeLegacyColor` (serialize.dart:753) opens with this rule:
+        // an out-of-gamut color is written as hsl(), the one legacy form a
+        // browser does not clamp at parse time. INSPECT output skips the
+        // reroute and shows the color in its own space.
+        if !inspect && !self.is_in_gamut() {
+            let (h, s, l) = self.legacy_hsl_triple();
+            return self.hsl_comma_css(h, s, l, a, opaque, compressed);
+        }
         match self.space {
             ColorSpace::Rgb => {
-                let r = self.channels[0].unwrap_or(0.0);
-                let g = self.channels[1].unwrap_or(0.0);
-                let b = self.channels[2].unwrap_or(0.0);
-                // A legacy rgb color whose channels exceed the [0,255] gamut is
-                // serialized via hsl(), matching dart-sass.
-                let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
-                if !(in_gamut(r) && in_gamut(g) && in_gamut(b)) {
-                    let hsl = crate::builtins::srgb_to_hsl([r / 255.0, g / 255.0, b / 255.0]);
-                    // The same hue-nulling the compressed rgb/hsl choice
-                    // applies: dart's srgb -> hsl conversion hands back a
-                    // MISSING hue when the saturation is fuzzy-zero, and a
-                    // missing hue writes as 0, so an out-of-gamut gray must not
-                    // leak a phantom hue. `[measured]` against dart-sass
-                    // 1.104.1: `color.to-space(color(srgb 2 0 0.5), rgb)` is
-                    // `hsl(0, 0%, 100%)`, not `hsl(345, 0%, 100%)`.
-                    let hue = if hsl[1].abs() < 1e-11 { 0.0 } else { hsl[0] };
-                    // Through the shared hsl writer, so a NaN channel — which
-                    // an infinite one converts to — becomes 0 here exactly as
-                    // it does for a color stored in the hsl space.
-                    return self.hsl_comma_css(hue, hsl[1], hsl[2], a, opaque, compressed);
-                }
+                let mut out = String::new();
                 Color {
-                    r,
-                    g,
-                    b,
+                    r: self.channels[0].unwrap_or(0.0),
+                    g: self.channels[1].unwrap_or(0.0),
+                    b: self.channels[2].unwrap_or(0.0),
                     a,
                     repr: None,
                     modern: None,
                 }
-                .to_css(compressed)
+                .write_css_mode(&mut out, compressed, inspect);
+                out
             }
             ColorSpace::Hsl => {
                 let (h, s, l) = self.legacy_hsl_triple();
@@ -2647,61 +2653,78 @@ impl ModernColor {
                 // then hex/named, else the shorter of the rgb form and the hsl
                 // form DERIVED from that rgb) — the stored hsl triple doesn't
                 // participate, so a powerless authored hue collapses to the
-                // round-trip's 0. Only an out-of-gamut color keeps its hsl form.
+                // round-trip's 0. The conversion is the engine's `hsl_to_srgb`,
+                // dart's `HslColorSpace.convert` to the last bit, because the
+                // rgb spelling turns on whether a channel is EXACTLY integral
+                // and this conversion is where the dust that decides it comes
+                // from.
                 if compressed {
-                    let rgb = Color::from_hsl(h, s / 100.0, l / 100.0, a);
-                    let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
-                    if in_gamut(rgb.r) && in_gamut(rgb.g) && in_gamut(rgb.b) {
-                        return rgb.to_css(true);
-                    }
+                    let srgb = crate::builtins::hsl_to_srgb([h, s, l]);
+                    return Color::rgb(srgb[0] * 255.0, srgb[1] * 255.0, srgb[2] * 255.0, a).to_css(true);
                 }
                 self.hsl_comma_css(h, s, l, a, opaque, compressed)
             }
             ColorSpace::Hwb => {
-                // hwb serializes through its sRGB representation: an
-                // integer, in-gamut rgb becomes hex/named; otherwise the
-                // classic hsl comma form is used.
+                // hwb serializes through its sRGB representation: a hex-able
+                // rgb becomes hex/named; otherwise the classic hsl comma form.
                 let (rgb, h, s, l) = self.hwb_rgb_and_hsl();
-                let int = |v: f64| (v - v.round()).abs() < 1e-9;
-                let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
+                let shadow = Color::rgb(rgb[0], rgb[1], rgb[2], a);
                 // Compressed hwb serializes through rgb like every legacy space
                 // (dart `_writeLegacyColor`): hex/named/rgb()/derived-hsl,
                 // whichever is shortest — rgba() included for a non-opaque
-                // color. Only out-of-gamut keeps the hsl comma form.
-                if compressed && rgb.iter().all(|&v| in_gamut(v)) {
-                    return Color {
-                        r: rgb[0],
-                        g: rgb[1],
-                        b: rgb[2],
-                        a,
-                        repr: None,
-                        modern: None,
-                    }
-                    .to_css(true);
+                // color.
+                if compressed {
+                    return shadow.to_css(true);
                 }
-                let rgb_ok = rgb.iter().all(|&v| int(v) && in_gamut(v));
-                // Expanded: only a fully-OPAQUE integer hwb collapses to a named
-                // color or hex; a non-opaque hwb uses the hsl comma form
+                // Expanded: only a fully-OPAQUE hex-able hwb collapses to a
+                // named color or hex; a non-opaque hwb uses the hsl comma form
                 // (dart-sass never emits rgba() for an hwb color in expanded).
-                if rgb_ok && opaque {
-                    if !compressed {
-                        if let Some(name) = rgb_name(rgb[0], rgb[1], rgb[2]) {
-                            return name.to_string();
-                        }
+                if opaque && shadow.can_use_hex() {
+                    if let Some(name) = rgb_name(rgb[0], rgb[1], rgb[2]) {
+                        return name.to_string();
                     }
-                    return Color {
-                        r: rgb[0],
-                        g: rgb[1],
-                        b: rgb[2],
-                        a,
-                        repr: None,
-                        modern: None,
-                    }
-                    .to_css(compressed);
+                    let mut out = String::new();
+                    shadow.write_css_mode(&mut out, false, inspect);
+                    return out;
                 }
                 self.hsl_comma_css(h, s, l, a, opaque, compressed)
             }
             _ => String::new(),
+        }
+    }
+
+    /// dart `SassColor.isInGamut` (color.dart:201) for the legacy spaces: every
+    /// LINEAR channel inside ITS OWN bounds, fuzzily; a polar hue is always in
+    /// gamut.
+    ///
+    /// The bounds are the space's own, not sRGB's, and that is the whole point:
+    /// `color.to-space(oklch(0.5 0.2 200), hsl)` carries a saturation of
+    /// 6051.64% over an rgb conversion that is ordinary black, so testing the
+    /// conversion calls it in gamut where dart calls it out. `[measured]`
+    /// against dart-sass 1.104.1, compressed:
+    /// `hsl(221.7487198664,266.6061126985%,0%)`, not `#000`.
+    fn is_in_gamut(&self) -> bool {
+        // dart `_isChannelInGamut`: `fuzzyGreaterThanOrEquals(v, min) &&
+        // fuzzyLessThanOrEquals(v, max)`. A missing channel is in gamut, and
+        // NaN fails both comparisons — which is how a color with an infinite
+        // (or NaN) lightness keeps its hsl form in either style.
+        let inside = |v: Option<f64>, max: f64| match v {
+            None => true,
+            Some(v) => (v > 0.0 || fuzzy_eq(v, 0.0)) && (v < max || fuzzy_eq(v, max)),
+        };
+        match self.space {
+            ColorSpace::Rgb => {
+                inside(self.channels[0], 255.0)
+                    && inside(self.channels[1], 255.0)
+                    && inside(self.channels[2], 255.0)
+            }
+            // hue is polar: only saturation/lightness and whiteness/blackness
+            // are bounded, each to [0, 100].
+            ColorSpace::Hsl | ColorSpace::Hwb => {
+                inside(self.channels[1], 100.0) && inside(self.channels[2], 100.0)
+            }
+            // Only the legacy spaces reach the legacy writer.
+            _ => true,
         }
     }
 
@@ -2768,8 +2791,10 @@ impl ModernColor {
         )
     }
 
-    /// The (hue, saturation%, lightness%) triple for legacy hsl/hwb
-    /// serialization. hwb is first converted to hsl via sRGB.
+    /// The (hue, saturation%, lightness%) triple a legacy color writes as
+    /// `hsl()`. An hsl color writes its own channels (dart's `toSpace(.hsl)` is
+    /// the identity, so a powerless hue survives); rgb and hwb convert through
+    /// sRGB.
     fn legacy_hsl_triple(&self) -> (f64, f64, f64) {
         match self.space {
             ColorSpace::Hsl => (
@@ -2777,6 +2802,21 @@ impl ModernColor {
                 self.channels[1].unwrap_or(0.0),
                 self.channels[2].unwrap_or(0.0),
             ),
+            ColorSpace::Rgb => {
+                let hsl = crate::builtins::srgb_to_hsl([
+                    self.channels[0].unwrap_or(0.0) / 255.0,
+                    self.channels[1].unwrap_or(0.0) / 255.0,
+                    self.channels[2].unwrap_or(0.0) / 255.0,
+                ]);
+                // dart's srgb -> hsl conversion hands back a MISSING hue when
+                // the saturation is fuzzy-zero, and a missing hue writes as 0,
+                // so an out-of-gamut gray must not leak a phantom hue.
+                // `[measured]` against dart-sass 1.104.1:
+                // `color.to-space(color(srgb 2 0 0.5), rgb)` is
+                // `hsl(0, 0%, 100%)`, not `hsl(345, 0%, 100%)`.
+                let hue = if hsl[1].abs() < 1e-11 { 0.0 } else { hsl[0] };
+                (hue, hsl[1], hsl[2])
+            }
             ColorSpace::Hwb => {
                 // Share the hwb->hsl conversion (and its achromatic-hue
                 // canonicalization) with hwb_rgb_and_hsl.
@@ -2795,11 +2835,16 @@ impl ModernColor {
 /// `rgb(127.5, 0, 127.5)`. An all-integer triple keeps plain numbers
 /// (`rgb(1, 2, 3)`).
 ///
-/// Integrality is EXACT (`v == v.round()`), not the fuzzy comparison used
-/// elsewhere in this file: dart switches on a channel that differs from an
-/// integer by as little as 1e-10, and the ~7e-15 dust an hsl round trip leaves
-/// behind is enough to flip it.
-fn push_rgb_channels(out: &mut String, r: f64, g: f64, b: f64, compressed: bool, sep: &str) {
+/// Integrality is EXACT for CSS output and FUZZY for `meta.inspect` (dart
+/// `_asInt`, serialize.dart:1202: `_inspect ? fuzzyAsInt(number) : (rounded ==
+/// number ? rounded : null)` — note dart's own doc comment there describes the
+/// opposite of what the code does). The same color therefore has two
+/// spellings, and the dust an hsl conversion leaves behind is what separates
+/// them: `[measured]` against dart-sass 1.104.1,
+/// `color.to-space(hsl(180, 60%, 50%, 0.4), rgb)` has channels
+/// (50.999999999999986, 203.99999999999997, 204), writes as
+/// `rgba(20%, 80%, 80%, 0.4)` and inspects as `rgba(51, 204, 204, 0.4)`.
+fn push_rgb_channels(out: &mut String, r: f64, g: f64, b: f64, compressed: bool, sep: &str, inspect: bool) {
     // dart `_tryIntegerRgbChannels` -> `_asInt`: a non-integral channel sends
     // the WHOLE triple to percentages (serialize.dart:869-886). Integrality
     // alone decides it — there is no gamut bound, which only the INSPECT form
@@ -2808,8 +2853,14 @@ fn push_rgb_channels(out: &mut String, r: f64, g: f64, b: f64, compressed: bool,
     // `meta.inspect(color.to-space(color(srgb 2 0 0), rgb))` — channels
     // (510, 0, 0) — is `rgb(510, 0, 0)`, while `color(srgb 2 0 0.5)` —
     // (510, 0, 127.5) — is `rgb(200%, 0%, 50%)`. A non-finite channel is never
-    // an integer (`inf - inf` is NaN), so it always takes the branch below.
-    let as_int = |v: f64| (v - v.round()).abs() < 1e-11;
+    // an integer, so it always takes the percentage branch below.
+    let as_int = |v: f64| {
+        if inspect {
+            fuzzy_is_int(v)
+        } else {
+            v.is_finite() && v == v.round()
+        }
+    };
     let ints = as_int(r) && as_int(g) && as_int(b);
     for (i, v) in [r, g, b].into_iter().enumerate() {
         if i > 0 {
@@ -3677,6 +3728,26 @@ mod tests {
         // incompatible -> None.
         assert_eq!(convert_factor("px", "s"), None);
         assert_eq!(convert_factor("px", "vw"), None);
+    }
+
+    #[test]
+    fn fuzzy_is_int_needs_both_clauses_of_fuzzy_equals() {
+        // Exactly integral, and the dust an hsl conversion leaves behind: both
+        // are integers to dart's `fuzzyIsInt`.
+        assert!(fuzzy_is_int(204.0));
+        assert!(fuzzy_is_int(203.999_999_999_999_97));
+        assert!(fuzzy_is_int(50.999_999_999_999_986));
+        assert!(fuzzy_is_int(-0.0));
+        // 5e-12 below 20 is INSIDE the epsilon, so the first clause of
+        // `fuzzyEquals` passes it -- and the second one, which rounds both
+        // sides at 1e11, rejects it (1999999999999 against 2000000000000).
+        // dart therefore spells this channel as a percentage even under
+        // `meta.inspect`.
+        assert!(!fuzzy_is_int(19.999_999_999_994_987));
+        // Plainly non-integral, and non-finite.
+        assert!(!fuzzy_is_int(127.5));
+        assert!(!fuzzy_is_int(f64::INFINITY));
+        assert!(!fuzzy_is_int(f64::NAN));
     }
 
     fn numval(value: f64, unit: &str) -> Value {

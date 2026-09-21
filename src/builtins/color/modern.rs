@@ -440,11 +440,17 @@ pub(crate) fn modify_in_space_full(
     if matches!(op, ModifyOp::Change) && !alpha_given {
         work.alpha = Some(work.alpha.unwrap_or(0.0));
     }
-    // dart-sass builds the modified color in the WORKING space and only then
-    // converts it back, so 1.104.0's channel conversion applies to the new
-    // channel VALUES — `change(red, $hue: NaN)` is `hsl(0, 100%, 50%)`, i.e.
-    // red again, not the black an unnormalized NaN hue would convert to.
-    let work = normalize_degenerate(work);
+    // dart-sass builds the modified color in the WORKING space -- through
+    // `SassColor.forSpaceInternal` -- and only then converts it back, so the
+    // whole of 1.104.0's channel normalization applies to the new channel
+    // VALUES. `change(red, $hue: NaN)` is `hsl(0, 100%, 50%)`, i.e. red again,
+    // not the black an unnormalized NaN hue would convert to; and a polar hue
+    // is reduced into `[0, 360)` BEFORE the conversion reads it, which only a
+    // conversion can observe: `(390 % 360) / 360` is exactly `1/12` while
+    // `(390 / 360) % 1` is an ulp short, and that ulp is the difference between
+    // `color.complement(rgba(10, 20, 30, 0.4))` writing `rgba(30, 20, 10, 0.4)`
+    // and writing a percentage triple.
+    let work = normalize_polar(work);
     // The legacy-keyword path keeps the original format when the result is in
     // the sRGB gamut, otherwise serializes in the (legacy) working space.
     let dest = if legacy_format && !in_gamut(&work, ColorSpace::Rgb) {

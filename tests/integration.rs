@@ -728,6 +728,111 @@ fn inspecting_an_out_of_gamut_legacy_rgb_color() {
     );
 }
 
+/// dart tests a legacy rgb triple's integrality EXACTLY for CSS output and
+/// FUZZILY for `meta.inspect` (`_asInt`, serialize.dart), so one color has two
+/// spellings: `color.to-space(hsl(180, 60%, 50%, 0.4), rgb)` has channels
+/// 50.999999999999986, 203.99999999999997 and 204 — percentages as CSS,
+/// integers under inspect. Measured against dart-sass 1.104.1.
+#[test]
+fn a_legacy_rgb_triple_is_integral_exactly_for_css_and_fuzzily_for_inspect() {
+    let c = "color.to-space(hsl(180, 60%, 50%, 0.4), rgb)";
+    assert_eq!(
+        css(&format!("@use \"sass:color\";\na {{x: {c}}}")),
+        "a {\n  x: rgba(20%, 80%, 80%, 0.4);\n}\n"
+    );
+    assert_eq!(
+        css(&format!(
+            "@use \"sass:color\";\n@use \"sass:meta\";\na {{x: meta.inspect({c})}}"
+        )),
+        "a {\n  x: rgba(51, 204, 204, 0.4);\n}\n"
+    );
+    // Compressed output applies the exact rule too: the dust keeps this color
+    // off hex, so the percentage form wins on length.
+    assert_eq!(
+        css_compressed(&format!("@use \"sass:color\";\na{{x:{c}}}")),
+        "a{x:rgba(20%,80%,80%,.4)}"
+    );
+    // The same color authored as hsl(): compressed serializes it through the
+    // very same conversion, so it reaches the very same spelling.
+    assert_eq!(
+        css_compressed("a{x:hsl(180, 60%, 50%, 0.4)}"),
+        "a{x:rgba(20%,80%,80%,.4)}"
+    );
+    // A channel that is EXACTLY integral needs no fuzz to stay a plain number.
+    assert_eq!(
+        css("a {x: rgba(10, 20, 30, 0.4)}"),
+        "a {\n  x: rgba(10, 20, 30, 0.4);\n}\n"
+    );
+    assert_eq!(css_compressed("a{x:hsl(120, 50%, 0%)}"), "a{x:#000}");
+}
+
+/// The reroute to `hsl()` that an out-of-gamut legacy color takes measures the
+/// color in ITS OWN space (dart `SassColor.isInGamut`: hsl and hwb bound
+/// channels 1 and 2 to [0, 100], rgb bounds all three to [0, 255]), not in the
+/// sRGB shadow the compressed writer would otherwise serialize. An oklch color
+/// converted to hsl carries a 655% saturation over a shadow that is ordinary
+/// black, so measuring the shadow would print `#000`. Measured against
+/// dart-sass 1.104.1 (`--style=compressed`).
+#[test]
+fn an_out_of_gamut_legacy_color_is_measured_in_its_own_space() {
+    let v = |scss: &str| css_compressed(&format!("@use \"sass:color\";\na{{x:{scss}}}"));
+    assert_eq!(
+        v("hsl(17.5913578322, 6051.6428880588%, 0%)"),
+        "a{x:hsl(17.5913578322,6051.6428880588%,0%)}"
+    );
+    assert_eq!(
+        v("color.to-space(oklch(0.5 0.2 200), hsl)"),
+        "a{x:hsl(183.9676958721,655.5972854828%,7.4482455068%)}"
+    );
+    // hwb is bounded the same way, and writes through hsl once it is out.
+    assert_eq!(
+        v("color.to-space(oklch(0.5 0.2 200), hwb)"),
+        "a{x:hsl(183.9676958721,655.5972854828%,7.4482455068%)}"
+    );
+    assert_eq!(v("hwb(120 -20% 30%)"), "a{x:hsl(120,180%,25%)}");
+    assert_eq!(v("color.adjust(red, $lightness: 200%)"), "a{x:hsl(0,100%,250%)}");
+    // An IN-gamut hwb still serializes through rgb, alpha and all.
+    assert_eq!(v("hwb(200 20% 30%)"), "a{x:rgb(20%,53.3333333333%,70%)}");
+    assert_eq!(
+        v("color.change(hwb(200 20% 30%), $alpha: 0.5)"),
+        "a{x:rgba(20%,53.3333333333%,70%,.5)}"
+    );
+    // An rgb color is bounded by [0, 255], and a fuzzy-zero saturation nulls
+    // the hue the conversion hands back.
+    assert_eq!(
+        v("color.to-space(color(srgb 2 0 0.5), rgb)"),
+        "a{x:hsl(0,0%,100%)}"
+    );
+}
+
+/// A modified color is built in the WORKING space before it converts back, and
+/// dart's construction reduces a polar hue into `[0, 360)` on the way (dart
+/// `SassColor.forSpaceInternal` -> `_normalizeHue`). Only the conversion can
+/// observe it -- `(390 % 360) / 360` is exactly `1/12` where `(390 / 360) % 1`
+/// is an ulp short -- and one ulp in a channel is the whole difference between
+/// an integer triple and a percentage one. Measured against dart-sass 1.104.1.
+#[test]
+fn a_modified_hue_is_reduced_before_the_conversion_back() {
+    let v = |scss: &str| css(&format!("@use \"sass:color\";\na {{x: {scss}}}"));
+    for c in [
+        "color.complement(rgba(10, 20, 30, 0.4))",
+        "color.adjust(rgba(10, 20, 30, 0.4), $hue: 180)",
+        "color.adjust(rgba(10, 20, 30, 0.4), $hue: -180)",
+        "color.adjust(rgba(10, 20, 30, 0.4), $hue: 540)",
+    ] {
+        assert_eq!(v(c), "a {\n  x: rgba(30, 20, 10, 0.4);\n}\n", "{c}");
+    }
+    // The hue a polar RESULT keeps is reduced too, as it always was.
+    assert_eq!(
+        v("color.adjust(hsl(210, 50%, 40%), $hue: 180)"),
+        "a {\n  x: hsl(30, 50%, 40%);\n}\n"
+    );
+    assert_eq!(
+        v("color.adjust(oklch(0.5 0.2 200), $hue: 400)"),
+        "a {\n  x: oklch(50% 0.2 240deg);\n}\n"
+    );
+}
+
 /// `color()`'s space name and its three channels are separated by MANDATORY
 /// whitespace — `color(display-p3 .5 .2 .9)` is an identifier followed by three
 /// numbers, so compressing those spaces away yields `color(display-p3.5.2.9)`,

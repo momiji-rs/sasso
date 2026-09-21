@@ -231,7 +231,7 @@ fn normalize_hue(hue: f64, invert: bool) -> f64 {
 /// saturation/chroma, inverting the hue by 180° when it was negative beyond
 /// fuzz; every legacy/polar hue reduces through [`normalize_hue`]'s fmod
 /// sequence. Other spaces are returned unchanged.
-fn normalize_polar(mut mc: ModernColor) -> ModernColor {
+pub(super) fn normalize_polar(mut mc: ModernColor) -> ModernColor {
     let fuzzy_zero = |v: f64| v.abs() < 1e-11;
     let (hue_idx, mag_idx) = match mc.space {
         ColorSpace::Hsl => (0, Some(1)),
