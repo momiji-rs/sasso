@@ -316,6 +316,58 @@ mod localtime;
 mod watch;
 
 #[cfg(test)]
+mod watch_importer_tests {
+    use super::RecordingImporter;
+    use sasso::{CanonicalizeContext, Importer};
+
+    /// A dependency that vanishes between `canonicalize` and `load`.
+    ///
+    /// The importer answers `None` — its own comment calls that a miss —
+    /// and the url never reaches `unresolved`, because canonicalizing it
+    /// SUCCEEDED. So nothing would follow the file or the directory it
+    /// lives in, and recreating it in a subdirectory would never reach the
+    /// watch. The stamp is taken for a miss as well as a hit; only `loaded`
+    /// is reserved for what was actually read.
+    ///
+    /// The race is the test: the file is deleted between the two calls, by
+    /// hand, so there is no timing to get right.
+    #[test]
+    fn a_dependency_that_vanishes_mid_load_is_still_followed() {
+        let dir = std::env::temp_dir().join(format!("sasso-vanish-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let dep = dir.join("sub").join("_v.scss");
+        std::fs::write(&dep, "$c: red;\n").unwrap();
+
+        let importer = RecordingImporter::new(vec![dir.clone()]);
+        let ctx = CanonicalizeContext {
+            from_import: false,
+            containing_url: None,
+        };
+        let canonical = importer
+            .canonicalize("sub/v", &ctx)
+            .expect("canonicalize")
+            .expect("the file is there at this point");
+
+        std::fs::remove_file(&dep).unwrap();
+
+        let loaded = importer.load(&canonical).expect("a miss is not an error");
+        let stamps = importer.loaded_stamps();
+        let paths = importer.loaded_paths();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(loaded.is_none(), "the file was deleted, so this is a miss");
+        assert!(
+            stamps.iter().any(|(p, _)| p.ends_with("_v.scss")),
+            "a miss must still be followed: {stamps:?}",
+        );
+        assert!(
+            paths.is_empty(),
+            "…but nothing was READ, so it is not a dependency: {paths:?}",
+        );
+    }
+}
+
+#[cfg(test)]
 mod default_jobs_tests {
     use super::{jobs_from, physical_cores};
 
@@ -1505,9 +1557,16 @@ impl sasso::Importer for RecordingImporter {
         let out = self.inner.load(canonical)?;
         if out.is_some() {
             self.loaded.borrow_mut().push(canonical.as_str().to_string());
-            if let Some(pair) = before {
-                self.read_stamps.borrow_mut().push(pair);
-            }
+        }
+        // The stamp is recorded whether or not the load found anything, and
+        // `loaded` is not. `FsImporter::load` answers `None` when the file
+        // vanished between `canonicalize` and here — its own comment calls
+        // that a miss — and such a url never reaches `unresolved` either,
+        // because canonicalizing it SUCCEEDED. Without this the file and its
+        // directory are followed by nobody, and recreating it in a
+        // subdirectory would never reach the watch.
+        if let Some(pair) = before {
+            self.read_stamps.borrow_mut().push(pair);
         }
         Ok(out)
     }
