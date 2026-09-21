@@ -334,9 +334,13 @@ function pickBinary(opts) {
     return compileInProcess("SASSO_BINARY declines the binary");
   }
 
-  // The binary has no watcher (#86), so `--watch` must stay in-process or
-  // delegating would take a working command line and break it.
-  if (opts.watch) return compileInProcess("--watch is not in the binary (#86)");
+  // `--watch` stays here, and since #86 that is a CHOICE rather than the
+  // binary lacking a watcher. It has one, and it polls, because a native
+  // watcher would be a runtime dependency in a crate whose `[dependencies]`
+  // is empty. Measured on one save, macOS: this CLI's `fs.watch` answers in
+  // 18-20 ms, the binary's poll in 13-55 ms, dart-sass in 47-51 ms. Handing
+  // off would trade the fastest of the three for the middle one.
+  if (opts.watch) return compileInProcess("--watch is faster in-process than the binary's poll");
   // `--update` is no longer on that list: the binary has it, and walks the
   // same dependency graph this CLI does. It is still held back from the
   // EXPLICIT `SASSO_BINARY=<path>` hand-off below, which is documented as
