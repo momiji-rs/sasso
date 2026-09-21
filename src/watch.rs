@@ -112,20 +112,41 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
-    /// Replace the watched set, keeping what is already known about the files
-    /// that stay. Called after every compile: the dependency set changes when
-    /// an `@use` is added or removed, and a file that has just been read is
-    /// not a file that has just changed.
+    /// Replace the watched set. Called after every compile, because the
+    /// dependency set changes when an `@use` is added or removed.
+    ///
+    /// The two groups are treated differently, and the difference is the
+    /// whole correctness of this:
+    ///
+    /// - a `file` already followed KEEPS the stamp it had. Re-stamping it
+    ///   here would record whatever is on disk NOW as the baseline for a
+    ///   build made from what was there when the compiler read it — so a
+    ///   save that lands while a compile is running would be absorbed and
+    ///   never compiled. Measured before this: 1 in 4 lost, writing into a
+    ///   680 ms compile.
+    /// - a `dir` is always re-stamped, because the compile's own output
+    ///   moves it. Creating a file changes its directory's mtime, so
+    ///   keeping the old stamp would make every first write look like a
+    ///   change and the watch would answer itself.
     ///
     /// `stamp` is injected so a test can drive this without a filesystem.
-    pub(crate) fn follow<F>(&mut self, paths: impl IntoIterator<Item = PathBuf>, mut stamp: F)
-    where
+    pub(crate) fn follow<F>(
+        &mut self,
+        files: impl IntoIterator<Item = PathBuf>,
+        dirs: impl IntoIterator<Item = PathBuf>,
+        mut stamp: F,
+    ) where
         F: FnMut(&Path) -> Stamp,
     {
         let mut next = BTreeMap::new();
-        for p in paths {
-            let s = stamp(&p);
+        for p in files {
+            let known = self.files.get(&p).copied();
+            let s = known.unwrap_or_else(|| stamp(&p));
             next.insert(p, s);
+        }
+        for d in dirs {
+            let s = stamp(&d);
+            next.insert(d, s);
         }
         self.files = next;
     }
@@ -320,7 +341,7 @@ mod tests {
     #[test]
     fn a_file_that_stays_missing_is_not_a_change() {
         let mut s = Snapshot::default();
-        s.follow([PathBuf::from("/gone.scss")], |_| Stamp::MISSING);
+        s.follow([PathBuf::from("/gone.scss")], [], |_| Stamp::MISSING);
         assert!(!s.changed(|_| Stamp::MISSING));
         // …and its appearance IS one.
         assert!(s.changed(|_| stamp_of(1)));
@@ -336,7 +357,7 @@ mod tests {
             modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
             len,
         };
-        s.follow([PathBuf::from("/a.scss")], |_| coarse(10));
+        s.follow([PathBuf::from("/a.scss")], [], |_| coarse(10));
         assert!(s.changed(|_| coarse(11)));
     }
 
@@ -346,10 +367,10 @@ mod tests {
     #[test]
     fn following_again_does_not_invent_a_change() {
         let mut s = Snapshot::default();
-        s.follow([PathBuf::from("/a.scss"), PathBuf::from("/b.scss")], |_| {
+        s.follow([PathBuf::from("/a.scss"), PathBuf::from("/b.scss")], [], |_| {
             stamp_of(1)
         });
-        s.follow([PathBuf::from("/a.scss"), PathBuf::from("/c.scss")], |_| {
+        s.follow([PathBuf::from("/a.scss"), PathBuf::from("/c.scss")], [], |_| {
             stamp_of(1)
         });
         assert_eq!(s.len(), 2);
@@ -377,5 +398,33 @@ mod tests {
         );
         // And a pathological sweep is capped rather than unbounded.
         assert_eq!(next_interval(Duration::from_millis(100), 50), MAX_INTERVAL);
+    }
+
+    /// A save that lands WHILE the compile is running must survive being
+    /// followed again. Re-stamping the file after the compile records the
+    /// new bytes as the baseline for output built from the old ones, and
+    /// nothing ever compiles them — measured at 1 in 4, writing into a
+    /// 680 ms compile.
+    #[test]
+    fn a_file_changed_during_the_compile_is_still_a_change() {
+        let mut s = Snapshot::default();
+        let f = PathBuf::from("/a.scss");
+        s.follow([f.clone()], [], |_| stamp_of(1));
+        // The compile runs; the file is saved again; the watcher follows the
+        // same set afterwards and must NOT adopt the new stamp.
+        s.follow([f.clone()], [], |_| stamp_of(2));
+        assert!(s.changed(|_| stamp_of(2)), "the mid-compile save was absorbed");
+    }
+
+    /// A directory is the opposite: the compile's own output moves it, so
+    /// its stamp is taken fresh or the watch answers itself forever.
+    #[test]
+    fn a_directory_is_restamped_because_our_own_writes_move_it() {
+        let mut s = Snapshot::default();
+        let d = PathBuf::from("/out");
+        s.follow([], [d.clone()], |_| stamp_of(1));
+        // The compile created a file in it, moving its mtime.
+        s.follow([], [d.clone()], |_| stamp_of(2));
+        assert!(!s.changed(|_| stamp_of(2)), "our own write looked like a change");
     }
 }

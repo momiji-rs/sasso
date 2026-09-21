@@ -978,6 +978,9 @@ struct Outcome {
     /// already uses, so the two flags cannot disagree about what a
     /// stylesheet depends on.
     loaded: Vec<PathBuf>,
+    /// The `@use`/`@import` urls that resolved to nothing, so `--watch` can
+    /// follow the directories they WOULD have been found in.
+    unresolved: Vec<String>,
 }
 
 impl Outcome {
@@ -987,6 +990,7 @@ impl Outcome {
             stdout: String::new(),
             status,
             loaded: Vec::new(),
+            unresolved: Vec::new(),
         }
     }
 }
@@ -1395,6 +1399,12 @@ fn read_source<'u>(unit: &'u Unit) -> Result<Cow<'u, str>, Outcome> {
 struct RecordingImporter {
     inner: FsImporter,
     loaded: RefCell<Vec<String>>,
+    /// Urls that resolved to nothing. `--watch` needs them: a dependency
+    /// that does not exist YET has no path to follow, and the directory it
+    /// would live in is not in `loaded` either — so without this, creating
+    /// `sub/_new.scss` for an `@use "sub/new"` that has been failing since
+    /// startup changes nothing anybody is looking at.
+    unresolved: RefCell<Vec<String>>,
 }
 
 impl RecordingImporter {
@@ -1402,6 +1412,7 @@ impl RecordingImporter {
         RecordingImporter {
             inner: FsImporter::new(load_paths),
             loaded: RefCell::new(Vec::new()),
+            unresolved: RefCell::new(Vec::new()),
         }
     }
 
@@ -1422,6 +1433,13 @@ impl RecordingImporter {
             .filter_map(|u| url_to_path(u))
             .collect()
     }
+
+    /// The urls this compile could not resolve, as written in the `@use` or
+    /// `@import`. Relative, so the caller pairs them with the directories
+    /// they were searched for in.
+    fn unresolved_urls(&self) -> Vec<String> {
+        self.unresolved.borrow().clone()
+    }
 }
 
 impl sasso::Importer for RecordingImporter {
@@ -1430,7 +1448,11 @@ impl sasso::Importer for RecordingImporter {
         url: &str,
         ctx: &sasso::CanonicalizeContext<'_>,
     ) -> Result<Option<sasso::CanonicalUrl>, sasso::ImporterError> {
-        self.inner.canonicalize(url, ctx)
+        let out = self.inner.canonicalize(url, ctx)?;
+        if out.is_none() {
+            self.unresolved.borrow_mut().push(url.to_string());
+        }
+        Ok(out)
     }
 
     fn load(
@@ -1629,6 +1651,7 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
         // resolved the graph, and a second walk to learn it would be the
         // cost `--update`'s comment explains away.
         loaded: importer.loaded_paths(),
+        unresolved: importer.unresolved_urls(),
     };
     match compiled {
         // `--no-css`: the compile (and its diagnostics) was all that was wanted.
@@ -1789,6 +1812,7 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
             let outcomes = compile_all(units, run_shared, jobs, stop_on_error);
             let mut ok = true;
             let mut followed: Vec<PathBuf> = Vec::new();
+            let mut unresolved: Vec<String> = Vec::new();
             {
                 let mut stdout = std::io::stdout().lock();
                 let mut stderr = std::io::stderr().lock();
@@ -1798,6 +1822,7 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
                         ok = false;
                     }
                     followed.extend(outcome.loaded);
+                    unresolved.extend(outcome.unresolved);
                     // A provisional run reports NOTHING. Its diagnostics are
                     // about a file that may still be being written, and the
                     // authoritative run 50 ms behind it will print whatever
@@ -1832,13 +1857,28 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
             // not exist YET can arrive. A missing `@use` target has no path
             // to stat; its directory does, and its mtime moves when the file
             // is created.
-            let dirs: Vec<PathBuf> = followed
+            let mut dirs: Vec<PathBuf> = followed
                 .iter()
                 .filter_map(|f| f.parent().map(Path::to_path_buf))
                 .collect();
-            followed.extend(dirs);
-            followed.extend(shared.load_paths.iter().cloned());
-            snapshot.follow(followed, watch::Stamp::of);
+            dirs.extend(shared.load_paths.iter().cloned());
+            // A url that resolved to NOTHING names a directory none of those
+            // cover as soon as it has a segment of its own: `@use "sub/new"`
+            // would be found in `<base>/sub`, and `sub/` is in no compile's
+            // dependency list because nothing in it was ever read. Following
+            // a directory that does not exist yet costs nothing here —
+            // `Stamp::MISSING` compares equal to itself and becomes a change
+            // the moment the directory appears.
+            let bases: Vec<PathBuf> = dirs.clone();
+            for url in &unresolved {
+                let Some(within) = Path::new(url).parent().filter(|p| !p.as_os_str().is_empty()) else {
+                    continue;
+                };
+                for base in &bases {
+                    dirs.push(base.join(within));
+                }
+            }
+            snapshot.follow(followed, dirs, watch::Stamp::of);
             coalesce.finished(provisional, ok);
         }
 

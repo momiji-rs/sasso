@@ -2872,3 +2872,66 @@ fn watch_does_not_trigger_itself() {
         std::panic::resume_unwind(e);
     }
 }
+
+/// A dependency that does not exist yet, in a SUBDIRECTORY.
+///
+/// Nothing in `sub/` was ever read, so `sub/` is in no compile's dependency
+/// list and following the directories of what WAS loaded does not reach it.
+/// Creating `sub/_new.scss` then changes a directory nobody is looking at and
+/// the watch never recovers — measured before the fix: NEVER SEEN.
+///
+/// The urls that resolved to nothing are recorded now, and the directory each
+/// of them names is followed even though it does not exist. Polling makes
+/// that cheap: a missing path stamps as missing, compares equal to itself,
+/// and becomes a change the moment it appears.
+#[test]
+fn watch_recovers_when_a_missing_dependency_arrives_in_a_subdirectory() {
+    use std::time::{Duration, Instant};
+
+    let dir = scratch("watch_subdir");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    write(&dir, "main.scss", "@use \"sub/new\";\n.a { b: 1 }\n");
+
+    let mut child = std::process::Command::new(BIN)
+        .args(["--no-source-map", "--watch", "main.scss", "out.css"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn --watch");
+
+    let out = dir.join("out.css");
+    let css = || std::fs::read_to_string(&out).unwrap_or_default();
+    let until = |pred: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(
+            until(&|| css().starts_with("/* Error:")),
+            "the unresolved @use should have produced error CSS: {:?}",
+            css(),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(dir.join("sub/_new.scss"), "$x: 1;\n").unwrap();
+        assert!(
+            until(&|| css().contains("b: 1")),
+            "the dependency arrived in a directory nothing was following: {:?}",
+            css(),
+        );
+    }));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
