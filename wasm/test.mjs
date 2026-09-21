@@ -786,6 +786,13 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const outputFlags = new Set(["-o", "--output"]);
   // Flags that exit before compiling, so they cannot be probed this way.
   const terminal = new Set(["-h", "--help", "--version", "--"]);
+  // …and the opposite: a flag whose whole job is NOT to exit. Probing `-w`
+  // with a valid input starts a watch, and `spawnSync` with no timeout waits
+  // for it forever — which is how this guard hung the suite the day the
+  // binary grew a watcher and `-w` first appeared in its `--help`. A flag
+  // that has to be killed did not say "unknown option", so it counts as
+  // accepted, which is exactly what the guard is asking.
+  const neverExits = new Set(["-w", "--watch"]);
 
   const dir = mkdtempSync(join(tmpdir(), "sasso-drift-"));
   const src = join(dir, "in.scss");
@@ -797,7 +804,10 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     const argv = outputFlags.has(f)
       ? [cliPath, "--no-source-map", f, join(dir, "out.css"), src]
       : [cliPath, "--no-source-map", ...(f in withValue ? [f, withValue[f]] : [f]), `${src}:${join(dir, "out.css")}`];
-    const r = spawnSync(process.execPath, argv, { encoding: "utf8" });
+    const r = spawnSync(process.execPath, argv, {
+      encoding: "utf8",
+      timeout: neverExits.has(f) ? 1500 : 30000,
+    });
     if (/unknown option/.test(r.stderr || "")) rejected.push(f);
   }
   assert.deepEqual(
@@ -845,10 +855,11 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const byDesign = new Map([
     ["--engine", "reports which engine the npm CLI chose; the binary IS the engine"],
   ]);
-  const gaps = new Map([
-    ["-w", "#86: the binary has no watcher yet"],
-    ["--watch", "#86: the binary has no watcher yet — a file-watching dependency in a crate whose [dependencies] section is empty is a deliberate decision, not a default"],
-  ]);
+  // Empty, and that is the point of the entry above it: #86's `-w`/`--watch`
+  // lived here until the binary grew a watcher, and the guard only started
+  // failing again — asking for this list to shrink — because the entries
+  // were removed when the work landed.
+  const gaps = new Map([]);
   const onlyNpm = [...npmFlags].filter((f) => !flags.includes(f) && !byDesign.has(f) && !gaps.has(f));
   assert.deepEqual(
     onlyNpm,

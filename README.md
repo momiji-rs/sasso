@@ -150,10 +150,14 @@ speeds up the `npx sasso` in a project's scripts without touching them
 happens to have; a mismatch is passed over in silence. `SASSO_BINARY=<path>`
 names a binary explicitly, version unchecked, and `SASSO_BINARY=0` turns the
 hand-off off. `SASSO_DEBUG_ENGINE=1` prints which of these happened and why.
-`--watch` always stays in-process, because the binary has no watcher yet
-(#86). `--update` hands off only on the version-MATCHED path: the binary has
-the flag now, but `SASSO_BINARY` is unchecked by design and may name one from
-before it, so that route stays in-process too. `sasso --engine` reports the
+`--watch` always stays in-process, and now by choice rather than for want of
+a watcher: the binary has one, and it polls, because a native watcher would
+be a runtime dependency. Measured on one save, macOS: the npm CLI's
+event-driven watch answers in 18-20 ms, the binary's poll in 13-55 ms and
+dart-sass in 47-51 ms. Handing off would trade the fastest of the three for
+the middle one. `--update` hands off only on the version-MATCHED path: the
+binary has the flag now, but `SASSO_BINARY` is unchecked by design and may
+name one from before it, so that route stays in-process too. `sasso --engine` reports the
 hand-off rather than taking it.
 
 **Importing the library** selects nothing: `import … from "sasso"` is always
@@ -243,11 +247,15 @@ flags: `--[no-]source-map`, `--source-map-urls`, `--[no-]embed-sources`,
 `--[no-]embed-source-map`, `--[no-]error-css`, `--[no-]charset`, `-q/--quiet`,
 `--quiet-deps`, `--stop-on-error`, `--[no-]unicode`, `--[no-]color` (accepted;
 sasso never colors), `--indented`, `--stdin`. Exit codes match too (64 usage,
-65 compile error, 66 unreadable input). Not supported by the binary: `--watch`,
-`--pkg-importer`, and the deprecation-selection flags — the **npm** CLI does
-have `--watch`, so the two are not yet identical in that direction (#86).
-`--update` is on both, and on both it compares the output against the entry
-*and* every stylesheet the entry loads, as dart-sass does. `sasso --help` lists everything.
+65 compile error, 66 unreadable input). Not supported by the binary:
+`--pkg-importer` and the deprecation-selection flags. `--update` and
+`-w/--watch` are on both CLIs (#86): `--update` compares the output against
+the entry *and* every stylesheet the entry loads, as dart-sass does, and
+`--watch` follows that same set, refuses the same three shapes dart refuses,
+and prints the same banner and per-write line. `--[no-]poll` is accepted
+beside `--watch` and does nothing — the binary always polls, because a native
+watcher would mean a dependency; `src/watch.rs` has the measurements.
+`sasso --help` lists everything.
 
 ## Conformance
 

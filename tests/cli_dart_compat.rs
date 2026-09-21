@@ -2644,3 +2644,231 @@ fn regex_lite_stamp(line: &str) -> bool {
     let punct = [(5, b'-'), (8, b'-'), (11, b' '), (14, b':')];
     digits.iter().all(|&i| b[i].is_ascii_digit()) && punct.iter().all(|&(i, c)| b[i] == c)
 }
+
+/// `--watch`'s three usage refusals, each measured against dart-sass 1.104.1
+/// on 2026-09-20: same wording, same exit code as dart's, and the same shape
+/// as `--update`'s two.
+#[test]
+fn watch_refuses_what_dart_refuses() {
+    let dir = scratch("watch_usage");
+    write(&dir, "a.scss", ".a { b: 1 }\n");
+    for (args, message) in [
+        (
+            vec!["--watch", "a.scss"],
+            "--watch is not allowed when printing to stdout.",
+        ),
+        (vec!["--watch", "--stdin"], "--watch is not allowed with --stdin."),
+        (
+            vec!["--poll", "a.scss:a.css"],
+            "--poll may not be passed without --watch.",
+        ),
+    ] {
+        let r = sasso(&dir, &args);
+        assert_eq!(r.code, 64, "{args:?} should be a usage error: {}", r.stderr);
+        assert!(
+            r.stderr.contains(message),
+            "{args:?}: wanted {message:?}, got {:?}",
+            &r.stderr[..r.stderr.len().min(120)],
+        );
+    }
+    // `--poll` and `--no-poll` are accepted WITH `--watch` — they choose
+    // between a native watcher and repeated stats, and we only have the
+    // second, so both are no-ops rather than errors. Checked through the
+    // usage layer alone (a real `--watch` never exits) by pairing them with
+    // a second refusal: reaching the stdin message means `--poll` itself got
+    // through.
+    for flag in ["--poll", "--no-poll"] {
+        let r = sasso(&dir, &[flag, "--watch", "--stdin"]);
+        assert_eq!(r.code, 64, "{flag}: {}", r.stderr);
+        assert!(
+            r.stderr.contains("--watch is not allowed with --stdin."),
+            "{flag} should be accepted beside --watch, got {:?}",
+            &r.stderr[..r.stderr.len().min(120)],
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A real watch session: it compiles, it notices a dependency change, it
+/// reports a break without dying, and it recovers.
+///
+/// Spawned rather than `sasso()`d because `--watch` never exits — the point
+/// of the flag. Timeouts are generous: this asserts that the events HAPPEN,
+/// not how fast, which is `bench/watch.md`'s job.
+#[test]
+fn watch_recompiles_reports_and_recovers() {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    let dir = scratch("watch_cycle");
+    write(&dir, "src/main.scss", "@use \"v\";\n.a { color: v.$c; }\n");
+    write(&dir, "src/_v.scss", "$c: red;\n");
+
+    let mut child = std::process::Command::new(BIN)
+        .args(["--no-source-map", "--watch", "src/main.scss", "out.css"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn --watch");
+
+    let out = dir.join("out.css");
+    let css = || std::fs::read_to_string(&out).unwrap_or_default();
+    let until = |pred: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+
+    // A save's CSS arrives from the PROVISIONAL run and its narration from the
+    // authoritative one a window later, so a step that waits on the file has
+    // not waited for the line. Long enough for the catch-up, short enough to
+    // keep the test quick.
+    let settle = || std::thread::sleep(Duration::from_millis(400));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(until(&|| css().contains("red")), "the first compile never landed");
+        settle();
+
+        std::fs::write(dir.join("src/_v.scss"), "$c: navy;\n").unwrap();
+        assert!(
+            until(&|| css().contains("navy")),
+            "a changed dependency was never noticed: {:?}",
+            css(),
+        );
+        settle();
+
+        // A break: error CSS replaces the output and the watch keeps running.
+        std::fs::write(dir.join("src/_v.scss"), "$c: ;\n").unwrap();
+        assert!(
+            until(&|| css().starts_with("/* Error:")),
+            "a broken dependency produced no error CSS: {:?}",
+            css(),
+        );
+        settle();
+
+        // Fixed back to EXACTLY what it was before the break. The npm CLI had
+        // this bug (#159): a cache of the last good CSS matched, the write was
+        // skipped, and the page stayed broken.
+        std::fs::write(dir.join("src/_v.scss"), "$c: navy;\n").unwrap();
+        assert!(
+            until(&|| css().contains("navy")),
+            "fixing it back to the same value left the error CSS: {:?}",
+            css(),
+        );
+        settle();
+    }));
+
+    let _ = child.kill();
+    let mut stdout = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut stdout);
+    }
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+
+    // dart prints the banner before the first compile and one line per file
+    // actually written; `--quiet` suppresses the lines but not the banner.
+    assert!(
+        stdout.starts_with("Sass is watching for changes. Press Ctrl-C to stop.\n\n"),
+        "banner missing: {stdout:?}",
+    );
+    let compiled = stdout.lines().filter(|l| l.contains("Compiled")).count();
+    assert!(
+        compiled >= 3,
+        "one line per successful write — first, change, recovery: {stdout:?}",
+    );
+    // …and a failed compile is silent on stdout, so the broken save added
+    // none of them.
+    assert!(
+        compiled <= 4,
+        "a failed compile must not be narrated, and a provisional run must not \
+         narrate a second time: {stdout:?}",
+    );
+}
+
+/// The output written INTO a directory the watch follows, which is the
+/// ordinary layout — `main.scss` and `main.css` side by side.
+///
+/// The poll follows the directories of everything it loaded, so that a
+/// dependency which does not exist YET can arrive. That makes the output's
+/// own write a candidate change: creating a file moves its directory's
+/// mtime, and a compile that provokes the next compile never stops. The
+/// npm CLI needs an explicit "these files are ours" set for the same reason.
+///
+/// It does not happen, and the reason is worth pinning: the snapshot is
+/// taken AFTER the compile, so a write that has already landed is already
+/// accounted for, and writing an existing file again does not touch its
+/// directory. This checks the whole of that, including the churn that does
+/// move a directory's mtime — `--no-error-css` deletes the output on a
+/// failure and the next success recreates it.
+#[test]
+fn watch_does_not_trigger_itself() {
+    use std::time::{Duration, Instant};
+
+    let dir = scratch("watch_selftrigger");
+    write(&dir, "main.scss", "@use \"v\";\n.a { color: v.$c; }\n");
+    write(&dir, "_v.scss", "$c: red;\n");
+
+    let mut child = std::process::Command::new(BIN)
+        .args([
+            "--no-source-map",
+            "--no-error-css",
+            "--watch",
+            "main.scss",
+            "main.css",
+        ])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn --watch");
+
+    let out = dir.join("main.css");
+    let css = || std::fs::read_to_string(&out).unwrap_or_default();
+    let until = |pred: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(until(&|| css().contains("red")), "the first compile never landed");
+        // Break it, so the output is DELETED, then fix it, so it is created
+        // again — the sequence that moves the directory's mtime twice.
+        std::fs::write(dir.join("_v.scss"), "$c: ;\n").unwrap();
+        assert!(
+            until(&|| css().is_empty()),
+            "--no-error-css should remove the output"
+        );
+        std::fs::write(dir.join("_v.scss"), "$c: teal;\n").unwrap();
+        assert!(until(&|| css().contains("teal")), "and put it back");
+        // Now leave it alone. An mtime that moves after this one is the
+        // watch answering itself.
+        std::thread::sleep(Duration::from_millis(600));
+        let settled = std::fs::metadata(&out).and_then(|m| m.modified()).ok();
+        std::thread::sleep(Duration::from_secs(2));
+        let later = std::fs::metadata(&out).and_then(|m| m.modified()).ok();
+        assert_eq!(settled, later, "the watch recompiled with nothing to recompile");
+    }));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}

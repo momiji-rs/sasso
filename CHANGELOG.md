@@ -13,6 +13,46 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Added
 
+- **`-w`/`--watch` in the binary** (#86), which closes the flag gap that made
+  a `sass` build script work under `npm install sasso` and fail with the
+  binary. It follows the entry and everything the entry loaded, re-resolving
+  after every compile, and it keeps running through an error.
+
+  **It polls, and that was the decision the issue asked for rather than a
+  default.** Every native watcher — inotify, kqueue, `ReadDirectoryChangesW`
+  — is a syscall this crate cannot make: `[dependencies]` is empty and stays
+  empty, and `unsafe_code = "deny"` outside the Miri-verified arena rules out
+  the FFI those APIs need. What `std` offers is `fs::metadata`, and asking it
+  repeatedly is a watcher.
+
+  Measured, it is not the slow option. One save, macOS, three samples:
+
+  ```
+    dart-sass 1.104.1   51 ms  47 ms  50 ms   (a native watcher)
+    sasso binary        29 ms  55 ms  13 ms   (this poll)
+    sasso npm CLI       20 ms  18 ms  19 ms   (node's fs.watch)
+  ```
+
+  The interval is not a constant, because the cost is not: a sweep is about
+  1.3 us per file, so 50 ms is free for ten files and 18% of a core for five
+  thousand. It scales so the watcher spends at most 2% of its time asking,
+  between a 50 ms floor and a 500 ms ceiling.
+
+  What it prints matches dart exactly — the banner, and one
+  `[stamp] Compiled x to y.` per file actually written, `--quiet` suppressing
+  the lines but not the banner. dart's three usage refusals are refused with
+  dart's wording and exit code: `--watch` to stdout, `--watch` with `--stdin`,
+  and `--poll` without `--watch`. `--[no-]poll` is accepted and does nothing
+  on both CLIs, for opposite reasons — this one always polls, and the npm CLI
+  always has node's watcher.
+
+  A burst of saves costs two compiles, not one per event: a provisional run
+  at the head, which reports nothing and touches no output because the
+  likeliest cause of a failure there is a file still being written, and an
+  authoritative one behind it. The same rule as the npm CLI's `_coalesce.mjs`,
+  and tested the same way — against a clock the test supplies, because the
+  spacing of real writes cannot be pinned on a loaded machine.
+
 - **`--update` in the binary** (#86). It was npm-only, so a build script
   written for `sass` worked under `npm install sasso` and failed with the
   binary — the mirror image of #24. It walks the dependency graph like

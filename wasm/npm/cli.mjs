@@ -575,6 +575,14 @@ function parseArgs(argv) {
       opts.stdin = false;
     } else if (a === "-w" || a === "--watch") {
       opts.watch = true;
+    } else if (a === "--poll" || a === "--no-poll") {
+      // dart chooses between a native watcher and repeated stats with this.
+      // NEITHER of our CLIs can honour it, for opposite reasons: node gives
+      // this one `fs.watch` and it always uses it, and the binary has no
+      // dependency to give it one so it always polls. Accepted so a build
+      // script written for dart runs, validated below so the flag is not
+      // silently meaningless, and otherwise a no-op.
+      opts.poll = a === "--poll";
     } else if (a === "--indented") {
       opts.indented = true;
     } else if (a === "--no-indented") {
@@ -722,6 +730,11 @@ function validate(opts) {
   // fresh) while the binary did the dangerous one; refusing the pair is what
   // dart does and leaves neither to luck.
   if (opts.update && opts.stdin) fail("error: --update is not allowed with --stdin.");
+  // dart: `--watch is not allowed with --stdin.` and `--poll may not be
+  // passed without --watch.`, both exit 64 (measured against 1.104.1 on
+  // 2026-09-20). The binary refuses the same two with the same wording.
+  if (opts.watch && opts.stdin) fail("error: --watch is not allowed with --stdin.");
+  if (opts.poll !== undefined && !opts.watch) fail("error: --poll may not be passed without --watch.");
   if (pairs) {
     if (!operands.every((a) => colonIndex(a) >= 0)) {
       fail('error: Positional and ":" arguments may not both be used.');

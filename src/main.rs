@@ -98,6 +98,10 @@ OTHER:
         --update                        skip writing an output that is already
                                         newer than its input and every
                                         stylesheet that input loads
+    -w, --watch                         recompile when a stylesheet changes
+        --[no-]poll                     accepted for dart-sass compatibility
+                                        (no-op: sasso always polls, because a
+                                        native watcher would be a dependency)
         --[no-]stop-on-error            don't start more files once one fails
     -c, --[no-]color                    accepted for dart-sass compatibility
                                         (no-op: sasso never colors output)
@@ -142,6 +146,14 @@ struct Cli {
     /// stylesheets reached through a load path (dart-sass `--quiet-deps`).
     quiet_deps: bool,
     update: bool,
+    /// Keep running and recompile when anything the entry loads changes
+    /// (dart-sass `-w`/`--watch`).
+    watch: bool,
+    /// dart's `--[no-]poll`, which chooses between a native watcher and
+    /// repeated stat calls. We only have the second, so the value is recorded
+    /// for its usage rule ("may not be passed without --watch") and then
+    /// ignored — see `watch.rs` for why there is no other option here.
+    poll: Option<bool>,
     /// Compile but discard the CSS (timing-only runs).
     no_css: bool,
     /// Recompile the input in-process this many times and report throughput.
@@ -297,6 +309,11 @@ fn physical_cores(cpuinfo: &str) -> Option<usize> {
 /// dependencies and no `unsafe`. Self-contained on purpose — see its module
 /// docs for why it reads the tz database rather than calling libc.
 mod localtime;
+
+/// `--watch` with no file-watching dependency: a poll whose interval pays for
+/// itself, and the rule that turns a burst of saves into two compiles. See
+/// its module docs for why polling is the only option here and what it costs.
+mod watch;
 
 #[cfg(test)]
 mod default_jobs_tests {
@@ -484,6 +501,8 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
         quiet: false,
         quiet_deps: false,
         update: false,
+        watch: false,
+        poll: None,
         no_css: false,
         loop_n: None,
         no_unicode: false,
@@ -531,6 +550,9 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
             "-q" | "--quiet" => cli.quiet = true,
             "--no-quiet" => cli.quiet = false,
             "--update" => cli.update = true,
+            "-w" | "--watch" => cli.watch = true,
+            "--poll" => cli.poll = Some(true),
+            "--no-poll" => cli.poll = Some(false),
             "--quiet-deps" => cli.quiet_deps = true,
             "--no-quiet-deps" => cli.quiet_deps = false,
             "--stop-on-error" => cli.stop_on_error = true,
@@ -616,6 +638,19 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
     // FRESH, leaving the previous run's CSS on disk.
     if cli.update && cli.stdin_flag {
         return Err("--update is not allowed with --stdin.".to_string());
+    }
+    // The same rule for `--watch`, and for the same reason: standard input is
+    // read once and cannot change, so there is nothing to watch. Measured
+    // against dart-sass 1.104.1 on 2026-09-20, exit 64 and this wording.
+    if cli.watch && cli.stdin_flag {
+        return Err("--watch is not allowed with --stdin.".to_string());
+    }
+    // `--poll` chooses between a native watcher and repeated stats, so it
+    // means nothing on its own. dart refuses it, exit 64, and we accept it
+    // ONLY to refuse it the same way — sasso always polls (see `watch.rs`),
+    // so neither spelling changes anything when `--watch` is there.
+    if cli.poll.is_some() && !cli.watch {
+        return Err("--poll may not be passed without --watch.".to_string());
     }
     if !cli.pairs.is_empty() {
         if !cli.positionals.is_empty() {
@@ -722,6 +757,12 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
     let to_stdout = cli.pairs.is_empty() && cli.output.is_none() && !entry_is_dir;
     if cli.update && to_stdout {
         return Err("--update is not allowed when printing to stdout.".to_string());
+    }
+    // And again for `--watch`: a watch with nowhere to write would recompile
+    // on every save and print the whole stylesheet to the terminal each time.
+    // dart refuses it with the same wording, exit 64 (measured 2026-09-20).
+    if cli.watch && to_stdout {
+        return Err("--watch is not allowed when printing to stdout.".to_string());
     }
     if to_stdout {
         // A stdout map can only be embedded, and its sources are always
@@ -903,6 +944,15 @@ struct Shared {
     /// Generate a source map for file targets (dart default: yes).
     file_source_map: bool,
     /// Write an error stylesheet to a file target on failure (dart default: yes).
+    /// `--watch` is running. Only the narration cares: the flag's behaviour
+    /// lives in `run_watch`, but the line dart prints per written file is
+    /// emitted from the unit that wrote it, like `--update`'s.
+    watch: bool,
+    /// This compile is the speculative one at the head of a burst (see
+    /// `watch.rs`). The likeliest cause of a failure here is a file still
+    /// being written, so it reports nothing and touches no output — the
+    /// authoritative run that always follows does both.
+    provisional: bool,
     file_error_css: bool,
     /// Print an error stylesheet to stdout on failure (`--error-css`, explicit).
     stdout_error_css: bool,
@@ -923,6 +973,11 @@ struct Outcome {
     stderr: String,
     stdout: String,
     status: Status,
+    /// Every file this compile read, the entry included — what `--watch`
+    /// follows. Collected from the same `RecordingImporter` `--update`
+    /// already uses, so the two flags cannot disagree about what a
+    /// stylesheet depends on.
+    loaded: Vec<PathBuf>,
 }
 
 impl Outcome {
@@ -931,6 +986,7 @@ impl Outcome {
             stderr,
             stdout: String::new(),
             status,
+            loaded: Vec::new(),
         }
     }
 }
@@ -1171,6 +1227,8 @@ fn run(cli: Cli) -> ExitCode {
         // dart: source maps default ON when writing to a file; an explicit
         // `--embed-source-map` implies one.
         file_source_map: cli.source_map.unwrap_or(true) || cli.embed_source_map,
+        watch: cli.watch,
+        provisional: false,
         file_error_css: cli.error_css.unwrap_or(true),
         stdout_error_css: cli.error_css == Some(true),
     };
@@ -1183,6 +1241,9 @@ fn run(cli: Cli) -> ExitCode {
     }
 
     let jobs = cli.jobs.unwrap_or_else(default_jobs);
+    if cli.watch {
+        return run_watch(&units, &shared, jobs, cli.stop_on_error);
+    }
     let outcomes = compile_all(&units, &shared, jobs, cli.stop_on_error);
 
     // Report in command-line order: each unit's diagnostics, then its CSS.
@@ -1495,7 +1556,13 @@ fn compile_unit(unit: &Unit, shared: &Shared) -> Outcome {
 fn finish_compile_error(unit: &Unit, shared: &Shared, rendered: &str, ascii: &str, outcome: &mut Outcome) {
     // `--no-css` means no output-side effects at all: no error stylesheet, and
     // an existing output is left exactly as it was.
-    if shared.no_css {
+    //
+    // A provisional run under `--watch` wants exactly that too, and for a
+    // different reason: it compiles the instant a change is seen, which for a
+    // slow save is a half-written file. Writing an error stylesheet for that,
+    // or deleting the last good CSS, would make an editor's own write
+    // sequence look like the user breaking their stylesheet.
+    if shared.no_css || shared.provisional {
         return;
     }
     match &unit.target {
@@ -1558,6 +1625,10 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
         stderr: std::mem::take(&mut *warnings.borrow_mut()),
         stdout: String::new(),
         status: Status::Ok,
+        // Taken whether or not this is a watch: the compile has already
+        // resolved the graph, and a second walk to learn it would be the
+        // cost `--update`'s comment explains away.
+        loaded: importer.loaded_paths(),
     };
     match compiled {
         // `--no-css`: the compile (and its diagnostics) was all that was wanted.
@@ -1605,13 +1676,19 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
                     outcome.stderr.push_str(&msg);
                     outcome.stderr.push('\n');
                     outcome.status = Status::IoError;
-                } else if shared.update && !shared.quiet {
-                    // dart narrates `--update`, and only `--update`: one line
-                    // per file actually WRITTEN, on stdout, timestamped to the
-                    // minute in local time (measured 2026-09-19). A skipped
-                    // output and a failed compile are both silent, which is
-                    // why this sits on the success arm after the write rather
-                    // than beside the freshness check.
+                } else if (shared.update || shared.watch) && !shared.quiet {
+                    // dart narrates `--update` and `--watch`, and only those
+                    // two: one line per file actually WRITTEN, on stdout,
+                    // timestamped to the minute in local time (measured
+                    // 2026-09-19 and 2026-09-20). A skipped output and a
+                    // failed compile are both silent, which is why this sits
+                    // on the success arm after the write rather than beside
+                    // the freshness check.
+                    //
+                    // Under `--watch` a provisional run reaches here too, and
+                    // its whole `stdout` is dropped by `run_watch` — so one
+                    // save is one line, from the authoritative run, rather
+                    // than the two the npm CLI prints for a `@warn`.
                     //
                     // `outcome.stdout` is flushed in command-line order, so a
                     // parallel build reports in argument order like dart's.
@@ -1667,6 +1744,120 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
 
 /// Throughput mode (`--loop N`): a warm/correctness pass reports diagnostics
 /// once, then the whole set is recompiled N times with a silent logger.
+/// `--watch`: compile, then keep compiling whenever anything the entry loaded
+/// changes.
+///
+/// The watcher itself is in `watch.rs` — what to poll, how often, and how a
+/// burst of saves becomes two compiles. This is the part that knows about
+/// units: which files to follow, what to print, and what a provisional run is
+/// allowed to do.
+///
+/// It never returns. dart's `--watch` exits only on a signal, and so does
+/// this: a compile error is reported and waited on, not fatal.
+fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) -> ExitCode {
+    use std::io::Write;
+
+    // dart prints this before the first compile and `--quiet` does not
+    // suppress it — measured 2026-09-20, and the npm CLI already matches.
+    {
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(b"Sass is watching for changes. Press Ctrl-C to stop.\n\n");
+        let _ = stdout.flush();
+    }
+
+    // A provisional run differs from an authoritative one in what it is
+    // ALLOWED to do, not in how it compiles, so it is the same `Shared` with
+    // one flag flipped rather than a second code path.
+    let quiet_shared = Shared {
+        provisional: true,
+        load_paths: shared.load_paths.clone(),
+        silenced: shared.silenced.clone(),
+        ..*shared
+    };
+
+    let mut snapshot = watch::Snapshot::default();
+    let mut coalesce = watch::Coalesce::new(watch::WINDOW);
+    let started = Instant::now();
+    let mut interval = watch::MIN_INTERVAL;
+    // The first compile is authoritative: nothing is half-written yet, and a
+    // watch that started against a broken stylesheet has to say so.
+    let mut step = watch::Step::Run { provisional: false };
+
+    loop {
+        if let watch::Step::Run { provisional } = step {
+            let run_shared = if provisional { &quiet_shared } else { shared };
+            let outcomes = compile_all(units, run_shared, jobs, stop_on_error);
+            let mut ok = true;
+            let mut followed: Vec<PathBuf> = Vec::new();
+            {
+                let mut stdout = std::io::stdout().lock();
+                let mut stderr = std::io::stderr().lock();
+                let mut stderr_ends_blank = true;
+                for outcome in outcomes.into_iter().flatten() {
+                    if outcome.status != Status::Ok {
+                        ok = false;
+                    }
+                    followed.extend(outcome.loaded);
+                    // A provisional run reports NOTHING. Its diagnostics are
+                    // about a file that may still be being written, and the
+                    // authoritative run 50 ms behind it will print whatever
+                    // is really wrong. Measured on the npm CLI, which does
+                    // report from both: one save with a `@warn` prints the
+                    // warning TWICE there and once in dart.
+                    if provisional {
+                        continue;
+                    }
+                    if !outcome.stderr.is_empty() {
+                        if !stderr_ends_blank {
+                            let _ = stderr.write_all(b"\n");
+                        }
+                        let _ = stderr.write_all(outcome.stderr.as_bytes());
+                        stderr_ends_blank = outcome.stderr.ends_with("\n\n");
+                    }
+                    let _ = stdout.write_all(outcome.stdout.as_bytes());
+                }
+                let _ = stdout.flush();
+                let _ = stderr.flush();
+            }
+            // Follow the ENTRY too. A compile that failed before reading
+            // anything — a parse error in the entry, an unreadable file —
+            // records no loads at all, and without this the watch would sit
+            // there forever with nothing to notice.
+            followed.extend(
+                units
+                    .iter()
+                    .filter_map(|u| u.source_path().map(Path::to_path_buf)),
+            );
+            // …and the directories they live in, so a dependency that does
+            // not exist YET can arrive. A missing `@use` target has no path
+            // to stat; its directory does, and its mtime moves when the file
+            // is created.
+            let dirs: Vec<PathBuf> = followed
+                .iter()
+                .filter_map(|f| f.parent().map(Path::to_path_buf))
+                .collect();
+            followed.extend(dirs);
+            followed.extend(shared.load_paths.iter().cloned());
+            snapshot.follow(followed, watch::Stamp::of);
+            coalesce.finished(provisional, ok);
+        }
+
+        std::thread::sleep(interval);
+        let swept = Instant::now();
+        let changed = snapshot.changed(watch::Stamp::of);
+        interval = watch::next_interval(swept.elapsed(), watch::SWEEP_BUDGET);
+
+        let now_ms = started.elapsed().as_millis() as u64;
+        // The catch-up first: a stream of changes arriving on every tick must
+        // not starve the authoritative run that makes them count.
+        step = match coalesce.on_tick(now_ms) {
+            run @ watch::Step::Run { .. } => run,
+            watch::Step::Wait if changed => coalesce.on_change(now_ms),
+            wait => wait,
+        };
+    }
+}
+
 fn run_loop(units: &[Unit], shared: &Shared, n: u32) -> ExitCode {
     let mut sources = Vec::with_capacity(units.len());
     for unit in units {
