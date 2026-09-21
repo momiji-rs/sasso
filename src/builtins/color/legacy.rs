@@ -694,7 +694,7 @@ fn parse_number_token(s: &str) -> Option<Number> {
 }
 
 pub(super) fn rgb_repr(r: f64, g: f64, b: f64, a: f64) -> String {
-    if (a - 1.0).abs() < f64::EPSILON {
+    if crate::value::fuzzy_eq(a, 1.0) {
         format!(
             "rgb({}, {}, {})",
             fmt_num(r, false),

@@ -1268,34 +1268,33 @@ impl Value {
 /// dart-sass's `fuzzyEquals`.
 const FUZZY_EPSILON: f64 = 1e-11;
 
-/// dart-sass `fuzzyEquals`: exact equality (so `Infinity == Infinity`) or a
-/// finite difference within [`FUZZY_EPSILON`]. `NaN` is never equal to
-/// anything (matching dart-sass and IEEE semantics).
-fn fuzzy_eq(a: f64, b: f64) -> bool {
-    a == b || (a - b).abs() < FUZZY_EPSILON
-}
-
 /// `1 / FUZZY_EPSILON`, the scale dart-sass's `fuzzyEquals` rounds at.
 const INVERSE_FUZZY_EPSILON: f64 = 1e11;
 
-/// dart-sass `fuzzyIsInt`: whether a value is `fuzzyEquals` to its own
-/// rounding — with BOTH clauses of that comparison, which [`fuzzy_eq`]
-/// simplifies away. The second one decides real cases here: the green channel
-/// of `color.to-space(hsl(210, 50%, 7.8431372549%), rgb)` is
-/// 19.999999999994987, within the epsilon of 20, and dart still calls it
-/// non-integral because scaling both by 1e11 and rounding disagrees
-/// (1999999999999 against 2000000000000). `[measured]` against dart-sass
-/// 1.104.1: `meta.inspect` of that color is
+/// dart-sass `fuzzyEquals`: exact equality (so `Infinity == Infinity`), or a
+/// difference within [`FUZZY_EPSILON`] **and** the same value after scaling
+/// both sides by 1e11 and rounding. `NaN` is never equal to anything (matching
+/// dart-sass and IEEE semantics).
+///
+/// The second clause is load-bearing, and it is the whole comparison, not an
+/// optimization of the first: 19.999999999994987 is within the epsilon of 20
+/// yet scaling disagrees (1999999999999 against 2000000000000), so dart calls
+/// it unequal. Every classification built on this — is a channel an integer, is
+/// a color in gamut, does a triple match a named color — inherits that, and
+/// dart's `namesByColor` lookup inherits it through `fuzzyHashCode`, which is
+/// the SAME rounding. `[measured]` against dart-sass 1.104.1:
+/// `meta.inspect(color.to-space(hsl(210, 50%, 7.8431372549%), rgb))` is
 /// `rgba(3.9215686274500006%, 7.843137254899995%, 11.764705882349999%, 0.4)`,
 /// not `rgba(10, 20, 30, 0.4)`.
-fn fuzzy_is_int(v: f64) -> bool {
-    if !v.is_finite() {
-        return false;
-    }
-    let rounded = v.round();
-    v == rounded
-        || ((v - rounded).abs() <= FUZZY_EPSILON
-            && (v * INVERSE_FUZZY_EPSILON).round() == (rounded * INVERSE_FUZZY_EPSILON).round())
+pub(crate) fn fuzzy_eq(a: f64, b: f64) -> bool {
+    a == b
+        || ((a - b).abs() <= FUZZY_EPSILON
+            && (a * INVERSE_FUZZY_EPSILON).round() == (b * INVERSE_FUZZY_EPSILON).round())
+}
+
+/// dart-sass `fuzzyIsInt`: whether a value is [`fuzzy_eq`] to its own rounding.
+pub(crate) fn fuzzy_is_int(v: f64) -> bool {
+    v.is_finite() && fuzzy_eq(v, v.round())
 }
 
 /// Sass `==` for two colors (dart-sass). Legacy colors with no missing channel
@@ -2026,7 +2025,7 @@ impl Color {
                 return;
             }
         }
-        let opaque = (self.a - 1.0).abs() < f64::EPSILON;
+        let opaque = fuzzy_eq(self.a, 1.0);
         if opaque && self.can_use_hex() {
             let r = self.r.round().clamp(0.0, 255.0) as u8;
             let g = self.g.round().clamp(0.0, 255.0) as u8;
@@ -2086,7 +2085,7 @@ impl Color {
         // FROM the rgb channels, so float noise can only lengthen it (never
         // shorten the rgb past it), keeping the choice safe.
         if compressed {
-            let in_gamut = |v: f64| (-1e-9..=255.0 + 1e-9).contains(&v);
+            let in_gamut = |v: f64| (v > 0.0 || fuzzy_eq(v, 0.0)) && (v < 255.0 || fuzzy_eq(v, 255.0));
             if in_gamut(self.r) && in_gamut(self.g) && in_gamut(self.b) {
                 // The candidate is built rather than written: it only replaces
                 // what is already in `out` if it turns out to be shorter, and
@@ -2096,8 +2095,12 @@ impl Color {
                 // dart nulls the hue when saturation is fuzzy-zero (srgb.dart:
                 // `fuzzyEquals(saturation, 0) ? null : hue`), and a missing hue
                 // serializes as 0 — float dust in a gray triple must not leak
-                // a phantom hue.
-                let hue = if hsl[1].abs() < 1e-11 { 0.0 } else { hsl[0] };
+                // a phantom hue. It is `fuzzyEquals` and not a bare epsilon: a
+                // saturation of 6e-12 KEEPS its hue, which lengthens the hsl bid
+                // past the rgb one. `[measured]`:
+                // `color.change(hsl(90, 50%, 50%), $saturation: -0.000000000006%)`
+                // compresses to `rgb(50%,50%,50%)`, not `hsl(0,0%,50%)`.
+                let hue = if fuzzy_eq(hsl[1], 0.0) { 0.0 } else { hsl[0] };
                 let hh = fmt_num(hue, true);
                 let ss = fmt_num(hsl[1], true);
                 let ll = fmt_num(hsl[2], true);
@@ -2144,10 +2147,12 @@ impl Color {
 /// triple (dart-sass canonical names). `None` if the triple has no name.
 pub(crate) fn rgb_name(r: f64, g: f64, b: f64) -> Option<&'static str> {
     let int = |v: f64| {
+        // dart looks the color up in `namesByColor`, a map keyed by SassColor,
+        // so a hit needs `fuzzyHashCode` — the same 1e11 rounding [`fuzzy_eq`]
+        // does — to agree on every channel. A channel further off than that
+        // has no name, however close it looks.
         let r = v.round();
-        // Range-check the ROUNDED value: a converted channel may sit a few
-        // ulps past 255 and still round to a named color (dart fuzzyRound).
-        if (v - r).abs() < 1e-9 && (0.0..=255.0).contains(&r) {
+        if fuzzy_eq(v, r) && (0.0..=255.0).contains(&r) {
             Some(r as u16)
         } else {
             None
@@ -2361,7 +2366,7 @@ impl ModernColor {
     }
 
     fn is_opaque(&self) -> bool {
-        matches!(self.alpha, Some(a) if (a - 1.0).abs() < f64::EPSILON)
+        matches!(self.alpha, Some(a) if fuzzy_eq(a, 1.0))
     }
 
     /// Serialize a single channel, rendering a missing channel as `none`. A
@@ -2554,7 +2559,7 @@ impl ModernColor {
         // color.space == .hwb` branch comes before the format and hex rules).
         if matches!(self.space, ColorSpace::Hwb) && !self.has_missing() {
             let a = self.alpha.unwrap_or(0.0);
-            let opaque = (a - 1.0).abs() < 1e-11;
+            let opaque = fuzzy_eq(a, 1.0);
             let h = fmt_num(self.channels[0].unwrap_or(0.0), false);
             let w = fmt_num(self.channels[1].unwrap_or(0.0), false);
             let b = fmt_num(self.channels[2].unwrap_or(0.0), false);
@@ -2583,7 +2588,7 @@ impl ModernColor {
         let y = xyz.chan(1, compressed);
         let z = xyz.chan(2, compressed);
         let alpha = self.alpha.unwrap_or(0.0);
-        let opaque = self.alpha.is_some() && (alpha - 1.0).abs() < f64::EPSILON;
+        let opaque = self.alpha.is_some() && fuzzy_eq(alpha, 1.0);
         let inner = if opaque {
             format!("color(xyz {x} {y} {z})")
         } else if compressed {
@@ -2623,7 +2628,12 @@ impl ModernColor {
     /// classic comma form. rgb may collapse to hex; hwb routes through hsl.
     fn legacy_css(&self, compressed: bool, inspect: bool) -> String {
         let a = self.alpha.unwrap_or(1.0);
-        let opaque = (a - 1.0).abs() < f64::EPSILON;
+        // dart `_writeLegacyColor` opens with `fuzzyEquals(color.alpha, 1)`, so
+        // an alpha 1e-13 short of 1 is opaque. `[measured]`:
+        // `color.change(red, $alpha: 0.9999999999999)` is `red`, not
+        // `rgba(255, 0, 0, 1)` — which is what a stricter test writes, alpha
+        // and all.
+        let opaque = crate::value::fuzzy_eq(a, 1.0);
         // dart `_writeLegacyColor` (serialize.dart:753) opens with this rule:
         // an out-of-gamut color is written as hsl(), the one legacy form a
         // browser does not clamp at parse time. INSPECT output skips the

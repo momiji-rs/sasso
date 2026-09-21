@@ -7927,6 +7927,46 @@ fn parity_legacy_color_form_choice() {
 }
 
 #[test]
+fn parity_fuzz_boundary_legacy_form() {
+    // Every legacy-form decision runs through dart's `fuzzyEquals`, whose 1e11
+    // rounding clause is what separates these from an ordinary integer: a `0`
+    // hue survives the invert a negative saturation asks for, a channel 6e-12
+    // past 255 is out of gamut, and one 1e-10 short of it is neither integral
+    // nor named.
+    for c in [
+        "color.change(hsl(120, 50%, 50%), $hue: 0, $saturation: -50%)",
+        "color.adjust(hsl(0, 50%, 50%), $saturation: -100%)",
+        "color.change(lch(50% 20 0), $chroma: -20)",
+        "color.change(oklch(0.5 0.2 0), $chroma: -0.2)",
+        "color.change(hsl(120, 50%, 50%), $saturation: -50%)",
+        "color.change(hsl(90, 50%, 50%), $saturation: -0.000000000006%)",
+        "color.change(hsl(90, 50%, 50%), $saturation: -0.0000000000004%)",
+        "color.change(hsl(90, 50%, 50%), $saturation: -0%)",
+        "color.change(red, $red: 255.000000000006)",
+        "color.change(blue, $red: 255.000000000006, $blue: 0)",
+        "color.change(red, $red: 254.9999999999)",
+        "color.change(red, $red: 255.0000000001)",
+        "color.change(red, $green: -0.0000000001)",
+        "color.change(blue, $red: 255, $blue: 0)",
+        "color.adjust(#ff0001, $blue: -1)",
+        "color.change(red, $alpha: 0.9999999999999)",
+        "color.change(red, $alpha: 0.999999999994)",
+        "color.change(hsl(120, 50%, 50%), $alpha: 0.9999999999999)",
+        "color.change(hwb(120 20% 30%), $alpha: 0.9999999999999)",
+        "color.to-space(lab(50% 0.000000000006 0), lch)",
+        "color.to-space(lab(50% 0.00000000006 0), lch)",
+        "color.to-space(lab(50% 0.0000000000004 0), lch)",
+        "color.to-space(oklab(0.5 0.000000000006 0), oklch)",
+        "color.to-space(lch(0.000000000006% 20 90), lab)",
+        "color.to-space(hsl(270, 0.000000000006%, 50%), rgb)",
+    ] {
+        let src = format!("@use \"sass:color\";\na {{b: {c}}}\n");
+        assert_parity(&src);
+        assert_parity_compressed(&src);
+    }
+}
+
+#[test]
 fn parity_modified_hue_reduced_before_conversion() {
     // dart builds the modified color in the working space through
     // `SassColor.forSpaceInternal`, which reduces a polar hue into `[0, 360)`

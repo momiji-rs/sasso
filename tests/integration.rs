@@ -805,6 +805,129 @@ fn an_out_of_gamut_legacy_color_is_measured_in_its_own_space() {
     );
 }
 
+/// dart's serializer opens with `fuzzyEquals(color.alpha, 1)`, so the opacity
+/// test is the same fuzzy comparison as every other legacy-form decision: an
+/// alpha 1e-13 short of 1 is opaque, and one 6e-12 short is not. Measured
+/// against dart-sass 1.104.1.
+#[test]
+fn the_opacity_test_is_dart_s_fuzzy_comparison() {
+    let v = |scss: &str| css(&format!("@use \"sass:color\";\na {{x: {scss}}}"));
+    assert_eq!(
+        v("color.change(red, $alpha: 0.9999999999999)"),
+        "a {\n  x: red;\n}\n"
+    );
+    assert_eq!(
+        v("color.change(hsl(120, 50%, 50%), $alpha: 0.9999999999999)"),
+        "a {\n  x: hsl(120, 50%, 50%);\n}\n"
+    );
+    // 6e-12 short: the 1e11 rounding disagrees, so the color is translucent --
+    // and its alpha still PRINTS as 1, which is dart's output too.
+    assert_eq!(
+        v("color.change(red, $alpha: 0.999999999994)"),
+        "a {\n  x: rgba(255, 0, 0, 1);\n}\n"
+    );
+}
+
+/// A hue is powerless -- a missing channel -- when the saturation or chroma a
+/// conversion produced is `fuzzyEquals` to zero, which is not the same as being
+/// within the epsilon of it. Measured against dart-sass 1.104.1.
+#[test]
+fn a_powerless_hue_is_decided_by_dart_s_fuzz_not_by_an_epsilon() {
+    let v = |scss: &str| css(&format!("@use \"sass:color\";\na {{x: {scss}}}"));
+    let missing = |c: &str| v(&format!("color.is-missing(color.to-space({c}), \"hue\")"));
+    for c in [
+        "lab(50% 0.000000000006 0), lch",
+        "lab(50% 0.00000000006 0), lch",
+        "oklab(0.5 0.000000000006 0), oklch",
+    ] {
+        assert_eq!(missing(c), "a {\n  x: false;\n}\n", "{c}");
+    }
+    assert_eq!(missing("lab(50% 0.0000000000004 0), lch"), "a {\n  x: true;\n}\n");
+    // The hue the compressed writer derives for its hsl bid follows the same
+    // rule, and keeping it is what makes the rgb form the shorter one.
+    assert_eq!(
+        css_compressed(
+            "@use \"sass:color\";\na {x: color.change(hsl(90, 50%, 50%), $saturation: -0.000000000006%)}"
+        ),
+        "a{x:rgb(50%,50%,50%)}"
+    );
+}
+
+/// dart's `_normalizeHue` pattern-matches a `0` hue (and any non-finite one)
+/// BEFORE applying the 180 degrees a negative saturation or chroma asks for, so
+/// the invert leaves a zero hue alone -- reducing `0 + 360 + 180` instead would
+/// turn red into cyan. Whether the magnitude counts as negative is dart's
+/// `fuzzyLessThan(channel1, 0)`, which needs both clauses of `fuzzyEquals`: a
+/// saturation of -6e-12 is not zero to dart, so it DOES invert. Measured
+/// against dart-sass 1.104.1.
+#[test]
+fn a_zero_hue_survives_the_invert_a_negative_saturation_asks_for() {
+    let v = |scss: &str| css(&format!("@use \"sass:color\";\na {{x: {scss}}}"));
+    assert_eq!(
+        v("color.change(hsl(120, 50%, 50%), $hue: 0, $saturation: -50%)"),
+        "a {\n  x: hsl(0, 50%, 50%);\n}\n"
+    );
+    assert_eq!(
+        v("color.adjust(hsl(0, 50%, 50%), $saturation: -100%)"),
+        "a {\n  x: hsl(0, 0%, 50%);\n}\n"
+    );
+    assert_eq!(
+        v("color.change(lch(50% 20 0), $chroma: -20)"),
+        "a {\n  x: lch(50% 20 0deg);\n}\n"
+    );
+    // A hue that is NOT zero takes the offset, as it always did.
+    assert_eq!(
+        v("color.change(hsl(120, 50%, 50%), $saturation: -50%)"),
+        "a {\n  x: hsl(300, 50%, 50%);\n}\n"
+    );
+    // Inside the epsilon but not inside the 1e11 rounding: still negative.
+    assert_eq!(
+        v("color.change(hsl(90, 50%, 50%), $saturation: -0.000000000006%)"),
+        "a {\n  x: hsl(270, 0%, 50%);\n}\n"
+    );
+    // Below the rounding, and for a negative zero: not negative at all.
+    assert_eq!(
+        v("color.change(hsl(90, 50%, 50%), $saturation: -0.0000000000004%)"),
+        "a {\n  x: hsl(90, 0%, 50%);\n}\n"
+    );
+    assert_eq!(
+        v("color.change(hsl(90, 50%, 50%), $saturation: -0%)"),
+        "a {\n  x: hsl(90, 0%, 50%);\n}\n"
+    );
+}
+
+/// Every legacy-form decision is made with dart's `fuzzyEquals`, so a channel
+/// 6e-12 past 255 is OUT of gamut (and writes hsl), and one 1e-10 short of 255
+/// is neither integral nor named (and writes percentages). A looser tolerance
+/// anywhere upstream decides the form before the serializer's exact rules run.
+/// Measured against dart-sass 1.104.1.
+#[test]
+fn a_channel_inside_the_fuzz_but_past_the_bound_is_out_of_gamut() {
+    let v = |scss: &str| css(&format!("@use \"sass:color\";\na {{x: {scss}}}"));
+    assert_eq!(
+        v("color.change(red, $red: 255.000000000006)"),
+        "a {\n  x: hsl(0, 100%, 50%);\n}\n"
+    );
+    assert_eq!(
+        v("color.change(blue, $red: 255.000000000006, $blue: 0)"),
+        "a {\n  x: hsl(0, 100%, 50%);\n}\n"
+    );
+    assert_eq!(
+        v("color.change(red, $red: 254.9999999999)"),
+        "a {\n  x: rgb(100%, 0%, 0%);\n}\n"
+    );
+    assert_eq!(
+        v("color.change(red, $green: -0.0000000001)"),
+        "a {\n  x: hsl(360, 100.0000000001%, 50%);\n}\n"
+    );
+    // A triple that IS exactly the named color still gets the name.
+    assert_eq!(
+        v("color.change(blue, $red: 255, $blue: 0)"),
+        "a {\n  x: red;\n}\n"
+    );
+    assert_eq!(v("color.adjust(#ff0001, $blue: -1)"), "a {\n  x: red;\n}\n");
+}
+
 /// A modified color is built in the WORKING space before it converts back, and
 /// dart's construction reduces a polar hue into `[0, 360)` on the way (dart
 /// `SassColor.forSpaceInternal` -> `_normalizeHue`). Only the conversion can

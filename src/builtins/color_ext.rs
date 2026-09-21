@@ -86,14 +86,17 @@ pub(super) fn computed(r: f64, g: f64, b: f64, a: f64) -> Color {
 /// not `grey`). Returns `None` for translucent colors, non-integer channels,
 /// or colors with no name.
 pub(super) fn named_repr(r: f64, g: f64, b: f64, a: f64) -> Option<std::rc::Rc<str>> {
-    if (a - 1.0).abs() >= f64::EPSILON {
+    if !crate::value::fuzzy_eq(a, 1.0) {
         return None;
     }
     let int = |v: f64| {
+        // dart finds the name by looking the color up in `namesByColor`, so the
+        // hit needs `fuzzyHashCode` — the 1e11 rounding of `fuzzyEquals` — to
+        // agree on every channel. `[measured]`:
+        // `color.change(red, $red: 254.9999999999)` is `rgb(100%, 0%, 0%)`, not
+        // `red`, even though the channel is 1e-10 from 255.
         let r = v.round();
-        // Range-check the ROUNDED value: a converted channel may sit a few
-        // ulps past 255 and still round to a named color (dart fuzzyRound).
-        if (v - r).abs() < 1e-9 && (0.0..=255.0).contains(&r) {
+        if crate::value::fuzzy_eq(v, r) && (0.0..=255.0).contains(&r) {
             Some(r as u16)
         } else {
             None

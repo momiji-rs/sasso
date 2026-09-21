@@ -59,6 +59,21 @@ Conformance is tracked separately as a ratchet against the official
   `color.complement(rgba(10, 20, 30, 0.4))` writing `rgba(30, 20, 10, 0.4)` and
   writing a percentage triple.
 
+  Every OTHER decision in that form choice runs through the same comparison,
+  and each was a bare epsilon or a looser tolerance of its own. A `0` hue now
+  survives the 180° offset a negative saturation asks for, because dart matches
+  `0` before it shifts — `color.change(hsl(120, 50%, 50%), $hue: 0,
+  $saturation: -50%)` is `hsl(0, 50%, 50%)`, where a shift-then-reduce turns red
+  into cyan. Whether that saturation counts as negative, whether a channel is
+  past its bound, whether a triple matches a named color (dart looks it up in a
+  map, so `fuzzyHashCode` — the same rounding — has to agree), whether a
+  conversion leaves a powerless hue, and whether an alpha is opaque are all the
+  one rule now: `color.change(red, $red: 255.000000000006)` is
+  `hsl(0, 100%, 50%)` rather than `red`, `color.change(red, $red:
+  254.9999999999)` is `rgb(100%, 0%, 0%)`, and
+  `color.change(red, $alpha: 0.9999999999999)` is `red` rather than an
+  `rgba()` whose alpha prints as `1`.
+
   One rule still differs: inspect mode writes numbers at full precision, with no
   10-decimal rounding, so dart's inspect of the first color above is
   `rgba(3.9215686274500006%, …)` where sasso rounds each channel. That is a
