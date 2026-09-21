@@ -562,6 +562,59 @@ fn compressed_keeps_the_zero_on_a_negative_decimal() {
     assert_eq!(v("0.0123456789px"), "a{x:0.0123456789px}");
 }
 
+/// A percent channel is `max * value / 100` in dart (`_percentageOrUnitless`),
+/// and the ORDER of that multiplication is observable: `0.4 * -40 / 100` is
+/// exactly -0.16 where `-40 / 100 * 0.4` is -0.16000000000000003. The dust
+/// reaches the output, where the rounding writer shortens the spelling — and a
+/// shortened spelling loses the leading zero the exact one keeps (`-.16` for
+/// `-0.16`). Measured against dart-sass 1.104.1 on 2026-09-21.
+#[test]
+fn a_percent_channel_multiplies_in_darts_order() {
+    let both = |value: &str, expanded: &str, compressed: &str| {
+        let src = format!("@use \"sass:color\";\na {{b: {value}}}\n");
+        assert_eq!(css(&src), format!("a {{\n  b: {expanded};\n}}\n"), "{value}");
+        assert_eq!(css_compressed(&src), format!("a{{b:{compressed}}}"), "{value}");
+    };
+    // The channels whose max is 0.4 — oklab's `a`/`b` and oklch's chroma — are
+    // where the dust is large enough to survive the writer. The constructor and
+    // `color.change` reach the same multiplication.
+    both(
+        "oklab(50% -40% -75%)",
+        "oklab(50% -0.16 -0.3)",
+        "oklab(.5 -0.16 -0.3)",
+    );
+    both(
+        "color.change(oklab(50% 0.2 -0.3), $a: -40%)",
+        "oklab(50% -0.16 -0.3)",
+        "oklab(.5 -0.16 -0.3)",
+    );
+    both("oklch(50% 40% 90)", "oklch(50% 0.16 90deg)", "oklch(.5 .16 90)");
+    both("color.channel(oklab(50% -40% -75%), \"a\")", "-0.16", "-0.16");
+    both("color.channel(oklch(50% 40% 90deg), \"chroma\")", "0.16", ".16");
+    // Converting out of the space carries the exact value with it.
+    both(
+        "color.to-space(oklab(50% -40% -75%), oklch)",
+        "oklch(50% 0.34 241.9275130641deg)",
+        "oklch(.5 .34 241.9275130641)",
+    );
+    // The lab/lch maxes (125 and 150) and the legacy 0-255 channels take the
+    // same order; their dust never reaches the tenth decimal, so these pin the
+    // arithmetic rather than a byte that used to differ.
+    both("lab(50% -40% 30%)", "lab(50% -50 37.5)", "lab(50 -50 37.5)");
+    both("lch(50% 40% 90deg)", "lch(50% 60 90deg)", "lch(50 60 90)");
+    both(
+        "color.change(lab(50% 20 30), $a: 40.7%)",
+        "lab(50% 50.875 30)",
+        "lab(50 50.875 30)",
+    );
+    both("color.channel(rgb(19.9% 30% 40%), \"red\")", "50.745", "50.745");
+    both(
+        "color.channel(color.change(red, $green: 19.9%), \"green\")",
+        "50.745",
+        "50.745",
+    );
+}
+
 /// The lightness of a `lab()`/`lch()`/`oklab()`/`oklch()` color is written as a
 /// percentage in expanded output and as the channel's own stored number when
 /// compressed — the same digits for lab/lch, whose lightness runs 0–100, and

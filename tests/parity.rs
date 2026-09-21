@@ -11471,3 +11471,44 @@ fn parity_module_filter_overload_via_function_reference() {
         "@use \"sass:color\";\n@use \"sass:meta\";\n.a {\n  a: meta.call(meta.get-function(\"grayscale\", $module: \"color\"), 1);\n  b: meta.call(meta.get-function(\"alpha\", $module: \"color\"), opacity=20);\n  c: meta.call(meta.get-function(\"grayscale\", $module: \"color\"), #abc);\n}\n",
     );
 }
+
+/// The percent-channel multiplication order, asked of dart rather than
+/// encoded: `_percentageOrUnitless` is `max * value / 100`, and both halves of
+/// the 0.4-max channels (the constructors and `color.change`) have to agree
+/// with it down to the last bit — the dust the other order leaves is what the
+/// compressed writer rounds, and rounding drops a leading zero dart keeps.
+#[test]
+fn parity_percent_channel_multiplication_order() {
+    for value in [
+        "oklab(50% -40% -75%)",
+        "oklab(50% 40% 75%)",
+        "oklch(50% 40% 90)",
+        "lab(50% -40% 30%)",
+        "lch(50% 40% 90deg)",
+        "rgb(19.9% 30.1% 40.7%)",
+        "hsl(120, 40.7%, 30.1%)",
+        "color.change(oklab(50% 0.2 -0.3), $a: -40%)",
+        "color.change(oklab(50% 0.2 -0.3), $b: -75%)",
+        "color.change(oklch(50% 0.2 90deg), $chroma: 40%)",
+        "color.change(lab(50% 20 30), $a: 40.7%)",
+        "color.change(red, $green: 19.9%)",
+        "color.change(red, $alpha: 40.7%)",
+        "color.to-space(oklab(50% -40% -75%), oklch)",
+        "color.channel(oklab(50% -40% -75%), \"a\")",
+        "color.channel(oklch(50% 40% 90deg), \"chroma\")",
+        "color.channel(rgb(19.9% 30% 40%), \"red\")",
+    ] {
+        let scss = format!("@use \"sass:color\";\na {{\n  b: {value};\n}}\n");
+        assert_parity(&scss);
+        assert_parity_compressed(&scss);
+    }
+    // Every percent, over the whole sweep of channel maxes, at a precision
+    // where the two orders part ways.
+    for pct in ["-40", "-19.9", "0.7", "19.9", "30.1", "40.7", "75"] {
+        let scss = format!(
+            "@use \"sass:color\";\na {{\n  b: oklab(50% {pct}% {pct}%);\n  c: lab(50% {pct}% {pct}%);\n  d: oklch(50% {pct}% 90deg);\n  e: lch(50% {pct}% 90deg);\n  f: rgb({pct}% {pct}% {pct}%);\n}}\n"
+        );
+        assert_parity(&scss);
+        assert_parity_compressed(&scss);
+    }
+}
