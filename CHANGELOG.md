@@ -28,6 +28,58 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **Fourteen of the fifteen compressed-only divergences the last triage left**,
+  by five mechanisms. All of it `[measured]` against dart-sass 1.104.1 in both
+  styles: compressed passing 14,037 → **14,051** of 14,258 (98.45% →
+  **98.55%**), expanded `+0`, nothing lost in either style.
+
+  **A percent channel is `max * value / 100`, in dart's order.** The triage had
+  read this family as a leading-zero bug; probing it showed both leading-zero
+  rules already right and the arithmetic wrong. dart's `_percentageOrUnitless`
+  multiplies before it divides, and that is observable: `0.4 * -40 / 100` is
+  exactly -0.16 where `-40 / 100 * 0.4` is -0.16000000000000003. The dust
+  reaches the writer, which shortens the spelling — and a shortened spelling
+  loses the leading zero the exact one keeps, so `oklab(50% -40% -75%)`
+  compressed to `oklab(.5 -.16 -0.3)` instead of `oklab(.5 -0.16 -0.3)`. It
+  governs every percent channel, over every channel maximum: 255, 125, 150, 0.4
+  and 100, in the constructors and in `color.change` alike. `[measured]` **+5**,
+  gated on its own with a per-case set diff.
+
+  **An `@import`'s modifiers are one string, spelled by the parser.** dart
+  builds it while parsing and `visitCssImport` writes it verbatim, so the
+  compressed media-query form — which belongs to `visitCssMediaRule` — can
+  never reach an `@import`. **5 cases.** Two divergences in the same spelling
+  show in BOTH styles, which is why no compressed case scored them: dart's
+  `_mediaQuery` writes the space that would separate a media type from the next
+  identifier *before* it learns that identifier is `and`, then writes the whole
+  `" and "` anyway, so `@import url("a.css") x, print and (orientation:
+  landscape)` carries TWO spaces where a real `@media` rule has one. Only an
+  `@import` can show it; a media rule re-serializes from its parsed queries.
+
+  **A plain-CSS `@function`'s SassScript declaration takes dart's optional
+  space.** dart keeps `result:` as verbatim source text and parses every other
+  declaration in that body as SassScript, so only the SassScript one gets the
+  space a minifier exists to drop: `@function --a() { #{result}: 1 + 1 }`
+  compresses to `@function --a(){result:2}` while `result: 1 + 1` keeps the gap
+  it was written with. **3 cases.**
+
+  **A private-use character is written raw when compressing**, in the unquoted
+  writer as well as the quoted one. `_tryPrivateUseCharacter` gives up
+  immediately when compressing — an escape is for a reader, and compressed
+  output has none — and the raw character is what makes the file non-ASCII and
+  earns it the BOM. **1 case**, byte-for-byte including the BOM.
+
+  Making that writer style-aware exposed a fifth mechanism, in `meta.inspect`:
+  dart inspects with `serializeValue(inspect: true)`, whose style is the DEFAULT
+  one, so the string it hands back already carries `\e000`. That string is five
+  characters long, not one — `string.length(inspect(unquote("\e000")))` is 5 —
+  and being ASCII it leaves a compressed stylesheet with no BOM at all. No
+  sass-spec case scores it either way; it is pinned by tests.
+
+  One case is left: `@#{"media"}` builds a generic node in dart, which never
+  reaches the media-rule writer, while sasso re-reads the name the
+  interpolation spells (`docs/dart-sass-divergences.md` §1.1).
+
 - **The legacy `rgb()`/`hsl()` form choice follows dart's two rules**, which
   closes the largest remaining family behind the compressed conformance gate.
   All of it `[measured]` against dart-sass 1.104.1 in both styles.

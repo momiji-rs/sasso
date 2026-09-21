@@ -293,8 +293,8 @@ dart-sass 1.104.1's **compressed** output for the same cases
 
 | Metric | Value |
 | --- | --- |
-| **Passing, compressed** | **14,037 — 98.45% of attempted** |
-| ↳ byte-exact compressed CSS | 11,545 |
+| **Passing, compressed** | **14,051 — 98.55% of attempted** |
+| ↳ byte-exact compressed CSS | 11,559 |
 | ↳ error specs correctly rejected (style-independent) | 2,492 |
 
 The gate found 1,528 cases that compile to byte-exact `expanded` CSS and to
@@ -306,10 +306,14 @@ which nodes survive compression empty (`@media {}` goes, `@font-face {}` stays
 — dart keeps an at-rule it does not know the semantics of), and whether a
 preserved call is a calculation or a string (a string carries one spelling for
 both styles, so `round(1px, 2bar)` could not lose its space). A fifth, which of
-the legacy `rgb()`/`hsl()` forms a colour is written in, accounted for 28 more.
-77 cases remain, 62 of which are ones where dart-sass 1.104.1's own expanded
-output no longer matches the expectation sass-spec ships. This is a ratchet like
-the other one — it can only go up.
+the legacy `rgb()`/`hsl()` forms a colour is written in, accounted for 28 more,
+and five smaller ones for the last 14: the order dart multiplies a channel by
+its maximum in, the spelling an `@import` keeps for its media modifiers, the
+space a plain-CSS `@function`'s SassScript declaration may drop, the escape a
+private-use character trades for its own bytes, and what `meta.inspect` escapes
+whatever the style. 63 cases remain, 62 of which are ones where dart-sass
+1.104.1's own expanded output no longer matches the expectation sass-spec ships.
+This is a ratchet like the other one — it can only go up.
 
 **Strict input validation, too.** Matching dart-sass means rejecting what
 dart-sass rejects, not just reproducing its output. sasso errors — rather than
