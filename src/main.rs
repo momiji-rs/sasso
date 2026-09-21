@@ -1498,6 +1498,25 @@ impl sasso::Importer for RecordingImporter {
     }
 }
 
+/// Would writing `output` replace a file this compile read — the entry
+/// itself, or one of its dependencies?
+///
+/// `path_key` rather than `==`, so the answer does not depend on the case a
+/// path was typed in on Windows, where two spellings are one file.
+fn aliases_a_source(output: &Path, unit: &Unit, deps: &[PathBuf]) -> bool {
+    // Against the working directory first: the output is whatever was typed
+    // on the command line and a dependency is the absolute path the importer
+    // resolved, so `_v.scss` and `/…/_v.scss` are the same file and compare
+    // equal only once both are.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let key = |p: &Path| path_key(&normalize_path(&cwd.join(p)));
+    let dest = key(output);
+    if unit.source_path().is_some_and(|p| key(p) == dest) {
+        return true;
+    }
+    deps.iter().any(|d| key(d) == dest)
+}
+
 /// `--update`: is `output` at least as new as `input` and every file in
 /// `deps`? A missing output, or an input that cannot be stat'd, is not fresh.
 fn output_is_fresh(output: &Path, input: Option<&Path>, deps: &[PathBuf]) -> bool {
@@ -1737,6 +1756,22 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
             // 0.48s. Learning the graph any earlier would mean resolving
             // `@use`/`@import` a second time, outside the compiler that
             // already does it.
+            // Never write over a file this compile READ. `sasso main.scss
+            // main.scss` and `sasso main.scss _v.scss` both replace a
+            // stylesheet with its own CSS — dart does that too for a
+            // one-shot compile, so it is not ours to change there. Under
+            // `--watch` dart declines, and the reason is visible the moment
+            // you try it: the write is a change, the change is a compile,
+            // and the compile writes again. Measured before this,
+            // `--watch main.scss main.scss` for 2.5 seconds:
+            //
+            //   dart     Compiled x0   source untouched
+            //   npm      Compiled x0   source untouched
+            //   binary   Compiled x24  source DESTROYED
+            //
+            // Silent, because dart is silent.
+            Target::File(output)
+                if shared.watch && aliases_a_source(output, unit, &importer.loaded_paths()) => {}
             Target::File(output)
                 if shared.update && output_is_fresh(output, unit.source_path(), &importer.loaded_paths()) => {
             }

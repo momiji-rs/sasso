@@ -3065,3 +3065,61 @@ fn watch_recovers_when_the_entry_itself_comes_back() {
         std::panic::resume_unwind(e);
     }
 }
+
+/// A watch whose OUTPUT is one of its own sources.
+///
+/// `sasso main.scss main.scss` replaces a stylesheet with its own CSS, and
+/// dart does that too for a one-shot compile — so it is not ours to change
+/// there. Under `--watch` dart declines, and why is visible the moment you
+/// try it: the write is a change, the change is a compile, the compile
+/// writes again. Measured before this, 2.5 seconds of
+/// `--watch main.scss main.scss`:
+///
+///   dart     Compiled x0   sources untouched
+///   npm      Compiled x0   sources untouched
+///   binary   Compiled x24  sources DESTROYED
+///
+/// The same rule covers an output that is a DEPENDENCY rather than the
+/// entry (`main.scss _v.scss`), which does not loop but does overwrite a
+/// file the compile read.
+#[test]
+fn watch_declines_to_write_over_a_source() {
+    use std::time::Duration;
+
+    for (entry, output) in [("main.scss", "main.scss"), ("main.scss", "_v.scss")] {
+        let dir = scratch("watch_selfoutput");
+        const SRC: &str = "@use \"v\";\n.a { color: v.$c; }\n";
+        const DEP: &str = "$c: red;\n";
+        write(&dir, "main.scss", SRC);
+        write(&dir, "_v.scss", DEP);
+
+        let mut child = std::process::Command::new(BIN)
+            .args(["--no-source-map", "--watch", entry, output])
+            .current_dir(&dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn --watch");
+
+        std::thread::sleep(Duration::from_millis(1500));
+        let _ = child.kill();
+        let mut stdout = String::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            use std::io::Read;
+            let _ = pipe.read_to_string(&mut stdout);
+        }
+        let _ = child.wait();
+
+        let main_now = read(&dir, "main.scss");
+        let dep_now = read(&dir, "_v.scss");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(main_now, SRC, "{entry} {output}: the entry was overwritten");
+        assert_eq!(dep_now, DEP, "{entry} {output}: the dependency was overwritten");
+        let compiled = stdout.lines().filter(|l| l.contains("Compiled")).count();
+        assert_eq!(
+            compiled, 0,
+            "{entry} {output}: dart is silent here and writes nothing; we said {compiled} times",
+        );
+    }
+}
