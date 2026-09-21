@@ -11512,3 +11512,43 @@ fn parity_percent_channel_multiplication_order() {
         assert_parity_compressed(&scss);
     }
 }
+
+/// An `@import`'s modifiers are written verbatim from the PARSER's spelling,
+/// which has a stray space a media RULE never shows. This belongs in the live
+/// suite: it is a quirk, and the only way to be sure of a quirk is to ask.
+#[test]
+fn parity_css_import_media_spelling() {
+    for modifiers in [
+        "x, print and (orientation: landscape)",
+        "x, screen and (a: 1) and (b: 2)",
+        "x, screen and not (a: 1)",
+        "x, screen and ((a: 1) or (b: 2))",
+        "x, only screen and (a: 1)",
+        "x, not screen and (a: 1)",
+        "x, screen",
+        "x, print and (a: 1), tv and (b: 2), speech",
+        "(a: 1) and (b: 2), screen and (c: 3)",
+        "x, SCREEN and (A: 1)",
+        "screen and (a: 1)",
+        "screen and (a: 1), print and (b: 2)",
+    ] {
+        let scss = format!("@import url(\"a.css\") {modifiers};\n");
+        assert_parity(&scss);
+        assert_parity_compressed(&scss);
+        // The same queries under a real `@media`, which spells them its own way.
+        let media = format!("@media {modifiers} {{\n  b {{\n    c: d;\n  }}\n}}\n");
+        assert_parity(&media);
+        assert_parity_compressed(&media);
+    }
+    // Modifiers only an `@import` accepts, so there is no `@media` half.
+    for modifiers in [
+        "supports(display: flex) screen and (a: 1)",
+        "supports(display: flex) x, screen and (a: 1)",
+        "layer(a) screen, print and (b: 2)",
+        "layer screen, print and (b: 2)",
+    ] {
+        let scss = format!("@import url(\"a.css\") {modifiers};\n");
+        assert_parity(&scss);
+        assert_parity_compressed(&scss);
+    }
+}

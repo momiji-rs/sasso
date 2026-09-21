@@ -1252,6 +1252,81 @@ fn compressed_css_import_loses_its_prelude_space() {
     );
 }
 
+/// An `@import`'s modifiers are ONE string, spelled by the PARSER and written
+/// verbatim by `visitCssImport`: the media-rule serializer never runs, so the
+/// compressed comma form never reaches them — and dart's `_mediaQuery` writes
+/// the space that would separate a media type from the next identifier BEFORE
+/// it learns that identifier is `and`, then writes the whole `" and "` anyway,
+/// leaving TWO spaces. Measured against dart-sass 1.104.1 on 2026-09-21.
+#[test]
+fn a_css_imports_media_list_keeps_the_parsers_spelling() {
+    let both = |scss: &str, expanded: &str, compressed: &str| {
+        assert_eq!(css(scss), format!("{expanded}\n"), "{scss}");
+        assert_eq!(css_compressed(scss), compressed, "{scss}");
+    };
+    // Everything after the first comma goes through `_mediaQueryList`, where a
+    // bare media type collects the stray space.
+    both(
+        "@import url(\"a.css\") x, print and (orientation: landscape);\n",
+        "@import url(\"a.css\") x, print  and (orientation: landscape);",
+        "@import\"a.css\"x, print  and (orientation: landscape)",
+    );
+    // Only the FIRST `and` doubles: the rest come from the logic sequence.
+    both(
+        "@import url(\"a.css\") x, screen and (a: 1) and (b: 2);\n",
+        "@import url(\"a.css\") x, screen  and (a: 1) and (b: 2);",
+        "@import\"a.css\"x, screen  and (a: 1) and (b: 2)",
+    );
+    both(
+        "@import url(\"a.css\") x, screen and not (a: 1);\n",
+        "@import url(\"a.css\") x, screen  and not (a: 1);",
+        "@import\"a.css\"x, screen  and not (a: 1)",
+    );
+    // A modifier absorbs the stray space, `not` included, because the parser
+    // has already written it before reading the second identifier.
+    both(
+        "@import url(\"a.css\") x, only screen and (a: 1);\n",
+        "@import url(\"a.css\") x, only screen and (a: 1);",
+        "@import\"a.css\"x, only screen and (a: 1)",
+    );
+    both(
+        "@import url(\"a.css\") x, not screen and (a: 1);\n",
+        "@import url(\"a.css\") x, not screen and (a: 1);",
+        "@import\"a.css\"x, not screen and (a: 1)",
+    );
+    // A type with no conditions has nothing to be separated from, and a query
+    // that opens on a condition has no type. The media type's own case is kept.
+    both(
+        "@import url(\"a.css\") x, screen;\n",
+        "@import url(\"a.css\") x, screen;",
+        "@import\"a.css\"x, screen",
+    );
+    both(
+        "@import url(\"a.css\") (a: 1) and (b: 2), screen and (c: 3);\n",
+        "@import url(\"a.css\") (a: 1) and (b: 2), screen  and (c: 3);",
+        "@import\"a.css\"(a: 1) and (b: 2), screen  and (c: 3)",
+    );
+    both(
+        "@import url(\"a.css\") x, SCREEN and (A: 1);\n",
+        "@import url(\"a.css\") x, SCREEN  and (A: 1);",
+        "@import\"a.css\"x, SCREEN  and (A: 1)",
+    );
+    // Before any comma the modifier loop joins identifiers with ONE space, so
+    // the same query written first is spelled the ordinary way.
+    both(
+        "@import url(\"a.css\") screen and (a: 1);\n",
+        "@import url(\"a.css\") screen and (a: 1);",
+        "@import\"a.css\"screen and (a: 1)",
+    );
+    // A REAL `@media` rule re-serializes from its parsed queries, so it has one
+    // space here and the compressed comma form the import cannot have.
+    both(
+        "@media x, screen and (a: 1) { b { c: d } }\n",
+        "@media x, screen and (a: 1) {\n  b {\n    c: d;\n  }\n}",
+        "@media x,screen and (a: 1){b{c:d}}",
+    );
+}
+
 /// A `@supports` DECLARATION is not a value: dart writes its calculations
 /// verbatim, spaces and all, in both styles — `calc-size` included. Measured
 /// against dart-sass 1.103.1.

@@ -655,7 +655,11 @@ impl<'a> Evaluator<'a> {
                 ImportModifier::Media { list, comma_before } => {
                     out.push_str(if *comma_before { ", " } else { sep });
                     let queries = self.resolve_media_queries(list)?;
-                    out.push_str(&serialize_media_queries(&queries, self.compressed()));
+                    // An import's modifiers are ONE STRING in dart-sass,
+                    // spelled by the PARSER and written verbatim by
+                    // `visitCssImport` — the media-rule serializer, and so the
+                    // compressed media-query form, is never reached from here.
+                    out.push_str(&serialize_import_media_queries(&queries));
                 }
             }
         }
