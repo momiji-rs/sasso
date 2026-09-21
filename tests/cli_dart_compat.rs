@@ -3010,3 +3010,58 @@ fn watch_stops_applying_update_after_the_first_compile() {
         std::panic::resume_unwind(e);
     }
 }
+
+/// A watch whose entry cannot be READ still follows it, so the fix is
+/// noticed. Nothing else is left to follow in that state: there are no
+/// loaded dependencies, and a compile that never started recorded none.
+#[test]
+fn watch_recovers_when_the_entry_itself_comes_back() {
+    use std::time::{Duration, Instant};
+
+    let dir = scratch("watch_entry_gone");
+    write(&dir, "main.scss", ".a { b: 1 }\n");
+
+    let mut child = std::process::Command::new(BIN)
+        .args(["--no-source-map", "--watch", "main.scss", "out.css"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn --watch");
+
+    let out = dir.join("out.css");
+    let css = || std::fs::read_to_string(&out).unwrap_or_default();
+    let until = |pred: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(
+            until(&|| css().contains("b: 1")),
+            "the first compile never landed"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::remove_file(dir.join("main.scss")).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        std::fs::write(dir.join("main.scss"), ".a { b: 2 }\n").unwrap();
+        assert!(
+            until(&|| css().contains("b: 2")),
+            "the entry came back and nothing noticed: {:?}",
+            css(),
+        );
+    }));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}

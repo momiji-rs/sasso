@@ -1585,7 +1585,15 @@ fn silent_warn_handler() -> WarnHandler {
 /// or buffer the CSS, and on failure render the diagnostic (plus dart's error
 /// stylesheet where it applies).
 fn compile_unit(unit: &Unit, shared: &Shared) -> Outcome {
-    match read_source(unit) {
+    // BEFORE the read, like every imported file's stamp (see
+    // `RecordingImporter::load`). Taking it after the compile instead —
+    // which is what `run_watch` used to do — absorbs a save that lands while
+    // a slow compile is reading the entry: the stamp records the new bytes,
+    // the CSS was built from the old ones, and the next sweep sees nothing
+    // to do. Measured, saving the entry 200 ms into a 680 ms compile: 5 of 5
+    // lost.
+    let entry_at_read = unit.source_path().map(|p| (p.to_path_buf(), watch::Stamp::of(p)));
+    let mut outcome = match read_source(unit) {
         Ok(source) => compile_source(unit, &source, shared),
         Err(mut outcome) => {
             // A read failure never reaches the compiler, but dart treats
@@ -1598,7 +1606,14 @@ fn compile_unit(unit: &Unit, shared: &Shared) -> Outcome {
             }
             outcome
         }
+    };
+    // Recorded even when the read FAILED: a watch whose entry cannot be read
+    // has to notice it coming back, and in that state it is the only file
+    // there is to follow.
+    if let Some(pair) = entry_at_read {
+        outcome.loaded.push(pair);
     }
+    outcome
 }
 
 /// Wrap up a compile error for `unit`: write dart's error stylesheet where it
@@ -1909,15 +1924,19 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
             // anything — a parse error in the entry, an unreadable file —
             // records no loads at all, and without this the watch would sit
             // there forever with nothing to notice.
-            // The entry is read directly rather than through the importer,
-            // so its read-time stamp is taken here. Later than the read by
-            // the length of the compile, which only ever reports a change
-            // that is not one — the safe direction.
-            followed.extend(
-                units
-                    .iter()
-                    .filter_map(|u| u.source_path().map(|p| (p.to_path_buf(), watch::Stamp::of(p)))),
-            );
+            // Every entry that COMPILED brought its own read-time stamp
+            // back with it. What is left is a unit that produced no outcome
+            // at all — `--stop-on-error` skipped it — whose entry still has
+            // to be followed, or a watch that stopped early would never see
+            // the fix. Nothing read it, so there is no read-time stamp to
+            // want: now is the honest answer.
+            for unit in units {
+                let Some(p) = unit.source_path() else { continue };
+                if followed.iter().any(|(f, _)| f == p) {
+                    continue;
+                }
+                followed.push((p.to_path_buf(), watch::Stamp::of(p)));
+            }
             // …and the directories they live in, so a dependency that does
             // not exist YET can arrive. A missing `@use` target has no path
             // to stat; its directory does, and its mtime moves when the file
