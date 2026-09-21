@@ -122,22 +122,49 @@ impl Stamp {
         Stamp {
             modified,
             len: m.len(),
-            digest: if coarse { digest_of(path) } else { 0 },
+            digest: if coarse { digest_of(path, m.is_dir()) } else { 0 },
         }
     }
 }
 
-/// FNV-1a over a file's bytes. Not a hash anybody should rely on for
-/// anything but "did these bytes change", which is all this asks — and it is
-/// one pass with no allocation beyond the read itself.
-fn digest_of(path: &Path) -> u64 {
-    let Ok(bytes) = std::fs::read(path) else {
-        return 0;
-    };
+/// FNV-1a over what makes this path different from itself a moment ago.
+///
+/// For a FILE that is its bytes. For a DIRECTORY it is the sorted names it
+/// contains — `fs::read` cannot read a directory at all, so digesting one as
+/// if it were a file returned 0 every time and left a coarse-clock directory
+/// with three fields that never move. That is the half of the watch that
+/// notices a dependency ARRIVING, so it has to be the half that works: a
+/// directory's own mtime is the only other signal, and on a filesystem that
+/// keeps whole seconds two entries created in one second are one mtime.
+///
+/// Names, not their metadata: a file's own contents are watched through its
+/// own stamp, and what a directory is asked here is only "is the same set of
+/// things in you".
+fn digest_of(path: &Path, is_dir: bool) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x1000_0000_01b3);
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+    };
+    if is_dir {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return 0;
+        };
+        // Sorted, because `read_dir` promises no order and an unstable one
+        // would read as a change on every sweep.
+        let mut names: Vec<std::ffi::OsString> = entries.flatten().map(|e| e.file_name()).collect();
+        names.sort();
+        for n in names {
+            eat(n.to_string_lossy().as_bytes());
+            eat(b"\0");
+        }
+    } else {
+        let Ok(bytes) = std::fs::read(path) else {
+            return 0;
+        };
+        eat(&bytes);
     }
     h
 }
@@ -552,7 +579,7 @@ mod tests {
             Stamp {
                 modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
                 len: live.len,
-                digest: digest_of(&p),
+                digest: digest_of(&p, false),
             }
         };
         // Same length, same second: only the contents differ.
@@ -575,5 +602,33 @@ mod tests {
             assert_eq!(precise.digest, 0, "a precise mtime should not read the file");
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A directory's digest is its entries, because `fs::read` cannot read
+    /// one — digesting a directory as though it were a file returned 0 every
+    /// time, so on a coarse clock all three fields stayed put and a
+    /// dependency arriving in it was never seen. That is the half of the
+    /// watch that recovers from a missing `@use`.
+    #[test]
+    fn a_directorys_digest_is_what_is_in_it() {
+        let dir = std::env::temp_dir().join(format!("sasso-dirdig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = digest_of(&dir, true);
+        std::fs::write(dir.join("_a.scss"), "$a: 1;\n").unwrap();
+        let one = digest_of(&dir, true);
+        std::fs::write(dir.join("_b.scss"), "$b: 2;\n").unwrap();
+        let two = digest_of(&dir, true);
+        // …and a file's CONTENTS changing is not a directory change: that is
+        // the file's own stamp's job, and counting it here would recompile
+        // twice for one save.
+        std::fs::write(dir.join("_a.scss"), "$a: 999;\n").unwrap();
+        let after_edit = digest_of(&dir, true);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_ne!(empty, one, "a file appeared");
+        assert_ne!(one, two, "another file appeared");
+        assert_eq!(two, after_edit, "editing a file is not a directory change");
+        // Reading a directory as a file is where this started.
+        assert_eq!(digest_of(&std::env::temp_dir(), false), 0);
     }
 }
