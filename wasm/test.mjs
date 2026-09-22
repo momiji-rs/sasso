@@ -3733,15 +3733,24 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const compiles = () => log.split("\n").filter((l) => l.includes("COMPILED")).length;
 
   try {
+    // Asserted, not merely waited for. Falling out of this loop at the
+    // deadline and carrying on would make a startup regression PASS: a
+    // compile that ran and produced the wrong CSS still leaves
+    // `compiles()` at 1, which is what the assertion below wants to see.
     const deadline = Date.now() + 20000;
+    let started = false;
     while (Date.now() < deadline) {
       try {
-        if (readFileSync(outFile, "utf8").includes("red")) break;
+        if (readFileSync(outFile, "utf8").includes("red")) {
+          started = true;
+          break;
+        }
       } catch {
         /* not yet */
       }
       await new Promise((r) => setTimeout(r, 25));
     }
+    assert.ok(started, `the first compile never landed: ${JSON.stringify(log)}`);
     // Nothing is touched from here. Several sweep intervals (50ms floor)
     // and several coalescing windows.
     await new Promise((r) => setTimeout(r, 1500));
@@ -3781,9 +3790,13 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       return false;
     };
     try {
-      await until(() => stdout.includes("watching for changes"), 15000);
+      // Asserted rather than awaited. `until` returns false at its
+      // deadline, and dropping that lets a watch that never started reach
+      // the narration assertions below, where it fails as "the banner is
+      // missing" — a true statement about the wrong thing.
+      assert.ok(await until(() => stdout.includes("watching for changes"), 15000), `the watch never announced itself: ${stderr}`);
       writeFileSync(src, ".a { color: blue; }\n"); // one recompile
-      await until(() => readFileSync(out, "utf8").includes("blue"), 15000);
+      assert.ok(await until(() => readFileSync(out, "utf8").includes("blue"), 15000), `the recompile never landed: ${stderr}`);
       await new Promise((r) => setTimeout(r, 250)); // let the line land
     } finally {
       proc.kill();
