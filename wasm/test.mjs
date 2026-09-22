@@ -9,7 +9,7 @@
 // asyncify refactors must preserve (docs/HANDOFF_ASYNC_IMPORTER_PERF.md).
 // Run after build.sh: `node wasm/test.mjs`.
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, symlinkSync, renameSync, rmSync, openSync, closeSync, chmodSync, realpathSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, copyFileSync, existsSync, statSync, lstatSync, symlinkSync, renameSync, rmSync, openSync, closeSync, chmodSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -4093,6 +4093,112 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
         if (!wrote) await new Promise((r) => setTimeout(r, 25));
       }
       assert.ok(wrote, `a working symlinked output was refused its error stylesheet: ${JSON.stringify(log)}`);
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // Refusing the WRITE is not refusing the branch. The first version of
+  // this skipped the whole failure path for a broken link and took two
+  // unrelated things with it.
+  //
+  // `onDisk` is the serious one: the watch remembers the CSS it last
+  // wrote so a catch-up does not write it again. Forgetting to forget it
+  // means "break the file, then fix it back to exactly what it was"
+  // matches the remembered value, skips the write, and the output never
+  // comes back — #159, measured again here.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchondisk-"));
+    const GOOD = ".a { color: red; }\n";
+    writeFileSync(join(wdir, "main.scss"), GOOD);
+    mkdirSync(join(wdir, "dist"));
+    const target = join(wdir, "dist", "out.css");
+    symlinkSync(target, join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    const css = () => {
+      try {
+        return readFileSync(target, "utf8");
+      } catch {
+        return "";
+      }
+    };
+    try {
+      assert.ok(await until(() => css().includes("red"), 20000), "onDisk: the first compile never landed");
+      await new Promise((r) => setTimeout(r, 400));
+      rmSync(target); // the link now dangles
+      writeFileSync(join(wdir, "main.scss"), ".a { color: ; }\n");
+      assert.ok(await until(() => /error/i.test(log), 20000), `onDisk: the break was never reported: ${JSON.stringify(log)}`);
+      await new Promise((r) => setTimeout(r, 400));
+      writeFileSync(join(wdir, "main.scss"), GOOD); // back to EXACTLY the old bytes
+      assert.ok(
+        await until(() => css().includes("red"), 20000),
+        "fixing the source back to what it was left the output missing for good",
+      );
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // …and `--no-error-css` still removes the output, which for a link
+  // means unlinking the LINK — `rmSync` never touches what it points at.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchunlink-"));
+    writeFileSync(join(wdir, "main.scss"), ".a { color: red; }\n");
+    mkdirSync(join(wdir, "dist"));
+    const target = join(wdir, "dist", "out.css");
+    symlinkSync(target, join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--no-error-css", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      assert.ok(
+        await until(() => {
+          try {
+            return readFileSync(target, "utf8").includes("red");
+          } catch {
+            return false;
+          }
+        }, 20000),
+        "unlink: the first compile never landed",
+      );
+      await new Promise((r) => setTimeout(r, 400));
+      rmSync(target); // the link now dangles
+      writeFileSync(join(wdir, "main.scss"), ".a { color: ; }\n");
+      assert.ok(await until(() => /error/i.test(log), 20000), `unlink: the break was never reported: ${JSON.stringify(log)}`);
+      await new Promise((r) => setTimeout(r, 400));
+      let stillThere = true;
+      try {
+        lstatSync(join(wdir, "out.css"));
+      } catch {
+        stillThere = false;
+      }
+      assert.ok(!stillThere, "--no-error-css left a dangling output link in place");
     } finally {
       proc.kill();
     }

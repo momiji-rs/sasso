@@ -998,7 +998,7 @@ function emit(result, outPath, wantMap, opts, stdinText) {
  * so "on by default" and "asked for" are not the same state, and
  * `undefined` is the default rather than `true`.
  */
-function reportFailure(outPath, opts, message) {
+function reportFailure(outPath, opts, message, mayCreate = true) {
   if (opts.noCss) return undefined;
   if (!outPath) {
     // No file: only an EXPLICIT --error-css puts the stylesheet on
@@ -1008,6 +1008,11 @@ function reportFailure(outPath, opts, message) {
   }
   try {
     if (opts.errorCss !== false) {
+      // A broken symlink is not a destination — see `leadsNowhere`. Only
+      // the WRITE is refused: everything else this function and its
+      // caller do is still right, and skipping the lot was a bug of its
+      // own (the removal below, and the caller's `onDisk = null`).
+      if (!mayCreate) return undefined;
       // Same as `emit`: the destination tree may not exist yet, and a
       // FIRST compile that fails is exactly when it does not. dart and
       // the binary both write 547 bytes of error CSS into `dist/css/`
@@ -1017,6 +1022,9 @@ function reportFailure(outPath, opts, message) {
       mkdirSync(dirname(outPath), { recursive: true });
       writeFileSync(outPath, errorCss(message));
     } else {
+      // Unlinks the LINK, not what it points at, so a dangling output is
+      // removed here exactly as a real one is. `--no-error-css` means the
+      // stale output goes, and a broken link is as stale as it gets.
       rmSync(outPath, { force: true });
     }
     return undefined;
@@ -1756,7 +1764,7 @@ function runWatch(input, output, common, opts) {
       // because an aliased watch never recompiles, which is one filter
       // change away from being false.
       //
-      // …and not through a BROKEN symlink either, which is a different
+      // …and not THROUGH a broken symlink either, which is a different
       // question and one `aliasesASource` cannot always answer. When the
       // watch starts with a dependency already missing, the first compile
       // throws before it reports what it loaded, so `known` holds the
@@ -1773,8 +1781,15 @@ function runWatch(input, output, common, opts) {
       // — there the first failing build writes no error stylesheet, and
       // the error still reaches stderr. The success path still creates
       // it, so the setup starts working the moment a build succeeds.
-      if (!aliasesASource() && !leadsNowhere(output) && e instanceof Exception) {
-        const writeError = reportFailure(output, opts, e.message);
+      //
+      // It is `mayCreate` and not a skip of this whole branch, because
+      // the rest of it is unrelated and both halves mattered: under
+      // `--no-error-css` the removal still has to unlink the link, and
+      // `onDisk` still has to be forgotten or "fix the typo back to what
+      // it was" leaves the output missing forever (#159, measured again
+      // here).
+      if (!aliasesASource() && e instanceof Exception) {
+        const writeError = reportFailure(output, opts, e.message, !leadsNowhere(output));
         if (writeError) process.stderr.write(`${writeError}\n`);
         // The destination is no longer the CSS we last wrote — it is the
         // error stylesheet, or gone. Forgetting that is how "fix the typo
