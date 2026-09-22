@@ -3761,6 +3761,87 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   }
 }
 
+// === Phase 3a3: one save, one `@warn` (#165) ===
+//
+// A burst is a provisional run plus a catch-up, and both used to report,
+// so every diagnostic a successful compile produced appeared twice.
+// Measured against dart-sass 1.104.1 and the binary, one `@warn` and
+// three saves:
+//
+//   dart          WARNING x4   (one at startup, one per save)
+//   binary        WARNING x4
+//   npm, before   WARNING x7
+//   npm, after    WARNING x4
+//
+// `--poll` because the native watcher on macOS delivers a save twice,
+// seconds apart (#164), which is real work the count cannot predict; the
+// ratio below holds either way and the absolute number only under a
+// watcher that fires once.
+{
+  const wdir = mkdtempSync(join(tmpdir(), "sasso-watchwarn-"));
+  const sheet = (c) => `@warn "the warning";\n.a { color: ${c}; }\n`;
+  writeFileSync(join(wdir, "main.scss"), sheet("red"));
+  const outFile = join(wdir, "out.css");
+  const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+    cwd: wdir,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  proc.stdout.on("data", (b) => (stdout += b));
+  proc.stderr.on("data", (b) => (stderr += b));
+  const warns = () => stderr.split("\n").filter((l) => l.includes("the warning")).length;
+  const compiled = () => stdout.split("\n").filter((l) => l.includes("Compiled")).length;
+  const css = () => {
+    try {
+      return readFileSync(outFile, "utf8");
+    } catch {
+      return "";
+    }
+  };
+  const until = async (pred, ms) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (pred()) return true;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
+  };
+
+  try {
+    assert.ok(await until(() => css().includes("red"), 20000), "cli --watch @warn: the first compile never landed");
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(warns(), 1, `the first compile warned more than once: ${JSON.stringify(stderr)}`);
+
+    writeFileSync(join(wdir, "main.scss"), sheet("navy"));
+    assert.ok(await until(() => css().includes("navy"), 20000), "cli --watch @warn: the save never landed");
+    // Past the catch-up, so a second report would have arrived by now.
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(warns(), 2, `one save printed the warning ${warns() - 1} times: ${JSON.stringify(stderr)}`);
+    // …and the invariant that survives a watcher firing twice: the
+    // warning belongs to the run that announces the write, so there is
+    // exactly one of each.
+    assert.equal(warns(), compiled(), `a warning per written file: ${warns()} warnings, ${compiled()} lines`);
+
+    // A save that produces exactly what is already on disk reports
+    // NOTHING — no line, and no warning either. That is this CLI's rule
+    // rather than dart's (dart recompiles and says so), and it is the
+    // one that makes the macOS double-notification harmless: the second
+    // burst for a save produces nothing, so it says nothing.
+    //
+    // It is also why the diagnostics are captured instead of let
+    // through. Without that they reach stderr during `compile()`, before
+    // anything knows whether the run produced anything.
+    writeFileSync(join(wdir, "main.scss"), sheet("navy"));
+    await new Promise((r) => setTimeout(r, 900));
+    assert.equal(warns(), 2, `a save that changed nothing warned again: ${JSON.stringify(stderr)}`);
+    assert.equal(compiled(), 2, `a save that changed nothing was narrated: ${JSON.stringify(stdout)}`);
+    console.log("ok: cli --watch — one save prints one @warn, and a save that changes nothing prints none");
+  } finally {
+    proc.kill();
+  }
+}
+
 // === Phase 3b: CLI --watch, what it SAYS ===
 //
 // The functional watch test above starts the child with `stdio: "ignore"`
