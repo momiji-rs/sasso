@@ -334,9 +334,13 @@ function pickBinary(opts) {
     return compileInProcess("SASSO_BINARY declines the binary");
   }
 
-  // The binary has no watcher (#86), so `--watch` must stay in-process or
-  // delegating would take a working command line and break it.
-  if (opts.watch) return compileInProcess("--watch is not in the binary (#86)");
+  // `--watch` stays here, and since #86 that is a CHOICE rather than the
+  // binary lacking a watcher. It has one, and it polls, because a native
+  // watcher would be a runtime dependency in a crate whose `[dependencies]`
+  // is empty. Measured on one save, macOS: this CLI's `fs.watch` answers in
+  // 18-20 ms, the binary's poll in 13-55 ms, dart-sass in 47-51 ms. Handing
+  // off would trade the fastest of the three for the middle one.
+  if (opts.watch) return compileInProcess("--watch is faster in-process than the binary's poll");
   // `--update` is no longer on that list: the binary has it, and walks the
   // same dependency graph this CLI does. It is still held back from the
   // EXPLICIT `SASSO_BINARY=<path>` hand-off below, which is documented as
@@ -575,6 +579,14 @@ function parseArgs(argv) {
       opts.stdin = false;
     } else if (a === "-w" || a === "--watch") {
       opts.watch = true;
+    } else if (a === "--poll" || a === "--no-poll") {
+      // dart chooses between a native watcher and repeated stats with this.
+      // NEITHER of our CLIs can honour it, for opposite reasons: node gives
+      // this one `fs.watch` and it always uses it, and the binary has no
+      // dependency to give it one so it always polls. Accepted so a build
+      // script written for dart runs, validated below so the flag is not
+      // silently meaningless, and otherwise a no-op.
+      opts.poll = a === "--poll";
     } else if (a === "--indented") {
       opts.indented = true;
     } else if (a === "--no-indented") {
@@ -722,6 +734,11 @@ function validate(opts) {
   // fresh) while the binary did the dangerous one; refusing the pair is what
   // dart does and leaves neither to luck.
   if (opts.update && opts.stdin) fail("error: --update is not allowed with --stdin.");
+  // dart: `--watch is not allowed with --stdin.` and `--poll may not be
+  // passed without --watch.`, both exit 64 (measured against 1.104.1 on
+  // 2026-09-20). The binary refuses the same two with the same wording.
+  if (opts.watch && opts.stdin) fail("error: --watch is not allowed with --stdin.");
+  if (opts.poll !== undefined && !opts.watch) fail("error: --poll may not be passed without --watch.");
   if (pairs) {
     if (!operands.every((a) => colonIndex(a) >= 0)) {
       fail('error: Positional and ":" arguments may not both be used.');

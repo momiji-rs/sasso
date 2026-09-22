@@ -98,6 +98,10 @@ OTHER:
         --update                        skip writing an output that is already
                                         newer than its input and every
                                         stylesheet that input loads
+    -w, --watch                         recompile when a stylesheet changes
+        --[no-]poll                     accepted for dart-sass compatibility
+                                        (no-op: sasso always polls, because a
+                                        native watcher would be a dependency)
         --[no-]stop-on-error            don't start more files once one fails
     -c, --[no-]color                    accepted for dart-sass compatibility
                                         (no-op: sasso never colors output)
@@ -142,6 +146,14 @@ struct Cli {
     /// stylesheets reached through a load path (dart-sass `--quiet-deps`).
     quiet_deps: bool,
     update: bool,
+    /// Keep running and recompile when anything the entry loads changes
+    /// (dart-sass `-w`/`--watch`).
+    watch: bool,
+    /// dart's `--[no-]poll`, which chooses between a native watcher and
+    /// repeated stat calls. We only have the second, so the value is recorded
+    /// for its usage rule ("may not be passed without --watch") and then
+    /// ignored — see `watch.rs` for why there is no other option here.
+    poll: Option<bool>,
     /// Compile but discard the CSS (timing-only runs).
     no_css: bool,
     /// Recompile the input in-process this many times and report throughput.
@@ -297,6 +309,101 @@ fn physical_cores(cpuinfo: &str) -> Option<usize> {
 /// dependencies and no `unsafe`. Self-contained on purpose — see its module
 /// docs for why it reads the tz database rather than calling libc.
 mod localtime;
+
+/// `--watch` with no file-watching dependency: a poll whose interval pays for
+/// itself, and the rule that turns a burst of saves into two compiles. See
+/// its module docs for why polling is the only option here and what it costs.
+mod watch;
+
+#[cfg(test)]
+mod dirs_key_tests {
+    use super::dirs_key;
+    use std::path::Path;
+
+    /// Windows: two spellings of one directory are one key.
+    ///
+    /// The importer lowercases a canonical path there and the command line
+    /// says whatever was typed, so without the fold the same directory
+    /// enters the snapshot twice — and the copy that is not marked as ours
+    /// watches the mtime our own output moves, which is a self-recompile
+    /// loop. #146 was this mistake one layer down.
+    #[cfg(windows)]
+    #[test]
+    fn two_spellings_of_one_directory_are_one_key() {
+        assert_eq!(dirs_key(Path::new(r"SRC\Sub")), dirs_key(Path::new(r"src\sub")));
+    }
+
+    /// …and everywhere else they are two directories, because they are two
+    /// files. Folding here would merge a watch's `src/` and `SRC/`.
+    #[cfg(not(windows))]
+    #[test]
+    fn case_is_part_of_the_name_off_windows() {
+        assert_ne!(dirs_key(Path::new("SRC/Sub")), dirs_key(Path::new("src/sub")));
+    }
+
+    /// Either way it is absolute: the command line says `out.css` and the
+    /// importer says the whole path, and a set holding both must see one
+    /// directory.
+    #[test]
+    fn a_relative_path_is_keyed_against_the_working_directory() {
+        let key = dirs_key(Path::new("out.css"));
+        assert!(key.is_absolute(), "{key:?}");
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(key, dirs_key(&cwd.join("out.css")));
+    }
+}
+
+#[cfg(test)]
+mod watch_importer_tests {
+    use super::RecordingImporter;
+    use sasso::{CanonicalizeContext, Importer};
+
+    /// A dependency that vanishes between `canonicalize` and `load`.
+    ///
+    /// The importer answers `None` — its own comment calls that a miss —
+    /// and the url never reaches `unresolved`, because canonicalizing it
+    /// SUCCEEDED. So nothing would follow the file or the directory it
+    /// lives in, and recreating it in a subdirectory would never reach the
+    /// watch. The stamp is taken for a miss as well as a hit; only `loaded`
+    /// is reserved for what was actually read.
+    ///
+    /// The race is the test: the file is deleted between the two calls, by
+    /// hand, so there is no timing to get right.
+    #[test]
+    fn a_dependency_that_vanishes_mid_load_is_still_followed() {
+        let dir = std::env::temp_dir().join(format!("sasso-vanish-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let dep = dir.join("sub").join("_v.scss");
+        std::fs::write(&dep, "$c: red;\n").unwrap();
+
+        let importer = RecordingImporter::new(vec![dir.clone()]);
+        let ctx = CanonicalizeContext {
+            from_import: false,
+            containing_url: None,
+        };
+        let canonical = importer
+            .canonicalize("sub/v", &ctx)
+            .expect("canonicalize")
+            .expect("the file is there at this point");
+
+        std::fs::remove_file(&dep).unwrap();
+
+        let loaded = importer.load(&canonical).expect("a miss is not an error");
+        let stamps = importer.loaded_stamps();
+        let paths = importer.loaded_paths();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(loaded.is_none(), "the file was deleted, so this is a miss");
+        assert!(
+            stamps.iter().any(|(p, _)| p.ends_with("_v.scss")),
+            "a miss must still be followed: {stamps:?}",
+        );
+        assert!(
+            paths.is_empty(),
+            "…but nothing was READ, so it is not a dependency: {paths:?}",
+        );
+    }
+}
 
 #[cfg(test)]
 mod default_jobs_tests {
@@ -484,6 +591,8 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
         quiet: false,
         quiet_deps: false,
         update: false,
+        watch: false,
+        poll: None,
         no_css: false,
         loop_n: None,
         no_unicode: false,
@@ -531,6 +640,9 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
             "-q" | "--quiet" => cli.quiet = true,
             "--no-quiet" => cli.quiet = false,
             "--update" => cli.update = true,
+            "-w" | "--watch" => cli.watch = true,
+            "--poll" => cli.poll = Some(true),
+            "--no-poll" => cli.poll = Some(false),
             "--quiet-deps" => cli.quiet_deps = true,
             "--no-quiet-deps" => cli.quiet_deps = false,
             "--stop-on-error" => cli.stop_on_error = true,
@@ -616,6 +728,19 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
     // FRESH, leaving the previous run's CSS on disk.
     if cli.update && cli.stdin_flag {
         return Err("--update is not allowed with --stdin.".to_string());
+    }
+    // The same rule for `--watch`, and for the same reason: standard input is
+    // read once and cannot change, so there is nothing to watch. Measured
+    // against dart-sass 1.104.1 on 2026-09-20, exit 64 and this wording.
+    if cli.watch && cli.stdin_flag {
+        return Err("--watch is not allowed with --stdin.".to_string());
+    }
+    // `--poll` chooses between a native watcher and repeated stats, so it
+    // means nothing on its own. dart refuses it, exit 64, and we accept it
+    // ONLY to refuse it the same way — sasso always polls (see `watch.rs`),
+    // so neither spelling changes anything when `--watch` is there.
+    if cli.poll.is_some() && !cli.watch {
+        return Err("--poll may not be passed without --watch.".to_string());
     }
     if !cli.pairs.is_empty() {
         if !cli.positionals.is_empty() {
@@ -722,6 +847,12 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
     let to_stdout = cli.pairs.is_empty() && cli.output.is_none() && !entry_is_dir;
     if cli.update && to_stdout {
         return Err("--update is not allowed when printing to stdout.".to_string());
+    }
+    // And again for `--watch`: a watch with nowhere to write would recompile
+    // on every save and print the whole stylesheet to the terminal each time.
+    // dart refuses it with the same wording, exit 64 (measured 2026-09-20).
+    if cli.watch && to_stdout {
+        return Err("--watch is not allowed when printing to stdout.".to_string());
     }
     if to_stdout {
         // A stdout map can only be embedded, and its sources are always
@@ -902,7 +1033,24 @@ struct Shared {
     source_map_urls: SourceMapUrls,
     /// Generate a source map for file targets (dart default: yes).
     file_source_map: bool,
-    /// Write an error stylesheet to a file target on failure (dart default: yes).
+    /// `--watch` is running. Only the narration cares: the flag's behaviour
+    /// lives in `run_watch`, but the line dart prints per written file is
+    /// emitted from the unit that wrote it, like `--update`'s.
+    watch: bool,
+    /// This compile is the speculative one at the head of a burst (see
+    /// `watch.rs`). The likeliest cause of a FAILURE here is a file still
+    /// being written, so it reports nothing and leaves the output exactly as
+    /// it was — no error stylesheet, no removal — and the authoritative run
+    /// that always follows does both.
+    ///
+    /// A SUCCESS still writes, and deliberately: that write is the whole
+    /// latency win, and it is what puts CSS on disk in 13 ms rather than 50.
+    /// It can be wrong — the save may not have finished — which is why the
+    /// authoritative run is guaranteed and why `--update`'s freshness check
+    /// is off for every run after the first (see `run_watch`).
+    provisional: bool,
+    /// Write an error stylesheet to a file target on failure (dart default:
+    /// yes). Off means the opposite side effect: a stale output is REMOVED.
     file_error_css: bool,
     /// Print an error stylesheet to stdout on failure (`--error-css`, explicit).
     stdout_error_css: bool,
@@ -923,6 +1071,25 @@ struct Outcome {
     stderr: String,
     stdout: String,
     status: Status,
+    /// Every file this compile read, the entry included, each paired with
+    /// what it looked like WHEN IT WAS READ — what `--watch` follows.
+    /// Collected from the same `RecordingImporter` `--update` already uses,
+    /// so the two flags cannot disagree about what a stylesheet depends on.
+    loaded: Vec<(PathBuf, watch::Stamp)>,
+    /// The `@use`/`@import` urls that resolved to nothing, so `--watch` can
+    /// follow the directories they WOULD have been found in.
+    unresolved: Vec<String>,
+    /// Outputs this compile CREATED or REMOVED — not merely overwrote.
+    ///
+    /// Only those move their directory's mtime, and that is the difference
+    /// `--watch` needs: a directory we disturbed has to be re-stamped or the
+    /// watch answers its own write, and a directory we only wrote an
+    /// existing file into must NOT be, or a dependency arriving there while
+    /// the compile ran is absorbed. In the ordinary `main.scss`/`main.css`
+    /// layout those are the same directory, so "did we write into it" is
+    /// the wrong question and "did we change what is in it" is the right
+    /// one.
+    disturbed: Vec<PathBuf>,
 }
 
 impl Outcome {
@@ -931,6 +1098,9 @@ impl Outcome {
             stderr,
             stdout: String::new(),
             status,
+            loaded: Vec::new(),
+            unresolved: Vec::new(),
+            disturbed: Vec::new(),
         }
     }
 }
@@ -1171,6 +1341,8 @@ fn run(cli: Cli) -> ExitCode {
         // dart: source maps default ON when writing to a file; an explicit
         // `--embed-source-map` implies one.
         file_source_map: cli.source_map.unwrap_or(true) || cli.embed_source_map,
+        watch: cli.watch,
+        provisional: false,
         file_error_css: cli.error_css.unwrap_or(true),
         stdout_error_css: cli.error_css == Some(true),
     };
@@ -1183,6 +1355,9 @@ fn run(cli: Cli) -> ExitCode {
     }
 
     let jobs = cli.jobs.unwrap_or_else(default_jobs);
+    if cli.watch {
+        return run_watch(&units, &shared, jobs, cli.stop_on_error);
+    }
     let outcomes = compile_all(&units, &shared, jobs, cli.stop_on_error);
 
     // Report in command-line order: each unit's diagnostics, then its CSS.
@@ -1294,23 +1469,26 @@ fn compile_all(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool
 }
 
 /// Read a unit's source text, or the outcome that reports why it could not be.
-fn read_source<'u>(unit: &'u Unit) -> Result<Cow<'u, str>, Outcome> {
+// Boxed: `Outcome` grew past clippy's `result_large_err` threshold when it
+// started carrying what a compile loaded and disturbed for `--watch`. One
+// allocation per FAILED read, which is a path that is already doing I/O.
+fn read_source<'u>(unit: &'u Unit) -> Result<Cow<'u, str>, Box<Outcome>> {
     match &unit.source {
         Source::Text(s) => Ok(Cow::Borrowed(s.as_str())),
-        Source::InvalidUtf8 => Err(Outcome::failed(
+        Source::InvalidUtf8 => Err(Box::new(Outcome::failed(
             Status::CompileError,
             "Error: Invalid UTF-8.\n".to_string(),
-        )),
+        ))),
         Source::File(path) => match std::fs::read_to_string(path) {
             Ok(s) => Ok(Cow::Owned(s)),
-            Err(e) if is_invalid_utf8(&e) => Err(Outcome::failed(
+            Err(e) if is_invalid_utf8(&e) => Err(Box::new(Outcome::failed(
                 Status::CompileError,
                 "Error: Invalid UTF-8.\n".to_string(),
-            )),
-            Err(_) => Err(Outcome::failed(
+            ))),
+            Err(_) => Err(Box::new(Outcome::failed(
                 Status::IoError,
                 format!("Error reading {}: Cannot open file.\n", path.display()),
-            )),
+            ))),
         },
     }
 }
@@ -1334,6 +1512,15 @@ fn read_source<'u>(unit: &'u Unit) -> Result<Cow<'u, str>, Outcome> {
 struct RecordingImporter {
     inner: FsImporter,
     loaded: RefCell<Vec<String>>,
+    /// Urls that resolved to nothing. `--watch` needs them: a dependency
+    /// that does not exist YET has no path to follow, and the directory it
+    /// would live in is not in `loaded` either — so without this, creating
+    /// `sub/_new.scss` for an `@use "sub/new"` that has been failing since
+    /// startup changes nothing anybody is looking at.
+    unresolved: RefCell<Vec<String>>,
+    /// What each loaded file looked like at the moment it was read — see
+    /// [`RecordingImporter::loaded_stamps`].
+    read_stamps: RefCell<Vec<(PathBuf, watch::Stamp)>>,
 }
 
 impl RecordingImporter {
@@ -1341,6 +1528,8 @@ impl RecordingImporter {
         RecordingImporter {
             inner: FsImporter::new(load_paths),
             loaded: RefCell::new(Vec::new()),
+            unresolved: RefCell::new(Vec::new()),
+            read_stamps: RefCell::new(Vec::new()),
         }
     }
 
@@ -1361,6 +1550,35 @@ impl RecordingImporter {
             .filter_map(|u| url_to_path(u))
             .collect()
     }
+
+    /// The same files, each paired with what it looked like WHEN IT WAS
+    /// READ. `--watch` needs that rather than the state afterwards: a file
+    /// this compile is meeting for the first time has no earlier stamp to
+    /// keep, so taking one after the compile records a save that landed
+    /// during it as the baseline and nothing ever compiles it. Measured
+    /// before this, saving 300 ms into a 680 ms first compile: 3 of 5 lost.
+    fn loaded_stamps(&self) -> Vec<(PathBuf, watch::Stamp)> {
+        self.read_stamps.borrow().clone()
+    }
+
+    /// Every file this compile ATTEMPTED to load, read or not.
+    ///
+    /// `loaded_paths` is the successful half and is what `--update`
+    /// compares mtimes against. This is the half `--watch` needs when it
+    /// asks "would writing here destroy something we touched": a
+    /// dependency that exists and failed to load — bad permissions,
+    /// invalid UTF-8 — is not a dependency, and overwriting it with error
+    /// CSS is still destroying the user's file.
+    fn attempted_paths(&self) -> Vec<PathBuf> {
+        self.read_stamps.borrow().iter().map(|(p, _)| p.clone()).collect()
+    }
+
+    /// The urls this compile could not resolve, as written in the `@use` or
+    /// `@import`. Relative, so the caller pairs them with the directories
+    /// they were searched for in.
+    fn unresolved_urls(&self) -> Vec<String> {
+        self.unresolved.borrow().clone()
+    }
 }
 
 impl sasso::Importer for RecordingImporter {
@@ -1369,19 +1587,96 @@ impl sasso::Importer for RecordingImporter {
         url: &str,
         ctx: &sasso::CanonicalizeContext<'_>,
     ) -> Result<Option<sasso::CanonicalUrl>, sasso::ImporterError> {
-        self.inner.canonicalize(url, ctx)
+        let out = self.inner.canonicalize(url, ctx)?;
+        if out.is_none() {
+            self.unresolved.borrow_mut().push(url.to_string());
+        }
+        Ok(out)
     }
 
     fn load(
         &self,
         canonical: &sasso::CanonicalUrl,
     ) -> Result<Option<sasso::ImporterResult>, sasso::ImporterError> {
+        // BEFORE the read, not after: a save that lands while the file is
+        // being read then differs from this stamp and is seen. The other
+        // order would absorb it.
+        let before = url_to_path(canonical.as_str()).map(|p| {
+            let stamp = watch::Stamp::of(&p);
+            (p, stamp)
+        });
+        // Recorded BEFORE the load is even attempted, and whatever it
+        // answers. Three outcomes, and only one of them is a dependency:
+        //
+        //   Ok(Some) the file was read — a dependency, and followed
+        //   Ok(None) it vanished between `canonicalize` and here. The
+        //            importer's own comment calls that a miss, and the url
+        //            never reaches `unresolved` either, because
+        //            canonicalizing it SUCCEEDED
+        //   Err      it is there and cannot be read: permissions, or
+        //            invalid UTF-8
+        //
+        // The last two are not dependencies and must still be FOLLOWED, or
+        // the file and its directory are watched by nobody and the fix
+        // reaches nothing. Measured for the third: `chmod 000` a dependency,
+        // and `chmod 644` afterwards was NEVER SEEN — the `?` returned
+        // before the stamp was taken.
+        if let Some(pair) = before {
+            self.read_stamps.borrow_mut().push(pair);
+        }
         let out = self.inner.load(canonical)?;
         if out.is_some() {
             self.loaded.borrow_mut().push(canonical.as_str().to_string());
         }
         Ok(out)
     }
+}
+
+/// One spelling for a watched directory, whatever it was written as.
+///
+/// The paths reaching the snapshot come from two places with different
+/// habits — the command line, which says `out.css`, and the importer, which
+/// says `/work/out.css` — and a set that holds both thinks they are two
+/// directories.
+fn dirs_key(p: &Path) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    // `path_key` too, not just `normalize_path`. The importer lowercases a
+    // canonical path on Windows and the command line says whatever the user
+    // typed, so without the fold the same directory enters the snapshot
+    // under two keys — and the one that is not in the `minus` set watches
+    // the mtime our own output moves, which is the self-recompile loop this
+    // whole mechanism exists to avoid. #146 was the same mistake one layer
+    // down.
+    path_key(&normalize_path(&cwd.join(p)))
+}
+
+/// Would writing `output` replace a file this compile read — the entry
+/// itself, or one of its dependencies?
+///
+/// `path_key` rather than `==`, so the answer does not depend on the case a
+/// path was typed in on Windows, where two spellings are one file.
+fn aliases_a_source(output: &Path, unit: &Unit, deps: &[PathBuf]) -> bool {
+    // `dirs_key`, the same one the snapshot uses: the output is whatever was
+    // typed on the command line and a dependency is the absolute path the
+    // importer resolved, so `_v.scss` and `/…/_v.scss` are the same file
+    // only once both are keyed — and the two places that ask this question
+    // must not answer it differently.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let key = dirs_key;
+    // …and through any symlink, because two names for one file is the other
+    // way to reach it. `out.css -> main.scss` passes a lexical comparison and
+    // then overwrites the stylesheet. `canonicalize` answers only for a path
+    // that EXISTS, which is why it is a second opinion rather than the rule:
+    // an output that is not there yet cannot alias anything.
+    let real = |p: &Path| std::fs::canonicalize(cwd.join(p)).ok().map(|c| path_key(&c));
+    let dest = key(output);
+    let dest_real = real(output);
+    let same =
+        |p: &Path| key(p) == dest || (dest_real.is_some() && real(p).is_some() && real(p) == dest_real);
+    if unit.source_path().is_some_and(same) {
+        return true;
+    }
+    deps.iter().any(|d| same(d))
 }
 
 /// `--update`: is `output` at least as new as `input` and every file in
@@ -1471,7 +1766,15 @@ fn silent_warn_handler() -> WarnHandler {
 /// or buffer the CSS, and on failure render the diagnostic (plus dart's error
 /// stylesheet where it applies).
 fn compile_unit(unit: &Unit, shared: &Shared) -> Outcome {
-    match read_source(unit) {
+    // BEFORE the read, like every imported file's stamp (see
+    // `RecordingImporter::load`). Taking it after the compile instead —
+    // which is what `run_watch` used to do — absorbs a save that lands while
+    // a slow compile is reading the entry: the stamp records the new bytes,
+    // the CSS was built from the old ones, and the next sweep sees nothing
+    // to do. Measured, saving the entry 200 ms into a 680 ms compile: 5 of 5
+    // lost.
+    let entry_at_read = unit.source_path().map(|p| (p.to_path_buf(), watch::Stamp::of(p)));
+    let mut outcome = match read_source(unit) {
         Ok(source) => compile_source(unit, &source, shared),
         Err(mut outcome) => {
             // A read failure never reaches the compiler, but dart treats
@@ -1480,11 +1783,19 @@ fn compile_unit(unit: &Unit, shared: &Shared) -> Outcome {
             // stale CSS). There is no source span to render here.
             if outcome.status == Status::CompileError {
                 let message = outcome.stderr.trim_end_matches('\n').to_string();
-                finish_compile_error(unit, shared, &message, &message, &mut outcome);
+                // Nothing was read, so there are no dependencies to alias.
+                finish_compile_error(unit, shared, &[], &message, &message, &mut outcome);
             }
-            outcome
+            *outcome
         }
+    };
+    // Recorded even when the read FAILED: a watch whose entry cannot be read
+    // has to notice it coming back, and in that state it is the only file
+    // there is to follow.
+    if let Some(pair) = entry_at_read {
+        outcome.loaded.push(pair);
     }
+    outcome
 }
 
 /// Wrap up a compile error for `unit`: write dart's error stylesheet where it
@@ -1492,11 +1803,37 @@ fn compile_unit(unit: &Unit, shared: &Shared) -> Outcome {
 /// consumes the CSS of an earlier successful build (dart deletes it too; the
 /// `.map`, if any, is left alone). `rendered` is the diagnostic as printed to
 /// the terminal, `ascii` the same rendered with the ASCII glyph set.
-fn finish_compile_error(unit: &Unit, shared: &Shared, rendered: &str, ascii: &str, outcome: &mut Outcome) {
+fn finish_compile_error(
+    unit: &Unit,
+    shared: &Shared,
+    deps: &[PathBuf],
+    rendered: &str,
+    ascii: &str,
+    outcome: &mut Outcome,
+) {
     // `--no-css` means no output-side effects at all: no error stylesheet, and
     // an existing output is left exactly as it was.
-    if shared.no_css {
+    //
+    // A provisional run under `--watch` wants exactly that too, and for a
+    // different reason: it compiles the instant a change is seen, which for a
+    // slow save is a half-written file. Writing an error stylesheet for that,
+    // or deleting the last good CSS, would make an editor's own write
+    // sequence look like the user breaking their stylesheet.
+    if shared.no_css || shared.provisional {
         return;
+    }
+    // …and the same for an output that IS one of this compile's sources.
+    // The success arm declines to write there; this one used to write the
+    // error stylesheet, or delete the file outright under `--no-error-css`.
+    // Measured before this: `--watch main.scss main.scss`, then break a
+    // dependency, and the entry is gone. Skipping a successful write and
+    // then destroying the file on the next typo is worse than either.
+    if shared.watch {
+        if let Target::File(output) = &unit.target {
+            if aliases_a_source(output, unit, deps) {
+                return;
+            }
+        }
     }
     match &unit.target {
         Target::Stdout => {
@@ -1506,10 +1843,13 @@ fn finish_compile_error(unit: &Unit, shared: &Shared, rendered: &str, ascii: &st
         }
         Target::File(output) => {
             if shared.file_error_css {
+                let existed = output.exists();
                 if let Err(msg) = write_file(output, error_css(rendered, ascii).as_bytes()) {
                     outcome.stderr.push_str(&msg);
                     outcome.stderr.push('\n');
                     outcome.status = Status::IoError;
+                } else if !existed {
+                    outcome.disturbed.push(output.clone());
                 }
             } else if let Err(e) = std::fs::remove_file(output) {
                 if e.kind() != std::io::ErrorKind::NotFound {
@@ -1518,8 +1858,166 @@ fn finish_compile_error(unit: &Unit, shared: &Shared, rendered: &str, ascii: &st
                         .push_str(&format!("error: cannot remove {}: {e}\n", output.display()));
                     outcome.status = Status::IoError;
                 }
+            } else {
+                // A removal moves the directory's mtime exactly as a
+                // creation does, and `--no-error-css` does one on every
+                // failed save.
+                outcome.disturbed.push(output.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod disturbed_tests {
+    use super::*;
+
+    /// `--watch` with `--no-error-css`: the only combination that removes an
+    /// output rather than writing an error stylesheet over it. `--watch`
+    /// alone is what the created-file guards need, and the removal guards
+    /// need both.
+    fn shared() -> Shared {
+        Shared {
+            load_paths: Vec::new(),
+            style: OutputStyle::Expanded,
+            unicode: true,
+            charset: true,
+            quiet: false,
+            quiet_deps: false,
+            update: false,
+            silenced: Vec::new(),
+            no_css: false,
+            embed_sources: false,
+            embed_source_map: false,
+            source_map_urls: SourceMapUrls::Relative,
+            file_source_map: false,
+            watch: true,
+            provisional: false,
+            file_error_css: false,
+            stdout_error_css: false,
+        }
+    }
+
+    fn unit(dir: &Path) -> Unit {
+        Unit {
+            source: Source::File(dir.join("main.scss")),
+            url: "main.scss".to_string(),
+            syntax: Syntax::Scss,
+            target: Target::File(dir.join("out.css")),
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sasso_{name}"));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A removal that removed nothing disturbed nothing.
+    ///
+    /// `disturbed` is a one-way door: `Snapshot::follow` puts the name into
+    /// the directory's `minus` set and never takes it out again. Recording a
+    /// removal that did not happen would therefore blind the watch to that
+    /// filename for the rest of the run — so the push belongs on the `Ok`
+    /// arm, and `NotFound` must reach neither it nor the error report.
+    #[test]
+    fn a_removal_of_an_absent_output_disturbs_nothing() {
+        let dir = scratch("no_error_css_absent");
+        let mut outcome = Outcome::failed(Status::CompileError, String::new());
+        finish_compile_error(&unit(&dir), &shared(), &[], "boom", "boom", &mut outcome);
+        let disturbed = outcome.disturbed.clone();
+        let stderr = outcome.stderr.clone();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(disturbed.is_empty(), "{disturbed:?}");
+        assert!(stderr.is_empty(), "{stderr:?}");
+    }
+
+    /// A write that FAILED still records what it created.
+    ///
+    /// `write_css_file` writes the map first and the CSS second, so an
+    /// unwritable output leaves a brand-new `.map` behind and returns `Err`.
+    /// Recording only on the `Ok` arm leaves that creation unowned: the
+    /// directory holding it is not re-stamped and the name is not in its
+    /// `minus` set, so our own sidecar can be read back as somebody else's
+    /// arrival.
+    ///
+    /// The output is a DIRECTORY here — the one way to make the CSS write
+    /// fail that needs no permission bit, and so behaves the same for root
+    /// and in CI.
+    #[test]
+    fn a_failed_write_records_the_map_it_created() {
+        let dir = scratch("partial_write");
+        let out = dir.join("out.css");
+        std::fs::create_dir(&out).unwrap();
+        let shared = Shared {
+            file_source_map: true,
+            ..shared()
+        };
+        let unit = Unit {
+            source: Source::File(dir.join("main.scss")),
+            url: "main.scss".to_string(),
+            syntax: Syntax::Scss,
+            target: Target::File(out.clone()),
+        };
+        let outcome = compile_source(&unit, ".a { color: red; }\n", &shared);
+        let disturbed = outcome.disturbed.clone();
+        let map = append_ext(&out, "map");
+        let map_landed = map.exists();
+        let failed = outcome.status == Status::IoError;
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(failed, "the CSS write was supposed to fail: {:?}", outcome.stderr);
+        assert!(map_landed, "the map is written first, so it should be there");
+        assert_eq!(
+            disturbed,
+            vec![map],
+            "the map this compile created went unrecorded"
+        );
+    }
+
+    /// …and a write that created nothing records nothing, so the guard above
+    /// cannot be satisfied by recording unconditionally.
+    #[test]
+    fn a_failed_write_that_created_nothing_records_nothing() {
+        let dir = scratch("partial_write_nothing");
+        let out = dir.join("out.css");
+        std::fs::create_dir(&out).unwrap();
+        // The map is already there, so this compile creates neither file.
+        std::fs::write(append_ext(&out, "map"), "{}").unwrap();
+        let shared = Shared {
+            file_source_map: true,
+            ..shared()
+        };
+        let unit = Unit {
+            source: Source::File(dir.join("main.scss")),
+            url: "main.scss".to_string(),
+            syntax: Syntax::Scss,
+            target: Target::File(out.clone()),
+        };
+        let outcome = compile_source(&unit, ".a { color: red; }\n", &shared);
+        let disturbed = outcome.disturbed.clone();
+        let failed = outcome.status == Status::IoError;
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(failed, "the CSS write was supposed to fail");
+        assert!(disturbed.is_empty(), "{disturbed:?}");
+    }
+
+    /// …and one that did remove a file did, because that moves the
+    /// directory's mtime exactly as a creation does.
+    #[test]
+    fn a_removal_of_a_present_output_is_a_disturbance() {
+        let dir = scratch("no_error_css_present");
+        let out = dir.join("out.css");
+        std::fs::write(&out, ".a{}").unwrap();
+        let mut outcome = Outcome::failed(Status::CompileError, String::new());
+        finish_compile_error(&unit(&dir), &shared(), &[], "boom", "boom", &mut outcome);
+        let disturbed = outcome.disturbed.clone();
+        let survived = out.exists();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(disturbed, vec![out]);
+        assert!(!survived, "the stale output outlived the failed compile");
     }
 }
 
@@ -1558,6 +2056,12 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
         stderr: std::mem::take(&mut *warnings.borrow_mut()),
         stdout: String::new(),
         status: Status::Ok,
+        // Taken whether or not this is a watch: the compile has already
+        // resolved the graph, and a second walk to learn it would be the
+        // cost `--update`'s comment explains away.
+        loaded: importer.loaded_stamps(),
+        unresolved: importer.unresolved_urls(),
+        disturbed: Vec::new(),
     };
     match compiled {
         // `--no-css`: the compile (and its diagnostics) was all that was wanted.
@@ -1597,21 +2101,67 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
             // 0.48s. Learning the graph any earlier would mean resolving
             // `@use`/`@import` a second time, outside the compiler that
             // already does it.
+            // Never write over a file this compile READ. `sasso main.scss
+            // main.scss` and `sasso main.scss _v.scss` both replace a
+            // stylesheet with its own CSS — dart does that too for a
+            // one-shot compile, so it is not ours to change there. Under
+            // `--watch` dart declines, and the reason is visible the moment
+            // you try it: the write is a change, the change is a compile,
+            // and the compile writes again. Measured before this,
+            // `--watch main.scss main.scss` for 2.5 seconds:
+            //
+            //   dart     Compiled x0   source untouched
+            //   npm      Compiled x0   source untouched
+            //   binary   Compiled x24  source DESTROYED
+            //
+            // Silent, because dart is silent.
+            Target::File(output)
+                if shared.watch && aliases_a_source(output, unit, &importer.attempted_paths()) => {}
             Target::File(output)
                 if shared.update && output_is_fresh(output, unit.source_path(), &importer.loaded_paths()) => {
             }
             Target::File(output) => {
-                if let Err(msg) = write_css_file(output, &css, map.as_ref(), &unit.url, stdin_text, shared) {
+                // Both files this write can CREATE. The sidecar is the one
+                // that is easy to forget: it is written by the same call and
+                // lands in the same directory, so a compile that recreates a
+                // deleted `.map` disturbs that directory just as a new CSS
+                // file would.
+                let existed = output.exists();
+                let map_path = append_ext(output, "map");
+                let map_existed = map_path.exists();
+                let wrote = write_css_file(output, &css, map.as_ref(), &unit.url, stdin_text, shared);
+                // Asked of the filesystem, and asked whether or not the write
+                // returned `Ok`: a failure is not a write that did nothing.
+                // The map goes first and the CSS second, `write_file` creates
+                // the parent chain before either, and `std::fs::write` creates
+                // a file before it fills it — so a failed write can leave a
+                // map with no CSS beside it, or an empty CSS file, and an
+                // unrecorded creation is a directory change nobody owns. The
+                // rule this list states is "what this compile CREATED", not
+                // "what it finished".
+                if !existed && output.exists() {
+                    outcome.disturbed.push(output.clone());
+                }
+                if !map_existed && map_path.exists() {
+                    outcome.disturbed.push(map_path);
+                }
+                if let Err(msg) = wrote {
                     outcome.stderr.push_str(&msg);
                     outcome.stderr.push('\n');
                     outcome.status = Status::IoError;
-                } else if shared.update && !shared.quiet {
-                    // dart narrates `--update`, and only `--update`: one line
-                    // per file actually WRITTEN, on stdout, timestamped to the
-                    // minute in local time (measured 2026-09-19). A skipped
-                    // output and a failed compile are both silent, which is
-                    // why this sits on the success arm after the write rather
-                    // than beside the freshness check.
+                } else if (shared.update || shared.watch) && !shared.quiet {
+                    // dart narrates `--update` and `--watch`, and only those
+                    // two: one line per file actually WRITTEN, on stdout,
+                    // timestamped to the minute in local time (measured
+                    // 2026-09-19 and 2026-09-20). A skipped output and a
+                    // failed compile are both silent, which is why this sits
+                    // on the success arm after the write rather than beside
+                    // the freshness check.
+                    //
+                    // Under `--watch` a provisional run reaches here too, and
+                    // its whole `stdout` is dropped by `run_watch` — so one
+                    // save is one line, from the authoritative run, rather
+                    // than the two the npm CLI prints for a `@warn`.
                     //
                     // `outcome.stdout` is flushed in command-line order, so a
                     // parallel build reports in argument order like dart's.
@@ -1659,7 +2209,17 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
             } else {
                 rendered.clone()
             };
-            finish_compile_error(unit, shared, &rendered, &ascii, &mut outcome);
+            finish_compile_error(
+                unit,
+                shared,
+                // Every attempted load, not just the successful ones: a
+                // dependency that is there and unreadable must not be
+                // overwritten by the error stylesheet describing why.
+                &importer.attempted_paths(),
+                &rendered,
+                &ascii,
+                &mut outcome,
+            );
         }
     }
     outcome
@@ -1667,6 +2227,215 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
 
 /// Throughput mode (`--loop N`): a warm/correctness pass reports diagnostics
 /// once, then the whole set is recompiled N times with a silent logger.
+/// `--watch`: compile, then keep compiling whenever anything the entry loaded
+/// changes.
+///
+/// The watcher itself is in `watch.rs` — what to poll, how often, and how a
+/// burst of saves becomes two compiles. This is the part that knows about
+/// units: which files to follow, what to print, and what a provisional run is
+/// allowed to do.
+///
+/// It never returns. dart's `--watch` exits only on a signal, and so does
+/// this: a compile error is reported and waited on, not fatal.
+fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) -> ExitCode {
+    use std::io::Write;
+
+    // dart prints this before the first compile and `--quiet` does not
+    // suppress it — measured 2026-09-20, and the npm CLI already matches.
+    {
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(b"Sass is watching for changes. Press Ctrl-C to stop.\n\n");
+        let _ = stdout.flush();
+    }
+
+    // A provisional run differs from an authoritative one in what it is
+    // ALLOWED to do, not in how it compiles, so these are the same `Shared`
+    // with a flag flipped rather than a second code path. (`..*shared` moves
+    // only `Copy` fields — the two `Vec`s are listed above it — so the
+    // borrow is never moved out of.)
+    //
+    // `--update` is honoured for the FIRST compile and never again, and that
+    // is a correctness fix rather than an optimisation. Its freshness check
+    // asks whether the output is newer than every input, and after the first
+    // compile the output is one THIS SESSION wrote — so a provisional run
+    // that caught a save half-written, succeeded, and wrote the wrong CSS
+    // makes its own output look up to date, and the authoritative run behind
+    // it skips the write that would have corrected it. Measured, writing
+    // `$c: bl` and finishing `ue;` 400 ms into a 680 ms compile: 6 of 6 runs
+    // stuck on `color: bl` forever. dart's own `--watch --update` is worse
+    // here — it left the first change uncompiled entirely — so there is no
+    // behaviour of its to copy.
+    let live = Shared {
+        update: false,
+        provisional: false,
+        load_paths: shared.load_paths.clone(),
+        silenced: shared.silenced.clone(),
+        ..*shared
+    };
+    let live_provisional = Shared {
+        update: false,
+        provisional: true,
+        load_paths: shared.load_paths.clone(),
+        silenced: shared.silenced.clone(),
+        ..*shared
+    };
+
+    let mut snapshot = watch::Snapshot::default();
+    let mut coalesce = watch::Coalesce::new(watch::WINDOW);
+    let started = Instant::now();
+    let mut interval = watch::MIN_INTERVAL;
+    // The first compile is authoritative: nothing is half-written yet, and a
+    // watch that started against a broken stylesheet has to say so.
+    let mut step = watch::Step::Run { provisional: false };
+    let mut started_once = false;
+
+    loop {
+        if let watch::Step::Run { provisional } = step {
+            // Before the compile, for the units it may never reach.
+            // `--stop-on-error` can stop before a later unit is even read,
+            // and that unit's entry still has to be followed — from BEFORE
+            // the run, or an edit made while the failing compile was
+            // running is adopted as the baseline and no later poll can see
+            // it. A unit that does compile brings its own read-time stamp
+            // back and that one wins.
+            let before_run: Vec<(PathBuf, watch::Stamp)> = units
+                .iter()
+                .filter_map(|u| u.source_path().map(|p| (p.to_path_buf(), watch::Stamp::of(p))))
+                .collect();
+            let run_shared = match (started_once, provisional) {
+                // The very first compile is the only one `--update` applies
+                // to; it is also never provisional.
+                (false, _) => shared,
+                (true, true) => &live_provisional,
+                (true, false) => &live,
+            };
+            started_once = true;
+            let outcomes = compile_all(units, run_shared, jobs, stop_on_error);
+            let mut ok = true;
+            let mut followed: Vec<(PathBuf, watch::Stamp)> = Vec::new();
+            let mut unresolved: Vec<String> = Vec::new();
+            let mut disturbed: Vec<PathBuf> = Vec::new();
+            {
+                let mut stdout = std::io::stdout().lock();
+                let mut stderr = std::io::stderr().lock();
+                let mut stderr_ends_blank = true;
+                for outcome in outcomes.into_iter().flatten() {
+                    if outcome.status != Status::Ok {
+                        ok = false;
+                    }
+                    followed.extend(outcome.loaded);
+                    unresolved.extend(outcome.unresolved);
+                    disturbed.extend(outcome.disturbed);
+                    // A provisional run reports NOTHING. Its diagnostics are
+                    // about a file that may still be being written, and the
+                    // authoritative run 50 ms behind it will print whatever
+                    // is really wrong. Measured on the npm CLI, which does
+                    // report from both: one save with a `@warn` prints the
+                    // warning TWICE there and once in dart.
+                    if provisional {
+                        continue;
+                    }
+                    if !outcome.stderr.is_empty() {
+                        if !stderr_ends_blank {
+                            let _ = stderr.write_all(b"\n");
+                        }
+                        let _ = stderr.write_all(outcome.stderr.as_bytes());
+                        stderr_ends_blank = outcome.stderr.ends_with("\n\n");
+                    }
+                    let _ = stdout.write_all(outcome.stdout.as_bytes());
+                }
+                let _ = stdout.flush();
+                let _ = stderr.flush();
+            }
+            // Follow the ENTRY too. A compile that failed before reading
+            // anything — a parse error in the entry, an unreadable file —
+            // records no loads at all, and without this the watch would sit
+            // there forever with nothing to notice.
+            // Every entry that COMPILED brought its own read-time stamp
+            // back. What is left is a unit that produced no outcome at all,
+            // and its pre-run stamp is the one to use — `Snapshot::follow`
+            // keeps the earliest observation of a path, so adding both is
+            // safe and the older wins.
+            followed.extend(before_run);
+            // …and the directories they live in, so a dependency that does
+            // not exist YET can arrive. A missing `@use` target has no path
+            // to stat; its directory does, and its mtime moves when the file
+            // is created.
+            let mut dirs: Vec<PathBuf> = followed
+                .iter()
+                .filter_map(|(f, _)| f.parent().map(Path::to_path_buf))
+                .collect();
+            dirs.extend(shared.load_paths.iter().cloned());
+            // A url that resolved to NOTHING names a directory none of those
+            // cover as soon as it has a segment of its own: `@use "sub/new"`
+            // would be found in `<base>/sub`, and `sub/` is in no compile's
+            // dependency list because nothing in it was ever read. Following
+            // a directory that does not exist yet costs nothing here —
+            // `Stamp::MISSING` compares equal to itself and becomes a change
+            // the moment the directory appears.
+            let bases: Vec<PathBuf> = dirs.clone();
+            for url in &unresolved {
+                let Some(within) = Path::new(url).parent().filter(|p| !p.as_os_str().is_empty()) else {
+                    continue;
+                };
+                for base in &bases {
+                    dirs.push(base.join(within));
+                }
+            }
+            // The directories this compile actually DISTURBED — where it
+            // created or removed a file, which is what moves a directory's
+            // mtime. Only those are re-stamped; every other directory keeps
+            // what it had, or a dependency created while the compile was
+            // running would become the baseline.
+            //
+            // From what was written rather than from the targets: in the
+            // ordinary `main.scss` / `main.css` layout the output's
+            // directory IS the sources' directory, so "we have a target
+            // there" would re-stamp it on every compile and absorb an
+            // arrival. Overwriting an existing file disturbs nothing.
+            //
+            // Keyed through `dirs_key`, like `dirs` itself: the outputs are
+            // spelled as they were typed and the dependencies as the
+            // importer resolved them, so `out.css` and `/work/out.css` are
+            // one directory only once both are.
+            // The FILES this compile created or removed, keyed like the
+            // directories they live in. `follow` turns them into "what in
+            // this directory is ours", so our own output is neither an
+            // arrival nor a mask for one.
+            let ours: Vec<PathBuf> = disturbed.iter().map(|f| dirs_key(f)).collect();
+            let dirs: Vec<PathBuf> = dirs.iter().map(|d| dirs_key(d)).collect();
+            snapshot.follow(followed, dirs, &ours, watch::Stamp::of);
+            coalesce.finished(provisional, ok);
+        }
+
+        std::thread::sleep(interval);
+        let swept = Instant::now();
+        let changed = snapshot.changed(watch::Stamp::of);
+        interval = watch::next_interval(swept.elapsed(), watch::SWEEP_BUDGET);
+
+        let now_ms = started.elapsed().as_millis() as u64;
+        // A change is told to the coalescer FIRST and always, even when a
+        // catch-up is already due this tick. The old order asked the tick
+        // first and took its run, dropping `changed` on the floor — and
+        // `Snapshot::changed` has already advanced the stamp by then, so the
+        // next sweep sees nothing and a save can be lost.
+        //
+        // Ordering it this way costs nothing: `on_change` while cooling only
+        // sets the dirty bit, and having set it, `on_tick` cannot answer
+        // `Run` in the same breath — it starts the cool-down. So the two
+        // cannot both fire, and the catch-up still wins when it is due.
+        let from_change = if changed {
+            coalesce.on_change(now_ms)
+        } else {
+            watch::Step::Wait
+        };
+        step = match (coalesce.on_tick(now_ms), from_change) {
+            (run @ watch::Step::Run { .. }, _) => run,
+            (_, from_change) => from_change,
+        };
+    }
+}
+
 fn run_loop(units: &[Unit], shared: &Shared, n: u32) -> ExitCode {
     let mut sources = Vec::with_capacity(units.len());
     for unit in units {

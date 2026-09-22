@@ -786,6 +786,13 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const outputFlags = new Set(["-o", "--output"]);
   // Flags that exit before compiling, so they cannot be probed this way.
   const terminal = new Set(["-h", "--help", "--version", "--"]);
+  // …and the opposite: a flag whose whole job is NOT to exit. Probing `-w`
+  // with a valid input starts a watch, and `spawnSync` with no timeout waits
+  // for it forever — which is how this guard hung the suite the day the
+  // binary grew a watcher and `-w` first appeared in its `--help`. A flag
+  // that has to be killed did not say "unknown option", so it counts as
+  // accepted, which is exactly what the guard is asking.
+  const neverExits = new Set(["-w", "--watch"]);
 
   const dir = mkdtempSync(join(tmpdir(), "sasso-drift-"));
   const src = join(dir, "in.scss");
@@ -797,7 +804,10 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     const argv = outputFlags.has(f)
       ? [cliPath, "--no-source-map", f, join(dir, "out.css"), src]
       : [cliPath, "--no-source-map", ...(f in withValue ? [f, withValue[f]] : [f]), `${src}:${join(dir, "out.css")}`];
-    const r = spawnSync(process.execPath, argv, { encoding: "utf8" });
+    const r = spawnSync(process.execPath, argv, {
+      encoding: "utf8",
+      timeout: neverExits.has(f) ? 1500 : 30000,
+    });
     if (/unknown option/.test(r.stderr || "")) rejected.push(f);
   }
   assert.deepEqual(
@@ -845,10 +855,11 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   const byDesign = new Map([
     ["--engine", "reports which engine the npm CLI chose; the binary IS the engine"],
   ]);
-  const gaps = new Map([
-    ["-w", "#86: the binary has no watcher yet"],
-    ["--watch", "#86: the binary has no watcher yet — a file-watching dependency in a crate whose [dependencies] section is empty is a deliberate decision, not a default"],
-  ]);
+  // Empty, and that is the point of the entry above it: #86's `-w`/`--watch`
+  // lived here until the binary grew a watcher, and the guard only started
+  // failing again — asking for this list to shrink — because the entries
+  // were removed when the work landed.
+  const gaps = new Map([]);
   const onlyNpm = [...npmFlags].filter((f) => !flags.includes(f) && !byDesign.has(f) && !gaps.has(f));
   assert.deepEqual(
     onlyNpm,
@@ -3179,12 +3190,14 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     const code = run(["/no/such/file.scss"], { SASSO_BINARY: envBin });
     assert.equal(code.status, 127, `cli: the child's exit code is this process's (got ${code.status})`);
 
-    // `--watch` is still not in the binary (#86), and `--update` now is — but
-    // only in a binary of THIS version, and `SASSO_BINARY` is documented as
-    // version-unchecked. So a command line carrying either must stay here
-    // rather than be handed to whatever that variable names. Delegating would
-    // give `echo` a working build and compile nothing — which is what the
-    // file check below would catch.
+    // `--watch` and `--update` are BOTH in the binary now (#86), and neither
+    // delegates — for different reasons. `--update` only exists in a binary
+    // of THIS version and `SASSO_BINARY` is documented as version-unchecked;
+    // `--watch` stays because this CLI's event watcher is measurably faster
+    // than the binary's poll. Either way the command line must stay here
+    // rather than be handed to whatever that variable names: delegating
+    // would give `echo` a working build and compile nothing, which is what
+    // the file check below would catch.
     {
       const upd = run(argv("f.css", "--update"), { SASSO_BINARY: echo });
       compiles("--update with a binary configured", upd, "f.css");
@@ -3196,7 +3209,11 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       const w = run(["--watch", src], { SASSO_BINARY: echo });
       assert.notEqual(w.status, 0, "cli: --watch still needs an output file");
       assert.match(w.stderr, /--watch requires <input> <output>/, "cli: … in this CLI's words, not a child's");
-      assert.match(w.stderr, /--watch is not in the binary/, "cli: … because --watch never delegates");
+      assert.match(
+        w.stderr,
+        /--watch is faster in-process/,
+        "cli: … because --watch never delegates, and the reason is no longer that the binary lacks one",
+      );
     }
 
     // Metadata answers from this file alone, as it does when no engine can load
