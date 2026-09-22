@@ -1900,7 +1900,19 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
                 if shared.update && output_is_fresh(output, unit.source_path(), &importer.loaded_paths()) => {
             }
             Target::File(output) => {
+                // Both files this write can CREATE. The sidecar is the one
+                // that is easy to forget: it is written by the same call and
+                // lands in the same directory, so a compile that recreates a
+                // deleted `.map` disturbs that directory just as a new CSS
+                // file would.
+                //
+                // Not demonstrable — deleting the sidecar under a watch gives
+                // exactly one compile either way, which is the right answer
+                // for other reasons. It is here because the rule this list
+                // states is "what this compile created or removed", and a
+                // created sidecar is that.
                 let existed = output.exists();
+                let map_existed = append_ext(output, "map").exists();
                 if let Err(msg) = write_css_file(output, &css, map.as_ref(), &unit.url, stdin_text, shared) {
                     outcome.stderr.push_str(&msg);
                     outcome.stderr.push('\n');
@@ -1908,6 +1920,10 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
                 } else {
                     if !existed {
                         outcome.disturbed.push(output.clone());
+                    }
+                    let map_path = append_ext(output, "map");
+                    if !map_existed && map_path.exists() {
+                        outcome.disturbed.push(map_path);
                     }
                     if (shared.update || shared.watch) && !shared.quiet {
                         // dart narrates `--update` and `--watch`, and only those

@@ -116,7 +116,7 @@ impl Stamp {
         // crate's MSRV is 1.74.
         let coarse = modified.map_or(true, |t| {
             t.duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos() == 0)
+                .map(|d| !subsecond_is_fine(d.subsec_nanos()))
                 .unwrap_or(true)
         });
         Stamp {
@@ -125,6 +125,25 @@ impl Stamp {
             digest: if coarse { digest_of(path, m.is_dir()) } else { 0 },
         }
     }
+}
+
+/// Whether a timestamp's sub-second part is fine enough to tell two saves
+/// apart.
+///
+/// A non-zero sub-second part is NOT that proof, which is what this used to
+/// test: a filesystem with millisecond stamps reports one, and two
+/// same-length writes inside the same millisecond still share it. What the
+/// value itself says is how far the clock actually ticks — a 1 ms clock can
+/// only ever produce multiples of 1,000,000 ns, a 100 ns clock multiples of
+/// 100 — so the trailing zeros are the resolution, and no extra syscall is
+/// needed to learn it.
+///
+/// The line is one microsecond. Two saves inside a millisecond is an editor
+/// and a formatter racing, which happens; two inside a microsecond is not a
+/// thing a person's tooling does. A precise clock landing on an exact
+/// multiple by chance costs one file one digest on one sweep.
+fn subsecond_is_fine(subsec_nanos: u32) -> bool {
+    subsec_nanos != 0 && subsec_nanos % 1_000 != 0
 }
 
 /// FNV-1a over what makes this path different from itself a moment ago.
@@ -658,5 +677,24 @@ mod tests {
             s.changed(|_| stamp_of(2)),
             "the arrival during the compile was absorbed"
         );
+    }
+
+    /// A sub-second part that is merely NON-ZERO proves nothing: a
+    /// millisecond clock reports one and still cannot tell two saves inside
+    /// one tick apart. What the value says is the resolution — its trailing
+    /// zeros — and that is what decides whether the contents have to be
+    /// read.
+    #[test]
+    fn the_resolution_is_read_from_the_timestamp_not_assumed() {
+        // Whole seconds, and the two coarse-but-non-zero cases the old test
+        // called precise.
+        assert!(!subsecond_is_fine(0), "FAT and friends");
+        assert!(!subsecond_is_fine(1_000_000), "a millisecond clock");
+        assert!(!subsecond_is_fine(123_000_000), "still a millisecond clock");
+        assert!(!subsecond_is_fine(456_000), "a microsecond clock");
+        // Anything finer than a microsecond can tell two saves apart.
+        assert!(subsecond_is_fine(100), "a 100 ns clock");
+        assert!(subsecond_is_fine(123_456_789), "nanoseconds");
+        assert!(subsecond_is_fine(1), "the finest there is");
     }
 }
