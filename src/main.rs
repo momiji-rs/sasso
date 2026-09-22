@@ -1554,19 +1554,28 @@ impl sasso::Importer for RecordingImporter {
             let stamp = watch::Stamp::of(&p);
             (p, stamp)
         });
+        // Recorded BEFORE the load is even attempted, and whatever it
+        // answers. Three outcomes, and only one of them is a dependency:
+        //
+        //   Ok(Some) the file was read — a dependency, and followed
+        //   Ok(None) it vanished between `canonicalize` and here. The
+        //            importer's own comment calls that a miss, and the url
+        //            never reaches `unresolved` either, because
+        //            canonicalizing it SUCCEEDED
+        //   Err      it is there and cannot be read: permissions, or
+        //            invalid UTF-8
+        //
+        // The last two are not dependencies and must still be FOLLOWED, or
+        // the file and its directory are watched by nobody and the fix
+        // reaches nothing. Measured for the third: `chmod 000` a dependency,
+        // and `chmod 644` afterwards was NEVER SEEN — the `?` returned
+        // before the stamp was taken.
+        if let Some(pair) = before {
+            self.read_stamps.borrow_mut().push(pair);
+        }
         let out = self.inner.load(canonical)?;
         if out.is_some() {
             self.loaded.borrow_mut().push(canonical.as_str().to_string());
-        }
-        // The stamp is recorded whether or not the load found anything, and
-        // `loaded` is not. `FsImporter::load` answers `None` when the file
-        // vanished between `canonicalize` and here — its own comment calls
-        // that a miss — and such a url never reaches `unresolved` either,
-        // because canonicalizing it SUCCEEDED. Without this the file and its
-        // directory are followed by nobody, and recreating it in a
-        // subdirectory would never reach the watch.
-        if let Some(pair) = before {
-            self.read_stamps.borrow_mut().push(pair);
         }
         Ok(out)
     }

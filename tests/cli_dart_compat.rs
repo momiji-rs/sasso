@@ -3229,3 +3229,67 @@ fn watch_declines_to_write_error_css_over_a_source() {
         );
     }
 }
+
+/// A dependency that exists and cannot be READ, then can.
+///
+/// Two things had to be true for this to work and neither was. The importer
+/// reports a permission failure as an error, and the `?` returned before the
+/// file's stamp was taken — so nothing followed it. And `chmod` moves no
+/// mtime, no length and no byte, so even once followed the stamp was
+/// identical before and after. Measured before: the fix was NEVER SEEN, a
+/// permanent dead end rather than a delay.
+#[cfg(unix)]
+#[test]
+fn watch_recovers_when_a_dependency_becomes_readable() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let dir = scratch("watch_unreadable");
+    write(&dir, "main.scss", "@use \"v\";\n.a { color: v.$c; }\n");
+    let dep = write(&dir, "_v.scss", "$c: red;\n");
+    std::fs::set_permissions(&dep, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut child = std::process::Command::new(BIN)
+        .args(["--no-source-map", "--watch", "main.scss", "out.css"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn --watch");
+
+    let out = dir.join("out.css");
+    let css = || std::fs::read_to_string(&out).unwrap_or_default();
+    let until = |pred: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(
+            until(&|| css().starts_with("/* Error:")),
+            "an unreadable dependency should fail the compile: {:?}",
+            css(),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::set_permissions(&dep, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            until(&|| css().contains("red")),
+            "the dependency became readable and nothing noticed: {:?}",
+            css(),
+        );
+    }));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::set_permissions(&dep, std::fs::Permissions::from_mode(0o644));
+    std::fs::remove_dir_all(&dir).ok();
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}

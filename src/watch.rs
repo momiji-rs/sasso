@@ -95,6 +95,18 @@ pub(crate) struct Stamp {
     /// FNV-1a of the contents, or `0` when the timestamp was precise enough
     /// not to need one.
     digest: u64,
+    /// The permission bits, because becoming READABLE is a change a watch
+    /// has to act on and none of the three fields above moves for it.
+    ///
+    /// A dependency that exists and cannot be read fails the compile; the
+    /// fix is `chmod`, which touches neither mtime nor length nor contents.
+    /// Measured before this: `chmod 000` a dependency, then `chmod 644`, and
+    /// the watch NEVER SAW it — a permanent dead end rather than a delay.
+    ///
+    /// The mode where there is one; elsewhere the one bit `std` exposes.
+    /// `readonly()` alone would miss `000 -> 444`, which is exactly the
+    /// unreadable-to-readable transition this exists for.
+    mode: u32,
 }
 
 impl Stamp {
@@ -105,6 +117,7 @@ impl Stamp {
         modified: None,
         len: u64::MAX,
         digest: 0,
+        mode: 0,
     };
 
     pub(crate) fn of(path: &Path) -> Stamp {
@@ -123,8 +136,23 @@ impl Stamp {
             modified,
             len: m.len(),
             digest: if coarse { digest_of(path, m.is_dir()) } else { 0 },
+            mode: mode_of(&m),
         }
     }
+}
+
+/// The permission bits, as far as this platform will say.
+#[cfg(unix)]
+fn mode_of(m: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    m.mode()
+}
+
+/// Windows has no mode; the read-only flag is what `std` offers, and it is
+/// the only permission change that can stop a stylesheet being read there.
+#[cfg(not(unix))]
+fn mode_of(m: &std::fs::Metadata) -> u32 {
+    u32::from(m.permissions().readonly())
 }
 
 /// Whether a timestamp's sub-second part is fine enough to tell two saves
@@ -367,6 +395,7 @@ mod tests {
             modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(n)),
             len: n,
             digest: 0,
+            mode: 0o644,
         }
     }
 
@@ -459,6 +488,7 @@ mod tests {
             modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
             len,
             digest: 0,
+            mode: 0o644,
         };
         s.follow([(PathBuf::from("/a.scss"), coarse(10))], [], &[], |_| coarse(10));
         assert!(s.changed(|_| coarse(11)));
@@ -556,6 +586,7 @@ mod tests {
             modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
             len: 10,
             digest,
+            mode: 0o644,
         };
         let mut s = Snapshot::default();
         s.follow([(PathBuf::from("/a.scss"), whole_second(111))], [], &[], |_| {
@@ -609,6 +640,7 @@ mod tests {
                 modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
                 len: live.len,
                 digest: digest_of(&p, false),
+                mode: live.mode,
             }
         };
         // Same length, same second: only the contents differ.
@@ -696,5 +728,25 @@ mod tests {
         assert!(subsecond_is_fine(100), "a 100 ns clock");
         assert!(subsecond_is_fine(123_456_789), "nanoseconds");
         assert!(subsecond_is_fine(1), "the finest there is");
+    }
+
+    /// Becoming readable is a change, and it is the one a watch is waiting
+    /// for when a dependency exists but cannot be read. `chmod` moves no
+    /// mtime, no length and no byte, so without the mode the stamp is
+    /// identical before and after and the fix reaches nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_permission_change_is_a_change() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sasso-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("_v.scss");
+        std::fs::write(&p, "$c: red;\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let locked = Stamp::of(&p);
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let opened = Stamp::of(&p);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_ne!(locked, opened, "chmod 000 -> 644 must be a change");
     }
 }
