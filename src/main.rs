@@ -2192,12 +2192,24 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
         interval = watch::next_interval(swept.elapsed(), watch::SWEEP_BUDGET);
 
         let now_ms = started.elapsed().as_millis() as u64;
-        // The catch-up first: a stream of changes arriving on every tick must
-        // not starve the authoritative run that makes them count.
-        step = match coalesce.on_tick(now_ms) {
-            run @ watch::Step::Run { .. } => run,
-            watch::Step::Wait if changed => coalesce.on_change(now_ms),
-            wait => wait,
+        // A change is told to the coalescer FIRST and always, even when a
+        // catch-up is already due this tick. The old order asked the tick
+        // first and took its run, dropping `changed` on the floor — and
+        // `Snapshot::changed` has already advanced the stamp by then, so the
+        // next sweep sees nothing and a save can be lost.
+        //
+        // Ordering it this way costs nothing: `on_change` while cooling only
+        // sets the dirty bit, and having set it, `on_tick` cannot answer
+        // `Run` in the same breath — it starts the cool-down. So the two
+        // cannot both fire, and the catch-up still wins when it is due.
+        let from_change = if changed {
+            coalesce.on_change(now_ms)
+        } else {
+            watch::Step::Wait
+        };
+        step = match (coalesce.on_tick(now_ms), from_change) {
+            (run @ watch::Step::Run { .. }, _) => run,
+            (_, from_change) => from_change,
         };
     }
 }

@@ -141,6 +141,18 @@ impl Stamp {
     }
 }
 
+/// Which of two observations of one file came first.
+///
+/// A missing file counts as earliest: whatever the other unit saw, "it was
+/// not there" is the observation that will differ once it is.
+fn earlier(a: &Stamp, b: &Stamp) -> bool {
+    match (a.modified, b.modified) {
+        (None, _) => true,
+        (_, None) => false,
+        (Some(x), Some(y)) => x < y,
+    }
+}
+
 /// The permission bits, as far as this platform will say.
 #[cfg(unix)]
 fn mode_of(m: &std::fs::Metadata) -> u32 {
@@ -262,10 +274,21 @@ impl Snapshot {
     ) where
         F: FnMut(&Path) -> Stamp,
     {
-        let mut next = BTreeMap::new();
+        let mut next: BTreeMap<PathBuf, Stamp> = BTreeMap::new();
         for (p, at_read) in files {
             let s = self.files.get(&p).copied().unwrap_or(at_read);
-            next.insert(p, s);
+            // Two units can load the same dependency, and each brings the
+            // stamp from when IT read the file. If one read before a save
+            // and the other after, taking the later one makes the newer
+            // bytes the baseline and the first unit's output is never
+            // recompiled. The earliest observation is the one that still
+            // differs from what is on disk, so that is the one to keep.
+            match next.get(&p) {
+                Some(seen) if !earlier(&s, seen) => {}
+                _ => {
+                    next.insert(p, s);
+                }
+            }
         }
         for d in dirs {
             let s = if ours.contains(&d) {
@@ -748,5 +771,53 @@ mod tests {
         let opened = Stamp::of(&p);
         std::fs::remove_dir_all(&dir).ok();
         assert_ne!(locked, opened, "chmod 000 -> 644 must be a change");
+    }
+
+    /// Two units, one dependency, read either side of a save. The later
+    /// stamp used to win, which makes the new bytes the baseline and leaves
+    /// the first unit's output built from the old ones forever.
+    #[test]
+    fn the_earliest_observation_of_a_shared_dependency_wins() {
+        let mut s = Snapshot::default();
+        let shared = PathBuf::from("/_v.scss");
+        // Unit A read it at 1; unit B, after the save, at 2.
+        s.follow(
+            [(shared.clone(), stamp_of(1)), (shared.clone(), stamp_of(2))],
+            [],
+            &[],
+            |_| stamp_of(2),
+        );
+        assert!(
+            s.changed(|_| stamp_of(2)),
+            "the save one unit compiled against was adopted as the baseline",
+        );
+        // …and the order it arrives in does not decide it.
+        let mut s = Snapshot::default();
+        s.follow(
+            [(shared.clone(), stamp_of(2)), (shared.clone(), stamp_of(1))],
+            [],
+            &[],
+            |_| stamp_of(2),
+        );
+        assert!(s.changed(|_| stamp_of(2)), "…in either order");
+    }
+
+    /// A file one unit could not find at all is the earliest observation
+    /// there is: whatever the other saw, "not there" differs the moment it
+    /// appears.
+    #[test]
+    fn a_missing_observation_beats_a_present_one() {
+        let mut s = Snapshot::default();
+        let p = PathBuf::from("/_v.scss");
+        s.follow(
+            [(p.clone(), stamp_of(5)), (p.clone(), Stamp::MISSING)],
+            [],
+            &[],
+            |_| stamp_of(5),
+        );
+        assert!(
+            s.changed(|_| stamp_of(5)),
+            "the file is there and one unit had not seen it"
+        );
     }
 }
