@@ -141,6 +141,40 @@ impl Stamp {
     }
 }
 
+impl Stamp {
+    /// A directory judged by what is in it EXCEPT the given names.
+    ///
+    /// No mtime and no length: ours moved both, so neither can answer the
+    /// question. What is left is the entry set, which our own writes are
+    /// taken out of and nobody else's are.
+    fn of_dir_minus(dir: &Path, ours: &[std::ffi::OsString]) -> Stamp {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Stamp::MISSING;
+        };
+        let mut names: Vec<std::ffi::OsString> = entries
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| !ours.contains(n))
+            .collect();
+        names.sort();
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for n in names {
+            for b in n.to_string_lossy().as_bytes() {
+                h ^= u64::from(*b);
+                h = h.wrapping_mul(0x1000_0000_01b3);
+            }
+            h ^= 0;
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+        Stamp {
+            modified: None,
+            len: 0,
+            digest: h,
+            mode: 0,
+        }
+    }
+}
+
 /// Which of two observations of one file came first.
 ///
 /// A missing file counts as earliest: whatever the other unit saw, "it was
@@ -235,6 +269,15 @@ fn digest_of(path: &Path, is_dir: bool) -> u64 {
 #[derive(Default, Debug)]
 pub(crate) struct Snapshot {
     files: BTreeMap<PathBuf, Stamp>,
+    /// For a directory this watch WROTE into: the names it put there.
+    ///
+    /// Such a directory cannot be judged by its mtime, because ours moved
+    /// it — but re-stamping it wholesale is worse, since a dependency that
+    /// arrived during the same compile is then folded into the new
+    /// baseline and never seen. So it is judged by its entry set with our
+    /// own files taken out: our write cannot look like an arrival, and
+    /// cannot hide one either.
+    minus: BTreeMap<PathBuf, Vec<std::ffi::OsString>>,
 }
 
 impl Snapshot {
@@ -274,6 +317,25 @@ impl Snapshot {
     ) where
         F: FnMut(&Path) -> Stamp,
     {
+        // `ours` is the FILES this compile created or removed. A directory
+        // holding one of them is judged by its entry set minus those names
+        // from here on.
+        let mut minus: BTreeMap<PathBuf, Vec<std::ffi::OsString>> = BTreeMap::new();
+        for f in ours {
+            if let (Some(d), Some(n)) = (f.parent(), f.file_name()) {
+                minus.entry(d.to_path_buf()).or_default().push(n.to_os_string());
+            }
+        }
+        // Once ours, always ours: a file we created last compile and only
+        // overwrote this one is still not somebody else's arrival.
+        for (d, names) in &self.minus {
+            let e = minus.entry(d.clone()).or_default();
+            for n in names {
+                if !e.contains(n) {
+                    e.push(n.clone());
+                }
+            }
+        }
         let mut next: BTreeMap<PathBuf, Stamp> = BTreeMap::new();
         for (p, at_read) in files {
             let s = self.files.get(&p).copied().unwrap_or(at_read);
@@ -291,14 +353,20 @@ impl Snapshot {
             }
         }
         for d in dirs {
-            let s = if ours.contains(&d) {
-                stamp(&d)
-            } else {
-                self.files.get(&d).copied().unwrap_or_else(|| stamp(&d))
+            let s = match minus.get(&d) {
+                // Ours: its mtime is meaningless to us now, so the stamp is
+                // the entry set without our files. Taken fresh, because an
+                // arrival is a difference in THAT, not in the mtime our own
+                // write already moved.
+                Some(names) => Stamp::of_dir_minus(&d, names),
+                // Not ours: keep what we knew, or an arrival during the
+                // compile becomes the baseline.
+                None => self.files.get(&d).copied().unwrap_or_else(|| stamp(&d)),
             };
             next.insert(d, s);
         }
         self.files = next;
+        self.minus = minus;
     }
 
     /// Has any followed file changed? Updates the remembered stamps, so a
@@ -309,7 +377,12 @@ impl Snapshot {
     {
         let mut changed = false;
         for (path, known) in self.files.iter_mut() {
-            let now = stamp(path);
+            // A directory we wrote into is asked the same question it was
+            // stamped with — see `Snapshot::minus`.
+            let now = match self.minus.get(path) {
+                Some(names) => Stamp::of_dir_minus(path, names),
+                None => stamp(path),
+            };
             if now != *known {
                 *known = now;
                 changed = true;
@@ -569,18 +642,6 @@ mod tests {
         assert!(s.changed(|_| stamp_of(2)), "the mid-compile save was absorbed");
     }
 
-    /// A directory is the opposite: the compile's own output moves it, so
-    /// its stamp is taken fresh or the watch answers itself forever.
-    #[test]
-    fn a_directory_is_restamped_because_our_own_writes_move_it() {
-        let mut s = Snapshot::default();
-        let d = PathBuf::from("/out");
-        s.follow([], [d.clone()], std::slice::from_ref(&d), |_| stamp_of(1));
-        // The compile created a file in it, moving its mtime.
-        s.follow([], [d.clone()], std::slice::from_ref(&d), |_| stamp_of(2));
-        assert!(!s.changed(|_| stamp_of(2)), "our own write looked like a change");
-    }
-
     /// A file this compile met for the FIRST time — the whole set, on the
     /// first compile of a watch — takes the stamp from when it was read,
     /// not from after. Otherwise a save that lands during that compile
@@ -819,5 +880,39 @@ mod tests {
             s.changed(|_| stamp_of(5)),
             "the file is there and one unit had not seen it"
         );
+    }
+
+    /// A directory this watch wrote into is judged by what is in it apart
+    /// from our own files.
+    ///
+    /// This replaces `a_directory_is_restamped_because_our_own_writes_move_it`,
+    /// which asserted the older contract — `ours` was a list of DIRECTORIES
+    /// and such a directory was re-stamped wholesale. That is what hid an
+    /// arrival landing during the same compile. Both halves of the property
+    /// are here: our own write is not a change, and somebody else's is — so the output landing there is not an arrival,
+    /// and a dependency arriving there during the same compile is not
+    /// hidden by it. Re-stamping such a directory wholesale did hide one.
+    #[test]
+    fn a_directory_we_wrote_into_still_sees_somebody_elses_arrival() {
+        let dir = std::env::temp_dir().join(format!("sasso-minus-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.scss"), "a{b:1}\n").unwrap();
+        let out = dir.join("main.css");
+
+        let mut s = Snapshot::default();
+        // The compile created its own output here.
+        std::fs::write(&out, "a{b:1}\n").unwrap();
+        s.follow([], [dir.clone()], std::slice::from_ref(&out), Stamp::of);
+        assert!(!s.changed(Stamp::of), "our own output is not a change");
+
+        // Overwriting it is not one either.
+        std::fs::write(&out, "a{b:2}\n").unwrap();
+        assert!(!s.changed(Stamp::of), "and neither is rewriting it");
+
+        // Somebody else's file is.
+        std::fs::write(dir.join("_v.scss"), "$c: red;\n").unwrap();
+        let seen = s.changed(Stamp::of);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(seen, "a dependency arrived and the directory was ours");
     }
 }

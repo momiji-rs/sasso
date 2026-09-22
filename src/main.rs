@@ -1522,6 +1522,18 @@ impl RecordingImporter {
         self.read_stamps.borrow().clone()
     }
 
+    /// Every file this compile ATTEMPTED to load, read or not.
+    ///
+    /// `loaded_paths` is the successful half and is what `--update`
+    /// compares mtimes against. This is the half `--watch` needs when it
+    /// asks "would writing here destroy something we touched": a
+    /// dependency that exists and failed to load — bad permissions,
+    /// invalid UTF-8 — is not a dependency, and overwriting it with error
+    /// CSS is still destroying the user's file.
+    fn attempted_paths(&self) -> Vec<PathBuf> {
+        self.read_stamps.borrow().iter().map(|(p, _)| p.clone()).collect()
+    }
+
     /// The urls this compile could not resolve, as written in the `@use` or
     /// `@import`. Relative, so the caller pairs them with the directories
     /// they were searched for in.
@@ -1904,7 +1916,7 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
             //
             // Silent, because dart is silent.
             Target::File(output)
-                if shared.watch && aliases_a_source(output, unit, &importer.loaded_paths()) => {}
+                if shared.watch && aliases_a_source(output, unit, &importer.attempted_paths()) => {}
             Target::File(output)
                 if shared.update && output_is_fresh(output, unit.source_path(), &importer.loaded_paths()) => {
             }
@@ -1998,7 +2010,10 @@ fn compile_source(unit: &Unit, source: &str, shared: &Shared) -> Outcome {
             finish_compile_error(
                 unit,
                 shared,
-                &importer.loaded_paths(),
+                // Every attempted load, not just the successful ones: a
+                // dependency that is there and unreadable must not be
+                // overwritten by the error stylesheet describing why.
+                &importer.attempted_paths(),
                 &rendered,
                 &ascii,
                 &mut outcome,
@@ -2074,6 +2089,17 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
 
     loop {
         if let watch::Step::Run { provisional } = step {
+            // Before the compile, for the units it may never reach.
+            // `--stop-on-error` can stop before a later unit is even read,
+            // and that unit's entry still has to be followed — from BEFORE
+            // the run, or an edit made while the failing compile was
+            // running is adopted as the baseline and no later poll can see
+            // it. A unit that does compile brings its own read-time stamp
+            // back and that one wins.
+            let before_run: Vec<(PathBuf, watch::Stamp)> = units
+                .iter()
+                .filter_map(|u| u.source_path().map(|p| (p.to_path_buf(), watch::Stamp::of(p))))
+                .collect();
             let run_shared = match (started_once, provisional) {
                 // The very first compile is the only one `--update` applies
                 // to; it is also never provisional.
@@ -2124,18 +2150,11 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
             // records no loads at all, and without this the watch would sit
             // there forever with nothing to notice.
             // Every entry that COMPILED brought its own read-time stamp
-            // back with it. What is left is a unit that produced no outcome
-            // at all — `--stop-on-error` skipped it — whose entry still has
-            // to be followed, or a watch that stopped early would never see
-            // the fix. Nothing read it, so there is no read-time stamp to
-            // want: now is the honest answer.
-            for unit in units {
-                let Some(p) = unit.source_path() else { continue };
-                if followed.iter().any(|(f, _)| f == p) {
-                    continue;
-                }
-                followed.push((p.to_path_buf(), watch::Stamp::of(p)));
-            }
+            // back. What is left is a unit that produced no outcome at all,
+            // and its pre-run stamp is the one to use — `Snapshot::follow`
+            // keeps the earliest observation of a path, so adding both is
+            // safe and the older wins.
+            followed.extend(before_run);
             // …and the directories they live in, so a dependency that does
             // not exist YET can arrive. A missing `@use` target has no path
             // to stat; its directory does, and its mtime moves when the file
@@ -2177,10 +2196,11 @@ fn run_watch(units: &[Unit], shared: &Shared, jobs: usize, stop_on_error: bool) 
             // spelled as they were typed and the dependencies as the
             // importer resolved them, so `out.css` and `/work/out.css` are
             // one directory only once both are.
-            let ours: Vec<PathBuf> = disturbed
-                .iter()
-                .filter_map(|f| f.parent().map(dirs_key))
-                .collect();
+            // The FILES this compile created or removed, keyed like the
+            // directories they live in. `follow` turns them into "what in
+            // this directory is ours", so our own output is neither an
+            // arrival nor a mask for one.
+            let ours: Vec<PathBuf> = disturbed.iter().map(|f| dirs_key(f)).collect();
             let dirs: Vec<PathBuf> = dirs.iter().map(|d| dirs_key(d)).collect();
             snapshot.follow(followed, dirs, &ours, watch::Stamp::of);
             coalesce.finished(provisional, ok);

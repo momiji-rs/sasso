@@ -3293,3 +3293,47 @@ fn watch_recovers_when_a_dependency_becomes_readable() {
         std::panic::resume_unwind(e);
     }
 }
+
+/// The output aliases a dependency that FAILED to load.
+///
+/// The alias guard was given the successful loads only, and a dependency
+/// that exists and cannot be parsed or read is not one of those — so the
+/// failure path wrote the error stylesheet describing the problem on top of
+/// the file that had it.
+///
+/// Invalid UTF-8 rather than a permission bit, because the file has to stay
+/// writable for the bug to be reachable at all: a `chmod 000` dependency
+/// cannot be overwritten either way, and would pass this test for the wrong
+/// reason.
+#[test]
+fn watch_declines_to_write_over_a_dependency_that_failed_to_load() {
+    use std::io::Write;
+    use std::time::Duration;
+
+    let dir = scratch("watch_alias_failed");
+    write(&dir, "main.scss", "@use \"v\";\n.a { color: v.$c; }\n");
+    let dep = dir.join("_v.scss");
+    // Valid SCSS, invalid UTF-8: the importer reports an error rather than
+    // a miss.
+    let bytes: &[u8] = b"$c: \xff\xfe;\n";
+    std::fs::File::create(&dep).unwrap().write_all(bytes).unwrap();
+
+    let mut child = std::process::Command::new(BIN)
+        .args(["--no-source-map", "--watch", "main.scss", "_v.scss"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn --watch");
+
+    std::thread::sleep(Duration::from_millis(1200));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let now = std::fs::read(&dep).unwrap_or_default();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(
+        now, bytes,
+        "the dependency was overwritten by the error stylesheet about it",
+    );
+}
