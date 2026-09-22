@@ -178,9 +178,9 @@ function canonicalHrefFor(path) {
  * on the npm CLI while dart, the binary and the native addon's own reads all
  * errored.
  *
- * Exported because four reads needed it — the entry on three code paths and
- * every dependency on one — and four copies of a rule is how they drift.
- * What each caller SAYS about it differs, so only the decoding lives here.
+ * Exported because the entry, every dependency and standard input needed
+ * the same rule — a copy at each read is how they drift. What each caller
+ * SAYS about a failure differs, so only the decoding lives here.
  */
 export function decodeUtf8(bytes) {
   try {

@@ -3647,6 +3647,54 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       );
     }
   }
+  // Standard input is an entry too. The file cases above never touch it,
+  // and `readFileSync(0, "utf8")` substituted U+FFFD, so `--stdin` and
+  // `-:out.css` compiled bytes a file refuses. The binary reports
+  // `Error: Invalid UTF-8.` and writes error CSS
+  // (`invalid_utf8_on_stdin_fails_like_a_file`).
+  const badStdin = Buffer.from("a { b: c }\n\xff\xfe\n", "binary");
+  // wasm, not "whichever addon loaded": the refusal happens in cli.mjs
+  // before either engine, and a missing addon would prefix a fallback
+  // warning that is not this assertion. `SASSO_BINARY=0` is already set.
+  const stdinEnv = { ...process.env, SASSO_ENGINE: "wasm" };
+  const stdinRun = (args) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { input: badStdin, env: stdinEnv });
+  const stdinCss = join(utf8dir, "stdin.css");
+  const viaFlag = stdinRun(["--stdin", stdinCss]);
+  assert.notEqual(viaFlag.status, 0, `stdin: --stdin succeeded: ${viaFlag.stdout}`);
+  assert.equal(
+    viaFlag.stderr.toString("utf8"),
+    "Error: Invalid UTF-8.\n",
+    `stdin: --stdin said ${JSON.stringify(viaFlag.stderr.toString("utf8"))}`,
+  );
+  assert.ok(
+    readFileSync(stdinCss, "utf8").startsWith("/* Error: Invalid UTF-8. */"),
+    "stdin: error stylesheet for a --stdin file target",
+  );
+  const stale = join(utf8dir, "stale.css");
+  writeFileSync(stale, "old { css: yes }\n");
+  const viaPair = stdinRun(["--no-error-css", `-:${stale}`]);
+  assert.notEqual(viaPair.status, 0, "stdin: -:out succeeded");
+  assert.equal(viaPair.stderr.toString("utf8"), "Error: Invalid UTF-8.\n", "stdin: -:out wording");
+  assert.equal(existsSync(stale), false, "stdin: stale CSS removed like any compile error");
+  const viaStdout = stdinRun(["-"]);
+  assert.notEqual(viaStdout.status, 0, "stdin: bare - succeeded");
+  assert.equal(viaStdout.stdout.length, 0, "stdin: CSS reached stdout");
+  assert.equal(viaStdout.stderr.toString("utf8"), "Error: Invalid UTF-8.\n", "stdin: bare - wording");
+  const viaLoop = stdinRun(["--loop", "1", "--stdin"]);
+  assert.notEqual(viaLoop.status, 0, "stdin: --loop succeeded");
+  assert.equal(viaLoop.stdout.length, 0, "stdin: --loop printed CSS");
+  assert.equal(viaLoop.stderr.toString("utf8"), "Error: Invalid UTF-8.\n", "stdin: --loop wording");
+  // And a valid multibyte stdin still round-trips. The fatal decoder must
+  // not reject bytes that merely are not ASCII.
+  const okStdin = Buffer.from("$c: \"café\";\n.a{color:$c}\n", "utf8");
+  const viaOk = spawnSync(process.execPath, [cliPath, "--style=compressed", "--no-source-map", "--stdin"], {
+    input: okStdin,
+    env: stdinEnv,
+  });
+  assert.equal(viaOk.status, 0, `stdin: valid UTF-8 failed: ${viaOk.stderr}`);
+  assert.ok(viaOk.stdout.toString("utf8").includes("café"), `stdin: valid UTF-8 lost: ${viaOk.stdout}`);
+
   rmSync(utf8dir, { recursive: true, force: true });
   console.log(`ok: invalid UTF-8 is refused, entry and dependency, on ${engines.length === 2 ? "both engines" : "the engine present here"}`);
 }

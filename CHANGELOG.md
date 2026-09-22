@@ -36,6 +36,14 @@ Conformance is tracked separately as a ratchet against the official
   The decoding is one exported rule now rather than four call sites, and
   the new case exercises BOTH engines wherever both are present.
 
+  Standard input was still outside that rule. `sasso --stdin`, a `-` job
+  and `--loop` read fd 0 with `readFileSync(0, "utf8")`, which substitutes
+  U+FFFD, and the `-` job decoded the result again non-fatally — so the
+  same bytes a file entry refuses compiled when they arrived on stdin.
+  Stdin is an entry: it uses the same decoder and reports
+  `Error: Invalid UTF-8.`, and a file target gets the error stylesheet,
+  as the binary does.
+
   Still divergent, and deliberately left: for a DEPENDENCY dart says
   `Invalid UTF-8.` with a span at the offending byte inside the file,
   while every sasso engine says `Cannot read <path>: stream did not
