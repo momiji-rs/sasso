@@ -323,6 +323,22 @@ fn a_plain_css_interpolation_carets_all_of_itself() {
         // a custom callable's body, and a custom property's, inside a string
         ("@function --a() { result: \"#{1}\" }\n", "^^^^"),
         ("a { --x: \"#{1}\" }\n", "^^^^"),
+        // a special function's verbatim arguments, and the IE `progid:` form
+        ("a { b: element(#{1}) }\n", "^^^^"),
+        ("a { b: element(\"#{1}\") }\n", "^^^^"),
+        ("a { b: progid:DXImageTransform(#{1}) }\n", "^^^^"),
+        // the modern `if()`'s raw operands: in a condition, in its function
+        // name, and in a clause value the raw grammar reached first
+        ("a { b: if(media(width > #{1}px): red; else: blue) }\n", "^^^^"),
+        (
+            "a { b: if(me#{\"dia\"}(width > 10px): red; else: blue) }\n",
+            "^^^^^^^^",
+        ),
+        (
+            "a { b: if(supports(#{\"color: red\"}): red; else: blue) }\n",
+            "^^^^^^^^^^^^^^^",
+        ),
+        ("a { b: if(media(width > 10px): #{1}; else: blue) }\n", "^^^^"),
         // and an ordinary value, which already erred but with one caret
         ("a { b: #{1} }\n", "^^^^"),
     ];

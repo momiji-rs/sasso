@@ -28,25 +28,37 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
-- **Plain CSS rejects every `#{…}`, where six positions let one through.** A
+- **Plain CSS rejects every `#{…}`, where eight positions let one through.** A
   `.css` file has no interpolation at all in dart — its parser raises
   `Interpolation isn't allowed in plain CSS.` wherever one appears — and sasso
   raised it in a value, a selector and a keyframes name but not in an at-rule's
   NAME, a media query's type or raw operand, a `@supports` condition, a loud
-  comment, a plain-CSS custom callable's body, or a custom property's value
-  inside a string. The first was the worst: `@#{"media"} (a: 1) { .x { y: z } }`
-  parsed into a node the plain-CSS evaluator has no arm for, so the whole rule
-  was dropped in silence. The other five compiled as though the interpolation
-  were text, which is a stylesheet dart refuses being accepted.
+  comment, a plain-CSS custom callable's body, a custom property's value inside
+  a string, a special function's verbatim arguments (`element()`,
+  `expression()`, a vendor-prefixed spelling, the IE `progid:` form), or the
+  modern CSS `if()`'s raw operands (a condition's parentheses, the function name
+  before them, a clause value the raw grammar reached first). The at-rule name
+  was the worst: `@#{"media"} (a: 1) { .x { y: z } }` parsed into a node the
+  plain-CSS evaluator has no arm for, so the whole rule was dropped in silence.
+  The rest compiled as though the interpolation were text, which is a stylesheet
+  dart refuses being accepted.
 
   The rejection also moved to where dart raises it — the END of its
   `singleInterpolation`, after the body has parsed and the `}` is consumed — so
   a body that is invalid on its own terms reports ITSELF (`#{$x}` is "Sass
   variables aren't allowed in plain CSS", `#{ }` is "Expected expression") and
-  the caret spans the whole `#{…}` instead of its first column. `[measured]`
-  against dart-sass 1.104.1: 26 forms, each byte-identical diagnostic, message,
-  position and underline alike. Both ratchets are unchanged, because no
-  sass-spec `.css` file contains an interpolation to score.
+  the caret spans the whole `#{…}` instead of its first column. Inside `if()`
+  the rejection also has to ESCAPE a backtracking attempt: sasso tries the
+  modern clause grammar and rewinds on error to the legacy `if($c, $t, $f)`
+  argument parse, which would report the `>` the raw grammar reads verbatim as
+  an operator. An interpolation in plain CSS is fatal wherever it stands, so no
+  retry can accept that text and the error propagates.
+
+  `[measured]` against dart-sass 1.104.1: of the 37 forms the tests pin, 35 are
+  byte-identical diagnostics — message, position and underline alike — and the
+  two that are not differ only in the caret length of a `$variable` inside the
+  interpolation, an already-recorded divergence. Both ratchets are unchanged,
+  because no sass-spec `.css` file contains an interpolation to score.
 
 - **An at-rule's node CLASS decides how it is written, not its name** — the
   fifteenth and last of the compressed-only divergences the triage found. dart's

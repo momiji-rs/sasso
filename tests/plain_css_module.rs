@@ -811,8 +811,42 @@ fn interpolation_in_a_loaded_file_is_an_error() {
     case("customfnstr", "@function --a() { result: \"#{1}\" }\n");
     // A custom property's value inside a string (the bare form already erred).
     case("custompropstr", "a { --x: \"#{1}\" }\n");
+    // A special function's verbatim argument list — `element()`,
+    // `expression()`, a vendor-prefixed spelling, and the IE `progid:` form —
+    // bare and inside a quoted string.
+    case("special", "a { b: element(#{1}) }\n");
+    case("specialstr", "a { b: element(\"#{1}\") }\n");
+    case("specialexpr", "a { b: expression(#{1}) }\n");
+    case("specialprefix", "a { b: -moz-element(#{1}) }\n");
+    case("specialprogid", "a { b: progid:DXImageTransform(#{1}) }\n");
+    // The modern CSS `if()`'s raw operands, which are read verbatim: inside a
+    // condition's parentheses (nested ones too), in the function name that
+    // precedes them, and in a clause's value after a raw condition.
+    case("ifraw", "a { b: if(media(width > #{1}px): red; else: blue) }\n");
+    case(
+        "ifrawnested",
+        "a { b: if(media((width > #{1}px)): red; else: blue) }\n",
+    );
+    case(
+        "ifrawname",
+        "a { b: if(me#{\"dia\"}(width > 10px): red; else: blue) }\n",
+    );
+    case("ifrawstyle", "a { b: if(style(--x: #{1}): red; else: blue) }\n");
+    case(
+        "ifrawsupports",
+        "a { b: if(supports(#{\"color: red\"}): red; else: blue) }\n",
+    );
+    case(
+        "ifrawwhole",
+        "a { b: if(media(#{\"width > 10px\"}): red; else: blue) }\n",
+    );
+    case("ifvalue", "a { b: if(media(width > 10px): #{1}; else: blue) }\n");
     // The positions that already rejected, pinned so they stay rejected.
     case("value", "a { b: #{1} }\n");
+    case("urlfn", "a { b: url(#{1}) }\n");
+    case("calcfn", "a { b: calc(#{1} + 1px) }\n");
+    case("ifcond", "a { b: if(#{1}: red; else: blue) }\n");
+    case("iflegacy", "a { b: if(#{1}, red, blue) }\n");
     case("valuestr", "a { b: \"#{1}\" }\n");
     case("selector", "#{\"a\"} { b: c }\n");
     case("keyframesname", "@keyframes #{\"k\"} { from { a: b } }\n");
@@ -832,11 +866,42 @@ fn interpolation_in_a_loaded_file_is_an_error() {
         "Expected expression."
     );
 
+    // Inside the modern `if()`'s raw grammar the rejection has to escape the
+    // fallback to the legacy `if($c, $t, $f)` argument parse, which would
+    // otherwise report the `>` it reads verbatim as an operator.
+    std::fs::write(
+        dir.join("_ifvar.css"),
+        "a { b: if(media(width > #{$x}px): red; else: blue) }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile_err_in(&dir, "e_ifvar.scss", "@use \"ifvar\";\n"),
+        "Sass variables aren't allowed in plain CSS."
+    );
+    std::fs::write(
+        dir.join("_ifempty.css"),
+        "a { b: if(media(width > #{ }px): red; else: blue) }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile_err_in(&dir, "e_ifempty.scss", "@use \"ifempty\";\n"),
+        "Expected expression."
+    );
+
     // SCSS is untouched: the same file is an interpolated at-rule name there.
     std::fs::write(dir.join("_sass.scss"), "@#{\"media\"} (a: 1) { .x { y: z } }\n").unwrap();
     assert_eq!(
         compile_in(&dir, "e_sass.scss", "@use \"sass\";\n"),
         "@media (a: 1) {\n  .x {\n    y: z;\n  }\n}"
+    );
+    std::fs::write(
+        dir.join("_sassif.scss"),
+        "a { b: if(me#{\"dia\"}(width > #{10}px): red; else: blue) }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile_in(&dir, "e_sassif.scss", "@use \"sassif\";\n"),
+        "a {\n  b: if(media(width > 10px): red; else: blue);\n}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
