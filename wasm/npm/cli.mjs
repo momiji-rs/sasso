@@ -1067,19 +1067,6 @@ function realPath(path) {
   }
 }
 
-/**
- * Is this path a symlink whose chain ends at nothing?
- *
- * Writing to it does not write to IT — it creates whatever the chain
- * names, somewhere else entirely, and the chain may be any length. That
- * is the whole reason this asks nothing about where the chain ends: a
- * broken link is not a destination, however many hops it takes to find
- * that out.
- */
-function leadsNowhere(path) {
-  return realOrNull(path) === null && isSymlink(path);
-}
-
 /** Is this path a symlink, whatever it points at? */
 function isSymlink(path) {
   try {
@@ -1389,6 +1376,21 @@ function runWatch(input, output, common, opts) {
   // usually the same string as the last one's — tried, and it silenced
   // every save after the first.
   let burstWrote = false;
+  // Has this watch ever successfully written the output? Never reset,
+  // unlike `onDisk`, which a failure clears.
+  //
+  // It is what decides whether the error stylesheet may go through a
+  // SYMLINKED output. A link we have written through is ours; one we
+  // have not could be pointing at anything, and `aliasesASource` cannot
+  // always tell — a dependency that EXISTS but fails to load never
+  // reaches `known`, because the compile throws before it reports what
+  // it loaded. Measured: `out.css -> _v.scss` with `_v.scss` holding
+  // invalid UTF-8, and `_v.scss` came back holding the error stylesheet.
+  //
+  // The span does not help either, which is worth recording: the error
+  // that reaches the write is `Undefined variable` in `main.scss`, not
+  // the read failure in `_v.scss`.
+  let everWrote = false;
   const artifacts = (result) =>
     `${result.css}\u0000${result.sourceMap ? JSON.stringify(result.sourceMap) : ""}`;
   // The last set of files a compile actually loaded, seeded with the entry.
@@ -1746,6 +1748,7 @@ function runWatch(input, output, common, opts) {
       else {
         onDisk = produced;
         burstWrote = true;
+        everWrote = true;
         // A provisional run narrates nothing, exactly as the binary's
         // does: its whole stdout is dropped there. The catch-up 50ms
         // behind it says the line instead, which is what puts the
@@ -1789,7 +1792,7 @@ function runWatch(input, output, common, opts) {
       // it was" leaves the output missing forever (#159, measured again
       // here).
       if (!aliasesASource() && e instanceof Exception) {
-        const writeError = reportFailure(output, opts, e.message, !leadsNowhere(output));
+        const writeError = reportFailure(output, opts, e.message, everWrote || !isSymlink(output));
         if (writeError) process.stderr.write(`${writeError}\n`);
         // The destination is no longer the CSS we last wrote — it is the
         // error stylesheet, or gone. Forgetting that is how "fix the typo

@@ -4063,13 +4063,25 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
-  // A WORKING symlink to somewhere that is not a source still gets its
-  // error stylesheet. The refusal is about links that lead nowhere, not
-  // about links — without this, "refuse every symlinked output" passes
-  // everything above while breaking an ordinary arrangement.
+  // A symlinked output gets its error stylesheet once the watch has
+  // WRITTEN it — and not before.
+  //
+  // That is the whole rule, and it is narrower than "never write through
+  // a symlink": a link this watch has written through is demonstrably an
+  // output, whatever it points at. Before the first successful build it
+  // is only a link, and `aliasesASource` cannot always tell what is on
+  // the other end — a dependency that exists and fails to LOAD never
+  // reaches `known`, because the compile throws before it says what it
+  // loaded.
+  //
+  // Both halves are here because either alone is satisfiable by a rule
+  // that is wrong: "always refuse" passes the first, "always allow"
+  // passes the second.
   {
     const wdir = mkdtempSync(join(tmpdir(), "sasso-watchlivelink-"));
-    writeFileSync(join(wdir, "main.scss"), ".a { color: ; }\n"); // broken
+    const GOOD = ".a { color: red; }\n";
+    const BROKEN = ".a { color: ; }\n";
+    writeFileSync(join(wdir, "main.scss"), BROKEN);
     mkdirSync(join(wdir, "dist"));
     writeFileSync(join(wdir, "dist", "out.css"), "/* stale */\n"); // the target EXISTS
     symlinkSync(join(wdir, "dist", "out.css"), join(wdir, "out.css"));
@@ -4081,18 +4093,97 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     proc.stdout.on("data", (b) => (log += b));
     proc.stderr.on("data", (b) => (log += b));
     const target = join(wdir, "dist", "out.css");
-    try {
-      const deadline = Date.now() + 20000;
-      let wrote = false;
-      while (Date.now() < deadline && !wrote) {
-        try {
-          wrote = readFileSync(target, "utf8").startsWith("/* Error:");
-        } catch {
-          /* not yet */
-        }
-        if (!wrote) await new Promise((r) => setTimeout(r, 25));
+    const css = () => {
+      try {
+        return readFileSync(target, "utf8");
+      } catch {
+        return "";
       }
-      assert.ok(wrote, `a working symlinked output was refused its error stylesheet: ${JSON.stringify(log)}`);
+    };
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      // Nothing written yet, so the stale target is left exactly alone.
+      assert.ok(await until(() => /error/i.test(log), 20000), `livelink: the break was never reported: ${JSON.stringify(log)}`);
+      await new Promise((r) => setTimeout(r, 500));
+      assert.equal(css(), "/* stale */\n", "a symlinked output was written before the watch had ever written it");
+
+      // One successful build, and the link is demonstrably an output.
+      writeFileSync(join(wdir, "main.scss"), GOOD);
+      assert.ok(await until(() => css().includes("red"), 20000), "livelink: the fix never landed");
+      await new Promise((r) => setTimeout(r, 400));
+
+      // Now a failure DOES leave the error stylesheet there, as dart does.
+      writeFileSync(join(wdir, "main.scss"), BROKEN);
+      assert.ok(
+        await until(() => css().startsWith("/* Error:"), 20000),
+        `a symlinked output the watch had written was refused its error stylesheet: ${JSON.stringify(css())}`,
+      );
+
+      // …and a SECOND consecutive failure behaves like the first. What
+      // the watch has written is a fact about the run, not something a
+      // failure undoes — `onDisk` is cleared by one, and sharing that
+      // reset would silence every failure after the first.
+      await new Promise((r) => setTimeout(r, 400));
+      writeFileSync(target, "/* wiped */\n");
+      writeFileSync(join(wdir, "main.scss"), ".b { color: ; }\n"); // a different break
+      assert.ok(
+        await until(() => css().startsWith("/* Error:"), 20000),
+        `the second failure in a row was refused its error stylesheet: ${JSON.stringify(css())}`,
+      );
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // The dependency EXISTS and fails to LOAD, so it never reaches
+  // `known` — the compile throws before it reports what it loaded — and
+  // the link to it resolves perfectly well, so nothing about the link
+  // looks wrong either.
+  //
+  // Invalid UTF-8 rather than a permission bit, for the reason #159
+  // recorded: the file has to stay WRITABLE for the bug to be reachable
+  // at all, so a `chmod 000` dependency would pass for the wrong reason.
+  //
+  // The error that reaches the write does not name it either — it is
+  // `Undefined variable` in `main.scss`, the second failure, not the
+  // read failure in `_v.scss`. So the span is no help and this is
+  // settled by "the watch has never written this output" instead.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchbadload-"));
+    writeFileSync(join(wdir, "main.scss"), `@use "v" as v;\n.a { color: v.$c; }\n`);
+    const dep = join(wdir, "_v.scss");
+    const bytes = Buffer.from("$c: \xff\xfe;\n", "binary");
+    writeFileSync(dep, bytes);
+    symlinkSync(dep, join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      assert.ok(await until(() => /error/i.test(log), 20000), `badload: nothing was reported: ${JSON.stringify(log)}`);
+      await new Promise((r) => setTimeout(r, 500));
+      assert.ok(
+        readFileSync(dep).equals(bytes),
+        "a dependency that failed to LOAD was overwritten by the error stylesheet about it",
+      );
     } finally {
       proc.kill();
     }
@@ -4153,8 +4244,46 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     }
   }
 
-  // …and `--no-error-css` still removes the output, which for a link
-  // means unlinking the LINK — `rmSync` never touches what it points at.
+  // …and `--no-error-css` still removes the output even when the watch
+  // has never written it, which is the case that separates "refuse the
+  // WRITE" from "skip the branch": the second takes the removal with it.
+  {
+    const wdir = mkdtempSync(join(tmpdir(), "sasso-watchunlink0-"));
+    writeFileSync(join(wdir, "main.scss"), ".a { color: ; }\n"); // broken from the start
+    mkdirSync(join(wdir, "dist"));
+    writeFileSync(join(wdir, "dist", "out.css"), "/* stale */\n");
+    symlinkSync(join(wdir, "dist", "out.css"), join(wdir, "out.css"));
+    const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--no-error-css", "--poll", "--watch", "main.scss", "out.css"], {
+      cwd: wdir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let log = "";
+    proc.stdout.on("data", (b) => (log += b));
+    proc.stderr.on("data", (b) => (log += b));
+    const until = async (pred, ms) => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (pred()) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return false;
+    };
+    try {
+      assert.ok(await until(() => /error/i.test(log), 20000), `unlink0: nothing was reported: ${JSON.stringify(log)}`);
+      await new Promise((r) => setTimeout(r, 500));
+      let stillThere = true;
+      try {
+        lstatSync(join(wdir, "out.css"));
+      } catch {
+        stillThere = false;
+      }
+      assert.ok(!stillThere, "--no-error-css left an output link the watch had never written");
+    } finally {
+      proc.kill();
+    }
+  }
+
+  // …and the same after it HAS written it, where the link dangles.
   {
     const wdir = mkdtempSync(join(tmpdir(), "sasso-watchunlink-"));
     writeFileSync(join(wdir, "main.scss"), ".a { color: red; }\n");

@@ -44,14 +44,26 @@ Conformance is tracked separately as a ratchet against the official
   comparing paths at all: the first compile throws before it reports what
   it loaded, so there is nothing to compare against.
 
-  One rule settles all three. A broken symlink is not a destination, so
-  the failure path will not follow one — it may create the OUTPUT, which
-  is what dart does and what the missing-`dist/css/` case needs, but it
-  will not follow a link that goes nowhere in order to create something
-  else. The cost is an output symlinked to a path that does not exist
-  yet: there the first FAILING build writes no error stylesheet, the
-  error still reaches stderr, and the first succeeding build creates the
-  target as before.
+  A fourth shape has nothing to do with dangling links at all: a
+  dependency that EXISTS and fails to load — invalid UTF-8, a parse error
+  — never reaches `known` either, because the compile throws before it
+  reports what it loaded, and the link to it resolves perfectly well. The
+  error's own span is no help: what reaches the write is `Undefined
+  variable` in the entry, not the read failure in the dependency.
+
+  One rule settles all four, and it is about the output rather than about
+  links: **the error stylesheet goes through a SYMLINKED output only once
+  this watch has written that output itself.** A link we have written
+  through is demonstrably an output, whatever it points at; one we have
+  not could be anything, and nothing available at that moment can tell.
+  A plain path is unaffected, so a failing first compile still writes its
+  error stylesheet into a `dist/css/` that never existed, as dart does.
+
+  The cost is one case: a symlinked output whose FIRST build fails gets
+  no error stylesheet. The error still reaches stderr, and everything
+  after the first successful build behaves exactly as before — including
+  a second failure in a row, since what the watch has written is a fact
+  about the run and not something a failure undoes.
 
   The binary has the same defect and cannot take the same fix; #177
   carries it with the measurement.
