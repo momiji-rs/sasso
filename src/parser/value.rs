@@ -641,12 +641,7 @@ impl Parser {
                 Ok(Expr::Var { name, pos })
             }
             Some('#') if self.sc.peek_at(1) == Some('{') => {
-                if self.plain_css {
-                    return Err(Error::at(
-                        "Interpolation isn't allowed in plain CSS.",
-                        self.sc.position(),
-                    ));
-                }
+                let interp_mark = self.sc.mark();
                 let interp_pos = self.sc.position();
                 self.sc.bump();
                 self.sc.bump();
@@ -658,6 +653,7 @@ impl Parser {
                 if !self.sc.eat('}') {
                     return Err(Error::at("expected \"}\"", self.sc.position()));
                 }
+                self.reject_plain_css_interp(interp_mark)?;
                 // A directly-following identifier character (or another
                 // interpolation) continues the same interpolated identifier:
                 // `#{1}0` is the single token `10`, `#{1}px` is `1px` (a
@@ -1258,7 +1254,7 @@ impl Parser {
                     break;
                 }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
-                    self.reject_plain_css_interp()?;
+                    let interp_mark = self.sc.mark();
                     if !lit.is_empty() {
                         pieces.push(take_lit(&mut lit));
                     }
@@ -1269,6 +1265,7 @@ impl Parser {
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
+                    self.reject_plain_css_interp(interp_mark)?;
                     pieces.push(TplPiece::Interp(e));
                 }
                 // A `\` before a newline is a CSS line continuation: dart's
@@ -1478,7 +1475,7 @@ impl Parser {
         loop {
             match self.sc.peek() {
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
-                    self.reject_plain_css_interp()?;
+                    let interp_mark = self.sc.mark();
                     if !lit.is_empty() {
                         pieces.push(take_lit(&mut lit));
                     }
@@ -1489,6 +1486,7 @@ impl Parser {
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
+                    self.reject_plain_css_interp(interp_mark)?;
                     pieces.push(TplPiece::Interp(e));
                     emitted += 1;
                 }
@@ -1848,7 +1846,7 @@ impl Parser {
                 // A top-level `$variable` is SassScript, not a plain URL.
                 Some('$') => return Ok(None),
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
-                    self.reject_plain_css_interp()?;
+                    let interp_mark = self.sc.mark();
                     if !lit.is_empty() {
                         pieces.push(take_lit(&mut lit));
                     }
@@ -1859,6 +1857,7 @@ impl Parser {
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
+                    self.reject_plain_css_interp(interp_mark)?;
                     pieces.push(TplPiece::Interp(e));
                 }
                 // A quoted string makes this a NORMAL function call, not a
@@ -2176,7 +2175,7 @@ impl Parser {
     fn read_if_raw_token(&mut self, pieces: &mut Vec<TplPiece>) -> Result<bool, Error> {
         match self.sc.peek() {
             Some('#') if self.sc.peek_at(1) == Some('{') => {
-                self.reject_plain_css_interp()?;
+                let interp_mark = self.sc.mark();
                 self.sc.bump();
                 self.sc.bump();
                 let e = self.parse_interp_value()?;
@@ -2184,6 +2183,7 @@ impl Parser {
                 if !self.sc.eat('}') {
                     return Err(Error::at("expected \"}\"", self.sc.position()));
                 }
+                self.reject_plain_css_interp(interp_mark)?;
                 pieces.push(TplPiece::Interp(e));
                 // An interpolation followed immediately by `(` is a function.
                 if self.sc.peek() == Some('(') {

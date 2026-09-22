@@ -291,6 +291,63 @@ fn a_module_diagnostic_carets_the_construct_it_is_about() {
     );
 }
 
+/// dart raises "Interpolation isn't allowed in plain CSS." at the END of
+/// `singleInterpolation`, once the body has parsed and the `}` is consumed: the
+/// caret spans the whole `#{…}`, and a body that is invalid on its own terms
+/// reports ITSELF instead. sasso rejected the interpolation at its `#` before
+/// reading it, which drew a one-column caret and pre-empted those messages.
+/// Every span below was measured against dart-sass 1.104.1.
+#[test]
+fn a_plain_css_interpolation_carets_all_of_itself() {
+    let block = |src: &str| {
+        compile(
+            src,
+            &Options::default()
+                .with_url("in.css")
+                .with_syntax(sasso::Syntax::Css),
+        )
+        .expect_err("expected a compile error")
+        .to_string()
+    };
+    let cases = [
+        // an at-rule's name, whole or in part
+        ("@#{\"media\"} (a: 1) { .x { y: z } }\n", "^^^^^^^^^^"),
+        ("@med#{\"ia\"} (a: 1) { .x { y: z } }\n", "^^^^^^^"),
+        // a media query's type, and a raw operand after `and`
+        ("@media #{\"screen\"} { a { b: c } }\n", "^^^^^^^^^^^"),
+        ("@media screen and #{\"(a: 1)\"} { a { b: c } }\n", "^^^^^^^^^^^"),
+        // a `@supports` function's arguments
+        ("@supports selector(#{\"a\"}) { a { b: c } }\n", "^^^^^^"),
+        // a loud comment's body
+        ("/* #{1} */\n", "^^^^"),
+        // a custom callable's body, and a custom property's, inside a string
+        ("@function --a() { result: \"#{1}\" }\n", "^^^^"),
+        ("a { --x: \"#{1}\" }\n", "^^^^"),
+        // and an ordinary value, which already erred but with one caret
+        ("a { b: #{1} }\n", "^^^^"),
+    ];
+    for (src, caret) in cases {
+        let b = block(src);
+        assert!(
+            b.starts_with("Error: Interpolation isn't allowed in plain CSS.\n"),
+            "{src:?}\n{b}"
+        );
+        assert_eq!(caret_line(&b), caret, "{src:?}\n{b}");
+    }
+    // The body reports itself first, so neither of these is the interpolation
+    // error at all.
+    assert!(
+        block("a { b: #{$x} }\n").starts_with("Error: Sass variables aren't allowed in plain CSS.\n"),
+        "{}",
+        block("a { b: #{$x} }\n")
+    );
+    assert!(
+        block("a { b: #{ } }\n").starts_with("Error: Expected expression.\n"),
+        "{}",
+        block("a { b: #{ } }\n")
+    );
+}
+
 #[test]
 fn a_namespaced_member_diagnostic_points_at_the_reference() {
     // `ns.$var` carried no position at all, so its "Undefined variable." was

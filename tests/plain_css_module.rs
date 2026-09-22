@@ -768,3 +768,75 @@ fn a_loaded_files_escaped_selectors_are_not_structure() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A loaded `.css` file has NO interpolation: dart's plain-CSS parser rejects
+/// every `#{…}` it reaches, so nothing interpolated ever becomes a node. Our
+/// parser rejected it in a value, a selector and a keyframes name but not in an
+/// at-rule's NAME, a media query, a `@supports` condition, a loud comment or a
+/// custom callable's body — where an interpolated at-rule was silently dropped
+/// instead. Every message below was measured against dart-sass 1.104.1.
+#[test]
+fn interpolation_in_a_loaded_file_is_an_error() {
+    let dir = scratch("interp");
+    let case = |file: &str, css: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), css).unwrap();
+        assert_eq!(
+            compile_err_in(&dir, &format!("e_{file}.scss"), &format!("@use \"{file}\";\n")),
+            "Interpolation isn't allowed in plain CSS.",
+            "source: {css}"
+        );
+    };
+
+    // An at-rule NAME, which used to parse into a node the plain-CSS evaluator
+    // had no arm for — so the whole rule vanished without a word.
+    case("name", "@#{\"media\"} (a: 1) { .x { y: z } }\n");
+    case("namepart", "@med#{\"ia\"} (a: 1) { .x { y: z } }\n");
+    case("nameempty", "@#{\"media\"} screen {}\n");
+    case("namechildless", "@#{\"foo\"} bar;\n");
+    case("nameinrule", ".a { @#{\"foo\"} { b: c } }\n");
+    case("nameinat", "@media p { @#{\"foo\"} { .x { y: z } } }\n");
+    // A media query: the type/modifier identifier and a raw operand after
+    // `not` or `and`, which used to compile as if the interpolation were text.
+    case("mediatype", "@media #{\"screen\"} { a { b: c } }\n");
+    case("medianot", "@media not #{\"(a: 1)\"} { a { b: c } }\n");
+    case("mediaand", "@media screen and #{\"(a: 1)\"} { a { b: c } }\n");
+    // A `@supports` condition, raw or inside a function's arguments.
+    case("supportsraw", "@supports #{\"(a: 1)\"} { a { b: c } }\n");
+    case("supportsfn", "@supports selector(#{\"a\"}) { a { b: c } }\n");
+    // A loud comment's body, at the top level and inside a rule.
+    case("comment", "/* #{1} */\n");
+    case("commentinrule", "a { /* #{1} */ b: c }\n");
+    // A plain-CSS custom callable's body, bare and inside a string.
+    case("customfn", "@function --a() { result: #{1} }\n");
+    case("customfnstr", "@function --a() { result: \"#{1}\" }\n");
+    // A custom property's value inside a string (the bare form already erred).
+    case("custompropstr", "a { --x: \"#{1}\" }\n");
+    // The positions that already rejected, pinned so they stay rejected.
+    case("value", "a { b: #{1} }\n");
+    case("valuestr", "a { b: \"#{1}\" }\n");
+    case("selector", "#{\"a\"} { b: c }\n");
+    case("keyframesname", "@keyframes #{\"k\"} { from { a: b } }\n");
+    case("framestop", "@keyframes k { #{\"from\"} { a: b } }\n");
+
+    // dart rejects at the END of its `singleInterpolation`, so a body that is
+    // itself invalid reports ITSELF first — the interpolation error never gets
+    // the chance.
+    std::fs::write(dir.join("_var.css"), "@#{$x} { a { b: c } }\n").unwrap();
+    assert_eq!(
+        compile_err_in(&dir, "e_var.scss", "@use \"var\";\n"),
+        "Sass variables aren't allowed in plain CSS."
+    );
+    std::fs::write(dir.join("_empty.css"), "@#{ } { a { b: c } }\n").unwrap();
+    assert_eq!(
+        compile_err_in(&dir, "e_empty.scss", "@use \"empty\";\n"),
+        "Expected expression."
+    );
+
+    // SCSS is untouched: the same file is an interpolated at-rule name there.
+    std::fs::write(dir.join("_sass.scss"), "@#{\"media\"} (a: 1) { .x { y: z } }\n").unwrap();
+    assert_eq!(
+        compile_in(&dir, "e_sass.scss", "@use \"sass\";\n"),
+        "@media (a: 1) {\n  .x {\n    y: z;\n  }\n}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

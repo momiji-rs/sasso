@@ -33,6 +33,18 @@ pub(crate) struct Mark {
     col: usize,
 }
 
+impl Mark {
+    /// The 1-based line/column the cursor stood at when the mark was taken —
+    /// the start of a diagnostic span whose length is measured by
+    /// [`Scanner::byte_len_from`].
+    pub(crate) fn pos(&self) -> Pos {
+        Pos {
+            line: self.line,
+            col: self.col,
+        }
+    }
+}
+
 pub(crate) struct Scanner {
     chars: Vec<char>,
     pos: usize,

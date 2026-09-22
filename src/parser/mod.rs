@@ -769,13 +769,16 @@ impl Parser {
         }
     }
 
-    /// In plain-CSS mode, a `#{…}` interpolation is rejected at its `#`.
-    fn reject_plain_css_interp(&self) -> Result<(), Error> {
+    /// In plain-CSS mode, a `#{…}` interpolation is an error. dart-sass raises
+    /// it at the END of `singleInterpolation`, once the body has parsed and the
+    /// `}` is consumed, so a malformed expression inside reports itself first
+    /// (`#{$x}` is "Sass variables aren't allowed in plain CSS", `#{ }` is
+    /// "Expected expression") and the caret spans the whole `#{…}`. `mark` must
+    /// be the cursor as it stood at the `#`.
+    fn reject_plain_css_interp(&self, mark: Mark) -> Result<(), Error> {
         if self.plain_css {
-            return Err(Error::at(
-                "Interpolation isn't allowed in plain CSS.",
-                self.sc.position(),
-            ));
+            return Err(Error::at("Interpolation isn't allowed in plain CSS.", mark.pos())
+                .with_length(self.sc.byte_len_from(mark)));
         }
         Ok(())
     }
@@ -891,12 +894,7 @@ impl Parser {
             }
             match c {
                 '#' if self.sc.peek_at(1) == Some('{') => {
-                    if self.plain_css {
-                        return Err(Error::at(
-                            "Interpolation isn't allowed in plain CSS.",
-                            self.sc.position(),
-                        ));
-                    }
+                    let interp_mark = self.sc.mark();
                     if !lit.is_empty() {
                         pieces.push(take_lit(&mut lit));
                     }
@@ -921,6 +919,7 @@ impl Parser {
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
+                    self.reject_plain_css_interp(interp_mark)?;
                     pieces.push(TplPiece::Interp(e));
                 }
                 '"' | '\'' => {
@@ -953,12 +952,7 @@ impl Parser {
                             continue;
                         }
                         if ch == '#' && self.sc.peek_at(1) == Some('{') {
-                            if self.plain_css {
-                                return Err(Error::at(
-                                    "Interpolation isn't allowed in plain CSS.",
-                                    self.sc.position(),
-                                ));
-                            }
+                            let interp_mark = self.sc.mark();
                             if !lit.is_empty() {
                                 pieces.push(take_lit(&mut lit));
                             }
@@ -969,6 +963,7 @@ impl Parser {
                             if !self.sc.eat('}') {
                                 return Err(Error::at("expected \"}\"", self.sc.position()));
                             }
+                            self.reject_plain_css_interp(interp_mark)?;
                             pieces.push(TplPiece::Interp(e));
                             continue;
                         }

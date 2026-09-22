@@ -28,6 +28,26 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **Plain CSS rejects every `#{…}`, where six positions let one through.** A
+  `.css` file has no interpolation at all in dart — its parser raises
+  `Interpolation isn't allowed in plain CSS.` wherever one appears — and sasso
+  raised it in a value, a selector and a keyframes name but not in an at-rule's
+  NAME, a media query's type or raw operand, a `@supports` condition, a loud
+  comment, a plain-CSS custom callable's body, or a custom property's value
+  inside a string. The first was the worst: `@#{"media"} (a: 1) { .x { y: z } }`
+  parsed into a node the plain-CSS evaluator has no arm for, so the whole rule
+  was dropped in silence. The other five compiled as though the interpolation
+  were text, which is a stylesheet dart refuses being accepted.
+
+  The rejection also moved to where dart raises it — the END of its
+  `singleInterpolation`, after the body has parsed and the `}` is consumed — so
+  a body that is invalid on its own terms reports ITSELF (`#{$x}` is "Sass
+  variables aren't allowed in plain CSS", `#{ }` is "Expected expression") and
+  the caret spans the whole `#{…}` instead of its first column. `[measured]`
+  against dart-sass 1.104.1: 26 forms, each byte-identical diagnostic, message,
+  position and underline alike. Both ratchets are unchanged, because no
+  sass-spec `.css` file contains an interpolation to score.
+
 - **An at-rule's node CLASS decides how it is written, not its name** — the
   fifteenth and last of the compressed-only divergences the triage found. dart's
   parser picks the class: `@media` and `@supports` become `CssMediaRule` /
