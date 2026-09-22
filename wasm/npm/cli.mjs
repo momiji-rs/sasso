@@ -40,6 +40,9 @@ import { makePoller } from "./_poller.mjs";
 import { baselineFor } from "./_baseline.mjs";
 import { makeWatchers } from "./_watchers.mjs";
 import { errorCss } from "./_errorcss.mjs";
+// One UTF-8 rule for every read. `readFileSync(fd, "utf8")` substitutes
+// U+FFFD instead of refusing, which is the bug this exists to prevent.
+import { decodeUtf8 } from "./_importer.mjs";
 // The prebuilt-addon rules, shared with native.mjs: which engine this platform
 // is SUPPOSED to run decides whether a wasm fallback is news (see `loadEngine`).
 import { nativePackage, platformKey } from "./_addon.mjs";
@@ -817,12 +820,30 @@ function validate(opts) {
   }
 }
 
-function readStdin() {
+/** Raw standard input. An unreadable fd is empty input, as a closed pipe is. */
+function readStdinBytes() {
   try {
-    return readFileSync(0, "utf8"); // fd 0
+    return readFileSync(0); // fd 0, bytes — "utf8" would substitute U+FFFD
   } catch {
-    return "";
+    return Buffer.alloc(0);
   }
+}
+
+/**
+ * Standard input as text.
+ *
+ * Invalid UTF-8 is an entry failure, not a string with replacement
+ * characters in it. A file entry throws `Error: Invalid UTF-8.`
+ * (`readEntry`); the binary does the same for stdin and then writes error
+ * CSS (`invalid_utf8_on_stdin_fails_like_a_file`). Decoding here, with the
+ * shared fatal decoder, is what makes `--stdin` and `--loop` do that too.
+ * A `-` job decodes later, inside `compileSlice`, because that is the
+ * compile-error path — doing it here would skip the error stylesheet.
+ */
+function readStdin() {
+  const text = decodeUtf8(readStdinBytes());
+  if (text === null) throw new Exception("Error: Invalid UTF-8.");
+  return text;
 }
 
 /**
@@ -1904,13 +1925,17 @@ function runLoop(opts, common) {
     fail("error: no input file (pass a path, an <in>:<out> pair, or --stdin)");
   }
   const fromStdin = path === undefined || path === "-";
-  const source = fromStdin ? readStdin() : undefined;
+  // Decoded inside `compileOnce`, not before `run`. Invalid UTF-8 throws the
+  // entry's Exception, and `run` is what turns that into the failure line;
+  // decoding first would be an uncaught exception and a stack trace.
+  let source;
   // A file keeps its own syntax (`.sass`, `.css`) and its own URL, as it would
   // outside the loop; only stdin takes `--indented`.
-  const compileOnce = (options) =>
-    fromStdin
-      ? compileString(source, { ...options, sourceMap: false, syntax: opts.indented ? "indented" : "scss" })
-      : compile(path, { ...options, sourceMap: false, ...syntaxOf(opts) });
+  const compileOnce = (options) => {
+    if (!fromStdin) return compile(path, { ...options, sourceMap: false, ...syntaxOf(opts) });
+    source ??= readStdin();
+    return compileString(source, { ...options, sourceMap: false, syntax: opts.indented ? "indented" : "scss" });
+  };
   const run = (options) => {
     // Same reason as the `--stdin` path: the warm pass is the one that
     // reports, and `fail` exits before an asynchronous stderr write can drain.
@@ -2029,16 +2054,20 @@ async function main() {
     if (opts.watch) fail("error: --watch cannot be used with --stdin");
     const output = opts.output !== undefined ? opts.output : opts.positionals[0];
     const wantMap = wantSourceMap(opts, output);
-    const source = readStdin();
+    // Read inside the capture, same reason as `--loop`: invalid UTF-8 throws
+    // the entry Exception, and the handler below is what writes error CSS
+    // and exits with that message. A read out here would skip both.
+    let source;
     // Captured and written synchronously, like a job's: the engine's logger
     // writes warnings through the ASYNCHRONOUS stream, and `fail` exits at
     // once, so on a pipe a warning would arrive after the error it preceded —
     // or, past the 64 KB pipe buffer, not at all (measured 2026-09-17: a
     // 1.2 MB warning came out of `--stdin` as 65584 bytes through a pipe and
     // 1200070 to a file).
-    const run = captureStderr(() =>
-      compileString(source, { ...common, sourceMap: wantMap, syntax: opts.indented ? "indented" : "scss" }),
-    );
+    const run = captureStderr(() => {
+      source = readStdin();
+      return compileString(source, { ...common, sourceMap: wantMap, syntax: opts.indented ? "indented" : "scss" });
+    });
     if (run.text) writeStderrSync(run.text);
     let result;
     try {
@@ -2126,7 +2155,10 @@ async function runJobs(jobs, opts, common) {
   // worker that claims the `-` job ever reads them. (It used to force the whole
   // batch into this thread instead, so one `-` job cost every OTHER job its
   // parallelism.)
-  const stdinBytes = jobs.some((j) => j.input === "-") ? shareText(readStdin()) : undefined;
+  // Raw bytes, not text. Decoding here would turn invalid UTF-8 into an
+  // exception before the `-` job exists, and the error stylesheet is written
+  // by that job's failure path. `compileSlice` decodes, fatally.
+  const stdinBytes = jobs.some((j) => j.input === "-") ? shareBytes(readStdinBytes()) : undefined;
 
   // Two sources writing to ONE destination have to stay in command-line order:
   // dart compiles both and the LAST one wins — the same file every run
@@ -2272,9 +2304,8 @@ async function runJobs(jobs, opts, common) {
   return failed;
 }
 
-/** A string in shared memory, so `workerData` carries a handle, not a copy. */
-function shareText(text) {
-  const bytes = new TextEncoder().encode(text);
+/** Bytes in shared memory, so `workerData` carries a handle, not a copy. */
+function shareBytes(bytes) {
   const shared = new Uint8Array(new SharedArrayBuffer(bytes.length));
   shared.set(bytes);
   return shared;
@@ -2416,8 +2447,25 @@ function compileSlice(jobs, opts, common, ctl, stdinBytes, diagnostics, compiled
   const note = (i, text) => diagnostics.set(i, (diagnostics.get(i) ?? "") + text);
   // Decoded on first use, so a worker that never claims the `-` job never
   // touches the bytes; there is at most one such job, so at most one decode.
+  // Fatal, not `new TextDecoder().decode`: the default decoder substitutes
+  // U+FFFD, and a `-` entry would compile bytes a file entry refuses. The
+  // throw is the compile error — `captureStderr` is wrapped around this —
+  // so the job reports `Error: Invalid UTF-8.` and writes error CSS.
   let stdinText;
-  const stdinSource = () => (stdinText ??= stdinBytes ? new TextDecoder().decode(stdinBytes) : "");
+  const stdinSource = () => {
+    if (stdinText !== undefined) return stdinText;
+    if (!stdinBytes) {
+      stdinText = "";
+      return stdinText;
+    }
+    // Copy off the SharedArrayBuffer. `TextDecoder` rejects a shared view
+    // ("The provided ArrayBufferView value must not be shared"), which would
+    // surface as an I/O-shaped error instead of the entry's UTF-8 failure.
+    const text = decodeUtf8(Uint8Array.from(stdinBytes));
+    if (text === null) throw new Exception("Error: Invalid UTF-8.");
+    stdinText = text;
+    return stdinText;
+  };
   let failed = 0;
   let next = 0;
   for (;;) {

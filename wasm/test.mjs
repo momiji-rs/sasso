@@ -50,6 +50,8 @@ write("imp/_base.scss", `.b { x: 1; }\n`);
 write("imp/theme/_index.scss", `.t { y: 2; }\n`);
 // FileImporter target partial
 write("fi/_shared.scss", `$s: 10px;\n`);
+// FileImporter target whose bytes are not UTF-8
+write("fi/badutf8.scss", Buffer.from("$c: \xff\xfered;\n", "binary"));
 
 for (const [name, mod] of [["size", size], ["speed", speed]]) {
   // === Phase 1: core modern API ===
@@ -143,6 +145,18 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   };
   const rfi = mod.compileString(`@use "shared" as s;\n.a { height: s.$s; }\n`, { importers: [fileImporter] });
   assert.ok(rfi.css.includes("height: 10px"), `${name}: user FileImporter findFileUrl`);
+
+  // Invalid UTF-8 behind a file: URL is a read error, not a missing import.
+  const badUtf8File = {
+    findFileUrl(url) {
+      return url === "badutf8" ? pathToFileURL(join(root, "fi", "badutf8.scss")) : null;
+    },
+  };
+  assert.throws(
+    () => mod.compileString(`@use "badutf8";`, { importers: [badUtf8File] }),
+    /stream did not contain valid UTF-8/,
+    `${name}: FileImporter invalid UTF-8 is a read error`,
+  );
 
   // importer load error -> reported compile error
   const boom = { canonicalize: () => new URL("custom:boom"), load() { throw new Error("kaboom-load"); } };
@@ -3591,6 +3605,117 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   assert.ok(caught.message.startsWith("Error:"), "error: message is the rendered block");
   assert.ok(caught.sassMessage.length > 0 && !caught.sassMessage.includes("\n"), "error: sassMessage is a raw one-liner");
   console.log("ok: structured Exception (sassMessage + span)");
+}
+
+// === Bytes that are not UTF-8 are refused, on every engine (#179) ===
+//
+// `readFileSync(path, "utf8")` does not reject invalid UTF-8 — it puts
+// U+FFFD in and hands back a string — so the npm CLI compiled a file dart
+// refuses and said nothing:
+//
+//   dart-sass 1.104.1   Error: Invalid UTF-8.
+//   sasso binary        Error: Invalid UTF-8.
+//   npm, before         @charset "UTF-8"; .a { color: ??red; }
+//
+// BOTH engines are exercised where both exist. That is the whole lesson
+// of this bug: the dependency half was wrong only on wasm, the entry half
+// was wrong on both, and a suite that runs one engine at a time saw
+// neither until CI ran the other one (#176).
+{
+  const utf8dir = mkdtempSync(join(tmpdir(), "sasso-badutf8-"));
+  // Valid SCSS, invalid UTF-8.
+  const badBytes = Buffer.from("$c: \xff\xfered;\n", "binary");
+  writeFileSync(join(utf8dir, "entry.scss"), Buffer.from(".a { color: \xff\xfered; }\n", "binary"));
+  writeFileSync(join(utf8dir, "viadep.scss"), `@use "v" as v;\n.a { color: v.$c; }\n`);
+  writeFileSync(join(utf8dir, "_v.scss"), badBytes);
+
+  // An ambient SASSO_ENGINE=wasm skips the native leg; SASSO_ENGINE=native
+  // without the addon makes the default ("") leg fail instead of testing wasm.
+  const envBase = { ...process.env };
+  delete envBase.SASSO_ENGINE;
+  delete envBase.SASSO_NATIVE_BINARY;
+  const hasNative = /^engine:\s+native/m.test(
+    spawnSync(process.execPath, [cliPath, "--engine"], { encoding: "utf8", env: envBase }).stdout || "",
+  );
+  // Where the addon is absent (the wasm CI job) there is one engine to
+  // try; where it is present, both.
+  const engines = hasNative ? ["native", "wasm"] : [""];
+
+  for (const engine of engines) {
+    const env = engine ? { ...envBase, SASSO_ENGINE: engine } : envBase;
+    const name = engine || "default";
+    for (const [what, file] of [
+      ["the entry", "entry.scss"],
+      ["a dependency", "viadep.scss"],
+    ]) {
+      const r = spawnSync(process.execPath, [cliPath, "--no-source-map", join(utf8dir, file)], {
+        encoding: "utf8",
+        env,
+      });
+      // Non-zero, not 65: this CLI exits 1 for every failure, which is
+      // #91 and not this bug. Asserting 65 here would fail for the right
+      // reason on the wrong ticket.
+      assert.notEqual(r.status, 0, `${name}/${what}: it succeeded: ${JSON.stringify(r.stdout)}`);
+      assert.ok(
+        !r.stdout.includes("�"),
+        `${name}/${what}: replacement characters reached the output: ${JSON.stringify(r.stdout)}`,
+      );
+      assert.ok(
+        /UTF-8/.test(r.stderr),
+        `${name}/${what}: nothing was said about the encoding: ${JSON.stringify(r.stderr)}`,
+      );
+    }
+  }
+  // Standard input is an entry too. The file cases above never touch it,
+  // and `readFileSync(0, "utf8")` substituted U+FFFD, so `--stdin` and
+  // `-:out.css` compiled bytes a file refuses. The binary reports
+  // `Error: Invalid UTF-8.` and writes error CSS
+  // (`invalid_utf8_on_stdin_fails_like_a_file`).
+  const badStdin = Buffer.from("a { b: c }\n\xff\xfe\n", "binary");
+  // wasm, not "whichever addon loaded": the refusal happens in cli.mjs
+  // before either engine, and a missing addon would prefix a fallback
+  // warning that is not this assertion. `SASSO_BINARY=0` is already set.
+  const stdinEnv = { ...process.env, SASSO_ENGINE: "wasm" };
+  const stdinRun = (args) =>
+    spawnSync(process.execPath, [cliPath, "--no-source-map", ...args], { input: badStdin, env: stdinEnv });
+  const stdinCss = join(utf8dir, "stdin.css");
+  const viaFlag = stdinRun(["--stdin", stdinCss]);
+  assert.notEqual(viaFlag.status, 0, `stdin: --stdin succeeded: ${viaFlag.stdout}`);
+  assert.equal(
+    viaFlag.stderr.toString("utf8"),
+    "Error: Invalid UTF-8.\n",
+    `stdin: --stdin said ${JSON.stringify(viaFlag.stderr.toString("utf8"))}`,
+  );
+  assert.ok(
+    readFileSync(stdinCss, "utf8").startsWith("/* Error: Invalid UTF-8. */"),
+    "stdin: error stylesheet for a --stdin file target",
+  );
+  const stale = join(utf8dir, "stale.css");
+  writeFileSync(stale, "old { css: yes }\n");
+  const viaPair = stdinRun(["--no-error-css", `-:${stale}`]);
+  assert.notEqual(viaPair.status, 0, "stdin: -:out succeeded");
+  assert.equal(viaPair.stderr.toString("utf8"), "Error: Invalid UTF-8.\n", "stdin: -:out wording");
+  assert.equal(existsSync(stale), false, "stdin: stale CSS removed like any compile error");
+  const viaStdout = stdinRun(["-"]);
+  assert.notEqual(viaStdout.status, 0, "stdin: bare - succeeded");
+  assert.equal(viaStdout.stdout.length, 0, "stdin: CSS reached stdout");
+  assert.equal(viaStdout.stderr.toString("utf8"), "Error: Invalid UTF-8.\n", "stdin: bare - wording");
+  const viaLoop = stdinRun(["--loop", "1", "--stdin"]);
+  assert.notEqual(viaLoop.status, 0, "stdin: --loop succeeded");
+  assert.equal(viaLoop.stdout.length, 0, "stdin: --loop printed CSS");
+  assert.equal(viaLoop.stderr.toString("utf8"), "Error: Invalid UTF-8.\n", "stdin: --loop wording");
+  // And a valid multibyte stdin still round-trips. The fatal decoder must
+  // not reject bytes that merely are not ASCII.
+  const okStdin = Buffer.from("$c: \"café\";\n.a{color:$c}\n", "utf8");
+  const viaOk = spawnSync(process.execPath, [cliPath, "--style=compressed", "--no-source-map", "--stdin"], {
+    input: okStdin,
+    env: stdinEnv,
+  });
+  assert.equal(viaOk.status, 0, `stdin: valid UTF-8 failed: ${viaOk.stderr}`);
+  assert.ok(viaOk.stdout.toString("utf8").includes("café"), `stdin: valid UTF-8 lost: ${viaOk.stdout}`);
+
+  rmSync(utf8dir, { recursive: true, force: true });
+  console.log(`ok: invalid UTF-8 is refused, entry and dependency, on ${engines.length === 2 ? "both engines" : "the engine present here"}`);
 }
 
 // === Phase 3: CLI --watch (recompiles on dependency change) ===

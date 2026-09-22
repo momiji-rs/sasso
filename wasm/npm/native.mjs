@@ -27,6 +27,7 @@ import {
   normalizeImporter,
   syntaxCode,
   syntaxForPath,
+  decodeUtf8,
 } from "./_importer.mjs";
 import { Exception, Logger } from "./_loader.mjs";
 import { deserializeArgs, serializeValue, setEngine, valueApi } from "./_value.mjs";
@@ -437,7 +438,11 @@ export function compileStringAsync(source, options = {}) {
 
 function entryFor(path, options) {
   const fsPath = path instanceof URL || String(path).startsWith("file:") ? fileURLToPath(path) : String(path);
-  const source = readFileSync(fsPath, "utf8");
+  // Refused rather than substituted — see `decodeUtf8`. The addon reads
+  // DEPENDENCIES itself and already refuses them; the entry comes through
+  // here, so without this the two halves of one compile disagreed.
+  const source = decodeUtf8(readFileSync(fsPath));
+  if (source === null) throw new Exception("Error: Invalid UTF-8.");
   // As in the wasm loader: absolute and normalized, symlinks intact, so a map
   // names the path the file was reached through (see `canonicalHrefFor`).
   const realPath = resolvePath(fsPath);

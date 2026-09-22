@@ -13,6 +13,46 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **The npm package compiled stylesheets that are not valid UTF-8 into
+  replacement characters, and said nothing** (#179). `readFileSync(path,
+  "utf8")` does not reject invalid UTF-8 — it substitutes U+FFFD and
+  returns a string — and four reads went through it: the entry on three
+  code paths and every dependency on one.
+
+  ```
+    $c: \xff\xfered;                    entry          dependency
+    dart-sass 1.104.1                  Invalid UTF-8.  Invalid UTF-8.
+    sasso binary                       Invalid UTF-8.  Cannot read …
+    npm, native addon, before          COMPILED        Cannot read …
+    npm, wasm, before                  COMPILED        COMPILED
+    npm, either, after                 Invalid UTF-8.  Cannot read …
+  ```
+
+  Note which cells were wrong: the dependency half only on wasm, the
+  entry half on both. A suite that runs one engine at a time saw neither,
+  which is how it survived — it took a test written on a machine with the
+  addon and run in CI without it (#176) to surface any of it.
+
+  The decoding is one exported rule now rather than four call sites, and
+  the new case exercises BOTH engines wherever both are present.
+
+  Standard input was still outside that rule. `sasso --stdin`, a `-` job
+  and `--loop` read fd 0 with `readFileSync(0, "utf8")`, which substitutes
+  U+FFFD, and the `-` job decoded the result again non-fatally — so the
+  same bytes a file entry refuses compiled when they arrived on stdin.
+  Stdin is an entry: it uses the same decoder and reports
+  `Error: Invalid UTF-8.`, and a file target gets the error stylesheet,
+  as the binary does.
+
+  Still divergent, and deliberately left: for a DEPENDENCY dart says
+  `Invalid UTF-8.` with a span at the offending byte inside the file,
+  while every sasso engine says `Cannot read <path>: stream did not
+  contain valid UTF-8` with a span at the `@use` that pulled it in.
+  Matching dart there means decoding inside the compiler rather than at
+  the read, so that the error carries a position — a core change, not a
+  read-site one. #179 keeps it.
+
+
 - **`--watch` in the npm CLI overwrote a stylesheet reached through a
   symlink** (#168). `out.css -> main.scss` and then
   `sasso --watch main.scss out.css` replaced the stylesheet with its own

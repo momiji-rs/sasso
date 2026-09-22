@@ -168,15 +168,41 @@ function canonicalHrefFor(path) {
   return pathToFileURL(nodePath.resolve(path)).href;
 }
 
+/**
+ * Decode bytes that are supposed to be UTF-8, or `null` when they are not.
+ *
+ * `readFileSync(path, "utf8")` does NOT reject invalid UTF-8 — it substitutes
+ * U+FFFD and returns a string — so every read that went through it accepted a
+ * file dart-sass refuses, and compiled it into replacement characters without
+ * a word. Measured (#179): `$c: \xff\xfered;` gave `.a { color: ��red; }`
+ * on the npm CLI while dart, the binary and the native addon's own reads all
+ * errored.
+ *
+ * Exported because the entry, every dependency and standard input needed
+ * the same rule — a copy at each read is how they drift. What each caller
+ * SAYS about a failure differs, so only the decoding lives here.
+ */
+export function decodeUtf8(bytes) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
 /** Read a resolved file as an importer result (`null` if it vanished). */
 function loadFsPath(path) {
-  let contents;
+  let bytes;
   try {
-    contents = readFileSync(path, "utf8");
+    bytes = readFileSync(path);
   } catch (e) {
     if (e && e.code === "ENOENT") return null; // raced between resolve and load
     throw new Error(`Cannot read ${path}: ${e && e.message ? e.message : e}`);
   }
+  const contents = decodeUtf8(bytes);
+  // The wording the binary's importer uses for the same refusal, so the two
+  // engines answer a build script the same way.
+  if (contents === null) throw new Error(`Cannot read ${path}: stream did not contain valid UTF-8`);
   return { contents, syntax: syntaxForPath(path), sourceMapUrl: null };
 }
 
@@ -308,11 +334,9 @@ function wrapFileImporter(imp, async) {
       return finish(raw, fromImport);
     },
     load(canonicalHref) {
-      try {
-        return loadFsPath(fileURLToPath(canonicalHref));
-      } catch {
-        return null;
-      }
+      // `loadFsPath` returns null on ENOENT and throws on a bad read,
+      // including invalid UTF-8. A catch here turned that into a miss.
+      return loadFsPath(fileURLToPath(canonicalHref));
     },
   };
 }
