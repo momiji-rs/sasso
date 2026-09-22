@@ -263,6 +263,44 @@ fn parity_at_rule_prelude_interpolation() {
     assert_parity("$z: zzz;\na[data-foo=\"#{$z}\"] { color: red; }\n");
 }
 
+/// An at-rule whose NAME comes from interpolation is a generic at-rule in
+/// dart, however that name reads: the parser decided the class before the
+/// evaluator ever resolved `#{…}`. Two things follow, and the live suite is the
+/// only place to check both — the conformance run is expanded-only.
+#[test]
+fn parity_at_rule_name_interpolation_is_generic() {
+    for scss in [
+        // The compressed space before a `(` prelude belongs to the conditional
+        // group rules alone.
+        "@#{\"media\"} (a: 1) { .x { y: z } }\n",
+        "@#{\"supports\"} (a: 1) { .x { y: z } }\n",
+        "@media (a: 1) { .x { y: z } }\n",
+        "@#{\"media\"} (a: 1);\n",
+        ".r { @#{\"media\"} (a: 1) { y: z } }\n",
+        "@media (b: 2) { @#{\"media\"} (a: 1) { .x { y: z } } }\n",
+        "@#{\"media\"} (b: 2) { @media (a: 1) { .x { y: z } } }\n",
+        // An empty block goes away only for a conditional group rule.
+        "@#{\"media\"} screen {}\n",
+        "@#{\"media\"} {}\n",
+        "@#{\"supports\"} (a: 1) {}\n",
+        "@#{\"media\"} (a: 1) { /* c */ }\n",
+        "@media screen {}\n",
+        // Emptied after the fact, by placeholder removal.
+        "@#{\"media\"} (a: 1) { %p { y: z } }\n",
+        "@media (a: 1) { %p { y: z } }\n",
+        // The name as written is no guide either way: `@MEDIA` is generic too.
+        "@MEDIA (a: 1) { .x { y: z } }\n",
+        "@MEDIA (a: 1) { /* c */ }\n",
+        // A `@media` inside a keyframe block nests verbatim and is still the
+        // parsed rule.
+        "@keyframes k { from { a: b } @media (a: 1) { to { c: d } } }\n",
+        "@keyframes k { 10% { /* c */ } }\n",
+    ] {
+        assert_parity(scss);
+        assert_parity_compressed(scss);
+    }
+}
+
 #[test]
 fn parity_large_numbers() {
     // Huge literals print as plain decimals, scientific notation expands,

@@ -56,21 +56,7 @@ silently drift away from the reference.
 These change the bytes a build emits. All of them are absent from the Lichess
 corpus, which is why it still measures 147/148.
 
-### 1.1 An interpolated at-rule name loses a space when compressed
-
-```scss
-@#{"media"} (a: 1) { a { b: c } }
-// dart:  @media (a: 1){a{b:c}}
-// sasso: @media(a: 1){a{b:c}}
-```
-
-The compressed no-space rule is keyed on the at-rule *name*, but in dart an
-interpolated name produces a generic node that never reaches the media-rule
-writer. A literal `@media` and an interpolated one resolve to the same string,
-so the distinction has to be carried as a field on the node rather than
-inferred from its name.
-
-### 1.2 A literal property inside a custom `@function --foo()` is not evaluated
+### 1.1 A literal property inside a custom `@function --foo()` is not evaluated
 
 ```scss
 @function --foo() { q: 1 + 2; }
@@ -85,7 +71,7 @@ insensitively) is kept verbatim, because that is the function's return value.
 no plain name — is `result: 3` in both. It is every OTHER property that
 diverges.
 
-### 1.3 A degenerate calculation inside `@supports` is evaluated instead of preserved
+### 1.2 A degenerate calculation inside `@supports` is evaluated instead of preserved
 
 ```scss
 @supports (a: lab(calc(infinity) 1 2)) { a { b: c } }
@@ -93,7 +79,7 @@ diverges.
 // sasso: @supports (a: lab(100% 1 2))
 ```
 
-### 1.4 `meta.call()` with an unknown name compiles instead of erroring ([#63](https://github.com/momiji-rs/sasso/issues/63))
+### 1.3 `meta.call()` with an unknown name compiles instead of erroring ([#63](https://github.com/momiji-rs/sasso/issues/63))
 
 ```scss
 @use "sass:meta";

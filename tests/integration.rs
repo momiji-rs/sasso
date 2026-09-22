@@ -1779,9 +1779,15 @@ fn compressed_keeps_an_empty_at_rule_that_is_not_media_or_supports() {
         css_compressed("@supports (a: b) { @foo { /* c */ } }"),
         "@supports(a: b){@foo{}}"
     );
-    // The name is matched as written, so a capitalized one is the generic
-    // at-rule dart parses it as, and survives.
+    // What survives is decided by the node class, not the name: a
+    // capitalized `@MEDIA` and an interpolated `@#{"media"}` are both the
+    // generic at-rule dart parses them as, and both survive.
     assert_eq!(css_compressed("@MEDIA screen { /* c */ }"), "@MEDIA screen{}");
+    assert_eq!(
+        css_compressed("@#{\"media\"} screen { /* c */ }"),
+        "@media screen{}"
+    );
+    assert_eq!(css_compressed("@#{\"supports\"} (a: 1) {}"), "@supports (a: 1){}");
     // Separators: an empty at-rule ends in `}`, which separates it from
     // whatever follows, and it leaves no trailing `;` behind.
     assert_eq!(css_compressed(".a { b: c } @foo {}"), ".a{b:c}@foo{}");
@@ -2054,6 +2060,68 @@ fn compressed_preserved_calculations_drop_the_argument_space() {
     assert_eq!(
         css_compressed("@supports (width: clamp(1px, var(--y), 2px)) { .a { b: 1; } }"),
         "@supports(width: clamp(1px, var(--y), 2px)){.a{b:1}}"
+    );
+}
+
+/// An at-rule whose name arrives through interpolation is a generic
+/// `CssAtRule` in dart, whatever the name spells: the PARSER decides the class,
+/// and by then `@#{"media"}` is not a `@media` rule. That is observable twice,
+/// both times making the conditional rule the less visible one — the compressed
+/// space before a `(` prelude, and the empty block that only a conditional rule
+/// takes with it. `[measured]` against dart-sass 1.104.1.
+#[test]
+fn an_interpolated_at_rule_name_is_a_generic_at_rule() {
+    // The space before `(`: dropped for a parsed `@media`/`@supports`, kept for
+    // the interpolated spelling of either.
+    assert_eq!(
+        css_compressed("@media (a: 1) { .x { y: z } }"),
+        "@media(a: 1){.x{y:z}}"
+    );
+    assert_eq!(
+        css_compressed("@#{\"media\"} (a: 1) { .x { y: z } }"),
+        "@media (a: 1){.x{y:z}}"
+    );
+    assert_eq!(
+        css_compressed("@supports (a: 1) { .x { y: z } }"),
+        "@supports(a: 1){.x{y:z}}"
+    );
+    assert_eq!(
+        css_compressed("@#{\"supports\"} (a: 1) { .x { y: z } }"),
+        "@supports (a: 1){.x{y:z}}"
+    );
+    // Wherever the node ends up: childless, bubbled out of a style rule, and
+    // nested inside a real `@media`.
+    // A childless one is generic by construction: a conditional group rule
+    // always has a block (`@media (a: 1);` is "expected \"{\"" in both
+    // engines), so nothing childless can drop the space.
+    assert_eq!(css_compressed("@#{\"media\"} (a: 1);"), "@media (a: 1)");
+    assert_eq!(
+        css_compressed(".r { @#{\"media\"} (a: 1) { y: z } }"),
+        "@media (a: 1){.r{y:z}}"
+    );
+    assert_eq!(
+        css_compressed("@media (b: 2) { @#{\"media\"} (a: 1) { .x { y: z } } }"),
+        "@media(b: 2){@media (a: 1){.x{y:z}}}"
+    );
+    // The empty block survives in BOTH styles, because `_isInvisible`
+    // short-circuits on a generic at-rule.
+    assert_eq!(css_compressed("@#{\"media\"} screen {}"), "@media screen{}");
+    assert_eq!(css_compressed("@#{\"media\"} {}"), "@media{}");
+    assert_eq!(
+        css_compressed("@#{\"media\"} (a: 1) { /* c */ }"),
+        "@media (a: 1){}"
+    );
+    assert_eq!(css("@#{\"media\"} screen {}"), "@media screen {}\n");
+    assert_eq!(css("@#{\"supports\"} (a: 1) {}"), "@supports (a: 1) {}\n");
+    // A parsed one, for contrast: emptied means gone.
+    assert_eq!(css_compressed("@media screen {}"), "");
+    assert_eq!(css("@media screen {}"), "");
+    // A placeholder-only body is emptied after the fact, by `@extend`, and the
+    // same split follows.
+    assert_eq!(css_compressed("@media (a: 1) { %p { y: z } }"), "");
+    assert_eq!(
+        css_compressed("@#{\"media\"} (a: 1) { %p { y: z } }"),
+        "@media (a: 1){}"
     );
 }
 

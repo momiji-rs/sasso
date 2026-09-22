@@ -144,6 +144,7 @@ impl<'a> Evaluator<'a> {
                             prelude,
                             body: out_body,
                             has_block: true,
+                            kind: AtRuleKind::Conditional,
                             lines,
                         });
                     }
@@ -161,6 +162,7 @@ impl<'a> Evaluator<'a> {
                             prelude,
                             body: out_body,
                             has_block: true,
+                            kind: AtRuleKind::Conditional,
                             lines: self.stamp(*lines),
                         });
                     }
@@ -186,6 +188,7 @@ impl<'a> Evaluator<'a> {
                             prelude: prelude_s,
                             body: Vec::new(),
                             has_block: false,
+                            kind: AtRuleKind::Generic,
                             lines,
                         }),
                         Some(b) => {
@@ -195,6 +198,7 @@ impl<'a> Evaluator<'a> {
                                 prelude: prelude_s,
                                 body: out_body,
                                 has_block: true,
+                                kind: AtRuleKind::Generic,
                                 lines,
                             });
                         }
@@ -214,6 +218,7 @@ impl<'a> Evaluator<'a> {
                         prelude: prelude_s,
                         body: out_body,
                         has_block: true,
+                        kind: AtRuleKind::Generic,
                         lines,
                     });
                 }
@@ -335,6 +340,7 @@ impl<'a> Evaluator<'a> {
                             prelude,
                             body: inner,
                             has_block: true,
+                            kind: AtRuleKind::Conditional,
                             lines,
                         });
                     }
@@ -352,6 +358,7 @@ impl<'a> Evaluator<'a> {
                             prelude,
                             body: inner,
                             has_block: true,
+                            kind: AtRuleKind::Conditional,
                             lines: self.stamp(*lines),
                         });
                     }
@@ -370,6 +377,7 @@ impl<'a> Evaluator<'a> {
                             prelude: prelude_s,
                             body: Vec::new(),
                             has_block: false,
+                            kind: AtRuleKind::Generic,
                             lines,
                         }),
                         Some(b) => {
@@ -379,6 +387,7 @@ impl<'a> Evaluator<'a> {
                                 prelude: prelude_s,
                                 body: inner,
                                 has_block: true,
+                                kind: AtRuleKind::Generic,
                                 lines,
                             });
                         }
@@ -418,6 +427,7 @@ impl<'a> Evaluator<'a> {
                         prelude: prelude_s,
                         body: out_body,
                         has_block: true,
+                        kind: AtRuleKind::Generic,
                         lines,
                     });
                 }
@@ -447,13 +457,17 @@ impl<'a> Evaluator<'a> {
     ) -> Result<(Vec<OutItem>, Vec<OutNode>), Error> {
         let mut items = Vec::new();
         let mut bubbled: Vec<OutNode> = Vec::new();
-        let bubble = |name: &str, prelude: String, inner: Vec<OutItem>, bubbled: &mut Vec<OutNode>| {
+        let bubble = |name: &str,
+                      kind: AtRuleKind,
+                      prelude: String,
+                      inner: Vec<OutItem>,
+                      bubbled: &mut Vec<OutNode>| {
             // Nothing to wrap means no copy of the parent rule, but the at-rule
             // itself still survives unless it is one of the two that go away
             // when their block is empty: `.a {@foo {}}` is `@foo {}`, while
             // `.a {@media b {}}` is nothing (see `at_rule_drops_when_empty`).
             let body = if inner.is_empty() {
-                if at_rule_drops_when_empty(name) {
+                if at_rule_drops_when_empty(kind) {
                     return;
                 }
                 Vec::new()
@@ -469,6 +483,7 @@ impl<'a> Evaluator<'a> {
                 prelude,
                 body,
                 has_block: true,
+                kind,
                 lines: SrcLines::default(),
             });
         };
@@ -482,12 +497,12 @@ impl<'a> Evaluator<'a> {
                     let queries = self.resolve_media_queries(query)?;
                     let prelude = serialize_media_queries(&queries, self.compressed());
                     let inner = self.css_body(body)?;
-                    bubble("media", prelude, inner, &mut bubbled);
+                    bubble("media", AtRuleKind::Conditional, prelude, inner, &mut bubbled);
                 }
                 Stmt::Supports { condition, body, .. } => {
                     let prelude = self.serialize_supports_condition(condition)?;
                     let inner = self.css_body(body)?;
-                    bubble("supports", prelude, inner, &mut bubbled);
+                    bubble("supports", AtRuleKind::Conditional, prelude, inner, &mut bubbled);
                 }
                 Stmt::AtRule {
                     name,
@@ -497,7 +512,7 @@ impl<'a> Evaluator<'a> {
                 } => {
                     let prelude_s = self.eval_template(prelude)?.trim().to_string();
                     let inner = self.css_body(b)?;
-                    bubble(name, prelude_s, inner, &mut bubbled);
+                    bubble(name, AtRuleKind::Generic, prelude_s, inner, &mut bubbled);
                 }
                 // `@keyframes` hoists out like any other block at-rule, but
                 // takes no copy of the parent selectors with it: its block holds
@@ -517,6 +532,7 @@ impl<'a> Evaluator<'a> {
                         prelude: prelude_s,
                         body: out_body,
                         has_block: true,
+                        kind: AtRuleKind::Generic,
                         lines,
                     });
                 }
@@ -528,7 +544,7 @@ impl<'a> Evaluator<'a> {
                 Stmt::CssCustomAtRule { name, prelude, body } => {
                     let prelude_s = self.eval_template(prelude)?;
                     let inner = self.css_custom_decl_items(body)?;
-                    bubble(name, prelude_s, inner, &mut bubbled);
+                    bubble(name, AtRuleKind::Generic, prelude_s, inner, &mut bubbled);
                 }
                 other => self.css_body_stmt(other, &mut items)?,
             }
@@ -747,6 +763,7 @@ impl<'a> Evaluator<'a> {
                         name: "media".to_string(),
                         prelude,
                         items: inner,
+                        kind: AtRuleKind::Conditional,
                         lines,
                     });
                 }
@@ -765,6 +782,7 @@ impl<'a> Evaluator<'a> {
                         name: "supports".to_string(),
                         prelude,
                         items: inner,
+                        kind: AtRuleKind::Conditional,
                         lines,
                     });
                 }
@@ -789,16 +807,16 @@ impl<'a> Evaluator<'a> {
                     Some(b) => {
                         let inner = self.css_body(b)?;
                         // An empty block below the bubbling level stays where it
-                        // is, on the same terms as above.
-                        if !inner.is_empty() || !at_rule_drops_when_empty(name) {
-                            let lines = self.stamp(*lines);
-                            items.push(OutItem::NestedAtRule {
-                                name: name.clone(),
-                                prelude: prelude_s,
-                                items: inner,
-                                lines,
-                            });
-                        }
+                        // is, on the same terms as above: this is a generic
+                        // at-rule, and only a conditional group rule goes away.
+                        let lines = self.stamp(*lines);
+                        items.push(OutItem::NestedAtRule {
+                            name: name.clone(),
+                            prelude: prelude_s,
+                            items: inner,
+                            kind: AtRuleKind::Generic,
+                            lines,
+                        });
                     }
                 }
             }
@@ -816,6 +834,7 @@ impl<'a> Evaluator<'a> {
                     name: name.clone(),
                     prelude: prelude_s,
                     items: inner,
+                    kind: AtRuleKind::Generic,
                     lines,
                 });
             }
@@ -829,6 +848,7 @@ impl<'a> Evaluator<'a> {
                     name: name.clone(),
                     prelude: prelude_s,
                     items: inner,
+                    kind: AtRuleKind::Generic,
                     lines: SrcLines::default(),
                 });
             }

@@ -50,6 +50,10 @@ impl<'a> Evaluator<'a> {
             prelude,
             body: out_body,
             has_block: true,
+            // The generic path: every at-rule without a visitor of its own
+            // comes through here, and so does every INTERPOLATED name, which is
+            // why a `@#{"media"}` node is generic however its name reads.
+            kind: AtRuleKind::Generic,
             lines,
         });
         Ok(())
@@ -77,6 +81,7 @@ impl<'a> Evaluator<'a> {
             prelude,
             body: out_body,
             has_block: true,
+            kind: AtRuleKind::Generic,
             lines: SrcLines::default(),
         });
         Ok(())
@@ -249,6 +254,7 @@ impl<'a> Evaluator<'a> {
                 name: "media".to_string(),
                 prelude,
                 items: at_body_to_items(out_body),
+                kind: AtRuleKind::Conditional,
                 lines,
             });
             return Ok(());
@@ -300,6 +306,7 @@ impl<'a> Evaluator<'a> {
                     prelude: prelude.to_string(),
                     body: std::mem::take(segment),
                     has_block: true,
+                    kind: AtRuleKind::Conditional,
                     lines,
                 });
             }
@@ -519,6 +526,7 @@ impl<'a> Evaluator<'a> {
                     prelude: prelude.clone(),
                     body: std::mem::take(segment),
                     has_block: true,
+                    kind: AtRuleKind::Conditional,
                     lines,
                 });
             }
@@ -796,6 +804,7 @@ impl<'a> Evaluator<'a> {
             prelude,
             body: shell,
             has_block: true,
+            kind: AtRuleKind::Generic,
             lines,
         });
         for n in after {

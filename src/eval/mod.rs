@@ -311,6 +311,35 @@ impl RuleSelectors {
     }
 }
 
+/// Which dart-sass node class an at-rule came from — a fact its NAME cannot
+/// answer, because the PARSER decides the class and the evaluator is only where
+/// an interpolated name finally reads `media`. `@#{"media"} (a: 1) {…}` is a
+/// generic at-rule in dart, spelled `@media (a: 1)`; only a parsed `@media` is a
+/// conditional group rule.
+///
+/// The difference is observable twice, both times making a conditional rule LESS
+/// visible than a generic one: it is the only kind that omits the compressed
+/// space before a `(` prelude (`visitCssMediaRule`/`visitCssSupportsRule`), and
+/// the only kind that goes away when its block writes nothing (`_isInvisible`
+/// short-circuits on `CssAtRule` — "an unknown at-rule is never invisible …
+/// we can't guarantee that (for example) `@foo {}` isn't meaningful").
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AtRuleKind {
+    /// dart `CssMediaRule` or `CssSupportsRule`.
+    Conditional,
+    /// dart `CssAtRule`: an unknown at-rule, `@font-face`, `@page`,
+    /// `@keyframes`, a plain-CSS custom `@function`/`@mixin` — and any at-rule
+    /// whose name arrived through interpolation, whatever that name spells.
+    Generic,
+}
+
+impl AtRuleKind {
+    /// Whether this is one of the two conditional group rules.
+    pub(crate) fn is_conditional(self) -> bool {
+        matches!(self, AtRuleKind::Conditional)
+    }
+}
+
 /// A flattened output node.
 #[derive(Clone)]
 pub(crate) enum OutNode {
@@ -351,6 +380,10 @@ pub(crate) enum OutNode {
         prelude: String,
         body: Vec<OutNode>,
         has_block: bool,
+        /// Which dart node class this is (see [`AtRuleKind`]), which `name`
+        /// cannot be asked: an interpolated `@#{"media"}` arrives here spelling
+        /// `media` and is generic.
+        kind: AtRuleKind,
         /// Source lines (`start` = the `{` line or the statement's own line
         /// for the `;` form, `end` = the `}` line or the same) for the
         /// serializer's trailing-comment rule; default = disabled.
@@ -440,6 +473,10 @@ impl OutNode {
             prelude,
             body: Vec::new(),
             has_block: false,
+            // A conditional group rule always has a block, so a childless
+            // at-rule is generic whatever it is called: `@#{"media"} (a: 1);`
+            // keeps the compressed space a real `@media` would drop.
+            kind: AtRuleKind::Generic,
             lines,
         }
     }
@@ -526,11 +563,15 @@ pub(crate) enum OutItem {
     /// A block at-rule (`@media`, `@supports`, unknown) nested inside an
     /// already-nested plain-CSS rule, kept in place instead of bubbled —
     /// dart-sass `_hasCssNesting`: once the user opts into native CSS nesting,
-    /// at-rules stay where they are. Only produced in plain-CSS mode.
+    /// at-rules stay where they are. Produced in plain-CSS mode, and for a
+    /// `@media` inside a keyframe block, which nests verbatim because a frame is
+    /// not a style rule.
     NestedAtRule {
         name: String,
         prelude: String,
         items: Vec<OutItem>,
+        /// Which dart node class this is, as for [`OutNode::AtRule`].
+        kind: AtRuleKind,
         /// Source lines of the at-rule, as for [`OutNode::AtRule`]: its `@`
         /// keyword's line and column drive the source-map entry.
         lines: SrcLines,
@@ -717,6 +758,7 @@ impl Sink<'_> {
                     name,
                     prelude,
                     items,
+                    kind,
                     lines,
                 } => body.push(OutNode::AtRule {
                     name,
@@ -759,17 +801,20 @@ impl Sink<'_> {
                                 name,
                                 prelude,
                                 items,
+                                kind,
                                 lines,
                             } => OutNode::AtRule {
                                 name,
                                 prelude,
                                 body: vec![OutNode::plain_rule(Vec::new(), items, SrcLines::default())],
                                 has_block: true,
+                                kind,
                                 lines,
                             },
                         })
                         .collect(),
                     has_block: true,
+                    kind,
                     lines,
                 }),
             },
@@ -4250,12 +4295,14 @@ fn reparent_nodes(nodes: Vec<OutNode>, parents: &[String]) -> Vec<OutNode> {
                 prelude,
                 body,
                 has_block,
+                kind,
                 lines,
             } => rest.push(OutNode::AtRule {
                 name,
                 prelude,
                 body: reparent_nodes(body, parents),
                 has_block,
+                kind,
                 lines,
             }),
             other => rest.push(other),
@@ -5527,6 +5574,7 @@ impl AtCtx {
                 prelude: prelude.clone(),
                 body,
                 has_block: true,
+                kind: AtRuleKind::Conditional,
                 lines: SrcLines::default(),
             },
             AtCtx::Supports { prelude } => OutNode::AtRule {
@@ -5534,6 +5582,7 @@ impl AtCtx {
                 prelude: prelude.clone(),
                 body,
                 has_block: true,
+                kind: AtRuleKind::Conditional,
                 lines: SrcLines::default(),
             },
             AtCtx::Keyframes { name, prelude } => OutNode::AtRule {
@@ -5541,6 +5590,7 @@ impl AtCtx {
                 prelude: prelude.clone(),
                 body,
                 has_block: true,
+                kind: AtRuleKind::Generic,
                 lines: SrcLines::default(),
             },
         }
@@ -5664,6 +5714,7 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
                 prelude,
                 body,
                 has_block,
+                kind,
                 lines,
             } => {
                 if has_block {
@@ -5671,6 +5722,7 @@ fn at_body_to_items(nodes: Vec<OutNode>) -> Vec<OutItem> {
                         name,
                         prelude,
                         items: at_body_to_items(body),
+                        kind,
                         lines,
                     });
                 } else {
@@ -6533,17 +6585,19 @@ fn rewrite_nodes(nodes: &mut Vec<OutNode>, plan: &crate::selector::ExtendPlan, s
                 }
             }
             OutNode::AtRule {
-                name,
                 body,
                 has_block,
+                kind,
                 ..
             } => {
                 // Body rules were already rewritten by rewrite_with_scopes
                 // (which knows the per-module scopes); only the empty-group
                 // drop remains here. A conditional group rule
                 // (`@media`/`@supports`) whose body is emptied by placeholder
-                // removal produces no CSS, so drop it.
-                *has_block && body.is_empty() && (name == "media" || name == "supports")
+                // removal produces no CSS, so drop it. A GENERIC at-rule
+                // survives an empty body, whatever its name spells
+                // (`@#{"media"} screen {}` is `@media screen {}` in dart).
+                *has_block && body.is_empty() && kind.is_conditional()
             }
             _ => false,
         };
