@@ -278,7 +278,8 @@ pub(super) fn channel(v: &Value, pos: Pos) -> Result<f64, Error> {
     match v {
         Value::Number(n) => {
             if n.unit() == "%" {
-                Ok((n.value / 100.0 * 255.0).clamp(0.0, 255.0))
+                // `255 * value / 100`, in dart's order: see `modern_channel`.
+                Ok((255.0 * n.value / 100.0).clamp(0.0, 255.0))
             } else {
                 Ok(n.value.clamp(0.0, 255.0))
             }

@@ -86,7 +86,10 @@ impl<'a> Evaluator<'a> {
     /// `(property, everything after the colon)` pairs: a verbatim value keeps
     /// its literal text, including the whitespace the source put after the
     /// colon, while an interpolated-property declaration evaluates as
-    /// SassScript and takes the canonical single space.
+    /// SassScript and takes dart's OPTIONAL space — which is the whole
+    /// difference between the two kinds of value here, since compressed output
+    /// writes none of it (`#{result}: 1 + 1` compresses to `result:2` where
+    /// `result: 1 + 1` keeps the space it was written with).
     ///
     /// Both the at-root path above and the plain-CSS evaluator's nested paths
     /// (`OutItem::Decl` with `custom: true`, which also emits its value
@@ -105,16 +108,18 @@ impl<'a> Evaluator<'a> {
                     decls.push((prop, raw));
                 }
                 CssCustomValue::Script(expr) => {
+                    let gap = self.optional_space();
                     let value = self.eval_expr(expr)?.to_css(self.compressed());
-                    decls.push((prop, format!(" {value}")));
+                    decls.push((prop, format!("{gap}{value}")));
                 }
                 // A nested property set on an interpolated property: each
                 // child emits as `property-suffix: value`.
                 CssCustomValue::Set(children) => {
+                    let gap = self.optional_space();
                     for (suffix, expr) in children {
                         let sfx = self.eval_template(suffix)?;
                         let value = self.eval_expr(expr)?.to_css(self.compressed());
-                        decls.push((format!("{prop}-{sfx}"), format!(" {value}")));
+                        decls.push((format!("{prop}-{sfx}"), format!("{gap}{value}")));
                     }
                 }
             }
@@ -655,11 +660,25 @@ impl<'a> Evaluator<'a> {
                 ImportModifier::Media { list, comma_before } => {
                     out.push_str(if *comma_before { ", " } else { sep });
                     let queries = self.resolve_media_queries(list)?;
-                    out.push_str(&serialize_media_queries(&queries, self.compressed()));
+                    // An import's modifiers are ONE STRING in dart-sass,
+                    // spelled by the PARSER and written verbatim by
+                    // `visitCssImport` — the media-rule serializer, and so the
+                    // compressed media-query form, is never reached from here.
+                    out.push_str(&serialize_import_media_queries(&queries));
                 }
             }
         }
         Ok(out)
+    }
+
+    /// dart-sass `_writeOptionalSpace`: a single space in every style but
+    /// compressed, where it is exactly the byte a minifier exists to drop.
+    pub(super) fn optional_space(&self) -> &'static str {
+        if self.compressed() {
+            ""
+        } else {
+            " "
+        }
     }
 
     /// The space between an at-rule's name and its prelude, which compressed

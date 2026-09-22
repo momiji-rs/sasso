@@ -8643,6 +8643,31 @@ fn serialize_media_queries(queries: &[ResolvedQuery], compressed: bool) -> Strin
         .join(sep)
 }
 
+/// Serialize a media query list as dart's PARSER spells it into an `@import`'s
+/// modifier interpolation (`_mediaQueryList`), which `visitCssImport` writes
+/// verbatim. That spelling is not the media-rule serializer's: `_mediaQuery`
+/// writes the space that would separate a media type from a following
+/// identifier BEFORE it learns the identifier is `and`, then writes the whole
+/// `" and "` separator anyway — so a bare `<type> and <condition>` query goes
+/// out with TWO spaces. Only an `@import` can show it, since a real `@media`
+/// rule re-serializes from the parsed queries.
+fn serialize_import_media_queries(queries: &[ResolvedQuery]) -> String {
+    queries
+        .iter()
+        .map(|q| {
+            let mut s = q.render(false);
+            // A modifier absorbs the stray space (`only screen and`, and even
+            // `not screen and`, are spelled with one), and a query that opens
+            // on a condition has no type to be separated from.
+            if let (None, Some(t), false) = (&q.modifier, &q.mtype, q.conditions.is_empty()) {
+                s.insert(t.len(), ' ');
+            }
+            s
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Merge an enclosing query list with a nested query list (dart-sass
 /// `_mergeMediaQueries`). Returns `None` if any pair is unrepresentable (keep
 /// the nested rule in place); otherwise the merged list, which is empty when

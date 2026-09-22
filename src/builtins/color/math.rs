@@ -339,7 +339,12 @@ pub(super) fn modern_channel(v: &Value, pct_base: f64) -> Option<f64> {
     match channel_unit_number(v) {
         Some(num) => {
             if num.unit() == "%" {
-                Some(num.value / 100.0 * pct_base)
+                // dart's `_percentageOrUnitless` is `max * value / 100`, and
+                // the order is observable: `0.4 * -40 / 100` is exactly -0.16
+                // where `-40 / 100 * 0.4` is -0.16000000000000003, which the
+                // compressed number writer rounds -- and, rounding, drops the
+                // leading zero dart keeps.
+                Some(pct_base * num.value / 100.0)
             } else {
                 Some(num.value)
             }

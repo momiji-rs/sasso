@@ -562,6 +562,59 @@ fn compressed_keeps_the_zero_on_a_negative_decimal() {
     assert_eq!(v("0.0123456789px"), "a{x:0.0123456789px}");
 }
 
+/// A percent channel is `max * value / 100` in dart (`_percentageOrUnitless`),
+/// and the ORDER of that multiplication is observable: `0.4 * -40 / 100` is
+/// exactly -0.16 where `-40 / 100 * 0.4` is -0.16000000000000003. The dust
+/// reaches the output, where the rounding writer shortens the spelling — and a
+/// shortened spelling loses the leading zero the exact one keeps (`-.16` for
+/// `-0.16`). Measured against dart-sass 1.104.1 on 2026-09-21.
+#[test]
+fn a_percent_channel_multiplies_in_darts_order() {
+    let both = |value: &str, expanded: &str, compressed: &str| {
+        let src = format!("@use \"sass:color\";\na {{b: {value}}}\n");
+        assert_eq!(css(&src), format!("a {{\n  b: {expanded};\n}}\n"), "{value}");
+        assert_eq!(css_compressed(&src), format!("a{{b:{compressed}}}"), "{value}");
+    };
+    // The channels whose max is 0.4 — oklab's `a`/`b` and oklch's chroma — are
+    // where the dust is large enough to survive the writer. The constructor and
+    // `color.change` reach the same multiplication.
+    both(
+        "oklab(50% -40% -75%)",
+        "oklab(50% -0.16 -0.3)",
+        "oklab(.5 -0.16 -0.3)",
+    );
+    both(
+        "color.change(oklab(50% 0.2 -0.3), $a: -40%)",
+        "oklab(50% -0.16 -0.3)",
+        "oklab(.5 -0.16 -0.3)",
+    );
+    both("oklch(50% 40% 90)", "oklch(50% 0.16 90deg)", "oklch(.5 .16 90)");
+    both("color.channel(oklab(50% -40% -75%), \"a\")", "-0.16", "-0.16");
+    both("color.channel(oklch(50% 40% 90deg), \"chroma\")", "0.16", ".16");
+    // Converting out of the space carries the exact value with it.
+    both(
+        "color.to-space(oklab(50% -40% -75%), oklch)",
+        "oklch(50% 0.34 241.9275130641deg)",
+        "oklch(.5 .34 241.9275130641)",
+    );
+    // The lab/lch maxes (125 and 150) and the legacy 0-255 channels take the
+    // same order; their dust never reaches the tenth decimal, so these pin the
+    // arithmetic rather than a byte that used to differ.
+    both("lab(50% -40% 30%)", "lab(50% -50 37.5)", "lab(50 -50 37.5)");
+    both("lch(50% 40% 90deg)", "lch(50% 60 90deg)", "lch(50 60 90)");
+    both(
+        "color.change(lab(50% 20 30), $a: 40.7%)",
+        "lab(50% 50.875 30)",
+        "lab(50 50.875 30)",
+    );
+    both("color.channel(rgb(19.9% 30% 40%), \"red\")", "50.745", "50.745");
+    both(
+        "color.channel(color.change(red, $green: 19.9%), \"green\")",
+        "50.745",
+        "50.745",
+    );
+}
+
 /// The lightness of a `lab()`/`lch()`/`oklab()`/`oklch()` color is written as a
 /// percentage in expanded output and as the channel's own stored number when
 /// compressed — the same digits for lab/lch, whose lightness runs 0–100, and
@@ -1199,6 +1252,81 @@ fn compressed_css_import_loses_its_prelude_space() {
     );
 }
 
+/// An `@import`'s modifiers are ONE string, spelled by the PARSER and written
+/// verbatim by `visitCssImport`: the media-rule serializer never runs, so the
+/// compressed comma form never reaches them — and dart's `_mediaQuery` writes
+/// the space that would separate a media type from the next identifier BEFORE
+/// it learns that identifier is `and`, then writes the whole `" and "` anyway,
+/// leaving TWO spaces. Measured against dart-sass 1.104.1 on 2026-09-21.
+#[test]
+fn a_css_imports_media_list_keeps_the_parsers_spelling() {
+    let both = |scss: &str, expanded: &str, compressed: &str| {
+        assert_eq!(css(scss), format!("{expanded}\n"), "{scss}");
+        assert_eq!(css_compressed(scss), compressed, "{scss}");
+    };
+    // Everything after the first comma goes through `_mediaQueryList`, where a
+    // bare media type collects the stray space.
+    both(
+        "@import url(\"a.css\") x, print and (orientation: landscape);\n",
+        "@import url(\"a.css\") x, print  and (orientation: landscape);",
+        "@import\"a.css\"x, print  and (orientation: landscape)",
+    );
+    // Only the FIRST `and` doubles: the rest come from the logic sequence.
+    both(
+        "@import url(\"a.css\") x, screen and (a: 1) and (b: 2);\n",
+        "@import url(\"a.css\") x, screen  and (a: 1) and (b: 2);",
+        "@import\"a.css\"x, screen  and (a: 1) and (b: 2)",
+    );
+    both(
+        "@import url(\"a.css\") x, screen and not (a: 1);\n",
+        "@import url(\"a.css\") x, screen  and not (a: 1);",
+        "@import\"a.css\"x, screen  and not (a: 1)",
+    );
+    // A modifier absorbs the stray space, `not` included, because the parser
+    // has already written it before reading the second identifier.
+    both(
+        "@import url(\"a.css\") x, only screen and (a: 1);\n",
+        "@import url(\"a.css\") x, only screen and (a: 1);",
+        "@import\"a.css\"x, only screen and (a: 1)",
+    );
+    both(
+        "@import url(\"a.css\") x, not screen and (a: 1);\n",
+        "@import url(\"a.css\") x, not screen and (a: 1);",
+        "@import\"a.css\"x, not screen and (a: 1)",
+    );
+    // A type with no conditions has nothing to be separated from, and a query
+    // that opens on a condition has no type. The media type's own case is kept.
+    both(
+        "@import url(\"a.css\") x, screen;\n",
+        "@import url(\"a.css\") x, screen;",
+        "@import\"a.css\"x, screen",
+    );
+    both(
+        "@import url(\"a.css\") (a: 1) and (b: 2), screen and (c: 3);\n",
+        "@import url(\"a.css\") (a: 1) and (b: 2), screen  and (c: 3);",
+        "@import\"a.css\"(a: 1) and (b: 2), screen  and (c: 3)",
+    );
+    both(
+        "@import url(\"a.css\") x, SCREEN and (A: 1);\n",
+        "@import url(\"a.css\") x, SCREEN  and (A: 1);",
+        "@import\"a.css\"x, SCREEN  and (A: 1)",
+    );
+    // Before any comma the modifier loop joins identifiers with ONE space, so
+    // the same query written first is spelled the ordinary way.
+    both(
+        "@import url(\"a.css\") screen and (a: 1);\n",
+        "@import url(\"a.css\") screen and (a: 1);",
+        "@import\"a.css\"screen and (a: 1)",
+    );
+    // A REAL `@media` rule re-serializes from its parsed queries, so it has one
+    // space here and the compressed comma form the import cannot have.
+    both(
+        "@media x, screen and (a: 1) { b { c: d } }\n",
+        "@media x, screen and (a: 1) {\n  b {\n    c: d;\n  }\n}",
+        "@media x,screen and (a: 1){b{c:d}}",
+    );
+}
+
 /// A `@supports` DECLARATION is not a value: dart writes its calculations
 /// verbatim, spaces and all, in both styles — `calc-size` included. Measured
 /// against dart-sass 1.103.1.
@@ -1751,7 +1879,8 @@ fn compressed_output_never_ends_with_a_semicolon() {
 
 /// A private-use character is escaped in expanded output and written RAW when
 /// compressing — dart trades the escape for the character once bytes are what
-/// matter. Measured against dart-sass 1.103.1.
+/// matter. Measured against dart-sass 1.103.1; the UNQUOTED writer and the
+/// `inspect` string were measured against 1.104.1 on 2026-09-21.
 #[test]
 fn compressed_writes_private_use_characters_raw() {
     let expanded = |scss: &str| compile(scss, &Options::default()).expect("compile");
@@ -1809,6 +1938,29 @@ fn compressed_writes_private_use_characters_raw() {
     assert_eq!(
         css_compressed(".a { b: inspect(\"\\e028\"); }"),
         ".a{b:\"\\e028\"}"
+    );
+    // The UNQUOTED writer follows the same rule as the quoted one, in both the
+    // BMP range and the supplementary planes.
+    assert_eq!(expanded("a { b: unquote(\"\\e000\"); }"), "a {\n  b: \\e000;\n}");
+    assert_eq!(
+        css_compressed("a { b: unquote(\"\\e000\"); }"),
+        "\u{feff}a{b:\u{e000}}"
+    );
+    assert_eq!(css_compressed("a { b: \\f0000; }"), "\u{feff}a{b:\u{f0000}}");
+    assert_eq!(
+        css_compressed("a { b: unquote(\"\\e000\") x; }"),
+        "\u{feff}a{b:\u{e000} x}"
+    );
+    // `inspect` escapes INSIDE the string it hands back, because it serializes
+    // in the default style wherever it is called from. So the value written
+    // here is ASCII — no BOM — and it is five characters long, not one.
+    assert_eq!(
+        css_compressed("@use \"sass:meta\";\na { b: meta.inspect((unquote(\"\\e000\"), x)); }"),
+        "a{b:\\e000, x}"
+    );
+    assert_eq!(
+        css_compressed("@use \"sass:string\";\na { b: string.length(inspect(unquote(\"\\e000\"))); }"),
+        "a{b:5}"
     );
 }
 
@@ -2788,6 +2940,36 @@ fn interpolation_resolves_inside_a_quoted_verbatim_value() {
         "@supports (--a: \"x\\ y\") {\n  .a {\n    b: c;\n  }\n}\n"
     );
 }
+/// A plain-CSS custom `@function`'s declaration takes dart's OPTIONAL space
+/// after the colon when its value is SassScript — the one byte a minifier
+/// exists to drop — while a VERBATIM value keeps whatever the source wrote, in
+/// both styles. Measured against dart-sass 1.104.1 on 2026-09-21.
+#[test]
+fn a_custom_functions_script_value_takes_the_optional_space() {
+    let both = |scss: &str, expanded: &str, compressed: &str| {
+        assert_eq!(css(scss), format!("{expanded}\n"), "{scss}");
+        assert_eq!(css_compressed(scss), compressed, "{scss}");
+    };
+    // An interpolated property makes the value SassScript.
+    both(
+        "@function --a() { #{result}: 1 + 1; }\n",
+        "@function --a() {\n  result: 2;\n}",
+        "@function --a(){result:2}",
+    );
+    both(
+        "@function --a() { #{result}: { b: c; } }\n",
+        "@function --a() {\n  result-b: c;\n}",
+        "@function --a(){result-b:c}",
+    );
+    // A verbatim value is source text: the space after its colon is not dart's
+    // to drop.
+    both(
+        "@function --a() { result: 1 + 1; }\n",
+        "@function --a() {\n  result: 1 + 1;\n}",
+        "@function --a(){result: 1 + 1}",
+    );
+}
+
 #[test]
 fn a_form_feed_is_a_newline_to_the_escape_reader() {
     // dart's `isNewline` counts U+000C, so a backslash cannot escape it — in a

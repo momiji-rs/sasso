@@ -78,7 +78,12 @@ inferred from its name.
 // sasso: q: 1 + 2;
 ```
 
-dart parses the body of a custom-property-named function as SassScript.
+dart parses the body of a custom-property-named function as SassScript, with
+exactly one exception: a declaration whose plain name is `result` (case-
+insensitively) is kept verbatim, because that is the function's return value.
+`result: 1 + 2` is `result: 1 + 2` in both, and `#{result}: 1 + 2` — which has
+no plain name — is `result: 3` in both. It is every OTHER property that
+diverges.
 
 ### 1.3 A degenerate calculation inside `@supports` is evaluated instead of preserved
 

@@ -693,23 +693,32 @@ pub(crate) fn push_quoted_with_styled(out: &mut String, text: &str, quote: char,
 /// Serialize an unquoted string for CSS / interpolation output (dart-sass
 /// `_visitUnquotedString`): a newline becomes a space, and a space directly
 /// after a newline is dropped so `"\a "`-style line breaks collapse to a single
-/// space; a private-use character is escaped as `\<hex>` (control characters,
-/// unlike in a quoted string, are written verbatim here); every other code
-/// point is written verbatim.
-pub(crate) fn serialize_unquoted(text: &str) -> String {
+/// space; a private-use character is escaped as `\<hex>` in every style BUT
+/// compressed (control characters, unlike in a quoted string, are written
+/// verbatim here); every other code point is written verbatim.
+pub(crate) fn serialize_unquoted(text: &str, compressed: bool) -> String {
     let mut out = String::new();
-    push_unquoted(&mut out, text);
+    push_unquoted(&mut out, text, compressed);
     out
 }
 
 /// [`serialize_unquoted`] into the caller's buffer. Almost every unquoted
 /// string is written verbatim — `bold`, `solid`, `inherit`, a url — so this
 /// costs nothing beyond the copy the caller was going to make anyway.
-pub(crate) fn push_unquoted(out: &mut String, text: &str) {
+pub(crate) fn push_unquoted(out: &mut String, text: &str, compressed: bool) {
+    // dart's `_tryPrivateUseCharacter` gives up immediately when compressing:
+    // an escape is for a READER, who cannot tell two unrendered glyphs apart,
+    // and compressed output has no reader. The character then goes out as its
+    // own UTF-8 bytes, which is what makes the file non-ASCII and earns it the
+    // BOM `emit` prepends.
+    let escapes_private_use = !compressed;
     // Fast path: nothing to rewrite unless a newline or private-use char is
     // present. Scan without allocating; only collect into a `Vec<char>` (needed
     // for the escape look-ahead) on the rare slow path.
-    if !text.chars().any(|c| c == '\n' || is_private_use(c as u32)) {
+    if !text
+        .chars()
+        .any(|c| c == '\n' || (escapes_private_use && is_private_use(c as u32)))
+    {
         out.push_str(text);
         return;
     }
@@ -718,7 +727,7 @@ pub(crate) fn push_unquoted(out: &mut String, text: &str) {
     let mut after_newline = false;
     for (i, &c) in chars.iter().enumerate() {
         let cp = c as u32;
-        if is_private_use(cp) {
+        if escapes_private_use && is_private_use(cp) {
             out.push('\\');
             out.push_str(&format!("{cp:x}"));
             let needs_space = chars
@@ -1059,7 +1068,7 @@ impl Value {
                 if s.quoted {
                     push_quoted_styled(out, &s.text, compressed);
                 } else {
-                    push_unquoted(out, &s.text);
+                    push_unquoted(out, &s.text, compressed);
                 }
             }
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -1097,7 +1106,7 @@ impl Value {
                 if s.quoted {
                     serialize_quoted_styled(&s.text, compressed)
                 } else {
-                    serialize_unquoted(&s.text)
+                    serialize_unquoted(&s.text, compressed)
                 }
             }
             Value::List(l) => l.to_css(compressed),
@@ -1807,7 +1816,10 @@ impl List {
                 // quote-less serializer (`_visitUnquotedString`): its newlines
                 // collapse to single spaces (issue_1786 `"#{a $str-with-lf}"`),
                 // unlike a directly interpolated string's raw text.
-                Value::Str(s) => push_unquoted(out, &s.text),
+                // Interpolation is serialized in the EXPANDED style in
+                // dart-sass whatever the output style is (`_serialize` takes
+                // the default), so a private-use character still escapes here.
+                Value::Str(s) => push_unquoted(out, &s.text, false),
                 other => other.write_interp(out),
             }
         }

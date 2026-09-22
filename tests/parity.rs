@@ -11471,3 +11471,128 @@ fn parity_module_filter_overload_via_function_reference() {
         "@use \"sass:color\";\n@use \"sass:meta\";\n.a {\n  a: meta.call(meta.get-function(\"grayscale\", $module: \"color\"), 1);\n  b: meta.call(meta.get-function(\"alpha\", $module: \"color\"), opacity=20);\n  c: meta.call(meta.get-function(\"grayscale\", $module: \"color\"), #abc);\n}\n",
     );
 }
+
+/// The percent-channel multiplication order, asked of dart rather than
+/// encoded: `_percentageOrUnitless` is `max * value / 100`, and both halves of
+/// the 0.4-max channels (the constructors and `color.change`) have to agree
+/// with it down to the last bit — the dust the other order leaves is what the
+/// compressed writer rounds, and rounding drops a leading zero dart keeps.
+#[test]
+fn parity_percent_channel_multiplication_order() {
+    for value in [
+        "oklab(50% -40% -75%)",
+        "oklab(50% 40% 75%)",
+        "oklch(50% 40% 90)",
+        "lab(50% -40% 30%)",
+        "lch(50% 40% 90deg)",
+        "rgb(19.9% 30.1% 40.7%)",
+        "hsl(120, 40.7%, 30.1%)",
+        "color.change(oklab(50% 0.2 -0.3), $a: -40%)",
+        "color.change(oklab(50% 0.2 -0.3), $b: -75%)",
+        "color.change(oklch(50% 0.2 90deg), $chroma: 40%)",
+        "color.change(lab(50% 20 30), $a: 40.7%)",
+        "color.change(red, $green: 19.9%)",
+        "color.change(red, $alpha: 40.7%)",
+        "color.to-space(oklab(50% -40% -75%), oklch)",
+        "color.channel(oklab(50% -40% -75%), \"a\")",
+        "color.channel(oklch(50% 40% 90deg), \"chroma\")",
+        "color.channel(rgb(19.9% 30% 40%), \"red\")",
+    ] {
+        let scss = format!("@use \"sass:color\";\na {{\n  b: {value};\n}}\n");
+        assert_parity(&scss);
+        assert_parity_compressed(&scss);
+    }
+    // Every percent, over the whole sweep of channel maxes, at a precision
+    // where the two orders part ways.
+    for pct in ["-40", "-19.9", "0.7", "19.9", "30.1", "40.7", "75"] {
+        let scss = format!(
+            "@use \"sass:color\";\na {{\n  b: oklab(50% {pct}% {pct}%);\n  c: lab(50% {pct}% {pct}%);\n  d: oklch(50% {pct}% 90deg);\n  e: lch(50% {pct}% 90deg);\n  f: rgb({pct}% {pct}% {pct}%);\n}}\n"
+        );
+        assert_parity(&scss);
+        assert_parity_compressed(&scss);
+    }
+}
+
+/// An `@import`'s modifiers are written verbatim from the PARSER's spelling,
+/// which has a stray space a media RULE never shows. This belongs in the live
+/// suite: it is a quirk, and the only way to be sure of a quirk is to ask.
+#[test]
+fn parity_css_import_media_spelling() {
+    for modifiers in [
+        "x, print and (orientation: landscape)",
+        "x, screen and (a: 1) and (b: 2)",
+        "x, screen and not (a: 1)",
+        "x, screen and ((a: 1) or (b: 2))",
+        "x, only screen and (a: 1)",
+        "x, not screen and (a: 1)",
+        "x, screen",
+        "x, print and (a: 1), tv and (b: 2), speech",
+        "(a: 1) and (b: 2), screen and (c: 3)",
+        "x, SCREEN and (A: 1)",
+        "screen and (a: 1)",
+        "screen and (a: 1), print and (b: 2)",
+    ] {
+        let scss = format!("@import url(\"a.css\") {modifiers};\n");
+        assert_parity(&scss);
+        assert_parity_compressed(&scss);
+        // The same queries under a real `@media`, which spells them its own way.
+        let media = format!("@media {modifiers} {{\n  b {{\n    c: d;\n  }}\n}}\n");
+        assert_parity(&media);
+        assert_parity_compressed(&media);
+    }
+    // Modifiers only an `@import` accepts, so there is no `@media` half.
+    for modifiers in [
+        "supports(display: flex) screen and (a: 1)",
+        "supports(display: flex) x, screen and (a: 1)",
+        "layer(a) screen, print and (b: 2)",
+        "layer screen, print and (b: 2)",
+    ] {
+        let scss = format!("@import url(\"a.css\") {modifiers};\n");
+        assert_parity(&scss);
+        assert_parity_compressed(&scss);
+    }
+}
+
+/// A plain-CSS custom callable's SassScript declaration takes the optional
+/// space; a verbatim one keeps its source text. Both kinds, in both styles.
+#[test]
+fn parity_custom_function_declaration_space() {
+    for scss in [
+        "@function --a() { #{result}: 1 + 1; }\n",
+        "@function --a() { #{result}: { b: c; } }\n",
+        "@function --a() { #{result}: { b: 1 + 1; c: 2 * 3; } }\n",
+        "@function --a() { result: 1 + 1; }\n",
+        "@function --a() { result:1 + 1; }\n",
+        "@function --a() { result: ; }\n",
+    ] {
+        assert_parity(scss);
+        assert_parity_compressed(scss);
+    }
+}
+
+/// A private-use character: escaped by the unquoted writer in every style but
+/// compressed, where it goes out as its own bytes and earns the BOM — while
+/// `inspect` escapes it whatever the style, because it serializes in the
+/// default one.
+#[test]
+fn parity_unquoted_private_use_character() {
+    for scss in [
+        "a { b: unquote(\"\\e000\"); }\n",
+        "a { b: unquote(\"\\f8ff\"); }\n",
+        "a { b: unquote(\"\\f0000\"); }\n",
+        "a { b: unquote(\"\\10fffd\"); }\n",
+        "a { b: \\f0000; }\n",
+        "a { b: unquote(\"\\e000\") x; }\n",
+        "a { b: (unquote(\"\\e000\"), x); }\n",
+        "a#{unquote(\"\\e000\")} { b: c; }\n",
+        "a { --x: unquote(\"\\e000\"); }\n",
+        "@use \"sass:meta\";\na { b: meta.inspect((unquote(\"\\e000\"), x)); }\n",
+        "@use \"sass:string\";\na { b: string.length(inspect(unquote(\"\\e000\"))); }\n",
+        "@use \"sass:string\";\na { b: string.length(inspect(unquote(\"\\e000\") x)); }\n",
+        // Not private use: raw in both styles already, and still non-ASCII.
+        "a { b: unquote(\"\\4e2d\"); }\n",
+    ] {
+        assert_parity(scss);
+        assert_parity_compressed(scss);
+    }
+}

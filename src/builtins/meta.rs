@@ -311,7 +311,13 @@ pub(crate) fn inspect_value(v: &Value) -> String {
                 // `"{text}"` turns `a"b` into INVALID CSS.
                 crate::value::serialize_quoted(&s.text)
             } else {
-                s.text.to_string()
+                // `_visitUnquotedString`, and so its private-use escape, runs
+                // HERE: dart inspects with `serializeValue(inspect: true)`,
+                // whose style is the default one, and hands back a string that
+                // already carries `\e000` — long enough to change
+                // `string.length`, and ASCII enough to leave a compressed
+                // stylesheet without the BOM a raw character would earn it.
+                crate::value::serialize_unquoted(&s.text, false)
             }
         }
         Value::List(l) => {
