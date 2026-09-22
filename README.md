@@ -152,10 +152,17 @@ names a binary explicitly, version unchecked, and `SASSO_BINARY=0` turns the
 hand-off off. `SASSO_DEBUG_ENGINE=1` prints which of these happened and why.
 `--watch` always stays in-process, and now by choice rather than for want of
 a watcher: the binary has one, and it polls, because a native watcher would
-be a runtime dependency. Measured on one save, macOS: the npm CLI's
-event-driven watch answers in 18-20 ms, the binary's poll in 13-55 ms and
-dart-sass in 47-51 ms. Handing off would trade the fastest of the three for
-the middle one. `--update` hands off only on the version-MATCHED path: the
+be a runtime dependency. Measured on macOS, one settled save per process,
+twelve fresh processes: the npm CLI answers in 34 ms (median), the binary in
+45 ms, dart-sass 1.104.1 in **13196 ms**. Handing off would trade the fastest
+of the three for the second.
+
+That third number is not a typo and not dart's fault: native filesystem
+events are what is slow on macOS. `fs.watch` on its own, no sasso involved,
+delivers in 552 ms (median) on one Mac here and drops 12 of 20 events
+entirely on another, against 0.2 ms on Linux. So since #164 the npm CLI does
+not rely on them either — it keeps `fs.watch` for latency and sweeps beside
+it for the guarantee. `--update` hands off only on the version-MATCHED path: the
 binary has the flag now, but `SASSO_BINARY` is unchecked by design and may
 name one from before it, so that route stays in-process too. `sasso --engine` reports the
 hand-off rather than taking it.
@@ -252,9 +259,11 @@ sasso never colors), `--indented`, `--stdin`. Exit codes match too (64 usage,
 `-w/--watch` are on both CLIs (#86): `--update` compares the output against
 the entry *and* every stylesheet the entry loads, as dart-sass does, and
 `--watch` follows that same set, refuses the same three shapes dart refuses,
-and prints the same banner and per-write line. `--[no-]poll` is accepted
-beside `--watch` and does nothing — the binary always polls, because a native
-watcher would mean a dependency; `src/watch.rs` has the measurements.
+and prints the same banner and per-write line. `--[no-]poll` selects how the npm CLI
+watches — `--poll` sweeps only, `--no-poll` uses node's `fs.watch` only, and
+the default is both (#164). On the binary it is still accepted and still does
+nothing, because that one always polls: a native watcher would mean a
+dependency. `src/watch.rs` and `wasm/npm/_poller.mjs` have the measurements.
 `sasso --help` lists everything.
 
 ## Conformance

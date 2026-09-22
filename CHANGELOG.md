@@ -11,6 +11,55 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--watch` in the npm CLI answered a save in about a second on macOS, and
+  sometimes not at all** (#164). It waited on `fs.watch`, and `fs.watch` is
+  the thing that is broken there. Measured with no sasso involved — watch a
+  directory, settle, write one file, time the callback, 20 samples 1200 ms
+  apart:
+
+  ```
+    macOS 26, Apple Silicon   node v22.22.3   20/20 delivered   median  552 ms
+    macOS 26, Intel           node v26.7.0     8/20 delivered   median 9132 ms
+    Linux, inotify            node v26.8.1    20/20 delivered   median  0.2 ms
+  ```
+
+  Twelve of twenty events never arrived at all on the Intel Mac, inside
+  fifteen seconds; a directory in `$HOME` rather than `/var/folders` made no
+  difference. dart-sass has the same problem for the same reason, and worse:
+  13196 ms median for a settled save on this machine.
+
+  So the watcher can no longer be what guarantees a save is seen. `fs.watch`
+  stays for latency — on Linux it answers in 0.2 ms and nothing beats it —
+  and a sweep runs beside it for the guarantee, on the binary's rule: a 50 ms
+  floor, an interval that grows with what a sweep costs, a 500 ms ceiling. A
+  sweep is 0.054 ms for ten files and 13.2 ms for five thousand, so a small
+  project spends 0.1% of a core.
+
+  ```
+    settled dependency save, macOS, median      before        after
+      npm CLI                                   2036 ms       24 ms
+      npm CLI, worst of 32                     13553 ms       46 ms
+    a save made the instant the watch starts
+      npm CLI, median                           1116 ms       55 ms
+      npm CLI, over 500 ms                       32/40         0/40
+  ```
+
+  The startup half needed its own fix: the sweep's baseline is now taken
+  BEFORE the compile reads anything, so a save made while that compile is
+  running is still seen. Stamping afterwards adopts the save as the baseline
+  and no later sweep can find it — the same rule as the binary's
+  `Snapshot::follow`, which keeps the earliest observation of a path.
+
+  `--[no-]poll` stops being a no-op on this CLI and starts meaning what it
+  means in dart: `--poll` sweeps only, `--no-poll` uses `fs.watch` only, and
+  the default is both.
+
+  Nothing was ever lost, which is what the issue originally claimed: the
+  saves it recorded as dropped were delivered 2.7 seconds later, past the
+  probe's own timeout.
+
 ### Added
 
 - **`-w`/`--watch` in the binary** (#86), which closes the flag gap that made
@@ -25,13 +74,19 @@ Conformance is tracked separately as a ratchet against the official
   the FFI those APIs need. What `std` offers is `fs::metadata`, and asking it
   repeatedly is a watcher.
 
-  Measured, it is not the slow option. One save, macOS, three samples:
+  Measured, it is not the slow option — it is the fast one. macOS, one
+  settled save per process, twelve fresh processes, median:
 
   ```
-    dart-sass 1.104.1   51 ms  47 ms  50 ms   (a native watcher)
-    sasso binary        29 ms  55 ms  13 ms   (this poll)
-    sasso npm CLI       20 ms  18 ms  19 ms   (node's fs.watch)
+    dart-sass 1.104.1   13196 ms   (its own native watcher)
+    sasso binary           45 ms   (this poll)
+    sasso npm CLI          34 ms   (fs.watch AND a poll beside it, #164)
   ```
+
+  An earlier version of this entry reported 51/29/20 ms from *one save each*,
+  which is not a measurement of a distribution whose tail runs to seconds.
+  See #164: native filesystem events on macOS are the slow part, in dart and
+  in node alike, and polling is what makes any of these three predictable.
 
   The interval is not a constant, because the cost is not: a sweep is about
   1.3 us per file, so 50 ms is free for ten files and 18% of a core for five
@@ -42,9 +97,8 @@ Conformance is tracked separately as a ratchet against the official
   `[stamp] Compiled x to y.` per file actually written, `--quiet` suppressing
   the lines but not the banner. dart's three usage refusals are refused with
   dart's wording and exit code: `--watch` to stdout, `--watch` with `--stdin`,
-  and `--poll` without `--watch`. `--[no-]poll` is accepted and does nothing
-  on both CLIs, for opposite reasons — this one always polls, and the npm CLI
-  always has node's watcher.
+  and `--poll` without `--watch`. `--[no-]poll` still does nothing on the
+  binary, which always polls; on the npm CLI it now chooses (#164).
 
   A burst of saves costs two compiles, not one per event: a provisional run
   at the head and an authoritative one behind it. A provisional FAILURE is

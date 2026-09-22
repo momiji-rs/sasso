@@ -3618,6 +3618,149 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   }
 }
 
+// === Phase 3a: CLI --watch --poll, the sweep with no watcher under it ===
+//
+// `--poll` turns node's `fs.watch` OFF, so nothing but the sweep can see
+// this save. That makes it the guard for the wiring: `_poller.mjs`'s own
+// tests drive a fake clock and know nothing about whether `cli.mjs` ever
+// starts one, and every other `--watch` case here would still pass on
+// events alone.
+//
+// It is also the flag a macOS user reaches for, and before #164 it was
+// accepted and ignored.
+{
+  const waitFor = async (pred, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (pred()) return true;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
+  };
+  const wdir = mkdtempSync(join(tmpdir(), "sasso-watchpoll-"));
+  writeFileSync(join(wdir, "main.scss"), `@use "v" as v;\n.a { color: v.$c; }\n`);
+  writeFileSync(join(wdir, "_v.scss"), `$c: red;\n`);
+  const outFile = join(wdir, "out.css");
+  const css = () => {
+    try {
+      return readFileSync(outFile, "utf8");
+    } catch {
+      return "";
+    }
+  };
+  const proc = spawn(process.execPath, [cliPath, "--no-source-map", "-I", join(wdir, "gen"), "--poll", "--watch", join(wdir, "main.scss"), outFile], {
+    stdio: "ignore",
+  });
+  try {
+    assert.ok(await waitFor(() => css().includes("red"), 20000), "cli --watch --poll: initial compile");
+    // Settled, so this cannot ride the catch-up that follows every
+    // provisional run — measuring that timer instead of the sweep is how
+    // the 12.4ms in the old bench came about.
+    await new Promise((r) => setTimeout(r, 500));
+    writeFileSync(join(wdir, "_v.scss"), `$c: blue;\n`);
+    assert.ok(
+      await waitFor(() => css().includes("blue"), 20000),
+      "cli --watch --poll: the sweep alone sees a dependency change",
+    );
+    // …and a file that did not exist when the watch started, which is the
+    // directory half of the sweep rather than the stamp half.
+    await new Promise((r) => setTimeout(r, 500));
+    writeFileSync(join(wdir, "main.scss"), `@use "v" as v;\n@use "extra";\n.a { color: v.$c; }\n`);
+    assert.ok(await waitFor(() => /error/i.test(css()) || css().includes("blue"), 20000), "cli --watch --poll: still alive");
+    await new Promise((r) => setTimeout(r, 500));
+    writeFileSync(join(wdir, "_extra.scss"), `.z { color: lime; }\n`);
+    assert.ok(
+      await waitFor(() => css().includes("lime"), 20000),
+      "cli --watch --poll: the sweep sees a dependency ARRIVE",
+    );
+    // …and a LOAD PATH that does not exist yet. This was the probes'
+    // job, and `makeProbe` is `fs.watch` underneath, so under `--poll`
+    // they are not armed at all — the sweep has to cover it, because an
+    // absent load path is already in the watched set and its entries
+    // appear the moment it does.
+    //
+    // Not guarded, and worth saying rather than pretending: nothing here
+    // can assert that no `fs.watch` was OPENED. On this machine the
+    // difference showed up as latency — 516-4064 ms through the probe
+    // against 11-23 ms through the sweep — but on Linux `fs.watch` is
+    // 0.2 ms and a timing assertion would tell the two apart nowhere.
+    await new Promise((r) => setTimeout(r, 500));
+    writeFileSync(join(wdir, "main.scss"), `@use "v" as v;
+@use "viaload" as l;
+.a { color: v.$c; b: l.$d; }
+`);
+    await new Promise((r) => setTimeout(r, 500));
+    mkdirSync(join(wdir, "gen"));
+    writeFileSync(join(wdir, "gen", "_viaload.scss"), `$d: olive;
+`);
+    assert.ok(
+      await waitFor(() => css().includes("olive"), 20000),
+      "cli --watch --poll: the sweep sees a load path that did not exist",
+    );
+    console.log("ok: cli --watch --poll — the sweep alone sees a change, an arrival, and a created load path");
+  } finally {
+    proc.kill();
+  }
+}
+
+// === Phase 3a2: an idle --watch compiles ONCE ===
+//
+// A spurious recompile is silent — identical CSS skips the write and the
+// narration — so counting `Compiled` lines cannot see one. A `@warn` in the
+// entry fires on every compile, which is what makes this countable at all.
+//
+// The case that needs it: `@use "sub/dep"` puts `sub/` in the watched set
+// only AFTER the first compile resolves it, so the sweep's pre-compile
+// baseline has never seen anything in there. Carrying that baseline across
+// unchanged makes every file in `sub/` an arrival — measured at three
+// compiles per idle startup instead of one.
+{
+  const wdir = mkdtempSync(join(tmpdir(), "sasso-watchidle-"));
+  mkdirSync(join(wdir, "sub"));
+  writeFileSync(join(wdir, "main.scss"), `@use "sub/dep" as d;\n@warn "COMPILED";\n.a { color: d.$c; }\n`);
+  writeFileSync(join(wdir, "sub", "_dep.scss"), `$c: red;\n`);
+  // Neighbours in the newly-scoped directory, so its arrival would show.
+  for (let k = 0; k < 3; k++) writeFileSync(join(wdir, "sub", `other${k}.txt`), "x\n");
+
+  const outFile = join(wdir, "out.css");
+  const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
+    cwd: wdir,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let log = "";
+  proc.stdout.on("data", (b) => (log += b));
+  proc.stderr.on("data", (b) => (log += b));
+  const compiles = () => log.split("\n").filter((l) => l.includes("COMPILED")).length;
+
+  try {
+    // Asserted, not merely waited for. Falling out of this loop at the
+    // deadline and carrying on would make a startup regression PASS: a
+    // compile that ran and produced the wrong CSS still leaves
+    // `compiles()` at 1, which is what the assertion below wants to see.
+    const deadline = Date.now() + 20000;
+    let started = false;
+    while (Date.now() < deadline) {
+      try {
+        if (readFileSync(outFile, "utf8").includes("red")) {
+          started = true;
+          break;
+        }
+      } catch {
+        /* not yet */
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.ok(started, `the first compile never landed: ${JSON.stringify(log)}`);
+    // Nothing is touched from here. Several sweep intervals (50ms floor)
+    // and several coalescing windows.
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(compiles(), 1, `an idle watch compiled more than once: ${JSON.stringify(log)}`);
+    console.log("ok: cli --watch --poll — an idle watch with a subdirectory dependency compiles once");
+  } finally {
+    proc.kill();
+  }
+}
+
 // === Phase 3b: CLI --watch, what it SAYS ===
 //
 // The functional watch test above starts the child with `stdio: "ignore"`
@@ -3647,9 +3790,13 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       return false;
     };
     try {
-      await until(() => stdout.includes("watching for changes"), 15000);
+      // Asserted rather than awaited. `until` returns false at its
+      // deadline, and dropping that lets a watch that never started reach
+      // the narration assertions below, where it fails as "the banner is
+      // missing" — a true statement about the wrong thing.
+      assert.ok(await until(() => stdout.includes("watching for changes"), 15000), `the watch never announced itself: ${stderr}`);
       writeFileSync(src, ".a { color: blue; }\n"); // one recompile
-      await until(() => readFileSync(out, "utf8").includes("blue"), 15000);
+      assert.ok(await until(() => readFileSync(out, "utf8").includes("blue"), 15000), `the recompile never landed: ${stderr}`);
       await new Promise((r) => setTimeout(r, 250)); // let the line land
     } finally {
       proc.kill();
@@ -4429,6 +4576,229 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
 // loaded CI machine stretching those gaps — the first version of the
 // burst test asserted `< 8` and did not notice coalescing being removed
 // entirely. With a fake clock there is no gap to stretch.
+// === What the sweep may treat as "what the compile read" (#164) ===
+//
+// The end-to-end case is a race — a save has to land between the
+// compile's read of a file and the snapshot taken after it — so it is
+// MEASURED rather than pinned here, the same call `_coalesce.mjs` makes
+// about its own property. A 900k-rule entry so the compile takes seconds,
+// `sub/_dep.scss` saved five seconds in, `--poll` so nothing but the
+// sweep can answer:
+//
+//   trusting the post-compile mtime    6 saves lost out of 6
+//   this rule                          0 lost out of 6
+//
+// What is pinned is the rule.
+{
+  const { baselineFor } = await import("./npm/_baseline.mjs");
+
+  // No compile in progress: there is nothing to distrust.
+  assert.equal(baselineFor(1000, undefined), 1000, "baseline: with no compile, the reading stands");
+  assert.equal(baselineFor(null, undefined), null, "baseline: …including for a file that is not there");
+
+  // Older than the compile: the compile read THIS, so it is the baseline.
+  assert.equal(baselineFor(999, 1000), 999, "baseline: a file older than the compile is trusted");
+  assert.equal(baselineFor(0, 1000), 0, "baseline: however much older");
+
+  // At or after it: the compile may have read the bytes before this save,
+  // so the reading cannot be the baseline — `null`, which the sweep reads
+  // as a difference and answers with one catch-up compile.
+  assert.equal(baselineFor(1000, 1000), null, "baseline: the same millisecond is not trusted");
+  assert.equal(baselineFor(1001, 1000), null, "baseline: a file that moved after the compile began is not trusted");
+
+  // A file that is gone is `null` either way, and that is not the same
+  // statement — but it lands on the same value, and the sweep treats a
+  // missing file as unchanged only while it stays missing.
+  assert.equal(baselineFor(null, 1000), null, "baseline: an absent file has no reading to trust");
+
+  console.log("ok: baseline — a reading taken after the compile began is not what the compile read");
+}
+
+// === The poll beside the watcher (#164) ===
+//
+// `fs.watch` is the fast path, and on macOS it cannot be trusted on its
+// own. Measured with no sasso involved — a directory watched, settled,
+// one file written, the callback timed, 20 samples 1200ms apart:
+//
+//   macOS 26, Apple Silicon   node v22.22.3   20/20 delivered   median  552ms
+//   macOS 26, Intel           node v26.7.0     8/20 delivered   median 9132ms
+//   Linux, inotify            node v26.8.1    20/20 delivered   median  0.2ms
+//
+// Twelve of twenty events never arrived at all on the Intel Mac, inside
+// fifteen seconds. So the sweep is what GUARANTEES a save is seen, and the
+// watcher only makes the common case instant.
+//
+// Its interval rule is tested here rather than from a `--watch` test for
+// the same reason `_coalesce.mjs`'s is: the alternative measures the
+// machine. With a clock the test drives, a 2ms sweep earns exactly 100ms,
+// every time.
+{
+  const { makePoller, nextInterval, MIN_INTERVAL_MS, MAX_INTERVAL_MS, SWEEP_BUDGET } = await import("./npm/_poller.mjs");
+
+  assert.equal(SWEEP_BUDGET, 50, "poller: a sweep may have 2% of a core");
+  // 0.054ms is the measured ten-file sweep; 13.184ms the 5000-file one.
+  assert.equal(nextInterval(0.054), MIN_INTERVAL_MS, "poller: ten files poll at the floor");
+  assert.equal(nextInterval(0), MIN_INTERVAL_MS, "poller: a free sweep does not busy-loop");
+  assert.equal(nextInterval(2), 100, "poller: the wait is the sweep times the budget");
+  assert.equal(nextInterval(13.184), MAX_INTERVAL_MS, "poller: 5000 files are capped, not unbounded");
+  assert.equal(nextInterval(4, 25), 100, "poller: the budget is a parameter");
+
+  /** One pending timer, driven by hand. */
+  const rig = ({ sweep, onChange = () => {} }) => {
+    let t = 0;
+    let queued = null;
+    let armed = 0;
+    const poller = makePoller({
+      sweep: () => sweep(() => t, (ms) => (t += ms)),
+      onChange,
+      setTimer: (fn, ms) => (armed++, (queued = { fn, ms }), armed),
+      clearTimer: () => (queued = null),
+      now: () => t,
+    });
+    return {
+      poller,
+      waited: () => queued?.ms,
+      armedCount: () => armed,
+      pending: () => queued !== null,
+      tick: () => {
+        const q = queued;
+        queued = null;
+        q.fn();
+      },
+      raw: () => queued,
+    };
+  };
+
+  // A sweep that reports a change wakes the caller exactly once.
+  {
+    let moved = false;
+    const seen = [];
+    const r = rig({ sweep: () => moved, onChange: () => seen.push("change") });
+    r.poller.start();
+    assert.equal(r.waited(), MIN_INTERVAL_MS, "poller: the first wait is the floor");
+    r.tick();
+    assert.deepEqual(seen, [], "poller: a quiet sweep says nothing");
+    moved = true;
+    r.tick();
+    assert.deepEqual(seen, ["change"], "poller: a sweep that moved reports once");
+    moved = false;
+    r.tick();
+    assert.deepEqual(seen, ["change"], "poller: and not again once it is quiet");
+  }
+
+  // The interval grows with what a sweep COSTS — the property that keeps
+  // a 5000-file tree from burning a core all afternoon.
+  {
+    let cost = 0.054;
+    const r = rig({
+      sweep: (_now, advance) => {
+        advance(cost);
+        return false;
+      },
+    });
+    r.poller.start();
+    r.tick();
+    assert.equal(r.waited(), MIN_INTERVAL_MS, "poller: ten files stay at the floor");
+    cost = 2;
+    r.tick();
+    assert.equal(r.waited(), 100, "poller: a 2ms sweep earns a 100ms wait");
+    cost = 40;
+    r.tick();
+    assert.equal(r.waited(), MAX_INTERVAL_MS, "poller: and an enormous one is capped");
+  }
+
+  // A sweep that throws is not the end of the watch: the next one is an
+  // interval away, and `fs.watch` is still live underneath. A safety net
+  // that can take the process down is worse than no safety net.
+  {
+    const seen = [];
+    const r = rig({
+      sweep: () => {
+        throw new Error("EIO");
+      },
+      onChange: () => seen.push("change"),
+    });
+    r.poller.start();
+    r.tick(); // must not throw
+    assert.ok(r.pending(), "poller: a thrown sweep still rearms");
+    assert.deepEqual(seen, [], "poller: and reports nothing it did not see");
+  }
+
+  // …and neither is a compile that throws out of `onChange`: the timer
+  // is rearmed BEFORE the callback, so the error reaches the caller with
+  // the next sweep already scheduled.
+  {
+    const r = rig({
+      sweep: () => true,
+      onChange: () => {
+        throw new Error("compile blew up");
+      },
+    });
+    r.poller.start();
+    assert.throws(() => r.tick(), /compile blew up/, "poller: the caller's error is not swallowed");
+    assert.ok(r.pending(), "poller: but the next sweep is already armed");
+  }
+
+  // Stopping stops it, and starting twice does not run two.
+  {
+    const r = rig({ sweep: () => false });
+    r.poller.start();
+    r.poller.start();
+    assert.equal(r.armedCount(), 1, "poller: start is idempotent");
+    r.poller.stop();
+    assert.equal(r.raw(), null, "poller: stop disarms");
+    r.poller.stop(); // must not throw
+  }
+
+  // …including a stop decided DURING a tick. `timer` is null for the whole
+  // of one, so it cannot answer "are we still running": a `stop()` from
+  // inside the sweep found nothing to clear and the tick rearmed on top of
+  // it. Nothing in `cli.mjs` stops a poller today, which is exactly why
+  // this needs a guard rather than a reader noticing.
+  {
+    let stopped = 0;
+    let queued = null;
+    let armed = 0;
+    const { makePoller: mk } = await import("./npm/_poller.mjs");
+    const poller = mk({
+      sweep: () => {
+        if (stopped++ === 0) poller.stop();
+        return false;
+      },
+      onChange: () => {},
+      setTimer: (fn, ms) => (armed++, (queued = { fn, ms }), armed),
+      clearTimer: () => (queued = null),
+      now: () => 0,
+    });
+    poller.start();
+    const first = queued;
+    queued = null;
+    first.fn();
+    assert.equal(queued, null, "poller: stop() from inside the sweep is not rearmed over");
+  }
+
+  // …and a stop from inside onChange, where the rearm has already
+  // happened, must still take.
+  {
+    let queued = null;
+    const { makePoller: mk } = await import("./npm/_poller.mjs");
+    const poller = mk({
+      sweep: () => true,
+      onChange: () => poller.stop(),
+      setTimer: (fn, ms) => ((queued = { fn, ms }), 1),
+      clearTimer: () => (queued = null),
+      now: () => 0,
+    });
+    poller.start();
+    const first = queued;
+    queued = null;
+    first.fn();
+    assert.equal(queued, null, "poller: stop() from inside onChange clears the rearm");
+  }
+
+  console.log("ok: poller — floor, budget, ceiling, a sweep that throws, start/stop");
+}
+
 {
   const { coalesce } = await import("./npm/_coalesce.mjs");
 
