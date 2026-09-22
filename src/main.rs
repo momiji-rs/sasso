@@ -1033,7 +1033,6 @@ struct Shared {
     source_map_urls: SourceMapUrls,
     /// Generate a source map for file targets (dart default: yes).
     file_source_map: bool,
-    /// Write an error stylesheet to a file target on failure (dart default: yes).
     /// `--watch` is running. Only the narration cares: the flag's behaviour
     /// lives in `run_watch`, but the line dart prints per written file is
     /// emitted from the unit that wrote it, like `--update`'s.
@@ -1050,6 +1049,8 @@ struct Shared {
     /// authoritative run is guaranteed and why `--update`'s freshness check
     /// is off for every run after the first (see `run_watch`).
     provisional: bool,
+    /// Write an error stylesheet to a file target on failure (dart default:
+    /// yes). Off means the opposite side effect: a stale output is REMOVED.
     file_error_css: bool,
     /// Print an error stylesheet to stdout on failure (`--error-css`, explicit).
     stdout_error_css: bool,
@@ -1864,6 +1865,86 @@ fn finish_compile_error(
                 outcome.disturbed.push(output.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod no_error_css_tests {
+    use super::*;
+
+    /// `--watch` with `--no-error-css`: the only combination that removes an
+    /// output rather than writing an error stylesheet over it.
+    fn shared() -> Shared {
+        Shared {
+            load_paths: Vec::new(),
+            style: OutputStyle::Expanded,
+            unicode: true,
+            charset: true,
+            quiet: false,
+            quiet_deps: false,
+            update: false,
+            silenced: Vec::new(),
+            no_css: false,
+            embed_sources: false,
+            embed_source_map: false,
+            source_map_urls: SourceMapUrls::Relative,
+            file_source_map: false,
+            watch: true,
+            provisional: false,
+            file_error_css: false,
+            stdout_error_css: false,
+        }
+    }
+
+    fn unit(dir: &Path) -> Unit {
+        Unit {
+            source: Source::File(dir.join("main.scss")),
+            url: "main.scss".to_string(),
+            syntax: Syntax::Scss,
+            target: Target::File(dir.join("out.css")),
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sasso_{name}"));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A removal that removed nothing disturbed nothing.
+    ///
+    /// `disturbed` is a one-way door: `Snapshot::follow` puts the name into
+    /// the directory's `minus` set and never takes it out again. Recording a
+    /// removal that did not happen would therefore blind the watch to that
+    /// filename for the rest of the run — so the push belongs on the `Ok`
+    /// arm, and `NotFound` must reach neither it nor the error report.
+    #[test]
+    fn a_removal_of_an_absent_output_disturbs_nothing() {
+        let dir = scratch("no_error_css_absent");
+        let mut outcome = Outcome::failed(Status::CompileError, String::new());
+        finish_compile_error(&unit(&dir), &shared(), &[], "boom", "boom", &mut outcome);
+        let disturbed = outcome.disturbed.clone();
+        let stderr = outcome.stderr.clone();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(disturbed.is_empty(), "{disturbed:?}");
+        assert!(stderr.is_empty(), "{stderr:?}");
+    }
+
+    /// …and one that did remove a file did, because that moves the
+    /// directory's mtime exactly as a creation does.
+    #[test]
+    fn a_removal_of_a_present_output_is_a_disturbance() {
+        let dir = scratch("no_error_css_present");
+        let out = dir.join("out.css");
+        std::fs::write(&out, ".a{}").unwrap();
+        let mut outcome = Outcome::failed(Status::CompileError, String::new());
+        finish_compile_error(&unit(&dir), &shared(), &[], "boom", "boom", &mut outcome);
+        let disturbed = outcome.disturbed.clone();
+        let survived = out.exists();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(disturbed, vec![out]);
+        assert!(!survived, "the stale output outlived the failed compile");
     }
 }
 

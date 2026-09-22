@@ -3337,3 +3337,81 @@ fn watch_declines_to_write_over_a_dependency_that_failed_to_load() {
         "the dependency was overwritten by the error stylesheet about it",
     );
 }
+
+/// A file arriving at the OUTPUT's own path is still seen.
+///
+/// `--no-error-css` on a failing compile removes the output, and a removal
+/// that really removed something is recorded so the watch does not answer
+/// its own write. A removal of a file that was never there must NOT be:
+/// `Snapshot::follow` puts a recorded name into the directory's `minus` set
+/// and never takes it out, so one bogus record would hide that filename for
+/// the rest of the run.
+///
+/// Reachable because `@use "out"` resolves to `out.css` as a plain CSS
+/// module, so the arriving file is both a dependency and the output path.
+/// The first unit then declines to write over a file that is its own source
+/// — deliberately, and silently — which is why the recompile is observed
+/// through a second unit's narration rather than through `out.css`.
+#[test]
+fn watch_sees_a_file_arrive_at_the_output_path() {
+    use std::time::{Duration, Instant};
+
+    let dir = scratch("watch_arrival_at_output");
+    write(&dir, "main.scss", "@use \"out\";\n.a { color: red; }\n");
+    write(&dir, "other.scss", ".z { color: green; }\n");
+
+    let log = dir.join("log.txt");
+    let mut child = std::process::Command::new(BIN)
+        .args([
+            "--no-source-map",
+            "--no-error-css",
+            "--watch",
+            "main.scss:out.css",
+            "other.scss:other.css",
+        ])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::from(std::fs::File::create(&log).unwrap()))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn --watch");
+
+    let compiled = || {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("Compiled other.scss"))
+            .count()
+    };
+    let until = |pred: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    };
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // main.scss fails — `out.css` does not exist — and `--no-error-css`
+        // asks to remove an output that was never there. other.scss compiles.
+        assert!(until(&|| compiled() >= 1), "the first compile never landed");
+        std::thread::sleep(Duration::from_millis(400));
+
+        // The missing dependency appears, at the output's own path. Nothing
+        // else is touched: the only change on disk is that one file.
+        std::fs::write(dir.join("out.css"), ".b { color: blue; }\n").unwrap();
+        assert!(
+            until(&|| compiled() >= 2),
+            "the watch went blind to its own output's filename",
+        );
+    }));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
