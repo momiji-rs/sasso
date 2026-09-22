@@ -67,8 +67,8 @@ Conformance is tracked separately as a ratchet against the official
   that the npm CLI accepts every native flag, which is how the binary fell two
   behind unnoticed; differences are now split into ones that will never cross
   and ones that are gaps, and a gap that has since been closed fails the build
-  so the list cannot go stale. `--watch` remains npm-only: it needs a file
-  watcher, and this crate's `[dependencies]` is empty.
+  so the list cannot go stale. `--watch` was the second of the two, and the
+  entry above closes it.
 
 ### Fixed
 
