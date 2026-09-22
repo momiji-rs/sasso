@@ -13,6 +13,45 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **`--watch` in the npm CLI printed every diagnostic twice per save**
+  (#165). A burst is a provisional run plus an authoritative catch-up, and
+  both reported. A provisional FAILURE was already silent, for the reason
+  `_coalesce.mjs` gives — what it read is not always what the save finally
+  left there — and a `@warn` is the same claim about the same bytes.
+
+  Measured, one `@warn` and three saves:
+
+  ```
+    dart-sass 1.104.1   WARNING x4    (one at startup, one per save)
+    sasso binary        WARNING x4
+    npm, before         WARNING x7
+    npm, after          WARNING x4
+  ```
+
+  Two rules do it, and the second matters more than it looks. A
+  provisional run compiles with `Logger.silent` and narrates nothing at
+  all — the binary drops its whole stdout for the same reason — so the
+  catch-up 50 ms behind it is the run that speaks. That also puts the
+  warning BEFORE the `Compiled` line, which is the order dart and the
+  binary both print (measured 2026-09-22, all three).
+
+  And an authoritative run's diagnostics are captured rather than let
+  through, so a run that turns out to have produced exactly the CSS
+  already on disk can say nothing at all. Without that, macOS delivering
+  one save twice — once from the sweep, once from an `fs.watch` event
+  seconds later (#164) — printed the warning again for work that produced
+  nothing. Measured before this, four runs of three saves: 5, 8, 7, 8
+  warnings where dart prints 4.
+
+  ```
+    cli --watch — one save prints one @warn, and a save that changes
+                  nothing prints none
+  ```
+
+  Verified on Linux too, where the watcher fires once and the count is
+  exact in all three modes: 4, 4, 4.
+
+
 - **`--watch` in the npm CLI answered a save in about a second on macOS, and
   sometimes not at all** (#164). It waited on `fs.watch`, and `fs.watch` is
   the thing that is broken there. Measured with no sasso involved — watch a

@@ -1325,6 +1325,21 @@ function runWatch(input, output, common, opts) {
   // which must clear it or fixing a typo back to what it was would find
   // the CSS unchanged and leave the error stylesheet on disk forever.
   let onDisk = null;
+  // Did anything in THIS burst actually produce new CSS?
+  //
+  // A burst is a provisional run plus its catch-up, and the catch-up
+  // almost always produces exactly what the provisional already wrote —
+  // so "did this run write" is the wrong question to ask when deciding
+  // whether to report. "Did this burst write" is the right one.
+  //
+  // It is also what separates a real save from a second notification of
+  // one. On macOS a save reaches the watch twice, once from the sweep and
+  // again from an `fs.watch` event seconds later (#164), and the second
+  // burst produces nothing new at either step. Comparing the diagnostic
+  // TEXT instead cannot tell those apart, because one save's `@warn` is
+  // usually the same string as the last one's — tried, and it silenced
+  // every save after the first.
+  let burstWrote = false;
   const artifacts = (result) =>
     `${result.css}\u0000${result.sourceMap ? JSON.stringify(result.sourceMap) : ""}`;
   // The last set of files a compile actually loaded, seeded with the entry.
@@ -1562,10 +1577,44 @@ function runWatch(input, output, common, opts) {
    * the terminal — one window later.
    */
   const recompile = (provisional) => {
+    // A provisional run is the head of a burst, so it starts a new one.
+    if (provisional) burstWrote = false;
     // BEFORE the compile reads a single file — see `takeSnapshots`.
     const before = polling || sawNameless ? snapshotBefore() : undefined;
     try {
-      const result = compile(input, common);
+      // A provisional run says NOTHING, and its `@warn`s are the half that
+      // was missing. Its failures were already silent, for the reason in
+      // `_coalesce.mjs`: what it read is not always what the save finally
+      // left there. A warning is the same claim about the same bytes, so
+      // printing it twice per save is printing it once too often —
+      // measured against dart 1.104.1, one `@warn` and three saves:
+      //
+      //   dart            WARNING x4   (one at startup, one per save)
+      //   sasso binary    WARNING x4
+      //   npm, before     WARNING x7
+      //
+      // The binary drops a provisional run's whole output for this; here
+      // the errors were already dropped and only the logger was left.
+      //
+      // An authoritative run's diagnostics are CAPTURED rather than let
+      // through: whether they are worth printing is not known until the
+      // CSS has been compared with what is already on disk, and by then
+      // the engine's logger has long since written them.
+      let said = "";
+      let result;
+      if (provisional) {
+        result = compile(input, { ...common, logger: Logger.silent });
+      } else {
+        const ran = captureStderr(() => compile(input, common));
+        said = ran.text;
+        if (ran.error) {
+          // Whatever it managed to warn about before failing is still the
+          // user's to see; the catch below adds the error itself.
+          if (said) writeStderrSync(said);
+          throw ran.error;
+        }
+        result = ran.value;
+      }
       // Watch before emitting: once the output file is visible, dependency
       // watchers are guaranteed live (a change saved right after the output
       // appears must not fall between emit and watcher registration).
@@ -1582,6 +1631,7 @@ function runWatch(input, output, common, opts) {
       // stylesheet every time you save it is the one outcome worth
       // ruling out even at the cost of saying nothing.
       if (aliasesASource()) {
+        if (said) writeStderrSync(said);
         failing = false;
         return true;
       }
@@ -1592,14 +1642,30 @@ function runWatch(input, output, common, opts) {
       // print a second `Compiled` line where dart prints one per save.
       const produced = artifacts(result);
       if (onDisk !== null && onDisk === produced) {
+        // Nothing new from this run. Report only if the burst it belongs
+        // to did produce something — that is the catch-up after a real
+        // save, where the provisional already wrote the CSS and this run
+        // is the one allowed to speak about it.
+        if (!provisional && burstWrote) {
+          if (said) writeStderrSync(said);
+          if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
+        }
         failing = false;
         return true;
       }
+      // Before the `Compiled` line, which is the order dart prints them in.
+      if (said) writeStderrSync(said);
       const writeError = emit(result, output, common.sourceMap, opts);
       if (writeError) process.stderr.write(`${writeError}\n`);
       else {
         onDisk = produced;
-        if (!opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
+        burstWrote = true;
+        // A provisional run narrates nothing, exactly as the binary's
+        // does: its whole stdout is dropped there. The catch-up 50ms
+        // behind it says the line instead, which is what puts the
+        // WARNING before it — the order dart and the binary both print
+        // (measured 2026-09-22, all three engines).
+        if (!provisional && !opts.noCss && !opts.quiet) process.stdout.write(compiledLine(input, output));
       }
       failing = false;
     } catch (e) {
