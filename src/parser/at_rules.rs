@@ -1156,6 +1156,7 @@ impl Parser {
                             // well as outside it — the string's TEXT is
                             // verbatim, `#{…}` is not part of it.
                             Some('#') if self.sc.peek_at(1) == Some('{') => {
+                                let interp_mark = self.sc.mark();
                                 if !lit.is_empty() {
                                     pieces.push(take_lit(&mut lit));
                                 }
@@ -1166,6 +1167,7 @@ impl Parser {
                                 if !self.sc.eat('}') {
                                     return Err(Error::at("expected \"}\"", self.sc.position()));
                                 }
+                                self.reject_plain_css_interp(interp_mark)?;
                                 pieces.push(TplPiece::Interp(e));
                             }
                             Some(ch) => {
@@ -1190,6 +1192,7 @@ impl Parser {
                     prev_newline = false;
                 }
                 '#' if self.sc.peek_at(1) == Some('{') => {
+                    let interp_mark = self.sc.mark();
                     if !lit.is_empty() {
                         pieces.push(take_lit(&mut lit));
                     }
@@ -1200,6 +1203,7 @@ impl Parser {
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
+                    self.reject_plain_css_interp(interp_mark)?;
                     pieces.push(TplPiece::Interp(e));
                     prev_newline = false;
                     wrote_anything = true;
@@ -1338,6 +1342,7 @@ impl Parser {
                     break;
                 }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    let interp_mark = self.sc.mark();
                     if !lit.is_empty() {
                         pieces.push(take_lit(&mut lit));
                     }
@@ -1348,6 +1353,7 @@ impl Parser {
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\".", self.sc.position()));
                     }
+                    self.reject_plain_css_interp(interp_mark)?;
                     pieces.push(TplPiece::Interp(e));
                 }
                 // CSS treats CR, FF, and CRLF as newlines inside a comment;
@@ -1397,6 +1403,7 @@ impl Parser {
                 lit.push(ch);
             }
             Some('#') if self.sc.peek_at(1) == Some('{') => {
+                let interp_mark = self.sc.mark();
                 self.sc.bump();
                 self.sc.bump();
                 let e = self.parse_value()?;
@@ -1404,6 +1411,7 @@ impl Parser {
                 if !self.sc.eat('}') {
                     return Err(Error::at("expected \"}\"", self.sc.position()));
                 }
+                self.reject_plain_css_interp(interp_mark)?;
                 if !lit.is_empty() {
                     pieces.push(take_lit(&mut lit));
                 }
@@ -1440,7 +1448,7 @@ impl Parser {
                     lit.push(ch);
                 }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
-                    self.reject_plain_css_interp()?;
+                    let interp_mark = self.sc.mark();
                     self.sc.bump();
                     self.sc.bump();
                     let e = self.parse_value()?;
@@ -1448,6 +1456,7 @@ impl Parser {
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
+                    self.reject_plain_css_interp(interp_mark)?;
                     if !lit.is_empty() {
                         pieces.push(take_lit(lit));
                     }
@@ -1592,6 +1601,7 @@ impl Parser {
     fn parse_interp_at_rule(&mut self, mut name: Vec<TplPiece>) -> Result<Stmt, Error> {
         loop {
             if self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{') {
+                let interp_mark = self.sc.mark();
                 self.sc.bump();
                 self.sc.bump();
                 self.skip_ws_inline();
@@ -1600,6 +1610,7 @@ impl Parser {
                 if !self.sc.eat('}') {
                     return Err(Error::at("expected \"}\"", self.sc.position()));
                 }
+                self.reject_plain_css_interp(interp_mark)?;
                 name.push(TplPiece::Interp(e));
                 continue;
             }
@@ -1884,6 +1895,7 @@ impl Parser {
     fn parse_media_or_interp(&mut self) -> Result<MediaInParens, Error> {
         self.skip_media_ws();
         if self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{') {
+            let interp_mark = self.sc.mark();
             self.sc.bump();
             self.sc.bump();
             let e = self.parse_value()?;
@@ -1891,6 +1903,7 @@ impl Parser {
             if !self.sc.eat('}') {
                 return Err(Error::at("expected \"}\"", self.sc.position()));
             }
+            self.reject_plain_css_interp(interp_mark)?;
             return Ok(MediaInParens::Interp(e));
         }
         self.parse_media_in_parens()
@@ -1903,6 +1916,7 @@ impl Parser {
         self.skip_media_ws();
         // A raw interpolation operand is spliced verbatim.
         if self.sc.peek() == Some('#') && self.sc.peek_at(1) == Some('{') {
+            let interp_mark = self.sc.mark();
             self.sc.bump();
             self.sc.bump();
             let e = self.parse_value()?;
@@ -1910,6 +1924,7 @@ impl Parser {
             if !self.sc.eat('}') {
                 return Err(Error::at("expected \"}\"", self.sc.position()));
             }
+            self.reject_plain_css_interp(interp_mark)?;
             return Ok(MediaInParens::Interp(e));
         }
         if !self.sc.eat('(') {
@@ -2109,6 +2124,7 @@ impl Parser {
         loop {
             match self.sc.peek() {
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    let interp_mark = self.sc.mark();
                     if !lit.is_empty() {
                         pieces.push(take_lit(&mut lit));
                     }
@@ -2119,6 +2135,7 @@ impl Parser {
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
+                    self.reject_plain_css_interp(interp_mark)?;
                     pieces.push(TplPiece::Interp(e));
                 }
                 Some(c) if is_ident_char(c) => {
@@ -2386,6 +2403,7 @@ impl Parser {
                     push_ident_escape(&mut lit, c, true);
                 }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
+                    let interp_mark = self.sc.mark();
                     if !lit.is_empty() {
                         pieces.push(take_lit(&mut lit));
                     }
@@ -2396,6 +2414,7 @@ impl Parser {
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
+                    self.reject_plain_css_interp(interp_mark)?;
                     pieces.push(TplPiece::Interp(e));
                 }
                 Some(q @ ('"' | '\'')) => {
@@ -2415,6 +2434,7 @@ impl Parser {
                             // the documented behaviour of this reader says and
                             // as the custom-property reader already did.
                             Some('#') if self.sc.peek_at(1) == Some('{') => {
+                                let interp_mark = self.sc.mark();
                                 if !lit.is_empty() {
                                     pieces.push(take_lit(&mut lit));
                                 }
@@ -2425,6 +2445,7 @@ impl Parser {
                                 if !self.sc.eat('}') {
                                     return Err(Error::at("expected \"}\"", self.sc.position()));
                                 }
+                                self.reject_plain_css_interp(interp_mark)?;
                                 pieces.push(TplPiece::Interp(e));
                             }
                             Some(ch) => {
@@ -2521,7 +2542,7 @@ impl Parser {
                     wrote_newline = false;
                 }
                 Some('#') if self.sc.peek_at(1) == Some('{') => {
-                    self.reject_plain_css_interp()?;
+                    let interp_mark = self.sc.mark();
                     if !lit.is_empty() {
                         pieces.push(take_lit(&mut lit));
                     }
@@ -2532,6 +2553,7 @@ impl Parser {
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
+                    self.reject_plain_css_interp(interp_mark)?;
                     pieces.push(TplPiece::Interp(e));
                     wrote_newline = false;
                 }
@@ -2552,6 +2574,7 @@ impl Parser {
                                 }
                             }
                             Some('#') if self.sc.peek_at(1) == Some('{') => {
+                                let interp_mark = self.sc.mark();
                                 if !lit.is_empty() {
                                     pieces.push(take_lit(&mut lit));
                                 }
@@ -2562,6 +2585,7 @@ impl Parser {
                                 if !self.sc.eat('}') {
                                     return Err(Error::at("expected \"}\"", self.sc.position()));
                                 }
+                                self.reject_plain_css_interp(interp_mark)?;
                                 pieces.push(TplPiece::Interp(e));
                             }
                             Some(c) => {

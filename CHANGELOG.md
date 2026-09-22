@@ -72,6 +72,59 @@ Conformance is tracked separately as a ratchet against the official
 
 ### Fixed
 
+- **Plain CSS rejects every `#{…}`, where eight positions let one through.** A
+  `.css` file has no interpolation at all in dart — its parser raises
+  `Interpolation isn't allowed in plain CSS.` wherever one appears — and sasso
+  raised it in a value, a selector and a keyframes name but not in an at-rule's
+  NAME, a media query's type or raw operand, a `@supports` condition, a loud
+  comment, a plain-CSS custom callable's body, a custom property's value inside
+  a string, a special function's verbatim arguments (`element()`,
+  `expression()`, a vendor-prefixed spelling, the IE `progid:` form), or the
+  modern CSS `if()`'s raw operands (a condition's parentheses, the function name
+  before them, a clause value the raw grammar reached first). The at-rule name
+  was the worst: `@#{"media"} (a: 1) { .x { y: z } }` parsed into a node the
+  plain-CSS evaluator has no arm for, so the whole rule was dropped in silence.
+  The rest compiled as though the interpolation were text, which is a stylesheet
+  dart refuses being accepted.
+
+  The rejection also moved to where dart raises it — the END of its
+  `singleInterpolation`, after the body has parsed and the `}` is consumed — so
+  a body that is invalid on its own terms reports ITSELF (`#{$x}` is "Sass
+  variables aren't allowed in plain CSS", `#{ }` is "Expected expression") and
+  the caret spans the whole `#{…}` instead of its first column. Inside `if()`
+  the rejection also has to ESCAPE a backtracking attempt: sasso tries the
+  modern clause grammar and rewinds on error to the legacy `if($c, $t, $f)`
+  argument parse, which would report the `>` the raw grammar reads verbatim as
+  an operator. An interpolation in plain CSS is fatal wherever it stands, so no
+  retry can accept that text and the error propagates.
+
+  `[measured]` against dart-sass 1.104.1: of the 37 forms the tests pin, 35 are
+  byte-identical diagnostics — message, position and underline alike — and the
+  two that are not differ only in the caret length of a `$variable` inside the
+  interpolation, an already-recorded divergence. Both ratchets are unchanged,
+  because no sass-spec `.css` file contains an interpolation to score.
+
+- **An at-rule's node CLASS decides how it is written, not its name** — the
+  fifteenth and last of the compressed-only divergences the triage found. dart's
+  parser picks the class: `@media` and `@supports` become `CssMediaRule` /
+  `CssSupportsRule`, and every other at-rule — including one whose name arrived
+  through interpolation, whatever that name spells — becomes a generic
+  `CssAtRule`. `@#{"media"} (a: 1)` therefore only SPELLS itself `@media`, and
+  neither thing the conditional group rules do applies to it: it keeps the
+  compressed space before a `(` prelude (`@media (a: 1){.x{y:z}}`, not
+  `@media(a: 1){.x{y:z}}`), and it survives an empty block, because
+  `_isInvisible` short-circuits on `CssAtRule` — "we can't guarantee that (for
+  example) `@foo {}` isn't meaningful". The output tree now carries the class as
+  a field of its own, so no writer re-reads a name to guess it.
+
+  `[measured]` against dart-sass 1.104.1 in both styles: compressed passing
+  14,051 → **14,052** of 14,258 (98.55% → **98.56%**), expanded `+0`. The
+  empty-block half shows in BOTH styles — `@#{"media"} screen {}` is output, not
+  nothing — where no sass-spec case scores it, so tests pin it. That leaves the
+  compressed ratchet with no known serialization divergence at all: its 62-case
+  gap to the expanded one is entirely cases whose shipped expectation dart-sass
+  1.104.1 itself no longer matches.
+
 - **Fourteen of the fifteen compressed-only divergences the last triage left**,
   by five mechanisms. All of it `[measured]` against dart-sass 1.104.1 in both
   styles: compressed passing 14,037 → **14,051** of 14,258 (98.45% →
@@ -120,9 +173,9 @@ Conformance is tracked separately as a ratchet against the official
   and being ASCII it leaves a compressed stylesheet with no BOM at all. No
   sass-spec case scores it either way; it is pinned by tests.
 
-  One case is left: `@#{"media"}` builds a generic node in dart, which never
-  reaches the media-rule writer, while sasso re-reads the name the
-  interpolation spells (`docs/dart-sass-divergences.md` §1.1).
+  One case was left, and the entry above closes it: `@#{"media"}` builds a
+  generic node in dart, which never reaches the media-rule writer, while sasso
+  re-read the name the interpolation spells.
 
 - **The legacy `rgb()`/`hsl()` form choice follows dart's two rules**, which
   closes the largest remaining family behind the compressed conformance gate.

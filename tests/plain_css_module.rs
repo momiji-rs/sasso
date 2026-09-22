@@ -768,3 +768,140 @@ fn a_loaded_files_escaped_selectors_are_not_structure() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A loaded `.css` file has NO interpolation: dart's plain-CSS parser rejects
+/// every `#{…}` it reaches, so nothing interpolated ever becomes a node. Our
+/// parser rejected it in a value, a selector and a keyframes name but not in an
+/// at-rule's NAME, a media query, a `@supports` condition, a loud comment or a
+/// custom callable's body — where an interpolated at-rule was silently dropped
+/// instead. Every message below was measured against dart-sass 1.104.1.
+#[test]
+fn interpolation_in_a_loaded_file_is_an_error() {
+    let dir = scratch("interp");
+    let case = |file: &str, css: &str| {
+        std::fs::write(dir.join(format!("_{file}.css")), css).unwrap();
+        assert_eq!(
+            compile_err_in(&dir, &format!("e_{file}.scss"), &format!("@use \"{file}\";\n")),
+            "Interpolation isn't allowed in plain CSS.",
+            "source: {css}"
+        );
+    };
+
+    // An at-rule NAME, which used to parse into a node the plain-CSS evaluator
+    // had no arm for — so the whole rule vanished without a word.
+    case("name", "@#{\"media\"} (a: 1) { .x { y: z } }\n");
+    case("namepart", "@med#{\"ia\"} (a: 1) { .x { y: z } }\n");
+    case("nameempty", "@#{\"media\"} screen {}\n");
+    case("namechildless", "@#{\"foo\"} bar;\n");
+    case("nameinrule", ".a { @#{\"foo\"} { b: c } }\n");
+    case("nameinat", "@media p { @#{\"foo\"} { .x { y: z } } }\n");
+    // A media query: the type/modifier identifier and a raw operand after
+    // `not` or `and`, which used to compile as if the interpolation were text.
+    case("mediatype", "@media #{\"screen\"} { a { b: c } }\n");
+    case("medianot", "@media not #{\"(a: 1)\"} { a { b: c } }\n");
+    case("mediaand", "@media screen and #{\"(a: 1)\"} { a { b: c } }\n");
+    // A `@supports` condition, raw or inside a function's arguments.
+    case("supportsraw", "@supports #{\"(a: 1)\"} { a { b: c } }\n");
+    case("supportsfn", "@supports selector(#{\"a\"}) { a { b: c } }\n");
+    // A loud comment's body, at the top level and inside a rule.
+    case("comment", "/* #{1} */\n");
+    case("commentinrule", "a { /* #{1} */ b: c }\n");
+    // A plain-CSS custom callable's body, bare and inside a string.
+    case("customfn", "@function --a() { result: #{1} }\n");
+    case("customfnstr", "@function --a() { result: \"#{1}\" }\n");
+    // A custom property's value inside a string (the bare form already erred).
+    case("custompropstr", "a { --x: \"#{1}\" }\n");
+    // A special function's verbatim argument list — `element()`,
+    // `expression()`, a vendor-prefixed spelling, and the IE `progid:` form —
+    // bare and inside a quoted string.
+    case("special", "a { b: element(#{1}) }\n");
+    case("specialstr", "a { b: element(\"#{1}\") }\n");
+    case("specialexpr", "a { b: expression(#{1}) }\n");
+    case("specialprefix", "a { b: -moz-element(#{1}) }\n");
+    case("specialprogid", "a { b: progid:DXImageTransform(#{1}) }\n");
+    // The modern CSS `if()`'s raw operands, which are read verbatim: inside a
+    // condition's parentheses (nested ones too), in the function name that
+    // precedes them, and in a clause's value after a raw condition.
+    case("ifraw", "a { b: if(media(width > #{1}px): red; else: blue) }\n");
+    case(
+        "ifrawnested",
+        "a { b: if(media((width > #{1}px)): red; else: blue) }\n",
+    );
+    case(
+        "ifrawname",
+        "a { b: if(me#{\"dia\"}(width > 10px): red; else: blue) }\n",
+    );
+    case("ifrawstyle", "a { b: if(style(--x: #{1}): red; else: blue) }\n");
+    case(
+        "ifrawsupports",
+        "a { b: if(supports(#{\"color: red\"}): red; else: blue) }\n",
+    );
+    case(
+        "ifrawwhole",
+        "a { b: if(media(#{\"width > 10px\"}): red; else: blue) }\n",
+    );
+    case("ifvalue", "a { b: if(media(width > 10px): #{1}; else: blue) }\n");
+    // The positions that already rejected, pinned so they stay rejected.
+    case("value", "a { b: #{1} }\n");
+    case("urlfn", "a { b: url(#{1}) }\n");
+    case("calcfn", "a { b: calc(#{1} + 1px) }\n");
+    case("ifcond", "a { b: if(#{1}: red; else: blue) }\n");
+    case("iflegacy", "a { b: if(#{1}, red, blue) }\n");
+    case("valuestr", "a { b: \"#{1}\" }\n");
+    case("selector", "#{\"a\"} { b: c }\n");
+    case("keyframesname", "@keyframes #{\"k\"} { from { a: b } }\n");
+    case("framestop", "@keyframes k { #{\"from\"} { a: b } }\n");
+
+    // dart rejects at the END of its `singleInterpolation`, so a body that is
+    // itself invalid reports ITSELF first — the interpolation error never gets
+    // the chance.
+    std::fs::write(dir.join("_var.css"), "@#{$x} { a { b: c } }\n").unwrap();
+    assert_eq!(
+        compile_err_in(&dir, "e_var.scss", "@use \"var\";\n"),
+        "Sass variables aren't allowed in plain CSS."
+    );
+    std::fs::write(dir.join("_empty.css"), "@#{ } { a { b: c } }\n").unwrap();
+    assert_eq!(
+        compile_err_in(&dir, "e_empty.scss", "@use \"empty\";\n"),
+        "Expected expression."
+    );
+
+    // Inside the modern `if()`'s raw grammar the rejection has to escape the
+    // fallback to the legacy `if($c, $t, $f)` argument parse, which would
+    // otherwise report the `>` it reads verbatim as an operator.
+    std::fs::write(
+        dir.join("_ifvar.css"),
+        "a { b: if(media(width > #{$x}px): red; else: blue) }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile_err_in(&dir, "e_ifvar.scss", "@use \"ifvar\";\n"),
+        "Sass variables aren't allowed in plain CSS."
+    );
+    std::fs::write(
+        dir.join("_ifempty.css"),
+        "a { b: if(media(width > #{ }px): red; else: blue) }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile_err_in(&dir, "e_ifempty.scss", "@use \"ifempty\";\n"),
+        "Expected expression."
+    );
+
+    // SCSS is untouched: the same file is an interpolated at-rule name there.
+    std::fs::write(dir.join("_sass.scss"), "@#{\"media\"} (a: 1) { .x { y: z } }\n").unwrap();
+    assert_eq!(
+        compile_in(&dir, "e_sass.scss", "@use \"sass\";\n"),
+        "@media (a: 1) {\n  .x {\n    y: z;\n  }\n}"
+    );
+    std::fs::write(
+        dir.join("_sassif.scss"),
+        "a { b: if(me#{\"dia\"}(width > #{10}px): red; else: blue) }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        compile_in(&dir, "e_sassif.scss", "@use \"sassif\";\n"),
+        "a {\n  b: if(media(width > 10px): red; else: blue);\n}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

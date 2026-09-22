@@ -209,6 +209,12 @@ struct Parser {
     /// `CssParser`. Nesting is still parsed (CSS nesting is preserved in output);
     /// the difference is that Sass features become errors.
     plain_css: bool,
+    /// Set once an interpolation body has been read in plain-CSS mode, where
+    /// `#{…}` is an error wherever it stands. A backtracking attempt (the
+    /// modern `if()` grammar) that read one therefore cannot be retried under
+    /// another grammar — no grammar accepts that text — so it must propagate
+    /// the error dart reports instead of the one the retry would raise.
+    plain_css_interp: bool,
     /// Indented-syntax mode: the input is the position-preserving SCSS
     /// reconstruction of a `.sass` file (see `sass_parser`), and the few
     /// grammar liberties dart's `SassParser` takes over `ScssParser` apply —
@@ -243,6 +249,7 @@ fn parse_inner(src: &str, plain_css: bool, indented: bool) -> Result<Stylesheet,
         interp_spans: Vec::new(),
         seen_non_module_stmt: false,
         plain_css,
+        plain_css_interp: false,
         indented,
     };
     let stmts = p.parse_statements(true)?;
@@ -769,13 +776,16 @@ impl Parser {
         }
     }
 
-    /// In plain-CSS mode, a `#{…}` interpolation is rejected at its `#`.
-    fn reject_plain_css_interp(&self) -> Result<(), Error> {
+    /// In plain-CSS mode, a `#{…}` interpolation is an error. dart-sass raises
+    /// it at the END of `singleInterpolation`, once the body has parsed and the
+    /// `}` is consumed, so a malformed expression inside reports itself first
+    /// (`#{$x}` is "Sass variables aren't allowed in plain CSS", `#{ }` is
+    /// "Expected expression") and the caret spans the whole `#{…}`. `mark` must
+    /// be the cursor as it stood at the `#`.
+    fn reject_plain_css_interp(&self, mark: Mark) -> Result<(), Error> {
         if self.plain_css {
-            return Err(Error::at(
-                "Interpolation isn't allowed in plain CSS.",
-                self.sc.position(),
-            ));
+            return Err(Error::at("Interpolation isn't allowed in plain CSS.", mark.pos())
+                .with_length(self.sc.byte_len_from(mark)));
         }
         Ok(())
     }
@@ -789,6 +799,7 @@ impl Parser {
     /// division) must not leak into the interpolated expression — suspend
     /// `calc_depth` for its duration.
     pub(super) fn parse_interp_value(&mut self) -> Result<Expr, Error> {
+        self.plain_css_interp |= self.plain_css;
         let saved = std::mem::replace(&mut self.calc_depth, 0);
         let e = self.parse_value();
         self.calc_depth = saved;
@@ -891,12 +902,7 @@ impl Parser {
             }
             match c {
                 '#' if self.sc.peek_at(1) == Some('{') => {
-                    if self.plain_css {
-                        return Err(Error::at(
-                            "Interpolation isn't allowed in plain CSS.",
-                            self.sc.position(),
-                        ));
-                    }
+                    let interp_mark = self.sc.mark();
                     if !lit.is_empty() {
                         pieces.push(take_lit(&mut lit));
                     }
@@ -921,6 +927,7 @@ impl Parser {
                     if !self.sc.eat('}') {
                         return Err(Error::at("expected \"}\"", self.sc.position()));
                     }
+                    self.reject_plain_css_interp(interp_mark)?;
                     pieces.push(TplPiece::Interp(e));
                 }
                 '"' | '\'' => {
@@ -953,12 +960,7 @@ impl Parser {
                             continue;
                         }
                         if ch == '#' && self.sc.peek_at(1) == Some('{') {
-                            if self.plain_css {
-                                return Err(Error::at(
-                                    "Interpolation isn't allowed in plain CSS.",
-                                    self.sc.position(),
-                                ));
-                            }
+                            let interp_mark = self.sc.mark();
                             if !lit.is_empty() {
                                 pieces.push(take_lit(&mut lit));
                             }
@@ -969,6 +971,7 @@ impl Parser {
                             if !self.sc.eat('}') {
                                 return Err(Error::at("expected \"}\"", self.sc.position()));
                             }
+                            self.reject_plain_css_interp(interp_mark)?;
                             pieces.push(TplPiece::Interp(e));
                             continue;
                         }

@@ -301,8 +301,8 @@ dart-sass 1.104.1's **compressed** output for the same cases
 
 | Metric | Value |
 | --- | --- |
-| **Passing, compressed** | **14,051 — 98.55% of attempted** |
-| ↳ byte-exact compressed CSS | 11,559 |
+| **Passing, compressed** | **14,052 — 98.56% of attempted** |
+| ↳ byte-exact compressed CSS | 11,560 |
 | ↳ error specs correctly rejected (style-independent) | 2,492 |
 
 The gate found 1,528 cases that compile to byte-exact `expanded` CSS and to
@@ -319,9 +319,13 @@ and five smaller ones for the last 14: the order dart multiplies a channel by
 its maximum in, the spelling an `@import` keeps for its media modifiers, the
 space a plain-CSS `@function`'s SassScript declaration may drop, the escape a
 private-use character trades for its own bytes, and what `meta.inspect` escapes
-whatever the style. 63 cases remain, 62 of which are ones where dart-sass
-1.104.1's own expanded output no longer matches the expectation sass-spec ships.
-This is a ratchet like the other one — it can only go up.
+whatever the style. The last one took a sixth: which of dart's node classes an
+at-rule came from, which its NAME cannot answer, because the parser decides the
+class and `@#{"media"} (a: 1)` is a generic at-rule that merely spells itself
+`@media`. The 62 cases that remain are all ones where dart-sass 1.104.1's own
+expanded output no longer matches the expectation sass-spec ships, so they
+cannot pass both ratchets at once. This is a ratchet like the other one — it can
+only go up.
 
 **Strict input validation, too.** Matching dart-sass means rejecting what
 dart-sass rejects, not just reproducing its output. sasso errors — rather than

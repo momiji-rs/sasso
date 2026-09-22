@@ -56,21 +56,7 @@ silently drift away from the reference.
 These change the bytes a build emits. All of them are absent from the Lichess
 corpus, which is why it still measures 147/148.
 
-### 1.1 An interpolated at-rule name loses a space when compressed
-
-```scss
-@#{"media"} (a: 1) { a { b: c } }
-// dart:  @media (a: 1){a{b:c}}
-// sasso: @media(a: 1){a{b:c}}
-```
-
-The compressed no-space rule is keyed on the at-rule *name*, but in dart an
-interpolated name produces a generic node that never reaches the media-rule
-writer. A literal `@media` and an interpolated one resolve to the same string,
-so the distinction has to be carried as a field on the node rather than
-inferred from its name.
-
-### 1.2 A literal property inside a custom `@function --foo()` is not evaluated
+### 1.1 A literal property inside a custom `@function --foo()` is not evaluated
 
 ```scss
 @function --foo() { q: 1 + 2; }
@@ -85,7 +71,7 @@ insensitively) is kept verbatim, because that is the function's return value.
 no plain name — is `result: 3` in both. It is every OTHER property that
 diverges.
 
-### 1.3 A degenerate calculation inside `@supports` is evaluated instead of preserved
+### 1.2 A degenerate calculation inside `@supports` is evaluated instead of preserved
 
 ```scss
 @supports (a: lab(calc(infinity) 1 2)) { a { b: c } }
@@ -93,7 +79,7 @@ diverges.
 // sasso: @supports (a: lab(100% 1 2))
 ```
 
-### 1.4 `meta.call()` with an unknown name compiles instead of erroring ([#63](https://github.com/momiji-rs/sasso/issues/63))
+### 1.3 `meta.call()` with an unknown name compiles instead of erroring ([#63](https://github.com/momiji-rs/sasso/issues/63))
 
 ```scss
 @use "sass:meta";
@@ -101,6 +87,21 @@ diverges.
 // dart:  Error: () isn't a valid CSS value.
 // sasso: emits `nope()` into the CSS, no error
 ```
+
+### 1.4 `@charset`'s argument is interpolated instead of taken literally
+
+```scss
+@charset "#{$nope}";
+// dart:  compiles — the argument is a plain string, never interpolated
+// sasso: Error: Undefined variable.
+```
+
+dart reads it with `string()`, not `interpolatedString()`, so `#{` inside the
+quotes is ordinary text in **both** syntaxes; the value is discarded either way,
+because the output's own `@charset` is re-derived from its content. sasso parses
+it as an interpolated string, which turns a body dart never evaluates into an
+error — `Interpolation isn't allowed in plain CSS.` in a `.css` file, and
+whatever the expression itself raises in a `.scss` one. Measured 2026-09-21.
 
 ## 2. Values and built-in semantics
 
@@ -165,6 +166,10 @@ programs; only what it prints differs.
 | `color.grayscale(null)` ([#139](https://github.com/momiji-rs/sasso/issues/139)) | `$color: null is not a color.` | ` is not a color.` — the `$param: ` prefix is missing, and `null` prints as nothing. The same for `true`, a map, and a quoted string; a list additionally needs dart's parenthesized spelling (`$color: (1 2) is not a color.`), which is the row above's root cause too. The prefix alone accounts for 46 byte-mismatching sass-spec cases. Measured 2026-09-18, re-measured 2026-09-19 |
 | a user callable given one argument twice — `@function f($a, $b)` called as `f(1, 2, $a: 3)` ([#147](https://github.com/momiji-rs/sasso/issues/147)) | `Argument $a was passed both by position and by name.`, as a single span | `No parameter named $a.`, with the two-span `declaration`/`invocation` frame. The built-in half of #147 is in §2, because there the call compiles. Measured 2026-09-19 |
 | `map.remove((c: d, e: f), c, $key: e)` ([#147](https://github.com/momiji-rs/sasso/issues/147)) | `Argument $key was passed both by position and by name.` — the parameter bound positionally | `Argument $keys was passed both by position and by name.` — the name of the `$keys...` rest. The one place sasso implements this check at all, hand-rolled in `map.rs`. Measured 2026-09-19 |
+| `@mixin --a { b: c }` in a `.css` file | `This at-rule isn't allowed in plain CSS.`, spanning `@mixin --a` | `Sass @mixin names beginning with -- are forbidden for forward-compatibility with plain CSS mixins.` — the message for the SCSS spelling, and a one-column caret. dart carves `--` out for `@function` but not for `@mixin`, so plain CSS has custom functions and no custom mixins. Measured 2026-09-21 |
+| `a { b: if(media(x, 2, 3) }` | `expected ":".` at the `}` — once dart has read a raw token it requires a clause, and only a `,` sends it back to the legacy `if($c, $t, $f)` grammar | `expected ")"` at the same position — sasso attempts the modern grammar, and on ANY error rewinds and lets the legacy argument parse report instead. Plain-CSS interpolation errors are exempted (they can never be recovered by another grammar), so the divergence is confined to messages a retry can plausibly improve. Measured 2026-09-22 |
+| `a { b: #{1 +} }` in a `.css` file | `Expected expression.`, at the `}` | `Operators aren't allowed in plain CSS.`, at the `+` — sasso's plain-CSS expression parser names the operator instead of the expression the operand needed. Measured 2026-09-21 |
+| `a { b: #{$x} }` in a `.css` file | `Sass variables aren't allowed in plain CSS.`, spanning `$x` | the same message with a one-column caret. The interpolation error around it spans exactly as dart's does; this one is the operand inside it. Measured 2026-09-21 |
 
 The two below are classes rather than single inputs, so each gets its own
 example.
