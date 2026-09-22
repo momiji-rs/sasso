@@ -3648,7 +3648,7 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       return "";
     }
   };
-  const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", join(wdir, "main.scss"), outFile], {
+  const proc = spawn(process.execPath, [cliPath, "--no-source-map", "-I", join(wdir, "gen"), "--poll", "--watch", join(wdir, "main.scss"), outFile], {
     stdio: "ignore",
   });
   try {
@@ -3673,7 +3673,31 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
       await waitFor(() => css().includes("lime"), 20000),
       "cli --watch --poll: the sweep sees a dependency ARRIVE",
     );
-    console.log("ok: cli --watch --poll — the sweep alone sees a change and an arrival");
+    // …and a LOAD PATH that does not exist yet. This was the probes'
+    // job, and `makeProbe` is `fs.watch` underneath, so under `--poll`
+    // they are not armed at all — the sweep has to cover it, because an
+    // absent load path is already in the watched set and its entries
+    // appear the moment it does.
+    //
+    // Not guarded, and worth saying rather than pretending: nothing here
+    // can assert that no `fs.watch` was OPENED. On this machine the
+    // difference showed up as latency — 516-4064 ms through the probe
+    // against 11-23 ms through the sweep — but on Linux `fs.watch` is
+    // 0.2 ms and a timing assertion would tell the two apart nowhere.
+    await new Promise((r) => setTimeout(r, 500));
+    writeFileSync(join(wdir, "main.scss"), `@use "v" as v;
+@use "viaload" as l;
+.a { color: v.$c; b: l.$d; }
+`);
+    await new Promise((r) => setTimeout(r, 500));
+    mkdirSync(join(wdir, "gen"));
+    writeFileSync(join(wdir, "gen", "_viaload.scss"), `$d: olive;
+`);
+    assert.ok(
+      await waitFor(() => css().includes("olive"), 20000),
+      "cli --watch --poll: the sweep sees a load path that did not exist",
+    );
+    console.log("ok: cli --watch --poll — the sweep alone sees a change, an arrival, and a created load path");
   } finally {
     proc.kill();
   }
@@ -4673,6 +4697,52 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
     r.poller.stop();
     assert.equal(r.raw(), null, "poller: stop disarms");
     r.poller.stop(); // must not throw
+  }
+
+  // …including a stop decided DURING a tick. `timer` is null for the whole
+  // of one, so it cannot answer "are we still running": a `stop()` from
+  // inside the sweep found nothing to clear and the tick rearmed on top of
+  // it. Nothing in `cli.mjs` stops a poller today, which is exactly why
+  // this needs a guard rather than a reader noticing.
+  {
+    let stopped = 0;
+    let queued = null;
+    let armed = 0;
+    const { makePoller: mk } = await import("./npm/_poller.mjs");
+    const poller = mk({
+      sweep: () => {
+        if (stopped++ === 0) poller.stop();
+        return false;
+      },
+      onChange: () => {},
+      setTimer: (fn, ms) => (armed++, (queued = { fn, ms }), armed),
+      clearTimer: () => (queued = null),
+      now: () => 0,
+    });
+    poller.start();
+    const first = queued;
+    queued = null;
+    first.fn();
+    assert.equal(queued, null, "poller: stop() from inside the sweep is not rearmed over");
+  }
+
+  // …and a stop from inside onChange, where the rearm has already
+  // happened, must still take.
+  {
+    let queued = null;
+    const { makePoller: mk } = await import("./npm/_poller.mjs");
+    const poller = mk({
+      sweep: () => true,
+      onChange: () => poller.stop(),
+      setTimer: (fn, ms) => ((queued = { fn, ms }), 1),
+      clearTimer: () => (queued = null),
+      now: () => 0,
+    });
+    poller.start();
+    const first = queued;
+    queued = null;
+    first.fn();
+    assert.equal(queued, null, "poller: stop() from inside onChange clears the rearm");
   }
 
   console.log("ok: poller — floor, budget, ceiling, a sweep that throws, start/stop");

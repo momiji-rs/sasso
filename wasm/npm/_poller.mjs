@@ -85,6 +85,10 @@ export function makePoller({
 }) {
   let timer = null;
   let interval = MIN_INTERVAL_MS;
+  // `timer` is null for the whole of a tick, so it cannot answer "are we
+  // still running": a `stop()` from inside `sweep` would find nothing to
+  // clear and the tick would rearm on top of it. This can.
+  let running = false;
 
   const tick = () => {
     timer = null;
@@ -102,15 +106,20 @@ export function makePoller({
     interval = nextInterval(now() - began, budget);
     // Rearmed BEFORE the callback: `onChange` runs a compile, and a
     // compile that throws would otherwise stop the polling for good.
-    timer = setTimer(tick, interval);
-    if (moved) onChange();
+    // Unless the sweep just stopped us, which is the one thing that must
+    // survive being decided mid-tick.
+    if (running) timer = setTimer(tick, interval);
+    if (moved && running) onChange();
   };
 
   return {
     start() {
-      if (timer === null) timer = setTimer(tick, interval);
+      if (running) return;
+      running = true;
+      timer = setTimer(tick, interval);
     },
     stop() {
+      running = false;
       if (timer !== null) clearTimer(timer);
       timer = null;
     },

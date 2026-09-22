@@ -1486,8 +1486,20 @@ function runWatch(input, output, common, opts) {
     // rather than giving up, which is why this is a function and not a
     // single `watch`.
     const dirs = new Set([...[...known].map((f) => dirname(f)), ...loadPathDirs]);
-    for (const lp of loadPathDirs) {
-      if (!existsSync(lp)) probes.arm(lp);
+    // `makeProbe` is `fs.watch` underneath, so under `--poll` arming one
+    // would be the native watcher coming in through the side door — and
+    // with it the latency the flag exists to escape. Measured before this
+    // gate: `--poll` picked the created load path up in 516-4064 ms, which
+    // is `fs.watch`'s number here, not the sweep's.
+    //
+    // The sweep covers it without them. An absent load path is already in
+    // `watchedDirs()`; `surveyNeighbours` skips it while `readdirSync`
+    // throws, and the moment it exists with a file in it the entry set
+    // differs.
+    if (nativeWatch) {
+      for (const lp of loadPathDirs) {
+        if (!existsSync(lp)) probes.arm(lp);
+      }
     }
     // Close only what is no longer needed and open only what is new,
     // re-arm a watcher that fails, and say so when one cannot be
