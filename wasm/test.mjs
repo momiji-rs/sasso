@@ -4147,19 +4147,27 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   // the link to it resolves perfectly well, so nothing about the link
   // looks wrong either.
   //
-  // Invalid UTF-8 rather than a permission bit, for the reason #159
+  // A parse error rather than a permission bit, for the reason #159
   // recorded: the file has to stay WRITABLE for the bug to be reachable
   // at all, so a `chmod 000` dependency would pass for the wrong reason.
   //
-  // The error that reaches the write does not name it either — it is
-  // `Undefined variable` in `main.scss`, the second failure, not the
-  // read failure in `_v.scss`. So the span is no help and this is
+  // And rather than invalid UTF-8, which was the first choice here and
+  // is ENGINE-DEPENDENT: the native addon refuses to read such a file
+  // ("stream did not contain valid UTF-8") while wasm reads it lossily
+  // and compiles, so the case simply did not fail on the wasm path and
+  // the test timed out waiting for an error that was never coming. CI
+  // caught that, this machine did not — the addon loads here and not
+  // there. See #179.
+  //
+  // The error that reaches the write does not name the dependency either
+  // — it is `Undefined variable` in `main.scss`, the second failure, not
+  // the parse error in `_v.scss`. So the span is no help and this is
   // settled by "the watch has never written this output" instead.
   {
     const wdir = mkdtempSync(join(tmpdir(), "sasso-watchbadload-"));
     writeFileSync(join(wdir, "main.scss"), `@use "v" as v;\n.a { color: v.$c; }\n`);
     const dep = join(wdir, "_v.scss");
-    const bytes = Buffer.from("$c: \xff\xfe;\n", "binary");
+    const bytes = Buffer.from("$c: ;\n");
     writeFileSync(dep, bytes);
     symlinkSync(dep, join(wdir, "out.css"));
     const proc = spawn(process.execPath, [cliPath, "--no-source-map", "--poll", "--watch", "main.scss", "out.css"], {
