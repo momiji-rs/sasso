@@ -316,6 +316,44 @@ mod localtime;
 mod watch;
 
 #[cfg(test)]
+mod dirs_key_tests {
+    use super::dirs_key;
+    use std::path::Path;
+
+    /// Windows: two spellings of one directory are one key.
+    ///
+    /// The importer lowercases a canonical path there and the command line
+    /// says whatever was typed, so without the fold the same directory
+    /// enters the snapshot twice — and the copy that is not marked as ours
+    /// watches the mtime our own output moves, which is a self-recompile
+    /// loop. #146 was this mistake one layer down.
+    #[cfg(windows)]
+    #[test]
+    fn two_spellings_of_one_directory_are_one_key() {
+        assert_eq!(dirs_key(Path::new(r"SRC\Sub")), dirs_key(Path::new(r"src\sub")));
+    }
+
+    /// …and everywhere else they are two directories, because they are two
+    /// files. Folding here would merge a watch's `src/` and `SRC/`.
+    #[cfg(not(windows))]
+    #[test]
+    fn case_is_part_of_the_name_off_windows() {
+        assert_ne!(dirs_key(Path::new("SRC/Sub")), dirs_key(Path::new("src/sub")));
+    }
+
+    /// Either way it is absolute: the command line says `out.css` and the
+    /// importer says the whole path, and a set holding both must see one
+    /// directory.
+    #[test]
+    fn a_relative_path_is_keyed_against_the_working_directory() {
+        let key = dirs_key(Path::new("out.css"));
+        assert!(key.is_absolute(), "{key:?}");
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(key, dirs_key(&cwd.join("out.css")));
+    }
+}
+
+#[cfg(test)]
 mod watch_importer_tests {
     use super::RecordingImporter;
     use sasso::{CanonicalizeContext, Importer};
@@ -1601,7 +1639,14 @@ impl sasso::Importer for RecordingImporter {
 /// directories.
 fn dirs_key(p: &Path) -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_default();
-    normalize_path(&cwd.join(p))
+    // `path_key` too, not just `normalize_path`. The importer lowercases a
+    // canonical path on Windows and the command line says whatever the user
+    // typed, so without the fold the same directory enters the snapshot
+    // under two keys — and the one that is not in the `minus` set watches
+    // the mtime our own output moves, which is the self-recompile loop this
+    // whole mechanism exists to avoid. #146 was the same mistake one layer
+    // down.
+    path_key(&normalize_path(&cwd.join(p)))
 }
 
 /// Would writing `output` replace a file this compile read — the entry
@@ -1610,12 +1655,13 @@ fn dirs_key(p: &Path) -> PathBuf {
 /// `path_key` rather than `==`, so the answer does not depend on the case a
 /// path was typed in on Windows, where two spellings are one file.
 fn aliases_a_source(output: &Path, unit: &Unit, deps: &[PathBuf]) -> bool {
-    // Against the working directory first: the output is whatever was typed
-    // on the command line and a dependency is the absolute path the importer
-    // resolved, so `_v.scss` and `/…/_v.scss` are the same file and compare
-    // equal only once both are.
+    // `dirs_key`, the same one the snapshot uses: the output is whatever was
+    // typed on the command line and a dependency is the absolute path the
+    // importer resolved, so `_v.scss` and `/…/_v.scss` are the same file
+    // only once both are keyed — and the two places that ask this question
+    // must not answer it differently.
     let cwd = std::env::current_dir().unwrap_or_default();
-    let key = |p: &Path| path_key(&normalize_path(&cwd.join(p)));
+    let key = dirs_key;
     // …and through any symlink, because two names for one file is the other
     // way to reach it. `out.css -> main.scss` passes a lexical comparison and
     // then overwrites the stylesheet. `canonicalize` answers only for a path
