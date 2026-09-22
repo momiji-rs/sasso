@@ -99,6 +99,24 @@ Conformance is tracked separately as a ratchet against the official
   saves it recorded as dropped were delivered 2.7 seconds later, past the
   probe's own timeout.
 
+- **The published crate carried a benchmark that could not compile.** `exclude`
+  dropped `/bench`, where every corpus the CodSpeed target reads lives, but not
+  `/benches`, where the target itself lives — so the tarball shipped
+  `benches/compile.rs` with none of the six files it `include_str!`s. `cargo
+  publish` never caught it because its verify step does not build bench targets;
+  `cargo build --benches` inside the unpacked 0.18.0 crate fails with six
+  `couldn't read benches/../bench/corpus/...` errors. Nothing that consumes
+  sasso as a library or installs the binary was affected — `cargo bench` and
+  `cargo test --all-targets` against the published source were, which is what a
+  distribution packager runs. `/benches` is now excluded too, so Cargo drops the
+  target from the published manifest and prints `warning: ignoring benchmark
+  'compile' as 'benches/compile.rs' is not included in the published package`.
+
+  The benchmark stays where it is rather than moving beside its corpora, for a
+  reason worth recording: CodSpeed's benchmark identity is
+  `{file}::{module_path}{bench_name}`, so relocating the file retires every URI
+  and resets the gate's regression history.
+
 ### Added
 
 - **`-w`/`--watch` in the binary** (#86), which closes the flag gap that made
