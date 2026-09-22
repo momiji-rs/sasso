@@ -11,6 +11,33 @@ Conformance is tracked separately as a ratchet against the official
 
 ## [Unreleased]
 
+### Changed
+
+- **CI checks the MSRV** (#169). `Cargo.toml` promises `rust-version =
+  "1.74"` and no job built against it; two APIs above it reached review
+  in #166 before anyone noticed.
+
+  `--lib --bins`, not `--all-targets`, and the reason is not a
+  preference: a dev-dependency pulls in crates that need edition 2024, so
+  the tests cannot build at 1.74 whatever they contain. The library and
+  the binary are also exactly what the MSRV is a promise about — a
+  consumer depends on `sasso`, not on its test suite.
+
+  What it adds over the clippy job, measured by putting each back into
+  `src/main.rs`:
+
+  ```
+    Option::is_none_or   (1.82, API)      clippy catches it, so does this
+    File::set_modified   (1.75, API)      clippy catches it, so does this
+    c"hello"             (1.77, SYNTAX)   only this
+  ```
+
+  Clippy's `incompatible_msrv` reads `rust-version` and knows the std
+  APIs it has version data for. It does not know about syntax, so a
+  literal, a language feature or an edition bump passes it and fails a
+  real 1.74 build.
+
+
 ### Fixed
 
 - **The npm CLI exited 1 for every kind of failure** (#91). dart-sass and
