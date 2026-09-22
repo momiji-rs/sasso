@@ -334,11 +334,9 @@ function wrapFileImporter(imp, async) {
       return finish(raw, fromImport);
     },
     load(canonicalHref) {
-      try {
-        return loadFsPath(fileURLToPath(canonicalHref));
-      } catch {
-        return null;
-      }
+      // `loadFsPath` returns null on ENOENT and throws on a bad read,
+      // including invalid UTF-8. A catch here turned that into a miss.
+      return loadFsPath(fileURLToPath(canonicalHref));
     },
   };
 }

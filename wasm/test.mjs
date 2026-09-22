@@ -50,6 +50,8 @@ write("imp/_base.scss", `.b { x: 1; }\n`);
 write("imp/theme/_index.scss", `.t { y: 2; }\n`);
 // FileImporter target partial
 write("fi/_shared.scss", `$s: 10px;\n`);
+// FileImporter target whose bytes are not UTF-8
+write("fi/badutf8.scss", Buffer.from("$c: \xff\xfered;\n", "binary"));
 
 for (const [name, mod] of [["size", size], ["speed", speed]]) {
   // === Phase 1: core modern API ===
@@ -143,6 +145,18 @@ for (const [name, mod] of [["size", size], ["speed", speed]]) {
   };
   const rfi = mod.compileString(`@use "shared" as s;\n.a { height: s.$s; }\n`, { importers: [fileImporter] });
   assert.ok(rfi.css.includes("height: 10px"), `${name}: user FileImporter findFileUrl`);
+
+  // Invalid UTF-8 behind a file: URL is a read error, not a missing import.
+  const badUtf8File = {
+    findFileUrl(url) {
+      return url === "badutf8" ? pathToFileURL(join(root, "fi", "badutf8.scss")) : null;
+    },
+  };
+  assert.throws(
+    () => mod.compileString(`@use "badutf8";`, { importers: [badUtf8File] }),
+    /stream did not contain valid UTF-8/,
+    `${name}: FileImporter invalid UTF-8 is a read error`,
+  );
 
   // importer load error -> reported compile error
   const boom = { canonicalize: () => new URL("custom:boom"), load() { throw new Error("kaboom-load"); } };
@@ -3615,15 +3629,20 @@ console.log("ok: cli — version/help/stdin/style/file @use/load-path/errors + e
   writeFileSync(join(utf8dir, "viadep.scss"), `@use "v" as v;\n.a { color: v.$c; }\n`);
   writeFileSync(join(utf8dir, "_v.scss"), badBytes);
 
+  // An ambient SASSO_ENGINE=wasm skips the native leg; SASSO_ENGINE=native
+  // without the addon makes the default ("") leg fail instead of testing wasm.
+  const envBase = { ...process.env };
+  delete envBase.SASSO_ENGINE;
+  delete envBase.SASSO_NATIVE_BINARY;
   const hasNative = /^engine:\s+native/m.test(
-    spawnSync(process.execPath, [cliPath, "--engine"], { encoding: "utf8" }).stdout || "",
+    spawnSync(process.execPath, [cliPath, "--engine"], { encoding: "utf8", env: envBase }).stdout || "",
   );
   // Where the addon is absent (the wasm CI job) there is one engine to
   // try; where it is present, both.
   const engines = hasNative ? ["native", "wasm"] : [""];
 
   for (const engine of engines) {
-    const env = engine ? { ...process.env, SASSO_ENGINE: engine } : process.env;
+    const env = engine ? { ...envBase, SASSO_ENGINE: engine } : envBase;
     const name = engine || "default";
     for (const [what, file] of [
       ["the entry", "entry.scss"],
